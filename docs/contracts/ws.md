@@ -1529,7 +1529,16 @@ published on the streaming path, never through the internal bus.
   assistant_message | reasoning | todo_list | file_change |
   command_execution | dynamic_tool | web_search | approval_request |
   system_notice | error`. Streaming upserts of one item arrive at most once
-  per 50 ms (always the latest text). Shapes:
+  per 50 ms (always the latest text). A failed tool item
+  (`command_execution`, `dynamic_tool`, `web_search`, `file_change`) carries
+  `error` — the tool's error text, ≤ ~2 KB. A `user_message` lists its
+  `attachments: [{id, kind: "image"|"file", mime, name?}]` (bytes via `GET
+  /runtime-sessions/{id}/attachments/{attachment_id}`). An `approval_request`
+  item carries `tool_item_id` (the tool call it gates, when known) and, once
+  cancelled, `cancel_reason` ∈ `agent | interrupt | closed` (also on its
+  `runtime_request`); `agent` = the provider withdrew it (Claude does when a
+  parallel sibling ends) or the turn ended. Several requests can be pending
+  at once (parallel tool calls); answer them in any order. Shapes:
   `ui/src/lib/api/types/agent-runtime.ts`.
 - What drives the UI (as in T3 Code's web client): streaming text =
   `assistant_message` / `reasoning` items with `streaming: true`; tool cards

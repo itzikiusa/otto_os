@@ -22,6 +22,8 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 # `--session-id` for a fresh Claude thread (the CLI requires a UUID).
 uuid = { workspace = true }
+# Decoding prompt attachments before they are stored.
+base64 = { workspace = true }
 # ACP wire types (the official SDK's schema; protocol v1). Only the types: the
 # runtime owns the process and the JSON-RPC framing (see src/acp.rs).
 agent-client-protocol = { version = "5.0.0", default-features = false }

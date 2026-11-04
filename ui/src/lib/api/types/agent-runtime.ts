@@ -87,15 +87,16 @@ export interface ProviderFailure {
 
 /** The type-specific part of a turn item. */
 export type TurnItemKind =
-  | { type: 'user_message'; text: string }
+  | { type: 'user_message'; text: string; attachments?: MessageAttachment[] }
   | { type: 'assistant_message'; message_id: string; text: string; streaming: boolean }
   | { type: 'reasoning'; text: string; streaming: boolean }
   | { type: 'todo_list'; plan_id: string; steps: PlanStep[]; explanation?: string }
-  | { type: 'file_change'; file_name: string; diff_str?: string; old_str?: string; new_str?: string }
-  | { type: 'command_execution'; input: string; output?: string; exit_code?: number }
-  | { type: 'dynamic_tool'; tool_name: string; input: unknown; output?: string }
+  /* Tool items carry `error` (the tool's error text, ~2 KB max) when failed. */
+  | { type: 'file_change'; file_name: string; diff_str?: string; old_str?: string; new_str?: string; error?: string }
+  | { type: 'command_execution'; input: string; output?: string; exit_code?: number; error?: string }
+  | { type: 'dynamic_tool'; tool_name: string; input: unknown; output?: string; error?: string }
   /** Web search / fetch tools; `patterns` are the queries or URLs. */
-  | { type: 'web_search'; patterns?: string[] }
+  | { type: 'web_search'; patterns?: string[]; error?: string }
   | {
       type: 'approval_request';
       request_id: Id;
@@ -104,6 +105,10 @@ export type TurnItemKind =
       /** The provider's own justification (Codex `reason`). */
       reason?: string;
       options: ApprovalOption[];
+      /** The turn item id of the tool call it gates, when known. */
+      tool_item_id?: string;
+      /** Set when cancelled; `agent` = the provider withdrew it. */
+      cancel_reason?: RequestCancelReason;
     }
   | { type: 'system_notice'; message: string }
   | { type: 'error'; failure: ProviderFailure };
@@ -120,6 +125,20 @@ export type TurnItem = {
   updated_at: string;
 } & TurnItemKind;
 
+/** Why a request was cancelled: `agent` = the provider withdrew it (Claude
+ *  does when a parallel sibling ends), `interrupt` = the turn was stopped,
+ *  `closed` = the session closed. */
+export type RequestCancelReason = 'agent' | 'interrupt' | 'closed';
+
+/** A file sent with a `user_message` (bytes at
+ *  GET /runtime-sessions/{id}/attachments/{attachment_id}). */
+export interface MessageAttachment {
+  id: string;
+  kind: 'image' | 'file';
+  mime: string;
+  name?: string;
+}
+
 export type RuntimeRequestStatus = 'pending' | 'resolved' | 'expired' | 'cancelled';
 
 export type ResponseCapability = { type: 'live' } | { type: 'not_resumable'; reason: string };
@@ -133,6 +152,7 @@ export interface RuntimeRequest {
   created_at: string;
   resolved_at: string | null;
   decision?: ApprovalDecision;
+  cancel_reason?: RequestCancelReason;
 }
 
 export interface PlanArtifact {
@@ -198,11 +218,15 @@ export interface RuntimeSession {
   model?: string;
   native_thread_id?: string;
   status: RuntimeSessionStatus;
+  access_mode: RuntimeAccessMode;
   created_by: Id;
   created_at: string;
   last_active_at: string;
   last_sequence: number;
 }
+
+/** T3 Code's RuntimeMode names; sticky per session like `model`. */
+export type RuntimeAccessMode = 'approval-required' | 'auto-accept-edits' | 'full-access';
 
 /** Body of POST /workspaces/{id}/runtime-sessions. */
 export interface CreateRuntimeSessionReq {
@@ -211,6 +235,7 @@ export interface CreateRuntimeSessionReq {
   cwd?: string | null;
   title?: string | null;
   model?: string | null;
+  access_mode?: RuntimeAccessMode;
 }
 
 /** Body of POST /runtime-sessions/{id}/prompt. */
@@ -228,6 +253,17 @@ export interface RuntimePromptReq {
   model?: string;
   effort?: string;
   images?: PromptImage[];
+  /** Non-image files (`application/pdf` only); providers that can't take
+   *  them answer 400. */
+  files?: PromptFile[];
+  /** Applies from this turn on and sticks. */
+  access_mode?: RuntimeAccessMode;
+}
+
+export interface PromptFile {
+  mime: string;
+  name: string;
+  data_base64: string;
 }
 
 /** An inline image (`mime` is `image/*`, base64 without a `data:` prefix). */

@@ -32,27 +32,36 @@
 //!   `{outcome: cancelled}` for cancel or a missing option
 //!   (`adapter.ts:1255-1266`). Updates replayed by `session/load` are history
 //!   the agent re-sends; Otto keeps its own, so they are dropped.
+//! * access mode: the flavour's launch argv per mode (Grok,
+//!   `acpSupport.ts:47-58`; Gemini's `--approval-mode`); Gemini switches live
+//!   with `session/set_mode` when `session/new|load` advertised the mode
+//!   (`AcpSessionRuntime.ts:2671-2688`), otherwise the runtime respawns and
+//!   loads the session. A failed `tool_call_update` carries its content as
+//!   the item's `error`. PDFs go as an embedded `resource` blob only when the
+//!   agent advertises `promptCapabilities.embeddedContext`.
 
 use std::collections::HashMap;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::schema::{
-    AuthenticateRequest, CancelNotification, ContentBlock, ImageContent, InitializeRequest,
-    InitializeResponse, LoadSessionRequest, NewSessionRequest, NewSessionResponse,
-    PermissionOption, PermissionOptionKind, Plan, PlanEntryStatus, PromptRequest, PromptResponse,
+    AuthenticateRequest, BlobResourceContents, CancelNotification, ContentBlock, EmbeddedResource,
+    EmbeddedResourceResource, ImageContent, InitializeRequest, InitializeResponse,
+    LoadSessionRequest, NewSessionRequest, NewSessionResponse, PermissionOption,
+    PermissionOptionKind, Plan, PlanEntryStatus, PromptRequest, PromptResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionNotification, SessionUpdate, StopReason, TextContent,
-    ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
+    SelectedPermissionOutcome, SessionNotification, SessionUpdate, SetSessionModeRequest,
+    StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 use otto_core::agent_runtime::{
     ApprovalDecision, ApprovalOption, PlanStep, PlanStepStatus, ProviderFailure, RequestKind,
-    RuntimePromptReq, RuntimeProvider, TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus,
+    RuntimeAccessMode, RuntimePromptReq, RuntimeProvider, TurnItem, TurnItemKind, TurnItemStatus,
+    TurnTerminalStatus,
 };
 use serde_json::{json, Value};
 
 use crate::driver::{
-    item, rpc_failure, rpc_key, DriverError, DriverEvent, DriverStep, LaunchContext, LaunchSpec,
-    StructuredDriver,
+    item, rpc_failure, rpc_key, tool_error, DriverError, DriverEvent, DriverStep, LaunchContext,
+    LaunchSpec, StructuredDriver,
 };
 
 const M_INITIALIZE: &str = "initialize";
@@ -66,6 +75,7 @@ const M_SESSION_PROMPT: &str = "session/prompt";
 const M_SESSION_CANCEL: &str = "session/cancel";
 const M_SESSION_UPDATE: &str = "session/update";
 const M_REQUEST_PERMISSION: &str = "session/request_permission";
+const M_SESSION_SET_MODE: &str = "session/set_mode";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -74,6 +84,9 @@ enum Phase {
     Authenticating { load: bool },
     Ready,
 }
+
+/// An access mode's extra `(head, tail)` argv.
+pub type AccessArgs = fn(RuntimeAccessMode) -> (Vec<String>, Vec<String>);
 
 /// What differs between ACP agents. The launch is
 /// `program head_args… [model_flag <model>] [context flags] tail_args…`.
@@ -90,6 +103,10 @@ pub struct AcpFlavor {
     /// `_meta` for `initialize` / `session/cancel`.
     pub initialize_meta: Option<Value>,
     pub cancel_meta: Option<Value>,
+    /// Extra argv per access mode.
+    pub access_args: Option<AccessArgs>,
+    /// The `session/set_mode` id of each access mode (live switching).
+    pub mode_id: Option<fn(RuntimeAccessMode) -> &'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,8 +152,13 @@ pub struct AcpDriver {
     auth_methods: Vec<(String, Option<String>)>,
     authenticated: bool,
     session_id: Option<String>,
-    /// `promptCapabilities.image` from `initialize`.
+    /// `promptCapabilities.image` / `.embeddedContext` from `initialize`.
     images: bool,
+    embedded: bool,
+    /// `modes.availableModes[].id` from `session/new|load`.
+    modes: Vec<String>,
+    access: RuntimeAccessMode,
+    mode_req: Option<u64>,
     queued: Option<(String, RuntimePromptReq)>,
     prompt_id: Option<u64>,
     turn_id: Option<String>,
@@ -175,6 +197,10 @@ impl AcpDriver {
             authenticated: false,
             session_id: None,
             images: false,
+            embedded: false,
+            modes: Vec::new(),
+            access: RuntimeAccessMode::default(),
+            mode_req: None,
             queued: None,
             prompt_id: None,
             turn_id: None,
@@ -188,16 +214,31 @@ impl AcpDriver {
     /// The Gemini CLI in ACP mode (T3 Code runs it from the ACP registry's
     /// `@google/gemini-cli` entry with the registry's argv; the installed
     /// CLI's own flag is `--acp`).
-    pub fn gemini() -> Self {
-        Self::new(RuntimeProvider::Gemini, "gemini", vec!["--acp".into()])
+    pub fn gemini(program: &str) -> Self {
+        let mut d = Self::new(RuntimeProvider::Gemini, program, vec!["--acp".into()]);
+        d.flavor.access_args = Some(|m| {
+            let mode = match m {
+                RuntimeAccessMode::ApprovalRequired => "default",
+                RuntimeAccessMode::AutoAcceptEdits => "auto_edit",
+                RuntimeAccessMode::FullAccess => "yolo",
+            };
+            (vec!["--approval-mode".into(), mode.into()], Vec::new())
+        });
+        d.flavor.mode_id = Some(|m| match m {
+            RuntimeAccessMode::ApprovalRequired => "default",
+            RuntimeAccessMode::AutoAcceptEdits => "autoEdit",
+            RuntimeAccessMode::FullAccess => "yolo",
+        });
+        d
     }
 
-    /// Grok over ACP, as T3 Code launches it (`acpSupport.ts:47-58`): the
-    /// approval-required runtime mode is `--permission-mode default agent
-    /// stdio` — every tool call asks. Otto never launches the `auto` /
-    /// `--always-approve` variants (approvals always reach a person).
-    /// `-m` is grok's top-level model flag; context flags (`--rules=`) must
-    /// precede `agent`, hence the tail. Auth: `xai.api_key` when
+    /// Grok over ACP, as T3 Code launches it (`grokAcpSpawnArgs`,
+    /// `acpSupport.ts:47-58`): approval-required is `--permission-mode
+    /// default agent stdio` (every tool call asks), full-access `agent
+    /// --always-approve stdio`. Grok has no auto-accept-edits launch mode
+    /// (T3 Code offers none either), so that mode asks like
+    /// approval-required. `-m` is grok's top-level model flag; context flags
+    /// (`--rules=`) must precede `agent`, hence the tail. Auth: `xai.api_key` when
     /// `XAI_API_KEY` is set, else `cached_token` (`acpSupport.ts:21-25,
     /// 77-81`); `_meta` on initialize / cancel (`:98-101`). T3 Code also sets
     /// `GROK_OAUTH2_REFERRER=t3code` — a T3-specific attribution Otto omits.
@@ -211,12 +252,20 @@ impl AcpDriver {
             RuntimeProvider::Grok,
             AcpFlavor {
                 program: "grok".into(),
-                head_args: vec!["--permission-mode".into(), "default".into()],
-                tail_args: vec!["agent".into(), "stdio".into()],
+                access_args: Some(|m| {
+                    let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect();
+                    match m {
+                        RuntimeAccessMode::FullAccess => {
+                            (Vec::new(), v(&["agent", "--always-approve", "stdio"]))
+                        }
+                        _ => (v(&["--permission-mode", "default"]), v(&["agent", "stdio"])),
+                    }
+                }),
                 model_flag: "-m".into(),
                 auth_preference: Some(auth.into()),
                 initialize_meta: Some(json!({"clientType": "extension"})),
                 cancel_meta: Some(json!({"cancelTrigger": "ctrl_c"})),
+                ..AcpFlavor::default()
             },
         )
     }
@@ -255,8 +304,26 @@ impl AcpDriver {
             .iter()
             .map(|i| ContentBlock::Image(ImageContent::new(&i.data_base64, &i.mime)))
             .collect();
+        blocks.extend(req.files.iter().map(|f| {
+            let blob = BlobResourceContents::new(&f.data_base64, format!("attachment:{}", f.name))
+                .mime_type(f.mime.clone());
+            ContentBlock::Resource(EmbeddedResource::new(
+                EmbeddedResourceResource::BlobResourceContents(blob),
+            ))
+        }));
         if !req.text.is_empty() {
             blocks.push(ContentBlock::Text(TextContent::new(&req.text)));
+        }
+        if let Some(mode) = req.access_mode.filter(|m| *m != self.access) {
+            self.access = mode;
+            if let Some(f) = self.flavor.mode_id {
+                let (id, line) = self.request(
+                    M_SESSION_SET_MODE,
+                    SetSessionModeRequest::new(sid.clone(), f(mode)),
+                );
+                self.mode_req = Some(id);
+                step.write(line);
+            }
         }
         let (id, line) = self.request(M_SESSION_PROMPT, PromptRequest::new(sid, blocks));
         self.prompt_id = Some(id);
@@ -352,6 +419,9 @@ impl AcpDriver {
             _ => TurnItemStatus::Pending,
         };
         let output = (!t.output.is_empty()).then(|| t.output.clone());
+        let error = (status == TurnItemStatus::Failed)
+            .then(|| tool_error(&t.output))
+            .flatten();
         let kind = match t.kind {
             ToolKind::Execute => TurnItemKind::CommandExecution {
                 input: command_text(t.raw_input.as_ref()).unwrap_or_else(|| t.title.clone()),
@@ -370,12 +440,14 @@ impl AcpDriver {
                 output,
             },
         };
-        item(
+        let mut it = item(
             format!("{}:tool:{id}", self.turn()),
             status,
             Some(t.title.clone()),
             kind,
-        )
+        );
+        it.error = error;
+        it
     }
 
     fn merge_content(t: &mut Tool, content: &[ToolCallContent]) {
@@ -519,6 +591,7 @@ impl AcpDriver {
             }
         }
         let title = req.tool_call.fields.title.clone();
+        let tool_item_id = format!("{}:tool:{}", self.turn(), req.tool_call.tool_call_id.0);
         self.pending.insert(
             request_id.clone(),
             Pending {
@@ -533,6 +606,7 @@ impl AcpDriver {
             prompt: title,
             reason: None,
             options,
+            tool_item_id: Some(tool_item_id),
         });
     }
 
@@ -572,7 +646,8 @@ impl AcpDriver {
                 .and_then(|r| serde_json::from_value::<InitializeResponse>(r).ok())
                 .map(|r| r.agent_capabilities);
             let load = caps.as_ref().is_some_and(|c| c.load_session);
-            self.images = caps.is_some_and(|c| c.prompt_capabilities.image);
+            self.images = caps.as_ref().is_some_and(|c| c.prompt_capabilities.image);
+            self.embedded = caps.is_some_and(|c| c.prompt_capabilities.embedded_context);
             if let Some(e) = error {
                 step.push(DriverEvent::Fatal(rpc_failure("handshake_error", &e)));
                 return;
@@ -603,6 +678,16 @@ impl AcpDriver {
                 step.push(DriverEvent::Fatal(rpc_failure("handshake_error", &e)));
                 return;
             }
+            self.modes = result
+                .as_ref()
+                .and_then(|r| r.pointer("/modes/availableModes"))
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|m| Some(m.get("id")?.as_str()?.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
             self.session_id = if loading {
                 self.resume.clone()
             } else {
@@ -619,6 +704,11 @@ impl AcpDriver {
             // agent refuses images it cannot take.
             if let Some((turn, req)) = self.queued.take() {
                 self.send_prompt(step, turn, &req);
+            }
+        } else if Some(id) == self.mode_req {
+            self.mode_req = None;
+            if let Some(e) = error {
+                step.push(DriverEvent::Error(rpc_failure("provider_error", &e)));
             }
         } else if Some(id) == self.prompt_id {
             self.prompt_id = None;
@@ -686,13 +776,19 @@ impl StructuredDriver for AcpDriver {
 
     fn launch(&self, ctx: &LaunchContext) -> LaunchSpec {
         let mut args = self.flavor.head_args.clone();
+        let mut tail_args = self.flavor.tail_args.clone();
+        if let Some(f) = self.flavor.access_args {
+            let (head, tail) = f(ctx.access_mode);
+            args.extend(head);
+            tail_args.extend(tail);
+        }
         if let Some(m) = &ctx.model {
             args.extend([self.flavor.model_flag.clone(), m.clone()]);
         }
         LaunchSpec {
             program: self.flavor.program.clone(),
             args,
-            tail_args: self.flavor.tail_args.clone(),
+            tail_args,
             env: Vec::new(),
         }
     }
@@ -700,6 +796,7 @@ impl StructuredDriver for AcpDriver {
     fn start(&mut self, ctx: &LaunchContext) -> DriverStep {
         self.cwd = ctx.cwd.clone();
         self.resume = ctx.resume.clone();
+        self.access = ctx.access_mode;
         let mut step = DriverStep::default();
         let mut init = InitializeRequest::new(ProtocolVersion::V1);
         if let Some(Value::Object(meta)) = &self.flavor.initialize_meta {
@@ -725,6 +822,11 @@ impl StructuredDriver for AcpDriver {
         if ready && !req.images.is_empty() && !self.images {
             return Err(DriverError(format!("{name} does not accept images")));
         }
+        if ready && !req.files.is_empty() && !self.embedded {
+            return Err(DriverError(format!(
+                "{name} does not accept file attachments"
+            )));
+        }
         let mut step = DriverStep::default();
         if ready {
             self.send_prompt(&mut step, turn_id.to_string(), req);
@@ -733,6 +835,13 @@ impl StructuredDriver for AcpDriver {
             self.queued = Some((turn_id.to_string(), req.clone()));
         }
         Ok(step)
+    }
+
+    /// Live only through an advertised `session/set_mode`.
+    fn switches_access_live(&self, to: RuntimeAccessMode) -> bool {
+        self.flavor
+            .mode_id
+            .is_some_and(|f| self.modes.iter().any(|m| m == f(to)))
     }
 
     fn interrupt(&mut self) -> DriverStep {
@@ -870,6 +979,7 @@ mod tests {
             model: None,
             resume: resume.map(str::to_string),
             sandboxed: false,
+            access_mode: RuntimeAccessMode::default(),
         }
     }
 
@@ -879,7 +989,7 @@ mod tests {
 
     #[test]
     fn handshake_loads_when_resuming_and_supported_and_queues_the_prompt() {
-        let mut d = AcpDriver::gemini();
+        let mut d = AcpDriver::gemini("gemini");
         let s = d.start(&ctx(Some("old")));
         assert_eq!(sent(&s, 0)["method"], "initialize");
         assert_eq!(
@@ -912,7 +1022,7 @@ mod tests {
             ..RuntimePromptReq::of("look")
         };
         for advertised in [false, true] {
-            let mut d = AcpDriver::gemini();
+            let mut d = AcpDriver::gemini("gemini");
             d.start(&ctx(None));
             let caps = json!({"protocolVersion":1,"agentCapabilities":{"promptCapabilities":{"image":advertised}}});
             d.on_line(&json!({"jsonrpc":"2.0","id":1,"result":caps}).to_string());
@@ -976,7 +1086,7 @@ mod tests {
 
     #[test]
     fn failed_load_falls_back_to_a_new_session() {
-        let mut d = AcpDriver::gemini();
+        let mut d = AcpDriver::gemini("gemini");
         d.start(&ctx(Some("gone")));
         d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}"#);
         let s = d.on_line(
@@ -991,7 +1101,7 @@ mod tests {
 
     #[test]
     fn decisions_map_onto_acp_option_kinds() {
-        let mut d = AcpDriver::gemini();
+        let mut d = AcpDriver::gemini("gemini");
         d.start(&ctx(None));
         d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
         d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#);
@@ -1026,7 +1136,7 @@ mod tests {
 
     #[test]
     fn chunks_accumulate_and_unsupported_client_methods_are_refused() {
-        let mut d = AcpDriver::gemini();
+        let mut d = AcpDriver::gemini("gemini");
         d.start(&ctx(None));
         d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
         d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#);
@@ -1055,5 +1165,85 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn access_modes_pick_t3_argv_and_gemini_switches_live_when_advertised() {
+        let at = |access_mode| LaunchContext {
+            access_mode,
+            ..ctx(None)
+        };
+        let g = AcpDriver::grok();
+        let full = g.launch(&at(RuntimeAccessMode::FullAccess));
+        assert!(full.args.is_empty());
+        assert_eq!(full.tail_args, ["agent", "--always-approve", "stdio"]);
+        // No auto-accept-edits launch mode: it asks, as approval-required.
+        let edits = g.launch(&at(RuntimeAccessMode::AutoAcceptEdits));
+        assert_eq!(edits.args, ["--permission-mode", "default"]);
+        assert_eq!(edits.tail_args, ["agent", "stdio"]);
+        assert!(!g.switches_access_live(RuntimeAccessMode::FullAccess));
+
+        let mut d = AcpDriver::gemini("gemini");
+        let spec = d.launch(&at(RuntimeAccessMode::AutoAcceptEdits));
+        assert_eq!(spec.args, ["--acp", "--approval-mode", "auto_edit"]);
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1","modes":{"currentModeId":"default","availableModes":[{"id":"default","name":"D"},{"id":"autoEdit","name":"E"}]}}}"#);
+        assert!(d.switches_access_live(RuntimeAccessMode::AutoAcceptEdits));
+        assert!(!d.switches_access_live(RuntimeAccessMode::FullAccess));
+        let req = RuntimePromptReq {
+            access_mode: Some(RuntimeAccessMode::AutoAcceptEdits),
+            ..RuntimePromptReq::of("go")
+        };
+        let s = d.prompt("t1", &req).unwrap();
+        assert_eq!(sent(&s, 0)["method"], "session/set_mode");
+        assert_eq!(sent(&s, 0)["params"]["modeId"], "autoEdit");
+        assert_eq!(sent(&s, 1)["method"], "session/prompt");
+        let e =
+            d.on_line(r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32602,"message":"bad mode"}}"#);
+        assert!(matches!(&e.events[0], DriverEvent::Error(f) if f.message == "bad mode"));
+    }
+
+    #[test]
+    fn pdfs_need_embedded_context_and_failed_tools_carry_their_text() {
+        let pdf = RuntimePromptReq {
+            files: vec![otto_core::agent_runtime::PromptFile {
+                mime: "application/pdf".into(),
+                name: "a.pdf".into(),
+                data_base64: "JVBERg==".into(),
+            }],
+            ..RuntimePromptReq::of("read")
+        };
+        for embedded in [false, true] {
+            let mut d = AcpDriver::gemini("gemini");
+            d.start(&ctx(None));
+            let caps = json!({"protocolVersion":1,"agentCapabilities":{"promptCapabilities":{"embeddedContext":embedded}}});
+            d.on_line(&json!({"jsonrpc":"2.0","id":1,"result":caps}).to_string());
+            d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#);
+            let Ok(s) = d.prompt("t1", &pdf) else {
+                assert!(!embedded);
+                continue;
+            };
+            assert!(embedded);
+            let block = &sent(&s, 0)["params"]["prompt"][0];
+            assert_eq!(block["type"], "resource");
+            assert_eq!(block["resource"]["blob"], "JVBERg==");
+            assert_eq!(block["resource"]["mimeType"], "application/pdf");
+            // A permission request names its tool's item; a failed update
+            // carries its content as the error.
+            d.on_line(r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call","toolCallId":"c1","title":"fetch","kind":"fetch","status":"pending"}}}"#);
+            let r = d.on_line(r#"{"jsonrpc":"2.0","id":"p1","method":"session/request_permission","params":{"sessionId":"s1","toolCall":{"toolCallId":"c1"},"options":[]}}"#);
+            assert!(
+                matches!(&r.events[0], DriverEvent::Request { tool_item_id: Some(t), .. } if t == "t1:tool:c1")
+            );
+            let f = d.on_line(r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call_update","toolCallId":"c1","status":"failed","content":[{"type":"content","content":{"type":"text","text":"403 Forbidden"}}]}}}"#);
+            let DriverEvent::TurnItem(i) = &f.events[0] else {
+                panic!()
+            };
+            assert_eq!(
+                (i.status, i.error.as_deref()),
+                (TurnItemStatus::Failed, Some("403 Forbidden"))
+            );
+        }
     }
 }

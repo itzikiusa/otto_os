@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyEvents, applyReplay, emptyProjection, type RuntimeProjection } from '../src/modules/threads/runtime/projection.ts';
-import { isRunning, pendingApprovals, timelineRows, workLabel } from '../src/modules/threads/runtime/timeline.ts';
+import { approvalOutcome, groupSummary, isRunning, pendingApprovals, timelineRows, toolError, workLabel, type TimelineRow } from '../src/modules/threads/runtime/timeline.ts';
 import type { RuntimeEvent, RuntimeEventBody, RuntimeRequest, TurnItem } from '../src/lib/api/types';
 
 const TS = '2026-11-04T10:00:00Z';
@@ -153,8 +153,146 @@ test('timeline groups consecutive work items between messages', () => {
   const work = (id: string, ordinal: number): TurnItem => ({ ...base, id, ordinal, type: 'reasoning', text: 'hmm', streaming: false });
   const rows = timelineRows([user(1), work('w1', 2), work('w2', 3), assistant('ok', false, 4)]);
   assert.deepEqual(
-    rows.map((r) => (r.kind === 'work' ? r.items.map((i) => i.id).join('+') : r.item.id)),
+    rows.map((r) => (r.kind === 'work' ? r.parts.map((x) => (x.kind === 'item' ? x.entry.item.id : '?')).join('+') : r.item.id)),
     ['u1', 'w1+w2', 'a1'],
   );
   assert.equal(workLabel(work('w', 1)), 'Thinking');
+});
+
+// ── Runtime polish: parallel groups, folded approvals, outcomes, errors ──
+const at = (s: number): string => new Date(Date.parse(TS) + s * 1000).toISOString();
+const tool = (id: string, ordinal: number, start: number, end: number | null, extra: Partial<TurnItem> = {}): TurnItem =>
+  ({
+    ...base,
+    id,
+    ordinal,
+    status: end === null ? 'running' : 'completed',
+    started_at: at(start),
+    completed_at: end === null ? null : at(end),
+    type: 'web_search',
+    title: 'WebFetch',
+    patterns: [`https://x/${id}`],
+    ...extra,
+  }) as TurnItem;
+const ask = (id: string, ordinal: number, toolId: string | undefined, extra: Partial<TurnItem> = {}): TurnItem =>
+  ({
+    ...base,
+    id,
+    ordinal,
+    status: 'pending',
+    type: 'approval_request',
+    request_id: `r-${id}`,
+    request_kind: 'permission',
+    title: 'WebFetch',
+    options: [],
+    ...(toolId ? { tool_item_id: toolId } : {}),
+    ...extra,
+  }) as TurnItem;
+const shape = (rows: TimelineRow[]): string[] =>
+  rows.map((r) =>
+    r.kind === 'message'
+      ? r.item.id
+      : r.parts
+          .map((x) =>
+            x.kind === 'item'
+              ? x.entry.item.id + (x.entry.approval ? `[${x.entry.approval.id}]` : '')
+              : `(${x.entries.map((e) => e.item.id + (e.approval ? `[${e.approval.id}]` : '')).join(',')})`,
+          )
+          .join('+'),
+  );
+
+test('tool calls that overlap in time group; sequential ones and non-tools stay rows', () => {
+  const think: TurnItem = { ...base, id: 'th', ordinal: 2, type: 'reasoning', text: 'x', streaming: false };
+  const rows = timelineRows([
+    user(1),
+    think,
+    tool('f1', 3, 0, 5),
+    tool('f2', 4, 1, 3),
+    tool('f3', 5, 4, 6), // starts before f1 ends
+    tool('c1', 6, 10, 11, { type: 'command_execution', input: 'ls', title: null } as Partial<TurnItem>), // after all ended
+    tool('c2', 7, 11, 12, { type: 'command_execution', input: 'pwd', title: null } as Partial<TurnItem>), // starts exactly at c1's end
+  ]);
+  assert.deepEqual(shape(rows), ['u1', 'th+(f1,f2,f3)+c1+c2']);
+  const group = rows[1].kind === 'work' ? rows[1].parts[1] : null;
+  assert.equal(group?.kind, 'group');
+  if (group?.kind === 'group') assert.equal(groupSummary(group.entries), 'Fetched 3 web pages');
+  // A call still running hasn't ended: the next one joins it.
+  assert.deepEqual(shape(timelineRows([tool('r1', 1, 0, null), tool('r2', 2, 30, null)])), ['(r1,r2)']);
+});
+
+test('group summary follows T3 summarizeToolGroup phrasing', () => {
+  const e = (item: TurnItem) => ({ item });
+  const cmd = tool('c', 1, 0, 1, { type: 'command_execution', input: 'ls', title: null } as Partial<TurnItem>);
+  const search = tool('s', 2, 0, 1, { title: 'WebSearch' } as Partial<TurnItem>);
+  const dyn = tool('d', 3, 0, 1, { type: 'dynamic_tool', tool_name: 'mcp', input: {}, title: null } as Partial<TurnItem>);
+  assert.equal(groupSummary([e(cmd), e(cmd)]), 'Ran 2 commands');
+  assert.equal(groupSummary([e(cmd), e(search)]), 'Ran 1 command and searched the web 1 time');
+  assert.equal(groupSummary([e(cmd), e(search), e(dyn), e(dyn)]), 'Ran 1 command, searched the web 1 time, and used 2 tools');
+});
+
+test('an approval with tool_item_id folds into its tool; an unknown or missing one stays its own row', () => {
+  const rows = timelineRows([
+    user(1),
+    tool('f1', 2, 0, 5),
+    ask('a1', 3, 'f1'),
+    tool('f2', 4, 1, null),
+    ask('a2', 5, 'f2'),
+    ask('a3', 6, 'nope'),
+    ask('a4', 7, undefined),
+  ]);
+  assert.deepEqual(shape(rows), ['u1', '(f1[a1],f2[a2])+a3+a4']);
+});
+
+test('several pending approvals are all answerable', () => {
+  const req = (id: string): RuntimeRequest => ({
+    id,
+    turn_id: 't1',
+    kind: 'permission',
+    status: 'pending',
+    response_capability: { type: 'live' },
+    created_at: TS,
+    resolved_at: null,
+  });
+  const p = fold([
+    ev(1, { type: 'turn_item.updated', turn_item: ask('a1', 1, 'f1') }),
+    ev(2, { type: 'turn_item.updated', turn_item: ask('a2', 2, 'f2') }),
+    ev(3, { type: 'runtime_request.updated', runtime_request: req('r-a1') }),
+    ev(4, { type: 'runtime_request.updated', runtime_request: req('r-a2') }),
+  ]);
+  assert.deepEqual(
+    pendingApprovals(p).map((a) => [a.requestId, a.canRespond]),
+    [
+      ['r-a1', true],
+      ['r-a2', true],
+    ],
+  );
+});
+
+test('approval outcome: withdrawn by the agent, interrupt, closed, declined; approved says nothing', () => {
+  const item = (cancel?: string) => ask('a', 1, 'f', { status: 'cancelled', ...(cancel ? { cancel_reason: cancel } : {}) } as Partial<TurnItem>);
+  const narrow = (i: TurnItem) => (i.type === 'approval_request' ? i : assert.fail('not an approval'));
+  assert.equal(approvalOutcome(narrow(item('agent')), undefined, 'Claude'), 'Withdrawn by Claude');
+  assert.equal(approvalOutcome(narrow(item('interrupt')), undefined, 'Claude'), 'Canceled when the turn stopped');
+  assert.equal(approvalOutcome(narrow(item('closed')), undefined, 'Claude'), 'Canceled when the thread closed');
+  // The reason may arrive on the request instead of the item.
+  const req: RuntimeRequest = {
+    id: 'r-a',
+    turn_id: 't1',
+    kind: 'permission',
+    status: 'cancelled',
+    response_capability: { type: 'live' },
+    created_at: TS,
+    resolved_at: TS,
+    cancel_reason: 'agent',
+  };
+  assert.equal(approvalOutcome(narrow(ask('a', 1, 'f')), req, 'Codex'), 'Withdrawn by Codex');
+  const done = narrow(ask('a', 1, 'f', { status: 'completed' } as Partial<TurnItem>));
+  assert.equal(approvalOutcome(done, { ...req, status: 'resolved', decision: 'decline', cancel_reason: undefined }, 'Claude'), 'Declined');
+  assert.equal(approvalOutcome(done, { ...req, status: 'resolved', decision: 'accept', cancel_reason: undefined }, 'Claude'), null);
+});
+
+test('a failed tool exposes its error text', () => {
+  assert.equal(toolError(tool('f', 1, 0, 1, { status: 'failed', error: 'HTTP 403' } as Partial<TurnItem>)), 'HTTP 403');
+  assert.equal(toolError(tool('f', 1, 0, 1)), null);
+  assert.equal(toolError(user()), null);
 });

@@ -32,7 +32,7 @@ Otto ports that design rather than inventing its own.
 | **Claude** | The **Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk ^0.3.284`, `apps/server/package.json:37`), in-process: `query()` (`apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts:1090`). The SDK spawns the `claude` CLI (`binaryPath` setting, default `claude`, `packages/contracts/src/settings.ts:715`, passed as `pathToClaudeCodeExecutable`, `ClaudeAdapterV2.ts:1651-1653`) and speaks its stream-json control protocol. Options: `permissionMode` from the runtime mode (`:2573-2620`), `includePartialMessages: true` (`:1617`), the `claude_code` system-prompt preset (`:1660`), `sessionId` on the first run and `resume` afterwards (`:1578-1580`). The ACP adapter `claude-agent-acp` is used only as a Registry agent (`packages/provider-acp-registry/src/server/adapter.ts:195-210`); T3 Code bundles no npm ACP adapter (`packages/provider-acp-registry/package.json:35-42`) | **The same SDK transport, ported to Rust** (`crates/otto-agent-protocol/src/claude.rs`). It runs the installed `claude` directly with the SDK's argv (`sdk.mjs` `ProcessTransport.initialize`): `--output-format stream-json --verbose --input-format stream-json --permission-prompt-tool stdio --permission-mode default --include-partial-messages [--model m] (--session-id <uuid> \| --resume <id>)`, env `CLAUDE_CODE_ENTRYPOINT=sdk-ts`. No Node, and **no npm package is needed** |
 | **Codex** | `codex app-server` (`["app-server", …launchArgs]`, `apps/server/src/provider/codexLaunchArgs.ts:12-15`). The binary is the `binaryPath` setting (default `codex`, `CodexAdapterV2.ts:1561`) or an optional managed install of 0.156.1 (`apps/server/src/provider/CodexInstallation.ts:61-98`). Env: `CODEX_HOME` (a shadow home that overlays `auth.json`, `Drivers/CodexHomeLayout.ts:11-77`) and `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` (`CodexProvider.ts:452-457`). Typed client: `packages/effect-codex-app-server`, generated from `openai/codex` `687a119f` (`scripts/generate.ts:16-19`) | `codex [context flags] app-server` (`src/codex.rs`). The context hook adds `--add-dir=…`, `-c developer_instructions=…` (top-level options `app-server` rejects after it) and `CODEX_HOME` (the Otto context bundle's shadow home), exactly as for a PTY codex session. No originator override. Wire shapes were checked against `codex app-server generate-json-schema` of the installed **0.166.0** |
 | **Gemini** | No first-party adapter. It is the ACP Registry entry `gemini` (npm `@google/gemini-cli`, `AcpRegistrySupport.test.ts:1693-1720`). The registry is fetched from `cdn.agentclientprotocol.com` (`AcpRegistrySupport.ts:51`), npm-installed into T3's own prefix (`:1252-1294`), and launched with the registry's argv/env (`:1877-1917`). The exact flag comes from the live registry JSON and is not in the repo | `gemini --acp` (the installed CLI's own flag) plus `--model m`, into the ACP driver (`src/acp.rs`, `AcpDriver::gemini`) |
-| **Grok** | `grok` from `binaryPath` (`packages/provider-grok/src/server/acpSupport.ts:67`). Argv per runtime mode (`:47-58`): `agent stdio`; `--permission-mode auto agent stdio`; `agent --always-approve stdio`; for approval-required, `--permission-mode default agent stdio`. Env `GROK_OAUTH2_REFERRER=t3code` (`:66-74`). `_meta` `{clientType:"extension"}` on initialize and `{cancelTrigger:"ctrl_c"}` on cancel (`:98-101`). Auth method `xai.api_key` when `XAI_API_KEY` is set, else `cached_token` (`:21-25`, `:77-81`) | `grok --permission-mode default [-m model] [--rules=<context>] agent stdio` (`AcpDriver::grok`). The context flags must come before `agent`: the subcommand rejects a trailing `--rules` (verified against grok 1.0.70). Same `_meta` and auth preference. Otto omits the T3-specific referrer and never launches the `auto` / `--always-approve` variants |
+| **Grok** | `grok` from `binaryPath` (`packages/provider-grok/src/server/acpSupport.ts:67`). Argv per runtime mode (`:47-58`): `agent stdio`; `--permission-mode auto agent stdio`; `agent --always-approve stdio`; for approval-required, `--permission-mode default agent stdio`. Env `GROK_OAUTH2_REFERRER=t3code` (`:66-74`). `_meta` `{clientType:"extension"}` on initialize and `{cancelTrigger:"ctrl_c"}` on cancel (`:98-101`). Auth method `xai.api_key` when `XAI_API_KEY` is set, else `cached_token` (`:21-25`, `:77-81`) | `grok --permission-mode default [-m model] [--rules=<context>] agent stdio` (`AcpDriver::grok`). The context flags must come before `agent`: the subcommand rejects a trailing `--rules` (verified against grok 1.0.70). Same `_meta` and auth preference. Otto omits the T3-specific referrer and never launches the `auto` variant; full-access is `agent --always-approve stdio` |
 | **Antigravity** | Only as the ACP Registry agent `antigravity-acp`, an npm adapter (`packages/client-runtime/src/providerClients.ts:39-43`) | **agy's own print-mode stream-json** (`src/agy.rs`): `agy --print= --input-format stream-json --output-format stream-json [--model m] [--conversation <id>]`, plus the context hook's `--add-dir=`. `--print` takes a value; the empty `=` stops it eating the next flag. No npm adapter. Never `--dangerously-skip-permissions` |
 
 Installed CLIs it was built against: claude 2.1.318, codex-cli 0.166.0,
@@ -261,15 +261,25 @@ Probed against agy 1.4.12 in a scratch repo.
    respawns with `--conversation`. Closing stdin does **not** stop a turn:
    agy finishes it and then exits 0.
 
-### What Otto does NOT port: policy auto-approval
+### Access modes
 
-T3 Code auto-answers by runtime mode. Reads are always allowed and
-full-access allows everything (`clientPolicy.ts:143-200`, `adapter.ts:1268-1276`).
-Codex and Claude get `on-request` / `never` / `bypassPermissions` in the
-wider modes. Otto runs **only the approval-required mode**: every question
-reaches a person. Only a provider's own config allow-rules (for example
-`~/.claude/settings.json` `permissions.allow`) apply, exactly as in a PTY
-session.
+The session's `access_mode` is T3 Code's `RuntimeMode` without `auto`:
+`approval-required` (default), `auto-accept-edits`, `full-access`. Each
+driver passes it the way T3 Code does (table in `docs/contracts/api.md`
+"Structured agent runtime"): Claude's `--permission-mode` (`default` /
+`acceptEdits` / `bypassPermissions` + `--allow-dangerously-skip-permissions`,
+`ClaudeAdapterV2.ts:2573-2681`), switched live with the control protocol's
+`set_permission_mode`; Codex's per-turn `approvalPolicy` + `sandboxPolicy`
+(`codexRuntimeModeTurnDefaults`, `CodexAdapterV2.ts:703-742`, the sandbox
+kept `externalSandbox` under Otto's Seatbelt); Grok's argv
+(`grokAcpSpawnArgs`, `acpSupport.ts:47-58`; no accept-edits variant, so that
+mode asks); Gemini's `--approval-mode` and live `session/set_mode` when
+advertised; agy's `--mode accept-edits` / `auto`. A driver that cannot switch
+live (`StructuredDriver::switches_access_live`) is respawned in the new mode
+and resumes its thread, as for a model switch. Otto does NOT port T3 Code's
+client-side auto-answering (`clientPolicy.ts:143-200`): whatever the CLI
+still asks reaches a person. Otto's Seatbelt, folder trust and prompt guard
+apply in every mode.
 
 ## 3. The normalized event model
 
@@ -287,8 +297,8 @@ fields are snake_case (Otto's wire convention):
 | `provider_session.updated` | `provider_session {status: starting\|ready\|running\|waiting\|stopped\|error, cwd, model, updated_at, last_error}` (`orchestrationV2.ts:950`) |
 | `provider_thread.updated` | `provider_thread {native_thread_id, context_usage?, updated_at}` (`:1074-1083`) |
 | `provider_turn.updated` | `provider_turn {id, ordinal, status: pending\|running\|completed\|interrupted\|failed\|cancelled, started_at, completed_at, turn_token_usage?}` (`:1168-1189`) |
-| `turn_item.updated` | `turn_item {id, turn_id, ordinal, status, title, started_at, completed_at, updated_at, type, …}`; `type` is one of the item types below (`:1495-1819`) |
-| `runtime_request.updated` | `runtime_request {id, turn_id, kind: command\|file_read\|file_change\|mcp_elicitation\|permission, status: pending\|resolved\|expired\|cancelled, response_capability: live\|not_resumable, created_at, resolved_at, decision?}` (`:1205-1231`) |
+| `turn_item.updated` | `turn_item {id, turn_id, ordinal, status, title, started_at, completed_at, updated_at, error?, type, …}` (`error`: a failed tool's text, ≤ ~2 KB); `type` is one of the item types below (`:1495-1819`) |
+| `runtime_request.updated` | `runtime_request {id, turn_id, kind: command\|file_read\|file_change\|mcp_elicitation\|permission, status: pending\|resolved\|expired\|cancelled, response_capability: live\|not_resumable, created_at, resolved_at, decision?, cancel_reason?}` (`:1205-1231`) |
 | `plan.updated` | `plan {id, turn_id, steps[{id, text, status: pending\|running\|completed}], explanation?}` (`:1320-1370`) |
 | `command_output.delta` | `{item_id, chunk}`. The only delta, never persisted |
 | `turn.terminal` | `{turn_id, status: completed\|interrupted\|cancelled\|failed, failure?, reason?}` |
@@ -297,7 +307,7 @@ Turn item types:
 
 | Item type | Fields |
 |---|---|
-| `user_message` | |
+| `user_message` | `text`, `attachments?[{id, kind: image\|file, mime, name?}]` (bytes at `GET /runtime-sessions/{id}/attachments/{attachment_id}`) |
 | `assistant_message` | `message_id`, `text`, `streaming` |
 | `reasoning` | `text`, `streaming` |
 | `todo_list` | |
@@ -305,7 +315,7 @@ Turn item types:
 | `command_execution` | `input`, `output?`, `exit_code?` |
 | `dynamic_tool` | |
 | `web_search` | `patterns` |
-| `approval_request` | `request_id`, `request_kind`, `prompt?`, `reason?`, `options[{decision, label}]` |
+| `approval_request` | `request_id`, `request_kind`, `prompt?`, `reason?`, `options[{decision, label}]`, `tool_item_id?`, `cancel_reason?` (`agent` / `interrupt` / `closed`) |
 | `system_notice` | |
 | `error` | `failure` |
 
@@ -532,12 +542,8 @@ in which headless agy denies what it would have asked about.
     10 MB images) and the `user_message` item could carry an image count.
 - **`ottod` teardown** calling `AgentRuntime::shutdown()`, and eviction of
   idle live entries.
-- **Runtime modes.** auto-accept-edits and full-access are unported; they
-  would need an admin setting, as `agent_skip_permissions` is for PTY
-  sessions.
 - **Features T3 Code has that Otto does not yet:** restart continuation,
-  non-image attachments (T3 Code sends Claude PDFs), images shown back in
-  the user item (they are sent, not persisted), steering a running turn
+  steering a running turn
   (`turn/steer`), Codex `thread/unarchive`, Claude thinking summaries and
   the subagent tree, ACP v2.
 - **Named provider accounts and network profiles** (refused today).

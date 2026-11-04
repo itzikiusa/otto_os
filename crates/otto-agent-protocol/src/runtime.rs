@@ -15,17 +15,19 @@
 //! run on a per-session persister task fed in that order.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use dashmap::DashMap;
 use otto_core::agent_runtime::{
-    ApprovalDecision, CreateRuntimeSessionReq, PlanArtifact, ProviderFailure, ProviderSession,
-    ProviderSessionStatus, ProviderThread, ProviderTurn, ProviderTurnStatus, ResponseCapability,
-    RuntimeEvent, RuntimeEventBody, RuntimePromptReq, RuntimePromptResp, RuntimeReplay,
-    RuntimeRequest, RuntimeRequestStatus, RuntimeSession, RuntimeSessionStatus, RuntimeSnapshot,
-    TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus,
+    ApprovalDecision, Attachment, AttachmentKind, CancelReason, CreateRuntimeSessionReq,
+    PlanArtifact, ProviderFailure, ProviderSession, ProviderSessionStatus, ProviderThread,
+    ProviderTurn, ProviderTurnStatus, ResponseCapability, RuntimeEvent, RuntimeEventBody,
+    RuntimePromptReq, RuntimePromptResp, RuntimeReplay, RuntimeRequest, RuntimeRequestStatus,
+    RuntimeSession, RuntimeSessionStatus, RuntimeSnapshot, TurnItem, TurnItemKind, TurnItemStatus,
+    TurnTerminalStatus,
 };
 use otto_core::{new_id, Error, Id, Result};
 use otto_state::{AgentRuntimeRepo, NewRuntimeSession, RuntimeEntityRow};
@@ -58,6 +60,8 @@ pub struct RuntimeConfig {
     /// chunk goes out at once; the latest text of a held item is flushed
     /// when the window ends or before any other event. Zero disables.
     pub stream_coalesce: Duration,
+    /// Prompt attachments, one folder per session (`<dir>/<session>/<id>`).
+    pub attachments_dir: PathBuf,
 }
 
 impl Default for RuntimeConfig {
@@ -68,6 +72,7 @@ impl Default for RuntimeConfig {
             interrupt_grace: Duration::from_secs(10),
             close_grace: Duration::from_secs(3),
             stream_coalesce: Duration::from_millis(50),
+            attachments_dir: std::env::temp_dir().join("otto-runtime-attachments"),
         }
     }
 }
@@ -314,7 +319,8 @@ impl AgentRuntime {
     /// items too, every pending request `expired` / not resumable, the
     /// provider session `stopped`. Written above the persisted sequence
     /// floor. The next prompt respawns the CLI and resumes the provider's own
-    /// session id. Returns sessions touched.
+    /// session id. Also removes the attachments of sessions that no longer
+    /// exist (a workspace delete cascades their rows). Returns sessions touched.
     pub async fn recover(&self) -> Result<usize> {
         let mut touched = 0;
         for sid in self.inner.repo.session_ids().await? {
@@ -370,6 +376,14 @@ impl AgentRuntime {
             if !rows.is_empty() {
                 touched += 1;
                 self.inner.repo.upsert_entities(&sid, &rows).await?;
+            }
+        }
+        if let Ok(mut dirs) = tokio::fs::read_dir(&self.inner.config.attachments_dir).await {
+            while let Ok(Some(d)) = dirs.next_entry().await {
+                let sid = d.file_name().to_string_lossy().to_string();
+                if matches!(self.inner.repo.get(&sid).await, Err(Error::NotFound(_))) {
+                    let _ = tokio::fs::remove_dir_all(d.path()).await;
+                }
             }
         }
         Ok(touched)
@@ -445,6 +459,7 @@ impl AgentRuntime {
                 title,
                 cwd,
                 model,
+                access_mode: req.access_mode.unwrap_or_default(),
                 created_by: user.clone(),
             })
             .await?;
@@ -454,6 +469,7 @@ impl AgentRuntime {
         if let Err(e) = self.ensure_process(&live).await {
             self.inner.live.remove(&id);
             let _ = self.inner.repo.delete(&id).await;
+            let _ = tokio::fs::remove_dir_all(self.attachments(&id)).await;
             return Err(e);
         }
         let s = live.lock().session.clone();
@@ -549,6 +565,7 @@ impl AgentRuntime {
             model: session.model.clone(),
             resume: session.native_thread_id.clone(),
             sandboxed: self.inner.host.sandboxed(&session).await,
+            access_mode: session.access_mode,
         };
         let mut spec = driver.launch(&ctx);
         self.inner
@@ -613,9 +630,10 @@ impl AgentRuntime {
         self.prompt_with(id, &RuntimePromptReq::of(text)).await
     }
 
-    /// A prompt with an optional model / effort and inline images.
+    /// A prompt with an optional model / effort / access mode and inline
+    /// images and files.
     pub async fn prompt_with(&self, id: &Id, req: &RuntimePromptReq) -> Result<RuntimePromptResp> {
-        if req.text.trim().is_empty() && req.images.is_empty() {
+        if req.text.trim().is_empty() && req.images.is_empty() && req.files.is_empty() {
             return Err(Error::Invalid("prompt text is empty".into()));
         }
         if let Some(bad) = req.images.iter().find(|i| !i.mime.starts_with("image/")) {
@@ -624,32 +642,68 @@ impl AgentRuntime {
                 bad.mime
             )));
         }
+        if let Some(bad) = req.files.iter().find(|f| f.mime != "application/pdf") {
+            return Err(Error::Invalid(format!(
+                "'{}' ({}) is not supported; only PDF files can be attached",
+                bad.name, bad.mime
+            )));
+        }
         let live = self.live(id).await?;
         check_can_prompt(&live.lock())?;
-        if let Some(model) = req.model.as_ref().filter(|m| !m.trim().is_empty()) {
+        let model = req.model.clone().filter(|m| !m.trim().is_empty());
+        if model.is_some() || req.access_mode.is_some() {
             let _spawning = live.spawn_lock.lock().await;
-            let stale = {
+            let (stale, model, mode) = {
                 let mut st = live.lock();
                 check_can_prompt(&st)?;
-                if st.session.model.as_ref() == Some(model) {
-                    None
-                } else {
-                    st.session.model = Some(model.clone());
-                    // A driver that cannot switch live restarts on the new
-                    // model and resumes its thread.
-                    let live_switch = st
-                        .proc
-                        .as_ref()
-                        .is_some_and(|p| p.driver.switches_model_live());
-                    (!live_switch).then(|| st.proc.take()).flatten()
+                let model = model.filter(|m| st.session.model.as_ref() != Some(m));
+                let mode = req.access_mode.filter(|m| *m != st.session.access_mode);
+                // A driver that cannot switch live restarts in the new
+                // selection and resumes its thread.
+                let live_switch = st.proc.as_ref().is_some_and(|p| {
+                    (model.is_none() || p.driver.switches_model_live())
+                        && mode.is_none_or(|m| p.driver.switches_access_live(m))
+                });
+                if let Some(m) = &model {
+                    st.session.model = Some(m.clone());
                 }
+                if let Some(m) = mode {
+                    st.session.access_mode = m;
+                }
+                let changed = model.is_some() || mode.is_some();
+                (
+                    (changed && !live_switch).then(|| st.proc.take()).flatten(),
+                    model,
+                    mode,
+                )
             };
             if let Some(p) = stale {
                 stop_child(p, self.inner.config.interrupt_grace);
             }
-            self.inner.repo.set_model(id, model).await?;
+            if let Some(m) = &model {
+                self.inner.repo.set_model(id, m).await?;
+            }
+            if let Some(m) = mode {
+                self.inner.repo.set_access_mode(id, m).await?;
+            }
         }
         self.ensure_process(&live).await?;
+        let attachments = self.store_attachments(id, req).await?;
+        let res = self.start_turn(&live, req, attachments.clone());
+        if res.is_err() {
+            for a in &attachments {
+                let _ = tokio::fs::remove_file(self.attachments(id).join(&a.id)).await;
+            }
+        }
+        res
+    }
+
+    fn start_turn(
+        &self,
+        live: &Arc<Live>,
+        req: &RuntimePromptReq,
+        attachments: Vec<Attachment>,
+    ) -> Result<RuntimePromptResp> {
         let mut st = live.lock();
         check_can_prompt(&st)?;
         let turn_id = new_id();
@@ -682,7 +736,7 @@ impl AgentRuntime {
         });
         let sequence = emit(
             &self.inner,
-            &live,
+            live,
             &mut st,
             RuntimeEventBody::ProviderTurnUpdated {
                 provider_turn: turn,
@@ -694,20 +748,75 @@ impl AgentRuntime {
             None,
             TurnItemKind::UserMessage {
                 text: req.text.clone(),
+                attachments,
             },
         );
         user.turn_id = Some(turn_id.clone());
-        upsert_item(&self.inner, &live, &mut st, user);
+        upsert_item(&self.inner, live, &mut st, user);
         set_session_status(
             &self.inner,
-            &live,
+            live,
             &mut st,
             ProviderSessionStatus::Running,
             None,
         );
         st.session.last_active_at = now;
-        apply_step(&self.inner, &live, &mut st, step);
+        apply_step(&self.inner, live, &mut st, step);
         Ok(RuntimePromptResp { turn_id, sequence })
+    }
+
+    /// The session's attachment folder.
+    fn attachments(&self, id: &Id) -> PathBuf {
+        self.inner.config.attachments_dir.join(id)
+    }
+
+    /// Write the prompt's images and files under the session's folder.
+    async fn store_attachments(&self, id: &Id, req: &RuntimePromptReq) -> Result<Vec<Attachment>> {
+        use base64::Engine;
+        let images = req
+            .images
+            .iter()
+            .map(|i| (AttachmentKind::Image, &i.mime, None, &i.data_base64));
+        let files = req
+            .files
+            .iter()
+            .map(|f| (AttachmentKind::File, &f.mime, Some(&f.name), &f.data_base64));
+        let mut out = Vec::new();
+        for (kind, mime, name, data) in images.chain(files) {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .map_err(|e| Error::Invalid(format!("an attachment is not valid base64: {e}")))?;
+            let a = Attachment {
+                id: new_id(),
+                kind,
+                mime: mime.clone(),
+                name: name.cloned(),
+            };
+            let dir = self.attachments(id);
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .and(tokio::fs::write(dir.join(&a.id), bytes).await)
+                .map_err(|e| Error::Internal(format!("could not store an attachment: {e}")))?;
+            out.push(a);
+        }
+        Ok(out)
+    }
+
+    /// A stored attachment of `id`: its mime type and bytes.
+    pub async fn attachment(&self, id: &Id, attachment_id: &str) -> Result<(String, Vec<u8>)> {
+        let live = self.live(id).await?;
+        let mime = live.lock().proj.items.values().find_map(|i| match &i.kind {
+            TurnItemKind::UserMessage { attachments, .. } => attachments
+                .iter()
+                .find(|a| a.id == attachment_id)
+                .map(|a| a.mime.clone()),
+            _ => None,
+        });
+        let mime = mime.ok_or_else(|| Error::NotFound("no such attachment".into()))?;
+        let bytes = tokio::fs::read(self.attachments(id).join(attachment_id))
+            .await
+            .map_err(|_| Error::NotFound("the attachment is gone".into()))?;
+        Ok((mime, bytes))
     }
 
     /// Interrupt the running turn. `false` when no turn was running.
@@ -722,7 +831,7 @@ impl AgentRuntime {
         }
         turn.interrupting = true;
         let turn_id = turn.id.clone();
-        cancel_pending(&self.inner, &live, &mut st, RuntimeRequestStatus::Cancelled);
+        cancel_pending(&self.inner, &live, &mut st, CancelReason::Interrupt);
         let Some(proc) = st.proc.as_mut() else {
             finish_turn(
                 &self.inner,
@@ -799,6 +908,7 @@ impl AgentRuntime {
             request_id,
             RuntimeRequestStatus::Resolved,
             Some(decision),
+            None,
         );
         if st.turn.is_some() && !has_pending(&st) {
             set_session_status(
@@ -821,6 +931,7 @@ impl AgentRuntime {
         if st.session.status == RuntimeSessionStatus::Closed {
             return Ok(st.session.clone());
         }
+        cancel_pending(&self.inner, &live, &mut st, CancelReason::Closed);
         finish_turn(
             &self.inner,
             &live,
@@ -1053,6 +1164,7 @@ fn resolve_request(
     request_id: &str,
     status: RuntimeRequestStatus,
     decision: Option<ApprovalDecision>,
+    cancel_reason: Option<CancelReason>,
 ) {
     let Some(mut req) = st.proj.requests.get(request_id).cloned() else {
         return;
@@ -1061,6 +1173,7 @@ fn resolve_request(
     req.status = status;
     req.resolved_at = Some(now);
     req.decision = decision;
+    req.cancel_reason = cancel_reason;
     emit(
         inner,
         live,
@@ -1082,11 +1195,17 @@ fn resolve_request(
             TurnItemStatus::Cancelled
         };
         settle_item(&mut item, s, now);
+        if let TurnItemKind::ApprovalRequest {
+            cancel_reason: r, ..
+        } = &mut item.kind
+        {
+            *r = cancel_reason;
+        }
         upsert_item(inner, live, st, item);
     }
 }
 
-fn cancel_pending(inner: &Inner, live: &Live, st: &mut State, status: RuntimeRequestStatus) {
+fn cancel_pending(inner: &Inner, live: &Live, st: &mut State, reason: CancelReason) {
     let mut ids: Vec<Id> = st
         .proj
         .requests
@@ -1096,7 +1215,15 @@ fn cancel_pending(inner: &Inner, live: &Live, st: &mut State, status: RuntimeReq
         .collect();
     ids.sort();
     for id in ids {
-        resolve_request(inner, live, st, &id, status, None);
+        resolve_request(
+            inner,
+            live,
+            st,
+            &id,
+            RuntimeRequestStatus::Cancelled,
+            None,
+            Some(reason),
+        );
     }
 }
 
@@ -1116,7 +1243,7 @@ fn finish_turn(
     };
     // Settle what the client saw last: the held text first.
     flush_held(inner, live, st);
-    cancel_pending(inner, live, st, RuntimeRequestStatus::Cancelled);
+    cancel_pending(inner, live, st, CancelReason::Agent);
     let now = Utc::now();
     let mut open: Vec<TurnItem> = st
         .proj
@@ -1159,6 +1286,7 @@ fn finish_turn(
                 started_at: Some(now),
                 completed_at: Some(now),
                 updated_at: now,
+                error: None,
                 kind: TurnItemKind::Error { failure: f.clone() },
             },
         );
@@ -1265,6 +1393,7 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                 prompt,
                 reason,
                 options,
+                tool_item_id,
             } => {
                 let turn_id = st.turn.as_ref().map(|t| t.id.clone());
                 let request = RuntimeRequest {
@@ -1276,6 +1405,7 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                     created_at: Utc::now(),
                     resolved_at: None,
                     decision: None,
+                    cancel_reason: None,
                 };
                 let mut item = item(
                     format!("{}:approval:{id}", turn_id.as_deref().unwrap_or_default()),
@@ -1287,6 +1417,8 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                         prompt: prompt.or(title),
                         reason,
                         options,
+                        tool_item_id,
+                        cancel_reason: None,
                     },
                 );
                 item.turn_id = turn_id;
@@ -1308,7 +1440,9 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                     .get(&request_id)
                     .is_some_and(|r| r.status == RuntimeRequestStatus::Pending);
                 if open {
-                    resolve_request(inner, live, st, &request_id, status, None);
+                    let reason =
+                        (status == RuntimeRequestStatus::Cancelled).then_some(CancelReason::Agent);
+                    resolve_request(inner, live, st, &request_id, status, None, reason);
                     if !has_pending(st) && st.turn.is_some() {
                         set_session_status(inner, live, st, ProviderSessionStatus::Running, None);
                     }
@@ -1483,7 +1617,7 @@ async fn pump(inner: Arc<Inner>, live: Arc<Live>, epoch: u64, mut rx: mpsc::Rece
                     };
                     finish_turn(&inner, &live, &mut st, status, failure, None);
                 } else {
-                    cancel_pending(&inner, &live, &mut st, RuntimeRequestStatus::Cancelled);
+                    cancel_pending(&inner, &live, &mut st, CancelReason::Agent);
                 }
                 let last_error = (code != Some(0)).then_some(message);
                 set_session_status(

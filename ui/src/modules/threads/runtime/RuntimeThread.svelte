@@ -15,6 +15,9 @@
   // attached images go with the message (composerAttachmentFiles.ts).
   // Slash commands as in composerSlashCommandSearch.ts: the client's own
   // commands act on the view; any other `/command` goes to the agent as typed.
+  // The access chip beside the model is T3's runtime mode (runtimeModeConfig.ts:
+  // labels, icons, descriptions); it rides the next prompt and sticks. PDFs go
+  // as file chips to the providers that take them (Claude).
   import { tick, untrack } from 'svelte';
   import { announceShown } from '../../../lib/announce.svelte';
   import { ApiError } from '../../../lib/api/client';
@@ -26,7 +29,7 @@
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import { formatEffortShort, formatModelLabel, supportsEffortSelection, type EffortLevel } from '../../../lib/providerModels';
   import { auth } from '../../../lib/stores/auth.svelte';
-  import type { PromptImage } from '../../../lib/api/types';
+  import type { PromptImage, RuntimeAccessMode } from '../../../lib/api/types';
   import {
     INTERACTIVE_SLASH_COMMANDS,
     isImmediateSlashCommand,
@@ -40,8 +43,11 @@
   import { toastError } from '../../../lib/toastError';
   import type { ApprovalDecision } from '../../../lib/api/types';
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
-  import { isRunning, latestTurn, pendingApprovals, timelineRows } from './timeline';
+  import { approvalOutcome, isRunning, latestTurn, pendingApprovals, timelineRows, type WorkEntry } from './timeline';
+  import RuntimeAccessChip from './RuntimeAccessChip.svelte';
   import RuntimeApprovalRow from './RuntimeApprovalRow.svelte';
+  import RuntimeAttachments from './RuntimeAttachments.svelte';
+  import RuntimeWorkGroup from './RuntimeWorkGroup.svelte';
   import RuntimeWorkRow from './RuntimeWorkRow.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
   import { runtimeViews } from './runtimeView.svelte';
@@ -62,6 +68,7 @@
   const loadError = $derived(runtimeViews.loadError[sessionId] ?? null);
   const rows = $derived(p ? timelineRows(p.items) : []);
   const approvals = $derived(new Map((p ? pendingApprovals(p) : []).map((a) => [a.requestId, a] as const)));
+  const requests = $derived(new Map((p?.requests ?? []).map((r) => [r.id, r] as const)));
   const turn = $derived(p ? latestTurn(p) : null);
   const closed = $derived(session?.status === 'closed');
   /** The agent couldn't start (a refused handshake answers the prompt 400;
@@ -101,23 +108,32 @@
   let pickerOpen = $state(false);
   let agentEl = $state<HTMLButtonElement | null>(null);
   const provider = $derived(session?.provider ?? '');
+  /** "Claude", for "Withdrawn by Claude". */
+  const agentName = $derived(harnessLabel(provider).replace(/ Code$/, ''));
   const agentLabel = $derived.by(() => {
     const m = model ?? session?.model ?? null;
     const label = m ? formatModelLabel(provider, m, auth.meta) : harnessLabel(provider);
     return effort ? `${label} · ${formatEffortShort(effort)}` : label;
   });
 
-  // ── Images (paste or attach; sent inline with the next message) ──────
+  // ── Access mode for the next turn: sticky per thread ────────────────
+  let pickedMode = $state<RuntimeAccessMode | null>(null);
+  const accessMode = $derived(pickedMode ?? session?.access_mode ?? runtimeThreads.lastAccessMode);
+
+  // ── Images and PDFs (paste or attach; sent with the next message) ─────
   const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
-  // The drivers that take image input (Claude content blocks, Codex image items).
+  // The drivers that take image input (Claude content blocks, Codex image
+  // items); PDFs go to Claude only (document blocks).
   const canImages = $derived(provider === 'claude' || provider === 'codex');
+  const canFiles = $derived(provider === 'claude');
+  const takes = (f: File): boolean => f.type.startsWith('image/') || (canFiles && f.type === 'application/pdf');
   let images = $state<(PromptImage & { name: string })[]>([]);
   let fileEl = $state<HTMLInputElement | null>(null);
   async function addImages(files: Iterable<File>): Promise<void> {
     for (const f of files) {
-      if (!f.type.startsWith('image/')) continue;
+      if (!takes(f)) continue;
       if (f.size > MAX_IMAGE_BYTES) {
-        toastError('Image too large', new Error(`${f.name} is over 10 MB`));
+        toastError('File too large', new Error(`${f.name} is over 10 MB`));
         continue;
       }
       const data = new Uint8Array(await f.arrayBuffer());
@@ -127,7 +143,7 @@
     }
   }
   function onPaste(e: ClipboardEvent): void {
-    const files = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'));
+    const files = [...(e.clipboardData?.files ?? [])].filter(takes);
     if (!canImages || files.length === 0) return;
     e.preventDefault();
     void addImages(files);
@@ -137,13 +153,17 @@
     sending = true;
     const sentImages = images;
     images = [];
+    const pics = sentImages.filter((f) => f.mime.startsWith('image/'));
+    const docs = sentImages.filter((f) => !f.mime.startsWith('image/'));
     try {
       awaitSeq = (
         await runtimeThreads.prompt(sessionId, {
           text: t,
           ...(model ? { model } : {}),
           ...(effort ? { effort } : {}),
-          ...(sentImages.length ? { images: sentImages.map(({ mime, data_base64 }) => ({ mime, data_base64 })) } : {}),
+          ...(pics.length ? { images: pics.map(({ mime, data_base64 }) => ({ mime, data_base64 })) } : {}),
+          ...(docs.length ? { files: docs } : {}),
+          access_mode: accessMode,
         })
       ).sequence;
       startError = null;
@@ -159,7 +179,7 @@
 
   function submit(): void {
     let t = text.trim();
-    if (!t || closed) return;
+    if ((!t && images.length === 0) || closed) return;
     const intent = parseInteractiveSlashInput(t);
     if (intent?.kind === 'send-prompt') t = intent.prompt;
     else if (intent && runSlash(intent)) {
@@ -311,6 +331,23 @@
   });
 </script>
 
+{#snippet entryRow({ item, approval }: WorkEntry)}
+  {@const pending = item.type === 'approval_request' ? approvals.get(item.request_id) : undefined}
+  {#if pending}
+    <RuntimeApprovalRow approval={pending} onrespond={respond} />
+  {:else}
+    {@const ask = approval ?? (item.type === 'approval_request' ? item : undefined)}
+    {@const gate = approval ? approvals.get(approval.request_id) : undefined}
+    <RuntimeWorkRow
+      {item}
+      output={p?.output[item.id]}
+      pending={gate}
+      note={ask && !gate ? approvalOutcome(ask, requests.get(ask.request_id), agentName) : null}
+      onrespond={respond}
+    />
+  {/if}
+{/snippet}
+
 <section class="rt" aria-label="Conversation" data-testid="runtime-thread-{sessionId}">
   <div class="rt-scroll" bind:this={scroller} onscroll={onScroll}>
     <div class="rt-col">
@@ -324,19 +361,23 @@
         {/if}
         {#each rows as row (row.kind === 'message' ? row.item.id : row.id)}
           {#if row.kind === 'message' && row.item.type === 'user_message'}
-            <div class="rt-user"><div class="rt-bubble" dir="auto">{row.item.text}</div></div>
+            <div class="rt-user">
+              {#if row.item.attachments?.length}<RuntimeAttachments {sessionId} attachments={row.item.attachments} />{/if}
+              {#if row.item.text}<div class="rt-bubble" dir="auto">{row.item.text}</div>{/if}
+            </div>
           {:else if row.kind === 'message' && row.item.type === 'assistant_message'}
-            <div class="rt-assistant" class:streaming={row.item.streaming}>
+            <div class="rt-assistant" class:streaming={row.item.streaming} dir="auto">
               <Markdown md={row.item.text} />
             </div>
           {:else if row.kind === 'work'}
             <div class="rt-work">
-              {#each row.items as item (item.id)}
-                {@const pending = item.type === 'approval_request' ? approvals.get(item.request_id) : undefined}
-                {#if pending}
-                  <RuntimeApprovalRow approval={pending} onrespond={respond} />
+              {#each row.parts as part (part.kind === 'group' ? part.id : part.entry.item.id)}
+                {#if part.kind === 'item'}
+                  {@render entryRow(part.entry)}
                 {:else}
-                  <RuntimeWorkRow {item} output={p?.output[item.id]} />
+                  <RuntimeWorkGroup id={part.id} entries={part.entries} open={part.entries.some((e) => e.approval && approvals.has(e.approval.request_id))}>
+                    {#each part.entries as e (e.item.id)}{@render entryRow(e)}{/each}
+                  </RuntimeWorkGroup>
                 {/if}
               {/each}
             </div>
@@ -397,7 +438,7 @@
         <div class="rt-images" data-testid="runtime-images">
           {#each images as img, i (i)}
             <span class="rt-image">
-              <Icon name="image" size={12} /><span class="ellipsis" dir="auto">{img.name}</span>
+              <Icon name={img.mime.startsWith('image/') ? 'image' : 'file'} size={12} /><span class="ellipsis" dir="auto">{img.name}</span>
               <button type="button" class="icon-btn" aria-label="Remove {img.name}" title="Remove" onclick={() => (images = images.filter((_, j) => j !== i))}>
                 <Icon name="x" size={12} />
               </button>
@@ -410,8 +451,8 @@
         <button
           type="button"
           class="icon-btn"
-          aria-label="Attach an image"
-          title="Attach an image (or paste one)"
+          aria-label={canFiles ? 'Attach an image or PDF' : 'Attach an image'}
+          title={canFiles ? 'Attach an image or PDF (or paste one)' : 'Attach an image (or paste one)'}
           data-testid="runtime-attach"
           disabled={closed}
           onclick={() => fileEl?.click()}
@@ -421,7 +462,7 @@
         <input
           bind:this={fileEl}
           type="file"
-          accept="image/*"
+          accept={canFiles ? 'image/*,application/pdf' : 'image/*'}
           multiple
           hidden
           onchange={(e) => {
@@ -447,6 +488,13 @@
             {#if session && hasProviderIcon(session.provider)}<ProviderIcon provider={session.provider} size={13} />{/if}
             <span class="ellipsis">{agentLabel}</span>
           </button>
+          <RuntimeAccessChip
+            mode={accessMode}
+            agent={harnessLabel(provider)}
+            cwd={session?.cwd ?? 'this folder'}
+            disabled={closed || !session}
+            onpick={(m) => (pickedMode = m)}
+          />
         </span>
         {#if running && !text.trim()}
           <button
@@ -467,7 +515,7 @@
             aria-label={running ? 'Queue message' : 'Send message'}
             title={running ? 'Queue (↵)' : 'Send (↵)'}
             data-testid="runtime-send"
-            disabled={closed || !text.trim()}
+            disabled={closed || (!text.trim() && images.length === 0)}
             onclick={submit}
           >
             <Icon name="arrowUp" size={16} />
@@ -514,16 +562,28 @@
     margin-inline: auto;
     padding-inline: 16px;
   }
+  /* T3's MessagesTimeline rhythm: a turn opens with clear air above the
+     user bubble; the answer and its work log sit close beneath it. */
   .rt-col {
     display: flex;
     flex-direction: column;
-    gap: 6px;
     padding-block: 16px 24px;
   }
   .rt-user {
     display: flex;
-    justify-content: flex-end;
-    padding-block-start: 10px;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+    padding-block-end: 12px;
+  }
+  .rt-user:not(:first-child) {
+    margin-block-start: 20px;
+  }
+  .rt-assistant {
+    padding-block-end: 12px;
+  }
+  .rt-assistant :global(:is(code, a.ref-chip)) {
+    unicode-bidi: isolate;
   }
   .rt-bubble {
     max-inline-size: min(80%, 78ch);
@@ -548,7 +608,9 @@
   .rt-work {
     display: flex;
     flex-direction: column;
+    gap: 2px;
     min-width: 0;
+    padding-block-end: 10px;
   }
   .rt-status {
     display: flex;
@@ -656,6 +718,9 @@
     min-width: 0;
   }
   .rt-grow {
+    display: flex;
+    align-items: center;
+    gap: 2px;
     flex: 1;
     min-width: 0;
   }

@@ -9,6 +9,7 @@ import { noteRuntimeWaiting } from '../../../lib/stores/runtimeAttention.svelte'
 import type {
   ApprovalDecision,
   ProviderSessionStatus,
+  RuntimeAccessMode,
   RuntimeEvent,
   RuntimePromptReq,
   RuntimePromptResp,
@@ -61,7 +62,12 @@ export function isRuntimeThread(s: Session | null | undefined): boolean {
   return s?.meta?.runtime === 'structured';
 }
 
+const ACCESS_KEY = 'otto_runtime_access_mode';
+
 class RuntimeThreads {
+  /** The access mode last picked anywhere: what a new thread starts in. */
+  lastAccessMode = $state<RuntimeAccessMode>(readAccessMode());
+
   /** Every loaded runtime session, by id. */
   byId = $state<Record<string, RuntimeSession>>({});
   /** Workspaces whose list has loaded once. */
@@ -133,14 +139,28 @@ class RuntimeThreads {
       cwd: req.cwd,
       title: req.title,
       model: req.model,
+      access_mode: this.lastAccessMode,
     });
     this.byId[created.id] = created;
     if (req.prompt) await this.prompt(created.id, { text: req.prompt, ...(req.effort ? { effort: req.effort } : {}) });
     return created;
   }
 
-  prompt(id: string, req: RuntimePromptReq): Promise<RuntimePromptResp> {
-    return api.post<RuntimePromptResp>(`/runtime-sessions/${id}/prompt`, req);
+  async prompt(id: string, req: RuntimePromptReq): Promise<RuntimePromptResp> {
+    const resp = await api.post<RuntimePromptResp>(`/runtime-sessions/${id}/prompt`, req);
+    const mode = req.access_mode;
+    if (mode) {
+      // Sticky on the session, and the default for the next new thread.
+      const row = this.byId[id];
+      if (row && row.access_mode !== mode) this.byId[id] = { ...row, access_mode: mode };
+      this.lastAccessMode = mode;
+      try {
+        localStorage.setItem(ACCESS_KEY, mode);
+      } catch {
+        /* per-viewer convenience only */
+      }
+    }
+    return resp;
   }
 
   async interrupt(id: string): Promise<void> {
@@ -161,3 +181,13 @@ class RuntimeThreads {
 }
 
 export const runtimeThreads = new RuntimeThreads();
+
+function readAccessMode(): RuntimeAccessMode {
+  try {
+    const v = localStorage.getItem(ACCESS_KEY);
+    if (v === 'auto-accept-edits' || v === 'full-access') return v;
+  } catch {
+    /* no storage */
+  }
+  return 'approval-required';
+}

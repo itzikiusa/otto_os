@@ -22,12 +22,15 @@
 //! * `turn/start {threadId, input: [{type: text}], approvalPolicy,
 //!   sandboxPolicy}` (`buildCodexTurnStartParams`, `:744-818`) and
 //!   `turn/interrupt {threadId, turnId}` (`:7567`).
-//! * runtime mode: T3 Code's approval-required — `approvalPolicy:
-//!   "untrusted"` + `sandboxPolicy: readOnly` (`:703-742`). Under Otto's
-//!   Seatbelt the inner sandbox is replaced by `externalSandbox` (nested
-//!   Seatbelt fails; the PTY path drops codex's own sandbox the same way,
-//!   `otto-sessions` `interaction_mode_apply`) — approvals still go to a
-//!   person.
+//! * access mode, per turn (`codexRuntimeModeTurnDefaults`, `:703-742`):
+//!   approval-required → `approvalPolicy: "untrusted"` + `sandboxPolicy:
+//!   readOnly`; auto-accept-edits → `"on-request"` + `workspaceWrite`;
+//!   full-access → `"never"` + `dangerFullAccess`. Under Otto's Seatbelt the
+//!   inner sandbox is always `externalSandbox` (nested Seatbelt fails; the
+//!   PTY path drops codex's own sandbox the same way, `otto-sessions`
+//!   `interaction_mode_apply`). A failed item's error text (`error`, else
+//!   the command's output) rides the item. No file inputs: 0.166.0's
+//!   `UserInput` has none, so a PDF is refused.
 //! * notifications → entities (`:4364-4955`, `:6529`): `item/started` /
 //!   `item/completed` upsert one item per Codex item (`agentMessage` →
 //!   `assistant_message`, `reasoning`, `commandExecution` →
@@ -51,14 +54,14 @@ use std::collections::HashMap;
 
 use otto_core::agent_runtime::{
     ApprovalDecision, ApprovalOption, PlanStep, PlanStepStatus, ProviderFailure, RequestKind,
-    RuntimePromptReq, RuntimeProvider, RuntimeRequestStatus, ThreadTokenUsage, TurnItem,
-    TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
+    RuntimeAccessMode, RuntimePromptReq, RuntimeProvider, RuntimeRequestStatus, ThreadTokenUsage,
+    TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
 use crate::driver::{
-    item, rpc_failure, rpc_key, DriverError, DriverEvent, DriverStep, LaunchContext, LaunchSpec,
-    StructuredDriver,
+    item, rpc_failure, rpc_key, tool_error, DriverError, DriverEvent, DriverStep, LaunchContext,
+    LaunchSpec, StructuredDriver,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +96,7 @@ pub struct CodexDriver {
     model: Option<String>,
     resume: Option<String>,
     sandboxed: bool,
+    access: RuntimeAccessMode,
     thread_id: Option<String>,
     turn_id: Option<String>,
     queued: Option<RuntimePromptReq>,
@@ -116,6 +120,7 @@ impl CodexDriver {
             model: None,
             resume: None,
             sandboxed: false,
+            access: RuntimeAccessMode::default(),
             thread_id: None,
             turn_id: None,
             queued: None,
@@ -142,26 +147,36 @@ impl CodexDriver {
 
     /// The thread-level sandbox mode (`SandboxMode`).
     fn sandbox_mode(&self) -> &'static str {
-        if self.sandboxed {
-            "danger-full-access" // confined by Otto's Seatbelt instead
-        } else {
-            "read-only"
+        match self.access {
+            _ if self.sandboxed => "danger-full-access", // confined by Otto's Seatbelt instead
+            RuntimeAccessMode::ApprovalRequired => "read-only",
+            RuntimeAccessMode::AutoAcceptEdits => "workspace-write",
+            RuntimeAccessMode::FullAccess => "danger-full-access",
         }
     }
 
     /// The turn-level `SandboxPolicy`.
     fn sandbox_policy(&self) -> Value {
-        if self.sandboxed {
-            json!({"type": "externalSandbox", "networkAccess": "enabled"})
-        } else {
-            json!({"type": "readOnly"})
+        match self.access {
+            _ if self.sandboxed => json!({"type": "externalSandbox", "networkAccess": "enabled"}),
+            RuntimeAccessMode::ApprovalRequired => json!({"type": "readOnly"}),
+            RuntimeAccessMode::AutoAcceptEdits => json!({"type": "workspaceWrite"}),
+            RuntimeAccessMode::FullAccess => json!({"type": "dangerFullAccess"}),
+        }
+    }
+
+    fn approval_policy(&self) -> &'static str {
+        match self.access {
+            RuntimeAccessMode::ApprovalRequired => "untrusted",
+            RuntimeAccessMode::AutoAcceptEdits => "on-request",
+            RuntimeAccessMode::FullAccess => "never",
         }
     }
 
     fn start_thread(&mut self, step: &mut DriverStep, resume: bool) {
         let mut params = json!({
             "cwd": self.cwd,
-            "approvalPolicy": "untrusted",
+            "approvalPolicy": self.approval_policy(),
             "sandbox": self.sandbox_mode(),
         });
         if let Some(m) = &self.model {
@@ -180,8 +195,9 @@ impl CodexDriver {
         step.write(line);
     }
 
-    /// `model` / `effort` apply to this turn and the ones after it.
+    /// `model` / `effort` / `access_mode` apply to this turn and the ones after it.
     fn send_turn(&mut self, step: &mut DriverStep, req: &RuntimePromptReq) {
+        self.access = req.access_mode.unwrap_or(self.access);
         let mut input: Vec<Value> = req
             .images
             .iter()
@@ -193,7 +209,8 @@ impl CodexDriver {
         let mut params = json!({
             "threadId": self.thread_id,
             "input": input,
-            "approvalPolicy": "untrusted",
+            "approvalPolicy": self.approval_policy(),
+            "approvalsReviewer": "user",
             "sandboxPolicy": self.sandbox_policy(),
         });
         if let Some(m) = &req.model {
@@ -367,10 +384,22 @@ impl CodexDriver {
             }
             _ => status,
         };
+        let error = (status == TurnItemStatus::Failed)
+            .then(|| match it.get("error") {
+                Some(Value::String(e)) => e.clone(),
+                Some(e @ Value::Object(_)) => e
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map_or_else(|| e.to_string(), str::to_string),
+                _ => st.output.clone(),
+            })
+            .and_then(|e| tool_error(&e));
         if completed {
             self.items.remove(&cid);
         }
-        Some(item(self.item_id(&cid), status, title, kind))
+        let mut out = item(self.item_id(&cid), status, title, kind);
+        out.error = error;
+        Some(out)
     }
 
     /// Grow a streamed text item by `delta`.
@@ -562,6 +591,7 @@ impl CodexDriver {
             prompt,
             reason: s("reason"),
             options,
+            tool_item_id: s("itemId").map(|i| self.item_id(&i)),
         });
     }
 
@@ -683,6 +713,7 @@ impl StructuredDriver for CodexDriver {
         self.model = ctx.model.clone();
         self.resume = ctx.resume.clone();
         self.sandboxed = ctx.sandboxed;
+        self.access = ctx.access_mode;
         let mut step = DriverStep::default();
         let (id, line) = self.request(
             "initialize",
@@ -703,6 +734,11 @@ impl StructuredDriver for CodexDriver {
         if self.turn_id.is_some() {
             return Err(DriverError("a prompt is already running".into()));
         }
+        if !req.files.is_empty() {
+            return Err(DriverError(
+                "Codex does not accept file attachments (only images)".into(),
+            ));
+        }
         self.turn_id = Some(turn_id.to_string());
         self.failure = None;
         let mut step = DriverStep::default();
@@ -715,6 +751,11 @@ impl StructuredDriver for CodexDriver {
     }
 
     fn switches_model_live(&self) -> bool {
+        true
+    }
+
+    /// The policy rides every `turn/start`.
+    fn switches_access_live(&self, _to: RuntimeAccessMode) -> bool {
         true
     }
 
@@ -868,6 +909,7 @@ mod tests {
             model: None,
             resume: resume.map(str::to_string),
             sandboxed,
+            access_mode: RuntimeAccessMode::default(),
         }
     }
 
@@ -1067,5 +1109,74 @@ mod tests {
             json!({"id": 3, "method": "item/tool/requestUserInput", "params": {}}),
         );
         assert_eq!(parse(&s.writes[0])["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn access_modes_set_each_turns_policy_and_failed_items_carry_errors() {
+        let mut d = CodexDriver::with_program("codex");
+        ready(&mut d, false);
+        assert!(d.switches_access_live(RuntimeAccessMode::FullAccess));
+        for (mode, approval, sandbox) in [
+            (
+                RuntimeAccessMode::AutoAcceptEdits,
+                "on-request",
+                "workspaceWrite",
+            ),
+            (RuntimeAccessMode::FullAccess, "never", "dangerFullAccess"),
+            (RuntimeAccessMode::ApprovalRequired, "untrusted", "readOnly"),
+        ] {
+            let req = RuntimePromptReq {
+                access_mode: Some(mode),
+                ..RuntimePromptReq::of("go")
+            };
+            let p = parse(&d.prompt("t1", &req).unwrap().writes[0])["params"].clone();
+            assert_eq!(p["approvalPolicy"], approval);
+            assert_eq!(p["sandboxPolicy"]["type"], sandbox);
+            feed(
+                &mut d,
+                json!({"method": "turn/completed", "params": {"threadId": "th1", "turn": {"id": "x", "items": [], "status": "completed"}}}),
+            );
+        }
+        // Seatbelt-confined: always the external sandbox.
+        let mut d = CodexDriver::with_program("codex");
+        ready(&mut d, true);
+        let req = RuntimePromptReq {
+            access_mode: Some(RuntimeAccessMode::FullAccess),
+            ..RuntimePromptReq::of("go")
+        };
+        let p = parse(&d.prompt("t1", &req).unwrap().writes[0])["params"].clone();
+        assert_eq!(
+            (
+                p["approvalPolicy"].as_str(),
+                p["sandboxPolicy"]["type"].as_str()
+            ),
+            (Some("never"), Some("externalSandbox"))
+        );
+        let s = feed(
+            &mut d,
+            json!({"method": "item/completed", "params": {"threadId": "th1", "turnId": "ct1", "item": {"type": "mcpToolCall", "id": "m1", "server": "web", "tool": "fetch", "status": "failed", "error": {"message": "timed out"}}}}),
+        );
+        let DriverEvent::TurnItem(i) = &s.events[0] else {
+            panic!()
+        };
+        assert_eq!(i.error.as_deref(), Some("timed out"));
+        let s = feed(
+            &mut d,
+            json!({"id": 9, "method": "item/fileChange/requestApproval", "params": {"threadId": "th1", "turnId": "ct1", "itemId": "f1"}}),
+        );
+        assert!(
+            matches!(&s.events[0], DriverEvent::Request { tool_item_id: Some(t), .. } if t == "t1:codex:f1")
+        );
+        let pdf = RuntimePromptReq {
+            files: vec![otto_core::agent_runtime::PromptFile {
+                mime: "application/pdf".into(),
+                name: "a.pdf".into(),
+                data_base64: "JVBERg==".into(),
+            }],
+            ..RuntimePromptReq::of("read")
+        };
+        let mut d = CodexDriver::with_program("codex");
+        ready(&mut d, false);
+        assert!(d.prompt("t1", &pdf).is_err());
     }
 }

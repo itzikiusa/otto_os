@@ -22,7 +22,11 @@
 //!   auto-DENIED and listed in `denied_actions` (only `settings.json`
 //!   `permissions.allow` rules and `--mode` apply, as for a PTY agy). Otto
 //!   never passes `--dangerously-skip-permissions`; the denial becomes a
-//!   system notice.
+//!   system notice. Access modes: auto-accept-edits → `--mode
+//!   accept-edits`, full-access → `--mode auto` (T3 Code's
+//!   `antigravityPermissionMode`); a switch respawns with `--conversation`.
+//! * a tool step that fails ends `state: ERROR` with `tool_info.error
+//!   {type, message}`; the message rides the item as its `error`.
 //! * interrupt — SIGINT: agy ends the turn with `result` ERROR +
 //!   `finished_reason: "interrupted"`, then exits; the next prompt respawns
 //!   with `--conversation`.
@@ -30,13 +34,13 @@
 use std::collections::HashMap;
 
 use otto_core::agent_runtime::{
-    ApprovalDecision, ProviderFailure, RuntimePromptReq, RuntimeProvider, TurnItemKind,
-    TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
+    ApprovalDecision, ProviderFailure, RuntimeAccessMode, RuntimePromptReq, RuntimeProvider,
+    TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
 use crate::driver::{
-    item, ChildSignal, DriverError, DriverEvent, DriverStep, LaunchContext, LaunchSpec,
+    item, tool_error, ChildSignal, DriverError, DriverEvent, DriverStep, LaunchContext, LaunchSpec,
     StructuredDriver,
 };
 
@@ -116,17 +120,15 @@ impl AgyDriver {
                         output,
                     },
                 };
-                let status = if done {
-                    TurnItemStatus::Completed
-                } else {
-                    TurnItemStatus::Running
+                let error = info.pointer("/error/message").and_then(Value::as_str);
+                let status = match s.get("state").and_then(Value::as_str) {
+                    Some("DONE") => TurnItemStatus::Completed,
+                    Some("ERROR") => TurnItemStatus::Failed,
+                    _ => TurnItemStatus::Running,
                 };
-                step.push(DriverEvent::TurnItem(item(
-                    id,
-                    status,
-                    Some(name.to_string()),
-                    kind,
-                )));
+                let mut it = item(id, status, Some(name.to_string()), kind);
+                it.error = error.and_then(tool_error);
+                step.push(DriverEvent::TurnItem(it));
             }
             _ => {}
         }
@@ -205,6 +207,13 @@ impl StructuredDriver for AgyDriver {
         if let Some(m) = &ctx.model {
             args.extend(["--model".into(), m.clone()]);
         }
+        match ctx.access_mode {
+            RuntimeAccessMode::ApprovalRequired => {}
+            RuntimeAccessMode::AutoAcceptEdits => {
+                args.extend(["--mode".into(), "accept-edits".into()])
+            }
+            RuntimeAccessMode::FullAccess => args.extend(["--mode".into(), "auto".into()]),
+        }
         if let Some(id) = &ctx.resume {
             args.extend(["--conversation".into(), id.clone()]);
         }
@@ -231,9 +240,9 @@ impl StructuredDriver for AgyDriver {
         if self.turn_id.is_some() {
             return Err(DriverError("a prompt is already running".into()));
         }
-        if !req.images.is_empty() || req.effort.is_some() {
+        if !req.images.is_empty() || !req.files.is_empty() || req.effort.is_some() {
             return Err(DriverError(
-                "Antigravity takes text only here (no images or effort)".into(),
+                "Antigravity takes text only here (no images, files or effort)".into(),
             ));
         }
         let text = &req.text;
@@ -292,6 +301,7 @@ mod tests {
             model: None,
             resume: resume.map(str::to_string),
             sandboxed: false,
+            access_mode: RuntimeAccessMode::default(),
         }
     }
 
@@ -435,5 +445,44 @@ mod tests {
             ..RuntimePromptReq::of("x")
         };
         assert!(d.prompt("t5", &effort).is_err(), "text only");
+    }
+
+    #[test]
+    fn access_modes_pass_mode_and_a_failed_tool_step_carries_its_error() {
+        let d = AgyDriver::with_program("agy");
+        let at = |access_mode| {
+            d.launch(&LaunchContext {
+                access_mode,
+                ..ctx(None)
+            })
+            .args
+        };
+        assert!(!at(RuntimeAccessMode::ApprovalRequired).contains(&"--mode".to_string()));
+        assert!(at(RuntimeAccessMode::AutoAcceptEdits)
+            .windows(2)
+            .any(|w| w == ["--mode", "accept-edits"]));
+        let full = at(RuntimeAccessMode::FullAccess);
+        assert!(full.windows(2).any(|w| w == ["--mode", "auto"]));
+        assert!(!full.iter().any(|a| a.contains("dangerously")));
+
+        let mut d = AgyDriver::with_program("agy");
+        d.prompt("t1", &RuntimePromptReq::of("read it")).unwrap();
+        let ev = feed(
+            &mut d,
+            step(
+                2,
+                "ERROR",
+                "tool",
+                json!({"tool_info":{"name":"read_file","parameters":{"Path":"/x"},"error":{"type":"TOOL_ERROR","message":"user denied permission for read_file(/x)"}}}),
+            ),
+        );
+        let DriverEvent::TurnItem(i) = &ev[0] else {
+            panic!()
+        };
+        assert_eq!(i.status, TurnItemStatus::Failed);
+        assert_eq!(
+            i.error.as_deref(),
+            Some("user denied permission for read_file(/x)")
+        );
     }
 }
