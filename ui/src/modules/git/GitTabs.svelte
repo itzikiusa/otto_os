@@ -323,13 +323,18 @@
     class="git-autofetch"
     class:on={git.autoFetchEnabled}
     title={git.autoFetchEnabled
-      ? `Auto-fetch on — selected repo every 30s, other open repos every ${git.autoFetchIntervalSec}s while Git is open and this window is focused. Click to pause.`
-      : 'Auto-fetch paused. Click to fetch open repos automatically.'}
-    aria-label="Toggle auto-fetch for open repositories"
+      ? `Auto-fetch on — selected repo every 60s, other recently used repos every ${Math.max(60, git.autoFetchIntervalSec)}s while Git is open and this window is focused. Click to pause.`
+      : 'Auto-fetch paused — a repo is still fetched once when you open it. Click to fetch open repos automatically.'}
+    aria-label="Auto-fetch open repositories"
     aria-pressed={git.autoFetchEnabled}
     onclick={() => git.setAutoFetch(!git.autoFetchEnabled)}
   >
-    <Icon name="fetch" size={13} />
+    <Icon name="fetch" size={14} />
+    <!-- Paused is a lasting, per-device choice: say so in words, not only in
+         the icon's tint (it was paused for weeks without anyone noticing).
+         One short word next to the fetch icon — the full sentence is the
+         tooltip — so it doesn't eat the room the repo tabs' branches need. -->
+    {#if !git.autoFetchEnabled}<span class="git-autofetch-off">Paused</span>{/if}
   </button>
   <button class="git-tab-new" title="Open a repository" aria-label="Open a repository" onclick={openPicker}>
     <Icon name="plus" size={14} />
@@ -555,8 +560,13 @@
     background: var(--hover);
     color: var(--text);
   }
-  .git-autofetch.on {
-    color: var(--accent-text);
+  .git-autofetch:not(.on) {
+    gap: 4px;
+    color: var(--warning);
+  }
+  .git-autofetch-off {
+    font-size: var(--fs-s);
+    white-space: nowrap;
   }
   .mono {
     font-family: var(--font-mono);

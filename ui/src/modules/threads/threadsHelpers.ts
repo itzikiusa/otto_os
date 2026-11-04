@@ -15,13 +15,24 @@ export function isPlainShellSession(s: Session | null | undefined): boolean {
  * plus delegated subagent workers whose parent session is a thread.
  * Sessions created in `#/agents` never leak into `#/threads`.
  */
-export function isThreadSession(s: Session, pool: readonly Session[] = ws.sessions): boolean {
+export function isThreadSession(s: Session, pool: readonly Session[] | ReadonlyMap<string, Session> = ws.sessions): boolean {
   if (s.kind === 'connection') return false;
+  // A side chat lives in its main thread's right panel until promoted.
+  if (sideChatOf(s)) return false;
+  // The bottom terminal drawer's shells are not threads.
+  if ((s.meta as Record<string, unknown> | undefined)?.threads_terminal === true) return false;
   if (isThreadSurfaceSession(s)) return true;
   const parentId = delegatedParentId(s);
   if (!parentId || parentId === s.id) return false;
-  const parent = pool.find((p) => p.id === parentId);
+  // A Map (the sidebar's id index) keeps a whole-list filter linear.
+  const parent = 'get' in pool ? pool.get(parentId) : pool.find((p) => p.id === parentId);
   return parent ? isThreadSurfaceSession(parent) : false;
+}
+
+/** Main thread id when `s` is a side chat (`meta.side_of`), else null. */
+export function sideChatOf(s: Session | null | undefined): string | null {
+  const v = (s?.meta as Record<string, unknown> | undefined)?.side_of;
+  return typeof v === 'string' && v.trim() !== '' ? v : null;
 }
 
 /** Parent session ID when this session was delegated or handed over from another thread. */
@@ -83,7 +94,8 @@ export function sessionBranch(
   }
   const cwd = (session.cwd ?? '').replace(/\/+$/, '');
   if (!cwd) return null;
-  const repo = matchRepoForCwd(cwd, repos);
+  // Strict match: never another repo's branch for a folder no repo contains.
+  const repo = repoForCwd(cwd, repos);
   if (!repo) return null;
   return statusById[repo.id]?.branch ?? null;
 }
@@ -106,21 +118,30 @@ export function matchRepoForCwd(cwd: string | null | undefined, repos: readonly 
   return best ?? repos[0] ?? null;
 }
 
-/** Harness display name for T3/PandaCode-style cards and badges. */
-export function harnessLabel(provider: string): string {
-  switch (provider) {
-    case 'claude':
-      return 'Claude Code';
-    case 'codex':
-      return 'Codex';
-    case 'agy':
-      return 'Antigravity';
-    case 'shell':
-      return 'Shell';
-    default:
-      return provider.charAt(0).toUpperCase() + provider.slice(1);
+/** The repo whose folder holds `cwd` (deepest match), or null — no fallback to
+ *  an unrelated repo, so the project card never shows another repo's branch. */
+export function repoForCwd(cwd: string | null | undefined, repos: readonly Repo[]): Repo | null {
+  const clean = (cwd ?? '').trim().replace(/\/+$/, '');
+  if (!clean) return null;
+  let best: Repo | null = null;
+  for (const r of repos) {
+    const rp = r.path.replace(/\/+$/, '');
+    if ((clean === rp || clean.startsWith(`${rp}/`)) && (!best || rp.length > best.path.length)) best = r;
   }
+  return best;
 }
+
+/** "GitHub" / "Bitbucket" / "GitLab" for a repo's forge, else null. */
+export function forgeLabel(repo: Repo | null | undefined): string | null {
+  const kind = repo?.forge && repo.forge !== 'unrecognized' ? repo.forge : repo?.provider;
+  if (kind === 'github') return 'GitHub';
+  if (kind === 'bitbucket') return 'Bitbucket';
+  if (kind === 'gitlab') return 'GitLab';
+  return null;
+}
+
+/** Harness display name (lives in lib/providers so lib pickers share it). */
+export { harnessLabel } from '../../lib/providers';
 
 /** File basename (`src/App.svelte` -> `App.svelte`). */
 export function baseName(path: string): string {

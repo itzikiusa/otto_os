@@ -260,20 +260,30 @@ pub fn schedule_snapshot(app: &tauri::AppHandle) {
 /// macOS-lite semantics, so snapshot instead. The always-alive hidden panels
 /// (assistant bar, tray popover) don't count — and because they keep the
 /// window set non-empty, tauri would no longer exit on its own, so the quit is
-/// requested explicitly (same outcome as before they existed).
-pub fn on_close_requested(app: &tauri::AppHandle, label: &str) {
+/// requested explicitly (same outcome as before they existed). Returns true
+/// when this close requested the quit (the caller logs the exit reason).
+pub fn on_close_requested(app: &tauri::AppHandle, label: &str) -> bool {
     if is_quitting() || !keeps_app_alive(label) {
-        return;
+        return false;
     }
     let real_windows = app.windows().keys().filter(|l| keeps_app_alive(l)).count();
     if real_windows <= 1 {
         mark_quitting();
         snapshot_all(app);
         app.exit(0);
-        return;
+        return true;
     }
     with_registry(|reg| reg.windows.retain(|w| w.label != label));
     persist();
+    false
+}
+
+/// App windows (the ones that keep Otto running) other than `except`.
+pub fn alive_window_count(app: &tauri::AppHandle, except: Option<&str>) -> usize {
+    app.windows()
+        .keys()
+        .filter(|l| keeps_app_alive(l) && Some(l.as_str()) != except)
+        .count()
 }
 
 /// Builder options shared by every Otto window — parity with the `main` window

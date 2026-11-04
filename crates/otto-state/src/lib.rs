@@ -63,6 +63,7 @@ pub mod skill_evals;
 pub mod skill_reviews;
 pub mod users;
 pub mod vault_docs_runs;
+pub mod workflow_run_search;
 pub mod workflow_triggers;
 pub mod workflows;
 pub mod workspaces;

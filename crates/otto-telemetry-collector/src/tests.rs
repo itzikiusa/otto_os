@@ -180,31 +180,87 @@ async fn dismissed_suggestions_and_daily_schedule_survive_restart() {
     usage.shutdown().await;
 }
 
+/// `OTTO_COLLECTOR_CACHE` (CI caches it): reuse a previously downloaded
+/// pinned collector instead of fetching ~100 MB per run. The copy is still
+/// re-hashed against the pinned checksum by `collector::install`.
+fn seed_collector(telemetry_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let cache = std::path::PathBuf::from(std::env::var_os("OTTO_COLLECTOR_CACHE")?)
+        .join(format!("collector-{}", collector::VERSION));
+    // `TelemetryService::start(dir)` keeps its state under `dir/telemetry`.
+    let target = telemetry_dir
+        .join("telemetry")
+        .join(format!("collector-{}", collector::VERSION));
+    if cache.join("otelcol-contrib").is_file() && cache.join("binary.sha256").is_file() {
+        std::fs::create_dir_all(&target).ok()?;
+        for name in ["otelcol-contrib", "binary.sha256"] {
+            std::fs::copy(cache.join(name), target.join(name)).ok()?;
+        }
+    }
+    Some(cache)
+}
+
+/// Save the verified install for the next run (no-op when already cached).
+fn save_collector(telemetry_dir: &std::path::Path, cache: &std::path::Path) {
+    let source = telemetry_dir
+        .join("telemetry")
+        .join(format!("collector-{}", collector::VERSION));
+    if cache.join("otelcol-contrib").is_file() || !source.join("binary.sha256").is_file() {
+        return;
+    }
+    if std::fs::create_dir_all(cache).is_ok() {
+        for name in ["otelcol-contrib", "binary.sha256"] {
+            let _ = std::fs::copy(source.join(name), cache.join(name));
+        }
+    }
+}
+
 #[tokio::test]
 #[ignore = "downloads pinned collector and starts an isolated ClickHouse; run serially"]
 async fn real_collector_delivers_all_signals_and_recovers() {
+    // Fail in milliseconds, naming the cause, instead of timing out 30 s later:
+    // without a `clickhouse` binary the usage engine can never become ready.
+    assert!(
+        otto_usage::ClickHouse::locate(None).is_some(),
+        "no `clickhouse` binary on PATH or in the known install locations; \
+         this test needs one (CI installs the pinned LTS release)"
+    );
+    // Per-phase wall time on stderr: the CI log shows where a slow run went.
+    let t0 = Instant::now();
+    let phase = |name: &str| eprintln!("[{:>6.1}s] {name}", t0.elapsed().as_secs_f64());
     let temp = tempfile::tempdir().unwrap();
     let usage = UsageEngine::start(
         otto_usage::UsageConfig::default(),
         temp.path().join("usage"),
     )
     .await;
-    assert!(
-        usage.wait_ready(Duration::from_secs(30)).await,
-        "isolated ClickHouse must become ready"
-    );
+    if !usage.wait_ready(Duration::from_secs(30)).await {
+        let status = usage.status().await;
+        panic!(
+            "isolated ClickHouse must become ready within 30 s: start_error={:?} binary={:?} version={:?} data_dir={}",
+            usage.start_error(),
+            status.binary,
+            status.version,
+            status.data_dir
+        );
+    }
+    phase("clickhouse ready");
     let c = TelemetryConfig {
         enabled: true,
         sample_interval_secs: 2,
         ..Default::default()
     };
+    let collector_cache = seed_collector(&temp.path().join("telemetry"));
     let service =
         TelemetryService::start(usage.clone(), temp.path().join("telemetry"), c.clone()).await;
+    // The recovery below fails one flush on purpose; retry it in seconds, not
+    // after the production minute of backoff.
+    service.set_flush_backoff(Duration::from_secs(2));
     let start = Instant::now();
     while !service.status().collector_ready && start.elapsed() < Duration::from_secs(360) {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     assert!(service.status().collector_ready, "{:?}", service.status());
+    phase("collector ready");
     let id = uuid::Uuid::new_v4().simple().to_string();
     for _ in 0..4 {
         let mut span = SpanRecord::new("http.server", "server", 250.0);
@@ -228,21 +284,30 @@ async fn real_collector_delivers_all_signals_and_recovers() {
         );
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    tokio::time::sleep(Duration::from_secs(4)).await;
+    phase("traces delivered");
     for table in [
         "otel_logs",
         "otel_metrics_gauge",
         "operation_minutes",
         "resource_minutes",
     ] {
-        let rows = usage
-            .query_rows(&format!("SELECT count() n FROM otto_telemetry.{table}"))
-            .await
-            .unwrap();
-        assert!(
-            number(&rows[0], "n") > 0.0,
-            "empty signal or rollup: {table}"
-        );
+        // Poll instead of a fixed pause: logs, gauges and the minute MVs land
+        // a moment after the traces.
+        let start = Instant::now();
+        loop {
+            let rows = usage
+                .query_rows(&format!("SELECT count() n FROM otto_telemetry.{table}"))
+                .await
+                .unwrap();
+            if number(&rows[0], "n") > 0.0 {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "empty signal or rollup: {table}"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
     }
     let trace = service.trace(&id).await.unwrap();
     assert_eq!(trace.len(), 4);
@@ -256,6 +321,7 @@ async fn real_collector_delivers_all_signals_and_recovers() {
     let recommendation_id = recommendations[0].id.clone();
     service.dismiss(&recommendation_id).await.unwrap();
     assert!(service.analyze().await.unwrap().is_empty());
+    phase("signals+analysis verified");
     // Between flushes telemetry holds no lease: the engine may idle-stop.
     let ch = usage.clickhouse().unwrap();
     let start = Instant::now();
@@ -277,6 +343,7 @@ async fn real_collector_delivers_all_signals_and_recovers() {
                 .is_ok_and(|rows| number(&rows[0], "n") > 0.0)
         }
     };
+    phase("engine parked");
     // Sampling a parked engine never wakes it; a requested flush does, once.
     assert!(service.record(SpanRecord::new("after.park", "server", 120.0)));
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -291,6 +358,7 @@ async fn real_collector_delivers_all_signals_and_recovers() {
         );
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+    phase("flush woke parked engine");
     // Replacing the shared engine changes its HTTP endpoint. The next flush
     // must lease the replacement and deliver to the recovered engine.
     ch.shutdown().await;
@@ -305,6 +373,7 @@ async fn real_collector_delivers_all_signals_and_recovers() {
         );
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+    phase("recovered after replacement");
     #[cfg(target_os = "macos")]
     {
         let mut profiling = c.clone();
@@ -325,6 +394,7 @@ async fn real_collector_delivers_all_signals_and_recovers() {
             "profile cooldown must be enforced"
         );
     }
+    phase("profiling verified");
     let mut new_config = c.clone();
     new_config.traces_days = 2;
     new_config.logs_days = 3;
@@ -332,27 +402,49 @@ async fn real_collector_delivers_all_signals_and_recovers() {
     service.configure(new_config).await.unwrap();
     // Retention DDL runs with the next flush (sampling keeps data buffered).
     service.request_flush();
-    tokio::time::sleep(Duration::from_secs(30)).await;
-    let rows=usage.query_rows("SELECT name,create_table_query FROM system.tables WHERE database='otto_telemetry' AND name IN ('otel_traces','otel_logs','otel_metrics_gauge','operation_minutes','resource_minutes')").await.unwrap();
-    for row in rows {
-        let expected = match string(&row, "name").as_str() {
-            "otel_traces" | "operation_minutes" => "toIntervalDay(2)",
-            "otel_logs" => "toIntervalDay(3)",
-            _ => "toIntervalDay(8)",
-        };
+    // Poll the five tables' DDL until every TTL matches (was a fixed 30 s).
+    let expected_ttl = |name: &str| match name {
+        "otel_traces" | "operation_minutes" => "toIntervalDay(2)",
+        "otel_logs" => "toIntervalDay(3)",
+        _ => "toIntervalDay(8)",
+    };
+    let start = Instant::now();
+    loop {
+        let rows=usage.query_rows("SELECT name,create_table_query FROM system.tables WHERE database='otto_telemetry' AND name IN ('otel_traces','otel_logs','otel_metrics_gauge','operation_minutes','resource_minutes')").await.unwrap();
+        let stale: Vec<_> = rows
+            .iter()
+            .filter(|row| {
+                !string(row, "create_table_query").contains(expected_ttl(&string(row, "name")))
+            })
+            .collect();
+        if rows.len() == 5 && stale.is_empty() {
+            break;
+        }
         assert!(
-            string(&row, "create_table_query").contains(expected),
-            "TTL mismatch: {row}"
+            start.elapsed() < Duration::from_secs(60),
+            "TTL mismatch: {stale:?}"
         );
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
+    phase("retention ttl verified");
     service.configure(TelemetryConfig::default()).await.unwrap();
     assert!(!service.status().collector_ready);
-    assert!(
-        usage.clickhouse().unwrap().maybe_park(Duration::ZERO).await,
-        "disable must release lease"
-    );
+    // The retention flush above may still be draining its collector; once it
+    // ends, disabled telemetry must hold no lease.
+    let ch = usage.clickhouse().unwrap();
+    let start = Instant::now();
+    while !ch.maybe_park(Duration::ZERO).await {
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "disable must release lease"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
     service.shutdown().await;
     usage.shutdown().await;
+    if let Some(cache) = &collector_cache {
+        save_collector(&temp.path().join("telemetry"), cache);
+    }
     eprintln!("Verified OTLP traces/logs/gauges, minute MVs, merged latency quantiles, trace drilldown, persisted dismissal, collector recovery, TTL updates and parking lease in {}",temp.path().display());
 }
 

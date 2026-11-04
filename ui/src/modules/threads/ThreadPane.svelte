@@ -1,22 +1,23 @@
 <script lang="ts">
-  import Badge from '../../lib/components/Badge.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
-  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte'; // xterm stays out of page:threads until a terminal shows
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { events } from '../../lib/events.svelte';
   import { focusOnMount } from '../../lib/focusOnMount';
   import { resolveSessionThreadConfig, type InteractionMode } from '../../lib/providerModels';
-  import { badgeTone, sessionState } from '../../lib/status';
+  import { sessionState } from '../../lib/status';
   import { git } from '../../lib/stores/git.svelte';
   import { transcript } from '../../lib/stores/transcript.svelte';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
   import { toastError } from '../../lib/toastError';
   import ConversationView from '../agents/conversation/ConversationView.svelte'; // ui-guards: allow — experimental threads embeds shared ConversationView
+  import { buildThreadMenu } from './threadMenu';
   import ThreadTerminalDrawer from './ThreadTerminalDrawer.svelte';
-  import { delegatedParentId, harnessLabel, isPlainShellSession, isThreadSession, sessionBranch } from './threadsHelpers';
+  import { harnessLabel, isPlainShellSession, isThreadSession, sessionBranch } from './threadsHelpers';
+  import { threadRepos } from './threadRepos.svelte';
   import { threads } from './threadsStore.svelte';
 
   interface Props {
@@ -31,16 +32,26 @@
   const rawStatus = $derived(ws.statusMap[paneId] ?? session?.status ?? 'idle');
   const needsYou = $derived(ws.needsYou[paneId] === true);
   const paneState = $derived(sessionState(session, rawStatus, needsYou, { stale: events.state !== 'connected' }));
-  const pinned = $derived(threads.isPinned(paneId));
-  const branch = $derived(sessionBranch(session, git.repos, git.statusById));
-  const parentId = $derived(delegatedParentId(session));
-  const parentSession = $derived(parentId ? (ws.getSession(parentId) ?? null) : null);
+  // Branch for the composer meta row too: metadata / registered repo, else the
+  // repo detected behind the thread's folder.
+  const detectedRepo = $derived(session ? threadRepos.repoFor(session.cwd, session.workspace_id) : null);
+  $effect(() => {
+    if (detectedRepo) git.ensureStatus(detectedRepo.id);
+  });
+  const detectedBranch = $derived.by((): string | null => {
+    if (!detectedRepo) return null;
+    return git.statusById[detectedRepo.id]?.branch || null;
+  });
+  const branch = $derived(detectedBranch ?? sessionBranch(session, git.repos, git.statusById));
 
   let convRef = $state<ReturnType<typeof ConversationView> | null>(null);
   let renaming = $state(false);
   let draftTitle = $state('');
-  let showTerminal = $state(false);
-  let showPeerBar = $state(false);
+  // Terminal drawer + peer bar live in the store so the page's top bar can
+  // drive the focused pane (single view has no pane header of its own).
+  const showTerminal = $derived(threads.isTerminalOpen(paneId));
+  const showPeerBar = $derived(threads.peerBarFor === paneId);
+  const toggleTerminal = (): void => threads.toggleTerminal(paneId);
   let peerTarget = $state('broadcast');
   let peerText = $state('');
   let peerSending = $state(false);
@@ -48,6 +59,22 @@
   const peerTargets = $derived(
     ws.sessions.filter((s) => !s.archived && s.id !== paneId && isThreadSession(s)),
   );
+
+  // The top bar's "Search conversation" asks the focused pane.
+  let lastSearchN = 0;
+  $effect(() => {
+    const req = threads.searchRequest;
+    if (req && req.id === paneId && req.n !== lastSearchN) {
+      lastSearchN = req.n;
+      convRef?.triggerSearch();
+    }
+  });
+
+  $effect(() => {
+    if (showPeerBar && peerTargets.length > 0 && peerTarget === 'broadcast') {
+      peerTarget = peerTargets[0].id;
+    }
+  });
 
   $effect(() => {
     if (showPeerBar && peerTarget !== 'broadcast' && !peerTargets.some((t) => t.id === peerTarget)) {
@@ -95,7 +122,7 @@
       });
       if (ok) {
         peerText = '';
-        showPeerBar = false;
+        if (threads.peerBarFor === paneId) threads.peerBarFor = null;
       }
     } finally {
       peerSending = false;
@@ -156,50 +183,7 @@
   }
 
   function openPaneMenu(e: MouseEvent): void {
-    if (!session) return;
-    const items: MenuItem[] = [
-      { label: 'Rename thread…', icon: 'edit', action: beginRename },
-      { label: pinned ? 'Unpin thread' : 'Pin thread', icon: 'star', action: () => threads.togglePin(paneId) },
-      ...(!isPlainShellSession(session)
-        ? [
-            { label: 'Search conversation…', icon: 'search' as const, hint: '⌘F', action: () => convRef?.triggerSearch() },
-            {
-              label: 'Show system notes',
-              icon: (transcript.showSystem ? 'eye' : 'eyeOff') as 'eye' | 'eyeOff',
-              checked: transcript.showSystem,
-              action: () => transcript.setShowSystem(!transcript.showSystem),
-            },
-          ]
-        : []),
-      { label: 'Send message to peer…', icon: 'send', action: () => (showPeerBar = !showPeerBar) },
-      { label: showTerminal ? 'Hide terminal drawer' : 'Open terminal drawer', icon: 'terminal', action: () => (showTerminal = !showTerminal) },
-      { label: 'Session room…', icon: 'people', action: () => onstartroom(paneId) },
-      ...(parentId
-        ? [
-            {
-              label: 'Open with parent in Split',
-              icon: 'split',
-              action: () => threads.openPairInSplit(parentId, paneId),
-            },
-          ]
-        : []),
-      { separator: true },
-      {
-        label: threads.isSettled(paneId) ? 'Move back to Active' : 'Settle to History',
-        icon: 'check',
-        action: () => threads.toggleSettle(paneId),
-      },
-      {
-        label: 'Archive',
-        icon: 'archive',
-        action: () => {
-          void ws.requestArchive(paneId).then((ok) => {
-            if (ok) threads.closePane(paneId);
-          });
-        },
-      },
-    ];
-    ctxMenu.show(e, items);
+    if (session) ctxMenu.show(e, buildThreadMenu(session, { onstartroom }));
   }
   function paneFocus(node: HTMLElement): { destroy(): void } {
     const mark = (): void => {
@@ -223,143 +207,60 @@
   data-testid="thread-pane-{paneId}"
   use:paneFocus
 >
-  <header class="tp-head">
-    <div class="tp-lead">
-      {#if session && hasProviderIcon(session.provider)}
-        <ProviderIcon provider={session.provider} size={14} />
-      {:else}
-        <Icon name="terminal" size={14} />
-      {/if}
-
-      {#if renaming}
-        <input
-          class="tp-rename-input"
-          dir="auto"
-          aria-label="Thread title"
-          bind:value={draftTitle}
-          use:focusOnMount
-          onblur={() => void commitRename()}
-          onkeydown={onRenameKey}
-        />
-      {:else}
-        <button
-          type="button"
-          class="tp-title ellipsis"
-          dir="auto"
-          title="Double-click to rename thread"
-          ondblclick={beginRename}
-        >
-          {session?.title ?? 'Loading thread…'}
-        </button>
-      {/if}
-
-      <StatusDot state={paneState} />
-      {#if !multiPane}
-        <Badge tone={badgeTone(paneState.tone)} variant="outline" label={paneState.label} />
-      {/if}
-
-      {#if branch && !multiPane}
-        <span class="tp-branch mono ellipsis" dir="ltr" title="Git branch: {branch}">
-          <Icon name="branch" size={12} />
-          {branch}
-        </span>
-      {/if}
-
-      {#if parentId && !multiPane}
-        <button
-          type="button"
-          class="chip tp-parent-link"
-          title="Open parent and worker side-by-side in Split"
-          onclick={() => threads.openPairInSplit(parentId, paneId)}
-        >
-          <Icon name="merge" size={12} />
-          <span class="ellipsis">Delegated by {parentSession?.title ?? 'parent'}</span>
-        </button>
-      {/if}
-    </div>
-
-    <div class="tp-actions">
-      <button
-        type="button"
-        class="icon-btn"
-        class:tp-pin-on={pinned}
-        aria-label={pinned ? 'Unpin thread' : 'Pin thread'}
-        title={pinned ? 'Unpin thread' : 'Pin thread'}
-        onclick={() => threads.togglePin(paneId)}
-      >
-        <Icon name="star" size={13} />
-      </button>
-
-      {#if !multiPane}
+  {#if multiPane}
+    <header class="tp-head">
+      <div class="tp-lead">
+        <StatusDot state={paneState} />
+        {#if session && hasProviderIcon(session.provider)}
+          <ProviderIcon provider={session.provider} size={14} />
+        {/if}
+        {#if renaming}
+          <input
+            class="tp-rename-input"
+            dir="auto"
+            aria-label="Thread title"
+            bind:value={draftTitle}
+            use:focusOnMount
+            onblur={() => void commitRename()}
+            onkeydown={onRenameKey}
+          />
+        {:else}
+          <button
+            type="button"
+            class="tp-title ellipsis"
+            dir="auto"
+            title="{session?.title ?? 'Thread'}{branch ? ` · ${branch}` : ''} — double-click to rename"
+            ondblclick={beginRename}
+          >
+            {session?.title ?? 'Loading thread…'}
+          </button>
+        {/if}
+      </div>
+      <div class="tp-actions">
+        {#if !isPlainShellSession(session)}
+          <button
+            type="button"
+            class="icon-btn"
+            class:active={showTerminal}
+            aria-pressed={showTerminal}
+            aria-label={showTerminal ? 'Hide terminal drawer' : 'Show terminal drawer'}
+            title="Terminal drawer"
+            data-testid="pane-terminal-btn-{paneId}"
+            onclick={toggleTerminal}
+          >
+            <Icon name="terminal" size={13} />
+          </button>
+        {/if}
         <button
           type="button"
           class="icon-btn"
-          class:active={showPeerBar}
-          aria-pressed={showPeerBar}
-          aria-label="Send message to peer thread"
-          title="Send to peer…"
-          data-testid="pane-peer-btn-{paneId}"
-          onclick={() => {
-            showPeerBar = !showPeerBar;
-            if (showPeerBar && peerTargets.length > 0 && peerTarget === 'broadcast') {
-              peerTarget = peerTargets[0].id;
-            }
-          }}
+          aria-label="More thread actions"
+          title="More actions"
+          aria-haspopup="menu"
+          onclick={openPaneMenu}
         >
-          <Icon name="send" size={13} />
+          <Icon name="more" size={13} />
         </button>
-      {/if}
-
-      {#if !isPlainShellSession(session)}
-        <button
-          type="button"
-          class="icon-btn"
-          aria-label="Search conversation"
-          title="Search conversation (⌘F)"
-          data-testid="pane-search-btn-{paneId}"
-          onclick={() => convRef?.triggerSearch()}
-        >
-          <Icon name="search" size={13} />
-        </button>
-
-        <button
-          type="button"
-          class="icon-btn"
-          class:active={showTerminal}
-          aria-pressed={showTerminal}
-          aria-label={showTerminal ? 'Hide raw terminal drawer' : 'Show raw terminal drawer'}
-          title="Terminal drawer"
-          data-testid="pane-terminal-btn-{paneId}"
-          onclick={() => (showTerminal = !showTerminal)}
-        >
-          <Icon name="terminal" size={13} />
-        </button>
-      {/if}
-
-      {#if !multiPane}
-        <button
-          type="button"
-          class="icon-btn"
-          aria-label="Session room"
-          title="Jump to or start a Session Room"
-          onclick={() => onstartroom(paneId)}
-        >
-          <Icon name="people" size={13} />
-        </button>
-      {/if}
-
-      <button
-        type="button"
-        class="icon-btn"
-        aria-label="More thread actions"
-        title="More actions"
-        aria-haspopup="menu"
-        onclick={openPaneMenu}
-      >
-        <Icon name="more" size={13} />
-      </button>
-
-      {#if multiPane}
         <button
           type="button"
           class="icon-btn"
@@ -370,9 +271,9 @@
         >
           <Icon name="x" size={13} />
         </button>
-      {/if}
-    </div>
-  </header>
+      </div>
+    </header>
+  {/if}
 
   {#if showPeerBar}
     <div class="tp-peer-bar" data-testid="pane-peer-bar-{paneId}">
@@ -400,7 +301,7 @@
             e.preventDefault();
             void submitInlinePeer();
           } else if (e.key === 'Escape') {
-            showPeerBar = false;
+            threads.peerBarFor = null;
           }
         }}
       />
@@ -417,7 +318,7 @@
         class="icon-btn"
         aria-label="Close peer relay bar"
         title="Close"
-        onclick={() => (showPeerBar = false)}
+        onclick={() => (threads.peerBarFor = null)}
       >
         <Icon name="x" size={12} />
       </button>
@@ -438,7 +339,7 @@
       </EmptyState>
     {:else if isPlainShellSession(session)}
       <div class="tp-shell-wrap otto-force-dark">
-        <Terminal sessionId={paneId} forceDark autoFocus={focused} resumeOnOpen={focused} />
+        <LazyTerminal sessionId={paneId} forceDark autoFocus={focused} resumeOnOpen={focused} />
       </div>
     {:else}
       <ConversationView
@@ -447,9 +348,11 @@
         workspaceId={session.workspace_id}
         resumeOnOpen={focused}
         surface="threads"
-        ontoggleterminal={() => (showTerminal = !showTerminal)}
+        ontoggleterminal={toggleTerminal}
         onopeninspector={(tab) => threads.setInspectorTab(tab)}
         onnewthread={(opts) => void spawnFollowupThread(opts)}
+        onsidechat={(q) => threads.openSideChat(paneId, q)}
+        branchHint={branch}
       />
     {/if}
   </div>
@@ -458,7 +361,7 @@
     <ThreadTerminalDrawer
       sessionId={paneId}
       title={session.title}
-      onclose={() => (showTerminal = false)}
+      onclose={toggleTerminal}
     />
   {/if}
 </article>
@@ -529,19 +432,6 @@
     border-color: var(--accent-line-strong);
     box-shadow: 0 0 0 2px var(--accent-soft);
   }
-  .tp-branch {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    max-width: 140px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .tp-parent-link {
-    cursor: pointer;
-    max-width: 160px;
-    font-size: var(--fs-xs);
-  }
   .tp-actions {
     display: flex;
     align-items: center;
@@ -551,12 +441,6 @@
   .tp-actions :global(.icon-btn.active) {
     background: var(--accent-soft);
     color: var(--accent-text);
-  }
-  .tp-pin-on {
-    color: var(--warning);
-  }
-  .tp-pin-on :global(svg path) {
-    fill: currentColor;
   }
   .tp-peer-bar {
     display: flex;

@@ -12,6 +12,7 @@ mod appkit_guard;
 mod bar;
 mod browser;
 mod host_rooms;
+mod lifecycle;
 mod panel;
 mod panes;
 mod panes_policy;
@@ -35,13 +36,30 @@ use tauri::{Emitter, Manager};
 pub(crate) use throttle::NO_THROTTLE;
 
 fn main() {
+    // Durable lifecycle log first: launch + the previous run's fate.
+    lifecycle::init();
+    lifecycle::watch_signals();
     // AppKit-dispatched callbacks can't unwind: log panics, contain them below.
     panic_guard::install();
     // AppKit's own Objective-C exceptions would abort the app the same way:
     // remove the known trigger and catch the rest below tao's frame.
     appkit_guard::disable_writing_tools_affordance();
     appkit_guard::install_exception_guard();
-    tauri::Builder::default()
+    appkit_guard::install_uncaught_exception_logger();
+    let builder = tauri::Builder::default();
+    // A crashed WebContent process leaves a blank window: log it and reload
+    // (what Tauri does by default when no hook is set).
+    #[cfg(target_os = "macos")]
+    let builder = builder.on_web_content_process_terminate(|webview| {
+        panic_guard::guard("webcontent-terminate", || {
+            lifecycle::durable(&format!(
+                "webview content process terminated label={} — reloading",
+                webview.label()
+            ));
+            let _ = webview.reload();
+        });
+    });
+    builder
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
@@ -62,13 +80,15 @@ fn main() {
                     // window-set bookkeeping). The bar / tray panels never
                     // take it.
                     "close-window" => {
-                        if let Some((_, w)) = app.windows().into_iter().find(|(l, w)| {
+                        if let Some((l, w)) = app.windows().into_iter().find(|(l, w)| {
                             windows::is_app_window(l) && w.is_focused().unwrap_or(false)
                         }) {
+                            lifecycle::event(&format!("menu close-window label={l}"));
                             let _ = w.close();
                         }
                     }
                     "quit" => {
+                        lifecycle::durable("exit: menu quit");
                         windows::mark_quitting();
                         windows::snapshot_all(app);
                         app.exit(0);
@@ -190,6 +210,11 @@ fn main() {
 
             build_menu(app)?;
 
+            // Heartbeat: bounds when a silent death (SIGKILL, memory
+            // pressure) happened.
+            let alive = app.handle().clone();
+            lifecycle::heartbeat(move || windows::alive_window_count(&alive, None));
+
             // Reopen the window set from the last quit (frames + secondary
             // windows); each window's SPA restores its own tabs/route from
             // per-window (`__OTTO_WIN__`-keyed) localStorage.
@@ -231,20 +256,33 @@ fn run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
         // Cmd+Q (or last-window close) → snapshot the whole window set so
         // the next launch restores it; a lone window close just forgets
         // that window (handled in on_close_requested).
-        tauri::RunEvent::ExitRequested { .. } => {
+        tauri::RunEvent::ExitRequested { code, .. } => {
+            lifecycle::durable(&format!(
+                "exit requested ({})",
+                match code {
+                    Some(c) => format!("app.exit({c})"),
+                    None => "all windows closed".to_string(),
+                }
+            ));
             windows::mark_quitting();
             windows::snapshot_all(app);
         }
         tauri::RunEvent::WindowEvent { label, event, .. } => match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 if panes::intercept_close(app, &label) {
+                    lifecycle::event(&format!(
+                        "close requested label={label} → kept (pane returned to its host)"
+                    ));
                     api.prevent_close();
                     return;
                 }
+                lifecycle::close_requested(&label, windows::alive_window_count(app, Some(&label)));
                 if windows::is_popout(&label) {
                     popout::on_close_requested(app, &label);
                 }
-                windows::on_close_requested(app, &label);
+                if windows::on_close_requested(app, &label) {
+                    lifecycle::durable(&format!("exit: last app window closed (label={label})"));
+                }
             }
             tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
                 if matches!(event, tauri::WindowEvent::Resized(_)) {
@@ -259,6 +297,7 @@ fn run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                 }
             }
             tauri::WindowEvent::Destroyed => {
+                lifecycle::destroyed(&label, windows::alive_window_count(app, Some(&label)));
                 panes::destroyed(app, &label);
                 host_rooms::destroyed(&label);
             }
@@ -267,6 +306,7 @@ fn run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
             }
             _ => {}
         },
+        tauri::RunEvent::Exit => lifecycle::clean_exit("exit (clean)"),
         _ => {}
     }
 }

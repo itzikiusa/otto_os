@@ -141,6 +141,7 @@ pub const DANGEROUS: &[&str] = &[
     // Merging is outward-facing and irreversible.
     "merge_pr",
     "create_issue",
+    "update_issue",
     "comment_issue",
     "transition_issue",
     // API client writers send real HTTP requests and/or persist saved requests.
@@ -1014,6 +1015,13 @@ fn issue_tool_specs() -> Vec<Value> {
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"project_key":{"type":"string"},"issue_type":{"type":"string"},
                 "summary":{"type":"string"},"description":{"type":"string"},"labels":{"type":"array","items":{"type":"string"}},
                 "priority":{"type":"string"},"parent":{"type":"string"},"epic":{"type":"string"},"fields":{"type":"object"}}}}),
+        json!({"name":"otto.update_issue","mutating":true,"category":"Issues",
+            "description":"Edit a Jira issue; omitted fields stay unchanged. `description` is Markdown (as in otto.create_issue). `labels` replaces the set; `add_labels` / `remove_labels` edit it. `priority` name or id, `assignee` accountId (`\"none\"` unassigns), `parent` or `epic` issue key. Returns `{key, url, updated}`. DANGEROUS: outward-facing — approval-gated.",
+            "inputSchema":{"type":"object","required":["key"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"},
+                "summary":{"type":"string"},"description":{"type":"string"},"labels":{"type":"array","items":{"type":"string"}},
+                "add_labels":{"type":"array","items":{"type":"string"}},"remove_labels":{"type":"array","items":{"type":"string"}},
+                "priority":{"type":"string"},"assignee":{"type":"string"},"parent":{"type":"string"},"epic":{"type":"string"}}}}),
         json!({"name":"otto.comment_issue","mutating":true,"category":"Issues",
             "description":"Add a comment to an issue. `body` is Markdown (Jira: converted to ADF — headings, lists, tables, code). DANGEROUS: outward-facing — approval-gated.",
             "inputSchema":{"type":"object","required":["key","body"],"properties":{
@@ -1241,6 +1249,32 @@ pub fn dangerous_detail(tool: &str, args: &Value) -> String {
             args.get("project_key").and_then(Value::as_str).unwrap_or("?"),
             args.get("summary").and_then(Value::as_str).unwrap_or("?")
         ),
+        "update_issue" => {
+            let fields: Vec<&str> = [
+                "summary",
+                "description",
+                "labels",
+                "add_labels",
+                "remove_labels",
+                "priority",
+                "assignee",
+                "parent",
+                "epic",
+            ]
+            .into_iter()
+            // A null `assignee` is an unassign — still an edit the card names.
+            .filter(|k| args.get(*k).is_some_and(|v| !v.is_null() || *k == "assignee"))
+            .collect();
+            format!(
+                "Edit issue '{}' ({})",
+                args.get("key").and_then(Value::as_str).unwrap_or("?"),
+                if fields.is_empty() {
+                    "no fields".to_string()
+                } else {
+                    fields.join(", ")
+                }
+            )
+        }
         "comment_issue" => format!(
             "Comment on issue '{}'",
             args.get("key").and_then(Value::as_str).unwrap_or("?")

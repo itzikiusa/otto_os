@@ -182,8 +182,9 @@ an opaque `secret_ref`. The driver receives a fully `ResolvedConfig` — the
 service has already fetched the secret and, if configured, opened the tunnel and
 rewritten `host`/`port`.
 
-**Test the connection** with the **Test** button next to the engine chip in the
-connection's status row (shows "Testing…" then a green/red dot). It runs a cheap
+**Test the connection** with **⋯ → Test connection** at the end of the view bar,
+next to the health dot and engine name (shows "Testing…" then a green/red dot;
+the version and latency are in the dot's tooltip). It runs a cheap
 probe (`SELECT 1` / `PING`) and reports latency and the server version.
 
 **Opening and closing.** A "+" New-connection button sits in the sidebar's
@@ -553,20 +554,29 @@ bare SELECT was auto-limited, the footer grows a **pager**
 (`‹ Prev · rows a–b · Next ›`) that re-runs server-side with `OFFSET`/`skip`
 (with an "unordered" hint when the statement has no `ORDER BY`; an explicit
 user `LIMIT` disables it; on MongoDB **Next** walks the collection by `_id`
-instead of `skip` — see §5). The **⌨** toolbar popover lists every shortcut
+instead of `skip` — see §5). **⋯ → Keyboard shortcuts** lists every shortcut
 (⌘↵, ⇧⌘↵, ⌘S save, ⇧⌘F format, ⇧⌘V cycle the results view, Esc cancel, ⌥⌘→/←
-switch query tabs, ⌥⌘T new tab, ⌥⌘W close tab, ⇧⌥⌘W reopen). The toolbar also
-has:
+switch query tabs, ⌥⌘T new tab, ⌥⌘W close tab, ⇧⌥⌘W reopen). The toolbar's
+first row is **Run** (the one primary action), **Run all** (when the buffer
+holds several statements), **Save**, **Ask AI ▾**, **Format** (icon) and **⋯**;
+the less frequent actions — **Run on…**, **Query plan (EXPLAIN)**, **Wrap long
+lines**, **Paste from clipboard history…** (⌥⌘V) and **Keyboard shortcuts** —
+live in **⋯**, and every shortcut still works. In detail:
 
 - **Save** — name and store the statement as a workspace **saved query** (visible
   in the sidebar's **Saved** switch; see §11).
-- **Explain** — opens the **query-plan panel** (§4c): a normalized EXPLAIN tree
+- **⋯ → Query plan (EXPLAIN)** — opens the **query-plan panel** (§4c): a normalized EXPLAIN tree
   with red badges on costly access patterns. Hidden for Redis (no plan surface);
   falls back to the raw-`EXPLAIN`-into-the-grid path if a plan can't be normalized.
 - **Format** — beautify the statement. Engine-aware: SQL engines use sql-formatter,
   **Mongo** uses a structural JS/JSON re-indenter (`db.coll.op({…})` / pipelines —
   the SQL formatter can't parse it), Redis (one-line commands) is a no-op.
-- **Ask AI** — the examine-with-agent hand-off (see §9).
+- **Ask AI ▾** — the ONE AI entry point (it replaced the separate *Ask Otto* and
+  *Ask in English* buttons, which opened the same DB Assistant panel and differed
+  only in the task line sent to the agent). The menu picks the task: **Write a
+  query from plain English…** (`nl`), **Ask about this database…** (`ask`), and
+  **Explain this query** / **Optimize this query** (`investigate`, seeded with
+  the selection, else the whole buffer). See §9.
 - **Variables** — a statement may reference `:name`, `{name}` or `{{name}}`
   placeholders; the bar under the editor holds a value + type (`string` quoted /
   `number` raw / `raw` verbatim) per variable, per tab. **Running with a missing
@@ -576,12 +586,14 @@ has:
   the tab.
 - **Active database** selector — scope queries to a DB (or a Redis keyspace) so
   you can drop the `db.` prefix.
-- **Limit** selector — the automatic row cap (below).
-- **Timeout** (ms) — per-statement wall-clock timeout (MySQL applies it as a
-  `MAX_EXECUTION_TIME(ms)` hint; blank/0 = no limit).
-- **Mask** toggle — when on, the **server** runs result cells through
+- **Query settings** (gear; a dot marks any non-default value) holds:
+- **Row limit** — the automatic row cap (below).
+- **Statement timeout…** (ms) — per-statement wall-clock timeout (MySQL
+  applies it as a `MAX_EXECUTION_TIME(ms)` hint; blank/0 = no limit).
+- **Mask sensitive values** — when on, the **server** runs result cells through
   `otto_core::redact` before they leave the daemon (emails, tokens, keys); the
-  grid shows a **🔒 Masked** badge. Raw values never reach the browser.
+  toolbar shows a **🔒 Masked** chip (click to turn it off). Raw values never
+  reach the browser.
 
 **Syntax highlighting.** The editor colours your query by engine: **SQL** for
 MySQL/ClickHouse, a small **Redis** highlighter for Redis, and **JavaScript** for
@@ -872,7 +884,7 @@ the final frame — toolbar, header band, row skeletons, status bar — at the
 loaded geometry); and the asynchronous editability probe widened the row-number
 column for the selection checkbox and added toolbar buttons that re-wrapped the
 strip (the checkbox slot is always reserved; the toolbar is one fixed row whose
-rarer verbs live in **Copy ▾ / Export ▾ / ⋯** menus; the edit verdict lands in
+rarer verbs live in the **Export ▾ / ⋯** menus; the edit verdict lands in
 the status bar). `desktop-db-layout-stability.spec.ts` pins the grid frame and
 first row from the loading frame through the probe.
 
@@ -997,11 +1009,36 @@ runs. The collection defaults to the one the current result was read from
 (else the object selected in the tree, else a text box); the draft is kept per
 connection in localStorage so closing the dialog loses nothing.
 
+### Add row (schema-derived insert form)
+
+**Add row** in the results toolbar — and in an **empty** result, where it is the
+call to action (MongoDB: **Insert document**) — opens a form with one field per
+column of the table. The fields come from the table's **schema**
+(`POST …/object`, the same detail the Structure view uses: type, nullability,
+default, `auto_increment` / `nextval(…)`, primary key), not from the result's
+rows, so an empty table no longer needs a hand-written `INSERT`. Each field is
+**Value**, **NULL** (disabled for NOT NULL columns) or **Default** — the column is
+left out of the column list, so the engine applies its default or
+auto-increment. Fields open as: required (NOT NULL, no default) → Value;
+nullable → NULL; defaulted / auto → Default. Generated columns (MySQL
+`VIRTUAL`/`STORED GENERATED`, ClickHouse `MATERIALIZED`/`ALIAS`) are locked out.
+Numbers are emitted bare (validated), booleans as the engine's literal (`1`/`0`,
+`TRUE`/`FALSE`), everything else quoted. **Review INSERT…** builds one
+`INSERT INTO … (…) VALUES (…)` (all-default: MySQL `() VALUES ()`, Postgres
+`DEFAULT VALUES`; ClickHouse needs one column) and opens the usual review modal;
+after it runs the grid re-runs its statement. If the schema can't be loaded the
+form falls back to the result's column names (fill-to-include). The schema tree's
+**Insert row…** / **Insert document…** opens the table in a new tab and then the
+form. Unlike row edits, inserting needs no primary key and no rows — only edit
+access and a plain single-table `SELECT` / `find` — so it works on ClickHouse
+too. Pure builder: `ui/src/modules/database/insert-form.ts`
+(`ui/unit/dbInsertForm.test.ts`).
+
 ### Single-document import/export
 
 From a record's **⋯** menu (Vertical/JSON): **Copy as JSON** copies the
 pretty-printed document, **Export…** downloads it as `<collection>-<id>.json`.
-The toolbar's **Insert from JSON…** (and the record menu's **Insert
+The ⋯ menu's **Insert row from JSON…** (and the record menu's **Insert
 document…**) opens the document editor in insert mode — paste or type a JSON
 object and **Save** builds `db.<collection>.insertOne(<doc>)` (SQL: an
 `INSERT INTO … VALUES` from the keys that match result columns) through the
@@ -1114,13 +1151,15 @@ first (see §13).
 
 ### Copy & export from the grid
 
-Toolbar actions reflect the **current filtered + sorted view**. **Copy ▾**:
-TSV / CSV / JSON to the clipboard, the column names, and (for a single-table
-result) *Open as INSERT statements* in a new tab. **Export ▾**: Download CSV /
+Toolbar actions reflect the **current filtered + sorted view**. **Export ▾** (one
+menu; Copy used to be a second dropdown): TSV / CSV / JSON to the clipboard, the
+column names, and (for a single-table result) *Open as INSERT statements* in a
+new tab, then Download CSV /
 JSON (browser downloads of the in-memory rows), **Export all rows…** (the
 streaming, uncapped local-file export — §10; flagged when the result is
 capped) and **Import file…** (§10b). **⋯**: Aggregate pipeline (Mongo),
-Compare two records (Vertical/JSON), Insert from JSON (editable results),
+Compare two records (Vertical/JSON), Insert row from JSON (SQL; any result that
+can take an insert),
 Expand JSON cells (Grid), *Send to running agent…* and *Examine with AI*.
 Above 20k rows, copies and downloads are built 5k rows at a time behind a
 "Preparing…" toast so the window stays responsive.
@@ -1307,7 +1346,7 @@ build the prompt. Requires workspace **Editor**.
 
 ### Ask in English (verified NL→SQL)
 
-The Query toolbar's **Ask in English** button opens an input where you describe
+The Query toolbar's **Ask AI → Write a query from plain English…** opens an input where you describe
 what you want in plain language; **Generate** drafts a query and returns it only
 **after it has been validated with `EXPLAIN`** against the live schema — never a
 hallucinated, unrunnable guess. The server-side loop (`POST …/db/nl-to-sql`):
@@ -1641,7 +1680,8 @@ parses (and which read fine as plain text in history rows and MCP results):
   UI prompts for a **typed confirmation** (type the connection name). Confirmed
   writes on a guarded connection are **audited** (`db.write_confirmed`). The UI also
   shows danger styling — a red rail / **PROD** badge for production, an amber rail /
-  **RO** badge for read-only — and a banner.
+  **RO** badge for read-only — and a **Production** / **Read-only** chip in the
+  view bar (the full rule in its tooltip).
 - **Agent writes (`otto.query_db`) meet the same guard.** The approval-gated MCP
   writer runs through this `…/db/query` path with the agent's credential and never
   sends `confirm_write` (an agent's would not count, S6-304), so a guarded

@@ -143,3 +143,15 @@ ui/src/shell/SplitDivider.svelte        the resizable, keyboard-operable divider
   right-click menu (`launchctl kickstart -k`, or a reinstall when the job isn't
   loaded). After "install failed: …" the screen also offers **Reinstall
   daemon**. The daemon log is `~/Library/Logs/Otto/ottod.log`.
+- **The app quit or vanished and you don't know why** — read
+  `~/Library/Logs/Otto/desktop.log` (1 MiB, rotates to `desktop.log.1`). One
+  line per lifecycle event, in UTC: launch (version, pid), every window close
+  request and destroy (label, user close vs programmatic destroy, app windows
+  remaining), each exit with its reason (menu quit, last app window closed,
+  `ExitRequested` / `Exit`), SIGTERM / SIGINT / SIGHUP, panics (site only —
+  details in `desktop-panic.log`), contained AppKit exceptions, uncaught
+  Objective-C exceptions, WebContent crashes (the window is reloaded), and an
+  `alive` heartbeat every 15 min. A launch after a run that never exited
+  cleanly starts with `previous run (pid=…, started=…) ended without a clean
+  exit; last event: …` — with no signal or panic before it, the process was
+  killed outright (SIGKILL, memory pressure), and the last `alive` bounds when.

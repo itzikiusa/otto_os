@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { apiCtx, seedWorkspace } from './seed';
 import { openPage } from './helpers';
 
+// Removal re-checks the tree first (GET …/worktrees/status); an unknown status
+// is refused outright — no confirm, and no remove request (force or not).
 test('unknown locked worktree status is visible and never requests force', async ({ page }) => {
   const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-status-'));
   const { ctx, base } = await apiCtx();
@@ -20,6 +22,11 @@ test('unknown locked worktree status is visible and never requests force', async
     const path = `${dir}-unknown`;
     const rows = [{path,head:'abc',branch:'unknown-branch',detached:false,bare:false,is_main:false,locked:true,lock_reason:'fixture',prunable:false,dirty:false,dirty_known:false}];
     await page.route(`**/api/v1/repos/${repo.id}/worktrees`, route => route.fulfill({json:rows}));
+    let statusChecks = 0;
+    await page.route(`**/api/v1/repos/${repo.id}/worktrees/status?*`, route => {
+      statusChecks += 1;
+      return route.fulfill({json:rows[0]});
+    });
     let removal: {path:string;force:boolean} | undefined;
     await page.route(`**/api/v1/repos/${repo.id}/worktrees/remove`, async route => {
       removal = route.request().postDataJSON();
@@ -35,10 +42,10 @@ test('unknown locked worktree status is visible and never requests force', async
     await expect(row.getByTitle('Changes unknown — status check unavailable')).toHaveText('?');
     await row.click({button:'right'});
     await page.getByRole('menuitem', {name:'Remove worktree…',exact:true}).click();
-    const dialog = page.getByRole('dialog', {name:'Remove worktree',exact:true});
-    await expect(dialog).toContainText('changes couldn’t be checked');
-    await dialog.getByRole('button', {name:'Remove',exact:true}).click();
-    await expect.poll(() => removal).toEqual({path,force:false});
+    await expect(page.getByText('Can’t remove this worktree').first()).toBeVisible();
+    await expect.poll(() => statusChecks).toBe(1);
+    await expect(page.getByRole('dialog', {name:/remove worktree/i})).toHaveCount(0);
+    expect(removal).toBeUndefined();
   } finally {
     await ctx.dispose();
     rmSync(dir, {recursive:true,force:true});

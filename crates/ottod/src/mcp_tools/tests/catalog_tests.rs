@@ -293,6 +293,22 @@ fn native_twin_schema_keeps_only_the_native_scoped_arguments() {
         .is_none());
 }
 
+/// `otto.update_issue` enabled in the control plane is visible to a session
+/// as `otto_update_issue`, with the outward schema, proxied to the governed
+/// twin (the user rule: every enabled control-plane tool reaches sessions).
+#[test]
+fn update_issue_reaches_sessions_through_the_governed_bridge() {
+    let tools = governed_tools_for(&["otto.update_issue".to_string()]);
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert_eq!(names, vec!["otto_update_issue"]);
+    assert_eq!(tools[0]["inputSchema"]["required"], json!(["key"]));
+    assert!(tools[0]["inputSchema"]["properties"]["add_labels"].is_object());
+    assert_eq!(
+        governed_tool_for_stdio_name("otto_update_issue").as_deref(),
+        Some("otto.update_issue")
+    );
+}
+
 /// Control-plane parity for the issue-create family: enabling
 /// `otto.create_issue` (approval-gated) and its discovery reads under MCP →
 /// Otto server makes them visible to a session under the stdio names, with

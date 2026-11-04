@@ -29,11 +29,12 @@
   import { fetchSlashCommands, submitPrompt } from './api';
   import type { ToolCallBlock } from './format';
   import { nextInteractionModeToggle, resolveSessionThreadConfig, supportsInteractionMode, type EffortLevel, type InteractionMode } from '../../../lib/providerModels';
-  import { isImmediateSlashCommand, mergeSlashCommands, parseInteractiveSlashInput, type ComposerSlashCommand, type ParsedSlashIntent } from '../../../lib/slashActions';
+  import { HOST_ONLY_SLASH_COMMANDS, isImmediateSlashCommand, mergeSlashCommands, parseInteractiveSlashInput, type ComposerSlashCommand, type ParsedSlashIntent } from '../../../lib/slashActions';
   import { detectMentionAtCaret, extractMentionedFiles, removeMentionFromDraft, searchWorkspaceFiles, type MentionEntry } from './fileMentions';
   import ComposerApprovalDock from './ComposerApprovalDock.svelte';
   import ComposerAttachments, { type ComposerAttachment } from './ComposerAttachments.svelte';
   import ComposerFooter from './ComposerFooter.svelte';
+  import ComposerSendControls from './ComposerSendControls.svelte';
   import ComposerPopups from './ComposerPopups.svelte';
   import ComposerStatusCard from './ComposerStatusCard.svelte';
   import { interruptComposerTurn, patchComposerEffort, patchComposerMode, patchComposerModel, runComposerSlashIntent, steerComposerTurn, uploadComposerImages } from './composerSlash';
@@ -73,6 +74,11 @@
     onfiles?: () => void;
     ontoggleterminal?: () => void;
     onnewthread?: (beside: boolean) => void;
+    /** `/btw <question>`: open a side chat (Threads only; hidden from `/` otherwise). */
+    onsidechat?: (question: string) => void;
+    /** Threads: model/effort chip inside the box, no key-hint line, a quiet
+     *  meta row (branch · access). Agents keeps the default composer. */
+    variant?: 'default' | 'threads';
   }
   let {
     sessionId,
@@ -92,7 +98,11 @@
     onfiles,
     ontoggleterminal,
     onnewthread,
+    onsidechat,
+    variant = 'default',
   }: Props = $props();
+  const calm = $derived(variant === 'threads');
+  let boxBar = $state<ReturnType<typeof ComposerSendControls> | null>(null);
 
   const ownerId = untrack(() => sessionId);
   const text = $derived(transcript.draft(ownerId));
@@ -223,7 +233,11 @@
   let cmdsFor = '';
   let cmdIdx = $state(0);
   let cmdDismissed = $state(false);
-  const allSlashCmds = $derived(mergeSlashCommands(cmds));
+  // `/btw` is interactive only where a host opens side chats (Threads); elsewhere
+  // a CLI's own command of that name (if any) shows instead.
+  const allSlashCmds = $derived(
+    mergeSlashCommands(cmds, onsidechat ? {} : { omitInteractive: HOST_ONLY_SLASH_COMMANDS }),
+  );
   const cmdPrefix = $derived.by(() => {
     const m = /^\/([\w:-]*)$/.exec(text);
     return m ? m[1].toLowerCase() : null;
@@ -292,8 +306,8 @@
     cmdDismissed = true;
     queueMicrotask(autosize);
     await runComposerSlashIntent(intent, {
-      openModelPicker: () => footerRef?.openModelPicker(),
-      openEffortPicker: () => footerRef?.openEffortPicker(),
+      openModelPicker: () => (calm ? boxBar?.openModelPicker() : footerRef?.openModelPicker()),
+      openEffortPicker: () => (calm ? boxBar?.openEffortPicker() : footerRef?.openEffortPicker()),
       openModePicker: () => footerRef?.openModePicker(),
       applyModelChange,
       applyEffortChange,
@@ -305,6 +319,7 @@
       onfiles,
       ontoggleterminal,
       onnewthread,
+      onsidechat,
     });
   }
 
@@ -520,8 +535,8 @@
         {branch}
         {cwd}
         onclose={() => (showStatusCard = false)}
-        onopenmodel={() => footerRef?.openModelPicker()}
-        onopeneffort={() => footerRef?.openEffortPicker()}
+        onopenmodel={() => (calm ? boxBar?.openModelPicker() : footerRef?.openModelPicker())}
+        onopeneffort={() => (calm ? boxBar?.openEffortPicker() : footerRef?.openEffortPicker())}
         onopenmode={() => footerRef?.openModePicker()}
       />
     {/if}
@@ -572,27 +587,31 @@
         <div class="tools">
           <input bind:this={fileEl} type="file" accept="image/*" multiple hidden onchange={pickImages} />
           <button class="icon-btn tool" onclick={() => fileEl?.click()} aria-label="Attach images" title="Attach images (or paste / drop them)"><Icon name="image" size={14} /></button>
-          <span class="keys" aria-hidden="true">
-            {busy ? '⏎ queue · ⇧⌘⏎ steer · ⇧⏎ new line' : '⏎ send · ⇧⏎ new line · @ file'}
-          </span>
-          <span class="grow"></span>
-          {#if uploading > 0}<span class="uploading">Uploading…</span>{/if}
-          {#if busy}
-            <button class="btn small stop" onclick={() => void interrupt()} disabled={stopping} title="Interrupt {agentName} — sends Esc to its terminal"><Icon name="stop" size={12} /> Stop</button>
-            <button
-              class="btn small steer-btn"
-              onclick={() => void steer()}
-              disabled={!canSend}
-              title="Steer {agentName} (⇧⌘⏎) — interrupt the current step and send this prompt immediately"
-            >
-              <Icon name="zap" size={12} /> Steer
-            </button>
-            <button class="btn small primary queue-btn" onclick={() => void submitOrSlash()} disabled={!canSend} title={sendTitle}>
-              <Icon name="send" size={12} /> Queue
-            </button>
-          {:else}
-            <button class="send" onclick={() => void submitOrSlash()} disabled={!canSend} title={sendTitle} aria-label={uploading > 0 ? 'Send (uploading images)' : 'Send'}><Icon name="send" size={14} /></button>
+          {#if !calm}
+            <span class="keys" aria-hidden="true">
+              {busy ? '⏎ queue · ⇧⌘⏎ steer · ⇧⏎ new line' : '⏎ send · ⇧⏎ new line · @ file'}
+            </span>
           {/if}
+          <span class="grow"></span>
+          <ComposerSendControls
+            bind:this={boxBar}
+            chip={calm}
+            {provider}
+            cfg={threadCfg}
+            {configBusy}
+            {busy}
+            {canSend}
+            {stopping}
+            {sendTitle}
+            {uploading}
+            {agentName}
+            onmodelchange={(m) => void applyModelChange(m)}
+            oneffortchange={(eff) => void applyEffortChange(eff)}
+            onmodechange={(mode) => void applyModeChange(mode)}
+            onstop={() => void interrupt()}
+            onsteer={() => void steer()}
+            onsend={() => void submitOrSlash()}
+          />
         </div>
       </div>
       <ComposerAttachments {attachments} onremoveattachment={removeAttachment} />
@@ -616,6 +635,7 @@
       {termStatus}
       {termInput}
       {uploading}
+      {variant}
     />
   {/if}
 </div>
@@ -710,57 +730,8 @@
   .grow {
     flex: 1;
   }
-  .stop,
-  .steer-btn,
-  .queue-btn {
-    flex-shrink: 0;
-  }
-  .steer-btn {
-    border-color: var(--accent-line);
-    color: var(--accent-text);
-    background: var(--accent-faint);
-  }
-  .steer-btn:hover:not(:disabled) {
-    background: var(--accent-soft);
-  }
-  .uploading {
-    flex-shrink: 0;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .send {
-    flex-shrink: 0;
-    display: inline-grid;
-    place-items: center;
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
-    border: 0;
-    padding: 0;
-    background: var(--accent-solid);
-    color: var(--accent-contrast);
-    cursor: pointer;
-  }
-  .send:hover:not(:disabled) {
-    filter: brightness(1.08);
-  }
-  .send:focus-visible {
-    outline: 2px solid var(--accent-text);
-    outline-offset: 2px;
-  }
-  .send:disabled {
-    background: var(--surface-3);
-    color: var(--text-dim);
-    cursor: default;
-  }
   textarea::placeholder {
     color: var(--text-dim);
-  }
-  @media (max-width: 640px), (pointer: coarse) {
-    .send {
-      width: var(--hit-min);
-      height: var(--hit-min);
-    }
   }
   .exited {
     display: flex;

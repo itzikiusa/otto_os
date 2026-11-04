@@ -22,6 +22,7 @@ export * from './types/git-merge';
 export * from './types/goal-loops';
 export * from './types/insights-share';
 export * from './types/integrations';
+export * from './types/issue-update';
 export * from './types/k8s';
 export * from './types/k8s-monitor';
 export * from './types/mcp';

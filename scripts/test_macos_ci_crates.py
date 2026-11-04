@@ -27,15 +27,21 @@ permissions:
 jobs:
   daemon:
     steps:
+      - name: Pick macOS scope
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            echo "MAC_SCOPE=-p a --lib" >> "$GITHUB_ENV"
+          else
+            echo "MAC_SCOPE=-p a --all-targets" >> "$GITHUB_ENV"
+          fi
       - name: cargo clippy (macOS cfg)
         run: >-
           cargo clippy
-          -p a
-          --all-targets
+          $MAC_SCOPE
       - name: cargo nextest
         run: >-
           cargo nextest run
-          -p a
+          $MAC_SCOPE
 """
 
 
@@ -51,6 +57,16 @@ class CheckTest(unittest.TestCase):
         errs = mod.check(WF, {"a", "c"}, {"a", "b", "c"}, self.dirs)
         self.assertTrue(any("missing -p c" in e for e in errs), errs)
         self.assertTrue(any("crates/c/**" in e for e in errs), errs)
+
+    def test_steps_must_run_the_picked_scope(self):
+        wf = WF.replace("          cargo nextest run\n          $MAC_SCOPE", "          cargo nextest run\n          -p a")
+        errs = mod.check(wf, {"a"}, {"a", "b"}, self.dirs)
+        self.assertTrue(any("cargo nextest` does not run" in e for e in errs), errs)
+
+    def test_pr_subset_does_not_count_for_the_full_run(self):
+        wf = WF.replace('MAC_SCOPE=-p a --all-targets', 'MAC_SCOPE=--all-targets')
+        errs = mod.check(wf, {"a"}, {"a", "b"}, self.dirs)
+        self.assertTrue(any("(full) is missing -p a" in e for e in errs), errs)
 
     def test_push_paths_must_mirror_pr_paths(self):
         wf = WF.replace("    paths:\n      - 'crates/a/**'\n      - 'crates/b/**'\npermissions", "    paths:\n      - 'crates/a/**'\npermissions")

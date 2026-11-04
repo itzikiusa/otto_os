@@ -1,7 +1,6 @@
 <script lang="ts">
   import { announce } from '../../lib/announce.svelte';
   import { rowMenu } from '../../lib/rowMenu';
-  import Badge from '../../lib/components/Badge.svelte';
   import { focusOnMount } from '../../lib/focusOnMount';
   import { NO_WORKSPACE } from '../../lib/labels';
   import { plural } from '../../lib/plural';
@@ -775,6 +774,39 @@
   );
 
   /** Tooltip for the connection health chip: "Connected · <version> · <ms> ms". */
+  function addMenu(e: MouseEvent): void {
+    const owner = auth.isRoot ? undefined : 'Only the owner can create connections';
+    ctxMenu.show(e, [
+      { label: 'New connection…', icon: 'plus', disabled: !auth.isRoot, title: owner ?? 'SSH, database or custom CLI', action: newConnection },
+      { label: 'New Kafka cluster…', icon: 'split', action: newCluster },
+      { label: 'New section…', icon: 'folder', action: () => createSection(null) },
+      { separator: true },
+      { label: 'Import connections…', icon: 'arrowDown', disabled: !auth.isRoot, title: owner ?? 'From MySQL Workbench, DBeaver, DataGrip or NoSQLBooster', action: () => (connImportOpen = true) },
+    ]);
+  }
+  function savedMenu(e: MouseEvent, q: DbSavedQuery): void {
+    ctxMenu.show(e, [
+      { label: 'Open', icon: 'file', action: () => database.openSavedQuery(q) },
+      { label: 'Rename', icon: 'edit', action: () => startRename(q) },
+      { separator: true },
+      { label: 'Delete…', icon: 'trash', danger: true, action: () => void deleteSaved(q) },
+    ]);
+  }
+  async function deleteSaved(q: DbSavedQuery): Promise<void> {
+    const ok = await confirmer.ask(`Delete saved query “${q.name}”? Open tabs keep their text but are no longer linked to it.`, {
+      title: 'Delete saved query',
+      confirmLabel: 'Delete query',
+      danger: true,
+    });
+    if (ok) void database.deleteSavedQuery(q.id);
+  }
+  const hasSchemaChanges = $derived(['mysql', 'postgres'].includes(database.connections.find((c) => c.id === database.selectedConnId)?.kind ?? ''));
+  function connActionsMenu(e: MouseEvent): void {
+    ctxMenu.show(e, [
+      { label: database.testing ? 'Testing connection…' : 'Test connection', icon: 'plug', disabled: database.testing, action: () => void database.testConnection() },
+      ...(hasSchemaChanges ? [{ label: 'Schema changes', icon: 'branch', title: 'Reviewed schema changes for this connection', action: () => (changesOpen = true) }] : []),
+    ]);
+  }
   function healthTitle(st: { serverVersion?: string; latencyMs?: number }): string {
     const parts = ['Connected'];
     if (st.serverVersion) parts.push(st.serverVersion);
@@ -979,11 +1011,6 @@
   {/snippet}
   {#snippet actions()}
     {#if !viewport.isPhone}
-      {#if !hubEmpty}
-      <button class="btn small ghost" disabled={!auth.isRoot} onclick={() => (connImportOpen = true)} title={auth.isRoot ? 'Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster' : 'Only the owner can import connections'}>
-        <Icon name="arrowDown" size={12} /> Import
-      </button>
-      {/if}
       {#if database.connections.length > 0 || database.otherConnections.length > 0 || brokers.clusters.length > 0}
         <button class="btn small primary" disabled={!auth.isRoot} onclick={newConnectionFromStrip} title={auth.isRoot ? 'New connection (SSH, database or custom CLI)' : 'Only the owner can create connections'}>
           <Icon name="plus" size={12} /> New connection
@@ -1137,9 +1164,8 @@
           {@const stText = st?.phase === 'connecting' ? 'Connecting…' : st?.phase === 'error' ? (st.error ? `Couldn’t connect: ${st.error}` : 'Couldn’t connect — the server gave no reason') : st?.phase === 'idle' ? 'Not connected yet' : ''}
           <div use:rowMenu class="conn-tab" class:active={on} class:prod={isProdConn(c)} class:guarded={isGuardedConn(c) && !isProdConn(c)} role="presentation" oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}>
             <!-- The status glyphs below are decorative; the tab carries their state as its description. -->
-            <button class="conn-tab-main" role="tab" aria-selected={on} aria-describedby={stText ? `conn-st-${c.id}` : undefined} tabindex={connTabStop(on, `db:${c.id}`)} onclick={() => database.openConnection(c.id)} title="{c.name} — right-click to open beside agents">
+            <button class="conn-tab-main" role="tab" aria-selected={on} aria-describedby={stText ? `conn-st-${c.id}` : undefined} tabindex={connTabStop(on, `db:${c.id}`)} onclick={() => database.openConnection(c.id)} title="{sectionLeaf(c) ? `${sectionPath(c)} / ` : ''}{c.name} — right-click to open beside agents">
               <span class="conn-tab-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={12} /></span>
-              {#if sectionLeaf(c)}<span class="conn-tab-path mono" title="Folder: {sectionPath(c)}">{sectionLeaf(c)}</span>{/if}
               <span class="conn-tab-name ellipsis">{c.name}</span>
               {#if envBadge(c)}<EnvBadge env={c.environment} readOnly={c.read_only} />{/if}
             </button>
@@ -1214,19 +1240,6 @@
           <EmptyState icon="terminal" title="Session closed" body="This terminal tab is no longer open." />
         {/if}
       {:else if database.selectedConnId}
-      {#if database.isGuarded}
-        <div class="guard-banner" class:prod={database.isProd}>
-          <Icon name={database.isProd ? 'zap' : 'key'} size={13} />
-          <span>
-            {#if database.isProd}
-              Production connection — schema changes require an approved change. Other writes require permission and confirmation.
-            {:else}
-              Read-only connection — native privileges and access rules limit execution.
-            {/if}
-          </span>
-        </div>
-      {/if}
-
       <div class="main-tabs" class:many={visibleTabs.length > 3}>
         <!-- The workbench views: a segmented control (selection = surface
              lift), ←/→ move between them like any tablist. -->
@@ -1246,36 +1259,38 @@
           {/each}
         </div>
         <span class="grow"></span>
+        <!-- Status is one quiet line (dot + engine; version and latency in its
+             tooltip); Test and Schema changes live in the one ⋯ menu. -->
         <div class="conn-status">
-          {#if database.capabilities}
-            <span class="cap-chip mono" title="Engine">{database.capabilities.engine}</span>
+          {#if database.isGuarded}
+            <!-- The guard as one chip in this row (the full rule in its tooltip
+                 and for AT) — the red rail + the tab's env badge carry it too. -->
+            {@const guardText = database.isProd
+              ? 'Production connection — schema changes require an approved change. Other writes require permission and confirmation.'
+              : 'Read-only connection — native privileges and access rules limit execution.'}
+            <span class="guard-chip" class:prod={database.isProd} title={guardText} data-testid="db-guard-chip">
+              <Icon name={database.isProd ? 'zap' : 'key'} size={12} />
+              <span aria-hidden="true">{database.isProd ? 'Production' : 'Read-only'}</span>
+              <span class="sr-only">{guardText}</span>
+            </span>
           {/if}
           {#if database.activeConnStatus?.phase === 'connecting'}
             <span class="conn-state" title="Connecting…"><span class="conn-tab-spin spinner" style="--spinner-size: 12px" aria-hidden="true"></span><span class="lbl">Connecting…</span></span>
           {:else if database.activeConnStatus?.phase === 'error'}
             <span class="conn-state err" title={database.activeConnStatus.error}>Disconnected</span>
-          {:else if database.activeConnStatus?.phase === 'ready'}
-            <span class="conn-state ok" title={healthTitle(database.activeConnStatus)}>
-              <span class="health-dot"></span>
-              {#if database.activeConnStatus.serverVersion}
-                <span class="health-ver mono ellipsis">{database.activeConnStatus.serverVersion}</span>
-              {/if}
-              {#if database.activeConnStatus.latencyMs != null}
-                <span class="health-lat">{database.activeConnStatus.latencyMs} ms</span>
-              {/if}
+          {/if}
+          {#if database.capabilities}
+            <span class="conn-state" class:ok={database.activeConnStatus?.phase === 'ready'} title={database.activeConnStatus?.phase === 'ready' ? healthTitle(database.activeConnStatus) : 'Engine'}>
+              {#if database.activeConnStatus?.phase === 'ready'}<span class="health-dot" aria-hidden="true"></span>{/if}
+              <span class="cap-chip mono">{database.capabilities.engine}</span>
             </span>
           {/if}
-          {#if ['mysql','postgres'].includes(database.connections.find(c=>c.id===database.selectedConnId)?.kind ?? '')}
-            <button class="btn small ghost" onclick={()=>changesOpen=true} title="Reviewed schema changes for this connection" aria-label="Schema changes">
-              <Icon name="branch" size={12} /><span class="lbl">Changes</span>
-            </button>
-          {/if}
-          <button class="btn small ghost" onclick={() => database.testConnection()} disabled={database.testing} title="Test this connection" aria-label={database.testing ? 'Testing connection' : 'Test connection'}>
-            <Icon name="plug" size={12} /><span class="lbl">{database.testing ? 'Testing…' : 'Test'}</span>
-          </button>
           {#if database.testResult}
             <span class="test-dot" class:ok={database.testResult.ok} title={database.testResult.message}></span>
           {/if}
+          <button class="icon-btn" onclick={connActionsMenu} aria-haspopup="menu" aria-label="Connection actions" title="Connection actions — test the connection{hasSchemaChanges ? ', schema changes' : ''}" data-testid="db-conn-actions">
+            <Icon name="more" size={14} />
+          </button>
         </div>
       </div>
 
@@ -1423,8 +1438,7 @@
       title="{c.name} · {c.kind}{isProdConn(c) ? ' · PRODUCTION' : c.read_only ? ' · read-only' : ''} — {isDb ? 'opens the workbench; right-click for more' : 'opens a terminal session; right-click for more'}"
     >
       <span class="conn-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={12} /></span>
-      <span class="conn-name">{c.name}</span>
-      <Badge variant="outline" label={c.kind} />
+      <span class="conn-name">{c.name}</span><span class="sr-only"> {c.kind}</span>
       {#if opening[c.id]}<span class="spinner" style="--spinner-size: 10px" aria-hidden="true" title="Opening…"></span>{/if}
       {#if envBadge(c)}<EnvBadge env={c.environment} readOnly={c.read_only} />{/if}
     </button>
@@ -1459,8 +1473,7 @@
       title="{cl.name} · kafka{isProdConn(cl) ? ' · PRODUCTION' : cl.read_only ? ' · read-only' : ''} — opens here"
     >
       <span class="conn-glyph kafka"><Icon name={engineGlyph('kafka')} size={12} /></span>
-      <span class="conn-name">{cl.name}</span>
-      <Badge variant="outline" label="kafka" />
+      <span class="conn-name">{cl.name}</span><span class="sr-only"> kafka</span>
       {#if envBadge(cl)}<EnvBadge env={cl.environment} readOnly={cl.read_only} />{/if}
     </button>
     <div class="conn-actions">
@@ -1486,12 +1499,9 @@
       <button class="tree-search-clear" onclick={() => (connFilter = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={12} /></button>
     {/if}
     {#if !viewport.isPhone}
-      <!-- New section / connection live here on tablet/desktop (the phone keeps
-           them in the accordion header), so the tab strip never overflows. -->
-      <button class="icon-btn" onclick={() => createSection(null)} aria-label="New section" title="New section"><Icon name="folder" size={12} /></button>
-      <button class="icon-btn" disabled={!auth.isRoot} onclick={newConnection} aria-label="New connection" title={auth.isRoot ? 'New connection (SSH, database or custom CLI)' : 'Only the owner can create connections'}><Icon name="plus" size={12} /></button>
-      <button class="icon-btn" onclick={newCluster} aria-label="New Kafka cluster" title="New Kafka cluster"><Icon name="split" size={12} /></button>
-      <button class="icon-btn" disabled={!auth.isRoot} onclick={() => (connImportOpen = true)} aria-label="Import connections" title={auth.isRoot ? 'Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster' : 'Only the owner can import connections'}><Icon name="arrowDown" size={12} /></button>
+      <!-- One "add" menu (the phone keeps its accordion-head buttons); New
+           connection is also the page header's primary. -->
+      <button class="icon-btn" onclick={addMenu} aria-haspopup="menu" aria-label="Add to connections" title="Add — connection, Kafka cluster, section, or import" data-testid="connhub-add"><Icon name="plus" size={12} /></button>
     {/if}
   </div>
   <!-- Type-filter chips: one tree, narrowed by connection type. -->
@@ -1608,7 +1618,7 @@
       <EmptyState icon="search" title="No matches" body={`No saved queries match “${savedSearch}”.`} actionLabel="Clear filter" actionKind="secondary" onaction={() => (savedSearch = '')} />
     {:else}
       {#each filteredSaved as q (q.id)}
-        <div class="saved-row">
+        <div class="saved-row" role="presentation" oncontextmenu={(e) => { e.preventDefault(); savedMenu(e, q); }}>
           {#if renamingId === q.id}
             <input dir="auto"
               class="rename-input"
@@ -1626,19 +1636,7 @@
               <Icon name="file" size={12} />
               <span class="ellipsis">{q.name}</span>
             </button>
-            <button class="icon-btn row-del" onclick={() => startRename(q)} aria-label="Rename saved query" title="Rename"><Icon name="edit" size={12} /></button>
-            <button
-              class="icon-btn row-del"
-              onclick={async () => {
-                const ok = await confirmer.ask(`Delete saved query “${q.name}”? Open tabs keep their text but are no longer linked to it.`, {
-                  title: 'Delete saved query',
-                  confirmLabel: 'Delete query',
-                  danger: true,
-                });
-                if (ok) void database.deleteSavedQuery(q.id);
-              }}
-              aria-label="Delete saved query “{q.name}”…"
-              title="Delete…"><Icon name="trash" size={12} /></button>
+            <button class="icon-btn row-del" onclick={(e) => savedMenu(e, q)} aria-haspopup="menu" aria-label="Actions for saved query {q.name}" title="Rename or delete"><Icon name="more" size={12} /></button>
           {/if}
         </div>
       {/each}
@@ -1686,7 +1684,6 @@
         <span class="conn-glyph {sc.kind}"><Icon name={engineGlyph(sc.kind)} size={12} /></span>
         <span class="schema-conn-name ellipsis">{sc.name}</span>
         {#if envBadge(sc)}<EnvBadge env={sc.environment} readOnly={sc.read_only} />{/if}
-        <Badge variant="outline" label={sc.kind} />
       </div>
     {/if}
     <SchemaTree />
@@ -2160,7 +2157,8 @@
   .row-del {
     opacity: 0;
   }
-  .saved-row:hover .row-del {
+  .saved-row:hover .row-del,
+  .saved-row:focus-within .row-del {
     opacity: 1;
   }
   .hist-row {
@@ -2204,21 +2202,20 @@
     border-inline-start: 3px solid var(--status-working);
   }
   /* Guardrail banner above the main tabs. */
-  .guard-banner {
-    display: flex;
+  .guard-chip {
+    display: inline-flex;
     align-items: center;
-    gap: 8px;
-    padding: 6px 14px;
-    font-size: var(--fs-s);
-    line-height: 1.4;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: var(--radius-s);
+    font-size: var(--fs-xs);
     color: var(--success);
-    background: color-mix(in srgb, var(--status-working) 12%, transparent);
-    border-bottom: 1px solid color-mix(in srgb, var(--status-working) 35%, transparent);
+    background: var(--success-soft);
+    white-space: nowrap;
   }
-  .guard-banner.prod {
+  .guard-chip.prod {
     color: var(--danger);
-    background: color-mix(in srgb, var(--status-exited) 13%, transparent);
-    border-bottom-color: color-mix(in srgb, var(--status-exited) 40%, transparent);
+    background: var(--danger-soft);
     font-weight: 600;
   }
   /* Per-row connection-type tag (mysql / ssh / kafka / …) — neutral, so the
@@ -2289,17 +2286,6 @@
   }
   .conn-tabs::-webkit-scrollbar {
     display: none;
-  }
-  .conn-tab-path {
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    color: var(--accent-text);
-    background: var(--accent-soft);
-    border-radius: 999px;
-    padding: 1px 6px;
-    flex-shrink: 0;
-    white-space: nowrap;
   }
   .conn-tab {
     display: flex;
@@ -2436,20 +2422,12 @@
     gap: 8px;
     min-width: 0;
   }
-  /* A narrower workbench first sheds the redundant status (the engine is on
-     the schema header too, the version is in the dot's tooltip); only a
-     phone-narrow one drops the view words and keeps the icons. */
+  /* A narrower workbench first sheds the engine word (the connection tab's
+     glyph shows it too); only a phone-narrow one drops the view words. */
   @container dbmain (max-width: 900px) {
-    .cap-chip,
-    .health-ver,
-    .health-lat {
+    .cap-chip {
       display: none;
     }
-  }
-  /* Five views (SQL engines) + status + Changes + Test don't fit a ~740px
-     workbench: the status/utility buttons go icon-only first (they carry a
-     title + aria-label), so nothing is ever clipped off the trailing edge. */
-  @container dbmain (max-width: 900px) {
     .main-tabs.many .conn-status .lbl {
       display: none;
     }
@@ -2468,12 +2446,7 @@
   }
   .cap-chip {
     font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: .06em;
     color: var(--text-dim);
-    background: var(--surface-2);
-    padding: 1px 6px;
-    border-radius: 999px;
   }
   .test-dot {
     width: 8px;
@@ -2526,17 +2499,6 @@
     height: 8px;
     border-radius: 50%;
     background: var(--status-working);
-    flex-shrink: 0;
-  }
-  .health-ver {
-    max-width: 130px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .health-lat {
-    color: var(--text-dim);
-    font-variant-numeric: tabular-nums;
     flex-shrink: 0;
   }
   

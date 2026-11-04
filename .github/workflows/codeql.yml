@@ -41,22 +41,28 @@ jobs:
     outputs:
       has_languages: ${{ steps.select.outputs.has_languages }}
       matrix: ${{ steps.select.outputs.matrix }}
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
+      # The PR's file list from the API: the old full-history checkout took
+      # up to 3.6 min on this repo just to run `git diff`.
+      - name: List changed files
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename' > "$RUNNER_TEMP/changed.txt"
 
       - name: Select language matrix
         id: select
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_REF: ${{ github.base_ref }}
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, os, subprocess
+          import json, os
 
           scheduled = [
               {"language": "actions", "build-mode": "none"},
@@ -66,15 +72,12 @@ jobs:
           ]
 
           event = os.environ.get("EVENT_NAME", "")
-          base_ref = os.environ.get("BASE_REF", "main") or "main"
 
           if event != "pull_request":
               selected = scheduled
           else:
-              diff = subprocess.check_output(
-                  ["git", "diff", "--name-only", f"origin/{base_ref}...HEAD"],
-                  text=True,
-              ).splitlines()
+              with open(os.path.join(os.environ["RUNNER_TEMP"], "changed.txt"), encoding="utf-8") as fh:
+                  diff = fh.read().splitlines()
               selected = []
               if any(p.startswith(".github/workflows/") for p in diff):
                   selected.append({"language": "actions", "build-mode": "none"})
@@ -104,6 +107,15 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
+          # Blobless sparse checkout: skips ~240 MB of videos / screenshots
+          # (not analysed: codeql-config.yml ignores marketing/ and docs/).
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/marketing/
+            !/docs/reviews/
+            !/docs/testing/room-games/
 
       - name: Initialize CodeQL
         id: init

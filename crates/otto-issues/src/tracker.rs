@@ -14,11 +14,21 @@ use otto_core::{Error, Result};
 use crate::issue_create::{
     linear_problems, local_problems, problems_error, CreateIssueReq, CreateIssueResp,
 };
+use crate::issue_update::{UpdateIssueReq, UpdateIssueResp};
 use crate::jira::{
     CommentRef, CreatedIssue, DevStatus, EditableField, IssueComment, IssueFull, JiraClient,
     JiraTransition, JiraUser,
 };
 use crate::linear::LinearClient;
+
+/// Whether an assignee id means "unassign": `"-1"`, `"none"` (any case) or
+/// empty. Jira Cloud unassigns on `accountId: null` — sending `"-1"` itself
+/// would assign the project's DEFAULT assignee — so every provider maps these
+/// to its own null.
+pub fn is_unassign(id: &str) -> bool {
+    let id = id.trim();
+    id.is_empty() || id == "-1" || id.eq_ignore_ascii_case("none")
+}
 
 /// A provider-dispatching issue client for one account.
 pub enum Tracker {
@@ -186,7 +196,8 @@ impl Tracker {
         }
     }
 
-    /// Assign to a user id; `"-1"` unassigns.
+    /// Assign to a user id; [`is_unassign`] values (`"-1"`, `"none"`, empty)
+    /// unassign.
     pub async fn assign_issue(&self, key: &str, user_id: &str) -> Result<()> {
         match self {
             Self::Jira(c) => c.assign_issue(key, user_id).await,
@@ -252,6 +263,23 @@ impl Tracker {
                     verification: None,
                 })
             }
+        }
+    }
+
+    /// Edit an issue's summary / description / labels / priority / assignee /
+    /// parent. Jira only — a Linear account is refused by name.
+    pub async fn update_issue_checked(
+        &self,
+        key: &str,
+        req: &UpdateIssueReq,
+    ) -> Result<UpdateIssueResp> {
+        match self {
+            Self::Jira(c) => c.update_issue_checked(key, req).await,
+            Self::Linear(_) => Err(Error::Invalid(
+                "editing an issue is Jira-only; on a Linear account only the description can be \
+                 edited (PUT /issue/{account_id}/{key}/description)"
+                    .into(),
+            )),
         }
     }
 

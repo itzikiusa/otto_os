@@ -1053,7 +1053,7 @@
      (⌘+/−), which re-rasterizes everything (terminal included) and keeps
      coordinates correct. ui.zoom still drives native zoom inside Tauri. -->
 <div class="shell" class:vibrant class:embedded={isEmbedded} class:mobile={compactShell} class:tablet={compactShell && viewport.isTablet} class:page-titled={pageTitled}>
-  {#if compactShell}
+  {#if compactShell && !(viewport.isPhone && moduleName === 'threads')}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <header
     class="mtopbar"

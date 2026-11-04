@@ -25,6 +25,9 @@ use crate::confluence::{
     PageWriteResp,
 };
 use crate::issue_create::{local_problems, problems_error, CreateIssueReq, CreateIssueResp};
+use crate::issue_update::{
+    update_problems, update_problems_error, UpdateIssueReq, UpdateIssueResp,
+};
 use crate::jira::{CommentRef, DevStatus, EditableField, IssueFull, JiraTransition, JiraUser};
 use crate::md_storage::markdown_to_storage;
 use crate::tracker::{RawQuery, Tracker};
@@ -138,6 +141,7 @@ pub fn router<S: IssuesCtx>() -> Router<S> {
         .route("/issue/{account_id}/{key}", get(get_issue::<S>))
         // Static `issues` outranks `{key}` (no tracker key is a bare word).
         .route("/issue/{account_id}/issues", post(create_issue::<S>))
+        .route("/issue/{account_id}/issues/{key}", patch(update_issue::<S>))
         // Extended issue view + write operations
         .route("/issue/{account_id}/{key}/full", get(get_issue_full::<S>))
         .route(
@@ -834,8 +838,9 @@ async fn list_assignable<S: IssuesCtx>(
 
 /// `PUT /issue/{account_id}/{key}/assignee`
 ///
-/// Body: `{"account_id": "..."}` — assign the issue to a user.
-/// Pass `"-1"` as the account_id value to unassign.
+/// Body: `{"account_id": "..."}` — assign the issue to a user. `null`,
+/// `"-1"` or `"none"` unassigns (sent to Jira as `accountId: null`; Jira's own
+/// `"-1"` would assign the project's default assignee).
 /// Returns `204 No Content` on success.
 async fn assign_issue<S: IssuesCtx>(
     State(s): State<S>,
@@ -843,11 +848,16 @@ async fn assign_issue<S: IssuesCtx>(
     Path((account_id, key)): Path<(Id, String)>,
     Json(body): Json<serde_json::Value>,
 ) -> ApiResult<StatusCode> {
-    let assignee_account_id = body
-        .get("account_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::Invalid("account_id is required".into()))?
-        .to_string();
+    let assignee_account_id = match body.get("account_id") {
+        Some(serde_json::Value::Null) => "none".to_string(),
+        Some(serde_json::Value::String(id)) => id.clone(),
+        _ => {
+            return Err(Error::Invalid(
+                "account_id is required (a user id, or null / \"none\" to unassign)".into(),
+            )
+            .into())
+        }
+    };
     let account = load_authorized_account(&s, &account_id, &user).await?;
     let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
         .await?
@@ -932,6 +942,29 @@ async fn create_issue<S: IssuesCtx>(
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = Tracker::for_account(&account, &token);
     Ok(Json(client.create_issue_checked(&req).await?))
+}
+
+/// `PATCH /issue/{account_id}/issues/{key}`
+///
+/// Body: [`UpdateIssueReq`] — edit summary / description (Markdown → ADF) /
+/// labels (replace, or `add_labels` / `remove_labels`) / priority / assignee /
+/// parent / epic in one call. Jira only. Returns [`UpdateIssueResp`].
+async fn update_issue<S: IssuesCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path((account_id, key)): Path<(Id, String)>,
+    Json(req): Json<UpdateIssueReq>,
+) -> ApiResult<Json<UpdateIssueResp>> {
+    let problems = update_problems(&req);
+    if !problems.is_empty() {
+        return Err(update_problems_error(key.trim(), &problems).into());
+    }
+    let account = load_authorized_account(&s, &account_id, &user).await?;
+    let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
+        .await?
+        .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
+    let client = Tracker::for_account(&account, &token);
+    Ok(Json(client.update_issue_checked(&key, &req).await?))
 }
 
 /// `POST /issue/{account_id}/{key}/comment`

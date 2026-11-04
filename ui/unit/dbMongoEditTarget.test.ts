@@ -66,7 +66,9 @@ test('lossy results clear stale edit targets; row pagination and ordinary marker
   const { EditFlow } = loadSource(new URL('../src/modules/database/EditFlow.svelte.ts', import.meta.url), {
     '../../lib/toast.svelte': {}, '../../lib/stores/database.svelte': {database:{}},
     './results-format': {}, './edit-types': {adapterFor: () => mongo.mongoAdapter},
-    './edit-sql': pureModule('edit-sql'), './edit-mongo': mongo, '../../lib/jsonTree/expansion-plan': {}, './review-batch': {},
+    './edit-sql': pureModule('edit-sql'), './edit-mongo': mongo, '../../lib/jsonTree/expansion-plan': {},
+    // "Add row" (InsertFlow) is covered by dbInsertForm.test.ts.
+    './insert-flow.svelte': { InsertFlow: class { target = null; form = null; } }, './review-batch': {},
     '../../lib/toastError': {}, '../../lib/plural': {},
   });
   const flow = new EditFlow();

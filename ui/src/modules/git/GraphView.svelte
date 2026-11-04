@@ -250,7 +250,7 @@
       {#if data.refs}<span class="mob-sec-count">{data.refs.local.length + data.refs.remote.length + data.refs.tags.length}</span>{/if}
     </button>
   {/if}
-  <RefSidebar
+  <RefSidebar {repoId}
     refs={data.refs}
     refsLoading={data.refsLoading}
     refsError={data.refsError}

@@ -12,7 +12,14 @@ name: CI
 #   2. `e2e-gate` splits across 4 parallel single-browser shards (`chromium`
 #      1/2 & 2/2, `webkit` 1/2 & 2/2) and folds all 4 JSON reports into the
 #      blocking `e2e-flaky-check.mjs --gate` verdict.
-#   3. Long `#[ignore]`d stress/sleep suites (`_at_50k_revisions_`, telemetry
+#   3. `changes` (scripts/ci-route.py) routes a PR: a UI-only change skips the
+#      Rust lint/tests (the test daemon still builds — a cache hit — for E2E),
+#      a docs-only change skips everything. Pushes to main run everything.
+#   4. Cargo caches are SAVED only by pushes to main (restore-only on PRs): PR
+#      saves (1.6 GB each, a new key per push) filled the 10 GB repo cap and
+#      evicted main's caches, so every new PR started cold (30+ min).
+#      docs/testing/build-performance.md has the job map and the measurements.
+#   5. Long `#[ignore]`d stress/sleep suites (`_at_50k_revisions_`, telemetry
 #      crash-recovery) and the 4-shard full functional E2E matrix run nightly in
 #      `perf-nightly.yml` and `e2e-nightly.yml`.
 
@@ -39,12 +46,61 @@ env:
   NEXTEST_VERSION: 0.9.150
 
 jobs:
+  changes:
+    name: Route (what changed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.route.outputs.rust }}
+      code: ${{ steps.route.outputs.code }}
+      plugin: ${{ steps.route.outputs.plugin }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          sparse-checkout: scripts
+          filter: blob:none
+      # The PR's file list comes from the API (no history fetch); non-PR
+      # events run every job.
+      - id: route
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          CHANGED: ${{ github.event.pull_request.changed_files }}
+        run: |
+          if [ "$EVENT" != pull_request ] || [ "${CHANGED:-0}" -ge 3000 ]; then
+            python3 scripts/ci-route.py --all | tee -a "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename' > "$RUNNER_TEMP/changed.txt" \
+            || [ "$(wc -l < "$RUNNER_TEMP/changed.txt")" -ne "$CHANGED" ]; then
+            echo "::warning::could not list the PR's files; running every job"
+            python3 scripts/ci-route.py --all | tee -a "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 scripts/ci-route.py < "$RUNNER_TEMP/changed.txt" | tee -a "$GITHUB_OUTPUT"
+
   rust-lint:
     name: Rust (fmt · clippy · guards)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          # ~240 of the tree's ~300 MB are videos and review screenshots no job
+          # reads: a blobless sparse checkout takes seconds, a full one 15 s–4.5 min.
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/marketing/
+            !/docs/reviews/
+            !/docs/testing/room-games/
 
       - name: Ensure runner disk headroom
         run: |
@@ -76,9 +132,9 @@ jobs:
             sudo ln -sf "$(command -v ld.lld)" /usr/bin/x86_64-linux-gnu-ld
           fi
 
-      - name: Cache cargo + workspace metadata
+      - name: Restore cargo + workspace metadata
         id: cargo-cache
-        uses: actions/cache@v6.1.0
+        uses: actions/cache/restore@v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -120,16 +176,49 @@ jobs:
           OTTO_PERF_BUDGET_SCALE: '3'
         run: cargo test -p otto-pty --release --lib perf_budgets -- --nocapture
 
+      # Saved by pushes to main only: PR caches are visible to that PR alone,
+      # and their 1.6 GB-per-push saves evicted main's (10 GB repo cap).
       - name: Prepare cargo cache manifest
-        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        if: github.event_name != 'pull_request' && steps.cargo-cache.outputs.cache-hit != 'true'
         run: python3 scripts/ci-cargo-cache.py prepare-save
+
+      - name: Save cargo cache
+        if: github.event_name != 'pull_request' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+            target/debug/.fingerprint
+            target/debug/build
+            target/debug/deps
+            target/debug/examples
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+            target/.ci-source-hashes.json
+          key: cargo-full-${{ runner.os }}-lint-v1-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml') }}-${{ hashFiles('crates/**', 'vendor/**') }}
 
   rust-build:
     name: Build workspace & test archive
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          # ~240 of the tree's ~300 MB are videos and review screenshots no job
+          # reads: a blobless sparse checkout takes seconds, a full one 15 s–4.5 min.
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/marketing/
+            !/docs/reviews/
+            !/docs/testing/room-games/
 
       - name: Ensure runner disk headroom
         run: |
@@ -153,9 +242,9 @@ jobs:
             sudo ln -sf "$(command -v ld.lld)" /usr/bin/x86_64-linux-gnu-ld
           fi
 
-      - name: Cache cargo + workspace targets
+      - name: Restore cargo + workspace targets
         id: cargo-cache
-        uses: actions/cache@v6.1.0
+        uses: actions/cache/restore@v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -176,6 +265,7 @@ jobs:
         run: python3 scripts/ci-cargo-cache.py restore
 
       - name: Install nextest
+        if: needs.changes.outputs.rust == 'true'
         run: |
           archive="$RUNNER_TEMP/cargo-nextest.tar.gz"
           tool_dir="$RUNNER_TEMP/otto-test-tools"
@@ -195,6 +285,7 @@ jobs:
           fi
 
       - name: Build & archive workspace tests + ottod
+        if: needs.changes.outputs.rust == 'true'
         run: |
           cargo nextest archive \
             --workspace --features otto-server/test-util \
@@ -203,10 +294,18 @@ jobs:
           test -x target/debug/ottod || cargo build --bin ottod --features otto-server/test-util
           test -x target/debug/ottod
 
+      # A UI-only change: no Rust changed, so only the E2E daemon is needed —
+      # the same units the archive build compiles (a cache hit from main).
+      - name: Build the test daemon only (UI-only change)
+        if: needs.changes.outputs.rust != 'true'
+        run: cargo build --workspace --bins --features otto-server/test-util
+
       - name: nextest override filters match tests
+        if: needs.changes.outputs.rust == 'true'
         run: python3 scripts/check-nextest-filters.py --cargo-arg=--features --cargo-arg=otto-server/test-util
 
       - name: cargo test (doctests)
+        if: needs.changes.outputs.rust == 'true'
         run: cargo test --workspace --doc --features otto-server/test-util
 
       - name: Upload the test daemon
@@ -218,6 +317,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload nextest archive
+        if: needs.changes.outputs.rust == 'true'
         uses: actions/upload-artifact@v7.0.2
         with:
           name: nextest-archive
@@ -226,13 +326,32 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      # Saved by pushes to main only: PR caches are visible to that PR alone,
+      # and their 1.6 GB-per-push saves evicted main's (10 GB repo cap).
       - name: Prepare cargo cache manifest
-        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        if: github.event_name != 'pull_request' && steps.cargo-cache.outputs.cache-hit != 'true'
         run: python3 scripts/ci-cargo-cache.py prepare-save
+
+      - name: Save cargo cache
+        if: github.event_name != 'pull_request' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+            target/debug/.fingerprint
+            target/debug/build
+            target/debug/deps
+            target/debug/ottod
+            target/.ci-source-hashes.json
+          key: cargo-full-${{ runner.os }}-build-v1-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml') }}-${{ hashFiles('crates/**', 'vendor/**') }}
 
   rust-test:
     name: Rust · nextest (${{ matrix.shard }}/10)
-    needs: rust-build
+    needs: [changes, rust-build]
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -241,6 +360,16 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          # ~240 of the tree's ~300 MB are videos and review screenshots no job
+          # reads: a blobless sparse checkout takes seconds, a full one 15 s–4.5 min.
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/marketing/
+            !/docs/reviews/
+            !/docs/testing/room-games/
 
       - name: Download nextest archive
         uses: actions/download-artifact@v8.0.2
@@ -287,6 +416,8 @@ jobs:
 
   ui:
     name: UI (svelte-check · tsc)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -294,6 +425,16 @@ jobs:
         working-directory: ui
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          # ~240 of the tree's ~300 MB are videos and review screenshots no job
+          # reads: a blobless sparse checkout takes seconds, a full one 15 s–4.5 min.
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/marketing/
+            !/docs/reviews/
+            !/docs/testing/room-games/
 
       - name: Test repo guard scripts & packaging
         working-directory: .
@@ -305,6 +446,7 @@ jobs:
           python3 -B -m unittest discover -s scripts -p 'test_loc_ratchet.py'
           python3 -B -m unittest discover -s scripts -p 'test_ci_apt_install.py'
           python3 -B -m unittest discover -s scripts -p 'test_ci_cargo_cache.py'
+          python3 -B -m unittest discover -s scripts -p 'test_ci_route.py'
 
       - name: Install Node
         uses: actions/setup-node@v7.1.0
@@ -330,10 +472,22 @@ jobs:
 
   plugin-team-performance:
     name: Plugin · Team Performance
+    needs: changes
+    if: needs.changes.outputs.plugin == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          # ~240 of the tree's ~300 MB are videos and review screenshots no job
+          # reads: a blobless sparse checkout takes seconds, a full one 15 s–4.5 min.
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/marketing/
+            !/docs/reviews/
+            !/docs/testing/room-games/
 
       - name: Install Node
         uses: actions/setup-node@v7.1.0
@@ -372,7 +526,8 @@ jobs:
 
   e2e-gate-shard:
     name: E2E smoke (${{ matrix.project }} ${{ matrix.shard }}/2)
-    needs: rust-build
+    needs: [changes, rust-build]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -397,6 +552,16 @@ jobs:
             shard: 2
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          # ~240 of the tree's ~300 MB are videos and review screenshots no job
+          # reads: a blobless sparse checkout takes seconds, a full one 15 s–4.5 min.
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/marketing/
+            !/docs/reviews/
+            !/docs/testing/room-games/
 
       - name: Download the test daemon
         uses: actions/download-artifact@v8.0.2
@@ -473,6 +638,16 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          # ~240 of the tree's ~300 MB are videos and review screenshots no job
+          # reads: a blobless sparse checkout takes seconds, a full one 15 s–4.5 min.
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/marketing/
+            !/docs/reviews/
+            !/docs/testing/room-games/
 
       - name: Install Node
         uses: actions/setup-node@v7.1.0
@@ -501,11 +676,22 @@ jobs:
 
   daemon-budget:
     name: Daemon perf budget
-    needs: rust-build
+    needs: [changes, rust-build]
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          # ~240 of the tree's ~300 MB are videos and review screenshots no job
+          # reads: a blobless sparse checkout takes seconds, a full one 15 s–4.5 min.
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/marketing/
+            !/docs/reviews/
+            !/docs/testing/room-games/
 
       - name: Download the test daemon
         uses: actions/download-artifact@v8.0.2
@@ -528,12 +714,24 @@ jobs:
 
   audit:
     name: cargo audit (advisory)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     continue-on-error: true
     env:
       CARGO_AUDIT_VERSION: 0.22.2
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          # ~240 of the tree's ~300 MB are videos and review screenshots no job
+          # reads: a blobless sparse checkout takes seconds, a full one 15 s–4.5 min.
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/marketing/
+            !/docs/reviews/
+            !/docs/testing/room-games/
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@1.99.1
@@ -567,9 +765,21 @@ jobs:
 
   deny:
     name: cargo deny (duplicates)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          # ~240 of the tree's ~300 MB are videos and review screenshots no job
+          # reads: a blobless sparse checkout takes seconds, a full one 15 s–4.5 min.
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/marketing/
+            !/docs/reviews/
+            !/docs/testing/room-games/
 
       - name: cargo deny check bans
         uses: EmbarkStudios/cargo-deny-action@v2.1.1
@@ -586,6 +796,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
+          filter: blob:none
 
       - name: Check 🐛 fix( commits touching ui/src
         run: scripts/check-fix-has-test.sh "origin/${{ github.base_ref }}" "${{ github.event.pull_request.head.sha }}"

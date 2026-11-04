@@ -42,6 +42,7 @@ pub const REF_ARGS: &[(&str, &str, &str)] = &[
     ("list_issue_projects", "account_id", "issue_account"),
     ("list_issue_types", "account_id", "issue_account"),
     ("create_issue", "account_id", "issue_account"),
+    ("update_issue", "account_id", "issue_account"),
     ("comment_issue", "account_id", "issue_account"),
     ("transition_issue", "account_id", "issue_account"),
     ("search_confluence", "account_id", "issue_account"),
@@ -191,6 +192,7 @@ pub fn pin_global(tool: &str) -> bool {
                 | "list_issue_projects"
                 | "list_issue_types"
                 | "create_issue"
+                | "update_issue"
                 | "comment_issue"
                 | "transition_issue"
                 | "search_confluence"
@@ -362,6 +364,7 @@ pub fn match_transition(list: &Value, wanted: &str) -> Result<String, Error> {
 /// first one whose role satisfies the tool (Editor for mutating, Viewer for
 /// reads), falling back to the first membership so the self-call's native RBAC
 /// produces the honest 403 rather than an "unknown workspace" here.
+/// Archived (removed) workspaces are never picked — not even as the fallback.
 pub fn pick_vault_workspace(
     rows: &[(otto_core::domain::Workspace, WorkspaceRole)],
     mutating: bool,
@@ -371,8 +374,9 @@ pub fn pick_vault_workspace(
     } else {
         WorkspaceRole::Viewer
     };
-    rows.iter()
+    let mut live = rows.iter().filter(|(w, _)| !w.archived);
+    live.clone()
         .find(|(_, role)| *role >= need)
-        .or_else(|| rows.first())
+        .or_else(|| live.next())
         .map(|(w, _)| w.id.clone())
 }

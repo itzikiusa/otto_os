@@ -14,6 +14,11 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 const MODELS_TTL: Duration = Duration::from_secs(60);
+/// Past [`MODELS_TTL`] a catalog is still served — and refreshed behind the
+/// response — for this long. `/meta` is on the app's boot path, and `agy
+/// models` is a process spawn; model lists change on CLI upgrades, not
+/// between two launches.
+const MODELS_MAX_STALE: Duration = Duration::from_secs(24 * 3600);
 
 type ModelsCache = Option<(
     Instant,
@@ -22,22 +27,53 @@ type ModelsCache = Option<(
     HashMap<String, Vec<ProviderModelOption>>,
 )>;
 
-/// Discover selectable models per provider at most once per [`MODELS_TTL`].
+static CACHE: tokio::sync::Mutex<ModelsCache> = tokio::sync::Mutex::const_new(None);
+static REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Discover selectable models per provider at most once per [`MODELS_TTL`];
+/// a stale catalog for the same inputs is served while ONE background
+/// refresh replaces it.
 pub async fn probe_provider_models_cached(
     providers: &[String],
     agy_program: Option<String>,
 ) -> HashMap<String, Vec<ProviderModelOption>> {
-    static CACHE: tokio::sync::Mutex<ModelsCache> = tokio::sync::Mutex::const_new(None);
+    use std::sync::atomic::Ordering;
     let mut slot = CACHE.lock().await;
     if let Some((at, cached_providers, cached_agy, models)) = slot.as_ref() {
-        if at.elapsed() < MODELS_TTL
-            && cached_providers.as_slice() == providers
-            && *cached_agy == agy_program
-        {
-            return models.clone();
+        if cached_providers.as_slice() == providers && *cached_agy == agy_program {
+            let age = at.elapsed();
+            if age < MODELS_TTL {
+                return models.clone();
+            }
+            if age < MODELS_MAX_STALE {
+                if !REFRESHING.swap(true, Ordering::AcqRel) {
+                    let providers = providers.to_vec();
+                    tokio::spawn(async move {
+                        // Cleared even if discovery panics.
+                        struct Done;
+                        impl Drop for Done {
+                            fn drop(&mut self) {
+                                REFRESHING.store(false, Ordering::Release);
+                            }
+                        }
+                        let _done = Done;
+                        let fresh = discover_models(&providers, agy_program.as_deref()).await;
+                        *CACHE.lock().await = Some((Instant::now(), providers, agy_program, fresh));
+                    });
+                }
+                return models.clone();
+            }
         }
     }
+    let out = discover_models(providers, agy_program.as_deref()).await;
+    *slot = Some((Instant::now(), providers.to_vec(), agy_program, out.clone()));
+    out
+}
 
+async fn discover_models(
+    providers: &[String],
+    agy_program: Option<&str>,
+) -> HashMap<String, Vec<ProviderModelOption>> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
@@ -60,11 +96,9 @@ pub async fn probe_provider_models_cached(
         );
     }
     if want_agy {
-        let agy = discover_agy_models(agy_program.as_deref()).await;
+        let agy = discover_agy_models(agy_program).await;
         out.insert("agy".to_string(), agy);
     }
-
-    *slot = Some((Instant::now(), providers.to_vec(), agy_program, out.clone()));
     out
 }
 
@@ -381,6 +415,27 @@ fn fallback_agy_models() -> Vec<ProviderModelOption> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `/meta` answers from a stale catalog at once; one background refresh
+    /// replaces it (no provider here, so the refresh is an empty map).
+    #[tokio::test]
+    async fn stale_catalog_is_served_then_refreshed_in_the_background() {
+        use std::sync::atomic::Ordering;
+        let marker = HashMap::from([("stale".to_string(), Vec::new())]);
+        let aged = Instant::now()
+            .checked_sub(Duration::from_secs(600))
+            .unwrap();
+        *CACHE.lock().await = Some((aged, Vec::new(), None, marker));
+        let served = probe_provider_models_cached(&[], None).await;
+        assert!(served.contains_key("stale"), "served stale");
+        for _ in 0..200 {
+            if !REFRESHING.load(Ordering::Acquire) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(probe_provider_models_cached(&[], None).await.is_empty());
+    }
 
     #[test]
     fn parses_claude_codex_and_agy_catalogs() {

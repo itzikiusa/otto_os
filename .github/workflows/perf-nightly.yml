@@ -1,8 +1,7 @@
 name: Perf (nightly, macOS)
 
 # Daemon perf budget on macOS WITH the embedded ClickHouse (perf2/03 N4): the
-# Linux CI job has no ClickHouse binary, so the biggest idle consumer is only
-# sampled here. Nightly + on demand — a macOS runner per PR is too slow/costly.
+# biggest idle consumer is only sampled here. Nightly + on demand — a macOS runner per PR is too slow/costly.
 # Blocking here: threads, wal_bytes, free_pct, the offline-compaction outcome
 # and the ClickHouse child's thread count (OTTO_PERF_BLOCK_CH=1); CPU numbers
 # are reported in the step summary.
@@ -30,13 +29,35 @@ jobs:
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@1.99.1
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.3
+      # Swatinem/rust-cache strips workspace crates before saving, so every
+      # night recompiled all of them (`cargo build -p ottod`: 9m29s on
+      # 2026-11-03 with a cache hit). Cache the workspace targets and restore
+      # unchanged sources' mtimes (scripts/ci-cargo-cache.py, as macos.yml
+      # does) so only crates changed since the last saved run rebuild.
+      - name: Cache cargo + workspace targets
+        id: cargo-cache
+        uses: actions/cache@v6.1.0
         with:
-          shared-key: perf-macos
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+            target/debug/.fingerprint
+            target/debug/build
+            target/debug/deps
+            target/debug/ottod
+            target/.ci-source-hashes.json
+          key: cargo-full-${{ runner.os }}-perf-nightly-v1-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml') }}-${{ hashFiles('crates/**', 'vendor/**') }}
+          restore-keys: |
+            cargo-full-${{ runner.os }}-perf-nightly-v1-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', '.cargo/config.toml') }}-
+            cargo-full-${{ runner.os }}-perf-nightly-v1-
+
+      - name: Restore cached source mtimes
+        run: python3 scripts/ci-cargo-cache.py restore
 
       - name: Install build deps (librdkafka needs cmake)
-        run: brew install cmake
+        run: command -v cmake || brew install cmake
 
       - name: Install ClickHouse (single binary, on PATH)
         run: |
@@ -72,12 +93,21 @@ jobs:
           cargo test -p otto-usage --test e2e \
             -- budget summary_and_report_query_budget idle_stop --nocapture
 
+      - name: Prepare cargo cache manifest
+        if: always() && steps.cargo-cache.outputs.cache-hit != 'true'
+        run: python3 scripts/ci-cargo-cache.py prepare-save
+
   scale-and-recovery-linux:
     name: Scale & crash-recovery gates (Linux)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
       NEXTEST_VERSION: 0.9.150
+      # Same pinned release as ci.yml. The telemetry recovery test starts an
+      # isolated ClickHouse; without a binary it timed out every night after
+      # it moved here from ci.yml (89fea975b) without its install step.
+      CLICKHOUSE_VERSION: 26.8.34.13
+      CLICKHOUSE_SHA512: e5c753b258679daa882747aaec10b351a85bcad1412af7957d4a4616dcf5b45663da219bd37fe0697fde2ae76dbed2ba5b414ce9a5c8044c6d1fa0142e03e4cc
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -117,8 +147,38 @@ jobs:
             sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev pkg-config libssl-dev
           fi
 
+      - name: Install ClickHouse
+        run: |
+          archive="$RUNNER_TEMP/clickhouse.tgz"
+          curl --fail --location --silent --show-error --retry 3 \
+            "https://github.com/ClickHouse/ClickHouse/releases/download/v$CLICKHOUSE_VERSION-lts/clickhouse-common-static-$CLICKHOUSE_VERSION-amd64.tgz" \
+            --output "$archive"
+          printf '%s  %s\n' "$CLICKHOUSE_SHA512" "$archive" | sha512sum --check
+          mkdir -p "$RUNNER_TEMP/ch"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/ch"
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 "$(find "$RUNNER_TEMP/ch" -type f -name clickhouse -path '*/bin/*' | head -n 1)" "$HOME/.local/bin/clickhouse"
+          rm -rf "$RUNNER_TEMP/ch" "$archive"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # One build for both gates: the same package set and features in each
+      # run below, so neither recompiles (they were two builds, 41 s + 25 s).
+      - name: Build gate test binaries
+        run: cargo nextest run --no-run -p otto-vault -p otto-design -p otto-telemetry-collector --profile ci
+
       - name: Ignored 50k-revision scale gates
-        run: cargo nextest run -p otto-vault -p otto-design --profile ci --run-ignored only -E 'test(/_at_50k_revisions_/)'
+        run: cargo nextest run -p otto-vault -p otto-design -p otto-telemetry-collector --profile ci --run-ignored only -E 'test(/_at_50k_revisions_/)'
+
+      # The pinned OpenTelemetry collector (~100 MB archive, 363 MB binary) is
+      # fetched per run otherwise; the test re-verifies the cached copy against
+      # the pinned SHA-256 before executing it.
+      - name: Cache the pinned telemetry collector
+        uses: actions/cache@v6.1.0
+        with:
+          path: ${{ runner.temp }}/otto-collector
+          key: otelcol-${{ runner.os }}-${{ hashFiles('crates/otto-telemetry-collector/src/collector.rs') }}
 
       - name: Telemetry delivery and collector recovery
-        run: cargo nextest run -p otto-telemetry-collector --lib --profile ci --run-ignored only --test-threads 1
+        env:
+          OTTO_COLLECTOR_CACHE: ${{ runner.temp }}/otto-collector
+        run: cargo nextest run -p otto-vault -p otto-design -p otto-telemetry-collector --profile ci --run-ignored only -E 'package(otto-telemetry-collector) & kind(lib)' --test-threads 1

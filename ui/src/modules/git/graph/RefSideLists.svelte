@@ -9,6 +9,8 @@
   import { sentenceCase } from '../../../lib/labels';
   import Icon from '../../../lib/components/Icon.svelte';
   import { normPath, stashShortMsg } from '../ref-menus';
+  import { relativeAge, worktreeFacts, worktreeSummary } from '../gitopsPlan';
+  import { plural } from '../../../lib/plural';
   import type { GraphActions } from './graphActions.svelte';
   import type { GraphMenus } from './graphMenus';
   import type { GraphSelection } from './graphSelection.svelte';
@@ -31,7 +33,8 @@
   let submodulesOpen = $state(false);
 </script>
 
-<!-- STASHES — read-only `git stash list`; right-click for Apply / Drop. -->
+<!-- STASHES — `git stash list`; a click opens the stash browser (files +
+     patch, Apply / Pop / Drop); right-click for the quick actions. -->
 <div class="ref-section">
   <button class="ref-header" onclick={() => (stashesOpen = !stashesOpen)} aria-expanded={stashesOpen}>
     <Icon name={stashesOpen ? 'chevronDown' : 'chevronRight'} size={12} />
@@ -44,12 +47,16 @@
       <div class="ref-action-row">
       <button use:rowMenu
         class="ref-row stash-row"
-        title={`${s.ref} · ${s.message}`}
-        onclick={() => selection.selectStash(s)}
+        title={`${s.ref} · ${s.message} · ${relativeAge(s.date)}${s.files != null ? ` · ${plural(s.files, 'file')}` : ''} — click to view its changes`}
+        onclick={() => {
+          selection.selectStash(s);
+          actions.openStashBrowser(s);
+        }}
         oncontextmenu={(e) => menus.stashMenu(e, s)}
       >
         <Icon name="stash" size={12} />
         <span class="ref-name stash-msg">{stashShortMsg(s)}</span>
+        {#if s.files != null}<span class="wt-flag mono" title={plural(s.files, 'file')}>{s.files}f</span>{/if}
         {#if s.branch}<span class="stash-branch mono dim">{s.branch}</span>{/if}
       </button>
       <button class="icon-btn ref-action" title="Actions for stash {s.ref}" aria-label="Actions for stash {s.ref}" aria-haspopup="menu" onclick={(e) => menus.stashMenu(e, s)}><Icon name="more" size={13} /></button>
@@ -73,6 +80,7 @@
   {#if worktreesOpen}
     {#each worktrees as w (w.path)}
       {@const isHere = currentRepoPath !== '' && normPath(w.path) === currentRepoPath}
+      {@const f = worktreeFacts(w)}
       <div class="ref-action-row">
       <button use:rowMenu
         type="button"
@@ -83,7 +91,7 @@
           ? `${w.path} · stale (folder gone)`
           : isHere
             ? `Current worktree · ${w.path}`
-            : `Open worktree · ${w.path}${w.branch ? ` · ${w.branch}` : ' · detached'}${w.dirty ? ' · uncommitted changes' : ''}`}
+            : `Open worktree · ${w.path}${w.branch ? ` · ${w.branch}` : ' · detached'} — ${worktreeSummary(w)}`}
         onclick={() => {
           if (!w.prunable && !isHere) void actions.openWorktree(w);
         }}
@@ -94,8 +102,10 @@
       >
         <Icon name="worktree" size={12} />
         <span class="ref-name stash-msg" class:dim={w.prunable}>{actions.wtName(w)}</span>
-        {#if !w.dirty_known}<span class="wt-dirty" title="Changes unknown — status check unavailable">?</span>
-        {:else if w.dirty}<span class="wt-dirty" title="Uncommitted changes">●</span>{/if}
+        {#if f.unknown}<span class="wt-dirty" title="Changes unknown — status check unavailable">?</span>
+        {:else if f.changes + f.untracked > 0}<span class="wt-dirty" title={`${plural(f.changes, 'uncommitted change')}, ${plural(f.untracked, 'untracked file')}`}>●{f.changes + f.untracked}</span>{/if}
+        {#if f.unpushed > 0}<span class="wt-dirty" title={`${plural(f.unpushed, 'commit')} on no remote and not in ${w.base ?? 'the default branch'}`}>↑{f.unpushed}</span>{/if}
+        {#if f.localOnly}<span class="wt-flag mono" title="This branch is not on any remote">local</span>{/if}
         {#if w.locked}<Icon name="lock" size={12} />{/if}
         {#if w.prunable}
           <span class="wt-flag mono dim">stale</span>

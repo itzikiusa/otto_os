@@ -78,6 +78,8 @@
     scanFor,
   } from './grid-view-cache';
   import RowDetail from './RowDetail.svelte';
+  import AddRowButton from './AddRowButton.svelte';
+  import InsertRowHost from './InsertRowHost.svelte';
   import type { MenuItem } from '../../lib/contextmenu.svelte';
 
   // Menu actions capture cell values. Destroying this result (source switch,
@@ -1207,10 +1209,10 @@
   }
 
   // ── Toolbar menus ────────────────────────────────────────────────────────────
-  // One row, fixed height: the rarely-used verbs live in three menus instead of
-  // a wrapping strip of a dozen buttons (which also re-flowed — and pushed the
-  // grid down — when the editability probe added its items after first paint).
-  function copyMenu(e: MouseEvent): void {
+  // One row, fixed height: the rarely-used verbs live in two menus (Export:
+  // copy + download + export + import; ⋯) instead of a wrapping strip of
+  // buttons that re-flowed when the editability probe added items. 
+  function copyItems(): MenuItem[] {
     const items: MenuItem[] = [
       { label: 'Copy as TSV', icon: 'copy', action: () => void copyTsv() },
       { label: 'Copy as CSV', icon: 'copy', action: () => void copyAs('csv') },
@@ -1230,10 +1232,12 @@
         },
       );
     }
-    showMenu(e, items);
+    return items;
   }
   function exportMenu(e: MouseEvent): void {
     const items: MenuItem[] = [
+      ...copyItems(),
+      { separator: true },
       { label: `Download CSV${exportScope}`, icon: 'download', disabled: !canExport, action: exportCsv },
       { label: `Download JSON${exportScope}`, icon: 'download', disabled: !canExport, action: exportJson },
     ];
@@ -1273,13 +1277,7 @@
         action: () => (compare = [...flow.selected] as [number, number]),
       });
     }
-    if (flow.editable) {
-      items.push({
-        label: `Insert ${engine === 'mongodb' ? 'document' : 'row'} from JSON…`,
-        icon: 'plus',
-        action: () => flow.openDocEditor(-1),
-      });
-    }
+    if (flow.insert.target && engine !== 'mongodb') items.push({ label: 'Insert row from JSON…', icon: 'plus', action: () => flow.openDocEditor(-1) });
     if (mode === 'grid') {
       items.push({
         label: expandJson ? 'Collapse JSON cells' : 'Expand JSON cells',
@@ -1287,10 +1285,10 @@
         action: () => (expandJson = !expandJson),
       });
     }
-    if (items.length) items.push({ separator: true });
+    items.push({ label: 'Find in results', icon: 'search', hint: '⌘F', action: () => findInPage.show() }, { separator: true });
     items.push({ label: 'Send to running agent…', icon: 'send', action: sendToRunningAgent });
     // Same gate as the editor's Ask AI buttons: the DB Assistant runs an agent.
-    if (connectionId && canAssist) items.push({ label: 'Examine with Otto', icon: 'sparkle', action: examineWithAi });
+    if (connectionId && canAssist) items.push({ label: 'Examine with AI', icon: 'sparkle', action: examineWithAi });
     showMenu(e, items);
   }
 
@@ -1478,6 +1476,7 @@
       {#if !mini && result}
         <span class="ge-meta">{result.stats.duration_ms} ms{#if result.rows_affected != null} · {result.rows_affected} affected{/if}</span>
       {/if}
+      {#if !mini && result?.rows_affected == null}<AddRowButton {flow} variant="empty" />{/if}
     </div>
   {/if}
 {:else}
@@ -1537,16 +1536,11 @@
           ><Icon name="panel" size={13} /></button>
         {/if}
         <span class="grow"></span>
-        <button class="icon-btn" onclick={() => findInPage.show()} aria-label="Find in results" title="Find (⌘F)">
-          <Icon name="search" size={13} />
-        </button>
-        <button class="btn small" onclick={copyMenu} title="Copy the result{exportScope}" aria-haspopup="menu">
-          <Icon name="copy" size={12} /><span class="tb-label">Copy</span><Icon name="chevronDown" size={12} />
-        </button>
-        <button class="btn small" class:export-nudge={result?.truncated} onclick={exportMenu} title="Download, export all rows, or import a file" aria-haspopup="menu">
+        <AddRowButton {flow} variant="toolbar" />
+        <button class="btn small" class:export-nudge={result?.truncated} onclick={exportMenu} title="Copy, download, export all rows, or import a file" aria-haspopup="menu">
           <Icon name="download" size={12} /><span class="tb-label">Export</span><Icon name="chevronDown" size={12} />
         </button>
-        <button class="icon-btn" onclick={moreMenu} aria-label="More result actions" title="More — pipeline, compare, insert, expand JSON, send to agent, examine with AI" aria-haspopup="menu">
+        <button class="icon-btn" onclick={moreMenu} aria-label="More result actions" title="More — find, pipeline, compare, insert, expand JSON, send to agent, examine with AI" aria-haspopup="menu">
           <Icon name="more" size={14} />
         </button>
       </div>
@@ -1627,6 +1621,7 @@
       </div>
     {/if}
 
+    {#if !mini && liveRows.length === 0 && !running}<AddRowButton {flow} variant="cta" />{/if}
     <!-- WP4: filter bar -->
     {#if engine === 'mongodb' && !mini && statement}
       <MongoFilterBar
@@ -1815,6 +1810,7 @@
   <LazyMount lazy={DocEditorLazy} what="the document editor" quiet props={{ flow }} onerror={() => (flow.docEditor = null)} />
 {/if}
 
+<InsertRowHost {flow} active={hosted && !mini} {running} result={resultProp ?? null} failed={!!error} {canModify} />
 {#if flow.rawDoc}
   <LazyMount lazy={RawDocViewerLazy} what="the document viewer" quiet props={{ flow }} onerror={() => (flow.rawDoc = null)} />
 {/if}

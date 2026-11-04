@@ -1,6 +1,7 @@
 // Chat render stability (perf backlog B1): render items keep their identity
 // for unchanged turns, the md→html memo is bounded, index items are cached per
 // turn object, and the live turn list is capped without breaking "Load earlier".
+import * as transcriptTrim from '../src/lib/stores/transcriptTrim.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { groupTurns, stableGroupTurns, type RenderItem } from '../src/modules/agents/conversation/format.ts';
@@ -82,7 +83,7 @@ test('md cache: hits return the memo, misses render once, bounds evict oldest', 
 
 function loadStore() {
   return loadSource(new URL('../src/lib/stores/transcript.svelte.ts', import.meta.url), {
-    './transcriptLifecycle': { TranscriptLifecycle },
+    './transcriptLifecycle': { TranscriptLifecycle }, './transcriptTrim': transcriptTrim,
     '../paneHeader': paneHeader,
     '../win': { winKey: (key: string) => key },
     '../api/client': { api: {}, isAbortError: () => false },
@@ -127,4 +128,42 @@ test('a long live chat is capped and "Load earlier" resumes exactly at the dropp
   c.applyDelta(String(10 * (TURN_CAP + 1) + 1), [reply(`t${TURN_CAP + 1}`, 'grew')]);
   assert.equal(c.turns.length, TURN_KEEP);
   assert.equal(c.turns.at(-1).blocks[0].md, 'grew');
+});
+
+test('switching back to a just-released thread re-arms the tail without re-reading it', async () => {
+  const reads: string[] = [];
+  const touches: string[] = [];
+  const page = (id: string) => ({ cursor: '5', has_earlier: false, stats: { turns: 1 }, unavailable_reason: null, turns: [reply(`${id}-t1`)] });
+  const { transcript } = loadSource(new URL('../src/lib/stores/transcript.svelte.ts', import.meta.url), {
+    './transcriptLifecycle': { TranscriptLifecycle }, './transcriptTrim': transcriptTrim,
+    '../paneHeader': paneHeader,
+    '../win': { winKey: (key: string) => key },
+    '../api/client': {
+      api: {
+        get: async (url: string) => { reads.push(url); return page(url.split('/')[2]); },
+        bg: { post: async (url: string) => { touches.push(url); } },
+      },
+      isAbortError: () => false,
+    },
+  });
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+  const a = { sessionId: 'a' };
+  let release = transcript.acquireView(a);
+  await settle();
+  assert.equal(reads.length, 1, 'first open reads the tail');
+  release();
+  // A delta lands while another thread is on screen: still applied.
+  transcript.applyEvent({ type: 'transcript_appended', session_id: 'a', workspace_id: 'w', cursor: '9', turns: [reply('a-t2')] });
+  assert.equal(transcript.conversation(a).turns.length, 2);
+  release = transcript.acquireView(a);
+  await settle();
+  assert.equal(reads.length, 1, 'warm switch back: no re-read');
+  assert.equal(touches.length, 2, 'but the tail is re-armed');
+  release();
+  // A socket gap (or an oversized frame) while released forces the re-read.
+  transcript.resyncVisible();
+  release = transcript.acquireView(a);
+  await settle();
+  assert.equal(reads.length, 2, 'missed deltas → re-read');
+  release();
 });

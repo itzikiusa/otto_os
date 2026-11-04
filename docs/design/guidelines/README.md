@@ -43,8 +43,20 @@ screen.
 
    A user moving between Git, Swarm and Usage should never notice a different
    header height, title size, empty-state style or button placement.
-5. **Restraint.**
+5. **Less is more (restraint).** This is a rule, not a preference: when in
+   doubt, remove it. Users repeatedly reported Threads, the Database Explorer
+   toolbar and Connections as "crowded, not appealing" (2026-11).
    - One primary action per view.
+   - One toolbar row above the content. A second row of controls means some of
+     them belong in ⋯ or a settings popover.
+   - Show a control by default only if most visits use it. Everything else
+     (toggles, rarely used actions, power-user options) lives in ⋯, a popover
+     or a context menu. It stays reachable, it is just not on screen.
+   - Merge controls that do nearly the same thing into one entry point (one
+     "Ask AI", not three AI buttons).
+   - Empty and start states are calm: a heading, one input or action, and
+     nothing that competes with it (no rows of pills, badges or explainer
+     paragraphs).
    - Colour carries meaning (danger, warning, success, info, selection) and is
      never decoration. No rainbow category chips.
    - No second call to action that does the same thing as the first.

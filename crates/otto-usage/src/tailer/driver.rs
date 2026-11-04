@@ -2182,7 +2182,8 @@ mod accounting_tests {
         );
         journal.close().await;
         pool.close().await;
-        tokio::fs::remove_dir_all(root).await.unwrap();
+        // Best-effort: background writers can still be creating files here.
+        let _ = tokio::fs::remove_dir_all(root).await;
     }
 
     #[tokio::test]

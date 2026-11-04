@@ -42,3 +42,22 @@ describe('slashActions', () => {
     assert.equal(parseInteractiveSlashInput('/commit fix tests'), null);
   });
 });
+
+describe('slashActions /btw side chat', () => {
+  it('parses /btw with its question', () => {
+    assert.deepEqual(parseInteractiveSlashInput('/btw why is the build slow?'), {
+      kind: 'side-chat',
+      question: 'why is the build slow?',
+    });
+    assert.deepEqual(parseInteractiveSlashInput('/btw'), { kind: 'side-chat', question: '' });
+    assert.equal(isImmediateSlashCommand('btw'), false);
+  });
+
+  it('lists /btw only when the host does not omit it, and then keeps a CLI command of that name', () => {
+    assert.equal(mergeSlashCommands(null).some((c) => c.name === 'btw' && c.source === 'interactive'), true);
+    const omitted = mergeSlashCommands([{ name: 'btw', description: 'CLI side question', source: 'builtin' }], {
+      omitInteractive: new Set(['btw']),
+    });
+    assert.equal(omitted.find((c) => c.name === 'btw')?.source, 'builtin');
+  });
+});

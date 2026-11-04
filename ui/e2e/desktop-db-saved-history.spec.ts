@@ -161,7 +161,8 @@ test('saved queries v2: save → update in place → save as new → rename → 
   await expect(savedRow(page, 'Beta')).toBeVisible();
 
   // 5) Inline rename Beta → Gamma.
-  await savedRow(page, 'Beta').getByRole('button', { name: 'Rename saved query' }).click();
+  await savedRow(page, 'Beta').getByRole('button', { name: /^Actions for saved query/ }).click();
+  await page.getByRole('menuitem', { name: 'Rename', exact: true }).click();
   await page.locator('.rename-input').fill('Gamma');
   await page.locator('.rename-input').press('Enter');
   await expect(savedRow(page, 'Gamma')).toBeVisible();

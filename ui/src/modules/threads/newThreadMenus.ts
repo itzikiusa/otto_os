@@ -3,29 +3,6 @@ import type { MenuItem } from '../../lib/contextmenu.svelte';
 import { INTERACTIVE_SLASH_COMMANDS, type ComposerSlashCommand } from '../../lib/slashActions';
 import { compactPath, projectNameFromCwd } from './threadsHelpers';
 
-export const NEW_THREAD_STARTERS = [
-  {
-    label: 'Review uncommitted changes',
-    prompt:
-      'Inspect git status and uncommitted diffs in this repo, highlight any bugs or edge cases, and suggest concrete fixes.',
-  },
-  {
-    label: 'Trace a bug across the repo',
-    prompt:
-      'Help me trace a bug end-to-end across this codebase: locate the entry point, data flow, and root cause before proposing a minimal fix.',
-  },
-  {
-    label: 'Write tests for recent edits',
-    prompt:
-      'Check the most recently modified files, identify uncovered behavior and edge cases, and write clean unit or integration tests.',
-  },
-  {
-    label: 'Coordinate 2 sessions in split view',
-    prompt:
-      'Outline a clear plan splitting this task into two independent tracks so I can run a second worker thread beside you in Split view.',
-  },
-] as const;
-
 const NEW_STAGE_SLASH_NAMES = new Set([
   'model',
   'effort',

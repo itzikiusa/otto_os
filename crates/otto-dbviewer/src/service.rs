@@ -1056,10 +1056,17 @@ impl DbViewerService {
 
     /// Close only the effective caller's governed pools. Shared tunnels remain
     /// until idle; closing one tab must not close another user's database work.
+    ///
+    /// Returns once ownership is detached — teardown (native cancels, pool
+    /// close, tunnel drop) finishes in the background. A pool close waits for
+    /// its checked-out connections, so awaiting it held `POST …/db/close` for
+    /// the full 5 s phase timeout (p95 5003 ms). A reopen meanwhile waits for
+    /// that teardown in [`Self::resolve_with`] instead of failing.
     pub async fn close_for_user(&self, conn_id: &Id, user_id: &Id) -> Result<()> {
         self.authorize(conn_id, user_id, None, "discover").await?;
         if !self.is_enforced(conn_id).await? {
-            return self.close_connection(conn_id).await;
+            drop(self.begin_close(conn_id));
+            return Ok(());
         }
         let entries = {
             let mut keys = self
@@ -1077,8 +1084,26 @@ impl DbViewerService {
                 .filter_map(|key| keys.remove(&key))
                 .collect::<Vec<_>>()
         };
+        // Detach synchronously (a fresh open can never be handed a pool that
+        // is about to close), then close the captured handles off-path.
+        let mut captured = Vec::new();
         for (engine, key) in entries {
-            self.registry.get(engine).close(&key).await;
+            match self.registry.get(engine).detach(&key) {
+                Some(driver) => captured.push((key, driver)),
+                // An engine without detach support closes in place.
+                None => self.registry.get(engine).close(&key).await,
+            }
+        }
+        if !captured.is_empty() {
+            let phase_timeout = self.close_phase_timeout;
+            tokio::spawn(async move {
+                let _ = tokio::time::timeout(phase_timeout, async {
+                    for (key, driver) in &captured {
+                        driver.close(key).await;
+                    }
+                })
+                .await;
+            });
         }
         Ok(())
     }
@@ -1257,6 +1282,7 @@ impl DbViewerService {
         operation: &str,
         secret_read: SecretRead,
     ) -> Result<Resolved> {
+        self.settle_close(conn_id).await;
         {
             let mut states = self.lifecycles.lock().unwrap_or_else(|e| e.into_inner());
             states.entry(conn_id.clone()).or_default().token.check()?;
@@ -1277,6 +1303,7 @@ impl DbViewerService {
         operation: &str,
         secret_read: SecretRead,
     ) -> Result<Resolved> {
+        self.settle_close(conn_id).await;
         let lifecycle = {
             let mut states = self.lifecycles.lock().unwrap_or_else(|e| e.into_inner());
             let state = states.entry(conn_id.clone()).or_default();
@@ -1436,9 +1463,25 @@ impl DbViewerService {
     /// tab was purely client-side and the warm pool made a "closed" connection
     /// reconnect instantly (and hold backend connections forever).
     pub async fn close_connection(&self, conn_id: &Id) -> Result<()> {
+        let mut completion = self.begin_close(conn_id);
+        loop {
+            if *completion.borrow_and_update() {
+                return Ok(());
+            }
+            if completion.changed().await.is_err() {
+                return Ok(());
+            }
+        }
+    }
+
+    /// The synchronous half of [`Self::close_connection`]: retire the
+    /// connection's generation, detach its pools/tunnels and spawn the owned
+    /// teardown. The receiver turns `true` once teardown finished (or timed
+    /// out). Dropping it does not cancel anything.
+    fn begin_close(&self, conn_id: &Id) -> tokio::sync::watch::Receiver<bool> {
         // All admission/ownership transitions are synchronous: cancellation of
         // this caller cannot strand a retired slot between detach and cleanup.
-        let mut completion = {
+        {
             let mut states = self.lifecycles.lock().unwrap_or_else(|e| e.into_inner());
             let state = states.entry(conn_id.clone()).or_default();
             if let Some(done) = &state.closing {
@@ -1517,14 +1560,23 @@ impl DbViewerService {
                 });
                 receiver
             }
-        };
-        loop {
-            if *completion.borrow_and_update() {
-                return Ok(());
-            }
-            if completion.changed().await.is_err() {
-                return Ok(());
-            }
+        }
+    }
+
+    /// Wait (bounded) for an in-progress close of `conn_id` to finish, so an
+    /// open racing a just-closed tab gets a FRESH generation instead of the
+    /// retired one's "Connection closed; retry" conflict. The teardown is two
+    /// [`Self::close_phase_timeout`] phases, so the wait cannot outlive them.
+    async fn settle_close(&self, conn_id: &Id) {
+        let pending = self
+            .lifecycles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(conn_id)
+            .and_then(|state| state.closing.as_ref().map(|done| done.subscribe()));
+        if let Some(mut done) = pending {
+            let bound = self.close_phase_timeout * 2 + Duration::from_secs(1);
+            let _ = tokio::time::timeout(bound, done.wait_for(|closed| *closed)).await;
         }
     }
 

@@ -164,6 +164,11 @@ pub(crate) fn append(line: &str) {
     }
 }
 
+/// `file.rs:line:col` without its directories.
+fn site_name(at: &str) -> &str {
+    at.rsplit(['/', '\\']).next().unwrap_or(at)
+}
+
 /// Install the logging panic hook. Keeps the default hook (stderr) after it.
 pub fn install() {
     let default = panic::take_hook();
@@ -180,6 +185,15 @@ pub fn install() {
             .or_else(|| info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "<non-string panic payload>".into());
         let admitted = admit_site(&at, &msg);
+        if admitted.is_some() {
+            // The lifecycle log gets the site only (file name — a registry
+            // path would carry the home folder); the detail stays below.
+            crate::lifecycle::durable(&format!(
+                "panic at {} (thread '{}') — details in desktop-panic.log",
+                site_name(&at),
+                thread.name().unwrap_or("<unnamed>")
+            ));
+        }
         if let Some(suppressed) = admitted {
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -218,6 +232,7 @@ pub fn guard<R>(what: &str, f: impl FnOnce() -> R) -> Option<R> {
                 append(&format!(
                     "=== contained: panic in {what} callback (skipped)\n\n"
                 ));
+                crate::lifecycle::event(&format!("contained panic in {what} callback (skipped)"));
             }
             None
         }
@@ -227,6 +242,16 @@ pub fn guard<R>(what: &str, f: impl FnOnce() -> R) -> Option<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panic_sites_lose_their_directories() {
+        assert_eq!(
+            site_name("/Users/x/.cargo/registry/src/idx/tao-0.1/src/app.rs:12:5"),
+            "app.rs:12:5"
+        );
+        assert_eq!(site_name("src/windows.rs:3:1"), "windows.rs:3:1");
+        assert_eq!(site_name("?"), "?");
+    }
 
     #[test]
     fn guard_contains_a_panic_and_passes_values_through() {

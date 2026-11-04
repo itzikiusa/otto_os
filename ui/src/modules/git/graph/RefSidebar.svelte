@@ -19,6 +19,7 @@
   import { planSection, type SectionPlan as Plan } from '../ref-budget';
   import { groupBranches, midParts, type BranchFolder, type BranchLeaf } from '../ref-menus';
   import RefSideLists from './RefSideLists.svelte';
+  import RefDialogs from './RefDialogs.svelte';
   import { createRefDrag } from './refDrag.svelte';
   import { resizerKey } from './resizerKey';
   import type { GraphActions } from './graphActions.svelte';
@@ -27,6 +28,7 @@
   import type { GraphSelection } from './graphSelection.svelte';
 
   interface Props {
+    repoId: string;
     refs: RefsResp | null;
     refsLoading: boolean;
     refsError: string | null;
@@ -48,6 +50,7 @@
     onmergerequest?: (source: string, target: string) => void;
   }
   let {
+    repoId,
     refs,
     refsLoading,
     refsError,
@@ -305,6 +308,7 @@
 {#snippet branchSection(section: 'local' | 'remote', list: RefBranch[], grouped: Grouped, plan: SectionPlan)}
   {@const open = section === 'local' ? localOpen : remoteOpen}
   <div class="ref-section">
+    <div class="ref-action-row">
     <button
       class="ref-header"
       onclick={() => (section === 'local' ? (localOpen = !localOpen) : (remoteOpen = !remoteOpen))}
@@ -315,6 +319,9 @@
       <span>{section === 'local' ? 'LOCAL' : 'REMOTE'}</span>
       <span class="ref-count">{list.length}</span>
     </button>
+    <button class="icon-btn ref-action" title="Delete several {section} branches…" aria-label="Delete several {section} branches"
+      disabled={list.length === 0 || checkoutBusy !== ''} onclick={() => actions.openBranchCleanup()}><Icon name="trash" size={13} /></button>
+    </div>
     {#if open}
       {#if list.length === 0}
         <div class="dim ref-empty">{section === 'local' ? 'No local branches' : 'No remote branches'}</div>
@@ -396,6 +403,8 @@
     <RefSideLists {stashes} {worktrees} {submodules} {currentRepoPath} {openWtBusy} {actions} {menus} {selection} />
   {/if}
 </aside>
+
+<RefDialogs {repoId} {refs} {status} {index} {actions} />
 
 <!-- Drag handle on the sidebar's inline-end edge (desktop): widen it to read
      long branch names. Double-click resets to the default width. A focusable

@@ -773,6 +773,25 @@ pub(crate) async fn review_open_counts_by_severity(
     (bug, warn, info)
 }
 
+/// The repo's bound git-account credential for fetch/push transport, or
+/// `None` (no account, unreadable secret) — git then uses the user's own
+/// credential helper / SSH agent.
+pub(crate) async fn repo_transport_credential(
+    ctx: &ServerCtx,
+    repo: &otto_core::domain::Repo,
+) -> Option<otto_git::transport::TransportCredential> {
+    let acc = ctx
+        .git_store
+        .get_account(repo.git_account_id.as_ref()?)
+        .await
+        .ok()?;
+    let token = otto_core::secrets::get_async(&ctx.secrets, &acc.token_ref)
+        .await
+        .ok()
+        .flatten()?;
+    otto_git::transport::TransportCredential::for_repo(token, &acc, repo).ok()
+}
+
 /// Resolve the repo's git token (the fetch must reach a private origin) and
 /// materialize the PR head via [`otto_review::worktree::materialize_pr_worktree`].
 pub(crate) async fn materialize_pr_worktree(
@@ -787,20 +806,7 @@ pub(crate) async fn materialize_pr_worktree(
     // Re-read the git token (resolve_provider_remote consumed it) so the fetch
     // can reach a private origin. Fetch is metadata-only (updates refs) and
     // never touches a working tree.
-    let git_token: Option<otto_git::transport::TransportCredential> =
-        match repo.git_account_id.as_ref() {
-            Some(aid) => match ctx.git_store.get_account(aid).await {
-                Ok(acc) => otto_core::secrets::get_async(&ctx.secrets, &acc.token_ref)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|token| {
-                        otto_git::transport::TransportCredential::for_repo(token, &acc, repo).ok()
-                    }),
-                Err(_) => None,
-            },
-            None => None,
-        };
+    let git_token = repo_transport_credential(ctx, repo).await;
     otto_review::worktree::materialize_pr_worktree(
         repo, review_id, pr_number, source, head_sha, suffix, git_token,
     )

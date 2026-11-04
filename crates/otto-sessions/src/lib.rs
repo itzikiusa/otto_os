@@ -21,6 +21,7 @@ pub mod slash_commands;
 pub mod submit;
 pub mod tail_scan;
 mod titles;
+pub mod tool_probe;
 pub mod trust;
 pub mod ws;
 

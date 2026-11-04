@@ -11,7 +11,7 @@
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import RedisKeyFilter from './RedisKeyFilter.svelte';
   import { database } from '../../lib/stores/database.svelte';
-  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import type { DbNodeKind, ObjectHit, SchemaNode } from '../../lib/api/types';
   import { copyTextOrThrow } from '../../lib/clipboard';
 
@@ -40,6 +40,24 @@
     }, 220);
   }
 
+  function treeOptions(e: MouseEvent): void {
+    const items: MenuItem[] = [];
+    if (searchable) {
+      const pg = database.selectedConn?.kind === 'postgres';
+      items.push(
+        { label: 'Search this schema', checked: database.objectSearchScope === 'schema', action: () => setScope('schema') },
+        { label: 'Search all schemas', checked: database.objectSearchScope === 'all', title: pg ? 'Postgres cannot cross databases — covers every schema in the connected database' : undefined, action: () => setScope('all') },
+        { separator: true },
+      );
+    }
+    items.push({
+      label: 'Show row counts',
+      checked: database.showCounts,
+      title: 'Approximate row counts. Off by default — collecting the estimate is what makes expanding a large server slow.',
+      action: () => database.setShowCounts(!database.showCounts),
+    });
+    ctxMenu.show(e, items);
+  }
   function setScope(scope: 'schema' | 'all'): void {
     database.objectSearchScope = scope;
     if (database.objectSearchQuery.trim() && searchable) {
@@ -424,11 +442,9 @@
       // Import a local file (CSV/TSV/NDJSON/JSON) into this table, prefilling its
       // name. Routes through the same guarded write path as a query.
       if (node.kind === 'table') {
-        items.push({
-          label: 'Import into…',
-          icon: 'arrowDown',
-          action: () => database.openImportDialog(node),
-        });
+        items.push({ label: 'Import into…', icon: 'arrowDown', action: () => database.openImportDialog(node) });
+        // Opens the table and its "Add row" form (fields from the schema).
+        items.push({ label: 'Insert row…', icon: 'plus', action: () => void database.objects.insertRowInto(node) });
       }
       items.push({ separator: true });
     }
@@ -447,11 +463,8 @@
       });
       // Import a local file into this collection (insertMany batches through the
       // same guarded write path), prefilling its name — parity with SQL tables.
-      items.push({
-        label: 'Import into…',
-        icon: 'arrowDown',
-        action: () => database.openImportDialog(node),
-      });
+      items.push({ label: 'Import into…', icon: 'arrowDown', action: () => database.openImportDialog(node) });
+      items.push({ label: 'Insert document…', icon: 'plus', action: () => void database.objects.insertRowInto(node) });
       items.push({ separator: true });
     }
 
@@ -517,7 +530,7 @@
         type="text"
         value={database.objectSearchQuery}
         oninput={onSearchInput}
-        placeholder={searchable ? 'Find a table…' : 'Filter schema…'}
+        placeholder={searchable ? (database.objectSearchScope === 'all' ? 'Find a table in all schemas…' : 'Find a table…') : 'Filter schema…'}
         onkeydown={(e) => {
           if (e.key === 'Escape') {
             e.preventDefault();
@@ -532,30 +545,10 @@
           <Icon name="x" size={12} />
         </button>
       {/if}
-    </div>
-    <div class="tree-opts">
-      {#if searchable}
-        <select
-          class="scope-pick"
-          value={database.objectSearchScope}
-          onchange={(e) => setScope(e.currentTarget.value as 'schema' | 'all')}
-          aria-label="Search scope"
-          title={database.selectedConn?.kind === 'postgres'
-            ? 'Postgres cannot cross databases — “All schemas” covers every schema in the connected database'
-            : 'Where to look for the object'}
-        >
-          <option value="schema">This schema</option>
-          <option value="all">All schemas</option>
-        </select>
-      {/if}
-      <label class="counts-toggle" title="Show approximate row counts. Off by default — collecting the estimate is what makes expanding a large server slow.">
-        <input
-          type="checkbox"
-          checked={database.showCounts}
-          onchange={(e) => database.setShowCounts(e.currentTarget.checked)}
-        />
-        Row counts
-      </label>
+      <!-- Search scope + row counts: one options menu, not a second row. -->
+      <button class="tree-search-clear" class:on={database.showCounts || database.objectSearchScope === 'all'} onclick={treeOptions} aria-haspopup="menu" aria-label="Schema tree options" title="Options — search scope, row counts" data-testid="schema-tree-options">
+        <Icon name="filter" size={12} />
+      </button>
     </div>
   {/if}
   {#if database.schemaLoading || database.activeConnStatus?.phase === 'connecting'}
@@ -895,35 +888,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .tree-opts {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 0 8px 4px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .scope-pick {
-    flex: 1;
-    min-width: 0;
-    font-size: var(--fs-xs);
-    padding: 1px 4px;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    color: var(--text);
-  }
-  .counts-toggle {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .counts-toggle input {
-    margin: 0;
-  }
-
   .back-btn {
     display: inline-flex;
     align-items: center;
@@ -1027,6 +991,9 @@
     cursor: pointer;
     padding: 0;
     flex-shrink: 0;
+  }
+  .tree-search-clear.on {
+    color: var(--accent-text);
   }
   .tree-search-clear:hover {
     color: var(--text);

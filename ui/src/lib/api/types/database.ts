@@ -426,7 +426,7 @@ export interface NlToSqlOutcome {
 }
 
 /** Entry mode for the embedded DB Assistant panel:
- *  - `nl`          — "Ask in English": produce a runnable query for the question.
+ *  - `nl`          — "Ask AI → Write a query from plain English": produce a runnable query for the question.
  *  - `ask`         — "Ask AI": free-form question about the data/schema.
  *  - `investigate` — examine a result/object (seeded with the statement + a small
  *                    sample of the result columns/rows via `result_context`). */

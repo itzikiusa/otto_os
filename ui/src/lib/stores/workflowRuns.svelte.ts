@@ -15,6 +15,8 @@ export interface WorkflowRunEvent {
   nodes_done?: number;
   nodes_total?: number;
   waiting_approval?: boolean;
+  /** The changed node's summary (only its id + status are read here). */
+  node?: { node_id: string; status: string } | null;
 }
 
 const TERMINAL = new Set(['success', 'error', 'canceled']);
@@ -73,6 +75,12 @@ class WorkflowRunsStore {
       r.nodes_total = ev.nodes_total;
     }
     if (ev.waiting_approval !== undefined) r.waiting_approval = ev.waiting_approval;
+    // The current step changed (a new step started, or the current one
+    // settled): refetch for its name. A few times per run, not per log line.
+    const n = ev.node;
+    if (n && ((n.status === 'running' && n.node_id !== r.current_node_id) || (n.node_id === r.current_node_id && n.status !== 'running'))) {
+      void this.refresh(currentWorkspaceId);
+    }
   }
 }
 

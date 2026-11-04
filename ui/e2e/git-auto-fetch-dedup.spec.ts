@@ -2,7 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { apiCtx, seedWorkspace } from './seed';
 
 // E2E for the two Git features:
@@ -146,7 +146,7 @@ test('auto-fetch: toggle is on by default and pausing it persists', async ({ pag
   expect(persisted.enabled).toBe(false);
 });
 
-test('auto-fetch: paused → no background fetch is issued', async ({ page }) => {
+test('auto-fetch: paused → one fetch on arrival, then no background rounds', async ({ page }) => {
   await boot(page, { paused: true });
   let fetches = 0;
   page.on('request', (r) => {
@@ -155,10 +155,12 @@ test('auto-fetch: paused → no background fetch is issued', async ({ page }) =>
   await page.goto(`/#/git/${upstreamRepoId}/graph`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
   await expect(page.locator('.git-autofetch')).not.toHaveClass(/\bon\b/);
-  // Observe startup and the five-second loop tick; a paused loop must never
-  // issue even the initial fetch (which is immediately due on a fresh page).
+  await expect(page.locator('.git-autofetch')).toContainText('Paused');
+  // Paused stops the rounds, not the arrival fetch: opening the page fetches
+  // the selected repo once, and the five-second loop ticks add nothing.
+  await expect.poll(() => fetches, { timeout: 15_000 }).toBe(1);
   await page.waitForTimeout(6_000);
-  expect(fetches, 'paused auto-fetch must not issue any fetch').toBe(0);
+  expect(fetches, 'paused auto-fetch issues only the arrival fetch').toBe(1);
 });
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -168,8 +170,6 @@ test('auto-fetch: paused → no background fetch is issued', async ({ page }) =>
 test('dedup: registering the same path twice returns the same repo (no duplicate)', async () => {
   const { ctx, base } = await apiCtx();
   const dir = initRepo('otto-e2e-dedup-');
-
-  const before = (await (await ctx.get(`${base}/api/v1/git/repos`)).json()) as unknown[];
 
   const reg = async () => {
     const r = await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/repos`, {
@@ -191,8 +191,11 @@ test('dedup: registering the same path twice returns the same repo (no duplicate
   expect(second.id).toBe(first.id);
   expect(third.id).toBe(first.id);
 
-  const after = (await (await ctx.get(`${base}/api/v1/git/repos`)).json()) as unknown[];
-  expect(after.length, 'exactly one new repo row should be created').toBe(before.length + 1);
+  // Count rows for THIS repo's path only: other workers register repos in the
+  // same daemon concurrently, so a global before/after count races.
+  const after = (await (await ctx.get(`${base}/api/v1/git/repos`)).json()) as { path: string }[];
+  const mine = after.filter((r) => r.path.endsWith(basename(dir)) || r.path.includes(`${basename(dir)}/`));
+  expect(mine.length, 'exactly one repo row for this path').toBe(1);
   await ctx.dispose();
 });
 

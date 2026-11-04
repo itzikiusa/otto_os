@@ -39,7 +39,7 @@ under its retention policy. Existing agent usage settings are independent.
 
 UI instrumentation covers module navigation through first paint, lazy chunk
 imports, background request queue wait, HTTP response-header arrival, response
-read/JSON decoding, supported browser long tasks, and a bounded two-frame responsiveness sample every five seconds. Hidden-window samples are discarded. Server instrumentation
+read/JSON decoding, supported browser long tasks, and a bounded two-frame responsiveness sample every five seconds (recorded only when a single frame wait exceeds 50 ms, so a throttled 30 Hz refresh is not reported as delay). Hidden-window samples are discarded. Server instrumentation
 covers matched HTTP routes, database driver/access phases, Git subprocesses,
 History lookups and the shared blocking-work boundary. Streaming response
 lifetimes and every individual function are not automatically traced. Native

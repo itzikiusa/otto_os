@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import * as transcriptTrim from '../src/lib/stores/transcriptTrim.ts';
 import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
 import { TranscriptLifecycle } from '../src/lib/stores/transcriptLifecycle.ts';
@@ -6,7 +7,7 @@ import * as paneHeader from '../src/lib/paneHeader.ts';
 
 test('a reopened composer shares the pending send claim while other sessions remain usable', () => {
   const { transcript } = loadSource(new URL('../src/lib/stores/transcript.svelte.ts', import.meta.url), {
-    './transcriptLifecycle': { TranscriptLifecycle },
+    './transcriptLifecycle': { TranscriptLifecycle }, './transcriptTrim': transcriptTrim,
     '../paneHeader': paneHeader,
     '../win': { winKey: (key: string) => key },
     '../api/client': { api: {}, isAbortError: () => false },
@@ -26,7 +27,7 @@ test('production send keeps a remounted draft and allows only one pending reques
   const ts = (await import('typescript')).default;
   const { deferred } = await import('./sourceHarness.ts');
   const { transcript } = loadSource(new URL('../src/lib/stores/transcript.svelte.ts', import.meta.url), {
-    './transcriptLifecycle': { TranscriptLifecycle },
+    './transcriptLifecycle': { TranscriptLifecycle }, './transcriptTrim': transcriptTrim,
     '../paneHeader': paneHeader,
     '../win': { winKey: (key: string) => key }, '../api/client': { api: {} },
   });
@@ -62,7 +63,7 @@ test('send is refused while an image upload is still pending', async () => {
   const { readFileSync } = await import('node:fs');
   const ts = (await import('typescript')).default;
   const { transcript } = loadSource(new URL('../src/lib/stores/transcript.svelte.ts', import.meta.url), {
-    './transcriptLifecycle': { TranscriptLifecycle },
+    './transcriptLifecycle': { TranscriptLifecycle }, './transcriptTrim': transcriptTrim,
     '../paneHeader': paneHeader,
     '../win': { winKey: (key: string) => key }, '../api/client': { api: {} },
   });

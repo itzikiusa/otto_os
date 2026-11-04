@@ -15,6 +15,7 @@
   import {
     activeNavId,
     availableModules,
+    moduleHome,
     resolveOrder,
     sidebarSections,
     visibleOrder,
@@ -71,7 +72,7 @@
     const split = splitMenuItems(id, label);
     const items: MenuItem[] = [
       // Plain clicks resume the module where it was left; this is the way home.
-      { label: `Open ${label} main page`, icon: 'home', action: () => router.go(id) },
+      { label: `Open ${label} main page`, icon: 'home', action: () => router.go(moduleHome(id)) },
       { separator: true },
       ...split,
       ...(split.length ? [{ separator: true }] : []),

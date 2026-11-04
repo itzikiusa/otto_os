@@ -12,10 +12,6 @@
   import GitToolbar from './GitToolbar.svelte';
   import GraphView from './GraphView.svelte';
   import GraphSearchBar from './GraphSearchBar.svelte';
-  import BlamePanel from './BlamePanel.svelte';
-  import FileHistoryPanel from './FileHistoryPanel.svelte';
-  import RemotesPanel from './RemotesPanel.svelte';
-  import RecoveryTools from './RecoveryTools.svelte';
   import { gitBridge } from './gitBridge.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
@@ -34,6 +30,11 @@
   const LocalReviewLazy = lazyComponent(() => import('./LocalReviewPanel.svelte'));
   const MergeApprovalLazy = lazyComponent(() => import('./MergeApprovalModal.svelte'));
   const ConflictResolverLazy = lazyComponent(() => import('./ConflictResolverView.svelte'));
+  // Opened panels (blame / file history drawer, remotes, recovery tools).
+  const BlameLazy = lazyComponent(() => import('./BlamePanel.svelte'));
+  const FileHistoryLazy = lazyComponent(() => import('./FileHistoryPanel.svelte'));
+  const RemotesLazy = lazyComponent(() => import('./RemotesPanel.svelte'));
+  const RecoveryLazy = lazyComponent(() => import('./RecoveryTools.svelte'));
 
   interface Props {
     repo: Repo;
@@ -449,18 +450,11 @@
           {#if fileTool}
             <aside class="rv-drawer">
               {#if fileTool.kind === 'history'}
-                <FileHistoryPanel
-                  repoId={repo.id}
-                  path={fileTool.path}
-                  onclose={() => gitBridge.closeFileTool()}
-                />
+                <LazyMount lazy={FileHistoryLazy} what="the file history" variant="panel"
+                  props={{ repoId: repo.id, path: fileTool.path, onclose: () => gitBridge.closeFileTool() }} />
               {:else}
-                <BlamePanel
-                  repoId={repo.id}
-                  path={fileTool.path}
-                  rev={fileTool.rev}
-                  onclose={() => gitBridge.closeFileTool()}
-                />
+                <LazyMount lazy={BlameLazy} what="the blame view" variant="panel"
+                  props={{ repoId: repo.id, path: fileTool.path, rev: fileTool.rev, onclose: () => gitBridge.closeFileTool() }} />
               {/if}
             </aside>
           {/if}
@@ -482,15 +476,15 @@
 </div>
 
 {#if remotesOpen}
-  <RemotesPanel
-    repoId={repo.id}
-    onclose={() => {
+  <LazyMount lazy={RemotesLazy} what="the remotes" quiet onerror={() => (remotesOpen = false)} props={{
+    repoId: repo.id,
+    onclose: () => {
       remotesOpen = false;
       // The repo record's remote/forge are derived from origin — re-read them
       // so an added or changed remote lights up the PR view without a reload.
       void git.loadAllRepos(true);
-    }}
-  />
+    },
+  }} />
 {/if}
 
 {#if mergeReq}
@@ -729,8 +723,9 @@
 
 {#if gitBridge.recovery?.repoId === repo.id}
   {#key repo.id}
-    <RecoveryTools repoId={repo.id} initialMode={gitBridge.recovery.mode} initialOnto={gitBridge.recovery.onto}
-      onclose={() => { gitBridge.recovery = null; gitBridge.refreshGraph(repo.id); }}
-      onresolve={() => { gitBridge.recovery = null; resolving = true; }} />
+    <LazyMount lazy={RecoveryLazy} what="the recovery tools" quiet onerror={() => (gitBridge.recovery = null)} props={{
+      repoId: repo.id, initialMode: gitBridge.recovery.mode, initialOnto: gitBridge.recovery.onto,
+      onclose: () => { gitBridge.recovery = null; gitBridge.refreshGraph(repo.id); },
+      onresolve: () => { gitBridge.recovery = null; resolving = true; } }} />
   {/key}
 {/if}

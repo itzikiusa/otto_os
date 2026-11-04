@@ -7,7 +7,11 @@ use otto_core::secrets::SecretStore;
 use otto_state::DbPool;
 use otto_state::{GitStore, NewGitAccount, NewRepo, WorkspacesRepo};
 
+use super::gitops_routes::{
+    repo_branches_delete, repo_worktree_remove, BranchesDeleteReq, WorktreeRemoveReq,
+};
 use super::*;
+use otto_core::api::BranchDeleteItem;
 
 /// S15-01: a non-origin remote only receives origin's account token when
 /// it lives on the same host; local paths never match anything.
@@ -1588,4 +1592,115 @@ fn pick_account_never_guesses_between_two_accounts() {
         acct("y", Github, Some("acme")),
     ];
     assert_eq!(pick(dup, Github, Some("acme")), None);
+}
+
+/// Bulk branch delete: each item runs independently — a merged branch goes
+/// locally AND on origin, an unmerged one comes back `needs_force` (its
+/// remote copy untouched), and the checked-out default branch is refused.
+#[tokio::test]
+async fn bulk_branch_delete_reports_per_branch_outcomes() {
+    let (_pool, ctx, user, ws) = fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let origin = root.join("origin.git");
+    let repo_dir = root.join("repo");
+    std::fs::create_dir(&repo_dir).unwrap();
+    let git = |cwd: &std::path::Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    git(
+        &root,
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            origin.to_str().unwrap(),
+        ],
+    );
+    git(&repo_dir, &["init", "-q", "-b", "main"]);
+    for (k, v) in [
+        ("user.name", "Fixture"),
+        ("user.email", "fixture@example.test"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&repo_dir, &["config", k, v]);
+    }
+    git(&repo_dir, &["commit", "--allow-empty", "-qm", "init"]);
+    git(
+        &repo_dir,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git(&repo_dir, &["branch", "done"]);
+    git(&repo_dir, &["push", "-q", "origin", "main", "done"]);
+    git(&repo_dir, &["checkout", "-q", "-b", "wip"]);
+    git(
+        &repo_dir,
+        &["commit", "--allow-empty", "-qm", "unmerged work"],
+    );
+    git(&repo_dir, &["checkout", "-q", "main"]);
+    let repo = ctx
+        .store
+        .create_repo(NewRepo {
+            workspace_id: ws,
+            name: "bulk".into(),
+            path: repo_dir.to_string_lossy().into_owned(),
+            remote_url: None,
+            provider: None,
+            git_account_id: None,
+        })
+        .await
+        .unwrap();
+    let item = |name: &str, remote: Option<&str>, force: bool| BranchDeleteItem {
+        name: name.into(),
+        local: None,
+        remote: remote.map(str::to_string),
+        remote_branch: None,
+        force: Some(force),
+    };
+    let call = |items: Vec<BranchDeleteItem>| {
+        repo_branches_delete(
+            State(ctx.clone()),
+            Extension(auth(&user, false)),
+            Path(repo.id.clone()),
+            Json(BranchesDeleteReq { items }),
+        )
+    };
+    let Json(resp) = call(vec![
+        item("done", Some("origin"), false),
+        item("wip", None, false),
+        item("main", Some("origin"), false),
+    ])
+    .await
+    .unwrap();
+    let r = &resp.results;
+    assert!(
+        r[0].local_deleted && r[0].remote_deleted && r[0].error.is_none(),
+        "{:?}",
+        r[0]
+    );
+    assert!(!r[1].local_deleted && r[1].needs_force, "{:?}", r[1]);
+    assert!(!r[2].local_deleted && r[2].error.as_deref() == Some("it is the checked-out branch"));
+    let remote_heads = git(
+        &origin,
+        &["for-each-ref", "--format=%(refname)", "refs/heads"],
+    );
+    assert!(!remote_heads.contains("refs/heads/done") && remote_heads.contains("refs/heads/main"));
+
+    let Json(resp) = call(vec![item("wip", None, true)]).await.unwrap();
+    assert!(resp.results[0].local_deleted, "{:?}", resp.results[0]);
+    assert!(git(&repo_dir, &["branch", "--list", "wip"])
+        .trim()
+        .is_empty());
 }

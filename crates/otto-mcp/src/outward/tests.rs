@@ -1793,6 +1793,65 @@ fn create_issue_and_its_discovery_reads_route_and_are_tiered() {
     );
 }
 
+#[test]
+fn update_issue_routes_and_is_tiered_like_create_issue() {
+    assert!(spec_names().contains(&"otto.update_issue".to_string()));
+    assert!(DANGEROUS.contains(&"update_issue"));
+    assert!(!DEFAULT_ENABLED.contains(&"update_issue"));
+    assert!(tool_is_mutating("update_issue"));
+    assert!(!tool_is_irreversible("update_issue"));
+    assert_eq!(tool_category("update_issue"), tool_category("create_issue"));
+    assert!(pin_global("update_issue"));
+    assert!(MULTI_REQUEST_WRITES.contains(&"update_issue"));
+    assert!(REF_ARGS
+        .iter()
+        .any(|(t, a, k)| *t == "update_issue" && *a == "account_id" && *k == "issue_account"));
+
+    let c = route_for(
+        "update_issue",
+        &json!({"account_id":"a 1","key":"PRJ-7","summary":"New","labels":[],
+                "add_labels":[],"remove_labels":["old"],"priority":"High","note":"ignored"}),
+    )
+    .unwrap();
+    assert_eq!(
+        (c.method, c.path.as_str()),
+        (Method::Patch, "/api/v1/issue/a%201/issues/PRJ-7")
+    );
+    // `labels: []` (clear) is kept; an empty op list is dropped; unknown keys
+    // never reach the route.
+    assert_eq!(
+        c.body.unwrap(),
+        json!({"summary":"New","labels":[],"remove_labels":["old"],"priority":"High"})
+    );
+    assert!(route_for("update_issue", &json!({"account_id":"a1"})).is_err());
+    // Unassign: an explicit null is forwarded; "none" passes through as given.
+    for (given, sent) in [(json!(null), json!(null)), (json!("none"), json!("none"))] {
+        let c = route_for(
+            "update_issue",
+            &json!({"account_id":"a1","key":"PRJ-7","assignee":given}),
+        )
+        .unwrap();
+        assert_eq!(c.body.unwrap(), json!({ "assignee": sent }));
+    }
+
+    let d = dangerous_detail(
+        "otto.update_issue",
+        &json!({"key":"PRJ-7","summary":"x","add_labels":["a"]}),
+    );
+    assert_eq!(d, "Edit issue 'PRJ-7' (summary, add_labels)");
+    let d = dangerous_detail("otto.update_issue", &json!({"key":"PRJ-7","assignee":null}));
+    assert_eq!(d, "Edit issue 'PRJ-7' (assignee)");
+    let msg = timeout_error(
+        "update_issue",
+        &json!({"key":"PRJ-7"}),
+        std::time::Duration::from_secs(120),
+    );
+    assert!(
+        msg.contains("issue PRJ-7 may already have completed"),
+        "{msg}"
+    );
+}
+
 // ----- Vault: optional workspace_id ------------------------------------
 
 #[test]
@@ -2037,6 +2096,39 @@ fn vault_tools_do_not_require_workspace_id() {
             );
         }
     }
+}
+
+#[test]
+fn pick_vault_workspace_never_picks_an_archived_workspace() {
+    fn ws(id: &str, archived: bool) -> otto_core::domain::Workspace {
+        otto_core::domain::Workspace {
+            id: id.into(),
+            name: id.into(),
+            root_path: format!("/tmp/{id}"),
+            settings: json!({}),
+            archived,
+            created_at: chrono::Utc::now(),
+        }
+    }
+    // A removed (archived) Editor membership must not win a write over a
+    // live Viewer one, nor be the fallback.
+    let rows = vec![
+        (ws("live-view", false), WorkspaceRole::Viewer),
+        (ws("removed-edit", true), WorkspaceRole::Editor),
+    ];
+    assert_eq!(
+        pick_vault_workspace(&rows, true).as_deref(),
+        Some("live-view")
+    );
+    assert_eq!(
+        pick_vault_workspace(&rows, false).as_deref(),
+        Some("live-view")
+    );
+    // Only archived workspaces: nothing to scope to (the caller then asks for
+    // an explicit `workspace_id`).
+    let all_removed = vec![(ws("removed", true), WorkspaceRole::Admin)];
+    assert_eq!(pick_vault_workspace(&all_removed, false), None);
+    assert_eq!(pick_vault_workspace(&all_removed, true), None);
 }
 
 #[test]

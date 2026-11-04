@@ -1,7 +1,8 @@
 <script lang="ts">
-  import Badge from '../../lib/components/Badge.svelte';
+  // One quiet single-line thread row (T3-style): status dot, title, time —
+  // the time gives way to pin / beside / ⋯ on hover or focus. A thread that
+  // needs you gets a warning dot and a soft tint; nothing else shouts.
   import Icon from '../../lib/components/Icon.svelte';
-  import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import { events } from '../../lib/events.svelte';
   import { rowMenu } from '../../lib/rowMenu';
@@ -10,7 +11,7 @@
   import { rel } from '../../lib/stores/now.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { Session } from '../../lib/api/types';
-  import { sessionBranch } from './threadsHelpers';
+  import { harnessLabel, sessionBranch } from './threadsHelpers';
   import { threads } from './threadsStore.svelte';
 
   interface Props {
@@ -23,117 +24,66 @@
     onselect?: () => void;
   }
 
-  let {
-    session: s,
-    variant,
-    child = false,
-    onrowclick,
-    onreopen,
-    onmenu,
-    onselect,
-  }: Props = $props();
+  let { session: s, variant, child = false, onrowclick, onreopen, onmenu, onselect }: Props = $props();
 
   const needs = $derived(ws.needsYou[s.id] === true);
-  const rawSt = $derived(ws.statusMap[s.id] ?? s.status);
-  const st = $derived(sessionState(s, rawSt, needs, { stale: events.state !== 'connected' }));
-  const br = $derived(variant === 'active' ? sessionBranch(s, git.repos, git.statusById) : null);
+  const st = $derived(sessionState(s, ws.statusMap[s.id] ?? s.status, needs, { stale: events.state !== 'connected' }));
   const pinned = $derived(threads.isPinned(s.id));
   const selected = $derived(threads.focusedSessionId === s.id && !threads.newDraftMode);
   const inPane = $derived(threads.paneIds.includes(s.id) && !threads.newDraftMode);
+  const history = $derived(variant === 'history');
+  // The tooltip (branch lookup over every repo's status) is only built while
+  // the row is hovered or focused: a git status change no longer re-derives it
+  // for every row of the sidebar.
+  let hot = $state(false);
+  const tip = $derived.by(() => {
+    if (!hot) return s.title;
+    const br = sessionBranch(s, git.repos, git.statusById);
+    return [s.title, harnessLabel(s.provider), br ? `on ${br}` : null, needs ? 'needs your approval' : null]
+      .filter(Boolean)
+      .join(' · ');
+  });
+
+  const testid = $derived(
+    variant === 'pinned' ? `thread-pinned-${s.id}` : variant === 'history' ? `thread-history-${s.id}` : `thread-row-${s.id}`,
+  );
 </script>
 
-{#if variant === 'pinned'}
-  <div
-    class="th-row reveal-host"
-    class:selected
-    class:in-pane={inPane}
-    data-testid="thread-pinned-{s.id}"
+<div
+  class="tr-row reveal-host"
+  class:child
+  class:needs-you={needs}
+  class:selected
+  class:in-pane={inPane && !selected}
+  data-testid={testid}
+>
+  <button
+    type="button"
+    class="tr-main"
+    title={tip}
+    onpointerenter={() => (hot = true)}
+    onpointerleave={() => (hot = false)}
+    onfocus={() => (hot = true)}
+    onblur={() => (hot = false)}
+    aria-current={selected ? 'true' : undefined}
+    onclick={(e) => (history ? onreopen(s, e.metaKey || e.ctrlKey) : onrowclick(e, s))}
+    oncontextmenu={(e) => onmenu(e, s)}
+    use:rowMenu
   >
-    <button
-      type="button"
-      class="th-row-main"
-      onclick={(e) => onrowclick(e, s)}
-      oncontextmenu={(e) => onmenu(e, s)}
-      use:rowMenu
-    >
+    {#if history}
+      <Icon name="archive" size={12} />
+    {:else}
       <StatusDot state={st} />
-      {#if hasProviderIcon(s.provider)}
-        <ProviderIcon provider={s.provider} size={13} />
-      {/if}
-      <span class="th-row-title ellipsis" dir="auto">{s.title}</span>
-    </button>
-    <div class="th-row-actions">
-      <button
-        type="button"
-        class="icon-btn th-pin-on"
-        aria-label="Unpin {s.title}"
-        title="Unpin thread"
-        onclick={() => threads.togglePin(s.id)}
-      >
-        <Icon name="star" size={12} />
-      </button>
-      <button
-        type="button"
-        class="icon-btn reveal-on-hover"
-        aria-label="Open {s.title} beside"
-        title="Open beside (Split)"
-        onclick={() => {
-          threads.openBeside(s.id);
-          onselect?.();
-        }}
-      >
-        <Icon name="split" size={12} />
-      </button>
-    </div>
-  </div>
-{:else if variant === 'active'}
-  <div
-    class="th-row th-row-rich reveal-host"
-    class:child
-    class:needs-you={needs}
-    class:selected
-    class:in-pane={inPane}
-    data-testid="thread-row-{s.id}"
-  >
-    <button
-      type="button"
-      class="th-row-card"
-      onclick={(e) => onrowclick(e, s)}
-      oncontextmenu={(e) => onmenu(e, s)}
-      use:rowMenu
-    >
-      <div class="th-row-top">
-        <StatusDot state={st} />
-        {#if hasProviderIcon(s.provider)}
-          <ProviderIcon provider={s.provider} size={13} />
-        {:else}
-          <Icon name="terminal" size={13} />
-        {/if}
-        <span class="th-row-title ellipsis" dir="auto">{s.title}</span>
-        <span class="th-row-time">{rel(s.last_active_at)}</span>
-      </div>
-      <div class="th-row-sub">
-        {#if needs}
-          <Badge tone="warn" label="Needs approval" dot />
-        {:else if rawSt === 'working'}
-          <Badge tone="ok" variant="outline" label="Working…" live />
-        {/if}
-        {#if child}
-          <span class="th-sub-meta">Worker</span>
-        {/if}
-        {#if br}
-          <span class="th-branch mono ellipsis" dir="ltr" title={br}>
-            <Icon name="branch" size={12} />
-            {br}
-          </span>
-        {/if}
-      </div>
-    </button>
-    <div class="th-row-actions reveal-on-hover">
+    {/if}
+    <span class="tr-title ellipsis" dir="auto">{s.title}</span>
+    <span class="tr-time">{rel(s.last_active_at)}</span>
+  </button>
+  <div class="tr-actions reveal-on-hover">
+    {#if variant !== 'pinned'}
       <button
         type="button"
         class="icon-btn"
-        class:th-pin-on={pinned}
+        class:tr-pin-on={pinned}
         aria-label="{pinned ? 'Unpin' : 'Pin'} {s.title}"
         title={pinned ? 'Unpin thread' : 'Pin thread'}
         data-testid="thread-pin-{s.id}"
@@ -141,193 +91,123 @@
       >
         <Icon name="star" size={12} />
       </button>
-      <button
-        type="button"
-        class="icon-btn"
-        aria-label="Open {s.title} beside in Split"
-        title="Open beside (Split)"
-        data-testid="thread-split-{s.id}"
-        onclick={() => {
-          threads.openBeside(s.id);
-          onselect?.();
-        }}
-      >
-        <Icon name="split" size={12} />
-      </button>
-      <button
-        type="button"
-        class="icon-btn"
-        aria-label="Settle {s.title} to History"
-        title="Settle to History"
-        data-testid="thread-settle-{s.id}"
-        onclick={() => threads.toggleSettle(s.id)}
-      >
-        <Icon name="check" size={12} />
-      </button>
-      <button
-        type="button"
-        class="icon-btn"
-        aria-label="More actions for {s.title}"
-        title="More actions"
-        aria-haspopup="menu"
-        onclick={(e) => onmenu(e, s)}
-      >
-        <Icon name="more" size={12} />
-      </button>
-    </div>
-  </div>
-{:else}
-  <div class="th-row reveal-host" data-testid="thread-history-{s.id}">
+    {/if}
     <button
       type="button"
-      class="th-row-main"
-      onclick={() => onreopen(s, false)}
-      oncontextmenu={(e) => onmenu(e, s)}
-      use:rowMenu
+      class="icon-btn"
+      aria-label="Open {s.title} beside"
+      title="Open beside (Split)"
+      data-testid="thread-split-{s.id}"
+      onclick={() => {
+        if (history) onreopen(s, true);
+        else {
+          threads.openBeside(s.id);
+          onselect?.();
+        }
+      }}
     >
-      {#if hasProviderIcon(s.provider)}
-        <ProviderIcon provider={s.provider} size={13} />
-      {:else}
-        <Icon name="archive" size={12} />
-      {/if}
-      <span class="th-row-title ellipsis" dir="auto">{s.title}</span>
-      <span class="th-row-time">{rel(s.last_active_at)}</span>
+      <Icon name="split" size={12} />
     </button>
-    <div class="th-row-actions reveal-on-hover">
-      <button
-        type="button"
-        class="icon-btn"
-        aria-label="Reopen {s.title}"
-        title="Reopen / Resume"
-        onclick={() => onreopen(s, false)}
-      >
-        <Icon name="refresh" size={12} />
-      </button>
-      <button
-        type="button"
-        class="icon-btn"
-        class:th-pin-on={pinned}
-        aria-label="{pinned ? 'Unpin' : 'Pin'} {s.title}"
-        title={pinned ? 'Unpin' : 'Pin'}
-        onclick={() => threads.togglePin(s.id)}
-      >
-        <Icon name="star" size={12} />
-      </button>
-      <button
-        type="button"
-        class="icon-btn"
-        aria-label="View {s.title} beside"
-        title="View transcript beside"
-        onclick={() => onreopen(s, true)}
-      >
-        <Icon name="split" size={12} />
-      </button>
-    </div>
+    <button
+      type="button"
+      class="icon-btn"
+      aria-label="More actions for {s.title}"
+      title="More actions"
+      aria-haspopup="menu"
+      onclick={(e) => onmenu(e, s)}
+    >
+      <Icon name="more" size={12} />
+    </button>
   </div>
-{/if}
+</div>
 
 <style>
-  .th-row {
+  .tr-row {
+    --tr-tint: transparent;
     position: relative;
     display: flex;
     align-items: center;
-    gap: 4px;
+    min-width: 0;
     border-radius: var(--radius-m);
-    border: 1px solid transparent;
-    transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
+    background: var(--tr-tint);
   }
-  .th-row:hover {
-    background: var(--hover);
+  .tr-row:hover {
+    --tr-tint: var(--hover);
   }
-  .th-row.in-pane {
-    background: var(--accent-faint);
-    border-color: var(--border);
+  .tr-row.in-pane {
+    --tr-tint: var(--accent-faint);
   }
-  .th-row.selected {
-    background: var(--accent-soft);
-    border-color: var(--accent-line);
+  .tr-row.selected {
+    --tr-tint: var(--accent-soft);
   }
-  .th-row.needs-you {
-    background: var(--warning-soft);
-    border-color: var(--border-strong);
+  .tr-row.needs-you {
+    --tr-tint: var(--warning-soft);
   }
-  .th-row.child {
-    margin-inline-start: 16px;
-    border-inline-start: 2px solid var(--border-strong);
+  .tr-row.child {
+    margin-inline-start: 14px;
   }
-  .th-row-main,
-  .th-row-card {
+  .tr-main {
     flex: 1;
     min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    block-size: 30px;
+    padding-inline: 8px;
     border: 0;
     background: transparent;
-    color: inherit;
+    color: var(--text);
     font: inherit;
+    font-size: var(--fs-m);
     text-align: start;
     cursor: pointer;
   }
-  .th-row-main {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 8px;
+  .tr-main :global(svg) {
+    flex-shrink: 0;
+    color: var(--text-dim);
   }
-  .th-row-card {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding: 8px;
-  }
-  .th-row-top {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-  }
-  .th-row-title {
+  .tr-title {
     flex: 1;
     min-width: 0;
-    font-size: var(--fs-s);
-    font-weight: 500;
+  }
+  .tr-row:not(.selected) .tr-title {
+    color: var(--text-dim);
+  }
+  .tr-row:hover .tr-title,
+  .tr-row.needs-you .tr-title {
     color: var(--text);
   }
-  .th-row-time {
+  .tr-time {
     flex-shrink: 0;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
-  .th-row-sub {
+  .tr-actions {
+    position: absolute;
+    inset-block: 0;
+    inset-inline-end: 2px;
     display: flex;
     align-items: center;
-    flex-wrap: wrap;
-    gap: 6px;
-    padding-inline-start: 14px;
-    min-width: 0;
+    gap: 0;
+    padding-inline-start: 6px;
+    border-radius: var(--radius-m);
+    /* Opaque so the title never shows through the revealed actions. */
+    background: linear-gradient(var(--tr-tint), var(--tr-tint)), var(--surface);
   }
-  .th-sub-meta {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
+  .tr-row:hover .tr-time,
+  .tr-row:focus-within .tr-time {
+    visibility: hidden;
   }
-  .th-branch {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    max-width: 140px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
+  @media (hover: none) {
+    .tr-time {
+      visibility: hidden;
+    }
   }
-  .th-row-actions {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    padding-inline-end: 4px;
-    flex-shrink: 0;
-  }
-  .th-pin-on {
+  .tr-pin-on {
     color: var(--warning);
   }
-  .th-pin-on :global(svg path) {
+  .tr-pin-on :global(svg path) {
     fill: currentColor;
   }
 </style>

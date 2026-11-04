@@ -176,7 +176,7 @@ test('MySQL: import a CSV into a table via the dialog', async ({ page }) => {
   // Run any query so the grid toolbar (with "Import file…") is present.
   await runStatement(page, 'SELECT * FROM customers ORDER BY id');
 
-  await page.locator('.grid-toolbar').getByTitle('Download, export all rows, or import a file', { exact: true }).click();
+  await page.locator('.grid-toolbar').getByTitle('Copy, download, export all rows, or import a file', { exact: true }).click();
   await page.locator('.ctx-item', { hasText: 'Import file' }).click();
   await expect(page.locator('.imp-form')).toBeVisible({ timeout: 10_000 });
   // The file is on the Otto host (root): pick that source first.
@@ -201,7 +201,7 @@ test('MongoDB: restricted import refuses unsupported native scope without writes
   await openConn(page, 'e2e-mongodb');
   // Mongo find to surface the results toolbar (if an import entry existed).
   await runStatement(page, 'db.orders.find({})');
-  const exportBtn = page.locator('.grid-toolbar').getByTitle('Download, export all rows, or import a file', { exact: true });
+  const exportBtn = page.locator('.grid-toolbar').getByTitle('Copy, download, export all rows, or import a file', { exact: true });
   await expect(exportBtn).toBeVisible({ timeout: 10_000 });
   await exportBtn.click();
   await page.locator('.ctx-item', { hasText: 'Import file' }).click();

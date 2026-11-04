@@ -15,7 +15,11 @@ test.beforeEach(async({page},info)=>{
 });
 test.afterEach(async()=>{await ctx?.dispose();});
 
-test('empty History continuation remains actionable and mounted visibility recovery ignores closed readers',async({page})=>{
+// The History module (#/history) was removed on main in c18c5fcdb ("slim unused
+// modules"); the route now lands on Agents, so this fixture has no page to drive.
+// Kept skipped (not deleted) until the transcript-reader recovery half moves to
+// a surface that still exists.
+test.skip('empty History continuation remains actionable and mounted visibility recovery ignores closed readers',async({page})=>{
   const reads:string[]=[],touches:string[]=[];
   await page.route('**/api/v1/workspaces/*/history/page?*',route=>route.fulfill({json:{entries:new URL(route.request().url()).searchParams.has('cursor')?[entry('reader-a'),entry('reader-b')]:[],next_cursor:new URL(route.request().url()).searchParams.has('cursor')?null:'next-window'}}));
   await page.route('**/api/v1/sessions/reader-*/transcript**',route=>{

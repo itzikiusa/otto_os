@@ -156,15 +156,17 @@ test('grid: filter row, row detail, numeric alignment and NULL styling', async (
   await expect(detail.locator('.rd-field', { hasText: 'status' })).toContainText('refunded');
 });
 
-test('Copy / Export / More menus stay inside the viewport', async ({ page }) => {
+test('Export (incl. Copy) / More menus stay inside the viewport', async ({ page }) => {
   await openMock(page);
   await typeStatement(page, 'SELECT * FROM shop.orders');
   await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
   await expect(page.locator('.grid tbody tr:not(.spacer)').first()).toBeVisible({ timeout: 15_000 });
-  for (const name of ['Copy', 'Export']) {
+  // Copy now lives inside the Export menu (one results-toolbar entry).
+  for (const name of ['Export']) {
     await page.locator('.grid-toolbar .btn', { hasText: name }).click();
     const menu = page.locator('.ctx-menu');
     await expect(menu).toBeVisible();
+    await expect(menu.locator('.ctx-item', { hasText: /Copy/ }).first()).toBeVisible();
     const b = await box(menu);
     const vp = page.viewportSize()!;
     expect(b.x + b.width).toBeLessThanOrEqual(vp.width);
@@ -173,6 +175,6 @@ test('Copy / Export / More menus stay inside the viewport', async ({ page }) => 
     await expect(menu).toBeHidden();
   }
   await page.getByRole('button', { name: 'More result actions' }).click();
-  await expect(page.locator('.ctx-item', { hasText: 'Examine with Otto' })).toBeVisible();
+  await expect(page.locator('.ctx-item', { hasText: 'Examine with AI' })).toBeVisible();
   await page.keyboard.press('Escape');
 });

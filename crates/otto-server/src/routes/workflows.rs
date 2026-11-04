@@ -844,6 +844,62 @@ pub async fn cancel_run(
 pub struct RunListQuery {
     #[serde(default)]
     summary: bool,
+    /// Open-text search / history paging: any of these switches the response
+    /// to a [`otto_core::workflows::RunListPage`] (see `search_runs`).
+    q: Option<String>,
+    status: Option<String>,
+    workflow_id: Option<Id>,
+    limit: Option<u32>,
+    cursor: Option<String>,
+}
+
+impl RunListQuery {
+    fn search(
+        self,
+        workspace_id: Id,
+        workflow_id: Option<Id>,
+    ) -> otto_state::workflow_run_search::RunSearch {
+        let statuses = self.status.iter().flat_map(|s| s.split(',')).map(str::trim);
+        otto_state::workflow_run_search::RunSearch {
+            workspace_id,
+            workflow_id: workflow_id.or(self.workflow_id),
+            q: self.q,
+            statuses: statuses
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+            limit: self.limit,
+            cursor: self.cursor,
+        }
+    }
+}
+
+/// The workspace-wide run lists: in-flight runs (the "Running" sidebar) and
+/// the searchable run history.
+pub fn workspace_run_routes() -> axum::Router<ServerCtx> {
+    axum::Router::new()
+        .route(
+            "/workspaces/{wid}/workflow-runs/active",
+            axum::routing::get(list_active_runs),
+        )
+        .route(
+            "/workspaces/{wid}/workflow-runs",
+            axum::routing::get(search_runs),
+        )
+}
+
+/// `GET /workspaces/{wid}/workflow-runs?q=&status=&workflow_id=&limit=&cursor=`
+/// — the workspace's run history, newest first, searchable (`RunListPage`).
+pub async fn search_runs(
+    Path(wid): Path<Id>,
+    Query(q): Query<RunListQuery>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<otto_core::workflows::RunListPage>> {
+    crate::auth::require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
+    let s = q.search(wid, None);
+    let page = otto_state::workflow_run_search::search_runs(&ctx.pool, &s).await;
+    Ok(Json(page.map_err(ApiError)?))
 }
 /// `GET /workflows/{id}/runs?summary=true` — legacy default keeps full rows.
 pub async fn list_runs(
@@ -854,7 +910,11 @@ pub async fn list_runs(
 ) -> ApiResult<Json<Value>> {
     let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Viewer).await?;
-    let rows = if q.summary {
+    let rows = if q.q.is_some() || q.cursor.is_some() || q.status.is_some() {
+        let s = q.search(wf.workspace_id.clone(), Some(id.clone()));
+        let page = otto_state::workflow_run_search::search_runs(&ctx.pool, &s).await;
+        serde_json::to_value(page.map_err(ApiError)?)
+    } else if q.summary {
         serde_json::to_value(
             otto_state::workflow_progress::run_summaries(&ctx.pool, &id)
                 .await
@@ -923,7 +983,7 @@ pub async fn list_templates() -> Json<Vec<WorkflowTemplate>> {
 /// All built-in templates: the orchestrator examples first, then game pipelines.
 fn all_templates() -> Vec<WorkflowTemplate> {
     let mut v = flow_templates();
-    v.extend(game_templates());
+    v.extend(otto_workflows::templates::game_templates());
     v
 }
 
@@ -958,102 +1018,6 @@ pub async fn create_from_template(
         .await
         .map_err(ApiError)?;
     Ok(Json(wf))
-}
-
-/// Build the three game-pipeline templates. Each chains:
-/// trigger → agent (design rules) → game_engine (kind) → verifier.
-fn game_templates() -> Vec<WorkflowTemplate> {
-    fn pipeline(game: &str, design: &str) -> WorkflowGraph {
-        let node =
-            |id: &str, kind: &str, name: &str, x: f64, params: serde_json::Value| WorkflowNode {
-                id: id.into(),
-                kind: kind.into(),
-                name: name.into(),
-                x,
-                y: 70.0,
-                params,
-                retry: None,
-            };
-        let edge = |s: &str, t: &str| WorkflowEdge {
-            id: format!("{s}-{t}"),
-            source: s.into(),
-            target: t.into(),
-            condition: None,
-        };
-        WorkflowGraph {
-            nodes: vec![
-                node(
-                    "trigger",
-                    "manual_trigger",
-                    "Start",
-                    40.0,
-                    serde_json::Value::Null,
-                ),
-                node(
-                    "design",
-                    "agent_prompt",
-                    "Design game",
-                    320.0,
-                    serde_json::json!({ "prompt": design }),
-                ),
-                node(
-                    "game",
-                    "game_engine",
-                    "Build game",
-                    600.0,
-                    serde_json::json!({ "game": game }),
-                ),
-                node(
-                    "verify",
-                    "verifier",
-                    "Verify",
-                    880.0,
-                    serde_json::Value::Null,
-                ),
-            ],
-            edges: vec![
-                edge("trigger", "design"),
-                edge("design", "game"),
-                edge("game", "verify"),
-            ],
-        }
-    }
-
-    vec![
-        WorkflowTemplate {
-            id: "game-slots".into(),
-            name: "Slots game".into(),
-            description: "5×3 slot machine: agent designs the paytable & RTP, then the engine assembles and verifies it.".into(),
-            instructions: String::new(),
-            icon: "grid".into(),
-            graph: pipeline(
-                "slots",
-                "Design a 5x3 slot game for the given theme: reel symbols, paytable, win lines, RTP ~96%, volatility, and a bonus feature. Return a structured spec.",
-            ),
-        },
-        WorkflowTemplate {
-            id: "game-crash".into(),
-            name: "Crash game (Aviator style)".into(),
-            description: "Aviator-style crash game: agent designs the multiplier curve & provably-fair RNG, then build & verify.".into(),
-            instructions: String::new(),
-            icon: "zap".into(),
-            graph: pipeline(
-                "crash",
-                "Design an aviator-style crash game: the multiplier growth curve, a provably-fair RNG seed/commit scheme, auto-cashout rules, house edge ~3%, and max multiplier. Return a structured spec.",
-            ),
-        },
-        WorkflowTemplate {
-            id: "game-scratch".into(),
-            name: "Scratch card".into(),
-            description: "Scratch-card game: agent designs prize tiers & win probabilities, then build & verify.".into(),
-            instructions: String::new(),
-            icon: "ticket".into(),
-            graph: pipeline(
-                "scratch",
-                "Design a scratch-card game: prize tiers and their win probabilities, panel layout, reveal mechanic, and RTP ~95%. Return a structured spec.",
-            ),
-        },
-    ]
 }
 
 /// The orchestrator example templates: end-to-end flows that exercise the wired
@@ -2163,7 +2127,10 @@ mod tests {
 
     #[test]
     fn templates_cover_the_three_games() {
-        let ids: Vec<String> = game_templates().into_iter().map(|t| t.id).collect();
+        let ids: Vec<String> = otto_workflows::templates::game_templates()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
         for want in ["game-slots", "game-crash", "game-scratch"] {
             assert!(ids.iter().any(|id| id == want), "missing template {want}");
         }
@@ -2203,7 +2170,7 @@ mod tests {
 
     #[test]
     fn every_template_uses_known_kinds_with_an_agent() {
-        for t in game_templates() {
+        for t in otto_workflows::templates::game_templates() {
             assert!(!t.graph.nodes.is_empty(), "{} has no nodes", t.id);
             for n in &t.graph.nodes {
                 assert!(

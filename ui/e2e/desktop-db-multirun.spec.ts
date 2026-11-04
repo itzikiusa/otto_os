@@ -144,7 +144,8 @@ for (const scheme of ['light', 'dark'] as const) {
     const { starts } = await fixture(page);
     await openStg(page);
 
-    await page.getByTestId('multi-run-open').click();
+    await page.getByTestId('qe-more').click();
+    await page.getByRole('menuitem', { name: 'Run on…' }).click();
     const sheet = page.getByTestId('multi-run');
     await expect(sheet).toBeVisible();
 

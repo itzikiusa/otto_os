@@ -266,19 +266,8 @@ pub(in crate::workflow_engine) async fn execute(
         // the repo's git-account token; mirrors run_service::open_pr. On
         // failure we note it, so the reason is visible instead of a bare
         // "branch not found" from the create call.
-        let push_token = match repo.git_account_id.as_ref() {
-            Some(aid) => match ctx.git_store.get_account(aid).await {
-                Ok(acc) => otto_core::secrets::get_async(&ctx.secrets, &acc.token_ref)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|token| {
-                        otto_git::transport::TransportCredential::for_repo(token, &acc, &repo).ok()
-                    }),
-                Err(_) => None,
-            },
-            None => None,
-        };
+        let push_token =
+            crate::modules::review::service::repo_transport_credential(ctx, &repo).await;
         logs.extend(hooks_note.take());
         match otto_git::LocalGit::new(&wt).push(push_token).await {
             Ok(_) => logs.push(format!(

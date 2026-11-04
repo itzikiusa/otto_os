@@ -103,7 +103,8 @@ for (const scheme of ['light', 'dark'] as const) {
       } });
     });
     await openQuery(page, scheme);
-    await page.getByRole('button', { name: 'Explain', exact: true }).click();
+    await page.getByTestId('qe-more').click();
+    await page.getByRole('menuitem', { name: 'Query plan (EXPLAIN)' }).click();
     const plan = page.locator('.plan-panel');
     await expect(plan).toBeVisible();
     await expect(page.getByText('No results yet', { exact: true })).toHaveCount(0);

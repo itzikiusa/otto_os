@@ -225,24 +225,28 @@ test('custom sidebar auto-discovers Threads, stage pickers + slash menu work, an
   await threadsNav.click();
 
   await expect(page.getByTestId('threads-page')).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByTestId('threads-experimental-badge')).toContainText('Experimental');
-
   await page.getByTestId('threads-new-btn').click();
   const stage = page.getByTestId('new-thread-stage');
   await expect(stage).toBeVisible();
-  await expect(stage.getByTestId('harness-claude')).toBeVisible();
+  await expect(page.getByTestId('threads-breadcrumb')).toContainText('New thread');
+  await expect(stage.locator('h1')).toContainText(/What should we (build|work on)/);
 
-  // Interactive Model, Effort, and Mode pickers on NewThreadStage.
-  const modelBtn = stage.getByTestId('picker-model');
-  const effortBtn = stage.getByTestId('picker-effort');
+  // One agent chip holds harness · model · effort; access mode sits in the meta row.
+  const agentBtn = stage.getByTestId('picker-agent');
   const modeBtn = stage.getByTestId('picker-mode');
-  await expect(modelBtn).toBeVisible();
-  await expect(effortBtn).toBeVisible();
+  await expect(agentBtn).toBeVisible();
   await expect(modeBtn).toContainText('Full access');
 
-  await effortBtn.click();
-  await page.getByRole('menuitemcheckbox', { name: /High/ }).first().click();
-  await expect(effortBtn).toContainText('High');
+  // One panel: provider rail · models · Reasoning · access (T3).
+  await agentBtn.click();
+  const picker = page.getByTestId('model-picker');
+  await expect(picker).toBeVisible();
+  await expect(picker.getByTestId('model-picker-provider-claude')).toBeVisible();
+  await expect(picker.getByTestId('model-picker-search')).toBeFocused();
+  await picker.getByTestId('picker-effort').getByRole('button', { name: 'High', exact: true }).click();
+  await page.keyboard.press('Escape');
+  await expect(picker).toHaveCount(0);
+  await expect(agentBtn).toContainText('High');
 
   // ⇧⇥ inside the composer toggles Plan mode.
   const input = stage.getByTestId('new-thread-input');
@@ -295,14 +299,23 @@ test('strict Threads vs Agents isolation, single pane header, interactive slash 
   await expect(tSidebar.getByText('Alpha Architect').first()).toBeVisible();
   await expect(tSidebar.getByText('Classic Agent Session')).toHaveCount(0);
 
-  // 3. Single unified header in ThreadPane (no duplicate .conv-head inside ConversationView).
-  await expect(paneA.locator('.tp-head')).toHaveCount(1);
+  // 3. Single view: the page top bar is the only header (breadcrumb names the
+  //    thread); no pane header and no duplicate .conv-head inside ConversationView.
+  await expect(page.getByTestId('threads-breadcrumb')).toContainText('Alpha Architect');
+  await expect(paneA.locator('.tp-head')).toHaveCount(0);
   await expect(paneA.locator('.conv-head')).toHaveCount(0);
+  // The right panel starts closed (T3); its toggle opens the surface launcher.
+  await expect(page.getByTestId('threads-inspector')).toHaveCount(0);
+  await page.getByTestId('threads-toggle-inspector').click();
+  await expect(page.getByTestId('threads-surface-launcher')).toBeVisible();
+  await expect(page.getByTestId('threads-surface-files')).toBeEnabled();
 
   // 4. Interactive Model / Effort / Mode pickers & `/` slash commands inside live ThreadPane.
   await expect(paneA.getByTestId('picker-model')).toBeVisible();
-  await expect(paneA.getByTestId('picker-effort')).toBeVisible();
   await expect(paneA.getByTestId('picker-mode')).toBeVisible();
+  await paneA.getByTestId('picker-model').click();
+  await expect(paneA.getByTestId('picker-effort')).toBeVisible();
+  await page.keyboard.press('Escape');
 
   const ta = paneA.locator('.composer textarea');
   await ta.fill('/');
@@ -315,7 +328,7 @@ test('strict Threads vs Agents isolation, single pane header, interactive slash 
   await ta.fill('/diff');
   await ta.press('Enter');
   await expect(
-    page.getByTestId('threads-inspector').getByRole('tab', { name: 'Changes' }),
+    page.getByTestId('threads-inspector').getByRole('tab', { name: 'Diff' }),
   ).toHaveAttribute('aria-selected', 'true');
 
   // 5. Plan-mode thread displays the Plan approval bar with both implementation actions.
@@ -342,6 +355,11 @@ test('multi-session split canvas, pins, file viewer, and peer-to-peer message re
   await expect(canvas.getByTestId(`thread-pane-${sessionB}`)).toBeVisible();
 
   // Open README.md in PandaCode-style file tabs and inspect rendered Markdown.
+  if ((await page.getByTestId('threads-inspector').count()) === 0) {
+    await page.getByTestId('threads-toggle-inspector').click();
+  }
+  await page.getByTestId('threads-surface-add').click();
+  await page.getByRole('menuitem', { name: /^Files/ }).click();
   const fileTabs = page.getByTestId('inspector-files-tab');
   await expect(fileTabs).toBeVisible();
   await fileTabs.getByRole('button', { name: 'README.md' }).first().click();
@@ -349,12 +367,14 @@ test('multi-session split canvas, pins, file viewer, and peer-to-peer message re
 
   // Connections inspector tab exposes one-click side-by-side DB Explorer launch.
   const inspector = page.getByTestId('threads-inspector');
-  await inspector.getByRole('tab', { name: 'Connections' }).click();
+  await inspector.getByTestId('threads-surface-add').click();
+  await page.getByRole('menuitem', { name: /Connections/ }).click();
   await expect(page.getByTestId('connections-open-beside')).toBeVisible();
 
   // Peers inspector tab relays a direct session-to-session message from Alpha → Beta.
   await canvas.getByTestId(`thread-pane-${sessionA}`).click();
-  await inspector.getByRole('tab', { name: 'Peers' }).click();
+  await inspector.getByTestId('threads-surface-add').click();
+  await page.getByRole('menuitem', { name: /Peers/ }).click();
   await page.getByTestId('peers-target-select').selectOption(sessionB);
   const relayMsg = 'Sync schema check from Alpha';
   await page.getByTestId('peers-message-input').fill(relayMsg);

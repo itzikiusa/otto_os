@@ -7,6 +7,7 @@ mod atlassian;
 pub mod confluence;
 pub mod http;
 pub mod issue_create;
+pub mod issue_update;
 pub mod jira;
 pub mod linear;
 pub(crate) mod markdown;
