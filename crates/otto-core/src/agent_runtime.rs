@@ -552,26 +552,6 @@ pub struct UpdateRuntimeSessionReq {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimePromptReq {
     pub text: String,
-    /// Model for this turn and the ones after it (T3 Code's per-turn model
-    /// selection: Codex `turn/start {model}`, Claude `set_model`). `None`
-    /// keeps the session's model.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    /// Reasoning effort for this turn and later ones (`low` … `max`);
-    /// providers without an effort ignore it. `None` keeps the current one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<String>,
-    /// Images sent with the text (Claude `image` content blocks, Codex image
-    /// input, ACP `image` content).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub images: Vec<PromptImage>,
-}
-
-/// One prompt image, inline: `image/*` media type and base64 bytes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PromptImage {
-    pub media_type: String,
-    pub data_b64: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
