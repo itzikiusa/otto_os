@@ -48,4 +48,7 @@ export const LIVE_ONLY_EVENTS: readonly EventType[] = [
   'resource_access_changed',
   'notifications_changed',
   'workbench_doc_changed',
+  // Structured runtime sessions: a session view folds them into its own
+  // projection (sequence-checked, replay on gap), no shared store.
+  'agent_runtime_event',
 ];

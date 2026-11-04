@@ -1515,7 +1515,7 @@ event of a runtime session (T3 Code's `ProviderAdapterV2Event` model, MIT),
 published on the streaming path, never through the internal bus.
 
 ```json
-{"type":"agent_runtime_event","workspace_id":"…","session_id":"…","owner_id":"…","event":{"session_id":"…","sequence":42,"ts":"2026-11-04T10:00:00Z","type":"turn_item.updated","turn_item":{"id":"…","turn_id":"…","ordinal":3,"status":"running","title":null,"started_at":"…","completed_at":null,"updated_at":"…","type":"assistant_message","message_id":"…","text":"Hel","streaming":true}}}
+{"type":"agent_runtime_event","workspace_id":"…","session_id":"…","owner_id":"…","event":{"session_id":"…","sequence":42,"ts":"2026-11-04T10:00:00Z","type":"turn_item.updated","turn_item":{"id":"…","turn_id":"…","ordinal":3,"status":"running","title":null,"started_at":"…","completed_at":null,"updated_at":"…",…assistant_message fields: message_id, text "Hel", streaming true…}}}
 ```
 
 - `event` is a `RuntimeEvent`: `session_id`, `sequence`, `ts` plus one of
