@@ -98,6 +98,10 @@ impl ServerCtx {
             otto_rbac::RbacAuthenticator::new(pool.clone())
         };
 
+        let bus = events.clone();
+        let agent_runtime = otto_agent_protocol::daemon_runtime(pool.clone(), manager.clone(), {
+            move |ev| crate::ws_fanout::publish_stream(&bus, ev)
+        });
         ServerCtx {
             authenticator: Arc::new(authenticator),
             roles: Arc::new(otto_rbac::RbacRoleChecker::new(pool.clone())),
@@ -180,6 +184,7 @@ impl ServerCtx {
             browser_credentials: otto_state::BrowserCredentialsRepo::new(pool.clone()),
             browser,
             ui_bridge: Default::default(),
+            agent_runtime,
             secrets,
             events,
             pool,

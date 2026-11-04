@@ -53,6 +53,7 @@ mime_guess.workspace = true
 otto-sessions.workspace = true
 otto-sandbox.workspace = true
 otto-connections.workspace = true
+otto-agent-protocol.workspace = true
 otto-aws.workspace = true
 otto-k8s.workspace = true
 otto-ssh.workspace = true

@@ -371,7 +371,8 @@ therefore also reads a **credential class** for each `(method, route)`
   and the approval decisions `/mcp/approvals/{id}/decide`,
   `/workflow-runs/{id}/approve`, `/runs/{id}/approve`,
   `/database-changes/{id}/approve`,
-  `/workspaces/{wid}/workgraph/approvals/{aid}/decide` — and, structurally,
+  `/workspaces/{wid}/workgraph/approvals/{aid}/decide`,
+  `/runtime-sessions/{id}/requests/{request_id}` — and, structurally,
   EVERY write whose last segment is `approve` / `decide` / `reject` /
   `rollback` except the Outward `/repos/{id}/prs/{number}/approve`
   (S11-308, S8-304: e.g. `/improvement/edits/{eid}/{approve,reject,rollback}`,
@@ -749,6 +750,65 @@ and keeps unmatched `user` rows after the plan — ids never regenerate. Claude
 (`tool_response.task.id` / `tool_input.taskId`). `GET …/activity/summary` counts
 ALL rows, so board-added tasks show in `done/total`. Codex publishes no plan:
 its list holds only user-added tasks.
+
+## Structured agent runtime (`/runtime-sessions`)
+
+Design: `docs/features/threads-structured-runtime.md` (a port of T3 Code's
+provider runtime, MIT). A **runtime session** drives an agent CLI over a
+structured stdio protocol instead of a PTY; its events are T3 Code's
+provider-runtime **entity upserts** (`otto_core::agent_runtime`, mirrored in
+`ui/src/lib/api/types/agent-runtime.ts`): a turn item is re-sent whole with
+its accumulated text and a `streaming` flag; `command_output.delta` is the
+only delta. Runtime sessions are their own rows (`agent_runtime_sessions`),
+not `sessions`: no PTY route, terminal socket or idle sweep touches them.
+Every spawn passes the PTY sessions' safety pipeline
+(`SessionManager::prepare_runtime_spawn`: cwd refusal, folder trust, context
+provisioning, Seatbelt); a named provider account or a workspace network
+profile is refused (400) rather than bypassed. Drivers: `gemini` (ACP,
+`gemini --acp`). `claude` / `codex` answer **400** `no structured driver …`
+until their drivers land.
+
+RBAC: `Agents` View for every GET, `Agents` Edit for every POST
+(`policy.rs`); every session route additionally requires workspace `viewer`
+and owner-or-admin (root passes); listing returns the caller's own sessions
+(all of them for a workspace admin / root). Every write requires a **person's
+credential** — an agent session's, MCP or share credential gets **403**; the
+request answer is also an `Admin`-class approval gate (above).
+
+`RuntimeSession`: `{id, workspace_id, provider: "claude"|"codex"|"gemini",
+title, cwd, model?, native_thread_id?, status, created_by, created_at,
+last_active_at, last_sequence}`; `status` ∈ `starting | idle | working |
+awaiting_permission | dormant | closed` (`dormant` = no process; the next
+prompt respawns it and resumes `native_thread_id` — ACP `session/load`).
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /workspaces/{id}/runtime-sessions | ws viewer | — | `RuntimeSession[]`, newest activity first (own; all for admin/root), max 500 |
+| POST /workspaces/{id}/runtime-sessions | ws editor, person | `{provider, cwd?, title?, model?}` (`cwd` absolute, default the workspace root) | **201** `RuntimeSession`. The child is spawned (and its handshake started) before the response: a refused folder, a missing CLI or a provider without a driver fails the create (**400**) and leaves no row |
+| GET /runtime-sessions/{id} | ws viewer + owner-or-admin | — | `RuntimeSession` with its live `status` |
+| POST /runtime-sessions/{id}/prompt | owner-or-admin, person | `{text}` (non-empty) | **202** `{turn_id, sequence}` (`sequence` of the turn's first `provider_turn.updated`). Respawns a `dormant` session first. **409** while a turn runs (one turn at a time) or after `close` |
+| POST /runtime-sessions/{id}/interrupt | owner-or-admin, person | — | `{interrupted}` — `false` when no turn was running. Pending requests → `cancelled`; the provider ends the turn (`turn.terminal` `interrupted`); if it has not within 10 s its process group is killed and the turn ends `interrupted` anyway |
+| POST /runtime-sessions/{id}/requests/{request_id} | owner-or-admin, person (`Admin` class) | `{decision}` ∈ `accept \| accept_for_session \| accept_always \| decline \| cancel` — one of the request's `approval_request` item `options[].decision` (`cancel` always allowed) | **204**; the request → `resolved` with the decision. **404** unknown / no longer pending, **400** a decision that was not offered |
+| POST /runtime-sessions/{id}/close | owner-or-admin, person | — | `RuntimeSession` (`status: closed`). Ends a running turn `interrupted`, closes the child's stdin (SIGTERM / SIGKILL to its group after 3 s each). Idempotent; later prompts **409** |
+| GET /runtime-sessions/{id}/events?after_sequence= | ws viewer + owner-or-admin | `after_sequence` (default 0) | `RuntimeReplay` — `{kind:"events", events, last_sequence}` or `{kind:"snapshot", snapshot_sequence, snapshot}` |
+
+**Replay** (T3 Code `subscribeThread`). `sequence` is per session, strictly
+increasing and never reused, also across daemon restarts. With
+`after_sequence = N`: `N` ≥ the latest → `events: []`; the in-memory ring
+(4096 events / 8 MiB) still holds every event after `N` and they are at most
+**128 events / 1 MiB** → exactly those (`kind: "events"`); otherwise
+`kind: "snapshot"`: `RuntimeSnapshot {provider_session, provider_thread,
+turns[], turn_items[] (by ordinal), runtime_requests[], plans[]}` — replace
+everything and continue after `snapshot_sequence`. Live delivery is the
+`agent_runtime_event` WS event (`docs/contracts/ws.md`); apply events whose
+`sequence` is above the one you hold, replay on any gap.
+
+**Persistence and restart.** Every entity's latest state is stored
+(`agent_runtime_entities`), streaming text once it settles; a fresh daemon
+serves snapshots from it. On boot every open turn becomes `cancelled`, its
+open items `cancelled`, every pending request `expired` with
+`response_capability: {type:"not_resumable"}`, the provider session
+`stopped` (T3 Code `reconcileProjection`).
 
 ## Connection sections (sidebar grouping)
 

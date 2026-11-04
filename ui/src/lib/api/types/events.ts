@@ -4,6 +4,7 @@
 import type {
   AgentTask, TrailEvent,
 } from './activity';
+import type { RuntimeEvent } from './agent-runtime';
 import type {
   BrowserChromeBuild, BrowserEngineInstallState, BrowserLiveSessionState,
 } from './browser';
@@ -502,6 +503,16 @@ export type OttoEvent =
       session_id: Id;
       cursor: string;
       turns: Turn[];
+    }
+  | {
+      /** One normalized structured-runtime event (token deltas included).
+       *  Scope::Session with the owner inline (`owner_id`). Replay gaps via
+       *  `GET /runtime-sessions/{id}/events?after_seq=`. */
+      type: 'agent_runtime_event';
+      workspace_id: Id;
+      session_id: Id;
+      owner_id: Id;
+      event: RuntimeEvent;
     }
   | {
       /** The agent's in-progress response as drawn on the session's terminal

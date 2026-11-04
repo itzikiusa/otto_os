@@ -496,6 +496,17 @@ fn scope_of(event: &Event) -> Scope<'_> {
             session_id,
             owner: None,
         },
+        // Runtime sessions are not `sessions` rows: the owner rides the event.
+        Event::AgentRuntimeEvent {
+            workspace_id,
+            session_id,
+            owner_id,
+            ..
+        } => Scope::Session {
+            workspace_id,
+            session_id,
+            owner: Some(owner_id),
+        },
         Event::SessionCreated { session } | Event::SessionArchiveChanged { session } => Scope::Session {
             workspace_id: &session.workspace_id,
             session_id: &session.id,
@@ -1132,6 +1143,30 @@ mod tests {
         match scope_of(&created) {
             Scope::Session { owner, .. } => assert_eq!(owner, Some(&"alice".to_string())),
             _ => panic!("expected Scope::Session for SessionCreated"),
+        }
+        // Structured runtime events: owner-only (+ admin/root), owner inline.
+        let runtime = Event::AgentRuntimeEvent {
+            workspace_id: "ws1".into(),
+            session_id: "rs1".into(),
+            owner_id: "alice".into(),
+            event: std::sync::Arc::new(otto_core::agent_runtime::RuntimeEvent {
+                session_id: "rs1".into(),
+                sequence: 1,
+                ts: chrono::Utc::now(),
+                body: otto_core::agent_runtime::RuntimeEventBody::CommandOutputDelta {
+                    item_id: "i1".into(),
+                    chunk: "x".into(),
+                },
+            }),
+        };
+        match scope_of(&runtime) {
+            Scope::Session {
+                owner, session_id, ..
+            } => {
+                assert_eq!(owner, Some(&"alice".to_string()));
+                assert_eq!(session_id, "rs1");
+            }
+            _ => panic!("expected Scope::Session for AgentRuntimeEvent"),
         }
     }
 

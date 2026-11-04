@@ -4,6 +4,7 @@
 //! and no async; every other crate depends on it and codes against these types.
 
 pub mod access;
+pub mod agent_runtime;
 pub mod api;
 pub mod auth;
 pub mod aws_env;

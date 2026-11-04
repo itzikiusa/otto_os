@@ -583,6 +583,16 @@ pub enum Event {
         session_id: Id,
         artifact: serde_json::Value,
     },
+    /// Structured agent runtime: one normalized event of a runtime session
+    /// (`otto_core::agent_runtime`). High-rate (token deltas) — published on
+    /// the streaming path. Session-family scoped; the owner rides the event
+    /// (`owner_id`) because runtime sessions are not rows of `sessions`.
+    AgentRuntimeEvent {
+        workspace_id: Id,
+        session_id: Id,
+        owner_id: Id,
+        event: Arc<crate::agent_runtime::RuntimeEvent>,
+    },
     /// Kubernetes monitoring: a collector cycle finished for `cluster_id`
     /// (dashboards refresh; `ok` = samples were written).
     K8sMonitorCycle {
@@ -689,7 +699,9 @@ impl Event {
     pub fn is_streaming(&self) -> bool {
         matches!(
             self,
-            Event::TranscriptLive { .. } | Event::TranscriptAppended { .. }
+            Event::TranscriptLive { .. }
+                | Event::TranscriptAppended { .. }
+                | Event::AgentRuntimeEvent { .. }
         )
     }
 
@@ -757,6 +769,7 @@ impl Event {
             Event::TranscriptAppended { .. } => "transcript_appended",
             Event::TranscriptLive { .. } => "transcript_live",
             Event::ArtifactAdded { .. } => "artifact_added",
+            Event::AgentRuntimeEvent { .. } => "agent_runtime_event",
             Event::K8sMonitorCycle { .. } => "k8s_monitor_cycle",
             Event::UiControlRequested { .. } => "ui_control_requested",
             Event::McpApprovalChanged { .. } => "mcp_approval_changed",

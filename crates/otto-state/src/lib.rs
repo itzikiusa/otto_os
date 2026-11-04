@@ -3,6 +3,7 @@
 //! Repositories map rows to `otto_core::domain` structs.
 
 pub mod activity;
+pub mod agent_runtime;
 pub mod api_client;
 pub mod audit;
 pub mod aws_accounts;
@@ -69,6 +70,9 @@ pub mod workflows;
 pub mod workspaces;
 
 pub use activity::{normalize_title, ActivityRepo, NewTask, NewTrail, PendingNudge};
+pub use agent_runtime::{
+    AgentRuntimeRepo, NewRuntimeSession, RuntimeEntityRow, RuntimeSessionRecord,
+};
 pub use api_client::{
     ApiClientRepo, NewApiAutomation, NewApiCollection, NewApiEnvironment, NewApiHistory,
     NewApiRequest,

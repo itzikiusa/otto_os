@@ -16,6 +16,8 @@ pub async fn recover_before_serve(ctx: &ServerCtx, boot: &mut BootPhases) -> Res
     boot.mark("restore");
     fail_orphaned_reviews(ctx).await;
     fail_orphaned_skill_evals(ctx).await;
+    // Structured runtime: turns the last life left open end `interrupted`.
+    warn_on_err("agent-runtime recovery", ctx.agent_runtime.recover().await);
     // Await old-life settlement before any supervisor or resumed workflow can
     // admit a fresh run; a detached sweep can accidentally reap that new work.
     // A failed step is LOGGED, never fatal: a stale `running` row is a smaller
