@@ -12,6 +12,9 @@
 //! * `big:<n>`    — `n` one-byte message chunks.
 //! * anything else — a thought chunk + `echo: <text>` in two chunks.
 //!
+//! With `--refuse-session` every `session/new` fails with `-32000` (signed
+//! out, no auth method to offer).
+//!
 //! `session/load` replays one history chunk before answering (clients must
 //! not show it). stdin EOF ends the process (exit 0), like the real CLIs.
 
@@ -59,6 +62,7 @@ fn main() {
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
     let mut asks = 0u32;
+    let refuse = std::env::args().any(|a| a == "--refuse-session");
     while let Some(msg) = next(&mut lines) {
         let id = msg.get("id").cloned().unwrap_or(Value::Null);
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
@@ -66,6 +70,9 @@ fn main() {
             "initialize" => reply(
                 &id,
                 json!({"protocolVersion":1,"agentCapabilities":{"loadSession":true}}),
+            ),
+            "session/new" if refuse => out(
+                json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":"Authentication required"}}),
             ),
             "session/new" => reply(
                 &id,

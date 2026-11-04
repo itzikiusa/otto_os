@@ -581,7 +581,7 @@ impl ClaudeDriver {
         }
         self.init_req = None;
         if resp.get("subtype").and_then(Value::as_str) == Some("error") {
-            step.push(DriverEvent::Error(ProviderFailure {
+            step.push(DriverEvent::Fatal(ProviderFailure {
                 class: "handshake_error".into(),
                 message: resp
                     .get("error")

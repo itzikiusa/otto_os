@@ -11,8 +11,8 @@
 //! against `codex app-server generate-json-schema` of 0.166.0:
 //!
 //! * spawn `codex app-server` (`codexLaunchArgs.ts:12-15`); Otto's context
-//!   hook adds `-c developer_instructions=…` and `CODEX_HOME` exactly as for
-//!   a PTY codex session.
+//!   hook adds `--add-dir=…`, `-c developer_instructions=…` (before the
+//!   subcommand) and `CODEX_HOME`, exactly as for a PTY codex session.
 //! * `initialize {clientInfo, capabilities: {experimentalApi,
 //!   optOutNotificationMethods: ["turn/diff/updated"]}}` then the
 //!   `initialized` notification (`CodexAdapterV2.ts:1763-1801`, `:233-237`).
@@ -580,7 +580,7 @@ impl CodexDriver {
     ) {
         if id == self.init_id && !self.ready && self.thread_req.is_none() {
             if let Some(e) = error {
-                self.handshake_failed(step, &e);
+                step.push(DriverEvent::Fatal(rpc_failure("handshake_error", &e)));
                 return;
             }
             step.write(json!({"method": "initialized"}).to_string());
@@ -594,7 +594,7 @@ impl CodexDriver {
                     self.start_thread(step, false);
                     return;
                 }
-                self.handshake_failed(step, &e);
+                step.push(DriverEvent::Fatal(rpc_failure("handshake_error", &e)));
                 return;
             }
             let r = result.unwrap_or(Value::Null);
@@ -633,17 +633,6 @@ impl CodexDriver {
         }
     }
 
-    fn handshake_failed(&mut self, step: &mut DriverStep, e: &Value) {
-        step.push(DriverEvent::Error(rpc_failure("handshake_error", e)));
-        if self.queued.take().is_some() {
-            step.push(DriverEvent::Terminal {
-                status: TurnTerminalStatus::Failed,
-                failure: Some(rpc_failure("handshake_error", e)),
-                reason: None,
-            });
-        }
-    }
-
     fn maybe_interrupt(&mut self, step: &mut DriverStep) {
         if !self.interrupt_when_started {
             return;
@@ -663,11 +652,13 @@ impl StructuredDriver for CodexDriver {
     }
 
     fn launch(&self, _ctx: &LaunchContext) -> LaunchSpec {
-        // The model goes in `thread/start` (`codexThreadRuntimeParams`).
+        // The model goes in `thread/start` (`codexThreadRuntimeParams`). The
+        // context hook's flags (`--add-dir=`, `-c …`) are top-level codex
+        // options `app-server` rejects after it, so the subcommand is the tail.
         LaunchSpec {
             program: self.program.clone(),
-            args: vec!["app-server".into()],
-            tail_args: Vec::new(),
+            args: Vec::new(),
+            tail_args: vec!["app-server".into()],
             env: Vec::new(),
         }
     }

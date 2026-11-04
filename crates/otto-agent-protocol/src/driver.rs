@@ -94,8 +94,12 @@ pub enum DriverEvent {
         failure: Option<ProviderFailure>,
         reason: Option<String>,
     },
-    /// A session-level problem (bad line, refused handshake).
+    /// A session-level problem the session survives (a bad line).
     Error(ProviderFailure),
+    /// The handshake was refused (not signed in, bad argv, …): the runtime
+    /// fails the running turn with it and stops the child; the next prompt
+    /// respawns and tries again.
+    Fatal(ProviderFailure),
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]

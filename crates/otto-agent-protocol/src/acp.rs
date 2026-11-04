@@ -538,14 +538,7 @@ impl AcpDriver {
         if let Phase::Authenticating { load } = self.phase {
             if id == self.auth_id {
                 if let Some(e) = error {
-                    step.push(DriverEvent::Error(rpc_failure("auth_required", &e)));
-                    if self.queued.take().is_some() {
-                        step.push(DriverEvent::Terminal {
-                            status: TurnTerminalStatus::Failed,
-                            failure: Some(rpc_failure("auth_required", &e)),
-                            reason: None,
-                        });
-                    }
+                    step.push(DriverEvent::Fatal(rpc_failure("auth_required", &e)));
                     return;
                 }
                 self.create_session(step, load);
@@ -571,7 +564,7 @@ impl AcpDriver {
                 .and_then(|r| serde_json::from_value::<InitializeResponse>(r).ok())
                 .is_some_and(|r| r.agent_capabilities.load_session);
             if let Some(e) = error {
-                step.push(DriverEvent::Error(rpc_failure("handshake_error", &e)));
+                step.push(DriverEvent::Fatal(rpc_failure("handshake_error", &e)));
                 return;
             }
             self.create_session(step, load && self.resume.is_some());
@@ -597,14 +590,7 @@ impl AcpDriver {
                     self.create_session(step, false);
                     return;
                 }
-                step.push(DriverEvent::Error(rpc_failure("handshake_error", &e)));
-                if self.queued.take().is_some() {
-                    step.push(DriverEvent::Terminal {
-                        status: TurnTerminalStatus::Failed,
-                        failure: Some(rpc_failure("handshake_error", &e)),
-                        reason: None,
-                    });
-                }
+                step.push(DriverEvent::Fatal(rpc_failure("handshake_error", &e)));
                 return;
             }
             self.session_id = if loading {
@@ -925,7 +911,7 @@ mod tests {
         // A second auth failure is reported, not looped.
         let s = d.on_line(r#"{"jsonrpc":"2.0","id":4,"error":{"code":-32000,"message":"Authentication required"}}"#);
         assert!(s.writes.is_empty());
-        assert!(matches!(&s.events[0], DriverEvent::Error(f) if f.class == "handshake_error"));
+        assert!(matches!(&s.events[0], DriverEvent::Fatal(f) if f.class == "handshake_error"));
         // Cancel carries Grok's _meta.
         let mut d = AcpDriver::grok();
         d.start(&ctx(None));

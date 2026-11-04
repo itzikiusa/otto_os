@@ -130,6 +130,10 @@ fn drivers() -> Arc<dyn DriverFactory> {
     Arc::new(|p: RuntimeProvider| -> Option<Box<dyn StructuredDriver>> {
         Some(match p {
             RuntimeProvider::Codex => Box::new(CodexDriver::with_program(FAKE_CODEX)),
+            // A signed-out ACP agent.
+            RuntimeProvider::Grok => {
+                Box::new(AcpDriver::new(p, FAKE, vec!["--refuse-session".into()]))
+            }
             _ => Box::new(AcpDriver::new(p, FAKE, Vec::new())),
         })
     })
@@ -574,7 +578,7 @@ async fn snapshot_past_replay_limits_and_recovery_after_a_restart() {
     rt.prompt(&s.id, "ask").await.unwrap();
     host.wait(is_type("runtime_request.updated")).await;
     rt.flush(&s.id).await;
-    rt.shutdown();
+    rt.shutdown().await;
     let seen = host.all().last().unwrap().sequence;
 
     let host2 = TestHost::new(dir.path().to_str().unwrap(), false);
@@ -638,7 +642,7 @@ async fn codex_streams_deltas_runs_an_approved_command_and_ends_the_turn() {
         .starts_with("fake-th-"));
     assert_eq!(s.model.as_deref(), Some("fake-model"));
     let spec = host.prepared.lock().unwrap()[0].clone();
-    assert_eq!(spec.args, ["app-server"]);
+    assert_eq!(spec.tail_args, ["app-server"], "context flags go before it");
 
     // prompt → streamed deltas → turn end
     rt.prompt(&s.id, "hello").await.unwrap();
@@ -736,7 +740,7 @@ async fn codex_resumes_its_thread_after_a_daemon_restart() {
     rt.prompt(&s.id, "hang").await.unwrap();
     host.wait_n(is_type("turn_item.updated"), 2).await;
     rt.flush(&s.id).await;
-    rt.shutdown();
+    rt.shutdown().await;
 
     let host2 = TestHost::new(dir.path().to_str().unwrap(), false);
     let rt2 = runtime(&pool, &host2, RuntimeConfig::default());
@@ -788,5 +792,45 @@ async fn streaming_chunks_coalesce_inside_the_window_and_flush_after_it() {
     assert_eq!(streamed.last().unwrap(), &"x".repeat(200));
     // Text only grows: no held update is lost or reordered.
     assert!(streamed.windows(2).all(|w| w[1].starts_with(w[0].as_str())));
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn refused_handshake_fails_the_turn_stops_the_child_and_retries_on_the_next_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(dir.path().to_str().unwrap(), false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, dir.path().to_str().unwrap(), RuntimeProvider::Grok).await;
+    // The refusal lands either before the prompt (400 with the reason) or
+    // after it (the turn fails with it); never a prompt queued forever.
+    let mut turns = 0;
+    for n in 1..=2 {
+        match rt.prompt(&s.id, "hi").await {
+            Ok(_) => {
+                turns += 1;
+                let fin = host.wait_n(is_terminal, turns).await;
+                assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Failed));
+            }
+            Err(Error::Invalid(m)) => assert!(m.contains("Authentication required"), "{m}"),
+            Err(e) => panic!("{e:?}"),
+        }
+        host.wait_n(
+            |e| {
+                matches!(&e.body, RuntimeEventBody::ProviderSessionUpdated { provider_session }
+                if provider_session.last_error.as_deref() == Some("Authentication required"))
+            },
+            n,
+        )
+        .await;
+        assert_eq!(
+            rt.get(&s.id).await.unwrap().status,
+            RuntimeSessionStatus::Dormant
+        );
+    }
+    assert!(
+        host.prepared.lock().unwrap().len() >= 2,
+        "each prompt respawns"
+    );
     rt.close(&s.id).await.unwrap();
 }

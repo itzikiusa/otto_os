@@ -375,13 +375,28 @@ impl AgentRuntime {
         Ok(touched)
     }
 
-    /// Ask every live child to exit (stdin EOF, then SIGTERM) — daemon shutdown.
-    pub fn shutdown(&self) {
-        for entry in self.inner.live.iter() {
-            let mut st = entry.value().lock();
-            if let Some(p) = st.proc.take() {
-                stop_child(p, self.inner.config.close_grace);
+    /// Daemon teardown: close every live child's stdin and SIGTERM its
+    /// process group now (no grace timer — the tokio runtime is about to
+    /// stop), then wait for the queued DB writes. The next boot's
+    /// [`Self::recover`] settles the turns they leave open.
+    pub async fn shutdown(&self) {
+        let lives: Vec<Arc<Live>> = self
+            .inner
+            .live
+            .iter()
+            .map(|e| Arc::clone(e.value()))
+            .collect();
+        for live in &lives {
+            if let Some(p) = live.lock().proc.take() {
+                let pid = p.pid;
+                drop(p);
+                signal_group(pid, libc::SIGTERM);
             }
+        }
+        for live in lives {
+            let (tx, rx) = oneshot::channel();
+            let _ = live.persist.send(PersistOp::Flush(tx));
+            let _ = rx.await;
         }
     }
 
@@ -592,7 +607,13 @@ impl AgentRuntime {
         check_can_prompt(&st)?;
         let turn_id = new_id();
         let Some(proc) = st.proc.as_mut() else {
-            return Err(Error::Conflict("the agent process exited; retry".into()));
+            // It died in its handshake (signed out, bad argv) before this
+            // prompt reached it; the next prompt respawns.
+            let why = st.proj.session.as_ref().and_then(|s| s.last_error.clone());
+            return Err(Error::Invalid(format!(
+                "the agent could not start: {}",
+                why.unwrap_or_else(|| "it exited".into())
+            )));
         };
         let step = proc
             .driver
@@ -1294,6 +1315,28 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                     status
                 };
                 finish_turn(inner, live, st, status, failure, reason);
+            }
+            DriverEvent::Fatal(failure) => {
+                if st.turn.is_some() {
+                    finish_turn(
+                        inner,
+                        live,
+                        st,
+                        TurnTerminalStatus::Failed,
+                        Some(failure.clone()),
+                        None,
+                    );
+                }
+                if let Some(p) = st.proc.take() {
+                    stop_child(p, inner.config.close_grace);
+                }
+                set_session_status(
+                    inner,
+                    live,
+                    st,
+                    ProviderSessionStatus::Stopped,
+                    Some(failure.message),
+                );
             }
             DriverEvent::Error(failure) => {
                 let mut e = item(
