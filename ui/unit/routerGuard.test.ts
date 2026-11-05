@@ -7,6 +7,7 @@ import { loadSource } from './sourceHarness.ts';
 import { captureRoomInvite, roomInvite, forgetRoom } from '../src/modules/rooms/room-access.ts';
 import { activeNavId, moduleHome } from '../src/lib/sidebar.ts';
 import { dropShareToken, storeShareToken, storedShareToken, type TokenStorage } from '../src/lib/shareTokenStore.ts';
+import { loadPairState, parsePairRoute, resetPairMemory, savePairState, type PairState, type PairStorage } from '../src/lib/phonePair.ts';
 
 const flush = async () => {
   for (let i = 0; i < 20; i++) await Promise.resolve();
@@ -30,7 +31,11 @@ function bindShareStore(st: TokenStorage) {
   };
 }
 
-function fixture(initialHash = '#/home', shareStore = bindShareStore(fakeSession())) {
+function bindPairStore(st: PairStorage) {
+  return { parsePairRoute, savePairState: (v: PairState | null) => savePairState(v, st) };
+}
+
+function fixture(initialHash = '#/home', shareStore = bindShareStore(fakeSession()), pairStore = bindPairStore(fakeSession())) {
   const listeners: (() => void)[] = [];
   const location = { hash: initialHash };
   const fire = () => listeners.forEach((l) => l());
@@ -65,6 +70,7 @@ function fixture(initialHash = '#/home', shareStore = bindShareStore(fakeSession
       './rooms/invites': { captureRoomInvite },
       './sidebar': { activeNavId, moduleHome },
       './shareTokenStore': shareStore,
+      './phonePair': pairStore,
     },
     { window, history },
   );
@@ -217,7 +223,38 @@ function loadReloaded(hash: string, tab: TokenStorage) {
       './rooms/invites': { captureRoomInvite },
       './sidebar': { activeNavId, moduleHome },
       './shareTokenStore': bindShareStore(tab),
+      './phonePair': bindPairStore(tab),
     },
     { window: { location, addEventListener: () => {}, removeEventListener: () => {} }, history: { replaceState: () => {} } },
   );
 }
+
+test('a phone pairing code is captured tab-scoped and stripped from the URL', async () => {
+  const tab = fakeSession();
+  const code = 'Q'.repeat(43);
+  resetPairMemory();
+  const f = fixture(`#/pair/${code}/threads/T1`, bindShareStore(fakeSession()), bindPairStore(tab));
+  await flush();
+  assert.equal(f.location.hash, '#/pair', 'the one-time code never stays in the URL');
+  assert.equal(f.router.module, 'pair');
+  resetPairMemory();
+  assert.deepEqual(
+    { code: loadPairState(tab)?.code, next: loadPairState(tab)?.next },
+    { code, next: 'threads/T1' },
+  );
+  // A crafted landing route is dropped, the code still captured.
+  resetPairMemory();
+  const tab2 = fakeSession();
+  fixture(`#/pair/${code}/settings/users`, bindShareStore(fakeSession()), bindPairStore(tab2));
+  await flush();
+  resetPairMemory();
+  assert.equal(loadPairState(tab2)?.next, null);
+  // A malformed code leaves only `#/pair` (the page asks for a fresh QR).
+  resetPairMemory();
+  const tab3 = fakeSession();
+  const g = fixture('#/pair/short', bindShareStore(fakeSession()), bindPairStore(tab3));
+  await flush();
+  assert.equal(g.location.hash, '#/pair');
+  resetPairMemory();
+  assert.equal(loadPairState(tab3), null);
+});

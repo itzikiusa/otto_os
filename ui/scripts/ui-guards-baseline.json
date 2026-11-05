@@ -175,7 +175,7 @@
     "src/lib/stores/ui.svelte.ts": 913,
     "src/lib/stores/workspace.svelte.ts": 2125,
     "src/modules/agents/NewSession.svelte": 1015,
-    "src/modules/agents/SessionView.svelte": 1419,
+    "src/modules/agents/SessionView.svelte": 1418,
     "src/modules/agents/conversation/ConversationView.svelte": 1362,
     "src/modules/api/RequestBuilder.svelte": 1967,
     "src/modules/api/ResponseViewer.svelte": 956,
@@ -246,7 +246,7 @@
     "src/modules/vault/vault.svelte.ts": 1388,
     "src/modules/workbench/WorkbenchPage.svelte": 970,
     "src/modules/workflows/WorkflowsPage.svelte": 2556,
-    "src/shell/App.svelte": 1515,
+    "src/shell/App.svelte": 1514,
     "src/shell/Navigator.svelte": 2499,
     "src/shell/NotificationBell.svelte": 820,
     "src/shell/Palette.svelte": 920

@@ -132,6 +132,8 @@
     shieldOff: 'M5.2 3.1 8 2l5 2v4c0 1-.2 1.9-.6 2.7m-1.4 1.8c-.8.7-1.8 1.2-3 1.5-2.8-1-5-3-5-6V5M2 2l12 12',
     lock: 'M4.5 7.5h7a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1Zm1 0V5a2.5 2.5 0 0 1 5 0v2.5M8 10v1.5',
     unlock: 'M4.5 7.5h7a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1Zm1 0V5a2.5 2.5 0 0 1 4.9-.7M8 10v1.5',
+    // Phone access / Continue on phone: a handset with its home bar.
+    phone: 'M5.5 1.5h5a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-5a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1ZM7 12.5h2',
     // Live-tab element picker toggle (browser module).
     target: 'M8 1v2.2M8 12.8V15M1 8h2.2M12.8 8H15M8 4.8a3.2 3.2 0 1 1 0 6.4 3.2 3.2 0 0 1 0-6.4ZM8 7.3a.7.7 0 1 1 0 1.4.7.7 0 0 1 0-1.4Z',
     // Live-tab "click to interact" pointer (browser panel).

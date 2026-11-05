@@ -79,6 +79,12 @@
     outline: 2px solid var(--accent-text);
     outline-offset: 1px;
   }
+  /* Phone: a linked thread is a primary hop — a full 44 px tap target. */
+  @media (pointer: coarse) {
+    .rt-link {
+      min-block-size: calc(var(--hit-min) + 8px);
+    }
+  }
   .rt-link-dot {
     inline-size: 7px;
     block-size: 7px;

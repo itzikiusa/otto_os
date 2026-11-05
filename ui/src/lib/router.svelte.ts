@@ -11,6 +11,7 @@ import { winKey } from './win';
 import { lsGet, lsSet } from './storage';
 import { isEmbedded } from './desktop';
 import { captureRoomInvite } from './rooms/invites';
+import { parsePairRoute, savePairState } from './phonePair';
 import { activeNavId, moduleHome } from './sidebar';
 
 // ---------------------------------------------------------------------------
@@ -53,14 +54,14 @@ function restoreLastRoute(): void {
   if (h !== '' && h !== '#/' && h !== '#') return; // explicit route wins
   const saved = lsGet(winKey(LS_LAST_ROUTE));
   // Never restore into a share route (`#/s/…` is one-time-view by design).
-  if (saved && saved.startsWith('#/') && !saved.startsWith('#/s/') && !saved.startsWith('#/room/') && !saved.startsWith('#/room-host/')) {
+  if (saved && saved.startsWith('#/') && !saved.startsWith('#/s/') && !saved.startsWith('#/pair') && !saved.startsWith('#/room/') && !saved.startsWith('#/room-host/')) {
     history.replaceState(null, '', saved);
   }
 }
 
 function persistLastRoute(hash: string): void {
   if (!IS_TAURI) return;
-  if (hash.startsWith('#/s/') || hash.startsWith('#/room/') || hash.startsWith('#/room-host/')) return; // ephemeral room/share views are never sticky
+  if (hash.startsWith('#/s/') || hash.startsWith('#/pair') || hash.startsWith('#/room/') || hash.startsWith('#/room-host/')) return; // ephemeral room/share views are never sticky
   lsSet(winKey(LS_LAST_ROUTE), hash);
 }
 
@@ -90,7 +91,7 @@ function ssSet(key: string, value: string): void {
 
 /** Routes never remembered as a module's resume point (one-time share/room views). */
 function ephemeralRoute(hash: string): boolean {
-  return hash.startsWith('#/s/') || hash.startsWith('#/room/') || hash.startsWith('#/room-host/');
+  return hash.startsWith('#/s/') || hash.startsWith('#/pair') || hash.startsWith('#/room/') || hash.startsWith('#/room-host/');
 }
 
 /** The sidebar nav id a hash belongs to (see `activeNavId`). */
@@ -265,6 +266,17 @@ class Router {
         history.replaceState(null, '', `#/room/${encodeURIComponent(roomId)}`);
         parts = ['room', roomId];
       }
+    }
+
+    // Phone pairing `#/pair/<code>[/<next…>]`: keep the one-time code (and
+    // the validated landing route) tab-scoped, then strip both from the URL
+    // and history like a share token. A malformed code leaves `#/pair`, whose
+    // page explains that the QR must be scanned again.
+    if (parts[0] === 'pair' && parts.length >= 2) {
+      const pair = parsePairRoute(parts);
+      if (pair) savePairState({ code: pair.code, next: pair.next });
+      history.replaceState(null, '', '#/pair');
+      parts = ['pair'];
     }
 
     // Task 3.1: share route `#/s/<sessionId>/<token>` — capture the token
