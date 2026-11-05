@@ -12,7 +12,6 @@ import { mockEnabled } from './lib/api/mockGate';
 import { setToken, getToken, baseUrl } from './lib/api/client';
 import { isEmbedded } from './lib/desktop';
 import { installMacFunctionKeyGuard } from './lib/macFunctionKeyGuard';
-import { transcript } from './lib/stores/transcript.svelte';
 
 installMacFunctionKeyGuard(document);
 
@@ -121,7 +120,8 @@ const app = mount(App, {
 
 // The session Chat view was removed in favour of Threads: drop the stale
 // per-session Terminal · Chat choices it persisted (harmless, just litter).
-transcript.sweepRetiredViewKeys();
+// Lazy: the transcript store must stay out of the entry chunk (bundle budget).
+void import('./lib/stores/transcript.svelte').then(({ transcript }) => transcript.sweepRetiredViewKeys()).catch(() => {});
 
 // Register the PWA service worker (no-op in dev if sw.js isn't served).
 // When a NEW service worker takes control (after a deploy), reload once so the
