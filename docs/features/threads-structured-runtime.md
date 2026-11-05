@@ -119,9 +119,40 @@ count that was interrupted after the first delta, then `close`.
    | anything else | `dynamic_tool` |
    | a root `TodoWrite` | the plan (`:9313`) |
 
-   Subagent frames (`parent_tool_use_id` set) are not projected. T3 Code
-   builds a subagent tree that Otto does not port. Subagent permission
-   questions still reach a person.
+   An `Agent` / `Task` call is a **`subagent` item** (a card) instead of a
+   `dynamic_tool`. The subagent's own frames (`parent_tool_use_id` = that
+   call) become items with `parent_item_id` = the card, in the card's turn:
+   text from its complete `assistant` frames (its partial stream events would
+   interleave with the root's, so they are skipped) and tool calls settled by
+   its `user` tool results. Its permission questions reach a person and point
+   at its own tool. T3 Code builds a separate subagent tree; Otto keeps one
+   flat item list with parent links (`claude_tasks.rs`).
+
+8. **Background work and the agent's own turns** (`claude_tasks.rs`, frames
+   of Claude Code 2.1.318). `system` frames `task_started {task_id,
+   tool_use_id, description, task_type, is_backgrounded}`, `task_progress`,
+   `task_updated {patch: {status, is_backgrounded}}` and `task_notification
+   {task_id, status, summary}` track the CLI's tasks; older CLIs are covered
+   by the launch tool results ("Command running in background with ID: …",
+   "Async agent launched … agentId: …"). A task counts as **background** when
+   the CLI says so or its tool call asked for `run_in_background`; those are
+   the provider session's `background_tasks` until they finish, then a
+   `system_notice` ("Background command finished: …"). A background
+   subagent's card stays `running` past its turn until its task ends.
+
+   When a background task finishes after the turn, the CLI feeds its
+   notification to the model and runs a turn **on its own**. Root output
+   that arrives with no prompt of ours running opens an **agent turn**
+   (`DriverEvent::TurnStarted` → `provider_turn.origin: "agent"`, no user
+   message); its `result` ends it. It runs like any turn: the thread is
+   working, Stop interrupts it, and a message sent meanwhile is queued, never
+   interleaved. A session is busy while a turn runs **or** background work is
+   pending (`latest_reply` / `PeerReply.busy`, `background_tasks`).
+
+9. **Steering.** A message with `delivery: "steer"` is written to the CLI's
+   stdin while the turn runs; the CLI hands it to the model at its next step
+   (the SDK's streaming input). It is a `user_message` of the running turn.
+   The other drivers do not steer; such a message is queued instead.
 
 ### Codex (`codex app-server`; `codex.rs`)
 
@@ -431,8 +462,15 @@ are `accept | accept_for_session | accept_always | decline | cancel`.
 **Envelope.** Each event carries `{session_id, sequence, ts}` flattened
 beside the payload.
 
+**Otto additions.** `queue.updated {queued_prompts}` (the session's queued
+messages, whole), `provider_session.background_tasks`,
+`provider_turn.origin`, the `subagent` item and `parent_item_id`. T3 Code
+carries subagents and background work as their own entities
+(`subagent.updated`, `background_work.updated`); Otto folds them into the
+session and the item list.
+
 **Not ported** (no Otto consumer yet): `app_thread.created`,
-`node.updated`, `subagent.updated`, `background_work.updated`, and the item
+`node.updated`, and the item
 types for checkpoints, handoffs, forks, user-input requests and
 file_search. `message.updated` is also not ported, because the
 `assistant_message` item carries the same text.
@@ -526,7 +564,34 @@ and still remembered the image.
   because the daemon stopped the turn. The next prompt respawns the CLI and
   resumes the provider's own session id. The interrupted turn's partial work
   is whatever the provider itself saved. T3 Code can also auto-continue
-  (`RestartContinuation.ts:33-36`); Otto does not.
+  (`RestartContinuation.ts:33-36`); Otto does not. Background work dies with
+  the child: recovery clears `background_tasks`, and open background
+  subagent cards settle `interrupted` (also when the process exits or the
+  thread closes).
+- **The queue survives a restart.** A message sent with `delivery: "queue"`
+  (or `"interrupt"`) while a turn runs is stored whole (text, images, files)
+  as the projection's `queue` entity. After a restart `recover` sends what is
+  queued (respawning the CLI, resuming its thread). Messages go out one per
+  turn, oldest first, each exactly once (one drain at a time per session).
+- **Stall watchdog.** A turn that emits nothing for 15 min (45 min while one
+  of its tools runs) is interrupted with `turn.terminal reason: "stalled"`
+  and a `system_notice`. A pending approval or pending background work is
+  never a stall (`RuntimeConfig::stall_after` / `stall_tool_after`).
+- **Reopen and delete.** `POST /runtime-sessions/{id}/reopen` clears
+  `closed` (in order with the close's own write) and respawns the agent with
+  its resume key. If the process exits before it is ready (the provider lost
+  the conversation), the runtime starts a fresh provider thread, keeps the
+  timeline, and adds a notice that the agent does not remember it; the old
+  key is kept until the fresh one is up. Concurrent reopens and prompts share
+  the per-session spawn lock: one process per thread. `DELETE
+  /runtime-sessions/{id}` closes the session, then removes its row (entities
+  cascade) and attachments.
+- **Personal-agent runs** (`personal_agent_threads.rs`) wait until the
+  thread is idle — no turn, its own included, no background work — and stays
+  idle for 5 s. Only then do they take the report (the report file, else the
+  last answer across turns) and close the thread. Background work counts as
+  progress, with a 45 min stuck allowance while it is pending. A closed run
+  thread can be reopened as a normal conversation (its meta is kept).
 
 ## 5. How the web client consumes it (T3 Code → Otto Threads)
 
@@ -608,21 +673,25 @@ in which headless agy denies what it would have asked about.
 | `crates/otto-core/src/agent_runtime.rs` | event model + REST DTOs |
 | `crates/otto-agent-protocol/src/driver.rs` | `StructuredDriver` contract (sans-IO) |
 | `crates/otto-agent-protocol/src/{claude,codex,acp,agy}.rs` | the drivers |
+| `crates/otto-agent-protocol/src/claude_tasks.rs` | Claude background tasks, subagent cards, their nested activity |
 | `crates/otto-agent-protocol/src/runtime.rs` | processes, turns, sequencing, coalescing, replay, persistence, recovery |
 | `crates/otto-agent-protocol/src/{host,process,ring,http}.rs` | safety host, child I/O, replay ring, `/runtime-sessions` router |
-| `crates/otto-agent-protocol/src/bin/otto-fake-{agent,codex,agy}.rs` | test doubles (ACP agent, `codex app-server`, agy stream-json) |
+| `crates/otto-agent-protocol/src/bin/otto-fake-{agent,codex,agy,claude}.rs` | test doubles (ACP agent, `codex app-server`, agy stream-json, Claude SDK stream-json with background work / subagents / steering) |
 | `crates/otto-state/src/agent_runtime.rs`, migration `0197_agent_runtime.sql` | persistence |
 | `ui/src/lib/api/types/agent-runtime.ts` | TS mirror |
 | `ui/src/modules/threads/runtime/projection.ts`, `timeline.ts` | event fold (T3 Code's projection reducer); what the view derives (pending requests, phase, rows) |
 | `ui/src/modules/threads/runtime/runtimeThreads.svelte.ts` | session rows (live status) and actions |
 | `ui/src/modules/threads/runtime/runtimeView.svelte.ts` | an open thread's projection: live events, replay after a gap / reconnect (loads with the view) |
-| `ui/src/modules/threads/runtime/Runtime{Thread,WorkRow,ApprovalRow}.svelte` | timeline, work-log rows, inline approvals, composer with Stop and a queued follow-up |
-| `ui/e2e/desktop-threads-runtime.spec.ts` | E2E against `otto-fake-codex` (global-setup's codex shim execs it for `app-server`) |
+| `ui/src/modules/threads/runtime/Runtime{Thread,WorkRow,ApprovalRow}.svelte` | timeline, work-log rows, inline approvals, composer with Stop (sending to a closed thread reopens it) |
+| `ui/src/modules/threads/runtime/Runtime{SubagentCard,QueueBar,TurnStatus}.svelte` | the subagent card; background work, the queue (Steer / Send now / Edit / Remove) and Closed · Reopen; the turn's status line (working, own turn, stopped, stalled, partly done) |
+| `ui/src/modules/threads/runtime/runtimeMenu.ts` | the thread menu: Reopen, Close, Delete (confirmed unless "Closing a session tab" is Always delete) |
+| `ui/e2e/desktop-threads-runtime.spec.ts` | E2E against `otto-fake-codex` and `otto-fake-claude` (global-setup's shims exec them for `app-server` / `--input-format stream-json`) |
 
 ## 9. Gaps and next steps
 
 - **Threads UI.** Runtime threads raise the shared "needs you" flag while
-  an approval waits, sit in History once closed (read-only, renamable),
+  an approval waits, sit in History once closed (renamable; opening or
+  messaging one reopens it),
   and take the view's slash commands (`/btw` side chat — itself a PTY
   thread — `/diff`, `/files`, `/terminal`, `/new`, `/fork`, `/review`);
   any other `/command` goes to the agent as typed (T3 Code's provider
@@ -649,9 +718,13 @@ in which headless agy denies what it would have asked about.
 - **`ottod` teardown** calling `AgentRuntime::shutdown()`, and eviction of
   idle live entries.
 - **Features T3 Code has that Otto does not yet:** restart continuation,
-  steering a running turn
-  (`turn/steer`), Codex `thread/unarchive`, Claude thinking summaries and
-  the subagent tree, ACP v2.
+  steering for Codex (`turn/steer`) and ACP, Codex `thread/unarchive`,
+  Claude thinking summaries, subagent / background tracking for the other
+  providers, ACP v2.
+- **Known limits.** A Claude resume key is persisted once the CLI answers its
+  handshake, so a daemon that dies before that loses the resume (the next
+  spawn starts fresh). A subagent's streamed text is not shown live (its
+  complete messages are).
 - **Named provider accounts and network profiles** (refused today).
 - ~~Otto MCP tools for structured sessions~~ — done: `prepare_runtime_spawn`
   mints the per-session `otto` credential and applies the workspace's enabled
