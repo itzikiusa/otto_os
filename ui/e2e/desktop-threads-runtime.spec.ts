@@ -168,7 +168,8 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   await expect(page.locator('[data-testid^="thread-terminal-drawer-"]')).toBeVisible({ timeout: 15_000 });
   await page.screenshot({ path: info.outputPath('runtime-terminal-light.png'), animations: 'disabled' });
 
-  // Rename, then close: the thread moves to History and opens read-only.
+  // Rename, then close: the thread moves to History; opening it from
+  // History reopens it (its agent resumes the conversation).
   await page.getByTestId('threads-thread-menu').click();
   await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Rename…' }).click();
   await page.locator('[role="dialog"] input').first().fill('Renamed runtime');
@@ -180,7 +181,8 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   const sidebar = page.getByTestId('threads-sidebar');
   await sidebar.locator('.th-history').click();
   await sidebar.locator('[data-testid^="thread-history-"]', { hasText: 'Renamed runtime' }).getByRole('button').first().click();
-  await expect(thread.getByTestId('runtime-composer')).toBeDisabled({ timeout: 15_000 });
+  await expect(thread.getByTestId('runtime-closed')).toHaveCount(0, { timeout: 15_000 });
+  await expect(thread.getByTestId('runtime-composer')).toBeEnabled();
   await expect(thread.getByText('echo: hello runtime')).toBeVisible();
 
   // A runtime approval raises the Threads "needs you" badge while you're
@@ -202,6 +204,90 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(thread.getByTestId('runtime-composer')).toBeVisible();
   await expectNoHorizontalOverflow(page);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A Claude thread (otto-fake-claude, via global-setup's claude shim): work it
+// starts in the background keeps it busy past its turn and the agent goes on
+// by itself when that work ends; a background subagent is a card with its
+// own activity; a closed thread reopens when you send to it; Delete honours
+// Settings › "Closing a session tab" = Always delete.
+// ─────────────────────────────────────────────────────────────────────────────
+test('a Claude thread: background work, its own turn, a subagent card, reopen and delete', async ({ page }, info) => {
+  const created = await ctx.post(`${base}/api/v1/workspaces/${wsId}/runtime-sessions`, {
+    data: { provider: 'claude', cwd: fixtureDir, title: 'Claude background' },
+  });
+  expect(created.ok(), await created.text()).toBeTruthy();
+  const id = (await created.json()).id as string;
+  await page.goto(`/#/threads/${id}`);
+  const thread = page.getByTestId(`runtime-thread-${id}`);
+  await expect(thread).toBeVisible({ timeout: 30_000 });
+  const composer = thread.getByTestId('runtime-composer');
+
+  // The turn ends with a background command still running: the thread says
+  // so, then continues on its own when the command finishes.
+  await composer.fill('bg 2');
+  await composer.press('Enter');
+  await expect(thread.getByText('Waiting for it.')).toBeVisible({ timeout: 15_000 });
+  const bg = thread.getByTestId('runtime-background');
+  await expect(bg).toContainText('sleep 300');
+  await page.screenshot({ path: info.outputPath('runtime-background-light.png'), animations: 'disabled' });
+  await expect(thread.getByText('Background done: ok')).toBeVisible({ timeout: 20_000 });
+  await expect(bg).toHaveCount(0);
+  await expect(thread.getByText('Background command finished: sleep 300')).toBeVisible();
+
+  // A background subagent: a card that runs past its turn, its activity nested.
+  await composer.fill('agent 2');
+  await composer.press('Enter');
+  const card = thread.locator('[data-testid^="runtime-subagent-"]');
+  await expect(card).toContainText('PR sweep', { timeout: 15_000 });
+  await expect(thread.getByText("I'm waiting for the PR sweep to come back.")).toBeVisible();
+  await expect(card).toHaveAttribute('data-status', 'running');
+  await expect(card).toContainText('Background');
+  await card.getByRole('button', { name: /PR sweep/ }).click();
+  await expect(card).toContainText('Looking at PRs');
+  await expectNoHorizontalOverflow(page);
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.screenshot({ path: info.outputPath('runtime-subagent-dark.png'), animations: 'disabled' });
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.screenshot({ path: info.outputPath('runtime-subagent-light.png'), animations: 'disabled' });
+  await expect(card).toHaveAttribute('data-status', 'completed', { timeout: 20_000 });
+  await expect(card).toContainText('Found 2 open PRs');
+  await expect(thread.getByText('Agent reported')).toBeVisible({ timeout: 15_000 });
+
+  // Close, then just send: the thread reopens and the agent answers.
+  await page.getByTestId('threads-thread-menu').click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Close thread…' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Close thread', exact: true }).click();
+  await expect(thread).toHaveCount(0); // its pane closes; the link still shows it
+  await page.goto(`/#/threads/${id}`);
+  await expect(thread.getByTestId('runtime-closed')).toBeVisible({ timeout: 15_000 });
+  await expect(composer).toBeEnabled();
+  await page.getByTestId('threads-thread-menu').click();
+  await expect(page.locator('.ctx-menu').getByRole('menuitem', { name: 'Reopen thread' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await composer.fill('after reopening');
+  await composer.press('Enter');
+  await expect(thread.getByText('echo: after reopening')).toBeVisible({ timeout: 20_000 });
+  await expect(thread.getByTestId('runtime-closed')).toHaveCount(0);
+
+  // Delete asks first …
+  await page.getByTestId('threads-thread-menu').click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete thread…' }).click();
+  const dlg = page.getByRole('dialog');
+  await expect(dlg).toContainText('Claude background');
+  await dlg.getByRole('button', { name: 'Cancel' }).click();
+  expect((await ctx.get(`${base}/api/v1/runtime-sessions/${id}`)).ok()).toBeTruthy();
+  // … unless closing a tab is set to "Always delete".
+  await page.evaluate(() => localStorage.setItem('otto_close_tab_pref', 'delete'));
+  await page.reload();
+  await expect(thread).toBeVisible({ timeout: 30_000 });
+  await page.getByTestId('threads-thread-menu').click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete thread…' }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect.poll(async () => (await ctx.get(`${base}/api/v1/runtime-sessions/${id}`)).status(), { timeout: 15_000 }).toBe(404);
+  await expect(thread).toHaveCount(0);
+  await page.evaluate(() => localStorage.removeItem('otto_close_tab_pref'));
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
