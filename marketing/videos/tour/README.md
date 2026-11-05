@@ -1,6 +1,6 @@
 # Otto product tour film
 
-One music-led film (2:20, 1920×1080, 30 fps, H.264 + AAC) that walks through
+One music-led film (2:30, 1920×1080, 30 fps, H.264 + AAC) that walks through
 every main area of the app, chaptered by sidebar section. The Help →
 Walkthroughs page plays it from `ui/src/lib/walkthroughs/film.json`.
 
@@ -20,6 +20,9 @@ scripts/timing.mjs        chapters.json → src/generated/timing.json + otto-tou
 scripts/soundtrack.mjs    the score + UI accents, arranged from timing.json → public/audio/
 scripts/capture.mjs       isolated daemon + demo DBs + seed + Playwright → public/capture/
 scripts/capture-rooms.mjs genuine two-person Rooms footage → public/capture/rooms/
+scripts/reuse-rooms.mjs   the same genuine Rooms clips, cut from the published (hash-checked) capture
+scripts/lib/demo-codex.mjs scripted `codex app-server` for Threads / Personal Agents on the structured runtime
+scripts/lib/stack.mjs     the isolated stack, incl. the fictional tailnet for Phone access
 scripts/lib/shots.mjs     the shot list (routes, clicks, stills, flow clips)
 scripts/render.mjs        Remotion render → loudnorm → poster → out/film.candidate.json
 scripts/validate.mjs      checks the candidate (media, chapters, captions, loudness, Rooms provenance)
@@ -37,11 +40,11 @@ and is arranged from the edit's music sections in `chapters.json`:
 |---|---|---|
 | Intro build | Meet Otto | The filter opens on a supersaw pad, the pluck arp comes in, then the kick from bar 3, a snare roll, a riser and half a beat of silence |
 | Drop / chorus | Home → Run with Otto | Four-on-the-floor kick, clap with a short room, swung 16th hats with open off-beats, pumping 8th bass, side-chained pad, arp and the lead hook. The last 4 bars are a post-chorus. |
-| Verse | Swarm, Workflows | Lighter hats, a syncopated bass, a darker pad and a prominent arp, with the hook's figure answered on the pluck |
+| Verse | Goal Loops, Workflows, Personal Agents | Lighter hats, a syncopated bass, a darker pad and a prominent arp, with the hook's figure answered on the pluck |
 | Chorus | Git → Design Hall | Riser and impact in, then the hook again |
 | Verse | Database, Connections | As the first verse |
 | Breakdown | Insights | Drums out, a resonant pad sweep, the hook on the pluck, then a 2-bar riser and snare roll |
-| Final chorus | Rooms | Full energy, with the hook harmonised a third below |
+| Final chorus | Rooms, Phone access | Full energy, with the hook harmonised a third below |
 | Outro | Everywhere | vi–IV–V resolves to I under the logo lockup, followed by a tonic hit and the hook's tag. The track then rings out. |
 
 Sound design (all in code):
@@ -128,6 +131,9 @@ OTTO_E2E_BIN=/path/to/ottod OTTO_E2E_PORT=7831 OTTO_E2E_PW_PORT=5231 \
 OTTO_TOUR_WHISPER=/path/to/whisper-cli OTTO_TOUR_WHISPER_MODEL=/path/to/ggml-small.bin \
   nice -n 10 node scripts/capture-rooms.mjs
 #   (or: cp -R <checkout>/marketing/videos/tour/public/capture/rooms public/capture/)
+#   (or, with no raw clips anywhere: node scripts/reuse-rooms.mjs — cuts them out of
+#    the published otto-tour-rooms-20260928.mp4, refusing any file whose SHA-256
+#    differs from script/rooms-validation.md; validate.mjs checks that hash)
 
 # 3. Timeline and score (seconds, light).
 node scripts/timing.mjs
@@ -193,6 +199,20 @@ basename.
   - a montage `card`
   - an optional `transition` (`whip`, `push` or `wipe`)
 - **After a UI change.** Re-run the capture, then render.
+
+## Runtime threads and Phone access: what is staged
+
+- **Threads and Personal Agents** run on the real structured runtime, the real
+  Codex driver and the production UI. Only the agent process is a stand-in:
+  `scripts/lib/demo-codex.mjs` speaks the `codex app-server` wire protocol and
+  streams scripted turns (plan, commands, a file change, a test run, an inline
+  approval, an `otto.slack_digest` tool call). No account or network is used.
+- **Phone access** pairs through the daemon's real pairing routes and its real
+  tailnet-only peer check. The tailnet is fictional: `OTTO_TAILSCALE_CLI`
+  points the daemon at a scripted CLI (`acme-mbp.tail0demo.ts.net`, 100.101.10.x),
+  and the phone browser reaches the UI through a local proxy that adds what
+  `tailscale serve` adds (the ts.net Host and a 100.x `X-Forwarded-For`). The
+  real tailnet, hostname and device tokens never appear on screen.
 
 ## Rooms footage: what is genuine
 

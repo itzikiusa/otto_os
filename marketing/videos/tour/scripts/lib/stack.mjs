@@ -18,6 +18,15 @@ export const UI_PORT = process.env.OTTO_E2E_PW_PORT ?? '5211';
 export const BASE = `http://127.0.0.1:${PORT}`;
 export const API = `${BASE}/api/v1`;
 export const UI = `http://localhost:${UI_PORT}`;
+// Phone access in the film: a FICTIONAL tailnet. The daemon's Tailscale CLI is
+// a scripted stand-in (OTTO_TAILSCALE_CLI) and the phone reaches the UI
+// through TAILNET_PORT, a local proxy that adds what `tailscale serve` adds
+// (the ts.net Host, a 100.x X-Forwarded-For), so pairing takes the daemon's
+// real tailnet-only path without the real tailnet, hostname or tokens.
+export const TAILNET_HOST = 'acme-mbp.tail0demo.ts.net';
+export const TAILNET_PHONE_IP = '100.101.10.21';
+export const TAILNET_PORT = String(Number(UI_PORT) + 1);
+export const TAILNET_UI = `http://${TAILNET_HOST}:${TAILNET_PORT}`;
 const PASSWORD = 'otto-tour-password';
 
 const MIME = {
@@ -50,7 +59,7 @@ function listFiles(dir, prefix = '') {
   return out;
 }
 
-function serveStatic(dist) {
+function serveStatic(dist, { port = UI_PORT, forwardedFor = null } = {}) {
   // The build is listed once up front and requests only ever pick from that
   // list, so a request path never becomes a filesystem path. Unknown paths
   // fall back to index.html (SPA routing).
@@ -60,7 +69,8 @@ function serveStatic(dist) {
     // Room guests use same-origin HTTP + WebSocket APIs. Forward to the
     // isolated daemon rather than substituting responses or events.
     if (/^\/(?:api|ws)\//.test(req.url ?? '')) {
-      const upstream = request({hostname: '127.0.0.1', port: Number(PORT), path: req.url, method: req.method, headers: req.headers}, response => {
+      const headers = forwardedFor ? { ...req.headers, 'x-forwarded-for': forwardedFor } : req.headers;
+      const upstream = request({hostname: '127.0.0.1', port: Number(PORT), path: req.url, method: req.method, headers}, response => {
         res.writeHead(response.statusCode ?? 502, response.headers); response.pipe(res);
       });
       upstream.on('error', () => { if (!res.headersSent) res.writeHead(502); res.end(); });
@@ -77,7 +87,8 @@ function serveStatic(dist) {
   server.on('upgrade', (req, socket, head) => {
     if (!(req.url ?? '').startsWith('/ws/')) { socket.destroy(); return; }
     const upstream = connect(Number(PORT), '127.0.0.1', () => {
-      upstream.write(`${req.method} ${req.url} HTTP/${req.httpVersion}\r\n${req.rawHeaders.reduce((all, value, i, pairs) => i % 2 ? all : `${all}${value}: ${pairs[i + 1]}\r\n`, '')}\r\n`);
+      const raw = req.rawHeaders.reduce((all, value, i, pairs) => i % 2 || (forwardedFor && /^x-forwarded-for$/i.test(value)) ? all : `${all}${value}: ${pairs[i + 1]}\r\n`, '');
+      upstream.write(`${req.method} ${req.url} HTTP/${req.httpVersion}\r\n${raw}${forwardedFor ? `X-Forwarded-For: ${forwardedFor}\r\n` : ''}\r\n`);
       if (head.length) upstream.write(head); socket.pipe(upstream); upstream.pipe(socket);
     });
     upstream.on('error', () => socket.destroy()); socket.on('error', () => upstream.destroy());
@@ -85,7 +96,7 @@ function serveStatic(dist) {
   });
   return new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(Number(UI_PORT), '127.0.0.1', () => resolve(server));
+    server.listen(Number(port), '127.0.0.1', () => resolve(server));
   });
 }
 
@@ -134,7 +145,7 @@ function killClickhouseFor(dataDir) {
 export async function startStack({ bin, dist, log, prepare }) {
   if (!existsSync(bin)) throw new Error(`[tour] ottod binary not found: ${bin} (set OTTO_E2E_BIN)`);
   if (!existsSync(join(dist, 'index.html'))) throw new Error(`[tour] UI build missing: ${dist}`);
-  for (const p of [PORT, UI_PORT]) {
+  for (const p of [PORT, UI_PORT, TAILNET_PORT]) {
     try {
       const busy = execSync(`lsof -nP -iTCP:${p} -sTCP:LISTEN -t`, { encoding: 'utf8' }).trim();
       if (busy) throw new Error(`[tour] port ${p} is already in use (pid ${busy}) — refusing to start`);
@@ -150,11 +161,27 @@ export async function startStack({ bin, dist, log, prepare }) {
   // CLI on their account.
   const fakeBin = join(rootDir, 'fake-agent-bin');
   mkdirSync(fakeBin, { recursive: true });
+  // A structured-runtime codex (`codex … app-server`: Threads, Personal
+  // Agents) gets the scripted demo app-server instead (lib/demo-codex.mjs).
+  const demoCodex = join(dirname(fileURLToPath(import.meta.url)), 'demo-codex.mjs');
   for (const cli of ['claude', 'codex', 'agy', 'gemini', 'grok']) {
     const shim = join(fakeBin, cli);
-    writeFileSync(shim, `#!/bin/sh\nexec "${join(fakeBin, 'agent-sim')}" ${cli}\n`);
+    const runtime = cli === 'codex' ? `for a in "$@"; do [ "$a" = app-server ] && exec "${process.execPath}" "${demoCodex}"; done\n` : '';
+    writeFileSync(shim, `#!/bin/sh\n${runtime}exec "${join(fakeBin, 'agent-sim')}" ${cli}\n`);
     chmodSync(shim, 0o755);
   }
+  // The scripted Tailscale CLI: a signed-in fictional tailnet whose HTTPS
+  // serve already points at this daemon; serve on/off are accepted no-ops.
+  const tsStatus = JSON.stringify({
+    BackendState: 'Running',
+    CurrentTailnet: { Name: 'maya@acme.example', MagicDNSEnabled: true },
+    Self: { DNSName: `${TAILNET_HOST}.`, TailscaleIPs: ['100.101.10.20'] },
+    Peer: { p1: { DNSName: 'maya-iphone.tail0demo.ts.net.', HostName: 'maya-iphone', OS: 'iOS', Online: true, TailscaleIPs: [TAILNET_PHONE_IP] } },
+  });
+  const tsServe = JSON.stringify({ TCP: { 443: { HTTPS: true } }, Web: { [`${TAILNET_HOST}:443`]: { Handlers: { '/': { Proxy: `http://127.0.0.1:${PORT}` } } } } });
+  const tailscale = join(fakeBin, 'tailscale-demo');
+  writeFileSync(tailscale, `#!/bin/sh\ncase "$1 $2" in\n  "status --json") echo '${tsStatus}' ;;\n  "serve status") echo '${tsServe}' ;;\n  *) exit 0 ;;\nesac\n`);
+  chmodSync(tailscale, 0o755);
   // A scripted "agent": prints a believable transcript so terminal tiles look
   // alive, then echoes input. Pure shell — nothing leaves the machine.
   copyFileSync(join(dirname(fileURLToPath(import.meta.url)), 'agent-sim.sh'), join(fakeBin, 'agent-sim'));
@@ -195,6 +222,7 @@ export async function startStack({ bin, dist, log, prepare }) {
       PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
       OTTO_SELF_IMPROVE: '0',
       OTTO_CLI_UPDATE: '0',
+      OTTO_TAILSCALE_CLI: tailscale,
       OTTO_E2E: '1',
       CLAUDE_BIN: '/nonexistent/otto-tour-no-claude',
       OTTO_PLUGINS_HOME: join(dataDir, 'plugins-home'),
@@ -205,6 +233,7 @@ export async function startStack({ bin, dist, log, prepare }) {
     stdio: ['ignore', logFd, logFd],
   });
   const server = await serveStatic(dist);
+  const tailnet = await serveStatic(dist, { port: TAILNET_PORT, forwardedFor: TAILNET_PHONE_IP });
   await waitHealthy();
   const onb = await fetch(`${API}/onboarding/root`, {
     method: 'POST',
@@ -222,6 +251,7 @@ export async function startStack({ bin, dist, log, prepare }) {
     }
     killClickhouseFor(dataDir);
     await new Promise((r) => server.close(() => r()));
+    await new Promise((r) => tailnet.close(() => r()));
     try {
       rmSync(rootDir, { recursive: true, force: true });
     } catch {

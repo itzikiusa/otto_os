@@ -1,6 +1,6 @@
 {
   "title": "Otto — product tour",
-  "edition": "20261031",
+  "edition": "20261105",
   "bpm": 120,
   "fps": 30,
   "chapters": [
@@ -10,7 +10,10 @@
       "title": "Meet Otto",
       "bars": 4,
       "music": "intro",
-      "captions": ["Your agents. Your repos. Your data. Your infrastructure.", "Otto: every coding agent, one native Mac app."]
+      "captions": [
+        "Your agents. Your repos. Your data. Your infrastructure.",
+        "Otto: every coding agent, one native Mac app."
+      ]
     },
     {
       "id": "home",
@@ -18,28 +21,40 @@
       "title": "Home",
       "bars": 3,
       "music": "chorus",
-      "captions": ["Home shows live sessions, dashboards, usage and findings.", "Light, dark and right-to-left, one design system."]
+      "captions": [
+        "Home shows live sessions, dashboards, usage and findings.",
+        "Light, dark and right-to-left, one design system."
+      ]
     },
     {
       "id": "command-bar",
       "section": "command-bar",
       "title": "The command bar",
       "bars": 4,
-      "captions": ["Press ⌘K, type or speak. Otto runs it or answers.", "⌥Space calls the bar from anywhere on your Mac."]
+      "captions": [
+        "Press ⌘K, type or speak. Otto runs it or answers.",
+        "⌥Space calls the bar from anywhere on your Mac."
+      ]
     },
     {
       "id": "agents",
       "section": "agents",
       "title": "Agents",
       "bars": 5,
-      "captions": ["Claude Code, Codex, Antigravity and shells run as real sessions.", "Tile up to 15 live terminals, or broadcast one prompt to many."]
+      "captions": [
+        "Claude Code, Codex, Antigravity and shells run as real sessions.",
+        "Tile up to 15 live terminals, or broadcast one prompt to many."
+      ]
     },
     {
       "id": "threads",
       "section": "threads",
       "title": "Threads",
-      "bars": 5,
-      "captions": ["Threads gives your agents a calm, inbox-style workspace.", "Split live conversations side-by-side, inspect files and diffs, and relay between peers."]
+      "bars": 6,
+      "captions": [
+        "Threads run your agents on the structured runtime: plans, commands and diffs stream live.",
+        "Approve right where the agent asks, and pick the thread up on your phone."
+      ]
     },
     {
       "id": "loops",
@@ -47,14 +62,30 @@
       "title": "Goal Loops",
       "bars": 3,
       "music": "verse",
-      "captions": ["Give a goal and acceptance checks.", "Goal loops plan, execute and evaluate until every check passes."]
+      "captions": [
+        "Give a goal and acceptance checks.",
+        "Goal loops plan, execute and evaluate until every check passes."
+      ]
     },
     {
       "id": "workflows",
       "section": "workflows",
       "title": "Workflows and Scheduled Tasks",
       "bars": 4,
-      "captions": ["Workflows chain agents, approvals and tools.", "Scheduled tasks and personal agents run on one unified hub."]
+      "captions": [
+        "Workflows chain agents, approvals and tools.",
+        "Scheduled tasks run agents on a cadence and report back."
+      ]
+    },
+    {
+      "id": "personal-agents",
+      "section": "personal-agents",
+      "title": "Personal Agents",
+      "bars": 4,
+      "captions": [
+        "A personal agent's Chat is a thread on the same runtime, with its tools.",
+        "A main agent delegates to its team and gets their reports back."
+      ]
     },
     {
       "id": "git",
@@ -62,21 +93,30 @@
       "title": "Git and AI review",
       "bars": 4,
       "music": "chorus",
-      "captions": ["A commit graph with your work in progress and pull requests.", "Multi-agent code review turns findings into tracked fixes."]
+      "captions": [
+        "A commit graph with your work in progress and pull requests.",
+        "Multi-agent code review turns findings into tracked fixes."
+      ]
     },
     {
       "id": "product",
       "section": "product",
       "title": "Product and Design Hall",
       "bars": 5,
-      "captions": ["Product unites stories, designs and learnings in one hub.", "Frames, 3D, sites and brand kits live in one versioned library."]
+      "captions": [
+        "Product unites stories, designs and learnings in one hub.",
+        "Frames, 3D, sites and brand kits live in one versioned library."
+      ]
     },
     {
       "id": "vault",
       "section": "vault",
       "title": "Vault and Skills Lab",
       "bars": 3,
-      "captions": ["The Vault links your markdown docs into a live knowledge graph.", "Skills Lab reviews, benchmarks and sharpens your agent skills."]
+      "captions": [
+        "The Vault links your markdown docs into a live knowledge graph.",
+        "Skills Lab reviews, benchmarks and sharpens your agent skills."
+      ]
     },
     {
       "id": "database",
@@ -84,14 +124,20 @@
       "title": "Database Explorer",
       "bars": 4,
       "music": "verse",
-      "captions": ["MySQL, Postgres, MongoDB, Redis and ClickHouse.", "Build a query visually and watch agent MCP queries live."]
+      "captions": [
+        "MySQL, Postgres, MongoDB, Redis and ClickHouse.",
+        "Build a query visually and watch agent MCP queries live."
+      ]
     },
     {
       "id": "infra",
       "section": "connections",
       "title": "Connections and cloud",
       "bars": 4,
-      "captions": ["SSH, Kafka, AWS, Kubernetes, APIs and the web.", "Every agent tool call goes through the MCP control plane."]
+      "captions": [
+        "SSH, Kafka, AWS, Kubernetes, APIs and the web.",
+        "Every agent tool call goes through the MCP control plane."
+      ]
     },
     {
       "id": "insights",
@@ -99,7 +145,10 @@
       "title": "Insights and Usage",
       "bars": 4,
       "music": "breakdown",
-      "captions": ["Insights turns your activity into key findings.", "Usage tracks tokens, cost and machine load."]
+      "captions": [
+        "Insights turns your activity into key findings.",
+        "Usage tracks tokens, cost and machine load."
+      ]
     },
     {
       "id": "rooms",
@@ -107,7 +156,13 @@
       "title": "Rooms · collaborate and recap",
       "bars": 8,
       "music": "final",
-      "captionBeats": [6, 6, 6, 6, 8],
+      "captionBeats": [
+        6,
+        6,
+        6,
+        6,
+        8
+      ],
       "captions": [
         "Start a room from a live session. The host admits who joins.",
         "Share a screen and talk it through.",
@@ -117,12 +172,25 @@
       ]
     },
     {
-      "id": "outro",
+      "id": "phone",
       "section": "phone-and-remote",
+      "title": "Phone access",
+      "bars": 4,
+      "captions": [
+        "Phone access serves Otto to your tailnet only, through Tailscale.",
+        "Scan the code, approve the match on your Mac, and your thread continues on the phone."
+      ]
+    },
+    {
+      "id": "outro",
+      "section": "channels",
       "title": "Everywhere",
       "bars": 6,
       "music": "outro",
-      "captions": ["Snip the screen, bridge Slack and Telegram, reach Otto from your phone.", "Otto. All your agents, one home."]
+      "captions": [
+        "Snip the screen, bridge Slack and Telegram, and take Otto with you.",
+        "Otto. All your agents, one home."
+      ]
     }
   ]
 }

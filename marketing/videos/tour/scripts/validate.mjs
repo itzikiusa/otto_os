@@ -64,10 +64,18 @@ assert(peak <= -1, `true peak ${peak} dBFS, expected ≤ −1`);
 
 // Rooms: the clips are the genuine capture (real recap evidence, no runtime errors).
 const rooms = join(tour, 'public/capture/rooms');
-const evidence = json(join(rooms, 'recap-evidence.json'));
-assert.equal(evidence.metadata.summary_status, 'ready');
-assert(evidence.draft.decisions.length && evidence.draft.actions.length);
-assert.deepEqual(json(join(rooms, 'provenance.json')).runtimeErrors, []);
+const provenance = json(join(rooms, 'provenance.json'));
+assert.deepEqual(provenance.runtimeErrors, []);
+if (provenance.reused) {
+  // Cut from the published capture (scripts/reuse-rooms.mjs): it must be the
+  // exact movie whose recap evidence rooms-validation.md records.
+  const recorded = readFileSync(join(tour, 'script/rooms-validation.md'), 'utf8').match(/^SHA-256: `([0-9a-f]{64})`/m)?.[1];
+  assert.equal(provenance.sha256, recorded, 'reused Rooms footage is not the validated capture');
+} else {
+  const evidence = json(join(rooms, 'recap-evidence.json'));
+  assert.equal(evidence.metadata.summary_status, 'ready');
+  assert(evidence.draft.decisions.length && evidence.draft.actions.length);
+}
 
 const mb = (statSync(join(out, film.file)).size / 1048576).toFixed(1);
 console.log(`PASS: ${film.file} ${film.duration.toFixed(2)}s, ${mb} MiB, 1080p30 H.264/AAC, ${film.chapters.length} chapters on the bar grid, ${stamps.length} captions, ${lufs} LUFS / ${peak} dBTP, genuine Rooms evidence.`);

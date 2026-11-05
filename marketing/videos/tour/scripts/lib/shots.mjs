@@ -3,7 +3,8 @@
 // scene specs (src/scenes.ts) reference these file names.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { UI, API } from './stack.mjs';
+import { devices } from 'playwright';
+import { UI, API, TAILNET_HOST, TAILNET_UI } from './stack.mjs';
 import { record } from './recorder.mjs';
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -273,6 +274,51 @@ export const SHOTS = {
       await rtlCtx.close();
     }
   },
+  // Threads on the structured runtime: a Codex thread (the capture's scripted
+  // app-server) streams its plan, a command, a file change and the test run,
+  // then asks inline before it opens a PR.
+  'threads-runtime': async (c) => {
+    const { context, page } = await open(c, 'threads', {
+      settle: 3500,
+      extra: [
+        { name: 'otto_rail_expanded', value: '0' },
+        { name: 'otto_threads_v1', value: JSON.stringify({ pinnedIds: [], paneIds: [], focusedSessionId: null, layoutMode: 'single', sidebarOpen: true, inspectorOpen: false }) },
+      ],
+    });
+    const stage = page.getByTestId('new-thread-stage');
+    await stage.waitFor({ timeout: 30_000 });
+    const rec = await record(page);
+    await wait(700);
+    await glide(page, stage.getByTestId('picker-agent'));
+    await wait(700);
+    await glide(page, page.getByTestId('model-picker').getByTestId('model-picker-provider-codex'));
+    await wait(500);
+    await page.keyboard.press('Escape');
+    await wait(400);
+    await stage.getByTestId('new-thread-input').click();
+    await typeSlow(page, 'Add a regression test for the checkout rate limit and run it', 45);
+    await wait(500);
+    await glide(page, stage.getByTestId('new-thread-send-btn'));
+    const thread = page.locator('[data-testid^="runtime-thread-"]');
+    await thread.waitFor({ timeout: 30_000 });
+    await thread.getByText('Want me to open a draft PR?').waitFor({ timeout: 40_000 });
+    await wait(1500);
+    await still(page, c, 'threads-runtime');
+    const composer = thread.getByTestId('runtime-composer');
+    await composer.click();
+    await typeSlow(page, 'Yes, open a draft PR', 50);
+    await page.keyboard.press('Enter');
+    const approval = thread.locator('[data-testid^="runtime-approval-"]');
+    await approval.waitFor({ timeout: 20_000 });
+    await wait(1400);
+    await still(page, c, 'threads-approval');
+    await glide(page, approval.getByRole('button', { name: 'Approve', exact: true }));
+    await thread.getByText('Draft PR', { exact: false }).last().waitFor({ timeout: 20_000 });
+    await wait(2200);
+    await still(page, c, 'threads-pr');
+    await rec.stop(join(c.out, 'threads-runtime.mp4'));
+    await context.close();
+  },
   // ── Automate ──────────────────────────────────────────────────────────────
   loops: async (c) => {
     const { context, page } = await open(c, 'loops', { settle: 3500 });
@@ -294,6 +340,25 @@ export const SHOTS = {
     await context.close();
   },
   'personal-agents': route('personal-agents', 'personal-agents', 3500),
+  // A personal agent's Chat tab is a Threads conversation on the same runtime.
+  'pa-chat': async (c) => {
+    const id = c.meta.ids.personalAgent;
+    if (!id) return console.log('  (no personal agent)');
+    const { context, page } = await open(c, `personal-agents/${id}/chat`, { settle: 4500 });
+    const composer = page.getByTestId('runtime-composer').first();
+    await composer.waitFor({ timeout: 30_000 });
+    await still(page, c, 'pa-chat-empty');
+    const rec = await record(page);
+    await wait(700);
+    await composer.click();
+    await typeSlow(page, 'What needs me today?', 60);
+    await page.keyboard.press('Enter');
+    await page.getByText('Shall I post this', { exact: false }).waitFor({ timeout: 40_000 });
+    await wait(2000);
+    await still(page, c, 'pa-chat');
+    await rec.stop(join(c.out, 'pa-chat.mp4'));
+    await context.close();
+  },
   // ── Build ─────────────────────────────────────────────────────────────────
   git: async (c) => {
     const { context, page } = await open(c, `git/${c.meta.ids.repo}/graph`, { settle: 4500 });
@@ -478,6 +543,65 @@ export const SHOTS = {
     await wait(800);
     await still(page, c, 'snip');
     await context.close();
+  },
+  // Phone access over a FICTIONAL tailnet (stack.mjs: scripted Tailscale CLI +
+  // the serve-like proxy): "Continue on phone" from the runtime thread → pair
+  // & open → the phone claims the code → approve on the Mac → the phone opens
+  // that same thread, signed in. Real pairing routes, no real tailnet.
+  'phone-pair': async (c) => {
+    const threads = (await api(c, 'GET', `/workspaces/${c.meta.ids.ws}/runtime-sessions`)) ?? [];
+    const tid = threads.find((t) => (t.title ?? '').startsWith('Add a regression test'))?.id;
+    if (!tid) return console.log('  (no runtime thread: run threads-runtime first)');
+    {
+      const { context, page } = await open(c, 'settings/phone-access', { settle: 3500 });
+      await still(page, c, 'phone-settings');
+      await context.close();
+    }
+    const { context, page } = await open(c, `threads/${tid}`, {
+      settle: 4000,
+      extra: [{ name: 'otto_rail_expanded', value: '0' }],
+    });
+    const phoneBrowser = await c.browser.browserType().launch({ args: [`--host-resolver-rules=MAP ${TAILNET_HOST} 127.0.0.1`, '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
+    try {
+      const rec = await record(page);
+      await wait(700);
+      // No phone is paired yet, so Continue on phone starts a pairing whose
+      // `next` is this thread.
+      const created = page.waitForResponse((r) => r.url().endsWith('/phone/pairings') && r.request().method() === 'POST', { timeout: 20_000 });
+      await glide(page, page.getByRole('button', { name: /^Continue on phone/ }).first());
+      const pairing = await (await created).json();
+      await page.locator('canvas.ph-qr').waitFor({ timeout: 15_000 });
+      await wait(1600);
+      await still(page, c, 'phone-qr');
+      // The phone scans it: the same link, through the tailnet.
+      const phone = await phoneBrowser.newContext({ ...devices['iPhone 15 Pro'], colorScheme: 'dark' });
+      await phone.addInitScript(() => {
+        const css = '::-webkit-scrollbar{width:0!important;height:0!important}';
+        addEventListener('DOMContentLoaded', () => { const st = document.createElement('style'); st.textContent = css; document.head.appendChild(st); });
+      });
+      const ph = await phone.newPage();
+      ph.on('pageerror', (e) => console.log(`  [phone pageerror] ${e.message.slice(0, 160)}`));
+      await ph.goto(`${TAILNET_UI}/${new URL(pairing.url).hash}`);
+      await ph.getByText(/\d{3}\s?\d{3}/).first().waitFor({ timeout: 30_000 }).catch(() => {});
+      await wait(1800);
+      await ph.screenshot({ path: join(c.out, 'phone-pair-code.jpg'), type: 'jpeg', quality: 90 });
+      console.log('  still phone-pair-code.jpg');
+      await page.getByRole('button', { name: 'Approve', exact: true }).waitFor({ timeout: 20_000 });
+      await wait(1500);
+      await still(page, c, 'phone-approve');
+      await glide(page, page.getByRole('button', { name: 'Approve', exact: true }));
+      await wait(2500);
+      await rec.stop(join(c.out, 'phone-pair.mp4'));
+      await ph.waitForURL(/#\/threads\//, { timeout: 30_000 }).catch(() => {});
+      await ph.getByText('Draft PR', { exact: false }).last().waitFor({ timeout: 30_000 }).catch(() => {});
+      await wait(3000);
+      await ph.screenshot({ path: join(c.out, 'phone-thread.jpg'), type: 'jpeg', quality: 90 });
+      console.log('  still phone-thread.jpg');
+      await phone.close();
+    } finally {
+      await phoneBrowser.close();
+      await context.close();
+    }
   },
   phone: async (c) => {
     const { context, page } = await open(c, 'home', { settle: 6000, viewport: { width: 390, height: 844 }, dpr: 3, mobile: true });

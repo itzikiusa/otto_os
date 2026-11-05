@@ -308,12 +308,14 @@ export async function seedAll(api, { dataDir, home, fakeBin, repoRoot, docker })
   }
 
   // ── Personal agents ──────────────────────────────────────────────────────
-  for (const [name, avatar, soul, at, directive] of [
-    ['Daily Recap', '🗞️', 'You are a crisp chief of staff. Summaries fit on one screen.', '08:30', 'Summarise yesterday’s merged PRs and open incidents.'],
-    ['Inbox Triage', '📬', 'You sort requests by urgency and draft short replies.', '09:15', 'Triage new support escalations.'],
-    ['Release Scout', '🚀', 'You watch release branches and flag risky changes early.', '17:00', 'List risky changes on the release branch.'],
+  // The first one runs on Codex, so its Chat tab is a structured-runtime
+  // thread (the capture's scripted app-server, lib/demo-codex.mjs).
+  for (const [name, avatar, soul, at, directive, provider] of [
+    ['Morning Brief', '🗞️', 'You are a crisp chief of staff. Summaries fit on one screen.', '07:00', 'Summarise my Slack mentions, DMs, unanswered threads and action items.', 'codex'],
+    ['Inbox Triage', '📬', 'You sort requests by urgency and draft short replies.', '09:15', 'Triage new support escalations.', 'claude'],
+    ['Release Scout', '🚀', 'You watch release branches and flag risky changes early.', '17:00', 'List risky changes on the release branch.', 'claude'],
   ]) {
-    const pa = await api.try('POST', `${W}/personal-agents`, { name, avatar, soul_md: soul, provider: 'claude', model: null, cwd: code, browser: false, delivery: { type: 'none' }, enabled: true });
+    const pa = await api.try('POST', `${W}/personal-agents`, { name, avatar, soul_md: soul, provider, model: null, cwd: code, browser: false, delivery: { type: 'none' }, enabled: true });
     if (pa?.id) {
       ids.personalAgent ??= pa.id;
       await api.try('POST', `/personal-agents/${pa.id}/schedules`, { schedule: { cadence: 'daily', at }, timezone: 'Europe/London', directive, enabled: true });
