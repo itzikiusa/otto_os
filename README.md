@@ -7,8 +7,41 @@ multi-agent code review, Jira/Confluence product workflows, SSH/database
 connections, an HTTP API client, real token-usage tracking, and Slack/Telegram
 bridges so an agent can work a ticket from a chat thread.
 
-**Version 0.2** · macOS (Apple Silicon and Intel) · actively developed, so
+**Version 0.2.1** · macOS (Apple Silicon and Intel) · actively developed, so
 expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
+
+🎬 **[Watch the 2:30 product tour](https://github.com/itzikiusa/otto_os/releases/download/v0.2.1/otto-tour-20261105.mp4)**
+(also in the app under **Help → Walkthroughs**).
+
+### What's new in 0.2.1
+
+- **Threads on structured agent protocols.** Codex, Claude, Antigravity, pi and
+  opencode run as structured sessions instead of terminals: plans, commands,
+  file edits and test runs stream into the thread, approvals appear inline
+  where the agent asks, and threads can open, message and close **linked
+  threads**. Thread agents get the Otto MCP tools, can make changes, and can
+  drive the UI once you allow it.
+- **Personal Agents on Threads.** An agent's runs and its **Chat** tab are
+  threads. A **main agent** creates and delegates to a team of agents and
+  collects their reports; agent-admin MCP tools set agents up with your
+  approval.
+- **Slack tools for agents.** `otto.slack_*` reads, searches and digests
+  Slack and posts as the bot or as you (one user token per Slack workspace,
+  opted in per agent), and can mark a message unread.
+- **Phone access over Tailscale.** Serves Otto to your own tailnet only (never
+  Funnel), pairs a phone with a QR code you approve on the Mac by a matching
+  code, lists and revokes paired phones, and adds **Continue on phone** to
+  every session and thread. See `docs/features/phone-access.md`.
+- **Database Explorer:** ordinary read-only SQL is no longer refused on
+  restricted connections (a refusal shows the reason), and a detected query
+  variable can be skipped. The session **Chat** view was removed; the
+  conversation view lives in Threads.
+
+| Threads — structured runtime | Threads — inline approval |
+| :---: | :---: |
+| ![A Codex thread streaming its plan, commands, edit and test run](docs/screenshots/threads-runtime.jpg) | ![An inline approval before the agent opens a PR](docs/screenshots/threads-approval.jpg) |
+| **Personal Agent — Chat on Threads** | **Phone access — Continue on phone** |
+| ![A personal agent's Chat tab with a Slack digest tool call](docs/screenshots/personal-agent-chat.jpg) | ![Approving a phone pairing by its matching code](docs/screenshots/phone-pair.jpg) |
 
 ### What's new in 0.2
 
@@ -53,8 +86,13 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 
 ## Features
 
-- **Threads (Experimental)** — an inbox-first conversational workspace (`#/threads`)
+- **Threads** — an inbox-first conversational workspace (`#/threads`)
   inspired by modern agentic IDEs while keeping Otto's multi-session power:
+  - **Structured runtime:** Codex, Claude, Antigravity, pi and opencode run
+    over their structured protocols (`otto-agent-protocol`), so plans,
+    commands, file changes and tool calls are real items, approvals answer
+    inline, and threads link into teams (`otto.thread_open` / `_message` /
+    `_close`). See `docs/features/threads-structured-runtime.md`.
   - **Inbox & project rail:** `Pinned` threads, `Active` ("needs you" / running)
     threads, `Projects` grouped by workspace/repo with `delegated_by` sub-worker
     nesting and branch chips, and `History`.
@@ -236,7 +274,10 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   Admin), per-workspace membership (grant one account several workspaces from
   a single **By user** screen), per-session isolation, an admin overview +
   audited impersonation, and **session sharing** via scoped, expiring,
-  revocable links gated by an email-OTP access code. Optional **remote/mobile
+  revocable links gated by an email-OTP access code. **Phone access** pairs
+  your own phone over **Tailscale** (tailnet-only `tailscale serve`, QR pairing
+  approved on the Mac, revocable device tokens, **Continue on phone** from any
+  session or thread — `docs/features/phone-access.md`). Optional **remote/mobile
   access** (Cloudflare tunnel + installable PWA) keeps the daemon loopback-only
   by default; copy, paste and keyboard shortcuts work from a remote browser
   even on the self-signed listener. The shell is fully
@@ -313,7 +354,10 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   - **Agents (Personal Agents):** named personas (souls) with a **pinned
     provider + model**, dedicated working folder and **memory notes**, one **or
     more** schedules, optional **browser use** (Playwright MCP), per-agent
-    delivery, and a **chat-anytime** session.
+    delivery, and a **Chat** tab that is a Threads conversation on the
+    structured runtime. A **main agent** can create agents, delegate to them
+    and collect their reports; agents can use the `otto.slack_*` tools as the
+    bot or as you (per-workspace user tokens, opted in per agent).
   - **Agent channels:** transparent group rooms where personal agents and humans
     post messages persisted and streamed live to the UI.
 - **Custom plugins** — extend Otto at runtime with out-of-process **sidecar
@@ -382,6 +426,9 @@ Otto is a Tauri 2 desktop app with a Rust backend daemon and a Svelte 5 frontend
   `otto-server` (routes), `ottod` (binary).
 
 ## Download (prebuilt DMG)
+
+**Versioned releases:** [Otto 0.2.1](../../releases/tag/v0.2.1) ships
+`Otto_0.2.1_aarch64.dmg` with its `.sha256` and the tour film.
 
 A GitHub Actions workflow builds the Apple-Silicon `.dmg` **monthly** (on the
 1st, 05:00 UTC; maintainers can also run it on demand via `workflow_dispatch`)
