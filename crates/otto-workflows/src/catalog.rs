@@ -96,8 +96,8 @@ pub fn node_catalog() -> Vec<NodeTypeSpec> {
             "type": "object",
             "properties": {
                 "allow_summary_fallback": {
-                    "type": "boolean", "default": false,
-                    "description": "Allow a deterministic summary when reviewer coverage is complete"
+                    "type": "boolean", "default": true,
+                    "description": "Let the score count when the summarizer fell back to the deterministic summary (all reviewers must still finish); false fails the review instead"
                 },
                 "mode": {
                     "type": "string",
