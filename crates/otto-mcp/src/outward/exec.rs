@@ -784,6 +784,10 @@ fn thread_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
 /// The main-agent team slice of [`route_for`]. `None` = not a team tool.
 /// Always AS the calling agent session (`session_id`, filled by the bridge).
 fn team_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
+    // A personal agent's own scope rides the same "as the calling agent" path.
+    if let Some(call) = own_route(tool, args) {
+        return Some(call);
+    }
     let call = || -> Result<SelfCall, Error> {
         let id = arg_str(args, "session_id")?;
         Ok(match tool {
@@ -957,9 +961,6 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         return call;
     }
     if let Some(call) = team_route(tool, args).or_else(|| admin_route(tool, args)) {
-        return call;
-    }
-    if let Some(call) = own_route(tool, args) {
         return call;
     }
     Ok(match tool {

@@ -625,8 +625,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
     ];
     // DB query pair before `open_pr_draft`, threads `wait_session`, Slack usage.
     splice_before(&mut specs, "otto.open_pr_draft", database_query_specs());
-    splice_before(&mut specs, "otto.wait_session", thread_tool_specs());
-    splice_before(&mut specs, "otto.wait_session", own_tool_specs());
+    splice_session_specs(&mut specs);
     splice_before(&mut specs, "otto.get_usage_summary", slack_tool_specs());
     specs.extend(issue_tool_specs());
     specs.extend([
@@ -1235,6 +1234,13 @@ fn team_tool_specs() -> [Value; 3] {
             "inputSchema":{"type":"object","required":["agent","task"],"properties":{
                 "agent":{"type":"string"},"task":{"type":"string"},"session_id":{"type":"string","description":"caller (auto)"}}}}),
     ]
+}
+
+/// The linked-thread + team slice, then a personal agent's own-scope tools,
+/// both before `otto.wait_session`.
+fn splice_session_specs(specs: &mut Vec<Value>) {
+    splice_before(specs, "otto.wait_session", thread_tool_specs());
+    splice_before(specs, "otto.wait_session", own_tool_specs());
 }
 
 /// A personal agent's own-scope slice of [`otto_tool_specs`]: its routines,
