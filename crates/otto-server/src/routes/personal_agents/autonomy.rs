@@ -485,9 +485,7 @@ async fn reset(
         )));
     };
     let repo = agents(&ctx);
-    if let Some(sid) = agent.chat_session_id.as_deref().filter(|s| !s.is_empty()) {
-        let _ = ctx.manager.kill_session(&sid.to_string()).await;
-    }
+    otto_assistant::personal_agent_threads::close_chat(&ctx, &agent).await;
     let reports = repo.reset_agent(&id).await.map_err(ApiError)?;
     for p in reports {
         let _ = tokio::fs::remove_file(&p).await;

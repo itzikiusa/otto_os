@@ -32,6 +32,12 @@ pub const DEFAULT_ENABLED: &[&str] = &[
     "thread_message",
     "thread_read",
     "thread_close",
+    // The main personal agent's team (its own workspace's agents only, as
+    // the calling agent): list, create (attributed to it, shown in Personal
+    // Agents) and delegate — a linked thread of its chat, never wider than it.
+    "personal_agent_list",
+    "personal_agent_create",
+    "personal_agent_delegate",
     // Discovery — where every id an agent needs comes from (workspaces, issue
     // accounts, goal loops, …); metadata only.
     "list_workspaces",
@@ -967,8 +973,10 @@ fn splice_before<const N: usize>(specs: &mut Vec<Value>, name: &str, slice: [Val
 
 /// The Linked Threads slice of [`otto_tool_specs`] (split out to keep that
 /// function under the size ratchet): an agent in a Threads (structured)
-/// session opening, listing, messaging and reading its linked threads.
-fn thread_tool_specs() -> [Value; 5] {
+/// session opening, listing, messaging and reading its linked threads — then
+/// the main personal agent's team tools ([`team_tool_specs`]).
+fn thread_tool_specs() -> [Value; 8] {
+    let [team_list, team_create, team_delegate] = team_tool_specs();
     [
         json!({"name":"otto.thread_open","mutating":false,"category":"Sessions",
             "description":"Open a linked agent thread from this Threads thread (same workspace, folder, access mode); shown beside yours. `prompt` = its first message (your role + task). Model/effort default when omitted. Returns its `id`.",
@@ -992,6 +1000,30 @@ fn thread_tool_specs() -> [Value; 5] {
             "description":"Close a linked thread in your group (stops its agent; kept in History). Not yourself or the group's lead.",
             "inputSchema":{"type":"object","required":["peer_session_id"],"properties":{
                 "peer_session_id":{"type":"string"},"session_id":{"type":"string","description":"caller (auto)"}}}}),
+        team_list,
+        team_create,
+        team_delegate,
+    ]
+}
+
+/// The main-agent team slice of [`otto_tool_specs`]: the workspace's main
+/// personal agent listing, creating and delegating to its agents (each call
+/// AS the calling agent session).
+fn team_tool_specs() -> [Value; 3] {
+    [
+        json!({"name":"otto.personal_agent_list","mutating":false,"category":"Sessions",
+            "description":"Your personal-agent team (you must be a personal agent): {lead, agents:[{id,name,about,provider,enabled,delegable,created_by_agent}]}.",
+            "inputSchema":{"type":"object","properties":{"session_id":{"type":"string","description":"caller (auto)"}}}}),
+        json!({"name":"otto.personal_agent_create","mutating":false,"category":"Sessions",
+            "description":"Main agent only: create a personal agent (name + instructions = its persona). Shown in Personal Agents, attributed to you. Returns it.",
+            "inputSchema":{"type":"object","required":["name","instructions"],"properties":{
+                "name":{"type":"string"},"instructions":{"type":"string"},
+                "provider":{"type":"string","description":"claude|codex|gemini|grok|opencode|pi (default: yours)"},
+                "model":{"type":"string"},"session_id":{"type":"string","description":"caller (auto)"}}}}),
+        json!({"name":"otto.personal_agent_delegate","mutating":false,"category":"Sessions",
+            "description":"Main agent only, from its Threads chat: hand `task` to one of your agents (name or id). Opens it beside you as a linked thread; its report arrives back here as a message when it finishes. Returns the thread.",
+            "inputSchema":{"type":"object","required":["agent","task"],"properties":{
+                "agent":{"type":"string"},"task":{"type":"string"},"session_id":{"type":"string","description":"caller (auto)"}}}}),
     ]
 }
 

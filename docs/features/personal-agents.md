@@ -42,11 +42,21 @@ Casino Reviewer Player (login via Keychain).
 
 The scheduler (60s tick, `crates/otto-assistant/src/personal_agents_scheduler.rs`)
 fires due schedules; the engine (`personal_agents_engine.rs`) runs each as a
-**fresh agent session** (`CreateSessionReq` with the pinned provider/model,
-`meta.browser`, the agent's cwd, and `meta.personal_agent = <id>`), pastes the
-prompt (persona note + directive + memory instructions + report-file
-instruction), watches for the report file, retries on failure, and records a
-`PersonalAgentRun` (summary, report, delivery state, session id). Concurrency
+**fresh Threads thread** on the structured runtime when the agent's provider is
+one Threads drives (`claude`, `codex`, `gemini`, `grok`, `opencode`, `pi` —
+`personal_agent_threads.rs`): the thread is created in the agent's cwd with the
+pinned model and the run's server-owned meta (`personal_agent = <id>`,
+`run_id`, `read_only`, `browser`, `agent_mode` — the same confinement a
+terminal run gets: forced Seatbelt + read-only tool list when read-only), sent
+the prompt (persona note + directive + memory instructions + report-file
+instruction) as one turn, and its report is the file the agent wrote — or the
+turn's final answer. No progress for 10 min = `stuck`. The thread closes when
+the run settles and stays in History (*Open thread* on the run). Any other
+provider (`agy`, custom CLIs) — or a workspace that routes agents through a
+network profile — runs as a **fresh terminal session** instead
+(`personal_agent_session.rs`: pasted prompt, report-file watch, retries).
+Either way the engine records a `PersonalAgentRun` (summary, report, delivery
+state, session / thread id). Concurrency
 is capped (`OTTO_PERSONAL_MAX_CONCURRENT`, default 2). Reports are kept for the
 last 100 runs; run updates stream over WS. Notify-on-change compares the
 last non-proactive successful run only when delivery succeeded or that run
@@ -64,9 +74,9 @@ Manual fire: **Run now** on the agent (or a specific schedule) →
 and rewrites the same `memory/notes.md`, so scheduled, manual and delegated runs
 share one per-agent guard: a due schedule waits (its cursor untouched, so it fires
 on a later tick) while another run is going, and Run now answers 409. A failed run
-keeps its session linked (*Open session*) and its error and any delivery failure
+keeps its session linked (*Open thread*) and its error and any delivery failure
 show inline on the run row. Each run's scratch report file is removed once read. A running run has **Stop…**
-(`POST /personal-agents/runs/{run_id}/cancel`): its session is killed (no retry)
+(`POST /personal-agents/runs/{run_id}/cancel`): its thread is closed / its session killed (no retry)
 and it settles `canceled`.
 
 **Arming.** A schedule never fires an occurrence from before its `armed_at` — set
@@ -78,10 +88,38 @@ creates them; the schedule form now supports them too — fires again after its
 
 ## 3. Chat anytime
 
-`POST /personal-agents/{id}/chat-session` returns (creating if absent) the
-agent's single interactive session — same persona cwd, same pinned
-provider/model. The agent page's **Chat** tab embeds its terminal, so talking
-to an agent is a normal live session.
+`POST /personal-agents/{id}/chat-session` returns (creating if absent or
+closed) the caller's single chat with the agent — same persona cwd, same pinned
+provider/model. On a Threads provider it is a **Threads thread** (`runtime:
+true`) and the agent page's **Chat** tab renders the Threads conversation view
+(streaming answer, work log, approvals inline, the composer) through
+`ui/src/lib/runtimeThreadPort.ts`; **Open in Threads** hands it to the Threads
+page. Other providers keep an embedded terminal.
+
+## 3a. The main agent
+
+Mark one agent **Main agent** (Autonomy tab; one per workspace). It is the one
+you talk to; its persona lists your other agents and three team tools:
+
+- `otto.personal_agent_list` — the team (id, name, what each does, whether it
+  can be delegated to);
+- `otto.personal_agent_create` — when you ask ("create an agent that watches
+  the build"): a new enabled agent owned by you, `created_by_agent` = the main
+  agent (shown as **By <main agent>** on its card and page);
+- `otto.personal_agent_delegate` — from the main agent's Threads chat: opens
+  the agent as a **linked thread** of the chat (its own persona folder, as
+  itself, never wider than the chat — a read-only chat's delegate is
+  read-only) with the task as its first message.
+
+When a delegated turn ends, Otto sends its final reply back to the main
+agent's chat as a message from that thread (`Report from …`), so reporting
+back never depends on the agent remembering to; every other agent's persona
+names the main agent as its lead. The chat shows the linked threads as chips —
+click one to switch the chat view to that agent's thread (⇧-click opens it in
+Threads), **Back to chat** returns. Limits: the relay is in memory (a daemon
+restart drops a pending one; the report stays in the agent's thread);
+delegation needs the chat to be a Threads thread and the target on a Threads
+provider; read-only sessions cannot create or delegate.
 
 ## 4. Rooms — inter-agent messaging, always visible
 

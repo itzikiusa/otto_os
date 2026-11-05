@@ -3968,6 +3968,8 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "hex",
+ "otto-agent-protocol",
+ "otto-agent-run",
  "otto-context",
  "otto-core",
  "otto-mcp",

@@ -109,6 +109,9 @@
     "otto_merge_pr",
     "otto_open_pr_draft",
     "otto_open_session",
+    "otto_personal_agent_create",
+    "otto_personal_agent_delegate",
+    "otto_personal_agent_list",
     "otto_produce_broker_message",
     "otto_product_story",
     "otto_query_db",
@@ -226,6 +229,9 @@
     "otto_merge_pr",
     "otto_open_pr_draft",
     "otto_open_session",
+    "otto_personal_agent_create",
+    "otto_personal_agent_delegate",
+    "otto_personal_agent_list",
     "otto_product_story",
     "otto_query_db",
     "otto_reject_improvement_edit",
@@ -379,6 +385,9 @@
     "otto_merge_pr",
     "otto_open_pr_draft",
     "otto_open_session",
+    "otto_personal_agent_create",
+    "otto_personal_agent_delegate",
+    "otto_personal_agent_list",
     "otto_produce_broker_message",
     "otto_product_story",
     "otto_query_db",
@@ -561,6 +570,9 @@
     "otto_merge_pr",
     "otto_open_pr_draft",
     "otto_open_session",
+    "otto_personal_agent_create",
+    "otto_personal_agent_delegate",
+    "otto_personal_agent_list",
     "otto_product_story",
     "otto_query_db",
     "otto_reject_improvement_edit",
@@ -2290,6 +2302,47 @@
       ],
       "properties": {
         "peer_session_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_personal_agent_list": {
+      "type": "object",
+      "properties": {}
+    },
+    "otto_personal_agent_create": {
+      "type": "object",
+      "required": [
+        "name",
+        "instructions"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "instructions": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string",
+          "description": "claude|codex|gemini|grok|opencode|pi (default: yours)"
+        },
+        "model": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_personal_agent_delegate": {
+      "type": "object",
+      "required": [
+        "agent",
+        "task"
+      ],
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "task": {
           "type": "string"
         }
       }

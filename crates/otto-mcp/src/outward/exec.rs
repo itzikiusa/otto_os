@@ -86,7 +86,8 @@ pub fn call_timeout(tool: &str, args: &Value) -> Duration {
         | "run_workflow"
         | "start_pr_review"
         | "open_session"
-        | "thread_open" => 60,
+        | "thread_open"
+        | "personal_agent_delegate" => 60,
         // A peer's reply long-polls up to 25 s.
         "thread_read" => 35,
         // Merge PUT (+ GitLab rebase PUT) around a ≤ 60 s provider poll.
@@ -669,12 +670,56 @@ fn thread_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
     tool.starts_with("thread_").then(call)
 }
 
+/// The main-agent team slice of [`route_for`]. `None` = not a team tool.
+/// Always AS the calling agent session (`session_id`, filled by the bridge).
+fn team_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
+    let call = || -> Result<SelfCall, Error> {
+        let id = arg_str(args, "session_id")?;
+        Ok(match tool {
+            "personal_agent_list" => SelfCall::get(format!(
+                "/api/v1/personal-agents/team?session_id={}",
+                seg(&id)
+            )),
+            "personal_agent_create" => {
+                let mut body = json!({
+                    "session_id": id,
+                    "name": arg_str(args, "name")?,
+                    "instructions": arg_str(args, "instructions")?,
+                });
+                for k in ["provider", "model"] {
+                    if let Some(v) = args
+                        .get(k)
+                        .and_then(Value::as_str)
+                        .filter(|v| !v.trim().is_empty())
+                    {
+                        body[k] = json!(v);
+                    }
+                }
+                SelfCall::post("/api/v1/personal-agents/team".to_string(), body)
+            }
+            "personal_agent_delegate" => SelfCall::post(
+                "/api/v1/personal-agents/team/delegate".to_string(),
+                json!({
+                    "session_id": id,
+                    "agent": arg_str(args, "agent")?,
+                    "task": arg_str(args, "task")?,
+                }),
+            ),
+            _ => return Err(Error::Invalid(format!("unknown tool otto.{tool}"))),
+        })
+    };
+    tool.starts_with("personal_agent_").then(call)
+}
+
 /// Map an outward tool + its (validated) arguments to the exact self-call against
 /// the daemon's own REST API. Pure: no I/O, no token — every tool reuses its
 /// endpoint's native RBAC when the call is later executed as the user. `ask_human_approval`
 /// is handled earlier (in `execute_otto_tool`) and never reaches here.
 pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
     if let Some(call) = thread_route(tool, args) {
+        return call;
+    }
+    if let Some(call) = team_route(tool, args) {
         return call;
     }
     Ok(match tool {

@@ -30,8 +30,9 @@ use crate::personal_agents_engine::RunPlan;
 /// Boxed `Send` future for the hook methods.
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// One personal-agent run's visible-session attempt loop (see
-/// [`AssistantCtx::run_agent_session`]).
+/// One personal-agent run's visible session (a Threads thread on the
+/// structured runtime, or a terminal session for the other providers — see
+/// `personal_agent_threads::run_agent_session`).
 pub struct AgentSessionRun<'a> {
     pub agent: &'a PersonalAgent,
     pub run_id: &'a str,
@@ -82,6 +83,9 @@ pub trait AssistantCtx: Clone + Send + Sync + 'static {
     fn context_library(&self) -> &otto_context::Library;
     fn memory(&self) -> &Arc<otto_memory::MemoryService>;
     fn roles(&self) -> &Arc<dyn otto_core::auth::RoleChecker>;
+    /// The structured agent runtime (Threads): personal-agent runs and chats
+    /// on a runtime provider are threads.
+    fn agent_runtime(&self) -> &otto_agent_protocol::AgentRuntime;
     /// Persist a notification-center notice and push it live
     /// (`ServerCtx::notifications().create`).
     fn create_notice(&self, notice: otto_state::NewNotice) -> BoxFut<'_, Result<()>>;
@@ -90,15 +94,6 @@ pub trait AssistantCtx: Clone + Send + Sync + 'static {
     /// Paste `prompt` into a live agent TUI and press Enter, verifying the
     /// submit (`otto_sessions::submit::submit_prompt`). `false` = not delivered.
     fn submit_prompt<'a>(&'a self, sid: &'a Id, prompt: &'a str) -> BoxFut<'a, bool>;
-
-    /// Run a personal agent's fresh visible session(s): create the session,
-    /// paste the report-augmented prompt, watch for the report file, retry per
-    /// `agent_run::run_with_recovery`. `Err` only for setup failures before
-    /// the first attempt (e.g. the workspace is gone).
-    fn run_agent_session<'a>(
-        &'a self,
-        run: AgentSessionRun<'a>,
-    ) -> BoxFut<'a, Result<AgentSessionOutcome>>;
 
     /// The transcript file behind `session` (`routes::transcript`), or `None`
     /// when it is unavailable.
@@ -138,6 +133,9 @@ pub trait AssistantCtx: Clone + Send + Sync + 'static {
     fn report_hash(report: &str) -> String;
     /// `report_delivery::report_hash_matches` (a stored hash may be legacy).
     fn report_hash_matches(stored: &str, report: &str) -> bool;
+    /// `report_delivery::augment_report_prompt`: append the "write your
+    /// report to FILE" contract.
+    fn augment_report_prompt(base: &str, out_path: &str) -> String;
     /// `report_delivery::write_report`.
     fn write_report<'a>(abs: &'a Path, report: &'a str) -> BoxFut<'a, Result<()>>;
 

@@ -313,3 +313,109 @@ async fn an_ownerless_preset_is_adopted_by_the_first_editor() {
         .await;
     assert_eq!(st, 403);
 }
+
+/// A Threads thread of ws1 owned by alice running as personal agent `agent`
+/// (the meta a chat thread carries; no CLI is spawned).
+async fn agent_thread(d: &Daemon, id: &str, agent: &str) {
+    otto_state::AgentRuntimeRepo::new(d.pool.clone())
+        .create(otto_state::NewRuntimeSession {
+            id: id.into(),
+            workspace_id: "ws1".into(),
+            provider: otto_core::agent_runtime::RuntimeProvider::Claude,
+            title: "Chat: Scout".into(),
+            cwd: "/tmp".into(),
+            model: None,
+            access_mode: Default::default(),
+            created_by: "alice".into(),
+            parent_id: None,
+            meta: Some(json!({
+                "source": "personal_agent", "personal_agent": agent, "personal_agent_chat": true
+            })),
+        })
+        .await
+        .unwrap();
+}
+
+/// The main agent's team routes: only the main agent creates or delegates,
+/// a created agent is attributed to it, names stay unique, the caller must be
+/// a personal-agent session the user owns, and delegation needs a target on
+/// a Threads provider.
+#[tokio::test]
+async fn the_main_agent_lists_creates_and_delegates_as_its_session() {
+    let d = boot().await;
+    let lead = d.agent(Some("alice")).await;
+    agent_thread(&d, "thr-lead", &lead).await;
+    let team_path = "/personal-agents/team?session_id=thr-lead";
+
+    // The team as the lead's thread (a person names the session).
+    let (st, team) = d.send("GET", &d.alice, team_path, json!(null)).await;
+    assert_eq!(st, 200, "{team}");
+    assert_eq!(team["lead"]["id"], lead.as_str());
+    assert_eq!(team["lead"]["is_main_agent"], false);
+    // Not a personal-agent session / someone else's.
+    let (st, _) = d
+        .send(
+            "GET",
+            &d.alice,
+            "/personal-agents/team?session_id=nope",
+            json!(null),
+        )
+        .await;
+    assert_eq!(st, 400);
+    let (st, _) = d.send("GET", &d.bob, team_path, json!(null)).await;
+    assert_eq!(st, 403);
+
+    let create =
+        json!({"session_id": "thr-lead", "name": "Builder", "instructions": "# Builds\nwatch CI"});
+    let (st, body) = d
+        .send("POST", &d.alice, "/personal-agents/team", create.clone())
+        .await;
+    assert_eq!(st, 403, "only the main agent: {body}");
+
+    let mut cfg = d.autonomy(&lead).await;
+    cfg.primary = true;
+    PersonalAgentsRepo::new(d.pool.clone())
+        .save_autonomy(&lead, &cfg)
+        .await
+        .unwrap();
+    let (st, made) = d
+        .send("POST", &d.alice, "/personal-agents/team", create.clone())
+        .await;
+    assert_eq!(st, 200, "{made}");
+    assert_eq!(made["created_by_agent"], lead.as_str());
+    assert_eq!(made["created_by"], "alice");
+    assert_eq!(made["soul_md"], "# Builds\nwatch CI");
+    let (st, _) = d
+        .send("POST", &d.alice, "/personal-agents/team", create)
+        .await;
+    assert_eq!(st, 409, "names stay unique");
+
+    let (_, team) = d.send("GET", &d.alice, team_path, json!(null)).await;
+    let agents = team["agents"].as_array().unwrap();
+    assert!(agents.iter().any(|a| a["name"] == "Builder"
+        && a["about"] == "Builds"
+        && a["delegable"] == true
+        && a["created_by_agent"] == lead.as_str()));
+
+    // Delegation: unknown agent → 404 naming the team; a terminal-only
+    // provider → 400; itself → 400.
+    let del = |agent: &str| json!({"session_id": "thr-lead", "agent": agent, "task": "check main"});
+    let delegate = "/personal-agents/team/delegate";
+    let (st, body) = d.send("POST", &d.alice, delegate, del("Ghost")).await;
+    assert_eq!(st, 404, "{body}");
+    assert!(
+        body["message"].as_str().unwrap_or("").contains("Builder"),
+        "{body}"
+    );
+    let mut agy = NewPersonalAgent::defaults("ws1".into(), "Old CLI".into());
+    agy.provider = "agy".into();
+    agy.created_by = Some("alice".into());
+    PersonalAgentsRepo::new(d.pool.clone())
+        .create(agy)
+        .await
+        .unwrap();
+    let (st, body) = d.send("POST", &d.alice, delegate, del("old cli")).await;
+    assert_eq!(st, 400, "{body}");
+    let (st, _) = d.send("POST", &d.alice, delegate, del(&lead)).await;
+    assert_eq!(st, 400);
+}

@@ -185,6 +185,9 @@ pub fn pin_global(tool: &str) -> bool {
         // overrides `session_id`); the route keeps the group to that thread's
         // own owner + workspace.
         || tool.starts_with("thread_")
+        // The main agent's team tools act AS the calling agent session too:
+        // the route resolves its agent and keeps to that agent's workspace.
+        || tool.starts_with("personal_agent_")
         || tool.starts_with("aws_")
         || tool.starts_with("k8s_")
         || DIRECTORY_TOOLS.iter().any(|(t, _)| *t == tool)

@@ -42,6 +42,7 @@ use crate::state::ServerCtx;
 
 /// Max bytes for one room message (agent AND user posts).
 mod autonomy;
+mod team;
 
 pub const MAX_ROOM_POST_BYTES: usize = 16 * 1024;
 /// Max characters in a room name (it is shown in lists, headers and every
@@ -108,6 +109,7 @@ pub fn routes() -> Router<ServerCtx> {
             get(list_messages).post(post_message),
         )
         .merge(autonomy::routes())
+        .merge(team::routes())
 }
 
 fn agents(ctx: &ServerCtx) -> PersonalAgentsRepo {
@@ -867,9 +869,10 @@ static CHAT_LOCKS: otto_core::keyed_lock::KeyedLocks<String> =
     otto_core::keyed_lock::KeyedLocks::new();
 
 /// `POST /personal-agents/{id}/chat-session` — return (creating if absent or
-/// dead) the agent's SINGLE interactive chat session: kind Agent, pinned
-/// provider / `meta.model` / persona cwd, tagged `meta.personal_agent`. The UI
-/// attaches a terminal pane to the returned id.
+/// dead) the agent's SINGLE interactive chat: a Threads thread for a runtime
+/// provider (`runtime: true` — the UI renders the Threads conversation), else
+/// a terminal session (kind Agent, pinned provider / `meta.model` / persona
+/// cwd, tagged `meta.personal_agent`) the UI attaches a terminal pane to.
 async fn chat_session(
     Path(id): Path<String>,
     State(ctx): State<ServerCtx>,
@@ -881,6 +884,12 @@ async fn chat_session(
     let _guard = CHAT_LOCKS.lock(agent.id.as_str()).await;
     // Re-read under the lock: a concurrent call may have just pinned a chat.
     let agent = repo.get(&id).await.map_err(ApiError)?;
+    let thread = otto_assistant::personal_agent_threads::chat_thread(&ctx, &agent, &user.id).await;
+    if let Some(t) = thread.map_err(ApiError)? {
+        return Ok(Json(
+            json!({"session_id": t.session_id, "created": t.created, "runtime": true}),
+        ));
+    }
 
     // Reuse the pinned session if it still exists AND is the caller's: a chat
     // is opened under its creator, so another member's pinned chat is one
@@ -1093,35 +1102,19 @@ async fn remove_member(
     Ok(Json(json!({"ok": true})))
 }
 
-/// Resolve a `session_id` to the personal agent it runs as: the session must
-/// exist, belong to the caller (root exempt), and carry `meta.personal_agent`.
-/// This is the room-tool identity — an agent can only speak as itself.
+/// Resolve a `session_id` (a terminal session or a Threads thread) to the
+/// personal agent it runs as: it must belong to the caller (root exempt) and
+/// carry `meta.personal_agent`. The room / team tools' identity — an agent
+/// can only speak as itself.
 async fn resolve_session_agent(
     ctx: &ServerCtx,
     user: &User,
     session_id: &str,
 ) -> Result<PersonalAgent, ApiError> {
-    let session = ctx
-        .manager
-        .get(&session_id.to_string())
+    otto_assistant::personal_agent_team::session_agent(ctx, &user.id, user.is_root, session_id)
         .await
-        .map_err(|_| ApiError(Error::Invalid("unknown session_id".into())))?;
-    if !user.is_root && session.created_by != user.id {
-        return Err(ApiError(Error::Forbidden(
-            "session belongs to another user".into(),
-        )));
-    }
-    let agent_id = session
-        .meta
-        .get("personal_agent")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            ApiError(Error::Invalid(
-                "session is not a personal-agent session".into(),
-            ))
-        })?;
-    agents(ctx).get(agent_id).await.map_err(ApiError)
+        .map(|(agent, _)| agent)
+        .map_err(ApiError)
 }
 
 /// The session a room read/post acts as. An agent-session credential (an
@@ -1401,6 +1394,7 @@ mod tests {
             enabled: false,
             chat_session_id: None,
             created_by: Some("alice".into()),
+            created_by_agent: None,
             created_at: String::new(),
             updated_at: String::new(),
         };

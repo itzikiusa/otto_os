@@ -1103,6 +1103,70 @@
       "rows": 0
     }
   },
+  "otto_personal_agent_list {}": {
+    "args": {},
+    "requests": [
+      [
+        "GET",
+        "/personal-agents/team?session_id=sess-test",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_personal_agent_create {\"name\":\"Scout\",\"instructions\":\"watch the build\",\"provider\":\"codex\"}": {
+    "args": {
+      "name": "Scout",
+      "instructions": "watch the build",
+      "provider": "codex"
+    },
+    "requests": [
+      [
+        "POST",
+        "/personal-agents/team",
+        {
+          "session_id": "sess-test",
+          "name": "Scout",
+          "instructions": "watch the build",
+          "provider": "codex"
+        }
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_personal_agent_delegate {\"agent\":\"Scout\",\"task\":\"check main\"}": {
+    "args": {
+      "agent": "Scout",
+      "task": "check main"
+    },
+    "requests": [
+      [
+        "POST",
+        "/personal-agents/team/delegate",
+        {
+          "session_id": "sess-test",
+          "agent": "Scout",
+          "task": "check main"
+        }
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
   "otto_api_list {}": {
     "args": {},
     "requests": [

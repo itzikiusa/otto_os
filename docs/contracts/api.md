@@ -800,7 +800,10 @@ request answer is also an `Admin`-class approval gate (above).
 
 `RuntimeSession`: `{id, workspace_id, provider: "claude"|"codex"|"gemini"|"grok"|"agy",
 title, cwd, model?, native_thread_id?, status, access_mode, created_by, created_at,
-last_active_at, last_sequence}`; `status` ∈ `starting | idle | working |
+last_active_at, last_sequence, parent_id?, ui_control?, meta?}` (`meta`: the
+server-owned meta a personal agent's run / chat thread runs under, migration
+0201 — see "Personal Agents"; absent on a plain thread, never settable by a
+request); `status` ∈ `starting | idle | working |
 awaiting_permission | dormant | closed` (`dormant` = no process; the next
 prompt respawns it and resumes `native_thread_id` — Claude `--resume`, Codex
 `thread/resume`, ACP `session/load`, agy `--conversation`; a provider that cannot resume it starts
@@ -4423,10 +4426,32 @@ writes) + the workspace-role axis on the agent's workspace.
 | PATCH /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor; `directive`/`permission` need the agent's owner, a ws admin or root (else 403) | `{schedule?, timezone?, directive?, enabled?, permission?}` | PersonalAgentSchedule — resuming it, or a really different `schedule`/`timezone`, re-arms it (`armed_at`; missed occurrences are not caught up) and refreshes `next_run_at`; a `once` whose `run_at` changes forgets that it fired. Resuming the AGENT (`PATCH /personal-agents/{id}` `enabled` false→true) re-arms all its schedules |
 | DELETE /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
 | POST /api/v1/personal-agents/{id}/run | scheduled_tasks edit + ws editor | `{schedule_id?}` (that schedule's directive and permission, even when the schedule is paused; without one, a generic check-in directive) | PersonalAgentRun — manual fire, returned at once in `running` (executes in the background; poll runs). 409 while a run of the agent — manual, delegated or scheduled — is already in progress (one run per agent at a time: its runs share a folder and memory; a due schedule waits, cursor untouched) |
-| POST /api/v1/personal-agents/runs/{run_id}/cancel | scheduled_tasks edit + ws editor | — | `{ok:true}` — stop a `running` run (its session is killed, no retry); it settles `canceled`. `409` when the run isn't running |
+| POST /api/v1/personal-agents/runs/{run_id}/cancel | scheduled_tasks edit + ws editor | — | `{ok:true}` — stop a `running` run (its thread is closed / its terminal session killed, no retry); it settles `canceled`. `409` when the run isn't running |
 | GET /api/v1/personal-agents/{id}/runs | scheduled_tasks view + ws viewer | — | `PersonalAgentRun[]` |
 | GET /api/v1/personal-agents/runs/{run_id}/report | scheduled_tasks view + ws viewer | — | `text/markdown` (the stored report; served by run id, path-canonicalized) |
-| POST /api/v1/personal-agents/{id}/chat-session | scheduled_tasks edit + ws editor | — | `{session_id, created}` (`created: false` when the existing pinned chat session was returned) — returns (creating if absent) the agent's single interactive chat session, pinned to its provider/model/persona cwd |
+| POST /api/v1/personal-agents/{id}/chat-session | scheduled_tasks edit + ws editor | — | `{session_id, created, runtime?}` (`created: false` when the existing pinned chat was returned) — returns (creating if absent or closed) the caller's single chat with the agent, pinned to its provider/model/persona cwd. On a structured-runtime provider (`claude`, `codex`, `gemini`, `grok`, `opencode`, `pi`) it is a **Threads thread** (`runtime: true`, a `RuntimeSession` id — open it with the `/runtime-sessions/*` routes; its server-owned `meta` = `{source:"personal_agent", personal_agent, personal_agent_chat:true, agent_mode:"directed", personal_agent_context_version, browser}`); otherwise a terminal session |
+| GET /api/v1/personal-agents/team?session_id= | scheduled_tasks view + ws viewer | — | `{lead:{id,name,is_main_agent}, agents:[{id,name,about,provider,enabled,delegable,created_by_agent}]}` — the calling personal agent and its workspace's other agents. `session_id` = the calling agent's session or thread (an agent credential is bound to its own; another → 403); it must carry `meta.personal_agent` (else 400) and be the caller's (root exempt). MCP: `otto.personal_agent_list` |
+| POST /api/v1/personal-agents/team | scheduled_tasks edit + ws editor | `{session_id?, name, instructions?, provider?, model?}` | PersonalAgent — the **main agent** (autonomy `primary`; else 403) creates an agent: owned by the caller's user, enabled, no delivery, `created_by_agent` = the main agent. `name` 1–80 chars, unique in the workspace (409); `instructions` (its `soul_md`) ≤ 32 KB; `provider` one of the structured-runtime providers (default: the main agent's). Refused in a read-only session. MCP: `otto.personal_agent_create` |
+| POST /api/v1/personal-agents/team/delegate | scheduled_tasks edit + ws editor | `{session_id?, agent, task}` | `RuntimeSession` — the main agent's **Threads chat** (a terminal caller → 400) opens `agent` (id or name; not itself; on a structured-runtime provider) as a linked thread of its chat: in that agent's persona folder, `meta.personal_agent` = that agent, `delegated_by_agent` = the main agent, read-only when the chat is. `task` (≤ 32 KB) is its first message. When its turn ends Otto sends its final reply back to the main agent's chat as a message from that thread (`Report from …`; retried while the lead is busy, up to 30 min; best-effort across restarts). Refused in a read-only session. MCP: `otto.personal_agent_delegate` |
+
+**Runs and chats are Threads threads** on a structured-runtime provider
+(`claude`, `codex`, `gemini`, `grok`, `opencode`, `pi`); any other provider
+(`agy`, custom) keeps a terminal session. A run's thread (`PersonalAgentRun.session_id`
+holds its id) carries the run's server-owned `RuntimeSession.meta`
+(`source:"personal_agent"`, `personal_agent`, `run_id`, `agent_mode`,
+`read_only`, `browser`) — applied by the spawn's safety pipeline exactly as for
+a terminal session (read-only = forced Seatbelt + the read-only tool list) and
+read by the tool policy (`read_only`, the agent's rules). One turn: the
+report-augmented prompt, then the report file the agent wrote — else the
+turn's final answer; no progress for 10 min = `stuck` (interrupted). The
+thread is closed when the run settles (kept in History). A person's
+`CreateRuntimeSessionReq` / `OpenPeerReq` can never set `meta` (daemon-only).
+
+**The main agent.** The workspace's `primary` agent is the user's main agent:
+its persona lists its agents and the team tools (`otto.personal_agent_list`
+/ `_create` / `_delegate`); every other agent's persona names it as the lead
+its delegated work reports back to. An agent it created shows
+`created_by_agent`.
 
 ### Personal agent autonomy (permission modes, goals, rules, activity, memory inspector)
 
