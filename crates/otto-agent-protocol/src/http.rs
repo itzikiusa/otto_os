@@ -102,6 +102,10 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
             "/runtime-sessions/{id}/peers/{peer}/reply",
             get(peer_reply::<S>),
         )
+        .route(
+            "/runtime-sessions/{id}/peers/{peer}/close",
+            post(close_peer::<S>),
+        )
 }
 
 /// A linked-thread call AS thread `id`: its owner (a person) or that
@@ -162,6 +166,17 @@ async fn message_peer<S: RuntimeCtx>(
         .message_peer(&id, &peer, &req.text)
         .await?;
     Ok((StatusCode::ACCEPTED, Json(r)))
+}
+
+/// POST /runtime-sessions/{id}/peers/{peer}/close — close a linked thread.
+async fn close_peer<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path((id, peer)): Path<(Id, Id)>,
+) -> ApiResult<Json<RuntimeSession>> {
+    as_thread(&ctx, &user, &auth, &id).await?;
+    Ok(Json(ctx.agent_runtime().close_peer(&id, &peer).await?))
 }
 
 #[derive(Deserialize)]

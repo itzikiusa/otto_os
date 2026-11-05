@@ -651,6 +651,18 @@ fn thread_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
                     seg(&peer)
                 ))
             }
+            "thread_close" => {
+                let id = arg_str(args, "session_id")?;
+                let peer = arg_str(args, "peer_session_id")?;
+                SelfCall::post(
+                    format!(
+                        "/api/v1/runtime-sessions/{}/peers/{}/close",
+                        seg(&id),
+                        seg(&peer)
+                    ),
+                    json!({}),
+                )
+            }
             _ => unreachable!("guarded by the prefix check"),
         })
     };

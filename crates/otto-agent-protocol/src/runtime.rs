@@ -613,6 +613,20 @@ impl AgentRuntime {
         })
     }
 
+    /// Close linked thread `peer` (stop its agent; it stays in History). A
+    /// thread closes the ones in its group, never itself or the group's
+    /// root (the lead a person opened) — those stay the person's to close.
+    pub async fn close_peer(&self, caller: &Id, peer: &Id) -> Result<RuntimeSession> {
+        let c = self.get(caller).await?;
+        let p = self.group_member(&c, peer).await?;
+        if p.parent_id.is_none() {
+            return Err(Error::Forbidden(
+                "that is the group's lead thread — only a person closes it".into(),
+            ));
+        }
+        self.close(&p.id).await
+    }
+
     /// Linked thread `peer`'s latest reply: waits up to `wait` for its
     /// running turn to settle, then returns that turn's assistant text.
     pub async fn peer_reply(&self, caller: &Id, peer: &Id, wait: Duration) -> Result<PeerReply> {

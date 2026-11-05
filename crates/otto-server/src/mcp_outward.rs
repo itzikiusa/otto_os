@@ -485,13 +485,10 @@ pub(crate) async fn governed_invoke(
     // omit `session_id` and post as the human, or read a room it is not a
     // member of. The route then refuses a session that is not a room-member
     // personal agent.
-    let bound_session = match short.as_str() {
-        "room_post" | "room_read" | "thread_open" | "thread_list" | "thread_message"
-        | "thread_read" => crate::ui_bridge::calling_session(auth).map(String::as_str),
-        _ => None,
-    };
+    let binds = matches!(short.as_str(), "room_post" | "room_read") || short.starts_with("thread_");
+    let bound_session = crate::ui_bridge::calling_session(auth).filter(|_| binds);
     let rebound;
-    let arguments = match bound_session {
+    let arguments = match bound_session.map(String::as_str) {
         Some(sid) => {
             let mut a = arguments.clone();
             if let Some(o) = a.as_object_mut() {

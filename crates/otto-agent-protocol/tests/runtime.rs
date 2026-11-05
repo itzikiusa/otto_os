@@ -1407,4 +1407,20 @@ async fn linked_threads_open_message_and_read_within_their_group() {
         rt.message_peer(&lead.id, &lead.id, "x").await,
         Err(Error::Invalid(_))
     ));
+
+    // Closing: never the lead (a person's), never outside the group; the
+    // lead closes its worker, which then reads as closed.
+    assert!(matches!(
+        rt.close_peer(&worker.id, &lead.id).await,
+        Err(Error::Forbidden(_))
+    ));
+    assert!(matches!(
+        rt.close_peer(&lead.id, &other.id).await,
+        Err(Error::NotFound(_))
+    ));
+    let closed = rt.close_peer(&lead.id, &worker.id).await.unwrap();
+    assert_eq!(
+        closed.status,
+        otto_core::agent_runtime::RuntimeSessionStatus::Closed
+    );
 }

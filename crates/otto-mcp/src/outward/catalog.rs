@@ -31,6 +31,7 @@ pub const DEFAULT_ENABLED: &[&str] = &[
     "thread_list",
     "thread_message",
     "thread_read",
+    "thread_close",
     // Discovery — where every id an agent needs comes from (workspaces, issue
     // accounts, goal loops, …); metadata only.
     "list_workspaces",
@@ -967,7 +968,7 @@ fn splice_before<const N: usize>(specs: &mut Vec<Value>, name: &str, slice: [Val
 /// The Linked Threads slice of [`otto_tool_specs`] (split out to keep that
 /// function under the size ratchet): an agent in a Threads (structured)
 /// session opening, listing, messaging and reading its linked threads.
-fn thread_tool_specs() -> [Value; 4] {
+fn thread_tool_specs() -> [Value; 5] {
     [
         json!({"name":"otto.thread_open","mutating":false,"category":"Sessions",
             "description":"Open a linked agent thread from this Threads thread (same workspace, folder, access mode); shown beside yours. `prompt` = its first message (your role + task). Model/effort default when omitted. Returns its `id`.",
@@ -987,6 +988,10 @@ fn thread_tool_specs() -> [Value; 4] {
             "description":"A linked thread's latest reply, waiting up to wait_secs (≤25, default 20) for its turn: {peer, busy, turn_status, text}.",
             "inputSchema":{"type":"object","required":["peer_session_id"],"properties":{
                 "peer_session_id":{"type":"string"},"wait_secs":{"type":"integer"},"session_id":{"type":"string","description":"caller (auto)"}}}}),
+        json!({"name":"otto.thread_close","mutating":false,"category":"Sessions",
+            "description":"Close a linked thread in your group (stops its agent; kept in History). Not yourself or the group's lead.",
+            "inputSchema":{"type":"object","required":["peer_session_id"],"properties":{
+                "peer_session_id":{"type":"string"},"session_id":{"type":"string","description":"caller (auto)"}}}}),
     ]
 }
 

@@ -138,6 +138,7 @@ pub const GROUPS: &[ToolGroup] = &[
             "thread_list",
             "thread_message",
             "thread_read",
+            "thread_close",
             "list_agent_rooms",
             "room_post",
             "room_read",

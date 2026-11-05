@@ -822,6 +822,7 @@ a fresh conversation).
 | POST /runtime-sessions/{id}/peers | same | `OpenPeerReq {provider, prompt?, title?, model?, effort?}` | **201** `RuntimeSession` — a linked thread: same owner, workspace, `cwd` and `access_mode` as `{id}` (never wider), `parent_id` = the group's root. `prompt` (if any) is its first turn, prefixed with who opened it and how to answer (`otto.thread_message`); `model` / `effort` default to the provider's when omitted |
 | POST /runtime-sessions/{id}/peers/{peer}/message | same | `PeerMessageReq {text}` | **202** `{turn_id, sequence}` — `text` becomes `{peer}`'s next turn, prefixed with the sender. **404** not in the group, **400** `{peer}` = `{id}`, **409** while `{peer}` runs a turn |
 | GET /runtime-sessions/{id}/peers/{peer}/reply?wait_secs= | same | `wait_secs` 0..25 (default 20) | `PeerReply {peer, busy, turn_status?, text}` — waits for `{peer}`'s running turn to settle, then its last turn's assistant text; `busy: true` when the wait ran out |
+| POST /runtime-sessions/{id}/peers/{peer}/close | same | — | `RuntimeSession` — closes linked thread `{peer}` of `{id}`'s group (stops its agent; it stays in History). `400` for `{id}` itself, `403` for the group's lead (`parent_id` null — a person closes it), `404` outside the group. MCP: `otto.thread_close` |
 
 **Replay** (T3 Code `subscribeThread`). `sequence` is per session, strictly
 increasing and never reused, also across daemon restarts. With

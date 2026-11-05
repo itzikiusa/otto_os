@@ -1085,6 +1085,24 @@
       "rows": 0
     }
   },
+  "otto_thread_close {\"peer_session_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}": {
+    "args": {
+      "peer_session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    },
+    "requests": [
+      [
+        "POST",
+        "/runtime-sessions/sess-test/peers/01ARZ3NDEKTSV4RRFFQ69G5FAV/close",
+        {}
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
   "otto_api_list {}": {
     "args": {},
     "requests": [

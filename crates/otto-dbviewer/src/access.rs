@@ -1178,7 +1178,11 @@ mod tests {
              IF(status = 1, 'on', 'off'), IFNULL(email, ''), DATEDIFF(NOW(), created_at), \
              CAST(created_at AS DATE) FROM MdlGm_tblPlayers",
         ] {
-            assert_eq!(operations(Engine::Mysql, sql).unwrap(), vec!["db_query"], "{sql}");
+            assert_eq!(
+                operations(Engine::Mysql, sql).unwrap(),
+                vec!["db_query"],
+                "{sql}"
+            );
         }
         for sql in [
             "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_NAME = 'MdlGm_tblPlayers'",
@@ -1194,8 +1198,14 @@ mod tests {
         }
         assert!(only_reads(&["db_query", "db_catalog"]));
         assert!(!only_reads(&["db_query", "db_data"]));
-        assert_eq!(authorized_as("db_catalog", Some("shop")), ("db_query", None));
-        assert_eq!(authorized_as("db_query", Some("shop")), ("db_query", Some("shop")));
+        assert_eq!(
+            authorized_as("db_catalog", Some("shop")),
+            ("db_query", None)
+        );
+        assert_eq!(
+            authorized_as("db_query", Some("shop")),
+            ("db_query", Some("shop"))
+        );
         // Still refused: side effects and stored (qualified) functions, which can write.
         for sql in [
             "SELECT SLEEP(5)",
@@ -1205,7 +1215,10 @@ mod tests {
             "SELECT my_udf(id) FROM t",
         ] {
             let err = operations(Engine::Mysql, sql).unwrap_err().to_string();
-            assert!(err.contains("isn't on restricted SQL's list"), "{sql}: {err}");
+            assert!(
+                err.contains("isn't on restricted SQL's list"),
+                "{sql}: {err}"
+            );
         }
     }
     #[test]
