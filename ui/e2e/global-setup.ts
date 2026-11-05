@@ -82,6 +82,9 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
       // Keep the throwaway daemon lean / non-networked.
       OTTO_SELF_IMPROVE: '0',
       OTTO_CLI_UPDATE: '0', // isolated tests never update the host's agent CLIs
+      // Phone access: never read or change the host's real tailnet (a path
+      // that is not a file reads as "Tailscale not installed").
+      OTTO_TAILSCALE_CLI: join(dataDir, 'no-tailscale'),
       // Route agent turns (Discovery Chat, Canvas assist) through the orchestrator's
       // deterministic offline E2E stub instead of spawning a real `claude` PTY, so
       // those feature flows are reproducible + network-free. The stub branches on an

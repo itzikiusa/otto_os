@@ -62,12 +62,24 @@ pub struct SystemCli {
     path: Option<PathBuf>,
 }
 
+/// Overrides [`CLI_CANDIDATES`] with one exact binary: an isolated daemon
+/// (E2E, the tour capture) points it at a scripted stand-in so it never reads
+/// or changes the real tailnet. Set but not a file → "not installed".
+pub const CLI_ENV: &str = "OTTO_TAILSCALE_CLI";
+
 impl SystemCli {
     pub fn detect() -> Self {
-        let path = CLI_CANDIDATES
-            .iter()
-            .map(PathBuf::from)
-            .find(|p| p.is_file());
+        Self::detect_with(std::env::var_os(CLI_ENV).map(PathBuf::from))
+    }
+
+    fn detect_with(over: Option<PathBuf>) -> Self {
+        let path = match over {
+            Some(p) => Some(p).filter(|p| p.is_file()),
+            None => CLI_CANDIDATES
+                .iter()
+                .map(PathBuf::from)
+                .find(|p| p.is_file()),
+        };
         Self { path }
     }
 }
@@ -618,6 +630,23 @@ mod tests {
         assert_eq!(s.devices.len(), 1);
         assert_eq!(s.devices[0].name, "iphone");
         assert_eq!(s.devices[0].os, "iOS");
+    }
+
+    #[test]
+    fn env_override_replaces_the_fixed_paths() {
+        let dir = std::env::temp_dir().join(format!("otto-ts-cli-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("tailscale");
+        std::fs::write(&fake, "#!/bin/sh\n").unwrap();
+        let cli = SystemCli::detect_with(Some(fake.clone()));
+        assert_eq!(cli.path(), Some(fake.display().to_string()));
+        // An override that is not a file never falls back to the real CLI.
+        assert_eq!(
+            SystemCli::detect_with(Some(dir.join("missing"))).path(),
+            None
+        );
+        std::fs::remove_file(&fake).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
     }
 
     #[tokio::test]

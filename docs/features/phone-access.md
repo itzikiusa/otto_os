@@ -116,3 +116,8 @@ safety); pair again.
   lock screen; the HTTP fallback (§4) would have to keep working without it.
 - The daemon serves Tailscale on its loopback port (`$OTTO_PORT`, default
   7700). Changing the port needs Turn off → Turn on.
+- `OTTO_TAILSCALE_CLI=<path>` replaces the fixed CLI locations with one exact
+  binary (a path that is not a file reads as "not installed"). Isolated
+  daemons set it so they never read or change the host's real tailnet: the
+  E2E daemon points it at nothing, and the tour-film capture points it at a
+  scripted fictional tailnet (`marketing/videos/tour/scripts/lib/stack.mjs`).
