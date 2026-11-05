@@ -1083,6 +1083,28 @@ blind timer.
 
 ---
 
+### `personal_agent_changed`
+
+```json
+{ "type": "personal_agent_changed", "workspace_id": "<Id>", "agent_id": "<Id>",
+  "what": "agent|schedules|deleted|delegations" }
+```
+
+- Emitted by `otto_server::routes::personal_agents` and `otto_assistant`
+  whenever a personal agent or its routines change, from ANY path: the UI's
+  agent / schedule / autonomy / personality / reset routes, the main agent's
+  team tools (`otto.personal_agent_create`), an agent's own routine tools
+  (`otto.routine_*`) and the Agent admin MCP tools (they call the same
+  routes). `delegations` = a hand-off started or settled (the lead's id);
+  `agent` also covers an instruction proposal filed / applied.
+- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
+- Ids only: the Personal Agents store refetches what `what` names (the agent
+  row, its schedules, its delegations), so a routine an agent set up in chat
+  shows in Routines at once.
+- TypeScript type: `{ type: 'personal_agent_changed'; workspace_id: Id; agent_id: Id; what: string }`.
+
+---
+
 ### `personal_agent_activity`
 
 ```json

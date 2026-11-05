@@ -1167,6 +1167,135 @@
       "rows": 0
     }
   },
+  "otto_routine_list {}": {
+    "args": {},
+    "requests": [
+      [
+        "GET",
+        "/personal-agents/routines?session_id=sess-test",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_routine_create {\"schedule\":{\"cadence\":\"days\",\"at\":\"09:00\",\"days\":\"sun-thu\"},\"instruction\":\"brief me\"}": {
+    "args": {
+      "schedule": {
+        "cadence": "days",
+        "at": "09:00",
+        "days": "sun-thu"
+      },
+      "instruction": "brief me"
+    },
+    "requests": [
+      [
+        "POST",
+        "/personal-agents/routines",
+        {
+          "schedule": {
+            "cadence": "days",
+            "at": "09:00",
+            "days": "sun-thu"
+          },
+          "instruction": "brief me",
+          "session_id": "sess-test"
+        }
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_routine_update {\"routine_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"enabled\":false}": {
+    "args": {
+      "routine_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "enabled": false
+    },
+    "requests": [
+      [
+        "PATCH",
+        "/personal-agents/routines/01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        {
+          "session_id": "sess-test",
+          "enabled": false
+        }
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_routine_delete {\"routine_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}": {
+    "args": {
+      "routine_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    },
+    "requests": [
+      [
+        "DELETE",
+        "/personal-agents/routines/01ARZ3NDEKTSV4RRFFQ69G5FAV?session_id=sess-test",
+        null
+      ]
+    ],
+    "result": {
+      "ok": null,
+      "rows": 0
+    }
+  },
+  "otto_personality_set {\"preset\":\"blunt\"}": {
+    "args": {
+      "preset": "blunt"
+    },
+    "requests": [
+      [
+        "PUT",
+        "/personal-agents/self/personality",
+        {
+          "preset": "blunt",
+          "session_id": "sess-test"
+        }
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_instructions_propose {\"instructions\":\"new\",\"reason\":\"user asked\"}": {
+    "args": {
+      "instructions": "new",
+      "reason": "user asked"
+    },
+    "requests": [
+      [
+        "POST",
+        "/personal-agents/self/instructions",
+        {
+          "instructions": "new",
+          "reason": "user asked",
+          "session_id": "sess-test"
+        }
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
   "otto_api_list {}": {
     "args": {},
     "requests": [

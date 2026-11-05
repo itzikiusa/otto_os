@@ -17,15 +17,20 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use otto_core::agent_runtime::RuntimeSession;
 use otto_core::cancel_signal::CancelSignal;
 use otto_core::domain::Session;
 use otto_core::event::Event;
-use otto_core::{Id, Result};
+use otto_core::{Error, Id, Result};
 use otto_state::{DbPool, PersonalAgent, WorkspacesRepo};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
 use crate::personal_agents_engine::RunPlan;
+
+/// What [`AssistantCtx::reopen_thread`] / [`AssistantCtx::thread_notice`]
+/// refuse with on a runtime that cannot do it yet.
+pub const RUNTIME_UNSUPPORTED: &str = "the agent runtime does not support this yet";
 
 /// Boxed `Send` future for the hook methods.
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -86,6 +91,25 @@ pub trait AssistantCtx: Clone + Send + Sync + 'static {
     /// The structured agent runtime (Threads): personal-agent runs and chats
     /// on a runtime provider are threads.
     fn agent_runtime(&self) -> &otto_agent_protocol::AgentRuntime;
+    /// Reopen a CLOSED structured-runtime thread in place: its history stays
+    /// and the next prompt resumes the provider's own session
+    /// (`AgentRuntime::reopen`). An agent's chat is permanent — a closed one
+    /// is reopened, never silently replaced. The default (a runtime without
+    /// reopen) refuses with [`RUNTIME_UNSUPPORTED`]; the chat then falls back
+    /// to a fresh thread.
+    fn reopen_thread<'a>(&'a self, id: &'a Id) -> BoxFut<'a, Result<RuntimeSession>> {
+        let _ = id;
+        Box::pin(async { Err(Error::Conflict(RUNTIME_UNSUPPORTED.into())) })
+    }
+    /// Append a turn-less system notice to a thread's conversation
+    /// (`AgentRuntime::notice`, a `system_notice` item): how a run's result
+    /// or a delegation's outcome shows up in the agent's chat WITHOUT costing
+    /// an agent turn. The default refuses with [`RUNTIME_UNSUPPORTED`]; the
+    /// feed then falls back to a framed follow-up turn where one is wanted.
+    fn thread_notice<'a>(&'a self, id: &'a Id, message: &'a str) -> BoxFut<'a, Result<()>> {
+        let _ = (id, message);
+        Box::pin(async { Err(Error::Conflict(RUNTIME_UNSUPPORTED.into())) })
+    }
     /// Persist a notification-center notice and push it live
     /// (`ServerCtx::notifications().create`).
     fn create_notice(&self, notice: otto_state::NewNotice) -> BoxFut<'_, Result<()>>;

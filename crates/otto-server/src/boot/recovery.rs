@@ -18,6 +18,13 @@ pub async fn recover_before_serve(ctx: &ServerCtx, boot: &mut BootPhases) -> Res
     fail_orphaned_skill_evals(ctx).await;
     // Structured runtime: turns the last life left open end `interrupted`.
     warn_on_err("agent-runtime recovery", ctx.agent_runtime.recover().await);
+    // Hand-offs to personal agents that restart interrupted (or whose
+    // outcome never reached the main agent's chat) are reported there now —
+    // delivery runs in the background, after this settles their rows' state.
+    warn_on_err(
+        "personal-agent delegation recovery",
+        otto_assistant::personal_agent_team::recover_delegations(ctx).await,
+    );
     // Await old-life settlement before any supervisor or resumed workflow can
     // admit a fresh run; a detached sweep can accidentally reap that new work.
     // A failed step is LOGGED, never fatal: a stale `running` row is a smaller

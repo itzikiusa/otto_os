@@ -4213,8 +4213,11 @@ mod tests {
     /// narrow review sessions, and the content reads are opt-in); 92_429
     /// with the fifteen Agent admin tools (otto_*_personal_agent*: set up
     /// and run the person's personal agents; hidden from narrow sessions)
-    /// and otto_get_scheduled_task_report.
-    const TOOLS_LIST_BYTE_BUDGET: usize = 93_500;
+    /// and otto_get_scheduled_task_report; 95_662 with a personal agent's six
+    /// own-scope tools (otto_routine_* ×4, otto_personality_set,
+    /// otto_instructions_propose: routines set up from chat with no approval;
+    /// hidden from narrow sessions).
+    const TOOLS_LIST_BYTE_BUDGET: usize = 96_500;
     /// A review-type session (R2 per-source scoping): 52_595 after slim-app cleanup.
     const NARROW_TOOLS_LIST_BYTE_BUDGET: usize = 56_800; // +otto_thread_*, +otto_personal_agent_*
 

@@ -30,6 +30,8 @@ struct Daemon {
     /// ws Admin.
     adam: String,
     root: String,
+    /// The daemon's event bus (personal_agent_changed asserts).
+    events: tokio::sync::broadcast::Sender<otto_core::event::Event>,
     _tmp: tempfile::TempDir,
 }
 
@@ -118,6 +120,7 @@ async fn boot() -> Daemon {
     let base = format!("http://{}", listener.local_addr().unwrap());
     let mut ctx = otto_server::ServerCtx::for_tests(&pool, tmp.path()).await;
     ctx.base_url = base.clone();
+    let events = ctx.events.clone();
     let (api_extras, root_extras) = otto_server::modules::module_routers(&ctx);
     let app = otto_server::build_router(ctx, api_extras, root_extras);
     tokio::spawn(async move {
@@ -131,6 +134,7 @@ async fn boot() -> Daemon {
         bob,
         adam,
         root,
+        events,
         _tmp: tmp,
     }
 }
@@ -418,4 +422,329 @@ async fn the_main_agent_lists_creates_and_delegates_as_its_session() {
     assert_eq!(st, 400, "{body}");
     let (st, _) = d.send("POST", &d.alice, delegate, del(&lead)).await;
     assert_eq!(st, 400);
+}
+
+/// The next `personal_agent_changed` for `agent` within a few seconds.
+async fn changed(
+    rx: &mut tokio::sync::broadcast::Receiver<otto_core::event::Event>,
+    agent: &str,
+) -> String {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let ev = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .expect("no personal_agent_changed event")
+            .expect("event bus closed");
+        if let otto_core::event::Event::PersonalAgentChanged { agent_id, what, .. } = ev {
+            if agent_id == agent {
+                return what;
+            }
+        }
+    }
+}
+
+/// Schedules changed from ANY path announce themselves (the UI's schedule
+/// routes and the agent's own routine tools), so the page shows a routine
+/// the agent just set up in chat without a reload.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_schedule_write_emits_personal_agent_changed() {
+    let d = boot().await;
+    let id = d.agent(Some("alice")).await;
+    let mut rx = d.events.subscribe();
+    let (st, s) = d
+        .send(
+            "POST",
+            &d.alice,
+            &format!("/personal-agents/{id}/schedules"),
+            json!({"schedule": {"cadence": "daily", "at": "09:00"}, "timezone": "UTC"}),
+        )
+        .await;
+    assert_eq!(st, 200, "{s}");
+    assert_eq!(changed(&mut rx, &id).await, "schedules");
+    let sid = s["id"].as_str().unwrap().to_string();
+    let (st, _) = d
+        .send(
+            "PATCH",
+            &d.alice,
+            &format!("/personal-agents/schedules/{sid}"),
+            json!({"enabled": false}),
+        )
+        .await;
+    assert_eq!(st, 200);
+    assert_eq!(changed(&mut rx, &id).await, "schedules");
+    let (st, _) = d
+        .send(
+            "DELETE",
+            &d.alice,
+            &format!("/personal-agents/schedules/{sid}"),
+            json!(null),
+        )
+        .await;
+    assert_eq!(st, 200);
+    assert_eq!(changed(&mut rx, &id).await, "schedules");
+    // An agent edit (and the autonomy save) too.
+    let (st, _) = d
+        .send(
+            "PATCH",
+            &d.alice,
+            &format!("/personal-agents/{id}"),
+            json!({"name": "Scout 2"}),
+        )
+        .await;
+    assert_eq!(st, 200);
+    assert_eq!(changed(&mut rx, &id).await, "agent");
+}
+
+/// An agent sets up its OWN routine from chat — no approval card: natural
+/// days ("sun-thu") become a cron, the user's timezone is the default, the
+/// next runs come back, the page is told, and it pauses / deletes it the
+/// same way. A specialist cannot touch another agent's routines; the main
+/// agent can.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agent_manages_its_own_routines_from_its_session() {
+    let d = boot().await;
+    let me = d.agent(Some("alice")).await;
+    agent_thread(&d, "thr-me", &me).await;
+    let mut rx = d.events.subscribe();
+    let (st, r) = d
+        .send(
+            "POST",
+            &d.alice,
+            "/personal-agents/routines",
+            json!({
+                "session_id": "thr-me",
+                "schedule": {"cadence": "days", "at": "09:00", "days": "sun-thu"},
+                "timezone": "Asia/Jerusalem",
+                "instruction": "Morning brief\nSummarise my open PRs",
+                "deliver": {"type": "slack", "channel": "C123"}
+            }),
+        )
+        .await;
+    assert_eq!(st, 200, "{r}");
+    assert_eq!(r["name"], "Morning brief");
+    assert_eq!(r["schedule"]["expr"], "0 9 * * 0,1,2,3,4");
+    assert_eq!(r["timezone"], "Asia/Jerusalem");
+    assert_eq!(r["deliver"]["type"], "slack");
+    assert_eq!(r["deliver"]["channel"], "C123");
+    assert_eq!(r["next_runs"].as_array().map(Vec::len), Some(3), "{r}");
+    assert_eq!(changed(&mut rx, &me).await, "schedules");
+    let rid = r["id"].as_str().unwrap().to_string();
+    // Its destination is the routine's own (the engine delivers there).
+    let stored = PersonalAgentsRepo::new(d.pool.clone())
+        .get_schedule(&rid)
+        .await
+        .unwrap();
+    assert_eq!(stored.delivery.unwrap()["chat_id"], "C123");
+
+    // Listed (with the user's timezone), paused, deleted — all as itself.
+    let (st, list) = d
+        .send(
+            "GET",
+            &d.alice,
+            "/personal-agents/routines?session_id=thr-me",
+            json!(null),
+        )
+        .await;
+    assert_eq!(st, 200);
+    assert_eq!(list["routines"][0]["id"], rid.as_str());
+    assert!(list["user_timezone"].is_string());
+    let (st, paused) = d
+        .send(
+            "PATCH",
+            &d.alice,
+            &format!("/personal-agents/routines/{rid}"),
+            json!({"session_id": "thr-me", "enabled": false}),
+        )
+        .await;
+    assert_eq!(st, 200, "{paused}");
+    assert_eq!(paused["paused"], true);
+    assert_eq!(paused["next_runs"], json!([]));
+
+    // Slack as the user needs "Can act as me in Slack".
+    let (st, body) = d
+        .send(
+            "POST",
+            &d.alice,
+            "/personal-agents/routines",
+            json!({"session_id": "thr-me", "schedule": {"cadence": "daily", "at": "09:00"},
+                   "instruction": "x", "deliver": {"type": "slack", "channel": "C1", "as": "me"}}),
+        )
+        .await;
+    assert_eq!(st, 403, "{body}");
+
+    // A specialist cannot manage another agent's routines…
+    let other = d.agent(Some("alice")).await;
+    let (st, _) = d
+        .send(
+            "GET",
+            &d.alice,
+            &format!("/personal-agents/routines?session_id=thr-me&agent={other}"),
+            json!(null),
+        )
+        .await;
+    assert_eq!(st, 403);
+    // …nor touch one by id.
+    let (st, _) = d
+        .send(
+            "DELETE",
+            &d.alice,
+            &format!("/personal-agents/routines/{rid}?session_id=nope"),
+            json!(null),
+        )
+        .await;
+    assert_ne!(st, 200);
+    let (st, _) = d
+        .send(
+            "DELETE",
+            &d.alice,
+            &format!("/personal-agents/routines/{rid}?session_id=thr-me"),
+            json!(null),
+        )
+        .await;
+    assert_eq!(st, 200);
+    assert!(PersonalAgentsRepo::new(d.pool.clone())
+        .list_schedules(&me)
+        .await
+        .unwrap()
+        .is_empty());
+
+    // The user's view of the same agent lists its routines with next runs.
+    let (st, view) = d
+        .send(
+            "GET",
+            &d.alice,
+            &format!("/personal-agents/{me}/routines"),
+            json!(null),
+        )
+        .await;
+    assert_eq!(st, 200);
+    assert_eq!(view["routines"], json!([]));
+}
+
+/// Personality is tone only and the agent may change its own; instructions it
+/// only PROPOSES — the owner applies (or edits first) and can undo.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn personality_and_instruction_proposals() {
+    let d = boot().await;
+    let me = d.agent(Some("alice")).await;
+    agent_thread(&d, "thr-me", &me).await;
+    let (st, p) = d
+        .send(
+            "PUT",
+            &d.alice,
+            "/personal-agents/self/personality",
+            json!({"session_id": "thr-me", "preset": "blunt"}),
+        )
+        .await;
+    assert_eq!(st, 200, "{p}");
+    assert_eq!(d.autonomy(&me).await.personality.preset, "blunt");
+    let (st, _) = d
+        .send(
+            "PUT",
+            &d.alice,
+            "/personal-agents/self/personality",
+            json!({"session_id": "thr-me", "preset": "rude"}),
+        )
+        .await;
+    assert_eq!(st, 400);
+
+    let (st, _) = d
+        .send(
+            "POST",
+            &d.alice,
+            "/personal-agents/self/instructions",
+            json!({"session_id": "thr-me", "instructions": "Always answer in bullets.", "reason": "you asked twice"}),
+        )
+        .await;
+    assert_eq!(st, 200);
+    let repo = PersonalAgentsRepo::new(d.pool.clone());
+    // Nothing applied yet.
+    assert_eq!(repo.get(&me).await.unwrap().soul_md, "");
+    let (st, prop) = d
+        .send(
+            "GET",
+            &d.bob,
+            &format!("/personal-agents/{me}/instructions-proposal"),
+            json!(null),
+        )
+        .await;
+    assert_eq!(st, 200);
+    assert_eq!(prop["proposal"]["to"], "Always answer in bullets.");
+    // Another Editor cannot apply it (instructions are the owner's).
+    let (st, _) = d
+        .send(
+            "POST",
+            &d.bob,
+            &format!("/personal-agents/{me}/instructions-proposal/apply"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(st, 403);
+    let (st, _) = d
+        .send(
+            "POST",
+            &d.alice,
+            &format!("/personal-agents/{me}/instructions-proposal/apply"),
+            json!({"text": "Always answer in short bullets."}),
+        )
+        .await;
+    assert_eq!(st, 200);
+    assert_eq!(
+        repo.get(&me).await.unwrap().soul_md,
+        "Always answer in short bullets."
+    );
+    let (_, prop) = d
+        .send(
+            "GET",
+            &d.alice,
+            &format!("/personal-agents/{me}/instructions-proposal"),
+            json!(null),
+        )
+        .await;
+    assert_eq!(prop["proposal"], Value::Null);
+    assert_eq!(prop["can_undo"], true);
+    let (st, _) = d
+        .send(
+            "POST",
+            &d.alice,
+            &format!("/personal-agents/{me}/instructions/undo"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(st, 200);
+    assert_eq!(repo.get(&me).await.unwrap().soul_md, "");
+}
+
+/// The main agent's hand-offs are listed with their live status for both
+/// sides (the page's Activity and the chat's hand-off chips).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delegations_are_listed_for_lead_and_member() {
+    let d = boot().await;
+    let lead = d.agent(Some("alice")).await;
+    let member = d.agent(Some("alice")).await;
+    otto_state::DelegationsRepo::new(d.pool.clone())
+        .create(otto_state::NewDelegation {
+            id: "thr-del".into(),
+            workspace_id: "ws1".into(),
+            lead_agent_id: lead.clone(),
+            lead_thread_id: "thr-lead".into(),
+            member_agent_id: member.clone(),
+            member_name: "Scout".into(),
+            task: "check the build".into(),
+        })
+        .await
+        .unwrap();
+    for id in [&lead, &member] {
+        let (st, list) = d
+            .send(
+                "GET",
+                &d.bob,
+                &format!("/personal-agents/{id}/delegations"),
+                json!(null),
+            )
+            .await;
+        assert_eq!(st, 200, "{list}");
+        assert_eq!(list[0]["id"], "thr-del");
+        assert_eq!(list[0]["status"], "running");
+    }
 }

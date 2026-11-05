@@ -446,6 +446,17 @@ pub enum Event {
         run_id: Id,
         status: String,
     },
+    /// A personal agent or its routines changed — created, edited, deleted,
+    /// a schedule added / edited / removed, its autonomy saved or the agent
+    /// reset — from ANY path (the UI, an agent's MCP admin / team tools).
+    /// `what` is "agent" | "schedules" | "deleted". The Personal Agents page
+    /// re-fetches the agent (and its schedules) on a matching tick, so a
+    /// routine an agent set up in chat shows at once.
+    PersonalAgentChanged {
+        workspace_id: Id,
+        agent_id: Id,
+        what: String,
+    },
     /// A personal agent's live activity changed: one of its sessions made a
     /// governed tool call (allowed / blocked / needs approval) or is waiting on
     /// an approval. Ids only — the agent page re-fetches
@@ -755,6 +766,7 @@ impl Event {
             Event::ScheduledTaskRunUpdated { .. } => "scheduled_task_run_updated",
             Event::PersonalAgentRunUpdated { .. } => "personal_agent_run_updated",
             Event::PersonalAgentActivity { .. } => "personal_agent_activity",
+            Event::PersonalAgentChanged { .. } => "personal_agent_changed",
             Event::AgentRoomMessage { .. } => "agent_room_message",
             Event::CanvasRefsChanged { .. } => "canvas_refs_changed",
             Event::RepoStatusChanged { .. } => "repo_status_changed",

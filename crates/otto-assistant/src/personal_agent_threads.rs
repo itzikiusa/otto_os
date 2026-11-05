@@ -57,7 +57,8 @@ pub fn report_path<C: AssistantCtx>(ctx: &C, agent: &PersonalAgent, run_id: &str
 
 /// The server-owned meta a run's session (thread or terminal) runs under.
 /// `personal_agent` is the session→agent identity the room / team tools and
-/// the tool policy resolve; `browser` adds the browser MCP; `work.origin`
+/// the tool policy resolve (`personal_agent_name` is display only — Threads
+/// groups and badges by it; `trigger` / `routine` say what started the run); `browser` adds the browser MCP; `work.origin`
 /// marks the run ENGINE-owned (`source: "personal_agent"` is deliberately
 /// outside `BACKGROUND_SESSION_SOURCES`, so without it the idle sweep would
 /// read a terminal run as the user's own and never reclaim it).
@@ -68,10 +69,13 @@ pub fn run_meta(agent: &PersonalAgent, run_id: &str, plan: &RunPlan) -> Value {
     json!({
         "source": "personal_agent",
         "personal_agent": agent.id,
+        "personal_agent_name": agent.name,
         "run_id": run_id,
         "browser": agent.browser && !plan.read_only,
         "agent_mode": plan.mode,
         "read_only": plan.read_only,
+        "trigger": plan.trigger,
+        "routine": plan.routine,
         "work": { "origin": "personal_agent" },
     })
 }
@@ -292,6 +296,30 @@ pub async fn chat_thread<C: AssistantCtx>(
             created: false,
         }));
     }
+    // The chat is permanent: the caller's own pinned chat that was closed
+    // (an app restart, a stray Close) is reopened in place — same history,
+    // the provider's session resumed — instead of a fresh, empty thread.
+    if pinned.is_none() {
+        if let Some(sid) = agent.chat_session_id.as_deref().filter(|s| !s.is_empty()) {
+            let id: Id = sid.to_string();
+            let mine =
+                rt.get(&id).await.ok().filter(|t| {
+                    t.created_by == user_id && t.status == RuntimeSessionStatus::Closed
+                });
+            if mine.is_some() {
+                match ctx.reopen_thread(&id).await {
+                    Ok(_) => {
+                        return Ok(Some(ChatThread {
+                            session_id: id,
+                            created: false,
+                        }))
+                    }
+                    Err(e) if e.to_string().contains(crate::ctx::RUNTIME_UNSUPPORTED) => {}
+                    Err(e) => warn!(agent = %agent.id, "reopening the chat failed: {e}"),
+                }
+            }
+        }
+    }
     if pinned.is_some() {
         let own = rt
             .list(&agent.workspace_id, Some(&user_id.to_string()))
@@ -327,6 +355,7 @@ pub async fn chat_thread<C: AssistantCtx>(
                 meta: Some(json!({
                     "source": "personal_agent",
                     "personal_agent": agent.id,
+                    "personal_agent_name": agent.name,
                     "personal_agent_chat": true,
                     "agent_mode": "directed",
                     "personal_agent_context_version": context_version,
@@ -431,12 +460,15 @@ mod tests {
             read_only: true,
             goal: None,
             max_duration: None,
+            trigger: "proactive",
+            routine: None,
         };
         let ro = run_meta(&agent, "r1", &proactive);
         assert_eq!(ro["read_only"], true);
         assert_eq!(ro["browser"], false);
         assert_eq!(ro["personal_agent"], "a1");
         assert_eq!(ro["run_id"], "r1");
+        assert_eq!(ro["trigger"], "proactive");
         agent.browser = true;
         let rw = run_meta(&agent, "r2", &RunPlan::directed());
         assert_eq!(rw["read_only"], false);

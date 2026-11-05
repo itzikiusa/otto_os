@@ -142,6 +142,12 @@ pub(super) const NATIVE_TWINS: &[NativeTwin] = &[
     twin("personal_agent_list"),
     twin("personal_agent_create"),
     twin("personal_agent_delegate"),
+    twin("routine_list"),
+    twin("routine_create"),
+    twin("routine_update"),
+    twin("routine_delete"),
+    twin("personality_set"),
+    twin("instructions_propose"),
     twin("api_list"),
     twin("api_get_request"),
     twin("api_history"),
@@ -596,6 +602,11 @@ pub(super) const NARROW_HIDDEN_PREFIXES: &[&str] = &[
     "otto_list_consumer_groups",
     // Slack as the bot / as the person: no review or draft needs it.
     "otto_slack_",
+    // A personal agent's own routines / personality / instruction
+    // proposals: only its own sessions use them, never a review.
+    "otto_routine_",
+    "otto_personality_set",
+    "otto_instructions_propose",
     // Agent admin (setting up the person's personal agents): neither.
     "otto_list_personal_agent",
     "otto_get_personal_agent",

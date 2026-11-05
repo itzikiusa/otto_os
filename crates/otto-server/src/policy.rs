@@ -1364,6 +1364,26 @@ fn personal_agents_policy(p: &str, get: bool) -> Option<PolicyDecision> {
     ) {
         return Some(Require(ScheduledTasks, if get { View } else { Edit }));
     }
+    // An agent's own scope (routines, personality, instruction proposals):
+    // agent-facing calls run as its session; reads View, writes Edit (the
+    // handlers add the workspace role + owner checks).
+    if matches!(
+        p,
+        "/personal-agents/routines"
+            | "/personal-agents/routines/{schedule_id}"
+            | "/personal-agents/self/personality"
+            | "/personal-agents/self/instructions"
+            | "/personal-agents/personalities"
+            | "/personal-agents/{id}/routines"
+            | "/personal-agents/{id}/personality"
+            | "/personal-agents/{id}/instructions-proposal"
+            | "/personal-agents/{id}/instructions-proposal/apply"
+            | "/personal-agents/{id}/instructions-proposal/dismiss"
+            | "/personal-agents/{id}/instructions/undo"
+            | "/personal-agents/{id}/delegations"
+    ) {
+        return Some(Require(ScheduledTasks, if get { View } else { Edit }));
+    }
     // Autonomy (permission modes, standing goals, rules, primary), the live
     // activity feed and the memory inspector — same posture; reset and a
     // goal's "work on it now" are writes.

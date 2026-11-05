@@ -43,7 +43,7 @@ fn every_control_plane_tool_is_in_the_session_listing_as_specified() {
         "control-plane tools no session sees: {missing:?}"
     );
 
-    assert_eq!(NATIVE_TWINS.len(), 53);
+    assert_eq!(NATIVE_TWINS.len(), 59);
     for twin in NATIVE_TWINS {
         let full = format!("otto.{}", twin.short);
         let spec = GOVERNED_SPECS
@@ -80,7 +80,7 @@ fn routed_twins_are_twins_and_route() {
             "{name} is not dispatched"
         );
     }
-    assert_eq!(ROUTED_TWINS.len(), 38);
+    assert_eq!(ROUTED_TWINS.len(), 44);
 }
 
 /// The pre-step: a workspace-scoped twin takes the call's workspace (and

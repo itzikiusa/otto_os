@@ -28,6 +28,7 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/personal-agents/team/delegate", post(delegate))
         .route("/personal-agents/templates", get(templates))
         .route("/personal-agents/{id}/overview", get(overview))
+        .route("/personal-agents/{id}/delegations", get(delegations))
 }
 
 /// `GET /personal-agents/templates` — the New-agent templates
@@ -47,6 +48,25 @@ async fn overview(
     let agent = repo.get(&id).await?;
     require_ws_role(&ctx, &user, &agent.workspace_id, WorkspaceRole::Viewer).await?;
     Ok(Json(admin::overview(&repo, &agent).await?))
+}
+
+/// `GET /personal-agents/{id}/delegations` — the hand-offs this agent led or
+/// worked, newest first, with their live status (`running` | `done` |
+/// `failed` | `stopped` | `interrupted`) and whether the outcome reached the
+/// lead's chat.
+async fn delegations(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<Vec<otto_state::PersonalAgentDelegation>>> {
+    let repo = otto_state::PersonalAgentsRepo::new(ctx.pool.clone());
+    let agent = repo.get(&id).await?;
+    require_ws_role(&ctx, &user, &agent.workspace_id, WorkspaceRole::Viewer).await?;
+    Ok(Json(
+        otto_state::DelegationsRepo::new(ctx.pool.clone())
+            .list_for_agent(&id, 50)
+            .await?,
+    ))
 }
 
 #[derive(Deserialize, Default)]
@@ -128,10 +148,11 @@ async fn create(
         WorkspaceRole::Editor,
     )
     .await?;
-    team::create_member(&ctx, &lead, &user.id, req.member)
+    let made = team::create_member(&ctx, &lead, &user.id, req.member)
         .await
-        .map(Json)
-        .map_err(ApiError)
+        .map_err(ApiError)?;
+    super::changed(&ctx, &made.workspace_id, &made.id, "agent");
+    Ok(Json(made))
 }
 
 /// `POST /personal-agents/team/delegate` — the main agent's chat thread opens

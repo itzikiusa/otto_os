@@ -822,6 +822,55 @@ fn team_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
     tool.starts_with("personal_agent_").then(call)
 }
 
+/// A personal agent's own-scope slice of [`route_for`] (routines,
+/// personality, instruction proposals). `None` = not an own-scope tool.
+/// Always AS the calling agent session (`session_id`, filled by the bridge).
+fn own_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
+    if !(tool.starts_with("routine_")
+        || tool == "personality_set"
+        || tool == "instructions_propose")
+    {
+        return None;
+    }
+    let call = || -> Result<SelfCall, Error> {
+        let id = arg_str(args, "session_id")?;
+        let agent_q = args
+            .get("agent")
+            .and_then(Value::as_str)
+            .filter(|a| !a.trim().is_empty())
+            .map(|a| format!("&agent={}", seg(a)))
+            .unwrap_or_default();
+        let routine = || {
+            arg_str(args, "routine_id")
+                .map(|r| format!("/api/v1/personal-agents/routines/{}", seg(&r)))
+        };
+        Ok(match tool {
+            "routine_list" => SelfCall::get(format!(
+                "/api/v1/personal-agents/routines?session_id={}{agent_q}",
+                seg(&id)
+            )),
+            "routine_create" => SelfCall::post(
+                "/api/v1/personal-agents/routines".to_string(),
+                body_without(args, &[]),
+            ),
+            "routine_update" => SelfCall::patch(routine()?, body_without(args, &["routine_id"])),
+            "routine_delete" => {
+                SelfCall::delete(format!("{}?session_id={}{agent_q}", routine()?, seg(&id)))
+            }
+            "personality_set" => SelfCall::put(
+                "/api/v1/personal-agents/self/personality".to_string(),
+                body_without(args, &[]),
+            ),
+            "instructions_propose" => SelfCall::post(
+                "/api/v1/personal-agents/self/instructions".to_string(),
+                body_without(args, &[]),
+            ),
+            _ => return Err(Error::Invalid(format!("unknown tool otto.{tool}"))),
+        })
+    };
+    Some(call())
+}
+
 /// `args` without the routing keys (the path carries them; `workspace_id` is
 /// filled by the choke point for the pin / approval scope, never a field).
 fn body_without(args: &Value, keys: &[&str]) -> Value {
@@ -908,6 +957,9 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         return call;
     }
     if let Some(call) = team_route(tool, args).or_else(|| admin_route(tool, args)) {
+        return call;
+    }
+    if let Some(call) = own_route(tool, args) {
         return call;
     }
     Ok(match tool {

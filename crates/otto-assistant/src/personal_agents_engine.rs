@@ -113,6 +113,17 @@ fn emit<C: AssistantCtx>(ctx: &C, agent: &PersonalAgent, run_id: &str, status: &
     });
 }
 
+/// Announce that an agent (`what` = "agent" | "schedules" | "deleted" |
+/// "delegations") changed, from whichever path changed it — the Personal
+/// Agents page refetches it (`personal_agent_changed`).
+pub fn emit_changed<C: AssistantCtx>(ctx: &C, workspace_id: &str, agent_id: &str, what: &str) {
+    let _ = ctx.events().send(Event::PersonalAgentChanged {
+        workspace_id: workspace_id.to_string(),
+        agent_id: agent_id.to_string(),
+        what: what.to_string(),
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Pure helpers (unit-tested)
 // ---------------------------------------------------------------------------
@@ -170,6 +181,11 @@ pub struct RunPlan {
     pub goal: Option<StandingGoal>,
     /// Wall-clock cap (proactive budget); `None` = the normal watchdogs only.
     pub max_duration: Option<Duration>,
+    /// What started the run (`schedule` | `manual` | `proactive`) — on the
+    /// run thread's meta, so Threads badges it ("Scheduled · …").
+    pub trigger: &'static str,
+    /// The routine's short name (a scheduled run) or the goal (proactive).
+    pub routine: Option<String>,
 }
 
 impl RunPlan {
@@ -179,6 +195,8 @@ impl RunPlan {
             read_only: false,
             goal: None,
             max_duration: None,
+            trigger: "manual",
+            routine: None,
         }
     }
 
@@ -189,10 +207,15 @@ impl RunPlan {
             read_only: schedule.permission == "read_only",
             goal: None,
             max_duration: None,
+            trigger: "schedule",
+            routine: Some(crate::personal_agent_feed::routine_label(
+                &schedule.directive,
+            )),
         }
     }
 
     pub fn proactive(goal: StandingGoal, max_minutes: u32) -> Self {
+        let routine = Some(crate::personal_agent_feed::routine_label(&goal.text));
         Self {
             mode: "proactive",
             read_only: true,
@@ -200,6 +223,8 @@ impl RunPlan {
             max_duration: Some(Duration::from_secs(
                 u64::from(max_minutes.clamp(1, 60)) * 60,
             )),
+            trigger: "proactive",
+            routine,
         }
     }
 }
@@ -262,6 +287,11 @@ pub fn render_autonomy(cfg: &AgentAutonomy, specialists: &[(String, String)]) ->
             specialists,
         ));
     }
+    s.push_str(&crate::personal_agent_routines::render_personality(
+        &cfg.personality,
+        cfg.primary,
+    ));
+    s.push_str(crate::personal_agent_routines::render_self_section());
     s
 }
 
@@ -915,6 +945,10 @@ async fn complete_agent_run<C: AssistantCtx>(
 ) -> Result<String> {
     let repo = repo(ctx);
     let run_id = run_id.to_string();
+    // A routine with its own destination delivers there.
+    let destination = schedule
+        .and_then(|s| s.delivery.clone())
+        .unwrap_or_else(|| agent.delivery.clone());
 
     let directive = directive_override
         .map(str::to_string)
@@ -973,6 +1007,7 @@ async fn complete_agent_run<C: AssistantCtx>(
             &run_id,
             if timed_out { "error" } else { "canceled" },
         );
+        crate::personal_agent_feed::post_run_result(ctx, agent, &run_id);
         return Ok(run_id);
     };
 
@@ -997,14 +1032,14 @@ async fn complete_agent_run<C: AssistantCtx>(
 
             // Notify only on meaningful change (always on for personal agents —
             // the report also always lands on the agent page regardless).
-            let hash = destination_report_hash(&agent.delivery, &C::report_hash(&out.report));
+            let hash = destination_report_hash(&destination, &C::report_hash(&out.report));
             let unchanged = repo
                 .last_ok_report_hash(&agent.id, &run_id)
                 .await
                 .ok()
                 .flatten()
                 .is_some_and(|prev| {
-                    content_hash_for_destination(&agent.delivery, &prev)
+                    content_hash_for_destination(&destination, &prev)
                         .is_some_and(|hash| C::report_hash_matches(hash, &out.report))
                 });
             // Proactive findings go to the agent's feed only — never outward.
@@ -1016,7 +1051,7 @@ async fn complete_agent_run<C: AssistantCtx>(
                         &agent.workspace_id,
                         agent.created_by.as_deref(),
                         &agent.name,
-                        &agent.delivery,
+                        &destination,
                         &out.summary,
                         &out.report,
                     )
@@ -1048,6 +1083,7 @@ async fn complete_agent_run<C: AssistantCtx>(
             prune(ctx, &agent.id).await;
             emit(ctx, agent, &run_id, status);
             agent_notice(ctx, agent, report_error.as_deref(), derr.as_deref()).await;
+            crate::personal_agent_feed::post_run_result(ctx, agent, &run_id);
             Ok(run_id)
         }
         Err(e) => {
@@ -1069,6 +1105,7 @@ async fn complete_agent_run<C: AssistantCtx>(
             prune(ctx, &agent.id).await;
             emit(ctx, agent, &run_id, "error");
             agent_notice(ctx, agent, Some(&msg), None).await;
+            crate::personal_agent_feed::post_run_result(ctx, agent, &run_id);
             Ok(run_id)
         }
     }
