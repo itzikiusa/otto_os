@@ -103,7 +103,42 @@ function groupParallel(entries: WorkEntry[]): WorkPart[] {
   return parts;
 }
 
+/** A subagent's own activity (items with `parent_item_id`), by card id. */
+export function subagentChildren(items: readonly TurnItem[]): Map<string, TurnItem[]> {
+  const out = new Map<string, TurnItem[]>();
+  for (const i of items) {
+    if (!i.parent_item_id) continue;
+    const list = out.get(i.parent_item_id);
+    if (list) list.push(i);
+    else out.set(i.parent_item_id, [i]);
+  }
+  return out;
+}
+
+/** How a finished turn went, for its status line: `partial` = it answered
+ *  but a step failed (Details / Retry), `stopped` = interrupted (neutral, not
+ *  an error), `stalled` = the watchdog stopped it. Null while running or
+ *  when it simply completed. */
+export type TurnOutcome = { kind: 'partial'; failed: TurnItem[]; retryText: string | null } | { kind: 'stopped' | 'stalled' };
+
+export function turnOutcome(p: RuntimeProjection, turn: ProviderTurn | null): TurnOutcome | null {
+  if (!turn || turn.status === 'running' || turn.status === 'pending') return null;
+  const own = p.items.filter((i) => i.turn_id === turn.id && !i.parent_item_id);
+  if (turn.status === 'interrupted' || turn.status === 'cancelled') {
+    return { kind: own.some((i) => i.id === `${turn.id}:stalled`) ? 'stalled' : 'stopped' };
+  }
+  if (turn.status !== 'completed') return null;
+  const answered = own.some((i) => i.type === 'assistant_message' && i.text.trim() !== '');
+  const failed = own.filter((i) => i.type !== 'system_notice' && (i.status === 'failed' || i.type === 'error'));
+  if (!answered || failed.length === 0) return null;
+  // Retry re-sends the message that started it (none for the agent's own turn).
+  const first = own.find((i) => i.type === 'user_message');
+  return { kind: 'partial', failed, retryText: first?.type === 'user_message' ? first.text : null };
+}
+
 export function timelineRows(items: readonly TurnItem[]): TimelineRow[] {
+  // A subagent's own items render inside its card, not in the timeline.
+  items = items.filter((i) => !i.parent_item_id);
   // An approval naming a tool item we have folds into that tool's row.
   const tools = new Set(items.filter(isTool).map((i) => i.id));
   const folded = new Map<string, ApprovalItem>();
@@ -202,6 +237,8 @@ export function workLabel(item: TurnItem): string {
       return title ?? item.prompt ?? 'Approval requested';
     case 'system_notice':
       return item.message;
+    case 'subagent':
+      return title ?? item.description ?? item.subagent_type ?? 'Subagent';
     case 'error':
       return item.failure.class === 'usage_limit' ? 'Usage limit reached' : title || 'Provider error';
     default:

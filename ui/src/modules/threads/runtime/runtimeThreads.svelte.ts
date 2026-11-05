@@ -10,6 +10,7 @@ import { noteRuntimeWaiting } from '../../../lib/stores/runtimeAttention.svelte'
 import { uiControl } from '../../../lib/stores/uiControl.svelte';
 import type {
   ApprovalDecision,
+  PromptDelivery,
   ProviderSessionStatus,
   RuntimeEvent,
   RuntimePromptReq,
@@ -47,7 +48,8 @@ export function asThreadSession(r: RuntimeSession): Session {
     kind: 'agent',
     provider: r.provider,
     title: r.title,
-    status: r.status === 'working' || r.status === 'starting' ? 'working' : 'idle',
+    // Background work the agent started keeps the row working between turns.
+    status: r.status === 'working' || r.status === 'starting' || (r.status !== 'closed' && (r.background_tasks?.length ?? 0) > 0) ? 'working' : 'idle',
     cwd: r.cwd,
     provider_session_id: r.native_thread_id ?? null,
     connection_id: null,
@@ -153,8 +155,10 @@ class RuntimeThreads {
     // The row follows status / turn changes only — not every streamed chunk.
     const row = this.byId[ev.session_id];
     if (row && row.status !== 'closed' && (ev.type === 'provider_session.updated' || ev.type === 'provider_turn.updated')) {
-      const status = ev.type === 'provider_session.updated' ? SESSION_STATUS[ev.provider_session.status] : row.status;
-      this.byId[ev.session_id] = { ...row, status, last_active_at: ev.ts };
+      if (ev.type === 'provider_session.updated') {
+        const ps = ev.provider_session;
+        this.byId[ev.session_id] = { ...row, status: SESSION_STATUS[ps.status], background_tasks: ps.background_tasks ?? [], last_active_at: ev.ts };
+      } else this.byId[ev.session_id] = { ...row, last_active_at: ev.ts };
     }
   }
 
@@ -203,6 +207,31 @@ class RuntimeThreads {
 
   async close(id: string): Promise<void> {
     this.byId[id] = await api.post<RuntimeSession>(`/runtime-sessions/${id}/close`);
+  }
+
+  /** A closed thread takes messages again (its agent resumes). */
+  async reopen(id: string): Promise<RuntimeSession> {
+    const r = await api.post<RuntimeSession>(`/runtime-sessions/${id}/reopen`);
+    this.byId[id] = r;
+    return r;
+  }
+
+  /** Stop the agent and remove the thread with its history. */
+  async remove(id: string): Promise<void> {
+    await api.del(`/runtime-sessions/${id}`);
+    const next = { ...this.byId };
+    delete next[id];
+    this.byId = next;
+  }
+
+  /** Drop a queued message. */
+  async unqueue(id: string, queuedId: string): Promise<void> {
+    await api.del(`/runtime-sessions/${id}/queue/${queuedId}`);
+  }
+
+  /** Deliver a queued message now: steer it in, or stop the turn and send it. */
+  async deliverQueued(id: string, queuedId: string, delivery: PromptDelivery): Promise<RuntimePromptResp> {
+    return api.post<RuntimePromptResp>(`/runtime-sessions/${id}/queue/${queuedId}`, { delivery });
   }
 }
 
