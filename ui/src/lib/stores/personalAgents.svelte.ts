@@ -9,12 +9,32 @@ import type {
   AgentRoomWithMembers,
   OttoEvent,
   PersonalAgent,
+  PersonalAgentAutonomy,
+  PersonalAgentDelegation,
   PersonalAgentRun,
   PersonalAgentSchedule,
+  ProviderSessionStatus,
+  RuntimeEvent,
+  RuntimeSession,
+  RuntimeSessionStatus,
 } from '../api/types';
 import { loadErrorText } from '../loadError';
+import { personalAgentOf } from '../personalAgentBadges';
 import { announceModule } from '../lazyModule';
 import { mapLimit } from '../poll';
+
+/** `set_session_status` in otto-agent-protocol's runtime.rs (as Threads maps it). */
+const THREAD_STATUS: Record<ProviderSessionStatus, RuntimeSessionStatus> = {
+  starting: 'starting',
+  ready: 'idle',
+  running: 'working',
+  waiting: 'awaiting_permission',
+  stopped: 'dormant',
+  error: 'dormant',
+};
+
+/** What an agent is doing right now, for its rail tile. */
+export type AgentPresence = 'needs_you' | 'working' | 'idle';
 
 /** Room messages per request / kept in memory on live appends. */
 const ROOM_PAGE = 200;
@@ -37,6 +57,15 @@ class PersonalAgentsStore {
   /** agent_id → its last runs-load failure (human text); cleared on success. A
    *  failed load keeps the last known runs, so it never reads as "no runs yet". */
   runsError: Record<string, string> = $state({});
+  /** agent_id → its autonomy (main agent / proactive), loaded with the list. */
+  autonomyById: Record<string, PersonalAgentAutonomy> = $state({});
+  /** agent_id → the hand-offs it led or worked (newest first). */
+  delegationsByAgent: Record<string, PersonalAgentDelegation[]> = $state({});
+  /** The workspace's personal-agent threads (chats, runs, delegated work),
+   *  status kept live from `agent_runtime_event` while a page watches. */
+  threads: RuntimeSession[] = $state([]);
+  /** agent_id → a run of it is `running` (from run events). */
+  runningByAgent: Record<string, boolean> = $state({});
   rooms: AgentRoomWithMembers[] = $state([]);
   /** room_id → its messages, oldest first (appended via `after` paging).
    *  Raw (replaced wholesale) and capped at ROOM_KEEP on live appends — a busy
@@ -63,6 +92,83 @@ class PersonalAgentsStore {
 
   agent(id: string): PersonalAgent | undefined {
     return this.agents.find((a) => a.id === id);
+  }
+
+  /** The workspace's main agent (autonomy `primary`), once autonomy loaded. */
+  get primary(): PersonalAgent | null {
+    return this.agents.find((a) => this.autonomyById[a.id]?.primary) ?? null;
+  }
+
+  /** Every thread that runs as `agentId`, newest activity first. */
+  threadsOf(agentId: string, closed = true): RuntimeSession[] {
+    return this.threads
+      .filter((t) => personalAgentOf(t.meta) === agentId && (closed || t.status !== 'closed'))
+      .sort((a, b) => b.last_active_at.localeCompare(a.last_active_at));
+  }
+
+  /** Needs you (a thread waits on an approval) > working (a turn or run is
+   *  going) > idle. */
+  presence(agentId: string): AgentPresence {
+    const live = this.threadsOf(agentId, false);
+    if (live.some((t) => t.status === 'awaiting_permission')) return 'needs_you';
+    if (this.runningByAgent[agentId] || live.some((t) => t.status === 'working' || t.status === 'starting')) return 'working';
+    return 'idle';
+  }
+
+  async loadThreads(workspaceId: string): Promise<void> {
+    try {
+      const rows = await personalAgentsApi.threads(workspaceId);
+      if (this.wsId && this.wsId !== workspaceId) return;
+      this.threads = rows.filter((r) => personalAgentOf(r.meta) !== null);
+    } catch {
+      /* Presence and Activity fall back to idle / empty; the next event retries. */
+    }
+  }
+
+  private adopting = new Set<string>();
+
+  /** A runtime event (`agent_runtime_event`, routed by the mounted page):
+   *  keep a known agent thread's status live; fetch a new one once (a run /
+   *  delegated thread first seen through its events). */
+  applyThreadEvent(ev: RuntimeEvent): void {
+    const i = this.threads.findIndex((t) => t.id === ev.session_id);
+    if (i < 0) {
+      if (this.adopting.has(ev.session_id)) return;
+      this.adopting.add(ev.session_id);
+      void personalAgentsApi
+        .thread(ev.session_id)
+        .then((r) => {
+          if (personalAgentOf(r.meta) && !this.threads.some((t) => t.id === r.id)) this.threads = [...this.threads, r];
+        })
+        .catch(() => {})
+        .finally(() => this.adopting.delete(ev.session_id));
+      return;
+    }
+    if (ev.type !== 'provider_session.updated' && ev.type !== 'provider_turn.updated') return;
+    const row = this.threads[i];
+    if (row.status === 'closed') return;
+    const status = ev.type === 'provider_session.updated' ? THREAD_STATUS[ev.provider_session.status] : row.status;
+    const next = [...this.threads];
+    next[i] = { ...row, status, last_active_at: ev.ts };
+    this.threads = next;
+  }
+
+  async loadAutonomy(agentId: string): Promise<void> {
+    try {
+      const a = await personalAgentsApi.autonomy(agentId);
+      this.autonomyById = { ...this.autonomyById, [agentId]: a };
+    } catch {
+      /* Badges are best-effort; the Autonomy tab shows its own state. */
+    }
+  }
+
+  async loadDelegations(agentId: string): Promise<void> {
+    try {
+      const list = await personalAgentsApi.delegations(agentId);
+      this.delegationsByAgent = { ...this.delegationsByAgent, [agentId]: list };
+    } catch {
+      /* Shown as "no delegated work" until the next event retries. */
+    }
   }
 
   /** Earliest next_run_at across an agent's enabled schedules (card display). */
@@ -93,9 +199,11 @@ class PersonalAgentsStore {
       if (current()) this.loadingAgents = false;
     }
     if (!current()) return;
-    // Schedules feed the cards' next-run + the Schedules tab; best-effort.
+    // Schedules feed the rail's next-run + Routines; autonomy marks the
+    // main agent. Both best-effort.
     await mapLimit(this.agents, 2, async (a) => {
-      if (current()) await this.loadSchedules(a.id);
+      if (!current()) return;
+      await Promise.all([this.loadSchedules(a.id), this.loadAutonomy(a.id)]);
     });
   }
 
@@ -342,9 +450,52 @@ class PersonalAgentsStore {
    *  load refreshes schedules; the Runs tab reloads runs). */
   applyRunEvent(ev: Extract<OttoEvent, { type: 'personal_agent_run_updated' }>): void {
     if (this.wsId && ev.workspace_id !== this.wsId) return;
+    // Presence is a flag per agent — cheap, kept even with no page mounted.
+    this.runningByAgent = { ...this.runningByAgent, [ev.agent_id]: ev.status === 'running' };
     if (this.viewers === 0) return;
     if (ev.agent_id in this.runsByAgent) void this.loadRuns(ev.agent_id);
     if (ev.agent_id in this.schedulesByAgent) void this.loadSchedules(ev.agent_id);
+  }
+
+  /** Live WS tick: an agent, its routines or its delegations changed from
+   *  any path (the UI, an agent's MCP admin / team tools). Refetch what the
+   *  event names — the agent list (a new / renamed / deleted agent) is
+   *  cheap and keeps the rail right even with no page mounted. */
+  applyChangedEvent(ev: Extract<OttoEvent, { type: 'personal_agent_changed' }>): void {
+    if (!this.wsId || ev.workspace_id !== this.wsId) return;
+    const id = ev.agent_id;
+    if (ev.what === 'deleted') {
+      this.agents = this.agents.filter((a) => a.id !== id);
+      return;
+    }
+    if (ev.what === 'schedules') {
+      void this.loadSchedules(id);
+      if (id in this.runsByAgent) void this.loadRuns(id);
+      return;
+    }
+    if (ev.what === 'delegations') {
+      void this.loadDelegations(id);
+      // The other side of a hand-off is refreshed too when it is cached.
+      for (const other of Object.keys(this.delegationsByAgent)) {
+        if (other !== id && this.delegationsByAgent[other]?.some((d) => d.lead_agent_id === id || d.member_agent_id === id)) {
+          void this.loadDelegations(other);
+        }
+      }
+      return;
+    }
+    // "agent": a create, edit or autonomy save.
+    void personalAgentsApi
+      .get(id)
+      .then((a) => {
+        if (a.workspace_id !== this.wsId) return;
+        const known = this.agents.some((x) => x.id === id);
+        this.agents = known ? this.agents.map((x) => (x.id === id ? a : x)) : [...this.agents, a];
+        if (!known) void this.loadSchedules(id);
+      })
+      .catch(() => {});
+    // Becoming the main agent clears every other agent's flag.
+    for (const a of this.agents) void this.loadAutonomy(a.id);
+    if (!this.agents.some((a) => a.id === id)) void this.loadAutonomy(id);
   }
 
   /** Mounted Rooms views. Room events touch message feeds only while one is. */

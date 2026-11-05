@@ -53,7 +53,12 @@
     fName = t.name;
     fAvatar = t.avatar;
     fSoul = t.soul_md;
-    const when = t.schedule.cadence === 'daily' ? `daily at ${t.schedule.at}` : `every ${t.schedule.every_min} min`;
+    const s = t.schedule;
+    if (!s) {
+      scheduleNote = t.primary ? 'Becomes your main agent — set up its routines by chatting with it.' : '';
+      return;
+    }
+    const when = s.cadence === 'daily' ? `daily at ${s.at}` : `every ${s.every_min} min`;
     scheduleNote = `Adds a schedule: ${when} — “${t.directive}”`;
   }
 
@@ -212,11 +217,11 @@
             schedule: o.schedule, timezone: o.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
             directive: o.directive?.trim() || t?.directive || '', enabled: o.enabled ?? true,
             permission: o.permission, idempotency_key: crypto.randomUUID(),
-          } : t ? {
+          } : t?.schedule ? {
             schedule: t.schedule, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
             directive: t.directive, enabled: true, idempotency_key: crypto.randomUUID(),
           } : null;
-          createdAgent = await personalAgents.create(ws.currentId!, body);
+          createdAgent = await personalAgents.create(ws.currentId!, { ...body, ...(t?.primary ? { primary: true } : {}) });
         } else {
           createdAgent = await personalAgents.update(createdAgent.id, body);
         }

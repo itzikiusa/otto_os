@@ -36,6 +36,7 @@
   import { browserTz, buildCadence, cadenceLabel, defaultCadence, loadCadence, WEEKDAYS, type CadenceForm } from './cadence';
   import type { PersonalAgentAutonomy, PersonalAgentPermission, PersonalAgentRun, PersonalAgentSchedule } from '../../lib/api/types';
   import { paAgentPort } from '../../lib/uiCommands/personalAgentsPort';
+  import { routineLabel, runBadge } from '../../lib/personalAgentBadges';
 
   const AgentMemoryInspectorLazy = lazyComponent(() => import('./AgentMemoryInspector.svelte'));
   const AgentDocumentsLazy = lazyComponent(() => import('./AgentDocuments.svelte'));
@@ -65,7 +66,9 @@
   async function goTab(t: Tab, event?: MouseEvent): Promise<void> {
     const list = (event?.currentTarget as HTMLElement | undefined)?.closest('[role="tablist"]');
     const seq = ++tabTransition;
-    const accepted = await router.goChecked(t === 'overview' ? `personal-agents/${agentId}` : `personal-agents/${agentId}/${t}`);
+    // `#/personal-agents/<id>` alone is the agent's home (its conversation);
+    // every tab of this settings page has its own path, Overview included.
+    const accepted = await router.goChecked(`personal-agents/${agentId}/${t}`);
     await tick();
     await Promise.resolve();
     if (seq !== tabTransition || !list?.isConnected || list.closest('[inert]')) return;
@@ -318,9 +321,9 @@
       const g = autonomy?.goals.find((x) => x.id === r.goal_id);
       return g ? `Goal · ${g.text}` : 'Standing goal';
     }
-    if (!r.schedule_id) return 'Manual';
-    const s = schedules.find((x) => x.id === r.schedule_id);
-    return s ? cadenceLabel(s.schedule, s.timezone) : 'Deleted schedule';
+    const s = r.schedule_id ? schedules.find((x) => x.id === r.schedule_id) : undefined;
+    if (r.schedule_id && !s) return 'Scheduled · deleted routine';
+    return runBadge(r, s ? `${routineLabel(s.directive)} (${cadenceLabel(s.schedule, s.timezone)})` : null).label;
   }
 
   /** Where each run's report goes, in words (outward destinations named). */
@@ -357,7 +360,7 @@
 <div class="agent-page">
 <PageHeader title={agent ? agent.name : 'Personal agent'} tabsPlacement="below">
   {#snippet leading()}
-    <button class="icon-btn" title="Back to Personal Agents" aria-label="Back to Personal Agents" onclick={() => router.go('personal-agents')}>
+    <button class="icon-btn" title="Back to the conversation" aria-label="Back to the conversation" onclick={() => router.go(`personal-agents/${agentId}`)}>
       <Icon name="chevronLeft" size={16} />
     </button>
     {#if agent}<AgentAvatar avatar={agent.avatar} name={agent.name} size={24} />{/if}

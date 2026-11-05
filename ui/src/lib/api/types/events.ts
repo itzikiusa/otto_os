@@ -246,6 +246,16 @@ export type OttoEvent =
       status: string;
     }
   | {
+      /** A personal agent or its routines changed (created, edited, deleted,
+       *  a schedule added/edited/removed, autonomy saved, a delegation
+       *  started/settled) — from ANY path, the UI or an agent's MCP tools.
+       *  The Personal Agents store refetches what `what` names. */
+      type: 'personal_agent_changed';
+      workspace_id: Id;
+      agent_id: Id;
+      what: 'agent' | 'schedules' | 'deleted' | 'delegations' | string;
+    }
+  | {
       /** A personal agent's live activity changed (tool call allowed/blocked/
        *  needing approval, or an approval it waits on) — the Activity tab
        *  re-fetches `GET /personal-agents/{id}/activity`. */

@@ -9,11 +9,15 @@ import type {
   PersonalAgent,
   PersonalAgentActivity,
   PersonalAgentAutonomy,
+  PersonalAgentDelegation,
   PersonalAgentDocument,
+  PersonalAgentInstructionsProposal,
+  PersonalAgentRoutines,
   PersonalAgentMemories,
   PersonalAgentPermission,
   PersonalAgentRun,
   PersonalAgentSchedule,
+  RuntimeSession,
   SavePersonalAgentAutonomyReq,
 } from './types';
 
@@ -27,6 +31,8 @@ export interface PersonalAgentInput {
   browser?: boolean;
   delivery?: Record<string, unknown>;
   enabled?: boolean;
+  /** Create only: make it the workspace's main agent. */
+  primary?: boolean;
 }
 
 export interface AgentScheduleInput {
@@ -65,6 +71,28 @@ export const personalAgentsApi = {
       scheduleId ? { schedule_id: scheduleId } : {},
     ),
   runs: (agentId: string) => api.get<PersonalAgentRun[]>(`/personal-agents/${agentId}/runs`),
+  /** Its routines with their next runs and the user's timezone. */
+  routines: (agentId: string) => api.get<PersonalAgentRoutines>(`/personal-agents/${agentId}/routines`),
+  /** Personality preset (tone only) and/or the user's own words (owner-only). */
+  setPersonality: (agentId: string, body: { preset?: string; note?: string }) =>
+    api.put<{ personality: { preset: string; note: string } }>(`/personal-agents/${agentId}/personality`, body),
+  proposal: (agentId: string) =>
+    api.get<PersonalAgentInstructionsProposal>(`/personal-agents/${agentId}/instructions-proposal`),
+  /** Apply the agent's proposed instructions (optionally edited first). Owner-only. */
+  applyProposal: (agentId: string, text?: string) =>
+    api.post<{ ok: boolean; soul_md: string }>(`/personal-agents/${agentId}/instructions-proposal/apply`, text === undefined ? {} : { text }),
+  dismissProposal: (agentId: string) =>
+    api.post<{ ok: boolean }>(`/personal-agents/${agentId}/instructions-proposal/dismiss`, {}),
+  /** Restore the instructions the last applied proposal replaced. Owner-only. */
+  undoInstructions: (agentId: string) =>
+    api.post<{ ok: boolean; soul_md: string }>(`/personal-agents/${agentId}/instructions/undo`, {}),
+  /** The workspace's structured-runtime threads (the store keeps the
+   *  personal-agent ones: chats, runs, delegated work). */
+  threads: (ws: string) => api.get<RuntimeSession[]>(`/workspaces/${ws}/runtime-sessions`),
+  thread: (id: string) => api.get<RuntimeSession>(`/runtime-sessions/${id}`),
+  /** Hand-offs this agent led or worked, newest first, with live status. */
+  delegations: (agentId: string) =>
+    api.get<PersonalAgentDelegation[]>(`/personal-agents/${agentId}/delegations`),
   /** Stop a running run (its session is killed; it settles `canceled`). */
   cancelRun: (runId: string) => api.post<{ ok: boolean }>(`/personal-agents/runs/${runId}/cancel`, {}),
   /** The stored report path for a run (fetched as text/markdown via authedText). */

@@ -11,6 +11,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toastError } from '../../lib/toastError';
   import type { Session } from '../../lib/api/types';
+  import { personalAgentName } from '../../lib/personalAgentBadges';
   import ThreadSidebarRow from './ThreadSidebarRow.svelte';
   import {
     delegatedParentId,
@@ -46,6 +47,19 @@
   });
 
   const homePath = $derived(ws.scratch?.root_path ?? null);
+  /** A personal agent's folder is `…/personal/<agent id>`: its threads are
+   *  grouped under the agent's NAME (from the thread meta / title), never
+   *  the folder's ULID. cwd → name. */
+  const agentFolderNames = $derived.by(() => {
+    const m = new Map<string, string>();
+    for (const s of runtimeThreads.rows(false).concat(runtimeThreads.rows(true))) {
+      const name = personalAgentName(s.meta as Record<string, unknown> | undefined, s.title);
+      const c = (s.cwd ?? '').replace(/\/+$/, '');
+      if (name && c && !m.has(c)) m.set(c, name);
+    }
+    return m;
+  });
+  const folderLabel = (cwd: string, fallback?: string): string => agentFolderNames.get(cwd) ?? projectNameFromCwd(cwd, fallback);
   // Id index over live + archived sessions: a delegated worker's parent
   // lookup is O(1) instead of a scan of every session per row.
   const allPool = $derived(new Map([...ws.archivedSessions, ...ws.sessions].map((s) => [s.id, s] as const)));
@@ -67,7 +81,7 @@
     }
     for (const s of allLiveThreads) {
       const c = (s.cwd ?? '').replace(/\/+$/, '');
-      if (c && !map.has(c)) map.set(c, { key: c, label: projectNameFromCwd(c), cwd: c });
+      if (c && !map.has(c)) map.set(c, { key: c, label: folderLabel(c), cwd: c });
     }
     for (const c of threads.extraProjects) {
       if (!map.has(c)) map.set(c, { key: c, label: projectNameFromCwd(c), cwd: c });
@@ -79,7 +93,7 @@
     const keys = threads.projectFilters;
     if (keys.length === 0) return 'All projects';
     if (keys.length > 1) return `${keys.length} projects`;
-    return projectOptions.find((p) => p.key === keys[0])?.label ?? projectNameFromCwd(keys[0]);
+    return projectOptions.find((p) => p.key === keys[0])?.label ?? folderLabel(keys[0]);
   });
 
   function matchesFilters(s: Session): boolean {
@@ -87,7 +101,7 @@
     const q = search.trim().toLowerCase();
     if (!q) return true;
     const br = sessionBranch(s, git.repos, git.statusById) ?? '';
-    const proj = projectNameFromCwd(s.cwd);
+    const proj = folderLabel((s.cwd ?? '').replace(/\/+$/, ''));
     return (
       s.title.toLowerCase().includes(q) ||
       s.provider.toLowerCase().includes(q) ||
@@ -142,7 +156,7 @@
     const ensure = (cwd: string) => {
       let g = groups.get(cwd);
       if (!g) {
-        g = { key: cwd, label: projectNameFromCwd(cwd, ws.current?.name ?? 'Workspace'), cwd, items: [] };
+        g = { key: cwd, label: folderLabel(cwd, ws.current?.name ?? 'Workspace'), cwd, items: [] };
         groups.set(cwd, g);
       }
       return g;

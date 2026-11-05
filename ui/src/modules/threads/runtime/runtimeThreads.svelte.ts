@@ -38,9 +38,29 @@ const SESSION_STATUS: Record<ProviderSessionStatus, RuntimeSessionStatus> = {
   error: 'dormant',
 };
 
+/** The server-owned meta keys a Threads row keeps: who a personal agent's
+ *  thread belongs to and what started it (lib/personalAgentBadges.ts). The
+ *  rest stays on the runtime row — a row never inherits keys that would
+ *  change how other session code treats it. */
+const ROW_META_KEYS = [
+  'source',
+  'personal_agent',
+  'personal_agent_name',
+  'personal_agent_chat',
+  'trigger',
+  'routine',
+  'agent_mode',
+  'run_id',
+  'read_only',
+  'delegated_by_agent',
+  'delegated_by_name',
+] as const;
+
 /** A runtime session as the Threads sidebar's row shape (never sent to the
  *  PTY session routes — `meta.runtime` marks it). */
 export function asThreadSession(r: RuntimeSession): Session {
+  const kept: Record<string, unknown> = {};
+  for (const k of ROW_META_KEYS) if (r.meta && r.meta[k] !== undefined) kept[k] = r.meta[k];
   return {
     id: r.id,
     workspace_id: r.workspace_id,
@@ -57,7 +77,7 @@ export function asThreadSession(r: RuntimeSession): Session {
     archived: r.status === 'closed',
     // `parent_session_id` nests a linked thread under its group's root in
     // the sidebar (the delegated-worker rule, `delegatedParentId`).
-    meta: { surface: 'threads', runtime: 'structured', ...(r.parent_id ? { parent_session_id: r.parent_id } : {}) },
+    meta: { ...kept, surface: 'threads', runtime: 'structured', ...(r.parent_id ? { parent_session_id: r.parent_id } : {}) },
   };
 }
 

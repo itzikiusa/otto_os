@@ -21,8 +21,11 @@ export interface AgentTemplate {
   avatar: string;
   name: string;
   soul_md: string;
-  schedule: { cadence: 'interval'; every_min: number } | { cadence: 'daily'; at: string };
+  /** `null` = no routine (the main agent is set up by chatting). */
+  schedule: { cadence: 'interval'; every_min: number } | { cadence: 'daily'; at: string } | null;
   directive: string;
+  /** Creating from it makes the agent the workspace's main agent. */
+  primary?: boolean;
 }
 
 const TEMPLATES = raw.templates as AgentTemplate[];

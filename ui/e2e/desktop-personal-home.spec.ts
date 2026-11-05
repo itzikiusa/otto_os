@@ -1,0 +1,148 @@
+import { test, expect, type Page } from '@playwright/test';
+import { apiCtx, seedWorkspace } from './seed';
+import { expectNoHorizontalOverflow } from './helpers';
+
+// The Personal Agents home: the agent rail (main agent first, with a star),
+// one continuous conversation per agent (an intro with "Try asking" chips
+// before the first message), the side panel (Details · Library · Activity)
+// with live routines and next runs, and — in Threads — personal-agent
+// threads grouped under the agent's NAME with what started each one.
+// Everything agent-side is route-mocked: no agent CLI runs.
+
+test.use({ serviceWorkers: 'block' });
+
+const MAIN = '01MAINAGENT0000000000000000';
+const SCOUT = '01M1RX7QZDVJ236Y7MZKAD9XYZ';
+
+async function setup(page: Page): Promise<string> {
+  const { ctx, base } = await apiCtx();
+  const ws = await seedWorkspace(ctx, base);
+  await ctx.dispose();
+  await page.addInitScript((id) => {
+    localStorage.setItem('otto_workspace', id);
+    localStorage.removeItem('otto.pa.panel');
+  }, ws);
+  const agent = (id: string, name: string, extra: Record<string, unknown> = {}) => ({
+    id, name, workspace_id: ws, avatar: '', soul_md: '', provider: 'claude', model: '', cwd: '', browser: false,
+    delivery: { type: 'none' }, enabled: true, chat_session_id: null, created_by: null, created_by_agent: null,
+    created_at: '2026-11-01T00:00:00Z', updated_at: '2026-11-01T00:00:00Z', ...extra,
+  });
+  const agents = [
+    agent(SCOUT, 'Scout', { avatar: 'char:nerd', soul_md: 'Watches the build and digs into failures.', created_by_agent: MAIN }),
+    agent(MAIN, 'Otto', { avatar: 'char:chief', soul_md: '<!-- otto-template:main-agent -->\nI’m your main agent: your one point of contact.' }),
+  ];
+  const schedule = { id: 'sch-1', agent_id: SCOUT, schedule: { cadence: 'cron', expr: '0 9 * * 0,1,2,3,4' }, timezone: 'Asia/Jerusalem', directive: 'Morning brief\nSummarise failing builds', enabled: true, permission: 'directed', last_run_at: null, next_run_at: '2026-11-08T07:00:00Z', created_at: '', updated_at: '' };
+  await page.route(`**/api/v1/workspaces/${ws}/personal-agents`, (r) => r.fulfill({ json: agents }));
+  await page.route('**/api/v1/personal-agents/*/autonomy', (r) => {
+    const main = r.request().url().includes(MAIN);
+    return r.fulfill({ json: { primary: main, proactive: { enabled: false, runs_per_day: 4, max_minutes: 10 }, goals: [], rules: [], personality: { preset: main ? '' : 'nerdy', note: '' } } });
+  });
+  await page.route('**/api/v1/personal-agents/*/schedules', (r) => r.fulfill({ json: r.request().url().includes(SCOUT) ? [schedule] : [] }));
+  await page.route('**/api/v1/personal-agents/*/routines', (r) => r.fulfill({ json: {
+    agent: { id: SCOUT, name: 'Scout', enabled: true }, user_timezone: 'Asia/Jerusalem',
+    routines: r.request().url().includes(SCOUT) ? [{ id: 'sch-1', agent_id: SCOUT, agent_name: 'Scout', name: 'Morning brief', instruction: schedule.directive, schedule: schedule.schedule, timezone: 'Asia/Jerusalem', enabled: true, paused: false, agent_paused: false, permission: 'directed', deliver: { type: 'chat' }, last_run_at: null, next_runs: ['2026-11-08T07:00:00Z', '2026-11-09T07:00:00Z', '2026-11-10T07:00:00Z'] }] : [],
+  } }));
+  await page.route('**/api/v1/personal-agents/*/runs', (r) => r.fulfill({ json: r.request().url().includes(SCOUT) ? [{
+    id: 'run-1', agent_id: SCOUT, schedule_id: 'sch-1', workspace_id: ws, status: 'ok', trigger: 'schedule', mode: 'scheduled', started_at: '2026-11-05T07:00:00Z', finished_at: '2026-11-05T07:03:00Z',
+    summary: 'Two builds failed on main', report_path: '/x', report_rel: `${SCOUT}/reports/r.md`, delivered: false, delivery_error: null, error: null, session_id: 'thr-run', report_hash: null, attempts: 1, skipped_delivery: true, goal_id: null, read_only: false, created_at: '2026-11-05T07:00:00Z',
+  }] : [] }));
+  await page.route('**/api/v1/personal-agents/*/delegations', (r) => r.fulfill({ json: [{
+    id: 'thr-del', workspace_id: ws, lead_agent_id: MAIN, lead_thread_id: 'thr-chat', member_agent_id: SCOUT, member_name: 'Scout', task: 'Why did the nightly build fail?', status: 'running', summary: '', created_at: '2026-11-05T08:00:00Z', finished_at: null, delivered_at: null,
+  }] }));
+  await page.route('**/api/v1/personal-agents/*/instructions-proposal', (r) => r.fulfill({ json: { proposal: null, can_undo: false } }));
+  await page.route('**/api/v1/personal-agents/*/memories', (r) => r.fulfill({ json: { version: 'v', items: [] } }));
+  await page.route('**/api/v1/personal-agents/*/slack-as-me', (r) => r.fulfill({ json: { teams: [], available: [] } }));
+  const dir = (id: string) => `/tmp/otto-e2e/personal/${id}`;
+  const thread = (id: string, title: string, cwd: string, meta: Record<string, unknown>, status = 'idle', parent: string | null = null) => ({
+    id, workspace_id: ws, provider: 'claude', title, cwd, status, access_mode: 'approval-required', created_by: 'root',
+    created_at: '2026-11-05T07:00:00Z', last_active_at: '2026-11-05T08:00:00Z', last_sequence: 1, parent_id: parent, meta,
+  });
+  await page.route(`**/api/v1/workspaces/${ws}/runtime-sessions`, (r) => r.fulfill({ json: [
+    thread('thr-chat', 'Chat: Otto', dir(MAIN), { source: 'personal_agent', personal_agent: MAIN, personal_agent_chat: true }),
+    thread('thr-run', 'Agent: Scout', dir(SCOUT), { source: 'personal_agent', personal_agent: SCOUT, personal_agent_name: 'Scout', run_id: 'run-1', trigger: 'schedule', routine: 'Morning brief', agent_mode: 'scheduled' }),
+    thread('thr-del', 'Agent: Scout', dir(SCOUT), { source: 'personal_agent', personal_agent: SCOUT, personal_agent_name: 'Scout', delegated_by_agent: MAIN, delegated_by_name: 'Otto' }, 'working', 'thr-chat'),
+  ] }));
+  return ws;
+}
+
+test('the home: rail, intro, side panel tabs, routines and hand-offs — light and dark', async ({ page }, info) => {
+  await setup(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/#/personal-agents');
+  const rail = page.getByTestId('pa-rail');
+  // The main agent leads the rail, starred; the specialist shows it is working.
+  await expect(rail.getByTestId(`pa-rail-${MAIN}`)).toBeVisible();
+  const tiles = rail.locator('[data-testid^="pa-rail-0"]');
+  await expect(tiles.first()).toHaveAttribute('data-testid', `pa-rail-${MAIN}`);
+  await expect(rail.getByTestId(`pa-rail-${SCOUT}`)).toHaveAttribute('data-presence', 'working');
+  // Never chatted: the intro, no tokens spent until a chip is picked.
+  await expect(page.getByTestId('pa-intro')).toContainText('Task me with anything');
+  await expect(page.getByRole('button', { name: 'What are my agents up to?' })).toBeVisible();
+  // The main agent's hand-offs are live chips above the chat.
+  await expect(page.getByTestId('pa-handoffs')).toContainText('Scout');
+  await expect(page.getByTestId('pa-handoffs')).toContainText('working…');
+  await expectNoHorizontalOverflow(page);
+
+  // The specialist: Details → its routine with the next three runs.
+  await rail.getByTestId(`pa-rail-${SCOUT}`).click();
+  await expect(page).toHaveURL(new RegExp(`#/personal-agents/${SCOUT}$`));
+  const panel = page.getByTestId('pa-side-panel');
+  await expect(panel).toBeVisible();
+  await expect(panel.getByTestId('pa-routines')).toContainText('Morning brief');
+  await expect(panel.getByTestId('pa-routines')).toContainText('Next:');
+  await expect(panel.getByTestId('pa-personality').getByRole('button', { name: 'Nerdy' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(panel.getByTestId('pa-personality')).toContainText('How Scout would answer');
+  for (const scheme of ['light', 'dark'] as const) {
+    await page.evaluate((s) => { document.documentElement.dataset.scheme = s; }, scheme);
+    await page.screenshot({ path: info.outputPath(`pa-home-details-${scheme}.png`) });
+  }
+  await page.evaluate(() => { document.documentElement.dataset.scheme = 'light'; });
+
+  // Library: the routine's report, badged with what started it.
+  await page.getByTestId('pa-panel-tab-library').click();
+  await expect(panel.getByTestId('pa-library')).toContainText('Two builds failed on main');
+  await expect(panel.getByTestId('pa-library')).toContainText('Scheduled · Morning brief');
+  // Activity: the hand-off it works and its threads with their badges.
+  await page.getByTestId('pa-panel-tab-activity').click();
+  await expect(panel.getByTestId('pa-delegations')).toContainText('From Otto');
+  await expect(panel.getByTestId('pa-activity')).toBeVisible();
+  for (const scheme of ['light', 'dark'] as const) {
+    await page.evaluate((s) => { document.documentElement.dataset.scheme = s; }, scheme);
+    await page.screenshot({ path: info.outputPath(`pa-home-activity-${scheme}.png`) });
+  }
+
+  // The header toggles the panel; "All settings" keeps the full page reachable.
+  await page.getByTestId('pa-conv-header').click();
+  await expect(panel).toHaveCount(0);
+  await page.getByRole('button', { name: 'More for Scout' }).click();
+  await page.getByRole('menuitem', { name: 'All settings' }).click();
+  await expect(page.getByRole('tab', { name: 'Overview', exact: true })).toHaveAttribute('aria-selected', 'true');
+});
+
+test('Threads groups agent threads by NAME and badges what started each', async ({ page }, info) => {
+  await setup(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/#/threads');
+  const sidebar = page.getByTestId('threads-sidebar');
+  // The group header is the agent's name — never its folder's ULID.
+  await expect(sidebar.getByRole('region', { name: 'Project Scout' }).or(sidebar.locator('section[aria-label="Project Scout"]'))).toBeVisible();
+  await expect(sidebar).not.toContainText(SCOUT);
+  await expect(sidebar.locator('section[aria-label="Project Otto"]')).toBeVisible();
+  await expect(page.getByTestId('thread-badge-thr-chat')).toHaveText('Chat');
+  await expect(page.getByTestId('thread-badge-thr-run')).toHaveText('Scheduled · Morning brief');
+  await expect(page.getByTestId('thread-badge-thr-del')).toHaveText('Delegated by Otto');
+  for (const scheme of ['light', 'dark'] as const) {
+    await page.evaluate((s) => { document.documentElement.dataset.scheme = s; }, scheme);
+    await page.screenshot({ path: info.outputPath(`threads-agent-groups-${scheme}.png`) });
+  }
+});
+
+test('phone: the rail becomes a top strip and nothing scrolls sideways', async ({ page }, info) => {
+  await setup(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/#/personal-agents/${SCOUT}`);
+  await expect(page.getByTestId('pa-rail')).toBeVisible();
+  await expect(page.getByTestId('pa-conversation')).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+  await page.screenshot({ path: info.outputPath('pa-home-phone.png') });
+});

@@ -136,7 +136,10 @@ test('personal agent: failed save preserves form and a retry creates the paused 
     ? r.fulfill({ status: 503, json: { code: 'upstream', message: 'Agent storage temporarily unavailable' } }) : r.continue());
   await page.setViewportSize({ width: 375, height: 812 });
   await page.goto('/#/personal-agents');
-  await page.getByRole('button', { name: 'New agent', exact: true }).click();
+  // The rail's "+" opens the quick create; the full form is behind "More options…".
+  const add = page.getByTestId('pa-rail-add').or(page.getByRole('button', { name: 'Set up your main agent', exact: true }));
+  await add.first().click();
+  await page.getByRole('dialog').getByRole('button', { name: 'More options…', exact: true }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByLabel('Name', { exact: true }).fill('Offline review assistant');
   await dialog.getByLabel('Enabled', { exact: false }).uncheck();

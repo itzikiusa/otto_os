@@ -11,6 +11,7 @@
   import { rel } from '../../lib/stores/now.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { Session } from '../../lib/api/types';
+  import { agentThreadBadge } from '../../lib/personalAgentBadges';
   import { harnessLabel, sessionBranch } from './threadsHelpers';
   import { threads } from './threadsStore.svelte';
 
@@ -44,6 +45,10 @@
       .join(' · ');
   });
 
+  /** A personal agent's thread says what started it: Chat / Scheduled ·
+   *  routine / Manual run / Proactive / Delegated by … */
+  const badge = $derived(agentThreadBadge(s.meta as Record<string, unknown> | undefined));
+
   const testid = $derived(
     variant === 'pinned' ? `thread-pinned-${s.id}` : variant === 'history' ? `thread-history-${s.id}` : `thread-row-${s.id}`,
   );
@@ -76,6 +81,7 @@
       <StatusDot state={st} />
     {/if}
     <span class="tr-title ellipsis" dir="auto">{s.title}</span>
+    {#if badge}<span class="tr-badge tr-badge-{badge.kind} ellipsis" title={badge.title} data-testid="thread-badge-{s.id}">{badge.label}</span>{/if}
     <span class="tr-time">{rel(s.last_active_at)}</span>
   </button>
   <div class="tr-actions reveal-on-hover">
@@ -176,6 +182,26 @@
   .tr-row:hover .tr-title,
   .tr-row.needs-you .tr-title {
     color: var(--text);
+  }
+  .tr-badge {
+    flex-shrink: 1;
+    max-inline-size: 45%;
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: var(--fs-xs);
+    line-height: 16px;
+    color: var(--text-dim);
+  }
+  .tr-badge-chat {
+    color: var(--accent-text);
+    border-color: var(--accent-line);
+  }
+  .tr-badge-scheduled {
+    color: var(--info);
+  }
+  .tr-badge-delegated {
+    color: var(--success);
   }
   .tr-time {
     flex-shrink: 0;

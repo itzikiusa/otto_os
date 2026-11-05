@@ -84,7 +84,8 @@ async function agentFor(key: string, ctx: UiCommandCtx): Promise<PersonalAgent> 
 
 /** Show one agent on `tab` and wait for its page to bind. */
 async function openAgent(a: PersonalAgent, tab: Tab, ctx: UiCommandCtx) {
-  const path = tab === 'overview' ? `personal-agents/${a.id}` : `personal-agents/${a.id}/${tab}`;
+  // `personal-agents/<id>` alone is the conversation home; every settings tab has its own path.
+  const path = `personal-agents/${a.id}/${tab}`;
   if (router.parts.join('/') !== path) router.go(path);
   return waitFor(() => {
     const p = paAgentPort.peek();

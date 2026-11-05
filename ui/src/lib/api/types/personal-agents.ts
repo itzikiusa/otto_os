@@ -118,6 +118,27 @@ export interface PersonalAgentSchedule {
   updated_at: string;
 }
 
+/** Work the main agent handed to another agent (`otto.personal_agent_delegate`),
+ *  tracked until its outcome is in the main agent's chat
+ *  (`GET /personal-agents/{id}/delegations`). `id` = the delegated thread. */
+export interface PersonalAgentDelegation {
+  id: Id;
+  workspace_id: Id;
+  lead_agent_id: Id;
+  lead_thread_id: Id;
+  member_agent_id: Id;
+  member_name: string;
+  /** The task, cut to 600 chars (the full text is in the thread). */
+  task: string;
+  status: 'running' | 'done' | 'failed' | 'stopped' | 'interrupted';
+  /** One-line outcome: the report's title, or why it failed. */
+  summary: string;
+  created_at: string;
+  finished_at: string | null;
+  /** When the outcome reached the lead's chat; null = still owed. */
+  delivered_at: string | null;
+}
+
 /** One execution of a personal agent (mirrors ScheduledTaskRun + schedule_id). */
 export interface PersonalAgentRun {
   id: Id;
@@ -191,6 +212,49 @@ export interface PersonalAgentAutonomy {
    *  in as them (default none). Set via `PUT /personal-agents/{id}/slack-as-me`
    *  (owner only), not the autonomy save. */
   slack_as_me_teams?: string[];
+  /** Tone only (docs/contracts/personal-agent-personalities.json): a preset
+   *  id ('' = the role's default) + the user's own words. Set via
+   *  `PUT /personal-agents/{id}/personality` or the agent's
+   *  `otto.personality_set`. */
+  personality?: { preset: string; note: string };
+}
+
+/** A routine as `GET /personal-agents/{id}/routines` returns it (a schedule
+ *  plus its name, destination and next 3 runs). */
+export interface PersonalAgentRoutine {
+  id: Id;
+  agent_id: Id;
+  agent_name: string;
+  /** The instruction's first line. */
+  name: string;
+  instruction: string;
+  schedule: Record<string, unknown>;
+  timezone: string;
+  /** Fires (the routine AND its agent are on). */
+  enabled: boolean;
+  paused: boolean;
+  agent_paused: boolean;
+  permission: PersonalAgentPermission;
+  deliver: { type: 'chat' } | { type: 'slack'; channel?: string; as: 'bot' | 'me' };
+  last_run_at: string | null;
+  /** RFC 3339; empty while paused. */
+  next_runs: string[];
+}
+
+/** `GET /personal-agents/{id}/routines`. */
+export interface PersonalAgentRoutines {
+  agent: { id: Id; name: string; enabled: boolean };
+  /** The user's (this Mac's) IANA timezone — a routine's default. */
+  user_timezone: string;
+  routines: PersonalAgentRoutine[];
+}
+
+/** `GET /personal-agents/{id}/instructions-proposal`: the agent's pending
+ *  proposal to change its own instructions (the user decides), and whether
+ *  the last applied change can be undone. */
+export interface PersonalAgentInstructionsProposal {
+  proposal: { from: string; to: string; reason: string; proposed_at: string } | null;
+  can_undo: boolean;
 }
 
 /** `PUT /personal-agents/{id}/autonomy` — partial; omitted sections are kept. */

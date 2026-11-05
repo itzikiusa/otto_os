@@ -1,21 +1,22 @@
 <script lang="ts">
-  import { mapLimit } from '../../lib/poll';
-  import { rowMenu } from '../../lib/rowMenu';
-  // Personal Agents module. Routes: `#/personal-agents` (agent cards),
-  // `#/personal-agents/rooms` (agent channels), `#/personal-agents/<agentId>[/<tab>]`
-  // (one agent's page). The first list GET seeds four disabled example agents
-  // server-side — they render as normal cards, marked "Example".
-  import RelTime from '../../lib/components/RelTime.svelte';
+  // Personal Agents module — a messenger-style home. Routes:
+  //   `#/personal-agents`                — the home on the main agent
+  //   `#/personal-agents/<agentId>`      — the home on that agent
+  //   `#/personal-agents/<agentId>/<tab>` — the agent's full settings page
+  //                                        (overview/activity/autonomy/…)
+  //   `#/personal-agents/rooms`          — agent channels
+  // The home is a rail of agent tiles (main agent first, live presence), the
+  // selected agent's ONE continuous conversation, and its side panel
+  // (Details · Library · Activity). The first list GET seeds disabled
+  // example agents server-side; the first of them is the main agent.
   import AutomateTasksTabs from '../../lib/components/AutomateTasksTabs.svelte';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import { confirmRunAndDeliver } from '../../lib/confirmOutward';
   import { toasts } from '../../lib/toast.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { router } from '../../lib/router.svelte';
-  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { registry } from '../../lib/commands.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
@@ -24,138 +25,111 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
-  import AgentAvatar from './AgentAvatar.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
-
-  import Skeleton from '../../lib/components/Skeleton.svelte';
-  import RoomsView from './RoomsView.svelte';
+  import AgentRail from './AgentRail.svelte';
+  import AgentConversation from './AgentConversation.svelte';
+  import type { PanelTab } from './AgentSidePanel.svelte';
+  import { railOrder } from './agentHome';
+  import { MASCOT } from './characters';
   import { loadErrorOf } from './loadError';
-  import { personalAgentsApi } from '../../lib/api/personalAgents';
-  import type { PersonalAgent, PersonalAgentAutonomy } from '../../lib/api/types';
+  import type { PersonalAgent, RuntimeEvent } from '../../lib/api/types';
+  import { onLive } from '../../lib/live';
   import { paListPort } from '../../lib/uiCommands/personalAgentsPort';
 
   const AgentEditSheetLazy = lazyComponent(() => import('./AgentEditSheet.svelte'));
   const AgentPageLazy = lazyComponent(() => import('./AgentPage.svelte'));
+  // The side panel and the quick create carry the personality / template
+  // catalogs: loaded when first shown, never with the page.
+  const SidePanelLazy = lazyComponent(() => import('./AgentSidePanel.svelte'));
+  const RoomsLazy = lazyComponent(() => import('./RoomsView.svelte'));
+  const QuickCreateLazy = lazyComponent(() => import('./AgentQuickCreate.svelte'));
 
   const sub = $derived(router.parts[1] ?? '');
-  const agentId = $derived(sub && sub !== 'rooms' ? sub : null);
+  const deepTab = $derived(router.parts[2] ?? '');
+  /** `#/personal-agents/<id>/<tab>` = the full settings page. */
+  const deepId = $derived(sub && sub !== 'rooms' && deepTab ? sub : null);
 
   let creating = $state(false);
-  // Agent UI control (lib/uiCommands/personalAgents.ts) opens the New-agent sheet.
-  $effect(() => paListPort.bind({ openCreate: () => { if (sub) router.go('personal-agents'); creating = true; } }));
-  /** Agent id whose Run now / Enable / Pause is in flight (no double fire). */
-  let busyId = $state<string | null>(null);
+  let fullCreate = $state(false);
+  // Agent UI control (lib/uiCommands/personalAgents.ts) opens the full New-agent sheet.
+  $effect(() => paListPort.bind({ openCreate: () => { if (deepId) router.go('personal-agents'); fullCreate = true; } }));
 
   $effect(() => {
-    if (ws.currentId) void personalAgents.loadAgents(ws.currentId);
+    const id = ws.currentId;
+    if (!id) return;
+    void personalAgents.loadAgents(id);
+    void personalAgents.loadThreads(id);
   });
-
-  // Live run events refetch runs/schedules only while this page is mounted.
+  // Live run / thread events refresh while this page is mounted; agent
+  // threads' status (rail presence, Activity) follows the runtime events.
   $effect(() => personalAgents.watch());
+  $effect(() => onLive(['agent_runtime_event'], (ev) => personalAgents.applyThreadEvent(ev.event as RuntimeEvent)));
 
-  // Autonomy summaries (primary / proactive) for the cards — one small GET per
-  // agent, best-effort (a failure just hides the badges).
-  let autonomyById = $state<Record<string, PersonalAgentAutonomy>>({});
-  const agentIdsKey = $derived(personalAgents.agents.map((a) => a.id).join(','));
-  $effect(() => {
-    const ids = agentIdsKey ? agentIdsKey.split(',') : [];
-    let disposed = false;
-    autonomyById = {};
-    void mapLimit(ids, 2, async (id) => {
-      if (disposed) return;
-      try {
-        const autonomy = await personalAgentsApi.autonomy(id);
-        if (!disposed) autonomyById = { ...autonomyById, [id]: autonomy };
-      } catch { /* Badge details are best-effort. */ }
-    });
-    return () => { disposed = true; };
+  const agents = $derived(railOrder(personalAgents.agents, (id) => !!personalAgents.autonomyById[id]?.primary));
+  const autonomyLoaded = $derived(agents.length > 0 && agents.every((a) => a.id in personalAgents.autonomyById));
+  const hasMain = $derived(!!personalAgents.primary);
+  const selected = $derived.by<PersonalAgent | null>(() => {
+    if (sub && sub !== 'rooms' && !deepTab) return personalAgents.agent(sub) ?? null;
+    return agents[0] ?? null;
   });
-  // The main agent (primary) leads the list — the one entry point.
-  const agents = $derived(
-    [...personalAgents.agents].sort(
-      (a, b) => Number(!!autonomyById[b.id]?.primary) - Number(!!autonomyById[a.id]?.primary),
-    ),
-  );
-  const primaryAgent = $derived(agents.find((a) => autonomyById[a.id]?.primary) ?? null);
   const loadError = $derived(loadErrorOf(personalAgents, 'agentsError'));
 
-  // ⌘K verbs while the module is open: create, the rooms tab, and one
-  // Open / Chat pair per agent.
+  // The side panel: open/closed and its tab, remembered per viewer.
+  const PANEL_KEY = 'otto.pa.panel';
+  function readPanel(): { open: boolean; tab: PanelTab } {
+    try {
+      const v = JSON.parse(localStorage.getItem(PANEL_KEY) ?? 'null') as { open?: boolean; tab?: PanelTab } | null;
+      return { open: v?.open ?? true, tab: v?.tab ?? 'details' };
+    } catch {
+      return { open: true, tab: 'details' };
+    }
+  }
+  const initial = readPanel();
+  let panelOpen = $state(initial.open && typeof window !== 'undefined' && window.innerWidth > 1100);
+  let panelTab = $state<PanelTab>(initial.tab);
+  $effect(() => {
+    const v = { open: panelOpen, tab: panelTab };
+    try {
+      localStorage.setItem(PANEL_KEY, JSON.stringify(v));
+    } catch {
+      /* per-viewer convenience only */
+    }
+  });
+
+  function select(id: string): void {
+    router.go(`personal-agents/${id}`);
+  }
+
+  // ⌘K verbs while the module is open.
   $effect(() =>
     registry.register('personal-agents', [
-      { id: 'personal-agents.new', title: 'New personal agent…', group: 'Personal Agents', keywords: 'create agent assistant schedule', run: () => { if (sub) router.go('personal-agents'); creating = true; } },
+      { id: 'personal-agents.new', title: 'New personal agent…', group: 'Personal Agents', keywords: 'create agent assistant schedule', run: () => { creating = true; } },
       { id: 'personal-agents.rooms', title: 'Open agent channels', group: 'Personal Agents', keywords: 'channel agent rooms talk', run: () => router.go('personal-agents/rooms') },
       ...agents.flatMap((a) => [
-        { id: `personal-agents.open.${a.id}`, title: `Open ${a.name}`, group: 'Personal Agents', detail: 'Personal agent', keywords: 'agent page settings runs', run: () => router.go(`personal-agents/${a.id}`) },
-        { id: `personal-agents.chat.${a.id}`, title: `Chat with ${a.name}`, group: 'Personal Agents', keywords: 'agent message talk', run: () => router.go(`personal-agents/${a.id}/chat`) },
+        { id: `personal-agents.chat.${a.id}`, title: `Chat with ${a.name}`, group: 'Personal Agents', keywords: 'agent message talk', run: () => router.go(`personal-agents/${a.id}`) },
+        { id: `personal-agents.open.${a.id}`, title: `${a.name}: all settings`, group: 'Personal Agents', detail: 'Personal agent', keywords: 'agent page settings runs', run: () => router.go(`personal-agents/${a.id}/overview`) },
       ]),
     ]),
   );
 
-  async function toggle(a: PersonalAgent): Promise<void> {
-    busyId = a.id;
-    try {
-      await personalAgents.setEnabled(a.id, !a.enabled);
-    } catch (e) {
-      toasts.error(a.enabled ? `Couldn’t pause ${a.name}` : `Couldn’t enable ${a.name}`, loadErrorText(e));
-    } finally {
-      busyId = null;
-    }
-  }
-
-  async function runNow(a: PersonalAgent): Promise<void> {
-    // Outward-facing: the run delivers its report the moment it finishes.
-    if (!(await confirmRunAndDeliver(a.name, a.delivery))) return;
-    busyId = a.id;
-    try {
-      await personalAgents.runNow(a.id);
-      toasts.success(`${a.name} is running`, 'Its report lands in Runs when it finishes.');
-      router.go(`personal-agents/${a.id}/runs`);
-    } catch (e) {
-      toasts.error(`Couldn’t run ${a.name}`, loadErrorText(e));
-    } finally {
-      busyId = null;
-    }
-  }
-
   async function remove(a: PersonalAgent): Promise<void> {
-    if (!(await confirmer.ask(`Delete personal agent “${a.name}”? Its schedules, memory and run history go with it.`, { title: 'Delete personal agent', danger: true, confirmLabel: 'Delete' }))) return;
+    if (!(await confirmer.ask(`Delete personal agent “${a.name}”? Its routines, memory and run history go with it.`, { title: 'Delete personal agent', danger: true, confirmLabel: 'Delete' }))) return;
     try {
       await personalAgents.remove(a.id);
       toasts.success(`Deleted ${a.name}`);
+      router.go('personal-agents');
     } catch (e) {
       toasts.error(`Couldn’t delete ${a.name}`, loadErrorText(e));
     }
   }
-
-  function cardMenu(e: MouseEvent | KeyboardEvent, a: PersonalAgent): void {
-    ctxMenu.show(e, [
-      { label: 'Open', icon: 'user', action: () => router.go(`personal-agents/${a.id}`) },
-      { label: 'Run now', icon: 'play', action: () => void runNow(a) },
-      { label: a.enabled ? 'Pause' : 'Enable', icon: a.enabled ? 'clock' : 'check', action: () => void toggle(a) },
-      { separator: true },
-      { label: 'Delete…', icon: 'trash', danger: true, action: () => void remove(a) },
-    ]);
-  }
-
-  /** A seeded example: disabled, never run, still carrying its shipped persona. */
-  function isExample(a: PersonalAgent): boolean {
-    return !a.enabled && !a.chat_session_id && (personalAgents.runsByAgent[a.id]?.length ?? 0) === 0;
-  }
-
-  function providerText(a: PersonalAgent): string {
-    return a.model ? `${a.provider} · ${a.model}` : a.provider;
-  }
-
 </script>
 
-{#if agentId}
-  {#key agentId}
+{#if deepId}
+  {#key deepId}
     {#if AgentPageLazy.error}
       <LoadState what="this agent" variant="page" error={AgentPageLazy.error} onretry={() => AgentPageLazy.retry()} />
     {:else if AgentPageLazy.component}
-      <AgentPageLazy.component {agentId} />
+      <AgentPageLazy.component agentId={deepId} />
     {:else}
       <LoadState what="this agent" variant="page" loading />
     {/if}
@@ -164,44 +138,43 @@
   <div class="pa-page">
   <PageHeader
     title="Scheduled Tasks"
-    subtitle={sub === 'rooms' ? 'Shared channels where personal agents coordinate' : 'Named agents with their own persona, schedules and memory'}
+    subtitle={sub === 'rooms' ? 'Shared channels where personal agents coordinate' : 'Your agents — task the main one with anything'}
   >
     {#snippet tabs()}
       <AutomateTasksTabs active={sub === 'rooms' ? 'rooms' : 'agents'} />
     {/snippet}
     {#snippet actions()}
       <AutomateGuideButton current="scheduled-tasks" />
-      <!-- One primary per view: Rooms has its own create (the list's name
-           field / the empty state's "Create a channel"). -->
-      {#if ws.currentId && sub !== 'rooms' && agents.length > 0}
-        <button class="btn small primary" data-icon="plus" onclick={() => (creating = true)}><Icon name="plus" size={12} /> New agent</button>
-      {/if}
     {/snippet}
   </PageHeader>
-  <PageBody fill={sub === 'rooms'}>
-  <div class="pa">
+  <PageBody fill padded={sub === 'rooms'}>
     {#if !ws.currentId}
       <EmptyState variant="page" icon="user" title="Add a workspace to get started"
         body="Personal agents and their channels belong to a workspace. Add your project folder to create them."
         actionLabel="Add workspace" actionIcon="plus" onaction={() => (ui.newWorkspaceOpen = true)} />
     {:else if sub === 'rooms'}
-      <RoomsView />
+      {#if RoomsLazy.component}
+        <RoomsLazy.component />
+      {:else}
+        <LoadState what="agent channels" variant="page" error={RoomsLazy.error} loading={!RoomsLazy.error} empty onretry={() => RoomsLazy.retry()} />
+      {/if}
     {:else}
       <LoadState
         what="personal agents"
-        loading={personalAgents.loadingAgents}
-        error={loadError}
+        loading={personalAgents.loadingAgents && agents.length === 0}
+        error={agents.length === 0 ? loadError : null}
         empty={agents.length === 0}
         variant="page"
         rows={3}
         onretry={() => ws.currentId && void personalAgents.loadAgents(ws.currentId)}
       >
         {#snippet emptyView()}
+          <img class="pa-mascot" src={MASCOT.wave} alt="" width="160" height="160" loading="lazy" decoding="async" />
           <EmptyState
             icon="user"
-            title="No personal agents yet"
-            body="A personal agent is a named persona on a pinned provider and model, with its own schedules, memory and delivery. Agents talk to each other only in channels you can read. Start blank or from a template."
-            actionLabel="New agent"
+            title="Meet your main agent"
+            body="Your main agent is your one point of contact: task it with anything, and it routes the work to the right agent and comes back with what they found."
+            actionLabel="Set up your main agent"
             actionIcon="plus"
             variant="page"
             onaction={() => (creating = true)}
@@ -209,124 +182,70 @@
             <AutomateGuide current="scheduled-tasks" />
           </EmptyState>
         {/snippet}
-        {#if !primaryAgent && Object.keys(autonomyById).length > 0}
-          <p class="pa-hint" role="note"><Icon name="star" size={12} /> Choose one agent as your <strong>main agent</strong> (its Autonomy tab): you talk to it, and it creates and directs the others.</p>
-        {:else if primaryAgent}
-          <p class="pa-hint" role="note"><Icon name="star" size={12} /> Talk to <button type="button" class="linklike" onclick={() => router.go(`personal-agents/${primaryAgent.id}/chat`)}>{primaryAgent.name}</button>, your main agent: it hands work to the others and they report back to it.</p>
-        {/if}
-        <ul class="cards" data-testid="pa-cards">
-          {#each agents as a (a.id)}
-            {@const example = isExample(a)}
-            {@const auto = autonomyById[a.id]}
-            <li use:rowMenu class="pa-card" class:paused={!a.enabled} class:primary={!!auto?.primary} oncontextmenu={(e) => cardMenu(e, a)}>
-              <div class="card-top">
-                <AgentAvatar avatar={a.avatar} name={a.name} size={36} />
-                <div class="card-id">
-                  <!-- The name is the card's one link; ::after stretches its hit
-                       area over the whole card, so the buttons stay real buttons
-                       (no button-in-button) and still sit on top. -->
-                  <button class="name" title={a.name} onclick={() => router.go(`personal-agents/${a.id}`)}>{a.name}</button>
-                  <span class="prov" title={providerText(a)}>
-                    <ProviderIcon provider={a.provider} size={12} /><span class="prov-t">{providerText(a)}</span>
-                  </span>
-                </div>
-                <button
-                  class="icon-btn card-more"
-                  aria-label="More actions for {a.name}"
-                  title="More actions"
-                  onclick={(e) => cardMenu(e, a)}><Icon name="more" size={14} /></button>
-              </div>
-              <div class="card-meta">
-                {#if example}
-                  <span class="chip" title="A shipped example — it stays off until you enable it. Run now still runs it once.">Example</span>
-                {:else if !a.enabled}
-                  <span class="chip" title="Schedules don’t fire while paused. Run now and chat still work.">Paused</span>
-                {:else}
-                  <span class="chip ok">Enabled</span>
-                {/if}
-                {#if a.browser}<span class="chip" title="Runs and chat can drive the in-app browser">Browser</span>{/if}
-                {#if auto?.primary}<span class="chip pa-accent" title="Your main agent — it creates agents, delegates to them, and they report back to it"><Icon name="star" size={12} /> Main agent</span>{/if}
-                {#if a.created_by_agent}<span class="chip" title="Created by your main agent">By {personalAgents.agent(a.created_by_agent)?.name ?? 'main agent'}</span>{/if}
-                {#if auto?.proactive.enabled}<span class="chip" title="Works its standing goals in the background, read-only"><Icon name="eye" size={12} /> Proactive</span>{/if}
-                <!-- A paused agent's schedules never fire — don't promise a next run. -->
-                {#if a.enabled}
-                  {#if personalAgents.schedulesError[a.id]}
-                    <span class="meta" title={personalAgents.schedulesError[a.id]}>Schedule unavailable — open Schedules to retry</span>
-                  {:else if personalAgents.schedulesLoading[a.id] && !(a.id in personalAgents.schedulesByAgent)}
-                    <Skeleton rows={1} height={16} label="schedule" />
-                  {:else}
-                    <span class="meta">Next run <RelTime iso={personalAgents.nextRunAt(a.id)} fallback="not scheduled" /></span>
-                  {/if}
-                {/if}
-              </div>
-              <div class="card-actions">
-                {#if auto?.primary}
-                  <button class="btn small primary" onclick={() => router.go(`personal-agents/${a.id}/chat`)}><Icon name="comment" size={12} /> Chat</button>
-                {/if}
-                {#if a.enabled}
-                  <button class="btn small" disabled={busyId === a.id} aria-label="Run now {a.name}" onclick={() => void runNow(a)}><Icon name="play" size={12} /> Run now</button>
-                  <button class="btn small" disabled={busyId === a.id} aria-label="Pause {a.name}" onclick={() => void toggle(a)}>Pause</button>
-                {:else}
-                  <button class="btn small" disabled={busyId === a.id} aria-label="Enable {a.name}" onclick={() => void toggle(a)}><Icon name="check" size={12} /> Enable</button>
-                  <button class="btn small" disabled={busyId === a.id} aria-label="Run once {a.name}" onclick={() => void runNow(a)} title="Run it once without enabling its schedules">Run once</button>
-                {/if}
-              </div>
-            </li>
-          {/each}
-        </ul>
+        <div class="pa-home" class:panel={panelOpen && !!selected}>
+          <AgentRail {agents} selectedId={selected?.id ?? null} onselect={select} oncreate={() => (creating = true)} />
+          <div class="pa-center">
+            {#if autonomyLoaded && !hasMain}
+              <p class="pa-hint" role="note">
+                <Icon name="star" size={12} /> No main agent yet — it is the one you talk to, and it hands work to the others.
+                <button type="button" class="linklike" onclick={() => (creating = true)}>Set one up</button>
+              </p>
+            {/if}
+            {#if selected}
+              {#key selected.id}
+                <AgentConversation agent={selected} {panelOpen} ontogglepanel={() => (panelOpen = !panelOpen)} ondelete={(a) => void remove(a)} />
+              {/key}
+            {:else}
+              <EmptyState icon="user" title="Agent not found" body="It may have been deleted, or it belongs to another workspace." actionLabel="Back to your agents" onaction={() => router.go('personal-agents')} />
+            {/if}
+          </div>
+          {#if panelOpen && selected}
+            {#if SidePanelLazy.component}
+              <SidePanelLazy.component agent={selected} tab={panelTab} ontab={(t: PanelTab) => (panelTab = t)} onclose={() => (panelOpen = false)} />
+            {:else}
+              <div class="pa-panel-slot"><LoadState what="the agent’s details" error={SidePanelLazy.error} loading={!SidePanelLazy.error} empty onretry={() => SidePanelLazy.retry()} /></div>
+            {/if}
+          {/if}
+        </div>
       </LoadState>
     {/if}
 
     {#if creating}
+      {#if QuickCreateLazy.component}
+        <QuickCreateLazy.component
+          needsMain={!hasMain}
+          oncreated={(a: PersonalAgent) => { creating = false; select(a.id); }}
+          onmore={() => { creating = false; fullCreate = true; }}
+          onclose={() => (creating = false)}
+        />
+      {:else}
+        <LoadState what="new-agent form" error={QuickCreateLazy.error} loading={!QuickCreateLazy.error} empty onretry={() => QuickCreateLazy.retry()} />
+      {/if}
+    {/if}
+    {#if fullCreate}
       {#if AgentEditSheetLazy.component}
-        <AgentEditSheetLazy.component agent={null} onclose={() => (creating = false)} />
+        <AgentEditSheetLazy.component agent={null} onclose={() => (fullCreate = false)} />
       {:else}
         <LoadState what="new-agent form" error={AgentEditSheetLazy.error} loading={!AgentEditSheetLazy.error} empty onretry={() => AgentEditSheetLazy.retry()} />
       {/if}
     {/if}
-  </div>
   </PageBody>
   </div>
 {/if}
 
 <style>
   .pa-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-  .pa { display: flex; flex-direction: column; min-height: 0; flex: 1; }
-  .cards {
-    list-style: none; margin: 0; padding: 0; display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px;
+  .pa-mascot { display: block; margin: 24px auto 0; }
+  .pa-home {
+    position: relative; display: flex; flex: 1; min-block-size: 0; block-size: 100%;
+    border-block-start: 1px solid var(--border); background: var(--bg);
   }
-  .pa-card {
-    position: relative;
-    border: 1px solid var(--border); background: var(--surface); border-radius: var(--radius-m);
-    padding: 12px; color: var(--text); display: flex; flex-direction: column; gap: 10px;
-    box-sizing: border-box; min-width: 0;
-  }
-  .pa-card:hover { border-color: var(--border-strong); }
-  .pa-card:focus-within { border-color: var(--border-strong); }
-  .card-top { display: flex; align-items: center; gap: 10px; min-width: 0; }
-  .card-id { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
-  .name {
-    all: unset; cursor: pointer; font-size: var(--fs-l); font-weight: 600; color: var(--text);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: var(--radius-s);
-  }
-  /* Stretch the name's hit area over the whole card (the "card link" pattern). */
-  .name::after { content: ''; position: absolute; inset: 0; border-radius: var(--radius-m); }
-  .name:focus-visible { outline: none; }
-  .name:focus-visible::after { outline: 2px solid var(--accent-text); outline-offset: -1px; }
-  .paused .name { color: var(--text-dim); }
-  .prov { display: flex; align-items: center; gap: 4px; min-width: 0; font-size: var(--fs-s); color: var(--text-dim); }
-  .prov :global(svg) { flex-shrink: 0; }
-  .prov-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* Positioned + later in the DOM than .name::after, so they paint above it
-     (and chips with a tooltip still get their hover). */
-  .card-more, .card-actions, .card-meta [title] { position: relative; }
-  .card-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-height: 20px; }
-  .meta { color: var(--text-dim); font-size: var(--fs-s); }
-  .card-actions { display: flex; gap: 6px; margin-top: auto; flex-wrap: wrap; }
-  .pa-card.primary { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
-  .pa-accent { color: var(--accent-text); border-color: var(--accent-line); display: inline-flex; align-items: center; gap: 4px; }
-  .pa-hint { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; color: var(--text-dim); font-size: var(--fs-s); flex-wrap: wrap; }
+  .pa-panel-slot { inline-size: 340px; flex: none; border-inline-start: 1px solid var(--border); padding: 12px; }
+  .pa-center { flex: 1; min-inline-size: 0; display: flex; flex-direction: column; min-block-size: 0; }
+  .pa-hint { display: flex; align-items: center; gap: 6px; margin: 0; padding: 6px 12px; color: var(--text-dim); font-size: var(--fs-s); flex-wrap: wrap; border-block-end: 1px solid var(--border); }
   .linklike { border: 0; background: none; padding: 0; color: var(--accent-text); font: inherit; font-weight: 600; cursor: pointer; }
   .linklike:hover { text-decoration: underline; }
+  @media (max-width: 640px) {
+    .pa-home { flex-direction: column; }
+  }
 </style>
