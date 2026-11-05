@@ -677,7 +677,11 @@ impl AgentRuntime {
 
     /// Record the agent-UI-control grant (closed sessions too — a revoke must
     /// always land). Keeps a live session's cached row in step.
-    pub async fn set_ui_control(&self, id: &Id, record: serde_json::Value) -> Result<RuntimeSession> {
+    pub async fn set_ui_control(
+        &self,
+        id: &Id,
+        record: serde_json::Value,
+    ) -> Result<RuntimeSession> {
         self.inner.repo.set_ui_control(id, &record).await?;
         if let Some(live) = self.inner.live.get(id).map(|l| Arc::clone(l.value())) {
             let mut st = live.lock();

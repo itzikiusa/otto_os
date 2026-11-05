@@ -937,7 +937,11 @@ pub fn is_human(auth: &AuthContext) -> bool {
 /// grant under `meta.ui_control`, `meta.runtime = "structured"`, no device
 /// pin (any of the owner's windows). `closed_ok` admits a closed thread (a
 /// revoke must always land); a run needs a live one.
-pub async fn caller_session(ctx: &ServerCtx, id: &Id, closed_ok: bool) -> otto_core::Result<Session> {
+pub async fn caller_session(
+    ctx: &ServerCtx,
+    id: &Id,
+    closed_ok: bool,
+) -> otto_core::Result<Session> {
     match ctx.manager.get(id).await {
         Ok(s) => Ok(s),
         Err(terminal_err) => {

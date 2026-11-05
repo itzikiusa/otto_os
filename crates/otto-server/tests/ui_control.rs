@@ -1081,13 +1081,23 @@ async fn structured_threads_are_granted_and_drive_like_sessions() {
 
     // The thread's own credential can't grant itself.
     let (st, _) = d
-        .post(&thread_token, "/sessions/thr1/ui-control", json!({"enabled": true}), None)
+        .post(
+            &thread_token,
+            "/sessions/thr1/ui-control",
+            json!({"enabled": true}),
+            None,
+        )
         .await;
     assert_eq!(st, 403);
 
     // The owner grants it; the thread row carries the grant.
     let (st, body) = d
-        .post(&d.human, "/sessions/thr1/ui-control", json!({"enabled": true}), None)
+        .post(
+            &d.human,
+            "/sessions/thr1/ui-control",
+            json!({"enabled": true}),
+            None,
+        )
         .await;
     assert_eq!(st, 200, "{body}");
     assert_eq!(body["meta"]["ui_control"]["enabled"], json!(true));
@@ -1110,7 +1120,12 @@ async fn structured_threads_are_granted_and_drive_like_sessions() {
 
     // Revoked: back to pending.
     let (st, _) = d
-        .post(&d.human, "/sessions/thr1/ui-control", json!({"enabled": false}), None)
+        .post(
+            &d.human,
+            "/sessions/thr1/ui-control",
+            json!({"enabled": false}),
+            None,
+        )
         .await;
     assert_eq!(st, 200);
     let out = invoke("ui_state").await;
