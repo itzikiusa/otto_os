@@ -349,6 +349,22 @@ pub(super) fn is_twin_call(name: &str) -> bool {
 /// the session owner, then the native answer shape ([`TwinReply`]).
 async fn twin_call(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<i64>), String> {
     use otto_server::mcp_outward::Method;
+    // In Threads, "open a session" opens a LINKED THREAD — the same rule the
+    // governed path applies (`otto_mcp::outward::thread_alias`); a terminal
+    // session (no runtime row) still opens a terminal session.
+    let aliased = match (name, ctx.session_id.as_deref()) {
+        ("otto_open_session", Some(sid)) => {
+            let thread = ctx
+                .get_json(&format!("/runtime-sessions/{}", seg(sid)))
+                .await;
+            otto_mcp::outward::thread_alias(name, args, thread.is_ok())
+        }
+        _ => None,
+    };
+    let (name, args) = match &aliased {
+        Some((_, a)) => ("otto_thread_open", a),
+        None => (name, args),
+    };
     let call = twin_route(
         name,
         args,

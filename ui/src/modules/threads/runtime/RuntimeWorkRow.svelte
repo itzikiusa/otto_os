@@ -15,7 +15,9 @@
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
   import { lastLine, patchToDiff } from '../../agents/conversation/format'; // ui-guards: allow — shared chat helpers
   import RuntimeApprovalRow from './RuntimeApprovalRow.svelte';
-  import { toolError, workLabel, type PendingApproval } from './timeline';
+  import { openedTarget, toolError, workLabel, type PendingApproval } from './timeline';
+  import { ws } from '../../../lib/stores/workspace.svelte';
+  import { threads } from '../threadsStore.svelte';
 
   interface Props {
     item: TurnItem;
@@ -49,6 +51,13 @@
   const failed = $derived(item.status === 'failed' || item.type === 'error');
   const stopped = $derived(item.status === 'cancelled' || item.status === 'interrupted');
   const label = $derived(workLabel(item));
+  /** The thread / session this call opened or spoke to — a one-click link. */
+  const target = $derived(running ? null : openedTarget(item));
+  function goTarget(e: MouseEvent): void {
+    if (!target) return;
+    if (target.kind === 'session') ws.navigateToSession(target.id);
+    else threads.selectThread(target.id, { split: e.shiftKey });
+  }
   const error = $derived(toolError(item));
   const commandOut = $derived(item.type === 'command_execution' ? (item.output ?? output) : '');
   const tail = $derived(running && commandOut ? lastLine(commandOut) : '');
@@ -102,6 +111,19 @@
       <span class="rw-label wrap" dir="auto">{label}</span>
       {#if running}<span class="spinner" aria-label="Running"></span>{/if}
     </div>
+  {/if}
+  {#if target}
+    <button
+      type="button"
+      class="rw-open"
+      onclick={goTarget}
+      title={target.kind === 'thread' ? 'Open this thread (⇧-click: beside)' : 'Open this session'}
+      data-testid="runtime-item-open"
+    >
+      <Icon name={target.kind === 'thread' ? 'comment' : 'terminal'} size={12} />
+      {target.kind === 'thread' ? 'Open thread' : 'Open session'}
+      <Icon name="chevronRight" size={12} />
+    </button>
   {/if}
   {#if item.type === 'error'}
     <p class="rw-error" dir="auto">{item.failure.message}</p>
@@ -182,6 +204,26 @@
   button.rw-line:hover {
     background: var(--hover);
     color: var(--text);
+  }
+  .rw-open {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-inline-start: 24px;
+    padding: 2px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--accent-text);
+    font: inherit;
+    cursor: pointer;
+  }
+  .rw-open:hover {
+    background: var(--accent-soft);
+  }
+  .rw-open:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: 1px;
   }
   .rw-label {
     flex: 1;

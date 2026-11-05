@@ -364,12 +364,17 @@
     },
     "requests": [
       [
+        "GET",
+        "/runtime-sessions/sess-test",
+        null
+      ],
+      [
         "POST",
-        "/workspaces/ws-test/sessions/open",
+        "/runtime-sessions/sess-test/peers",
         {
           "provider": "claude",
-          "title": "t",
-          "prompt": "p"
+          "prompt": "p",
+          "title": "t"
         }
       ]
     ],

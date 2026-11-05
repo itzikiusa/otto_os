@@ -220,7 +220,10 @@ pub async fn upsert_request_preserving(
 /// carry over; workspace and folder come from the calling thread. `None`
 /// leaves the call alone.
 pub fn thread_alias(tool: &str, args: &Value, in_thread: bool) -> Option<(String, Value)> {
-    if !in_thread || tool.strip_prefix("otto.").unwrap_or(tool) != "open_session" {
+    let short = tool
+        .strip_prefix("otto.")
+        .or_else(|| tool.strip_prefix("otto_"));
+    if !in_thread || short.unwrap_or(tool) != "open_session" {
         return None;
     }
     let mut out = json!({});
@@ -2300,5 +2303,7 @@ mod thread_alias_tests {
         // A terminal session still opens a terminal session.
         assert!(thread_alias("otto.open_session", &args, false).is_none());
         assert!(thread_alias("otto.list_sessions", &args, true).is_none());
+        // The stdio spelling too.
+        assert!(thread_alias("otto_open_session", &args, true).is_some());
     }
 }
