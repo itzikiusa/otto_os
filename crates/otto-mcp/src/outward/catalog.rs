@@ -47,6 +47,13 @@ pub const DEFAULT_ENABLED: &[&str] = &[
     "list_issue_projects",
     "list_issue_types",
     "get_scheduled_task",
+    "get_scheduled_task_report",
+    // Agent admin reads (personal agents: templates, config, runs, reports).
+    "list_personal_agent_templates",
+    "list_personal_agents",
+    "get_personal_agent",
+    "list_personal_agent_runs",
+    "get_personal_agent_report",
     // ---- Feature reads (metadata/list/get) — safe to expose by default once the
     // outward server itself is turned on. Content-heavy reads (consume/search)
     // stay off by default; see the two opt-in reads excluded from this list.
@@ -150,6 +157,19 @@ pub const DANGEROUS: &[&str] = &[
     "delete_scheduled_task",
     "run_scheduled_task",
     "set_scheduled_task_enabled",
+    // Agent admin — setting up / changing / running the person's personal
+    // agents for them. Off by default (category "Agent admin": one All
+    // toggle in the control plane), every call approval-gated; the card names
+    // the persona diff, schedules, permission and main-agent flag.
+    "create_personal_agent",
+    "update_personal_agent",
+    "delete_personal_agent",
+    "add_personal_agent_schedule",
+    "update_personal_agent_schedule",
+    "remove_personal_agent_schedule",
+    "set_personal_agent_autonomy",
+    "set_personal_agent_slack_as_me",
+    "run_personal_agent",
     // ---- Feature writes — mutating / outward-facing / agent-spawning. Off by
     // default, approval-gated by the control plane.
     "run_workflow",
@@ -236,6 +256,7 @@ pub const IRREVERSIBLE: &[&str] = &[
     "api_execute",
     "api_run_automation",
     "delete_scheduled_task",
+    "delete_personal_agent",
     // A committed UPDATE / DELETE / DROP has no undo inside Otto.
     "query_db",
 ];
@@ -268,6 +289,9 @@ pub const PERSON_ONLY_TOOLS: &[&str] = &[
     "approve_improvement_edit",
     "reject_improvement_edit",
     "rollback_improvement_edit",
+    // Lending the person's own Slack identity to an agent: the twin of the
+    // owner-only, person-only `PUT /personal-agents/{id}/slack-as-me`.
+    "set_personal_agent_slack_as_me",
 ];
 
 /// True iff `bare` is one of the [`PERSON_ONLY_TOOLS`].
@@ -393,6 +417,7 @@ pub const VAULT_REF_DESC: &str = "Vault id (integer) or vault name (otto.vault_l
 pub const DESIGN_REF_DESC: &str = "Design artifact id or exact title.";
 pub const ROOM_REF_DESC: &str = "Agent room id or name (otto.list_agent_rooms).";
 pub const TASK_REF_DESC: &str = "Scheduled task id or name (otto.list_scheduled_tasks).";
+pub const AGENT_REF_DESC: &str = "Personal agent id or name (otto.list_personal_agents).";
 pub const AWS_ACCOUNT_REF_DESC: &str = "AWS account id or name (otto.aws_list_accounts).";
 pub const K8S_CLUSTER_REF_DESC: &str = "Kubernetes cluster id or name (otto.k8s_list_clusters).";
 pub const PR_NUMBER_DESC: &str = "Pull request number (otto.list_prs).";
@@ -975,8 +1000,81 @@ pub fn otto_tool_specs() -> Vec<Value> {
     ]);
     // Agent UI control: one governed tool per `docs/contracts/ui-commands.json`
     // entry (`otto.ui_*`, category "UI control") — see `crate::ui_commands`.
-    specs.extend(ui_commands::specs());
+    specs.extend(agent_admin_specs().into_iter().chain(ui_commands::specs()));
     specs
+}
+
+/// The "Agent admin" slice of [`otto_tool_specs`]: a person's personal agents
+/// set up and run on their behalf (reads default-on, writes approval-gated),
+/// plus the scheduled-task report read.
+fn agent_admin_specs() -> [Value; 15] {
+    let a = json!({"type":"string","description":AGENT_REF_DESC});
+    let str_ = json!({"type":"string"});
+    let sched = json!({"type":"object","description":"{cadence:'interval'|'daily'|'weekly'|'cron'|'once', every_min, at:'HH:MM', weekday, expr:'<5-field cron>', run_at}"});
+    let perm = json!({"type":"string","enum":["directed","read_only"]});
+    let cat = "Agent admin";
+    [
+        json!({"name":"otto.list_personal_agent_templates","mutating":false,"category":cat,
+            "description":"Personal-agent templates (id, title, name, soul_md persona, schedule, directive) for otto.create_personal_agent `template`.",
+            "inputSchema":{"type":"object","properties":{}}}),
+        json!({"name":"otto.list_personal_agents","mutating":false,"category":cat,
+            "description":"Personal agents across every workspace you can read (id, name, provider, enabled, workspace).",
+            "inputSchema":{"type":"object","properties":{"workspace_id":{"type":"string","description":WS_DIR_DESC}}}}),
+        json!({"name":"otto.get_personal_agent","mutating":false,"category":cat,
+            "description":"One personal agent: config + persona, schedules, autonomy (primary, proactive, goals, rules, slack_as_me_teams), 5 latest runs.",
+            "inputSchema":{"type":"object","required":["agent_id"],"properties":{"agent_id":a}}}),
+        json!({"name":"otto.list_personal_agent_runs","mutating":false,"category":cat,
+            "description":"A personal agent's runs (status, summary, error, session_id; the id reads its report).",
+            "inputSchema":{"type":"object","required":["agent_id"],"properties":{"agent_id":a}}}),
+        json!({"name":"otto.get_personal_agent_report","mutating":false,"category":cat,
+            "description":"A personal-agent run's Markdown report.",
+            "inputSchema":{"type":"object","required":["run_id"],"properties":{"run_id":str_}}}),
+        json!({"name":"otto.get_scheduled_task_report","mutating":false,"category":"Scheduled Tasks",
+            "description":"A scheduled-task run's Markdown report (run ids: otto.list_scheduled_task_runs).",
+            "inputSchema":{"type":"object","required":["run_id"],"properties":{"run_id":str_}}}),
+        json!({"name":"otto.create_personal_agent","mutating":true,"category":cat,
+            "description":"Create a personal agent you own, optionally from `template` (your fields override it). `schedules` replaces the template's schedule (empty directive = the template's); `timezone` = the template schedule's; `primary` = make it the main agent. Approval-gated.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{
+                "workspace_id":str_,"template":str_,"name":str_,
+                "soul_md":{"type":"string","description":"persona markdown"},"avatar":str_,
+                "provider":str_,"model":str_,"cwd":str_,"browser":{"type":"boolean"},
+                "delivery":{"type":"object","description":"{type:'none'|'slack'|'telegram'|'email'|'webhook', chat_id|to|url}"},
+                "enabled":{"type":"boolean"},"timezone":str_,"primary":{"type":"boolean"},
+                "schedules":{"type":"array","items":{"type":"object","properties":{
+                    "schedule":sched,"timezone":str_,"directive":str_,"permission":perm,"enabled":{"type":"boolean"}}}}}}}),
+        json!({"name":"otto.update_personal_agent","mutating":true,"category":cat,
+            "description":"Edit a personal agent; omitted fields keep. `enabled` pauses / resumes all its schedules. Approval-gated.",
+            "inputSchema":{"type":"object","required":["agent_id"],"properties":{
+                "agent_id":a,"name":str_,"soul_md":{"type":"string","description":"persona markdown"},
+                "avatar":str_,"provider":str_,"model":str_,"cwd":str_,"browser":{"type":"boolean"},
+                "delivery":{"type":"object"},"enabled":{"type":"boolean"}}}}),
+        json!({"name":"otto.delete_personal_agent","mutating":true,"category":cat,
+            "description":"Delete a personal agent with its schedules and runs. Irreversible; approval-gated.",
+            "inputSchema":{"type":"object","required":["agent_id"],"properties":{"agent_id":a}}}),
+        json!({"name":"otto.add_personal_agent_schedule","mutating":true,"category":cat,
+            "description":"Add a schedule to a personal agent (`timezone` IANA; `permission` read_only runs change nothing). Approval-gated.",
+            "inputSchema":{"type":"object","required":["agent_id","schedule"],"properties":{
+                "agent_id":a,"schedule":sched,"timezone":str_,"directive":str_,"permission":perm,"enabled":{"type":"boolean"}}}}),
+        json!({"name":"otto.update_personal_agent_schedule","mutating":true,"category":cat,
+            "description":"Edit a personal-agent schedule (ids: otto.get_personal_agent); `enabled` pauses / resumes it. Approval-gated.",
+            "inputSchema":{"type":"object","required":["schedule_id"],"properties":{
+                "schedule_id":str_,"schedule":sched,"timezone":str_,"directive":str_,"permission":perm,"enabled":{"type":"boolean"}}}}),
+        json!({"name":"otto.remove_personal_agent_schedule","mutating":true,"category":cat,
+            "description":"Remove a personal-agent schedule. Approval-gated.",
+            "inputSchema":{"type":"object","required":["schedule_id"],"properties":{"schedule_id":str_}}}),
+        json!({"name":"otto.set_personal_agent_autonomy","mutating":true,"category":cat,
+            "description":"Set a personal agent's autonomy: `primary` (the main agent), `proactive` {enabled,runs_per_day,max_minutes}, `goals` [{text,enabled}], `rules` [{text}] (lists replace). Approval-gated.",
+            "inputSchema":{"type":"object","required":["agent_id"],"properties":{
+                "agent_id":a,"primary":{"type":"boolean"},"proactive":{"type":"object"},
+                "goals":{"type":"array","items":{"type":"object"}},"rules":{"type":"array","items":{"type":"object"}}}}}),
+        json!({"name":"otto.set_personal_agent_slack_as_me","mutating":true,"category":cat,
+            "description":"Let a personal agent act as YOU in Slack in these connected `teams` (ids: otto.slack_my_workspaces; [] = off). Always asks you; never auto-approved.",
+            "inputSchema":{"type":"object","required":["agent_id","teams"],"properties":{
+                "agent_id":a,"teams":{"type":"array","items":{"type":"string"}}}}}),
+        json!({"name":"otto.run_personal_agent","mutating":true,"category":cat,
+            "description":"Run a personal agent now (optionally one `schedule_id`'s directive); returns the running run. Approval-gated.",
+            "inputSchema":{"type":"object","required":["agent_id"],"properties":{"agent_id":a,"schedule_id":str_}}}),
+    ]
 }
 
 /// Insert `slice` just before the spec named `name` (at the end if absent).

@@ -1373,6 +1373,8 @@ fn personal_agents_policy(p: &str, get: bool) -> Option<PolicyDecision> {
             | "/personal-agents/{id}/activity"
             | "/personal-agents/{id}/memories"
             | "/personal-agents/{id}/slack-as-me"
+            | "/personal-agents/{id}/overview"
+            | "/personal-agents/templates"
     ) {
         return Some(Require(ScheduledTasks, if get { View } else { Edit }));
     }

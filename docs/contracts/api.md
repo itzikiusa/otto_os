@@ -4433,6 +4433,7 @@ engine.
 | `otto.set_scheduled_task_enabled` | yes (DANGEROUS) | off | #139 |
 | `otto.run_scheduled_task` | yes (DANGEROUS) | off | #141 |
 | `otto.delete_scheduled_task` | yes (DANGEROUS) | off | #140 |
+| `otto.get_scheduled_task_report` | no | on | `GET /scheduled-tasks/runs/{run_id}/report` (text) |
 
 ## Personal Agents
 
@@ -4452,7 +4453,9 @@ writes) + the workspace-role axis on the agent's workspace.
 | Method & path | Role | Body | Response |
 |---|---|---|---|
 | GET /api/v1/workspaces/{id}/personal-agents | scheduled_tasks view + ws viewer | — | `PersonalAgent[]` (first list seeds 4 disabled example agents) |
-| POST /api/v1/workspaces/{id}/personal-agents | scheduled_tasks edit + ws editor | `{name, avatar?, soul_md?, provider?, model?, cwd?, browser?, delivery?, enabled?}` — `cwd` (also on PATCH) must be empty (default dir under data_dir) or an absolute path / `~/…` with no `..` segments, else 400; re-checked at run time | PersonalAgent |
+| POST /api/v1/workspaces/{id}/personal-agents | scheduled_tasks edit + ws editor | `{name?, template?, avatar?, soul_md?, provider?, model?, cwd?, browser?, delivery?, enabled?, schedules?, timezone?, primary?}` — `cwd` (also on PATCH) must be empty (default dir under data_dir) or an absolute path / `~/…` with no `..` segments, else 400; re-checked at run time. `template` (an id or title from `GET /personal-agents/templates`; unknown → 400) pre-fills `name`, `avatar`, `soul_md` and adds its schedule — explicit fields win. `schedules` = `[{schedule, timezone?, directive?, enabled?, permission?, idempotency_key?}]` (the schedules-route body) replaces the template's; an empty `directive` takes the template's. `timezone` = the template schedule's (default UTC). `primary: true` makes it the workspace's main agent. Every schedule is validated before the agent exists (a bad cadence → 400, nothing created). `name` is required unless a template gives one | PersonalAgent + `schedules: PersonalAgentSchedule[]` (+ `primary` when sent). MCP: `otto.create_personal_agent` |
+| GET /api/v1/personal-agents/templates | scheduled_tasks view | — | `PersonalAgentTemplate[]` `{id, title, description, avatar, name, soul_md, schedule, directive}` — the New-agent templates (`docs/contracts/personal-agent-templates.json`, the one source the UI imports too). MCP: `otto.list_personal_agent_templates` |
+| GET /api/v1/personal-agents/{id}/overview | scheduled_tasks view + ws viewer | — | `{agent: PersonalAgent, schedules: PersonalAgentSchedule[], autonomy: PersonalAgentAutonomy, recent_runs: PersonalAgentRun[] (≤5)}`. MCP: `otto.get_personal_agent` |
 | GET /api/v1/personal-agents/{id} | scheduled_tasks view + ws viewer | — | PersonalAgent |
 | PATCH /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor; owner-only fields: the owner (`created_by`), a ws admin or root | any subset of the create body | PersonalAgent. The agent runs as its owner, so `soul_md`, `provider`, `model`, `cwd`, `browser` and `delivery` — and its memory and context (`PUT …/memory`, `PUT …/context`) — are owner-only: another Editor changing any of them → 403 ("This agent runs as its owner; only the owner or a workspace admin can change …"). Name, avatar, enable/pause stay open to Editors |
 | DELETE /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}`. A run in flight is stopped first and the delete waits for it to settle; `409` while a run is finishing |
@@ -4468,6 +4471,38 @@ writes) + the workspace-role axis on the agent's workspace.
 | GET /api/v1/personal-agents/team?session_id= | scheduled_tasks view + ws viewer | — | `{lead:{id,name,is_main_agent}, agents:[{id,name,about,provider,enabled,delegable,created_by_agent}]}` — the calling personal agent and its workspace's other agents. `session_id` = the calling agent's session or thread (an agent credential is bound to its own; another → 403); it must carry `meta.personal_agent` (else 400) and be the caller's (root exempt). MCP: `otto.personal_agent_list` |
 | POST /api/v1/personal-agents/team | scheduled_tasks edit + ws editor | `{session_id?, name, instructions?, provider?, model?}` | PersonalAgent — the **main agent** (autonomy `primary`; else 403) creates an agent: owned by the caller's user, enabled, no delivery, `created_by_agent` = the main agent. `name` 1–80 chars, unique in the workspace (409); `instructions` (its `soul_md`) ≤ 32 KB; `provider` one of the structured-runtime providers (default: the main agent's). Refused in a read-only session. MCP: `otto.personal_agent_create` |
 | POST /api/v1/personal-agents/team/delegate | scheduled_tasks edit + ws editor | `{session_id?, agent, task}` | `RuntimeSession` — the main agent's **Threads chat** (a terminal caller → 400) opens `agent` (id or name; not itself; on a structured-runtime provider) as a linked thread of its chat: in that agent's persona folder, `meta.personal_agent` = that agent, `delegated_by_agent` = the main agent, read-only when the chat is. `task` (≤ 32 KB) is its first message. When its turn ends Otto sends its final reply back to the main agent's chat as a message from that thread (`Report from …`; retried while the lead is busy, up to 30 min; best-effort across restarts). Refused in a read-only session. MCP: `otto.personal_agent_delegate` |
+
+### Agent admin MCP tools (category "Agent admin")
+
+An agent in the person's own session or thread sets up and runs their personal
+agents for them. Reads are on by default; writes are off by default (one
+**All** toggle on the "Agent admin" group in MCP → Otto server) and every write
+is approval-gated — the card names exactly what changes (the persona summary,
+or a line diff against the stored / template persona; each schedule's cadence,
+timezone and permission; main agent; Slack act-as-you teams). An approved
+write runs as the calling session (the session owner's identity, read-only
+sessions refused), except `set_personal_agent_slack_as_me`: it is
+**person-only** — ALWAYS a fresh approval (no auto-approve rule or token grant
+covers it) and only the approved call replays as the approving person, so the
+owner-only `PUT …/slack-as-me` stays closed to a raw agent token. `agent_id`
+takes an id or name (resolved across the workspaces you can read).
+
+| Tool | mutating | Default | Backing endpoint |
+|---|---|---|---|
+| `otto.list_personal_agent_templates` | no | on | `GET /personal-agents/templates` |
+| `otto.list_personal_agents` | no | on | the cross-workspace directory (`GET /workspaces/{id}/personal-agents`) |
+| `otto.get_personal_agent` | no | on | `GET /personal-agents/{id}/overview` |
+| `otto.list_personal_agent_runs` | no | on | `GET /personal-agents/{id}/runs` |
+| `otto.get_personal_agent_report` | no | on | `GET /personal-agents/runs/{run_id}/report` (text) |
+| `otto.create_personal_agent` | yes (DANGEROUS) | off | `POST /workspaces/{id}/personal-agents` (template + schedules + primary in one call) |
+| `otto.update_personal_agent` | yes (DANGEROUS) | off | `PATCH /personal-agents/{id}` (`enabled` pauses / resumes) |
+| `otto.delete_personal_agent` | yes (DANGEROUS, irreversible) | off | `DELETE /personal-agents/{id}` |
+| `otto.add_personal_agent_schedule` | yes (DANGEROUS) | off | `POST /personal-agents/{id}/schedules` |
+| `otto.update_personal_agent_schedule` | yes (DANGEROUS) | off | `PATCH /personal-agents/schedules/{schedule_id}` |
+| `otto.remove_personal_agent_schedule` | yes (DANGEROUS) | off | `DELETE /personal-agents/schedules/{schedule_id}` |
+| `otto.set_personal_agent_autonomy` | yes (DANGEROUS) | off | `PUT /personal-agents/{id}/autonomy` |
+| `otto.set_personal_agent_slack_as_me` | yes (DANGEROUS, person-only) | off | `PUT /personal-agents/{id}/slack-as-me` |
+| `otto.run_personal_agent` | yes (DANGEROUS) | off | `POST /personal-agents/{id}/run` |
 
 **Runs and chats are Threads threads** on a structured-runtime provider
 (`claude`, `codex`, `gemini`, `grok`, `opencode`, `pi`); any other provider

@@ -122,31 +122,6 @@ fn rooms(ctx: &ServerCtx) -> AgentRoomsRepo {
 
 // --- Request bodies --------------------------------------------------------
 
-#[derive(Deserialize)]
-struct CreateAgentReq {
-    name: String,
-    #[serde(default)]
-    avatar: Option<String>,
-    #[serde(default)]
-    soul_md: Option<String>,
-    #[serde(default)]
-    provider: Option<String>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    cwd: Option<String>,
-    #[serde(default)]
-    browser: Option<bool>,
-    #[serde(default)]
-    delivery: Option<Value>,
-    #[serde(default = "default_true")]
-    enabled: bool,
-}
-
-fn default_true() -> bool {
-    true
-}
-
 #[derive(Deserialize, Default)]
 struct UpdateAgentReq {
     name: Option<String>,
@@ -160,22 +135,6 @@ struct UpdateAgentReq {
     enabled: Option<bool>,
 }
 
-#[derive(Deserialize)]
-struct CreateScheduleReq {
-    #[serde(default)]
-    idempotency_key: Option<String>,
-    schedule: Value,
-    #[serde(default)]
-    timezone: Option<String>,
-    #[serde(default)]
-    directive: String,
-    #[serde(default = "default_true")]
-    enabled: bool,
-    /// The schedule's own permission set: `read_only` | `directed` (default).
-    #[serde(default)]
-    permission: Option<String>,
-}
-
 #[derive(Deserialize, Default)]
 struct UpdateScheduleReq {
     schedule: Option<Value>,
@@ -183,15 +142,6 @@ struct UpdateScheduleReq {
     directive: Option<String>,
     enabled: Option<bool>,
     permission: Option<String>,
-}
-
-fn check_permission(p: Option<&str>) -> Result<(), ApiError> {
-    match p {
-        None | Some("read_only") | Some("directed") => Ok(()),
-        Some(other) => Err(ApiError(Error::Invalid(format!(
-            "schedule permission must be read_only or directed (got '{other}')"
-        )))),
-    }
 }
 
 #[derive(Deserialize, Default)]
@@ -238,40 +188,11 @@ struct MessagesQuery {
     session_id: Option<String>,
 }
 
-// --- Validation ------------------------------------------------------------
-
-/// Same slug rule as scheduled tasks — a non-empty custom provider is allowed.
-fn check_provider(p: &str) -> Result<(), ApiError> {
-    let p = p.trim();
-    if p.is_empty()
-        || p.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        Ok(())
-    } else {
-        Err(ApiError(Error::Invalid(format!(
-            "provider '{p}' is not a valid provider name"
-        ))))
-    }
-}
-
-fn check_timezone(tz: &str) -> Result<(), ApiError> {
-    let t = tz.trim();
-    if t.is_empty() || t.parse::<chrono_tz::Tz>().is_ok() {
-        Ok(())
-    } else {
-        Err(ApiError(Error::Invalid(format!("unknown timezone '{tz}'"))))
-    }
-}
-
-fn check_delivery(d: &Value) -> Result<(), ApiError> {
-    match d.get("type").and_then(Value::as_str).unwrap_or("none") {
-        "none" | "slack" | "telegram" | "email" | "webhook" => Ok(()),
-        other => Err(ApiError(Error::Invalid(format!(
-            "delivery type must be none|slack|telegram|email|webhook (got '{other}')"
-        )))),
-    }
-}
+// Validation lives in `otto_assistant::personal_agent_admin` (shared with
+// the governed agent-admin tools).
+use otto_assistant::personal_agent_admin::{
+    check_delivery, check_permission, check_provider, check_timezone,
+};
 
 // --- Owner-only changes (S3-05 for personal agents) ------------------------
 
@@ -368,44 +289,18 @@ async fn list(
     ))
 }
 
-/// `POST /workspaces/{id}/personal-agents`
+/// `POST /workspaces/{id}/personal-agents` — optionally from a `template`,
+/// with its `schedules` and `primary` in the same call
+/// (`otto_assistant::personal_agent_admin::create`).
 async fn create(
     Path(ws_id): Path<String>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
-    Json(req): Json<CreateAgentReq>,
-) -> ApiResult<Json<PersonalAgent>> {
+    Json(req): Json<otto_assistant::personal_agent_admin::CreateReq>,
+) -> ApiResult<Json<Value>> {
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
-    if req.name.trim().is_empty() {
-        return Err(ApiError(Error::Invalid("name is required".into())));
-    }
-    let provider = req.provider.unwrap_or_default();
-    check_provider(&provider)?;
-    let delivery = req.delivery.unwrap_or_else(|| json!({"type":"none"}));
-    check_delivery(&delivery)?;
-    if let Some(c) = req.cwd.as_deref() {
-        personal_agents_engine::validate_agent_cwd(c).map_err(ApiError)?;
-    }
-    let agent = agents(&ctx)
-        .create(NewPersonalAgent {
-            avatar: req.avatar.unwrap_or_default(),
-            soul_md: req.soul_md.unwrap_or_default(),
-            provider: if provider.trim().is_empty() {
-                "claude".into()
-            } else {
-                provider
-            },
-            model: req.model.unwrap_or_default(),
-            cwd: req.cwd.unwrap_or_default(),
-            browser: req.browser.unwrap_or(false),
-            delivery,
-            enabled: req.enabled,
-            created_by: Some(user.id.clone()),
-            ..NewPersonalAgent::defaults(ws_id, req.name.trim().to_string())
-        })
-        .await
-        .map_err(ApiError)?;
-    Ok(Json(agent))
+    let made = otto_assistant::personal_agent_admin::create(&ctx, &ws_id, &user.id, req).await?;
+    Ok(Json(made))
 }
 
 /// `GET /personal-agents/{id}`
@@ -536,7 +431,7 @@ async fn create_schedule(
     Path(id): Path<String>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
-    Json(req): Json<CreateScheduleReq>,
+    Json(req): Json<otto_assistant::personal_agent_admin::ScheduleIn>,
 ) -> ApiResult<Json<PersonalAgentSchedule>> {
     let repo = agents(&ctx);
     let agent = repo.get(&id).await.map_err(ApiError)?;
@@ -552,26 +447,7 @@ async fn create_schedule(
         changed.push("schedule permission");
     }
     require_agent_owner(&ctx, &user, &agent, &changed).await?;
-    cadence::validate(&req.schedule).map_err(ApiError)?;
-    let timezone = req.timezone.unwrap_or_else(|| "UTC".into());
-    check_timezone(&timezone)?;
-    check_permission(req.permission.as_deref())?;
-    let schedule = repo
-        .create_schedule_once(
-            NewAgentSchedule {
-                agent_id: id,
-                schedule: req.schedule,
-                timezone,
-                directive: req.directive,
-                enabled: req.enabled,
-            },
-            req.idempotency_key.as_deref(),
-            req.permission.as_deref().unwrap_or("directed"),
-        )
-        .await
-        .map_err(ApiError)?;
-    refresh_next_run(&repo, &schedule).await;
-    repo.get_schedule(&schedule.id)
+    otto_assistant::personal_agent_admin::add_schedule::<ServerCtx>(&repo, &id, req)
         .await
         .map(Json)
         .map_err(ApiError)
@@ -672,12 +548,7 @@ async fn delete_schedule(
 
 /// Recompute `next_run_at` for display (best-effort; cursor untouched).
 async fn refresh_next_run(repo: &PersonalAgentsRepo, schedule: &PersonalAgentSchedule) {
-    let tz = cadence::task_tz(&schedule.timezone);
-    let next =
-        cadence::next_run(&schedule.schedule, chrono::Utc::now(), tz).map(|d| d.to_rfc3339());
-    let _ = repo
-        .set_schedule_runtime(&schedule.id, None, next.as_deref())
-        .await;
+    otto_assistant::personal_agent_admin::refresh_next_run::<ServerCtx>(repo, schedule).await;
 }
 
 // --- Run handlers -----------------------------------------------------------

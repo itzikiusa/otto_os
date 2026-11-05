@@ -2198,3 +2198,162 @@ async fn an_auto_approved_update_issue_edits_and_unassigns() {
         ]
     );
 }
+
+// ---------------------------------------------------------------------------
+// Agent admin: an agent sets up the person's personal agents for them
+// ---------------------------------------------------------------------------
+
+/// An agent in the person's session creates a personal agent from a
+/// template — custom cron schedule in a timezone, main agent — with ONE
+/// approval whose card names all of it; the approved call runs as the
+/// session's owner (the agent is owned by alice) and the read tools (on by
+/// default) see the result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agent_sets_up_a_personal_agent_after_one_approval() {
+    let d = boot().await;
+    enable_tools(
+        &d,
+        &[
+            "create_personal_agent",
+            "list_personal_agent_templates",
+            "get_personal_agent",
+        ],
+    )
+    .await;
+    let env = d
+        .agent_invoke("list_personal_agent_templates", json!({}))
+        .await;
+    assert_eq!(env["executed"], true, "{env}");
+    assert!(env["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["id"] == "slack-daily-digest"));
+
+    let args = json!({
+        "workspace_id": "ws1", "template": "slack-daily-digest", "name": "Slack helper",
+        "provider": "claude",
+        "schedules": [{"schedule": {"cadence": "cron", "expr": "0 7 * * 0-5"},
+                       "timezone": "Asia/Jerusalem", "permission": "directed"}],
+        "primary": true,
+    });
+    let env = d.agent_invoke("create_personal_agent", args.clone()).await;
+    assert_eq!(env["decision"], "pending_approval", "{env}");
+    let card = d
+        .pending_approvals()
+        .await
+        .into_iter()
+        .find(|a| a["tool"] == "otto.create_personal_agent")
+        .expect("a card");
+    let detail = card["detail"].as_str().unwrap_or_default();
+    for want in [
+        "Slack helper",
+        "Slack daily digest (as me)",
+        "cron `0 7 * * 0-5`",
+        "Asia/Jerusalem",
+        "may act",
+        "MAIN agent",
+        "persona",
+    ] {
+        assert!(detail.contains(want), "card misses {want:?}: {detail}");
+    }
+    assert_eq!(card["workspace_id"], "ws1", "{card}");
+    let id = card["id"].as_str().unwrap().to_string();
+    let (st, body) = d
+        .send(
+            "POST",
+            &d.human.clone(),
+            &format!("/mcp/approvals/{id}/decide"),
+            Some(json!({"approved": true})),
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    let env = d.agent_invoke("create_personal_agent", args).await;
+    assert_eq!(env["executed"], true, "{env}");
+    let made = &env["content"];
+    assert_eq!(made["name"], "Slack helper", "{env}");
+    assert_eq!(made["created_by"], "alice", "{env}");
+    assert!(made["soul_md"]
+        .as_str()
+        .unwrap()
+        .contains("otto-template:slack-daily-digest"));
+    assert_eq!(made["schedules"][0]["schedule"]["expr"], "0 7 * * 0-5");
+    assert_eq!(made["schedules"][0]["timezone"], "Asia/Jerusalem");
+    assert!(made["schedules"][0]["directive"]
+        .as_str()
+        .is_some_and(|d| d.contains("digest")));
+    // The agent is found by NAME.
+    let env = d
+        .agent_invoke("get_personal_agent", json!({"agent_id": "Slack helper"}))
+        .await;
+    assert_eq!(env["executed"], true, "{env}");
+    assert_eq!(env["content"]["autonomy"]["primary"], true, "{env}");
+    assert_eq!(env["content"]["schedules"].as_array().unwrap().len(), 1);
+}
+
+/// Lending the person's Slack identity: the raw agent token is refused on the
+/// person-only route; through the governed tool it ALWAYS files an approval
+/// (no auto-approve rule covers it) and only the approved call runs — as the
+/// person, so the owner-only route accepts it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slack_act_as_me_for_an_agent_always_asks_the_person() {
+    let d = boot().await;
+    enable_tools(&d, &["set_personal_agent_slack_as_me"]).await;
+    let (st, agent) = d
+        .send(
+            "POST",
+            &d.human.clone(),
+            "/workspaces/ws1/personal-agents",
+            Some(json!({"name": "Digest"})),
+        )
+        .await;
+    assert_eq!(st, 200, "{agent}");
+    let aid = agent["id"].as_str().unwrap().to_string();
+    let path = format!("/personal-agents/{aid}/slack-as-me");
+    let (st, body) = d
+        .send("PUT", &d.agent.clone(), &path, Some(json!({"teams": []})))
+        .await;
+    assert_eq!(st, 403, "raw agent token: {body}");
+
+    // An operator's auto-approve rule never covers it.
+    let (st, rule) = d
+        .rule(json!({"scope": "global", "target_kind": "tool",
+                     "target": "set_personal_agent_slack_as_me", "allow_irreversible": true}))
+        .await;
+    assert!(st == 201 || st == 400, "{rule}");
+    let args = json!({"agent_id": "Digest", "teams": []});
+    let env = d
+        .agent_invoke("set_personal_agent_slack_as_me", args.clone())
+        .await;
+    assert_eq!(env["decision"], "pending_approval", "{env}");
+    assert!(env.get("auto_approved_by").is_none(), "{env}");
+    let card = d
+        .pending_approvals()
+        .await
+        .into_iter()
+        .find(|a| a["tool"] == "otto.set_personal_agent_slack_as_me")
+        .expect("a card");
+    assert!(
+        card["detail"]
+            .as_str()
+            .is_some_and(|t| t.contains("'Digest'") && t.contains("Slack")),
+        "{card}"
+    );
+    let id = card["id"].as_str().unwrap().to_string();
+    let (st, body) = d
+        .send(
+            "POST",
+            &d.human.clone(),
+            &format!("/mcp/approvals/{id}/decide"),
+            Some(json!({"approved": true})),
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    let env = d.agent_invoke("set_personal_agent_slack_as_me", args).await;
+    assert_eq!(env["executed"], true, "{env}");
+    assert_eq!(env["content"]["teams"], json!([]), "{env}");
+    assert_eq!(
+        env["content"]["is_owner"], true,
+        "replayed as the person: {env}"
+    );
+}

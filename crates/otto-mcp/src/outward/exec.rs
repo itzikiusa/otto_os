@@ -822,6 +822,83 @@ fn team_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
     tool.starts_with("personal_agent_").then(call)
 }
 
+/// `args` without the routing keys (the path carries them; `workspace_id` is
+/// filled by the choke point for the pin / approval scope, never a field).
+fn body_without(args: &Value, keys: &[&str]) -> Value {
+    let mut body = args.clone();
+    if let Some(o) = body.as_object_mut() {
+        for k in keys.iter().chain(&["workspace_id"]) {
+            o.remove(*k);
+        }
+    }
+    body
+}
+
+/// The "Agent admin" slice of [`route_for`] (a person's personal agents, set
+/// up and run for them). `None` = not an agent-admin tool.
+fn admin_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
+    let agent =
+        || arg_str(args, "agent_id").map(|id| format!("/api/v1/personal-agents/{}", seg(&id)));
+    let schedule = || {
+        arg_str(args, "schedule_id")
+            .map(|id| format!("/api/v1/personal-agents/schedules/{}", seg(&id)))
+    };
+    let run = |what: &str| {
+        arg_str(args, "run_id").map(|id| format!("/api/v1/{what}/runs/{}/report", seg(&id)))
+    };
+    let call = || -> Result<SelfCall, Error> {
+        Ok(match tool {
+            "list_personal_agent_templates" => {
+                SelfCall::get("/api/v1/personal-agents/templates".into())
+            }
+            "list_personal_agents" => SelfCall::get(format!(
+                "/api/v1/workspaces/{}/personal-agents",
+                seg(&arg_str(args, "workspace_id")?)
+            )),
+            "get_personal_agent" => SelfCall::get(format!("{}/overview", agent()?)),
+            "list_personal_agent_runs" => SelfCall::get(format!("{}/runs", agent()?)),
+            "get_personal_agent_report" => SelfCall::get(run("personal-agents")?),
+            "get_scheduled_task_report" => SelfCall::get(run("scheduled-tasks")?),
+            "create_personal_agent" => SelfCall::post(
+                format!(
+                    "/api/v1/workspaces/{}/personal-agents",
+                    seg(&arg_str(args, "workspace_id")?)
+                ),
+                body_without(args, &[]),
+            ),
+            "update_personal_agent" => SelfCall::patch(agent()?, body_without(args, &["agent_id"])),
+            "delete_personal_agent" => SelfCall::delete(agent()?),
+            "add_personal_agent_schedule" => SelfCall::post(
+                format!("{}/schedules", agent()?),
+                body_without(args, &["agent_id"]),
+            ),
+            "update_personal_agent_schedule" => {
+                SelfCall::patch(schedule()?, body_without(args, &["schedule_id"]))
+            }
+            "remove_personal_agent_schedule" => SelfCall::delete(schedule()?),
+            "set_personal_agent_autonomy" => SelfCall::put(
+                format!("{}/autonomy", agent()?),
+                body_without(args, &["agent_id"]),
+            ),
+            "set_personal_agent_slack_as_me" => SelfCall::put(
+                format!("{}/slack-as-me", agent()?),
+                json!({"teams": args.get("teams").cloned().unwrap_or_else(|| json!([]))}),
+            ),
+            "run_personal_agent" => {
+                let mut body = json!({});
+                if let Some(s) = args.get("schedule_id").filter(|v| v.is_string()) {
+                    body["schedule_id"] = s.clone();
+                }
+                SelfCall::post(format!("{}/run", agent()?), body)
+            }
+            _ => return Err(Error::Invalid(format!("unknown tool otto.{tool}"))),
+        })
+    };
+    // `_personal_agent`: never the main agent's `personal_agent_*` team tools.
+    let admin = tool.contains("_personal_agent") || tool == "get_scheduled_task_report";
+    admin.then(call)
+}
+
 /// Map an outward tool + its (validated) arguments to the exact self-call against
 /// the daemon's own REST API. Pure: no I/O, no token — every tool reuses its
 /// endpoint's native RBAC when the call is later executed as the user. `ask_human_approval`
@@ -830,7 +907,7 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
     if let Some(call) = thread_route(tool, args).or_else(|| slack_route(tool, args)) {
         return call;
     }
-    if let Some(call) = team_route(tool, args) {
+    if let Some(call) = team_route(tool, args).or_else(|| admin_route(tool, args)) {
         return call;
     }
     Ok(match tool {
@@ -2265,7 +2342,11 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
 
 /// Tools whose route answers `text/plain` rather than JSON; [`run_tool`] wraps
 /// the body as `{"text": …}` for them (today only the pod-logs route).
-pub const TEXT_TOOLS: &[&str] = &["k8s_logs"];
+pub const TEXT_TOOLS: &[&str] = &[
+    "k8s_logs",
+    "get_personal_agent_report",
+    "get_scheduled_task_report",
+];
 /// Cap on the text handed back for a [`TEXT_TOOLS`] call (keeps the tail —
 /// the newest log lines). The route's own non-follow cap is 5 MiB.
 pub const MAX_TEXT_CHARS: usize = 256 * 1024;

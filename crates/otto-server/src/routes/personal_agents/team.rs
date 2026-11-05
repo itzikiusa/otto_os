@@ -2,7 +2,8 @@
 //! `_create` / `_delegate` call AS the calling agent session (an agent
 //! credential is bound to its own session; a person names one with
 //! `session_id`). The logic is `otto_assistant::personal_agent_team`; these
-//! handlers resolve the caller and check its workspace role.
+//! handlers resolve the caller and check its workspace role. Also the
+//! templates catalog and an agent's overview (`personal_agent_admin`).
 
 use axum::extract::{Query, State};
 use axum::routing::{get, post};
@@ -10,6 +11,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::Value;
 
+use otto_assistant::personal_agent_admin as admin;
 use otto_assistant::personal_agent_team::{self as team, NewMember};
 use otto_core::agent_runtime::RuntimeSession;
 use otto_core::domain::{User, WorkspaceRole};
@@ -24,6 +26,27 @@ pub fn routes() -> Router<ServerCtx> {
     Router::new()
         .route("/personal-agents/team", get(list).post(create))
         .route("/personal-agents/team/delegate", post(delegate))
+        .route("/personal-agents/templates", get(templates))
+        .route("/personal-agents/{id}/overview", get(overview))
+}
+
+/// `GET /personal-agents/templates` — the New-agent templates
+/// (`docs/contracts/personal-agent-templates.json`).
+async fn templates() -> Json<Value> {
+    Json(serde_json::json!(admin::templates()))
+}
+
+/// `GET /personal-agents/{id}/overview` — agent + schedules + autonomy +
+/// latest runs (`otto.get_personal_agent`).
+async fn overview(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<Value>> {
+    let repo = otto_state::PersonalAgentsRepo::new(ctx.pool.clone());
+    let agent = repo.get(&id).await?;
+    require_ws_role(&ctx, &user, &agent.workspace_id, WorkspaceRole::Viewer).await?;
+    Ok(Json(admin::overview(&repo, &agent).await?))
 }
 
 #[derive(Deserialize, Default)]

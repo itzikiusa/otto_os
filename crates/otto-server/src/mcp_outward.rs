@@ -34,6 +34,7 @@ use crate::auth::{CurrentAuthContext, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 
+use otto_assistant::personal_agent_admin::approval_detail as admin_detail;
 pub use otto_mcp::outward::*;
 
 const MAX_WAIT_SECS: u64 = 30;
@@ -737,6 +738,10 @@ impl governance::Stages for OttoStages<'_> {
                 let appr_id = match pending {
                     Some(id) => id,
                     None => {
+                        // A personal-agent write names exactly what changes.
+                        let detail = admin_detail(&ctx.pool, tool, self.arguments)
+                            .await
+                            .unwrap_or_else(|| dangerous_detail(tool, self.arguments));
                         ctx.mcp
                             .approvals()
                             .create(NewApproval {
@@ -756,7 +761,7 @@ impl governance::Stages for OttoStages<'_> {
                                                 dangerous_detail(tool, self.arguments)
                                             )
                                         }
-                                        None => dangerous_detail(tool, self.arguments),
+                                        None => detail,
                                     };
                                     match self.forced_approval {
                                         Some((why, _)) => format!("{why}. {base}"),

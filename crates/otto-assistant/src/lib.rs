@@ -7,6 +7,7 @@
 //! feed stay in `otto-server`.
 
 pub mod ctx;
+pub mod personal_agent_admin;
 pub mod personal_agent_documents;
 pub mod personal_agent_memory;
 mod personal_agent_session;

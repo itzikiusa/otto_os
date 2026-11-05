@@ -218,22 +218,7 @@ async fn save_autonomy(
     .await?;
     repo.save_autonomy(&id, &next).await.map_err(ApiError)?;
     if becomes_primary {
-        for other in repo
-            .list_by_workspace(&agent.workspace_id)
-            .await
-            .map_err(ApiError)?
-        {
-            if other.id == id {
-                continue;
-            }
-            let mut cfg = repo.autonomy(&other.id).await.map_err(ApiError)?;
-            if cfg.primary {
-                cfg.primary = false;
-                repo.save_autonomy(&other.id, &cfg)
-                    .await
-                    .map_err(ApiError)?;
-            }
-        }
+        otto_assistant::personal_agent_admin::clear_other_primaries(&repo, &agent).await?;
     }
     Ok(Json(next))
 }

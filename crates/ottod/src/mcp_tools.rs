@@ -4210,8 +4210,11 @@ mod tests {
     /// 80_081 with the four linked-thread tools (otto_thread_*); 81_425 with
     /// the main agent's three team tools (otto_personal_agent_*); 84_696 with
     /// the nine Slack tools alone (otto_slack_*, bot + as-you; hidden from
-    /// narrow review sessions, and the content reads are opt-in).
-    const TOOLS_LIST_BYTE_BUDGET: usize = 87_000;
+    /// narrow review sessions, and the content reads are opt-in); 92_429
+    /// with the fifteen Agent admin tools (otto_*_personal_agent*: set up
+    /// and run the person's personal agents; hidden from narrow sessions)
+    /// and otto_get_scheduled_task_report.
+    const TOOLS_LIST_BYTE_BUDGET: usize = 93_500;
     /// A review-type session (R2 per-source scoping): 52_595 after slim-app cleanup.
     const NARROW_TOOLS_LIST_BYTE_BUDGET: usize = 56_800; // +otto_thread_*, +otto_personal_agent_*
 

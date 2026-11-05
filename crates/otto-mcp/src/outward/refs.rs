@@ -79,6 +79,18 @@ pub const REF_ARGS: &[(&str, &str, &str)] = &[
     ("set_scheduled_task_enabled", "task_id", "scheduled_task"),
     ("run_scheduled_task", "task_id", "scheduled_task"),
     ("delete_scheduled_task", "task_id", "scheduled_task"),
+    ("get_personal_agent", "agent_id", "personal_agent"),
+    ("list_personal_agent_runs", "agent_id", "personal_agent"),
+    ("update_personal_agent", "agent_id", "personal_agent"),
+    ("delete_personal_agent", "agent_id", "personal_agent"),
+    ("add_personal_agent_schedule", "agent_id", "personal_agent"),
+    ("set_personal_agent_autonomy", "agent_id", "personal_agent"),
+    (
+        "set_personal_agent_slack_as_me",
+        "agent_id",
+        "personal_agent",
+    ),
+    ("run_personal_agent", "agent_id", "personal_agent"),
     ("create_scheduled_task", "workflow_id", "workflow"),
     ("update_scheduled_task", "workflow_id", "workflow"),
     ("room_post", "room_id", "agent_room"),
@@ -119,6 +131,7 @@ pub const DIRECTORY_TOOLS: &[(&str, &str)] = &[
     ("list_scheduled_tasks", "scheduled_task"),
     ("list_goal_loops", "goal_loop"),
     ("list_agent_rooms", "agent_room"),
+    ("list_personal_agents", "personal_agent"),
     ("list_issue_accounts", "issue_account"),
     ("list_product_stories", "product_story"),
 ];
@@ -211,6 +224,7 @@ pub fn pin_global(tool: &str) -> bool {
                 | "get_product_story"
                 | "get_usage_summary"
                 | "list_bundled_skills"
+                | "list_personal_agent_templates"
         )
 }
 
@@ -229,6 +243,11 @@ pub const PIN_NARROW_TOOLS: &[&str] = &[
 /// whatever `workspace_id` the caller sends). Listed so the classification
 /// test forces a conscious choice for every new tool.
 pub const PIN_UNVERIFIABLE: &[&str] = &[
+    // A schedule / run id alone names no workspace (no read route to probe).
+    "update_personal_agent_schedule",
+    "remove_personal_agent_schedule",
+    "get_personal_agent_report",
+    "get_scheduled_task_report",
     "list_findings",
     "get_finding",
     "approve_improvement_edit",

@@ -596,6 +596,16 @@ pub(super) const NARROW_HIDDEN_PREFIXES: &[&str] = &[
     "otto_list_consumer_groups",
     // Slack as the bot / as the person: no review or draft needs it.
     "otto_slack_",
+    // Agent admin (setting up the person's personal agents): neither.
+    "otto_list_personal_agent",
+    "otto_get_personal_agent",
+    "otto_create_personal_agent",
+    "otto_update_personal_agent",
+    "otto_delete_personal_agent",
+    "otto_add_personal_agent",
+    "otto_remove_personal_agent",
+    "otto_set_personal_agent",
+    "otto_run_personal_agent",
 ];
 
 pub(super) fn is_narrow_source(source: Option<&str>) -> bool {

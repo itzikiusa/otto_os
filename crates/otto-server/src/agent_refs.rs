@@ -219,6 +219,25 @@ pub(crate) const KINDS: &[RefKind] = &[
             "list_agent_rooms",
         )
     },
+    RefKind {
+        keep: Some(&[
+            "id",
+            "name",
+            "workspace_id",
+            "provider",
+            "model",
+            "enabled",
+            "created_by_agent",
+        ]),
+        ..kind(
+            "personal_agent",
+            "personal agent",
+            Scope::Workspace,
+            "/api/v1/workspaces/{ws}/personal-agents",
+            &["name"],
+            "list_personal_agents",
+        )
+    },
     kind(
         "canvas_scene",
         "canvas scene",

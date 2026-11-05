@@ -41,6 +41,61 @@ export interface PersonalAgent {
   updated_at: string;
 }
 
+/** `GET /personal-agents/templates` — one New-agent template (the one source
+ *  is `docs/contracts/personal-agent-templates.json`). */
+export interface PersonalAgentTemplate {
+  id: string;
+  title: string;
+  description: string;
+  avatar: string;
+  name: string;
+  soul_md: string;
+  schedule: Record<string, unknown>;
+  directive: string;
+}
+
+/** `POST /workspaces/{id}/personal-agents` — `template` pre-fills name /
+ *  avatar / persona and its schedule (explicit fields win); `schedules`
+ *  replaces the template's (empty directive = the template's); `timezone` is
+ *  the template schedule's; `primary` makes it the main agent. */
+export interface CreatePersonalAgentReq {
+  name?: string;
+  template?: string;
+  avatar?: string;
+  soul_md?: string;
+  provider?: string;
+  model?: string;
+  cwd?: string;
+  browser?: boolean;
+  delivery?: Record<string, unknown>;
+  enabled?: boolean;
+  schedules?: {
+    schedule: Record<string, unknown>;
+    timezone?: string;
+    directive?: string;
+    enabled?: boolean;
+    permission?: PersonalAgentPermission;
+    idempotency_key?: string;
+  }[];
+  timezone?: string;
+  primary?: boolean;
+}
+
+/** The create response: the agent plus the schedules it was created with. */
+export type CreatedPersonalAgent = PersonalAgent & {
+  schedules: PersonalAgentSchedule[];
+  primary?: boolean;
+};
+
+/** `GET /personal-agents/{id}/overview` (`otto.get_personal_agent`). */
+export interface PersonalAgentOverview {
+  agent: PersonalAgent;
+  schedules: PersonalAgentSchedule[];
+  autonomy: PersonalAgentAutonomy;
+  /** The 5 latest runs, newest first. */
+  recent_runs: PersonalAgentRun[];
+}
+
 /** One cadence+directive of a personal agent (1..N per agent, own cursor). */
 export interface PersonalAgentSchedule {
   id: Id;

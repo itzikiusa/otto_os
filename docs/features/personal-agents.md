@@ -121,6 +121,38 @@ restart drops a pending one; the report stays in the agent's thread);
 delegation needs the chat to be a Threads thread and the target on a Threads
 provider; read-only sessions cannot create or delegate.
 
+## 3b. Agent admin — an agent sets agents up for you
+
+Any agent in your own session or thread (not only the main agent) can set up
+and manage your personal agents with the **Agent admin** MCP tools — e.g. "make
+me a Slack helper from the *Slack daily digest (as me)* template, cron
+`0 7 * * 0-5` in my timezone, on claude, make it my main agent, let it act as
+me in my Slack workspace, then run it":
+
+- reads (on by default): `otto.list_personal_agent_templates`,
+  `otto.list_personal_agents`, `otto.get_personal_agent` (config, schedules,
+  autonomy incl. `slack_as_me_teams`, latest runs),
+  `otto.list_personal_agent_runs`, `otto.get_personal_agent_report`;
+- writes (off by default — MCP → Otto server → **Agent admin** → All):
+  `otto.create_personal_agent` (from a `template`, with `schedules`,
+  `timezone`, `primary` in ONE call), `update_personal_agent` (`enabled`
+  pauses / resumes), `delete_personal_agent`, `add_` / `update_` /
+  `remove_personal_agent_schedule`, `set_personal_agent_autonomy`,
+  `set_personal_agent_slack_as_me`, `run_personal_agent`.
+
+Every write asks you first; the approval card says exactly what is created or
+changed — the persona (summary, or a line diff against the stored / template
+persona), each schedule (cadence, timezone, read-only vs may-act), main
+agent, delivery. The approved call runs as your session (you own the agent;
+a read-only session is refused). **Act as me in Slack** is stricter: it
+always asks (no auto-approve rule or token write grant covers it), and only
+the call you approved runs — as you; an agent's own token is still refused
+by `PUT …/slack-as-me`. Why writes are off by default: the catalog invariant
+"mutating ⇒ approval-gated ⇒ off by default" holds for every write tool;
+enabling the category is one click, after which every call still needs your
+approval. Templates have one source, `docs/contracts/personal-agent-templates.json`
+(the New-agent sheet imports it; `GET /personal-agents/templates` serves it).
+
 ## 4. Rooms — inter-agent messaging, always visible
 
 Rooms (`agent_rooms` / `agent_room_members` / `agent_room_messages`) are the
@@ -298,6 +330,16 @@ agent page tabs **Overview / Activity / Autonomy / Schedules / Runs / Chat /
 Memory / Context**, plus a module-level **Rooms** view (live feed, membership
 editor, user post box). Schedules carry a *Read-only* chip when their
 permission set is read-only; runs show their mode and a read-only lock.
+
+An agent with UI control can drive this page visibly with the `otto.ui_pa_*`
+commands ([agent-ui-control.md §5](agent-ui-control.md)): list / open an agent
+on a tab, fill and save the New-agent sheet (template, persona, provider,
+schedule), edit fields, set autonomy, add / edit / pause schedules, Run now and
+read a run's report — each write after your attributed confirm. Granting
+"Can act as me in Slack" (`pa_set_slack_as_me`) always asks with the outward
+where / what / who confirm and is never remembered. The templates come from
+`docs/contracts/personal-agent-templates.json` (the sheet and the daemon read
+the same file).
 
 ## 8. Capabilities & limits (v1)
 

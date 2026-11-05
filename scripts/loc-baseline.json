@@ -8,7 +8,7 @@
     "crates/otto-sessions/src/manager.rs": 6281
   },
   "totals": {
-    "otto-server": 89171
+    "otto-server": 89076
   },
   "functions": {
     "crates/otto-automation/src/goal_loop.rs::controller_inner": 424,
