@@ -58,6 +58,25 @@ you've clicked Allow.
   Otto UI. The route refuses session and MCP tokens, so an agent can't grant
   itself.
 
+### Threads
+
+Agents in **Threads** (the structured runtime: Claude, Codex, Gemini, Grok,
+opencode, pi) use the same tools and the same grant. The request appears
+under the thread's header (*"‹Gemini› · ‹thread› wants to drive Otto"*, with
+**Allow for this thread** / **Deny**), and the thread's **⋯ → Allow UI
+control** flips it. The grant is stored on the thread and ends when the
+thread is closed. Whatever the agent opens — a database connection and its
+query tabs, a Kubernetes workspace, a note — shows in the **side pane beside
+Threads**, so you watch the queries run next to the conversation.
+
+### Its own window
+
+`otto.ui_open` takes `placement: "window"` in the desktop app: the module
+opens beside you and that pane is then **detached into its own window**,
+keeping its tabs, drafts and results (later commands keep driving it there).
+You can do the same yourself from the side pane's **⋯ → Detach side pane**
+(and **Return to split** brings it back).
+
 ## 3. What you see while it drives
 
 - **Where it opens.** If no pane shows the module the agent needs, Otto opens it
@@ -123,7 +142,7 @@ secrets from results before the agent sees them.
 | Command | Risk | What it does |
 |---------|------|--------------|
 | `state` | read | What each open Otto document shows (main pane / side pane, route, module, focus) plus the current module's view state. Works with no window (headless). |
-| `open` | navigate | Open a module / route, in the side pane by default (`placement: side|main`). |
+| `open` | navigate | Open a module / route, in the side pane by default (`placement: side|main|window` — `window` detaches the pane into its own desktop window). |
 | `focus` | navigate | Bring the window forward and focus a pane. |
 
 ### Database Explorer, API client, Git, Browser

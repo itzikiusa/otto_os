@@ -932,6 +932,61 @@ pub fn is_human(auth: &AuthContext) -> bool {
         && !auth.is_scoped()
 }
 
+/// The calling session as the bridge sees it: a terminal session, or a
+/// Threads (structured runtime) thread presented in the same shape — its
+/// grant under `meta.ui_control`, `meta.runtime = "structured"`, no device
+/// pin (any of the owner's windows). `closed_ok` admits a closed thread (a
+/// revoke must always land); a run needs a live one.
+pub async fn caller_session(ctx: &ServerCtx, id: &Id, closed_ok: bool) -> otto_core::Result<Session> {
+    match ctx.manager.get(id).await {
+        Ok(s) => Ok(s),
+        Err(terminal_err) => {
+            let Ok(t) = ctx.agent_runtime.get(id).await else {
+                return Err(terminal_err);
+            };
+            if !closed_ok && t.status == otto_core::agent_runtime::RuntimeSessionStatus::Closed {
+                return Err(Error::NotFound(format!("thread {id} is closed")));
+            }
+            Ok(runtime_as_session(t))
+        }
+    }
+}
+
+fn runtime_as_session(t: otto_core::agent_runtime::RuntimeSession) -> Session {
+    let mut meta = json!({"runtime": "structured"});
+    if let Some(grant) = t.ui_control {
+        meta[META_KEY] = grant;
+    }
+    Session {
+        id: t.id,
+        workspace_id: t.workspace_id,
+        kind: otto_core::domain::SessionKind::Agent,
+        provider: t.provider.as_str().to_string(),
+        title: t.title,
+        status: otto_core::domain::SessionStatus::Running,
+        cwd: t.cwd,
+        provider_session_id: t.native_thread_id,
+        connection_id: None,
+        created_by: t.created_by,
+        created_at: t.created_at,
+        last_active_at: t.last_active_at,
+        archived: false,
+        meta,
+    }
+}
+
+/// Persist a grant record on whichever kind of session `id` is.
+pub async fn store_grant(ctx: &ServerCtx, id: &Id, record: Value) -> otto_core::Result<Session> {
+    if ctx.manager.get(id).await.is_ok() {
+        return ctx.manager.update_meta(id, record).await;
+    }
+    let grant = record.get(META_KEY).cloned().unwrap_or(Value::Null);
+    ctx.agent_runtime
+        .set_ui_control(id, grant)
+        .await
+        .map(runtime_as_session)
+}
+
 /// The message the agent gets while the user has not allowed UI control.
 pub const PENDING_GRANT_MSG: &str = "The user hasn't allowed UI control for this session yet — they were asked in Otto; retry after they allow it";
 
@@ -950,9 +1005,7 @@ pub async fn run(
             "UI control is for agents running in an Otto session (this credential has no session)",
         )
     })?;
-    let session = ctx
-        .manager
-        .get(sid)
+    let session = caller_session(ctx, sid, false)
         .await
         .map_err(|_| UiError::new("not_found", "the calling session no longer exists"))?;
     if session.created_by != auth.effective_user.id {
@@ -1091,9 +1144,7 @@ async fn ensure_grant(
             notified,
         )
         .await;
-        let s = ctx
-            .manager
-            .get(&session.id)
+        let s = caller_session(ctx, &session.id, false)
             .await
             .map_err(|_| UiError::new("not_found", "the calling session no longer exists"))?;
         match grant_state(&s.meta) {

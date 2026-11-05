@@ -555,6 +555,7 @@ in which headless agy denies what it would have asked about.
   them in `session/new|load.mcpServers` with each server's env. pi (0.75) has
   no MCP. The credential is revoked when the process exits or the thread
   closes.
+- **Agent UI control** (done): a thread's agent can drive Otto beside it — open a DB connection, run queries in your Database Explorer, detach the pane into its own window — with the same per-thread grant as terminal sessions (see [Agent UI control](./agent-ui-control.md#threads)).
 - **Linked threads** (`/runtime-sessions/{id}/peers`, `otto.thread_open` /
   `_list` / `_message` / `_read`): a thread's agent opens other threads
   (`parent_id` = the group's root), messages them and reads their replies —

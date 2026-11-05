@@ -16,6 +16,10 @@
 //   • WRITE MEMORY: "Allow writes on ‹where› for this session", ticked in an
 //     agent's write confirm — keyed (session, scope) and dropped with the grant.
 //
+//   • OTHER SESSION KINDS: Threads' structured threads aren't workspace-store
+//     sessions; their store registers a {@link UiSessionSource} so the grant,
+//     the prompt and "Review" work for them too.
+//
 // Standalone on purpose (no runtime import): lib/uiCommands.ts imports this
 // store and installs the Stop hook, never the other way round.
 
@@ -99,6 +103,18 @@ export function agentName(agent: Pick<UiAgentRef, 'provider' | 'title'>): string
   return title ? `${who} · ${title}` : who;
 }
 
+/** A non-terminal kind of agent session that can be granted UI control. */
+export interface UiSessionSource {
+  /** The session in the shape the grant reads (`meta.ui_control`), or null. */
+  get(id: Id): Pick<Session, 'id' | 'meta' | 'provider' | 'title'> | null;
+  /** Apply the server's returned grant locally. */
+  patch(id: Id, grant: UiControlGrant): void;
+  /** Its pane (which shows the prompt) is on screen right now. */
+  onScreen(id: Id): boolean;
+  /** Bring it up (the toast's "Review"). */
+  reveal(id: Id): void;
+}
+
 class UiControlStore {
   /** Open prompts, by session id. */
   requests: Record<Id, UiControlRequest> = $state({});
@@ -144,8 +160,22 @@ class UiControlStore {
 
   // ── grant ────────────────────────────────────────────────────────────────
 
-  private session(id: Id): Session | null {
-    return ws.getSession(id) ?? ws.otherWsSessions.find((s) => s.id === id) ?? null;
+  private sources: UiSessionSource[] = [];
+
+  /** Register another session kind (Threads' structured threads). */
+  addSource(src: UiSessionSource): () => void {
+    this.sources = [...this.sources, src];
+    return () => {
+      this.sources = this.sources.filter((x) => x !== src);
+    };
+  }
+
+  private sourceOf(id: Id): UiSessionSource | null {
+    return this.sources.find((src) => src.get(id) !== null) ?? null;
+  }
+
+  private session(id: Id): Pick<Session, 'id' | 'meta' | 'provider' | 'title'> | null {
+    return ws.getSession(id) ?? ws.otherWsSessions.find((s) => s.id === id) ?? this.sourceOf(id)?.get(id) ?? null;
   }
 
   granted(sessionId: Id): boolean {
@@ -213,17 +243,24 @@ class UiControlStore {
    *  after a Deny, never twice for one open prompt. */
   private announce(ev: Extract<OttoEvent, { type: 'ui_control_requested' }>): void {
     if (isEmbedded || this.denied.includes(ev.session_id) || this.granted(ev.session_id)) return;
-    const onScreen = router.module === 'agents' && ws.panes.includes(ev.session_id);
+    const src = this.sourceOf(ev.session_id);
+    const onScreen = src ? src.onScreen(ev.session_id) : router.module === 'agents' && ws.panes.includes(ev.session_id);
     if (onScreen) return;
     const s = this.session(ev.session_id);
     const who = providerName(s?.provider ?? '');
     const where = ev.module && ev.module !== 'shell' ? ` in ${moduleLabel(ev.module)}` : '';
     toasts.push('info', `${who} wants to drive Otto`, `“${ev.session_title}” asked to ${commandLabel(ev.command).toLowerCase()}${where}.`, 12_000, {
-      action: { label: 'Review', run: () => ws.navigateToSession(ev.session_id) },
+      action: { label: 'Review', run: () => (src ? src.reveal(ev.session_id) : ws.navigateToSession(ev.session_id)) },
     });
   }
 
   private patchLocal(sessionId: Id, enabled: boolean, meta?: Record<string, unknown>): void {
+    const src = this.sourceOf(sessionId);
+    if (src) {
+      const fromServer = grantOf({ meta: meta ?? {} });
+      src.patch(sessionId, fromServer ?? { ...(grantOf(src.get(sessionId)) ?? {}), enabled });
+      return;
+    }
     const patch = (s: Session): Session =>
       s.id !== sessionId
         ? s

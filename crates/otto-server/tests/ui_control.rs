@@ -1028,3 +1028,91 @@ async fn agent_credential_cannot_open_sessions_outside_its_workspace() {
         .await;
     assert_eq!(st, 400, "a session at / must be refused: {body}");
 }
+
+/// Threads' structured threads drive Otto too: the grant route accepts a
+/// thread id (stored on its runtime row, shown back as `meta.ui_control` and
+/// on `GET /runtime-sessions/{id}`), the thread's own credential can't grant
+/// itself, and a granted thread's `otto.ui_*` call reaches the bridge.
+#[tokio::test]
+async fn structured_threads_are_granted_and_drive_like_sessions() {
+    let d = boot().await;
+    let pool = file_pool(d._tmp.path()).await;
+    let thread = otto_state::AgentRuntimeRepo::new(pool.clone())
+        .create(otto_state::NewRuntimeSession {
+            id: "thr1".into(),
+            workspace_id: "ws1".into(),
+            provider: otto_core::agent_runtime::RuntimeProvider::Gemini,
+            title: "Query the orders".into(),
+            cwd: "/tmp".into(),
+            model: None,
+            access_mode: Default::default(),
+            created_by: "alice".into(),
+            parent_id: None,
+        })
+        .await
+        .unwrap()
+        .session;
+    let (thread_token, _) = AuthRepo::new(pool.clone())
+        .issue_session_api_token(&"alice".to_string(), &thread.id)
+        .await
+        .unwrap();
+    let invoke = |tool: &str| {
+        let http = d.http.clone();
+        let url = format!("{}/api/v1/mcp/otto-tools/invoke", d.base);
+        let token = thread_token.clone();
+        let tool = format!("otto.{tool}");
+        async move {
+            http.post(url)
+                .bearer_auth(token)
+                .json(&json!({"tool": tool, "arguments": {}}))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+
+    // No grant yet (and no window to ask in): pending, never a crash on the
+    // missing `sessions` row.
+    let out = invoke("ui_state").await;
+    assert_eq!(out["code"], "pending_grant", "{out}");
+
+    // The thread's own credential can't grant itself.
+    let (st, _) = d
+        .post(&thread_token, "/sessions/thr1/ui-control", json!({"enabled": true}), None)
+        .await;
+    assert_eq!(st, 403);
+
+    // The owner grants it; the thread row carries the grant.
+    let (st, body) = d
+        .post(&d.human, "/sessions/thr1/ui-control", json!({"enabled": true}), None)
+        .await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["meta"]["ui_control"]["enabled"], json!(true));
+    assert_eq!(body["meta"]["runtime"], json!("structured"));
+    let row: Value = d
+        .http
+        .get(format!("{}/api/v1/runtime-sessions/thr1", d.base))
+        .bearer_auth(&d.human)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(row["ui_control"]["enabled"], json!(true), "{row}");
+
+    // Granted: the call reaches the bridge (headless `state`, no window open).
+    let out = invoke("ui_state").await;
+    assert_eq!(out["content"]["ui_visible"], json!(false), "{out}");
+
+    // Revoked: back to pending.
+    let (st, _) = d
+        .post(&d.human, "/sessions/thr1/ui-control", json!({"enabled": false}), None)
+        .await;
+    assert_eq!(st, 200);
+    let out = invoke("ui_state").await;
+    assert_eq!(out["code"], "pending_grant", "{out}");
+}

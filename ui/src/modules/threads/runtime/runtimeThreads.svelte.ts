@@ -5,7 +5,9 @@
 
 import { api } from '../../../lib/api/client';
 import { onLive } from '../../../lib/live';
+import { router } from '../../../lib/router.svelte';
 import { noteRuntimeWaiting } from '../../../lib/stores/runtimeAttention.svelte';
+import { uiControl } from '../../../lib/stores/uiControl.svelte';
 import type {
   ApprovalDecision,
   ProviderSessionStatus,
@@ -17,6 +19,7 @@ import type {
   RuntimeSessionStatus,
   Session,
 } from '../../../lib/api/types';
+import { threads } from '../threadsStore.svelte';
 
 const RUNTIME_PROVIDERS: readonly string[] = ['claude', 'codex', 'gemini', 'grok', 'opencode', 'pi'];
 
@@ -204,4 +207,23 @@ class RuntimeThreads {
 }
 
 export const runtimeThreads = new RuntimeThreads();
+
+// Agent UI control (otto.ui_* — the agent drives Otto beside the thread): a
+// thread's grant lives on its runtime row, so tell the UI-control store
+// where to read and patch it, and how to bring the thread up.
+uiControl.addSource({
+  get: (id) => {
+    const r = runtimeThreads.get(id);
+    return r ? { id: r.id, provider: r.provider, title: r.title, meta: r.ui_control ? { ui_control: r.ui_control } : {} } : null;
+  },
+  patch: (id, grant) => {
+    const r = runtimeThreads.byId[id];
+    if (r) runtimeThreads.byId[id] = { ...r, ui_control: grant };
+  },
+  onScreen: (id) => router.module === 'threads' && threads.paneIds.includes(id),
+  reveal: (id) => {
+    if (router.module !== 'threads') router.go(`threads/${id}`);
+    threads.selectThread(id);
+  },
+});
 

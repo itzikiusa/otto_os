@@ -570,6 +570,11 @@ pub struct RuntimeSession {
     /// opened it from another thread); `None` for a root / unlinked thread.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<Id>,
+    /// The agent-UI-control grant record (`{enabled, by, at}` — the same shape
+    /// terminal sessions keep in `meta.ui_control`); `None` = never decided.
+    /// Written only by `POST /sessions/{id}/ui-control`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_control: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
