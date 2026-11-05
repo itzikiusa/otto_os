@@ -327,22 +327,33 @@ impl AcpDriver {
         )
     }
 
-    /// opencode over ACP (`opencode acp`; opencode `packages/cli/src/acp`):
-    /// no model flag — the model is the `model` session config option; its
-    /// ACP modes are agents (build / plan), not permission levels, so the
-    /// access mode rides `OPENCODE_PERMISSION` (full access = `"allow"`),
-    /// otherwise opencode asks through `session/request_permission`.
+    /// opencode over ACP (`opencode acp`; verified live against 1.19.5): no
+    /// model flag — the model is the `model` session config option (value
+    /// `provider/model`, the only config option it advertises); it takes
+    /// stdio `mcpServers` with their env in `session/new|load`. The access
+    /// mode rides `OPENCODE_PERMISSION`, a JSON permission object deep-merged
+    /// OVER the user's config (a bare string like `"allow"` breaks
+    /// `session/new` with a `directory` service failure): full access allows
+    /// everything; the others ask for everything but reads (plus edits for
+    /// auto-accept-edits) through `session/request_permission`. Without it
+    /// opencode's own default is to allow, so every mode sets it.
     pub fn opencode() -> Self {
         Self::with_flavor(
             RuntimeProvider::Opencode,
             AcpFlavor {
                 program: "opencode".into(),
                 tail_args: vec!["acp".into()],
-                access_env: Some(|m| match m {
-                    RuntimeAccessMode::FullAccess => {
-                        vec![("OPENCODE_PERMISSION".into(), "\"allow\"".into())]
-                    }
-                    _ => Vec::new(),
+                access_env: Some(|m| {
+                    let rules = match m {
+                        RuntimeAccessMode::FullAccess => r#"{"*":"allow"}"#,
+                        RuntimeAccessMode::AutoAcceptEdits => {
+                            r#"{"*":"ask","read":"allow","glob":"allow","grep":"allow","list":"allow","edit":"allow"}"#
+                        }
+                        RuntimeAccessMode::ApprovalRequired => {
+                            r#"{"*":"ask","read":"allow","glob":"allow","grep":"allow","list":"allow"}"#
+                        }
+                    };
+                    vec![("OPENCODE_PERMISSION".into(), rules.into())]
                 }),
                 model_config_id: Some("model"),
                 ..AcpFlavor::default()
@@ -1171,8 +1182,28 @@ mod tests {
         assert!(spec.args.is_empty(), "no model flag: {:?}", spec.args);
         assert_eq!(
             spec.env,
-            [("OPENCODE_PERMISSION".to_string(), "\"allow\"".to_string())]
+            [(
+                "OPENCODE_PERMISSION".to_string(),
+                r#"{"*":"allow"}"#.to_string()
+            )]
         );
+        // Every mode is explicit and valid JSON (opencode's default allows).
+        for (mode, bash, edit) in [
+            (RuntimeAccessMode::ApprovalRequired, "ask", "ask"),
+            (RuntimeAccessMode::AutoAcceptEdits, "ask", "allow"),
+        ] {
+            let spec = d.launch(&LaunchContext {
+                access_mode: mode,
+                ..c.clone()
+            });
+            let rules: Value = serde_json::from_str(&spec.env[0].1).unwrap();
+            assert_eq!(rules["*"], bash);
+            assert_eq!(
+                rules.get("edit").map_or("ask", |v| v.as_str().unwrap()),
+                edit
+            );
+            assert_eq!(rules["read"], "allow");
+        }
         d.start(&c);
         d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
         let s = d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"ses_1"}}"#);

@@ -1,25 +1,34 @@
 //! pi (earendil-works/pi) driver — pi's own RPC mode (`pi --mode rpc`).
 //!
 //! T3 Code (MIT, Copyright (c) 2026 T3 Tools Inc.) drives pi the same way
-//! (`packages/provider-pi`). The protocol (`docs/rpc.md`, `docs/json.md`,
-//! `docs/rpc-commands.md` in the pi repo; checked against pi 0.75.4):
+//! (`packages/provider-pi`). The protocol (`docs/rpc.md`,
+//! `docs/rpc-commands.md`, `docs/json.md` in the pi package; verified live
+//! against pi 1.5.0, still compatible with 0.75):
 //!
 //! * argv — `pi --mode rpc [--session <id>] [--model provider/id]
-//!   [--tools …]`. `--session` takes the id `get_state` reported, which is
-//!   the resume key.
+//!   [--tools … --exclude-tools mcp__*]`. `--session` takes the id
+//!   `get_state` reported (`data.sessionId`, a UUID), which is the resume key.
 //! * stdin — strict JSONL commands with an optional `id`: `get_state`,
 //!   `prompt {message, images?}`, `set_thinking_level {level}`, `abort`.
 //! * stdout — `response {id, command, success, data|error}` per command, and
 //!   session events: `message_update {assistantMessageEvent: {type:
-//!   text_delta|thinking_delta, delta}}`, `message_end`,
+//!   text_delta|thinking_delta|toolcall_*, delta}}`, `message_end`,
 //!   `tool_execution_start|end {toolCallId, toolName, args, result,
-//!   isError}`, `agent_end {willRetry}` and — on newer pi — `agent_settled`,
-//!   after which pi does not continue on its own. A prompt whose response
-//!   disposition is `handled` started no run.
+//!   isError}`, `agent_end {messages, willRetry}` and — pi 1.x —
+//!   `agent_settled {aborted}`, after which pi does not continue on its own
+//!   (an `agent_end` can still be followed by retries or compaction
+//!   recovery). Once a process has sent `agent_settled` its turns end there;
+//!   until then (pi 0.x never sends it) a non-retrying `agent_end` ends the
+//!   turn. A prompt whose response disposition is `handled` started no run.
+//!   A provider failure (auth, quota) is not a refused prompt: the prompt is
+//!   `started` and the run ends with the last assistant message's
+//!   `stopReason: "error"` + `errorMessage`.
 //! * permissions — pi has NO approval round-trip: tools run unprompted. The
 //!   access mode is therefore the TOOL SET: approval-required → read-only
 //!   tools, auto-accept-edits → + edit/write, full-access → everything
-//!   (bash included). A switch respawns with `--session`.
+//!   (bash included). MCP tools (`mcp__<server>__<tool>`, delivered by the
+//!   host's launcher as a per-session `-e` extension) can write too, so the
+//!   restricted modes exclude them. A switch respawns with `--session`.
 //! * `extension_ui_request` dialogs (select / confirm / input / editor) are
 //!   answered `cancelled` — Otto has no surface for an extension's dialog.
 //! * interrupt — `abort`; the run then ends through the normal events.
@@ -53,7 +62,9 @@ fn thinking_level(effort: &str) -> Option<&'static str> {
         "low" => "low",
         "medium" => "medium",
         "high" => "high",
-        "xhigh" | "max" | "ultra" => "xhigh",
+        "xhigh" => "xhigh",
+        // pi 1.x; a model without it clamps to its highest level.
+        "max" | "ultra" => "max",
         "off" | "none" => "off",
         _ => return None,
     })
@@ -74,6 +85,10 @@ pub struct PiDriver {
     message: Option<(String, String)>,
     messages: u32,
     tools: HashMap<String, Tool>,
+    /// This pi sends `agent_settled` (1.x): a turn ends there, and a
+    /// non-retrying `agent_end` only stashes its outcome in `ended`.
+    settles: bool,
+    ended: Option<(TurnTerminalStatus, Option<ProviderFailure>)>,
 }
 
 impl PiDriver {
@@ -87,6 +102,8 @@ impl PiDriver {
             message: None,
             messages: 0,
             tools: HashMap::new(),
+            settles: false,
+            ended: None,
         }
     }
 
@@ -114,6 +131,7 @@ impl PiDriver {
         self.close_message(step);
         self.turn_id = None;
         self.prompt_req = None;
+        self.ended = None;
         self.tools.clear();
         step.push(DriverEvent::Terminal {
             status,
@@ -195,6 +213,34 @@ impl PiDriver {
         (!text.is_empty()).then(|| text.join("\n"))
     }
 
+    /// An `agent_end`'s outcome, from its last message's `stopReason`.
+    fn run_outcome(v: &Value) -> (TurnTerminalStatus, Option<ProviderFailure>) {
+        let last = v
+            .get("messages")
+            .and_then(Value::as_array)
+            .and_then(|m| m.last());
+        match last
+            .and_then(|m| m.get("stopReason"))
+            .and_then(Value::as_str)
+        {
+            Some("aborted") => (TurnTerminalStatus::Interrupted, None),
+            Some("error") => (
+                TurnTerminalStatus::Failed,
+                Some(ProviderFailure {
+                    class: "provider_error".into(),
+                    message: last
+                        .and_then(|m| m.get("errorMessage"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("pi reported an error")
+                        .to_string(),
+                    code: None,
+                    retryable: None,
+                }),
+            ),
+            _ => (TurnTerminalStatus::Completed, None),
+        }
+    }
+
     fn on_event(&mut self, step: &mut DriverStep, v: &Value) {
         match v.get("type").and_then(Value::as_str) {
             Some("message_update") => {
@@ -256,49 +302,27 @@ impl PiDriver {
                 }
                 step.push(DriverEvent::TurnItem(it));
             }
-            // pi will not continue on its own: the turn is over.
+            // pi will not continue on its own: the turn is over, with the
+            // last run's outcome (an abort wins).
             Some("agent_settled") => {
                 let aborted = v.get("aborted").and_then(Value::as_bool) == Some(true);
-                self.finish(
-                    step,
-                    if aborted {
-                        TurnTerminalStatus::Interrupted
-                    } else {
-                        TurnTerminalStatus::Completed
-                    },
-                    None,
-                );
-            }
-            // Older pi has no `agent_settled`: a run that will not retry ends
-            // the turn (a later `agent_settled` then finds no open turn).
-            Some("agent_end") if v.get("willRetry").and_then(Value::as_bool) != Some(true) => {
-                let stop = v
-                    .get("messages")
-                    .and_then(Value::as_array)
-                    .and_then(|m| m.last())
-                    .and_then(|m| m.get("stopReason"))
-                    .and_then(Value::as_str);
-                let (status, failure) = match stop {
-                    Some("aborted") => (TurnTerminalStatus::Interrupted, None),
-                    Some("error") => (
-                        TurnTerminalStatus::Failed,
-                        Some(ProviderFailure {
-                            class: "provider_error".into(),
-                            message: v
-                                .pointer("/messages")
-                                .and_then(Value::as_array)
-                                .and_then(|m| m.last())
-                                .and_then(|m| m.get("errorMessage"))
-                                .and_then(Value::as_str)
-                                .unwrap_or("pi reported an error")
-                                .to_string(),
-                            code: None,
-                            retryable: None,
-                        }),
-                    ),
-                    _ => (TurnTerminalStatus::Completed, None),
+                let (status, failure) = match self.ended.take() {
+                    _ if aborted => (TurnTerminalStatus::Interrupted, None),
+                    Some(ended) => ended,
+                    None => (TurnTerminalStatus::Completed, None),
                 };
                 self.finish(step, status, failure);
+            }
+            // A run that will not retry. pi 0.x has no `agent_settled`, so
+            // until this process has sent one the run ends the turn (a later
+            // `agent_settled` then finds no open turn).
+            Some("agent_end") if v.get("willRetry").and_then(Value::as_bool) != Some(true) => {
+                let (status, failure) = Self::run_outcome(v);
+                if self.settles {
+                    self.ended = Some((status, failure));
+                } else {
+                    self.finish(step, status, failure);
+                }
             }
             Some("extension_ui_request") => {
                 let blocking = matches!(
@@ -384,7 +408,9 @@ impl StructuredDriver for PiDriver {
             args.extend(["--model".into(), m.clone()]);
         }
         if let Some(t) = tools_for(ctx.access_mode) {
+            // `--tools` keeps MCP tools, which can write: drop them too.
             args.extend(["--tools".into(), t.into()]);
+            args.extend(["--exclude-tools".into(), "mcp__*".into()]);
         }
         LaunchSpec {
             program: self.program.clone(),
@@ -454,6 +480,10 @@ impl StructuredDriver for PiDriver {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return step;
         };
+        if v.get("type").and_then(Value::as_str) == Some("agent_settled") {
+            // Even after the turn closed (at a pi-0.x-style `agent_end`).
+            self.settles = true;
+        }
         if v.get("type").and_then(Value::as_str) == Some("response") {
             self.on_response(&mut step, &v);
         } else if self.turn_id.is_some()
@@ -501,7 +531,9 @@ mod tests {
                 "--model",
                 "openai-codex/gpt-5.5",
                 "--tools",
-                "read,grep,find,ls"
+                "read,grep,find,ls",
+                "--exclude-tools",
+                "mcp__*"
             ]
         );
         let full = d.launch(&ctx(None, RuntimeAccessMode::FullAccess)).args;
@@ -525,7 +557,7 @@ mod tests {
         let mut req = RuntimePromptReq::of("hi");
         req.effort = Some("max".into());
         let s = d.prompt("t1", &req).unwrap();
-        assert_eq!(sent(&s, 0)["level"], "xhigh");
+        assert_eq!(sent(&s, 0)["level"], "max");
         let p = sent(&s, 1);
         assert_eq!(
             (p["type"].as_str(), p["message"].as_str()),
@@ -564,6 +596,51 @@ mod tests {
             .on_line(r#"{"type":"agent_settled","aborted":false}"#)
             .events
             .is_empty());
+    }
+
+    /// Once pi has sent `agent_settled` (1.x), `agent_end` no longer ends the
+    /// turn — `agent_settled` does, with the stashed outcome. The lines are
+    /// pi 1.5.0's for a provider whose OAuth refresh fails (trimmed).
+    #[test]
+    fn a_settling_pi_ends_turns_at_agent_settled_with_the_runs_outcome() {
+        let mut d = PiDriver::with_program("pi");
+        d.start(&ctx(None, RuntimeAccessMode::FullAccess));
+        d.prompt("t1", &RuntimePromptReq::of("hi")).unwrap();
+        let s = d.on_line(r#"{"type":"agent_end","messages":[{"role":"assistant","stopReason":"stop"}],"willRetry":false}"#);
+        assert!(matches!(
+            &s.events[0],
+            DriverEvent::Terminal {
+                status: TurnTerminalStatus::Completed,
+                ..
+            }
+        ));
+        // Learns that this pi settles; nothing is open any more.
+        assert!(d
+            .on_line(r#"{"type":"agent_settled","aborted":false}"#)
+            .events
+            .is_empty());
+
+        d.prompt("t2", &RuntimePromptReq::of("again")).unwrap();
+        let s = d.on_line(r#"{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"OAuth refresh failed for openai-codex"}}"#);
+        assert!(s.events.is_empty());
+        let s = d.on_line(r#"{"type":"agent_end","messages":[{"role":"system","content":""},{"role":"user","content":[]},{"role":"assistant","content":[],"stopReason":"error","errorMessage":"OAuth refresh failed for openai-codex"}],"willRetry":false}"#);
+        assert!(s.events.is_empty(), "agent_end must wait for agent_settled");
+        let s = d.on_line(r#"{"type":"agent_settled","aborted":false}"#);
+        assert!(
+            matches!(&s.events[0], DriverEvent::Terminal { status: TurnTerminalStatus::Failed, failure: Some(f), .. } if f.message == "OAuth refresh failed for openai-codex")
+        );
+
+        // An abort wins over the stashed outcome.
+        d.prompt("t3", &RuntimePromptReq::of("go")).unwrap();
+        d.on_line(r#"{"type":"agent_end","messages":[{"role":"assistant","stopReason":"stop"}],"willRetry":false}"#);
+        let s = d.on_line(r#"{"type":"agent_settled","aborted":true}"#);
+        assert!(matches!(
+            &s.events[0],
+            DriverEvent::Terminal {
+                status: TurnTerminalStatus::Interrupted,
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -342,3 +342,79 @@ async fn sync_workspace_mcp_records_skipped_user_servers() {
         "{meta}"
     );
 }
+
+/// pi reads none of the launcher files: a pi spawn gets `-e <private
+/// extension>` registering `otto` + the enabled user servers (a name pi
+/// refuses lands in `mcp_skipped`), and the snapshot names what it was given.
+/// The extension dies with the session's credentials.
+#[tokio::test]
+async fn sync_workspace_mcp_hands_pi_a_private_extension() {
+    use std::os::unix::fs::PermissionsExt;
+    struct Servers;
+    impl crate::mcp::McpServerSource for Servers {
+        fn enabled_servers(
+            &self,
+            _ws: &str,
+        ) -> std::result::Result<Vec<otto_core::hooks::McpServerSpec>, String> {
+            Ok(["jira", "bad name"]
+                .map(|n| otto_core::hooks::McpServerSpec {
+                    name: n.into(),
+                    command: "node".into(),
+                    args: vec!["srv.js".into()],
+                    env: [("TOKEN".to_string(), "$ecret!".to_string())].into(),
+                })
+                .to_vec())
+        }
+    }
+    let (mut mgr, repo, ws, user) = test_manager().await;
+    Arc::get_mut(&mut mgr).unwrap().mcp_servers = Some(Arc::new(Servers));
+    let cwd = tempfile::tempdir().unwrap();
+    let session = repo
+        .create(NewSession {
+            workspace_id: ws.id.clone(),
+            kind: SessionKind::Agent,
+            provider: "pi".into(),
+            title: "pi mcp".into(),
+            cwd: cwd.path().to_string_lossy().into_owned(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: user.clone(),
+            meta: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    let otto = crate::mcp::OttoToolsServer {
+        command: "/usr/bin/true".into(),
+        args: vec!["mcp-tools".into()],
+        env: [("OTTO_API_TOKEN".to_string(), "tok".to_string())].into(),
+    };
+    let args = mgr.sync_workspace_mcp(&session, Some(otto), false).await;
+    let path = pi_mcp_extension_path(&session.id);
+    assert_eq!(
+        args,
+        ["-e".to_string(), path.to_string_lossy().into_owned()]
+    );
+    let body = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(
+        body.contains("pi.registerMcpServer(name, config)"),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#""jira""#) && !body.contains("bad name"),
+        "{body}"
+    );
+    // pi-escaped secret; the otto credential rides the process env only.
+    assert!(body.contains(r#""TOKEN":"$$ecret$!""#), "{body}");
+    assert!(!body.contains("tok\""), "{body}");
+    let meta = repo.get(&session.id).await.unwrap().meta;
+    assert_eq!(meta["mcp_servers"], serde_json::json!(["otto", "jira"]));
+    assert_eq!(meta["mcp_skipped"][0]["server"], "bad name");
+    // Not written into the work tree as a pi config.
+    assert!(!cwd.path().join(".pi").exists());
+    mgr.retire_credentials(&session).await;
+    assert!(!path.exists(), "removed with the session's credentials");
+}

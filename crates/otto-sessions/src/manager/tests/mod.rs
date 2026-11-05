@@ -3753,6 +3753,8 @@ fn effort_args_maps_per_provider_and_rejects_unknown() {
         effort_args("codex", &ultra),
         vec!["-c", "model_reasoning_effort=\"ultra\""]
     );
+    assert_eq!(effort_args("pi", &high), vec!["--thinking", "high"]);
+    assert_eq!(effort_args("pi", &ultra), vec!["--thinking", "max"]);
     assert!(effort_args("shell", &high).is_empty());
     assert!(effort_args("claude", &serde_json::json!({ "effort": "bogus" })).is_empty());
 }

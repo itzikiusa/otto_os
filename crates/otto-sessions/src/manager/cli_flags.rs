@@ -72,6 +72,15 @@ pub(super) fn effort_args(provider: &str, meta: &serde_json::Value) -> Vec<Strin
             "-c".to_string(),
             format!("model_reasoning_effort=\"{effort}\""),
         ],
+        // pi 1.5: `--thinking off|minimal|low|medium|high|xhigh|max`.
+        "pi" => {
+            let mapped = if effort == "ultra" {
+                "max"
+            } else {
+                effort.as_str()
+            };
+            vec!["--thinking".to_string(), mapped.to_string()]
+        }
         _ => vec![],
     }
 }
