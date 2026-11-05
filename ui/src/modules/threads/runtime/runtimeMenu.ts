@@ -3,6 +3,8 @@
 // closed thread lives in History and can still be renamed.
 import { confirmer } from '../../../lib/confirm.svelte';
 import type { MenuItem } from '../../../lib/contextmenu.svelte';
+import { auth } from '../../../lib/stores/auth.svelte';
+import { uiControl } from '../../../lib/stores/uiControl.svelte';
 import { toastError } from '../../../lib/toastError';
 import { threads } from '../threadsStore.svelte';
 import { runtimeThreads } from './runtimeThreads.svelte';
@@ -18,6 +20,7 @@ export function runtimeThreadMenu(id: string): MenuItem[] {
       hint: '/terminal',
       action: () => threads.toggleTerminal(id),
     },
+    ...uiControlItem(id),
     { separator: true },
     {
       label: 'Close thread…',
@@ -25,6 +28,29 @@ export function runtimeThreadMenu(id: string): MenuItem[] {
       danger: true,
       disabled: runtimeThreads.get(id)?.status === 'closed',
       action: () => void closeThread(id),
+    },
+  ];
+}
+
+/** "Allow UI control" (checked while on): lets the thread's agent open and
+ *  drive Otto modules (a DB connection, k8s, a note…) in the side pane. Only
+ *  the owner may turn it on; anyone who sees it on may turn it off. */
+function uiControlItem(id: string): MenuItem[] {
+  const r = runtimeThreads.get(id);
+  if (!r) return [];
+  const on = uiControl.granted(id);
+  const canGrant = r.status !== 'closed' && !auth.isImpersonating && r.created_by === auth.me?.id;
+  if (!canGrant && !on) return [];
+  return [
+    {
+      label: 'Allow UI control',
+      icon: 'cursor',
+      checked: on,
+      disabled: uiControl.busy[id] === true,
+      title: on
+        ? 'UI control is on — the agent can open and drive Otto beside this thread. Click to turn it off.'
+        : 'Let the agent open and drive Otto (connections, queries, k8s, notes…) beside this thread, where you can see it',
+      action: () => void uiControl.setGrant(id, !on),
     },
   ];
 }

@@ -10,7 +10,8 @@
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { git } from '../../lib/stores/git.svelte';
-  import { ui } from '../../lib/stores/ui.svelte';
+  import { isRuntimeThread } from './runtime/runtimeThreads.svelte';
+  import { loadBrowserView } from '../../lib/browserPort';
   import { ws } from '../../lib/stores/workspace.svelte';
   import ThreadProjectCard from './ThreadProjectCard.svelte';
   import { PrSurfaceView, SideChatView } from './threadLazy.svelte';
@@ -25,6 +26,9 @@
   const ChangesView = lazyComponent(() => import('./ThreadChangesTab.svelte'));
   const ConnectionsView = lazyComponent(() => import('./ThreadConnectionsTab.svelte'));
   const PeersView = lazyComponent(() => import('./ThreadPeersTab.svelte'));
+  // The Browser opens HERE, as an inspector tab — never the shell's Side
+  // panel, which Threads hides (it would be a second right column).
+  const BrowserTab = lazyComponent(loadBrowserView);
 
   interface Props {
     onstartroom: (sessionId: string) => void;
@@ -51,7 +55,7 @@
   const canSide = $derived(!!focusedSession && !isPlainShellSession(focusedSession));
 
   interface Surface {
-    id: ThreadsInspectorTab | 'browser' | 'terminal';
+    id: ThreadsInspectorTab | 'terminal';
     label: string;
     key: string;
     icon: IconName;
@@ -65,9 +69,10 @@
     side: 'Side chat',
     connections: 'Connections',
     peers: 'Peers',
+    browser: 'Browser',
   };
   const launcher = $derived<Surface[]>([
-    { id: 'browser', label: 'Browser', key: 'B', icon: 'globe' },
+    { id: 'browser', label: 'Browser', key: 'B', icon: 'globe', prefetch: () => BrowserTab.prefetch() },
     { id: 'terminal', label: 'Terminal', key: 'T', icon: 'terminal' },
     { id: 'files', label: 'Files', key: 'F', icon: 'file', prefetch: () => FilesView.prefetch() },
     { id: 'changes', label: 'Diff', key: 'D', icon: 'branch', disabled: repo ? null : 'Not a git repository', prefetch: () => ChangesView.prefetch() },
@@ -90,8 +95,7 @@
 
   function launch(s: Surface): void {
     if (s.disabled) return;
-    if (s.id === 'browser') ui.openRight('browser');
-    else if (s.id === 'terminal') threadsChrome.setTerminal(true);
+    if (s.id === 'terminal') threadsChrome.setTerminal(true);
     else threads.setInspectorTab(s.id);
   }
 
@@ -200,6 +204,10 @@
       <LazyMount lazy={SideChatView} what="the side chat" variant="panel" props={{ mainId: focusedSession?.id ?? null }} />
     {:else if active === 'connections'}
       <LazyMount lazy={ConnectionsView} what="connections" variant="panel" props={{ workspaceId, focusedSessionId: threads.focusedSessionId }} />
+    {:else if active === 'browser'}
+      <!-- The ask bar submits to the focused terminal thread; a structured
+           thread has no PTY to type into, so it gets the unbound hint. -->
+      <LazyMount lazy={BrowserTab} what="the browser" variant="panel" props={{ embedded: true, targetSessionId: focusedSession && !isRuntimeThread(focusedSession) && focusedSession.kind === 'agent' ? focusedSession.id : null }} />
     {:else if active === 'peers'}
       <LazyMount lazy={PeersView} what="peers" variant="panel" props={{ workspaceId, focusedSessionId: threads.focusedSessionId, onstartroom }} />
     {:else}

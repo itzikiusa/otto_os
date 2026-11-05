@@ -226,6 +226,8 @@ export interface RuntimeSession {
   /** The linked group's ROOT thread, when an agent opened this thread from
    *  another one (`otto.thread_open`); absent on a root / unlinked thread. */
   parent_id?: Id | null;
+  /** The agent-UI-control grant (`POST /sessions/{id}/ui-control`); absent = never decided. */
+  ui_control?: { enabled: boolean; granted_at?: string; granted_by?: Id } | null;
 }
 
 /** Body of `POST /runtime-sessions/{id}/peers` — open a linked thread. */

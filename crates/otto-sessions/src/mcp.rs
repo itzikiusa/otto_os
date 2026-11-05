@@ -6,6 +6,8 @@
 //!   - agy:        `<workspace>/.agents/mcp_config.json` (never `.mcp.json`)
 //!   - grok:       `<workspace>/.grok/config.toml` (never `.mcp.json`)
 //!   - codex:      per-spawn `-c mcp_servers.*` overrides (never `.mcp.json`)
+//!   - pi:         per-session `-e <tmp>/otto-mcp/<id>.pi-mcp.js` (an extension
+//!     registering the servers; never pi's own `mcp.json` — [`pi_mcp_extension`])
 //!
 //! Everything Otto writes is **reconciled, not accumulated**: each file carries
 //! a marker key listing the server names Otto manages there, and every spawn
@@ -688,7 +690,13 @@ pub fn skipped_servers(
         .filter(|s| s.name != SERVER_KEY && s.name != OTTO_TOOLS_KEY)
         .filter(|s| !delivered.contains(&s.name))
         .map(|s| {
-            let reason = if let Some(bad) = s.env.keys().find(|k| !is_shell_name(k)) {
+            let reason = if provider == "pi" && pi_server_name(&s.name).is_none() {
+                "pi needs a name of letters, digits, ‘_’ and ‘-’ that no other server of this \
+                 session already uses (pi treats ‘-’ and ‘_’ as the same)"
+                    .to_string()
+            } else if provider == "pi" {
+                "Otto couldn’t write pi’s per-session MCP extension (see the daemon log)".to_string()
+            } else if let Some(bad) = s.env.keys().find(|k| !is_shell_name(k)) {
                 format!("its env variable “{bad}” isn’t a valid shell variable name")
             } else if provider == "codex" && !is_bare_toml_key(&s.name) {
                 "Codex needs a name of letters, digits, ‘_’ and ‘-’, and no free one was left                  for this server"
@@ -700,6 +708,146 @@ pub fn skipped_servers(
             json!({ "server": s.name, "reason": reason })
         })
         .collect()
+}
+
+/// `name` when pi accepts it as an MCP server name (letters, digits, `_`, `-`).
+fn pi_server_name(name: &str) -> Option<&str> {
+    (!name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+    .then_some(name)
+}
+
+/// A literal for a pi config value that pi interpolates (`env` / `headers`):
+/// a leading `!` would run the rest as a shell command and `$NAME` /
+/// `${NAME}` would expand, so `$` → `$$` and `!` → `$!` (pi's escapes).
+fn pi_literal(v: &str) -> String {
+    v.replace('$', "$$").replace('!', "$!")
+}
+
+/// The per-session pi extension that hands this spawn's MCP servers to pi
+/// (≥ 1.x built-in MCP): `pi -e <file>` loads it and it calls
+/// `pi.registerMcpServer(name, config)` per server — session-only
+/// registrations, so neither `~/.pi/agent/mcp.json` nor a project's
+/// `.pi/mcp.json` (read only in trusted projects) is touched or needed.
+///
+/// `otto` and `otto-browser` carry no env: pi starts stdio servers with its
+/// own environment, which holds the session's Otto credential, so their
+/// entries stay identity-neutral. A user server's env (Keychain secrets
+/// resolved) is written escaped ([`pi_literal`]) — the caller writes the file
+/// owner-only. Every server is `deferred` (pi's `tool_search` loads its tools
+/// on demand, like Claude's tool search). Names pi refuses, and names equal to
+/// an earlier one once `-` and `_` are unified, are skipped. Each
+/// registration is guarded, so one refusal cannot drop the rest.
+///
+/// Returns the module source (`None` when there is nothing to register) and
+/// the server names it registers.
+pub fn pi_mcp_extension(
+    otto_tools: Option<&OttoToolsServer>,
+    browser: bool,
+    users: Option<&[UserMcpServer]>,
+) -> (Option<String>, Vec<String>) {
+    let mut servers = Map::new();
+    let mut names: Vec<String> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    let mut add = |name: &str, config: Value| {
+        let unified = name.replace('-', "_");
+        if pi_server_name(name).is_none() || seen.contains(&unified) {
+            return;
+        }
+        seen.push(unified);
+        names.push(name.to_string());
+        servers.insert(name.to_string(), config);
+    };
+    if let Some(otto) = otto_tools {
+        add(
+            OTTO_TOOLS_KEY,
+            json!({
+                "command": otto.command,
+                "args": otto.args,
+                "exposure": "deferred",
+                "timeout": CLIENT_TOOL_TIMEOUT_SECS,
+                "description": "Otto: sessions, repos and PRs, Jira and Confluence, databases, \
+                                AWS, Kubernetes, vault docs and other workspace tools",
+            }),
+        );
+    }
+    if browser {
+        let (command, args) = browser_command();
+        add(
+            SERVER_KEY,
+            json!({
+                "command": command,
+                "args": args,
+                "exposure": "deferred",
+                "timeout": CLIENT_TOOL_TIMEOUT_SECS,
+            }),
+        );
+    }
+    for s in users.unwrap_or_default() {
+        if s.name == SERVER_KEY || s.name == OTTO_TOOLS_KEY {
+            continue;
+        }
+        let env: Map<String, Value> = s
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::String(pi_literal(v))))
+            .collect();
+        add(
+            &s.name,
+            json!({
+                "command": s.command,
+                "args": s.args,
+                "env": env,
+                "exposure": "deferred",
+                "timeout": USER_SERVER_TOOL_TIMEOUT_SECS,
+            }),
+        );
+    }
+    if servers.is_empty() {
+        return (None, names);
+    }
+    let doc = format!(
+        "// Otto-managed: this pi session's MCP servers, rewritten at every spawn and\n\
+         // removed with the session. Do not edit.\n\
+         const servers = {};\n\
+         export default function (pi) {{\n\
+         \x20 for (const [name, config] of Object.entries(servers)) {{\n\
+         \x20   try {{\n\
+         \x20     pi.registerMcpServer(name, config);\n\
+         \x20   }} catch (e) {{\n\
+         \x20     console.error(`otto: MCP server ${{name}} not registered: ${{e}}`);\n\
+         \x20   }}\n\
+         \x20 }}\n\
+         }}\n",
+        Value::Object(servers)
+    );
+    (Some(doc), names)
+}
+
+/// Write `body` to `path` owner-only (0600) before any byte lands, creating
+/// the parent; a pre-existing file is tightened first. For files that carry
+/// credentials or Keychain-resolved secrets.
+pub fn write_private_file(path: &Path, body: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    // `mode` only applies on create: tighten a pre-existing file too, before
+    // the secrets are written into it.
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("chmod {}: {e}", path.display()))?;
+    file.write_all(body)
+        .map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 /// `sh -c` program that loads a server's env file and execs the real server:
@@ -845,11 +993,6 @@ pub fn write_env_file(
     path: &Path,
     env: &std::collections::BTreeMap<String, String>,
 ) -> Result<(), String> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-    }
     let mut body = String::new();
     for (k, v) in env {
         body.push_str(k);
@@ -857,19 +1000,7 @@ pub fn write_env_file(
         body.push_str(&shell_quote(v));
         body.push('\n');
     }
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|e| format!("open {}: {e}", path.display()))?;
-    // `mode` only applies on create: tighten a pre-existing file too, before
-    // the secrets are written into it.
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| format!("chmod {}: {e}", path.display()))?;
-    file.write_all(body.as_bytes())
-        .map_err(|e| format!("write {}: {e}", path.display()))
+    write_private_file(path, body.as_bytes())
 }
 
 /// Add (or refresh) Otto's `otto` MCP server in grok's PROJECT-scoped config
@@ -1193,6 +1324,80 @@ pub fn retire_user_server(workspace_root: &str, name: &str, apply: bool) -> Resu
         write_grok_doc(&dir, &grok_path, &grok_doc)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod pi_tests {
+    use super::*;
+
+    fn user(name: &str, env: &[(&str, &str)]) -> UserMcpServer {
+        UserMcpServer {
+            name: name.into(),
+            command: "node".into(),
+            args: vec!["s.js".into()],
+            env: env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    /// The module's `servers` JSON (between `const servers = ` and `;`).
+    fn servers_of(doc: &str) -> Value {
+        let start = doc.find("const servers = ").unwrap() + "const servers = ".len();
+        let end = start + doc[start..].find(";\nexport default").unwrap();
+        serde_json::from_str(&doc[start..end]).unwrap()
+    }
+
+    #[test]
+    fn pi_extension_registers_otto_and_valid_user_servers_deferred() {
+        let otto = OttoToolsServer {
+            command: "/x/ottod".into(),
+            args: vec!["mcp-tools".into()],
+            env: [("OTTO_API_TOKEN".to_string(), "secret-tok".to_string())].into(),
+        };
+        let users = [
+            user("jira", &[("KEY", "a$b!c")]),
+            user("my_srv", &[]),
+            user("my-srv", &[]), // the same server as `my_srv` to pi
+            user("bad name", &[]),
+            user(OTTO_TOOLS_KEY, &[]), // reserved
+        ];
+        let (doc, names) = pi_mcp_extension(Some(&otto), false, Some(&users));
+        let doc = doc.unwrap();
+        assert_eq!(names, ["otto", "jira", "my_srv"]);
+        let s = servers_of(&doc);
+        assert_eq!(s["otto"]["command"], "/x/ottod");
+        assert!(
+            s["otto"].get("env").is_none(),
+            "the credential stays in the env"
+        );
+        assert!(!doc.contains("secret-tok"));
+        assert_eq!(s["jira"]["env"]["KEY"], "a$$b$!c");
+        assert_eq!(s["jira"]["exposure"], "deferred");
+        assert_eq!(s["jira"]["timeout"], USER_SERVER_TOOL_TIMEOUT_SECS);
+        assert!(doc.contains("export default function (pi)"));
+    }
+
+    #[test]
+    fn pi_extension_is_absent_without_servers_and_keeps_otto_on_an_unknown_set() {
+        assert_eq!(pi_mcp_extension(None, false, Some(&[])), (None, vec![]));
+        let otto = OttoToolsServer {
+            command: "o".into(),
+            args: vec![],
+            env: Default::default(),
+        };
+        let (doc, names) = pi_mcp_extension(Some(&otto), true, None);
+        assert!(doc.is_some());
+        assert_eq!(names, [OTTO_TOOLS_KEY, SERVER_KEY]);
+    }
+
+    #[test]
+    fn pi_literals_survive_pis_interpolation() {
+        assert_eq!(pi_literal("!rm -rf"), "$!rm -rf");
+        assert_eq!(pi_literal("${HOME}$x"), "$${HOME}$$x");
+        assert_eq!(pi_literal("plain"), "plain");
+    }
 }
 
 #[cfg(test)]

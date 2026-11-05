@@ -8,18 +8,15 @@
 // rows in the ⋯ menu. Keep `PANE_TIER_MIN` and the `@container pane (…)`
 // rules in SessionView.svelte in step.
 
-/** How a session pane shows an agent: the raw terminal, or the conversation
- *  rebuilt from the provider transcript (docs/design/conversation-view.md §5.1). */
-export type SessionViewMode = 'terminal' | 'chat';
-
 /**
  * Width tiers, widest → narrowest:
- * - `full`    ≥ 720 px — labelled Terminal/Chat toggle, provider chip with its
- *   name + idle countdown + cwd folder, task/now/handover chips;
- * - `compact` 420–719 — icon-only toggle, the provider chip shrinks to its icon;
- * - `minimal` 200–419 — dot + title + one view-flip icon + ⋯ (zoom, ✕ and the
- *   details move into ⋯);
- * - `micro`   < 200    — dot + title + ⋯ (the view switch moves into ⋯ too).
+ * - `full`    ≥ 720 px — provider chip with its name + idle countdown + cwd
+ *   folder, task/now/handover chips;
+ * - `compact` 420–719 — the provider chip shrinks to its icon, find → ⋯;
+ * - `minimal` 200–419 — dot + title + ⋯ (zoom, ✕ and the details move into ⋯);
+ * - `micro`   < 200    — dot + title + ⋯ with tighter padding.
+ * (A session pane is always its terminal — the Terminal · Chat switch was
+ * removed in favour of Threads.)
  */
 export type PaneTier = 'full' | 'compact' | 'minimal' | 'micro';
 
@@ -40,23 +37,6 @@ export function paneTier(width: number): PaneTier {
 export function tierAtMost(tier: PaneTier, than: PaneTier): boolean {
   const order: PaneTier[] = ['full', 'compact', 'minimal', 'micro'];
   return order.indexOf(tier) >= order.indexOf(than);
-}
-
-/**
- * Read a persisted per-session view choice. The retired `split` mode (chat
- * beside the terminal inside one pane) reads as `chat` — the side a Split user
- * was reading; the terminal is one click away. Anything else unknown → null
- * (= the default view).
- */
-export function parseSessionView(raw: string | null | undefined): SessionViewMode | null {
-  if (raw === 'terminal' || raw === 'chat') return raw;
-  if (raw === 'split') return 'chat';
-  return null;
-}
-
-/** The other view — what the toggle and ⌘⇧C switch to. */
-export function otherSessionView(mode: SessionViewMode): SessionViewMode {
-  return mode === 'chat' ? 'terminal' : 'chat';
 }
 
 /** The last path segment of a working directory, for the inline chip

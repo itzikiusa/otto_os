@@ -2,9 +2,9 @@
 // `Conversation` per session id, holding the folded transcript, paging ("Load
 // earlier" via the opaque `before` cursor) and the live tail fed by
 // `transcript_appended` deltas. Subagent bodies are fetched lazily (`?sub=`)
-// and cached per parent. Also owns the two persisted UI preferences: the global
-// "Show system" toggle and the per-session Terminal · Chat view
-// (winKey-namespaced, like the rest of the pane layout state).
+// and cached per parent. Also owns the persisted global "Show system" toggle.
+// (The per-session Terminal · Chat view it used to persist was removed in
+// favour of Threads — `sweepRetiredViewKeys` drops the stale choices.)
 import { api } from '../api/client';
 import { loadErrorText } from '../loadError';
 import { winKey } from '../win';
@@ -12,7 +12,6 @@ import { TranscriptLifecycle } from './transcriptLifecycle';
 import { TURN_CAP, TURN_KEEP, trimTurnHead } from './transcriptTrim';
 
 export { TURN_CAP, TURN_KEEP, trimTurnHead };
-import { parseSessionView, type SessionViewMode } from '../paneHeader';
 import type { Transcript, TranscriptTouchQuery, Turn, Artifact, OttoEvent } from '../api/types';
 
 // ---------------------------------------------------------------------------
@@ -499,12 +498,10 @@ export class Conversation {
 // Store
 // ---------------------------------------------------------------------------
 
-export type { SessionViewMode };
-
 const LS_SHOW_SYSTEM = 'otto_conv_show_system';
-const LS_VIEW_PREFIX = 'otto_session_view:';
-/** The retired Split view's chat fraction — only ever deleted now. */
-const LS_SPLIT_PREFIX = 'otto_session_split_frac:';
+/** Retired per-session pane choices (Terminal · Chat, then Split's chat
+ *  fraction) — nothing reads them any more; only ever deleted now. */
+const LS_RETIRED_VIEW_KEY = /(^|::)otto_session_(view|split_frac):/;
 const LS_DRAFT_PREFIX = 'otto_chat_draft:';
 
 function lsGet(k: string): string | null {
@@ -542,8 +539,6 @@ class TranscriptStore {
   private retryAttempts = new Map<string, number>();
   /** Global "Show system" — reveals reminders / hooks / injected queue items. */
   showSystem = $state(lsGet(LS_SHOW_SYSTEM) === '1');
-  /** Per-session view choice, mirrored from localStorage so panes react. */
-  private views: Record<string, SessionViewMode> = $state({});
 
   /** Get-or-create the conversation for a source (never fetches by itself). */
   conversation(src: TranscriptSource): Conversation {
@@ -662,25 +657,20 @@ class TranscriptStore {
     lsSet(LS_SHOW_SYSTEM, on ? '1' : '0');
   }
 
-  /** The saved Terminal · Chat choice for a session, or null (= use the
-   *  default). A choice saved by the retired Split view reads as Chat and is
-   *  rewritten once, with its orphaned split fraction dropped. */
-  view(sessionId: string): SessionViewMode | null {
-    const cached = this.views[sessionId];
-    if (cached) return cached;
-    const key = winKey(LS_VIEW_PREFIX + sessionId);
-    const raw = lsGet(key);
-    const mode = parseSessionView(raw);
-    if (raw === 'split' && mode) {
-      lsSet(key, mode);
-      lsDel(winKey(LS_SPLIT_PREFIX + sessionId));
+  /** Drop the retired per-session Terminal · Chat / Split choices (every
+   *  window's namespace). A session pane is always its terminal now, so a
+   *  stale 'chat' is already harmless — this only stops the keys lingering. */
+  sweepRetiredViewKeys(): void {
+    try {
+      const stale: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && LS_RETIRED_VIEW_KEY.test(k)) stale.push(k);
+      }
+      for (const k of stale) lsDel(k);
+    } catch {
+      /* storage unavailable — nothing to clean up */
     }
-    return mode;
-  }
-
-  setView(sessionId: string, mode: SessionViewMode): void {
-    this.views[sessionId] = mode;
-    lsSet(winKey(LS_VIEW_PREFIX + sessionId), mode);
   }
 
   /** Recover only mounted, document-visible conversations. */

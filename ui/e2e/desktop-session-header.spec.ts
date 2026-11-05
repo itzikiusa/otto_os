@@ -10,7 +10,8 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 // control, restart and ⋯ into one row, so at 2 panes a long title read
 // "i have some perform…" and at 6 "i h…". It is now one compact row adapted to
 // the pane width (lib/paneHeader.ts tiers); the title gets the space and the
-// pane controls moved into ⋯. This spec pins that down:
+// pane controls moved into ⋯. (The view switch is gone altogether: a session
+// pane is always its terminal since the Chat view moved to Threads.) This spec pins that down:
 //   • the title shows at least TITLE_CHARS characters untruncated,
 //   • no header overflows, wraps or changes height,
 //   • ⋯ holds the moved actions (font, copy-on-select, restart).
@@ -124,14 +125,13 @@ for (const scheme of ['light', 'dark'] as const) {
         expect(fit.have, `title ${i} width ${fit.have}px vs ${fit.need}px for ${TITLE_CHARS} chars`).toBeGreaterThanOrEqual(fit.need - 0.5);
         // The title's tooltip carries the whole text.
         await expect(page.locator('.pane-title').nth(i)).toHaveAttribute('title', new RegExp(`^${TITLE.slice(0, 20)}`));
-        // Status + title + ⋯ are always there; the view switch is reachable inline.
+        // Status + title + ⋯ are always there; no Terminal · Chat switch.
         await expect(head.locator('[role="img"]').first()).toBeVisible();
         await expect(head.locator('button[title="More…"]')).toBeVisible();
-        const inlineSwitch = head.locator('[role="tablist"][aria-label="Session view"]:visible, [data-view-toggle]:visible');
-        await expect(inlineSwitch).toHaveCount(1);
+        await expect(head.locator('[role="tablist"][aria-label="Session view"], [data-view-toggle]')).toHaveCount(0);
         const buttons = head.locator('button:visible');
         const nb = await buttons.count();
-        // Chrome stays lean: at most toggle(2 tabs) + details + zoom + ⋯ (+ grip).
+        // Chrome stays lean: at most details + zoom + ⋯ (+ grip, find, UI control).
         expect(nb, `header ${i} visible buttons`).toBeLessThanOrEqual(6);
         for (let b = 0; b < nb; b++) await expectFullyInViewport(page, buttons.nth(b), `header ${i} button ${b}`);
       }

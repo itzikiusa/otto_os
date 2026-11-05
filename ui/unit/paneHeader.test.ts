@@ -1,17 +1,15 @@
 // Session pane header helpers (lib/paneHeader.ts): the width tiers that mirror
-// SessionView's `@container pane` rules, the retired-Split preference
-// migration, and the details rows the compact header moved off the bar.
+// SessionView's `@container pane` rules, the sweep of the retired Terminal ·
+// Chat preference, and the details rows the compact header moved off the bar.
 import * as transcriptTrim from '../src/lib/stores/transcriptTrim.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   PANE_TIER_MIN,
   cwdLabel,
-  otherSessionView,
   paneDetails,
   paneDetailsTitle,
   paneTier,
-  parseSessionView,
   tierAtMost,
 } from '../src/lib/paneHeader.ts';
 import * as paneHeader from '../src/lib/paneHeader.ts';
@@ -43,19 +41,9 @@ test('tierAtMost orders the tiers widest → narrowest', () => {
   assert.equal(tierAtMost('full', 'micro'), false);
 });
 
-test('a stored Split preference reads as Chat; unknown values fall back to the default', () => {
-  assert.equal(parseSessionView('split'), 'chat');
-  assert.equal(parseSessionView('chat'), 'chat');
-  assert.equal(parseSessionView('terminal'), 'terminal');
-  assert.equal(parseSessionView(null), null);
-  assert.equal(parseSessionView(undefined), null);
-  assert.equal(parseSessionView(''), null);
-  assert.equal(parseSessionView('Split'), null, 'only the exact persisted token migrates');
-});
-
-test('the view toggle flips between the two remaining views', () => {
-  assert.equal(otherSessionView('terminal'), 'chat');
-  assert.equal(otherSessionView('chat'), 'terminal');
+test('the Terminal · Chat view helpers are gone — a session pane is always its terminal', () => {
+  assert.equal('parseSessionView' in paneHeader, false);
+  assert.equal('otherSessionView' in paneHeader, false);
 });
 
 test('cwdLabel shows the last folder of a path', () => {
@@ -96,14 +84,19 @@ test('paneDetails keeps only the facts that exist, in a stable order', () => {
   assert.deepEqual(paneDetails({ tasks: { done: 0, total: 0 } }), [], 'an empty roll-up is not a fact');
 });
 
-test('the transcript store migrates a stored Split to Chat once and drops the split fraction', () => {
+test('the transcript store sweeps the retired Terminal · Chat / Split choices in every window namespace', () => {
   const storage = new Map<string, string>([
-    ['otto_session_view:a', 'split'],
+    ['otto_session_view:a', 'chat'],
     ['otto_session_split_frac:a', '0.62'],
-    ['otto_session_view:b', 'terminal'],
-    ['otto_session_view:c', 'bogus'],
+    ['otto_win_w2::otto_session_view:b', 'split'],
+    ['otto_conv_show_system', '1'],
+    ['otto_session_viewer_note', 'keep'],
   ]);
   const localStorage = {
+    get length() {
+      return storage.size;
+    },
+    key: (i: number) => [...storage.keys()][i] ?? null,
     getItem: (k: string) => storage.get(k) ?? null,
     setItem: (k: string, v: string) => void storage.set(k, v),
     removeItem: (k: string) => void storage.delete(k),
@@ -112,20 +105,13 @@ test('the transcript store migrates a stored Split to Chat once and drops the sp
     new URL('../src/lib/stores/transcript.svelte.ts', import.meta.url),
     {
       './transcriptLifecycle': { TranscriptLifecycle }, './transcriptTrim': transcriptTrim,
-      '../paneHeader': paneHeader,
       '../win': { winKey: (key: string) => key },
       '../api/client': { api: {}, isAbortError: () => false },
     },
     { localStorage },
   );
-  assert.equal(transcript.view('a'), 'chat');
-  assert.equal(storage.get('otto_session_view:a'), 'chat', 'rewritten on read');
-  assert.equal(storage.has('otto_session_split_frac:a'), false, 'orphaned fraction removed');
-  assert.equal(transcript.view('b'), 'terminal');
-  assert.equal(transcript.view('c'), null, 'unknown → default view');
-  assert.equal(transcript.view('missing'), null);
-  transcript.setView('b', 'chat');
-  assert.equal(transcript.view('b'), 'chat');
-  assert.equal(storage.get('otto_session_view:b'), 'chat');
-  assert.equal(typeof transcript.splitFrac, 'undefined', 'the Split fraction API is gone');
+  assert.equal(typeof transcript.view, 'undefined', 'the per-session view API is gone');
+  assert.equal(typeof transcript.setView, 'undefined');
+  transcript.sweepRetiredViewKeys();
+  assert.deepEqual([...storage.keys()].sort(), ['otto_conv_show_system', 'otto_session_viewer_note']);
 });

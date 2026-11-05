@@ -7,11 +7,11 @@
       "description": "Describe what the user's Otto window shows right now: each open document (main pane / side pane), its route and module, whether it is focused/visible, and the current module's own view state. Use it before driving a module. With no Otto window open it returns the daemon's view (`ui_visible:false`).",
       "input_schema": { "type": "object", "properties": {}, "additionalProperties": false } },
     { "name": "open", "module": "shell", "route": "", "risk": "navigate", "timeout_ms": 15000,
-      "description": "Open an Otto module (or a specific route inside it) where the user can see it. `placement: side` (default) opens it in the side pane next to your session; `main` navigates the main pane. Returns the route and pane it now shows in.",
+      "description": "Open an Otto module (or a specific route inside it) where the user can see it. `placement: side` (default) opens it in the side pane next to your session or thread; `main` navigates the main pane; `window` (desktop app) opens it beside you and detaches that pane into its own window, keeping its tabs and results. Returns the route and pane it now shows in.",
       "input_schema": { "type": "object", "properties": {
         "module": { "type": "string", "description": "Sidebar module id, e.g. `connections`, `git`, `api`, `browser`, `kubernetes`, `aws`, `vault`, `workflows`." },
         "route": { "type": "string", "description": "Optional hash route inside the module (e.g. `database`, `git/<repo_id>`). Defaults to the module's home route." },
-        "placement": { "type": "string", "enum": ["side", "main"], "description": "Where to show it. Default `side`." } },
+        "placement": { "type": "string", "enum": ["side", "main", "window"], "description": "Where to show it. Default `side`." } },
         "additionalProperties": false } },
     { "name": "focus", "module": "shell", "route": "", "risk": "navigate", "timeout_ms": 5000,
       "description": "Bring the Otto window to the front and focus a pane (`side` or `main`, default the pane showing the most recently driven module).",

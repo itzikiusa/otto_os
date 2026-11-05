@@ -371,41 +371,45 @@ impl ProviderRegistry {
                 shell_fallback: false,
             },
         );
-        // opencode (opencode.ai): `--session ses_<id>` both creates and
-        // resumes (ids must start with `ses`), so Otto assigns it like
-        // claude's; `--standalone` keeps the TUI off a shared background
-        // service; `--auto` skips permission prompts. The TUI takes no model
-        // flag (v2), so no picker here — Threads sets it over ACP.
-        let opencode_args: Vec<String> = {
-            let mut a = vec!["--standalone".into()];
-            if skip_permissions {
-                a.push("--auto".into());
-            }
-            a.extend(["--session".into(), "ses_{sid}".into()]);
-            a
-        };
+        // opencode (opencode.ai; verified against 1.19.5): the TUI is
+        // `opencode [project] [--model provider/model] [-s <id> | -c]
+        // [--auto]`. `-s` only OPENS an existing session ("Session not
+        // found" for any other id) and opencode mints its own ids, so Otto
+        // cannot pre-assign one; `-c` resumes the cwd's MOST RECENT session,
+        // which would cross-wire two opencode sessions sharing a folder.
+        // Terminal opencode sessions therefore start fresh on every
+        // (re)spawn (no `resume_args`); Threads resumes opencode exactly via
+        // ACP `session/load`. `--auto` approves every permission that is not
+        // explicitly denied.
         map.insert(
             "opencode".to_string(),
             ProviderSpec {
                 cmd: "opencode".into(),
-                args: opencode_args.clone(),
-                resume_args: Some(opencode_args),
+                args: if skip_permissions {
+                    vec!["--auto".into()]
+                } else {
+                    Vec::new()
+                },
+                resume_args: None,
                 update_command: Some("opencode upgrade".into()),
-                model_args: None,
+                model_args: Some(vec!["--model".into(), "{model}".into()]),
                 model_family: Some("opencode".into()),
                 captures_session_id: false,
                 shell_fallback: false,
             },
         );
-        // pi (pi.dev): no permission system (tools run unprompted). Resume by
-        // id needs `--session-id` (pi ≥ 0.76), so terminal pi sessions start
-        // fresh; Threads resumes pi through its RPC mode.
+        // pi (pi.dev; verified against 1.5.0): no permission system (tools
+        // run unprompted). `--session-id <id>` opens the cwd's session with
+        // that id and creates it when missing, so Otto assigns the id like
+        // claude's and one argv both starts and resumes. (pi 0.x has no
+        // `--session-id`.)
+        let pi_args: Vec<String> = vec!["--session-id".into(), "{sid}".into()];
         map.insert(
             "pi".to_string(),
             ProviderSpec {
                 cmd: "pi".into(),
-                args: Vec::new(),
-                resume_args: None,
+                args: pi_args.clone(),
+                resume_args: Some(pi_args),
                 update_command: Some("pi update".into()),
                 model_args: Some(vec!["--model".into(), "{model}".into()]),
                 model_family: Some("pi".into()),

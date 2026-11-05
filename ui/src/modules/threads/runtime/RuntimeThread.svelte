@@ -48,6 +48,7 @@
   import RuntimeApprovalRow from './RuntimeApprovalRow.svelte';
   import RuntimeAttachments from './RuntimeAttachments.svelte';
   import RuntimeLinkedThreads from './RuntimeLinkedThreads.svelte';
+  import RuntimeUiControl from './RuntimeUiControl.svelte';
   import RuntimeWorkGroup from './RuntimeWorkGroup.svelte';
   import RuntimeWorkRow from './RuntimeWorkRow.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
@@ -352,6 +353,7 @@
 
 <section class="rt" aria-label="Conversation" data-testid="runtime-thread-{sessionId}">
   <RuntimeLinkedThreads {sessionId} />
+  <RuntimeUiControl {sessionId} />
   <div class="rt-scroll" bind:this={scroller} onscroll={onScroll}>
     <div class="rt-col">
       <LoadState what="conversation" loading={!p && !loadError} error={p ? null : loadError} empty={!p} onretry={() => runtimeViews.retry(sessionId)}>

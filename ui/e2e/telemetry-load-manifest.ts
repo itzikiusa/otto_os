@@ -2,7 +2,6 @@
  * These populated workloads complement it; a new shared heavy component must
  * add a scenario here and run with the telemetry load report. */
 export const TELEMETRY_LOAD_SCENARIOS = [
-  { component: 'conversation', spec: 'desktop-conversation-load-perf.spec.ts', workload: 'large transcripts, concurrent streams and scrolling' },
   { component: 'terminal', spec: 'desktop-terminal-compact-queue-perf.spec.ts', workload: 'PTY bursts and bounded queued output' },
   { project: 'desktop-webkit', component: 'database.results', spec: 'desktop-db-results-perf.spec.ts', workload: 'large result tables and virtualized scrolling' },
   { project: 'desktop-webkit', component: 'database.editor', spec: 'desktop-db-editor-perf.spec.ts', workload: 'large query editing and completion' },

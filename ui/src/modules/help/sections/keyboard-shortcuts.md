@@ -76,7 +76,6 @@ You can also press `?` anywhere outside a text field to open the shortcut sheet 
 | `←` / `→` | Move between tabs when a tab has focus (`Home` / `End` for the first / last) |
 | `⌥⇧←` / `⌥⇧→` | Move the focused tab left / right (also in the tab's right-click menu) |
 | `⌫` | Close the focused tab |
-| `⌘⇧C` | Toggle the focused agent session between the terminal and chat views |
 
 **New session dialog**
 

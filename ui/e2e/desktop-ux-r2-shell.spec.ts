@@ -188,7 +188,7 @@ test('terminal applies an in-flight resize snapshot that arrives after a selecti
 });
 
 for (const scheme of ['light', 'dark']) {
-  test(`loaded chat session and settled Home prompt ${scheme}`, async ({ page }, info) => {
+  test(`loaded agent session and settled Home prompt ${scheme}`, async ({ page }, info) => {
     const { ctx, base } = await apiCtx();
     const response = await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/sessions`, { data: {
       kind: 'agent', provider: 'shell', title: 'Release review', cwd: '/tmp',
@@ -205,12 +205,11 @@ for (const scheme of ['light', 'dark']) {
       localStorage.setItem('otto_right_open', '0');
     }, { workspaceId, scheme });
     await page.goto(`/#/agents/${session.id}`);
-    // Chat is the conversation view (the in-pane Split view is retired).
-    await page.getByRole('tablist', { name: 'Session view' }).getByRole('tab', { name: 'Chat', exact: true }).click();
-    await expect(page.locator('.conv[data-loaded="true"]')).toBeVisible();
-    await expect(page.locator('.pane-body[data-view="chat"]')).toBeVisible();
+    // A session pane is always its terminal (the Chat view moved to Threads).
+    await expect(page.locator('.pane-body[data-view="terminal"]')).toBeVisible();
+    await expect(page.getByRole('tablist', { name: 'Session view' })).toHaveCount(0);
     await expectNoHorizontalOverflow(page);
-    await page.screenshot({ path: info.outputPath('loaded-chat.png'), animations: 'disabled' });
+    await page.screenshot({ path: info.outputPath('loaded-session.png'), animations: 'disabled' });
     await page.goto('/#/home');
     await page.getByRole('button', { name: 'Add space', exact: true }).click();
     await expect(page.getByRole('textbox', { name: 'Space name', exact: true })).toBeVisible();

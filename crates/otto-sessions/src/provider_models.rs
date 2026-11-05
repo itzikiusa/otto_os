@@ -102,12 +102,17 @@ async fn discover_models(probe: &ModelProbe) -> HashMap<String, Vec<ProviderMode
             "agy" => discover_agy_models(probe.agy_program.as_deref()).await,
             "grok" => discover_grok_models(probe.grok_program.as_deref()).await,
             "opencode" => {
-                let out = run_models(probe.opencode_program.as_deref(), &["models"]).await;
+                // opencode 1.19 boots its whole server for this (~2 s warm).
+                let out = run_models(probe.opencode_program.as_deref(), &["models"], 10).await;
                 parse_opencode_models_output(&out)
             }
             "pi" => {
-                let out =
-                    run_models(probe.pi_program.as_deref(), &["--offline", "--list-models"]).await;
+                let out = run_models(
+                    probe.pi_program.as_deref(),
+                    &["--offline", "--list-models"],
+                    3,
+                )
+                .await;
                 parse_pi_models_output(&out)
             }
             _ => continue,
@@ -434,13 +439,13 @@ fn fallback_agy_models() -> Vec<ProviderModelOption> {
     ]
 }
 
-/// `<program> <args…>`'s stdout + stderr (3 s cap), `""` when absent / failed.
-async fn run_models(program: Option<&str>, args: &[&str]) -> String {
+/// `<program> <args…>`'s stdout + stderr (`secs` cap), `""` when absent / failed.
+async fn run_models(program: Option<&str>, args: &[&str], secs: u64) -> String {
     let Some(prog) = program else {
         return String::new();
     };
     let Ok(Ok(out)) = timeout(
-        Duration::from_secs(3),
+        Duration::from_secs(secs),
         Command::new(prog)
             .args(args)
             .stdin(std::process::Stdio::null())
@@ -654,6 +659,47 @@ mod tests {
             "anthropic/claude-sonnet-4\nopenai/gpt-5\nsome log line\n",
         );
         assert_eq!(oc.len(), 2);
+    }
+
+    /// Verbatim output of the installed CLIs (pi 1.5.0 `--offline
+    /// --list-models`, opencode 1.19.5 `models`, stdout then stderr as
+    /// `run_models` joins them).
+    #[test]
+    fn parses_real_pi_1_5_and_opencode_1_19_output() {
+        let pi = parse_pi_models_output(
+            "provider      model          context  max-out  thinking  images\n\
+             openai-codex  gpt-5.6-luna   272K     128K     yes       yes   \n\
+             openai-codex  gpt-6.1-terra  500K     128K     yes       yes   \n\
+             opencode      big-pickle     200K     32K      yes       no    \n\
+             \n",
+        );
+        assert_eq!(
+            pi.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            [
+                "openai-codex/gpt-5.6-luna",
+                "openai-codex/gpt-6.1-terra",
+                "opencode/big-pickle"
+            ]
+        );
+        assert_eq!(pi[1].label, "gpt-6.1-terra");
+        assert_eq!(pi[1].description, "openai-codex · 500K context");
+        assert_eq!(pi[0].default_effort.as_deref(), Some("medium"));
+
+        let oc = parse_opencode_models_output(
+            "opencode/beam-free\nopencode/big-pickle\ngithub-copilot/claude-haiku-4.5\n\
+             google/gemini-3.8-flash\nopenai/gpt-5.6-luna-fast\n\
+             \n[auto-update-checker] Package not found, nothing to invalidate: x\n",
+        );
+        assert_eq!(
+            oc.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            [
+                "opencode/beam-free",
+                "opencode/big-pickle",
+                "github-copilot/claude-haiku-4.5",
+                "google/gemini-3.8-flash",
+                "openai/gpt-5.6-luna-fast"
+            ]
+        );
     }
 
     /// Every provider of a family gets that family's list under its own name.

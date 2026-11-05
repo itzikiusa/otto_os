@@ -118,6 +118,11 @@ const app = mount(App, {
   target: document.getElementById('app')!,
 });
 
+// The session Chat view was removed in favour of Threads: drop the stale
+// per-session Terminal · Chat choices it persisted (harmless, just litter).
+// Lazy: the transcript store must stay out of the entry chunk (bundle budget).
+void import('./lib/stores/transcript.svelte').then(({ transcript }) => transcript.sweepRetiredViewKeys()).catch(() => {});
+
 // Register the PWA service worker (no-op in dev if sw.js isn't served).
 // When a NEW service worker takes control (after a deploy), reload once so the
 // fresh app shell is shown immediately — otherwise a cached SW can keep serving

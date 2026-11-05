@@ -54,6 +54,16 @@ fn codex_server_env_path(session_id: &Id, server: &str) -> std::path::PathBuf {
         .join(format!("{session_id}.{server}.env"))
 }
 
+/// Per-session pi MCP extension (`<tmp>/otto-mcp/<session_id>.pi-mcp.js`,
+/// mode 0600; [`crate::mcp::pi_mcp_extension`]): loaded with `pi -e`, it
+/// carries the user servers' resolved env. Removed with the session's other
+/// credentials.
+fn pi_mcp_extension_path(session_id: &Id) -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join("otto-mcp")
+        .join(format!("{session_id}.pi-mcp.js"))
+}
+
 /// Delete every per-server env file written for `session_id`
 /// ([`codex_server_env_path`]). Best-effort.
 async fn remove_codex_server_env_files(session_id: &Id) {
@@ -6062,6 +6072,7 @@ async fn revoke_session_credentials(
     session_id: &Id,
 ) -> Result<()> {
     let _ = std::fs::remove_file(codex_creds_path(session_id));
+    let _ = std::fs::remove_file(pi_mcp_extension_path(session_id));
     remove_codex_server_env_files(session_id).await;
     if let Some(auth) = auth {
         auth.revoke_session_tokens(owner, session_id).await?;

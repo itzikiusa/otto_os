@@ -37,7 +37,7 @@ Otto ports that design rather than inventing its own.
 
 Installed CLIs it was built against: claude 2.1.318, codex-cli 0.166.0,
 gemini (with `--acp`), grok 1.0.70 (`agent stdio`, ACP protocol v1), agy
-1.4.12.
+1.4.12, opencode 1.19.5 (`acp`), pi 1.5.0 (`--mode rpc`).
 
 **Claude, ACP or SDK?** T3 Code's own Claude provider is the SDK path. The
 ACP adapter (`@agentclientprotocol/claude-agent-acp`) is only a Registry
@@ -260,6 +260,112 @@ Probed against agy 1.4.12 in a scratch repo.
    `result` and exits 1, so the session goes `dormant` and the next prompt
    respawns with `--conversation`. Closing stdin does **not** stop a turn:
    agy finishes it and then exits 0.
+
+### opencode (`opencode acp`) and pi (`pi --mode rpc`)
+
+Verified live on 2026-11-05 against **opencode 1.19.5** (npm `opencode-ai`)
+and **pi 1.5.0** (npm `@earendil-works/pi-coding-agent`), by speaking each
+protocol from a script.
+
+**opencode** runs through the ACP driver (`AcpDriver::opencode`):
+
+- `initialize` reports `loadSession: true`, stdio + HTTP MCP and image /
+  embedded-context prompts. `session/new {cwd, mcpServers}` returns the
+  `ses_…` id and one config option, `model`. `session/set_config_option
+  {configId: "model", value: "provider/model"}` selects the model. There is
+  no model flag and no modes.
+- A stdio `mcpServers` entry with its `env` reached the server: a probe tool
+  returned its env secret to the model.
+- `session/load` with the earlier id remembered the earlier turn. The replayed
+  history is dropped.
+- The access mode is the `OPENCODE_PERMISSION` env. opencode deep-merges this
+  JSON object over the user's config:
+
+  | Mode | `OPENCODE_PERMISSION` |
+  |---|---|
+  | full access | `{"*":"allow"}` |
+  | auto-accept edits | `{"*":"ask", "read"/"glob"/"grep"/"list"/"edit": "allow"}` |
+  | approval required | the same without `edit` |
+
+  A bare string such as `"allow"` makes `session/new` fail with "OpenCode
+  service failure (directory)". Without the env, opencode allows everything,
+  so every mode sets it. In approval-required mode the bash call arrived as
+  `session/request_permission` with the options `once` / `always` /
+  `reject`.
+- A non-JSON line can appear on stdout (`[auto-update-checker] …`). The
+  driver skips it.
+- Free models (`opencode/big-pickle`, `…-free`) work without a login.
+
+**pi** runs through its own RPC mode (`PiDriver`):
+
+- `get_state` reports `data.sessionId` (a UUID) and `data.model`. A prompt
+  answers `{disposition: "started"}`. Events then follow:
+  `message_update.assistantMessageEvent` (`text_delta`, `toolcall_*`),
+  `tool_execution_start|end {toolCallId, toolName, args, result.content,
+  isError}`, `agent_end {messages, willRetry}`, then `agent_settled
+  {aborted}`.
+- A turn ends at `agent_settled` once the process has sent one. pi 0.x has
+  no `agent_settled`, so there the turn ends at a `willRetry: false`
+  `agent_end`.
+- A provider failure is not a refused prompt. The prompt is `started`, and
+  the run ends with the last assistant message's `stopReason: "error"` +
+  `errorMessage`. Seen live: an expired openai-codex OAuth refresh and the
+  OpenCode Zen free-tier 429.
+- Resume is `--session <id>`.
+- Thinking is `set_thinking_level` (`off` … `xhigh`, `max` in 1.x).
+- No approvals: the access mode is the tool set. Restricted modes add
+  `--tools … --exclude-tools mcp__*`, because MCP tools can write and pi
+  cannot ask first.
+
+**pi MCP.** pi 1.x reads `~/.pi/agent/mcp.json` and, in trusted projects
+only, `.pi/mcp.json`. Otto edits neither. For each spawn it writes a private
+extension, `<tmp>/otto-mcp/<session>.pi-mcp.js` (mode 0600), and passes
+`-e <file>`. The extension calls `pi.registerMcpServer(name, config)` for:
+
+- `otto`;
+- `otto-browser`, when the session opts in;
+- the workspace's enabled user servers.
+
+These registrations last only for that session. Details:
+
+- **Exposure.** Each server is `deferred`, so pi's `tool_search` loads its
+  tools on demand.
+- **Credentials.** `otto` and `otto-browser` carry no env. pi starts stdio
+  servers with its own environment, which holds the session's Otto
+  credential.
+- **User env.** User-server env values are escaped for pi's interpolation
+  (`$` → `$$`, `!` → `$!`).
+- **Names.** Names pi refuses, or duplicates once `-` and `_` count as the
+  same, are listed in `mcp_skipped`.
+- **Cleanup.** The file is removed with the session's credentials.
+
+Terminal pi sessions get the same `-e` file.
+
+Verified live with real pi 1.5.0 and a scripted OpenAI-compatible model:
+
+- `tool_search` loaded `mcp__otto__otto_list_workspaces` from the real
+  `ottod mcp-tools`. The call returned the workspaces using the
+  credential inherited from the environment.
+- A probe server received its escaped env (`s3cr$$et$!x` → `s3cr$et!x`).
+- The pi TUI started with `--session-id … -e …` and connected the server.
+
+The model had to be scripted because neither of pi's own providers had a
+working login on the test machine.
+
+**Terminal sessions** (`crates/otto-sessions/src/providers.rs`):
+
+- **pi:** `pi --session-id <otto sid> [--model p/m] [--thinking level]`. pi
+  1.x creates the cwd's session with that id, or reopens it, so the same
+  argv starts and resumes it. pi 0.x has no `--session-id`.
+- **opencode:** `opencode [--auto] [--model p/m]`. `-s <id>` only opens an
+  existing session (an unknown id is "Session not found"), and opencode mints
+  its own ids. `-c` would resume the cwd's most recent session and cross-wire
+  sessions that share a folder. So terminal opencode sessions are **not
+  resumable** and start fresh on every respawn. The ACP path resumes
+  exactly.
+- **Models:** `opencode models` lists one `provider/model` per line. It takes
+  about 2 s warm, so its probe gets 10 s. `pi --offline --list-models` prints
+  a `provider model context …` table, read as `provider/model` ids.
 
 ### Access modes
 
@@ -552,9 +658,11 @@ in which headless agy denies what it would have asked about.
   MCP servers. Claude / Codex / agy get them as a terminal session does
   (`.mcp.json` + `claude --mcp-config` with Otto's managed entries, codex
   `-c`, `.agents/mcp_config.json`); ACP agents (Gemini, Grok, opencode) get
-  them in `session/new|load.mcpServers` with each server's env. pi (0.75) has
-  no MCP. The credential is revoked when the process exits or the thread
-  closes.
+  them in `session/new|load.mcpServers` with each server's env. pi (1.x) gets
+  them through a private per-session `-e` extension that registers each
+  server (see "opencode and pi" above). The credential is revoked when the
+  process exits or the thread closes.
+- **Agent UI control** (done): a thread's agent can drive Otto beside it — open a DB connection, run queries in your Database Explorer, detach the pane into its own window — with the same per-thread grant as terminal sessions (see [Agent UI control](./agent-ui-control.md#threads)).
 - **Linked threads** (`/runtime-sessions/{id}/peers`, `otto.thread_open` /
   `_list` / `_message` / `_read`): a thread's agent opens other threads
   (`parent_id` = the group's root), messages them and reads their replies —

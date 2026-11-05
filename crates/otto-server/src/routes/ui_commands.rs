@@ -125,7 +125,9 @@ pub async fn set_ui_control(
 ) -> ApiResult<Json<Session>> {
     require_human(&auth, "changing UI control")?;
     let user = &auth.effective_user;
-    let session = ctx.manager.get(&id).await.map_err(ApiError)?;
+    let session = ui_bridge::caller_session(&ctx, &id, !req.enabled)
+        .await
+        .map_err(ApiError)?;
     if req.enabled {
         if session.created_by != user.id {
             return Err(ApiError(Error::Forbidden(
@@ -143,9 +145,7 @@ pub async fn set_ui_control(
             "only the session's owner or a workspace admin can stop UI control".into(),
         )));
     }
-    let updated = ctx
-        .manager
-        .update_meta(&id, ui_bridge::grant_record(req.enabled, &user.id))
+    let updated = ui_bridge::store_grant(&ctx, &id, ui_bridge::grant_record(req.enabled, &user.id))
         .await
         .map_err(ApiError)?;
     if !req.enabled {

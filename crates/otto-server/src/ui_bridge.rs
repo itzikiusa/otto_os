@@ -361,41 +361,11 @@ fn opened_target(
 // Grants — pure helpers over `session.meta.ui_control`
 // ===========================================================================
 
-/// The server-owned grant record in `session.meta`.
-pub const META_KEY: &str = "ui_control";
-
-/// `Some(true)` granted, `Some(false)` explicitly denied/revoked, `None` never decided.
-pub fn grant_state(meta: &Value) -> Option<bool> {
-    meta.get(META_KEY)?.get("enabled")?.as_bool()
-}
-
-/// When the last grant decision was made (RFC 3339), if recorded.
-fn grant_decided_at(meta: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
-    meta.get(META_KEY)?
-        .get("granted_at")?
-        .as_str()
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|t| t.with_timezone(&chrono::Utc))
-}
+pub use otto_core::ui_grant::{grant_decided_at, grant_record, grant_state, META_KEY};
 
 /// A Deny/Stop within [`DENY_QUIET`] — answer without prompting again.
 fn recently_denied(meta: &Value, now: chrono::DateTime<chrono::Utc>) -> bool {
-    grant_state(meta) == Some(false)
-        && grant_decided_at(meta).is_some_and(|t| {
-            now.signed_duration_since(t)
-                .to_std()
-                .map(|d| d < DENY_QUIET)
-                .unwrap_or(true)
-        })
-}
-
-/// The grant record written by `POST /sessions/{id}/ui-control`.
-pub fn grant_record(enabled: bool, by: &str) -> Value {
-    json!({ META_KEY: {
-        "enabled": enabled,
-        "granted_at": chrono::Utc::now().to_rfc3339(),
-        "granted_by": by,
-    }})
+    otto_core::ui_grant::recently_denied(meta, now, DENY_QUIET)
 }
 
 // ===========================================================================
@@ -932,6 +902,47 @@ pub fn is_human(auth: &AuthContext) -> bool {
         && !auth.is_scoped()
 }
 
+/// The calling session: a terminal session, or a Threads thread in the same
+/// shape (`RuntimeSession::into_session`). `closed_ok`: a revoke always lands.
+pub async fn caller_session(
+    ctx: &ServerCtx,
+    id: &Id,
+    closed_ok: bool,
+) -> otto_core::Result<Session> {
+    let err = match ctx.manager.get(id).await {
+        Ok(s) => return Ok(s),
+        Err(e) => e,
+    };
+    match ctx.agent_runtime.get(id).await {
+        Ok(t)
+            if closed_ok || t.status != otto_core::agent_runtime::RuntimeSessionStatus::Closed =>
+        {
+            Ok(t.into_session())
+        }
+        _ => Err(err),
+    }
+}
+
+/// The calling session (terminal or thread) holds the UI-control grant.
+pub async fn caller_granted(ctx: &ServerCtx, id: &Id) -> bool {
+    caller_session(ctx, id, false)
+        .await
+        .is_ok_and(|s| grant_state(&s.meta) == Some(true))
+}
+
+/// Persist a grant record on whichever kind of session `id` is.
+pub async fn store_grant(ctx: &ServerCtx, id: &Id, record: Value) -> otto_core::Result<Session> {
+    if ctx.manager.get(id).await.is_ok() {
+        return ctx.manager.update_meta(id, record).await;
+    }
+    let grant = record.get(META_KEY).cloned().unwrap_or(Value::Null);
+    Ok(ctx
+        .agent_runtime
+        .set_ui_control(id, grant)
+        .await?
+        .into_session())
+}
+
 /// The message the agent gets while the user has not allowed UI control.
 pub const PENDING_GRANT_MSG: &str = "The user hasn't allowed UI control for this session yet — they were asked in Otto; retry after they allow it";
 
@@ -950,9 +961,7 @@ pub async fn run(
             "UI control is for agents running in an Otto session (this credential has no session)",
         )
     })?;
-    let session = ctx
-        .manager
-        .get(sid)
+    let session = caller_session(ctx, sid, false)
         .await
         .map_err(|_| UiError::new("not_found", "the calling session no longer exists"))?;
     if session.created_by != auth.effective_user.id {
@@ -1091,9 +1100,7 @@ async fn ensure_grant(
             notified,
         )
         .await;
-        let s = ctx
-            .manager
-            .get(&session.id)
+        let s = caller_session(ctx, &session.id, false)
             .await
             .map_err(|_| UiError::new("not_found", "the calling session no longer exists"))?;
         match grant_state(&s.meta) {

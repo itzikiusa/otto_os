@@ -110,6 +110,12 @@ async function open(args: OpenArgs, ctx: UiCommandCtx): Promise<unknown> {
   }
   const placement = args.placement === 'main' ? 'main' : 'side';
   const label = labelFor(route);
+  if (args.placement === 'window' && !(isTauri && nativePaneSnapshot())) {
+    throw new UiCommandError(
+      'failed',
+      `This Otto window can’t detach panes into their own window (that needs the desktop app). Use placement: side.`,
+    );
+  }
   const done = (pane: 'main' | 'side', extra: Record<string, unknown> = {}) => ({
     ui_visible: true,
     pane,
@@ -245,8 +251,22 @@ async function state(): Promise<unknown> {
   return out;
 }
 
+/** `placement: window` — show it in the side pane, then detach that pane into
+ *  its own desktop window (the same document: its tabs, drafts and results
+ *  move with it). Already detached → it stays where it is. */
+async function openInWindow(args: OpenArgs, ctx: UiCommandCtx): Promise<unknown> {
+  const shown = (await open({ ...args, placement: 'side' }, ctx)) as Record<string, unknown>;
+  if (shown.pane !== 'side') return shown;
+  const pane = nativePaneSnapshot();
+  if (pane && pane.mode === 'attached') {
+    ctx.progress(`Detaching ${String(shown.label)} into its own window`);
+    await nativePane.detach('side');
+  }
+  return { ...shown, pane: 'window' };
+}
+
 registerUiCommands('shell', {
   state: () => state(),
-  open: (args, ctx) => open(args ?? {}, ctx),
+  open: (args, ctx) => ((args as OpenArgs | null)?.placement === 'window' ? openInWindow(args ?? {}, ctx) : open(args ?? {}, ctx)),
   focus: (args) => focus(args ?? {}),
 });

@@ -13,15 +13,17 @@ impl SessionManager {
     /// other's updates. Also snapshots the server names THIS provider was
     /// actually given into the session meta (`mcp_servers`) — codex's `-c`
     /// overrides, agy's `.agents/mcp_config.json`, grok's `.grok/config.toml`,
-    /// `.mcp.json` for everyone else — plus `mcp_servers_error` when the
-    /// user-server lookup failed. Best-effort throughout — never blocks the spawn.
+    /// pi's per-session `-e` extension, `.mcp.json` for everyone else — plus
+    /// `mcp_servers_error` when the user-server lookup failed. Best-effort
+    /// throughout — never blocks the spawn.
     ///
     /// A failed lookup is NOT "nothing enabled": the previously managed user
     /// entries in the shared files are preserved (only Otto's own entries are
     /// reconciled) so one transient fault can't strip every session's servers.
     ///
-    /// Returns the codex `-c` overrides for the browser and the user's servers
-    /// (`codex_otto`: whether the caller already attached `otto` to codex).
+    /// Returns the per-spawn launch args: codex's `-c` overrides for the
+    /// browser and the user's servers (`codex_otto`: whether the caller
+    /// already attached `otto` to codex), or pi's `-e <extension>`.
     pub(super) async fn sync_workspace_mcp(
         &self,
         session: &Session,
@@ -65,6 +67,7 @@ impl SessionManager {
             }
         };
         let has_otto = otto_tools.is_some();
+        let pi_otto = otto_tools.clone().filter(|_| session.provider == "pi");
         let cfg = crate::mcp::ManagedMcpConfig {
             browser: session_browser,
             user_servers: user_servers.clone(),
@@ -114,7 +117,7 @@ impl SessionManager {
             tracing::warn!(session = %session.id, "MCP launcher reconcile task failed: {e}");
             (Vec::new(), None, None)
         });
-        let mut codex_args = Vec::new();
+        let mut launch_args = Vec::new();
         let delivered: Vec<String> = match session.provider.as_str() {
             // agy never reads `.mcp.json` — same managed set, its own file.
             "agy" => agy_names.unwrap_or_default(),
@@ -150,7 +153,7 @@ impl SessionManager {
             "codex" => {
                 let mut names = Vec::new();
                 if session_browser {
-                    codex_args.extend(crate::mcp::codex_browser_args());
+                    launch_args.extend(crate::mcp::codex_browser_args());
                     names.push(crate::mcp::SERVER_KEY.to_string());
                 }
                 if codex_otto {
@@ -164,10 +167,39 @@ impl SessionManager {
                         let path = codex_server_env_path(&session.id, &s.name);
                         crate::mcp::write_env_file(&path, &s.env).map(|()| path)
                     });
-                    codex_args.extend(out.args);
+                    launch_args.extend(out.args);
                     names.extend(out.delivered);
                 }
                 names
+            }
+            // pi reads no launcher file Otto manages: a per-session `-e`
+            // extension registers this spawn's set (the browser per this
+            // session's own opt-in, like codex). Unknown user set → otto and
+            // the browser only.
+            "pi" => {
+                let (doc, names) = crate::mcp::pi_mcp_extension(
+                    pi_otto.as_ref(),
+                    session_browser,
+                    user_servers.as_deref(),
+                );
+                let path = pi_mcp_extension_path(&session.id);
+                match doc {
+                    Some(doc) => match crate::mcp::write_private_file(&path, doc.as_bytes()) {
+                        Ok(()) => {
+                            launch_args
+                                .extend(["-e".to_string(), path.to_string_lossy().into_owned()]);
+                            names
+                        }
+                        Err(e) => {
+                            tracing::warn!(session = %session.id, "write pi MCP extension: {e}");
+                            Vec::new()
+                        }
+                    },
+                    None => {
+                        let _ = std::fs::remove_file(&path);
+                        Vec::new()
+                    }
+                }
             }
             _ => mcp_json_names,
         };
@@ -184,7 +216,7 @@ impl SessionManager {
         // A structured runtime session has no `sessions` row to snapshot into.
         let structured = session.meta.get("runtime").and_then(|v| v.as_str()) == Some("structured");
         if structured {
-            return codex_args;
+            return launch_args;
         }
         if let Err(e) = self
             .repo
@@ -200,7 +232,7 @@ impl SessionManager {
         {
             tracing::warn!(session = %session.id, "record MCP server snapshot: {e}");
         }
-        codex_args
+        launch_args
     }
 
     /// The workspace's ENABLED user MCP servers for `session` (Keychain

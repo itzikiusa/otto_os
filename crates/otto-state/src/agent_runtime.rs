@@ -1,4 +1,4 @@
-//! Persistence for the structured agent runtime (migrations 0197, 0198): runtime
+//! Persistence for the structured agent runtime (migrations 0197–0200): runtime
 //! session rows and the entity projection (the latest JSON state of every
 //! provider session / thread, turn, turn item, runtime request and plan —
 //! the T3 Code projection model). The live event ring lives in memory
@@ -55,7 +55,7 @@ pub struct RuntimeEntityRow {
 macro_rules! session_cols {
     () => {
         "id, workspace_id, provider, title, cwd, model, native_thread_id, closed, \
-         created_by, created_at, last_active_at, last_seq, seq_reserved, access_mode, parent_id"
+         created_by, created_at, last_active_at, last_seq, seq_reserved, access_mode, parent_id, ui_control"
     };
 }
 
@@ -93,6 +93,9 @@ fn row_to_session(r: &sqlx::sqlite::SqliteRow) -> Result<RuntimeSessionRecord> {
             last_active_at: ts(&r.get::<String, _>("last_active_at"))?,
             last_sequence: u(r.get("last_seq")),
             parent_id: r.get("parent_id"),
+            ui_control: r
+                .get::<Option<String>, _>("ui_control")
+                .and_then(|j| serde_json::from_str(&j).ok()),
         },
         closed,
         seq_reserved: u(r.get("seq_reserved")),
@@ -209,6 +212,20 @@ impl AgentRuntimeRepo {
             .execute(&self.pool)
             .await
             .map_err(dberr("set runtime session access mode"))?;
+        Ok(())
+    }
+
+    /// Store the agent-UI-control grant record (see `RuntimeSession::ui_control`).
+    pub async fn set_ui_control(&self, id: &Id, record: &serde_json::Value) -> Result<()> {
+        let res = sqlx::query("UPDATE agent_runtime_sessions SET ui_control = ? WHERE id = ?")
+            .bind(record.to_string())
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set runtime session ui control"))?;
+        if res.rows_affected() == 0 {
+            return Err(Error::NotFound(format!("runtime session {id}")));
+        }
         Ok(())
     }
 
