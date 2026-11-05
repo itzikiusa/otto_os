@@ -2,7 +2,6 @@
   import { announceShown } from '../../lib/announce.svelte';
   // One personal agent: Overview / Activity / Autonomy / Schedules / Runs /
   // Chat / Memory / Context tabs.
-  import { announce } from '../../lib/announce.svelte';
   import { latestOnly } from '../../lib/latest';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { tabKeys } from '../../lib/tabKeys';
@@ -14,7 +13,6 @@
   import { authedText } from '../../lib/api/client';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
-  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -31,6 +29,8 @@
   import AgentEditSheet from './AgentEditSheet.svelte';
   import AgentAutonomy from './AgentAutonomy.svelte';
   import AgentActivity from './AgentActivity.svelte';
+  import AgentChat from './AgentChat.svelte';
+  import { openAgentSession } from '../../lib/openAgentSession';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { browserTz, buildCadence, cadenceLabel, defaultCadence, loadCadence, WEEKDAYS, type CadenceForm } from './cadence';
@@ -128,7 +128,6 @@
     }
     try {
       await personalAgentsApi.reset(agentId, typed);
-      chatSessionId = '';
       memoryReload += 1;
       void personalAgents.loadSchedules(agentId);
       void personalAgents.loadRuns(agentId);
@@ -155,36 +154,6 @@
     }
     void personalAgents.loadRuns(agentId);
   }
-
-  // --- Chat: one interactive session pinned to the agent's provider/model/cwd.
-  let chatSessionId = $state('');
-  let chatError = $state('');
-  // Bumped by Retry: clearing the (already empty) session id is no change, so
-  // the effect never re-ran and Retry left "Opening…" up forever.
-  let chatAttempt = $state(0);
-  // The get-or-create in flight, if any. Chat → Runs → Chat during the first
-  // (multi-second) create used to fire a SECOND create — two Claude sessions,
-  // one orphaned. The server serialises per agent too; this avoids the request.
-  let chatPending: Promise<void> | null = null;
-  $effect(() => {
-    void chatAttempt;
-    if (tab !== 'chat' || chatSessionId) return;
-    const id = agentId;
-    if (chatPending) return;
-    chatError = '';
-    announce(`Opening ${untrack(() => agent?.name) ?? 'the agent'}’s chat session…`);
-    chatPending = personalAgentsApi
-      .chatSession(id)
-      .then((r) => {
-        if (id === agentId) chatSessionId = r.session_id;
-      })
-      .catch((e) => {
-        if (id === agentId) chatError = loadErrorText(e);
-      })
-      .finally(() => {
-        chatPending = null;
-      });
-  });
 
   // --- Schedules form -------------------------------------------------------
   let schedFormOpen = $state(false);
@@ -390,7 +359,8 @@
       </span>
       {#if !agent.enabled}<span class="chip" title="Schedules don’t fire while paused. Run now and chat still work.">Paused</span>{/if}
       {#if agent.browser}<span class="chip" title="Runs and chat can use the Otto browser tool">Browser</span>{/if}
-      {#if autonomy?.primary}<span class="chip pa-accent" title="Your primary assistant — routes specialist work to your other agents"><Icon name="star" size={12} /> Your agent</span>{/if}
+      {#if autonomy?.primary}<span class="chip pa-accent" title="Your main agent — creates agents, delegates to them, and they report back to it"><Icon name="star" size={12} /> Main agent</span>{/if}
+      {#if agent.created_by_agent}<span class="chip" title="Created by your main agent">Created by {personalAgents.agent(agent.created_by_agent)?.name ?? 'your main agent'}</span>{/if}
       {#if autonomy?.proactive.enabled}<span class="chip" title="Works its standing goals in the background, read-only"><Icon name="eye" size={12} /> Proactive</span>{/if}
     {/if}
   {/snippet}
@@ -649,7 +619,7 @@
               <button class="btn small" onclick={() => viewReport(r)}>View report</button>
             {/if}
             {#if r.session_id}
-              <button class="btn small" title="Open the agent session this run drove" onclick={() => ws.navigateToSession(r.session_id ?? '')}>Open session</button>
+              <button class="btn small" title="Open the thread (or session) this run drove" onclick={() => void openAgentSession(r.session_id ?? '')}>Open thread</button>
             {/if}
             {#if r.status === 'running'}
               <button class="btn small danger" title="Stop this run (its agent session is stopped)" aria-label="Stop {scheduleName(r)}" onclick={() => void stopRun(r)}>Stop…</button>
@@ -666,15 +636,7 @@
       </ul>
     </LoadState>
   {:else if tab === 'chat'}
-    {#if chatError}
-      <LoadState what="the chat session" error={chatError} empty onretry={() => { chatError = ''; chatSessionId = ''; chatAttempt += 1; }} />
-    {:else if chatSessionId}
-      <div class="chatwrap">
-        <LazyTerminal sessionId={chatSessionId} autoFocus />
-      </div>
-    {:else}
-      <p class="muted">Opening {agent.name}’s chat session…</p>
-    {/if}
+    <AgentChat {agentId} agentName={agent.name} workspaceId={agent.workspace_id} reloadKey={memoryReload} />
   {:else if (tab === 'memory' || tab === 'context') && agent}
     {#if tab === 'memory'}
       {#if AgentMemoryInspectorLazy.error}
@@ -789,6 +751,5 @@
   .chk { display: flex; align-items: center; gap: 6px; font-size: var(--fs-m); color: var(--text); }
   .actions { display: flex; gap: 8px; justify-content: flex-end; }
   .agent-body.chat-fill { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-  .chatwrap { flex: 1; min-height: 0; height: auto; border: 1px solid var(--border); border-radius: var(--radius-m); overflow: hidden; }
   .report { white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: var(--fs-s); line-height: 1.45; color: var(--text); margin: 0; }
 </style>

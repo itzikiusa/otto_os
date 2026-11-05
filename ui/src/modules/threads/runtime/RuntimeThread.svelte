@@ -57,8 +57,10 @@
   interface Props {
     sessionId: string;
     focused: boolean;
+    /** Hosted outside Threads (Personal Agents' chat): a linked-thread chip switches the host's view. */
+    onswitch?: (id: string) => void;
   }
-  let { sessionId, focused }: Props = $props();
+  let { sessionId, focused, onswitch }: Props = $props();
 
   $effect(() => {
     const id = sessionId;
@@ -352,7 +354,7 @@
 {/snippet}
 
 <section class="rt" aria-label="Conversation" data-testid="runtime-thread-{sessionId}">
-  <RuntimeLinkedThreads {sessionId} />
+  <RuntimeLinkedThreads {sessionId} {onswitch} />
   <RuntimeUiControl {sessionId} />
   <div class="rt-scroll" bind:this={scroller} onscroll={onScroll}>
     <div class="rt-col">

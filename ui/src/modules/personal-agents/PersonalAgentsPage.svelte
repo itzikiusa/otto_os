@@ -68,7 +68,7 @@
     });
     return () => { disposed = true; };
   });
-  // "Your agent" (primary) leads the list — the one entry point.
+  // The main agent (primary) leads the list — the one entry point.
   const agents = $derived(
     [...personalAgents.agents].sort(
       (a, b) => Number(!!autonomyById[b.id]?.primary) - Number(!!autonomyById[a.id]?.primary),
@@ -207,7 +207,9 @@
           </EmptyState>
         {/snippet}
         {#if !primaryAgent && Object.keys(autonomyById).length > 0}
-          <p class="pa-hint" role="note"><Icon name="star" size={12} /> Choose one agent as <strong>your agent</strong> (its Autonomy tab): your main assistant, routing specialist work to the others.</p>
+          <p class="pa-hint" role="note"><Icon name="star" size={12} /> Choose one agent as your <strong>main agent</strong> (its Autonomy tab): you talk to it, and it creates and directs the others.</p>
+        {:else if primaryAgent}
+          <p class="pa-hint" role="note"><Icon name="star" size={12} /> Talk to <button type="button" class="linklike" onclick={() => router.go(`personal-agents/${primaryAgent.id}/chat`)}>{primaryAgent.name}</button>, your main agent: it hands work to the others and they report back to it.</p>
         {/if}
         <ul class="cards" data-testid="pa-cards">
           {#each agents as a (a.id)}
@@ -240,7 +242,8 @@
                   <span class="chip ok">Enabled</span>
                 {/if}
                 {#if a.browser}<span class="chip" title="Runs and chat can drive the in-app browser">Browser</span>{/if}
-                {#if auto?.primary}<span class="chip pa-accent" title="Your primary assistant"><Icon name="star" size={12} /> Your agent</span>{/if}
+                {#if auto?.primary}<span class="chip pa-accent" title="Your main agent — it creates agents, delegates to them, and they report back to it"><Icon name="star" size={12} /> Main agent</span>{/if}
+                {#if a.created_by_agent}<span class="chip" title="Created by your main agent">By {personalAgents.agent(a.created_by_agent)?.name ?? 'main agent'}</span>{/if}
                 {#if auto?.proactive.enabled}<span class="chip" title="Works its standing goals in the background, read-only"><Icon name="eye" size={12} /> Proactive</span>{/if}
                 <!-- A paused agent's schedules never fire — don't promise a next run. -->
                 {#if a.enabled}
@@ -320,5 +323,7 @@
   .card-actions { display: flex; gap: 6px; margin-top: auto; flex-wrap: wrap; }
   .pa-card.primary { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
   .pa-accent { color: var(--accent-text); border-color: var(--accent-line); display: inline-flex; align-items: center; gap: 4px; }
-  .pa-hint { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; color: var(--text-dim); font-size: var(--fs-s); }
+  .pa-hint { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; color: var(--text-dim); font-size: var(--fs-s); flex-wrap: wrap; }
+  .linklike { border: 0; background: none; padding: 0; color: var(--accent-text); font: inherit; font-weight: 600; cursor: pointer; }
+  .linklike:hover { text-decoration: underline; }
 </style>

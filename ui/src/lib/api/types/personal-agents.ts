@@ -34,6 +34,9 @@ export interface PersonalAgent {
   /** The agent's single interactive chat session (set by the chat-session route). */
   chat_session_id?: string | null;
   created_by?: string | null;
+  /** The main agent that created this one (`otto.personal_agent_create`);
+   *  absent / null = a person did. */
+  created_by_agent?: Id | null;
   created_at: string;
   updated_at: string;
 }

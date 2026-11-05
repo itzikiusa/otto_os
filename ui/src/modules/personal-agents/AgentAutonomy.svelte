@@ -287,9 +287,9 @@
     </section>
 
     <section class="pa-panel" aria-labelledby="primary-h">
-      <h2 id="primary-h">Your agent</h2>
-      <p class="hint">Your primary assistant: it handles general requests and routes specialist work to your other agents through a shared agent channel. One per workspace.</p>
-      <label class="chk"><input type="checkbox" bind:checked={primary} disabled={!editable || saving} /> Make this my primary agent</label>
+      <h2 id="primary-h">Main agent</h2>
+      <p class="hint">The agent you talk to. From its chat it can create agents when you ask, and hand work to your other agents — each opens beside the chat as a linked thread and reports back to it. One per workspace.</p>
+      <label class="chk"><input type="checkbox" bind:checked={primary} disabled={!editable || saving} /> Make this my main agent</label>
     </section>
 
     {#if editable}
