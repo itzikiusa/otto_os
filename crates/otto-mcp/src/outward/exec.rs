@@ -830,10 +830,7 @@ fn team_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
 /// personality, instruction proposals). `None` = not an own-scope tool.
 /// Always AS the calling agent session (`session_id`, filled by the bridge).
 fn own_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
-    if !(tool.starts_with("routine_")
-        || tool == "personality_set"
-        || tool == "instructions_propose")
-    {
+    if !super::refs::is_agent_own_tool(tool) {
         return None;
     }
     let call = || -> Result<SelfCall, Error> {
