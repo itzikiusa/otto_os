@@ -6,6 +6,7 @@ import { ChapterHeader, ProgressRail } from './components/Titles';
 import { Desktop } from './components/Desktop';
 import { Intro } from './components/Intro';
 import { Outro } from './components/Outro';
+import { PhonePair } from './components/PhonePair';
 import { BEAT, CHAPTERS, SHOTS, T, type PlacedShot } from './layout';
 import { C, GROUP_TINT } from './theme';
 import { SNAP, clamp, easeInOut, sp } from './motion';
@@ -123,5 +124,6 @@ const ShotView: React.FC<{ s: PlacedShot; lead: number; inE: Edge; outE: Edge }>
   }
   else if (s.shot.id === 'intro') body = <Intro frames={n} />;
   else if (s.shot.id === 'outro') body = <Outro frames={n} />;
+  else if (s.shot.id === 'phone-pair') body = <PhonePair frames={n} />;
   return <AbsoluteFill style={style}>{body}</AbsoluteFill>;
 };

@@ -1,12 +1,12 @@
 {
-  "edition": "20261031",
+  "edition": "20261105",
   "bpm": 120,
   "fps": 30,
   "beatFrames": 15,
   "barFrames": 60,
-  "totalBars": 66,
-  "totalFrames": 3960,
-  "totalSeconds": 132,
+  "totalBars": 75,
+  "totalFrames": 4500,
+  "totalSeconds": 150,
   "chapters": [
     {
       "id": "intro",
@@ -102,19 +102,19 @@
       "title": "Threads",
       "music": null,
       "startBar": 16,
-      "bars": 5,
+      "bars": 6,
       "startFrame": 960,
-      "frames": 300,
+      "frames": 360,
       "lines": [
         {
-          "text": "Threads gives your agents a calm, inbox-style workspace.",
+          "text": "Threads run your agents on the structured runtime: plans, commands and diffs stream live.",
           "start": 32.25,
-          "end": 36.85
+          "end": 37.85
         },
         {
-          "text": "Split live conversations side-by-side, inspect files and diffs, and relay between peers.",
-          "start": 37,
-          "end": 41.85
+          "text": "Approve right where the agent asks, and pick the thread up on your phone.",
+          "start": 38,
+          "end": 43.85
         }
       ]
     },
@@ -123,20 +123,20 @@
       "section": "loops",
       "title": "Goal Loops",
       "music": "verse",
-      "startBar": 21,
+      "startBar": 22,
       "bars": 3,
-      "startFrame": 1260,
+      "startFrame": 1320,
       "frames": 180,
       "lines": [
         {
           "text": "Give a goal and acceptance checks.",
-          "start": 42.25,
-          "end": 44.85
+          "start": 44.25,
+          "end": 46.85
         },
         {
           "text": "Goal loops plan, execute and evaluate until every check passes.",
-          "start": 45,
-          "end": 47.85
+          "start": 47,
+          "end": 49.85
         }
       ]
     },
@@ -145,20 +145,42 @@
       "section": "workflows",
       "title": "Workflows and Scheduled Tasks",
       "music": null,
-      "startBar": 24,
+      "startBar": 25,
       "bars": 4,
-      "startFrame": 1440,
+      "startFrame": 1500,
       "frames": 240,
       "lines": [
         {
           "text": "Workflows chain agents, approvals and tools.",
-          "start": 48.25,
-          "end": 51.85
+          "start": 50.25,
+          "end": 53.85
         },
         {
-          "text": "Scheduled tasks and personal agents run on one unified hub.",
-          "start": 52,
-          "end": 55.85
+          "text": "Scheduled tasks run agents on a cadence and report back.",
+          "start": 54,
+          "end": 57.85
+        }
+      ]
+    },
+    {
+      "id": "personal-agents",
+      "section": "personal-agents",
+      "title": "Personal Agents",
+      "music": null,
+      "startBar": 29,
+      "bars": 4,
+      "startFrame": 1740,
+      "frames": 240,
+      "lines": [
+        {
+          "text": "A personal agent's Chat is a thread on the same runtime, with its tools.",
+          "start": 58.25,
+          "end": 61.85
+        },
+        {
+          "text": "A main agent delegates to its team and gets their reports back.",
+          "start": 62,
+          "end": 65.85
         }
       ]
     },
@@ -167,20 +189,20 @@
       "section": "git",
       "title": "Git and AI review",
       "music": "chorus",
-      "startBar": 28,
+      "startBar": 33,
       "bars": 4,
-      "startFrame": 1680,
+      "startFrame": 1980,
       "frames": 240,
       "lines": [
         {
           "text": "A commit graph with your work in progress and pull requests.",
-          "start": 56.25,
-          "end": 59.85
+          "start": 66.25,
+          "end": 69.85
         },
         {
           "text": "Multi-agent code review turns findings into tracked fixes.",
-          "start": 60,
-          "end": 63.85
+          "start": 70,
+          "end": 73.85
         }
       ]
     },
@@ -189,20 +211,20 @@
       "section": "product",
       "title": "Product and Design Hall",
       "music": null,
-      "startBar": 32,
+      "startBar": 37,
       "bars": 5,
-      "startFrame": 1920,
+      "startFrame": 2220,
       "frames": 300,
       "lines": [
         {
           "text": "Product unites stories, designs and learnings in one hub.",
-          "start": 64.25,
-          "end": 68.85
+          "start": 74.25,
+          "end": 78.85
         },
         {
           "text": "Frames, 3D, sites and brand kits live in one versioned library.",
-          "start": 69,
-          "end": 73.85
+          "start": 79,
+          "end": 83.85
         }
       ]
     },
@@ -211,20 +233,20 @@
       "section": "vault",
       "title": "Vault and Skills Lab",
       "music": null,
-      "startBar": 37,
+      "startBar": 42,
       "bars": 3,
-      "startFrame": 2220,
+      "startFrame": 2520,
       "frames": 180,
       "lines": [
         {
           "text": "The Vault links your markdown docs into a live knowledge graph.",
-          "start": 74.25,
-          "end": 76.85
+          "start": 84.25,
+          "end": 86.85
         },
         {
           "text": "Skills Lab reviews, benchmarks and sharpens your agent skills.",
-          "start": 77,
-          "end": 79.85
+          "start": 87,
+          "end": 89.85
         }
       ]
     },
@@ -233,20 +255,20 @@
       "section": "database",
       "title": "Database Explorer",
       "music": "verse",
-      "startBar": 40,
+      "startBar": 45,
       "bars": 4,
-      "startFrame": 2400,
+      "startFrame": 2700,
       "frames": 240,
       "lines": [
         {
           "text": "MySQL, Postgres, MongoDB, Redis and ClickHouse.",
-          "start": 80.25,
-          "end": 83.85
+          "start": 90.25,
+          "end": 93.85
         },
         {
           "text": "Build a query visually and watch agent MCP queries live.",
-          "start": 84,
-          "end": 87.85
+          "start": 94,
+          "end": 97.85
         }
       ]
     },
@@ -255,20 +277,20 @@
       "section": "connections",
       "title": "Connections and cloud",
       "music": null,
-      "startBar": 44,
+      "startBar": 49,
       "bars": 4,
-      "startFrame": 2640,
+      "startFrame": 2940,
       "frames": 240,
       "lines": [
         {
           "text": "SSH, Kafka, AWS, Kubernetes, APIs and the web.",
-          "start": 88.25,
-          "end": 91.85
+          "start": 98.25,
+          "end": 101.85
         },
         {
           "text": "Every agent tool call goes through the MCP control plane.",
-          "start": 92,
-          "end": 95.85
+          "start": 102,
+          "end": 105.85
         }
       ]
     },
@@ -277,20 +299,20 @@
       "section": "insights",
       "title": "Insights and Usage",
       "music": "breakdown",
-      "startBar": 48,
+      "startBar": 53,
       "bars": 4,
-      "startFrame": 2880,
+      "startFrame": 3180,
       "frames": 240,
       "lines": [
         {
           "text": "Insights turns your activity into key findings.",
-          "start": 96.25,
-          "end": 99.85
+          "start": 106.25,
+          "end": 109.85
         },
         {
           "text": "Usage tracks tokens, cost and machine load.",
-          "start": 100,
-          "end": 103.85
+          "start": 110,
+          "end": 113.85
         }
       ]
     },
@@ -299,57 +321,79 @@
       "section": "rooms",
       "title": "Rooms · collaborate and recap",
       "music": "final",
-      "startBar": 52,
+      "startBar": 57,
       "bars": 8,
-      "startFrame": 3120,
+      "startFrame": 3420,
       "frames": 480,
       "lines": [
         {
           "text": "Start a room from a live session. The host admits who joins.",
-          "start": 104.25,
-          "end": 106.85
+          "start": 114.25,
+          "end": 116.85
         },
         {
           "text": "Share a screen and talk it through.",
-          "start": 107,
-          "end": 109.85
+          "start": 117,
+          "end": 119.85
         },
         {
           "text": "Teammates draw on the shared screen, with permission.",
-          "start": 110,
-          "end": 112.85
+          "start": 120,
+          "end": 122.85
         },
         {
           "text": "Hand over terminal control, and take it back at any time.",
-          "start": 113,
-          "end": 115.85
+          "start": 123,
+          "end": 125.85
         },
         {
           "text": "With everyone's consent, get a local recap: decisions and action items.",
-          "start": 116,
-          "end": 119.85
+          "start": 126,
+          "end": 129.85
+        }
+      ]
+    },
+    {
+      "id": "phone",
+      "section": "phone-and-remote",
+      "title": "Phone access",
+      "music": null,
+      "startBar": 65,
+      "bars": 4,
+      "startFrame": 3900,
+      "frames": 240,
+      "lines": [
+        {
+          "text": "Phone access serves Otto to your tailnet only, through Tailscale.",
+          "start": 130.25,
+          "end": 133.85
+        },
+        {
+          "text": "Scan the code, approve the match on your Mac, and your thread continues on the phone.",
+          "start": 134,
+          "end": 137.85
         }
       ]
     },
     {
       "id": "outro",
-      "section": "phone-and-remote",
+      "section": "channels",
       "title": "Everywhere",
       "music": "outro",
-      "startBar": 60,
+      "startBar": 69,
       "bars": 6,
-      "startFrame": 3600,
+      "startFrame": 4140,
       "frames": 360,
       "lines": [
         {
-          "text": "Snip the screen, bridge Slack and Telegram, reach Otto from your phone.",
-          "start": 120.25,
-          "end": 125.85
+          "text": "Snip the screen, bridge Slack and Telegram, and take Otto with you.",
+          "start": 138.25,
+          "end": 143.85
         },
         {
           "text": "Otto. All your agents, one home.",
-          "start": 126,
-          "end": 131.85
+          "start": 144,
+          "end": 149.85
         }
       ]
     }

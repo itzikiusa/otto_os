@@ -5,7 +5,9 @@
 // Coordinates are normalized to the captured page (1600×900 CSS px @2x):
 // x 0..1 left→right, y 0..1 top→bottom.
 // Stills/clips come from scripts/capture.mjs → public/capture/ and the Rooms
-// clips from scripts/capture-rooms.mjs → public/capture/rooms/.
+// clips from scripts/capture-rooms.mjs (or scripts/reuse-rooms.mjs: the same
+// footage, cropped clear of the published movie's caption band — hence the
+// Rooms coordinates below are in that crop) → public/capture/rooms/.
 import type { ChapterSpec } from './types';
 
 const cap = (f: string) => `capture/${f}`;
@@ -130,51 +132,56 @@ export const SCENES: Record<string, ChapterSpec> = {
     ],
   },
 
-  // 5 bars = 20 beats
+  // 6 bars = 24 beats — Threads on the structured runtime (a Codex thread
+  // driven by the capture's scripted app-server, scripts/lib/demo-codex.mjs)
   threads: {
     id: 'threads',
     group: 'Work',
     title: 'Threads',
-    kicker: 'Inbox-style conversations, multi-session splits and workspace files',
+    kicker: 'Agents on the structured runtime: plans, commands and diffs, live',
     shots: [
       {
         kind: 'screen',
-        src: cap('threads-stage.jpg'),
-        beats: 6,
-        label: 'Pick Claude, Codex or Antigravity and start a thread',
+        src: cap('threads-runtime.mp4'),
+        from: 5.2,
+        rate: 2,
+        beats: 10,
+        label: 'Start a Codex thread and watch it work',
         cam: [
-          { b: 0, x: 0.5, y: 0.5, z: 1 },
-          { b: 1.5, x: 0.5, y: 0.44, z: 1.28 },
+          { b: 0, x: 0.6, y: 0.82, z: 1.45 },
+          { b: 3, x: 0.6, y: 0.3, z: 1.5 },
         ],
         callouts: [
-          { b: 1.2, until: 4.5, x: 0.16, y: 0.26, label: 'Pins · Active · Projects · History', side: 'right' },
-          { b: 2.5, x: 0.5, y: 0.36, label: 'Claude · Codex · Antigravity', side: 'bottom' },
+          { b: 4, until: 7.5, x: 0.375, y: 0.17, label: 'Plan · commands · edits, streamed', side: 'right' },
+          { b: 7.5, x: 0.6, y: 0.33, label: 'Tests run, results inline', side: 'bottom' },
         ],
       },
       {
         kind: 'screen',
-        src: cap('threads-split.jpg'),
-        beats: 8,
+        src: cap('threads-approval.jpg'),
+        beats: 5,
         transition: 'push',
-        label: 'Split live threads beside files, diffs and connections',
+        label: 'It asks before anything outward-facing',
         cam: [
-          { b: 0, x: 0.5, y: 0.5, z: 1.02 },
-          { b: 2.5, x: 0.56, y: 0.42, z: 1.28 },
+          { b: 0, x: 0.6, y: 0.45, z: 1.2 },
+          { b: 1, x: 0.6, y: 0.52, z: 1.65 },
         ],
-        callouts: [
-          { b: 1.5, until: 5, x: 0.45, y: 0.18, label: 'Multi-session split', side: 'bottom' },
-          { b: 3.5, x: 0.84, y: 0.24, label: 'Files · Changes · Connections · Peers', side: 'left' },
-        ],
+        callouts: [{ b: 1.5, x: 0.48, y: 0.56, label: 'Approve inline', side: 'bottom' }],
       },
       {
         kind: 'screen',
-        src: cap('threads-peers.jpg'),
-        beats: 6,
+        src: cap('threads-pr.jpg'),
+        beats: 9,
         transition: 'whip',
-        label: 'Direct session-to-session relay and peer timeline',
+        label: 'Approved: the draft PR is up, and the thread keeps going',
         cam: [
-          { b: 0, x: 0.62, y: 0.45, z: 1.1 },
-          { b: 1.5, x: 0.76, y: 0.38, z: 1.4 },
+          { b: 0, x: 0.6, y: 0.4, z: 1.15 },
+          { b: 1.5, x: 0.6, y: 0.5, z: 1.5 },
+          { b: 5.5, x: 0.85, y: 0.12, z: 1.6 },
+        ],
+        callouts: [
+          { b: 2, until: 5.5, x: 0.57, y: 0.62, label: 'Draft PR #218', side: 'top' },
+          { b: 6, x: 0.963, y: 0.026, label: 'Continue on phone', side: 'bottom' },
         ],
       },
     ],
@@ -210,12 +217,12 @@ export const SCENES: Record<string, ChapterSpec> = {
     id: 'workflows',
     group: 'Automate',
     title: 'Workflows and Scheduled Tasks',
-    kicker: 'Pipelines, schedules and personal agents in one place',
+    kicker: 'Pipelines and schedules in one place',
     shots: [
       {
         kind: 'screen',
         src: cap('workflows.jpg'),
-        beats: 6,
+        beats: 8,
         cam: [
           { b: 0, x: 0.5, y: 0.5, z: 1 },
           { b: 1.5, x: 0.42, y: 0.3, z: 1.3 },
@@ -225,23 +232,49 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('scheduled-tasks.jpg'),
-        beats: 5,
+        beats: 8,
         transition: 'push',
-        label: 'Unified Scheduled Tasks: Tasks · Agents · Agent channels',
+        label: 'Scheduled tasks run agents on a cadence and report back',
         cam: [
           { b: 0, x: 0.5, y: 0.4, z: 1.08 },
-          { b: 1, x: 0.45, y: 0.22, z: 1.45 },
+          { b: 1.5, x: 0.45, y: 0.22, z: 1.45 },
+        ],
+      },
+    ],
+  },
+
+  // 4 bars = 16 beats — a personal agent's Chat tab is a runtime thread
+  'personal-agents': {
+    id: 'personal-agents',
+    group: 'Automate',
+    title: 'Personal Agents',
+    kicker: 'Agents with a soul, a schedule and a team, chatting on Threads',
+    shots: [
+      {
+        kind: 'screen',
+        src: cap('pa-chat.mp4'),
+        from: 0.2,
+        rate: 1.15,
+        beats: 12,
+        label: 'Chat with your agent: a thread on the structured runtime',
+        cam: [
+          { b: 0, x: 0.53, y: 0.78, z: 1.4 },
+          { b: 2.5, x: 0.5, y: 0.45, z: 1.42 },
+        ],
+        callouts: [
+          { b: 0.5, until: 3, x: 0.413, y: 0.075, label: 'The Chat tab', side: 'bottom' },
+          { b: 4, until: 8, x: 0.33, y: 0.285, label: 'Tools like otto.slack_digest', side: 'right' },
         ],
       },
       {
         kind: 'screen',
         src: cap('personal-agents.jpg'),
-        beats: 5,
+        beats: 4,
         transition: 'whip',
-        label: 'Personal agents with their own soul, memory and rooms',
+        label: 'A main agent delegates to its team and collects their reports',
         cam: [
           { b: 0, x: 0.5, y: 0.4, z: 1.1 },
-          { b: 1, x: 0.48, y: 0.22, z: 1.5 },
+          { b: 1, x: 0.48, y: 0.22, z: 1.45 },
         ],
       },
     ],
@@ -476,10 +509,10 @@ export const SCENES: Record<string, ChapterSpec> = {
         beats: 6,
         label: 'Start a room from a live session',
         cam: [
-          { b: 0, x: 0.5, y: 0.5, z: 1.05 },
-          { b: 2, x: 0.5, y: 0.5, z: 1.6 },
+          { b: 0, x: 0.5, y: 0.558, z: 1.05 },
+          { b: 2, x: 0.5, y: 0.558, z: 1.6 },
         ],
-        callouts: [{ b: 3, x: 0.62, y: 0.49, label: 'The host admits who joins', side: 'right' }],
+        callouts: [{ b: 3, x: 0.634, y: 0.547, label: 'The host admits who joins', side: 'right' }],
       },
       {
         kind: 'screen',
@@ -490,10 +523,10 @@ export const SCENES: Record<string, ChapterSpec> = {
         transition: 'whip',
         label: 'Share a live screen and talk it through',
         cam: [
-          { b: 0, x: 0.45, y: 0.5, z: 1.1 },
-          { b: 1.5, x: 0.33, y: 0.55, z: 1.75 },
+          { b: 0, x: 0.444, y: 0.558, z: 1.1 },
+          { b: 1.5, x: 0.31, y: 0.614, z: 1.75 },
         ],
-        highlights: [{ b: 2.5, until: 5.5, x: 0.16, y: 0.38, w: 0.3, h: 0.38 }],
+        highlights: [{ b: 2.5, until: 5.5, x: 0.12, y: 0.424, w: 0.335, h: 0.424 }],
       },
       {
         kind: 'screen',
@@ -504,8 +537,8 @@ export const SCENES: Record<string, ChapterSpec> = {
         transition: 'push',
         label: 'Teammates draw on the shared screen, with permission',
         cam: [
-          { b: 0, x: 0.35, y: 0.5, z: 1.4 },
-          { b: 1, x: 0.27, y: 0.53, z: 1.9 },
+          { b: 0, x: 0.332, y: 0.558, z: 1.4 },
+          { b: 1, x: 0.243, y: 0.591, z: 1.9 },
         ],
       },
       {
@@ -517,10 +550,10 @@ export const SCENES: Record<string, ChapterSpec> = {
         transition: 'whip',
         label: 'Hand over terminal control, take it back any time',
         cam: [
-          { b: 0, x: 0.5, y: 0.5, z: 1 },
-          { b: 2, x: 0.28, y: 0.8, z: 1.7 },
+          { b: 0, x: 0.5, y: 0.558, z: 1 },
+          { b: 2, x: 0.254, y: 0.893, z: 1.7 },
         ],
-        callouts: [{ b: 3, x: 0.2, y: 0.83, label: 'A real test, in the shared terminal', side: 'right' }],
+        callouts: [{ b: 3, x: 0.165, y: 0.926, label: 'A real test, in the shared terminal', side: 'right' }],
       },
       {
         kind: 'screen',
@@ -531,11 +564,46 @@ export const SCENES: Record<string, ChapterSpec> = {
         transition: 'push',
         label: 'A local recap, only after everyone consents',
         cam: [
-          { b: 0, x: 0.5, y: 0.45, z: 1.05 },
-          { b: 1.5, x: 0.5, y: 0.33, z: 1.45 },
+          { b: 0, x: 0.5, y: 0.502, z: 1.05 },
+          { b: 1.5, x: 0.5, y: 0.368, z: 1.45 },
         ],
-        callouts: [{ b: 2.5, x: 0.36, y: 0.24, label: 'Decisions · actions · open questions', side: 'right' }],
+        callouts: [{ b: 2.5, x: 0.344, y: 0.268, label: 'Decisions · actions · open questions', side: 'right' }],
       },
+    ],
+  },
+
+  // 4 bars = 16 beats — Phone access over a FICTIONAL tailnet (scripted
+  // Tailscale CLI + a serve-like proxy in scripts/lib/stack.mjs)
+  phone: {
+    id: 'phone',
+    group: 'Everywhere',
+    title: 'Phone access',
+    kicker: 'Your tailnet only, paired with a QR code you approve',
+    shots: [
+      {
+        kind: 'screen',
+        src: cap('phone-settings.jpg'),
+        beats: 4,
+        label: 'Tailscale serves Otto to your own devices',
+        cam: [
+          { b: 0, x: 0.6, y: 0.4, z: 1.1 },
+          { b: 1, x: 0.72, y: 0.3, z: 1.45 },
+        ],
+      },
+      {
+        kind: 'screen',
+        src: cap('phone-pair.mp4'),
+        from: 0.4,
+        rate: 1.8,
+        beats: 7,
+        transition: 'push',
+        label: 'Continue on phone: scan, then approve the matching code',
+        cam: [
+          { b: 0, x: 0.5, y: 0.45, z: 1.15 },
+          { b: 1, x: 0.5, y: 0.5, z: 1.75 },
+        ],
+      },
+      { kind: 'custom', id: 'phone-pair', beats: 5, label: 'The same thread, on your phone' },
     ],
   },
 
