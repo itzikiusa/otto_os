@@ -208,7 +208,7 @@
   $effect(() => {
     const id = tab.savedQueryId;
     if (id && id !== prevSavedId) {
-      const names = extractVars(tab.statement, splitMode);
+      const names = extractVars(tab.statement, splitMode).filter((n) => !tab.vars[n]?.skip);
       const missing = names.filter((n) => !(tab.vars[n]?.value ?? '').trim());
       if (missing.length > 0) varsPrompt = { names: missing, base: tab.statement };
     }
@@ -568,7 +568,7 @@
     }
     // Query-level variables: every :name / {name} in the chosen statement needs
     // a value before it can run.
-    const names = extractVars(base, splitMode);
+    const names = extractVars(base, splitMode).filter((n) => !tab.vars[n]?.skip); // "skip" = left as written
     const missing = names.filter((n) => !(tab.vars[n]?.value ?? '').trim());
     if (missing.length > 0) {
       varsPrompt = { names: missing, base };
@@ -1359,8 +1359,7 @@
         {@const spec = tab.vars[name] ?? defaultVarSpec()}
         <div class="qe-var">
           <span class="qe-var-name mono">{name}</span>
-          <input dir="auto" aria-label={`Value for ${name}`}
-            class="input qe-var-input"
+          <input dir="auto" aria-label={`Value for ${name}`} disabled={spec.skip} class="input qe-var-input"
             value={spec.value}
             placeholder={spec.type === 'number' ? '123' : 'value'}
             spellcheck="false"
@@ -1371,7 +1370,7 @@
             }}
           />
           <select
-            class="input qe-var-type"
+            class="input qe-var-type" disabled={spec.skip}
             value={spec.type}
             title="How to substitute this variable: string (quoted), number (raw), or raw (verbatim)"
             onchange={(e) =>
@@ -1383,7 +1382,7 @@
             <option value="number">number</option>
             <option value="raw">raw</option>
           </select>
-          {#if spec.type === 'string'}
+          {#if spec.type === 'string' && !spec.skip}
             <label class="qe-var-esc" title="Escape quotes inside the value">
               <input
                 type="checkbox"
@@ -1394,6 +1393,7 @@
               esc
             </label>
           {/if}
+          <label class="qe-var-esc" title="Not a variable: leave it in the query as written"><input type="checkbox" checked={!!spec.skip} onchange={(e) => database.setVar(name, { skip: (e.currentTarget as HTMLInputElement).checked })} />skip</label>
         </div>
       {/each}
     </div>

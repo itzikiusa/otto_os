@@ -504,6 +504,8 @@ export interface VarSpec {
   type: VarType;
   /** Escape special chars inside a string literal (doubled `'` for SQL, `\` for redis). */
   escape: boolean;
+  /** Not a variable: leave the token in the query as written (no prompt). */
+  skip?: boolean;
 }
 
 export function defaultVarSpec(value = ''): VarSpec {

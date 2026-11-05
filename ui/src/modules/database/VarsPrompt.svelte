@@ -25,7 +25,7 @@
   let drafts = $state<Record<string, VarSpec>>(
     untrack(() => Object.fromEntries(names.map((n) => [n, { ...(vars[n] ?? defaultVarSpec()) }]))),
   );
-  const missing = $derived(names.filter((n) => !(drafts[n]?.value ?? '').trim()));
+  const missing = $derived(names.filter((n) => !drafts[n]?.skip && !(drafts[n]?.value ?? '').trim()));
 
   function submit(): void {
     if (missing.length > 0) return;
@@ -43,30 +43,36 @@
   <div class="vp" data-testid="vars-prompt">
     <p class="vp-hint">
       This query references {names.length === 1 ? 'a variable' : `${names.length} variables`} without a
-      value. Fill them in to run — values are kept on the tab for next time.
+      value. Fill them in to run, or tick skip to leave one in the query as written — values are
+      kept on the tab for next time.
     </p>
     {#each names as name (name)}
       <div class="vp-row">
         <span class="vp-name mono" title={name}>{name}</span>
         <input dir="auto"
           class="input vp-input"
+          disabled={drafts[name].skip}
           bind:value={drafts[name].value}
           placeholder={drafts[name].type === 'number' ? '123' : 'value'}
           spellcheck="false"
           onkeydown={onKeydown}
           aria-label="Value for {name}"
         />
-        <select class="input vp-type" bind:value={drafts[name].type} title="How to substitute: string (quoted), number (raw), or raw (verbatim)" aria-label="Type for {name}">
+        <select class="input vp-type" disabled={drafts[name].skip} bind:value={drafts[name].type} title="How to substitute: string (quoted), number (raw), or raw (verbatim)" aria-label="Type for {name}">
           <option value="string">string</option>
           <option value="number">number</option>
           <option value="raw">raw</option>
         </select>
-        {#if drafts[name].type === 'string'}
+        {#if drafts[name].type === 'string' && !drafts[name].skip}
           <label class="vp-esc" title="Escape quotes inside the value">
             <input type="checkbox" bind:checked={drafts[name].escape} />
             esc
           </label>
         {/if}
+        <label class="vp-esc" title="Not a variable: leave it in the query as written">
+          <input type="checkbox" bind:checked={drafts[name].skip} aria-label="Skip {name}" />
+          skip
+        </label>
       </div>
     {/each}
   </div>

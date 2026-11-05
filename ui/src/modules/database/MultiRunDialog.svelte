@@ -127,7 +127,7 @@
   const targets = $derived(buildTargets(order, picks, { mode: clusterMode }, overrides));
 
   // ── Parameters ────────────────────────────────────────────────────────────
-  const placeholders = $derived(extractVars(statement, splitMode));
+  const placeholders = $derived(extractVars(statement, splitMode).filter((n) => !database.tab.vars?.[n]?.skip));
   interface ParamDraft {
     text: string;
     type: DbParamType;

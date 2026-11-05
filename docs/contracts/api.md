@@ -2591,8 +2591,9 @@ session is suspended (resumable providers) or killed, so a finished run holds no
 live PTYs; `true` leaves it running). `review_run` runs the multi-agent PR-review
 engine per step: `providers` (string[]), `lenses` (string[]; `skills` is an
 alias), `threshold` (0–100, default 80), `require_pass` (bool — errors the step
-when the review cannot pass), `allow_summary_fallback` (bool, default `false` —
-accept a deterministic summary only when reviewer coverage is complete), `mode` (`"fan_out"`|`"orchestrator"` — absent = follow the run
+when the review cannot pass), `allow_summary_fallback` (bool, default `true` —
+a deterministic fallback summary keeps every finding, so the score still
+counts when every reviewer finished; `false` fails the review on a fallback), `mode` (`"fan_out"`|`"orchestrator"` — absent = follow the run
 override / the stored `ReviewConfig.mode` / `fan_out`; any other string is
 ignored; a run started with `RunWorkflowReq.review_mode` overrides it); its
 output adds
