@@ -62,6 +62,7 @@
     channels: lazyComponent(() => import('./Channels.svelte')),
     'mcp-servers': lazyComponent(() => import('./McpServers.svelte')),
     'language-servers': lazyComponent(() => import('./LanguageServers.svelte')),
+    'phone-access': lazyComponent(() => import('./PhoneAccess.svelte')),
     sharing: lazyComponent(() => import('./EmailSenderSetup.svelte')),
     providers: lazyComponent(() => import('./Providers.svelte')),
     'context-soul': lazyComponent(() => import('./ContextSoul.svelte')),

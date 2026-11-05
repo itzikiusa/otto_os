@@ -208,3 +208,33 @@ export function workLabel(item: TurnItem): string {
       return title ?? item.type.replaceAll('_', ' ');
   }
 }
+
+/** What an Otto session/thread tool call points at, for the quick link under
+ *  its row: the thread `otto.thread_open` opened (or `open_session`, which a
+ *  thread's agent is given as a linked thread), the peer a
+ *  `thread_message` / `thread_read` spoke to, or the terminal session an
+ *  `open_session` from elsewhere started. Null for anything else. */
+export interface OpenedTarget {
+  kind: 'thread' | 'session';
+  id: string;
+}
+
+const ULID = /"id"\s*:\s*"([0-9A-HJKMNP-TV-Z]{26})"/;
+
+export function openedTarget(item: TurnItem): OpenedTarget | null {
+  if (item.type !== 'dynamic_tool' || item.error) return null;
+  const tool = item.tool_name.replace(/^.*otto[._]/, '');
+  const input = (item.input && typeof item.input === 'object' ? item.input : {}) as Record<string, unknown>;
+  const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
+  if (tool === 'thread_message') return idOr(str(input.to_session_id), 'thread');
+  if (tool === 'thread_read') return idOr(str(input.peer_session_id), 'thread');
+  if (tool !== 'thread_open' && tool !== 'open_session') return null;
+  const id = item.output?.match(ULID)?.[1] ?? null;
+  // A runtime thread's row carries `access_mode`; a terminal session's doesn't.
+  const kind = tool === 'thread_open' || item.output?.includes('"access_mode"') ? 'thread' : 'session';
+  return idOr(id, kind);
+}
+
+function idOr(id: string | null, kind: OpenedTarget['kind']): OpenedTarget | null {
+  return id ? { kind, id } : null;
+}

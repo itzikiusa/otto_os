@@ -43,6 +43,7 @@
   let roomChunk: Promise<typeof import('./modules/rooms/RoomGuest.svelte')> | null = null;
   let hostRoomChunk: Promise<typeof import('./modules/rooms/RoomHost.svelte')> | null = null;
   let shareChunk: Promise<typeof import('./modules/share/SharePage.svelte')> | null = null;
+  let pairChunk: Promise<typeof import('./modules/phone/PairPage.svelte')> | null = null;
   let barChunk: Promise<typeof import('./modules/desktop/BarHost.svelte')> | null = null;
   let trayChunk: Promise<typeof import('./modules/desktop/TrayPage.svelte')> | null = null;
   // The shell resolves together with the page its route shows (each page is
@@ -56,15 +57,18 @@
   const room = () => (roomChunk ??= import('./modules/rooms/RoomGuest.svelte'));
   const hostRoom = () => (hostRoomChunk ??= import('./modules/rooms/RoomHost.svelte'));
   const share = () => (shareChunk ??= import('./modules/share/SharePage.svelte'));
+  const pair = () => (pairChunk ??= import('./modules/phone/PairPage.svelte'));
   const barHost = () => (barChunk ??= import('./modules/desktop/BarHost.svelte'));
   const trayPage = () => (trayChunk ??= import('./modules/desktop/TrayPage.svelte'));
   // The main window fetches the shell chunk while /meta is still in flight.
-  if (!['bar', 'tray', 's', 'room', 'room-host'].includes(router.module)) void shell().catch(() => {});
+  if (!['bar', 'tray', 's', 'room', 'room-host', 'pair'].includes(router.module)) void shell().catch(() => {});
 
   // Boot once per entry into an authenticated route, not per navigation:
   // reading `router.module` inside the effect re-ran boot() on every sidebar
   // switch, which reset the phase to 'loading' and remounted the whole shell.
-  const needsAuth = $derived(router.module !== 'room');
+  // The phone pairing page (`#/pair`) is pre-auth too: it signs the phone in
+  // itself and reloads into the normal boot once approved.
+  const needsAuth = $derived(router.module !== 'room' && router.module !== 'pair');
   $effect(() => {
     if (needsAuth) untrack(() => void auth.boot());
   });
@@ -190,6 +194,10 @@
        route must bypass the login/onboarding gate entirely and render the
        single-session SharePage using the token captured from the URL fragment. -->
   {#await share() then m}<m.default sessionId={router.parts[1] ?? ''} />{:catch}{@render chunkError()}{/await}
+{:else if router.module === 'pair'}
+  <!-- Phone pairing (pre-auth): the one-time code from the QR is the only
+       credential until the person on the Mac approves this phone. -->
+  {#await pair()}{@render chunkWait()}{:then m}<m.default />{:catch}{@render chunkError()}{/await}
 {:else if router.module === 'bar'}
   <!-- Desktop shell's assistant bar panel (`otto-bar`): a transparent
        chromeless window, so it never renders the boot screens or the Shell —

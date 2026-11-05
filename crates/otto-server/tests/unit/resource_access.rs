@@ -132,6 +132,7 @@ fn auth(user: &User) -> otto_core::auth::AuthContext {
         mcp_internal: false,
         mcp_session_id: None,
         managed_session_id: None,
+        device_id: None,
     }
 }
 async fn request<S: AccessCtx>(

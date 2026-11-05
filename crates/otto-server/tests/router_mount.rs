@@ -246,6 +246,9 @@ const PUBLIC_ROUTES: &[&str] = &[
     // Share-link guests (email OTP verify / extend).
     "POST /api/v1/share/extend",
     "POST /api/v1/share/verify",
+    // Phone pairing (the code / poll secret is the credential; tailnet only).
+    "POST /api/v1/phone/pair/claim",
+    "POST /api/v1/phone/pair/poll",
     // Inbound webhooks — per-workspace webhook key.
     "POST /api/v1/webhooks/{workspace_id}",
     // Room guests join with an invite credential.

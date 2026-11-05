@@ -48,6 +48,7 @@ function browser(initial = '#/home') {
     './rooms/invites': { captureRoomInvite },
     './sidebar': { activeNavId },
     './shareTokenStore': { dropShareToken: () => {}, storeShareToken: () => {}, storedShareToken: () => null },
+    './phonePair': { parsePairRoute: () => null, savePairState: () => {} },
   }, { window, history });
   return { router, history, entries: () => entries.map((e) => e.hash), at: () => at, loc };
 }

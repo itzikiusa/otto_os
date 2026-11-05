@@ -281,6 +281,7 @@ mod framing_tests {
             mcp_internal: false,
             mcp_session_id: None,
             managed_session_id: None,
+            device_id: None,
         };
         let (status, v) = body(post_response(&tools, &auth, &json!([]), "t").await).await;
         assert_eq!(status, StatusCode::OK);

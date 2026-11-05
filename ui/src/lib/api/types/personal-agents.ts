@@ -34,8 +34,66 @@ export interface PersonalAgent {
   /** The agent's single interactive chat session (set by the chat-session route). */
   chat_session_id?: string | null;
   created_by?: string | null;
+  /** The main agent that created this one (`otto.personal_agent_create`);
+   *  absent / null = a person did. */
+  created_by_agent?: Id | null;
   created_at: string;
   updated_at: string;
+}
+
+/** `GET /personal-agents/templates` — one New-agent template (the one source
+ *  is `docs/contracts/personal-agent-templates.json`). */
+export interface PersonalAgentTemplate {
+  id: string;
+  title: string;
+  description: string;
+  avatar: string;
+  name: string;
+  soul_md: string;
+  schedule: Record<string, unknown>;
+  directive: string;
+}
+
+/** `POST /workspaces/{id}/personal-agents` — `template` pre-fills name /
+ *  avatar / persona and its schedule (explicit fields win); `schedules`
+ *  replaces the template's (empty directive = the template's); `timezone` is
+ *  the template schedule's; `primary` makes it the main agent. */
+export interface CreatePersonalAgentReq {
+  name?: string;
+  template?: string;
+  avatar?: string;
+  soul_md?: string;
+  provider?: string;
+  model?: string;
+  cwd?: string;
+  browser?: boolean;
+  delivery?: Record<string, unknown>;
+  enabled?: boolean;
+  schedules?: {
+    schedule: Record<string, unknown>;
+    timezone?: string;
+    directive?: string;
+    enabled?: boolean;
+    permission?: PersonalAgentPermission;
+    idempotency_key?: string;
+  }[];
+  timezone?: string;
+  primary?: boolean;
+}
+
+/** The create response: the agent plus the schedules it was created with. */
+export type CreatedPersonalAgent = PersonalAgent & {
+  schedules: PersonalAgentSchedule[];
+  primary?: boolean;
+};
+
+/** `GET /personal-agents/{id}/overview` (`otto.get_personal_agent`). */
+export interface PersonalAgentOverview {
+  agent: PersonalAgent;
+  schedules: PersonalAgentSchedule[];
+  autonomy: PersonalAgentAutonomy;
+  /** The 5 latest runs, newest first. */
+  recent_runs: PersonalAgentRun[];
 }
 
 /** One cadence+directive of a personal agent (1..N per agent, own cursor). */
@@ -129,6 +187,10 @@ export interface PersonalAgentAutonomy {
   rules: PersonalAgentRule[];
   /** The workspace's primary assistant ("your agent"). */
   primary: boolean;
+  /** "Can act as me in Slack": the owner's Slack team ids this agent may act
+   *  in as them (default none). Set via `PUT /personal-agents/{id}/slack-as-me`
+   *  (owner only), not the autonomy save. */
+  slack_as_me_teams?: string[];
 }
 
 /** `PUT /personal-agents/{id}/autonomy` — partial; omitted sections are kept. */

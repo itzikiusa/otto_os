@@ -668,6 +668,7 @@ fn auth_for(user: &otto_core::domain::User) -> AuthContext {
         mcp_internal: false,
         mcp_session_id: None,
         managed_session_id: None,
+        device_id: None,
     }
 }
 

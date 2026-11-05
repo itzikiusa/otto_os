@@ -1861,6 +1861,7 @@ mod tests {
                 mcp_internal: false,
                 mcp_session_id: None,
                 managed_session_id: None,
+                device_id: None,
             });
         let response = app.clone().oneshot(request).await.unwrap();
         let status = response.status();

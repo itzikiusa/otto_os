@@ -86,9 +86,13 @@ pub fn call_timeout(tool: &str, args: &Value) -> Duration {
         | "run_workflow"
         | "start_pr_review"
         | "open_session"
-        | "thread_open" => 60,
+        | "thread_open"
+        | "personal_agent_delegate" => 60,
         // A peer's reply long-polls up to 25 s.
         "thread_read" => 35,
+        // Several searches (activity) / a member walk + history or search.
+        "slack_my_activity" => 60,
+        "slack_read_messages" | "slack_search" | "slack_list_conversations" => 45,
         // Merge PUT (+ GitLab rebase PUT) around a ≤ 60 s provider poll.
         "merge_pr" => 90,
         // createmeta types + fields (paged), parent lookup, POST, verify GET.
@@ -211,6 +215,28 @@ pub async fn upsert_request_preserving(
         }
         None => Ok(saved),
     }
+}
+
+/// In Threads, "open a session" means a LINKED THREAD: an agent running in a
+/// structured thread (`in_thread`) that calls `otto.open_session` gets
+/// `otto.thread_open` instead — a thread beside its own, in its linked group,
+/// never a terminal session. `provider`/`prompt`/`title`/`model`/`effort`
+/// carry over; workspace and folder come from the calling thread. `None`
+/// leaves the call alone.
+pub fn thread_alias(tool: &str, args: &Value, in_thread: bool) -> Option<(String, Value)> {
+    let short = tool
+        .strip_prefix("otto.")
+        .or_else(|| tool.strip_prefix("otto_"));
+    if !in_thread || short.unwrap_or(tool) != "open_session" {
+        return None;
+    }
+    let mut out = json!({});
+    for k in ["provider", "prompt", "title", "model", "effort"] {
+        if let Some(v) = args.get(k).filter(|v| v.is_string()) {
+            out[k] = v.clone();
+        }
+    }
+    Some(("otto.thread_open".into(), out))
 }
 
 pub fn arg_str(args: &Value, key: &str) -> Result<String, Error> {
@@ -578,6 +604,114 @@ fn db_query_call(args: &Value, write: bool) -> Result<SelfCall, Error> {
     ))
 }
 
+/// The Slack slice of [`route_for`] — `/workspaces/{id}/integrations/slack/…`
+/// (otto-channels `slack_tools`). `None` = not a Slack tool.
+fn slack_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
+    let short = tool.strip_prefix("slack_")?;
+    let call = || -> Result<SelfCall, Error> {
+        let base = format!(
+            "/api/v1/workspaces/{}/integrations/slack",
+            seg(&arg_str(args, "workspace_id")?)
+        );
+        // The JSON body: every listed argument the caller sent.
+        let body = |keys: &[&str]| {
+            let mut b = json!({});
+            for k in keys {
+                if let Some(v) = args.get(*k).filter(|v| !v.is_null()) {
+                    b[*k] = v.clone();
+                }
+            }
+            b
+        };
+        let get = |path: &str, keys: &[(&str, &str)]| {
+            let q = opt_query(args, keys);
+            SelfCall::get(if q.is_empty() {
+                format!("{base}/{path}")
+            } else {
+                format!("{base}/{path}?{q}")
+            })
+        };
+        let who = [("as", "as"), ("team", "team")];
+        Ok(match short {
+            "my_workspaces" => get("teams", &[]),
+            "list_conversations" => get(
+                "conversations",
+                &[
+                    who[0],
+                    who[1],
+                    ("q", "q"),
+                    ("types", "types"),
+                    ("limit", "limit"),
+                ],
+            ),
+            "find_user" => {
+                arg_str(args, "q")?;
+                get("users", &[("q", "q"), who[0], who[1]])
+            }
+            "read_messages" => {
+                arg_str(args, "channel")?;
+                get(
+                    "messages",
+                    &[
+                        ("channel", "channel"),
+                        who[0],
+                        who[1],
+                        ("thread_ts", "thread_ts"),
+                        ("oldest", "oldest"),
+                        ("latest", "latest"),
+                        ("limit", "limit"),
+                        ("cursor", "cursor"),
+                    ],
+                )
+            }
+            "search" => {
+                arg_str(args, "query")?;
+                get(
+                    "search",
+                    &[
+                        ("query", "query"),
+                        who[1],
+                        ("count", "count"),
+                        ("page", "page"),
+                        ("sort", "sort"),
+                    ],
+                )
+            }
+            "my_activity" => get(
+                "activity",
+                &[who[1], ("since", "since"), ("limit", "limit")],
+            ),
+            "post_message" => {
+                arg_str(args, "channel")?;
+                arg_str(args, "text")?;
+                SelfCall::post(
+                    format!("{base}/messages"),
+                    body(&["as", "team", "channel", "text", "thread_ts"]),
+                )
+            }
+            "react" => {
+                for k in ["channel", "ts", "name"] {
+                    arg_str(args, k)?;
+                }
+                SelfCall::post(
+                    format!("{base}/reactions"),
+                    body(&["as", "team", "channel", "ts", "name"]),
+                )
+            }
+            "mark_unread" => {
+                arg_str(args, "channel")?;
+                arg_str(args, "ts")?;
+                SelfCall::post(
+                    format!("{base}/mark"),
+                    body(&["team", "channel", "ts", "unread"]),
+                )
+            }
+            other => return Err(Error::Invalid(format!("unknown otto tool 'slack_{other}'"))),
+        })
+    };
+    Some(call())
+}
+
 /// The Linked Threads slice of [`route_for`] (split out to keep it under the
 /// size ratchet). `None` = not a thread tool.
 fn thread_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
@@ -629,10 +763,140 @@ fn thread_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
                     seg(&peer)
                 ))
             }
+            "thread_close" => {
+                let id = arg_str(args, "session_id")?;
+                let peer = arg_str(args, "peer_session_id")?;
+                SelfCall::post(
+                    format!(
+                        "/api/v1/runtime-sessions/{}/peers/{}/close",
+                        seg(&id),
+                        seg(&peer)
+                    ),
+                    json!({}),
+                )
+            }
             _ => unreachable!("guarded by the prefix check"),
         })
     };
     tool.starts_with("thread_").then(call)
+}
+
+/// The main-agent team slice of [`route_for`]. `None` = not a team tool.
+/// Always AS the calling agent session (`session_id`, filled by the bridge).
+fn team_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
+    let call = || -> Result<SelfCall, Error> {
+        let id = arg_str(args, "session_id")?;
+        Ok(match tool {
+            "personal_agent_list" => SelfCall::get(format!(
+                "/api/v1/personal-agents/team?session_id={}",
+                seg(&id)
+            )),
+            "personal_agent_create" => {
+                let mut body = json!({
+                    "session_id": id,
+                    "name": arg_str(args, "name")?,
+                    "instructions": arg_str(args, "instructions")?,
+                });
+                for k in ["provider", "model"] {
+                    if let Some(v) = args
+                        .get(k)
+                        .and_then(Value::as_str)
+                        .filter(|v| !v.trim().is_empty())
+                    {
+                        body[k] = json!(v);
+                    }
+                }
+                SelfCall::post("/api/v1/personal-agents/team".to_string(), body)
+            }
+            "personal_agent_delegate" => SelfCall::post(
+                "/api/v1/personal-agents/team/delegate".to_string(),
+                json!({
+                    "session_id": id,
+                    "agent": arg_str(args, "agent")?,
+                    "task": arg_str(args, "task")?,
+                }),
+            ),
+            _ => return Err(Error::Invalid(format!("unknown tool otto.{tool}"))),
+        })
+    };
+    tool.starts_with("personal_agent_").then(call)
+}
+
+/// `args` without the routing keys (the path carries them; `workspace_id` is
+/// filled by the choke point for the pin / approval scope, never a field).
+fn body_without(args: &Value, keys: &[&str]) -> Value {
+    let mut body = args.clone();
+    if let Some(o) = body.as_object_mut() {
+        for k in keys.iter().chain(&["workspace_id"]) {
+            o.remove(*k);
+        }
+    }
+    body
+}
+
+/// The "Agent admin" slice of [`route_for`] (a person's personal agents, set
+/// up and run for them). `None` = not an agent-admin tool.
+fn admin_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
+    let agent =
+        || arg_str(args, "agent_id").map(|id| format!("/api/v1/personal-agents/{}", seg(&id)));
+    let schedule = || {
+        arg_str(args, "schedule_id")
+            .map(|id| format!("/api/v1/personal-agents/schedules/{}", seg(&id)))
+    };
+    let run = |what: &str| {
+        arg_str(args, "run_id").map(|id| format!("/api/v1/{what}/runs/{}/report", seg(&id)))
+    };
+    let call = || -> Result<SelfCall, Error> {
+        Ok(match tool {
+            "list_personal_agent_templates" => {
+                SelfCall::get("/api/v1/personal-agents/templates".into())
+            }
+            "list_personal_agents" => SelfCall::get(format!(
+                "/api/v1/workspaces/{}/personal-agents",
+                seg(&arg_str(args, "workspace_id")?)
+            )),
+            "get_personal_agent" => SelfCall::get(format!("{}/overview", agent()?)),
+            "list_personal_agent_runs" => SelfCall::get(format!("{}/runs", agent()?)),
+            "get_personal_agent_report" => SelfCall::get(run("personal-agents")?),
+            "get_scheduled_task_report" => SelfCall::get(run("scheduled-tasks")?),
+            "create_personal_agent" => SelfCall::post(
+                format!(
+                    "/api/v1/workspaces/{}/personal-agents",
+                    seg(&arg_str(args, "workspace_id")?)
+                ),
+                body_without(args, &[]),
+            ),
+            "update_personal_agent" => SelfCall::patch(agent()?, body_without(args, &["agent_id"])),
+            "delete_personal_agent" => SelfCall::delete(agent()?),
+            "add_personal_agent_schedule" => SelfCall::post(
+                format!("{}/schedules", agent()?),
+                body_without(args, &["agent_id"]),
+            ),
+            "update_personal_agent_schedule" => {
+                SelfCall::patch(schedule()?, body_without(args, &["schedule_id"]))
+            }
+            "remove_personal_agent_schedule" => SelfCall::delete(schedule()?),
+            "set_personal_agent_autonomy" => SelfCall::put(
+                format!("{}/autonomy", agent()?),
+                body_without(args, &["agent_id"]),
+            ),
+            "set_personal_agent_slack_as_me" => SelfCall::put(
+                format!("{}/slack-as-me", agent()?),
+                json!({"teams": args.get("teams").cloned().unwrap_or_else(|| json!([]))}),
+            ),
+            "run_personal_agent" => {
+                let mut body = json!({});
+                if let Some(s) = args.get("schedule_id").filter(|v| v.is_string()) {
+                    body["schedule_id"] = s.clone();
+                }
+                SelfCall::post(format!("{}/run", agent()?), body)
+            }
+            _ => return Err(Error::Invalid(format!("unknown tool otto.{tool}"))),
+        })
+    };
+    // `_personal_agent`: never the main agent's `personal_agent_*` team tools.
+    let admin = tool.contains("_personal_agent") || tool == "get_scheduled_task_report";
+    admin.then(call)
 }
 
 /// Map an outward tool + its (validated) arguments to the exact self-call against
@@ -640,7 +904,10 @@ fn thread_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
 /// endpoint's native RBAC when the call is later executed as the user. `ask_human_approval`
 /// is handled earlier (in `execute_otto_tool`) and never reaches here.
 pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
-    if let Some(call) = thread_route(tool, args) {
+    if let Some(call) = thread_route(tool, args).or_else(|| slack_route(tool, args)) {
+        return call;
+    }
+    if let Some(call) = team_route(tool, args).or_else(|| admin_route(tool, args)) {
         return call;
     }
     Ok(match tool {
@@ -2075,7 +2342,11 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
 
 /// Tools whose route answers `text/plain` rather than JSON; [`run_tool`] wraps
 /// the body as `{"text": …}` for them (today only the pod-logs route).
-pub const TEXT_TOOLS: &[&str] = &["k8s_logs"];
+pub const TEXT_TOOLS: &[&str] = &[
+    "k8s_logs",
+    "get_personal_agent_report",
+    "get_scheduled_task_report",
+];
 /// Cap on the text handed back for a [`TEXT_TOOLS`] call (keeps the tail —
 /// the newest log lines). The route's own non-follow cap is 5 MiB.
 pub const MAX_TEXT_CHARS: usize = 256 * 1024;
@@ -2262,4 +2533,26 @@ pub async fn self_get_text(
         (text, false)
     };
     Ok(json!({"text": text, "truncated": truncated}))
+}
+
+#[cfg(test)]
+mod thread_alias_tests {
+    use super::*;
+
+    #[test]
+    fn open_session_from_a_thread_becomes_a_linked_thread() {
+        let args = json!({"workspace_id": "w", "provider": "codex", "prompt": "do x",
+                          "cwd": "/elsewhere", "model": "gpt-5"});
+        let (tool, a) = thread_alias("otto.open_session", &args, true).unwrap();
+        assert_eq!(tool, "otto.thread_open");
+        assert_eq!(
+            a,
+            json!({"provider": "codex", "prompt": "do x", "model": "gpt-5"})
+        );
+        // A terminal session still opens a terminal session.
+        assert!(thread_alias("otto.open_session", &args, false).is_none());
+        assert!(thread_alias("otto.list_sessions", &args, true).is_none());
+        // The stdio spelling too.
+        assert!(thread_alias("otto_open_session", &args, true).is_some());
+    }
 }

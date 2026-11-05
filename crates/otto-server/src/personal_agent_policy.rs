@@ -42,7 +42,12 @@ pub enum AgentGate {
 /// Non-mutating catalog tools a read-only session still may not call: a room
 /// post is a SEND and an approval request asks a human to let the agent act —
 /// a read-only run reports instead.
-const READ_ONLY_EXTRA_DENY: &[&str] = &["room_post", "ask_human_approval"];
+const READ_ONLY_EXTRA_DENY: &[&str] = &[
+    "room_post",
+    "ask_human_approval",
+    "personal_agent_create",
+    "personal_agent_delegate",
+];
 
 /// True iff a read-only session may NOT call the bare tool.
 pub fn read_only_denies(bare: &str) -> bool {
@@ -609,11 +614,24 @@ pub async fn session_binding(
     if let Some(hit) = binding_cache::get(&key) {
         return Some(hit);
     }
-    let s = otto_state::SessionsRepo::new(pool.clone())
-        .get(&session_id.to_string())
+    let b = match otto_state::SessionsRepo::new(pool.clone())
+        .get(&key.1)
         .await
-        .ok()?;
-    let b = SessionBinding::of(&s);
+    {
+        Ok(s) => SessionBinding::of(&s),
+        // A Threads thread (no `sessions` row): its server-owned meta — a
+        // personal agent's run / chat — else a plain thread that writes
+        // while it is open.
+        Err(_) => {
+            let t = otto_state::AgentRuntimeRepo::new(pool.clone())
+                .get(&key.1)
+                .await
+                .ok()?;
+            let mut b = SessionBinding::of(&t.session.clone().into_session());
+            b.read_only |= t.closed;
+            b
+        }
+    };
     binding_cache::put(key, b.clone());
     Some(b)
 }

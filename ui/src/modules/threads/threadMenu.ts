@@ -9,6 +9,7 @@ import { ws } from '../../lib/stores/workspace.svelte';
 import { toastError } from '../../lib/toastError';
 import { delegatedParentId, isPlainShellSession } from './threadsHelpers';
 import { threads } from './threadsStore.svelte';
+import { phoneHandoff } from '../../lib/stores/phoneHandoff.svelte';
 
 export async function promptRenameThread(s: Session): Promise<void> {
   const next = await confirmer.promptText('Enter a title for this thread.', {
@@ -51,6 +52,7 @@ export function buildThreadMenu(s: Session, opts: { onstartroom: (id: string) =>
     ...(!shell ? [{ label: 'Side chat…', icon: 'comment', hint: '/btw', action: () => threads.openSideChat(id) }] : []),
     { label: 'Send message to peer…', icon: 'send', action: () => threads.togglePeerBar(id) },
     { label: 'Session room…', icon: 'people', action: () => opts.onstartroom(id) },
+    ...phoneHandoff.menuItem(`threads/${id}`, 'this thread'),
     ...(parentId
       ? [{ label: 'Open with parent in Split', icon: 'split', action: () => threads.openPairInSplit(parentId, id) }]
       : []),

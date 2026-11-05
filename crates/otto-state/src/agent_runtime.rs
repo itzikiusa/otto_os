@@ -1,4 +1,4 @@
-//! Persistence for the structured agent runtime (migrations 0197–0200): runtime
+//! Persistence for the structured agent runtime (migrations 0197–0201): runtime
 //! session rows and the entity projection (the latest JSON state of every
 //! provider session / thread, turn, turn item, runtime request and plan —
 //! the T3 Code projection model). The live event ring lives in memory
@@ -30,6 +30,8 @@ pub struct NewRuntimeSession {
     pub created_by: Id,
     /// The linked group's root thread (see `RuntimeSession::parent_id`).
     pub parent_id: Option<Id>,
+    /// Server-owned meta (see `RuntimeSession::meta`).
+    pub meta: Option<serde_json::Value>,
 }
 
 /// A stored session plus the sequence floor a restarted runtime resumes above.
@@ -55,7 +57,7 @@ pub struct RuntimeEntityRow {
 macro_rules! session_cols {
     () => {
         "id, workspace_id, provider, title, cwd, model, native_thread_id, closed, \
-         created_by, created_at, last_active_at, last_seq, seq_reserved, access_mode, parent_id, ui_control"
+         created_by, created_at, last_active_at, last_seq, seq_reserved, access_mode, parent_id, ui_control, meta"
     };
 }
 
@@ -96,6 +98,9 @@ fn row_to_session(r: &sqlx::sqlite::SqliteRow) -> Result<RuntimeSessionRecord> {
             ui_control: r
                 .get::<Option<String>, _>("ui_control")
                 .and_then(|j| serde_json::from_str(&j).ok()),
+            meta: r
+                .get::<Option<String>, _>("meta")
+                .and_then(|j| serde_json::from_str(&j).ok()),
         },
         closed,
         seq_reserved: u(r.get("seq_reserved")),
@@ -111,8 +116,8 @@ impl AgentRuntimeRepo {
         let now = fmt(Utc::now());
         sqlx::query(
             "INSERT INTO agent_runtime_sessions (id, workspace_id, provider, title, cwd, model, \
-             access_mode, created_by, created_at, last_active_at, parent_id) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             access_mode, created_by, created_at, last_active_at, parent_id, meta) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&new.id)
         .bind(&new.workspace_id)
@@ -125,6 +130,7 @@ impl AgentRuntimeRepo {
         .bind(&now)
         .bind(&now)
         .bind(&new.parent_id)
+        .bind(new.meta.as_ref().map(|m| m.to_string()))
         .execute(&self.pool)
         .await
         .map_err(dberr("create runtime session"))?;
@@ -387,12 +393,17 @@ mod tests {
                 model: None,
                 access_mode: RuntimeAccessMode::AutoAcceptEdits,
                 parent_id: None,
+                meta: Some(serde_json::json!({"personal_agent": "a1"})),
                 created_by: "u1".into(),
             })
             .await
             .unwrap();
         assert_eq!(rec.session.status, RuntimeSessionStatus::Dormant);
         assert_eq!(rec.session.access_mode, RuntimeAccessMode::AutoAcceptEdits);
+        assert_eq!(
+            rec.session.meta,
+            Some(serde_json::json!({"personal_agent": "a1"}))
+        );
         let id: Id = "r1".into();
         repo.set_access_mode(&id, RuntimeAccessMode::FullAccess)
             .await

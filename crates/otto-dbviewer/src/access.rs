@@ -243,7 +243,13 @@ pub(crate) async fn credential_profile_with(
 /// Restrict executable expressions as an additional boundary around builtin
 /// side effects and native PUBLIC catalogs. Native table/role checks remain
 /// authoritative for data privileges; this never grants a database operation.
-struct SafeExpressions;
+/// Walks a statement for anything restricted SQL refuses. A read of a native
+/// system catalog is not refused: it is recorded (`catalog`) and costs the
+/// connection-wide `db_catalog` operation (see [`operations`]).
+#[derive(Default)]
+struct SafeExpressions {
+    catalog: bool,
+}
 impl Visitor for SafeExpressions {
     type Break = Error;
     fn pre_visit_query(&mut self, query: &sqlparser::ast::Query) -> ControlFlow<Self::Break> {
@@ -278,35 +284,11 @@ impl Visitor for SafeExpressions {
     fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
         if let Expr::Function(function) = expr {
             let name = function.name.to_string().to_ascii_lowercase();
-            if !matches!(
-                name.as_str(),
-                "count"
-                    | "sum"
-                    | "avg"
-                    | "min"
-                    | "max"
-                    | "abs"
-                    | "round"
-                    | "floor"
-                    | "ceil"
-                    | "ceiling"
-                    | "lower"
-                    | "upper"
-                    | "length"
-                    | "char_length"
-                    | "concat"
-                    | "coalesce"
-                    | "nullif"
-                    | "now"
-                    | "date_trunc"
-                    | "date_part"
-                    | "substring"
-                    | "trim"
-                    | "replace"
-            ) {
-                return ControlFlow::Break(Error::Forbidden(
-                    "restricted SQL permits only verified built-in pure functions".into(),
-                ));
+            if !pure_builtin(&name) {
+                return ControlFlow::Break(Error::Forbidden(format!(
+                    "function {name}() isn't on restricted SQL's list of built-in pure functions \
+                     (a stored / user-defined function can write)"
+                )));
             }
         }
         let cast_type = match expr {
@@ -366,12 +348,285 @@ impl Visitor for SafeExpressions {
                     "information_schema" | "mysql" | "sys" | "performance_schema"
                 )
         }) {
-            return ControlFlow::Break(Error::Forbidden(
-                "native system catalogs are available only through filtered metadata APIs".into(),
-            ));
+            self.catalog = true;
         }
         ControlFlow::Continue(())
     }
+}
+
+/// A built-in, side-effect-free SQL function (MySQL + PostgreSQL), matched
+/// on its UNQUALIFIED lower-cased name — so a schema-qualified call (a
+/// user-defined / stored function, which can write) never matches. Nothing
+/// here sleeps, locks, reads files, touches sequences or other sessions
+/// ([`function_has_side_effect`] is the deny side of the same line).
+fn pure_builtin(name: &str) -> bool {
+    const PURE: &[&str] = &[
+        // aggregates + window
+        "count",
+        "sum",
+        "avg",
+        "min",
+        "max",
+        "group_concat",
+        "string_agg",
+        "array_agg",
+        "json_agg",
+        "jsonb_agg",
+        "json_arrayagg",
+        "json_objectagg",
+        "bit_and",
+        "bit_or",
+        "bit_xor",
+        "bool_and",
+        "bool_or",
+        "every",
+        "stddev",
+        "stddev_pop",
+        "stddev_samp",
+        "std",
+        "variance",
+        "var_pop",
+        "var_samp",
+        "percentile_cont",
+        "percentile_disc",
+        "mode",
+        "row_number",
+        "rank",
+        "dense_rank",
+        "percent_rank",
+        "cume_dist",
+        "ntile",
+        "lag",
+        "lead",
+        "first_value",
+        "last_value",
+        "nth_value",
+        "any_value",
+        // conditional / null / type
+        "coalesce",
+        "nullif",
+        "ifnull",
+        "if",
+        "isnull",
+        "greatest",
+        "least",
+        "cast",
+        "convert",
+        "to_char",
+        "to_date",
+        "to_timestamp",
+        "to_number",
+        // numeric
+        "abs",
+        "round",
+        "floor",
+        "ceil",
+        "ceiling",
+        "trunc",
+        "truncate",
+        "mod",
+        "power",
+        "pow",
+        "sqrt",
+        "exp",
+        "ln",
+        "log",
+        "log2",
+        "log10",
+        "sign",
+        "pi",
+        "degrees",
+        "radians",
+        "sin",
+        "cos",
+        "tan",
+        "asin",
+        "acos",
+        "atan",
+        "atan2",
+        "cot",
+        "div",
+        "format",
+        "conv",
+        "hex",
+        "unhex",
+        "bin",
+        "oct",
+        "crc32",
+        "md5",
+        "sha1",
+        "sha2",
+        "width_bucket",
+        // string
+        "lower",
+        "upper",
+        "lcase",
+        "ucase",
+        "length",
+        "char_length",
+        "character_length",
+        "octet_length",
+        "bit_length",
+        "concat",
+        "concat_ws",
+        "substring",
+        "substr",
+        "mid",
+        "left",
+        "right",
+        "trim",
+        "ltrim",
+        "rtrim",
+        "btrim",
+        "replace",
+        "reverse",
+        "repeat",
+        "lpad",
+        "rpad",
+        "locate",
+        "position",
+        "instr",
+        "strpos",
+        "split_part",
+        "substring_index",
+        "field",
+        "find_in_set",
+        "ascii",
+        "ord",
+        "char",
+        "chr",
+        "space",
+        "initcap",
+        "insert",
+        "elt",
+        "quote",
+        "regexp_like",
+        "regexp_replace",
+        "regexp_substr",
+        "regexp_instr",
+        "regexp_match",
+        "regexp_matches",
+        "starts_with",
+        "translate",
+        "soundex",
+        "to_base64",
+        "from_base64",
+        "encode",
+        "decode",
+        // date / time
+        "now",
+        "current_date",
+        "current_time",
+        "current_timestamp",
+        "curdate",
+        "curtime",
+        "localtime",
+        "localtimestamp",
+        "utc_date",
+        "utc_time",
+        "utc_timestamp",
+        "date",
+        "time",
+        "timestamp",
+        "year",
+        "quarter",
+        "month",
+        "monthname",
+        "week",
+        "weekday",
+        "weekofyear",
+        "yearweek",
+        "day",
+        "dayofmonth",
+        "dayofweek",
+        "dayofyear",
+        "dayname",
+        "hour",
+        "minute",
+        "second",
+        "microsecond",
+        "date_format",
+        "time_format",
+        "date_add",
+        "date_sub",
+        "adddate",
+        "subdate",
+        "addtime",
+        "subtime",
+        "datediff",
+        "timediff",
+        "timestampdiff",
+        "timestampadd",
+        "date_trunc",
+        "date_part",
+        "extract",
+        "last_day",
+        "makedate",
+        "maketime",
+        "make_date",
+        "make_timestamp",
+        "from_unixtime",
+        "unix_timestamp",
+        "str_to_date",
+        "sec_to_time",
+        "time_to_sec",
+        "to_days",
+        "from_days",
+        "period_add",
+        "period_diff",
+        "convert_tz",
+        "age",
+        "date_bin",
+        "justify_days",
+        "justify_hours",
+        "justify_interval",
+        "isfinite",
+        // json
+        "json_extract",
+        "json_unquote",
+        "json_value",
+        "json_contains",
+        "json_contains_path",
+        "json_keys",
+        "json_length",
+        "json_type",
+        "json_valid",
+        "json_object",
+        "json_array",
+        "json_search",
+        "json_depth",
+        "json_pretty",
+        "json_quote",
+        "json_overlaps",
+        "json_build_object",
+        "json_build_array",
+        "jsonb_build_object",
+        "jsonb_build_array",
+        "json_extract_path",
+        "json_extract_path_text",
+        "jsonb_extract_path",
+        "jsonb_extract_path_text",
+        "json_array_length",
+        "jsonb_array_length",
+        "json_typeof",
+        "jsonb_typeof",
+        "jsonb_pretty",
+        "to_json",
+        "to_jsonb",
+        "row_to_json",
+        "json_object_keys",
+        "jsonb_object_keys",
+        // arrays (PostgreSQL)
+        "array_length",
+        "cardinality",
+        "array_position",
+        "array_to_string",
+        "string_to_array",
+        "array_upper",
+        "array_lower",
+        "unnest",
+    ];
+    PURE.contains(&name)
 }
 
 /// True when `sql` provably only READS: it parses with the engine's sqlparser
@@ -685,8 +940,12 @@ pub(crate) fn operations(engine: Engine, sql: &str) -> Result<Vec<&'static str>>
     }
     let mut ops = vec!["db_query"];
     for statement in statements {
-        if let ControlFlow::Break(error) = statement.visit(&mut SafeExpressions) {
+        let mut safe = SafeExpressions::default();
+        if let ControlFlow::Break(error) = statement.visit(&mut safe) {
             return Err(error);
+        }
+        if safe.catalog && !ops.contains(&"db_catalog") {
+            ops.push("db_catalog");
         }
         let op = match statement {
             Statement::Query(ref q) => {
@@ -732,6 +991,21 @@ pub(crate) fn operations(engine: Engine, sql: &str) -> Result<Vec<&'static str>>
             | Statement::Rollback {
                 savepoint: None, ..
             } => "db_query",
+            // Metadata reads (SHOW … / DESCRIBE): connection-wide, like a
+            // system-catalog SELECT — they can name any table.
+            Statement::ShowColumns { .. }
+            | Statement::ShowCreate { .. }
+            | Statement::ShowTables { .. }
+            | Statement::ShowViews { .. }
+            | Statement::ShowDatabases { .. }
+            | Statement::ShowSchemas { .. }
+            | Statement::ShowFunctions { .. }
+            | Statement::ShowCollation { .. }
+            | Statement::ShowCharset(_)
+            | Statement::ShowVariable { .. }
+            | Statement::ShowVariables { .. }
+            | Statement::ShowStatus { .. }
+            | Statement::ExplainTable { .. } => "db_catalog",
             _ => {
                 return Err(Error::Forbidden(
                     "this SQL form is unsupported for governed direct execution".into(),
@@ -743,6 +1017,25 @@ pub(crate) fn operations(engine: Engine, sql: &str) -> Result<Vec<&'static str>>
         }
     }
     Ok(ops)
+}
+
+/// Every operation in `ops` only reads (`db_query`, or a metadata /
+/// system-catalog read — `db_catalog`).
+pub(crate) fn only_reads(ops: &[&str]) -> bool {
+    ops.iter()
+        .all(|op| matches!(*op, "db_query" | "db_catalog"))
+}
+
+/// The (operation, child) an operation is authorized as: `db_catalog` (a
+/// system-catalog / SHOW / DESCRIBE read, which can name ANY table) is a
+/// `db_query` on the WHOLE connection — so a user confined to some schemas
+/// or tables can't list the rest; everything else keeps the request's child.
+pub(crate) fn authorized_as<'a>(op: &'a str, child: Option<&'a str>) -> (&'a str, Option<&'a str>) {
+    if op == "db_catalog" {
+        ("db_query", None)
+    } else {
+        (op, child)
+    }
 }
 
 /// Extra operation an authorizer must hold for a statement whose read-ness
@@ -853,7 +1146,12 @@ mod tests {
         .is_err());
         assert!(operations(Engine::Postgres, "SELECT 1; SET ROLE owner").is_err());
         assert!(operations(Engine::Postgres, "SELECT lo_create(0)").is_err());
-        assert!(operations(Engine::Postgres, "SELECT * FROM pg_catalog.pg_class").is_err());
+        // A system-catalog read is no longer refused: it costs the
+        // connection-wide `db_catalog` (authorized as `db_query`, no child).
+        assert_eq!(
+            operations(Engine::Postgres, "SELECT * FROM pg_catalog.pg_class").unwrap(),
+            vec!["db_query", "db_catalog"]
+        );
         assert!(operations(Engine::Postgres, "SELECT set_config('role','owner',false)").is_err());
         assert!(operations(
             Engine::Mysql,
@@ -869,6 +1167,59 @@ mod tests {
             .unwrap(),
             vec!["db_query"]
         );
+    }
+    #[test]
+    fn everyday_read_only_reporting_sql_runs_in_restricted_mode() {
+        // Real queries an agent was refused: per-day breakdowns and metadata.
+        for sql in [
+            "SELECT DATE(created_at) d, COUNT(*) FROM MdlGm_tblPlayers \
+             WHERE created_at >= NOW() - INTERVAL 7 DAY GROUP BY DATE(created_at) ORDER BY d",
+            "SELECT DATE_FORMAT(created_at, '%Y-%m-%d'), YEAR(created_at), MONTH(created_at), \
+             IF(status = 1, 'on', 'off'), IFNULL(email, ''), DATEDIFF(NOW(), created_at), \
+             CAST(created_at AS DATE) FROM MdlGm_tblPlayers",
+        ] {
+            assert_eq!(
+                operations(Engine::Mysql, sql).unwrap(),
+                vec!["db_query"],
+                "{sql}"
+            );
+        }
+        for sql in [
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_NAME = 'MdlGm_tblPlayers'",
+            "SHOW COLUMNS FROM MdlGm_tblPlayers",
+            "DESCRIBE MdlGm_tblPlayers",
+            "SHOW TABLES",
+        ] {
+            assert_eq!(
+                operations(Engine::Mysql, sql).unwrap(),
+                vec!["db_query", "db_catalog"],
+                "{sql}"
+            );
+        }
+        assert!(only_reads(&["db_query", "db_catalog"]));
+        assert!(!only_reads(&["db_query", "db_data"]));
+        assert_eq!(
+            authorized_as("db_catalog", Some("shop")),
+            ("db_query", None)
+        );
+        assert_eq!(
+            authorized_as("db_query", Some("shop")),
+            ("db_query", Some("shop"))
+        );
+        // Still refused: side effects and stored (qualified) functions, which can write.
+        for sql in [
+            "SELECT SLEEP(5)",
+            "SELECT LOAD_FILE('/etc/passwd')",
+            "SELECT GET_LOCK('x', 1)",
+            "SELECT shop.give_bonus(1)",
+            "SELECT my_udf(id) FROM t",
+        ] {
+            let err = operations(Engine::Mysql, sql).unwrap_err().to_string();
+            assert!(
+                err.contains("isn't on restricted SQL's list"),
+                "{sql}: {err}"
+            );
+        }
     }
     #[test]
     fn governed_sql_rejects_table_functions_and_custom_casts() {

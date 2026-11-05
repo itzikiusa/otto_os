@@ -52,6 +52,8 @@ mod mcp_profiles_edges;
 mod personal_agent_policy;
 #[path = "personal_agents_owner.rs"]
 mod personal_agents_owner;
+#[path = "phone_pairing.rs"]
+mod phone_pairing;
 #[path = "policy_coverage.rs"]
 mod policy_coverage;
 #[path = "provider_resolve.rs"]
@@ -86,6 +88,8 @@ mod share_api;
 mod share_otp;
 #[path = "share_scope_guard.rs"]
 mod share_scope_guard;
+#[path = "slack_as_me.rs"]
+mod slack_as_me;
 #[path = "ui_control.rs"]
 mod ui_control;
 #[path = "workbench_api.rs"]

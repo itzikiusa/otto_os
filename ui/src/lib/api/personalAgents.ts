@@ -70,9 +70,11 @@ export const personalAgentsApi = {
   /** The stored report path for a run (fetched as text/markdown via authedText). */
   reportPath: (runId: string) => `/personal-agents/runs/${runId}/report`,
 
-  /** Return (creating if absent or dead) the agent's single chat session. */
+  /** Return (creating if absent or dead) the agent's single chat: a Threads
+   *  thread (`runtime: true`) for a structured-runtime provider, else a
+   *  terminal session. */
   chatSession: (agentId: string) =>
-    api.post<{ session_id: string; created: boolean }>(`/personal-agents/${agentId}/chat-session`, {}),
+    api.post<{ session_id: string; created: boolean; runtime?: boolean }>(`/personal-agents/${agentId}/chat-session`, {}),
 
   document: (agentId: string, kind: 'memory' | 'context') =>
     api.get<PersonalAgentDocument>(`/personal-agents/${agentId}/${kind}`),

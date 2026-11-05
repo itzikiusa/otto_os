@@ -54,3 +54,7 @@ export type {
   ProductTranscriptPage, ProductTranscriptSearchPage,
 } from './types/product';
 export type { ProductPublicationPreview } from './types/product-studio';
+export type {
+  TailnetDevice, PhoneServing, PhoneAccessStatus, PairingCreated, PairingStatus, PairingView,
+  PhoneDevice, PairClaimResult, PairPollResult,
+} from './types/phone';

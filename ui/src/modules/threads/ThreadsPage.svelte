@@ -29,6 +29,8 @@
   import { threadsChrome } from './threadsChrome.svelte';
   import ThreadSidebar from './ThreadSidebar.svelte';
   import { buildThreadMenu } from './threadMenu';
+  import PhoneHandoffButton from '../../lib/components/PhoneHandoffButton.svelte';
+  import { prepareDeepLink } from '../../lib/deepLinkOpen';
   import { runtimeThreadMenu } from './runtime/runtimeMenu';
   import { asThreadSession, isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
   import { isThreadSession, projectNameFromCwd } from './threadsHelpers';
@@ -128,10 +130,15 @@
     if (routeSessionId && routeSessionId !== lastRoutedId) {
       lastRoutedId = routeSessionId;
       untrack(() => {
-        void ws.ensureSession(routeSessionId).then((s) => {
+        // Resolve the thread's workspace first: a link from another workspace
+        // (a phone QR) switches there instead of opening nothing.
+        void (async () => {
+          if (!runtimeThreads.get(routeSessionId) && !(await prepareDeepLink(ws, routeSessionId, 'thread'))) return;
+          const s = await ws.ensureSession(routeSessionId);
+          if (!s && !runtimeThreads.get(routeSessionId) && ws.currentId) await runtimeThreads.load(ws.currentId).catch(() => {});
           const id = s?.id ?? runtimeThreads.get(routeSessionId)?.id;
-          if (id) threads.selectThread(id, { syncRoute: false });
-        });
+          if (id && lastRoutedId === routeSessionId) threads.selectThread(id, { syncRoute: false });
+        })();
       });
     } else if (!routeSessionId) {
       lastRoutedId = null;
@@ -425,6 +432,7 @@
         <Icon name="panel" size={14} />
       </button>
       {#if focused}
+        <PhoneHandoffButton route={`threads/${focused.id}`} what="this thread" size={14} overflow={4} testid="threads-continue-phone" />
         <button
           type="button"
           class="icon-btn"

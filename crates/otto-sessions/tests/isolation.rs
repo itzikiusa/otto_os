@@ -779,6 +779,7 @@ async fn agent_status(
         mcp_internal: false,
         mcp_session_id: None,
         managed_session_id: Some(own.clone()),
+        device_id: None,
     });
     let response = app.clone().oneshot(req).await.unwrap();
     let status = response.status();

@@ -180,6 +180,11 @@ pub struct AuthContext {
     /// Human-only checkpoint actions reject this origin; normal user/PAT tokens
     /// remain None. Labels never determine this trusted identity.
     pub managed_session_id: Option<Id>,
+    /// The paired phone (`phone_devices.id`) a **device token** belongs to;
+    /// `None` for every other credential. A device token is the owner's own
+    /// (human) credential, but it never administers Otto, mints credentials or
+    /// approves a pairing — the feature guard narrows it (`otto_phone::policy`).
+    pub device_id: Option<Id>,
 }
 
 impl AuthContext {
@@ -206,6 +211,7 @@ impl AuthContext {
             mcp_internal: false,
             mcp_session_id: None,
             managed_session_id: None,
+            device_id: None,
         }
     }
 }
@@ -325,6 +331,21 @@ pub struct RequestCredential {
 
 tokio::task_local! {
     static REQUEST_CREDENTIAL: RequestCredential;
+    static REQUEST_PEER: crate::peer::RequestPeer;
+}
+
+/// Run `fut` (the rest of the request) with `peer` as the network peer the
+/// host guard saw — read back with [`request_peer`] (the authenticator refuses
+/// a device token from a peer that is neither the tailnet nor this Mac).
+pub async fn with_request_peer<F: Future>(peer: crate::peer::RequestPeer, fut: F) -> F::Output {
+    REQUEST_PEER.scope(peer, fut).await
+}
+
+/// The current request's peer, or `None` outside a request scope (daemon
+/// work, a socket's periodic re-check after the upgrade was already checked,
+/// an in-process test router without `ConnectInfo`).
+pub fn request_peer() -> Option<crate::peer::RequestPeer> {
+    REQUEST_PEER.try_with(|p| p.clone()).ok()
 }
 
 /// Run `fut` (the rest of the request) with `cred` as the request credential.
@@ -611,6 +632,7 @@ mod owner_tests {
             mcp_internal: false,
             mcp_session_id: None,
             managed_session_id: None,
+            device_id: None,
         };
         assert_eq!(ctx.real_user.id, ctx.effective_user.id);
         assert_eq!(ctx.real_user.username, ctx.effective_user.username);
@@ -639,6 +661,7 @@ mod owner_tests {
             mcp_internal: false,
             mcp_session_id: None,
             managed_session_id: None,
+            device_id: None,
         };
         assert!(ctx.is_scoped());
         let scope = ctx.scope.expect("scoped token must carry a SessionScope");

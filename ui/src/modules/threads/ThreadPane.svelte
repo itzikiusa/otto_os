@@ -19,6 +19,7 @@
   import { harnessLabel, isPlainShellSession, isThreadSession, sessionBranch } from './threadsHelpers';
   import { threadRepos } from './threadRepos.svelte';
   import { threads } from './threadsStore.svelte';
+  import PhoneHandoffButton from '../../lib/components/PhoneHandoffButton.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { runtimeThreadMenu } from './runtime/runtimeMenu';
@@ -273,6 +274,7 @@
             <Icon name="terminal" size={13} />
           </button>
         {/if}
+        <PhoneHandoffButton route={`threads/${paneId}`} what="this thread" name={session?.title} testid="pane-continue-phone-{paneId}" />
         <button
           type="button"
           class="icon-btn"

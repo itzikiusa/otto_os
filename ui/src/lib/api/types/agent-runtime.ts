@@ -228,6 +228,10 @@ export interface RuntimeSession {
   parent_id?: Id | null;
   /** The agent-UI-control grant (`POST /sessions/{id}/ui-control`); absent = never decided. */
   ui_control?: { enabled: boolean; granted_at?: string; granted_by?: Id } | null;
+  /** Server-owned meta a personal agent's run / chat thread runs under
+   *  (`personal_agent`, `read_only`, `source`, `run_id`, …); absent on a plain
+   *  thread. Never sent by a client. */
+  meta?: Record<string, unknown> | null;
 }
 
 /** Body of `POST /runtime-sessions/{id}/peers` — open a linked thread. */

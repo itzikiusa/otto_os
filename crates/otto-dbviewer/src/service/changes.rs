@@ -81,10 +81,11 @@ impl DbViewerService {
         let child = crate::access::child(attempt.node.as_deref());
         let checker = otto_rbac::resource_access::ResourceAccess::new(self.connections.pool());
         for operation in crate::access::operations(engine, &attempt.script)? {
+            let (operation, child) = crate::access::authorized_as(operation, child.as_deref());
             if checker
                 .evaluate(
                     &user,
-                    &crate::access::target(&connection.id, child.as_deref()),
+                    &crate::access::target(&connection.id, child),
                     operation,
                 )
                 .await?
@@ -152,12 +153,9 @@ impl DbViewerService {
         let user = crate::access::current_user(&self.connections.pool(), &conn, user_id).await?;
         let access = otto_rbac::resource_access::ResourceAccess::new(self.connections.pool());
         for operation in &operations {
+            let (operation, child) = crate::access::authorized_as(operation, child.as_deref());
             let decision = access
-                .evaluate(
-                    &user,
-                    &crate::access::target(&conn.id, child.as_deref()),
-                    operation,
-                )
+                .evaluate(&user, &crate::access::target(&conn.id, child), operation)
                 .await?;
             if decision.reason == "explicit_deny" {
                 return Err(Error::Forbidden(

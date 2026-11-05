@@ -67,7 +67,7 @@
       {#each primary as o (o.decision)}
         <button
           type="button"
-          class="btn small"
+          class="btn small ra-btn"
           class:primary={o.decision === 'accept'}
           disabled={responding}
           onclick={() => void respond(o.decision)}
@@ -78,7 +78,7 @@
       {#if more.length > 0}
         <button
           type="button"
-          class="btn small"
+          class="btn small ra-btn"
           aria-haspopup="menu"
           aria-label="More approval options"
           title="More approval options"
@@ -132,6 +132,13 @@
     line-height: 1.5;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+  }
+  /* Phone: approving is the thread's main action — full 44 px tap targets. */
+  @media (pointer: coarse) {
+    .ra-btn {
+      min-block-size: calc(var(--hit-min) + 8px);
+      padding-inline: 14px;
+    }
   }
   .ra-reason {
     margin: 0;

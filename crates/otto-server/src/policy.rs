@@ -108,7 +108,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     //    it precedes the feature families below).
     // ----------------------------------------------------------------------
 
-    if room_capability_route(p) {
+    if room_capability_route(p) || otto_phone::policy::exempt(p) {
         return Exempt;
     }
     // perf2/10-mcp R7: an agent session's stdio bridge appends its OWN tool-call
@@ -941,7 +941,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/webhooks/{workspace_id}" {
         return Exempt;
     }
-    if p.starts_with("/workspaces/{id}/integrations") {
+    if p.starts_with("/workspaces/{id}/integrations") || p.starts_with("/integrations/slack/me") {
         return Require(Channels, if get { View } else { Edit });
     }
 
@@ -1104,60 +1104,9 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(ScheduledTasks, Edit);
     }
 
-    // ---- Personal Agents (+ agent rooms) ---------------------------------
-    // Same RBAC posture as Scheduled Tasks (recurring unattended agents): the
-    // feature axis rides `ScheduledTasks`; every handler additionally does the
-    // workspace-role check (flat routes load the agent/run/room and
-    // `require_ws_role` on its workspace_id — IDOR guard). Message posting is a
-    // write (agents post through their session identity; users post directly).
-    if p == "/workspaces/{id}/personal-agents" || p == "/workspaces/{id}/agent-rooms" {
-        return Require(ScheduledTasks, if get { View } else { Edit });
-    }
-    if p == "/personal-agents/{id}" || p == "/agent-rooms/{id}" {
-        return Require(ScheduledTasks, if get { View } else { Edit });
-    }
-    // Autonomy (permission modes, standing goals, rules, primary), the live
-    // activity feed and the memory inspector — same posture; reset and a
-    // goal's "work on it now" are writes.
-    if matches!(
-        p,
-        "/personal-agents/{id}/autonomy"
-            | "/personal-agents/{id}/activity"
-            | "/personal-agents/{id}/memories"
-    ) {
-        return Require(ScheduledTasks, if get { View } else { Edit });
-    }
-    if matches!(
-        p,
-        "/personal-agents/{id}/memories/edit"
-            | "/personal-agents/{id}/reset"
-            | "/personal-agents/{id}/goals/{goal_id}/run"
-    ) {
-        return Require(ScheduledTasks, Edit);
-    }
-    if p == "/personal-agents/{id}/memory" || p == "/personal-agents/{id}/context" {
-        return Require(ScheduledTasks, if get { View } else { Edit });
-    }
-    if p == "/personal-agents/{id}/schedules" {
-        return Require(ScheduledTasks, if get { View } else { Edit });
-    }
-    if p == "/personal-agents/schedules/{schedule_id}" {
-        return Require(ScheduledTasks, Edit);
-    }
-    if p == "/personal-agents/runs/{run_id}/cancel" {
-        return Require(ScheduledTasks, Edit);
-    }
-    if p == "/personal-agents/{id}/run" || p == "/personal-agents/{id}/chat-session" {
-        return Require(ScheduledTasks, Edit);
-    }
-    if p == "/personal-agents/{id}/runs" || p == "/personal-agents/runs/{run_id}/report" {
-        return Require(ScheduledTasks, View);
-    }
-    if p == "/agent-rooms/{id}/members" || p == "/agent-rooms/{id}/members/{agent_id}" {
-        return Require(ScheduledTasks, Edit);
-    }
-    if p == "/agent-rooms/{id}/messages" {
-        return Require(ScheduledTasks, if get { View } else { Edit });
+    // ---- Personal Agents (+ agent rooms) — see `personal_agents_policy`.
+    if let Some(d) = personal_agents_policy(p, get) {
+        return d;
     }
 
     // ---- Browser (reader/annotate tabs + on-demand page fetch) ---------------
@@ -1398,6 +1347,72 @@ pub enum RouteClass {
     Outward,
 }
 
+/// Personal Agents (+ agent rooms). Same RBAC posture as Scheduled Tasks
+/// (recurring unattended agents): the feature axis rides `ScheduledTasks`;
+/// every handler additionally does the workspace-role check (flat routes load
+/// the agent/run/room and `require_ws_role` on its workspace_id — IDOR guard).
+/// Message posting is a write (agents post through their session identity;
+/// users post directly). `team` (+ `/delegate`) are the main agent's team
+/// tools, called as its session. `None` = not a personal-agents route.
+fn personal_agents_policy(p: &str, get: bool) -> Option<PolicyDecision> {
+    if p == "/workspaces/{id}/personal-agents" || p == "/workspaces/{id}/agent-rooms" {
+        return Some(Require(ScheduledTasks, if get { View } else { Edit }));
+    }
+    if matches!(
+        p,
+        "/personal-agents/{id}" | "/agent-rooms/{id}" | "/personal-agents/team"
+    ) {
+        return Some(Require(ScheduledTasks, if get { View } else { Edit }));
+    }
+    // Autonomy (permission modes, standing goals, rules, primary), the live
+    // activity feed and the memory inspector — same posture; reset and a
+    // goal's "work on it now" are writes.
+    if matches!(
+        p,
+        "/personal-agents/{id}/autonomy"
+            | "/personal-agents/{id}/activity"
+            | "/personal-agents/{id}/memories"
+            | "/personal-agents/{id}/slack-as-me"
+            | "/personal-agents/{id}/overview"
+            | "/personal-agents/templates"
+    ) {
+        return Some(Require(ScheduledTasks, if get { View } else { Edit }));
+    }
+    if matches!(
+        p,
+        "/personal-agents/{id}/memories/edit"
+            | "/personal-agents/{id}/reset"
+            | "/personal-agents/{id}/goals/{goal_id}/run"
+    ) {
+        return Some(Require(ScheduledTasks, Edit));
+    }
+    if p == "/personal-agents/{id}/memory" || p == "/personal-agents/{id}/context" {
+        return Some(Require(ScheduledTasks, if get { View } else { Edit }));
+    }
+    if p == "/personal-agents/{id}/schedules" {
+        return Some(Require(ScheduledTasks, if get { View } else { Edit }));
+    }
+    if p == "/personal-agents/schedules/{schedule_id}" {
+        return Some(Require(ScheduledTasks, Edit));
+    }
+    if p == "/personal-agents/runs/{run_id}/cancel" || p == "/personal-agents/team/delegate" {
+        return Some(Require(ScheduledTasks, Edit));
+    }
+    if p == "/personal-agents/{id}/run" || p == "/personal-agents/{id}/chat-session" {
+        return Some(Require(ScheduledTasks, Edit));
+    }
+    if p == "/personal-agents/{id}/runs" || p == "/personal-agents/runs/{run_id}/report" {
+        return Some(Require(ScheduledTasks, View));
+    }
+    if p == "/agent-rooms/{id}/members" || p == "/agent-rooms/{id}/members/{agent_id}" {
+        return Some(Require(ScheduledTasks, Edit));
+    }
+    if p == "/agent-rooms/{id}/messages" {
+        return Some(Require(ScheduledTasks, if get { View } else { Edit }));
+    }
+    None
+}
+
 /// The credential class of `(method, matched_path)`, or `None` for an
 /// ordinary route. `matched_path` is the same `/api/v1`-prefixed template
 /// [`policy_for`] takes. Reads stay untagged unless they return secrets.
@@ -1502,14 +1517,15 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
                     | "/aws/accounts/{id}/eks/clusters/{name}/import-kubeconfig"
             )
             // Channel bridges: tokens, allowed users and open_to_all decide
-            // who can drive new agent sessions remotely (S11-306). The
-            // `/test` send stays Outward (matched below).
+            // who can drive new agent sessions remotely (S11-306); so do Slack
+            // as-me tokens + grants. `/test` stays Outward (matched below).
             || matches!(
                 p,
                 "/workspaces/{id}/integrations"
                     | "/workspaces/{id}/integrations/{channel}"
                     | "/workspaces/{id}/integrations/seed-from-loom"
             )
+            || p.starts_with("/integrations/slack/me") || p == "/personal-agents/{id}/slack-as-me"
             // Self-improvement autonomy flips edits to auto-apply into shared
             // skills (S8-304); the email sender carries share links + OTPs;
             // notification settings silence the owner; revoking the owner's
@@ -1559,6 +1575,7 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
             || p == "/product/testcase-runs/{rid}/publish"
             || p == "/product/versions/{vid}/publish"
             || p == "/workspaces/{id}/integrations/{channel}/test"
+            || otto_channels::slack_tools::OUTWARD_ROUTES.contains(&p)
             || p == "/brokers/clusters/{id}/topics/{topic}/produce"
             || p == "/brokers/clusters/{id}/replay"
             || p == "/brokers/clusters/{id}/groups/{group}/reset"

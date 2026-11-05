@@ -584,6 +584,107 @@ global. See `./self-improvement.md` for the self-improvement engine itself.
 
 ---
 
+## 7b. Slack tools for agents — as the bot, or as you
+
+Agents get Slack as MCP tools (`otto.slack_*`, stdio names `otto_slack_*`;
+code: `crates/otto-channels/src/slack_api.rs` + `slack_tools.rs` +
+`slack_user_tokens.rs` + `slack_as_me.rs`, catalog in
+`crates/otto-mcp/src/outward/catalog.rs`).
+
+| Tool | What | Default |
+|---|---|---|
+| `slack_my_workspaces` | the Slack teams you can act in as yourself; does this workspace have a bot | on |
+| `slack_list_conversations` | channels, DMs (named by person), group DMs; `q` filter | on |
+| `slack_find_user` | members / bots by name, `@handle` or id | on |
+| `slack_read_messages` | channel / DM history or one thread (`thread_ts`), oldest → newest, cursor paging | **opt-in** |
+| `slack_search` | `search.messages` with Slack's syntax (`from:@x in:#c after:2026-11-04`) — as you only | **opt-in** |
+| `slack_my_activity` | your digest since `since` (default 24h): mentions + DM / group-DM traffic — as you only | **opt-in** |
+| `slack_post_message` | post, or reply in a thread (`thread_ts`); returns `ts` + permalink | approval-gated |
+| `slack_react` | add an emoji reaction | approval-gated |
+| `slack_mark_unread` | as you: leave a message (and later ones) unread | approval-gated |
+
+"Opt-in" reads carry message content (your DMs, as=user) and stay off until
+you enable them in the **MCP Control Plane** (Channels group). Every write
+files an approval whose card says who it acts as (`AS YOU in Slack
+workspace 'Acme'` / the bot), where, and the text — every time; you can add an
+auto-approve rule (none is irreversible) if you choose.
+
+**`as=bot`** (default) uses the workspace's Slack integration bot token
+(`chan-bot-{workspace}-slack`, §3). Bot scopes the tools need beyond the bridge:
+`channels:history`, `groups:history`, `im:history`, `mpim:history` (read),
+`channels:read`, `groups:read`, `im:read`, `users:read` (lists),
+`chat:write`, `reactions:write`, `im:write` (DM by `@handle`). Slack gives bots
+no search, so search / activity / mark are as-you only.
+
+**`as=user`** — *Act as me in Slack* (Settings → Channels, below the cards).
+Each Otto user pastes their own **User OAuth Token** (`xoxp-…`), once per
+Slack workspace they belong to (a user token is per Slack workspace). Otto
+checks it with `auth.test` — a bot token, or a second token for an
+already-connected team, is refused (use **Replace**) — and stores it in the
+Keychain under that Otto user (`slack-user-{otto_user}-{team_id}`, plus a
+token-free index `slack-user-{otto_user}`). It is never per Otto workspace,
+never shared with another Otto user, never returned by any route. **Test**
+re-runs `auth.test` and shows the Slack user, team and missing scopes.
+
+User Token Scopes (Slack app → OAuth & Permissions → *User Token Scopes*, then
+reinstall): `channels:history groups:history im:history mpim:history
+channels:read groups:read im:read mpim:read users:read search:read chat:write
+reactions:write channels:write groups:write im:write mpim:write`. The
+`*:write` scopes are what `conversations.mark` requires (they would also
+allow creating / archiving channels; Otto never calls those methods). Keep
+token rotation off — Otto does not refresh rotating (`xoxe.xoxp-`) tokens.
+
+Who may act as you:
+
+- **You, and sessions you run directly** (terminal, Threads, scheduled tasks,
+  workflows, an external MCP client on your token): every team you connected.
+  With several teams, pass `team` (id, name or `acme` subdomain); with one it
+  is the default.
+- **A personal agent**: none, until you (its owner — nobody else, and never an
+  agent credential) tick teams under the agent's **Autonomy → Can act as me in
+  Slack** (`PUT /personal-agents/{id}/slack-as-me`, stored as
+  `slack_as_me_teams` in its autonomy config). Read-only runs (proactive)
+  still can't post or mark — the read-only gate refuses every mutating tool.
+
+**Mark unread.** Slack has no "mark unread" method; `slack_mark_unread` calls
+`conversations.mark` with the read cursor one microsecond before the message
+`ts` (Slack timestamps are unique per channel at µs precision), which is what
+the client's own *Mark unread* does. Caveats, honestly: (1) if you have that
+conversation open and focused in a Slack client, the client may mark it read
+again at once; (2) whether your **own** message (posted as you) shows the
+channel bold / a badge depends on the client — the "new messages" line
+appears, but some clients don't badge a conversation for messages you sent;
+posting to a channel/DM other than where you are reading, then marking it,
+is the reliable pattern; (3) the method needs the `*:write` user scopes above.
+This was verified against Slack's documented behaviour and mocked HTTP only —
+not against a live workspace.
+
+**Template.** Personal Agents → New agent → *Slack daily digest (as me)*:
+daily at 18:00 it runs `slack_my_activity`, reads the conversations that
+matter, posts a *Needs you / Waiting on others / FYI* digest **as you** to
+your digest channel (edit `#my-digest` in its persona; `@yourself` = your own
+DM), then marks it unread. Setup: connect the team, tick it on the agent,
+enable the three opt-in reads.
+
+**Slack limits worth knowing.** `conversations.history` / `.replies` are
+Tier 3 (≈50/min) for internal custom apps — but Slack limits *commercially
+distributed, non-Marketplace* apps created after 2025-05-29 to 1 request/min
+and 15 messages per call there, so use your own internal app. Search is
+index-backed and can lag a few minutes; `after:` is day-granular, so the
+digest re-filters by `ts`. A 429 asking for ≤3 s is retried once; otherwise
+the tool returns `ratelimited (retry after Ns)`. Message text is decoded
+(mentions named, links unfolded) and capped at 4,000 chars per message.
+
+**Slack's own MCP server** (Slack's hosted MCP / the Slack Claude connector)
+can be registered in the MCP Control Plane instead: it covers search, reading
+channels / threads, user profiles and sending messages as the connected user.
+At the time of writing it does not cover marking messages unread
+(`conversations.mark`), works through Slack's OAuth app approval per
+workspace, and is not tied to Otto's per-user / per-agent act-as-me gate —
+which is why Otto ships its own tools.
+
+---
+
 ## 8. API / contract reference
 
 Authoritative source: `docs/contracts/api.md` (*Channel integrations* and

@@ -4,6 +4,7 @@
 //! server (and router-builder crates) only depend on the otto-core traits.
 
 pub mod cache;
+pub mod devices;
 pub mod passwords;
 pub mod resource_access;
 pub mod tokens;

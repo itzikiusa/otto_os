@@ -3,12 +3,12 @@
   "new_file_max": 4000,
   "files": {
     "crates/otto-dbviewer/src/drivers/mongodb.rs": 4179,
-    "crates/otto-git/src/local.rs": 5335,
-    "crates/otto-server/src/workflow_engine.rs": 4404,
-    "crates/otto-sessions/src/manager.rs": 6346
+    "crates/otto-git/src/local.rs": 5304,
+    "crates/otto-server/src/workflow_engine.rs": 4375,
+    "crates/otto-sessions/src/manager.rs": 6281
   },
   "totals": {
-    "otto-server": 89226
+    "otto-server": 89119
   },
   "functions": {
     "crates/otto-automation/src/goal_loop.rs::controller_inner": 424,
@@ -17,9 +17,9 @@
     "crates/otto-issues/src/jira.rs::parse_issue_full": 427,
     "crates/otto-k8s/src/monitor/collector.rs::run_cycle_with": 412,
     "crates/otto-mcp/src/outward/catalog.rs::otto_tool_specs": 569,
-    "crates/otto-mcp/src/outward/exec.rs::route_for": 1437,
-    "crates/otto-server/src/policy.rs::policy_for": 1282,
-    "crates/otto-server/src/routes/mod.rs::protected_routes": 616,
+    "crates/otto-mcp/src/outward/exec.rs::route_for": 1436,
+    "crates/otto-server/src/policy.rs::policy_for": 1227,
+    "crates/otto-server/src/routes/mod.rs::protected_routes": 613,
     "crates/otto-server/src/skill_eval.rs::run_skill_eval_core": 446,
     "crates/otto-server/src/skill_review_static.rs::static_review": 585,
     "execute_node": 35,

@@ -461,6 +461,7 @@ fn agent_callers_are_recognised_for_new_host_confirmation() {
         mcp_internal: false,
         mcp_session_id: None,
         managed_session_id: None,
+        device_id: None,
     };
     let empty = HeaderMap::new();
     assert!(!is_agent_caller(&empty, &person));

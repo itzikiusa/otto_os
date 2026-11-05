@@ -39,6 +39,7 @@
     "k8s_pod_actions_list",
     "k8s_pod_http",
     "k8s_top",
+    "otto_add_personal_agent_schedule",
     "otto_api_execute",
     "otto_api_get_request",
     "otto_api_history",
@@ -55,12 +56,14 @@
     "otto_consume_broker_messages",
     "otto_create_confluence_page",
     "otto_create_issue",
+    "otto_create_personal_agent",
     "otto_create_pr",
     "otto_create_scheduled_task",
     "otto_db_children",
     "otto_db_object",
     "otto_db_query",
     "otto_db_schema",
+    "otto_delete_personal_agent",
     "otto_delete_scheduled_task",
     "otto_design_assist",
     "otto_design_link",
@@ -70,10 +73,13 @@
     "otto_get_finding",
     "otto_get_improvement_run",
     "otto_get_issue",
+    "otto_get_personal_agent",
+    "otto_get_personal_agent_report",
     "otto_get_pr",
     "otto_get_pr_checks",
     "otto_get_pr_diff",
     "otto_get_scheduled_task",
+    "otto_get_scheduled_task_report",
     "otto_get_self_improvement_config",
     "otto_get_session",
     "otto_get_workflow",
@@ -97,6 +103,9 @@
     "otto_list_issue_projects",
     "otto_list_issue_transitions",
     "otto_list_issue_types",
+    "otto_list_personal_agent_runs",
+    "otto_list_personal_agent_templates",
+    "otto_list_personal_agents",
     "otto_list_product_stories",
     "otto_list_prs",
     "otto_list_repos",
@@ -109,14 +118,19 @@
     "otto_merge_pr",
     "otto_open_pr_draft",
     "otto_open_session",
+    "otto_personal_agent_create",
+    "otto_personal_agent_delegate",
+    "otto_personal_agent_list",
     "otto_produce_broker_message",
     "otto_product_story",
     "otto_query_db",
     "otto_reject_improvement_edit",
+    "otto_remove_personal_agent_schedule",
     "otto_rollback_improvement_edit",
     "otto_room_post",
     "otto_room_read",
     "otto_run_goal_loop",
+    "otto_run_personal_agent",
     "otto_run_scheduled_task",
     "otto_run_self_improvement",
     "otto_run_workflow",
@@ -125,9 +139,21 @@
     "otto_search_issues",
     "otto_search_memory",
     "otto_send_message",
+    "otto_set_personal_agent_autonomy",
+    "otto_set_personal_agent_slack_as_me",
     "otto_set_scheduled_task_enabled",
+    "otto_slack_find_user",
+    "otto_slack_list_conversations",
+    "otto_slack_mark_unread",
+    "otto_slack_my_activity",
+    "otto_slack_my_workspaces",
+    "otto_slack_post_message",
+    "otto_slack_react",
+    "otto_slack_read_messages",
+    "otto_slack_search",
     "otto_start_pr_review",
     "otto_test_integration",
+    "otto_thread_close",
     "otto_thread_list",
     "otto_thread_message",
     "otto_thread_open",
@@ -136,6 +162,8 @@
     "otto_ui_request_control",
     "otto_update_confluence_page",
     "otto_update_issue",
+    "otto_update_personal_agent",
+    "otto_update_personal_agent_schedule",
     "otto_update_scheduled_task",
     "otto_usage_summary",
     "otto_vault_backlinks",
@@ -193,6 +221,7 @@
     "otto_get_pr_checks",
     "otto_get_pr_diff",
     "otto_get_scheduled_task",
+    "otto_get_scheduled_task_report",
     "otto_get_self_improvement_config",
     "otto_get_session",
     "otto_get_workflow",
@@ -225,6 +254,9 @@
     "otto_merge_pr",
     "otto_open_pr_draft",
     "otto_open_session",
+    "otto_personal_agent_create",
+    "otto_personal_agent_delegate",
+    "otto_personal_agent_list",
     "otto_product_story",
     "otto_query_db",
     "otto_reject_improvement_edit",
@@ -243,6 +275,7 @@
     "otto_set_scheduled_task_enabled",
     "otto_start_pr_review",
     "otto_test_integration",
+    "otto_thread_close",
     "otto_thread_list",
     "otto_thread_message",
     "otto_thread_open",
@@ -307,6 +340,7 @@
     "k8s_pod_actions_list",
     "k8s_pod_http",
     "k8s_top",
+    "otto_add_personal_agent_schedule",
     "otto_api_execute",
     "otto_api_get_request",
     "otto_api_history",
@@ -323,12 +357,14 @@
     "otto_consume_broker_messages",
     "otto_create_confluence_page",
     "otto_create_issue",
+    "otto_create_personal_agent",
     "otto_create_pr",
     "otto_create_scheduled_task",
     "otto_db_children",
     "otto_db_object",
     "otto_db_query",
     "otto_db_schema",
+    "otto_delete_personal_agent",
     "otto_delete_scheduled_task",
     "otto_design_assist",
     "otto_design_link",
@@ -338,10 +374,13 @@
     "otto_get_finding",
     "otto_get_improvement_run",
     "otto_get_issue",
+    "otto_get_personal_agent",
+    "otto_get_personal_agent_report",
     "otto_get_pr",
     "otto_get_pr_checks",
     "otto_get_pr_diff",
     "otto_get_scheduled_task",
+    "otto_get_scheduled_task_report",
     "otto_get_self_improvement_config",
     "otto_get_session",
     "otto_get_workflow",
@@ -365,6 +404,9 @@
     "otto_list_issue_projects",
     "otto_list_issue_transitions",
     "otto_list_issue_types",
+    "otto_list_personal_agent_runs",
+    "otto_list_personal_agent_templates",
+    "otto_list_personal_agents",
     "otto_list_product_stories",
     "otto_list_prs",
     "otto_list_repos",
@@ -377,14 +419,19 @@
     "otto_merge_pr",
     "otto_open_pr_draft",
     "otto_open_session",
+    "otto_personal_agent_create",
+    "otto_personal_agent_delegate",
+    "otto_personal_agent_list",
     "otto_produce_broker_message",
     "otto_product_story",
     "otto_query_db",
     "otto_reject_improvement_edit",
+    "otto_remove_personal_agent_schedule",
     "otto_rollback_improvement_edit",
     "otto_room_post",
     "otto_room_read",
     "otto_run_goal_loop",
+    "otto_run_personal_agent",
     "otto_run_scheduled_task",
     "otto_run_self_improvement",
     "otto_run_workflow",
@@ -393,9 +440,21 @@
     "otto_search_issues",
     "otto_search_memory",
     "otto_send_message",
+    "otto_set_personal_agent_autonomy",
+    "otto_set_personal_agent_slack_as_me",
     "otto_set_scheduled_task_enabled",
+    "otto_slack_find_user",
+    "otto_slack_list_conversations",
+    "otto_slack_mark_unread",
+    "otto_slack_my_activity",
+    "otto_slack_my_workspaces",
+    "otto_slack_post_message",
+    "otto_slack_react",
+    "otto_slack_read_messages",
+    "otto_slack_search",
     "otto_start_pr_review",
     "otto_test_integration",
+    "otto_thread_close",
     "otto_thread_list",
     "otto_thread_message",
     "otto_thread_open",
@@ -404,6 +463,8 @@
     "otto_ui_request_control",
     "otto_update_confluence_page",
     "otto_update_issue",
+    "otto_update_personal_agent",
+    "otto_update_personal_agent_schedule",
     "otto_update_scheduled_task",
     "otto_usage_summary",
     "otto_vault_backlinks",
@@ -424,6 +485,7 @@
     "workbench_write"
   ],
   "names:vault-docs-review": [
+    "otto_add_personal_agent_schedule",
     "otto_approve_improvement_edit",
     "otto_ask_human_approval",
     "otto_broadcast_message",
@@ -433,8 +495,10 @@
     "otto_consume_broker_messages",
     "otto_create_confluence_page",
     "otto_create_issue",
+    "otto_create_personal_agent",
     "otto_create_pr",
     "otto_create_scheduled_task",
+    "otto_delete_personal_agent",
     "otto_delete_scheduled_task",
     "otto_design_assist",
     "otto_design_link",
@@ -444,9 +508,12 @@
     "otto_get_finding",
     "otto_get_improvement_run",
     "otto_get_issue",
+    "otto_get_personal_agent",
+    "otto_get_personal_agent_report",
     "otto_get_pr_checks",
     "otto_get_pr_diff",
     "otto_get_scheduled_task",
+    "otto_get_scheduled_task_report",
     "otto_get_self_improvement_config",
     "otto_get_workflow",
     "otto_git_status",
@@ -457,6 +524,9 @@
     "otto_list_integrations",
     "otto_list_issue_projects",
     "otto_list_issue_types",
+    "otto_list_personal_agent_runs",
+    "otto_list_personal_agent_templates",
+    "otto_list_personal_agents",
     "otto_list_scheduled_task_runs",
     "otto_list_scheduled_tasks",
     "otto_merge_pr",
@@ -464,20 +534,35 @@
     "otto_produce_broker_message",
     "otto_query_db",
     "otto_reject_improvement_edit",
+    "otto_remove_personal_agent_schedule",
     "otto_rollback_improvement_edit",
     "otto_run_goal_loop",
+    "otto_run_personal_agent",
     "otto_run_scheduled_task",
     "otto_run_self_improvement",
     "otto_run_workflow",
     "otto_search_codebase",
     "otto_search_confluence",
+    "otto_set_personal_agent_autonomy",
+    "otto_set_personal_agent_slack_as_me",
     "otto_set_scheduled_task_enabled",
+    "otto_slack_find_user",
+    "otto_slack_list_conversations",
+    "otto_slack_mark_unread",
+    "otto_slack_my_activity",
+    "otto_slack_my_workspaces",
+    "otto_slack_post_message",
+    "otto_slack_react",
+    "otto_slack_read_messages",
+    "otto_slack_search",
     "otto_start_pr_review",
     "otto_test_integration",
     "otto_transition_issue",
     "otto_ui_request_control",
     "otto_update_confluence_page",
     "otto_update_issue",
+    "otto_update_personal_agent",
+    "otto_update_personal_agent_schedule",
     "otto_update_scheduled_task",
     "otto_vault_backlinks",
     "otto_vault_dir",
@@ -526,6 +611,7 @@
     "otto_get_pr_checks",
     "otto_get_pr_diff",
     "otto_get_scheduled_task",
+    "otto_get_scheduled_task_report",
     "otto_get_self_improvement_config",
     "otto_get_session",
     "otto_get_workflow",
@@ -558,6 +644,9 @@
     "otto_merge_pr",
     "otto_open_pr_draft",
     "otto_open_session",
+    "otto_personal_agent_create",
+    "otto_personal_agent_delegate",
+    "otto_personal_agent_list",
     "otto_product_story",
     "otto_query_db",
     "otto_reject_improvement_edit",
@@ -576,6 +665,7 @@
     "otto_set_scheduled_task_enabled",
     "otto_start_pr_review",
     "otto_test_integration",
+    "otto_thread_close",
     "otto_thread_list",
     "otto_thread_message",
     "otto_thread_open",
@@ -2279,6 +2369,58 @@
         }
       }
     },
+    "otto_thread_close": {
+      "type": "object",
+      "required": [
+        "peer_session_id"
+      ],
+      "properties": {
+        "peer_session_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_personal_agent_list": {
+      "type": "object",
+      "properties": {}
+    },
+    "otto_personal_agent_create": {
+      "type": "object",
+      "required": [
+        "name",
+        "instructions"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "instructions": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string",
+          "description": "claude|codex|gemini|grok|opencode|pi (default: yours)"
+        },
+        "model": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_personal_agent_delegate": {
+      "type": "object",
+      "required": [
+        "agent",
+        "task"
+      ],
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "task": {
+          "type": "string"
+        }
+      }
+    },
     "otto_api_list": {
       "type": "object",
       "properties": {
@@ -2837,6 +2979,271 @@
         },
         "delete_source_branch": {
           "type": "boolean"
+        }
+      }
+    },
+    "otto_slack_my_workspaces": {
+      "type": "object",
+      "required": [
+        "workspace_id"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_slack_list_conversations": {
+      "type": "object",
+      "required": [
+        "workspace_id"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "as": {
+          "type": "string",
+          "enum": [
+            "bot",
+            "user"
+          ],
+          "description": "user = as you"
+        },
+        "team": {
+          "type": "string",
+          "description": "as=user: your Slack team"
+        },
+        "q": {
+          "type": "string"
+        },
+        "types": {
+          "type": "string",
+          "description": "e.g. im,mpim"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      }
+    },
+    "otto_slack_find_user": {
+      "type": "object",
+      "required": [
+        "workspace_id",
+        "q"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "q": {
+          "type": "string"
+        },
+        "as": {
+          "type": "string",
+          "enum": [
+            "bot",
+            "user"
+          ],
+          "description": "user = as you"
+        },
+        "team": {
+          "type": "string",
+          "description": "as=user: your Slack team"
+        }
+      }
+    },
+    "otto_slack_read_messages": {
+      "type": "object",
+      "required": [
+        "workspace_id",
+        "channel"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "channel": {
+          "type": "string",
+          "description": "id, #name or @user"
+        },
+        "as": {
+          "type": "string",
+          "enum": [
+            "bot",
+            "user"
+          ],
+          "description": "user = as you"
+        },
+        "team": {
+          "type": "string",
+          "description": "as=user: your Slack team"
+        },
+        "thread_ts": {
+          "type": "string"
+        },
+        "oldest": {
+          "type": "string"
+        },
+        "latest": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "cursor": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_slack_search": {
+      "type": "object",
+      "required": [
+        "workspace_id",
+        "query"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "team": {
+          "type": "string",
+          "description": "as=user: your Slack team"
+        },
+        "count": {
+          "type": "integer"
+        },
+        "page": {
+          "type": "integer"
+        },
+        "sort": {
+          "type": "string",
+          "enum": [
+            "timestamp",
+            "score"
+          ]
+        }
+      }
+    },
+    "otto_slack_my_activity": {
+      "type": "object",
+      "required": [
+        "workspace_id"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "team": {
+          "type": "string",
+          "description": "as=user: your Slack team"
+        },
+        "since": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      }
+    },
+    "otto_slack_post_message": {
+      "type": "object",
+      "required": [
+        "workspace_id",
+        "channel",
+        "text"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "channel": {
+          "type": "string",
+          "description": "id, #name or @user"
+        },
+        "text": {
+          "type": "string"
+        },
+        "thread_ts": {
+          "type": "string"
+        },
+        "as": {
+          "type": "string",
+          "enum": [
+            "bot",
+            "user"
+          ],
+          "description": "user = as you"
+        },
+        "team": {
+          "type": "string",
+          "description": "as=user: your Slack team"
+        }
+      }
+    },
+    "otto_slack_react": {
+      "type": "object",
+      "required": [
+        "workspace_id",
+        "channel",
+        "ts",
+        "name"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "channel": {
+          "type": "string",
+          "description": "id, #name or @user"
+        },
+        "ts": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "as": {
+          "type": "string",
+          "enum": [
+            "bot",
+            "user"
+          ],
+          "description": "user = as you"
+        },
+        "team": {
+          "type": "string",
+          "description": "as=user: your Slack team"
+        }
+      }
+    },
+    "otto_slack_mark_unread": {
+      "type": "object",
+      "required": [
+        "workspace_id",
+        "channel",
+        "ts"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "channel": {
+          "type": "string",
+          "description": "id, #name or @user"
+        },
+        "ts": {
+          "type": "string"
+        },
+        "unread": {
+          "type": "boolean"
+        },
+        "team": {
+          "type": "string",
+          "description": "as=user: your Slack team"
         }
       }
     },
@@ -3542,6 +3949,333 @@
         "task_id": {
           "type": "string",
           "description": "Scheduled task id or name (otto.list_scheduled_tasks)."
+        }
+      }
+    },
+    "otto_list_personal_agent_templates": {
+      "type": "object",
+      "properties": {}
+    },
+    "otto_list_personal_agents": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "description": "Optional workspace id or name; omit = all you can read."
+        }
+      }
+    },
+    "otto_get_personal_agent": {
+      "type": "object",
+      "required": [
+        "agent_id"
+      ],
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "description": "Personal agent id or name (otto.list_personal_agents)."
+        }
+      }
+    },
+    "otto_list_personal_agent_runs": {
+      "type": "object",
+      "required": [
+        "agent_id"
+      ],
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "description": "Personal agent id or name (otto.list_personal_agents)."
+        }
+      }
+    },
+    "otto_get_personal_agent_report": {
+      "type": "object",
+      "required": [
+        "run_id"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_get_scheduled_task_report": {
+      "type": "object",
+      "required": [
+        "run_id"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_create_personal_agent": {
+      "type": "object",
+      "required": [
+        "workspace_id"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "template": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "soul_md": {
+          "type": "string",
+          "description": "persona markdown"
+        },
+        "avatar": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "browser": {
+          "type": "boolean"
+        },
+        "delivery": {
+          "type": "object",
+          "description": "{type:'none'|'slack'|'telegram'|'email'|'webhook', chat_id|to|url}"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "timezone": {
+          "type": "string"
+        },
+        "primary": {
+          "type": "boolean"
+        },
+        "schedules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "schedule": {
+                "type": "object",
+                "description": "{cadence:'interval'|'daily'|'weekly'|'cron'|'once', every_min, at:'HH:MM', weekday, expr:'<5-field cron>', run_at}"
+              },
+              "timezone": {
+                "type": "string"
+              },
+              "directive": {
+                "type": "string"
+              },
+              "permission": {
+                "type": "string",
+                "enum": [
+                  "directed",
+                  "read_only"
+                ]
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    },
+    "otto_update_personal_agent": {
+      "type": "object",
+      "required": [
+        "agent_id"
+      ],
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "description": "Personal agent id or name (otto.list_personal_agents)."
+        },
+        "name": {
+          "type": "string"
+        },
+        "soul_md": {
+          "type": "string",
+          "description": "persona markdown"
+        },
+        "avatar": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "browser": {
+          "type": "boolean"
+        },
+        "delivery": {
+          "type": "object"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "otto_delete_personal_agent": {
+      "type": "object",
+      "required": [
+        "agent_id"
+      ],
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "description": "Personal agent id or name (otto.list_personal_agents)."
+        }
+      }
+    },
+    "otto_add_personal_agent_schedule": {
+      "type": "object",
+      "required": [
+        "agent_id",
+        "schedule"
+      ],
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "description": "Personal agent id or name (otto.list_personal_agents)."
+        },
+        "schedule": {
+          "type": "object",
+          "description": "{cadence:'interval'|'daily'|'weekly'|'cron'|'once', every_min, at:'HH:MM', weekday, expr:'<5-field cron>', run_at}"
+        },
+        "timezone": {
+          "type": "string"
+        },
+        "directive": {
+          "type": "string"
+        },
+        "permission": {
+          "type": "string",
+          "enum": [
+            "directed",
+            "read_only"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "otto_update_personal_agent_schedule": {
+      "type": "object",
+      "required": [
+        "schedule_id"
+      ],
+      "properties": {
+        "schedule_id": {
+          "type": "string"
+        },
+        "schedule": {
+          "type": "object",
+          "description": "{cadence:'interval'|'daily'|'weekly'|'cron'|'once', every_min, at:'HH:MM', weekday, expr:'<5-field cron>', run_at}"
+        },
+        "timezone": {
+          "type": "string"
+        },
+        "directive": {
+          "type": "string"
+        },
+        "permission": {
+          "type": "string",
+          "enum": [
+            "directed",
+            "read_only"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "otto_remove_personal_agent_schedule": {
+      "type": "object",
+      "required": [
+        "schedule_id"
+      ],
+      "properties": {
+        "schedule_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_set_personal_agent_autonomy": {
+      "type": "object",
+      "required": [
+        "agent_id"
+      ],
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "description": "Personal agent id or name (otto.list_personal_agents)."
+        },
+        "primary": {
+          "type": "boolean"
+        },
+        "proactive": {
+          "type": "object"
+        },
+        "goals": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "otto_set_personal_agent_slack_as_me": {
+      "type": "object",
+      "required": [
+        "agent_id",
+        "teams"
+      ],
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "description": "Personal agent id or name (otto.list_personal_agents)."
+        },
+        "teams": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "otto_run_personal_agent": {
+      "type": "object",
+      "required": [
+        "agent_id"
+      ],
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "description": "Personal agent id or name (otto.list_personal_agents)."
+        },
+        "schedule_id": {
+          "type": "string"
         }
       }
     },

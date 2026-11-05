@@ -905,8 +905,8 @@ impl DbViewerService {
             Engine::from_kind(conn.kind).ok_or_else(|| Error::Invalid("not a database".into()))?;
         let operations = crate::access::operations(engine, &req.statement)?;
         for operation in &operations {
-            self.authorize_snap(snap, user_id, req.node.as_deref(), operation)
-                .await?;
+            let (op, node) = crate::access::authorized_as(operation, req.node.as_deref());
+            self.authorize_snap(snap, user_id, node, op).await?;
         }
         // A lexer-classified (not parser-proven) statement needs editor trust
         // even when it reads — see `access::unparsed_read_requires`.
@@ -916,7 +916,7 @@ impl DbViewerService {
                     .await?;
             }
         }
-        if conn.read_only && operations.iter().any(|op| *op != "db_query") {
+        if conn.read_only && !crate::access::only_reads(&operations) {
             return Err(Error::Forbidden(format!(
                 "read-only connection '{}' cannot perform database mutations; \
                  turn off Read-only in the connection's settings to allow them",
@@ -2392,9 +2392,10 @@ impl DbViewerService {
             )
             .await?;
         if snap.enforced()
-            && crate::access::operations(r.config.engine, &req.statement)?
-                .iter()
-                .any(|op| *op != "db_query")
+            && !crate::access::only_reads(&crate::access::operations(
+                r.config.engine,
+                &req.statement,
+            )?)
         {
             // Direct nonproduction mutations passed their separate resource gate.
             // Approved changes use another resolver operation entirely.
@@ -3020,7 +3021,7 @@ impl DbViewerService {
         if snap.enforced() {
             let engine = Engine::from_kind(snap.conn.kind)
                 .ok_or_else(|| Error::Invalid("not a database".into()))?;
-            if crate::access::operations(engine, statement)? != vec!["db_query"] {
+            if !crate::access::only_reads(&crate::access::operations(engine, statement)?) {
                 return Err(Error::Forbidden(
                     "exports must contain only read queries".into(),
                 ));

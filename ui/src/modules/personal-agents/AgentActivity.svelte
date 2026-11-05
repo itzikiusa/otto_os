@@ -8,7 +8,7 @@
   import { mcpCpApi } from '../../lib/api/mcp';
   import { liveQuery } from '../../lib/live';
   import type { Poller } from '../../lib/poll';
-  import { ws } from '../../lib/stores/workspace.svelte';
+  import { openAgentSession } from '../../lib/openAgentSession';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { router } from '../../lib/router.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -190,7 +190,7 @@
           <span class="meta">Started <RelTime iso={run.started_at} /></span>
           {#if data.now.session_status}<span class="meta">Session: {sessionLabel(data.now.session_status)}</span>{/if}
           {#if run.session_id}
-            <button class="btn small" onclick={() => ws.navigateToSession(run.session_id ?? '')}>Watch session</button>
+            <button class="btn small" onclick={() => void openAgentSession(run.session_id ?? '')}>Watch</button>
           {/if}
           <button class="btn small danger" disabled={stopping} aria-label="Stop {run.summary?.trim() || modeLabel(run)}" onclick={() => void stopRun(run)}>
             <Icon name="stop" size={12} /> {stopping ? 'Stopping…' : 'Stop…'}

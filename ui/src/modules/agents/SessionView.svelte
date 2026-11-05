@@ -30,6 +30,8 @@
   import { copyText } from '../../lib/clipboard';
   import StartRoomModal from '../rooms/StartRoomModal.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { phoneHandoff } from '../../lib/stores/phoneHandoff.svelte';
+  import PhoneHandoffButton from '../../lib/components/PhoneHandoffButton.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { popoutItems } from '../../lib/popoutMenu';
   import { now, nowMinute, rel } from '../../lib/stores/now.svelte';
@@ -187,8 +189,7 @@
   let attachProductOpen = $state(false);
   let handoverOpen = $state(false);
   let shareOpen = $state(false);
-  // Loaded on first use: ShareModal bundles the QR encoder (qrcode), which
-  // the Agents chunk — the default landing page — otherwise carries.
+  // Lazy: ShareModal bundles the QR encoder (qrcode), kept out of the Agents chunk.
   let ShareModal = $state<typeof import('./ShareModal.svelte').default | null>(null);
   async function openShare(): Promise<void> {
     try {
@@ -649,6 +650,7 @@
             // tab to right-click, so Share was unreachable from here.
             ...((session?.kind === 'agent') ? [{ label: 'Start room…', icon: 'people', action: () => (roomOpen = true) } as MenuItem] : []),
             { label: 'Share…', icon: 'share', action: () => void openShare() } as MenuItem,
+            ...phoneHandoff.menuItem(`agents/${sessionId}`, 'this session'),
             { separator: true } as MenuItem,
             {
               label: attachedIssue ? 'Change issue…' : 'Attach issue…',
@@ -837,6 +839,7 @@
         data-testid="ui-control-toggle"
       ><Icon name="cursor" size={13} /></button>
     {/if}
+    <span class="pane-phone"><PhoneHandoffButton route={`agents/${sessionId}`} what="this session" name={session?.title ?? sessionId} testid="pane-continue-phone" /></span>
     <button
       class="icon-btn pane-find"
       data-testid="pane-find"
@@ -869,13 +872,9 @@
       aria-label="More… — {session?.title ?? sessionId}"
       aria-haspopup="menu"
     ><Icon name="more" size={13} /></button>
-    {#if showClose}
-      <button class="icon-btn pane-close" onclick={onclosepane} title={closeTitle} aria-label={closeTitle}><Icon name="x" size={12} /></button>
-    {/if}
+    {#if showClose}<button class="icon-btn pane-close" onclick={onclosepane} title={closeTitle} aria-label={closeTitle}><Icon name="x" size={12} /></button>{/if}
   </header>
-  <!-- The network strip only takes a row when the session HAS a profile (or
-       the person asked for it from ⋯ → Network profile…) — "Network: none ·
-       Direct" in every session header was chrome with nothing to say. -->
+  <!-- Network strip only with a profile (or asked via ⋯ → Network profile…). -->
   {#if session && auth.can('connections', 'view') && (networkProfileId || netOpen)}
     {#key sessionId}<SessionNetworkStatus defaultOpen={netOpen && !networkProfileId} {sessionId} workspaceId={session.workspace_id} selectedProfileId={typeof session.meta?.network_profile_id === 'string' ? session.meta.network_profile_id : ''} editable={!readOnly} manageEditable={!readOnly && auth.can('connections', 'edit')} onchange={async (id) => { await ws.updateSessionMeta(sessionId, { network_profile_id: id || null }); }} />{/key}
   {/if}
@@ -1096,11 +1095,11 @@
     color: var(--text-dim);
     font-weight: 500;
   }
-  .pane:not(.current) .pane-head > :is(.ui-ctl, .pane-find, .pane-zoom, .pane-more, .pane-close, .meta-chip) {
+  .pane:not(.current) .pane-head > :is(.ui-ctl, .pane-phone, .pane-find, .pane-zoom, .pane-more, .pane-close, .meta-chip) {
     opacity: 0.7;
     transition: opacity var(--dur-fast) ease-out;
   }
-  .pane:not(.current) .pane-head:is(:hover, :focus-within) > :is(.ui-ctl, .pane-find, .pane-zoom, .pane-more, .pane-close, .meta-chip) {
+  .pane:not(.current) .pane-head:is(:hover, :focus-within) > :is(.ui-ctl, .pane-phone, .pane-find, .pane-zoom, .pane-more, .pane-close, .meta-chip) {
     opacity: 1;
   }
   /* C3a drag handle: in the leading padding, visible on hover/focus only. The
@@ -1287,7 +1286,7 @@
   .meta-idle {
     opacity: 0.85;
   }
-  .pane-head > :is(.ui-ctl, .pane-find, .pane-zoom, .pane-more, .pane-close) {
+  .pane-head > :is(.ui-ctl, .pane-phone, .pane-find, .pane-zoom, .pane-more, .pane-close) {
     flex-shrink: 0;
   }
   .pane-body {
@@ -1388,7 +1387,7 @@
     .pane-head .handover-crumb {
       padding: 0 4px;
     }
-    .pane-head .pane-find {
+    .pane-head :is(.pane-find, .pane-phone) {
       display: none;
     }
   }

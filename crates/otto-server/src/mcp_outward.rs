@@ -34,6 +34,7 @@ use crate::auth::{CurrentAuthContext, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 
+use otto_assistant::personal_agent_admin::approval_detail as admin_detail;
 pub use otto_mcp::outward::*;
 
 const MAX_WAIT_SECS: u64 = 30;
@@ -200,6 +201,14 @@ pub async fn otto_tools_invoke(
 /// reused via an ephemeral self-call) and audits the whole thing.
 ///
 /// Returns the governed envelope `Value` (`{decision, executed, content, …}`).
+// A Threads thread asking to open a session gets a linked thread instead.
+async fn in_thread(ctx: &ServerCtx, auth: &AuthContext, tool: &str) -> bool {
+    match crate::ui_bridge::calling_session(auth) {
+        Some(s) if tool.ends_with("open_session") => ctx.agent_runtime.get(s).await.is_ok(),
+        _ => false,
+    }
+}
+
 pub(crate) async fn governed_invoke(
     ctx: &ServerCtx,
     auth: &AuthContext,
@@ -209,6 +218,11 @@ pub(crate) async fn governed_invoke(
     wait_seconds: Option<u64>,
 ) -> ApiResult<Value> {
     let user = &auth.effective_user;
+    let aliased =
+        otto_mcp::outward::thread_alias(tool, arguments, in_thread(ctx, auth, tool).await);
+    let (tool, arguments) = aliased
+        .as_ref()
+        .map_or((tool, arguments), |(t, a)| (t.as_str(), a));
     let short = tool.strip_prefix("otto.").unwrap_or(tool).to_string();
     // Vault calls may omit `workspace_id` (vaults are a global library) —
     // resolve the effective workspace up front so the token's workspace pin,
@@ -472,13 +486,12 @@ pub(crate) async fn governed_invoke(
     // omit `session_id` and post as the human, or read a room it is not a
     // member of. The route then refuses a session that is not a room-member
     // personal agent.
-    let bound_session = match short.as_str() {
-        "room_post" | "room_read" | "thread_open" | "thread_list" | "thread_message"
-        | "thread_read" => crate::ui_bridge::calling_session(auth).map(String::as_str),
-        _ => None,
-    };
+    let binds = matches!(short.as_str(), "room_post" | "room_read")
+        || short.starts_with("thread_")
+        || short.starts_with("personal_agent_");
+    let bound_session = crate::ui_bridge::calling_session(auth).filter(|_| binds);
     let rebound;
-    let arguments = match bound_session {
+    let arguments = match bound_session.map(String::as_str) {
         Some(sid) => {
             let mut a = arguments.clone();
             if let Some(o) = a.as_object_mut() {
@@ -725,6 +738,10 @@ impl governance::Stages for OttoStages<'_> {
                 let appr_id = match pending {
                     Some(id) => id,
                     None => {
+                        // A personal-agent write names exactly what changes.
+                        let detail = admin_detail(&ctx.pool, tool, self.arguments)
+                            .await
+                            .unwrap_or_else(|| dangerous_detail(tool, self.arguments));
                         ctx.mcp
                             .approvals()
                             .create(NewApproval {
@@ -744,7 +761,7 @@ impl governance::Stages for OttoStages<'_> {
                                                 dangerous_detail(tool, self.arguments)
                                             )
                                         }
-                                        None => dangerous_detail(tool, self.arguments),
+                                        None => detail,
                                     };
                                     match self.forced_approval {
                                         Some((why, _)) => format!("{why}. {base}"),

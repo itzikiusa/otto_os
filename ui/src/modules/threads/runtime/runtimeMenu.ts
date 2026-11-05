@@ -7,6 +7,7 @@ import { auth } from '../../../lib/stores/auth.svelte';
 import { uiControl } from '../../../lib/stores/uiControl.svelte';
 import { toastError } from '../../../lib/toastError';
 import { threads } from '../threadsStore.svelte';
+import { phoneHandoff } from '../../../lib/stores/phoneHandoff.svelte';
 import { runtimeThreads } from './runtimeThreads.svelte';
 
 export function runtimeThreadMenu(id: string): MenuItem[] {
@@ -21,6 +22,7 @@ export function runtimeThreadMenu(id: string): MenuItem[] {
       action: () => threads.toggleTerminal(id),
     },
     ...uiControlItem(id),
+    ...phoneHandoff.menuItem(`threads/${id}`, 'this thread'),
     { separator: true },
     {
       label: 'Close thread…',

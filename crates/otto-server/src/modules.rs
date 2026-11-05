@@ -991,6 +991,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         otto_sessions::api_router::<ServerCtx>(),
         otto_connections::api_router::<ServerCtx>(),
         otto_aws::api_router::<ServerCtx>(),
+        otto_phone::protected_router::<ServerCtx>(),
         otto_agent_protocol::api_router::<ServerCtx>(),
         otto_k8s::api_router::<ServerCtx>(),
         otto_dbviewer::api_router::<ServerCtx>(),

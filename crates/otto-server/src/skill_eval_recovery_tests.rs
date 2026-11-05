@@ -422,6 +422,7 @@ async fn promotion_waits_for_publication_and_rechecks_pending_score() {
         mcp_internal: false,
         mcp_session_id: None,
         managed_session_id: None,
+        device_id: None,
     });
     let guard = crate::eval_score::update_guard(&eval.id).await;
     let promote = promote_skill(
@@ -482,6 +483,7 @@ fn promotion_auth(user: &User) -> crate::auth::CurrentAuthContext {
         mcp_internal: false,
         mcp_session_id: None,
         managed_session_id: None,
+        device_id: None,
     })
 }
 

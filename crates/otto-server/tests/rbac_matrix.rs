@@ -493,6 +493,7 @@ fn class_app(pool: DbPool, user: User, cred: Cred) -> (Router, Vec<(Method, Stri
                 mcp_internal: false,
                 mcp_session_id: None,
                 managed_session_id: None,
+                device_id: None,
             };
             match cred {
                 Cred::Human => {}
@@ -604,6 +605,7 @@ fn root_gated_one(state: TestState, template: &str, user: User, cred: Cred) -> R
                 mcp_internal: false,
                 mcp_session_id: None,
                 managed_session_id: None,
+                device_id: None,
             };
             match cred {
                 Cred::Human => {}

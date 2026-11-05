@@ -44,3 +44,9 @@ test('providerErrorText keeps a cloud CLI refusal on 403, otherwise reads as loa
   assert.equal(providerErrorText(new TypeError('Load failed')), loadErrorText(new TypeError('Load failed')));
   assert.doesNotMatch(providerErrorText(new TypeError('Load failed')), /Load failed/);
 });
+
+test('a 403 keeps the server’s reason when it gives one', () => {
+  const e = new FakeApiError(403, "forbidden: function sleep() isn't on restricted SQL's list");
+  assert.equal(loadErrorText(e), "You don’t have access to this: function sleep() isn't on restricted SQL's list");
+  assert.equal(loadErrorText(new FakeApiError(403, '')), 'You don’t have access to this.');
+});

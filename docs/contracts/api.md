@@ -620,6 +620,60 @@ sender → `400`. The guest then re-verifies the new code via
 
 ---
 
+## Phone access (Tailscale serve + QR pairing + device tokens)
+
+Reach Otto from your own phone over Tailscale (docs/features/phone-access.md).
+Storage: `phone_pairings` + `phone_devices` (migration `0202_phone_access`);
+code in `crates/otto-phone` (routes, tailscale, policy) and
+`crates/otto-rbac/src/devices.rs` (repo + token auth).
+
+**Peer classification.** The host guard classifies every request's peer
+(`otto_core::peer::classify_peer`) and publishes it for the request
+(`otto_core::auth::request_peer`): `Local` (a loopback peer addressing a
+loopback name — the desktop app), `Tailnet` (a direct `100.64.0.0/10` /
+`fd7a:115c:a1e0::/48` peer, or a loopback peer whose `Host` is `*.ts.net`, with
+no `Tailscale-Funnel-Request` header and whose LAST `X-Forwarded-For` entry is a
+tailnet address — how `tailscale serve` forwards), else `Other`.
+
+**Device tokens.** A paired phone signs in with a device token (64 hex, only
+its SHA-256 stored, never cached). It authenticates as its owner with
+`AuthContext.device_id` set, is refused (401) from an `Other` peer whenever the
+peer is known, slides a 30-day idle expiry (capped by a 180-day absolute one)
+and records `last_seen_at` / `last_ip`. The feature guard narrows it
+(`otto_phone::policy::device_gate`): no `/auth/tokens*`, `/mcp/tokens*`,
+`/auth/shares*` (not even GET), no `Secret`-class route, no `Admin`-class route
+except human approval gates (`/runtime-sessions/{id}/requests/{request_id}`,
+`/mcp/approvals/{id}/decide`, `/workflow-runs/{id}/approve`,
+`/database-changes/{id}/approve`, `…/approve|reject|decide`), and no `/phone/*`
+route but `/phone/device/me`. `POST /auth/logout` with a device token unpairs
+it; `revoke_all_for_user` (password reset, disable) drops devices too.
+Every revoke bumps the revocation generation: `/ws/events` closes with 4401
+within a beat, `/ws/term` re-checks within 5 s.
+
+**Who may call the owner routes.** A person's own credential — not an agent
+session / MCP / share token (403), not a device token (403), not an
+impersonation overlay (403). Routes marked *on the Mac* additionally refuse a
+known non-`Local` peer (a password login from the phone cannot pair phones).
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /api/v1/phone/status | owner | — | `PhoneAccessStatus {installed, cli_path, backend_state, logged_in, tailnet, magic_dns, self_name, self_ips[], devices: TailnetDevice[] {name, dns_name, os, online, ips[]}, serving: {url, https, port} \| null, other_serves, note, error, can_manage}` — `can_manage` = root on the Mac |
+| POST /api/v1/phone/serve | owner, root, on the Mac | `{enabled: bool}` | `PhoneAccessStatus`. On: `tailscale serve --bg --yes --https=443 http://127.0.0.1:<port>`, verified with an HTTPS GET of `/api/v1/health` through the Mac's own tailnet address; on failure that entry is removed and `--http=80` is used (`note` says why). Off: `serve --yes --https=<p>\|--http=<p> off` for Otto's own mounts only. A port another config uses is never touched (502 when both are taken). Never Funnel. 502 on CLI failure. Audited `phone.serve.on/off` |
+| POST /api/v1/phone/pairings | owner, on the Mac | `{next?: string}` | `PairingCreated {id, code, url, expires_at}` — `url` = `<serving url>/#/pair/<code>[/<next>]`; the code (32 random bytes, hex) is single-use, hashed at rest, expires in 2 min; creating one expires the user's previous outstanding pairing. `next` must pass `otto_core::phone::validate_next_route` (`''`, `home`, `agents`, `threads`, `agents/<id>`, `threads/<id>`; id `[A-Za-z0-9_-]{1,64}`) → else 400. 409 when Phone access is off. Audited `phone.pair.create` |
+| GET /api/v1/phone/pairings/{id} | owner, on the Mac | — | `PairingView {id, status: waiting\|claimed\|approved\|denied\|consumed\|expired, expires_at, device_label, peer_ip, confirm_code}` (`confirm_code` once claimed). 404 for another user's pairing |
+| POST /api/v1/phone/pairings/{id}/approve | owner, on the Mac | — | `PairingView`; only a `claimed`, unexpired pairing moves (else 409). Audited `phone.pair.approve` |
+| POST /api/v1/phone/pairings/{id}/deny | owner, on the Mac | — | `PairingView` (same rules). Audited `phone.pair.deny` |
+| GET /api/v1/phone/devices | owner | — | `PhoneDevice[] {id, name, user_agent, created_at, last_seen_at, last_ip, idle_expires_at, expires_at, current}` (live only, newest first) |
+| PATCH /api/v1/phone/devices/{id} | owner | `{name}` | `PhoneDevice` (name trimmed, ≤64 chars, controls dropped; 400 when empty). Audited `phone.device.rename` |
+| DELETE /api/v1/phone/devices/{id} | owner | — | 204 (404 when not yours). The token is dead at once. Audited `phone.device.revoke` |
+| POST /api/v1/phone/devices/revoke-all | owner | — | `{revoked: n}` (also expires outstanding pairings). Audited `phone.device.revoke_all` |
+| GET /api/v1/phone/device/me | any credential | — | `{device: PhoneDevice \| null}` — non-null (with `current: true`) iff the caller is a device token |
+| DELETE /api/v1/phone/device/me | device token | — | 204 — the phone unpairs itself (400 for any other credential). Audited `phone.device.unpair` |
+| POST /api/v1/phone/pair/claim | **public**, tailnet peer only (403 otherwise) | `{code}` | `PairClaimResult {pairing_id, poll_secret, confirm_code, expires_at}` — atomic `waiting → claimed`; the device label comes from `User-Agent`; the approval window is 2 min. A bad / used / expired code → 404 (one answer for all), counted per peer; 5 bad codes or 300 requests per 10 min → 429 `rate_limited`. Audited `phone.pair.claim` / `phone.pair.refused` (never the code) |
+| POST /api/v1/phone/pair/poll | **public**, tailnet peer only | `{pairing_id, poll_secret}` | `PairPollResult {status: pending\|approved\|denied\|expired, token?, next?, device?}` — on approval the pairing is consumed and the device token minted in one transaction, so `token` appears exactly once; a replay answers `expired`. 404 for a wrong secret. Audited `phone.device.paired` |
+
+---
+
 # Otto API Contract — extended surface (v1, mounted)
 
 The tables above (#1–#89) are the original frozen core. The sections below complete the
@@ -800,7 +854,10 @@ request answer is also an `Admin`-class approval gate (above).
 
 `RuntimeSession`: `{id, workspace_id, provider: "claude"|"codex"|"gemini"|"grok"|"agy",
 title, cwd, model?, native_thread_id?, status, access_mode, created_by, created_at,
-last_active_at, last_sequence}`; `status` ∈ `starting | idle | working |
+last_active_at, last_sequence, parent_id?, ui_control?, meta?}` (`meta`: the
+server-owned meta a personal agent's run / chat thread runs under, migration
+0201 — see "Personal Agents"; absent on a plain thread, never settable by a
+request); `status` ∈ `starting | idle | working |
 awaiting_permission | dormant | closed` (`dormant` = no process; the next
 prompt respawns it and resumes `native_thread_id` — Claude `--resume`, Codex
 `thread/resume`, ACP `session/load`, agy `--conversation`; a provider that cannot resume it starts
@@ -822,6 +879,7 @@ a fresh conversation).
 | POST /runtime-sessions/{id}/peers | same | `OpenPeerReq {provider, prompt?, title?, model?, effort?}` | **201** `RuntimeSession` — a linked thread: same owner, workspace, `cwd` and `access_mode` as `{id}` (never wider), `parent_id` = the group's root. `prompt` (if any) is its first turn, prefixed with who opened it and how to answer (`otto.thread_message`); `model` / `effort` default to the provider's when omitted |
 | POST /runtime-sessions/{id}/peers/{peer}/message | same | `PeerMessageReq {text}` | **202** `{turn_id, sequence}` — `text` becomes `{peer}`'s next turn, prefixed with the sender. **404** not in the group, **400** `{peer}` = `{id}`, **409** while `{peer}` runs a turn |
 | GET /runtime-sessions/{id}/peers/{peer}/reply?wait_secs= | same | `wait_secs` 0..25 (default 20) | `PeerReply {peer, busy, turn_status?, text}` — waits for `{peer}`'s running turn to settle, then its last turn's assistant text; `busy: true` when the wait ran out |
+| POST /runtime-sessions/{id}/peers/{peer}/close | same | — | `RuntimeSession` — closes linked thread `{peer}` of `{id}`'s group (stops its agent; it stays in History). `400` for `{id}` itself, `403` for the group's lead (`parent_id` null — a person closes it), `404` outside the group. MCP: `otto.thread_close` |
 
 **Replay** (T3 Code `subscribeThread`). `sequence` is per session, strictly
 increasing and never reused, also across daemon restarts. With
@@ -1911,6 +1969,41 @@ blank caller list as everyone and ignores the flag.
 | POST /workspaces/{id}/integrations/{channel}/test | ws editor | — | sends a test message (webhook: probes the callback URL) |
 | GET /workspaces/{id}/integrations/slack/directory | ws editor | — | `SlackDirectory` `{users:[{id,name,handle,is_bot}], channels:[{id,name,is_private}], users_error?, channels_error?, truncated}` via the saved bot token (`users:read`, `channels:read`, `groups:read`); cached 5 min per bot, `?refresh=1` bypasses. A Slack-side failure is a per-part `*_error`, never an HTTP error |
 | POST /workspaces/{id}/integrations/seed-from-loom | ws editor + root | — | seed integrations from a Loom config |
+
+#### Slack as the bot or as you (`otto.slack_*`)
+
+Agent-facing Slack Web API calls (otto-channels `slack_tools`). Every tool route takes
+`as` = `bot` (default: the workspace integration's saved `xoxb-` token) or `user` (alias
+`me`: the **caller's own** `xoxp-` user token for one of their connected Slack teams,
+picked by `team` = team id, name or URL subdomain, case-insensitive; omitted = the only
+allowed team, else **400** listing the available ones). An as-user call also passes the
+host's *act-as-me* gate: a person, or a session they run directly, may use every team
+they connected; a **personal agent** only the teams its owner ticked
+(`PersonalAgentAutonomy.slack_as_me_teams`, default none → **403**). Every answer carries
+`as` (and, as-user, `team_id`, `team`, `user_id`). Slack errors map to **404**
+(`channel_not_found`, `not_in_channel`, `message_not_found`, `thread_not_found`,
+`user_not_found`), **400** (bad ts / cursor / emoji, `already_reacted`, `is_archived`) or
+**502** naming the method and code (`missing_scope` adds the scope Slack says is needed;
+`ratelimited (retry after Ns)`). `channel` accepts a conversation id, `#name`, `@handle`
+or a member id (opens / reuses the DM). Times (`oldest`, `latest`, `since`) accept a Slack
+ts, `30m` / `6h` / `2d` / `1w`, RFC 3339 or `YYYY-MM-DD`. Tokens are never returned.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /integrations/slack/me | signed in (Channels: View) | — | `SlackMeTeam[]` — the caller's connected teams `{team_id, team, url, user_id, user, scopes, added_at, missing_scopes}` |
+| POST /integrations/slack/me | person only (Admin class) | `{token}` (`xoxp-…`) | **201** `SlackMeTeam` — validated by `auth.test` (a bot token → **400**); a team already connected → **409** (replace it) |
+| PUT /integrations/slack/me/{team_id} | person only | `{token}` | `SlackMeTeam` — swaps that team's token; a token of another team → **400** |
+| DELETE /integrations/slack/me/{team_id} | person only | — | **204**; **404** unknown team |
+| POST /integrations/slack/me/{team_id}/test | person only | — | `{ok: true, team: SlackMeTeam}` (live `auth.test`, refreshes identity + scopes) or `{ok: false, error}` |
+| GET /workspaces/{id}/integrations/slack/teams | ws viewer | — | `{teams: SlackMeTeam[], bot, as_me_restricted}` — the teams this credential may act in as you, whether the workspace has a bot token. MCP: `otto.slack_my_workspaces` |
+| GET /workspaces/{id}/integrations/slack/conversations?as=&team=&types=&q=&limit= | ws viewer | — | `{conversations: [{id, name, kind: channel\|private\|im\|mpim, user?, is_member?, topic?, num_members?}], truncated}` — bot: `conversations.list`; you: `users.conversations` (your channels, DMs named by person, group DMs). MCP: `otto.slack_list_conversations` |
+| GET /workspaces/{id}/integrations/slack/users?as=&team=&q= | ws viewer | — | `{users: [{id, name, handle, is_bot}]}` (≤ 50 matches of the cached member list). MCP: `otto.slack_find_user` |
+| GET /workspaces/{id}/integrations/slack/messages?channel=&as=&team=&thread_ts=&oldest=&latest=&limit=&cursor= | ws viewer | — | `{channel, thread_ts?, messages: [{ts, time, thread_ts?, user?, user_name?, text, subtype?, reply_count?, reactions?, files?}], next_cursor?, has_more}` oldest → newest; text decoded, mentions named, ≤ 4,000 chars each; `limit` ≤ 200 (default 50). MCP: `otto.slack_read_messages` |
+| POST /workspaces/{id}/integrations/slack/messages | ws editor (Outward) | `{as?, team?, channel, text, thread_ts?}` (`text` ≤ 40,000 chars) | `{channel, ts, thread_ts?, permalink?}` — `chat.postMessage`; `thread_ts` replies in a thread. MCP: `otto.slack_post_message` (approval-gated) |
+| GET /workspaces/{id}/integrations/slack/search?query=&team=&count=&page=&sort= | ws viewer | — | as you only: `{query, total, page, pages, matches: [{channel_id, channel_name, kind, ts, time, user?, user_name?, text, permalink?}]}` (`search.messages`, `sort` timestamp\|score, `count` ≤ 100). MCP: `otto.slack_search` |
+| GET /workspaces/{id}/integrations/slack/activity?team=&since=&limit= | ws viewer | — | as you only: `{since, since_time, mentions: Hit[], direct: Hit[], complete, note}` — messages mentioning you + your DM / group-DM traffic since `since` (default `24h`), newest first, `from_me` on your own; search-backed. MCP: `otto.slack_my_activity` |
+| POST /workspaces/{id}/integrations/slack/reactions | ws editor (Outward) | `{as?, team?, channel, ts, name}` | `{ok, channel, ts}` (`reactions.add`). MCP: `otto.slack_react` (approval-gated) |
+| POST /workspaces/{id}/integrations/slack/mark | ws editor (Outward) | `{team?, channel, ts, unread?}` | as you only: `{ok, channel, ts, cursor, unread}` — `conversations.mark` with the read cursor 1 µs before `ts` (`unread`, default) or at `ts` (`unread: false`). MCP: `otto.slack_mark_unread` (approval-gated) |
 
 PUT with `enabled: true` returns **409 `conflict`** (Problem message names the other
 workspace) when the integration's inbound listener token — the Slack **app** token, or
@@ -4394,6 +4487,7 @@ engine.
 | `otto.set_scheduled_task_enabled` | yes (DANGEROUS) | off | #139 |
 | `otto.run_scheduled_task` | yes (DANGEROUS) | off | #141 |
 | `otto.delete_scheduled_task` | yes (DANGEROUS) | off | #140 |
+| `otto.get_scheduled_task_report` | no | on | `GET /scheduled-tasks/runs/{run_id}/report` (text) |
 
 ## Personal Agents
 
@@ -4413,7 +4507,9 @@ writes) + the workspace-role axis on the agent's workspace.
 | Method & path | Role | Body | Response |
 |---|---|---|---|
 | GET /api/v1/workspaces/{id}/personal-agents | scheduled_tasks view + ws viewer | — | `PersonalAgent[]` (first list seeds 4 disabled example agents) |
-| POST /api/v1/workspaces/{id}/personal-agents | scheduled_tasks edit + ws editor | `{name, avatar?, soul_md?, provider?, model?, cwd?, browser?, delivery?, enabled?}` — `cwd` (also on PATCH) must be empty (default dir under data_dir) or an absolute path / `~/…` with no `..` segments, else 400; re-checked at run time | PersonalAgent |
+| POST /api/v1/workspaces/{id}/personal-agents | scheduled_tasks edit + ws editor | `{name?, template?, avatar?, soul_md?, provider?, model?, cwd?, browser?, delivery?, enabled?, schedules?, timezone?, primary?}` — `cwd` (also on PATCH) must be empty (default dir under data_dir) or an absolute path / `~/…` with no `..` segments, else 400; re-checked at run time. `template` (an id or title from `GET /personal-agents/templates`; unknown → 400) pre-fills `name`, `avatar`, `soul_md` and adds its schedule — explicit fields win. `schedules` = `[{schedule, timezone?, directive?, enabled?, permission?, idempotency_key?}]` (the schedules-route body) replaces the template's; an empty `directive` takes the template's. `timezone` = the template schedule's (default UTC). `primary: true` makes it the workspace's main agent. Every schedule is validated before the agent exists (a bad cadence → 400, nothing created). `name` is required unless a template gives one | PersonalAgent + `schedules: PersonalAgentSchedule[]` (+ `primary` when sent). MCP: `otto.create_personal_agent` |
+| GET /api/v1/personal-agents/templates | scheduled_tasks view | — | `PersonalAgentTemplate[]` `{id, title, description, avatar, name, soul_md, schedule, directive}` — the New-agent templates (`docs/contracts/personal-agent-templates.json`, the one source the UI imports too). MCP: `otto.list_personal_agent_templates` |
+| GET /api/v1/personal-agents/{id}/overview | scheduled_tasks view + ws viewer | — | `{agent: PersonalAgent, schedules: PersonalAgentSchedule[], autonomy: PersonalAgentAutonomy, recent_runs: PersonalAgentRun[] (≤5)}`. MCP: `otto.get_personal_agent` |
 | GET /api/v1/personal-agents/{id} | scheduled_tasks view + ws viewer | — | PersonalAgent |
 | PATCH /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor; owner-only fields: the owner (`created_by`), a ws admin or root | any subset of the create body | PersonalAgent. The agent runs as its owner, so `soul_md`, `provider`, `model`, `cwd`, `browser` and `delivery` — and its memory and context (`PUT …/memory`, `PUT …/context`) — are owner-only: another Editor changing any of them → 403 ("This agent runs as its owner; only the owner or a workspace admin can change …"). Name, avatar, enable/pause stay open to Editors |
 | DELETE /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}`. A run in flight is stopped first and the delete waits for it to settle; `409` while a run is finishing |
@@ -4422,10 +4518,64 @@ writes) + the workspace-role axis on the agent's workspace.
 | PATCH /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor; `directive`/`permission` need the agent's owner, a ws admin or root (else 403) | `{schedule?, timezone?, directive?, enabled?, permission?}` | PersonalAgentSchedule — resuming it, or a really different `schedule`/`timezone`, re-arms it (`armed_at`; missed occurrences are not caught up) and refreshes `next_run_at`; a `once` whose `run_at` changes forgets that it fired. Resuming the AGENT (`PATCH /personal-agents/{id}` `enabled` false→true) re-arms all its schedules |
 | DELETE /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
 | POST /api/v1/personal-agents/{id}/run | scheduled_tasks edit + ws editor | `{schedule_id?}` (that schedule's directive and permission, even when the schedule is paused; without one, a generic check-in directive) | PersonalAgentRun — manual fire, returned at once in `running` (executes in the background; poll runs). 409 while a run of the agent — manual, delegated or scheduled — is already in progress (one run per agent at a time: its runs share a folder and memory; a due schedule waits, cursor untouched) |
-| POST /api/v1/personal-agents/runs/{run_id}/cancel | scheduled_tasks edit + ws editor | — | `{ok:true}` — stop a `running` run (its session is killed, no retry); it settles `canceled`. `409` when the run isn't running |
+| POST /api/v1/personal-agents/runs/{run_id}/cancel | scheduled_tasks edit + ws editor | — | `{ok:true}` — stop a `running` run (its thread is closed / its terminal session killed, no retry); it settles `canceled`. `409` when the run isn't running |
 | GET /api/v1/personal-agents/{id}/runs | scheduled_tasks view + ws viewer | — | `PersonalAgentRun[]` |
 | GET /api/v1/personal-agents/runs/{run_id}/report | scheduled_tasks view + ws viewer | — | `text/markdown` (the stored report; served by run id, path-canonicalized) |
-| POST /api/v1/personal-agents/{id}/chat-session | scheduled_tasks edit + ws editor | — | `{session_id, created}` (`created: false` when the existing pinned chat session was returned) — returns (creating if absent) the agent's single interactive chat session, pinned to its provider/model/persona cwd |
+| POST /api/v1/personal-agents/{id}/chat-session | scheduled_tasks edit + ws editor | — | `{session_id, created, runtime?}` (`created: false` when the existing pinned chat was returned) — returns (creating if absent or closed) the caller's single chat with the agent, pinned to its provider/model/persona cwd. On a structured-runtime provider (`claude`, `codex`, `gemini`, `grok`, `opencode`, `pi`) it is a **Threads thread** (`runtime: true`, a `RuntimeSession` id — open it with the `/runtime-sessions/*` routes; its server-owned `meta` = `{source:"personal_agent", personal_agent, personal_agent_chat:true, agent_mode:"directed", personal_agent_context_version, browser}`); otherwise a terminal session |
+| GET /api/v1/personal-agents/team?session_id= | scheduled_tasks view + ws viewer | — | `{lead:{id,name,is_main_agent}, agents:[{id,name,about,provider,enabled,delegable,created_by_agent}]}` — the calling personal agent and its workspace's other agents. `session_id` = the calling agent's session or thread (an agent credential is bound to its own; another → 403); it must carry `meta.personal_agent` (else 400) and be the caller's (root exempt). MCP: `otto.personal_agent_list` |
+| POST /api/v1/personal-agents/team | scheduled_tasks edit + ws editor | `{session_id?, name, instructions?, provider?, model?}` | PersonalAgent — the **main agent** (autonomy `primary`; else 403) creates an agent: owned by the caller's user, enabled, no delivery, `created_by_agent` = the main agent. `name` 1–80 chars, unique in the workspace (409); `instructions` (its `soul_md`) ≤ 32 KB; `provider` one of the structured-runtime providers (default: the main agent's). Refused in a read-only session. MCP: `otto.personal_agent_create` |
+| POST /api/v1/personal-agents/team/delegate | scheduled_tasks edit + ws editor | `{session_id?, agent, task}` | `RuntimeSession` — the main agent's **Threads chat** (a terminal caller → 400) opens `agent` (id or name; not itself; on a structured-runtime provider) as a linked thread of its chat: in that agent's persona folder, `meta.personal_agent` = that agent, `delegated_by_agent` = the main agent, read-only when the chat is. `task` (≤ 32 KB) is its first message. When its turn ends Otto sends its final reply back to the main agent's chat as a message from that thread (`Report from …`; retried while the lead is busy, up to 30 min; best-effort across restarts). Refused in a read-only session. MCP: `otto.personal_agent_delegate` |
+
+### Agent admin MCP tools (category "Agent admin")
+
+An agent in the person's own session or thread sets up and runs their personal
+agents for them. Reads are on by default; writes are off by default (one
+**All** toggle on the "Agent admin" group in MCP → Otto server) and every write
+is approval-gated — the card names exactly what changes (the persona summary,
+or a line diff against the stored / template persona; each schedule's cadence,
+timezone and permission; main agent; Slack act-as-you teams). An approved
+write runs as the calling session (the session owner's identity, read-only
+sessions refused), except `set_personal_agent_slack_as_me`: it is
+**person-only** — ALWAYS a fresh approval (no auto-approve rule or token grant
+covers it) and only the approved call replays as the approving person, so the
+owner-only `PUT …/slack-as-me` stays closed to a raw agent token. `agent_id`
+takes an id or name (resolved across the workspaces you can read).
+
+| Tool | mutating | Default | Backing endpoint |
+|---|---|---|---|
+| `otto.list_personal_agent_templates` | no | on | `GET /personal-agents/templates` |
+| `otto.list_personal_agents` | no | on | the cross-workspace directory (`GET /workspaces/{id}/personal-agents`) |
+| `otto.get_personal_agent` | no | on | `GET /personal-agents/{id}/overview` |
+| `otto.list_personal_agent_runs` | no | on | `GET /personal-agents/{id}/runs` |
+| `otto.get_personal_agent_report` | no | on | `GET /personal-agents/runs/{run_id}/report` (text) |
+| `otto.create_personal_agent` | yes (DANGEROUS) | off | `POST /workspaces/{id}/personal-agents` (template + schedules + primary in one call) |
+| `otto.update_personal_agent` | yes (DANGEROUS) | off | `PATCH /personal-agents/{id}` (`enabled` pauses / resumes) |
+| `otto.delete_personal_agent` | yes (DANGEROUS, irreversible) | off | `DELETE /personal-agents/{id}` |
+| `otto.add_personal_agent_schedule` | yes (DANGEROUS) | off | `POST /personal-agents/{id}/schedules` |
+| `otto.update_personal_agent_schedule` | yes (DANGEROUS) | off | `PATCH /personal-agents/schedules/{schedule_id}` |
+| `otto.remove_personal_agent_schedule` | yes (DANGEROUS) | off | `DELETE /personal-agents/schedules/{schedule_id}` |
+| `otto.set_personal_agent_autonomy` | yes (DANGEROUS) | off | `PUT /personal-agents/{id}/autonomy` |
+| `otto.set_personal_agent_slack_as_me` | yes (DANGEROUS, person-only) | off | `PUT /personal-agents/{id}/slack-as-me` |
+| `otto.run_personal_agent` | yes (DANGEROUS) | off | `POST /personal-agents/{id}/run` |
+
+**Runs and chats are Threads threads** on a structured-runtime provider
+(`claude`, `codex`, `gemini`, `grok`, `opencode`, `pi`); any other provider
+(`agy`, custom) keeps a terminal session. A run's thread (`PersonalAgentRun.session_id`
+holds its id) carries the run's server-owned `RuntimeSession.meta`
+(`source:"personal_agent"`, `personal_agent`, `run_id`, `agent_mode`,
+`read_only`, `browser`) — applied by the spawn's safety pipeline exactly as for
+a terminal session (read-only = forced Seatbelt + the read-only tool list) and
+read by the tool policy (`read_only`, the agent's rules). One turn: the
+report-augmented prompt, then the report file the agent wrote — else the
+turn's final answer; no progress for 10 min = `stuck` (interrupted). The
+thread is closed when the run settles (kept in History). A person's
+`CreateRuntimeSessionReq` / `OpenPeerReq` can never set `meta` (daemon-only).
+
+**The main agent.** The workspace's `primary` agent is the user's main agent:
+its persona lists its agents and the team tools (`otto.personal_agent_list`
+/ `_create` / `_delegate`); every other agent's persona names it as the lead
+its delegated work reports back to. An agent it created shows
+`created_by_agent`.
 
 ### Personal agent autonomy (permission modes, goals, rules, activity, memory inspector)
 
@@ -4479,6 +4629,8 @@ server-derived; a client never sets it.
 |---|---|---|---|
 | GET /api/v1/personal-agents/{id}/autonomy | scheduled_tasks view + ws viewer | — | `PersonalAgentAutonomy` (defaults when never saved) |
 | PUT /api/v1/personal-agents/{id}/autonomy | scheduled_tasks edit + ws editor; changing standing-goal texts (added, removed, edited) or the rule set needs the **agent owner, a ws admin or root** (403 otherwise — toggling `enabled`, `proactive` and `primary` stay ws editor; a full-form save with unchanged goals and rules passes; an ownerless preset is adopted by the caller) | `{proactive?: {enabled, runs_per_day (1..24), max_minutes (1..60)}, goals?: [{id?, text, enabled?}], rules?: [{id?, text}], primary?}` — partial; omitted sections kept; ≤20 goals, ≤30 rules, ≤500 chars each; a goal keeps its `last_run_at` by id; making an agent `primary` clears it on every other agent of the workspace | `PersonalAgentAutonomy` |
+| GET /api/v1/personal-agents/{id}/slack-as-me | scheduled_tasks view + ws viewer | — | `PersonalAgentSlackGrant {teams, is_owner, available}` — "Can act as me in Slack": the owner's Slack team ids this agent may act in as them (`AgentAutonomy.slack_as_me_teams`, default none); `available` = the caller's connected teams (`SlackMeTeam[]`, owner only) |
+| PUT /api/v1/personal-agents/{id}/slack-as-me | the agent **owner** only, from a person's credential (Admin class: an agent token → 403) + ws editor | `{teams: string[]}` — each must be one of the owner's connected teams (else 400); `[]` turns it off | `PersonalAgentSlackGrant` |
 | POST /api/v1/personal-agents/{id}/goals/{goal_id}/run | scheduled_tasks edit + ws editor (the run acts as the agent's owner) | — | `PersonalAgentRun` (`mode: "proactive"`, read-only) — work the goal now; 409 while a run is in progress; counts against the daily budget |
 | GET /api/v1/personal-agents/{id}/activity | scheduled_tasks view + ws viewer | query `after_seq?` (only ring items with `seq > after_seq`), `epoch?` (the boot id the cursor came with), `runs?` (default `true`; `false` → `runs: null`) | `PersonalAgentActivity` — plus `seq` (cursor: newest ring seq covered), `epoch` (daemon boot id; the in-memory ring and its `seq` restart with the daemon) and `reset` (`true` when the sent `epoch` is not this process's, or `after_seq` is ahead of anything it handed out: the answer is then a full one — replace items and cursor). Approvals read in one statement; run `summary` clipped to 280 chars |
 | GET /api/v1/personal-agents/{id}/memories | scheduled_tasks view + ws viewer | — | `PersonalAgentMemories` |

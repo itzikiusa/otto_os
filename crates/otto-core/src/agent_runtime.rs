@@ -575,14 +575,37 @@ pub struct RuntimeSession {
     /// Written only by `POST /sessions/{id}/ui-control`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_control: Option<serde_json::Value>,
+    /// The server-owned meta this thread runs under — the `sessions.meta`
+    /// keys the spawn's safety pipeline and the tool policy read
+    /// (`personal_agent`, `read_only`, `source`, `run_id`, `browser`, …).
+    /// Set once at create by the daemon (a personal agent's run or chat);
+    /// never by a client. `None` = a plain thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
 }
 
 impl RuntimeSession {
+    /// A boolean flag in [`Self::meta`] (`read_only`, …); absent = false.
+    pub fn meta_flag(&self, key: &str) -> bool {
+        self.meta
+            .as_ref()
+            .and_then(|m| m.get(key))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    }
+
     /// This thread in terminal-session shape, for surfaces keyed by session
     /// (agent UI control): `meta.runtime = "structured"`, its grant under
     /// `meta.ui_control`, no device pin (any of the owner's windows).
     pub fn into_session(self) -> crate::domain::Session {
         let mut meta = serde_json::json!({"runtime": "structured"});
+        if let Some(serde_json::Value::Object(extra)) = self.meta {
+            for (k, v) in extra {
+                if k != "runtime" && k != "ui_control" {
+                    meta[k] = v;
+                }
+            }
+        }
         if let Some(grant) = self.ui_control {
             meta["ui_control"] = grant;
         }
@@ -616,6 +639,10 @@ pub struct CreateRuntimeSessionReq {
     pub model: Option<String>,
     #[serde(default)]
     pub access_mode: Option<RuntimeAccessMode>,
+    /// Server-owned [`RuntimeSession::meta`]. Never read from a request body
+    /// (`serde(skip)`): only the daemon's own callers set it.
+    #[serde(skip)]
+    pub meta: Option<serde_json::Value>,
 }
 
 /// `POST /runtime-sessions/{id}/peers` — an agent (or its owner) opens a
@@ -635,6 +662,13 @@ pub struct OpenPeerReq {
     /// model's default.
     #[serde(default)]
     pub effort: Option<String>,
+    /// Daemon-only (`serde(skip)`): the linked thread's own folder (default:
+    /// the opener's) and its [`RuntimeSession::meta`] — a personal agent the
+    /// main agent delegates to runs in ITS persona folder, as itself.
+    #[serde(skip)]
+    pub cwd: Option<String>,
+    #[serde(skip)]
+    pub meta: Option<serde_json::Value>,
 }
 
 /// `POST /runtime-sessions/{id}/peers/{peer}/message`.

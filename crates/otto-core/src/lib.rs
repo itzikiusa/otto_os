@@ -25,6 +25,8 @@ pub mod keyed_lock;
 pub mod kubeconfig_policy;
 pub mod mcp_budgets;
 pub mod paths;
+pub mod peer;
+pub mod phone;
 pub mod provider;
 pub mod provider_accounts;
 pub mod redact;

@@ -174,7 +174,7 @@ fn explain(e: &anyhow::Error, scope: &str) -> String {
 
 /// `users.list` members → [`DirUser`]s, skipping deactivated accounts and
 /// Slackbot's placeholder entry.
-fn parse_users(val: &Value) -> Vec<DirUser> {
+pub(crate) fn parse_users(val: &Value) -> Vec<DirUser> {
     let s = |v: &Value| v.as_str().map(str::trim).unwrap_or("").to_string();
     val["members"]
         .as_array()

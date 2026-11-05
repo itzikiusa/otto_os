@@ -28,6 +28,23 @@ pub trait ChannelsCtx: Clone + Send + Sync + 'static {
     fn secrets(&self) -> &Arc<dyn SecretStore>;
     fn roles(&self) -> &Arc<dyn RoleChecker>;
     fn workspaces(&self) -> &WorkspacesRepo;
+    /// Which of the caller's connected Slack teams this credential may act in
+    /// as the person (`as=user` Slack tools): every team for a person or a
+    /// session they run directly; for a personal agent only the teams its
+    /// owner allowed ("Can act as me in Slack", default none). See
+    /// [`crate::slack_as_me::caller_scope`].
+    fn slack_as_me<'a>(
+        &'a self,
+        auth: &'a otto_core::auth::AuthContext,
+    ) -> otto_core::auth::BoxFuture<'a, otto_core::Result<crate::slack_user_tokens::AsMe>> {
+        Box::pin(async move {
+            crate::slack_as_me::caller_scope(&self.integrations().pool(), auth).await
+        })
+    }
+    /// The Slack Web API root (tests point it at a loopback mock).
+    fn slack_api_base(&self) -> String {
+        crate::slack_api::SLACK_API.to_string()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -71,7 +88,7 @@ type ApiResult<T> = std::result::Result<T, ApiErr>;
 
 /// Build the channels router. Paths are relative to the `/api/v1` mount point.
 pub fn router<S: ChannelsCtx>() -> Router<S> {
-    Router::new()
+    let r = Router::new()
         .route("/workspaces/{id}/integrations", get(list_integrations::<S>))
         .route(
             "/workspaces/{id}/integrations/status",
@@ -92,7 +109,8 @@ pub fn router<S: ChannelsCtx>() -> Router<S> {
         .route(
             "/workspaces/{id}/integrations/slack/directory",
             get(slack_directory::<S>),
-        )
+        );
+    crate::slack_tools::routes(r)
 }
 
 /// Response body for a test-message call.

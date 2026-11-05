@@ -59,6 +59,18 @@ impl PtySpawner {
     }
 }
 
+impl otto_phone::PhoneCtx for ServerCtx {
+    fn pool(&self) -> otto_state::DbPool {
+        self.pool.clone()
+    }
+    fn is_human(&self, auth: &otto_core::auth::AuthContext) -> bool {
+        crate::ui_bridge::is_human(auth)
+    }
+    fn audit(&self, entry: otto_state::NewAuditEntry) -> BoxFuture<'_, ()> {
+        Box::pin(ServerCtx::audit(self, entry))
+    }
+}
+
 impl otto_aws::AwsCtx for ServerCtx {
     fn pool(&self) -> otto_state::DbPool {
         self.pool.clone()

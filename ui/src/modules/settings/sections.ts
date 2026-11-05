@@ -54,6 +54,7 @@ export const SETTINGS_SECTIONS = [
   { id: 'channels', label: 'Slack, Telegram & webhooks', group: 'integrations', keywords: 'slack telegram webhook bridge inbound bot' },
   { id: 'mcp-servers', label: 'MCP servers', group: 'integrations', keywords: 'model context protocol tools workspace' },
   { id: 'language-servers', label: 'Language servers', group: 'integrations', keywords: 'lsp completion gopls rust-analyzer typescript install path' },
+  { id: 'phone-access', label: 'Phone access', group: 'integrations', keywords: 'tailscale tailnet phone iphone android mobile pair qr device continue remote serve' },
   { id: 'sharing', label: 'Sharing', group: 'integrations', keywords: 'email sender share guest one-time code otp gmail smtp email remote' },
   // ── Agents ──
   // Settings admins reach Update all CLIs (ws editor) and the model catalog

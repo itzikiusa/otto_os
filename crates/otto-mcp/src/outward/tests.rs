@@ -2215,3 +2215,226 @@ async fn a_truncated_success_body_is_not_success() {
     assert!(resp.status().is_success());
     assert!(parse_self(resp).await.is_err());
 }
+
+// ----- Slack (otto-channels `slack_tools`) ----------------------------------
+
+#[test]
+fn slack_tools_route_to_the_workspace_slack_family() {
+    let r = |tool: &str, args: serde_json::Value| route_for(tool, &args).unwrap();
+    assert_eq!(
+        r("slack_my_workspaces", json!({"workspace_id": "ws1"})).path,
+        "/api/v1/workspaces/ws1/integrations/slack/teams"
+    );
+    let read = r(
+        "slack_read_messages",
+        json!({"workspace_id": "ws1", "channel": "#ops room", "as": "user",
+               "team": "Acme", "thread_ts": "1.000001", "limit": 20}),
+    );
+    assert_eq!(read.method, Method::Get);
+    assert_eq!(
+        read.path,
+        "/api/v1/workspaces/ws1/integrations/slack/messages?channel=%23ops%20room&as=user&team=Acme&thread_ts=1.000001&limit=20"
+    );
+    assert_eq!(
+        r(
+            "slack_search",
+            json!({"workspace_id": "w", "query": "from:@dana after:2026-11-04"})
+        )
+        .path,
+        "/api/v1/workspaces/w/integrations/slack/search?query=from%3A%40dana%20after%3A2026-11-04"
+    );
+    let post = r(
+        "slack_post_message",
+        json!({"workspace_id": "ws1", "channel": "C1", "text": "hi", "as": "user",
+               "thread_ts": null, "extra": 1}),
+    );
+    assert_eq!(
+        (post.method, post.path.as_str()),
+        (
+            Method::Post,
+            "/api/v1/workspaces/ws1/integrations/slack/messages"
+        )
+    );
+    // Only the route's own fields travel; nulls are dropped.
+    assert_eq!(
+        post.body,
+        Some(json!({"as": "user", "channel": "C1", "text": "hi"}))
+    );
+    let mark = r(
+        "slack_mark_unread",
+        json!({"workspace_id": "ws1", "channel": "C1", "ts": "1.000002", "unread": true}),
+    );
+    assert_eq!(mark.path, "/api/v1/workspaces/ws1/integrations/slack/mark");
+    assert_eq!(mark.body.unwrap()["unread"], json!(true));
+    for (tool, args) in [
+        (
+            "slack_post_message",
+            json!({"workspace_id": "w", "channel": "C1"}),
+        ),
+        (
+            "slack_react",
+            json!({"workspace_id": "w", "channel": "C1", "ts": "1.0"}),
+        ),
+        (
+            "slack_mark_unread",
+            json!({"workspace_id": "w", "ts": "1.0"}),
+        ),
+        ("slack_search", json!({"workspace_id": "w"})),
+        ("slack_list_conversations", json!({})),
+    ] {
+        assert!(route_for(tool, &args).is_err(), "{tool}");
+    }
+}
+
+#[test]
+fn slack_writes_are_gated_and_their_card_says_who_and_what() {
+    for w in ["slack_post_message", "slack_react", "slack_mark_unread"] {
+        assert!(tool_is_mutating(w), "{w}");
+        assert!(!IRREVERSIBLE.contains(&w), "{w}");
+    }
+    // Message content is opt-in; metadata is on by default.
+    for r in ["slack_read_messages", "slack_search", "slack_my_activity"] {
+        assert!(!DEFAULT_ENABLED.contains(&r), "{r}");
+    }
+    assert!(DEFAULT_ENABLED.contains(&"slack_my_workspaces"));
+    let d = dangerous_detail(
+        "otto.slack_post_message",
+        &json!({"as": "user", "team": "Acme", "channel": "#ops", "text": "Daily summary"}),
+    );
+    assert_eq!(
+        d,
+        "Post to Slack AS YOU in Slack workspace 'Acme' in '#ops': Daily summary"
+    );
+    let bot = dangerous_detail(
+        "otto.slack_post_message",
+        &json!({"channel": "C1", "text": "x", "thread_ts": "1.0"}),
+    );
+    assert!(bot.contains("as the workspace's Slack bot") && bot.contains("(thread 1.0)"));
+    assert!(dangerous_detail(
+        "otto.slack_mark_unread",
+        &json!({"ts": "1.0", "channel": "C1"})
+    )
+    .contains("as unread"));
+}
+
+// ----- Agent admin (personal agents set up for the person) -------------
+
+const AGENT_ADMIN_READS: &[&str] = &[
+    "list_personal_agent_templates",
+    "list_personal_agents",
+    "get_personal_agent",
+    "list_personal_agent_runs",
+    "get_personal_agent_report",
+    "get_scheduled_task_report",
+];
+const AGENT_ADMIN_WRITES: &[&str] = &[
+    "create_personal_agent",
+    "update_personal_agent",
+    "delete_personal_agent",
+    "add_personal_agent_schedule",
+    "update_personal_agent_schedule",
+    "remove_personal_agent_schedule",
+    "set_personal_agent_autonomy",
+    "set_personal_agent_slack_as_me",
+    "run_personal_agent",
+];
+
+#[test]
+fn agent_admin_tools_are_classified() {
+    for r in AGENT_ADMIN_READS {
+        assert!(DEFAULT_ENABLED.contains(r), "{r} must be default-enabled");
+        assert!(!tool_is_mutating(r), "{r} is a read");
+    }
+    for w in AGENT_ADMIN_WRITES {
+        assert!(tool_is_dangerous(w), "{w} must be approval-gated");
+        assert!(!DEFAULT_ENABLED.contains(w), "{w} must be off by default");
+        assert_eq!(tool_category(w), Some("Agent admin"), "{w}");
+    }
+    // Lending the person's Slack identity always asks them (forced, never
+    // auto-approved, replayed as the person); a delete has no undo.
+    assert!(tool_is_person_only("set_personal_agent_slack_as_me"));
+    assert!(tool_is_irreversible("delete_personal_agent"));
+    // The main agent's team tools keep their own routing.
+    assert!(!tool_is_person_only("personal_agent_create"));
+}
+
+#[test]
+fn agent_admin_tools_route_to_the_personal_agent_routes() {
+    let r = |t: &str, a: serde_json::Value| {
+        let c = route_for(t, &a).unwrap();
+        (format!("{:?}", c.method), c.path, c.body)
+    };
+    assert_eq!(
+        r("list_personal_agent_templates", json!({})).1,
+        "/api/v1/personal-agents/templates"
+    );
+    assert_eq!(
+        r("get_personal_agent", json!({"agent_id":"a1"})).1,
+        "/api/v1/personal-agents/a1/overview"
+    );
+    let (m, p, b) = r(
+        "create_personal_agent",
+        json!({"workspace_id":"w1","template":"slack-daily-digest","name":"Slack helper",
+               "schedules":[{"schedule":{"cadence":"cron","expr":"0 7 * * 0-5"},"timezone":"Asia/Jerusalem"}],
+               "primary":true}),
+    );
+    assert_eq!(
+        (m.as_str(), p.as_str()),
+        ("Post", "/api/v1/workspaces/w1/personal-agents")
+    );
+    let b = b.unwrap();
+    assert!(b.get("workspace_id").is_none(), "{b}");
+    assert_eq!(b["template"], "slack-daily-digest");
+    assert_eq!(b["primary"], true);
+    let (m, p, b) = r(
+        "update_personal_agent",
+        json!({"agent_id":"a1","workspace_id":"w1","soul_md":"x","enabled":false}),
+    );
+    assert_eq!(
+        (m.as_str(), p.as_str()),
+        ("Patch", "/api/v1/personal-agents/a1")
+    );
+    assert_eq!(b.unwrap(), json!({"soul_md":"x","enabled":false}));
+    assert_eq!(
+        r(
+            "update_personal_agent_schedule",
+            json!({"schedule_id":"s1","enabled":false})
+        )
+        .1,
+        "/api/v1/personal-agents/schedules/s1"
+    );
+    let (m, p, b) = r(
+        "set_personal_agent_slack_as_me",
+        json!({"agent_id":"a1","teams":["T1"],"extra":1}),
+    );
+    assert_eq!(
+        (m.as_str(), p.as_str()),
+        ("Put", "/api/v1/personal-agents/a1/slack-as-me")
+    );
+    assert_eq!(b.unwrap(), json!({"teams":["T1"]}));
+    assert_eq!(
+        r(
+            "set_personal_agent_autonomy",
+            json!({"agent_id":"a1","primary":true})
+        )
+        .1,
+        "/api/v1/personal-agents/a1/autonomy"
+    );
+    let (_, p, b) = r("run_personal_agent", json!({"agent_id":"a1"}));
+    assert_eq!(p, "/api/v1/personal-agents/a1/run");
+    assert_eq!(b.unwrap(), json!({}));
+    assert_eq!(
+        r("get_personal_agent_report", json!({"run_id":"r1"})).1,
+        "/api/v1/personal-agents/runs/r1/report"
+    );
+    assert_eq!(
+        r("get_scheduled_task_report", json!({"run_id":"r1"})).1,
+        "/api/v1/scheduled-tasks/runs/r1/report"
+    );
+    assert!(TEXT_TOOLS.contains(&"get_personal_agent_report"));
+    // The team tools are untouched by the admin routing.
+    assert_eq!(
+        r("personal_agent_list", json!({"session_id":"s"})).1,
+        "/api/v1/personal-agents/team?session_id=s"
+    );
+}

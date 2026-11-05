@@ -9,9 +9,12 @@ import { isTauri } from '../lib/stores/ui.svelte';
 import { ws } from '../lib/stores/workspace.svelte';
 import { installPaletteSources, type PaletteDeps } from './paletteSources.svelte';
 import { registerBrowserView } from '../lib/browserPort';
+import { registerRuntimeThreadView } from '../lib/runtimeThreadPort';
 
 // Hosts that embed the Browser view (Threads' inspector) load it through the port.
 registerBrowserView(() => import('../modules/browser/BrowserView.svelte'));
+// Hosts that embed one Threads conversation (a personal agent's chat).
+registerRuntimeThreadView(() => import('../modules/threads/runtime/EmbeddedRuntimeThread.svelte'));
 
 export function installShell(deps: PaletteDeps): () => void {
   const stopPalette = installPaletteSources(deps);

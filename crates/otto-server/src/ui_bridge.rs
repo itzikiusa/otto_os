@@ -363,11 +363,6 @@ fn opened_target(
 
 pub use otto_core::ui_grant::{grant_decided_at, grant_record, grant_state, META_KEY};
 
-/// A Deny/Stop within [`DENY_QUIET`] — answer without prompting again.
-fn recently_denied(meta: &Value, now: chrono::DateTime<chrono::Utc>) -> bool {
-    otto_core::ui_grant::recently_denied(meta, now, DENY_QUIET)
-}
-
 // ===========================================================================
 // Result shaping — pure
 // ===========================================================================
@@ -1072,7 +1067,7 @@ async fn ensure_grant(
     }
     let pending =
         |extra: &str| UiError::new("pending_grant", format!("{PENDING_GRANT_MSG}{extra}"));
-    if recently_denied(&session.meta, chrono::Utc::now()) {
+    if otto_core::ui_grant::recently_denied(&session.meta, chrono::Utc::now(), DENY_QUIET) {
         return Err(pending(" (they declined or stopped it moments ago)."));
     }
     let bridge = &ctx.ui_bridge;
@@ -1333,6 +1328,10 @@ pub fn spawn_session_watch(ctx: ServerCtx) {
 
 #[cfg(test)]
 mod tests {
+    fn recently_denied(meta: &Value, now: chrono::DateTime<chrono::Utc>) -> bool {
+        otto_core::ui_grant::recently_denied(meta, now, DENY_QUIET)
+    }
+
     use super::*;
 
     fn doc(
@@ -1626,6 +1625,7 @@ mod tests {
             mcp_internal: false,
             mcp_session_id: None,
             managed_session_id: None,
+            device_id: None,
         };
         assert!(is_human(&base));
         assert!(calling_session(&base).is_none());

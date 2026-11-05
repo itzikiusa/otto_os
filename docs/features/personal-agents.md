@@ -42,11 +42,21 @@ Casino Reviewer Player (login via Keychain).
 
 The scheduler (60s tick, `crates/otto-assistant/src/personal_agents_scheduler.rs`)
 fires due schedules; the engine (`personal_agents_engine.rs`) runs each as a
-**fresh agent session** (`CreateSessionReq` with the pinned provider/model,
-`meta.browser`, the agent's cwd, and `meta.personal_agent = <id>`), pastes the
-prompt (persona note + directive + memory instructions + report-file
-instruction), watches for the report file, retries on failure, and records a
-`PersonalAgentRun` (summary, report, delivery state, session id). Concurrency
+**fresh Threads thread** on the structured runtime when the agent's provider is
+one Threads drives (`claude`, `codex`, `gemini`, `grok`, `opencode`, `pi` —
+`personal_agent_threads.rs`): the thread is created in the agent's cwd with the
+pinned model and the run's server-owned meta (`personal_agent = <id>`,
+`run_id`, `read_only`, `browser`, `agent_mode` — the same confinement a
+terminal run gets: forced Seatbelt + read-only tool list when read-only), sent
+the prompt (persona note + directive + memory instructions + report-file
+instruction) as one turn, and its report is the file the agent wrote — or the
+turn's final answer. No progress for 10 min = `stuck`. The thread closes when
+the run settles and stays in History (*Open thread* on the run). Any other
+provider (`agy`, custom CLIs) — or a workspace that routes agents through a
+network profile — runs as a **fresh terminal session** instead
+(`personal_agent_session.rs`: pasted prompt, report-file watch, retries).
+Either way the engine records a `PersonalAgentRun` (summary, report, delivery
+state, session / thread id). Concurrency
 is capped (`OTTO_PERSONAL_MAX_CONCURRENT`, default 2). Reports are kept for the
 last 100 runs; run updates stream over WS. Notify-on-change compares the
 last non-proactive successful run only when delivery succeeded or that run
@@ -64,9 +74,9 @@ Manual fire: **Run now** on the agent (or a specific schedule) →
 and rewrites the same `memory/notes.md`, so scheduled, manual and delegated runs
 share one per-agent guard: a due schedule waits (its cursor untouched, so it fires
 on a later tick) while another run is going, and Run now answers 409. A failed run
-keeps its session linked (*Open session*) and its error and any delivery failure
+keeps its session linked (*Open thread*) and its error and any delivery failure
 show inline on the run row. Each run's scratch report file is removed once read. A running run has **Stop…**
-(`POST /personal-agents/runs/{run_id}/cancel`): its session is killed (no retry)
+(`POST /personal-agents/runs/{run_id}/cancel`): its thread is closed / its session killed (no retry)
 and it settles `canceled`.
 
 **Arming.** A schedule never fires an occurrence from before its `armed_at` — set
@@ -78,10 +88,70 @@ creates them; the schedule form now supports them too — fires again after its
 
 ## 3. Chat anytime
 
-`POST /personal-agents/{id}/chat-session` returns (creating if absent) the
-agent's single interactive session — same persona cwd, same pinned
-provider/model. The agent page's **Chat** tab embeds its terminal, so talking
-to an agent is a normal live session.
+`POST /personal-agents/{id}/chat-session` returns (creating if absent or
+closed) the caller's single chat with the agent — same persona cwd, same pinned
+provider/model. On a Threads provider it is a **Threads thread** (`runtime:
+true`) and the agent page's **Chat** tab renders the Threads conversation view
+(streaming answer, work log, approvals inline, the composer) through
+`ui/src/lib/runtimeThreadPort.ts`; **Open in Threads** hands it to the Threads
+page. Other providers keep an embedded terminal.
+
+## 3a. The main agent
+
+Mark one agent **Main agent** (Autonomy tab; one per workspace). It is the one
+you talk to; its persona lists your other agents and three team tools:
+
+- `otto.personal_agent_list` — the team (id, name, what each does, whether it
+  can be delegated to);
+- `otto.personal_agent_create` — when you ask ("create an agent that watches
+  the build"): a new enabled agent owned by you, `created_by_agent` = the main
+  agent (shown as **By <main agent>** on its card and page);
+- `otto.personal_agent_delegate` — from the main agent's Threads chat: opens
+  the agent as a **linked thread** of the chat (its own persona folder, as
+  itself, never wider than the chat — a read-only chat's delegate is
+  read-only) with the task as its first message.
+
+When a delegated turn ends, Otto sends its final reply back to the main
+agent's chat as a message from that thread (`Report from …`), so reporting
+back never depends on the agent remembering to; every other agent's persona
+names the main agent as its lead. The chat shows the linked threads as chips —
+click one to switch the chat view to that agent's thread (⇧-click opens it in
+Threads), **Back to chat** returns. Limits: the relay is in memory (a daemon
+restart drops a pending one; the report stays in the agent's thread);
+delegation needs the chat to be a Threads thread and the target on a Threads
+provider; read-only sessions cannot create or delegate.
+
+## 3b. Agent admin — an agent sets agents up for you
+
+Any agent in your own session or thread (not only the main agent) can set up
+and manage your personal agents with the **Agent admin** MCP tools — e.g. "make
+me a Slack helper from the *Slack daily digest (as me)* template, cron
+`0 7 * * 0-5` in my timezone, on claude, make it my main agent, let it act as
+me in my Slack workspace, then run it":
+
+- reads (on by default): `otto.list_personal_agent_templates`,
+  `otto.list_personal_agents`, `otto.get_personal_agent` (config, schedules,
+  autonomy incl. `slack_as_me_teams`, latest runs),
+  `otto.list_personal_agent_runs`, `otto.get_personal_agent_report`;
+- writes (off by default — MCP → Otto server → **Agent admin** → All):
+  `otto.create_personal_agent` (from a `template`, with `schedules`,
+  `timezone`, `primary` in ONE call), `update_personal_agent` (`enabled`
+  pauses / resumes), `delete_personal_agent`, `add_` / `update_` /
+  `remove_personal_agent_schedule`, `set_personal_agent_autonomy`,
+  `set_personal_agent_slack_as_me`, `run_personal_agent`.
+
+Every write asks you first; the approval card says exactly what is created or
+changed — the persona (summary, or a line diff against the stored / template
+persona), each schedule (cadence, timezone, read-only vs may-act), main
+agent, delivery. The approved call runs as your session (you own the agent;
+a read-only session is refused). **Act as me in Slack** is stricter: it
+always asks (no auto-approve rule or token write grant covers it), and only
+the call you approved runs — as you; an agent's own token is still refused
+by `PUT …/slack-as-me`. Why writes are off by default: the catalog invariant
+"mutating ⇒ approval-gated ⇒ off by default" holds for every write tool;
+enabling the category is one click, after which every call still needs your
+approval. Templates have one source, `docs/contracts/personal-agent-templates.json`
+(the New-agent sheet imports it; `GET /personal-agents/templates` serves it).
 
 ## 4. Rooms — inter-agent messaging, always visible
 
@@ -213,6 +283,16 @@ gets a "You are the user's primary assistant" section listing the other enabled
 agents, with instructions to route specialist work to them through a shared
 room.
 
+**Can act as me in Slack** (Autonomy tab, owner only, default off): which of
+the owner's connected Slack workspaces (Settings → Channels → *Act as me in
+Slack*) the agent may use the as-you Slack tools in — read DMs, search, post
+(approval-gated every time) and mark unread. Stored as `slack_as_me_teams` in
+the autonomy config, set via `PUT /personal-agents/{id}/slack-as-me` from a
+person's credential only (an agent can't grant itself). Without it every
+`as=user` Slack call from the agent's sessions is refused (403). The *Slack
+daily digest (as me)* template uses it — see
+[Channels §7b](./channels-slack-telegram.md#7b-slack-tools-for-agents--as-the-bot-or-as-you).
+
 ## 5. Per-session model pinning (foundation, applies everywhere)
 
 - `CreateSessionReq.model` pins the model for **that session only** (folded
@@ -250,6 +330,16 @@ agent page tabs **Overview / Activity / Autonomy / Schedules / Runs / Chat /
 Memory / Context**, plus a module-level **Rooms** view (live feed, membership
 editor, user post box). Schedules carry a *Read-only* chip when their
 permission set is read-only; runs show their mode and a read-only lock.
+
+An agent with UI control can drive this page visibly with the `otto.ui_pa_*`
+commands ([agent-ui-control.md §5](agent-ui-control.md)): list / open an agent
+on a tab, fill and save the New-agent sheet (template, persona, provider,
+schedule), edit fields, set autonomy, add / edit / pause schedules, Run now and
+read a run's report — each write after your attributed confirm. Granting
+"Can act as me in Slack" (`pa_set_slack_as_me`) always asks with the outward
+where / what / who confirm and is never remembered. The templates come from
+`docs/contracts/personal-agent-templates.json` (the sheet and the daemon read
+the same file).
 
 ## 8. Capabilities & limits (v1)
 

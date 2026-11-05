@@ -364,12 +364,17 @@
     },
     "requests": [
       [
+        "GET",
+        "/runtime-sessions/sess-test",
+        null
+      ],
+      [
         "POST",
-        "/workspaces/ws-test/sessions/open",
+        "/runtime-sessions/sess-test/peers",
         {
           "provider": "claude",
-          "title": "t",
-          "prompt": "p"
+          "prompt": "p",
+          "title": "t"
         }
       ]
     ],
@@ -1071,6 +1076,88 @@
         "GET",
         "/runtime-sessions/sess-test/peers/01ARZ3NDEKTSV4RRFFQ69G5FAV/reply?wait_secs=5",
         null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_thread_close {\"peer_session_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}": {
+    "args": {
+      "peer_session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    },
+    "requests": [
+      [
+        "POST",
+        "/runtime-sessions/sess-test/peers/01ARZ3NDEKTSV4RRFFQ69G5FAV/close",
+        {}
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_personal_agent_list {}": {
+    "args": {},
+    "requests": [
+      [
+        "GET",
+        "/personal-agents/team?session_id=sess-test",
+        null
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_personal_agent_create {\"name\":\"Scout\",\"instructions\":\"watch the build\",\"provider\":\"codex\"}": {
+    "args": {
+      "name": "Scout",
+      "instructions": "watch the build",
+      "provider": "codex"
+    },
+    "requests": [
+      [
+        "POST",
+        "/personal-agents/team",
+        {
+          "session_id": "sess-test",
+          "name": "Scout",
+          "instructions": "watch the build",
+          "provider": "codex"
+        }
+      ]
+    ],
+    "result": {
+      "ok": {
+        "ok": true
+      },
+      "rows": 0
+    }
+  },
+  "otto_personal_agent_delegate {\"agent\":\"Scout\",\"task\":\"check main\"}": {
+    "args": {
+      "agent": "Scout",
+      "task": "check main"
+    },
+    "requests": [
+      [
+        "POST",
+        "/personal-agents/team/delegate",
+        {
+          "session_id": "sess-test",
+          "agent": "Scout",
+          "task": "check main"
+        }
       ]
     ],
     "result": {

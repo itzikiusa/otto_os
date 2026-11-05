@@ -443,6 +443,7 @@ mod secrets_reset_tests {
             mcp_internal: false,
             mcp_session_id: None,
             managed_session_id: agent.then(|| "agent-session".into()),
+            device_id: None,
         })
     }
 

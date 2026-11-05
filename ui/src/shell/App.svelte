@@ -80,6 +80,8 @@
   import { ws } from '../lib/stores/workspace.svelte';
   import { git } from '../lib/stores/git.svelte';
   import { auth, impersonationStartedMs } from '../lib/stores/auth.svelte';
+  import { openSessionDeepLink } from '../lib/deepLinkOpen';
+  import PhoneHandoffHost from '../lib/components/PhoneHandoffHost.svelte';
   import { events } from '../lib/events.svelte';
   import { dismissTopDialog, installKeyMap, modalKeyVerdict, routeFind, type KeyAction } from '../lib/keys';
   import { attachMenuBridge, attachCloseHandler, handleMenu } from '../lib/menu';
@@ -323,11 +325,9 @@
   }
 
   // ---- route → store sync (one-way; avoids route↔store loop) ----
-  // When the URL is `#/agents/<sessionId>` (set by navigateToSession or Back/Forward),
-  // apply the session id into the workspace store's pane/tab state. This is
-  // intentionally ONE-WAY: the store mutation (openSession) does NOT re-navigate,
-  // so there is no loop. The router's own `navigating` flag guards against
-  // recursive hash changes during back/forward.
+  // `#/agents/<sessionId>` (navigateToSession, Back/Forward, a phone QR) →
+  // the store's pane/tab state, after switching to the session's workspace
+  // when it isn't this one (lib/deepLinkOpen). ONE-WAY: opening never re-navigates.
   $effect(() => {
     const sessionId = router.parts[1];
     const module = router.module;
@@ -338,9 +338,7 @@
       // still on pane A and "restore" A into the focused pane — clobbering the
       // click. Reading it untracked lets focusPane move the frame freely; a real
       // route change (tab/navigator/back-forward) still falls through to sync.
-      if (untrack(() => ws.activeSessionId) !== sessionId) {
-        ws.openSession(sessionId);
-      }
+      if (untrack(() => ws.activeSessionId) !== sessionId) void openSessionDeepLink(ws, sessionId);
     }
   });
 
@@ -1235,6 +1233,7 @@
 
 <ConfirmDialog />
 <ContextMenu />
+<PhoneHandoffHost />
 <FindInPage />
 {/if}
 
