@@ -506,6 +506,12 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
 
   // Access chip: Full access asks once, warns, and rides the next prompt.
   const chip = thread.getByTestId('runtime-access');
+  // New threads start in Full access when agent_skip_permissions is on (the
+  // default), so step down to Supervised first — that direction never asks.
+  if (/Full access/.test((await chip.textContent()) ?? '')) {
+    await chip.click();
+    await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Supervised' }).click();
+  }
   await expect(chip).toContainText('Supervised');
   await chip.click();
   await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Full access' }).click();
