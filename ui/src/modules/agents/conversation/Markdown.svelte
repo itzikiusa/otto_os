@@ -17,7 +17,7 @@
     maxChars: 4_000_000,
     maxEntryChars: 512 * 1024,
   });
-  // Perf-spec probe (e2e/desktop-conversation-perf.spec.ts): opt-in via a
+  // Perf-spec probe (formerly e2e/desktop-conversation-perf.spec.ts): opt-in via a
   // `window.__ottoMdProbe` object installed before load; nothing otherwise.
   if (typeof window !== 'undefined') {
     const probe = (window as unknown as { __ottoMdProbe?: { cache?: unknown } }).__ottoMdProbe;

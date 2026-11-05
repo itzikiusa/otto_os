@@ -36,24 +36,15 @@ Agents is where your coding agents run. Each session is a real terminal on this 
 - **Tabs**: one tab per open session. Drag tabs to reorder; middle-click closes. Right-click a tab for Rename, Close others, Close to the right, Close all tabs, Reopen closed tab, Share…, Open in New Window (desktop app) and view switching.
 - **Split panes**: split any pane left/right/up/down, up to 15 panes. Drag any divider (arrow keys, `Home` and `End` also work on a focused divider). Drag a pane by its grip onto another pane's centre to swap, or onto an edge to split beside it. Layout presets: Equal columns, Equal rows, One above two, One beside two, Grid (pane ⋯ menu or ⌘K). The layout is remembered per workspace.
 - **Tiled view**: every session in a grid. Up to 15 tiles are live at once; the rest show a light placeholder and only connect when you click **Click to attach**, so opening the grid doesn't wake every suspended agent. Drag tiles to reorder. **Free layout** turns the grid into split panes.
-- Per pane: **Terminal** or **Chat** (the conversation rebuilt from the agent's transcript). Chat works for `claude` and `codex`. For both at once, split the pane (`⌘D`) and put one side in Chat.
+- Every pane is the session's **Terminal**. The old per-pane Chat view (and its `⌘⇧C` toggle) was removed; for a chat-style conversation with an agent, use **Threads**.
 
 **Terminal**
-- Full scrollback survives reconnects (the daemon keeps 10,000 lines per session). Find (`⌘F`, or the search button in the pane header) searches the screen and the daemon's full buffer. `⌘F` reaches the active pane's terminal even when you last clicked its header or a side panel; in **Chat** it searches the conversation.
+- Full scrollback survives reconnects (the daemon keeps 10,000 lines per session). Find (`⌘F`, or the search button in the pane header) searches the screen and the daemon's full buffer. `⌘F` reaches the active pane's terminal even when you last clicked its header or a side panel
 - Click a URL to open it in your browser, or a file reference like `src/App.svelte:42` to open it in the Files panel.
 - `⌥`-drag selects text in agent CLIs (they capture the mouse). Copy-on-select is a toggle in the pane's ⋯ menu.
 - Paste an image and Otto uploads it, then types the saved file's path into the terminal.
 - `⇧↵` inserts a newline in the agent's prompt instead of submitting.
 - Terminal font size: *Terminal font larger / smaller / Reset* in the pane's ⋯ menu, or the zoom keys while the terminal is focused.
-
-**Chat view**
-- Your messages on the right; the agent's replies under its name and time, in a readable column. Hover a message to copy it or see its exact time.
-- Tool work folds into one line that says what happened ("Ran 2 commands, edited retry.rs"). Open it for the steps: each shows its status, a command's last output line, and opens to the full output or an inline diff. The agent's plan shows as a checklist.
-- Code blocks show their language and have **Wrap** and **Copy**; long ones fold behind **Show all**.
-- While the agent works, the last line says what it is doing now. If it stops at a permission prompt or a question, a card says what it is asking and opens the terminal to answer.
-- Scrolled up? New replies never move the page; a pill counts them and jumps back (`⌘↓`).
-- Search the conversation (`⌘F`); the ⋯ menu shows or hides system notes and reloads the transcript.
-- Composer: `↵` sends, `⇧↵` adds a newline, `/` lists the provider's slash commands and your skills, attach images with the image button or paste / drop them. **Stop** interrupts the agent (the same as `Esc` in its terminal). Messages sent while the agent is busy are queued and show as "Queued" until it takes them.
 
 **Broadcast**
 - With 2 or more panes open, **↗ broadcast** sends one line to every visible session. `⌘⇧B` opens Ask Otto pre-filled to broadcast to the sessions you name.
@@ -95,13 +86,10 @@ Agents is where your coding agents run. Each session is a real terminal on this 
 | `⌘⇧D` | Split horizontally |
 | `⌘⌥←` `⌘⌥→` `⌘⌥↑` `⌘⌥↓` | Move the focused pane left, right, up or down |
 | `⌘⌥S` | Swap the focused pane with the next |
-| `⌘⇧C` | Toggle the pane between Terminal and Chat |
-| `⌘F` | Find in the terminal, or search the conversation in Chat |
-| `↵` / `⇧↵` | In Chat search: next / previous match |
-| `⌘↓` | In Chat: jump to the latest message |
+| `⌘F` | Find in the terminal |
 | `⌘C` / `⌃⇧C` | Copy the terminal selection |
 | `⌃⇧V` | Paste into the terminal from the clipboard |
-| `⇧↵` | New line in the agent's prompt (terminal and composer) |
+| `⇧↵` | New line in the agent's prompt |
 | `⌥`-drag | Select text in an agent terminal |
 | `⌘+` / `⌘−` / `⌘0` | Terminal font larger / smaller / reset (terminal focused) |
 | `⌘⇧B` | Broadcast to sessions |
@@ -112,7 +100,6 @@ Agents is where your coding agents run. Each session is a real terminal on this 
 
 - Access needs the **Agents** feature: View to watch, Edit to start, type into, restart, archive or hand over. You see only your own sessions; workspace admins see everyone's. A workspace Viewer can watch a terminal but not type.
 - Resume depends on the provider's transcript on disk. If the CLI has cleaned it up, the session reopens without its earlier conversation.
-- Chat view needs a readable transcript: it's available for `claude` and `codex`, and appears after the first prompt.
 - By default agents run with their skip-permissions flag so they never block on tool approval. Turn this off in Settings → Providers (applies to new sessions).
 - The OS sandbox is off by default. Turn it on in Settings → Daemon → Process sandbox to limit where agents can write.
 - A session started in your home folder is trusted for, and may write anywhere under, `~`. Pick a narrower folder to keep it confined.

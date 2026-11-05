@@ -5,13 +5,13 @@
   import { toastError } from '../../lib/toastError';
   import { loadErrorText } from '../../lib/loadError';
   // One pane: a compact, width-adaptive session header (status + title first;
-  // everything secondary in the details chip or the ⋯ menu) + terminal or chat.
+  // everything secondary in the details chip or the ⋯ menu) + the terminal.
   import Terminal from '../../lib/components/Terminal.svelte';
   import { PRIMARY_SCROLLBACK } from '../../lib/components/termFlow';
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import { events } from '../../lib/events.svelte';
   import { sessionState } from '../../lib/status';
-  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import SessionNetworkStatus from '../connections/SessionNetworkStatus.svelte';
   import SessionMcpProfiles from './SessionMcpProfiles.svelte';
@@ -43,26 +43,20 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { router } from '../../lib/router.svelte';
   import { untrack } from 'svelte';
-  import { transcript } from '../../lib/stores/transcript.svelte';
   import {
     cwdLabel,
-    otherSessionView,
     paneDetails,
     paneDetailsTitle,
     paneTier,
     tierAtMost,
     type PaneTier,
-    type SessionViewMode,
   } from '../../lib/paneHeader';
   import { presetItems } from './SplitNode.svelte';
-  import ConversationView from './conversation/ConversationView.svelte';
   import type { AttachedIssue, SessionStatus } from '../../lib/api/types';
   import { uiControl } from '../../lib/stores/uiControl.svelte';
   import { commandLabel, providerName } from '../../lib/uiCommands/frames';
   import { moduleLabel } from '../../lib/sidebar';
-  import { findInPage } from '../../lib/findinpage.svelte';
   import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
-  import { onTabKey } from '../../lib/tabKeys';
 
   interface Props {
     sessionId: string;
@@ -87,7 +81,7 @@
      *  defaults to the 2k embed depth). The tiled grid passes the smaller
      *  depth — 15 live tiles × 10k lines was 150–360 MB of xterm buffers (SA-05). */
     scrollback?: number;
-    /** Opening the pane resumes a suspended session in Terminal or Chat.
+    /** Opening the pane resumes a suspended session.
      *  The tiled grid passes false: a tile shows a session, it does not ask
      *  for its CLI back — typing into it or Resume does. Default true. */
     resumeOnOpen?: boolean;
@@ -159,8 +153,6 @@
   const foldedMinimal = $derived(tierAtMost(tier, 'minimal'));
   /** Find folds into ⋯ from compact down (⌘F reaches the terminal anyway). */
   const foldedFind = $derived(tierAtMost(tier, 'compact'));
-  /** The view switch is hidden inline too (CSS `micro`). */
-  const foldedMicro = $derived(tier === 'micro');
   /** The drag grip is a mouse affordance — phones keep keyboard/palette moves. */
   const gripOn = $derived(showGrip && dragKey != null && !viewport.isPhone);
 
@@ -294,66 +286,19 @@
       : '',
   );
 
-  // --- Terminal · Chat (docs/design/conversation-view.md §5.1) ---------------
-  // The chat is rebuilt from the provider transcript; probing it once per agent
-  // session (cheap 200, `unavailable_reason` when nothing resolves) makes the
-  // Chat view instant when picked. The default view is Terminal for every
-  // session — the chat is opt-in per session, and the user's choice is
-  // persisted (`otto_session_view:<id>`, winKey; a retired `split` reads as
-  // chat — lib/paneHeader.ts `parseSessionView`).
-  const defaultView: SessionViewMode = 'terminal';
-  const savedView = $derived(isAgent ? transcript.view(sessionId) : null);
-  const view = $derived<SessionViewMode>(isAgent ? (savedView ?? defaultView) : 'terminal');
+  // A session pane is always its terminal: the old Terminal · Chat switch
+  // (⌘⇧C) was removed in favour of Threads, which owns the structured chat.
+  // Nothing reads the old `otto_session_view:<id>` choices, so a saved 'chat'
+  // is harmless; main.ts sweeps them at boot (`transcript.sweepRetiredViewKeys`).
   // Find: the terminal's own bar (an xterm has no DOM text for the page find
-  // to walk — WebGL none at all, DOM only the visible rows); the chat IS DOM,
-  // so the page-wide find covers it (ConversationView registers a provider
-  // for every loaded turn). ⌘F lands here too without a click: this pane's
-  // Terminal takes it while active (findRank → keys.ts routeFind); the
-  // focused split pane outranks another pane showing the same session.
+  // to walk). ⌘F lands here too without a click: this pane's Terminal takes it
+  // while active (findRank → keys.ts routeFind); the focused split pane
+  // outranks another pane showing the same session.
   const findRank = $derived(focused ? 2 : ws.activeSessionId === sessionId ? 1 : 0);
-  const findLabel = $derived(view === 'chat' ? 'Find in chat' : 'Find in terminal');
+  const findLabel = 'Find in terminal';
   function openSessionFind(): void {
-    if (view === 'chat') findInPage.show();
-    else termRef?.openFind();
+    termRef?.openFind();
   }
-
-  function setView(mode: SessionViewMode): void {
-    transcript.setView(sessionId, mode);
-  }
-  /** ⌘⇧C and the narrow-pane flip button: Terminal ⇄ Chat. */
-  function toggleView(): void {
-    setView(otherSessionView(view));
-  }
-  const VIEW_META: [SessionViewMode, string, IconName][] = [
-    ['terminal', 'Terminal', 'terminal'],
-    ['chat', 'Chat', 'comment'],
-  ];
-  const viewLabel = (m: SessionViewMode): string => (m === 'chat' ? 'Chat' : 'Terminal');
-  /** The shared tablist keys, then focus re-lands on the selected tab: the
-   *  terminal view grabs focus when it mounts, which would strand the user. */
-  function onViewTabKey(e: KeyboardEvent): void {
-    onTabKey(e);
-    if (!e.defaultPrevented) return;
-    const list = e.currentTarget as HTMLElement;
-    queueMicrotask(() => list.querySelector<HTMLElement>(`[data-view="${view}"]`)?.focus());
-  }
-  $effect(() => {
-    if (!isAgent) return;
-    const onKey = (e: KeyboardEvent): void => {
-      // A split starts with the SAME session in both panes, so two listeners
-      // pass the active-session guard; the first one handles it (and
-      // preventDefaults) — a second flip would undo it.
-      if (e.defaultPrevented) return;
-      if (!(e.metaKey || e.ctrlKey) || !e.shiftKey || e.altKey) return;
-      if (e.key !== 'c' && e.key !== 'C') return;
-      // Only the active pane reacts (tiled/split views mount several).
-      if (ws.activeSessionId !== sessionId) return;
-      e.preventDefault();
-      toggleView();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  });
   let dirsOpen = $state(false);
   let mcpOpen = $state(false); // ⋯ → MCP tools (the session's MCP profiles)
   const mcpToolsShown = $derived(isAgent && auth.can('mcp', 'view'));
@@ -613,7 +558,7 @@
   /** Terminal font + copy-on-select — they used to be header buttons; the
    *  shortcuts (⌘− ⌘+ ⌘0 in the terminal) are unchanged. */
   function terminalItems(): MenuItem[] {
-    if (viewport.isPhone || view !== 'terminal') return [];
+    if (viewport.isPhone) return [];
     const size = fontShrunk ? `${ui.termFontSize}px, drawn at ${drawnFont}px` : `${ui.termFontSize}px`;
     return [
       { label: 'Terminal font larger', icon: 'plus', hint: '⌘+', disabled: ui.termFontSize >= 28, action: () => ui.termZoomIn() },
@@ -638,7 +583,7 @@
   // ⌘K "Redraw terminal" for the pane the keyboard is in (same action as the
   // ⋯ menu row above).
   $effect(() => {
-    if (!kbFocused || view !== 'terminal' || viewport.isPhone) return;
+    if (!kbFocused || viewport.isPhone) return;
     return registry.register('session-terminal', [
       {
         id: 'terminal.redraw',
@@ -656,20 +601,11 @@
    *
    *  It is also the overflow menu: the pane controls (font, copy-on-select,
    *  restart) always live here, and every control a narrow tier hides from the
-   *  header (the view switch, zoom, ✕, the details chip) comes back as a row,
+   *  header (zoom, ✕, the details chip) comes back as a row,
    *  so nothing is ever unreachable — a 100 px pane is a dot, a title and ⋯. */
   function sessionMenuItems(): MenuItem[] {
     // Pane controls first: the rows that used to be header buttons.
     const controls: MenuItem[] = [
-      ...(foldedMicro && isAgent
-        ? VIEW_META.map(([m, label, icon]) => ({
-            label: `${label} view`,
-            icon,
-            checked: view === m,
-            hint: view === m ? undefined : '⌘⇧C',
-            action: () => setView(m),
-          }) as MenuItem)
-        : []),
       ...(foldedFind ? [{ label: findLabel, icon: 'search', hint: '⌘F', action: openSessionFind } as MenuItem] : []),
       ...(foldedMinimal && showZoom
         ? [
@@ -774,7 +710,7 @@
 >
   <!-- ONE row, adapted to the PANE width by the `@container pane` rules below
        (full ≥720 · compact 420–719 · minimal 200–419 · micro <200). Priority:
-       status + title always; then the view switch and ⋯; everything secondary
+       status + title always; then ⋯; everything secondary
        sits in the details chip or the ⋯ menu. `data-tier` mirrors the script's
        twin of the breakpoints (which rows ⋯ adds back) for tests. -->
   <header class="pane-head" class:grip-on={gripOn} data-tier={tier} bind:clientWidth={headW}>
@@ -887,33 +823,6 @@
       </span>
     </button>
     <span class="grow"></span>
-    {#if isAgent}
-      <div class="segmented view-seg" role="tablist" tabindex="-1" aria-label="Session view" onmousedown={(e) => e.stopPropagation()} onkeydown={onViewTabKey}>
-        {#each VIEW_META as [m, label, icon] (m)}
-          <button
-            role="tab"
-            class:active={view === m}
-            aria-selected={view === m}
-            aria-label={label}
-            tabindex={view === m ? 0 : -1}
-            data-view={m}
-            onclick={() => setView(m)}
-            title={label}
-            aria-keyshortcuts="Meta+Shift+C"
-          ><Icon name={icon} size={12} /><span class="head-lbl">{label}</span></button>
-        {/each}
-      </div>
-      <!-- `minimal` tier stand-in: one button that flips to the other view. -->
-      <button
-        class="icon-btn view-flip"
-        data-view-toggle
-        aria-label="Switch to {viewLabel(otherSessionView(view))} view"
-        title="Switch to {viewLabel(otherSessionView(view))} view"
-        aria-keyshortcuts="Meta+Shift+C"
-        onmousedown={(e) => e.stopPropagation()}
-        onclick={toggleView}
-      ><Icon name={otherSessionView(view) === 'chat' ? 'comment' : 'terminal'} size={13} /></button>
-    {/if}
     {#if uiToggleInline}
       <button
         class="icon-btn ui-ctl"
@@ -996,16 +905,10 @@
     </div>
   {/if}
   {#if session?.meta?.handover}<HandoverDeliveryPanel {session} readonly={readOnly} />{/if}
-  <div class="pane-body" data-view={view}>
-    {#if view === 'chat'}
-      <div class="pane-chat">
-        <ConversationView {sessionId} workspaceId={session?.workspace_id ?? ws.currentId ?? ''} readonly={readOnly} {resumeOnOpen} />
-      </div>
-    {:else}
-      <div class="pane-term">
-        <Terminal bind:this={termRef} {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} restartNonce={ws.restartNonces[sessionId] ?? 0} onstatus={onTermStatus} onfontfit={(px) => (drawnFont = px)} showToolbar={false} autoFocus={kbFocused} {findRank} preferDom={isAgent} claimOnAttach={!readOnly} keepAlive={true} {scrollback} {resumeOnOpen} />
-      </div>
-    {/if}
+  <div class="pane-body" data-view="terminal">
+    <div class="pane-term">
+      <Terminal bind:this={termRef} {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} restartNonce={ws.restartNonces[sessionId] ?? 0} onstatus={onTermStatus} onfontfit={(px) => (drawnFont = px)} showToolbar={false} autoFocus={kbFocused} {findRank} preferDom={isAgent} claimOnAttach={!readOnly} keepAlive={true} {scrollback} {resumeOnOpen} />
+    </div>
   </div>
 </section>
 
@@ -1193,11 +1096,11 @@
     color: var(--text-dim);
     font-weight: 500;
   }
-  .pane:not(.current) .pane-head > :is(.view-seg, .view-flip, .ui-ctl, .pane-find, .pane-zoom, .pane-more, .pane-close, .meta-chip) {
+  .pane:not(.current) .pane-head > :is(.ui-ctl, .pane-find, .pane-zoom, .pane-more, .pane-close, .meta-chip) {
     opacity: 0.7;
     transition: opacity var(--dur-fast) ease-out;
   }
-  .pane:not(.current) .pane-head:is(:hover, :focus-within) > :is(.view-seg, .view-flip, .ui-ctl, .pane-find, .pane-zoom, .pane-more, .pane-close, .meta-chip) {
+  .pane:not(.current) .pane-head:is(:hover, :focus-within) > :is(.ui-ctl, .pane-find, .pane-zoom, .pane-more, .pane-close, .meta-chip) {
     opacity: 1;
   }
   /* C3a drag handle: in the leading padding, visible on hover/focus only. The
@@ -1384,28 +1287,7 @@
   .meta-idle {
     opacity: 0.85;
   }
-  /* Terminal · Chat: a two-state segmented toggle — icon + label when wide,
-     icon-only when compact, one flip button (`.view-flip`) when minimal. */
-  .view-seg {
-    flex-shrink: 0;
-    padding: 1px;
-  }
-  .view-seg > button {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    height: 20px;
-    padding: 0 8px;
-    font-size: var(--fs-xs);
-  }
-  .view-seg > button:focus-visible {
-    outline: 2px solid var(--accent-text);
-    outline-offset: -1px;
-  }
-  .view-flip {
-    display: none;
-  }
-  .pane-head > :is(.view-flip, .ui-ctl, .pane-find, .pane-zoom, .pane-more, .pane-close) {
+  .pane-head > :is(.ui-ctl, .pane-find, .pane-zoom, .pane-more, .pane-close) {
     flex-shrink: 0;
   }
   .pane-body {
@@ -1419,12 +1301,6 @@
     flex: 1;
     min-height: 0;
     min-width: 0;
-  }
-  .pane-chat {
-    flex: 1;
-    min-height: 0;
-    min-width: 0;
-    background: var(--bg);
   }
   /* Additional directories editor (mirrors New Session). */
   .dir-list {
@@ -1484,10 +1360,10 @@
      Container queries on the PANE (`container: pane`). Tiers, widest first —
      keep in step with PANE_TIER_MIN in lib/paneHeader.ts, whose script twin
      adds the hidden controls back into ⋯:
-       full    ≥720  everything: labelled toggle, provider name · idle · folder
-       compact 420–719  icon-only toggle, details chip = provider icon, no "Now:", find → ⋯
-       minimal 200–419  dot · title · view flip · ⋯   (zoom, ✕, chips → ⋯)
-       micro   <200     dot · title · ⋯              (view switch → ⋯ too)
+       full    ≥720  everything: provider name · idle · folder
+       compact 420–719  details chip = provider icon, no "Now:", find → ⋯
+       minimal 200–419  dot · title · ⋯   (zoom, ✕, chips → ⋯)
+       micro   <200     dot · title · ⋯   (tighter padding)
      The status dot, the title and ⋯ never go. */
   @container pane (width < 720px) {
     .pane-head .head-lbl,
@@ -1512,15 +1388,11 @@
     .pane-head .handover-crumb {
       padding: 0 4px;
     }
-    .pane-head .view-seg > button {
-      padding: 0 6px;
-    }
     .pane-head .pane-find {
       display: none;
     }
   }
   @container pane (width < 420px) {
-    .pane-head .view-seg,
     .pane-head .meta-chip,
     .pane-head .task-chip,
     .pane-head .needs-you-badge,
@@ -1532,17 +1404,11 @@
     .pane-head .pane-close {
       display: none;
     }
-    .pane-head .view-flip {
-      display: inline-flex;
-    }
     .pane-head {
       gap: 4px;
     }
   }
   @container pane (width < 200px) {
-    .pane-head .view-flip {
-      display: none;
-    }
     .pane-head {
       padding-inline: 6px 2px;
     }

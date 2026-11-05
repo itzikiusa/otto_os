@@ -12,6 +12,7 @@ import { mockEnabled } from './lib/api/mockGate';
 import { setToken, getToken, baseUrl } from './lib/api/client';
 import { isEmbedded } from './lib/desktop';
 import { installMacFunctionKeyGuard } from './lib/macFunctionKeyGuard';
+import { transcript } from './lib/stores/transcript.svelte';
 
 installMacFunctionKeyGuard(document);
 
@@ -117,6 +118,10 @@ window.addEventListener('unhandledrejection', (e) => {
 const app = mount(App, {
   target: document.getElementById('app')!,
 });
+
+// The session Chat view was removed in favour of Threads: drop the stale
+// per-session Terminal · Chat choices it persisted (harmless, just litter).
+transcript.sweepRetiredViewKeys();
 
 // Register the PWA service worker (no-op in dev if sw.js isn't served).
 // When a NEW service worker takes control (after a deploy), reload once so the

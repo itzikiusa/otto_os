@@ -300,24 +300,21 @@ those roots.
 
 ## 5. UI
 
-### 5.1 View toggle in `SessionView.svelte`
-A two-state **Terminal · Chat** toggle in the pane header; persisted per session
-via a `winKey`-style localStorage key (`otto_session_view:<id>`); default
-*Terminal* for every session (Chat was the default when a transcript resolved
-until 2026-09-06; it is opt-in per session now). `⌘⇧C` toggles; ←/→ move
-between the two tabs.
+### 5.1 View toggle in `SessionView.svelte` — removed (2026-11)
+**The session Chat view was removed in favour of Threads.** A session pane is
+always its terminal: no Terminal · Chat toggle, no `⌘⇧C`, no *Terminal view* /
+*Chat view* rows in the pane ⋯ menu. `ConversationView` lives on as the
+renderer Threads hosts (`modules/threads/ThreadPane.svelte`,
+`ThreadSideChat.svelte`); the transcript endpoints and tail supervisor are
+unchanged. The persisted `otto_session_view:<id>` and
+`otto_session_split_frac:<id>` keys are no longer read and are swept from
+localStorage at boot (`transcript.sweepRetiredViewKeys`), so a saved `chat`
+is harmless.
 
-The toggle adapts to the pane width with the rest of the header
-(`lib/paneHeader.ts` tiers): icon + label on a wide pane (≥ 720 px), icon-only
-below that, one "switch to the other view" button below 420 px, and two
-checkable rows in the pane's ⋯ menu below 200 px.
-
-*Split* (chat left / terminal right inside one pane, with its own divider) was
-**removed on 2026-09-28**: next to the multi-pane layouts it was not usable (a
-split pane cut in half again) and it crowded every header. A stored `split`
-preference reads as `chat` and is rewritten on first read, and the orphaned
-`otto_session_split_frac:<id>` key is deleted. To see the chat and the terminal
-side by side, split the pane (`⌘D`) and put one pane in Chat.
+History of the removed toggle: a two-state **Terminal · Chat** switch in the
+pane header, persisted per session (`otto_session_view:<id>`), default
+*Terminal* since 2026-09-06, `⌘⇧C` toggled. *Split* (chat beside the terminal
+inside one pane) was removed earlier, on 2026-09-28.
 
 ### 5.2 `agents/conversation/ConversationView.svelte` (chat rev 6 "chat v2", 2026-09-29)
 Props: `{ sessionId?: string; transcriptPath?: string; workspaceId: string; readonly?: boolean }`
@@ -535,7 +532,11 @@ throughout, and the design is checked in light and dark.
   paths, file references / chips / linkified output, fence info, the
   whole-block highlight split, and the preview parsers.
 - `unit/chatPresentation.test.ts`: code-block chrome.
-- `e2e/desktop-conversation-chat.spec.ts`: two speakers, fold + thinking +
+- *(Removed with the session Chat view: `desktop-conversation{,-chat,-shots,-perf,-load-perf}.spec.ts`
+  drove the chat through the session pane. The daemon API checks moved to
+  `e2e/desktop-transcript-api.spec.ts`; the renderer is now exercised through
+  Threads, `e2e/desktop-threads*.spec.ts`.)* Formerly
+  `e2e/desktop-conversation-chat.spec.ts`: two speakers, fold + thinking +
   tokens, timeline + read source + inline / panel diff, IDE code blocks +
   mermaid, links, changed files + md / sandboxed HTML / CSV / diff previews
   + full view + All changes, the narrow overlay, ⌥↑ + Edit & resend, the
@@ -563,7 +564,7 @@ below is unchanged.
 ### 5.5 Mission Control
 Cards with a `session_id` show `done/total` from the existing
 `GET /workspaces/{wid}/activity/summary` counts and get **+ Sub-task** (inline
-input → `POST /sessions/{id}/tasks`). Clicking a card opens the session in Chat.
+input → `POST /sessions/{id}/tasks`). Clicking a card opens the session (in Chat until the session Chat view was removed).
 
 ### 5.6 Outputs (right panel tab **Outputs**, `panels/OutputsPanel.svelte`)
 Artifact list + preview: HTML in `sandbox=""` iframe (copy `MockupViewer`'s

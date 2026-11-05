@@ -1,7 +1,8 @@
 # Conversation view, History, Tasks board & Outputs
 
-Every agent session in Otto can be read as a **Claude/Codex-app-style
-conversation** instead of (or beside) its raw terminal; every past conversation
+Agent conversations in Otto can be read as a **Claude/Codex-app-style
+conversation** in **Threads** (the session panes themselves are always the raw
+terminal — the per-session Chat view was removed, see §4.1); every past conversation
 — Otto's own sessions *and* the transcripts the CLIs already left on disk — is
 searchable and resumable from a **History** page; the per-session **task
 tracker** is two-way (the agent's plan comes in, board tasks go out); and the
@@ -24,11 +25,11 @@ files, PRs and images a session produced are listed with previews in an
 
 | You want to… | Otto gives you |
 |---|---|
-| Read what an agent did without scrolling a terminal | **Chat view** — a two-state **Terminal · Chat** toggle in every agent session header (`⌘⇧C` toggles); user bubbles, assistant prose, one-line tool-work summaries that open into a step timeline, inline diffs, code blocks with Copy, a live "working on…" line, images, subagent cards |
+| Read what an agent did without scrolling a terminal | **Threads** — the conversation renderer (the session pane's old Terminal · Chat toggle and `⌘⇧C` were removed in favour of Threads); user bubbles, assistant prose, one-line tool-work summaries that open into a step timeline, inline diffs, code blocks with Copy, a live "working on…" line, images, subagent cards |
 | Find that conversation from last week | **History** (`#/history`) — search + provider / folder / status / date filters, grouped by repo like the Claude/Codex app sidebars; read-only on the right |
 | Continue a conversation the CLI had outside Otto | **Resume in Otto** — imports the on-disk transcript as a reconnectable session, then the normal resume path (`claude --resume` / Codex rollout) continues it |
 | See the agent's plan and push work into it | **Task tracker** in the Activity panel — TodoWrite/TaskCreate tasks merged with **+ Add task** rows (`from board` badge, `queued` until the agent is nudged) |
-| Drive many agents from one board | **Mission Control** cards show `done/total`, take an inline **+ Sub-task**, and open the session straight into Chat |
+| Drive many agents from one board | **Mission Control** cards show `done/total`, take an inline **+ Sub-task**, and open the session |
 | Get the files/PRs/images a session produced | **Outputs** right-panel tab — list + sandboxed preview (HTML, Markdown, images, PDF), download for the rest; also inline under a History conversation |
 
 ---
@@ -44,15 +45,14 @@ files, PRs and images a session produced are listed with previews in an
 | Live draft | `ui/src/modules/agents/conversation/LiveDraft.svelte` | Sub-turn streaming: the screen text under the last folded turn, deduped against it |
 | Tasks merge + nudge | `crates/otto-state` (`ActivityRepo::replace_tasks`, migration 0122), `crates/otto-server/src/agent_tasks_nudge.rs` | Agent rows replaced on sync, user rows merged by title/ext_id; one sweep hands board tasks to the PTY |
 | History index | migration 0123 `transcript_index`, background walker | Head+tail scan of both provider roots; `history_index_progress` |
-| Conversation UI | `ui/src/modules/agents/conversation/` + `SessionView.svelte`, `ui/src/lib/stores/transcript.svelte.ts` | `ConversationView` (`sessionId` or `transcriptPath` mode, `readonly`), the view toggle, composer |
+| Conversation UI | `ui/src/modules/agents/conversation/` (hosted by `ui/src/modules/threads/`), `ui/src/lib/stores/transcript.svelte.ts` | `ConversationView` (`sessionId` or `transcriptPath` mode, `readonly`), composer |
 | History UI | `ui/src/modules/agents/history/` | `HistoryPage.svelte`, the `history` store, the ⌘K command |
 | Tasks / board UI | `ui/src/modules/panels/ActivityPanel.svelte`, `ui/src/modules/agents/WorkQueue.svelte`, `ui/src/lib/stores/activity.svelte.ts` | Add task, badges, done/total strip, sub-tasks |
 | Outputs UI | `ui/src/modules/panels/OutputsPanel.svelte`, `ui/src/shell/RightPanel.svelte` | The **Outputs** tab and the embedded History variant |
 | Types | `ui/src/lib/api/types.ts` (`// ── Transcript` section) | Mirror of `otto-transcript/src/model.rs` |
 | Contracts (authoritative) | `docs/contracts/api.md`, `docs/contracts/ws.md` | Routes, RBAC, event scopes |
 
-Entry points in the app: the **Terminal · Chat** toggle in any agent session
-header; **History** in the left nav (Agents group), the **History** button in the
+Entry points in the app: **Threads** (the conversation view); **History** in the left nav (Agents group), the **History** button in the
 Agents header and in Mission Control, and ⌘K **"Go to History"**; the
 **Activity** and **Outputs** tabs of the right panel (⌘J) while an agent session
 is focused.
@@ -74,7 +74,7 @@ a Claude projects or Codex sessions root: `~/.claude/projects` (plus
   terminal only, with `unavailable_reason: 'no_provider_session_id'`.
 - **Codex**: rollouts are matched by cwd once and then stored on the session row
   (`sessions.transcript_path`). Until the match lands the chat reports
-  `codex_rollout_unresolved` and the toggle stays on Terminal.
+  `codex_rollout_unresolved`.
 - **agy (Antigravity)**: history is a SQLite store with encrypted usage, not
   JSONL — the adapter is a stub (`provider_unsupported`); the UI shows the
   terminal only.
@@ -86,24 +86,20 @@ a Claude projects or Codex sessions root: `~/.claude/projects` (plus
 
 ## 4. Full feature walkthrough
 
-### 4.1 The view toggle (Terminal · Chat)
+### 4.1 The session Chat view (removed)
 
-Every agent session header has a two-state toggle. **Terminal** is the default
-for every session; **Chat** is opt-in (greyed-out empty state when no transcript
-resolves). The choice is remembered per session (`otto_session_view:<id>` in
-localStorage — the same key Mission Control and History set to `chat` before
-opening a session). `⌘⇧C` toggles the focused pane; ←/→ move between the tabs.
+Session panes used to carry a two-state **Terminal · Chat** toggle (`⌘⇧C`,
+persisted per session as `otto_session_view:<id>`). It was removed in favour of
+**Threads**, which owns the chat-style conversation: a session pane is now
+always its terminal, the header has no view switch, and the ⋯ menu has no
+*Terminal view* / *Chat view* rows. Old `otto_session_view:*` /
+`otto_session_split_frac:*` keys are ignored and swept from localStorage at
+boot (`transcript.sweepRetiredViewKeys`). The daemon's transcript endpoints are
+unchanged. (The in-pane **Split** view had already been retired on
+2026-09-28.)
 
-The toggle follows the pane width: icon + label on a wide pane (≥ 720 px),
-icon-only below that, a single "Switch to Chat/Terminal view" button below
-420 px, and *Terminal view* / *Chat view* rows in the pane's ⋯ menu below
-200 px. See [agent-sessions.md → pane header](./agent-sessions.md) for the
-whole header.
-
-The former **Split** view (chat and terminal side by side inside one pane) was
-removed on 2026-09-28 — it crowded every header and halved an already-split
-pane. A saved `split` choice opens as Chat. For chat beside the terminal, split
-the pane (`⌘D`) and switch one side to Chat.
+The rest of this section describes the conversation renderer as Threads hosts
+it.
 
 ### 4.2 The conversation
 
@@ -164,7 +160,7 @@ header offers:
 
 | Action | What it does |
 |---|---|
-| **Resume in Otto** / **Open in Otto** | `on_disk` → `POST …/history/import` creates a `reconnectable` session, then `POST /sessions/{id}/restart` continues it with the provider's resume args; `exited`/`reconnectable` → restart; live → just opens. Always lands in **Chat**. |
+| **Resume in Otto** / **Open in Otto** | `on_disk` → `POST …/history/import` creates a `reconnectable` session, then `POST /sessions/{id}/restart` continues it with the provider's resume args; `exited`/`reconnectable` → restart; live → just opens. |
 | **Open folder** | Reveals the cwd in the OS file manager (desktop app; falls back to copying the path when no bridge is available — the toast says so). |
 | **Copy path** | Copies the transcript path (right-click → also the folder path). |
 | **Archive** | Archives the Otto session (not offered for `on_disk` rows — there is nothing to archive). |
@@ -204,7 +200,7 @@ Any card backed by a session gets a **task strip**: `done/total`, a progress
 bar and the in-progress task, from `GET /workspaces/{wid}/activity/summary`
 (kept live by `tasks_updated`). **+ Sub-task** opens an inline input on the card
 (`⏎` adds, `Esc` cancels) → the same `POST /sessions/{id}/tasks`. Clicking a
-card opens the session in **Chat** (the view key is set before navigating). The
+card opens the session. The
 header's **History** button jumps to `#/history`.
 
 ### 4.6 Outputs
@@ -354,14 +350,14 @@ corpus numbers and any route-level deviations are recorded in
 
 | Symptom | Cause / fix |
 |---|---|
-| The toggle is stuck on **Terminal**; chat says "no transcript" | `unavailable_reason` tells you which: `no_provider_session_id` (the CLI never reported its id — resume to get one), `codex_rollout_unresolved` (the cwd match hasn't happened yet — it lands on the next capture scan), `transcript_missing` (the file was deleted/moved), `provider_unsupported` (agy/shell). |
+| The chat says "no transcript" | `unavailable_reason` tells you which: `no_provider_session_id` (the CLI never reported its id — resume to get one), `codex_rollout_unresolved` (the cwd match hasn't happened yet — it lands on the next capture scan), `transcript_missing` (the file was deleted/moved), `provider_unsupported` (agy/shell). |
 | A conversation you had in the terminal is missing from History | The index skips unchanged files; if the file is new, press **↻ Rescan** and watch `scanned/total`. Files under synthetic temp project dirs are excluded on purpose. |
 | **Resume in Otto** created a session but the agent starts fresh | The provider needs its resume args: Claude by `provider_session_id`, Codex by the persisted rollout path. Check the imported row has both (`GET /sessions/{id}`); a Codex rollout from another machine cannot be resumed here. |
 | An added task never reaches the agent (stays **queued**) | The sweep waits for `idle`, at most 120 s while `working`, and indefinitely while a permission prompt is pending — answer the prompt in the terminal. `nudged_at` on the row confirms delivery. |
 | Board tasks vanish when the agent republishes its list | They shouldn't — only `source:'agent'` rows are replaced. If a title collides with an agent task the user row *adopts* the agent's status (that is the merge, not a loss). |
 | Outputs shows a file but the preview is "Forbidden" | The path fell outside the allow-list (session cwd / data dir / user temp) or matched the deny-list (`.git`, `.env*`, keys). Copy the path and open it locally. |
 | Mission Control strip shows `0/0` though the Activity panel lists tasks | The summary is loaded with the board; press **↻** or wait for the next `tasks_updated`. |
-| A chat that sat idle for ~5 min goes dead (composer shows **Resume**, no new turns; a reload or opening the terminal brings it back) | The idle-suspend sweep judged the session *unattached*: a Chat-mode pane mounts no terminal WS. Fixed by counting the chat's 60 s `POST …/transcript/touch` as a viewer (`VIEW_HOLD`, 3 min); if you still see it, check the daemon log for `suspended idle, unattached session` and that the touch pings are reaching the daemon (they fail with "offline" in WKWebView when every network interface is down, e.g. right after sleep). |
+| A chat that sat idle for ~5 min goes dead (composer shows **Resume**, no new turns; a reload or opening the terminal brings it back) | The idle-suspend sweep judged the session *unattached*: a chat surface mounts no terminal WS. Fixed by counting the chat's 60 s `POST …/transcript/touch` as a viewer (`VIEW_HOLD`, 3 min); if you still see it, check the daemon log for `suspended idle, unattached session` and that the touch pings are reaching the daemon (they fail with "offline" in WKWebView when every network interface is down, e.g. right after sleep). |
 | `Duplicate identifier` / type errors after pulling | `ui/src/lib/api/types.ts` mirrors `model.rs` — rebuild both sides together (see §8 of the design doc for the current hand-offs). |
 
 ---

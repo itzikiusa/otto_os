@@ -430,7 +430,7 @@
       ontoggleterminal();
       return;
     }
-    if (sessionId) transcript.setView(sessionId, 'terminal');
+    if (sessionId) ws.navigateToSession(sessionId); // no host toggle (Threads side chat)
   }
   // Screen-reader announcements: only the moments that matter (working,
   // finished, needs you) — not every streamed frame or tool row.

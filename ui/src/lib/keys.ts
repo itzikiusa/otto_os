@@ -549,7 +549,6 @@ export const KEYMAP: ShortcutGroup[] = [
       { keys: '← / →', label: 'Move between tabs when a tab has focus (Home / End for the first / last)' },
       { keys: '⌥⇧← / ⌥⇧→', label: 'Move the focused tab left / right (also in the tab\'s right-click menu)' },
       { keys: '⌫', label: 'Close the focused tab' },
-      { keys: '⌘⇧C', label: 'Toggle the focused agent session between the terminal and chat views' },
     ],
   },
   {

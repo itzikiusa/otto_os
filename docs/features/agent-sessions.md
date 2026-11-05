@@ -366,7 +366,8 @@ bar; `↑`/`↓` or a click steps through them, and the viewport only jumps ther
 by itself when the client buffer has no hit. `⌘F` reaches the terminal of the
 active session pane even without keyboard focus in the xterm (the header search
 button does the same). A focused query editor, text field or open modal keeps
-`⌘F`, and so does the Chat view, where the page find covers the transcript.
+`⌘F`. (The session Chat view, where the page find covered the transcript,
+was removed in favour of Threads.)
 Routing: `routeFind` in `ui/src/lib/keys.ts`; the terminal opts in with
 `Terminal findRank`.
 
@@ -434,8 +435,9 @@ takes the size back too.
   filtered list. Persisted as `otto_session_order_<ws>`.
 - **Pane header** — one 30 px row whose priority is *status dot + title*: the
   title is the only item that grows, everything else shrinks or folds before it
-  does. Inline: the Terminal · Chat toggle, the details chip, zoom (tiled) and
-  ⋯ (+ ✕ in a split). The **details chip** is the provider icon (+ name, idle /
+  does. Inline: the details chip, zoom (tiled) and ⋯ (+ ✕ in a split). A
+  session pane is always its terminal: the former Terminal · Chat toggle (and
+  `⌘⇧C`) was removed in favour of **Threads**, which hosts the chat view. The **details chip** is the provider icon (+ name, idle /
   suspend countdown and folder on a wide pane); its tooltip and its click menu
   hold the rest — themed full name, subscription account, state, tasks, the
   full cwd (*Copy folder path*) and the handover source. The **⋯ menu** holds
@@ -451,10 +453,10 @@ takes the size back too.
 
   | Tier | Pane width | Header |
   |---|---|---|
-  | full | ≥ 720 px | dot · title · task / now / handover chips · details chip with text · labelled toggle · zoom · ⋯ · ✕ |
-  | compact | 420–719 | same, but the toggle and chips are icon-only and "Now: …" is hidden |
-  | minimal | 200–419 | dot · title · one *Switch to …* button · ⋯ — zoom, ✕ and the details move into ⋯ |
-  | micro | < 200 | dot · title · ⋯ — *Terminal view* / *Chat view* are ⋯ rows |
+  | full | ≥ 720 px | dot · title · task / now / handover chips · details chip with text · zoom · ⋯ · ✕ |
+  | compact | 420–719 | same, but the chips are icon-only, "Now: …" is hidden and find moves into ⋯ |
+  | minimal | 200–419 | dot · title · ⋯ — zoom, ✕ and the details move into ⋯ |
+  | micro | < 200 | dot · title · ⋯ (tighter padding) |
 
   The header height never changes and nothing is ever clipped: the title
   ellipsizes (full text in its tooltip) instead.
@@ -759,7 +761,7 @@ when **all** of these hold:
    resumed losslessly).
 
    **Opening a session only to look at it does not pin its CLI.** Reopening a
-   suspended session (a terminal attach or a chat view) resumes it with
+   suspended session (a terminal attach or a Threads chat) resumes it with
    `--resume` so its history repaints. Until somebody actually types into it
    (or an engine sends it a turn) that process is a *passive resume*: it gets
    **no** manual grace, only the engine one above, so it is suspended again a
@@ -804,7 +806,7 @@ terminals don't count): **12** by default, setting `max_live_agent_sessions`
 ones first — ordered by the later of their last PTY output and their last use
 (typing, a terminal attach or detach, a chat ping). The cap overrides the
 manual grace, but never takes a session that is watched (terminal viewer,
-chat view, engine turn driver), pinned, `working`, printed anything in the
+Threads chat, engine turn driver), pinned, `working`, printed anything in the
 last 2 minutes (or the idle grace, if set lower), has a busy process tree, has
 a fresh open turn, or cannot be resumed. If everything over the cap is in use
 the cap stays exceeded until the next sweep and the daemon logs

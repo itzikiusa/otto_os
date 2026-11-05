@@ -78,23 +78,20 @@ async function expectHeadersFit(page: Page): Promise<void> {
 /** Only what is actually rendered — tiers hide controls with `display: none`. */
 const visibleHeaderButtons = (page: Page) => page.locator('.pane-head button:visible');
 
-test('minimal panes keep dot + title + view flip + ⋯ and every button in the viewport', async ({ page }) => {
+test('minimal panes keep dot + title + ⋯ and every button in the viewport', async ({ page }) => {
   test.slow();
   await columnsUntil(page, 400);
   const n = await page.locator('[data-pane-key]').count();
   await expect(page.locator('.pane-head[data-tier="minimal"]')).toHaveCount(n);
 
-  // The Terminal · Chat tabs are hidden; one flip button per pane replaces them.
+  // A session pane is always its terminal: no Terminal · Chat switch at all.
   await expect(page.getByRole('tablist', { name: 'Session view' })).toHaveCount(0);
-  await expect(page.locator('[data-view-toggle]:visible')).toHaveCount(n);
+  await expect(page.locator('[data-view-toggle]')).toHaveCount(0);
   await expect(page.locator('button[title="More…"]:visible')).toHaveCount(n);
   // The title stays readable — it is the one thing that gets the space.
   const titleW = await page.locator('.pane-title').first().evaluate((el) => el.getBoundingClientRect().width);
   expect(titleW, 'title width in a minimal pane').toBeGreaterThan(40);
   await expect(page.locator('.pane-title').first()).toHaveText('Baresi');
-
-  await page.locator('[data-view-toggle]').first().click();
-  await expect(page.locator('.pane-body[data-view="chat"]').first()).toBeVisible({ timeout: 15_000 });
 
   // Restart, and the ✕ this tier hid, are ⋯ rows.
   await page.locator('button[title="More…"]').first().click();
@@ -112,27 +109,25 @@ test('minimal panes keep dot + title + view flip + ⋯ and every button in the v
   for (let i = 0; i < count; i++) await expectFullyInViewport(page, buttons.nth(i), 'pane header button');
 });
 
-test('micro panes keep the title and fold the view switch and close into ⋯', async ({ page }) => {
+test('micro panes keep the title and fold close into ⋯', async ({ page }) => {
   test.slow();
   await columnsUntil(page, 190);
   const n = await page.locator('[data-pane-key]').count();
   await expect(page.locator('.pane-head[data-tier="micro"]')).toHaveCount(n);
 
-  // The title never leaves the header; the flip button does.
+  // The title never leaves the header.
   await expect(page.locator('.pane-title')).toHaveCount(n);
   await expect(page.locator('.pane-title').first()).toBeVisible();
-  await expect(page.locator('[data-view-toggle]:visible')).toHaveCount(0);
   await expectHeadersFit(page);
 
   await page.locator('button[title="More…"]').first().click();
   const menu = page.locator('.ctx-menu');
   await expectFullyInViewport(page, menu, 'pane overflow menu');
-  // The view switch is the first group of rows.
-  await expect(menu.getByRole('menuitemcheckbox', { name: /^Terminal view/ })).toBeVisible();
-  await menu.getByRole('menuitemcheckbox', { name: /^Chat view/ }).click();
-  await expect(page.locator('.pane-body[data-view="chat"]').first()).toBeVisible({ timeout: 15_000 });
+  // No Terminal / Chat view rows any more (the session Chat view is gone).
+  await expect(menu.getByRole('menuitemcheckbox', { name: /^(Terminal|Chat) view/ })).toHaveCount(0);
+  await page.keyboard.press('Escape');
 
-  // …and the ✕ is reachable from the same menu. Every pane here holds the SAME
+  // The ✕ is reachable from the ⋯ menu. Every pane here holds the SAME
   // session (⌘D clones the focused one), so closing its tab empties the split.
   await page.locator('button[title="More…"]').first().click();
   await menu.getByRole('menuitem', { name: 'Close session' }).click();

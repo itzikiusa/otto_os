@@ -18,7 +18,7 @@ export const UNAVAILABLE_TRANSCRIPT_COPY: Record<
     body: 'The provider transcript file for this session is gone or was never created here. Use the terminal view.',
   },
   provider_unsupported: {
-    title: 'Chat view not available for this provider',
+    title: 'Chat not available for this provider',
     body: 'This agent does not keep a readable transcript. Use the terminal view.',
   },
   codex_rollout_unresolved: {
