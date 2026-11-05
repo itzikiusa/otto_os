@@ -90,6 +90,9 @@ pub fn call_timeout(tool: &str, args: &Value) -> Duration {
         | "personal_agent_delegate" => 60,
         // A peer's reply long-polls up to 25 s.
         "thread_read" => 35,
+        // Several searches (activity) / a member walk + history or search.
+        "slack_my_activity" => 60,
+        "slack_read_messages" | "slack_search" | "slack_list_conversations" => 45,
         // Merge PUT (+ GitLab rebase PUT) around a ≤ 60 s provider poll.
         "merge_pr" => 90,
         // createmeta types + fields (paged), parent lookup, POST, verify GET.
@@ -601,6 +604,114 @@ fn db_query_call(args: &Value, write: bool) -> Result<SelfCall, Error> {
     ))
 }
 
+/// The Slack slice of [`route_for`] — `/workspaces/{id}/integrations/slack/…`
+/// (otto-channels `slack_tools`). `None` = not a Slack tool.
+fn slack_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
+    let short = tool.strip_prefix("slack_")?;
+    let call = || -> Result<SelfCall, Error> {
+        let base = format!(
+            "/api/v1/workspaces/{}/integrations/slack",
+            seg(&arg_str(args, "workspace_id")?)
+        );
+        // The JSON body: every listed argument the caller sent.
+        let body = |keys: &[&str]| {
+            let mut b = json!({});
+            for k in keys {
+                if let Some(v) = args.get(*k).filter(|v| !v.is_null()) {
+                    b[*k] = v.clone();
+                }
+            }
+            b
+        };
+        let get = |path: &str, keys: &[(&str, &str)]| {
+            let q = opt_query(args, keys);
+            SelfCall::get(if q.is_empty() {
+                format!("{base}/{path}")
+            } else {
+                format!("{base}/{path}?{q}")
+            })
+        };
+        let who = [("as", "as"), ("team", "team")];
+        Ok(match short {
+            "my_workspaces" => get("teams", &[]),
+            "list_conversations" => get(
+                "conversations",
+                &[
+                    who[0],
+                    who[1],
+                    ("q", "q"),
+                    ("types", "types"),
+                    ("limit", "limit"),
+                ],
+            ),
+            "find_user" => {
+                arg_str(args, "q")?;
+                get("users", &[("q", "q"), who[0], who[1]])
+            }
+            "read_messages" => {
+                arg_str(args, "channel")?;
+                get(
+                    "messages",
+                    &[
+                        ("channel", "channel"),
+                        who[0],
+                        who[1],
+                        ("thread_ts", "thread_ts"),
+                        ("oldest", "oldest"),
+                        ("latest", "latest"),
+                        ("limit", "limit"),
+                        ("cursor", "cursor"),
+                    ],
+                )
+            }
+            "search" => {
+                arg_str(args, "query")?;
+                get(
+                    "search",
+                    &[
+                        ("query", "query"),
+                        who[1],
+                        ("count", "count"),
+                        ("page", "page"),
+                        ("sort", "sort"),
+                    ],
+                )
+            }
+            "my_activity" => get(
+                "activity",
+                &[who[1], ("since", "since"), ("limit", "limit")],
+            ),
+            "post_message" => {
+                arg_str(args, "channel")?;
+                arg_str(args, "text")?;
+                SelfCall::post(
+                    format!("{base}/messages"),
+                    body(&["as", "team", "channel", "text", "thread_ts"]),
+                )
+            }
+            "react" => {
+                for k in ["channel", "ts", "name"] {
+                    arg_str(args, k)?;
+                }
+                SelfCall::post(
+                    format!("{base}/reactions"),
+                    body(&["as", "team", "channel", "ts", "name"]),
+                )
+            }
+            "mark_unread" => {
+                arg_str(args, "channel")?;
+                arg_str(args, "ts")?;
+                SelfCall::post(
+                    format!("{base}/mark"),
+                    body(&["team", "channel", "ts", "unread"]),
+                )
+            }
+            other => return Err(Error::Invalid(format!("unknown otto tool 'slack_{other}'"))),
+        })
+    };
+    Some(call())
+}
+
 /// The Linked Threads slice of [`route_for`] (split out to keep it under the
 /// size ratchet). `None` = not a thread tool.
 fn thread_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
@@ -716,7 +827,7 @@ fn team_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
 /// endpoint's native RBAC when the call is later executed as the user. `ask_human_approval`
 /// is handled earlier (in `execute_otto_tool`) and never reaches here.
 pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
-    if let Some(call) = thread_route(tool, args) {
+    if let Some(call) = thread_route(tool, args).or_else(|| slack_route(tool, args)) {
         return call;
     }
     if let Some(call) = team_route(tool, args) {

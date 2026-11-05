@@ -86,6 +86,8 @@ mod share_api;
 mod share_otp;
 #[path = "share_scope_guard.rs"]
 mod share_scope_guard;
+#[path = "slack_as_me.rs"]
+mod slack_as_me;
 #[path = "ui_control.rs"]
 mod ui_control;
 #[path = "workbench_api.rs"]

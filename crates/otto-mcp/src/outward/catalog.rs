@@ -103,6 +103,11 @@ pub const DEFAULT_ENABLED: &[&str] = &[
     "list_product_stories",
     "get_product_story",
     "list_integrations",
+    // Slack metadata (the as-me teams, conversation + member directories).
+    // Message content (read / search / activity) stays opt-in.
+    "slack_my_workspaces",
+    "slack_list_conversations",
+    "slack_find_user",
     "get_usage_summary",
     "list_bundled_skills",
     // Self-improvement (reads)
@@ -169,6 +174,11 @@ pub const DANGEROUS: &[&str] = &[
     "update_confluence_page",
     "comment_confluence_page",
     "test_integration",
+    // Slack writes: a post / reaction other people see (as the bot or AS
+    // THE PERSON), and the person's own read cursor in Slack.
+    "slack_post_message",
+    "slack_react",
+    "slack_mark_unread",
     "broadcast_message",
     // Delegation: opening a worker session and driving one session by id are
     // the same capability as broadcast (they type into a running agent).
@@ -334,6 +344,11 @@ pub const OPT_IN_READS: &[&str] = &[
     "consume_broker_messages",
     // A PR diff streams code, like code search.
     "get_pr_diff",
+    // Slack message content — channel/DM history, search and the day digest
+    // read a person's conversations (as=user: their DMs).
+    "slack_read_messages",
+    "slack_search",
+    "slack_my_activity",
     // (search_memory + Vault v2 content reads removed — Vault feature disabled.)
 ];
 
@@ -573,10 +588,10 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "pr_number":{"type":"integer","description":"Alias of `number`."},
                 "strategy":{"type":"string","enum":["merge","squash","rebase"]},"delete_source_branch":{"type":"boolean"}}}}),
     ];
-    // The DB query pair sits just before `open_pr_draft`, as it always has;
-    // Linked Threads just before `wait_session`.
+    // DB query pair before `open_pr_draft`, threads `wait_session`, Slack usage.
     splice_before(&mut specs, "otto.open_pr_draft", database_query_specs());
     splice_before(&mut specs, "otto.wait_session", thread_tool_specs());
+    splice_before(&mut specs, "otto.get_usage_summary", slack_tool_specs());
     specs.extend(issue_tool_specs());
     specs.extend([
         // ================= Vault (docs home) =================
@@ -971,6 +986,92 @@ fn splice_before<const N: usize>(specs: &mut Vec<Value>, name: &str, slice: [Val
     specs.splice(at..at, slice);
 }
 
+/// The Slack slice of [`otto_tool_specs`]: as the workspace bot (`as=bot`,
+/// default) or as the calling person (`as=user`, their own token for one of
+/// their connected Slack `team`s — a personal agent only where its owner
+/// allowed it). Search / activity / mark are as-the-person only.
+fn slack_tool_specs() -> [Value; 9] {
+    let ws = json!({"type":"string"});
+    // Kept SHORT: these repeat in every Slack schema of tools/list.
+    let who = json!({"type":"string","enum":["bot","user"],"description":"user = as you"});
+    let team = json!({"type":"string","description":"as=user: your Slack team"});
+    let ch = json!({"type":"string","description":"id, #name or @user"});
+    [
+        json!({"name":"otto.slack_my_workspaces","mutating":false,"category":"Channels",
+            "description":"The Slack workspaces (teams) you can act in as yourself, and whether this Otto workspace has a Slack bot. Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":ws}}}),
+        json!({"name":"otto.slack_list_conversations","mutating":false,"category":"Channels",
+            "description":"List Slack channels, DMs (kind im, named by person) and group DMs. as=user lists yours. `q` filters by name. Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":ws,"as":who,"team":team,
+                "q":{"type":"string"},"types":{"type":"string","description":"e.g. im,mpim"},"limit":{"type":"integer"}}}}),
+        json!({"name":"otto.slack_find_user","mutating":false,"category":"Channels",
+            "description":"Find Slack members (incl. bots) by name, @handle or id. Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id","q"],"properties":{"workspace_id":ws,"q":{"type":"string"},"as":who,"team":team}}}),
+        json!({"name":"otto.slack_read_messages","mutating":false,"category":"Channels",
+            "description":"Read a Slack channel/DM history, or one thread (`thread_ts`), oldest→newest. oldest/latest: ts, 2h/1d, RFC 3339 or date. Pass `next_cursor` back as `cursor` for older. Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id","channel"],"properties":{"workspace_id":ws,"channel":ch,"as":who,"team":team,
+                "thread_ts":{"type":"string"},"oldest":{"type":"string"},"latest":{"type":"string"},"limit":{"type":"integer"},"cursor":{"type":"string"}}}}),
+        json!({"name":"otto.slack_search","mutating":false,"category":"Channels",
+            "description":"Search Slack messages as you (Slack search syntax: from:@x in:#c after:YYYY-MM-DD). Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id","query"],"properties":{"workspace_id":ws,"query":{"type":"string"},"team":team,
+                "count":{"type":"integer"},"page":{"type":"integer"},"sort":{"type":"string","enum":["timestamp","score"]}}}}),
+        json!({"name":"otto.slack_my_activity","mutating":false,"category":"Channels",
+            "description":"Your Slack digest since `since` (default 24h): messages mentioning you + your DM/group-DM traffic (from_me marks yours). Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":ws,"team":team,"since":{"type":"string"},"limit":{"type":"integer"}}}}),
+        json!({"name":"otto.slack_post_message","mutating":true,"category":"Channels",
+            "description":"Post a Slack message (`thread_ts` = reply in thread) as the bot or as=user as you. Returns ts + permalink. DANGEROUS: outward — approval-gated.",
+            "inputSchema":{"type":"object","required":["workspace_id","channel","text"],"properties":{"workspace_id":ws,"channel":ch,"text":{"type":"string"},
+                "thread_ts":{"type":"string"},"as":who,"team":team}}}),
+        json!({"name":"otto.slack_react","mutating":true,"category":"Channels",
+            "description":"Add an emoji reaction (`name`, e.g. eyes) to a Slack message. DANGEROUS: approval-gated.",
+            "inputSchema":{"type":"object","required":["workspace_id","channel","ts","name"],"properties":{"workspace_id":ws,"channel":ch,"ts":{"type":"string"},
+                "name":{"type":"string"},"as":who,"team":team}}}),
+        json!({"name":"otto.slack_mark_unread","mutating":true,"category":"Channels",
+            "description":"As you: mark a Slack message (and later ones) unread — your read cursor goes just before `ts`; unread=false marks read up to it. Approval-gated.",
+            "inputSchema":{"type":"object","required":["workspace_id","channel","ts"],"properties":{"workspace_id":ws,"channel":ch,"ts":{"type":"string"},
+                "unread":{"type":"boolean"},"team":team}}}),
+    ]
+}
+
+/// The approval card's detail for the Slack writers: who it acts as, where,
+/// and (for a post) the text.
+fn slack_detail(short: &str, args: &Value) -> Option<String> {
+    let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("");
+    let who = match (s("as"), s("team")) {
+        ("user" | "me", "") => "AS YOU".to_string(),
+        ("user" | "me", t) => format!("AS YOU in Slack workspace '{t}'"),
+        _ => "as the workspace's Slack bot".to_string(),
+    };
+    Some(match short {
+        "slack_post_message" => {
+            let text: String = s("text").chars().take(500).collect();
+            let thread = match s("thread_ts") {
+                "" => String::new(),
+                t => format!(" (thread {t})"),
+            };
+            format!("Post to Slack {who} in '{}'{thread}: {text}", s("channel"))
+        }
+        "slack_react" => format!(
+            "React :{}: {who} to Slack message {} in '{}'",
+            s("name").trim_matches(':'),
+            s("ts"),
+            s("channel")
+        ),
+        "slack_mark_unread" => format!(
+            "Mark Slack message {} in '{}' as {} for you (team '{}')",
+            s("ts"),
+            s("channel"),
+            if args.get("unread").and_then(Value::as_bool) == Some(false) {
+                "read"
+            } else {
+                "unread"
+            },
+            s("team")
+        ),
+        _ => return None,
+    })
+}
+
 /// The Linked Threads slice of [`otto_tool_specs`] (split out to keep that
 /// function under the size ratchet): an agent in a Threads (structured)
 /// session opening, listing, messaging and reading its linked threads — then
@@ -1227,6 +1328,9 @@ pub fn prune_exempt_tools(exempt: &[String], enabled: &[String]) -> Vec<String> 
 /// recurring autonomous capability they are granting (security review fix).
 pub fn dangerous_detail(tool: &str, args: &Value) -> String {
     let short = tool.strip_prefix("otto.").unwrap_or(tool);
+    if let Some(d) = slack_detail(short, args) {
+        return d;
+    }
     match short {
         "create_scheduled_task" | "update_scheduled_task" => {
             let name = args.get("name").and_then(Value::as_str).unwrap_or("(unnamed)");

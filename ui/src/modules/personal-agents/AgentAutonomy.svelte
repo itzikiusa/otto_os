@@ -12,6 +12,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
+  import AgentSlackAsMe from './AgentSlackAsMe.svelte';
   import type { PersonalAgentAutonomy, PersonalAgentRule } from '../../lib/api/types';
 
   interface Props {
@@ -291,6 +292,9 @@
       <p class="hint">The agent you talk to. From its chat it can create agents when you ask, and hand work to your other agents — each opens beside the chat as a linked thread and reports back to it. One per workspace.</p>
       <label class="chk"><input type="checkbox" bind:checked={primary} disabled={!editable || saving} /> Make this my main agent</label>
     </section>
+
+    <!-- Saved on its own (owner only): it lends the owner's Slack identity. -->
+    <AgentSlackAsMe {agentId} />
 
     {#if editable}
       <div class="actions">

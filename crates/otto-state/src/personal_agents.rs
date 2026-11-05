@@ -188,6 +188,10 @@ pub struct AgentAutonomy {
     /// The workspace's primary assistant ("your agent") — at most one per
     /// workspace (the route clears the flag on every other agent).
     pub primary: bool,
+    /// "Can act as me in Slack": the Slack team ids (of the owner's connected
+    /// as-me teams, `otto_channels::slack_user_tokens`) this agent may act in
+    /// as its owner. Empty (the default) = none. Owner-only to change.
+    pub slack_as_me_teams: Vec<String>,
 }
 
 /// Proactive mode: the agent works its standing goals in the background,

@@ -1916,6 +1916,41 @@ blank caller list as everyone and ignores the flag.
 | GET /workspaces/{id}/integrations/slack/directory | ws editor | — | `SlackDirectory` `{users:[{id,name,handle,is_bot}], channels:[{id,name,is_private}], users_error?, channels_error?, truncated}` via the saved bot token (`users:read`, `channels:read`, `groups:read`); cached 5 min per bot, `?refresh=1` bypasses. A Slack-side failure is a per-part `*_error`, never an HTTP error |
 | POST /workspaces/{id}/integrations/seed-from-loom | ws editor + root | — | seed integrations from a Loom config |
 
+#### Slack as the bot or as you (`otto.slack_*`)
+
+Agent-facing Slack Web API calls (otto-channels `slack_tools`). Every tool route takes
+`as` = `bot` (default: the workspace integration's saved `xoxb-` token) or `user` (alias
+`me`: the **caller's own** `xoxp-` user token for one of their connected Slack teams,
+picked by `team` = team id, name or URL subdomain, case-insensitive; omitted = the only
+allowed team, else **400** listing the available ones). An as-user call also passes the
+host's *act-as-me* gate: a person, or a session they run directly, may use every team
+they connected; a **personal agent** only the teams its owner ticked
+(`PersonalAgentAutonomy.slack_as_me_teams`, default none → **403**). Every answer carries
+`as` (and, as-user, `team_id`, `team`, `user_id`). Slack errors map to **404**
+(`channel_not_found`, `not_in_channel`, `message_not_found`, `thread_not_found`,
+`user_not_found`), **400** (bad ts / cursor / emoji, `already_reacted`, `is_archived`) or
+**502** naming the method and code (`missing_scope` adds the scope Slack says is needed;
+`ratelimited (retry after Ns)`). `channel` accepts a conversation id, `#name`, `@handle`
+or a member id (opens / reuses the DM). Times (`oldest`, `latest`, `since`) accept a Slack
+ts, `30m` / `6h` / `2d` / `1w`, RFC 3339 or `YYYY-MM-DD`. Tokens are never returned.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /integrations/slack/me | signed in (Channels: View) | — | `SlackMeTeam[]` — the caller's connected teams `{team_id, team, url, user_id, user, scopes, added_at, missing_scopes}` |
+| POST /integrations/slack/me | person only (Admin class) | `{token}` (`xoxp-…`) | **201** `SlackMeTeam` — validated by `auth.test` (a bot token → **400**); a team already connected → **409** (replace it) |
+| PUT /integrations/slack/me/{team_id} | person only | `{token}` | `SlackMeTeam` — swaps that team's token; a token of another team → **400** |
+| DELETE /integrations/slack/me/{team_id} | person only | — | **204**; **404** unknown team |
+| POST /integrations/slack/me/{team_id}/test | person only | — | `{ok: true, team: SlackMeTeam}` (live `auth.test`, refreshes identity + scopes) or `{ok: false, error}` |
+| GET /workspaces/{id}/integrations/slack/teams | ws viewer | — | `{teams: SlackMeTeam[], bot, as_me_restricted}` — the teams this credential may act in as you, whether the workspace has a bot token. MCP: `otto.slack_my_workspaces` |
+| GET /workspaces/{id}/integrations/slack/conversations?as=&team=&types=&q=&limit= | ws viewer | — | `{conversations: [{id, name, kind: channel\|private\|im\|mpim, user?, is_member?, topic?, num_members?}], truncated}` — bot: `conversations.list`; you: `users.conversations` (your channels, DMs named by person, group DMs). MCP: `otto.slack_list_conversations` |
+| GET /workspaces/{id}/integrations/slack/users?as=&team=&q= | ws viewer | — | `{users: [{id, name, handle, is_bot}]}` (≤ 50 matches of the cached member list). MCP: `otto.slack_find_user` |
+| GET /workspaces/{id}/integrations/slack/messages?channel=&as=&team=&thread_ts=&oldest=&latest=&limit=&cursor= | ws viewer | — | `{channel, thread_ts?, messages: [{ts, time, thread_ts?, user?, user_name?, text, subtype?, reply_count?, reactions?, files?}], next_cursor?, has_more}` oldest → newest; text decoded, mentions named, ≤ 4,000 chars each; `limit` ≤ 200 (default 50). MCP: `otto.slack_read_messages` |
+| POST /workspaces/{id}/integrations/slack/messages | ws editor (Outward) | `{as?, team?, channel, text, thread_ts?}` (`text` ≤ 40,000 chars) | `{channel, ts, thread_ts?, permalink?}` — `chat.postMessage`; `thread_ts` replies in a thread. MCP: `otto.slack_post_message` (approval-gated) |
+| GET /workspaces/{id}/integrations/slack/search?query=&team=&count=&page=&sort= | ws viewer | — | as you only: `{query, total, page, pages, matches: [{channel_id, channel_name, kind, ts, time, user?, user_name?, text, permalink?}]}` (`search.messages`, `sort` timestamp\|score, `count` ≤ 100). MCP: `otto.slack_search` |
+| GET /workspaces/{id}/integrations/slack/activity?team=&since=&limit= | ws viewer | — | as you only: `{since, since_time, mentions: Hit[], direct: Hit[], complete, note}` — messages mentioning you + your DM / group-DM traffic since `since` (default `24h`), newest first, `from_me` on your own; search-backed. MCP: `otto.slack_my_activity` |
+| POST /workspaces/{id}/integrations/slack/reactions | ws editor (Outward) | `{as?, team?, channel, ts, name}` | `{ok, channel, ts}` (`reactions.add`). MCP: `otto.slack_react` (approval-gated) |
+| POST /workspaces/{id}/integrations/slack/mark | ws editor (Outward) | `{team?, channel, ts, unread?}` | as you only: `{ok, channel, ts, cursor, unread}` — `conversations.mark` with the read cursor 1 µs before `ts` (`unread`, default) or at `ts` (`unread: false`). MCP: `otto.slack_mark_unread` (approval-gated) |
+
 PUT with `enabled: true` returns **409 `conflict`** (Problem message names the other
 workspace) when the integration's inbound listener token — the Slack **app** token, or
 the Telegram bot token (the request's value, else the stored one) — is already used by
@@ -4505,6 +4540,8 @@ server-derived; a client never sets it.
 |---|---|---|---|
 | GET /api/v1/personal-agents/{id}/autonomy | scheduled_tasks view + ws viewer | — | `PersonalAgentAutonomy` (defaults when never saved) |
 | PUT /api/v1/personal-agents/{id}/autonomy | scheduled_tasks edit + ws editor; changing standing-goal texts (added, removed, edited) or the rule set needs the **agent owner, a ws admin or root** (403 otherwise — toggling `enabled`, `proactive` and `primary` stay ws editor; a full-form save with unchanged goals and rules passes; an ownerless preset is adopted by the caller) | `{proactive?: {enabled, runs_per_day (1..24), max_minutes (1..60)}, goals?: [{id?, text, enabled?}], rules?: [{id?, text}], primary?}` — partial; omitted sections kept; ≤20 goals, ≤30 rules, ≤500 chars each; a goal keeps its `last_run_at` by id; making an agent `primary` clears it on every other agent of the workspace | `PersonalAgentAutonomy` |
+| GET /api/v1/personal-agents/{id}/slack-as-me | scheduled_tasks view + ws viewer | — | `PersonalAgentSlackGrant {teams, is_owner, available}` — "Can act as me in Slack": the owner's Slack team ids this agent may act in as them (`AgentAutonomy.slack_as_me_teams`, default none); `available` = the caller's connected teams (`SlackMeTeam[]`, owner only) |
+| PUT /api/v1/personal-agents/{id}/slack-as-me | the agent **owner** only, from a person's credential (Admin class: an agent token → 403) + ws editor | `{teams: string[]}` — each must be one of the owner's connected teams (else 400); `[]` turns it off | `PersonalAgentSlackGrant` |
 | POST /api/v1/personal-agents/{id}/goals/{goal_id}/run | scheduled_tasks edit + ws editor (the run acts as the agent's owner) | — | `PersonalAgentRun` (`mode: "proactive"`, read-only) — work the goal now; 409 while a run is in progress; counts against the daily budget |
 | GET /api/v1/personal-agents/{id}/activity | scheduled_tasks view + ws viewer | query `after_seq?` (only ring items with `seq > after_seq`), `epoch?` (the boot id the cursor came with), `runs?` (default `true`; `false` → `runs: null`) | `PersonalAgentActivity` — plus `seq` (cursor: newest ring seq covered), `epoch` (daemon boot id; the in-memory ring and its `seq` restart with the daemon) and `reset` (`true` when the sent `epoch` is not this process's, or `after_seq` is ahead of anything it handed out: the answer is then a full one — replace items and cursor). Approvals read in one statement; run `summary` clipped to 280 chars |
 | GET /api/v1/personal-agents/{id}/memories | scheduled_tasks view + ws viewer | — | `PersonalAgentMemories` |

@@ -5,6 +5,7 @@
 // Monitor's Insights tab) can find agents created from it.
 
 export const K8S_WATCHDOG_MARK = '<!-- otto-template:k8s-watchdog -->';
+export const SLACK_DIGEST_MARK = '<!-- otto-template:slack-daily-digest -->';
 
 export interface AgentTemplate {
   id: string;
@@ -13,7 +14,7 @@ export interface AgentTemplate {
   avatar: string;
   name: string;
   soul_md: string;
-  schedule: { cadence: 'interval'; every_min: number };
+  schedule: { cadence: 'interval'; every_min: number } | { cadence: 'daily'; at: string };
   directive: string;
 }
 
@@ -45,6 +46,35 @@ Every run:
 7. End with one line: \`Verdict: HEALTHY\` | \`Verdict: DEGRADED\` | \`Verdict: INCIDENT\`.
 
 Never run \`k8s_action\`. Keep the report under 60 lines.`,
+    },
+    {
+      id: 'slack-daily-digest',
+      title: 'Slack daily digest (as me)',
+      description: 'Every evening: reads your Slack mentions and DMs, summarizes what happened and what you need to handle, posts it to your channel as you and leaves it unread.',
+      avatar: '',
+      name: 'Slack digest',
+      schedule: { cadence: 'daily', at: '18:00' },
+      directive: 'Write my Slack daily digest for the last 24 hours and post it to my digest channel.',
+      soul_md: `${SLACK_DIGEST_MARK}
+# Slack daily digest
+
+You summarize the owner’s Slack day and leave the summary waiting for them, unread.
+
+Setup (once, by the owner): connect Slack in Settings → Channels → **Act as me in Slack**, tick that workspace under this agent’s **Autonomy → Can act as me in Slack**, and enable \`otto_slack_read_messages\`, \`otto_slack_search\` and \`otto_slack_my_activity\` in the MCP Control Plane. Replace **#my-digest** below with the channel (or \`@yourself\` for your own DM) the digest goes to.
+
+Every run:
+1. \`otto_slack_my_workspaces\` — use the only team, or the one the directive names (pass it as \`team\` on every call; \`workspace_id\` is this agent’s Otto workspace, see \`otto_list_workspaces\`).
+2. \`otto_slack_my_activity\` with \`since: "24h"\`: the messages that mention the owner and their DM / group-DM traffic.
+3. For each conversation that matters (a question to the owner, a request, a decision, a bot conversation such as Grok), read it in full with \`otto_slack_read_messages\` (\`as: "user"\`; \`thread_ts\` for a thread). Skip noise.
+4. Write the digest (≤ 40 lines, Slack markdown):
+   - **Needs you** — each item: who, what they need, the link (permalink), how urgent.
+   - **Waiting on others** — things the owner asked and hasn’t got an answer to.
+   - **FYI** — decisions and news, one line each.
+   Never invent facts; quote short phrases when the wording matters.
+5. Post it with \`otto_slack_post_message\` (\`as: "user"\`, \`channel: "#my-digest"\`). The owner approves the post.
+6. Mark it unread with \`otto_slack_mark_unread\` (same channel, the \`ts\` the post returned) so it is waiting for them.
+
+Never post anywhere else, never reply in other conversations, and never react to messages.`,
     },
   ];
 }

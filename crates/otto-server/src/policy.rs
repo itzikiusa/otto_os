@@ -941,7 +941,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/webhooks/{workspace_id}" {
         return Exempt;
     }
-    if p.starts_with("/workspaces/{id}/integrations") {
+    if p.starts_with("/workspaces/{id}/integrations") || p.starts_with("/integrations/slack/me") {
         return Require(Channels, if get { View } else { Edit });
     }
 
@@ -1372,6 +1372,7 @@ fn personal_agents_policy(p: &str, get: bool) -> Option<PolicyDecision> {
         "/personal-agents/{id}/autonomy"
             | "/personal-agents/{id}/activity"
             | "/personal-agents/{id}/memories"
+            | "/personal-agents/{id}/slack-as-me"
     ) {
         return Some(Require(ScheduledTasks, if get { View } else { Edit }));
     }
@@ -1514,14 +1515,15 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
                     | "/aws/accounts/{id}/eks/clusters/{name}/import-kubeconfig"
             )
             // Channel bridges: tokens, allowed users and open_to_all decide
-            // who can drive new agent sessions remotely (S11-306). The
-            // `/test` send stays Outward (matched below).
+            // who can drive new agent sessions remotely (S11-306); so do Slack
+            // as-me tokens + grants. `/test` stays Outward (matched below).
             || matches!(
                 p,
                 "/workspaces/{id}/integrations"
                     | "/workspaces/{id}/integrations/{channel}"
                     | "/workspaces/{id}/integrations/seed-from-loom"
             )
+            || p.starts_with("/integrations/slack/me") || p == "/personal-agents/{id}/slack-as-me"
             // Self-improvement autonomy flips edits to auto-apply into shared
             // skills (S8-304); the email sender carries share links + OTPs;
             // notification settings silence the owner; revoking the owner's
@@ -1571,6 +1573,7 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
             || p == "/product/testcase-runs/{rid}/publish"
             || p == "/product/versions/{vid}/publish"
             || p == "/workspaces/{id}/integrations/{channel}/test"
+            || otto_channels::slack_tools::OUTWARD_ROUTES.contains(&p)
             || p == "/brokers/clusters/{id}/topics/{topic}/produce"
             || p == "/brokers/clusters/{id}/replay"
             || p == "/brokers/clusters/{id}/groups/{group}/reset"

@@ -72,6 +72,12 @@ impl IntegrationsRepo {
         Self { pool }
     }
 
+    /// The database handle (the channels crate reads the calling session and
+    /// its personal agent's Slack act-as-me grant through it).
+    pub fn pool(&self) -> DbPool {
+        self.pool.clone()
+    }
+
     /// List all integrations for a workspace.
     pub async fn list(&self, workspace_id: &Id) -> Result<Vec<Integration>> {
         let rows = sqlx::query(

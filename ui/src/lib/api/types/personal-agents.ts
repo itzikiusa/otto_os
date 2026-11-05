@@ -132,6 +132,10 @@ export interface PersonalAgentAutonomy {
   rules: PersonalAgentRule[];
   /** The workspace's primary assistant ("your agent"). */
   primary: boolean;
+  /** "Can act as me in Slack": the owner's Slack team ids this agent may act
+   *  in as them (default none). Set via `PUT /personal-agents/{id}/slack-as-me`
+   *  (owner only), not the autonomy save. */
+  slack_as_me_teams?: string[];
 }
 
 /** `PUT /personal-agents/{id}/autonomy` — partial; omitted sections are kept. */

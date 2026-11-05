@@ -4208,8 +4208,10 @@ mod tests {
     /// discovery reads (list_issue_projects / _types); 84_834 with
     /// otto_query_db; 77_821 after slim-app cleanup (review sessions: 52_595);
     /// 80_081 with the four linked-thread tools (otto_thread_*); 81_425 with
-    /// the main agent's three team tools (otto_personal_agent_*).
-    const TOOLS_LIST_BYTE_BUDGET: usize = 82_000;
+    /// the main agent's three team tools (otto_personal_agent_*); 84_696 with
+    /// the nine Slack tools alone (otto_slack_*, bot + as-you; hidden from
+    /// narrow review sessions, and the content reads are opt-in).
+    const TOOLS_LIST_BYTE_BUDGET: usize = 87_000;
     /// A review-type session (R2 per-source scoping): 52_595 after slim-app cleanup.
     const NARROW_TOOLS_LIST_BYTE_BUDGET: usize = 56_800; // +otto_thread_*, +otto_personal_agent_*
 

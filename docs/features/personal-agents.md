@@ -251,6 +251,16 @@ gets a "You are the user's primary assistant" section listing the other enabled
 agents, with instructions to route specialist work to them through a shared
 room.
 
+**Can act as me in Slack** (Autonomy tab, owner only, default off): which of
+the owner's connected Slack workspaces (Settings → Channels → *Act as me in
+Slack*) the agent may use the as-you Slack tools in — read DMs, search, post
+(approval-gated every time) and mark unread. Stored as `slack_as_me_teams` in
+the autonomy config, set via `PUT /personal-agents/{id}/slack-as-me` from a
+person's credential only (an agent can't grant itself). Without it every
+`as=user` Slack call from the agent's sessions is refused (403). The *Slack
+daily digest (as me)* template uses it — see
+[Channels §7b](./channels-slack-telegram.md#7b-slack-tools-for-agents--as-the-bot-or-as-you).
+
 ## 5. Per-session model pinning (foundation, applies everywhere)
 
 - `CreateSessionReq.model` pins the model for **that session only** (folded

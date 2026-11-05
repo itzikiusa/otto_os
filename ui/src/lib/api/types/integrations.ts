@@ -137,6 +137,41 @@ export interface SlackDirectory {
   truncated: boolean;
 }
 
+/** `GET /integrations/slack/me` — one Slack workspace (team) the signed-in
+ *  person connected for "Act as me in Slack" (their own xoxp- user token,
+ *  stored per Otto user in the Keychain; the token itself is never returned). */
+export interface SlackMeTeam {
+  team_id: string;
+  team: string;
+  /** `https://acme.slack.com/` */
+  url: string;
+  /** The person's Slack member id in that team. */
+  user_id: string;
+  user: string;
+  /** Scopes Slack granted the token (at paste / last test). */
+  scopes: string[];
+  added_at: string;
+  /** As-me scopes the token lacks (some tools fail until added). */
+  missing_scopes: string[];
+}
+
+/** `POST /integrations/slack/me/{team_id}/test`. */
+export interface SlackMeTestResp {
+  ok: boolean;
+  team?: SlackMeTeam;
+  error?: string;
+}
+
+/** `GET|PUT /personal-agents/{id}/slack-as-me` — "Can act as me in Slack":
+ *  the owner's Slack teams this agent may act in as them (default none). */
+export interface PersonalAgentSlackGrant {
+  teams: string[];
+  /** Only the agent's owner may change it. */
+  is_owner: boolean;
+  /** The caller's connected teams (owner only). */
+  available: SlackMeTeam[];
+}
+
 export interface Integration {
   workspace_id: string;
   channel: Channel;
