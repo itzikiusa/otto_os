@@ -854,7 +854,8 @@ request answer is also an `Admin`-class approval gate (above).
 
 `RuntimeSession`: `{id, workspace_id, provider: "claude"|"codex"|"gemini"|"grok"|"agy",
 title, cwd, model?, native_thread_id?, status, access_mode, created_by, created_at,
-last_active_at, last_sequence, parent_id?, ui_control?, meta?}` (`meta`: the
+last_active_at, last_sequence, parent_id?, ui_control?, meta?, background_tasks?}`
+(`background_tasks`: live, see below; absent = none) (`meta`: the
 server-owned meta a personal agent's run / chat thread runs under, migration
 0201 — see "Personal Agents"; absent on a plain thread, never settable by a
 request); `status` ∈ `starting | idle | working |
@@ -863,22 +864,70 @@ prompt respawns it and resumes `native_thread_id` — Claude `--resume`, Codex
 `thread/resume`, ACP `session/load`, agy `--conversation`; a provider that cannot resume it starts
 a fresh conversation).
 
+**Background work and the agent's own turns.** Work an agent starts in the
+background (Claude: a `run_in_background` Bash, a background `Agent` /
+`Task` subagent — tracked from the CLI's `task_started` … `task_notification`
+frames, or the launch tool result on older CLIs) is listed as
+`background_tasks: [{id, kind: "command"|"agent"|…, label, started_at,
+item_id?}]` on the `provider_session` entity (and the `RuntimeSession` row)
+until it finishes; a `system_notice` ("Background command finished: …")
+marks the end. When it finishes after the turn, Claude continues **on its
+own**: the runtime opens an **agent turn** (`provider_turn.origin: "agent"`,
+no `user_message`) that runs like any turn — `working`, Stop interrupts it,
+prompts wait (409, or `delivery`, below) — and ends on its `result`. A
+session is **busy** while a turn runs or any background task is pending
+(`PeerReply.busy`). A subagent is one `subagent` item (`{tool_name,
+description?, subagent_type?, prompt?, output?, background, last_tool?,
+tool_uses}`); its own messages and tool calls are items with
+`parent_item_id` = the card, in the card's turn (their approvals reach a
+person like the root's). A background card stays `running` past its turn
+until its task ends; when the process exits or the session closes, open
+cards settle `interrupted` and the list empties.
+
+**Queue and steer.** A prompt sent while a turn runs is refused (409) unless
+it says `delivery`: `queue` — it waits in the session's **queue** (persisted
+with the projection: it survives a daemon restart, after which it is sent)
+and goes out when the turn ends, one per turn, oldest first; `steer` — into
+the running turn now (Claude reads it at its next step; it is a
+`user_message` of that turn) — a provider that cannot steer queues it
+instead; `interrupt` — first in the queue, then the running turn is stopped
+("Stop & send now"). The queue is `queued_prompts: [{id, text, attachments,
+created_at}]` on the snapshot and `queue.updated` events.
+
+**Stall watchdog.** A turn that emits nothing for **15 min** (`RuntimeConfig
+.stall_after`; 45 min while one of its tools is still running) is
+interrupted as stalled: `turn.terminal` `interrupted` with `reason:
+"stalled"` and a `system_notice`. Waiting on a person (a pending approval)
+or on background work never counts as a stall.
+
+**Reopen and delete.** A closed session can be reopened (its agent respawns
+resuming `native_thread_id`; when the provider refuses the resume — it
+exits before it is ready — it starts a fresh conversation, keeps the
+timeline, and adds a `system_notice` saying the agent does not remember it).
+One process per session at any time: concurrent reopens / prompts share the
+spawn. Delete stops the agent and removes the row, its projection and its
+attachments.
+
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /workspaces/{id}/runtime-sessions | ws viewer | — | `RuntimeSession[]`, newest activity first (own; all for admin/root), max 500 |
 | POST /workspaces/{id}/runtime-sessions | ws editor, person | `{provider, cwd?, title?, model?, access_mode?}` (`cwd` absolute, default the workspace root; `access_mode` default `full-access` while Settings › Providers skips permission prompts — the `agent_skip_permissions` setting, on by default, the rule terminal sessions follow — else `approval-required`). `provider` ∈ `claude \| codex \| gemini \| grok \| agy \| opencode \| pi` | **201** `RuntimeSession`. The child is spawned (and its handshake started) before the response: a refused folder, a missing CLI or a provider without a driver fails the create (**400**) and leaves no row |
 | GET /runtime-sessions/{id} | ws viewer + owner-or-admin | — | `RuntimeSession` with its live `status` |
 | PATCH /runtime-sessions/{id} | owner-or-admin, person | `UpdateRuntimeSessionReq {title}` (trimmed, non-empty) | `RuntimeSession` with the new title. Allowed on a `closed` session too (it stays listed as history). **400** empty title |
-| POST /runtime-sessions/{id}/prompt | owner-or-admin, person | `{text, model?, effort?, access_mode?, images?: [{mime, data_base64}], files?: [{mime, name, data_base64}]}` — `text` non-empty unless `images` / `files` are; `files` only `application/pdf`; body ≤ 32 MiB | **202** `{turn_id, sequence}` (`sequence` of the turn's first `provider_turn.updated`). Respawns a `dormant` session first. `model` sticks (it becomes the session's `model`): Claude switches live (`set_model`), Codex passes it on `turn/start`, ACP and agy restart the CLI with the new model and resume the thread. `effort` (Claude `apply_flag_settings` `effortLevel`, Codex `turn/start` `effort`) and `images` (Claude image blocks, Codex `image` data-URL inputs, ACP `image` blocks when the agent advertises `promptCapabilities.image`) and `files` (Claude base64 `document` blocks, ACP `resource` blobs when the agent advertises `promptCapabilities.embeddedContext`; Codex 0.166.0 has no file input) are refused with **400** where unsupported, with a readable reason; agy takes text only. `access_mode` applies from this turn on (table above). Images and files are stored under the daemon data dir (`runtime-attachments/<session>/`, removed with the session) and listed on the turn's `user_message` item as `attachments: [{id, kind: "image"\|"file", mime, name?}]`. **409** while a turn runs (one turn at a time) or after `close`. A CLI that refuses its handshake (signed out, unsupported account) fails the running turn with that failure, or — when it refused before the prompt reached it — answers **400** `the agent could not start: <reason>`; either way the session goes `dormant` with `provider_session.last_error`, and the next prompt respawns it |
+| POST /runtime-sessions/{id}/prompt | owner-or-admin, person | `{text, model?, effort?, access_mode?, delivery?: "queue"\|"steer"\|"interrupt", images?: [{mime, data_base64}], files?: [{mime, name, data_base64}]}` — `text` non-empty unless `images` / `files` are; `files` only `application/pdf`; body ≤ 32 MiB | **202** `{turn_id, sequence, queued_id?, steered?}` (`sequence` of the turn's first `provider_turn.updated`; with `delivery` while a turn runs: `queued_id` + empty `turn_id` when queued, `steered: true` + the running turn's id when steered — see "Queue and steer"). Respawns a `dormant` session first. `model` sticks (it becomes the session's `model`): Claude switches live (`set_model`), Codex passes it on `turn/start`, ACP and agy restart the CLI with the new model and resume the thread. `effort` (Claude `apply_flag_settings` `effortLevel`, Codex `turn/start` `effort`) and `images` (Claude image blocks, Codex `image` data-URL inputs, ACP `image` blocks when the agent advertises `promptCapabilities.image`) and `files` (Claude base64 `document` blocks, ACP `resource` blobs when the agent advertises `promptCapabilities.embeddedContext`; Codex 0.166.0 has no file input) are refused with **400** where unsupported, with a readable reason; agy takes text only. `access_mode` applies from this turn on (table above). Images and files are stored under the daemon data dir (`runtime-attachments/<session>/`, removed with the session) and listed on the turn's `user_message` item as `attachments: [{id, kind: "image"\|"file", mime, name?}]`. **409** while a turn runs (one turn at a time) or after `close`. A CLI that refuses its handshake (signed out, unsupported account) fails the running turn with that failure, or — when it refused before the prompt reached it — answers **400** `the agent could not start: <reason>`; either way the session goes `dormant` with `provider_session.last_error`, and the next prompt respawns it |
+| POST /runtime-sessions/{id}/queue/{queued_id} | owner-or-admin, person | `QueuedDeliverReq {delivery: "steer"\|"interrupt"}` | **202** `RuntimePromptResp` — delivers a queued message now (`steer` into the running turn, or stop it and send this next; with no turn running it simply starts one). **404** no longer queued |
+| DELETE /runtime-sessions/{id}/queue/{queued_id} | owner-or-admin, person | — | **204** — removes a queued message. **404** no longer queued |
 | POST /runtime-sessions/{id}/interrupt | owner-or-admin, person | — | `{interrupted}` — `false` when no turn was running. Pending requests → `cancelled` (`cancel_reason: "interrupt"`); the provider ends the turn (`turn.terminal` `interrupted`); if it has not within 10 s its process group is killed and the turn ends `interrupted` anyway |
 | POST /runtime-sessions/{id}/requests/{request_id} | owner-or-admin, person (`Admin` class) | `{decision}` ∈ `accept \| accept_for_session \| accept_always \| decline \| cancel` — one of the request's `approval_request` item `options[].decision` (`cancel` always allowed) | **204**; the request → `resolved` with the decision. **404** unknown / no longer pending, **400** a decision that was not offered |
-| POST /runtime-sessions/{id}/close | owner-or-admin, person | — | `RuntimeSession` (`status: closed`). Pending requests → `cancelled` (`cancel_reason: "closed"`). Ends a running turn `interrupted`, closes the child's stdin (SIGTERM / SIGKILL to its group after 3 s each). Idempotent; later prompts **409** |
+| POST /runtime-sessions/{id}/close | owner-or-admin, person | — | `RuntimeSession` (`status: closed`). Pending requests → `cancelled` (`cancel_reason: "closed"`). Ends a running turn `interrupted`, closes the child's stdin (SIGTERM / SIGKILL to its group after 3 s each). Idempotent; later prompts **409** (reopen first) |
+| POST /runtime-sessions/{id}/reopen | owner-or-admin, person | — | `RuntimeSession` — a `closed` session takes prompts again: its agent respawns now, resuming `native_thread_id` (a refused resume → a fresh conversation + `system_notice`). Its `meta` is kept. No-op on an open session. Spawn failures as for create (**400**; the session stays open, the next prompt retries) |
+| DELETE /runtime-sessions/{id} | owner-or-admin, person | — | **204** — closes the session (as above), then removes its row, projection and attachments. Not undoable |
 | GET /runtime-sessions/{id}/attachments/{attachment_id} | ws viewer + owner-or-admin | — | the raw bytes, `Content-Type: <mime>` (`Content-Security-Policy: sandbox`, `nosniff`). **404** an id that is not one of the session's `user_message` attachments |
 | GET /runtime-sessions/{id}/events?after_sequence= | ws viewer + owner-or-admin | `after_sequence` (default 0) | `RuntimeReplay` — `{kind:"events", events, last_sequence}` or `{kind:"snapshot", snapshot_sequence, snapshot}` |
 | GET /runtime-sessions/{id}/peers | ws editor + owner-or-admin; a person or **that thread's own agent** (its session-bound credential) | — | `PeerInfo[] {id, provider, title, status, is_self}` — the thread's linked group: the root (the thread with no `parent_id`) plus every open thread whose `parent_id` is it, same owner |
 | POST /runtime-sessions/{id}/peers | same | `OpenPeerReq {provider, prompt?, title?, model?, effort?}` | **201** `RuntimeSession` — a linked thread: same owner, workspace, `cwd` and `access_mode` as `{id}` (never wider), `parent_id` = the group's root. `prompt` (if any) is its first turn, prefixed with who opened it and how to answer (`otto.thread_message`); `model` / `effort` default to the provider's when omitted |
 | POST /runtime-sessions/{id}/peers/{peer}/message | same | `PeerMessageReq {text}` | **202** `{turn_id, sequence}` — `text` becomes `{peer}`'s next turn, prefixed with the sender. **404** not in the group, **400** `{peer}` = `{id}`, **409** while `{peer}` runs a turn |
-| GET /runtime-sessions/{id}/peers/{peer}/reply?wait_secs= | same | `wait_secs` 0..25 (default 20) | `PeerReply {peer, busy, turn_status?, text}` — waits for `{peer}`'s running turn to settle, then its last turn's assistant text; `busy: true` when the wait ran out |
+| GET /runtime-sessions/{id}/peers/{peer}/reply?wait_secs= | same | `wait_secs` 0..25 (default 20) | `PeerReply {peer, busy, background_tasks, turn_status?, text}` — waits for `{peer}` to settle (no turn — its own included — and no background work), then the assistant text of its last turn that has any (a subagent's own text excluded); `busy: true` when the wait ran out |
 | POST /runtime-sessions/{id}/peers/{peer}/close | same | — | `RuntimeSession` — closes linked thread `{peer}` of `{id}`'s group (stops its agent; it stays in History). `400` for `{id}` itself, `403` for the group's lead (`parent_id` null — a person closes it), `404` outside the group. MCP: `otto.thread_close` |
 
 **Replay** (T3 Code `subscribeThread`). `sequence` is per session, strictly

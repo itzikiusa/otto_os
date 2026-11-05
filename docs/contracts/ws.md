@@ -1523,12 +1523,17 @@ published on the streaming path, never through the internal bus.
   `provider_thread.updated {provider_thread}`, `provider_turn.updated
   {provider_turn}`, `turn_item.updated {turn_item}`,
   `runtime_request.updated {runtime_request}`, `plan.updated {plan}`,
-  `command_output.delta {item_id, chunk}`, `turn.terminal {turn_id, status:
-  completed|interrupted|cancelled|failed, failure?, reason?}`. Entities are
-  sent WHOLE (replace by id); `turn_item.type` ∈ `user_message |
+  `queue.updated {queued_prompts}`, `command_output.delta {item_id, chunk}`,
+  `turn.terminal {turn_id, status: completed|interrupted|cancelled|failed,
+  failure?, reason?}` (`reason: "stalled"` = the stall watchdog stopped it).
+  Entities are sent WHOLE (replace by id); `turn_item.type` ∈ `user_message |
   assistant_message | reasoning | todo_list | file_change |
   command_execution | dynamic_tool | web_search | approval_request |
-  system_notice | error`. Streaming upserts of one item arrive at most once
+  system_notice | subagent | error`. A `subagent`'s own activity items carry
+  `parent_item_id` (the card). `provider_turn.origin: "agent"` marks a turn
+  the agent started on its own; `provider_session.background_tasks` lists
+  pending background work (api.md "Background work and the agent's own
+  turns"). Streaming upserts of one item arrive at most once
   per 50 ms (always the latest text). A failed tool item
   (`command_execution`, `dynamic_tool`, `web_search`, `file_change`) carries
   `error` — the tool's error text, ≤ ~2 KB. A `user_message` lists its
