@@ -577,6 +577,34 @@ pub struct RuntimeSession {
     pub ui_control: Option<serde_json::Value>,
 }
 
+impl RuntimeSession {
+    /// This thread in terminal-session shape, for surfaces keyed by session
+    /// (agent UI control): `meta.runtime = "structured"`, its grant under
+    /// `meta.ui_control`, no device pin (any of the owner's windows).
+    pub fn into_session(self) -> crate::domain::Session {
+        let mut meta = serde_json::json!({"runtime": "structured"});
+        if let Some(grant) = self.ui_control {
+            meta["ui_control"] = grant;
+        }
+        crate::domain::Session {
+            id: self.id,
+            workspace_id: self.workspace_id,
+            kind: crate::domain::SessionKind::Agent,
+            provider: self.provider.as_str().to_string(),
+            title: self.title,
+            status: crate::domain::SessionStatus::Running,
+            cwd: self.cwd,
+            provider_session_id: self.native_thread_id,
+            connection_id: None,
+            created_by: self.created_by,
+            created_at: self.created_at,
+            last_active_at: self.last_active_at,
+            archived: false,
+            meta,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CreateRuntimeSessionReq {
     pub provider: Option<RuntimeProvider>,

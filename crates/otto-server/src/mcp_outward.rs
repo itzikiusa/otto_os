@@ -185,12 +185,7 @@ pub async fn otto_tools_invoke(
             crate::ui_bridge::calling_session(&auth),
             env.as_object_mut(),
         ) {
-            let granted = ctx
-                .manager
-                .get(sid)
-                .await
-                .ok()
-                .is_some_and(|s| crate::ui_bridge::grant_state(&s.meta) == Some(true));
+            let granted = crate::ui_bridge::caller_granted(&ctx, sid).await;
             obj.insert("ui_granted".into(), json!(granted));
         }
     }
@@ -1576,12 +1571,7 @@ pub async fn otto_server_enabled(
         })
         .collect();
     let ui_granted = match crate::ui_bridge::calling_session(&auth) {
-        Some(sid) => ctx
-            .manager
-            .get(sid)
-            .await
-            .ok()
-            .is_some_and(|s| crate::ui_bridge::grant_state(&s.meta) == Some(true)),
+        Some(sid) => crate::ui_bridge::caller_granted(&ctx, sid).await,
         None => false,
     };
     Ok(Json(json!({

@@ -31,6 +31,7 @@ pub mod redact;
 pub mod secret_paths;
 pub mod secrets;
 pub mod text;
+pub mod ui_grant;
 pub mod workflows;
 pub mod workref;
 
