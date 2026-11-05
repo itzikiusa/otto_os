@@ -33,6 +33,7 @@
   import { loadErrorOf } from './loadError';
   import { personalAgentsApi } from '../../lib/api/personalAgents';
   import type { PersonalAgent, PersonalAgentAutonomy } from '../../lib/api/types';
+  import { paListPort } from '../../lib/uiCommands/personalAgentsPort';
 
   const AgentEditSheetLazy = lazyComponent(() => import('./AgentEditSheet.svelte'));
   const AgentPageLazy = lazyComponent(() => import('./AgentPage.svelte'));
@@ -41,6 +42,8 @@
   const agentId = $derived(sub && sub !== 'rooms' ? sub : null);
 
   let creating = $state(false);
+  // Agent UI control (lib/uiCommands/personalAgents.ts) opens the New-agent sheet.
+  $effect(() => paListPort.bind({ openCreate: () => { if (sub) router.go('personal-agents'); creating = true; } }));
   /** Agent id whose Run now / Enable / Pause is in flight (no double fire). */
   let busyId = $state<string | null>(null);
 

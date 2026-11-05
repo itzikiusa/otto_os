@@ -229,6 +229,23 @@ confirmations still apply.
 | `sched_run_now` | local_write* | `task` | Confirm, then the run starts and its Runs open. *It's an outward confirm when the task delivers somewhere. |
 | `sched_set_enabled` | local_write | `task`, `enabled` | Confirm, then the task is paused / resumed. |
 
+### Personal Agents: `scheduled-tasks` (route `#/personal-agents`)
+
+The Personal Agents page belongs to the Scheduled Tasks pane, so these commands run there (`lib/uiCommands/personalAgents.ts`; confirm text in `personalAgentsPlan.ts`).
+
+| Command | Risk | Args | What you see |
+|---------|------|------|--------------|
+| `pa_list` | read | none | The agent cards. Returns agents (provider, enabled, delivery, schedule count, next run). |
+| `pa_open` | navigate | `agent`, `tab?` | The agent on `overview`/`activity`/`autonomy`/`schedules`/`runs`/`chat`/`memory`/`context`. Returns its persona summary and schedules. |
+| `pa_create` | local_write | `template?`, `name?`, `avatar?`, `soul_md?`, `provider?`, `model?`, `schedule?` | The New-agent sheet opens and fills in front of you (template first, then the overrides; `schedule` replaces the template's). The confirm names the template, the persona (edited or not), provider and schedule; Save runs the sheet's own Save. Declining closes the sheet. |
+| `pa_edit` | local_write | `agent`, `name?`, `avatar?`, `soul_md?`, `provider?`, `model?`, `enabled?` | The Overview, then a confirm listing only the fields that change (persona summarized). |
+| `pa_set_autonomy` | local_write | `agent`, `primary?`, `proactive?`, `goals?`, `rules?` | The Autonomy tab with the section highlighted, a confirm, then the tab re-reads. Goal / rule lists replace the old ones. |
+| `pa_set_slack_as_me` | **outward** | `agent`, `teams` (ids or names; `[]` = off) | The "Can act as me in Slack" panel, then **always** the where / what / who confirm — it lends your Slack identity, so it is never remembered. Owner only. |
+| `pa_add_schedule` | local_write | `agent`, `schedule`, `timezone?`, `directive?`, `permission?`, `enabled?` | The Schedules tab, a confirm with the cadence (cron included), timezone, permission and directive, then the new row highlighted. |
+| `pa_edit_schedule` | local_write | `agent`, `schedule_id`, any of the schedule fields | The row, a from → to confirm, then the change (`enabled: false` pauses it). |
+| `pa_run_now` | local_write* | `agent`, `schedule_id?` | Confirm, then the run starts on the Runs tab. *Outward confirm when the agent delivers its report somewhere. |
+| `pa_open_report` | navigate | `agent`, `run?` | The run's report sheet (default: the latest run with a report). Returns its text (≤60 KB). |
+
 ### Home: `home` (route `#/home`)
 
 | Command | Risk | Args | What you see |

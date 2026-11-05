@@ -16,6 +16,9 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { PersonalAgent } from '../../lib/api/types';
   import { agentTemplates, templateById } from './templates';
+  import { paSheetPort } from '../../lib/uiCommands/personalAgentsPort';
+  import type { PaCreateFill, PaScheduleArg } from '../../lib/uiCommands/personalAgentsPlan';
+  import { cadenceLabel } from './cadence';
 
   interface Props {
     /** null = create a new agent. */
@@ -36,6 +39,8 @@
   let scheduleNote = $state('');
   let createdAgent = $state<PersonalAgent | null>(null);
   let pendingSchedule: Parameters<typeof personalAgents.createSchedule>[1] | null = null;
+  /** A schedule an agent filled in (UI control), replacing the template's. */
+  let scheduleOverride = $state<PaScheduleArg | null>(null);
 
   function applyTemplate(id: string): void {
     if (createdAgent) return;
@@ -202,7 +207,12 @@
       } else if (createdAgent || ws.currentId) {
         if (!createdAgent) {
           const t = templateById(fTemplate);
-          pendingSchedule = t ? {
+          const o = scheduleOverride;
+          pendingSchedule = o ? {
+            schedule: o.schedule, timezone: o.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
+            directive: o.directive?.trim() || t?.directive || '', enabled: o.enabled ?? true,
+            permission: o.permission, idempotency_key: crypto.randomUUID(),
+          } : t ? {
             schedule: t.schedule, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
             directive: t.directive, enabled: true, idempotency_key: crypto.randomUUID(),
           } : null;
@@ -225,10 +235,35 @@
       busy = false;
     }
   }
+
+  // Agent UI control (lib/uiCommands/personalAgents.ts): fill the new-agent
+  // form where the user sees it, then run this same Save.
+  $effect(() => {
+    if (agent) return;
+    return paSheetPort.bind({
+      fill(f: PaCreateFill) {
+        if (f.template !== undefined) applyTemplate(f.template);
+        if (f.name !== undefined) fName = f.name;
+        if (f.avatar !== undefined) fAvatar = f.avatar;
+        if (f.soul_md !== undefined) fSoul = f.soul_md;
+        if (f.provider !== undefined) { fProvider = f.provider; fModel = ''; }
+        if (f.model !== undefined) fModel = f.model;
+        if (f.schedule) {
+          scheduleOverride = f.schedule;
+          scheduleNote = `Adds a schedule: ${cadenceLabel(f.schedule.schedule, f.schedule.timezone ?? '')}`;
+        }
+      },
+      async submit() {
+        await save();
+        return { agent: createdAgent, error: error || (createdAgent ? '' : 'The form was not saved.') };
+      },
+      close: () => onclose(),
+    });
+  });
 </script>
 
 <Modal title={agent ? `Edit ${agent.name}` : 'New personal agent'} width={620} {onclose}>
-  <div class="sheet">
+  <div class="sheet" data-pa-sheet>
     {#if error}<div class="err" use:announceShown={{ text: error, assertive: true }} bind:this={errorEl}>{error}</div>{/if}
     {#if !agent && !ws.currentId}
       <button class="btn" onclick={() => (ui.newWorkspaceOpen = true)}>Add workspace</button>

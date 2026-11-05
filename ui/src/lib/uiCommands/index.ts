@@ -77,6 +77,13 @@ registerLazyUiCommands(
   () => import('./scheduled'),
   'scheduled-tasks',
 );
+// Personal Agents: route `personal-agents`, pane `scheduled-tasks` (its
+// `ui_state` stays the Scheduled Tasks one).
+registerLazyUiCommands(
+  'scheduled-tasks',
+  ['pa_list', 'pa_open', 'pa_create', 'pa_edit', 'pa_set_autonomy', 'pa_set_slack_as_me', 'pa_add_schedule', 'pa_edit_schedule', 'pa_run_now', 'pa_open_report'],
+  () => import('./personalAgents'),
+);
 registerLazyUiCommands(
   'home',
   ['home_state', 'home_go_to_view', 'home_zoom_box', 'home_add_box', 'home_remove_box'],

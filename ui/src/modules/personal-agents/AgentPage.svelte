@@ -35,6 +35,7 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { browserTz, buildCadence, cadenceLabel, defaultCadence, loadCadence, WEEKDAYS, type CadenceForm } from './cadence';
   import type { PersonalAgentAutonomy, PersonalAgentPermission, PersonalAgentRun, PersonalAgentSchedule } from '../../lib/api/types';
+  import { paAgentPort } from '../../lib/uiCommands/personalAgentsPort';
 
   const AgentMemoryInspectorLazy = lazyComponent(() => import('./AgentMemoryInspector.svelte'));
   const AgentDocumentsLazy = lazyComponent(() => import('./AgentDocuments.svelte'));
@@ -270,6 +271,15 @@
     }
   }
 
+  // Agent UI control (lib/uiCommands/personalAgents.ts): re-read Autonomy
+  // after a save made outside the tab, open a run's report.
+  let autonomyReload = $state(0);
+  $effect(() => paAgentPort.bind({ agentId, reloadAutonomy: () => {
+    autonomyReload += 1;
+    const id = agentId;
+    personalAgentsApi.autonomy(id).then((a) => { if (id === agentId) autonomy = a; }).catch(() => {});
+  }, viewReport: (r) => void viewReport(r) }));
+
   // --- Runs / report viewer -------------------------------------------------
   let reportRun = $state<PersonalAgentRun | null>(null);
   let reportText = $state('');
@@ -424,7 +434,7 @@
     {/if}
   {:else if tab === 'overview'}
     <div class="overview">
-      <section class="pa-panel">
+      <section class="pa-panel" data-pa-persona>
         <div class="card-head">
           <h2>Persona</h2>
           <button class="btn small ghost" onclick={() => (editing = true)}>Edit</button>
@@ -465,7 +475,7 @@
   {:else if tab === 'activity'}
     {#key agentId}<AgentActivity {agentId} />{/key}
   {:else if tab === 'autonomy'}
-    {#key agentId}<AgentAutonomy {agentId} editable={canEditDocuments} ownerEditable={canEditOwnerFields} {ownerNote} onsaved={(a) => (autonomy = a)} />{/key}
+    {#key `${agentId}:${autonomyReload}`}<AgentAutonomy {agentId} editable={canEditDocuments} ownerEditable={canEditOwnerFields} {ownerNote} onsaved={(a) => (autonomy = a)} />{/key}
   {:else if tab === 'schedules'}
     {#if schedules.length > 0 || schedFormOpen}
       <div class="section-head">
@@ -561,7 +571,7 @@
     {:else}
       <ul class="rows">
         {#each schedules as s (s.id)}
-          <li class="rowline">
+          <li class="rowline" data-schedule-id={s.id}>
             <div class="rowmain">
               <div class="rowtitle">
                 <strong>{cadenceLabel(s.schedule, s.timezone)}</strong>
@@ -604,7 +614,7 @@
       {/snippet}
       <ul class="rows">
         {#each runs as r (r.id)}
-          <li class="run">
+          <li class="run" data-run-id={r.id}>
             <StatusBadge status={runStatus(r.status)} variant="text" />
             <span class="run-when"><RelTime iso={r.started_at} /></span>
             <span class="chip clip-chip" title="What started this run">{scheduleName(r)}</span>

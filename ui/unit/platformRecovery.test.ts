@@ -19,7 +19,7 @@ test('template retry preserves the first created agent and schedule request key'
   let creates = 0;
   const attempts: any[] = [];
   const c = functions('modules/personal-agents/AgentEditSheet.svelte', ['save', 'buildDelivery', 'deliversReports'], {
-    busy: false, error: '', agent: null, createdAgent: null, pendingSchedule: null,
+    busy: false, error: '', agent: null, createdAgent: null, pendingSchedule: null, scheduleOverride: null,
     fName: 'Recap', fAvatar: '', fSoul: '', fProvider: 'claude', fModel: '', fCwd: '', fBrowser: false,
     fEnabled: true, fDestType: 'none', fTemplate: 'recap', ws: { currentId: 'workspace' },
     crypto: { randomUUID: () => 'stable-request' }, Intl,
