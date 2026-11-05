@@ -9,11 +9,14 @@
 //! on the thread, applied by the spawn's safety pipeline and read by the tool
 //! policy), so a read-only run is confined the same way.
 //!
-//! A run is one turn: create the thread, send the report-augmented prompt,
-//! wait for the turn to settle (no progress for [`RUN_NO_PROGRESS`] = stuck),
-//! take the report from the file the agent wrote — or, when it wrote none,
-//! the turn's final assistant text — and close the thread (it stays in
-//! History, openable from the run).
+//! A run: create the thread, send the report-augmented prompt, wait until
+//! the thread is done — no turn running, no background work the agent
+//! started still pending, nothing new for a few seconds (the agent continues
+//! on its own when its background work ends) — take the report from the
+//! file the agent wrote, or else its last answer, and close the thread (it
+//! stays in History, openable from the run and reopenable). No progress for
+//! [`RUN_NO_PROGRESS`] = stuck, with a longer allowance while background
+//! work is pending.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -184,8 +187,9 @@ async fn run_thread<C: AssistantCtx>(
         }
     };
     let id = thread.id.clone();
-    let result = drive_turn(ctx, &id, &augmented, &out_path).await;
-    // Done (or failed): the thread stops and stays in History.
+    let result = drive_turn(ctx, &id, &augmented, &out_path, cancel).await;
+    // Done (or failed) — nothing of the agent's is still running: the
+    // thread stops and stays in History, where it can be reopened.
     let _ = ctx.agent_runtime().close(&id).await;
     let _ = std::fs::remove_file(&out_path);
     Ok(match result {
@@ -199,47 +203,133 @@ async fn run_thread<C: AssistantCtx>(
     })
 }
 
-/// Send the run's prompt and wait for its turn: the report file if the agent
-/// wrote one, else the turn's final answer. `Err(reason)` when the agent
-/// could not start, the turn failed with nothing to report, or it made no
-/// progress for [`RUN_NO_PROGRESS`] (it is interrupted).
+/// How a run waits for its thread.
+#[derive(Debug, Clone, Copy)]
+struct RunWait {
+    /// One wait for the thread to settle before the progress check.
+    poll: Duration,
+    /// Settled = idle this long with nothing new (the agent may start a turn
+    /// of its own right after background work ends).
+    stable: Duration,
+    /// No progress for this long = stuck.
+    no_progress: Duration,
+    /// The same while background work the agent started is pending (a
+    /// `sleep 300`, a PR sweep): it produces nothing until it finishes.
+    background_no_progress: Duration,
+}
+
+const RUN_WAIT: RunWait = RunWait {
+    poll: POLL,
+    stable: Duration::from_secs(5),
+    no_progress: RUN_NO_PROGRESS,
+    background_no_progress: Duration::from_secs(45 * 60),
+};
+
+/// What a run reads of its thread (the runtime; a script in tests).
+trait RunProbe: Sync {
+    fn reply(
+        &self,
+        wait: Duration,
+    ) -> impl std::future::Future<Output = Result<otto_core::agent_runtime::PeerReply>> + Send;
+    fn last_sequence(&self) -> impl std::future::Future<Output = u64> + Send;
+    fn interrupt(&self) -> impl std::future::Future<Output = ()> + Send;
+}
+
+struct ThreadProbe<'a> {
+    rt: &'a otto_agent_protocol::AgentRuntime,
+    id: &'a Id,
+}
+
+impl RunProbe for ThreadProbe<'_> {
+    async fn reply(&self, wait: Duration) -> Result<otto_core::agent_runtime::PeerReply> {
+        self.rt.latest_reply(self.id, wait).await
+    }
+    async fn last_sequence(&self) -> u64 {
+        self.rt
+            .get(self.id)
+            .await
+            .map(|s| s.last_sequence)
+            .unwrap_or(0)
+    }
+    async fn interrupt(&self) {
+        let _ = self.rt.interrupt(self.id).await;
+    }
+}
+
+/// Send the run's prompt and wait until the thread is done: the report file
+/// if the agent wrote one, else its last answer. `Err(reason)` when the
+/// agent could not start, the run was stopped, it ended with nothing to
+/// report, or it made no progress for [`RUN_NO_PROGRESS`] (it is
+/// interrupted).
 async fn drive_turn<C: AssistantCtx>(
     ctx: &C,
     id: &Id,
     prompt: &str,
     out_path: &std::path::Path,
+    cancel: &otto_core::cancel_signal::CancelSignal,
 ) -> std::result::Result<String, String> {
     let rt = ctx.agent_runtime();
     rt.prompt(id, prompt)
         .await
         .map_err(|e| format!("create-failed: {e}"))?;
-    let mut last_seq = 0;
+    wait_settled(&ThreadProbe { rt, id }, out_path, cancel, RUN_WAIT).await
+}
+
+/// Wait until the thread is idle — no turn (the prompted one, or one the
+/// agent starts itself when its background work ends) and no background
+/// work pending — and stays idle for `w.stable`. Background work and the
+/// agent's own turns are progress: a run never ends (and its thread is
+/// never closed) while the agent still has work in flight.
+async fn wait_settled<P: RunProbe>(
+    p: &P,
+    out_path: &std::path::Path,
+    cancel: &otto_core::cancel_signal::CancelSignal,
+    w: RunWait,
+) -> std::result::Result<String, String> {
+    let mut last_seq = p.last_sequence().await;
     let mut changed = Instant::now();
     loop {
-        let reply = rt
-            .latest_reply(id, POLL)
-            .await
-            .map_err(|e| format!("exited: {e}"))?;
+        if cancel.is_cancelled() {
+            return Err("stopped".into());
+        }
+        let reply = p.reply(w.poll).await.map_err(|e| format!("exited: {e}"))?;
+        let seq = p.last_sequence().await;
+        if seq != last_seq {
+            last_seq = seq;
+            changed = Instant::now();
+        }
         if !reply.busy {
+            tokio::time::sleep(w.stable).await;
+            let again = p
+                .reply(Duration::ZERO)
+                .await
+                .map_err(|e| format!("exited: {e}"))?;
+            let seq = p.last_sequence().await;
+            if again.busy || seq != last_seq {
+                last_seq = seq;
+                changed = Instant::now();
+                continue; // it went on (its own turn, a late notice)
+            }
             let file = tokio::fs::read_to_string(out_path)
                 .await
                 .ok()
                 .filter(|t| !t.trim().is_empty());
-            let report = file.unwrap_or(reply.text);
+            let report = file.unwrap_or(again.text);
             if report.trim().is_empty() {
                 return Err(format!(
                     "exited: the turn ended {} with no report",
-                    reply.turn_status.as_deref().unwrap_or("without a status")
+                    again.turn_status.as_deref().unwrap_or("without a status")
                 ));
             }
             return Ok(report);
         }
-        let seq = rt.get(id).await.map(|s| s.last_sequence).unwrap_or(0);
-        if seq != last_seq {
-            last_seq = seq;
-            changed = Instant::now();
-        } else if changed.elapsed() >= RUN_NO_PROGRESS {
-            let _ = rt.interrupt(id).await;
+        let limit = if reply.background_tasks > 0 {
+            w.background_no_progress.max(w.no_progress)
+        } else {
+            w.no_progress
+        };
+        if changed.elapsed() >= limit {
+            p.interrupt().await;
             return Err("stuck".into());
         }
     }
@@ -373,6 +463,144 @@ pub async fn close_chat<C: AssistantCtx>(ctx: &C, agent: &PersonalAgent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use otto_core::cancel_signal::CancelSignal;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    /// One scripted observation of the thread: (busy, background tasks,
+    /// last sequence, last answer). The last one repeats.
+    type Obs = (bool, u32, u64, &'static str);
+
+    struct Script {
+        steps: Mutex<Vec<Obs>>,
+        at: AtomicUsize,
+        interrupted: AtomicBool,
+    }
+
+    impl Script {
+        fn new(steps: Vec<Obs>) -> Self {
+            Self {
+                steps: Mutex::new(steps),
+                at: AtomicUsize::new(0),
+                interrupted: AtomicBool::new(false),
+            }
+        }
+        fn now(&self) -> Obs {
+            let steps = self.steps.lock().unwrap();
+            steps[self.at.load(Ordering::SeqCst).min(steps.len() - 1)]
+        }
+    }
+
+    impl RunProbe for Script {
+        async fn reply(&self, _wait: Duration) -> Result<otto_core::agent_runtime::PeerReply> {
+            // Each reply moves the script on (one poll / stability check).
+            let (busy, bg, _, text) = self.now();
+            self.at.fetch_add(1, Ordering::SeqCst);
+            Ok(otto_core::agent_runtime::PeerReply {
+                peer: otto_core::agent_runtime::PeerInfo {
+                    id: "t".into(),
+                    provider: RuntimeProvider::Claude,
+                    title: "t".into(),
+                    status: RuntimeSessionStatus::Idle,
+                    is_self: true,
+                },
+                busy,
+                background_tasks: bg,
+                turn_status: (!busy).then(|| "completed".into()),
+                text: text.into(),
+            })
+        }
+        async fn last_sequence(&self) -> u64 {
+            let steps = self.steps.lock().unwrap();
+            let i = self.at.load(Ordering::SeqCst).saturating_sub(1);
+            steps[i.min(steps.len() - 1)].2
+        }
+        async fn interrupt(&self) {
+            self.interrupted.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn fast() -> RunWait {
+        RunWait {
+            poll: Duration::from_millis(1),
+            stable: Duration::from_millis(1),
+            no_progress: Duration::from_millis(80),
+            background_no_progress: Duration::from_secs(30),
+        }
+    }
+
+    fn no_file() -> PathBuf {
+        std::env::temp_dir().join("otto-pa-no-such-report.md")
+    }
+
+    #[tokio::test]
+    async fn a_turn_ending_with_background_work_pending_does_not_complete_the_run() {
+        // The turn ends ("Waiting…") with a background task pending; it
+        // makes no events for a while (longer than the plain stuck limit);
+        // then the agent's own turn runs and answers.
+        let mut steps: Vec<Obs> = vec![(true, 0, 3, "")];
+        steps.extend(std::iter::repeat_n(
+            (true, 1, 9, "Waiting for the PR sweep"),
+            60,
+        ));
+        steps.push((true, 0, 12, "Waiting for the PR sweep"));
+        steps.push((false, 0, 20, "Sweep done: 2 PRs"));
+        steps.push((false, 0, 20, "Sweep done: 2 PRs"));
+        let p = Script::new(steps);
+        let w = RunWait {
+            poll: Duration::from_millis(5),
+            ..fast()
+        };
+        let got = wait_settled(&p, &no_file(), &CancelSignal::new(), w).await;
+        assert_eq!(got.as_deref(), Ok("Sweep done: 2 PRs"));
+        assert!(!p.interrupted.load(Ordering::SeqCst), "not stuck");
+    }
+
+    #[tokio::test]
+    async fn an_idle_moment_before_the_agents_own_turn_is_not_the_end() {
+        // Idle once (the task just finished), but within the stability
+        // window the agent starts its own turn: the run goes on.
+        let p = Script::new(vec![
+            (false, 0, 5, "first"),
+            (true, 0, 6, "first"),
+            (false, 0, 9, "final"),
+            (false, 0, 9, "final"),
+        ]);
+        let got = wait_settled(&p, &no_file(), &CancelSignal::new(), fast()).await;
+        assert_eq!(got.as_deref(), Ok("final"));
+    }
+
+    #[tokio::test]
+    async fn no_progress_is_still_stuck_and_stop_ends_the_wait() {
+        let p = Script::new(vec![(true, 0, 4, "")]);
+        let got = wait_settled(&p, &no_file(), &CancelSignal::new(), fast()).await;
+        assert_eq!(got, Err("stuck".into()));
+        assert!(p.interrupted.load(Ordering::SeqCst));
+        let stop = CancelSignal::new();
+        stop.cancel();
+        let p = Script::new(vec![(true, 1, 4, "")]);
+        assert_eq!(
+            wait_settled(&p, &no_file(), &stop, fast()).await,
+            Err("stopped".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn the_report_file_wins_over_the_last_answer() {
+        let dir = std::env::temp_dir().join(format!("otto-pa-report-{}", otto_core::new_id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("r.report.md");
+        tokio::fs::write(&path, "# Report").await.unwrap();
+        let p = Script::new(vec![(false, 0, 2, "chat text")]);
+        let got = wait_settled(&p, &path, &CancelSignal::new(), fast()).await;
+        assert_eq!(got.as_deref(), Ok("# Report"));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let p = Script::new(vec![(false, 0, 2, "")]);
+        assert!(wait_settled(&p, &no_file(), &CancelSignal::new(), fast())
+            .await
+            .unwrap_err()
+            .contains("no report"));
+    }
 
     #[test]
     fn only_structured_refusals_fall_back_to_a_terminal() {
