@@ -172,6 +172,7 @@ async fn send_as(
         mcp_internal: false,
         mcp_session_id: None,
         managed_session_id: None,
+        device_id: None,
     });
     let resp = app.clone().oneshot(req).await.unwrap();
     let status = resp.status();

@@ -90,6 +90,9 @@ pub fn public_routes() -> Router<ServerCtx> {
         // OTTO_PLUGIN_TOKEN (validated in each handler) — NOT a user bearer, so it
         // lives in public_routes (outside the user auth chokepoint), like /ingest/*.
         .merge(crate::plugins::host_routes())
+        // Phone pairing claim + poll: the code / poll secret in the body is
+        // the credential; tailnet peers only (otto-phone routes.rs).
+        .merge(otto_phone::public_router::<ServerCtx>())
         // Email-OTP share gate (mobile plan Task 7.3): redeem an emailed code for
         // a share token. PUBLIC by design — the share token in the body IS the
         // auth, so this must be reachable BEFORE the (still OTP-pending) scoped

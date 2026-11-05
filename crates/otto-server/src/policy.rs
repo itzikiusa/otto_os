@@ -108,7 +108,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     //    it precedes the feature families below).
     // ----------------------------------------------------------------------
 
-    if room_capability_route(p) {
+    if room_capability_route(p) || otto_phone::policy::exempt(p) {
         return Exempt;
     }
     // perf2/10-mcp R7: an agent session's stdio bridge appends its OWN tool-call

@@ -1344,6 +1344,7 @@ mod tests {
             mcp_internal: false,
             mcp_session_id: None,
             managed_session_id: None,
+            device_id: None,
         };
         // A person: the request decides (none = post as the user).
         assert_eq!(bound_room_session(&auth, None).unwrap(), None);

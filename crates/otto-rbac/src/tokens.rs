@@ -278,8 +278,11 @@ impl AuthRepo {
         .bind(&hash)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| Error::Internal(format!("authenticate: {e}")))?
-        .ok_or(Error::Unauthorized)?;
+        .map_err(|e| Error::Internal(format!("authenticate: {e}")))?;
+        let Some(row) = row else {
+            // Not an `auth_sessions` token: maybe a paired phone's device token.
+            return self.authenticate_device(token).await;
+        };
 
         let now = Utc::now();
         let expires_at = parse_ts(&row.get::<String, _>("expires_at"))?;
@@ -402,6 +405,7 @@ impl AuthRepo {
                 mcp_internal: false,
                 mcp_session_id: None,
                 managed_session_id: None,
+                device_id: None,
             });
         }
 
@@ -461,6 +465,7 @@ impl AuthRepo {
                 mcp_internal: false,
                 mcp_session_id: None,
                 managed_session_id: None,
+                device_id: None,
             });
         }
 
@@ -512,6 +517,7 @@ impl AuthRepo {
             mcp_scope,
             mcp_internal,
             managed_session_id: managed_session.clone().or_else(|| mcp_session_id.clone()),
+            device_id: None,
             mcp_session_id,
         };
 
@@ -541,6 +547,12 @@ impl AuthRepo {
             .execute(&self.pool)
             .await
             .map_err(|e| Error::Internal(format!("revoke token: {e}")))?;
+        // A paired phone signing out (`/auth/logout`) unpairs it.
+        sqlx::query("DELETE FROM phone_devices WHERE token_hash = ?")
+            .bind(&hash)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Error::Internal(format!("revoke device token: {e}")))?;
         self.evict_hash(&hash);
         signal_revocation();
         Ok(())
@@ -562,9 +574,50 @@ impl AuthRepo {
             .execute(&self.pool)
             .await
             .map_err(|e| Error::Internal(format!("revoke all for user: {e}")))?;
+        let devices = crate::devices::DevicesRepo::new(self.pool.clone())
+            .revoke_all(user_id)
+            .await?;
         self.evict_user(user_id);
         signal_revocation();
-        Ok(res.rows_affected())
+        Ok(res.rows_affected() + devices)
+    }
+
+    /// A paired phone's device token (`phone_devices`): the owner's own
+    /// identity with `device_id` set. Never cached; refused from a peer that is
+    /// neither the tailnet nor this Mac whenever the request's peer is known
+    /// (`otto_core::auth::request_peer`, stamped by the host guard).
+    async fn authenticate_device(&self, token: &str) -> Result<AuthContext> {
+        let peer = otto_core::auth::request_peer();
+        if peer.as_ref().is_some_and(|p| !p.trusted_for_devices()) {
+            return Err(Error::Unauthorized);
+        }
+        let ip = peer.map(|p| p.ip.to_string());
+        let dev = crate::devices::DevicesRepo::new(self.pool.clone())
+            .authenticate(token, ip.as_deref())
+            .await?
+            .ok_or(Error::Unauthorized)?;
+        let row = sqlx::query(
+            "SELECT id, username, display_name, is_root, disabled, created_at FROM users WHERE id = ?",
+        )
+        .bind(&dev.user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("device user: {e}")))?
+        .ok_or(Error::Unauthorized)?;
+        if row.get::<i64, _>("disabled") != 0 {
+            return Err(Error::Unauthorized);
+        }
+        let user = User {
+            id: row.get("id"),
+            username: row.get("username"),
+            display_name: row.get("display_name"),
+            is_root: row.get::<i64, _>("is_root") != 0,
+            disabled: false,
+            created_at: parse_ts(&row.get::<String, _>("created_at"))?,
+        };
+        let mut ctx = AuthContext::automation(&user, "device");
+        ctx.device_id = Some(dev.device_id);
+        Ok(ctx)
     }
 
     /// Purge credentials that expired more than `grace_days` ago (14-daemon-perf

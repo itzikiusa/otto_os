@@ -146,6 +146,7 @@ fn build_app(pool: DbPool, actor: User) -> Router {
                 mcp_internal: false,
                 mcp_session_id: None,
                 managed_session_id: None,
+                device_id: None,
             });
             next.run(req).await
         }
@@ -451,6 +452,7 @@ fn users_app(ctx: otto_server::state::ServerCtx, actor: User) -> Router {
                 mcp_internal: false,
                 mcp_session_id: None,
                 managed_session_id: None,
+                device_id: None,
             });
             next.run(req).await
         }

@@ -419,6 +419,7 @@ impl Fixture {
                 mcp_internal: false,
                 mcp_session_id: None,
                 managed_session_id: managed_session_id.map(Into::into),
+                device_id: None,
             });
         let response = self.approval_api().oneshot(request).await.unwrap();
         let status = response.status();

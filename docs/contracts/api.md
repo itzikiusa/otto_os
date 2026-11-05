@@ -620,6 +620,60 @@ sender → `400`. The guest then re-verifies the new code via
 
 ---
 
+## Phone access (Tailscale serve + QR pairing + device tokens)
+
+Reach Otto from your own phone over Tailscale (docs/features/phone-access.md).
+Storage: `phone_pairings` + `phone_devices` (migration `0202_phone_access`);
+code in `crates/otto-phone` (routes, tailscale, policy) and
+`crates/otto-rbac/src/devices.rs` (repo + token auth).
+
+**Peer classification.** The host guard classifies every request's peer
+(`otto_core::peer::classify_peer`) and publishes it for the request
+(`otto_core::auth::request_peer`): `Local` (a loopback peer addressing a
+loopback name — the desktop app), `Tailnet` (a direct `100.64.0.0/10` /
+`fd7a:115c:a1e0::/48` peer, or a loopback peer whose `Host` is `*.ts.net`, with
+no `Tailscale-Funnel-Request` header and whose LAST `X-Forwarded-For` entry is a
+tailnet address — how `tailscale serve` forwards), else `Other`.
+
+**Device tokens.** A paired phone signs in with a device token (64 hex, only
+its SHA-256 stored, never cached). It authenticates as its owner with
+`AuthContext.device_id` set, is refused (401) from an `Other` peer whenever the
+peer is known, slides a 30-day idle expiry (capped by a 180-day absolute one)
+and records `last_seen_at` / `last_ip`. The feature guard narrows it
+(`otto_phone::policy::device_gate`): no `/auth/tokens*`, `/mcp/tokens*`,
+`/auth/shares*` (not even GET), no `Secret`-class route, no `Admin`-class route
+except human approval gates (`/runtime-sessions/{id}/requests/{request_id}`,
+`/mcp/approvals/{id}/decide`, `/workflow-runs/{id}/approve`,
+`/database-changes/{id}/approve`, `…/approve|reject|decide`), and no `/phone/*`
+route but `/phone/device/me`. `POST /auth/logout` with a device token unpairs
+it; `revoke_all_for_user` (password reset, disable) drops devices too.
+Every revoke bumps the revocation generation: `/ws/events` closes with 4401
+within a beat, `/ws/term` re-checks within 5 s.
+
+**Who may call the owner routes.** A person's own credential — not an agent
+session / MCP / share token (403), not a device token (403), not an
+impersonation overlay (403). Routes marked *on the Mac* additionally refuse a
+known non-`Local` peer (a password login from the phone cannot pair phones).
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /api/v1/phone/status | owner | — | `PhoneAccessStatus {installed, cli_path, backend_state, logged_in, tailnet, magic_dns, self_name, self_ips[], devices: TailnetDevice[] {name, dns_name, os, online, ips[]}, serving: {url, https, port} \| null, other_serves, note, error, can_manage}` — `can_manage` = root on the Mac |
+| POST /api/v1/phone/serve | owner, root, on the Mac | `{enabled: bool}` | `PhoneAccessStatus`. On: `tailscale serve --bg --yes --https=443 http://127.0.0.1:<port>`, verified with an HTTPS GET of `/api/v1/health` through the Mac's own tailnet address; on failure that entry is removed and `--http=80` is used (`note` says why). Off: `serve --yes --https=<p>\|--http=<p> off` for Otto's own mounts only. A port another config uses is never touched (502 when both are taken). Never Funnel. 502 on CLI failure. Audited `phone.serve.on/off` |
+| POST /api/v1/phone/pairings | owner, on the Mac | `{next?: string}` | `PairingCreated {id, code, url, expires_at}` — `url` = `<serving url>/#/pair/<code>[/<next>]`; the code (32 random bytes, hex) is single-use, hashed at rest, expires in 2 min; creating one expires the user's previous outstanding pairing. `next` must pass `otto_core::phone::validate_next_route` (`''`, `home`, `agents`, `threads`, `agents/<id>`, `threads/<id>`; id `[A-Za-z0-9_-]{1,64}`) → else 400. 409 when Phone access is off. Audited `phone.pair.create` |
+| GET /api/v1/phone/pairings/{id} | owner, on the Mac | — | `PairingView {id, status: waiting\|claimed\|approved\|denied\|consumed\|expired, expires_at, device_label, peer_ip, confirm_code}` (`confirm_code` once claimed). 404 for another user's pairing |
+| POST /api/v1/phone/pairings/{id}/approve | owner, on the Mac | — | `PairingView`; only a `claimed`, unexpired pairing moves (else 409). Audited `phone.pair.approve` |
+| POST /api/v1/phone/pairings/{id}/deny | owner, on the Mac | — | `PairingView` (same rules). Audited `phone.pair.deny` |
+| GET /api/v1/phone/devices | owner | — | `PhoneDevice[] {id, name, user_agent, created_at, last_seen_at, last_ip, idle_expires_at, expires_at, current}` (live only, newest first) |
+| PATCH /api/v1/phone/devices/{id} | owner | `{name}` | `PhoneDevice` (name trimmed, ≤64 chars, controls dropped; 400 when empty). Audited `phone.device.rename` |
+| DELETE /api/v1/phone/devices/{id} | owner | — | 204 (404 when not yours). The token is dead at once. Audited `phone.device.revoke` |
+| POST /api/v1/phone/devices/revoke-all | owner | — | `{revoked: n}` (also expires outstanding pairings). Audited `phone.device.revoke_all` |
+| GET /api/v1/phone/device/me | any credential | — | `{device: PhoneDevice \| null}` — non-null (with `current: true`) iff the caller is a device token |
+| DELETE /api/v1/phone/device/me | device token | — | 204 — the phone unpairs itself (400 for any other credential). Audited `phone.device.unpair` |
+| POST /api/v1/phone/pair/claim | **public**, tailnet peer only (403 otherwise) | `{code}` | `PairClaimResult {pairing_id, poll_secret, confirm_code, expires_at}` — atomic `waiting → claimed`; the device label comes from `User-Agent`; the approval window is 2 min. A bad / used / expired code → 404 (one answer for all), counted per peer; 5 bad codes or 300 requests per 10 min → 429 `rate_limited`. Audited `phone.pair.claim` / `phone.pair.refused` (never the code) |
+| POST /api/v1/phone/pair/poll | **public**, tailnet peer only | `{pairing_id, poll_secret}` | `PairPollResult {status: pending\|approved\|denied\|expired, token?, next?, device?}` — on approval the pairing is consumed and the device token minted in one transaction, so `token` appears exactly once; a replay answers `expired`. 404 for a wrong secret. Audited `phone.device.paired` |
+
+---
+
 # Otto API Contract — extended surface (v1, mounted)
 
 The tables above (#1–#89) are the original frozen core. The sections below complete the

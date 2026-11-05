@@ -52,6 +52,8 @@ mod mcp_profiles_edges;
 mod personal_agent_policy;
 #[path = "personal_agents_owner.rs"]
 mod personal_agents_owner;
+#[path = "phone_pairing.rs"]
+mod phone_pairing;
 #[path = "policy_coverage.rs"]
 mod policy_coverage;
 #[path = "provider_resolve.rs"]

@@ -309,27 +309,40 @@ pub async fn host_guard_with_settings(
         }
         host = Some(name);
     }
-    stamp_client_ip(&mut req, host.as_deref(), trusted_header.as_deref());
-    next.run(req).await
+    match stamp_client_ip(&mut req, host.as_deref(), trusted_header.as_deref()) {
+        Some(peer) => otto_core::auth::with_request_peer(peer, next.run(req)).await,
+        None => next.run(req).await,
+    }
 }
 
-/// Insert the resolved [`otto_sessions::share_throttle::ClientIp`] (no-op when
-/// the listener did not wire `ConnectInfo`, e.g. in-process tests).
-fn stamp_client_ip(req: &mut Request, host: Option<&str>, trusted_header: Option<&str>) {
+/// Insert the resolved [`otto_sessions::share_throttle::ClientIp`] and return
+/// the classified [`otto_core::peer::RequestPeer`] (tailnet / this Mac / other)
+/// the device-token and pairing rules read (`None` when the listener did not
+/// wire `ConnectInfo`, e.g. in-process tests).
+fn stamp_client_ip(
+    req: &mut Request,
+    host: Option<&str>,
+    trusted_header: Option<&str>,
+) -> Option<otto_core::peer::RequestPeer> {
     use otto_sessions::share_throttle::{resolve_client_ip, ClientIp};
-    let Some(peer) = req
+    let peer = req
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|ci| ci.0.ip())
-    else {
-        return;
-    };
+        .map(|ci| ci.0.ip())?;
+    let header = |n: &str| req.headers().get(n).and_then(|v| v.to_str().ok());
+    let classified = otto_core::peer::classify_peer(
+        peer,
+        host,
+        header("x-forwarded-for"),
+        header("tailscale-funnel-request").is_some(),
+    );
     let forwarded = trusted_header
         .and_then(|h| req.headers().get(h))
         .and_then(|v| v.to_str().ok());
     let ip = resolve_client_ip(peer, trusted_header.is_some(), forwarded);
     let local = peer.is_loopback() && host.is_none_or(is_loopback_name);
     req.extensions_mut().insert(ClientIp { ip, local });
+    Some(classified)
 }
 
 #[cfg(test)]

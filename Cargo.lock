@@ -4500,6 +4500,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-phone"
+version = "0.2.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "http-body-util",
+ "otto-core",
+ "otto-rbac",
+ "otto-state",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "otto-product"
 version = "0.2.0"
 dependencies = [
@@ -4656,6 +4674,7 @@ dependencies = [
  "otto-memory",
  "otto-netguard",
  "otto-orchestrator",
+ "otto-phone",
  "otto-product",
  "otto-pty",
  "otto-rbac",

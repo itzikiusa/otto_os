@@ -1044,6 +1044,7 @@ mod tests {
                 mcp_internal: false,
                 mcp_session_id: None,
                 managed_session_id: managed.then(|| "fixture-session".into()),
+                device_id: None,
             };
             let authenticated = app
                 .clone()
@@ -1142,6 +1143,7 @@ mod tests {
                 mcp_internal: false,
                 mcp_session_id: None,
                 managed_session_id: None,
+                device_id: None,
             };
             let app = Router::new()
                 .nest(

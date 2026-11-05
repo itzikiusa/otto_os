@@ -46,6 +46,7 @@ members = [
     "crates/otto-agent-protocol",
     "crates/otto-review",
     "crates/otto-rooms",
+    "crates/otto-phone",
 ]
 # Custom plugins are out-of-process sidecars installed at RUNTIME under
 # ~/otto-plugins (not workspace members, not compiled into the app). See
@@ -60,6 +61,7 @@ license = "MIT"
 otto-core = { path = "crates/otto-core" }
 otto-state = { path = "crates/otto-state" }
 otto-rbac = { path = "crates/otto-rbac" }
+otto-phone = { path = "crates/otto-phone" }
 otto-automation = { path = "crates/otto-automation" }
 otto-keychain = { path = "crates/otto-keychain" }
 otto-pty = { path = "crates/otto-pty" }

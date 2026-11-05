@@ -164,8 +164,22 @@ where
         // the feature grant both pass it. Admin and Secret routes — identity /
         // policy / daemon administration, human approval gates, plaintext
         // credentials and credential minting — need a person's own credential.
-        if let Some(class) = route_class(&method, &template) {
+        let class = route_class(&method, &template);
+        if let Some(class) = class {
             if let Err(msg) = credential_class_gate(class, crate::ui_bridge::is_human(ctx)) {
+                return forbidden(msg).into_response();
+            }
+        }
+        // PAIRED PHONE (otto_phone::policy::device_gate): the owner's own
+        // credential, minus credentials, administration and Phone access.
+        if ctx.device_id.is_some() {
+            use otto_phone::policy::{device_gate, Sensitivity as Sv};
+            let sv = match class {
+                Some(RouteClass::Admin) => Sv::Admin,
+                Some(RouteClass::Secret) => Sv::Secret,
+                _ => Sv::Normal,
+            };
+            if let Err(msg) = device_gate(&method, &template, sv) {
                 return forbidden(msg).into_response();
             }
         }
