@@ -15,7 +15,7 @@ interface Persisted {
   terminalSplit?: boolean;
 }
 
-const SURFACES: readonly ThreadsInspectorTab[] = ['files', 'changes', 'pr', 'side', 'connections', 'peers'];
+const SURFACES: readonly ThreadsInspectorTab[] = ['files', 'changes', 'pr', 'side', 'connections', 'peers', 'browser'];
 
 function read(): Persisted {
   try {

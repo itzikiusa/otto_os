@@ -313,6 +313,13 @@ test('strict Threads vs Agents isolation, single pane header, interactive slash 
   await page.getByTestId('threads-toggle-inspector').click();
   await expect(page.getByTestId('threads-surface-launcher')).toBeVisible();
   await expect(page.getByTestId('threads-surface-files')).toBeEnabled();
+  // Browser opens as an inspector tab — never the shell's Side panel beside
+  // the inspector (that was two right columns).
+  await page.getByTestId('threads-surface-browser').click();
+  const insp = page.getByTestId('threads-inspector');
+  await expect(insp.getByRole('tab', { name: 'Browser' })).toHaveAttribute('aria-selected', 'true');
+  await expect(insp.locator('.browser')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.browser')).toHaveCount(1);
 
   // 4. Interactive Model / Effort / Mode pickers & `/` slash commands inside live ThreadPane.
   await expect(paneA.getByTestId('picker-model')).toBeVisible();
