@@ -474,6 +474,9 @@ impl AgentRuntime {
                     .unwrap_or_else(|| self.inner.host.default_access_mode()),
                 created_by: user.clone(),
                 parent_id,
+                meta: req
+                    .meta
+                    .filter(|m| m.as_object().is_some_and(|o| !o.is_empty())),
             })
             .await?;
         let id = rec.session.id.clone();
@@ -548,23 +551,34 @@ impl AgentRuntime {
 
     /// Open a linked thread from `caller`: same owner, workspace, cwd and
     /// access mode (never wider than the opener's), grouped under the
-    /// caller's root; the opening prompt (if any) is sent framed.
+    /// caller's root; the opening prompt (if any) is sent framed. The
+    /// daemon-only `req.cwd` / `req.meta` give the thread its own folder and
+    /// meta (a delegated personal agent); a read-only opener's thread is
+    /// read-only too, whatever `req.meta` says.
     pub async fn open_peer(&self, caller: &Id, req: OpenPeerReq) -> Result<RuntimeSession> {
         let c = self.get(caller).await?;
         if c.status == RuntimeSessionStatus::Closed {
             return Err(Error::Conflict("the session is closed".into()));
         }
         let root = c.parent_id.clone().unwrap_or_else(|| c.id.clone());
+        let mut meta = req.meta;
+        if c.meta_flag("read_only") {
+            let m = meta.get_or_insert_with(|| serde_json::json!({}));
+            if let Some(o) = m.as_object_mut() {
+                o.insert("read_only".into(), serde_json::Value::Bool(true));
+            }
+        }
         let created = self
             .create_linked(
                 &c.created_by,
                 &c.workspace_id,
                 CreateRuntimeSessionReq {
                     provider: Some(req.provider),
-                    cwd: Some(c.cwd.clone()),
+                    cwd: Some(req.cwd.unwrap_or_else(|| c.cwd.clone())),
                     title: req.title,
                     model: req.model,
                     access_mode: Some(c.access_mode),
+                    meta,
                 },
                 Some(root),
             )
@@ -632,8 +646,18 @@ impl AgentRuntime {
     pub async fn peer_reply(&self, caller: &Id, peer: &Id, wait: Duration) -> Result<PeerReply> {
         let c = self.get(caller).await?;
         let p = self.group_member(&c, peer).await?;
+        let mut reply = self.latest_reply(&p.id, wait).await?;
+        reply.peer.is_self = false;
+        Ok(reply)
+    }
+
+    /// Session `id`'s latest reply: waits up to `wait` for its running turn
+    /// to settle, then returns that turn's assistant messages, joined.
+    /// `busy` = the wait ran out. What a daemon-driven run (a personal
+    /// agent's) waits on for its result.
+    pub async fn latest_reply(&self, id: &Id, wait: Duration) -> Result<PeerReply> {
         let deadline = Instant::now() + wait;
-        let live = self.live(&p.id).await?;
+        let live = self.live(id).await?;
         loop {
             let busy = live.lock().turn.is_some();
             if !busy || Instant::now() >= deadline {
@@ -661,7 +685,7 @@ impl AgentRuntime {
             })
             .unwrap_or_default();
         Ok(PeerReply {
-            peer: Self::peer_info(&session, caller),
+            peer: Self::peer_info(&session, id),
             busy,
             turn_status: last
                 .filter(|t| t.status.is_terminal())

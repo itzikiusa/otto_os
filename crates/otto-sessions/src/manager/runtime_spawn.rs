@@ -125,6 +125,11 @@ impl SessionManager {
             spec.args.extend(injection.args);
             spec.env.extend(injection.env);
         }
+        // A read-only session's tool list (claude: no shell, no subagents) —
+        // what its terminal spawn adds; `read_only_strip` has nothing to drop
+        // from a structured driver's argv.
+        spec.args
+            .extend(cli_flags::read_only_args(&session.provider, &session.meta));
         // A subcommand that must follow the injected top-level flags.
         spec.args.extend(tail_args);
         // Last, over the fully-built spec — as `create` does.
@@ -212,6 +217,15 @@ impl SessionManager {
     pub async fn retire_runtime_credentials(&self, session: &Session) {
         self.retire_credentials(session).await;
         let _ = tokio::fs::remove_file(claude_mcp_config_path(&session.id)).await;
+    }
+
+    /// Whether the structured child of `session` will run Seatbelt-confined:
+    /// a read-only session ALWAYS is (`apply_sandbox`'s forced profile),
+    /// otherwise per the `process_sandbox` setting.
+    pub async fn runtime_session_sandboxed(&self, session: &Session) -> bool {
+        let read_only = session.meta.get("read_only").and_then(|v| v.as_bool()) == Some(true);
+        (read_only && otto_sandbox::is_supported())
+            || self.runtime_has_process_sandbox(&session.provider).await
     }
 
     /// Whether `provider` would run Seatbelt-confined (the runtime's drivers

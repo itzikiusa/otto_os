@@ -96,6 +96,10 @@ pub struct PersonalAgent {
     /// chat-session route).
     pub chat_session_id: Option<String>,
     pub created_by: Option<String>,
+    /// The main agent that created this one (`otto.personal_agent_create`);
+    /// `None` = a person did.
+    #[serde(default)]
+    pub created_by_agent: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -315,6 +319,8 @@ pub struct NewPersonalAgent {
     pub delivery: Value,
     pub enabled: bool,
     pub created_by: Option<String>,
+    /// See [`PersonalAgent::created_by_agent`].
+    pub created_by_agent: Option<String>,
 }
 
 impl NewPersonalAgent {
@@ -332,6 +338,7 @@ impl NewPersonalAgent {
             delivery: serde_json::json!({"type": "none"}),
             enabled: true,
             created_by: None,
+            created_by_agent: None,
         }
     }
 }
@@ -427,6 +434,7 @@ fn row_to_agent(r: &sqlx::sqlite::SqliteRow) -> Result<PersonalAgent> {
         enabled: r.get::<i64, _>("enabled") != 0,
         chat_session_id: r.get("chat_session_id"),
         created_by: r.get("created_by"),
+        created_by_agent: r.get("created_by_agent"),
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
     })
@@ -537,8 +545,9 @@ impl PersonalAgentsRepo {
         let now = fmt(Utc::now());
         sqlx::query(
             "INSERT INTO personal_agents (id, workspace_id, name, avatar, soul_md, provider, \
-             model, cwd, browser, delivery_json, enabled, created_by, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             model, cwd, browser, delivery_json, enabled, created_by, created_by_agent, \
+             created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&a.workspace_id)
@@ -552,6 +561,7 @@ impl PersonalAgentsRepo {
         .bind(a.delivery.to_string())
         .bind(a.enabled as i64)
         .bind(&a.created_by)
+        .bind(&a.created_by_agent)
         .bind(&now)
         .bind(&now)
         .execute(&self.pool)
@@ -1327,6 +1337,23 @@ impl PersonalAgentsRepo {
             out.push((row_to_agent(r)?, cfg));
         }
         Ok(out)
+    }
+
+    /// The workspace's main agent (autonomy `primary`), if one is set — the
+    /// lead its other agents report back to.
+    pub async fn primary_agent(&self, ws: &str) -> Result<Option<PersonalAgent>> {
+        let row = sqlx::query(
+            "SELECT a.* FROM personal_agents a \
+             JOIN personal_agent_autonomy x ON x.agent_id = a.id \
+             WHERE a.workspace_id = ? AND json_valid(x.config_json) \
+               AND json_extract(x.config_json, '$.primary') = 1 \
+             ORDER BY a.created_at ASC LIMIT 1",
+        )
+        .bind(ws)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("get primary personal agent"))?;
+        row.as_ref().map(row_to_agent).transpose()
     }
 
     /// The agent's autonomy config (defaults when no row exists).

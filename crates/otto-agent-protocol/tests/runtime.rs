@@ -215,6 +215,7 @@ async fn create_as(rt: &AgentRuntime, cwd: &str, provider: RuntimeProvider) -> R
             title: None,
             model: None,
             access_mode: None,
+            meta: None,
         },
     )
     .await
@@ -1345,6 +1346,74 @@ async fn attachments_are_stored_served_and_refused_where_unsupported() {
     assert!(store.join(&g.id).exists());
 }
 
+/// A daemon-driven thread (a personal agent's): its server-owned meta is
+/// stored, survives a reload and reaches the spawn; a thread it opens may get
+/// its own folder and meta but stays read-only when the opener is; the run's
+/// result is the latest turn's assistant text.
+#[tokio::test]
+async fn daemon_threads_carry_meta_and_report_their_latest_reply() {
+    use otto_core::agent_runtime::OpenPeerReq;
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let own = dir.path().join("specialist");
+    std::fs::create_dir_all(&own).unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let lead = rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            CreateRuntimeSessionReq {
+                provider: Some(RuntimeProvider::Gemini),
+                cwd: Some(cwd.into()),
+                meta: Some(serde_json::json!({"personal_agent": "main", "read_only": true})),
+                ..CreateRuntimeSessionReq::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(lead.meta_flag("read_only"));
+    let stored = AgentRuntimeRepo::new(pool.clone())
+        .get(&lead.id)
+        .await
+        .unwrap();
+    assert_eq!(stored.session.meta, lead.meta);
+
+    rt.prompt(&lead.id, "status please").await.unwrap();
+    let reply = rt.latest_reply(&lead.id, WAIT).await.unwrap();
+    assert!(!reply.busy);
+    assert_eq!(reply.turn_status.as_deref(), Some("completed"));
+    assert!(reply.text.contains("status please"), "{}", reply.text);
+
+    let peer = rt
+        .open_peer(
+            &lead.id,
+            OpenPeerReq {
+                provider: RuntimeProvider::Gemini,
+                prompt: None,
+                title: Some("Agent: Specialist".into()),
+                model: None,
+                effort: None,
+                cwd: Some(own.to_string_lossy().into_owned()),
+                meta: Some(serde_json::json!({"personal_agent": "spec"})),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(peer.cwd, own.to_string_lossy());
+    assert_eq!(peer.parent_id.as_ref(), Some(&lead.id));
+    let meta = peer.meta.clone().unwrap();
+    assert_eq!(meta["personal_agent"], "spec");
+    assert_eq!(meta["read_only"], true, "never wider than the opener");
+    // A request body can never carry meta (daemon-only).
+    let parsed: CreateRuntimeSessionReq = serde_json::from_value(
+        serde_json::json!({"provider": "gemini", "meta": {"read_only": false}}),
+    )
+    .unwrap();
+    assert!(parsed.meta.is_none());
+}
+
 /// Linked threads: a thread opens another (same owner/workspace/cwd/access,
 /// grouped under the root), messages it with a framed prompt, and reads its
 /// reply; an unrelated thread is not reachable.
@@ -1367,6 +1436,8 @@ async fn linked_threads_open_message_and_read_within_their_group() {
                 title: Some("worker".into()),
                 model: None,
                 effort: None,
+                cwd: None,
+                meta: None,
             },
         )
         .await

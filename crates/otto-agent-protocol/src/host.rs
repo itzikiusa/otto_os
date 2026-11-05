@@ -50,8 +50,20 @@ pub trait RuntimeHost: Send + Sync + 'static {
 }
 
 /// The synthetic PTY-shaped [`Session`] the safety helpers read (never
-/// persisted to `sessions`).
+/// persisted to `sessions`). Its meta is `{"runtime": "structured"}` plus the
+/// thread's server-owned [`RuntimeSession::meta`] — so a personal agent's
+/// thread spawns confined exactly as its terminal session would (`read_only`
+/// forces the Seatbelt profile and the read-only tool list, `browser` adds
+/// the browser MCP, `personal_agent` binds its `otto` tools to the agent).
 pub fn as_agent_session(s: &RuntimeSession) -> Session {
+    let mut meta = serde_json::json!({ "runtime": "structured" });
+    if let Some(serde_json::Value::Object(extra)) = &s.meta {
+        for (k, v) in extra {
+            if k != "runtime" {
+                meta[k.as_str()] = v.clone();
+            }
+        }
+    }
     Session {
         id: s.id.clone(),
         workspace_id: s.workspace_id.clone(),
@@ -66,7 +78,7 @@ pub fn as_agent_session(s: &RuntimeSession) -> Session {
         created_at: s.created_at,
         last_active_at: s.last_active_at,
         archived: false,
-        meta: serde_json::json!({ "runtime": "structured" }),
+        meta,
     }
 }
 
@@ -86,7 +98,7 @@ impl RuntimeHost for SessionManagerHost {
 
     async fn sandboxed(&self, session: &RuntimeSession) -> bool {
         self.manager
-            .runtime_has_process_sandbox(session.provider.as_str())
+            .runtime_session_sandboxed(&as_agent_session(session))
             .await
     }
 
