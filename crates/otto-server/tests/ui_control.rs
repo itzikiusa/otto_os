@@ -1131,3 +1131,47 @@ async fn structured_threads_are_granted_and_drive_like_sessions() {
     let out = invoke("ui_state").await;
     assert_eq!(out["code"], "pending_grant", "{out}");
 }
+
+/// A Threads thread's own credential is NOT read-only: it has no `sessions`
+/// row, and the write guard used to fail closed on that, refusing every
+/// non-GET call its agent made (`otto.thread_open`, `otto.open_session`, …).
+#[tokio::test]
+async fn a_threads_own_credential_can_write() {
+    let d = boot().await;
+    let pool = file_pool(d._tmp.path()).await;
+    otto_state::AgentRuntimeRepo::new(pool.clone())
+        .create(otto_state::NewRuntimeSession {
+            id: "thr2".into(),
+            workspace_id: "ws1".into(),
+            provider: otto_core::agent_runtime::RuntimeProvider::Claude,
+            title: "Lead".into(),
+            cwd: "/tmp".into(),
+            model: None,
+            access_mode: Default::default(),
+            created_by: "alice".into(),
+            parent_id: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        otto_server::personal_agent_policy::session_read_only(&pool, "thr2").await,
+        Some(false)
+    );
+    let (thread_token, _) = AuthRepo::new(pool.clone())
+        .issue_session_api_token(&"alice".to_string(), &"thr2".to_string())
+        .await
+        .unwrap();
+    // The real call `otto.thread_open` makes. No CLI is spawnable here, so it
+    // may fail later — but never at the read-only write guard.
+    let resp = d
+        .http
+        .post(format!("{}/api/v1/runtime-sessions/thr2/peers", d.base))
+        .bearer_auth(&thread_token)
+        .json(&json!({"provider": "codex", "prompt": "hi"}))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    assert!(!body.contains("read-only"), "{status}: {body}");
+}

@@ -609,11 +609,25 @@ pub async fn session_binding(
     if let Some(hit) = binding_cache::get(&key) {
         return Some(hit);
     }
-    let s = otto_state::SessionsRepo::new(pool.clone())
-        .get(&session_id.to_string())
+    let b = match otto_state::SessionsRepo::new(pool.clone())
+        .get(&key.1)
         .await
-        .ok()?;
-    let b = SessionBinding::of(&s);
+    {
+        Ok(s) => SessionBinding::of(&s),
+        // A Threads thread (no `sessions` row) writes while it is open.
+        Err(_) => {
+            let t = otto_state::AgentRuntimeRepo::new(pool.clone())
+                .get(&key.1)
+                .await
+                .ok()?;
+            SessionBinding {
+                read_only: t.closed,
+                agent_id: None,
+                workspace_id: t.session.workspace_id.to_string(),
+                unattended: false,
+            }
+        }
+    };
     binding_cache::put(key, b.clone());
     Some(b)
 }

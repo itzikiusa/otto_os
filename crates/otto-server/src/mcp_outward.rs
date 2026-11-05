@@ -200,6 +200,14 @@ pub async fn otto_tools_invoke(
 /// reused via an ephemeral self-call) and audits the whole thing.
 ///
 /// Returns the governed envelope `Value` (`{decision, executed, content, …}`).
+// A Threads thread asking to open a session gets a linked thread instead.
+async fn in_thread(ctx: &ServerCtx, auth: &AuthContext, tool: &str) -> bool {
+    match crate::ui_bridge::calling_session(auth) {
+        Some(s) if tool.ends_with("open_session") => ctx.agent_runtime.get(s).await.is_ok(),
+        _ => false,
+    }
+}
+
 pub(crate) async fn governed_invoke(
     ctx: &ServerCtx,
     auth: &AuthContext,
@@ -209,6 +217,11 @@ pub(crate) async fn governed_invoke(
     wait_seconds: Option<u64>,
 ) -> ApiResult<Value> {
     let user = &auth.effective_user;
+    let aliased =
+        otto_mcp::outward::thread_alias(tool, arguments, in_thread(ctx, auth, tool).await);
+    let (tool, arguments) = aliased
+        .as_ref()
+        .map_or((tool, arguments), |(t, a)| (t.as_str(), a));
     let short = tool.strip_prefix("otto.").unwrap_or(tool).to_string();
     // Vault calls may omit `workspace_id` (vaults are a global library) —
     // resolve the effective workspace up front so the token's workspace pin,

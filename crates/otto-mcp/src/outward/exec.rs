@@ -213,6 +213,25 @@ pub async fn upsert_request_preserving(
     }
 }
 
+/// In Threads, "open a session" means a LINKED THREAD: an agent running in a
+/// structured thread (`in_thread`) that calls `otto.open_session` gets
+/// `otto.thread_open` instead — a thread beside its own, in its linked group,
+/// never a terminal session. `provider`/`prompt`/`title`/`model`/`effort`
+/// carry over; workspace and folder come from the calling thread. `None`
+/// leaves the call alone.
+pub fn thread_alias(tool: &str, args: &Value, in_thread: bool) -> Option<(String, Value)> {
+    if !in_thread || tool.strip_prefix("otto.").unwrap_or(tool) != "open_session" {
+        return None;
+    }
+    let mut out = json!({});
+    for k in ["provider", "prompt", "title", "model", "effort"] {
+        if let Some(v) = args.get(k).filter(|v| v.is_string()) {
+            out[k] = v.clone();
+        }
+    }
+    Some(("otto.thread_open".into(), out))
+}
+
 pub fn arg_str(args: &Value, key: &str) -> Result<String, Error> {
     args.get(key)
         .and_then(Value::as_str)
@@ -2262,4 +2281,24 @@ pub async fn self_get_text(
         (text, false)
     };
     Ok(json!({"text": text, "truncated": truncated}))
+}
+
+#[cfg(test)]
+mod thread_alias_tests {
+    use super::*;
+
+    #[test]
+    fn open_session_from_a_thread_becomes_a_linked_thread() {
+        let args = json!({"workspace_id": "w", "provider": "codex", "prompt": "do x",
+                          "cwd": "/elsewhere", "model": "gpt-5"});
+        let (tool, a) = thread_alias("otto.open_session", &args, true).unwrap();
+        assert_eq!(tool, "otto.thread_open");
+        assert_eq!(
+            a,
+            json!({"provider": "codex", "prompt": "do x", "model": "gpt-5"})
+        );
+        // A terminal session still opens a terminal session.
+        assert!(thread_alias("otto.open_session", &args, false).is_none());
+        assert!(thread_alias("otto.list_sessions", &args, true).is_none());
+    }
 }
