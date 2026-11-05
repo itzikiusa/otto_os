@@ -130,6 +130,9 @@ pub struct PersonalAgentSchedule {
     /// folder); `directed` runs under the normal approval + auto-approve rules.
     #[serde(default = "default_permission")]
     pub permission: String,
+    /// The routine's own destination (0203); `None` = the agent's delivery.
+    #[serde(default)]
+    pub delivery: Option<Value>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -192,6 +195,19 @@ pub struct AgentAutonomy {
     /// as-me teams, `otto_channels::slack_user_tokens`) this agent may act in
     /// as its owner. Empty (the default) = none. Owner-only to change.
     pub slack_as_me_teams: Vec<String>,
+    /// The agent's personality: a preset id from
+    /// `docs/contracts/personal-agent-personalities.json` ("" = the default
+    /// for its role) plus an optional free-text tweak. Tone only — never
+    /// rules, permissions or approvals.
+    pub personality: Personality,
+}
+
+/// See [`AgentAutonomy::personality`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Personality {
+    pub preset: String,
+    pub note: String,
 }
 
 /// Proactive mode: the agent works its standing goals in the background,
@@ -461,6 +477,11 @@ fn row_to_schedule(r: &sqlx::sqlite::SqliteRow) -> Result<PersonalAgentSchedule>
         permission: r
             .try_get::<String, _>("permission")
             .unwrap_or_else(|_| default_permission()),
+        delivery: r
+            .try_get::<Option<String>, _>("delivery_json")
+            .ok()
+            .flatten()
+            .and_then(|s| json(&s).ok()),
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
     })
@@ -838,6 +859,20 @@ impl PersonalAgentsRepo {
         .await
         .map_err(dberr("update personal agent schedule"))?;
         self.get_schedule(id).await
+    }
+
+    /// Set (or clear) a routine's own destination.
+    pub async fn set_schedule_delivery(&self, id: &str, delivery: Option<&Value>) -> Result<()> {
+        sqlx::query(
+            "UPDATE personal_agent_schedules SET delivery_json = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(delivery.map(Value::to_string))
+        .bind(fmt(Utc::now()))
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("set personal agent schedule delivery"))?;
+        Ok(())
     }
 
     pub async fn delete_schedule(&self, id: &str) -> Result<()> {
