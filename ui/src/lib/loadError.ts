@@ -19,7 +19,12 @@ function isStatusError(e: unknown): e is StatusError {
 export function loadErrorText(e: unknown): string {
   if (isStatusError(e)) {
     if (e.status === 401) return 'Your session expired. Sign in again, then retry.';
-    if (e.status === 403) return 'You don’t have access to this.';
+    // A 403 often carries the precise refusal ("function sleep() isn't…",
+    // "read-only connection …") — that is the actionable part, so show it.
+    if (e.status === 403) {
+      const why = (e.message ?? '').replace(/^forbidden:\s*/i, '').trim();
+      return why && why.toLowerCase() !== 'forbidden' ? `You don’t have access to this: ${why}` : 'You don’t have access to this.';
+    }
     if (e.status === 404) return 'It no longer exists, or this daemon doesn’t serve it.';
     return e.message ? e.message : `The daemon answered ${e.status}.`;
   }
