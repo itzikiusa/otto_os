@@ -257,8 +257,8 @@ pub const GROUPS: &[ToolGroup] = &[
     ToolGroup {
         id: "channels",
         label: "Channels",
-        description: "Slack / Telegram integrations.",
-        prefixes: &[],
+        description: "Slack / Telegram integrations; Slack as the bot or as you.",
+        prefixes: &["slack_"],
         exact: &["list_integrations", "test_integration"],
     },
     ToolGroup {

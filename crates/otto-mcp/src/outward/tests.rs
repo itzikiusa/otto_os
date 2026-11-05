@@ -2215,3 +2215,104 @@ async fn a_truncated_success_body_is_not_success() {
     assert!(resp.status().is_success());
     assert!(parse_self(resp).await.is_err());
 }
+
+// ----- Slack (otto-channels `slack_tools`) ----------------------------------
+
+#[test]
+fn slack_tools_route_to_the_workspace_slack_family() {
+    let r = |tool: &str, args: serde_json::Value| route_for(tool, &args).unwrap();
+    assert_eq!(
+        r("slack_my_workspaces", json!({"workspace_id": "ws1"})).path,
+        "/api/v1/workspaces/ws1/integrations/slack/teams"
+    );
+    let read = r(
+        "slack_read_messages",
+        json!({"workspace_id": "ws1", "channel": "#ops room", "as": "user",
+               "team": "Acme", "thread_ts": "1.000001", "limit": 20}),
+    );
+    assert_eq!(read.method, Method::Get);
+    assert_eq!(
+        read.path,
+        "/api/v1/workspaces/ws1/integrations/slack/messages?channel=%23ops%20room&as=user&team=Acme&thread_ts=1.000001&limit=20"
+    );
+    assert_eq!(
+        r(
+            "slack_search",
+            json!({"workspace_id": "w", "query": "from:@dana after:2026-11-04"})
+        )
+        .path,
+        "/api/v1/workspaces/w/integrations/slack/search?query=from%3A%40dana%20after%3A2026-11-04"
+    );
+    let post = r(
+        "slack_post_message",
+        json!({"workspace_id": "ws1", "channel": "C1", "text": "hi", "as": "user",
+               "thread_ts": null, "extra": 1}),
+    );
+    assert_eq!(
+        (post.method, post.path.as_str()),
+        (
+            Method::Post,
+            "/api/v1/workspaces/ws1/integrations/slack/messages"
+        )
+    );
+    // Only the route's own fields travel; nulls are dropped.
+    assert_eq!(
+        post.body,
+        Some(json!({"as": "user", "channel": "C1", "text": "hi"}))
+    );
+    let mark = r(
+        "slack_mark_unread",
+        json!({"workspace_id": "ws1", "channel": "C1", "ts": "1.000002", "unread": true}),
+    );
+    assert_eq!(mark.path, "/api/v1/workspaces/ws1/integrations/slack/mark");
+    assert_eq!(mark.body.unwrap()["unread"], json!(true));
+    for (tool, args) in [
+        (
+            "slack_post_message",
+            json!({"workspace_id": "w", "channel": "C1"}),
+        ),
+        (
+            "slack_react",
+            json!({"workspace_id": "w", "channel": "C1", "ts": "1.0"}),
+        ),
+        (
+            "slack_mark_unread",
+            json!({"workspace_id": "w", "ts": "1.0"}),
+        ),
+        ("slack_search", json!({"workspace_id": "w"})),
+        ("slack_list_conversations", json!({})),
+    ] {
+        assert!(route_for(tool, &args).is_err(), "{tool}");
+    }
+}
+
+#[test]
+fn slack_writes_are_gated_and_their_card_says_who_and_what() {
+    for w in ["slack_post_message", "slack_react", "slack_mark_unread"] {
+        assert!(tool_is_mutating(w), "{w}");
+        assert!(!IRREVERSIBLE.contains(&w), "{w}");
+    }
+    // Message content is opt-in; metadata is on by default.
+    for r in ["slack_read_messages", "slack_search", "slack_my_activity"] {
+        assert!(!DEFAULT_ENABLED.contains(&r), "{r}");
+    }
+    assert!(DEFAULT_ENABLED.contains(&"slack_my_workspaces"));
+    let d = dangerous_detail(
+        "otto.slack_post_message",
+        &json!({"as": "user", "team": "Acme", "channel": "#ops", "text": "Daily summary"}),
+    );
+    assert_eq!(
+        d,
+        "Post to Slack AS YOU in Slack workspace 'Acme' in '#ops': Daily summary"
+    );
+    let bot = dangerous_detail(
+        "otto.slack_post_message",
+        &json!({"channel": "C1", "text": "x", "thread_ts": "1.0"}),
+    );
+    assert!(bot.contains("as the workspace's Slack bot") && bot.contains("(thread 1.0)"));
+    assert!(dangerous_detail(
+        "otto.slack_mark_unread",
+        &json!({"ts": "1.0", "channel": "C1"})
+    )
+    .contains("as unread"));
+}

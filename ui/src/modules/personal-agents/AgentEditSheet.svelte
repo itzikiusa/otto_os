@@ -48,7 +48,8 @@
     fName = t.name;
     fAvatar = t.avatar;
     fSoul = t.soul_md;
-    scheduleNote = `Adds a schedule: every ${t.schedule.every_min} min — “${t.directive}”`;
+    const when = t.schedule.cadence === 'daily' ? `daily at ${t.schedule.at}` : `every ${t.schedule.every_min} min`;
+    scheduleNote = `Adds a schedule: ${when} — “${t.directive}”`;
   }
 
   let busy = $state(false);

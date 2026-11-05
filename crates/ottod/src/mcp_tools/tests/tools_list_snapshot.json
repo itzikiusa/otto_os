@@ -126,6 +126,15 @@
     "otto_search_memory",
     "otto_send_message",
     "otto_set_scheduled_task_enabled",
+    "otto_slack_find_user",
+    "otto_slack_list_conversations",
+    "otto_slack_mark_unread",
+    "otto_slack_my_activity",
+    "otto_slack_my_workspaces",
+    "otto_slack_post_message",
+    "otto_slack_react",
+    "otto_slack_read_messages",
+    "otto_slack_search",
     "otto_start_pr_review",
     "otto_test_integration",
     "otto_thread_close",
@@ -396,6 +405,15 @@
     "otto_search_memory",
     "otto_send_message",
     "otto_set_scheduled_task_enabled",
+    "otto_slack_find_user",
+    "otto_slack_list_conversations",
+    "otto_slack_mark_unread",
+    "otto_slack_my_activity",
+    "otto_slack_my_workspaces",
+    "otto_slack_post_message",
+    "otto_slack_react",
+    "otto_slack_read_messages",
+    "otto_slack_search",
     "otto_start_pr_review",
     "otto_test_integration",
     "otto_thread_close",
@@ -475,6 +493,15 @@
     "otto_search_codebase",
     "otto_search_confluence",
     "otto_set_scheduled_task_enabled",
+    "otto_slack_find_user",
+    "otto_slack_list_conversations",
+    "otto_slack_mark_unread",
+    "otto_slack_my_activity",
+    "otto_slack_my_workspaces",
+    "otto_slack_post_message",
+    "otto_slack_react",
+    "otto_slack_read_messages",
+    "otto_slack_search",
     "otto_start_pr_review",
     "otto_test_integration",
     "otto_transition_issue",
@@ -2852,6 +2879,271 @@
         },
         "delete_source_branch": {
           "type": "boolean"
+        }
+      }
+    },
+    "otto_slack_my_workspaces": {
+      "type": "object",
+      "required": [
+        "workspace_id"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_slack_list_conversations": {
+      "type": "object",
+      "required": [
+        "workspace_id"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "as": {
+          "type": "string",
+          "enum": [
+            "bot",
+            "user"
+          ],
+          "description": "user = as you"
+        },
+        "team": {
+          "type": "string",
+          "description": "as=user: your Slack team"
+        },
+        "q": {
+          "type": "string"
+        },
+        "types": {
+          "type": "string",
+          "description": "e.g. im,mpim"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      }
+    },
+    "otto_slack_find_user": {
+      "type": "object",
+      "required": [
+        "workspace_id",
+        "q"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "q": {
+          "type": "string"
+        },
+        "as": {
+          "type": "string",
+          "enum": [
+            "bot",
+            "user"
+          ],
+          "description": "user = as you"
+        },
+        "team": {
+          "type": "string",
+          "description": "as=user: your Slack team"
+        }
+      }
+    },
+    "otto_slack_read_messages": {
+      "type": "object",
+      "required": [
+        "workspace_id",
+        "channel"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "channel": {
+          "type": "string",
+          "description": "id, #name or @user"
+        },
+        "as": {
+          "type": "string",
+          "enum": [
+            "bot",
+            "user"
+          ],
+          "description": "user = as you"
+        },
+        "team": {
+          "type": "string",
+          "description": "as=user: your Slack team"
+        },
+        "thread_ts": {
+          "type": "string"
+        },
+        "oldest": {
+          "type": "string"
+        },
+        "latest": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "cursor": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_slack_search": {
+      "type": "object",
+      "required": [
+        "workspace_id",
+        "query"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "team": {
+          "type": "string",
+          "description": "as=user: your Slack team"
+        },
+        "count": {
+          "type": "integer"
+        },
+        "page": {
+          "type": "integer"
+        },
+        "sort": {
+          "type": "string",
+          "enum": [
+            "timestamp",
+            "score"
+          ]
+        }
+      }
+    },
+    "otto_slack_my_activity": {
+      "type": "object",
+      "required": [
+        "workspace_id"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "team": {
+          "type": "string",
+          "description": "as=user: your Slack team"
+        },
+        "since": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      }
+    },
+    "otto_slack_post_message": {
+      "type": "object",
+      "required": [
+        "workspace_id",
+        "channel",
+        "text"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "channel": {
+          "type": "string",
+          "description": "id, #name or @user"
+        },
+        "text": {
+          "type": "string"
+        },
+        "thread_ts": {
+          "type": "string"
+        },
+        "as": {
+          "type": "string",
+          "enum": [
+            "bot",
+            "user"
+          ],
+          "description": "user = as you"
+        },
+        "team": {
+          "type": "string",
+          "description": "as=user: your Slack team"
+        }
+      }
+    },
+    "otto_slack_react": {
+      "type": "object",
+      "required": [
+        "workspace_id",
+        "channel",
+        "ts",
+        "name"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "channel": {
+          "type": "string",
+          "description": "id, #name or @user"
+        },
+        "ts": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "as": {
+          "type": "string",
+          "enum": [
+            "bot",
+            "user"
+          ],
+          "description": "user = as you"
+        },
+        "team": {
+          "type": "string",
+          "description": "as=user: your Slack team"
+        }
+      }
+    },
+    "otto_slack_mark_unread": {
+      "type": "object",
+      "required": [
+        "workspace_id",
+        "channel",
+        "ts"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "channel": {
+          "type": "string",
+          "description": "id, #name or @user"
+        },
+        "ts": {
+          "type": "string"
+        },
+        "unread": {
+          "type": "boolean"
+        },
+        "team": {
+          "type": "string",
+          "description": "as=user: your Slack team"
         }
       }
     },

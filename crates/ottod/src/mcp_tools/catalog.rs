@@ -591,6 +591,8 @@ pub(super) const NARROW_HIDDEN_PREFIXES: &[&str] = &[
     "otto_consume_broker_",
     "otto_produce_broker_",
     "otto_list_consumer_groups",
+    // Slack as the bot / as the person: no review or draft needs it.
+    "otto_slack_",
 ];
 
 pub(super) fn is_narrow_source(source: Option<&str>) -> bool {

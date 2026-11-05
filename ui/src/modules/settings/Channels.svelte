@@ -28,6 +28,7 @@
   import { latestOnly } from '../../lib/latest';
   import type { Tone } from '../../lib/status';
   import AllowedIdsEditor from './AllowedIdsEditor.svelte';
+  import SlackActAsMe from './SlackActAsMe.svelte';
   import { pendingRejected, senderLabel, withAllowed } from './channelAllow';
 
   // ---------------------------------------------------------------------------
@@ -118,11 +119,7 @@
   const webhook = $derived(integrations.find((i) => i.channel === 'webhook') ?? null);
 
   // Human label for a channel kind (used in toasts, headings, confirm dialogs).
-  const CHANNEL_LABELS: Record<Channel, string> = {
-    slack: 'Slack',
-    telegram: 'Telegram',
-    webhook: 'Webhook',
-  };
+  const CHANNEL_LABELS: Record<Channel, string> = { slack: 'Slack', telegram: 'Telegram', webhook: 'Webhook' };
   const channelLabel = (c: Channel): string => CHANNEL_LABELS[c];
 
   // Agent CLI ids → the names people know them by.
@@ -645,6 +642,7 @@
     </div>
     </LoadState>
   {/if}
+  <SlackActAsMe /> <!-- per Otto user, not per workspace -->
   </PageBody>
 </div>
 

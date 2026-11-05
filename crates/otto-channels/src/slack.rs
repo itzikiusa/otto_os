@@ -302,7 +302,7 @@ fn strip_mention(text: &str) -> &str {
 /// sequence: `<url|label>` → the url (with the label when it differs),
 /// `<@U1|dana>` → `@dana`, `<#C1|ops>` → `#ops`, `<!here>` → `@here`; the
 /// entities are decoded last so an escaped `&amp;lt;` stays a literal `&lt;`.
-fn decode_slack_text(text: &str) -> String {
+pub(crate) fn decode_slack_text(text: &str) -> String {
     fn control(inner: &str) -> String {
         let (target, label) = match inner.split_once('|') {
             Some((t, l)) => (t, Some(l)),

@@ -4207,8 +4207,10 @@ mod tests {
     /// missing text, not padding); 85_412 with otto_create_issue and its
     /// discovery reads (list_issue_projects / _types); 84_834 with
     /// otto_query_db; 77_821 after slim-app cleanup (review sessions: 52_595);
-    /// 80_081 with the four linked-thread tools (otto_thread_*).
-    const TOOLS_LIST_BYTE_BUDGET: usize = 81_000;
+    /// 80_081 with the four linked-thread tools (otto_thread_*); 84_696 with
+    /// the nine Slack tools (otto_slack_*, bot + as-you; hidden from narrow
+    /// review sessions, and the content reads are opt-in).
+    const TOOLS_LIST_BYTE_BUDGET: usize = 85_000;
     /// A review-type session (R2 per-source scoping): 52_595 after slim-app cleanup.
     const NARROW_TOOLS_LIST_BYTE_BUDGET: usize = 55_200; // +otto_thread_*
 

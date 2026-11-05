@@ -233,7 +233,7 @@
     "src/modules/product/design/DesignArena.svelte": 1696,
     "src/modules/scheduled-tasks/ScheduledTasksPage.svelte": 1467,
     "src/modules/settings/Appearance.svelte": 845,
-    "src/modules/settings/Channels.svelte": 1071,
+    "src/modules/settings/Channels.svelte": 1069,
     "src/modules/settings/Providers.svelte": 904,
     "src/modules/settings/Users.svelte": 952,
     "src/modules/skills-eval/MatrixView.svelte": 910,
