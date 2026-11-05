@@ -34,6 +34,7 @@
   import { runtimeThreadMenu } from './runtime/runtimeMenu';
   import { asThreadSession, isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
   import { isThreadSession, projectNameFromCwd } from './threadsHelpers';
+  import { personalAgentName } from '../../lib/personalAgentBadges';
   import { threads, type ThreadsLayoutMode } from './threadsStore.svelte';
 
   const SIDEBAR_W_KEY = 'threads.sidebarW';
@@ -237,6 +238,9 @@
       : null,
   );
   const crumbProject = $derived.by(() => {
+    // A personal agent's thread: its agent's name, never its folder's id.
+    const agent = focused ? personalAgentName(focused.meta as Record<string, unknown> | undefined, focused.title) : null;
+    if (agent && !showWelcomeStage) return agent;
     const cwd = focused?.cwd ?? (showWelcomeStage ? threads.stageCwd : null) ?? ws.current?.root_path ?? null;
     return cwd ? projectNameFromCwd(cwd, ws.current?.name ?? 'Workspace') : (ws.current?.name ?? 'Scratch');
   });

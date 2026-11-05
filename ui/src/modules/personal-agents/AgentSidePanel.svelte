@@ -70,6 +70,7 @@
   const running = $derived(runs.filter((r) => r.status === 'running'));
   const delegations = $derived(personalAgents.delegationsByAgent[agent.id] ?? []);
   const threads = $derived(personalAgents.threadsOf(agent.id, false));
+  const busyThreads = $derived(threads.filter((t) => t.status === 'working' || t.status === 'starting' || t.status === 'awaiting_permission'));
   const autonomy = $derived(personalAgents.autonomyById[agent.id] ?? null);
   const nameOf = (id: string): string | undefined => personalAgents.agent(id)?.name;
 
@@ -437,7 +438,7 @@
     {:else}
       <section class="sp-sec" data-testid="pa-activity">
         <h3>Now</h3>
-        {#if running.length === 0 && threads.every((t) => t.status !== 'working' && t.status !== 'awaiting_permission') && !delegations.some((d) => d.status === 'running')}
+        {#if running.length === 0 && busyThreads.length === 0}
           <div class="sp-idle">
             <img src={MASCOT.sleep} alt="" width="96" height="96" loading="lazy" decoding="async" />
             <p class="sp-empty">All caught up — nothing running.</p>
@@ -449,6 +450,18 @@
             <li class="sp-item">
               <span class="sp-item-main static"><span class="spinner" aria-hidden="true"></span><span class="sp-item-t"><span>{b.label}</span><span class="sp-dim">started <RelTime iso={r.started_at} /></span></span></span>
               <button type="button" class="btn small" onclick={() => void stopRun(r)}>Stop</button>
+            </li>
+          {/each}
+          {#each busyThreads as t (t.id)}
+            {@const b = agentThreadBadge(t.meta, nameOf)}
+            <li class="sp-item">
+              <button type="button" class="sp-item-main" onclick={() => router.go(`threads/${t.id}`)}>
+                {#if t.status === 'awaiting_permission'}<Icon name="hand" size={14} />{:else}<span class="spinner" aria-hidden="true"></span>{/if}
+                <span class="sp-item-t">
+                  <span>{t.status === 'awaiting_permission' ? 'Waiting for your approval' : 'Working…'}{b ? ` · ${b.label}` : ''}</span>
+                  <span class="sp-dim ellipsis" dir="auto">{t.title}</span>
+                </span>
+              </button>
             </li>
           {/each}
         </ul>

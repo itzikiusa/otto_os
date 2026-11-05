@@ -14,6 +14,12 @@ test.use({ serviceWorkers: 'block' });
 const MAIN = '01MAINAGENT0000000000000000';
 const SCOUT = '01M1RX7QZDVJ236Y7MZKAD9XYZ';
 
+/** Switch the app's color scheme the way Settings does (stored, reloaded). */
+async function setScheme(page: Page, scheme: 'light' | 'dark'): Promise<void> {
+  await page.evaluate((s) => localStorage.setItem('otto_scheme', s), scheme);
+  await page.reload();
+}
+
 async function setup(page: Page): Promise<string> {
   const { ctx, base } = await apiCtx();
   const ws = await seedWorkspace(ctx, base);
@@ -93,10 +99,11 @@ test('the home: rail, intro, side panel tabs, routines and hand-offs — light a
   await expect(panel.getByTestId('pa-personality').getByRole('button', { name: 'Nerdy' })).toHaveAttribute('aria-pressed', 'true');
   await expect(panel.getByTestId('pa-personality')).toContainText('How Scout would answer');
   for (const scheme of ['light', 'dark'] as const) {
-    await page.evaluate((s) => { document.documentElement.dataset.scheme = s; }, scheme);
+    await setScheme(page, scheme);
+    await expect(panel.getByTestId('pa-routines')).toContainText('Morning brief');
     await page.screenshot({ path: info.outputPath(`pa-home-details-${scheme}.png`) });
   }
-  await page.evaluate(() => { document.documentElement.dataset.scheme = 'light'; });
+  await setScheme(page, 'light');
 
   // Library: the routine's report, badged with what started it.
   await page.getByTestId('pa-panel-tab-library').click();
@@ -107,7 +114,9 @@ test('the home: rail, intro, side panel tabs, routines and hand-offs — light a
   await expect(panel.getByTestId('pa-delegations')).toContainText('From Otto');
   await expect(panel.getByTestId('pa-activity')).toBeVisible();
   for (const scheme of ['light', 'dark'] as const) {
-    await page.evaluate((s) => { document.documentElement.dataset.scheme = s; }, scheme);
+    await setScheme(page, scheme);
+    await page.getByTestId('pa-panel-tab-activity').click();
+    await expect(panel.getByTestId('pa-delegations')).toContainText('From Otto');
     await page.screenshot({ path: info.outputPath(`pa-home-activity-${scheme}.png`) });
   }
 
@@ -131,8 +140,11 @@ test('Threads groups agent threads by NAME and badges what started each', async 
   await expect(page.getByTestId('thread-badge-thr-chat')).toHaveText('Chat');
   await expect(page.getByTestId('thread-badge-thr-run')).toHaveText('Scheduled · Morning brief');
   await expect(page.getByTestId('thread-badge-thr-del')).toHaveText('Delegated by Otto');
+  // The breadcrumb names the agent too.
+  await expect(page.locator('body')).not.toContainText('01MAINAGENT');
   for (const scheme of ['light', 'dark'] as const) {
-    await page.evaluate((s) => { document.documentElement.dataset.scheme = s; }, scheme);
+    await setScheme(page, scheme);
+    await expect(page.getByTestId('thread-badge-thr-chat')).toHaveText('Chat');
     await page.screenshot({ path: info.outputPath(`threads-agent-groups-${scheme}.png`) });
   }
 });
