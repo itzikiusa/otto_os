@@ -220,6 +220,7 @@ async fn save_autonomy(
     if becomes_primary {
         otto_assistant::personal_agent_admin::clear_other_primaries(&repo, &agent).await?;
     }
+    super::changed(&ctx, &agent.workspace_id, &agent.id, "agent");
     Ok(Json(next))
 }
 
@@ -492,6 +493,7 @@ async fn reset(
     }
     repo.save_autonomy(&id, &cfg).await.map_err(ApiError)?;
     crate::personal_agent_activity::clear(&id);
+    super::changed(&ctx, &agent.workspace_id, &agent.id, "schedules");
     Ok(Json(json!({"ok": true})))
 }
 

@@ -86,6 +86,7 @@
     "otto_get_workflow_run",
     "otto_git_pr_review",
     "otto_git_status",
+    "otto_instructions_propose",
     "otto_list_agent_rooms",
     "otto_list_broker_clusters",
     "otto_list_broker_topics",
@@ -121,6 +122,7 @@
     "otto_personal_agent_create",
     "otto_personal_agent_delegate",
     "otto_personal_agent_list",
+    "otto_personality_set",
     "otto_produce_broker_message",
     "otto_product_story",
     "otto_query_db",
@@ -129,6 +131,10 @@
     "otto_rollback_improvement_edit",
     "otto_room_post",
     "otto_room_read",
+    "otto_routine_create",
+    "otto_routine_delete",
+    "otto_routine_list",
+    "otto_routine_update",
     "otto_run_goal_loop",
     "otto_run_personal_agent",
     "otto_run_scheduled_task",
@@ -387,6 +393,7 @@
     "otto_get_workflow_run",
     "otto_git_pr_review",
     "otto_git_status",
+    "otto_instructions_propose",
     "otto_list_agent_rooms",
     "otto_list_broker_clusters",
     "otto_list_broker_topics",
@@ -422,6 +429,7 @@
     "otto_personal_agent_create",
     "otto_personal_agent_delegate",
     "otto_personal_agent_list",
+    "otto_personality_set",
     "otto_produce_broker_message",
     "otto_product_story",
     "otto_query_db",
@@ -430,6 +438,10 @@
     "otto_rollback_improvement_edit",
     "otto_room_post",
     "otto_room_read",
+    "otto_routine_create",
+    "otto_routine_delete",
+    "otto_routine_list",
+    "otto_routine_update",
     "otto_run_goal_loop",
     "otto_run_personal_agent",
     "otto_run_scheduled_task",
@@ -2417,6 +2429,134 @@
           "type": "string"
         },
         "task": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_routine_list": {
+      "type": "object",
+      "properties": {
+        "agent": {
+          "type": "string",
+          "description": "main agent only: another agent's id or name (default: you)"
+        }
+      }
+    },
+    "otto_routine_create": {
+      "type": "object",
+      "required": [
+        "schedule",
+        "instruction"
+      ],
+      "properties": {
+        "schedule": {
+          "type": "object",
+          "description": "{cadence:'daily'|'weekly'|'days'|'interval'|'cron'|'once', at:'HH:MM', days:'sun-thu'|'weekdays'|['fri','sat'] (cadence days), weekday:0-6 Mon..Sun (weekly), every_min, expr:'<5-field cron, 0=Sun>', run_at}"
+        },
+        "timezone": {
+          "type": "string",
+          "description": "IANA, e.g. Asia/Jerusalem"
+        },
+        "instruction": {
+          "type": "string",
+          "description": "what each run does"
+        },
+        "deliver": {
+          "type": "object",
+          "description": "{type:'chat'(default)|'slack', channel, as:'bot'(default)|'me'} — results always land in your chat too"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "permission": {
+          "type": "string",
+          "enum": [
+            "directed",
+            "read_only"
+          ]
+        },
+        "agent": {
+          "type": "string",
+          "description": "main agent only: another agent's id or name (default: you)"
+        }
+      }
+    },
+    "otto_routine_update": {
+      "type": "object",
+      "required": [
+        "routine_id"
+      ],
+      "properties": {
+        "routine_id": {
+          "type": "string"
+        },
+        "schedule": {
+          "type": "object",
+          "description": "{cadence:'daily'|'weekly'|'days'|'interval'|'cron'|'once', at:'HH:MM', days:'sun-thu'|'weekdays'|['fri','sat'] (cadence days), weekday:0-6 Mon..Sun (weekly), every_min, expr:'<5-field cron, 0=Sun>', run_at}"
+        },
+        "timezone": {
+          "type": "string"
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "deliver": {
+          "type": "object",
+          "description": "{type:'chat'(default)|'slack', channel, as:'bot'(default)|'me'} — results always land in your chat too"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "permission": {
+          "type": "string",
+          "enum": [
+            "directed",
+            "read_only"
+          ]
+        },
+        "agent": {
+          "type": "string",
+          "description": "main agent only: another agent's id or name (default: you)"
+        }
+      }
+    },
+    "otto_routine_delete": {
+      "type": "object",
+      "required": [
+        "routine_id"
+      ],
+      "properties": {
+        "routine_id": {
+          "type": "string"
+        },
+        "agent": {
+          "type": "string",
+          "description": "main agent only: another agent's id or name (default: you)"
+        }
+      }
+    },
+    "otto_personality_set": {
+      "type": "object",
+      "properties": {
+        "preset": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    },
+    "otto_instructions_propose": {
+      "type": "object",
+      "required": [
+        "instructions",
+        "reason"
+      ],
+      "properties": {
+        "instructions": {
+          "type": "string"
+        },
+        "reason": {
           "type": "string"
         }
       }

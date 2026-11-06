@@ -38,6 +38,16 @@ pub const DEFAULT_ENABLED: &[&str] = &[
     "personal_agent_list",
     "personal_agent_create",
     "personal_agent_delegate",
+    // A personal agent's OWN scope, as the calling agent: its routines (the
+    // main agent also its team's), its personality, and PROPOSING new
+    // instructions (the user decides). No approval card — nothing outside
+    // the agent changes, and every change shows in Personal Agents at once.
+    "routine_list",
+    "routine_create",
+    "routine_update",
+    "routine_delete",
+    "personality_set",
+    "instructions_propose",
     // Discovery — where every id an agent needs comes from (workspaces, issue
     // accounts, goal loops, …); metadata only.
     "list_workspaces",
@@ -615,7 +625,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
     ];
     // DB query pair before `open_pr_draft`, threads `wait_session`, Slack usage.
     splice_before(&mut specs, "otto.open_pr_draft", database_query_specs());
-    splice_before(&mut specs, "otto.wait_session", thread_tool_specs());
+    splice_session_specs(&mut specs);
     splice_before(&mut specs, "otto.get_usage_summary", slack_tool_specs());
     specs.extend(issue_tool_specs());
     specs.extend([
@@ -1223,6 +1233,50 @@ fn team_tool_specs() -> [Value; 3] {
             "description":"Main agent only, from its Threads chat: hand `task` to one of your agents (name or id). Opens it beside you as a linked thread; its report arrives back here as a message when it finishes. Returns the thread.",
             "inputSchema":{"type":"object","required":["agent","task"],"properties":{
                 "agent":{"type":"string"},"task":{"type":"string"},"session_id":{"type":"string","description":"caller (auto)"}}}}),
+    ]
+}
+
+/// The linked-thread + team slice, then a personal agent's own-scope tools,
+/// both before `otto.wait_session`.
+fn splice_session_specs(specs: &mut Vec<Value>) {
+    splice_before(specs, "otto.wait_session", thread_tool_specs());
+    splice_before(specs, "otto.wait_session", own_tool_specs());
+}
+
+/// A personal agent's own-scope slice of [`otto_tool_specs`]: its routines,
+/// personality and instruction proposals, each AS the calling agent session.
+fn own_tool_specs() -> [Value; 6] {
+    let sid = json!({"type":"string","description":"caller (auto)"});
+    let agent = json!({"type":"string","description":"main agent only: another agent's id or name (default: you)"});
+    let sched = json!({"type":"object","description":"{cadence:'daily'|'weekly'|'days'|'interval'|'cron'|'once', at:'HH:MM', days:'sun-thu'|'weekdays'|['fri','sat'] (cadence days), weekday:0-6 Mon..Sun (weekly), every_min, expr:'<5-field cron, 0=Sun>', run_at}"});
+    let deliver = json!({"type":"object","description":"{type:'chat'(default)|'slack', channel, as:'bot'(default)|'me'} — results always land in your chat too"});
+    [
+        json!({"name":"otto.routine_list","mutating":false,"category":"Sessions",
+            "description":"Your routines (recurring tasks on a schedule) with their next 3 runs, and the user's timezone.",
+            "inputSchema":{"type":"object","properties":{"agent":agent,"session_id":sid}}}),
+        json!({"name":"otto.routine_create","mutating":false,"category":"Sessions",
+            "description":"Set up a routine for yourself (no approval). Turn the user's words into `schedule`; omit `timezone` for the user's own. Returns it with next_runs — confirm the schedule and next run in one line.",
+            "inputSchema":{"type":"object","required":["schedule","instruction"],"properties":{
+                "schedule":sched,"timezone":{"type":"string","description":"IANA, e.g. Asia/Jerusalem"},
+                "instruction":{"type":"string","description":"what each run does"},"deliver":deliver,
+                "enabled":{"type":"boolean"},"permission":{"type":"string","enum":["directed","read_only"]},
+                "agent":agent,"session_id":sid}}}),
+        json!({"name":"otto.routine_update","mutating":false,"category":"Sessions",
+            "description":"Edit one of your routines (ids: otto.routine_list); enabled=false pauses, true resumes.",
+            "inputSchema":{"type":"object","required":["routine_id"],"properties":{
+                "routine_id":{"type":"string"},"schedule":sched,"timezone":{"type":"string"},
+                "instruction":{"type":"string"},"deliver":deliver,"enabled":{"type":"boolean"},
+                "permission":{"type":"string","enum":["directed","read_only"]},"agent":agent,"session_id":sid}}}),
+        json!({"name":"otto.routine_delete","mutating":false,"category":"Sessions",
+            "description":"Delete one of your routines.",
+            "inputSchema":{"type":"object","required":["routine_id"],"properties":{"routine_id":{"type":"string"},"agent":agent,"session_id":sid}}}),
+        json!({"name":"otto.personality_set","mutating":false,"category":"Sessions",
+            "description":"Change your personality when the user asks: `preset` (chief|warm|blunt|nerdy|cynical|strict|independent|autodidact|playful|formal|terse; ''=default) and/or `note` (their words). Tone only; applies from your next session.",
+            "inputSchema":{"type":"object","properties":{"preset":{"type":"string"},"note":{"type":"string"},"session_id":sid}}}),
+        json!({"name":"otto.instructions_propose","mutating":false,"category":"Sessions",
+            "description":"Propose a new version of your standing instructions (the FULL new text + why). The user sees From/To and decides — never claim it is applied.",
+            "inputSchema":{"type":"object","required":["instructions","reason"],"properties":{
+                "instructions":{"type":"string"},"reason":{"type":"string"},"session_id":sid}}}),
     ]
 }
 

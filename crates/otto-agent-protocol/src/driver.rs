@@ -13,9 +13,9 @@
 //! resolution and cancellation, and the process-death terminal.
 
 use otto_core::agent_runtime::{
-    ApprovalDecision, ApprovalOption, PlanStep, ProviderFailure, RequestKind, RuntimeAccessMode,
-    RuntimePromptReq, RuntimeProvider, RuntimeRequestStatus, ThreadTokenUsage, TurnItem,
-    TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
+    ApprovalDecision, ApprovalOption, BackgroundTask, PlanStep, ProviderFailure, RequestKind,
+    RuntimeAccessMode, RuntimePromptReq, RuntimeProvider, RuntimeRequestStatus, ThreadTokenUsage,
+    TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
 };
 
 #[derive(Debug, Clone)]
@@ -112,6 +112,15 @@ pub enum DriverEvent {
     },
     Usage(TurnTokenUsage),
     ContextUsage(ThreadTokenUsage),
+    /// The agent started a turn on its own (no prompt of ours is running —
+    /// Claude Code continues when background work it started finishes).
+    /// `turn_id` is the driver's; the runtime opens it as an `agent` turn
+    /// and ends it on the next [`DriverEvent::Terminal`].
+    TurnStarted {
+        turn_id: String,
+    },
+    /// The agent's pending background work, whole (replaces the last list).
+    BackgroundTasks(Vec<BackgroundTask>),
     /// The protocol says the running turn ended.
     Terminal {
         status: TurnTerminalStatus,
@@ -162,6 +171,7 @@ pub fn item(
         completed_at: (!status.is_open()).then_some(now),
         updated_at: now,
         error: None,
+        parent_item_id: None,
         kind,
     }
 }
@@ -238,6 +248,15 @@ pub trait StructuredDriver: Send + 'static {
     /// new mode, resuming its thread.
     fn switches_access_live(&self, _to: RuntimeAccessMode) -> bool {
         false
+    }
+
+    /// Add a person's message to the RUNNING turn (steering): the agent
+    /// reads it at its next step. A driver that cannot refuses, and the
+    /// runtime queues the message for after the turn instead.
+    fn steer(&mut self, _req: &RuntimePromptReq) -> Result<DriverStep, DriverError> {
+        Err(DriverError(
+            "this agent cannot take a message mid-turn".into(),
+        ))
     }
 
     /// Cancel the running turn; the driver still reports the terminal when the

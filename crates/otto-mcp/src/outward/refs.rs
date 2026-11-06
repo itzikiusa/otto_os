@@ -185,6 +185,14 @@ pub const PIN_PROBES: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
+/// A personal agent's own-scope tools (routines, personality, instruction
+/// proposals): like the team tools they act AS the calling agent session —
+/// the bridge binds `session_id` to it and the route keeps to that agent
+/// (and, for the main agent, its workspace).
+pub fn is_agent_own_tool(tool: &str) -> bool {
+    tool.starts_with("routine_") || matches!(tool, "personality_set" | "instructions_propose")
+}
+
 /// Tools that may run under a workspace pin WITHOUT a workspace — they
 /// address no workspace-owned object: global rows (AWS accounts, K8s
 /// clusters, the product-story and design libraries), the caller's own issue
@@ -201,6 +209,7 @@ pub fn pin_global(tool: &str) -> bool {
         // The main agent's team tools act AS the calling agent session too:
         // the route resolves its agent and keeps to that agent's workspace.
         || tool.starts_with("personal_agent_")
+        || is_agent_own_tool(tool)
         || tool.starts_with("aws_")
         || tool.starts_with("k8s_")
         || DIRECTORY_TOOLS.iter().any(|(t, _)| *t == tool)

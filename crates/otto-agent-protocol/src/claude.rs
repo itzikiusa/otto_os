@@ -46,16 +46,26 @@
 //!   without `is_error` → completed; errors mentioning interrupt / cancel →
 //!   interrupted / cancelled; anything else failed.
 //!
-//! Subagent frames (`parent_tool_use_id` set) are not projected (T3 Code
-//! builds a separate subagent tree, which Otto does not port); their
-//! permission requests still reach a person.
+//! Subagents and background work (`claude_tasks.rs`): an `Agent` / `Task`
+//! call is a `subagent` card whose frames (`parent_tool_use_id` set) are
+//! projected under it; `run_in_background` work is tracked from the CLI's
+//! `task_*` frames into the session's background-task list. Subagent
+//! permission requests reach a person like the root's.
+//!
+//! Auto turns: after `result` the CLI may run a turn on its own (a
+//! background task finished and its notification was fed to the model).
+//! Root frames arriving with no prompt of ours running open one
+//! ([`DriverEvent::TurnStarted`]); its `result` ends it.
 
 use std::collections::HashMap;
 
+#[path = "claude_tasks.rs"]
+mod tasks;
+
 use otto_core::agent_runtime::{
-    ApprovalDecision, ApprovalOption, PlanStep, PlanStepStatus, ProviderFailure, RequestKind,
-    RuntimeAccessMode, RuntimePromptReq, RuntimeProvider, RuntimeRequestStatus, TurnItem,
-    TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
+    ApprovalDecision, ApprovalOption, BackgroundTask, PlanStep, PlanStepStatus, ProviderFailure,
+    RequestKind, RuntimeAccessMode, RuntimePromptReq, RuntimeProvider, RuntimeRequestStatus,
+    TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
@@ -154,6 +164,18 @@ pub struct ClaudeDriver {
     /// Ids of in-flight `set_model` / `apply_flag_settings` /
     /// `set_permission_mode` requests.
     switches: Vec<String>,
+    /// CLI tasks by task id (see `claude_tasks.rs`).
+    tasks: HashMap<String, tasks::Task>,
+    /// Subagent cards by their `Agent` / `Task` tool_use id.
+    agents: HashMap<String, tasks::Agent>,
+    /// Subagents' own tool calls by tool_use id.
+    sub_tools: HashMap<String, tasks::SubTool>,
+    /// Root tool calls that asked for `run_in_background`: (tool, label).
+    bg_inputs: tasks::BgInputs,
+    /// Task ids already finished (a late duplicate frame is ignored).
+    finished: Vec<String>,
+    /// The background list last reported.
+    reported_background: Vec<BackgroundTask>,
 }
 
 impl Default for ClaudeDriver {
@@ -181,6 +203,20 @@ impl ClaudeDriver {
             access: RuntimeAccessMode::default(),
             bypass_allowed: false,
             switches: Vec::new(),
+            tasks: HashMap::new(),
+            agents: HashMap::new(),
+            sub_tools: HashMap::new(),
+            bg_inputs: HashMap::new(),
+            finished: Vec::new(),
+            reported_background: Vec::new(),
+        }
+    }
+
+    /// A driver for `program` instead of `claude` (tests: `otto-fake-claude`).
+    pub fn with_program(program: impl Into<String>) -> Self {
+        Self {
+            program: program.into(),
+            ..Self::new()
         }
     }
 
@@ -425,6 +461,11 @@ impl ClaudeDriver {
                         .unwrap_or("tool")
                         .to_string();
                     let input = block.get("input").cloned().unwrap_or(Value::Null);
+                    if tasks::is_agent_tool(&name) {
+                        self.start_agent(step, &id, &name, &input);
+                        continue;
+                    }
+                    self.note_background_input(&id, &name, &input);
                     if name == "TodoWrite" {
                         self.on_todo_write(step, &input);
                     }
@@ -458,11 +499,15 @@ impl ClaudeDriver {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
+            let text = result_text(block.get("content"));
+            let is_error = block.get("is_error").and_then(Value::as_bool) == Some(true);
+            if self.on_root_tool_result(step, &id, &text, is_error) {
+                continue;
+            }
             let Some(mut t) = self.tools.remove(&id) else {
                 continue;
             };
-            let text = result_text(block.get("content"));
-            if block.get("is_error").and_then(Value::as_bool) == Some(true) {
+            if is_error {
                 t.status = TurnItemStatus::Failed;
                 t.error = tool_error(&text);
             } else {
@@ -526,7 +571,10 @@ impl ClaudeDriver {
             .get("tool_use_id")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let tool_item_id = tool_use_id.as_deref().map(|id| self.tool_item_id(id));
+        let tool_item_id = tool_use_id.as_deref().map(|id| {
+            self.sub_tool_item_id(id)
+                .unwrap_or_else(|| self.tool_item_id(id))
+        });
         self.pending.insert(
             request_id.clone(),
             Pending {
@@ -603,6 +651,7 @@ impl ClaudeDriver {
     fn on_result(&mut self, step: &mut DriverStep, msg: &Value) {
         self.close_blocks(step);
         self.tools.clear();
+        self.end_turn_tasks(step);
         if let Some(u) = msg.get("usage") {
             let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
             let cached = n("cache_read_input_tokens");
@@ -624,6 +673,18 @@ impl ClaudeDriver {
         });
         self.turn_id = None;
         self.streamed.clear();
+    }
+
+    /// Root output with no prompt of ours running: the CLI started a turn
+    /// on its own (after a background task's notification).
+    fn open_auto_turn(&mut self, step: &mut DriverStep) {
+        if self.turn_id.is_some() || self.init_req.is_some() {
+            return;
+        }
+        let id = otto_core::new_id();
+        self.turn_id = Some(id.clone());
+        self.streamed.clear();
+        step.push(DriverEvent::TurnStarted { turn_id: id });
     }
 
     fn on_control_response(&mut self, step: &mut DriverStep, resp: &Value) {
@@ -828,6 +889,17 @@ impl StructuredDriver for ClaudeDriver {
         Ok(step)
     }
 
+    /// The CLI reads stdin in order and hands a user message that arrives
+    /// mid-turn to the model at its next step (the SDK's streaming input).
+    fn steer(&mut self, req: &RuntimePromptReq) -> Result<DriverStep, DriverError> {
+        if self.turn_id.is_none() {
+            return Err(DriverError("no turn is running".into()));
+        }
+        let mut step = DriverStep::default();
+        self.send_user(&mut step, req);
+        Ok(step)
+    }
+
     fn switches_model_live(&self) -> bool {
         true
     }
@@ -922,14 +994,33 @@ impl StructuredDriver for ClaudeDriver {
                     model: msg.get("model").and_then(Value::as_str).map(str::to_string),
                 });
             }
+            "system" => {
+                self.on_task_frame(&mut step, &msg);
+            }
             "stream_event" if root => {
+                self.open_auto_turn(&mut step);
                 if let Some(ev) = msg.get("event") {
                     self.on_stream_event(&mut step, ev);
                 }
             }
-            "assistant" if root => self.on_assistant(&mut step, &msg),
-            "user" if root => self.on_user(&mut step, &msg),
-            "result" => self.on_result(&mut step, &msg),
+            "assistant" if root => {
+                self.open_auto_turn(&mut step);
+                self.on_assistant(&mut step, &msg);
+            }
+            "user" if root => {
+                self.open_auto_turn(&mut step);
+                self.on_user(&mut step, &msg);
+            }
+            "assistant" | "user" => {
+                if let Some(parent) = msg.get("parent_tool_use_id").and_then(Value::as_str) {
+                    self.on_subagent_frame(&mut step, parent, &msg);
+                }
+            }
+            // A `result` with no turn open (nothing of it was shown) ends nothing.
+            "result" if self.turn_id.is_some() => self.on_result(&mut step, &msg),
+            "result" => {
+                self.end_turn_tasks(&mut step);
+            }
             _ => {}
         }
         step
@@ -939,6 +1030,8 @@ impl StructuredDriver for ClaudeDriver {
         self.pending.clear();
         self.tools.clear();
         self.blocks.clear();
+        self.clear_tasks();
+        self.turn_id = None;
         DriverStep::default()
     }
 }
@@ -1215,7 +1308,7 @@ mod tests {
         };
         assert_eq!(steps.len(), 2);
         assert_eq!(steps[0].status, PlanStepStatus::Running);
-        // Subagent frames are not projected.
+        // A subagent this driver never saw launched is not projected.
         let s = feed(
             &mut d,
             json!({"type":"assistant","message":{"id":"m3","content":[{"type":"text","text":"sub"}]},"parent_tool_use_id":"tu-agent"}),
@@ -1325,5 +1418,296 @@ mod tests {
         assert_eq!(i.status, TurnItemStatus::Failed);
         assert_eq!(i.error.as_deref(), Some("User declined tool execution."));
         assert!(matches!(&i.kind, TurnItemKind::WebSearch { .. }));
+    }
+
+    fn bg_lists(s: &DriverStep) -> Vec<Vec<BackgroundTask>> {
+        s.events
+            .iter()
+            .filter_map(|e| match e {
+                DriverEvent::BackgroundTasks(l) => Some(l.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn items(s: &DriverStep) -> Vec<TurnItem> {
+        s.events
+            .iter()
+            .filter_map(|e| match e {
+                DriverEvent::TurnItem(i) => Some(i.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn background_bash_stays_pending_past_its_turn_until_its_notification() {
+        let mut d = ClaudeDriver::new();
+        ready(&mut d);
+        d.prompt("t1", &RuntimePromptReq::of("run it")).unwrap();
+        feed(
+            &mut d,
+            json!({"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"sleep 300","description":"Wait five minutes","run_in_background":true}}]},"parent_tool_use_id":null}),
+        );
+        let s = feed(
+            &mut d,
+            json!({"type":"system","subtype":"task_started","task_id":"b1","tool_use_id":"tu1","description":"Wait five minutes","task_type":"local_bash"}),
+        );
+        let l = bg_lists(&s);
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0][0].id, "b1");
+        assert_eq!(l[0][0].kind, "command");
+        assert_eq!(l[0][0].item_id.as_deref(), Some("t1:tool:tu1"));
+        // The launch result settles the tool call; the task runs on.
+        let s = feed(
+            &mut d,
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"Command running in background with ID: b1. Output is being written to: /tmp/b1"}]},"parent_tool_use_id":null}),
+        );
+        assert_eq!(items(&s)[0].status, TurnItemStatus::Completed);
+        assert!(bg_lists(&s).is_empty(), "no change");
+        let s = feed(
+            &mut d,
+            json!({"type":"result","subtype":"success","is_error":false}),
+        );
+        assert!(matches!(
+            s.events.last(),
+            Some(DriverEvent::Terminal { .. })
+        ));
+        assert_eq!(d.background_list().len(), 1);
+        // Done: a notice, the list empties.
+        let s = feed(
+            &mut d,
+            json!({"type":"system","subtype":"task_notification","task_id":"b1","tool_use_id":"tu1","status":"completed","summary":"exit 0","output_file":"/tmp/b1"}),
+        );
+        let notice = &items(&s)[0];
+        assert!(
+            matches!(&notice.kind, TurnItemKind::SystemNotice { message } if message == "Background command finished: Wait five minutes")
+        );
+        assert_eq!(notice.turn_id, None, "no turn running");
+        assert_eq!(bg_lists(&s), vec![Vec::<BackgroundTask>::new()]);
+        // A duplicate notification changes nothing.
+        let s = feed(
+            &mut d,
+            json!({"type":"system","subtype":"task_notification","task_id":"b1","status":"completed"}),
+        );
+        assert!(bg_lists(&s).is_empty() && items(&s).is_empty());
+    }
+
+    #[test]
+    fn root_output_after_result_opens_an_auto_turn_its_result_ends() {
+        let mut d = ClaudeDriver::new();
+        ready(&mut d);
+        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+        feed(
+            &mut d,
+            json!({"type":"result","subtype":"success","is_error":false}),
+        );
+        // Trailing frames that are not root output open nothing.
+        let s = feed(
+            &mut d,
+            json!({"type":"system","subtype":"task_summary","detail":null}),
+        );
+        assert!(s.events.is_empty());
+        let s = feed(
+            &mut d,
+            json!({"type":"result","subtype":"success","is_error":false}),
+        );
+        assert!(
+            !s.events
+                .iter()
+                .any(|e| matches!(e, DriverEvent::Terminal { .. })),
+            "a result with no turn open ends nothing"
+        );
+        let s = feed(
+            &mut d,
+            json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"m9"}},"parent_tool_use_id":null}),
+        );
+        let DriverEvent::TurnStarted { turn_id } = &s.events[0] else {
+            panic!("{:?}", s.events)
+        };
+        let auto = turn_id.clone();
+        // The person's prompt waits: one turn at a time.
+        assert!(d.prompt("t2", &RuntimePromptReq::of("hi")).is_err());
+        let s = feed(
+            &mut d,
+            json!({"type":"assistant","message":{"id":"m9","content":[{"type":"tool_use","id":"tu9","name":"Read","input":{"file_path":"/w/a"}}]},"parent_tool_use_id":null}),
+        );
+        assert_eq!(items(&s)[0].id, format!("{auto}:tool:tu9"));
+        let s = feed(
+            &mut d,
+            json!({"type":"result","subtype":"success","is_error":false}),
+        );
+        assert!(matches!(
+            s.events.last(),
+            Some(DriverEvent::Terminal {
+                status: TurnTerminalStatus::Completed,
+                ..
+            })
+        ));
+        assert!(d.prompt("t2", &RuntimePromptReq::of("hi")).is_ok());
+    }
+
+    #[test]
+    fn a_launch_result_alone_tracks_background_work_on_older_clis() {
+        let mut d = ClaudeDriver::new();
+        ready(&mut d);
+        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+        feed(
+            &mut d,
+            json!({"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"npm test","run_in_background":true}}]},"parent_tool_use_id":null}),
+        );
+        let s = feed(
+            &mut d,
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"Command running in background with ID: bash_7. Output is being written to: /tmp/x."}]},"parent_tool_use_id":null}),
+        );
+        let l = bg_lists(&s);
+        assert_eq!(l[0][0].id, "bash_7");
+        assert_eq!(l[0][0].label, "npm test");
+        // A later task_started for the same call keeps one entry.
+        let s = feed(
+            &mut d,
+            json!({"type":"system","subtype":"task_started","task_id":"bash_7","tool_use_id":"tu1","description":"Run tests","task_type":"local_bash"}),
+        );
+        assert_eq!(bg_lists(&s)[0].len(), 1);
+        // A foreground task is not background work — until it is moved there.
+        feed(
+            &mut d,
+            json!({"type":"system","subtype":"task_started","task_id":"f1","tool_use_id":"tu2","description":"build","task_type":"local_bash"}),
+        );
+        assert_eq!(d.background_list().len(), 1);
+        let s = feed(
+            &mut d,
+            json!({"type":"system","subtype":"task_updated","task_id":"f1","patch":{"is_backgrounded":true}}),
+        );
+        assert_eq!(bg_lists(&s)[0].len(), 2);
+        let s = feed(
+            &mut d,
+            json!({"type":"system","subtype":"task_updated","task_id":"f1","patch":{"status":"killed"}}),
+        );
+        assert_eq!(bg_lists(&s)[0].len(), 1);
+        assert!(items(&s).iter().any(|i| matches!(&i.kind,
+            TurnItemKind::SystemNotice { message } if message.starts_with("Background command stopped"))));
+    }
+
+    #[test]
+    fn a_background_subagent_is_a_card_with_its_activity_nested_until_its_task_ends() {
+        let mut d = ClaudeDriver::new();
+        ready(&mut d);
+        d.prompt("t1", &RuntimePromptReq::of("sweep")).unwrap();
+        let s = feed(
+            &mut d,
+            json!({"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"tuA","name":"Agent","input":{"description":"PR sweep","prompt":"Sweep PRs","subagent_type":"general-purpose","run_in_background":true}}]},"parent_tool_use_id":null}),
+        );
+        let card = &items(&s)[0];
+        assert_eq!(card.id, "t1:tool:tuA");
+        assert!(card.is_background_open());
+        assert!(
+            matches!(&card.kind, TurnItemKind::Subagent { description: Some(dsc), background: true, .. } if dsc == "PR sweep")
+        );
+        let s = feed(
+            &mut d,
+            json!({"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"tuA","description":"PR sweep","task_type":"local_agent","is_backgrounded":true}),
+        );
+        assert_eq!(bg_lists(&s)[0][0].kind, "agent");
+        assert_eq!(bg_lists(&s)[0][0].item_id.as_deref(), Some("t1:tool:tuA"));
+        // Its own frames nest under the card (its stream events are skipped).
+        let s = feed(
+            &mut d,
+            json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"s1"}},"parent_tool_use_id":"tuA"}),
+        );
+        assert!(s.events.is_empty());
+        let s = feed(
+            &mut d,
+            json!({"type":"assistant","message":{"id":"s1","content":[{"type":"text","text":"Looking"},{"type":"tool_use","id":"tuR","name":"Read","input":{"file_path":"/w/a"}}]},"parent_tool_use_id":"tuA"}),
+        );
+        let it = items(&s);
+        assert!(it[..2]
+            .iter()
+            .all(|i| i.parent_item_id.as_deref() == Some("t1:tool:tuA")
+                && i.turn_id.as_deref() == Some("t1")));
+        assert!(
+            matches!(&it[2].kind, TurnItemKind::Subagent { tool_uses: 1, last_tool: Some(t), .. } if t == "Read")
+        );
+        // A subagent's permission request points at ITS tool.
+        let s = feed(
+            &mut d,
+            json!({"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Read","input":{"file_path":"/w/a"},"tool_use_id":"tuR"}}),
+        );
+        assert!(
+            matches!(&s.events[0], DriverEvent::Request { tool_item_id: Some(t), .. } if t == "t1:tool:tuR")
+        );
+        let s = feed(
+            &mut d,
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tuR","content":"# a"}]},"parent_tool_use_id":"tuA"}),
+        );
+        assert_eq!(items(&s)[0].status, TurnItemStatus::Completed);
+        // Launched: the card runs on past the turn.
+        let s = feed(
+            &mut d,
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tuA","content":"Async agent launched successfully. agentId: x1"}]},"parent_tool_use_id":null}),
+        );
+        assert_eq!(items(&s)[0].status, TurnItemStatus::Running);
+        let s = feed(
+            &mut d,
+            json!({"type":"result","subtype":"success","is_error":false}),
+        );
+        assert!(!items(&s).iter().any(|i| i.id == "t1:tool:tuA"));
+        let s = feed(
+            &mut d,
+            json!({"type":"system","subtype":"task_progress","task_id":"a1","tool_use_id":"tuA","last_tool_name":"Grep","usage":{"tool_uses":4}}),
+        );
+        assert!(matches!(
+            &items(&s)[0].kind,
+            TurnItemKind::Subagent { tool_uses: 4, .. }
+        ));
+        let s = feed(
+            &mut d,
+            json!({"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"tuA","status":"completed","summary":"Found 2 open PRs"}),
+        );
+        let card = &items(&s)[0];
+        assert_eq!(card.status, TurnItemStatus::Completed);
+        assert_eq!(card.turn_id.as_deref(), Some("t1"), "stays in its turn");
+        assert!(
+            matches!(&card.kind, TurnItemKind::Subagent { output: Some(o), .. } if o == "Found 2 open PRs")
+        );
+        assert_eq!(bg_lists(&s), vec![Vec::<BackgroundTask>::new()]);
+    }
+
+    #[test]
+    fn a_foreground_subagent_completes_with_its_tool_result() {
+        let mut d = ClaudeDriver::new();
+        ready(&mut d);
+        d.prompt("t1", &RuntimePromptReq::of("look")).unwrap();
+        feed(
+            &mut d,
+            json!({"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"tuA","name":"Task","input":{"description":"Find files","prompt":"find"}}]},"parent_tool_use_id":null}),
+        );
+        feed(
+            &mut d,
+            json!({"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"tuA","task_type":"local_agent"}),
+        );
+        assert!(d.background_list().is_empty());
+        let s = feed(
+            &mut d,
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tuA","content":[{"type":"text","text":"3 files"}]}]},"parent_tool_use_id":null}),
+        );
+        let card = &items(&s)[0];
+        assert_eq!(card.status, TurnItemStatus::Completed);
+        assert!(
+            matches!(&card.kind, TurnItemKind::Subagent { output: Some(o), background: false, .. } if o == "3 files")
+        );
+    }
+
+    #[test]
+    fn steering_writes_the_message_into_the_running_turn_only() {
+        let mut d = ClaudeDriver::new();
+        ready(&mut d);
+        assert!(d.steer(&RuntimePromptReq::of("more")).is_err(), "idle");
+        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+        let s = d.steer(&RuntimePromptReq::of("also check b")).unwrap();
+        let w: Value = serde_json::from_str(&s.writes[0]).unwrap();
+        assert_eq!(w["type"], "user");
+        assert_eq!(w["message"]["content"][0]["text"], "also check b");
+        assert!(s.events.is_empty());
     }
 }

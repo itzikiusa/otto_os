@@ -47,6 +47,12 @@ const READ_ONLY_EXTRA_DENY: &[&str] = &[
     "ask_human_approval",
     "personal_agent_create",
     "personal_agent_delegate",
+    // A read-only run reports; it does not reconfigure itself.
+    "routine_create",
+    "routine_update",
+    "routine_delete",
+    "personality_set",
+    "instructions_propose",
 ];
 
 /// True iff a read-only session may NOT call the bare tool.

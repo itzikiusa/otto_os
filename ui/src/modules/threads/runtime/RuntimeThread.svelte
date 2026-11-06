@@ -3,7 +3,9 @@
   // (your messages, the agent's streaming answer, a quiet work log of
   // reasoning / commands / edits / tools with approvals inline) over one
   // composer whose send turns into Stop while a turn runs; a message sent
-  // meanwhile is queued and goes out when the turn ends.
+  // meanwhile waits in the thread's durable queue (RuntimeQueueBar: steer it
+  // in, send now). The agent's own turns run like any other; a closed thread
+  // keeps its composer — sending reopens it (its agent resumes).
   // Ported from T3 Code (MIT, Copyright (c) 2026 T3 Tools Inc.):
   // apps/web/src/components/chat/MessagesTimeline.tsx + ThreadTimeline.tsx
   // (messages with work-log groups between them, follow the bottom),
@@ -29,27 +31,24 @@
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import { formatEffortShort, formatModelLabel, supportsEffortSelection, type EffortLevel } from '../../../lib/providerModels';
   import { auth } from '../../../lib/stores/auth.svelte';
-  import type { PromptImage, RuntimeAccessMode } from '../../../lib/api/types';
-  import {
-    INTERACTIVE_SLASH_COMMANDS,
-    isImmediateSlashCommand,
-    parseInteractiveSlashInput,
-    type ComposerSlashCommand,
-    type ParsedSlashIntent,
-  } from '../../../lib/slashActions';
+  import type { ApprovalDecision, PromptDelivery, RuntimeAccessMode } from '../../../lib/api/types';
+  import { INTERACTIVE_SLASH_COMMANDS, isImmediateSlashCommand, parseInteractiveSlashInput, type ComposerSlashCommand } from '../../../lib/slashActions';
   import StageSlashPopup from '../StageSlashPopup.svelte';
   import { threads } from '../threadsStore.svelte';
   import { now } from '../../../lib/stores/now.svelte';
   import { toastError } from '../../../lib/toastError';
-  import type { ApprovalDecision } from '../../../lib/api/types';
+  import RuntimeQueueBar from './RuntimeQueueBar.svelte';
+  import RuntimeTurnStatus from './RuntimeTurnStatus.svelte';
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
-  import { approvalOutcome, isRunning, latestTurn, pendingApprovals, timelineRows, type WorkEntry } from './timeline';
+  import { approvalOutcome, isRunning, latestTurn, messageAttribution, pendingApprovals, subagentChildren, timelineRows, turnOutcome, type WorkEntry } from './timeline';
+  import { readAttachments, runViewSlash, type ComposerFile } from './runtimeComposer';
   import RuntimeAccessChip from './RuntimeAccessChip.svelte';
   import RuntimeApprovalRow from './RuntimeApprovalRow.svelte';
   import RuntimeAttachments from './RuntimeAttachments.svelte';
   import RuntimeLinkedThreads from './RuntimeLinkedThreads.svelte';
   import RuntimeUiControl from './RuntimeUiControl.svelte';
   import RuntimeWorkGroup from './RuntimeWorkGroup.svelte';
+  import RuntimeSubagentCard from './RuntimeSubagentCard.svelte';
   import RuntimeWorkRow from './RuntimeWorkRow.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
   import { runtimeViews } from './runtimeView.svelte';
@@ -75,6 +74,10 @@
   const requests = $derived(new Map((p?.requests ?? []).map((r) => [r.id, r] as const)));
   const turn = $derived(p ? latestTurn(p) : null);
   const closed = $derived(session?.status === 'closed');
+  /** Each subagent card's own activity. */
+  const children = $derived(p ? subagentChildren(p.items) : new Map<string, never[]>());
+  /** Background work still pending (the live session entity first). */
+  const background = $derived(p?.session?.background_tasks ?? session?.background_tasks ?? []);
   /** The agent couldn't start (a refused handshake answers the prompt 400;
    *  the session goes dormant with `last_error`) — shown inline, T3 Code's
    *  ThreadErrorBanner, until the next prompt starts it. */
@@ -89,8 +92,8 @@
   });
 
   let text = $state('');
-  let queued = $state<string | null>(null);
   let sending = $state(false);
+  let reopening = $state(false);
   /** The accepted prompt's first sequence, until the projection reaches it. */
   let awaitSeq = $state<number | null>(null);
   let stopping = $state(false);
@@ -99,6 +102,8 @@
   let atBottom = true;
 
   const running = $derived((p ? isRunning(p) : false) || sending || (awaitSeq !== null && (p?.lastSequence ?? 0) < awaitSeq));
+  const outcome = $derived(p && !running ? turnOutcome(p, turn) : null);
+  const ownTurn = $derived(turn?.origin === 'agent');
   const workingFor = $derived.by(() => {
     if (!running || !turn?.started_at || turn.status !== 'running') return null;
     const s = Math.max(0, Math.floor((now() - Date.parse(turn.started_at)) / 1000));
@@ -125,26 +130,16 @@
   const accessMode = $derived(pickedMode ?? session?.access_mode ?? 'approval-required');
 
   // ── Images and PDFs (paste or attach; sent with the next message) ─────
-  const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
   // The drivers that take image input (Claude content blocks, Codex image
   // items); PDFs go to Claude only (document blocks).
   const canImages = $derived(provider === 'claude' || provider === 'codex');
   const canFiles = $derived(provider === 'claude');
   const takes = (f: File): boolean => f.type.startsWith('image/') || (canFiles && f.type === 'application/pdf');
-  let images = $state<(PromptImage & { name: string })[]>([]);
+  let images = $state<ComposerFile[]>([]);
   let fileEl = $state<HTMLInputElement | null>(null);
   async function addImages(files: Iterable<File>): Promise<void> {
-    for (const f of files) {
-      if (!takes(f)) continue;
-      if (f.size > MAX_IMAGE_BYTES) {
-        toastError('File too large', new Error(`${f.name} is over 10 MB`));
-        continue;
-      }
-      const data = new Uint8Array(await f.arrayBuffer());
-      let bin = '';
-      for (let i = 0; i < data.length; i += 0x8000) bin += String.fromCharCode(...data.subarray(i, i + 0x8000));
-      images = [...images, { name: f.name || 'pasted image', mime: f.type, data_base64: btoa(bin) }];
-    }
+    const read = await readAttachments(files, takes);
+    if (read.length) images = [...images, ...read];
   }
   function onPaste(e: ClipboardEvent): void {
     const files = [...(e.clipboardData?.files ?? [])].filter(takes);
@@ -153,7 +148,7 @@
     void addImages(files);
   }
 
-  async function send(t: string): Promise<void> {
+  async function send(t: string, delivery?: PromptDelivery): Promise<void> {
     sending = true;
     const sentImages = images;
     images = [];
@@ -169,8 +164,11 @@
           ...(docs.length ? { files: docs } : {}),
           // Only a person's pick changes the mode; otherwise the session keeps its own.
           ...(pickedMode ? { access_mode: pickedMode } : {}),
+          // While a turn runs it waits in the thread's queue (never interleaved).
+          ...(delivery ? { delivery } : {}),
         })
       ).sequence;
+      if (delivery) awaitSeq = null;
       startError = null;
     } catch (e) {
       if (e instanceof ApiError && e.status === 400) startError = e.message;
@@ -182,18 +180,31 @@
     }
   }
 
+  /** Reopen a closed thread (its agent resumes); `true` when it is open. */
+  async function reopen(): Promise<boolean> {
+    if (!closed || reopening) return !closed;
+    reopening = true;
+    const ok = await runtimeThreads.reopen(sessionId).then(
+      () => true,
+      (e: unknown) => (toastError('Couldn’t reopen the thread', e), false),
+    );
+    reopening = false;
+    return ok;
+  }
+
   function submit(): void {
     let t = text.trim();
-    if ((!t && images.length === 0) || closed) return;
+    if ((!t && images.length === 0) || reopening) return;
     const intent = parseInteractiveSlashInput(t);
     if (intent?.kind === 'send-prompt') t = intent.prompt;
-    else if (intent && runSlash(intent)) {
+    else if (intent && runViewSlash(intent, sessionId, session)) {
       text = '';
       return;
     }
     text = '';
-    if (running) queued = t;
-    else void send(t);
+    // A closed thread reopens first; while a turn runs it waits in the queue.
+    if (closed) void reopen().then((ok) => (ok ? send(t) : void (text ||= t)));
+    else void send(t, running ? 'queue' : undefined);
   }
 
   // ── Slash commands: the ones that act on this view ─────────────────────
@@ -215,46 +226,6 @@
     cmdDismissed = false;
   });
 
-  function runSlash(intent: ParsedSlashIntent): boolean {
-    switch (intent.kind) {
-      case 'open-diff':
-        threads.setInspectorTab('changes');
-        return true;
-      case 'open-files':
-        threads.setInspectorTab('files');
-        return true;
-      case 'toggle-terminal':
-        threads.toggleTerminal(sessionId);
-        return true;
-      case 'new-thread':
-        void newThread(intent.beside);
-        return true;
-      case 'side-chat':
-        threads.openSideChat(sessionId, intent.question);
-        return true;
-      default:
-        return false;
-    }
-  }
-
-  async function newThread(beside: boolean): Promise<void> {
-    if (!session) return;
-    if (!beside) return threads.startNewThread({ workspaceId: session.workspace_id, cwd: session.cwd });
-    try {
-      const { provider, cwd, model } = session;
-      const created = await runtimeThreads.start(session.workspace_id, {
-        provider,
-        cwd,
-        title: `${harnessLabel(provider)} thread`,
-        model: model ?? null,
-        prompt: '',
-      });
-      threads.openBeside(created.id);
-    } catch (e) {
-      toastError('Couldn’t start thread', e);
-    }
-  }
-
   function acceptCmd(c: ComposerSlashCommand): void {
     if (isImmediateSlashCommand(c.name)) {
       text = `/${c.name}`;
@@ -265,15 +236,6 @@
       composerEl?.focus();
     }
   }
-
-  // The queued follow-up goes out once the turn has ended.
-  $effect(() => {
-    if (!running && queued) {
-      const q = queued;
-      queued = null;
-      void send(q);
-    }
-  });
 
   async function stop(): Promise<void> {
     if (stopping) return;
@@ -338,7 +300,9 @@
 
 {#snippet entryRow({ item, approval }: WorkEntry)}
   {@const pending = item.type === 'approval_request' ? approvals.get(item.request_id) : undefined}
-  {#if pending}
+  {#if item.type === 'subagent'}
+    <RuntimeSubagentCard {item} activity={children.get(item.id) ?? []} output={p?.output} />
+  {:else if pending}
     <RuntimeApprovalRow approval={pending} onrespond={respond} />
   {:else}
     {@const ask = approval ?? (item.type === 'approval_request' ? item : undefined)}
@@ -367,7 +331,12 @@
           />
         {/if}
         {#each rows as row (row.kind === 'message' ? row.item.id : row.id)}
-          {#if row.kind === 'message' && row.item.type === 'user_message'}
+          {#if row.kind === 'day'}
+            <div class="rt-day" role="separator" aria-label={row.label}><span>{row.label}</span></div>
+          {:else if row.kind === 'message' && row.item.type === 'user_message' && messageAttribution(row.item.text)}
+            {@const a = messageAttribution(row.item.text)!}
+            <div class="rt-from" data-testid="rt-from"><span class="rt-from-h"><Icon name="send" size={12} /> From {a.from}</span><Markdown md={a.body} /></div>
+          {:else if row.kind === 'message' && row.item.type === 'user_message'}
             <div class="rt-user">
               {#if row.item.attachments?.length}<RuntimeAttachments {sessionId} attachments={row.item.attachments} />{/if}
               {#if row.item.text}<div class="rt-bubble" dir="auto">{row.item.text}</div>{/if}
@@ -390,11 +359,7 @@
             </div>
           {/if}
         {/each}
-        {#if workingFor}
-          <p class="rt-status"><span class="spinner" aria-hidden="true"></span>Working for {workingFor}</p>
-        {:else if turn && !running && turn.status === 'interrupted'}
-          <p class="rt-status">Stopped</p>
-        {/if}
+        <RuntimeTurnStatus {workingFor} {ownTurn} {outcome} disabled={closed} onresend={(t) => void send(t)} />
       </LoadState>
     </div>
   </div>
@@ -410,12 +375,20 @@
         {/each}
       </ol>
     {/if}
-    {#if queued}
-      <div class="rt-queued" data-testid="runtime-queued">
-        <span class="ellipsis" dir="auto">Queued: {queued}</span>
-        <button type="button" class="btn small" onclick={() => ((text = queued ?? ''), (queued = null))}>Edit</button>
-      </div>
-    {/if}
+    <RuntimeQueueBar
+      {sessionId}
+      {background}
+      queued={p?.queued ?? []}
+      {running}
+      canSteer={provider === 'claude'}
+      {closed}
+      {reopening}
+      onreopen={() => void reopen()}
+      onedit={(t) => {
+        text = t;
+        composerEl?.focus();
+      }}
+    />
     <div class="rt-composer">
       {#if suggestions.length > 0}
         <StageSlashPopup id={popId} items={suggestions} active={cmdIdx} onaccept={acceptCmd} onhover={(i) => (cmdIdx = i)} />
@@ -425,9 +398,9 @@
         bind:value={text}
         dir="auto"
         rows={2}
-        disabled={closed}
+        disabled={reopening}
         placeholder={closed
-          ? 'This thread is closed'
+          ? 'Send a message to reopen this thread'
           : approvals.size > 0
             ? 'Waiting for your approval above'
             : running
@@ -461,7 +434,7 @@
           aria-label={canFiles ? 'Attach an image or PDF' : 'Attach an image'}
           title={canFiles ? 'Attach an image or PDF (or paste one)' : 'Attach an image (or paste one)'}
           data-testid="runtime-attach"
-          disabled={closed}
+          disabled={reopening}
           onclick={() => fileEl?.click()}
         >
           <Icon name="image" size={14} />
@@ -522,7 +495,7 @@
             aria-label={running ? 'Queue message' : 'Send message'}
             title={running ? 'Queue (↵)' : 'Send (↵)'}
             data-testid="runtime-send"
-            disabled={closed || (!text.trim() && images.length === 0)}
+            disabled={reopening || (!text.trim() && images.length === 0)}
             onclick={submit}
           >
             <Icon name="arrowUp" size={16} />
@@ -612,23 +585,16 @@
     margin-inline-start: 2px;
     color: var(--text-dim);
   }
+  .rt-day { display: flex; align-items: center; gap: 10px; margin-block: 8px 14px; color: var(--text-dim); font-size: var(--fs-s); }
+  .rt-day::before, .rt-day::after { content: ''; flex: 1; border-block-start: 1px solid var(--border); }
+  .rt-from { margin-block: 12px; padding: 8px 12px; border-inline-start: 3px solid var(--accent-solid); border-radius: var(--radius-m); background: var(--surface-2); min-width: 0; }
+  .rt-from-h { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-s); font-weight: 600; color: var(--accent-text); }
   .rt-work {
     display: flex;
     flex-direction: column;
     gap: 2px;
     min-width: 0;
     padding-block-end: 10px;
-  }
-  .rt-status {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin: 4px 0 0;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-  }
-  .rt-status .spinner {
-    --spinner-size: 11px;
   }
   .rt-dock {
     display: flex;
@@ -672,22 +638,6 @@
   }
   .rt-plan .step-completed {
     color: var(--success);
-  }
-  .rt-queued {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-    padding-block: 4px;
-    padding-inline: 10px 6px;
-    border-radius: var(--radius-m);
-    background: var(--surface-2);
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-  }
-  .rt-queued .ellipsis {
-    flex: 1;
-    min-width: 0;
   }
   .rt-composer {
     display: flex;

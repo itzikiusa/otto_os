@@ -24,10 +24,19 @@ for (const route of ['personal-agents', 'loops']) {
     await expectNoHorizontalOverflow(page);
   });
 }
+
+/** The rail's first agent → its full settings page (the home is the chat). */
+async function openFirstAgentSettings(page: import('@playwright/test').Page): Promise<void> {
+  const tile = page.locator('[data-testid^="pa-rail-"]:not([data-testid="pa-rail-add"])').first();
+  await expect(tile).toBeVisible();
+  const id = (await tile.getAttribute('data-testid'))!.replace('pa-rail-', '');
+  await page.goto(`/#/personal-agents/${id}/overview`);
+}
+
 test('agent detail: arrow keys and End move focus with selection', async ({ page }) => {
   await workspace(page);
   await page.goto('/#/personal-agents');
-  await page.locator('.pa-card .name').first().click();
+  await openFirstAgentSettings(page);
   const overview = page.getByRole('tab', { name: 'Overview', exact: true });
   await overview.focus();
   await page.keyboard.press('ArrowRight');
@@ -42,7 +51,8 @@ test('agent detail: arrow keys and End move focus with selection', async ({ page
 test('agent form: losing workspace preserves typed fields and explains how to save', async ({ page }) => {
   await workspace(page);
   await page.goto('/#/personal-agents');
-  await page.getByRole('button', { name: 'New agent', exact: true }).click();
+  await page.getByTestId('pa-rail-add').click();
+  await page.getByRole('dialog').getByRole('button', { name: 'More options…', exact: true }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByLabel('Name', { exact: true }).fill('Keep my new agent');
   await page.evaluate(async () => {
@@ -169,8 +179,7 @@ test.describe('loaded automation visual and interaction fixtures', () => {
       await page.getByLabel('Message to the channel').fill('Draft kept while reading the discussion');
       await shot('rooms');
       await page.goto('/#/personal-agents');
-      await expect(page.locator('.pa-card').first()).toBeVisible();
-      await page.locator('.pa-card .name').first().click();
+      await openFirstAgentSettings(page);
       // ≤640px the agent's sections are a picker instead of a tab strip.
       if (width <= 640) await page.getByRole('combobox', { name: 'Agent sections' }).selectOption({ label: 'Schedules' });
       else await page.getByRole('tab', { name: 'Schedules', exact: true }).click();
@@ -206,7 +215,7 @@ test.describe('loaded automation visual and interaction fixtures', () => {
 test('agent detail: RTL arrow keys follow visual tab direction', async ({ page }) => {
   await workspace(page);
   await page.goto('/#/personal-agents');
-  await page.locator('.pa-card .name').first().click();
+  await openFirstAgentSettings(page);
   await page.evaluate(() => document.documentElement.dir = 'rtl');
   await page.getByRole('tab', { name: 'Overview', exact: true }).focus();
   await page.keyboard.press('ArrowLeft');

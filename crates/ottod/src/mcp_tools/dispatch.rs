@@ -224,6 +224,36 @@ pub(super) const ROUTED_TWINS: &[(&str, TwinScope, TwinReply)] = &[
         TwinScope::CallingSession,
         TwinReply::Raw,
     ),
+    (
+        "otto_routine_list",
+        TwinScope::CallingSession,
+        TwinReply::Raw,
+    ),
+    (
+        "otto_routine_create",
+        TwinScope::CallingSession,
+        TwinReply::Raw,
+    ),
+    (
+        "otto_routine_update",
+        TwinScope::CallingSession,
+        TwinReply::Raw,
+    ),
+    (
+        "otto_routine_delete",
+        TwinScope::CallingSession,
+        TwinReply::Raw,
+    ),
+    (
+        "otto_personality_set",
+        TwinScope::CallingSession,
+        TwinReply::Raw,
+    ),
+    (
+        "otto_instructions_propose",
+        TwinScope::CallingSession,
+        TwinReply::Raw,
+    ),
     ("otto_send_message", TwinScope::Plain, TwinReply::Raw),
     // PR comment — the one git WRITE on this surface. It lives here rather
     // than behind the gateway because the review workflow's whole product is

@@ -16,18 +16,19 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use dashmap::DashMap;
 use otto_core::agent_runtime::{
     ApprovalDecision, Attachment, AttachmentKind, CancelReason, CreateRuntimeSessionReq,
-    OpenPeerReq, PeerInfo, PeerReply, PlanArtifact, ProviderFailure, ProviderSession,
-    ProviderSessionStatus, ProviderThread, ProviderTurn, ProviderTurnStatus, ResponseCapability,
-    RuntimeEvent, RuntimeEventBody, RuntimePromptReq, RuntimePromptResp, RuntimeReplay,
-    RuntimeRequest, RuntimeRequestStatus, RuntimeSession, RuntimeSessionStatus, RuntimeSnapshot,
-    TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus,
+    OpenPeerReq, PeerInfo, PeerReply, PlanArtifact, PromptDelivery, ProviderFailure,
+    ProviderSession, ProviderSessionStatus, ProviderThread, ProviderTurn, ProviderTurnStatus,
+    QueuedPrompt, ResponseCapability, RuntimeEvent, RuntimeEventBody, RuntimePromptReq,
+    RuntimePromptResp, RuntimeReplay, RuntimeRequest, RuntimeRequestStatus, RuntimeSession,
+    RuntimeSessionStatus, RuntimeSnapshot, TurnItem, TurnItemKind, TurnItemStatus, TurnOrigin,
+    TurnTerminalStatus,
 };
 use otto_core::{new_id, Error, Id, Result};
 use otto_state::{AgentRuntimeRepo, NewRuntimeSession, RuntimeEntityRow};
@@ -62,6 +63,16 @@ pub struct RuntimeConfig {
     pub stream_coalesce: Duration,
     /// Prompt attachments, one folder per session (`<dir>/<session>/<id>`).
     pub attachments_dir: PathBuf,
+    /// How long a reopen waits for the resumed agent to get ready before
+    /// trusting the resume (an exit before then = refused → fresh thread).
+    pub start_wait: Duration,
+    /// A turn that emits nothing for this long is stopped as stalled —
+    /// unless it waits on a person (a pending approval) or on background
+    /// work. Zero disables.
+    pub stall_after: Duration,
+    /// The same allowance while one of the turn's tools is still running
+    /// (a long build, a subagent).
+    pub stall_tool_after: Duration,
 }
 
 impl Default for RuntimeConfig {
@@ -73,6 +84,9 @@ impl Default for RuntimeConfig {
             close_grace: Duration::from_secs(3),
             stream_coalesce: Duration::from_millis(50),
             attachments_dir: std::env::temp_dir().join("otto-runtime-attachments"),
+            start_wait: Duration::from_secs(20),
+            stall_after: Duration::from_secs(15 * 60),
+            stall_tool_after: Duration::from_secs(45 * 60),
         }
     }
 }
@@ -83,12 +97,35 @@ const K_TURN: &str = "turn";
 const K_ITEM: &str = "turn_item";
 const K_REQUEST: &str = "runtime_request";
 const K_PLAN: &str = "plan";
+const K_QUEUE: &str = "queue";
+
+/// A queued message as persisted: the whole prompt (its images / files
+/// too), so it goes out unchanged after a restart.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct QueuedRecord {
+    id: Id,
+    created_at: chrono::DateTime<Utc>,
+    req: RuntimePromptReq,
+}
+
+impl QueuedRecord {
+    fn public(&self) -> QueuedPrompt {
+        QueuedPrompt {
+            id: self.id.clone(),
+            text: self.req.text.clone(),
+            attachments: (self.req.images.len() + self.req.files.len()).min(u32::MAX as usize)
+                as u32,
+            created_at: self.created_at,
+        }
+    }
+}
 
 enum PersistOp {
     Upsert(Vec<RuntimeEntityRow>),
     Reserve(u64),
     NativeThreadId(String),
     Closed,
+    Opened,
     Flush(oneshot::Sender<()>),
 }
 
@@ -103,6 +140,8 @@ struct Projection {
     /// request id → its `approval_request` item id.
     request_items: HashMap<Id, Id>,
     plans: HashMap<String, PlanArtifact>,
+    /// Messages waiting for the running turn to end, oldest first.
+    queue: Vec<QueuedRecord>,
     next_item_ordinal: u32,
     next_turn_ordinal: u32,
 }
@@ -140,6 +179,9 @@ impl Projection {
                         p.plans.insert(pl.id.clone(), pl);
                     }
                 }
+                K_QUEUE => {
+                    p.queue = serde_json::from_value(v).unwrap_or_default();
+                }
                 _ => {}
             }
         }
@@ -162,6 +204,7 @@ impl Projection {
             turn_items,
             runtime_requests,
             plans,
+            queued_prompts: self.queue.iter().map(QueuedRecord::public).collect(),
         }
     }
 
@@ -207,9 +250,10 @@ impl Projection {
                 self.plans.insert(plan.id.clone(), plan.clone());
                 Some(row(K_PLAN, &plan.id, json(plan)))
             }
-            RuntimeEventBody::CommandOutputDelta { .. } | RuntimeEventBody::TurnTerminal { .. } => {
-                None
-            }
+            // The queue's row (the whole prompts) is written by `emit_queue`.
+            RuntimeEventBody::CommandOutputDelta { .. }
+            | RuntimeEventBody::TurnTerminal { .. }
+            | RuntimeEventBody::QueueUpdated { .. } => None,
         }
     }
 }
@@ -236,6 +280,8 @@ struct Proc {
 struct ActiveTurn {
     id: Id,
     interrupting: bool,
+    /// Stopped by the stall watchdog.
+    stalled: bool,
 }
 
 struct State {
@@ -251,6 +297,8 @@ struct State {
     held: Vec<TurnItem>,
     /// When each streaming item was last emitted.
     stream_emitted: HashMap<Id, Instant>,
+    /// When the session last emitted anything (the stall watchdog's clock).
+    last_activity: Instant,
 }
 
 impl State {
@@ -266,6 +314,8 @@ impl State {
 
 struct Live {
     spawn_lock: tokio::sync::Mutex<()>,
+    /// One queue drain at a time (a queued message is sent exactly once).
+    drain_lock: tokio::sync::Mutex<()>,
     state: Mutex<State>,
     persist: mpsc::UnboundedSender<PersistOp>,
 }
@@ -277,6 +327,8 @@ impl Live {
 }
 
 struct Inner {
+    /// This runtime, for work a sync path hands off (draining the queue).
+    me: Weak<Inner>,
     repo: AgentRuntimeRepo,
     host: Arc<dyn RuntimeHost>,
     drivers: Arc<dyn DriverFactory>,
@@ -298,7 +350,8 @@ impl AgentRuntime {
         config: RuntimeConfig,
     ) -> Self {
         Self {
-            inner: Arc::new(Inner {
+            inner: Arc::new_cyclic(|me| Inner {
+                me: me.clone(),
                 repo,
                 host,
                 drivers,
@@ -323,12 +376,22 @@ impl AgentRuntime {
     /// exist (a workspace delete cascades their rows). Returns sessions touched.
     pub async fn recover(&self) -> Result<usize> {
         let mut touched = 0;
+        let mut queued = Vec::new();
         for sid in self.inner.repo.session_ids().await? {
             let rec = self.inner.repo.get(&sid).await?;
             let mut seq = rec.seq_reserved.max(rec.session.last_sequence);
             let now = Utc::now();
             let mut rows = Vec::new();
-            for mut r in self.inner.repo.entities(&sid).await? {
+            let entities = self.inner.repo.entities(&sid).await?;
+            // Messages queued before the restart go out now.
+            if !rec.closed
+                && entities.iter().any(|e| {
+                    e.kind == K_QUEUE && e.payload.as_array().is_some_and(|a| !a.is_empty())
+                })
+            {
+                queued.push(sid.clone());
+            }
+            for mut r in entities {
                 let changed = match r.kind.as_str() {
                     K_TURN => serde_json::from_value::<ProviderTurn>(r.payload.clone())
                         .ok()
@@ -358,8 +421,13 @@ impl AgentRuntime {
                         }),
                     K_SESSION => serde_json::from_value::<ProviderSession>(r.payload.clone())
                         .ok()
-                        .filter(|s| s.status != ProviderSessionStatus::Stopped)
+                        .filter(|s| {
+                            s.status != ProviderSessionStatus::Stopped
+                                || !s.background_tasks.is_empty()
+                        })
                         .map(|mut s| {
+                            // The process (and its background work) is gone.
+                            s.background_tasks.clear();
                             s.status = ProviderSessionStatus::Stopped;
                             s.updated_at = now;
                             serde_json::to_value(s)
@@ -385,6 +453,9 @@ impl AgentRuntime {
                     let _ = tokio::fs::remove_dir_all(d.path()).await;
                 }
             }
+        }
+        for sid in queued {
+            self.kick_queue(&sid);
         }
         Ok(touched)
     }
@@ -651,42 +722,51 @@ impl AgentRuntime {
         Ok(reply)
     }
 
-    /// Session `id`'s latest reply: waits up to `wait` for its running turn
-    /// to settle, then returns that turn's assistant messages, joined.
-    /// `busy` = the wait ran out. What a daemon-driven run (a personal
-    /// agent's) waits on for its result.
+    /// Session `id`'s latest reply: waits up to `wait` for it to settle —
+    /// no turn running (the person's or one the agent started itself) and
+    /// no background work pending — then returns the assistant messages of
+    /// its last turn that has any, joined (a subagent's own messages are
+    /// not the agent's answer). `busy` = the wait ran out. What a
+    /// daemon-driven run (a personal agent's) waits on for its result.
     pub async fn latest_reply(&self, id: &Id, wait: Duration) -> Result<PeerReply> {
         let deadline = Instant::now() + wait;
         let live = self.live(id).await?;
         loop {
-            let busy = live.lock().turn.is_some();
-            if !busy || Instant::now() >= deadline {
+            if !is_busy(&live.lock()) || Instant::now() >= deadline {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
         let st = live.lock();
-        let busy = st.turn.is_some();
+        let busy = is_busy(&st);
         let snap = st.proj.snapshot();
         let session = st.session.clone();
         drop(st);
-        let last = snap.turns.iter().max_by_key(|t| t.ordinal);
-        let text = last
-            .map(|t| {
-                snap.turn_items
-                    .iter()
-                    .filter(|i| i.turn_id.as_ref() == Some(&t.id))
-                    .filter_map(|i| match &i.kind {
-                        TurnItemKind::AssistantMessage { text, .. } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n\n")
-            })
+        let mut turns: Vec<&ProviderTurn> = snap.turns.iter().collect();
+        turns.sort_by_key(|t| std::cmp::Reverse(t.ordinal));
+        let answer = |t: &ProviderTurn| {
+            snap.turn_items
+                .iter()
+                .filter(|i| i.turn_id.as_ref() == Some(&t.id) && i.parent_item_id.is_none())
+                .filter_map(|i| match &i.kind {
+                    TurnItemKind::AssistantMessage { text, .. } if !text.trim().is_empty() => {
+                        Some(text.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        };
+        let last = turns.first().copied();
+        let text = turns
+            .iter()
+            .map(|t| answer(t))
+            .find(|t| !t.is_empty())
             .unwrap_or_default();
         Ok(PeerReply {
             peer: Self::peer_info(&session, id),
             busy,
+            background_tasks: session.background_tasks.len().min(u32::MAX as usize) as u32,
             turn_status: last
                 .filter(|t| t.status.is_terminal())
                 .and_then(|t| serde_json::to_value(t.status).ok())
@@ -754,6 +834,7 @@ impl AgentRuntime {
         let next_seq = rec.seq_reserved.max(rec.session.last_sequence) + 1;
         let live = Arc::new(Live {
             spawn_lock: tokio::sync::Mutex::new(()),
+            drain_lock: tokio::sync::Mutex::new(()),
             state: Mutex::new(State {
                 session: rec.session,
                 next_seq,
@@ -765,6 +846,7 @@ impl AgentRuntime {
                 proc: None,
                 held: Vec::new(),
                 stream_emitted: HashMap::new(),
+                last_activity: Instant::now(),
             }),
             persist: tx,
         });
@@ -886,7 +968,30 @@ impl AgentRuntime {
             )));
         }
         let live = self.live(id).await?;
-        check_can_prompt(&live.lock())?;
+        let first = check_can_prompt(&live.lock());
+        match (first, req.delivery) {
+            (Err(Error::Conflict(m)), Some(d)) if m == TURN_RUNNING => {
+                return self.deliver_busy(id, &live, req, d).await;
+            }
+            (r, _) => r?,
+        }
+        match self.prompt_now(id, &live, req).await {
+            Err(Error::Conflict(m)) if m == TURN_RUNNING && req.delivery.is_some() => {
+                let d = req.delivery.unwrap_or(PromptDelivery::Queue);
+                self.deliver_busy(id, &live, req, d).await
+            }
+            other => other,
+        }
+    }
+
+    /// Start a turn with `req` (no turn may be running).
+    async fn prompt_now(
+        &self,
+        id: &Id,
+        live: &Arc<Live>,
+        req: &RuntimePromptReq,
+    ) -> Result<RuntimePromptResp> {
+        let live = Arc::clone(live);
         let model = req.model.clone().filter(|m| !m.trim().is_empty());
         if model.is_some() || req.access_mode.is_some() {
             let _spawning = live.spawn_lock.lock().await;
@@ -966,10 +1071,12 @@ impl AgentRuntime {
             started_at: Some(now),
             completed_at: None,
             turn_token_usage: None,
+            origin: TurnOrigin::User,
         };
         st.turn = Some(ActiveTurn {
             id: turn_id.clone(),
             interrupting: false,
+            stalled: false,
         });
         let sequence = emit(
             &self.inner,
@@ -999,7 +1106,166 @@ impl AgentRuntime {
         );
         st.session.last_active_at = now;
         apply_step(&self.inner, live, &mut st, step);
-        Ok(RuntimePromptResp { turn_id, sequence })
+        Ok(RuntimePromptResp {
+            turn_id,
+            sequence,
+            queued_id: None,
+            steered: false,
+        })
+    }
+
+    /// A message for a session whose turn is running: steer it into the
+    /// turn (when the driver can), or queue it — first and stop the turn
+    /// for `interrupt`.
+    async fn deliver_busy(
+        &self,
+        id: &Id,
+        live: &Arc<Live>,
+        req: &RuntimePromptReq,
+        delivery: PromptDelivery,
+    ) -> Result<RuntimePromptResp> {
+        if delivery == PromptDelivery::Steer {
+            let attachments = self.store_attachments(id, req).await?;
+            if let Some(resp) = steer_turn(&self.inner, live, req, attachments.clone()) {
+                return Ok(resp);
+            }
+            for a in &attachments {
+                let _ = tokio::fs::remove_file(self.attachments(id).join(&a.id)).await;
+            }
+        }
+        let front = delivery == PromptDelivery::Interrupt;
+        let (queued_id, sequence) = {
+            let mut st = live.lock();
+            if st.session.status == RuntimeSessionStatus::Closed {
+                return Err(Error::Conflict("the session is closed".into()));
+            }
+            let rec = QueuedRecord {
+                id: new_id(),
+                created_at: Utc::now(),
+                req: RuntimePromptReq {
+                    delivery: None,
+                    ..req.clone()
+                },
+            };
+            let qid = rec.id.clone();
+            if front {
+                st.proj.queue.insert(0, rec);
+            } else {
+                st.proj.queue.push(rec);
+            }
+            (qid, emit_queue(&self.inner, live, &mut st))
+        };
+        if front {
+            self.interrupt(id).await?;
+        }
+        // The turn may have ended meanwhile: nothing would drain it then.
+        self.kick_queue(id);
+        Ok(RuntimePromptResp {
+            turn_id: String::new(),
+            sequence,
+            queued_id: Some(queued_id),
+            steered: false,
+        })
+    }
+
+    /// Drop a queued message (`false` when it is not queued any more).
+    pub async fn unqueue(&self, id: &Id, queued_id: &str) -> Result<bool> {
+        let live = self.live(id).await?;
+        let mut st = live.lock();
+        let before = st.proj.queue.len();
+        st.proj.queue.retain(|q| q.id != queued_id);
+        if st.proj.queue.len() == before {
+            return Ok(false);
+        }
+        emit_queue(&self.inner, &live, &mut st);
+        Ok(true)
+    }
+
+    /// Deliver a queued message now: steer it into the running turn, or
+    /// (`interrupt`) stop the turn and send it next. With no turn running
+    /// it simply goes out.
+    pub async fn deliver_queued(
+        &self,
+        id: &Id,
+        queued_id: &str,
+        delivery: PromptDelivery,
+    ) -> Result<RuntimePromptResp> {
+        let live = self.live(id).await?;
+        let rec = {
+            let mut st = live.lock();
+            let Some(n) = st.proj.queue.iter().position(|q| q.id == queued_id) else {
+                return Err(Error::NotFound("that message is no longer queued".into()));
+            };
+            if delivery == PromptDelivery::Queue {
+                return Ok(RuntimePromptResp {
+                    turn_id: String::new(),
+                    sequence: st.session.last_sequence,
+                    queued_id: Some(queued_id.to_string()),
+                    steered: false,
+                });
+            }
+            let rec = st.proj.queue.remove(n);
+            emit_queue(&self.inner, &live, &mut st);
+            rec
+        };
+        let req = RuntimePromptReq {
+            delivery: Some(delivery),
+            ..rec.req.clone()
+        };
+        let res = self.prompt_with(id, &req).await;
+        if res.is_err() {
+            // Back where it was, so nothing is lost.
+            let mut st = live.lock();
+            if !st.proj.queue.iter().any(|q| q.id == rec.id) {
+                st.proj.queue.insert(0, rec);
+                emit_queue(&self.inner, &live, &mut st);
+            }
+        }
+        res
+    }
+
+    /// Send the next queued message once no turn runs (spawned off the
+    /// sync paths that end a turn).
+    fn kick_queue(&self, id: &Id) {
+        kick_queue(&self.inner, id);
+    }
+
+    async fn drain_queue(&self, id: &Id) {
+        let Ok(live) = self.live(id).await else {
+            return;
+        };
+        let _one = live.drain_lock.lock().await;
+        let next = {
+            let st = live.lock();
+            if st.session.status == RuntimeSessionStatus::Closed || st.turn.is_some() {
+                return;
+            }
+            st.proj.queue.first().cloned()
+        };
+        let Some(rec) = next else {
+            return;
+        };
+        let res = self.prompt_now(id, &live, &rec.req).await;
+        let mut st = live.lock();
+        match res {
+            // A turn started first: this one waits for its end.
+            Err(Error::Conflict(m)) if m == TURN_RUNNING => return,
+            Ok(_) => {}
+            Err(e) => {
+                let mut n = item(
+                    new_id(),
+                    TurnItemStatus::Failed,
+                    None,
+                    TurnItemKind::SystemNotice {
+                        message: format!("A queued message could not be sent: {e}"),
+                    },
+                );
+                n.turn_id = None;
+                upsert_item(&self.inner, &live, &mut st, n);
+            }
+        }
+        st.proj.queue.retain(|q| q.id != rec.id);
+        emit_queue(&self.inner, &live, &mut st);
     }
 
     /// The session's attachment folder.
@@ -1059,44 +1325,7 @@ impl AgentRuntime {
     /// Interrupt the running turn. `false` when no turn was running.
     pub async fn interrupt(&self, id: &Id) -> Result<bool> {
         let live = self.live(id).await?;
-        let mut st = live.lock();
-        let Some(turn) = st.turn.as_mut() else {
-            return Ok(false);
-        };
-        if turn.interrupting {
-            return Ok(true);
-        }
-        turn.interrupting = true;
-        let turn_id = turn.id.clone();
-        cancel_pending(&self.inner, &live, &mut st, CancelReason::Interrupt);
-        let Some(proc) = st.proc.as_mut() else {
-            finish_turn(
-                &self.inner,
-                &live,
-                &mut st,
-                TurnTerminalStatus::Interrupted,
-                None,
-                None,
-            );
-            return Ok(true);
-        };
-        let step = proc.driver.interrupt();
-        let (epoch, pid) = (proc.epoch, proc.pid);
-        apply_step(&self.inner, &live, &mut st, step);
-        drop(st);
-        let grace = self.inner.config.interrupt_grace;
-        let live = Arc::clone(&live);
-        tokio::spawn(async move {
-            tokio::time::sleep(grace).await;
-            let st = live.lock();
-            let stuck = st.turn.as_ref().is_some_and(|t| t.id == turn_id)
-                && st.proc.as_ref().is_some_and(|p| p.epoch == epoch);
-            if stuck {
-                tracing::warn!("runtime turn ignored interrupt; killing its process group");
-                signal_group(pid, libc::SIGKILL);
-            }
-        });
-        Ok(true)
+        Ok(interrupt_turn(&self.inner, &live))
     }
 
     /// Answer a pending request (T3 Code `runtime-request.respond`).
@@ -1147,14 +1376,9 @@ impl AgentRuntime {
             Some(decision),
             None,
         );
-        if st.turn.is_some() && !has_pending(&st) {
-            set_session_status(
-                &self.inner,
-                &live,
-                &mut st,
-                ProviderSessionStatus::Running,
-                None,
-            );
+        if !has_pending(&st) {
+            let next = settled_status(&st);
+            set_session_status(&self.inner, &live, &mut st, next, None);
         }
         apply_step(&self.inner, &live, &mut st, step);
         Ok(())
@@ -1180,6 +1404,7 @@ impl AgentRuntime {
         if let Some(p) = st.proc.take() {
             stop_child(p, self.inner.config.close_grace);
         }
+        settle_background(&self.inner, &live, &mut st, TurnItemStatus::Interrupted);
         retire(&self.inner, &st.session);
         set_session_status(
             &self.inner,
@@ -1191,6 +1416,114 @@ impl AgentRuntime {
         st.session.status = RuntimeSessionStatus::Closed;
         let _ = live.persist.send(PersistOp::Closed);
         Ok(st.session.clone())
+    }
+
+    /// Reopen a closed session: it takes prompts again and its agent is
+    /// respawned now, resuming the provider's own thread (`native_thread_id`).
+    /// A provider that cannot resume it (its process dies before it is
+    /// ready) gets a fresh thread instead and the timeline says so (a
+    /// `system_notice`). Its meta is kept. No-op on an open session.
+    pub async fn reopen(&self, id: &Id) -> Result<RuntimeSession> {
+        let live = self.live(id).await?;
+        {
+            let mut st = live.lock();
+            if st.session.status != RuntimeSessionStatus::Closed {
+                return Ok(st.session.clone());
+            }
+            st.session.status = RuntimeSessionStatus::Dormant;
+            // After the close's own write, in order.
+            let _ = live.persist.send(PersistOp::Opened);
+        }
+        self.flush(id).await;
+        self.ensure_process(&live).await?;
+        let resume = live.lock().session.native_thread_id.clone();
+        if resume.is_some() && !self.wait_started(&live).await {
+            // The provider refused the resume: start a fresh thread, keeping
+            // the old key until the fresh one is up.
+            live.lock().session.native_thread_id = None;
+            let fresh = self.ensure_process(&live).await;
+            if fresh.is_err() || !self.wait_started(&live).await {
+                live.lock().session.native_thread_id = resume;
+                fresh?;
+                return Err(Error::Invalid(
+                    "the agent could not start again — send a message to retry".into(),
+                ));
+            }
+            if live.lock().session.native_thread_id.is_none() {
+                self.inner.repo.clear_native_thread_id(id).await?;
+            }
+            self.notice(
+                id,
+                "The earlier conversation could not be resumed, so the agent starts fresh: \
+                 the history above is kept here, but the agent does not remember it.",
+            )
+            .await?;
+        }
+        let s = live.lock().session.clone();
+        Ok(s)
+    }
+
+    /// Whether the spawned process got ready (`false` = it exited first).
+    async fn wait_started(&self, live: &Arc<Live>) -> bool {
+        let deadline = Instant::now() + self.inner.config.start_wait;
+        loop {
+            {
+                let st = live.lock();
+                if st.proc.is_none() {
+                    return false;
+                }
+                let ready = st.proj.session.as_ref().is_some_and(|p| {
+                    !matches!(
+                        p.status,
+                        ProviderSessionStatus::Starting | ProviderSessionStatus::Stopped
+                    )
+                });
+                if ready {
+                    return true;
+                }
+            }
+            if Instant::now() >= deadline {
+                return true; // slow, not refused: the next prompt finds out
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Add a `system_notice` to the timeline (in the running turn, if any) —
+    /// the daemon telling the person something about the thread. Refused on
+    /// a closed session (reopen it first).
+    pub async fn notice(&self, id: &Id, message: &str) -> Result<()> {
+        let message = message.trim();
+        if message.is_empty() {
+            return Err(Error::Invalid("notice text is empty".into()));
+        }
+        let live = self.live(id).await?;
+        let mut st = live.lock();
+        if st.session.status == RuntimeSessionStatus::Closed {
+            return Err(Error::Conflict("the session is closed".into()));
+        }
+        let mut n = item(
+            new_id(),
+            TurnItemStatus::Completed,
+            None,
+            TurnItemKind::SystemNotice {
+                message: message.to_string(),
+            },
+        );
+        n.turn_id = st.turn.as_ref().map(|t| t.id.clone());
+        upsert_item(&self.inner, &live, &mut st, n);
+        Ok(())
+    }
+
+    /// Delete the session: close it (stopping its agent), then remove its
+    /// row, its projection and its attachments. Not undoable.
+    pub async fn delete(&self, id: &Id) -> Result<()> {
+        self.close(id).await?;
+        self.flush(id).await;
+        self.inner.live.remove(id);
+        self.inner.repo.delete(id).await?;
+        let _ = tokio::fs::remove_dir_all(self.attachments(id)).await;
+        Ok(())
     }
 
     // ---- replay -----------------------------------------------------------
@@ -1232,14 +1565,234 @@ impl AgentRuntime {
     }
 }
 
+const TURN_RUNNING: &str = "a turn is already running";
+
 fn check_can_prompt(st: &State) -> Result<()> {
     if st.session.status == RuntimeSessionStatus::Closed {
         return Err(Error::Conflict("the session is closed".into()));
     }
     if st.turn.is_some() {
-        return Err(Error::Conflict("a turn is already running".into()));
+        return Err(Error::Conflict(TURN_RUNNING.into()));
     }
     Ok(())
+}
+
+/// Interrupt the running turn (a person's Stop, the stall watchdog): the
+/// driver asks the provider to end it; past `interrupt_grace` its process
+/// group is killed. `false` when no turn was running.
+fn interrupt_turn(inner: &Arc<Inner>, live: &Arc<Live>) -> bool {
+    let mut st = live.lock();
+    let Some(turn) = st.turn.as_mut() else {
+        return false;
+    };
+    if turn.interrupting {
+        return true;
+    }
+    turn.interrupting = true;
+    let turn_id = turn.id.clone();
+    cancel_pending(inner, live, &mut st, CancelReason::Interrupt);
+    let Some(proc) = st.proc.as_mut() else {
+        finish_turn(
+            inner,
+            live,
+            &mut st,
+            TurnTerminalStatus::Interrupted,
+            None,
+            None,
+        );
+        return true;
+    };
+    let step = proc.driver.interrupt();
+    let (epoch, pid) = (proc.epoch, proc.pid);
+    apply_step(inner, live, &mut st, step);
+    drop(st);
+    let grace = inner.config.interrupt_grace;
+    let live = Arc::clone(live);
+    tokio::spawn(async move {
+        tokio::time::sleep(grace).await;
+        let st = live.lock();
+        let stuck = st.turn.as_ref().is_some_and(|t| t.id == turn_id)
+            && st.proc.as_ref().is_some_and(|p| p.epoch == epoch);
+        if stuck {
+            tracing::warn!("runtime turn ignored interrupt; killing its process group");
+            signal_group(pid, libc::SIGKILL);
+        }
+    });
+    true
+}
+
+/// Steer `req` into the running turn when its driver takes it.
+fn steer_turn(
+    inner: &Inner,
+    live: &Live,
+    req: &RuntimePromptReq,
+    attachments: Vec<Attachment>,
+) -> Option<RuntimePromptResp> {
+    let mut st = live.lock();
+    let turn_id = st.turn.as_ref()?.id.clone();
+    let step = st.proc.as_mut()?.driver.steer(req).ok()?;
+    let mut user = item(
+        format!("{turn_id}:steer:{}", new_id()),
+        TurnItemStatus::Completed,
+        None,
+        TurnItemKind::UserMessage {
+            text: req.text.clone(),
+            attachments,
+        },
+    );
+    user.turn_id = Some(turn_id.clone());
+    upsert_item(inner, live, &mut st, user);
+    let sequence = st.session.last_sequence;
+    st.session.last_active_at = Utc::now();
+    apply_step(inner, live, &mut st, step);
+    Some(RuntimePromptResp {
+        turn_id,
+        sequence,
+        queued_id: None,
+        steered: true,
+    })
+}
+
+/// Spawn a drain of `id`'s queue (no-op when the runtime is gone).
+fn kick_queue(inner: &Inner, id: &Id) {
+    if let Some(me) = inner.me.upgrade() {
+        let rt = AgentRuntime { inner: me };
+        let id = id.clone();
+        tokio::spawn(async move { rt.drain_queue(&id).await });
+    }
+}
+
+/// Persist and publish the queue (`queue.updated`). Returns its sequence.
+fn emit_queue(inner: &Inner, live: &Live, st: &mut State) -> u64 {
+    let queued_prompts = st.proj.queue.iter().map(QueuedRecord::public).collect();
+    let seq = emit(
+        inner,
+        live,
+        st,
+        RuntimeEventBody::QueueUpdated { queued_prompts },
+    );
+    let _ = live.persist.send(PersistOp::Upsert(vec![RuntimeEntityRow {
+        kind: K_QUEUE.into(),
+        entity_id: "queue".into(),
+        sequence: seq,
+        payload: serde_json::to_value(&st.proj.queue).unwrap_or(serde_json::Value::Null),
+    }]));
+    seq
+}
+
+/// When the running turn counts as stalled, if it can: not while it waits
+/// on a person or on background work; longer while one of its tools runs.
+fn stall_deadline(st: &State, cfg: &RuntimeConfig) -> Option<Instant> {
+    let turn = st.turn.as_ref().filter(|t| !t.interrupting)?;
+    if cfg.stall_after.is_zero() || has_pending(st) || !st.session.background_tasks.is_empty() {
+        return None;
+    }
+    let tool_running = st.proj.items.values().any(|i| {
+        i.turn_id.as_deref() == Some(turn.id.as_str())
+            && i.status.is_open()
+            && matches!(
+                i.kind,
+                TurnItemKind::CommandExecution { .. }
+                    | TurnItemKind::DynamicTool { .. }
+                    | TurnItemKind::WebSearch { .. }
+                    | TurnItemKind::FileChange { .. }
+                    | TurnItemKind::Subagent { .. }
+            )
+    });
+    let allowance = if tool_running {
+        cfg.stall_tool_after.max(cfg.stall_after)
+    } else {
+        cfg.stall_after
+    };
+    Some(st.last_activity + allowance)
+}
+
+/// Working: a turn (the person's or the agent's own) or background work.
+fn is_busy(st: &State) -> bool {
+    st.turn.is_some() || !st.session.background_tasks.is_empty()
+}
+
+/// The provider status once no request is pending: running a turn, ready
+/// between turns, stopped without a process.
+fn settled_status(st: &State) -> ProviderSessionStatus {
+    if st.turn.is_some() {
+        ProviderSessionStatus::Running
+    } else if st.proc.is_some() {
+        ProviderSessionStatus::Ready
+    } else {
+        ProviderSessionStatus::Stopped
+    }
+}
+
+/// The provider session's current status + error (to re-emit it with a
+/// changed background list).
+fn current_status(st: &State) -> (ProviderSessionStatus, Option<String>) {
+    match st.proj.session.as_ref() {
+        Some(p) => (p.status, p.last_error.clone()),
+        None => (settled_status(st), None),
+    }
+}
+
+/// The agent started a turn on its own (`origin: agent`): it runs like a
+/// prompted one — Working, Stop interrupts it, prompts wait for its end.
+fn open_agent_turn(inner: &Inner, live: &Live, st: &mut State, turn_id: String) {
+    if st.turn.is_some() || st.session.status == RuntimeSessionStatus::Closed {
+        return;
+    }
+    let now = Utc::now();
+    st.proj.next_turn_ordinal += 1;
+    let turn = ProviderTurn {
+        id: turn_id.clone(),
+        ordinal: st.proj.next_turn_ordinal,
+        status: ProviderTurnStatus::Running,
+        started_at: Some(now),
+        completed_at: None,
+        turn_token_usage: None,
+        origin: TurnOrigin::Agent,
+    };
+    st.turn = Some(ActiveTurn {
+        id: turn_id,
+        interrupting: false,
+        stalled: false,
+    });
+    emit(
+        inner,
+        live,
+        st,
+        RuntimeEventBody::ProviderTurnUpdated {
+            provider_turn: turn,
+        },
+    );
+    let status = if has_pending(st) {
+        ProviderSessionStatus::Waiting
+    } else {
+        ProviderSessionStatus::Running
+    };
+    set_session_status(inner, live, st, status, None);
+    st.session.last_active_at = now;
+}
+
+/// The process (and so its background work) is gone: settle every
+/// background subagent still open and clear the background list.
+fn settle_background(inner: &Inner, live: &Live, st: &mut State, status: TurnItemStatus) {
+    let now = Utc::now();
+    let mut open: Vec<TurnItem> = st
+        .proj
+        .items
+        .values()
+        .filter(|i| i.is_background_open())
+        .cloned()
+        .collect();
+    open.sort_by_key(|i| i.ordinal);
+    for mut item in open {
+        settle_item(&mut item, status, now);
+        upsert_item(inner, live, st, item);
+    }
+    if !st.session.background_tasks.is_empty() {
+        st.session.background_tasks.clear();
+        let (status, last_error) = current_status(st);
+        set_session_status(inner, live, st, status, last_error);
+    }
 }
 
 fn has_pending(st: &State) -> bool {
@@ -1274,6 +1827,7 @@ fn emit(inner: &Inner, live: &Live, st: &mut State, body: RuntimeEventBody) -> u
     if let Some(row) = st.proj.apply(&body, seq) {
         let _ = live.persist.send(PersistOp::Upsert(vec![row]));
     }
+    st.last_activity = Instant::now();
     let ev = Arc::new(RuntimeEvent {
         session_id: st.session.id.clone(),
         sequence: seq,
@@ -1308,8 +1862,11 @@ fn set_session_status(
     }
     let model = st.session.model.clone();
     let cwd = st.session.cwd.clone();
+    let background_tasks = st.session.background_tasks.clone();
     let prev = st.proj.session.as_ref();
-    if prev.is_some_and(|p| p.status == status && p.last_error == last_error) {
+    if prev.is_some_and(|p| {
+        p.status == status && p.last_error == last_error && p.background_tasks == background_tasks
+    }) {
         return;
     }
     let provider_session = ProviderSession {
@@ -1318,6 +1875,7 @@ fn set_session_status(
         model: prev.and_then(|p| p.model.clone()).or(model),
         updated_at: Utc::now(),
         last_error,
+        background_tasks,
     };
     emit(
         inner,
@@ -1479,6 +2037,11 @@ fn finish_turn(
     let Some(active) = st.turn.take() else {
         return;
     };
+    let reason = if active.stalled {
+        Some("stalled".to_string())
+    } else {
+        reason
+    };
     // Settle what the client saw last: the held text first.
     flush_held(inner, live, st);
     cancel_pending(inner, live, st, CancelReason::Agent);
@@ -1490,6 +2053,7 @@ fn finish_turn(
         .filter(|i| {
             i.turn_id.as_deref() == Some(active.id.as_str())
                 && (i.status.is_open() || i.is_streaming())
+                && !i.is_background_open()
         })
         .cloned()
         .collect();
@@ -1525,6 +2089,7 @@ fn finish_turn(
                 completed_at: Some(now),
                 updated_at: now,
                 error: None,
+                parent_item_id: None,
                 kind: TurnItemKind::Error { failure: f.clone() },
             },
         );
@@ -1534,18 +2099,37 @@ fn finish_turn(
         live,
         st,
         RuntimeEventBody::TurnTerminal {
-            turn_id: active.id,
+            turn_id: active.id.clone(),
             status,
             failure,
             reason,
         },
     );
+    if active.stalled {
+        let mins = inner.config.stall_after.as_secs().div_ceil(60);
+        let mut n = item(
+            format!("{}:stalled", active.id),
+            TurnItemStatus::Interrupted,
+            None,
+            TurnItemKind::SystemNotice {
+                message: format!(
+                    "Stopped: the agent showed no progress for about {mins} min. \
+                     Send a message to continue."
+                ),
+            },
+        );
+        n.turn_id = Some(active.id.clone());
+        upsert_item(inner, live, st, n);
+    }
     let next = if st.proc.is_some() {
         ProviderSessionStatus::Ready
     } else {
         ProviderSessionStatus::Stopped
     };
     set_session_status(inner, live, st, next, None);
+    if !st.proj.queue.is_empty() {
+        kick_queue(inner, &st.session.id);
+    }
 }
 
 /// Apply a driver step: events, then stdin writes, then the signal.
@@ -1681,8 +2265,9 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                     let reason =
                         (status == RuntimeRequestStatus::Cancelled).then_some(CancelReason::Agent);
                     resolve_request(inner, live, st, &request_id, status, None, reason);
-                    if !has_pending(st) && st.turn.is_some() {
-                        set_session_status(inner, live, st, ProviderSessionStatus::Running, None);
+                    if !has_pending(st) {
+                        let next = settled_status(st);
+                        set_session_status(inner, live, st, next, None);
                     }
                 }
             }
@@ -1716,6 +2301,14 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                     st,
                     RuntimeEventBody::ProviderThreadUpdated { provider_thread },
                 );
+            }
+            DriverEvent::TurnStarted { turn_id } => open_agent_turn(inner, live, st, turn_id),
+            DriverEvent::BackgroundTasks(tasks) => {
+                if st.session.background_tasks != tasks {
+                    st.session.background_tasks = tasks;
+                    let (status, last_error) = current_status(st);
+                    set_session_status(inner, live, st, status, last_error);
+                }
             }
             DriverEvent::Terminal {
                 status,
@@ -1783,7 +2376,12 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
 async fn pump(inner: Arc<Inner>, live: Arc<Live>, epoch: u64, mut rx: mpsc::Receiver<ChildMsg>) {
     let window = inner.config.stream_coalesce;
     loop {
-        let due = live.lock().held_deadline(window);
+        let due = {
+            let st = live.lock();
+            let held = st.held_deadline(window);
+            let stall = stall_deadline(&st, &inner.config);
+            held.into_iter().chain(stall).min()
+        };
         let msg = match due {
             Some(at) => match tokio::time::timeout_at(at.into(), rx.recv()).await {
                 Ok(m) => m,
@@ -1793,6 +2391,16 @@ async fn pump(inner: Arc<Inner>, live: Arc<Live>, epoch: u64, mut rx: mpsc::Rece
                         return; // closed or superseded
                     }
                     flush_held(&inner, &live, &mut st);
+                    let stalled =
+                        stall_deadline(&st, &inner.config).is_some_and(|at| at <= Instant::now());
+                    if stalled {
+                        tracing::warn!(session = %st.session.id, "runtime turn stalled; stopping it");
+                        if let Some(t) = st.turn.as_mut() {
+                            t.stalled = true;
+                        }
+                        drop(st);
+                        interrupt_turn(&inner, &live);
+                    }
                     continue;
                 }
             },
@@ -1830,6 +2438,7 @@ async fn pump(inner: Arc<Inner>, live: Arc<Live>, epoch: u64, mut rx: mpsc::Rece
                 retire(&inner, &st.session);
                 let step = proc.driver.on_exit(code);
                 apply_step(&inner, &live, &mut st, step);
+                settle_background(&inner, &live, &mut st, TurnItemStatus::Interrupted);
                 let detail = stderr_tail
                     .lines()
                     .rev()
@@ -1879,6 +2488,7 @@ async fn persister(repo: AgentRuntimeRepo, id: Id, mut rx: mpsc::UnboundedReceiv
             PersistOp::Reserve(upto) => repo.reserve_seq(&id, upto).await,
             PersistOp::NativeThreadId(n) => repo.set_native_thread_id(&id, &n).await,
             PersistOp::Closed => repo.set_closed(&id).await,
+            PersistOp::Opened => repo.set_open(&id).await,
             PersistOp::Flush(done) => {
                 let _ = done.send(());
                 Ok(())

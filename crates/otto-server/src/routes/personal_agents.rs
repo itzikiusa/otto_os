@@ -42,6 +42,7 @@ use crate::state::ServerCtx;
 
 /// Max bytes for one room message (agent AND user posts).
 mod autonomy;
+mod own;
 mod team;
 
 pub const MAX_ROOM_POST_BYTES: usize = 16 * 1024;
@@ -109,6 +110,7 @@ pub fn routes() -> Router<ServerCtx> {
             get(list_messages).post(post_message),
         )
         .merge(autonomy::routes())
+        .merge(own::routes())
         .merge(team::routes())
 }
 
@@ -300,6 +302,9 @@ async fn create(
 ) -> ApiResult<Json<Value>> {
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
     let made = otto_assistant::personal_agent_admin::create(&ctx, &ws_id, &user.id, req).await?;
+    if let Some(id) = made["id"].as_str() {
+        changed(&ctx, &ws_id, id, "agent");
+    }
     Ok(Json(made))
 }
 
@@ -366,6 +371,7 @@ async fn update(
             }
         }
     }
+    changed(&ctx, &updated.workspace_id, &id, "agent");
     Ok(Json(updated))
 }
 
@@ -409,7 +415,14 @@ async fn remove(
         .await;
     }
     repo.delete(&id).await.map_err(ApiError)?;
+    changed(&ctx, &agent.workspace_id, &id, "deleted");
     Ok(Json(json!({"ok": true})))
+}
+
+/// `personal_agent_changed` — every agent / routine write announces itself,
+/// whichever path made it (the UI, an agent's MCP admin or team tools).
+pub(crate) fn changed(ctx: &ServerCtx, ws: &str, agent_id: &str, what: &str) {
+    personal_agents_engine::emit_changed(ctx, ws, agent_id, what);
 }
 
 // --- Schedule handlers ------------------------------------------------------
@@ -447,10 +460,11 @@ async fn create_schedule(
         changed.push("schedule permission");
     }
     require_agent_owner(&ctx, &user, &agent, &changed).await?;
-    otto_assistant::personal_agent_admin::add_schedule::<ServerCtx>(&repo, &id, req)
+    let made = otto_assistant::personal_agent_admin::add_schedule::<ServerCtx>(&repo, &id, req)
         .await
-        .map(Json)
-        .map_err(ApiError)
+        .map_err(ApiError)?;
+    self::changed(&ctx, &agent.workspace_id, &id, "schedules");
+    Ok(Json(made))
 }
 
 /// `PATCH /personal-agents/schedules/{schedule_id}`
@@ -526,10 +540,9 @@ async fn update_schedule(
     if cadence_changed || rearm {
         refresh_next_run(&repo, &updated).await;
     }
-    repo.get_schedule(&schedule_id)
-        .await
-        .map(Json)
-        .map_err(ApiError)
+    let out = repo.get_schedule(&schedule_id).await.map_err(ApiError)?;
+    self::changed(&ctx, &agent.workspace_id, &agent.id, "schedules");
+    Ok(Json(out))
 }
 
 /// `DELETE /personal-agents/schedules/{schedule_id}`
@@ -543,6 +556,7 @@ async fn delete_schedule(
     let agent = repo.get(&schedule.agent_id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &agent.workspace_id, WorkspaceRole::Editor).await?;
     repo.delete_schedule(&schedule_id).await.map_err(ApiError)?;
+    changed(&ctx, &agent.workspace_id, &agent.id, "schedules");
     Ok(Json(json!({"ok": true})))
 }
 
@@ -736,8 +750,9 @@ async fn save_context(
 /// "no session" and spawned two Claude sessions, orphaning one that kept
 /// burning a PTY and tokens. Serialised per agent, the second call waits and
 /// then reuses the first one's pinned session.
-static CHAT_LOCKS: otto_core::keyed_lock::KeyedLocks<String> =
-    otto_core::keyed_lock::KeyedLocks::new();
+// (Shared with the engine's chat feed, which opens the same chat to post a
+// run's result into it.)
+use otto_assistant::personal_agent_feed::CHAT_LOCKS;
 
 /// `POST /personal-agents/{id}/chat-session` — return (creating if absent or
 /// dead) the agent's SINGLE interactive chat: a Threads thread for a runtime
@@ -1126,12 +1141,18 @@ async fn seed_presets(ctx: &ServerCtx, ws_id: &str) {
             return;
         }
     }
-    for (agent, schedules) in preset_agents(ws_id) {
+    for (i, (agent, schedules)) in preset_agents(ws_id).into_iter().enumerate() {
         match repo.create(agent).await {
             Ok(created) => {
                 for mut s in schedules {
                     s.agent_id = created.id.clone();
                     let _ = repo.create_schedule(s).await;
+                }
+                // The first preset is the workspace's main agent: the one
+                // the user talks to, which routes work to the others.
+                if i == 0 {
+                    let _ =
+                        otto_assistant::personal_agent_admin::make_primary(&repo, &created).await;
                 }
             }
             Err(e) => tracing::warn!("personal agents: seed preset failed: {e}"),
@@ -1165,10 +1186,8 @@ fn preset_agents(ws_id: &str) -> Vec<(NewPersonalAgent, Vec<NewAgentSchedule>)> 
         (
             base(
                 "Personal Assistant",
-                "🧑‍💼",
-                "You are a calm, resourceful personal assistant. You keep track of what your \
-                 user is working on, answer questions directly, and prepare concise briefings. \
-                 You prefer short, actionable answers over long explanations.",
+                "char:chief",
+                otto_assistant::personal_agent_admin::MAIN_AGENT_PERSONA,
             ),
             vec![],
         ),

@@ -580,6 +580,7 @@ fn scope_of(event: &Event) -> Scope<'_> {
         // (rooms are always fully user-visible by design).
         | Event::PersonalAgentRunUpdated { workspace_id, .. }
         | Event::PersonalAgentActivity { workspace_id, .. }
+        | Event::PersonalAgentChanged { workspace_id, .. }
         | Event::AgentRoomMessage { workspace_id, .. } => Scope::Workspace(workspace_id),
         // Usage tick, self-improvement updates, and insight-ready are global
         // (no workspace axis — insights are a cross-workspace cadence report).

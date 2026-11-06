@@ -22,7 +22,26 @@ export interface ProviderSession {
   model: string | null;
   updated_at: string;
   last_error: string | null;
+  /** Background work the agent started that has not finished (absent = none).
+   *  The thread is busy while any is pending, even between turns. */
+  background_tasks?: BackgroundTask[];
 }
+
+/** One piece of background work (a `run_in_background` command, a
+ *  background subagent). */
+export interface BackgroundTask {
+  id: string;
+  /** `command`, `agent`, or the provider's own task type. */
+  kind: string;
+  label: string;
+  started_at: string;
+  /** The tool call that started it, when known. */
+  item_id?: Id;
+}
+
+/** Who started a turn; `agent` = the agent continued on its own (its
+ *  background work finished). Absent = `user`. */
+export type TurnOrigin = 'user' | 'agent';
 
 export interface ThreadTokenUsage {
   used_tokens: number;
@@ -55,6 +74,7 @@ export interface ProviderTurn {
   started_at: string | null;
   completed_at: string | null;
   turn_token_usage?: TurnTokenUsage;
+  origin?: TurnOrigin;
 }
 
 export type TurnItemStatus =
@@ -111,6 +131,22 @@ export type TurnItemKind =
       cancel_reason?: RequestCancelReason;
     }
   | { type: 'system_notice'; message: string }
+  /** A subagent (Claude's Agent / Task tool): its own messages and tools are
+   *  items whose `parent_item_id` is this item. A background one stays
+   *  `running` past its turn until its task ends. */
+  | {
+      type: 'subagent';
+      tool_name: string;
+      description?: string;
+      subagent_type?: string;
+      prompt?: string;
+      /** Its final answer (tool result / task summary). */
+      output?: string;
+      background: boolean;
+      last_tool?: string;
+      tool_uses: number;
+      error?: string;
+    }
   | { type: 'error'; failure: ProviderFailure };
 
 export type TurnItem = {
@@ -123,6 +159,8 @@ export type TurnItem = {
   started_at: string | null;
   completed_at: string | null;
   updated_at: string;
+  /** The `subagent` item this item is the activity of. */
+  parent_item_id?: Id;
 } & TurnItemKind;
 
 /** Why a request was cancelled: `agent` = the provider withdrew it (Claude
@@ -172,12 +210,15 @@ export type RuntimeEventBody =
   | { type: 'turn_item.updated'; turn_item: TurnItem }
   | { type: 'runtime_request.updated'; runtime_request: RuntimeRequest }
   | { type: 'plan.updated'; plan: PlanArtifact }
+  /** The messages waiting for the running turn, whole (persisted). */
+  | { type: 'queue.updated'; queued_prompts: QueuedPrompt[] }
   | { type: 'command_output.delta'; item_id: Id; chunk: string }
   | {
       type: 'turn.terminal';
       turn_id: Id;
       status: TurnTerminalStatus;
       failure?: ProviderFailure;
+      /** e.g. `stalled` (the stall watchdog stopped it), `the session was closed`. */
       reason?: string;
     };
 
@@ -199,6 +240,27 @@ export interface RuntimeSnapshot {
   turn_items: TurnItem[];
   runtime_requests: RuntimeRequest[];
   plans: PlanArtifact[];
+  /** Messages queued behind the running turn, oldest first. */
+  queued_prompts?: QueuedPrompt[];
+}
+
+/** A message waiting in a thread's queue (sent when the running turn ends). */
+export interface QueuedPrompt {
+  id: Id;
+  text: string;
+  /** Images / files riding with it. */
+  attachments: number;
+  created_at: string;
+}
+
+/** How a message sent while a turn runs is delivered: `queue` (after it),
+ *  `steer` (into it now — Claude; queued elsewhere), `interrupt` (stop it
+ *  and send this next). */
+export type PromptDelivery = 'queue' | 'steer' | 'interrupt';
+
+/** Body of POST /runtime-sessions/{id}/queue/{queued_id}. */
+export interface QueuedDeliverReq {
+  delivery: PromptDelivery;
 }
 
 /** Response of GET /runtime-sessions/{id}/events?after_sequence=. */
@@ -232,6 +294,8 @@ export interface RuntimeSession {
    *  (`personal_agent`, `read_only`, `source`, `run_id`, …); absent on a plain
    *  thread. Never sent by a client. */
   meta?: Record<string, unknown> | null;
+  /** Background work still pending (live; absent = none). */
+  background_tasks?: BackgroundTask[];
 }
 
 /** Body of `POST /runtime-sessions/{id}/peers` — open a linked thread. */
@@ -257,7 +321,9 @@ export interface PeerInfo {
 /** `GET /runtime-sessions/{id}/peers/{peer}/reply?wait_secs=`. */
 export interface PeerReply {
   peer: PeerInfo;
+  /** A turn (the person's or the agent's own) or background work is running. */
   busy: boolean;
+  background_tasks: number;
   turn_status?: string;
   text: string;
 }
@@ -295,6 +361,8 @@ export interface RuntimePromptReq {
   files?: PromptFile[];
   /** Applies from this turn on and sticks. */
   access_mode?: RuntimeAccessMode;
+  /** While a turn runs; omitted = refused (409). */
+  delivery?: PromptDelivery;
 }
 
 export interface PromptFile {
@@ -310,9 +378,13 @@ export interface PromptImage {
 }
 
 export interface RuntimePromptResp {
+  /** The turn it started or steered into; empty when queued. */
   turn_id: Id;
-  /** `sequence` of the turn's first `provider_turn.updated`. */
+  /** `sequence` of the turn's first `provider_turn.updated` (or of the
+   *  `queue.updated` / steered message). */
   sequence: number;
+  queued_id?: Id;
+  steered?: boolean;
 }
 
 /** Response of POST /runtime-sessions/{id}/interrupt. */

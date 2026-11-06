@@ -23,6 +23,17 @@ use crate::AssistantCtx;
 pub const TEMPLATES_JSON: &str =
     include_str!("../../../docs/contracts/personal-agent-templates.json");
 
+/// The main agent's persona (the seeded first preset and the `main-agent`
+/// template): one point of contact that routes work and reports back.
+pub const MAIN_AGENT_PERSONA: &str = "I'm your main agent: your one point of contact. I can \
+manage your other agents. Task me with anything — I'll make sure it gets to the right agent, and \
+I come back with what they found.\n\n\
+- I answer quick things myself, in short, direct replies.\n\
+- Specialist or long-running work goes to the agent that fits; I tell you who has it, and when it \
+reports back I tell you the substance and what needs you.\n\
+- When no agent fits a recurring kind of work, I create one and tell you its name.\n\
+- I ask only when I need information, a judgment call or your approval.";
+
 /// Every template: `{id, title, description, avatar, name, soul_md, schedule,
 /// directive}`.
 pub fn templates() -> Vec<Value> {
@@ -325,12 +336,17 @@ pub async fn create<C: AssistantCtx>(
     for s in schedules {
         made.push(add_schedule::<C>(&repo, &agent.id, s).await?);
     }
-    if req.primary == Some(true) {
+    // A template may make its agent the main agent (`main-agent`); an
+    // explicit `primary` wins.
+    let primary = req
+        .primary
+        .or_else(|| tpl.as_ref().and_then(|t| t["primary"].as_bool()));
+    if primary == Some(true) {
         make_primary(&repo, &agent).await?;
     }
     let mut out = serde_json::to_value(&agent).map_err(|e| Error::Internal(e.to_string()))?;
     out["schedules"] = json!(made);
-    if let Some(p) = req.primary {
+    if let Some(p) = primary {
         out["primary"] = json!(p);
     }
     Ok(out)
@@ -644,8 +660,11 @@ mod tests {
             for k in ["id", "title", "name", "soul_md", "directive"] {
                 assert!(t[k].as_str().is_some(), "{k} missing in {t}");
             }
-            assert!(t["schedule"]["cadence"].is_string());
+            // A template either ships a routine or (the main agent) none —
+            // it is set up by chatting.
+            assert!(t["schedule"]["cadence"].is_string() || t["schedule"].is_null());
         }
+        assert_eq!(template("main-agent").unwrap()["primary"], true);
         assert!(template("slack-daily-digest").is_some());
         assert!(template("Slack daily digest (as me)").is_some());
         assert!(template("nope").is_none());

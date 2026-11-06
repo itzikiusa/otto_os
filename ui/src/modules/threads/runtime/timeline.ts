@@ -69,7 +69,9 @@ export type WorkPart = { kind: 'item'; entry: WorkEntry } | { kind: 'group'; id:
  *  (T3's work-log group between messages). */
 export type TimelineRow =
   | { kind: 'message'; item: Extract<TurnItem, { type: 'user_message' | 'assistant_message' }> }
-  | { kind: 'work'; id: string; parts: WorkPart[] };
+  | { kind: 'work'; id: string; parts: WorkPart[] }
+  /** A date separator, only in a thread that spans more than one day. */
+  | { kind: 'day'; id: string; label: string };
 
 const TOOL_TYPES: ReadonlySet<TurnItem['type']> = new Set(['command_execution', 'dynamic_tool', 'web_search', 'file_change']);
 const isTool = (i: TurnItem): boolean => TOOL_TYPES.has(i.type);
@@ -103,7 +105,42 @@ function groupParallel(entries: WorkEntry[]): WorkPart[] {
   return parts;
 }
 
+/** A subagent's own activity (items with `parent_item_id`), by card id. */
+export function subagentChildren(items: readonly TurnItem[]): Map<string, TurnItem[]> {
+  const out = new Map<string, TurnItem[]>();
+  for (const i of items) {
+    if (!i.parent_item_id) continue;
+    const list = out.get(i.parent_item_id);
+    if (list) list.push(i);
+    else out.set(i.parent_item_id, [i]);
+  }
+  return out;
+}
+
+/** How a finished turn went, for its status line: `partial` = it answered
+ *  but a step failed (Details / Retry), `stopped` = interrupted (neutral, not
+ *  an error), `stalled` = the watchdog stopped it. Null while running or
+ *  when it simply completed. */
+export type TurnOutcome = { kind: 'partial'; failed: TurnItem[]; retryText: string | null } | { kind: 'stopped' | 'stalled' };
+
+export function turnOutcome(p: RuntimeProjection, turn: ProviderTurn | null): TurnOutcome | null {
+  if (!turn || turn.status === 'running' || turn.status === 'pending') return null;
+  const own = p.items.filter((i) => i.turn_id === turn.id && !i.parent_item_id);
+  if (turn.status === 'interrupted' || turn.status === 'cancelled') {
+    return { kind: own.some((i) => i.id === `${turn.id}:stalled`) ? 'stalled' : 'stopped' };
+  }
+  if (turn.status !== 'completed') return null;
+  const answered = own.some((i) => i.type === 'assistant_message' && i.text.trim() !== '');
+  const failed = own.filter((i) => i.type !== 'system_notice' && (i.status === 'failed' || i.type === 'error'));
+  if (!answered || failed.length === 0) return null;
+  // Retry re-sends the message that started it (none for the agent's own turn).
+  const first = own.find((i) => i.type === 'user_message');
+  return { kind: 'partial', failed, retryText: first?.type === 'user_message' ? first.text : null };
+}
+
 export function timelineRows(items: readonly TurnItem[]): TimelineRow[] {
+  // A subagent's own items render inside its card, not in the timeline.
+  items = items.filter((i) => !i.parent_item_id);
   // An approval naming a tool item we have folds into that tool's row.
   const tools = new Set(items.filter(isTool).map((i) => i.id));
   const folded = new Map<string, ApprovalItem>();
@@ -126,7 +163,54 @@ export function timelineRows(items: readonly TurnItem[]): TimelineRow[] {
     }
   }
   flush();
-  return rows;
+  return withDays(rows, items);
+}
+
+const itemTime = (i: TurnItem): number => Date.parse(i.started_at ?? i.updated_at);
+const dayKey = (ms: number): string => new Date(ms).toDateString();
+
+/** "Today", "Yesterday", "Wed, Nov 4" (a past year adds it: "Mon, Dec 29, 2025"). */
+export function dayLabel(ms: number, now: Date = new Date()): string {
+  const d = new Date(ms);
+  if (d.toDateString() === now.toDateString()) return 'Today';
+  const y = new Date(now);
+  y.setDate(now.getDate() - 1);
+  if (d.toDateString() === y.toDateString()) return 'Yesterday';
+  const opts: Intl.DateTimeFormatOptions = { weekday: 'short', month: 'short', day: 'numeric' };
+  if (d.getFullYear() !== now.getFullYear()) opts.year = 'numeric';
+  return d.toLocaleDateString(undefined, opts);
+}
+
+/** Date separators before the first row of each day — only when the thread
+ *  spans more than one calendar day (a one-day chat stays uncluttered). */
+function withDays(rows: TimelineRow[], items: readonly TurnItem[], now: Date = new Date()): TimelineRow[] {
+  const at = new Map(items.map((i) => [i.id, itemTime(i)]));
+  const rowTime = (r: TimelineRow): number =>
+    (r.kind === 'message' ? at.get(r.item.id) : r.kind === 'work' ? at.get(r.id) : undefined) ?? NaN;
+  const days = new Set(rows.map(rowTime).filter(Number.isFinite).map(dayKey));
+  if (days.size < 2) return rows;
+  const out: TimelineRow[] = [];
+  let last = '';
+  for (const r of rows) {
+    const t = rowTime(r);
+    if (Number.isFinite(t) && dayKey(t) !== last) {
+      last = dayKey(t);
+      out.push({ kind: 'day', id: `day:${last}`, label: dayLabel(t, now) });
+    }
+    out.push(r);
+  }
+  return out;
+}
+
+/** Who a framed message came from — an agent's feed turn (`[Message from
+ *  Scheduled · Brief (t-1)]: body`) or a linked thread (`[Message from
+ *  thread "Fix CI" (claude, id …). Answer it with …]\n\nbody`). Null for a
+ *  message the user typed. */
+export function messageAttribution(text: string): { from: string; body: string } | null {
+  const thread = /^\[(?:Message from|Opened by) thread "([^"]*)"[^\]]*\]\s*\n\n?([\s\S]*)$/.exec(text);
+  if (thread) return { from: thread[1] || 'a linked thread', body: thread[2] };
+  const feed = /^\[Message from ([^\]]+?)(?: \([^()\]]*\))?\]: ([\s\S]*)$/.exec(text);
+  return feed ? { from: feed[1], body: feed[2] } : null;
 }
 
 /** T3's `summarizeToolGroup` sentence: "Ran 2 commands and searched the web 3 times". */
@@ -202,6 +286,8 @@ export function workLabel(item: TurnItem): string {
       return title ?? item.prompt ?? 'Approval requested';
     case 'system_notice':
       return item.message;
+    case 'subagent':
+      return title ?? item.description ?? item.subagent_type ?? 'Subagent';
     case 'error':
       return item.failure.class === 'usage_limit' ? 'Usage limit reached' : title || 'Provider error';
     default:

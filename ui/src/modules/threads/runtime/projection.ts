@@ -16,6 +16,7 @@ import type {
   ProviderSession,
   ProviderThread,
   ProviderTurn,
+  QueuedPrompt,
   RuntimeEvent,
   RuntimeReplay,
   RuntimeRequest,
@@ -32,12 +33,14 @@ export interface RuntimeProjection {
   items: TurnItem[];
   requests: RuntimeRequest[];
   plans: PlanArtifact[];
+  /** Messages queued behind the running turn (`queue.updated`), oldest first. */
+  queued: QueuedPrompt[];
   /** Live `command_output.delta` text per command item (never persisted). */
   output: Record<string, string>;
 }
 
 export function emptyProjection(): RuntimeProjection {
-  return { lastSequence: 0, session: null, thread: null, turns: [], items: [], requests: [], plans: [], output: {} };
+  return { lastSequence: 0, session: null, thread: null, turns: [], items: [], requests: [], plans: [], queued: [], output: {} };
 }
 
 export function fromSnapshot(snapshot: RuntimeSnapshot, sequence: number): RuntimeProjection {
@@ -49,6 +52,7 @@ export function fromSnapshot(snapshot: RuntimeSnapshot, sequence: number): Runti
     items: [...snapshot.turn_items].sort((a, b) => a.ordinal - b.ordinal),
     requests: snapshot.runtime_requests,
     plans: snapshot.plans,
+    queued: snapshot.queued_prompts ?? [],
     output: {},
   };
 }
@@ -94,6 +98,8 @@ function applyOne(p: RuntimeProjection, ev: RuntimeEvent): RuntimeProjection {
       return { ...next, requests: upsert(p.requests, ev.runtime_request) };
     case 'plan.updated':
       return { ...next, plans: upsert(p.plans, ev.plan) };
+    case 'queue.updated':
+      return { ...next, queued: ev.queued_prompts };
     case 'command_output.delta':
       return { ...next, output: { ...p.output, [ev.item_id]: (p.output[ev.item_id] ?? '') + ev.chunk } };
     case 'turn.terminal':

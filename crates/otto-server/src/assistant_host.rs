@@ -55,6 +55,15 @@ impl AssistantCtx for ServerCtx {
     fn agent_runtime(&self) -> &otto_agent_protocol::AgentRuntime {
         &self.agent_runtime
     }
+    fn reopen_thread<'a>(
+        &'a self,
+        id: &'a Id,
+    ) -> BoxFut<'a, Result<otto_core::agent_runtime::RuntimeSession>> {
+        Box::pin(self.agent_runtime.reopen(id))
+    }
+    fn thread_notice<'a>(&'a self, id: &'a Id, message: &'a str) -> BoxFut<'a, Result<()>> {
+        Box::pin(self.agent_runtime.notice(id, message))
+    }
     fn create_notice(&self, notice: otto_state::NewNotice) -> BoxFut<'_, Result<()>> {
         Box::pin(async move { self.notifications().create(notice).await.map(|_| ()) })
     }

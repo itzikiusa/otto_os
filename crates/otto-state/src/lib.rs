@@ -40,6 +40,7 @@ pub mod mcp_servers;
 pub mod memory;
 pub mod name_themes;
 pub mod notifications;
+pub mod personal_agent_delegations;
 pub mod personal_agents;
 pub mod plugins;
 pub mod product;
@@ -137,8 +138,9 @@ pub use mcp_profiles::{McpProfile, McpProfileFields, McpProfileRepo, FULL_PROFIL
 pub use mcp_servers::{McpServersRepo, NewMcpServer};
 pub use memory::{GovernedImport, MemoriesRepo};
 pub use notifications::{NewNotice, NoticeAccess, NotificationsRepo};
+pub use personal_agent_delegations::{DelegationsRepo, NewDelegation, PersonalAgentDelegation};
 pub use personal_agents::{
-    AgentAutonomy, AgentRule, ProactiveConfig, RuleEnforcement, StandingGoal,
+    AgentAutonomy, AgentRule, Personality, ProactiveConfig, RuleEnforcement, StandingGoal,
 };
 pub use personal_agents::{
     AgentRoom, AgentRoomMessage, AgentRoomsRepo, AgentSchedulePatch, FinishAgentRun, NewAgentRun,

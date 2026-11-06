@@ -488,7 +488,8 @@ pub(crate) async fn governed_invoke(
     // personal agent.
     let binds = matches!(short.as_str(), "room_post" | "room_read")
         || short.starts_with("thread_")
-        || short.starts_with("personal_agent_");
+        || short.starts_with("personal_agent_")
+        || is_agent_own_tool(&short);
     let bound_session = crate::ui_bridge::calling_session(auth).filter(|_| binds);
     let rebound;
     let arguments = match bound_session.map(String::as_str) {

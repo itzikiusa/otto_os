@@ -25,7 +25,9 @@
     loading = true;
     loadError = '';
     try {
-      grant = await api.get<PersonalAgentSlackGrant>(`/personal-agents/${encodeURIComponent(agentId)}/slack-as-me`);
+      const g = await api.get<Partial<PersonalAgentSlackGrant>>(`/personal-agents/${encodeURIComponent(agentId)}/slack-as-me`);
+      // An older daemon (or a partial reply) may omit the lists — never crash the panel.
+      grant = { ...g, teams: g.teams ?? [], available: g.available ?? [], is_owner: g.is_owner ?? false } as PersonalAgentSlackGrant;
       picked = [...grant.teams];
     } catch (e) {
       loadError = loadErrorText(e);

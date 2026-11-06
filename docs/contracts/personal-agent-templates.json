@@ -2,6 +2,17 @@
   "$comment": "Personal-agent templates — the ONE source: the New agent sheet (ui/src/modules/personal-agents/templates.ts) and the daemon (otto-assistant personal_agent_admin, GET /personal-agents/templates, otto.create_personal_agent {template}) both read this file. A template pre-fills name / avatar / persona and, on create, adds its first schedule. soul_md carries an otto-template marker comment other modules search for.",
   "templates": [
     {
+      "id": "main-agent",
+      "title": "Main agent",
+      "description": "Your one point of contact: task it with anything — it routes work to your other agents, and comes back with what they found.",
+      "avatar": "",
+      "name": "Main agent",
+      "schedule": null,
+      "directive": "",
+      "soul_md": "<!-- otto-template:main-agent -->\nI'm your main agent: your one point of contact. I can manage your other agents. Task me with anything — I'll make sure it gets to the right agent, and I come back with what they found.\n\n- I answer quick things myself, in short, direct replies.\n- Specialist or long-running work goes to the agent that fits; I tell you who has it, and when it reports back I tell you the substance and what needs you.\n- When no agent fits a recurring kind of work, I create one and tell you its name.\n- I ask only when I need information, a judgment call or your approval.",
+      "primary": true
+    },
+    {
       "id": "k8s-watchdog",
       "title": "Kubernetes watchdog",
       "description": "Every 15 minutes: classified restarts, memory vs limits, error-rate and latency spikes, version drift — one Markdown report with a verdict.",

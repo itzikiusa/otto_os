@@ -7,6 +7,41 @@ delivery, chat-anytime, and fully user-visible inter-agent rooms.
 > Contracts: the "Personal Agents", "Agent rooms" and "Model catalog" sections
 > of [`docs/contracts/api.md`](../contracts/api.md) are authoritative.
 
+## 0. The home — one conversation per agent
+
+`#/personal-agents` is a messenger-style home (`PersonalAgentsPage.svelte`):
+
+- **Rail** (`AgentRail.svelte`) — one avatar tile per agent: the **main agent
+  first, with a star**, then enabled before paused. Each tile has a live
+  presence dot — *working* (a run or a thread turn is going), *needs you* (a
+  thread waits on an approval), idle — fed by `personal_agent_run_updated` and
+  `agent_runtime_event`. **+** quick-creates an agent (name, personality,
+  avatar, optional template; "More options…" opens the full sheet). ⌘1–9
+  switch agents. On a phone the rail is a top strip.
+- **Conversation** (`AgentConversation.svelte`) — the agent's ONE continuous
+  chat (its Threads thread, rendered by the Threads conversation view). Before
+  the first message an intro stands in with "Try asking" chips (no tokens
+  until one is picked). The main agent's hand-offs show as live chips above
+  the chat (agent avatar · *working…* / *done* / *failed* / *stopped*; click →
+  the delegated thread). The header (avatar, name, status, next routine)
+  opens the side panel; ⋯ has Run now, Pause, Open chat in Threads, All
+  settings, Delete.
+- **Side panel** (`AgentSidePanel.svelte`): **Details** — who it is, model,
+  main-agent role, an "Update instructions?" card when the agent proposed a
+  change, **Personality**, **Routines** (live, with the next 3 runs, pause /
+  resume, "Describe a routine" → the agent sets it up in chat), what it can
+  use, Slack-as-me, **What it has learned** (its memory items, editable);
+  **Library** — run reports newest first (badged *Scheduled · …* / *Manual
+  run* / *Proactive*), memory, context; **Activity** — running runs (Stop),
+  hand-offs it led or works, its threads with what started each.
+- **All settings** — `#/personal-agents/<id>/<tab>` keeps the full page
+  (Overview, Activity, Autonomy, Schedules, Runs, Chat, Memory, Context).
+
+Avatars are in-repo character art (`ui/src/lib/assets/agents`, one per
+personality; stored as `avatar: "char:<id>"`; a glyph or initials still work)
+and the Otto mascot (`ui/src/lib/assets/mascot`) in the empty and idle states.
+They are emitted as files by Vite (never inlined) and load lazily.
+
 ## 1. Overview
 
 A personal agent is a small persistent entity (`personal_agents`,
@@ -86,7 +121,7 @@ timezone really changes. Re-enabling an agent after a week therefore doesn't fir
 creates them; the schedule form now supports them too — fires again after its
 `run_at` is edited and it is re-enabled.
 
-## 3. Chat anytime
+## 3. Chat anytime — the chat never dies, and everything lands in it
 
 `POST /personal-agents/{id}/chat-session` returns (creating if absent or
 closed) the caller's single chat with the agent — same persona cwd, same pinned
@@ -96,30 +131,62 @@ true`) and the agent page's **Chat** tab renders the Threads conversation view
 `ui/src/lib/runtimeThreadPort.ts`; **Open in Threads** hands it to the Threads
 page. Other providers keep an embedded terminal.
 
+**Permanent.** The caller's own pinned chat that was closed is **reopened in
+place** (`AssistantCtx::reopen_thread` → `AgentRuntime::reopen`: same history,
+the provider's session resumed) instead of a fresh empty thread; a CLI that
+exited respawns on the next prompt. (Until the runtime's reopen lands on the
+daemon build, the hook refuses and a fresh chat is opened, as before.)
+
+**Everything reports into it** (`personal_agent_feed.rs`). Every finished run
+— scheduled, manual or proactive, ok / failed / stopped — posts an attributed
+line into the owner's chat with the agent ("Scheduled · Morning brief — done:
+Two PRs need review"), as a turn-less system notice (`AgentRuntime::notice`).
+Where the runtime cannot show a notice yet, a scheduled or manual result is
+sent as a framed follow-up turn (`[Message from Scheduled · Morning brief
+(<run thread>)]: …`) so the agent tells you what it found; proactive runs never
+cost a turn. A busy chat is waited for (≤ 30 min); a closed one is reopened
+first.
+
 ## 3a. The main agent
 
-Mark one agent **Main agent** (Autonomy tab; one per workspace). It is the one
-you talk to; its persona lists your other agents and three team tools:
+One agent per workspace is the **main agent** — your one point of contact
+("Task me with anything; I'll make sure it gets to the right agent"). A new
+workspace seeds it (the first preset, with the `chief` personality); the
+`main-agent` template and the quick create's "Main agent" start make one; any
+agent becomes it from Details → *Make main agent*. Its persona lists your
+other agents and the team tools:
 
-- `otto.personal_agent_list` — the team (id, name, what each does, whether it
-  can be delegated to);
-- `otto.personal_agent_create` — when you ask ("create an agent that watches
-  the build"): a new enabled agent owned by you, `created_by_agent` = the main
-  agent (shown as **By <main agent>** on its card and page);
-- `otto.personal_agent_delegate` — from the main agent's Threads chat: opens
-  the agent as a **linked thread** of the chat (its own persona folder, as
-  itself, never wider than the chat — a read-only chat's delegate is
-  read-only) with the task as its first message.
+- `otto.personal_agent_list` — the team (id, name, what each does);
+- `otto.personal_agent_create` — when you ask, or a recurring kind of work no
+  agent covers: a new enabled agent owned by you, `created_by_agent` = the main
+  agent (shown on the agent);
+- `otto.personal_agent_delegate` — **non-blocking**: opens the agent as a
+  linked thread of the chat (its own persona folder, as itself, never wider
+  than the chat), and the main agent ends its turn.
 
-When a delegated turn ends, Otto sends its final reply back to the main
-agent's chat as a message from that thread (`Report from …`), so reporting
-back never depends on the agent remembering to; every other agent's persona
-names the main agent as its lead. The chat shows the linked threads as chips —
-click one to switch the chat view to that agent's thread (⇧-click opens it in
-Threads), **Back to chat** returns. Limits: the relay is in memory (a daemon
-restart drops a pending one; the report stays in the agent's thread);
-delegation needs the chat to be a Threads thread and the target on a Threads
-provider; read-only sessions cannot create or delegate.
+**Never dropped.** Every hand-off is a `personal_agent_delegations` row
+(0203) until its outcome is IN the main agent's chat. When the delegated turn
+ends, the outcome is posted there — a notice ("Report from Scout — done:
+Build is green") **and** the main agent's next turn with the report, told to
+relay its actual substance and listing the hand-offs still out (so it never
+re-sends or polls them). A failure (including a turn that ended with tool
+steps but no written reply), a stop, "still working after 4 h" and "an Otto
+restart interrupted it" (boot recovery settles open rows and delivers what is
+owed) all reach the chat too — the main agent never silently stops. The
+hand-off chips and the Activity tab show each one's live status
+(`GET /personal-agents/{id}/delegations`).
+
+What changed from the first version, and why: the main agent had to be set by
+hand (none existed by default, so "the main agent" did nothing); its prompt
+told it to handle things itself and gave no rules for reporting back, so it
+said work was "done" when it was only assigned, and answered "the report came
+through" instead of the substance; a delegated failure, an empty reply, a
+closed chat or a restart dropped the report silently (an in-memory relay with
+`warn!` on every error path); and routines needed the approval-gated admin
+tools. Now: a seeded main agent, chief-of-staff prompt rules ("assigned, not
+done", relay the substance, offer a retry ≤ 2 and never retry an outward
+step), a persisted relay that always ends in the chat, and own-scope routine
+tools (§3c).
 
 ## 3b. Agent admin — an agent sets agents up for you
 
@@ -152,6 +219,44 @@ by `PUT …/slack-as-me`. Why writes are off by default: the catalog invariant
 enabling the category is one click, after which every call still needs your
 approval. Templates have one source, `docs/contracts/personal-agent-templates.json`
 (the New-agent sheet imports it; `GET /personal-agents/templates` serves it).
+
+## 3c. An agent's own scope — routines, personality, learning
+
+Every personal agent manages **its own** routines straight from chat, with
+**no approval card** (they change nothing outside the agent, and every change
+shows in its Routines at once via `personal_agent_changed`). The main agent
+may manage its team's routines too (`agent: "<name>"`).
+
+- `otto.routine_create` — "every weekday at 9 Israel time, send me a Slack
+  message with …": the agent turns your words into a schedule (`daily`,
+  `weekly`, `days` with `days: "sun-thu"` / `"weekdays"` / a list, `interval`,
+  `cron`, `once`), the timezone defaults to yours (this Mac's), and the result
+  goes to the chat — or `deliver: {type: "slack", channel, as: "bot"|"me"}`
+  (as the Otto bot via the routine's own destination, `delivery_json`; as you
+  only with "Can act as me in Slack"). It answers with the next 3 runs.
+- `otto.routine_list` / `otto.routine_update` (`enabled: false` pauses) /
+  `otto.routine_delete`.
+- `otto.personality_set` — "be more blunt" (tone only; applies from its next
+  session).
+- `otto.instructions_propose` — the agent may PROPOSE new standing
+  instructions; Details shows **Update instructions?** with From / To, *Apply*
+  / *Edit first* / *Dismiss* (owner only), and *Undo* after applying. Agents
+  never rewrite their instructions themselves.
+
+**Personality** — a preset from `docs/contracts/personal-agent-personalities.json`
+(chief of staff, warm, blunt, nerdy, cynical, very strict, free-willed,
+autodidact, playful, formal, terse) plus your own words, rendered into the
+persona as "Your personality". It shapes tone in chat, reports and messages to
+other agents — never rules, permissions or approvals. Pick it at create time
+or in Details (with a sample answer).
+
+**Learning** — every persona tells the agent to keep `memory/notes.md` small
+and curated (one fact per line, rewrite rather than append, ≤ ~60 lines) and
+to record your corrections and preferences there; Details → *What it has
+learned* lists those items (edit / forget).
+
+All six tools are on by default (Sessions group), refused in read-only runs,
+and hidden from narrow review sessions.
 
 ## 4. Rooms — inter-agent messaging, always visible
 
@@ -324,11 +429,17 @@ skill-eval settings.
 
 ## 7. UI
 
-Sidebar → **Personal Agents**: agent cards (provider·model chip, next run, Run
-now, *Your agent* / *Proactive* badges; the primary agent first, with Chat) →
-agent page tabs **Overview / Activity / Autonomy / Schedules / Runs / Chat /
+Sidebar → **Personal Agents**: the home (§0) → *All settings* opens the agent
+page tabs **Overview / Activity / Autonomy / Schedules / Runs / Chat /
 Memory / Context**, plus a module-level **Rooms** view (live feed, membership
-editor, user post box). Schedules carry a *Read-only* chip when their
+editor, user post box).
+
+**In Threads** an agent's threads are grouped under the agent's **name** (from
+the thread meta `personal_agent_name`, or the daemon-given "Chat: X" / "Agent:
+X" title) — never its folder's id — and each row carries what started it:
+**Chat**, **Scheduled · <routine>**, **Manual run**, **Proactive** or
+**Delegated by <main agent>** (`ui/src/lib/personalAgentBadges.ts`, shared
+with the agent page's run lists). Schedules carry a *Read-only* chip when their
 permission set is read-only; runs show their mode and a read-only lock.
 
 An agent with UI control can drive this page visibly with the `otto.ui_pa_*`
@@ -342,6 +453,16 @@ where / what / who confirm and is never remembered. The templates come from
 the same file).
 
 ## 8. Capabilities & limits (v1)
+
+- The chat's reopen and turn-less notices need the runtime's `reopen` /
+  `notice` (otto-agent-protocol); until the daemon build has them the
+  `AssistantCtx` hooks refuse, a closed chat is replaced by a fresh one, and a
+  run result is posted as a framed follow-up turn instead of a notice.
+- The conversation view shows a `[Message from …]` post as a plain user
+  bubble with its header (an attributed card and date separators are a
+  Threads rendering follow-up).
+- Workspace **Scheduled Tasks** are a separate automation and are not linked
+  to an agent; Details points to them.
 
 - **Memory** displays the existing `memory/notes.md` as Markdown. Editors can
   edit the source, Save or Cancel. A concurrent change produces a conflict while
