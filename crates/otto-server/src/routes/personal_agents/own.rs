@@ -17,7 +17,8 @@ use serde_json::{json, Value};
 
 use otto_assistant::personal_agent_routines::{self as own, RoutineIn};
 use otto_assistant::personal_agent_team as team;
-use otto_core::domain::{User, WorkspaceRole};
+use otto_core::domain::User;
+use otto_core::domain::WorkspaceRole::{self, Editor, Viewer};
 use otto_core::Error;
 use otto_state::PersonalAgent;
 
@@ -98,14 +99,7 @@ async fn list(
     CurrentAuthContext(auth): CurrentAuthContext,
     Query(q): Query<OwnQuery>,
 ) -> ApiResult<Json<Value>> {
-    let me = caller(
-        &ctx,
-        &user,
-        &auth,
-        q.session_id.as_deref(),
-        WorkspaceRole::Viewer,
-    )
-    .await?;
+    let me = caller(&ctx, &user, &auth, q.session_id.as_deref(), Viewer).await?;
     let agent = own::target(&ctx, &me, q.agent.as_deref()).await?;
     Ok(Json(own::list(&ctx, &agent).await?))
 }
@@ -117,14 +111,7 @@ async fn create(
     CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<RoutineReq>,
 ) -> ApiResult<Json<Value>> {
-    let me = caller(
-        &ctx,
-        &user,
-        &auth,
-        req.session_id.as_deref(),
-        WorkspaceRole::Editor,
-    )
-    .await?;
+    let me = caller(&ctx, &user, &auth, req.session_id.as_deref(), Editor).await?;
     let agent = own::target(&ctx, &me, req.agent.as_deref()).await?;
     Ok(Json(own::create(&ctx, &agent, req.routine).await?))
 }
@@ -137,14 +124,7 @@ async fn update(
     CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<RoutineReq>,
 ) -> ApiResult<Json<Value>> {
-    let me = caller(
-        &ctx,
-        &user,
-        &auth,
-        req.session_id.as_deref(),
-        WorkspaceRole::Editor,
-    )
-    .await?;
+    let me = caller(&ctx, &user, &auth, req.session_id.as_deref(), Editor).await?;
     let agent = own::target(&ctx, &me, req.agent.as_deref()).await?;
     Ok(Json(own::update(&ctx, &agent, &id, req.routine).await?))
 }
@@ -157,14 +137,7 @@ async fn remove(
     CurrentAuthContext(auth): CurrentAuthContext,
     Query(q): Query<OwnQuery>,
 ) -> ApiResult<Json<Value>> {
-    let me = caller(
-        &ctx,
-        &user,
-        &auth,
-        q.session_id.as_deref(),
-        WorkspaceRole::Editor,
-    )
-    .await?;
+    let me = caller(&ctx, &user, &auth, q.session_id.as_deref(), Editor).await?;
     let agent = own::target(&ctx, &me, q.agent.as_deref()).await?;
     Ok(Json(own::delete(&ctx, &agent, &id).await?))
 }
@@ -186,14 +159,7 @@ async fn self_personality(
     CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<PersonalityReq>,
 ) -> ApiResult<Json<Value>> {
-    let me = caller(
-        &ctx,
-        &user,
-        &auth,
-        req.session_id.as_deref(),
-        WorkspaceRole::Editor,
-    )
-    .await?;
+    let me = caller(&ctx, &user, &auth, req.session_id.as_deref(), Editor).await?;
     let p = own::set_personality(&ctx, &me, req.preset.as_deref(), req.note.as_deref()).await?;
     Ok(Json(
         json!({"personality": p, "applies": "from your next session"}),
@@ -217,14 +183,7 @@ async fn self_propose(
     CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<ProposeReq>,
 ) -> ApiResult<Json<Value>> {
-    let me = caller(
-        &ctx,
-        &user,
-        &auth,
-        req.session_id.as_deref(),
-        WorkspaceRole::Editor,
-    )
-    .await?;
+    let me = caller(&ctx, &user, &auth, req.session_id.as_deref(), Editor).await?;
     Ok(Json(
         own::propose(&ctx, &me, &req.instructions, &req.reason).await?,
     ))
@@ -254,7 +213,7 @@ async fn agent_routines(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Value>> {
-    let agent = load(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
+    let agent = load(&ctx, &user, &id, Viewer).await?;
     Ok(Json(own::list(&ctx, &agent).await?))
 }
 
@@ -274,7 +233,7 @@ async fn set_personality(
     CurrentUser(user): CurrentUser,
     Json(req): Json<UserPersonalityReq>,
 ) -> ApiResult<Json<Value>> {
-    let agent = load(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let agent = load(&ctx, &user, &id, Editor).await?;
     if req.note.is_some() {
         super::require_agent_owner(&ctx, &user, &agent, &["personality note"]).await?;
     }
@@ -288,7 +247,7 @@ async fn read_proposal(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Value>> {
-    let agent = load(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
+    let agent = load(&ctx, &user, &id, Viewer).await?;
     Ok(Json(json!({
         "proposal": own::proposal(&ctx, &agent).await?,
         "can_undo": own::can_undo(&ctx, &agent).await,
@@ -309,7 +268,7 @@ async fn apply_proposal(
     CurrentUser(user): CurrentUser,
     Json(req): Json<ApplyReq>,
 ) -> ApiResult<Json<Value>> {
-    let agent = load(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let agent = load(&ctx, &user, &id, Editor).await?;
     super::require_agent_owner(&ctx, &user, &agent, &["instructions"]).await?;
     let to = own::apply_proposal(&ctx, &agent, req.text.as_deref()).await?;
     Ok(Json(json!({"ok": true, "soul_md": to})))
@@ -321,7 +280,7 @@ async fn dismiss_proposal(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Value>> {
-    let agent = load(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let agent = load(&ctx, &user, &id, Editor).await?;
     own::dismiss_proposal(&ctx, &agent).await?;
     Ok(Json(json!({"ok": true})))
 }
@@ -333,7 +292,7 @@ async fn undo(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Value>> {
-    let agent = load(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let agent = load(&ctx, &user, &id, Editor).await?;
     super::require_agent_owner(&ctx, &user, &agent, &["instructions"]).await?;
     let prev = own::undo_instructions(&ctx, &agent).await?;
     Ok(Json(json!({"ok": true, "soul_md": prev})))
