@@ -255,7 +255,7 @@
         if (f.model !== undefined) fModel = f.model;
         if (f.schedule) {
           scheduleOverride = f.schedule;
-          scheduleNote = `Adds a schedule: ${cadenceLabel(f.schedule.schedule, f.schedule.timezone ?? '')}`;
+          scheduleNote = `Adds a schedule: ${cadenceLabel(f.schedule.schedule, f.schedule.timezone ?? '', { cronWords: true })}`;
         }
       },
       async submit() {

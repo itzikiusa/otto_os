@@ -348,7 +348,7 @@
               <li class="sp-routine" data-schedule-id={s.id}>
                 <div class="sp-routine-main">
                   <strong class="ellipsis" dir="auto" title={s.directive}>{routineName(s)}</strong>
-                  <span class="sp-dim">{cadenceLabel(s.schedule, s.timezone)}{r?.deliver.type === 'slack' ? ` · Slack${r.deliver.as === 'me' ? ' as you' : ''}` : ''}</span>
+                  <span class="sp-dim">{cadenceLabel(s.schedule, s.timezone, { cronWords: true })}{r?.deliver.type === 'slack' ? ` · Slack${r.deliver.as === 'me' ? ' as you' : ''}` : ''}</span>
                   {#if !s.enabled}
                     <span class="sp-dim">Paused</span>
                   {:else if !agent.enabled}

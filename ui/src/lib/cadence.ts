@@ -32,10 +32,70 @@ export function everyLabel(min: number): string {
   return `Every ${min} min`;
 }
 
+const DOW_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const DOW_PLURAL = ['Sundays', 'Mondays', 'Tuesdays', 'Wednesdays', 'Thursdays', 'Fridays', 'Saturdays'];
+
+/** Cron day-of-week field → sorted days (0 = Sun; 7 folds to 0), or null. */
+function cronDays(f: string): number[] | null {
+  const days = new Set<number>();
+  for (const part of f.split(',')) {
+    const m = /^(\d)(?:-(\d))?$/.exec(part);
+    if (!m) return null;
+    const a = Number(m[1]);
+    const b = m[2] === undefined ? a : Number(m[2]);
+    if (a > 7 || b > 7 || b < a) return null;
+    for (let d = a; d <= b; d++) days.add(d % 7);
+  }
+  return [...days].sort((x, y) => x - y);
+}
+
+/** Days as people say them: "Weekdays", "Sun–Thu", "Mondays", "Mon, Wed, Fri". */
+function daysLabel(days: number[]): string {
+  const key = days.join('');
+  if (days.length === 7) return 'Every day';
+  if (key === '12345') return 'Weekdays';
+  if (key === '06') return 'Weekends';
+  if (days.length === 1) return DOW_PLURAL[days[0]];
+  // A contiguous run, wrapping past Saturday (Sun–Thu is 0..4; Fri–Sun wraps).
+  for (let start = 0; start < 7; start++) {
+    const run = days.map((_, i) => (start + i) % 7);
+    if (run.every((d) => days.includes(d)) && days.length > 2) {
+      return `${DOW_SHORT[run[0]]}–${DOW_SHORT[run[run.length - 1]]}`;
+    }
+  }
+  return days.map((d) => DOW_SHORT[d]).join(', ');
+}
+
+/** A common cron in words ("Sun–Thu at 09:00", "Every day at 07:30",
+ *  "Monthly on day 1 at 08:00", "Every hour at :15"); null when the
+ *  expression is anything less ordinary — callers then show it raw. */
+export function cronHuman(expr: string): string | null {
+  const f = expr.trim().split(/\s+/);
+  if (f.length !== 5) return null;
+  const [mi, hr, dom, mon, dow] = f;
+  if (!/^\d{1,2}$/.test(mi) || Number(mi) > 59 || mon !== '*') return null;
+  const mm = mi.padStart(2, '0');
+  if (hr === '*' && dom === '*' && dow === '*') return `Every hour at :${mm}`;
+  if (!/^\d{1,2}$/.test(hr) || Number(hr) > 23) return null;
+  const at = `${hr.padStart(2, '0')}:${mm}`;
+  if (dom === '*' && dow === '*') return `Every day at ${at}`;
+  if (dom === '*') {
+    const days = cronDays(dow);
+    return days && days.length ? `${daysLabel(days)} at ${at}` : null;
+  }
+  if (/^\d{1,2}$/.test(dom) && Number(dom) >= 1 && Number(dom) <= 31 && dow === '*') {
+    return `Monthly on day ${Number(dom)} at ${at}`;
+  }
+  return null;
+}
+
 export interface CadenceLabelOptions {
   /** Include a cron schedule's expression and timezone ("Cron 0 9 * * 1 · UTC").
    *  False where the row renders the expression itself, in mono. Default true. */
   cronExpr?: boolean;
+  /** Say a common cron in words ("Sun–Thu at 09:00 · UTC", [`cronHuman`]);
+   *  an unusual one still reads "Cron <expr> · <tz>". Default false. */
+  cronWords?: boolean;
 }
 
 /** Human cadence for a stored schedule ("Daily at 03:00 · Europe/London"). */
@@ -50,6 +110,8 @@ export function cadenceLabel(
   if (c === 'interval') return everyLabel(Number(s.every_min ?? 60));
   if (c === 'cron') {
     const expr = typeof s.expr === 'string' ? s.expr.trim() : '';
+    const words = opts.cronWords && expr ? cronHuman(expr) : null;
+    if (words) return `${words} · ${tz}`;
     return opts.cronExpr === false || !expr ? 'Cron' : `Cron ${expr} · ${tz}`;
   }
   if (c === 'once') {

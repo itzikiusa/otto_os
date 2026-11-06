@@ -113,7 +113,7 @@
         <span class="conv-status" data-presence={presence}>
           <span class="conv-dot {agent.enabled ? presence : 'paused'}" aria-hidden="true"></span>
           {agent.enabled ? STATUS[presence] : 'Paused'}
-          {#if agent.enabled && next} · next routine <RelTime iso={next} />{/if}
+          {#if agent.enabled && next}<span>· next routine <RelTime iso={next} /></span>{/if}
         </span>
       </span>
       <Icon name="chevronRight" size={14} />
