@@ -153,7 +153,7 @@ test('timeline groups consecutive work items between messages', () => {
   const work = (id: string, ordinal: number): TurnItem => ({ ...base, id, ordinal, type: 'reasoning', text: 'hmm', streaming: false });
   const rows = timelineRows([user(1), work('w1', 2), work('w2', 3), assistant('ok', false, 4)]);
   assert.deepEqual(
-    rows.map((r) => (r.kind === 'work' ? r.parts.map((x) => (x.kind === 'item' ? x.entry.item.id : '?')).join('+') : r.item.id)),
+    rows.map((r) => (r.kind === 'work' ? r.parts.map((x) => (x.kind === 'item' ? x.entry.item.id : '?')).join('+') : r.kind === 'day' ? r.label : r.item.id)),
     ['u1', 'w1+w2', 'a1'],
   );
   assert.equal(workLabel(work('w', 1)), 'Thinking');
@@ -192,7 +192,9 @@ const shape = (rows: TimelineRow[]): string[] =>
   rows.map((r) =>
     r.kind === 'message'
       ? r.item.id
-      : r.parts
+      : r.kind === 'day'
+        ? r.label
+        : r.parts
           .map((x) =>
             x.kind === 'item'
               ? x.entry.item.id + (x.entry.approval ? `[${x.entry.approval.id}]` : '')

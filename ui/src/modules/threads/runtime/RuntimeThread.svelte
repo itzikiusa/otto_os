@@ -40,7 +40,7 @@
   import RuntimeQueueBar from './RuntimeQueueBar.svelte';
   import RuntimeTurnStatus from './RuntimeTurnStatus.svelte';
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
-  import { approvalOutcome, isRunning, latestTurn, pendingApprovals, subagentChildren, timelineRows, turnOutcome, type WorkEntry } from './timeline';
+  import { approvalOutcome, isRunning, latestTurn, messageAttribution, pendingApprovals, subagentChildren, timelineRows, turnOutcome, type WorkEntry } from './timeline';
   import { readAttachments, runViewSlash, type ComposerFile } from './runtimeComposer';
   import RuntimeAccessChip from './RuntimeAccessChip.svelte';
   import RuntimeApprovalRow from './RuntimeApprovalRow.svelte';
@@ -331,7 +331,12 @@
           />
         {/if}
         {#each rows as row (row.kind === 'message' ? row.item.id : row.id)}
-          {#if row.kind === 'message' && row.item.type === 'user_message'}
+          {#if row.kind === 'day'}
+            <div class="rt-day" role="separator" aria-label={row.label}><span>{row.label}</span></div>
+          {:else if row.kind === 'message' && row.item.type === 'user_message' && messageAttribution(row.item.text)}
+            {@const a = messageAttribution(row.item.text)!}
+            <div class="rt-from" data-testid="rt-from"><span class="rt-from-h"><Icon name="send" size={12} /> From {a.from}</span><Markdown md={a.body} /></div>
+          {:else if row.kind === 'message' && row.item.type === 'user_message'}
             <div class="rt-user">
               {#if row.item.attachments?.length}<RuntimeAttachments {sessionId} attachments={row.item.attachments} />{/if}
               {#if row.item.text}<div class="rt-bubble" dir="auto">{row.item.text}</div>{/if}
@@ -580,62 +585,10 @@
     margin-inline-start: 2px;
     color: var(--text-dim);
   }
-  .rt-work {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
-    padding-block-end: 10px;
-  }
-  .rt-dock {
-    inline-size: 100%;
-    max-inline-size: 760px;
-    margin-inline: auto;
-    padding-inline: 16px;
-  }
-  /* T3's MessagesTimeline rhythm: a turn opens with clear air above the
-     user bubble; the answer and its work log sit close beneath it. */
-  .rt-col {
-    display: flex;
-    flex-direction: column;
-    padding-block: 16px 24px;
-  }
-  .rt-user {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 6px;
-    padding-block-end: 12px;
-  }
-  .rt-user:not(:first-child) {
-    margin-block-start: 20px;
-  }
-  .rt-assistant {
-    padding-block-end: 12px;
-  }
-  .rt-assistant :global(:is(code, a.ref-chip)) {
-    unicode-bidi: isolate;
-  }
-  .rt-bubble {
-    max-inline-size: min(80%, 78ch);
-    padding: 8px 14px;
-    border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border));
-    border-radius: var(--radius-l);
-    background: color-mix(in srgb, var(--accent) 16%, var(--surface));
-    color: var(--text);
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    unicode-bidi: plaintext;
-  }
-  .rt-assistant {
-    min-width: 0;
-    color: var(--text);
-  }
-  .rt-assistant.streaming :global(.md > :last-child)::after {
-    content: '▍';
-    margin-inline-start: 2px;
-    color: var(--text-dim);
-  }
+  .rt-day { display: flex; align-items: center; gap: 10px; margin-block: 8px 14px; color: var(--text-dim); font-size: var(--fs-s); }
+  .rt-day::before, .rt-day::after { content: ''; flex: 1; border-block-start: 1px solid var(--border); }
+  .rt-from { margin-block: 12px; padding: 8px 12px; border-inline-start: 3px solid var(--accent-solid); border-radius: var(--radius-m); background: var(--surface-2); min-width: 0; }
+  .rt-from-h { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-s); font-weight: 600; color: var(--accent-text); }
   .rt-work {
     display: flex;
     flex-direction: column;

@@ -69,7 +69,9 @@ export type WorkPart = { kind: 'item'; entry: WorkEntry } | { kind: 'group'; id:
  *  (T3's work-log group between messages). */
 export type TimelineRow =
   | { kind: 'message'; item: Extract<TurnItem, { type: 'user_message' | 'assistant_message' }> }
-  | { kind: 'work'; id: string; parts: WorkPart[] };
+  | { kind: 'work'; id: string; parts: WorkPart[] }
+  /** A date separator, only in a thread that spans more than one day. */
+  | { kind: 'day'; id: string; label: string };
 
 const TOOL_TYPES: ReadonlySet<TurnItem['type']> = new Set(['command_execution', 'dynamic_tool', 'web_search', 'file_change']);
 const isTool = (i: TurnItem): boolean => TOOL_TYPES.has(i.type);
@@ -161,7 +163,54 @@ export function timelineRows(items: readonly TurnItem[]): TimelineRow[] {
     }
   }
   flush();
-  return rows;
+  return withDays(rows, items);
+}
+
+const itemTime = (i: TurnItem): number => Date.parse(i.started_at ?? i.updated_at);
+const dayKey = (ms: number): string => new Date(ms).toDateString();
+
+/** "Today", "Yesterday", "Wed, Nov 4" (a past year adds it: "Mon, Dec 29, 2025"). */
+export function dayLabel(ms: number, now: Date = new Date()): string {
+  const d = new Date(ms);
+  if (d.toDateString() === now.toDateString()) return 'Today';
+  const y = new Date(now);
+  y.setDate(now.getDate() - 1);
+  if (d.toDateString() === y.toDateString()) return 'Yesterday';
+  const opts: Intl.DateTimeFormatOptions = { weekday: 'short', month: 'short', day: 'numeric' };
+  if (d.getFullYear() !== now.getFullYear()) opts.year = 'numeric';
+  return d.toLocaleDateString(undefined, opts);
+}
+
+/** Date separators before the first row of each day — only when the thread
+ *  spans more than one calendar day (a one-day chat stays uncluttered). */
+function withDays(rows: TimelineRow[], items: readonly TurnItem[], now: Date = new Date()): TimelineRow[] {
+  const at = new Map(items.map((i) => [i.id, itemTime(i)]));
+  const rowTime = (r: TimelineRow): number =>
+    (r.kind === 'message' ? at.get(r.item.id) : r.kind === 'work' ? at.get(r.id) : undefined) ?? NaN;
+  const days = new Set(rows.map(rowTime).filter(Number.isFinite).map(dayKey));
+  if (days.size < 2) return rows;
+  const out: TimelineRow[] = [];
+  let last = '';
+  for (const r of rows) {
+    const t = rowTime(r);
+    if (Number.isFinite(t) && dayKey(t) !== last) {
+      last = dayKey(t);
+      out.push({ kind: 'day', id: `day:${last}`, label: dayLabel(t, now) });
+    }
+    out.push(r);
+  }
+  return out;
+}
+
+/** Who a framed message came from — an agent's feed turn (`[Message from
+ *  Scheduled · Brief (t-1)]: body`) or a linked thread (`[Message from
+ *  thread "Fix CI" (claude, id …). Answer it with …]\n\nbody`). Null for a
+ *  message the user typed. */
+export function messageAttribution(text: string): { from: string; body: string } | null {
+  const thread = /^\[(?:Message from|Opened by) thread "([^"]*)"[^\]]*\]\s*\n\n?([\s\S]*)$/.exec(text);
+  if (thread) return { from: thread[1] || 'a linked thread', body: thread[2] };
+  const feed = /^\[Message from ([^\]]+?)(?: \([^()\]]*\))?\]: ([\s\S]*)$/.exec(text);
+  return feed ? { from: feed[1], body: feed[2] } : null;
 }
 
 /** T3's `summarizeToolGroup` sentence: "Ran 2 commands and searched the web 3 times". */

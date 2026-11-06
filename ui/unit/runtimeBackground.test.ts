@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyEvents, emptyProjection, type RuntimeProjection } from '../src/modules/threads/runtime/projection.ts';
-import { isRunning, latestTurn, subagentChildren, timelineRows, turnOutcome, workLabel } from '../src/modules/threads/runtime/timeline.ts';
+import { dayLabel, isRunning, latestTurn, messageAttribution, subagentChildren, timelineRows, turnOutcome, workLabel } from '../src/modules/threads/runtime/timeline.ts';
 import type { ProviderTurn, RuntimeEvent, RuntimeEventBody, TurnItem } from '../src/lib/api/types';
 
 const TS = '2026-11-05T10:00:00Z';
@@ -57,7 +57,7 @@ test("a subagent's activity renders inside its card, not in the timeline", () =>
     it('a', 5, 't1', { type: 'assistant_message', message_id: 'm', text: 'Waiting for the sweep', streaming: false }),
   ];
   const rows = timelineRows(items);
-  const ids = rows.flatMap((r) => (r.kind === 'message' ? [r.item.id] : r.parts.flatMap((x) => (x.kind === 'item' ? [x.entry.item.id] : x.entries.map((e) => e.item.id)))));
+  const ids = rows.flatMap((r) => (r.kind === 'message' ? [r.item.id] : r.kind === 'day' ? [] : r.parts.flatMap((x) => (x.kind === 'item' ? [x.entry.item.id] : x.entries.map((e) => e.item.id)))));
   assert.deepEqual(ids, ['u', 't1:tool:a', 'a']);
   assert.deepEqual(subagentChildren(items).get('t1:tool:a')?.map((i) => i.id), ['t1:sub:a:s1:0', 't1:tool:r']);
   assert.equal(workLabel(card), 'PR sweep');
@@ -86,4 +86,24 @@ test('a finished turn: stopped is neutral, a failed step with an answer is partl
   assert.equal(turnOutcome(clean, latestTurn(clean)), null);
   const noAnswer = fold([turnEv(1, { id: 't1', ordinal: 1 }), ev(2, { type: 'turn_item.updated', turn_item: items[1] })]);
   assert.equal(turnOutcome(noAnswer, latestTurn(noAnswer)), null);
+});
+
+test('day separators appear only when a thread spans days; framed messages are attributed', () => {
+  const at = (id: string, iso: string, type: 'user_message' | 'assistant_message' = 'user_message') =>
+    ({ id, turn_id: 't', ordinal: 0, status: 'completed', title: null, started_at: iso, completed_at: iso, updated_at: iso, type, text: id }) as TurnItem;
+  const one = timelineRows([at('a', '2026-11-05T10:00:00'), at('b', '2026-11-05T11:00:00', 'assistant_message')]);
+  assert.equal(one.filter((r) => r.kind === 'day').length, 0);
+  const two = timelineRows([at('a', '2026-11-04T10:00:00'), at('b', '2026-11-05T11:00:00')]);
+  assert.deepEqual(two.map((r) => r.kind), ['day', 'message', 'day', 'message']);
+  const now = new Date('2026-11-05T12:00:00');
+  assert.equal(dayLabel(Date.parse('2026-11-05T09:00:00'), now), 'Today');
+  assert.equal(dayLabel(Date.parse('2026-11-04T09:00:00'), now), 'Yesterday');
+  assert.match(dayLabel(Date.parse('2025-12-29T09:00:00'), now), /2025/);
+  assert.deepEqual(messageAttribution('[Message from Scheduled · Brief (t-1)]: Two builds failed'), { from: 'Scheduled · Brief', body: 'Two builds failed' });
+  assert.deepEqual(messageAttribution('[Message from Scout]: done'), { from: 'Scout', body: 'done' });
+  assert.deepEqual(
+    messageAttribution('[Message from thread "Fix CI" (claude, id 01X). Answer it with the otto_thread_message tool (session_id 01X); see every linked thread with otto_thread_list.]\n\nPlease rebase'),
+    { from: 'Fix CI', body: 'Please rebase' },
+  );
+  assert.equal(messageAttribution('just my own [note]: hi'), null);
 });
