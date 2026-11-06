@@ -20,8 +20,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use otto_core::agent_runtime::{
-    CreateRuntimeSessionReq, OpenPeerReq, PeerInfo, PeerMessageReq, PeerReply, RuntimePromptReq,
-    RuntimePromptResp, RuntimeReplay, RuntimeRequestRespondReq, RuntimeSession,
+    CreateRuntimeSessionReq, OpenPeerReq, PeerInfo, PeerMessageReq, PeerReply, QueuedDeliverReq,
+    RuntimePromptReq, RuntimePromptResp, RuntimeReplay, RuntimeRequestRespondReq, RuntimeSession,
     UpdateRuntimeSessionReq,
 };
 use otto_core::api::Problem;
@@ -72,7 +72,7 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
         )
         .route(
             "/runtime-sessions/{id}",
-            get(get_one::<S>).patch(rename::<S>),
+            get(get_one::<S>).patch(rename::<S>).delete(delete_one::<S>),
         )
         // Inline base64 images ride in the body (axum's default cap is 2 MB).
         .route(
@@ -85,6 +85,11 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
             post(answer::<S>),
         )
         .route("/runtime-sessions/{id}/close", post(close::<S>))
+        .route("/runtime-sessions/{id}/reopen", post(reopen::<S>))
+        .route(
+            "/runtime-sessions/{id}/queue/{queued_id}",
+            post(deliver_queued::<S>).delete(unqueue::<S>),
+        )
         .route("/runtime-sessions/{id}/events", get(events::<S>))
         .route(
             "/runtime-sessions/{id}/attachments/{attachment_id}",
@@ -336,6 +341,68 @@ async fn close<S: RuntimeCtx>(
     require_human(&ctx, &auth)?;
     authorized(&ctx, &user, &id).await?;
     Ok(Json(ctx.agent_runtime().close(&id).await?))
+}
+
+/// POST /runtime-sessions/{id}/reopen — a closed thread takes prompts again
+/// (its agent respawns, resuming the provider's thread).
+async fn reopen<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<RuntimeSession>> {
+    require_human(&ctx, &auth)?;
+    authorized(&ctx, &user, &id).await?;
+    Ok(Json(ctx.agent_runtime().reopen(&id).await?))
+}
+
+/// DELETE /runtime-sessions/{id} — stop its agent and remove it with its history.
+async fn delete_one<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Id>,
+) -> ApiResult<StatusCode> {
+    require_human(&ctx, &auth)?;
+    authorized(&ctx, &user, &id).await?;
+    ctx.agent_runtime().delete(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /runtime-sessions/{id}/queue/{queued_id} — deliver a queued message
+/// now (`steer` into the running turn, or `interrupt` it and send next).
+async fn deliver_queued<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path((id, queued_id)): Path<(Id, String)>,
+    Json(req): Json<QueuedDeliverReq>,
+) -> ApiResult<(StatusCode, Json<RuntimePromptResp>)> {
+    require_human(&ctx, &auth)?;
+    authorized(&ctx, &user, &id).await?;
+    let r = ctx
+        .agent_runtime()
+        .deliver_queued(&id, &queued_id, req.delivery)
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(r)))
+}
+
+/// DELETE /runtime-sessions/{id}/queue/{queued_id} — drop a queued message.
+async fn unqueue<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path((id, queued_id)): Path<(Id, String)>,
+) -> ApiResult<StatusCode> {
+    require_human(&ctx, &auth)?;
+    authorized(&ctx, &user, &id).await?;
+    if ctx.agent_runtime().unqueue(&id, &queued_id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiErr(Error::NotFound(
+            "that message is no longer queued".into(),
+        )))
+    }
 }
 
 /// GET /runtime-sessions/{id}/attachments/{attachment_id} — the raw bytes.

@@ -9,6 +9,7 @@ use std::time::Duration;
 use chrono::Utc;
 use otto_agent_protocol::acp::AcpDriver;
 use otto_agent_protocol::agy::AgyDriver;
+use otto_agent_protocol::claude::ClaudeDriver;
 use otto_agent_protocol::codex::CodexDriver;
 use otto_agent_protocol::ring::RingLimits;
 use otto_agent_protocol::{
@@ -151,6 +152,9 @@ fn drivers() -> Arc<dyn DriverFactory> {
                 fake_bin!("otto-fake-agent"),
                 vec!["--refuse-session".into()],
             )),
+            RuntimeProvider::Claude => {
+                Box::new(ClaudeDriver::with_program(fake_bin!("otto-fake-claude")))
+            }
             _ => Box::new(AcpDriver::new(p, fake_bin!("otto-fake-agent"), Vec::new())),
         })
     })
@@ -1493,5 +1497,389 @@ async fn linked_threads_open_message_and_read_within_their_group() {
     assert_eq!(
         closed.status,
         otto_core::agent_runtime::RuntimeSessionStatus::Closed
+    );
+}
+
+// ---- Claude (otto-fake-claude): background work, own turns, queue, reopen ----
+
+fn turns(host: &TestHost) -> Vec<otto_core::agent_runtime::ProviderTurn> {
+    let mut by_id = std::collections::BTreeMap::new();
+    for e in host.all() {
+        if let RuntimeEventBody::ProviderTurnUpdated { provider_turn } = e.body {
+            by_id.insert(provider_turn.id.clone(), provider_turn);
+        }
+    }
+    let mut v: Vec<_> = by_id.into_values().collect();
+    v.sort_by_key(|t| t.ordinal);
+    v
+}
+
+fn is_agent_turn_running(e: &RuntimeEvent) -> bool {
+    matches!(&e.body, RuntimeEventBody::ProviderTurnUpdated { provider_turn }
+        if provider_turn.origin == otto_core::agent_runtime::TurnOrigin::Agent
+            && provider_turn.status == ProviderTurnStatus::Running)
+}
+
+fn user_texts(host: &TestHost) -> Vec<String> {
+    host.items()
+        .into_iter()
+        .filter_map(|i| match i.kind {
+            TurnItemKind::UserMessage { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+fn notices(host: &TestHost) -> Vec<String> {
+    host.items()
+        .into_iter()
+        .filter_map(|i| match i.kind {
+            TurnItemKind::SystemNotice { message } => Some(message),
+            _ => None,
+        })
+        .collect()
+}
+
+fn queued(mode: otto_core::agent_runtime::PromptDelivery, text: &str) -> RuntimePromptReq {
+    RuntimePromptReq {
+        delivery: Some(mode),
+        ..RuntimePromptReq::of(text)
+    }
+}
+
+#[tokio::test]
+async fn claude_background_work_keeps_the_thread_busy_until_its_own_turn_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    rt.prompt(&s.id, "bg 1").await.unwrap();
+    host.wait(is_terminal).await;
+    // The person's turn ended, the background command did not.
+    let r = rt.latest_reply(&s.id, Duration::ZERO).await.unwrap();
+    assert!(r.busy, "pending background work is busy");
+    assert_eq!(r.background_tasks, 1);
+    assert_eq!(r.text, "Waiting for it.");
+    let live = rt.get(&s.id).await.unwrap();
+    assert_eq!(live.background_tasks.len(), 1);
+    assert_eq!(live.background_tasks[0].kind, "command");
+    // It finishes; the agent continues on its own, and the reply waits for that.
+    let r = rt.latest_reply(&s.id, WAIT).await.unwrap();
+    assert!(!r.busy && r.background_tasks == 0);
+    assert_eq!(r.text, "Background done: ok");
+    assert_eq!(r.turn_status.as_deref(), Some("completed"));
+    let t = turns(&host);
+    assert_eq!(t.len(), 2);
+    assert_eq!(t[1].origin, otto_core::agent_runtime::TurnOrigin::Agent);
+    assert_eq!(t[1].status, ProviderTurnStatus::Completed);
+    assert_eq!(
+        user_texts(&host),
+        vec!["bg 1".to_string()],
+        "no user message"
+    );
+    assert!(notices(&host).contains(&"Background command finished: sleep 300".to_string()));
+    // The session event carried the list, then cleared it.
+    let lists: Vec<usize> = host
+        .all()
+        .into_iter()
+        .filter_map(|e| match e.body {
+            RuntimeEventBody::ProviderSessionUpdated { provider_session } => {
+                Some(provider_session.background_tasks.len())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(lists.contains(&1) && lists.last() == Some(&0), "{lists:?}");
+    assert!(rt.get(&s.id).await.unwrap().background_tasks.is_empty());
+}
+
+#[tokio::test]
+async fn claude_background_subagent_card_outlives_its_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    rt.prompt(&s.id, "agent 1").await.unwrap();
+    host.wait(is_terminal).await;
+    let card = |host: &TestHost| {
+        host.items()
+            .into_iter()
+            .find(|i| matches!(i.kind, TurnItemKind::Subagent { .. }))
+            .unwrap()
+    };
+    let c = card(&host);
+    assert_eq!(
+        c.status,
+        TurnItemStatus::Running,
+        "the turn end left it running"
+    );
+    let children: Vec<TurnItem> = host
+        .items()
+        .into_iter()
+        .filter(|i| i.parent_item_id.as_ref() == Some(&c.id))
+        .collect();
+    assert_eq!(children.len(), 2, "its text and its Read");
+    let r = rt.latest_reply(&s.id, WAIT).await.unwrap();
+    assert_eq!(
+        r.text, "Agent reported",
+        "the subagent's own text is not the answer"
+    );
+    let c = card(&host);
+    assert_eq!(c.status, TurnItemStatus::Completed);
+    assert!(
+        matches!(&c.kind, TurnItemKind::Subagent { output: Some(o), .. } if o == "Found 2 open PRs")
+    );
+}
+
+#[tokio::test]
+async fn a_message_sent_during_the_agents_own_turn_waits_in_the_queue() {
+    use otto_core::agent_runtime::PromptDelivery;
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    rt.prompt(&s.id, "bg 0.2").await.unwrap();
+    host.wait(is_agent_turn_running).await;
+    // Never interleaved: a plain prompt is refused, a queued one waits.
+    assert!(matches!(
+        rt.prompt(&s.id, "now").await,
+        Err(Error::Conflict(_))
+    ));
+    let r = rt
+        .prompt_with(&s.id, &queued(PromptDelivery::Queue, "after"))
+        .await
+        .unwrap();
+    assert!(r.queued_id.is_some() && r.turn_id.is_empty());
+    let q = host
+        .wait(|e| matches!(&e.body, RuntimeEventBody::QueueUpdated { queued_prompts } if queued_prompts.len() == 1))
+        .await;
+    let RuntimeEventBody::QueueUpdated { queued_prompts } = q.body else {
+        unreachable!()
+    };
+    assert_eq!(queued_prompts[0].text, "after");
+    host.wait_n(is_terminal, 3).await;
+    assert_eq!(
+        user_texts(&host),
+        vec!["bg 0.2".to_string(), "after".into()]
+    );
+    assert_eq!(last_assistant_text(&host), "echo: after");
+    host.wait(|e| matches!(&e.body, RuntimeEventBody::QueueUpdated { queued_prompts } if queued_prompts.is_empty()))
+        .await;
+    let t = turns(&host);
+    assert_eq!(t.len(), 3);
+    assert_eq!(t[2].origin, otto_core::agent_runtime::TurnOrigin::User);
+}
+
+#[tokio::test]
+async fn steer_lands_in_the_running_turn_and_interrupt_sends_next() {
+    use otto_core::agent_runtime::PromptDelivery;
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    let first = rt.prompt(&s.id, "slow 3").await.unwrap();
+    host.wait(|e| matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+        if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, streaming: false, .. } if text == "Working…")))
+        .await;
+    let r = rt
+        .prompt_with(&s.id, &queued(PromptDelivery::Steer, "more"))
+        .await
+        .unwrap();
+    assert!(r.steered);
+    assert_eq!(r.turn_id, first.turn_id);
+    host.wait(|e| matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+        if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, .. } if text == "steered: more")))
+        .await;
+    // Stop & send now: the turn stops, the message goes next.
+    let r = rt
+        .prompt_with(&s.id, &queued(PromptDelivery::Interrupt, "next"))
+        .await
+        .unwrap();
+    assert!(r.queued_id.is_some());
+    let stopped = host.wait(is_terminal).await;
+    assert_eq!(terminal(&stopped), Some(TurnTerminalStatus::Interrupted));
+    let done = host.wait_n(is_terminal, 2).await;
+    assert_eq!(terminal(&done), Some(TurnTerminalStatus::Completed));
+    assert_eq!(last_assistant_text(&host), "echo: next");
+    assert_eq!(turns(&host).len(), 2, "the steer did not start a turn");
+    let steered = host
+        .items()
+        .into_iter()
+        .find(|i| matches!(&i.kind, TurnItemKind::UserMessage { text, .. } if text == "more"))
+        .unwrap();
+    assert_eq!(steered.turn_id.as_ref(), Some(&first.turn_id));
+}
+
+#[tokio::test]
+async fn a_queued_message_survives_a_daemon_restart() {
+    use otto_core::agent_runtime::PromptDelivery;
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    rt.prompt(&s.id, "slow 30").await.unwrap();
+    // The CLI is up (its resume key is known) and working.
+    host.wait(|e| {
+        matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+        if matches!(turn_item.kind, TurnItemKind::AssistantMessage { .. }))
+    })
+    .await;
+    rt.prompt_with(&s.id, &queued(PromptDelivery::Queue, "later"))
+        .await
+        .unwrap();
+    rt.shutdown().await;
+    drop(rt);
+    let host2 = TestHost::new(cwd, false);
+    let rt2 = runtime(&pool, &host2, RuntimeConfig::default());
+    rt2.recover().await.unwrap();
+    // The queue drains after the restart: the interrupted turn, then "later".
+    host2.wait(is_terminal).await;
+    assert_eq!(user_texts(&host2), vec!["later".to_string()]);
+    assert_eq!(last_assistant_text(&host2), "echo: later");
+    let prepared = host2.prepared.lock().unwrap().clone();
+    assert!(
+        prepared[0].args.iter().any(|a| a == "--resume"),
+        "resumed: {:?}",
+        prepared.iter().map(|p| p.args.clone()).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn reopen_resumes_the_thread_or_starts_fresh_with_a_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    rt.prompt(&s.id, "hi").await.unwrap();
+    host.wait(is_terminal).await;
+    let native = rt.get(&s.id).await.unwrap().native_thread_id.unwrap();
+    rt.close(&s.id).await.unwrap();
+    assert!(matches!(
+        rt.prompt(&s.id, "x").await,
+        Err(Error::Conflict(_))
+    ));
+    assert!(matches!(
+        rt.notice(&s.id, "x").await,
+        Err(Error::Conflict(_))
+    ));
+    let spawns = || host.prepared.lock().unwrap().len();
+    let before = spawns();
+    // Two reopens at once: one agent process.
+    let (a, b) = tokio::join!(rt.reopen(&s.id), rt.reopen(&s.id));
+    assert_ne!(a.unwrap().status, RuntimeSessionStatus::Closed);
+    assert_ne!(b.unwrap().status, RuntimeSessionStatus::Closed);
+    assert_eq!(spawns(), before + 1, "a single runner");
+    let last = host.prepared.lock().unwrap().last().cloned().unwrap();
+    let r = last.args.iter().position(|a| a == "--resume").unwrap();
+    assert_eq!(last.args[r + 1], native);
+    let stored = AgentRuntimeRepo::new(pool.clone())
+        .get(&s.id)
+        .await
+        .unwrap();
+    assert!(!stored.closed, "persisted open");
+    rt.prompt(&s.id, "again").await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    assert_eq!(last_assistant_text(&host), "echo: again");
+    // The provider lost the conversation: a fresh thread, and the timeline says so.
+    rt.close(&s.id).await.unwrap();
+    tokio::fs::remove_dir_all(dir.path().join(".fake-claude"))
+        .await
+        .unwrap();
+    let reopened = rt.reopen(&s.id).await.unwrap();
+    assert_ne!(reopened.status, RuntimeSessionStatus::Closed);
+    assert!(
+        notices(&host)
+            .iter()
+            .any(|n| n.contains("could not be resumed")),
+        "{:?}",
+        notices(&host)
+    );
+    let last = host.prepared.lock().unwrap().last().cloned().unwrap();
+    assert!(last.args.iter().any(|a| a == "--session-id"));
+    let fresh = rt.get(&s.id).await.unwrap().native_thread_id.unwrap();
+    assert_ne!(fresh, native);
+    rt.flush(&s.id).await;
+    let stored = AgentRuntimeRepo::new(pool.clone())
+        .get(&s.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        stored.session.native_thread_id.as_deref(),
+        Some(fresh.as_str())
+    );
+    rt.prompt(&s.id, "fresh").await.unwrap();
+    host.wait_n(is_terminal, 3).await;
+    assert_eq!(last_assistant_text(&host), "echo: fresh");
+}
+
+#[tokio::test]
+async fn delete_removes_the_thread_and_its_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    rt.prompt(&s.id, "hi").await.unwrap();
+    host.wait(is_terminal).await;
+    rt.delete(&s.id).await.unwrap();
+    assert!(matches!(rt.get(&s.id).await, Err(Error::NotFound(_))));
+    let repo = AgentRuntimeRepo::new(pool.clone());
+    assert!(matches!(repo.get(&s.id).await, Err(Error::NotFound(_))));
+    assert!(repo.entities(&s.id).await.unwrap().is_empty());
+    assert!(rt.list(&"w1".into(), None).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_silent_turn_is_stopped_as_stalled_but_background_work_is_no_stall() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(
+        &pool,
+        &host,
+        RuntimeConfig {
+            stall_after: Duration::from_millis(1200),
+            stall_tool_after: Duration::from_millis(1200),
+            interrupt_grace: Duration::from_secs(5),
+            ..RuntimeConfig::default()
+        },
+    );
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    rt.prompt(&s.id, "silent").await.unwrap();
+    let t = host.wait(is_terminal).await;
+    assert_eq!(terminal(&t), Some(TurnTerminalStatus::Interrupted));
+    assert!(
+        matches!(&t.body, RuntimeEventBody::TurnTerminal { reason: Some(r), .. } if r == "stalled")
+    );
+    assert!(notices(&host)
+        .iter()
+        .any(|n| n.starts_with("Stopped: the agent showed no progress")));
+    // Two seconds of background work between turns: nothing is stopped.
+    rt.prompt(&s.id, "bg 2").await.unwrap();
+    let r = rt.latest_reply(&s.id, WAIT).await.unwrap();
+    assert!(!r.busy);
+    assert_eq!(r.text, "Background done: ok");
+    let ends: Vec<TurnTerminalStatus> = host.all().iter().filter_map(terminal).collect();
+    assert_eq!(
+        ends,
+        vec![
+            TurnTerminalStatus::Interrupted,
+            TurnTerminalStatus::Completed,
+            TurnTerminalStatus::Completed
+        ]
     );
 }

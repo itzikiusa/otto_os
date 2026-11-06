@@ -58,12 +58,19 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
   // `otto-fake-codex`, built next to ottod), so Threads specs can drive a
   // real runtime session: echo, `ask` (an approval) and `hang` (Stop).
   const fakeCodex = join(dirname(OTTOD), 'otto-fake-codex');
+  // Likewise a structured-runtime Claude thread (`claude … --input-format
+  // stream-json`) gets `otto-fake-claude`: echo, `bg <s>` (background work
+  // and the agent's own follow-up turn), `agent <s>` (a background subagent),
+  // `slow <s>` and `silent`.
+  const fakeClaude = join(dirname(OTTOD), 'otto-fake-claude');
   for (const cli of ['claude', 'codex', 'agy', 'gemini', 'grok']) {
     const shim = join(fakeBin, cli);
     const runtime =
       cli === 'codex' && existsSync(fakeCodex)
         ? `for a in "$@"; do [ "$a" = app-server ] && exec '${fakeCodex}' "$@"; done\n`
-        : '';
+        : cli === 'claude' && existsSync(fakeClaude)
+          ? `for a in "$@"; do [ "$a" = stream-json ] && exec '${fakeClaude}' "$@"; done\n`
+          : '';
     writeFileSync(
       shim,
       `#!/bin/sh\n${runtime}echo "otto e2e: the real ${cli} CLI is disabled in tests"\nexec cat\n`,

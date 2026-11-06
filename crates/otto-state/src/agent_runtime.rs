@@ -98,6 +98,7 @@ fn row_to_session(r: &sqlx::sqlite::SqliteRow) -> Result<RuntimeSessionRecord> {
             ui_control: r
                 .get::<Option<String>, _>("ui_control")
                 .and_then(|j| serde_json::from_str(&j).ok()),
+            background_tasks: Vec::new(),
             meta: r
                 .get::<Option<String>, _>("meta")
                 .and_then(|j| serde_json::from_str(&j).ok()),
@@ -244,8 +245,32 @@ impl AgentRuntimeRepo {
         Ok(())
     }
 
+    /// Reopen a closed session (it takes prompts again).
+    pub async fn set_open(&self, id: &Id) -> Result<()> {
+        let res = sqlx::query("UPDATE agent_runtime_sessions SET closed = 0 WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("reopen runtime session"))?;
+        if res.rows_affected() == 0 {
+            return Err(Error::NotFound(format!("runtime session {id}")));
+        }
+        Ok(())
+    }
+
+    /// Clear the provider's resume key (a resume it refused: the next spawn
+    /// starts a fresh provider thread).
+    pub async fn clear_native_thread_id(&self, id: &Id) -> Result<()> {
+        sqlx::query("UPDATE agent_runtime_sessions SET native_thread_id = NULL WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("clear runtime native thread id"))?;
+        Ok(())
+    }
+
     /// Remove a session row (its entities cascade) — a create whose first
-    /// spawn was refused.
+    /// spawn was refused, or a person's Delete.
     pub async fn delete(&self, id: &Id) -> Result<()> {
         sqlx::query("DELETE FROM agent_runtime_sessions WHERE id = ?")
             .bind(id)

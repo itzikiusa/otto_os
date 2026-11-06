@@ -9,8 +9,10 @@
 //! item with its accumulated text and a `streaming` flag, a runtime request
 //! with its status, …); `command_output.delta` is the one true delta. Field
 //! names are snake_case (Otto's wire convention) where T3 Code uses camelCase;
-//! event `type` tags are T3 Code's. Subset: no app threads, nodes, subagents,
-//! background work, checkpoints or handoffs.
+//! event `type` tags are T3 Code's. Subset: no app threads, nodes,
+//! checkpoints or handoffs. Background work is the provider session's
+//! [`BackgroundTask`] list; a subagent is one `subagent` item whose activity
+//! items point back at it ([`TurnItem::parent_item_id`]).
 //!
 //! Every event carries the Otto session id, a per-session `sequence` (strictly
 //! increasing, never reused, also across daemon restarts) and a timestamp. A
@@ -94,6 +96,43 @@ pub struct ProviderSession {
     pub model: Option<String>,
     pub updated_at: DateTime<Utc>,
     pub last_error: Option<String>,
+    /// Work the agent started in the background that has not finished yet
+    /// (a `run_in_background` command, a background subagent). The session
+    /// is busy while any is pending, even between turns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background_tasks: Vec<BackgroundTask>,
+}
+
+/// One piece of background work an agent started (Claude Code's
+/// `task_started` … `task_notification`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundTask {
+    /// The provider's task id.
+    pub id: String,
+    /// `command`, `agent`, or the provider's own task type.
+    pub kind: String,
+    /// What it is doing (the command, the subagent's description).
+    pub label: String,
+    pub started_at: DateTime<Utc>,
+    /// The turn item of the tool call that started it, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<Id>,
+}
+
+/// Who started a turn: a person's prompt, or the agent itself (Claude Code
+/// continues on its own when background work it started finishes).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnOrigin {
+    #[default]
+    User,
+    Agent,
+}
+
+impl TurnOrigin {
+    pub fn is_user(&self) -> bool {
+        *self == Self::User
+    }
 }
 
 /// `ThreadTokenUsageSnapshot` (context-window usage).
@@ -161,6 +200,9 @@ pub struct ProviderTurn {
     pub completed_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_token_usage: Option<TurnTokenUsage>,
+    /// `agent` = a turn the agent started on its own (no user message).
+    #[serde(default, skip_serializing_if = "TurnOrigin::is_user")]
+    pub origin: TurnOrigin,
 }
 
 /// `OrchestrationV2TurnItemStatus`.
@@ -318,6 +360,29 @@ pub enum TurnItemKind {
     SystemNotice {
         message: String,
     },
+    /// A subagent the agent launched (Claude's `Agent` / `Task` tool). Its
+    /// own messages and tool calls are items whose `parent_item_id` is this
+    /// item; a background one stays `running` past its turn until its task
+    /// finishes.
+    Subagent {
+        tool_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent_type: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+        /// Its final answer (the tool result / task summary).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+        #[serde(default)]
+        background: bool,
+        /// The tool it used last, while it runs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_tool: Option<String>,
+        #[serde(default)]
+        tool_uses: u32,
+    },
     Error {
         failure: ProviderFailure,
     },
@@ -338,6 +403,9 @@ pub struct TurnItem {
     /// A failed tool's error text (about 2 KB at most).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The `subagent` item this item belongs to (its activity), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_item_id: Option<Id>,
     #[serde(flatten)]
     pub kind: TurnItemKind,
 }
@@ -355,6 +423,19 @@ impl TurnItem {
                 ..
             }
         )
+    }
+
+    /// A background subagent still running — it outlives its turn, so a
+    /// turn's end does not settle it.
+    pub fn is_background_open(&self) -> bool {
+        self.status.is_open()
+            && matches!(
+                self.kind,
+                TurnItemKind::Subagent {
+                    background: true,
+                    ..
+                }
+            )
     }
 }
 
@@ -465,6 +546,10 @@ pub enum RuntimeEventBody {
     RuntimeRequestUpdated { runtime_request: RuntimeRequest },
     #[serde(rename = "plan.updated")]
     PlanUpdated { plan: PlanArtifact },
+    /// The messages waiting for the running turn to end, whole (persisted:
+    /// they survive a daemon restart and go out one per turn, oldest first).
+    #[serde(rename = "queue.updated")]
+    QueueUpdated { queued_prompts: Vec<QueuedPrompt> },
     /// Live command output (never persisted; the item's `output` holds the total).
     #[serde(rename = "command_output.delta")]
     CommandOutputDelta { item_id: Id, chunk: String },
@@ -488,6 +573,7 @@ impl RuntimeEventBody {
             Self::TurnItemUpdated { .. } => "turn_item.updated",
             Self::RuntimeRequestUpdated { .. } => "runtime_request.updated",
             Self::PlanUpdated { .. } => "plan.updated",
+            Self::QueueUpdated { .. } => "queue.updated",
             Self::CommandOutputDelta { .. } => "command_output.delta",
             Self::TurnTerminal { .. } => "turn.terminal",
         }
@@ -515,6 +601,9 @@ pub struct RuntimeSnapshot {
     pub turn_items: Vec<TurnItem>,
     pub runtime_requests: Vec<RuntimeRequest>,
     pub plans: Vec<PlanArtifact>,
+    /// Messages queued behind the running turn, oldest first.
+    #[serde(default)]
+    pub queued_prompts: Vec<QueuedPrompt>,
 }
 
 /// `GET /runtime-sessions/{id}/events` (T3 Code `subscribeThread` items).
@@ -575,6 +664,10 @@ pub struct RuntimeSession {
     /// Written only by `POST /sessions/{id}/ui-control`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_control: Option<serde_json::Value>,
+    /// Background work still pending (live only; see
+    /// [`ProviderSession::background_tasks`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background_tasks: Vec<BackgroundTask>,
     /// The server-owned meta this thread runs under — the `sessions.meta`
     /// keys the spawn's safety pipeline and the tool policy read
     /// (`personal_agent`, `read_only`, `source`, `run_id`, `browser`, …).
@@ -694,12 +787,16 @@ pub struct PeerInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PeerReply {
     pub peer: PeerInfo,
-    /// True while the peer is still working its turn (the wait timed out).
+    /// True while the peer is still working (the wait timed out): a turn —
+    /// the person's or one it started itself — or background work.
     pub busy: bool,
+    /// Background tasks still pending.
+    #[serde(default)]
+    pub background_tasks: u32,
     /// The last turn's final status (`completed` / `failed` / …), if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_status: Option<String>,
-    /// Its assistant messages, joined.
+    /// The assistant messages of its last turn that has any, joined.
     pub text: String,
 }
 
@@ -759,6 +856,41 @@ pub struct RuntimePromptReq {
     pub files: Vec<PromptFile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_mode: Option<RuntimeAccessMode>,
+    /// What to do when a turn is already running. Omitted = refuse (409).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<PromptDelivery>,
+}
+
+/// How a message sent while a turn runs is delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptDelivery {
+    /// Wait in the session's queue; sent when the turn ends.
+    Queue,
+    /// Into the running turn now (the agent reads it at its next step) —
+    /// Claude only; elsewhere it is queued.
+    Steer,
+    /// Stop the running turn and send this next.
+    Interrupt,
+}
+
+/// A message waiting in a session's queue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedPrompt {
+    pub id: Id,
+    pub text: String,
+    /// Images / files riding with it.
+    #[serde(default)]
+    pub attachments: u32,
+    pub created_at: DateTime<Utc>,
+}
+
+/// `POST /runtime-sessions/{id}/queue/{queued_id}` — deliver a queued
+/// message now instead of waiting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuedDeliverReq {
+    /// `steer` or `interrupt` (`queue` is a no-op).
+    pub delivery: PromptDelivery,
 }
 
 impl RuntimePromptReq {
@@ -805,9 +937,17 @@ pub struct Attachment {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimePromptResp {
+    /// The turn it started or steered into; empty when it was queued.
     pub turn_id: Id,
-    /// `sequence` of the turn's first `provider_turn.updated`.
+    /// `sequence` of the turn's first `provider_turn.updated` (of the
+    /// `queue.updated` / steered `user_message` when it did not start one).
     pub sequence: u64,
+    /// Set when the message was queued behind the running turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_id: Option<Id>,
+    /// Set when the message was steered into the running turn.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub steered: bool,
 }
 
 /// `POST /runtime-sessions/{id}/requests/{request_id}` (T3 Code
@@ -840,6 +980,7 @@ mod tests {
             completed_at: None,
             updated_at: ts(),
             error: None,
+            parent_item_id: None,
             kind: TurnItemKind::AssistantMessage {
                 message_id: "m1".into(),
                 text: "Hel".into(),
@@ -871,6 +1012,13 @@ mod tests {
                     model: None,
                     updated_at: ts(),
                     last_error: None,
+                    background_tasks: vec![BackgroundTask {
+                        id: "b1".into(),
+                        kind: "command".into(),
+                        label: "sleep 300".into(),
+                        started_at: ts(),
+                        item_id: None,
+                    }],
                 },
             },
             RuntimeEventBody::ProviderThreadUpdated {
@@ -891,6 +1039,7 @@ mod tests {
                     started_at: Some(ts()),
                     completed_at: None,
                     turn_token_usage: None,
+                    origin: TurnOrigin::Agent,
                 },
             },
             RuntimeEventBody::RuntimeRequestUpdated {
@@ -920,6 +1069,14 @@ mod tests {
                     explanation: None,
                 },
             },
+            RuntimeEventBody::QueueUpdated {
+                queued_prompts: vec![QueuedPrompt {
+                    id: "q1".into(),
+                    text: "after".into(),
+                    attachments: 1,
+                    created_at: ts(),
+                }],
+            },
             RuntimeEventBody::CommandOutputDelta {
                 item_id: "i".into(),
                 chunk: "out".into(),
@@ -947,6 +1104,64 @@ mod tests {
             assert_eq!(v["type"], body.type_name(), "{v}");
             assert_eq!(serde_json::from_value::<RuntimeEvent>(v).unwrap(), ev);
         }
+    }
+
+    #[test]
+    fn new_fields_are_additive_on_the_wire() {
+        // A user turn, a root item and an empty background list serialize
+        // as before (older clients and stored rows read unchanged).
+        let turn: ProviderTurn = serde_json::from_value(json!({
+            "id": "t", "ordinal": 1, "status": "running", "started_at": null, "completed_at": null
+        }))
+        .unwrap();
+        assert_eq!(turn.origin, TurnOrigin::User);
+        assert!(serde_json::to_value(&turn).unwrap().get("origin").is_none());
+        let agent = ProviderTurn {
+            origin: TurnOrigin::Agent,
+            ..turn
+        };
+        assert_eq!(serde_json::to_value(&agent).unwrap()["origin"], "agent");
+        let card = TurnItem {
+            id: "t:tool:a".into(),
+            turn_id: Some("t".into()),
+            ordinal: 1,
+            status: TurnItemStatus::Running,
+            title: Some("PR sweep".into()),
+            started_at: None,
+            completed_at: None,
+            updated_at: ts(),
+            error: None,
+            parent_item_id: None,
+            kind: TurnItemKind::Subagent {
+                tool_name: "Agent".into(),
+                description: Some("PR sweep".into()),
+                subagent_type: None,
+                prompt: None,
+                output: None,
+                background: true,
+                last_tool: None,
+                tool_uses: 0,
+            },
+        };
+        assert!(card.is_background_open());
+        let v = serde_json::to_value(&card).unwrap();
+        assert_eq!(v["type"], "subagent");
+        assert!(v.get("parent_item_id").is_none());
+        let child = TurnItem {
+            parent_item_id: Some(card.id.clone()),
+            kind: TurnItemKind::SystemNotice {
+                message: "x".into(),
+            },
+            ..card.clone()
+        };
+        assert!(!child.is_background_open());
+        assert_eq!(
+            serde_json::to_value(&child).unwrap()["parent_item_id"],
+            "t:tool:a"
+        );
+        let req: RuntimePromptReq =
+            serde_json::from_value(json!({"text": "hi", "delivery": "steer"})).unwrap();
+        assert_eq!(req.delivery, Some(PromptDelivery::Steer));
     }
 
     #[test]

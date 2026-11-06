@@ -23,7 +23,7 @@
   import { FilterPopover, PullRequestsView, SettingsView, UsageView } from './threadLazy.svelte';
   import { threadsChrome } from './threadsChrome.svelte';
   import { promptNewScript } from './threadGitMenus';
-  import { runtimeThreadMenu } from './runtime/runtimeMenu';
+  import { reopenThread, runtimeThreadMenu } from './runtime/runtimeMenu';
   import { isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
   import { threads } from './threadsStore.svelte';
 
@@ -260,8 +260,10 @@
 
   async function reopenArchived(s: Session, beside = false): Promise<void> {
     threads.unsettle(s.id);
-    // A closed runtime thread opens read-only; it has nothing to unarchive.
-    if (s.archived && !isRuntimeThread(s)) {
+    // A closed runtime thread reopens (its agent resumes the conversation).
+    if (s.archived && isRuntimeThread(s)) {
+      if (!(await reopenThread(s.id, false))) return;
+    } else if (s.archived) {
       try {
         await ws.unarchiveSession(s.id);
       } catch (e) {
