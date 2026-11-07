@@ -656,6 +656,47 @@ struct Launched {
     tag: String,
 }
 
+/// Typed lineage survives the fresh per-run worktree branch name. Never
+/// choose another repo's review in a multi-repository previous iteration.
+async fn previous_iteration_review(plan: &ReviewPlan<'_>, repo_id: &Id) -> Option<Id> {
+    let prior = plan
+        .env
+        .run_input
+        .get(otto_workflows::rereview::PREVIOUS_RUN_KEY)?
+        .as_str()?;
+    let store = WorkflowsRepo::new(plan.ctx.pool.clone());
+    let previous = store.get_run(&prior.to_string()).await.ok()?;
+    let current = store.get_run(&plan.env.run_id).await.ok()?;
+    if previous.workspace_id != current.workspace_id || previous.workflow_id != current.workflow_id
+    {
+        return None;
+    }
+    let node = previous.nodes.iter().find(|n| n.node_id == plan.node.id)?;
+    let mut ids = node.review_ids.clone();
+    if let Some(out) = &node.output {
+        if let Some(id) = out.get("review_id").and_then(Value::as_str) {
+            ids.push(id.to_string());
+        }
+        if let Some(reviews) = out.get("reviews").and_then(Value::as_array) {
+            ids.extend(
+                reviews
+                    .iter()
+                    .filter_map(|r| r.get("review_id").and_then(Value::as_str))
+                    .map(str::to_string),
+            );
+        }
+    }
+    ids.reverse();
+    for id in ids {
+        if let Ok(review) = plan.ctx.reviews_store.get_review(&id).await {
+            if &review.repo_id == repo_id {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
 /// Launch phase: validate the repo, post the start line, and start (or adopt,
 /// on a restart) the checkpointed review. `Ok(None)` is a multi-repo target
 /// that was logged and skipped; the single-target case keeps its hard error.
@@ -726,12 +767,21 @@ async fn launch(
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         });
+    let mut cfg_override = plan.cfg_override.clone();
+    if let Some(id) = previous_iteration_review(plan, repo_id).await {
+        let mut cfg = match cfg_override.take() {
+            Some(cfg) => cfg,
+            None => crate::modules::review::load_review_config_for_repo(ctx, repo_id).await,
+        };
+        cfg.previous_review_id = Some(id);
+        cfg_override = Some(cfg);
+    }
     let (review_id, resolved_base, no_changes) = match crate::modules::run_review_for_branch(
         ctx,
         repo_id,
         worktree,
         want_base.as_deref(),
-        plan.cfg_override.clone(),
+        cfg_override,
         plan.jira_context.clone(),
         plan.run_context.clone(),
         Some(plan.mode),
