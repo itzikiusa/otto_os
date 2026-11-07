@@ -308,6 +308,14 @@ async fn isolate_repos(
                 isolation_failures.push(format!("cannot refresh {rid} for re-review: {error}"));
             }
         }
+        for pr in &prs {
+            if pr.head_ref.is_none() {
+                isolation_failures.push(format!(
+                    "cannot pin current PR #{} head for re-review",
+                    pr.number
+                ));
+            }
+        }
         let expected = otto_workflows::run_refs::match_pr_targets(
             &otto_workflows::run_refs::parse_pr_spec(input.get("pr")),
             &entries,

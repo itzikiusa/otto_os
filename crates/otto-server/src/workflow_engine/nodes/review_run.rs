@@ -273,10 +273,12 @@ pub(in crate::workflow_engine) async fn execute(
     // Two repositories may make progress together, while every reviewer still
     // acquires the SAME process-wide semaphore in the shared review engine.
     // Results are restored to input order to preserve the original first-repo contract.
-    let results =
-        super::review_parallel::collect(targets.iter().enumerate().map(|(t_idx, target)| {
+    let tasks = targets
+        .iter()
+        .enumerate()
+        .map(|(t_idx, target)| {
             let plan = &plan;
-            async move {
+            Box::pin(async move {
                 let mut target_logs = Vec::new();
                 let Some(launched) = launch(plan, t_idx, target, &mut target_logs).await? else {
                     return Ok::<_, otto_core::Error>((None, target_logs));
@@ -295,9 +297,10 @@ pub(in crate::workflow_engine) async fn execute(
                 .await?;
                 let out = score_target(plan, &launched, &status, &mut target_logs).await;
                 Ok((Some(out), target_logs))
-            }
-        }))
-        .await;
+            }) as futures_util::future::BoxFuture<'_, _>
+        })
+        .collect();
+    let results = super::review_parallel::collect(tasks).await;
     let mut outs = Vec::new();
     for result in results {
         let (out, target_logs) = result?;
@@ -706,6 +709,12 @@ async fn launch(
     target: &ReviewTarget,
     logs: &mut Vec<String>,
 ) -> Result<Option<Launched>> {
+    if WorkflowsRepo::new(plan.ctx.pool.clone())
+        .is_canceled(&plan.env.run_id)
+        .await
+    {
+        return Err(otto_core::Error::Internal("run canceled".into()));
+    }
     let (repo_id, worktree, want_base, label) = target;
     let ReviewPlan {
         ctx,
