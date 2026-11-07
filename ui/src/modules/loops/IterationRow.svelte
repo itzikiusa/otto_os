@@ -13,6 +13,7 @@
     loopId,
     loopStatus,
     executorCount,
+    hasGraph = false,
     open = false,
     criteria = {},
     onopensession,
@@ -21,6 +22,7 @@
     loopId: string;
     loopStatus: string;
     executorCount: number;
+    hasGraph?: boolean;
     open?: boolean;
     /** Criterion id → text, so evaluation chips name what they judged. */
     criteria?: Record<string, string>;
@@ -91,7 +93,7 @@
   // Retry is only valid while the loop is blocked (no live controller); a
   // running loop's controller owns the executor and a second run would race it.
   function canRetry(a: LoopAgentState): boolean {
-    return loopStatus === 'blocked' && (a.status === 'waiting' || a.status === 'error');
+    return !hasGraph && loopStatus === 'blocked' && (a.status === 'waiting' || a.status === 'error');
   }
 </script>
 

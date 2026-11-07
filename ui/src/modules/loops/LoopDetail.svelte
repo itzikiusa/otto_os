@@ -9,9 +9,11 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import SessionView from '../agents/SessionView.svelte';
   import IterationRow from './IterationRow.svelte';
+  import GoalGraphView from './GoalGraphView.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
-  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import { PHASES, PHASE_LABEL, stepVisual, progressFill, criterionMark } from './loopPresentation';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { humanVerification } from './verification';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -79,46 +81,6 @@
     const ev = iterations.find((it) => it.evaluation)?.evaluation;
     return Object.fromEntries((ev?.criteria ?? []).map((c) => [c.id, c.met])) as Record<string, boolean>;
   });
-
-  const PHASES = ['planning', 'executing', 'evaluating', 'digesting'] as const;
-  const PHASE_LABEL: Record<(typeof PHASES)[number], string> = {
-    planning: 'Plan',
-    executing: 'Execute',
-    evaluating: 'Evaluate',
-    digesting: 'Digest',
-  };
-  function phaseIndex(loop: GoalLoop): number {
-    const p = loop.phase === 'waiting' ? 'executing' : loop.phase;
-    return PHASES.indexOf(p as (typeof PHASES)[number]);
-  }
-  /** Succeeded marks every phase done. Anything else keeps a current phase; only a running loop pulses. */
-  function stepVisual(l: GoalLoop, i: number): { past: boolean; active: boolean; current: boolean } {
-    if (l.status === 'succeeded') return { past: true, active: false, current: false };
-    let idx = phaseIndex(l);
-    if (idx < 0) idx = PHASES.length - 1;
-    const onStep = idx === i;
-    return { past: idx > i, active: l.status === 'running' && onStep, current: onStep };
-  }
-  function progressFill(status: string): string {
-    switch (status) {
-      case 'running':
-        return 'running';
-      case 'blocked':
-      case 'exhausted':
-        return 'warn';
-      case 'failed':
-        return 'bad';
-      case 'succeeded':
-        return 'ok';
-      default:
-        return 'dim';
-    }
-  }
-  function criterionMark(met: boolean | undefined): { icon: IconName; label: string; kind: string } {
-    if (met === true) return { icon: 'check', label: 'Met', kind: 'met' };
-    if (met === false) return { icon: 'x', label: 'Not met', kind: 'unmet' };
-    return { icon: 'minus', label: 'Not checked', kind: 'unchecked' };
-  }
 
   function elapsedSecs(l: GoalLoop): number {
     let s = l.elapsed_secs;
@@ -363,6 +325,12 @@
       {/if}
     </section>
 
+    {#if loop.config.graph}
+      <div class="card-box">
+        <GoalGraphView graph={loop.config.graph} states={loop.ledger?.graph_nodes ?? []} criteria={loop.definition.acceptance_criteria} />
+      </div>
+    {/if}
+
     {#each openQuestions as q (q.id)}
       <section class="decision" aria-label="Decision needed">
         <h3 class="section-title"><Icon name="warning" size={12} /> Decision needed</h3>
@@ -456,6 +424,7 @@
             loopId={id}
             loopStatus={loop.status}
             executorCount={loop.config.executors.length}
+            hasGraph={!!loop.config.graph}
             criteria={critText}
             open={i === 0}
             onopensession={(sid) => void openSession(sid)}
