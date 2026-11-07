@@ -1,0 +1,61 @@
+direction: down
+
+# Matches ui/src/modules/loops/templates.ts: general.
+# Node IDs and acceptance IDs match the editable template.
+vars: {
+  d2-config: {
+    layout-engine: dagre
+    theme-id: 0
+    pad: 28
+  }
+}
+
+title: "General engineering — suggested execution graph" {
+  shape: text
+  near: top-center
+  style.font-size: 24
+}
+
+tasks: {
+  label: "One task per goal-loop iteration"
+  style.stroke: "#94a3b8"
+  style.fill: "#f8fafc"
+  task-1: "Understand the change\ntask-1 · c1\nThe causal scope and acceptance checks are grounded in current code." {
+    style.fill: "#ffffff"
+    style.stroke: "#475569"
+    style.border-radius: 8
+    style.font-size: 17
+  }
+  task-2: "Implement the change\ntask-2 · c2\nThe requested behavior is implemented with meaningful regression coverage." {
+    style.fill: "#ffffff"
+    style.stroke: "#475569"
+    style.border-radius: 8
+    style.font-size: 17
+  }
+  task-3: "Review and verify\ntask-3 · c3\nFinal review and relevant checks support completion." {
+    style.fill: "#ffffff"
+    style.stroke: "#475569"
+    style.border-radius: 8
+    style.font-size: 17
+  }
+  task-1 -> task-2: "c1 accepted"
+  task-2 -> task-3: "c2 accepted"
+}
+
+completion: "Completion review\nAll goal criteria need evidence" {
+  shape: diamond
+  style.fill: "#e0f2fe"
+  style.stroke: "#0369a1"
+}
+retained: "Succeeded\nWork and proof remain available" {
+  style.fill: "#dcfce7"
+  style.stroke: "#15803d"
+}
+tasks.task-3 -> completion: "c3 accepted"
+completion -> retained: "review accepts"
+
+notes: "Plan → Execute → Evaluate → Digest\nRepairs invalidate dependent tasks.\nEvidence and limits govern completion." {
+  shape: text
+  near: bottom-center
+  style.font-size: 15
+}
