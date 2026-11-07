@@ -24,16 +24,15 @@
 > per-step ▶/✅/❌, and a `🔍` review block for the fix→review loop), flushed
 > before the final result (the run's `final-output.md` deliverable when it
 > produced one, else `summary.md`). Agent steps can inline named **skills**;
-> `review_run` fans out the full multi-provider × multi-lens **PR-review engine**
-> and scores it, and `git_pr` can **auto-open the PR** once the review passes
+> `review_run` selects relevant lenses through the **PR-review engine**
+> and scores verified findings, and `git_pr` can **auto-open the PR** once the review passes
 > (the review is the approval — no human gate). The separate **API-client
 > "Automations"** surface (a multi-step saved-request runner) is also fully
 > functional. A couple of honest caveats remain (the game `game_engine`/`verifier`
 > are scaffolds) — stated inline; do not assume full parity with mature
 > n8n/Zapier engines. Agent-backed steps finish on a **turn oracle** (sub-agent-
-> and handoff-aware — §3), and `review_run` runs its lenses **fan-out** (one
-> agent per lens × provider) or **orchestrator** (one agent per provider running
-> every lens as its own sub-agents) — §4.
+> and handoff-aware — §3). Adaptive review uses bounded managed fan-out, with
+> one provider per selected lens unless cross-provider comparison is enabled — §4.
 
 The doc is grounded in the code in `crates/otto-server/src/workflow_engine.rs`,
 `crates/otto-workflows/src/context.rs` (run context files; the node catalog,
@@ -383,7 +382,7 @@ any "not wired" stub kinds** — the four former product/review stubs are now wi
 | `product_rewrite` | Product Rewrite / Product | Rewrites the story (**`jira-story-writer`**); outputs `{ story_id, body_md, session_id }`; `persist:true` saves a `suggested` product version. | `story_id`, `persist?`, `instruction?` | **Real** ² |
 | `product_plan` | Product Plan / Product | Breaks the story into a plan (**`story-task-breakdown`**); outputs `{ story_id, plan_md, session_id }`; `persist:true` saves a `plan` version. | `story_id`, `persist?`, `instruction?` | **Real** ² |
 | `product_publish` | Product Publish / Product | Publishes a story as a Confluence **RFC** or a **Jira** issue. **`dry_run` defaults true** and captures a real content/destination preview; configure `story_id`, `account_id` and `project_key`/`space_key` before preview. Connect Preview → Human Approval → live Product Publish; live publication consumes that exact approved snapshot. | `kind` (`rfc`/`jira`), `dry_run`, `account_id`, … | **Real** |
-| `review_run` | Review Run / AI | Runs the **PR-review engine** (multi-provider × multi-lens reviewer agents + a scoring summarizer), polls to completion, emits a **0–100 `score`** (`100−20×must-fix−5×should-fix; optional findings deduct 0 by default`), optional `goals` assessment blended in, `passed` requires a complete review, nonempty diff, no open must-fix findings and `score≥threshold`. `require_pass:true` **errors** the step when the review cannot pass. Output also carries `blocking`/`advisory`/`findings`/`providers`/`lenses`. See *`review_run`, gating & auto-PR* below. | `repo_id`, `base` (default `main`), `providers[]`, `lenses[]` (alias `skills[]`), `threshold` (default 80), `require_pass`, `await`, `timeout_s`, `goals[]`, `mode?` (`fan_out`/`orchestrator` — *Execution mode* below) | **Real** |
+| `review_run` | Review Run / AI | Runs the **PR-review engine** (scope-selected reviewer lenses + an evidence-checking summarizer), polls to completion, emits a **0–100 `score`** (`100−20×must-fix−5×should-fix; optional findings deduct 0 by default`), optional `goals` assessment blended in, `passed` requires a complete review, nonempty diff, no open must-fix findings and `score≥threshold`. `require_pass:true` **errors** the step when the review cannot pass. Output also carries `blocking`/`advisory`/`findings`/`providers`/`lenses`. See *`review_run`, gating & auto-PR* below. | `repo_id`, `base` (default `main`), `providers[]`, `lenses[]` (alias `skills[]`), `threshold` (default 80), `require_pass`, `await`, `timeout_s`, `goals[]`, `mode?` (`fan_out`/`orchestrator` — *Execution compatibility* below) | **Real** |
 | `canvas` | Canvas Diagram / Product | Asks an agent for a **mermaid/excalidraw** diagram and writes it under the data dir (`workflow-canvas/{run}/{node}.{ext}`); output `{ scene_id, path, diagram, … }`. | `prompt`, `mode` (`mermaid`/`excalidraw`), `provider?`, `model?` | **Real** |
 | `self_improve` | Self-Improve (offer) / AI | Runs the **self-improvement engine** in OFFER-ONLY mode (`Autonomy::Propose` — every skill/memory edit is queued for approval, **never** applied) over recent sessions and posts the offered list to the trigger's chat thread; output `{ run_id, summary, offered, edits }`. | `providers[]` or `provider?` (empty ⇒ the workspace's configured Self-Improvement providers) | **Real** |
 | `git_pr` | Git PR / Network | **Drafts** a pull request for a repo branch — the title/description are crafted by an agent (the node's `provider`/`model`, empty ⇒ run's resolved default; not the claude-only orchestrator). Default is draft-only (`opened:false`); **`open:true`** actually OPENS the PR on the remote (outward-facing, per-step opt-in) — gate it on the incoming edge (e.g. the review passing). | `repo_id`, `base` (default `main`), `open` (default `false`), `worktree_path?`, `provider?`, `model?` | **Real** |
@@ -472,58 +471,46 @@ the review association and current summarizer; session IDs already captured by
 the workflow remain in its history. Completed attempts release their live PTYs
 while retaining the session record.
 
-Failures, the absolute finding-count timeout (2–20 minutes), and empty summaries
-when findings exist use the deterministic summary. The Agents panel labels this
+Failures, the finding-count timeout (5–30 minutes), and empty summaries
+when findings exist can preserve a deterministic summary. This is not independently
+verified output: adaptive reviews remain incomplete and cannot pass on fallback
+alone. The Agents panel labels this
 **Deterministic fallback**. Cancelling a review stops its summarizer and leaves
 the review cancelled, without creating a fallback summary. Each retry uses a new
 session and result file; incomplete JSON is never a completion signal.
 
 ### `review_run`, gating & auto-PR
-`review_run` drives the **same multi-agent engine as a PR review**. By default it
-fans out one reviewer agent per `providers[]` × `lenses[]` pair (e.g.
-`providers:["claude","codex"]` × `lenses:["correctness-review","security-review",
-"test-review"]`; `skills[]` is accepted as an alias for `lenses[]`), and a
-summarizer consolidates + scores the findings into a **0–100 `score`** with
-`passed`, `threshold` (0–100, default 80), `blocking`, `advisory`, `findings`
-(brief strings), `providers`, and `lenses` in the output. When **both** `providers`
-and `lenses` are empty it falls back to the stored/default PR-review config.
-`require_pass:true` makes the step **ERROR** when the score is below `threshold` or
-any must-fix finding remains open (even with a zero deduction), so
-any downstream step is error-skipped.
+`review_run` drives the **same adaptive engine as a PR review**. It assesses
+changed behavior and affected consumers, then selects justified lenses. Configured
+`providers[]` form a pool; one provider runs each selected lens by default.
+`cross_provider_check:true` opts into additional provider comparisons. `skills[]`
+remains an alias for `lenses[]`, but an installed skill is not required.
 
-#### Execution mode (`fan_out` / `orchestrator`)
-How the lenses are *run* is selectable — the result shape is identical either
-way, and **both modes end with the same single summarizer**:
+The verified findings produce a **0–100 `score`**, with `passed`, `threshold`
+(default 80), `blocking`, `advisory`, `findings`, `providers` and `lenses` in the
+output. A goals assessment can be blended into the score. Default deductions are
+20 per must-fix, 5 per should-fix and 0 per optional finding. Explicit weights are
+preserved. A pass requires complete reviewer and verifier coverage, a nonempty
+diff, no open must-fix findings and a score meeting the threshold. A passing
+numeric score cannot override a must-fix finding.
 
-| Mode | Sessions opened | Per-lens findings | Reviewer row reads |
-|---|---|---|---|
-| **`fan_out`** (default) | one reviewer agent per **lens × provider** (3 lenses × 2 providers = 6) | each agent writes its own findings file | `claude · correctness-review` |
-| **`orchestrator`** | one agent per **provider** (2), each running **every lens as its own sub-agents** | each sub-agent writes `otto-review-<rid>-<i>-<lens-slug>.json`; the orchestrator merges them into the one findings file it writes **last** | `claude · orchestrator (3 lenses)`, with a live note `lenses 3/6 done · correctness ✓ security ✓ test ✓` |
+`require_pass:true` errors the step when those conditions are not met; dependent
+steps are error-skipped. Empty provider/lens configuration inherits the effective
+repository review configuration (custom, named preset or global default).
 
-Findings carry a `lens` label in both modes (empty on an orchestrator row
-itself), so the summarizer — and the review panel — still see which lens
-produced what. Fan-out finishes sooner on a fast machine; orchestrator is far
-easier on file descriptors and CPU (N sessions instead of N × lenses) and is the
-mode to pick when a wide review used to trip "Too many open files".
+#### Execution compatibility
 
-**Resolution order**, most specific first:
+Existing `review_mode` run overrides, `params.mode` and stored `ReviewConfig.mode`
+remain accepted for compatibility. The step logs the resolved legacy preference;
+adaptive review executes managed fan-out regardless of that preference, so every
+selected reviewer participates in the same daemon-wide concurrency limit.
+`review_mode` still accepts only `fan_out` or `orchestrator`; an unknown value, or
+an override combined with a non-object/non-null run input, is rejected with 400.
 
-1. **The run's override** — `review_mode` on `POST /workflows/{id}/run` (the Run
-   dialog's *Review mode* row, or the MCP `otto.run_workflow` argument). It is
-   seeded into the run input and **wins over every `review_run` node in that
-   run**, including nodes that set their own mode.
-2. **The node** — `params.mode` (the inspector's *Execution mode* select;
-   *Default* leaves the key absent).
-3. **The stored PR-review config** — `mode` inside the workspace's `pr_review`
-   settings.
-4. **`fan_out`.**
+Multi-repository steps admit at most two repositories concurrently and preserve
+per-target result order. These reviews share the global reviewer queue; a second
+repository does not multiply the provider concurrency allowance.
 
-The resolved mode and where it came from are the step's **first** log line:
-`review_run: mode orchestrator (node)` — the source reads `run override`, `node`,
-`stored config` or `default`. An unknown `review_mode` on `/run` is a **400**
-(`review_mode must be "fan_out" or "orchestrator"`), and a `review_mode` sent
-with a non-object, non-null `input` is a **400**
-(`input must be a JSON object when review_mode is set`).
 
 The review's comparison base resolves in order: node `base` param → input
 `base` → the run's ambient base → the repo's **detected default branch** — and
@@ -1388,8 +1375,8 @@ are **append-only** — never edit or renumber an existing one.
   `transform`, `delay`, `log`, `db_query` (read-only), `broker_peek`,
   `channel_notify`, `budget_gate`, `human_approval`, `condition`, `loop`,
   `swarm_task`, `api_run`, and the **now-wired** `product_analyze`,
-  `product_rewrite`, `product_plan`, `product_publish`, `review_run` (multi-provider
-  × multi-lens PR-review engine, 0–100 scored, `require_pass`), `canvas`, `git_pr`
+  `product_rewrite`, `product_plan`, `product_publish`, `review_run` (adaptive
+  PR-review engine, 0–100 scored, `require_pass`), `canvas`, `git_pr`
   (PR draft, or `open:true` to auto-open on a passing review).
 - **Visible sessions per step** (openable while running) and a **Proof Pack** linked
   to each completed run.
@@ -1398,9 +1385,9 @@ are **append-only** — never edit or renumber an existing one.
   handoff file is written, and a 20 s idle confirm passes; every fallback is
   bounded, the live phase + sub-agent counts are visible in the run view, and the
   session is suspended (resumable) when the step succeeds.
-- **Two review execution modes** — `review_run` fans out one agent per lens ×
-  provider, or runs one **orchestrator** agent per provider that delegates every
-  lens to its own sub-agents; selectable per node and overridable per run (§4).
+- **Proportionate review** — scope assessment selects relevant lenses; bounded
+  fan-out runs one provider per lens by default. Cross-provider comparison is
+  explicit; legacy execution-mode fields remain compatible (§4).
 - **Versioning:** graph snapshot history with view + restore (append-only), now
   covering **standing `instructions`** alongside the graph.
 - Live WS run progress + per-step logs/output/"work product", plus a **Final
@@ -1528,7 +1515,7 @@ are **append-only** — never edit or renumber an existing one.
 | Step log: `↻ retry 2/3 in 2s (codex turn aborted)`, then `✗ codex turn aborted` | codex wrote a `turn_aborted` for the turn we submitted and started no new one within 90 s (usually a dropped upstream connection or a cancelled TUI). The node's retry policy re-runs the step; with no retries left the step errors. |
 | Step log: `↻ retry 2/5 in 23s (provider overloaded: 529)` | An overload / rate-limit / fd-exhaustion / spawn error — the engine forces a ≥ 20 s backoff (plus jitter) and up to 5 attempts when retries are enabled (§3). Nothing to do but let it retry; repeated hits mean too many concurrent agents. |
 | Step log: `✗ step made no progress for 5m (agent looks stuck; 0 tasks pending)` | The stall trip fired (§3): no transcript, sub-agent or `tasks/*.output` movement for `wf_step_stall_secs`. The step is retried in a fresh session. Raise the setting for genuinely long quiet work, or `0` to disable. The trip is never consulted while a bounded hold (idle confirm / handoff grace / linger) is running. |
-| A review in **orchestrator** mode shows 2 agent rows instead of 6 | That is the mode working: one agent per **provider**, each running every lens as its own sub-agents, plus the summarizer (§4 *Execution mode*). The row reads `claude · orchestrator (3 lenses)` and its note counts the lenses (`lenses 3/6 done · …`). Switch the node's *Execution mode* to Fan-out — or start the run with `review_mode: "fan_out"` — to get one row per lens × provider. |
+| A review launches fewer agents than the configured lens/provider combinations | Expected: scope assessment selects applicable lenses and uses one provider per lens by default. Inspect **Review scope**. Enable cross-provider comparison only when the added comparison is useful. |
 | A branch I expected to run was `skipped (branch not taken)` | An incoming edge's `condition` evaluated false (or its upstream was branch-skipped). Inspect the `edge → … not taken` log line and the source node's output the condition tested. |
 | Run fails immediately, no node ran | The graph has a **cycle** (topo-sort failed) — remove the back-edge. |
 | A downstream node is `skipped` ("upstream did not succeed") | A predecessor errored or was skipped; fix/inspect the upstream node first. |
