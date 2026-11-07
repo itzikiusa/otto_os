@@ -13,5 +13,3 @@ pub(super) mod identity;
 pub(super) mod refs;
 pub(super) mod schedule;
 pub(super) mod state;
-
-mod rereview;

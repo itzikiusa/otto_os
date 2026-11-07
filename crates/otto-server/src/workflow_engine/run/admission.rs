@@ -78,7 +78,8 @@ pub(in crate::workflow_engine) async fn admit(
         prior_nodes,
     )
     .await?;
-    super::rereview::write_previous_context(ctx, workflow, &input, &files).await;
+    otto_workflows::review_history::write_previous_context(&ctx.pool, workflow, &input, &files)
+        .await;
     let prepared = prepare_input(ctx, ws, workflow, input, &files).await;
     write_brief(
         workflow,

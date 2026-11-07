@@ -894,6 +894,10 @@ impl RunListQuery {
 pub fn workspace_run_routes() -> axum::Router<ServerCtx> {
     axum::Router::new()
         .route(
+            "/workflow-runs/{id}/re-review",
+            axum::routing::post(rereview_run),
+        )
+        .route(
             "/workspaces/{wid}/workflow-runs/active",
             axum::routing::get(list_active_runs),
         )

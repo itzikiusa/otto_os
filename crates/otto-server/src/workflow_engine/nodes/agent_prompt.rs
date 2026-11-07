@@ -7,11 +7,33 @@ use super::NodeCall;
 pub(in crate::workflow_engine) async fn execute(
     call: NodeCall<'_>,
 ) -> Result<(Value, Vec<String>)> {
-    let context_key = super::review_context::key(&call).await;
-    let cached = match context_key.as_ref() {
-        Some(key) => super::review_context::previous_reply(&call, key).await,
-        None => None,
-    };
+    let context_instructions = prepend_skills(
+        call.ctx,
+        &call.node.params,
+        call.node
+            .params
+            .get("prompt")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    );
+    let (context_key, cached) = otto_workflows::review_context::recover(
+        &call.ctx.pool,
+        &otto_workflows::review_context::ContextInput {
+            run_id: &call.env.run_id,
+            node_id: &call.node.id,
+            params: &call.node.params,
+            upstream: &call.input,
+            files: &call.env.files,
+            default_provider: &call.env.default_provider,
+            instructions: &context_instructions,
+            previous_run_id: call
+                .env
+                .run_input
+                .get(otto_workflows::rereview::PREVIOUS_RUN_KEY)
+                .and_then(Value::as_str),
+        },
+    )
+    .await;
     let NodeCall {
         ctx,
         ws,
@@ -106,7 +128,7 @@ pub(in crate::workflow_engine) async fn execute(
     if reused {
         out.insert("context_reused".into(), json!(true));
     }
-    super::review_context::attach(&mut out, context_key);
+    otto_workflows::review_context::attach(&mut out, context_key);
     out.insert("working_directory".into(), json!(acwd));
     // `repos`/`worktree` forward too so data-flow inspection still
     // shows them — though the run-level registry (RunEnv.files), not

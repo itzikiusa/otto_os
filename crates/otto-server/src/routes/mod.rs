@@ -727,7 +727,6 @@ pub fn protected_routes() -> Router<ServerCtx> {
             get(workflow_run_files::read),
         )
         .route("/workflow-runs/{id}/cancel", post(workflows::cancel_run))
-        .route("/workflow-runs/{id}/re-review", post(workflows::rereview_run))
         .route(
             "/workflow-runs/{id}/retry-node",
             post(workflows::retry_run_node),

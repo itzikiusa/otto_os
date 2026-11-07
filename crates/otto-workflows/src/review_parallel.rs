@@ -3,7 +3,7 @@
 use futures_util::future::BoxFuture;
 use futures_util::{stream::FuturesUnordered, StreamExt};
 
-pub(super) async fn collect<'a, T: Send + 'a>(tasks: Vec<BoxFuture<'a, T>>) -> Vec<T> {
+pub async fn collect<'a, T: Send + 'a>(tasks: Vec<BoxFuture<'a, T>>) -> Vec<T> {
     let mut pending = tasks.into_iter().enumerate();
     let mut running: FuturesUnordered<BoxFuture<'a, (usize, T)>> = FuturesUnordered::new();
     for _ in 0..2 {

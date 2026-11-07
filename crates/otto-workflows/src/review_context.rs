@@ -1,7 +1,29 @@
 //! Opt-in reuse for read-only context discovery. Never used for checkout,
 //! deterministic gates, review, fixes, notifications, or publishing.
-use super::super::*;
-use super::NodeCall;
+use crate::context::{RepoEntry, RunContextFiles};
+use otto_core::{workflows::NodeStatus, Id};
+use otto_state::{DbPool, WorkflowsRepo};
+use serde_json::{json, Value};
+
+pub struct ContextInput<'a> {
+    pub run_id: &'a Id,
+    pub node_id: &'a str,
+    pub params: &'a Value,
+    pub upstream: &'a Value,
+    pub files: &'a RunContextFiles,
+    pub default_provider: &'a str,
+    pub instructions: &'a str,
+    pub previous_run_id: Option<&'a str>,
+}
+
+pub async fn recover(pool: &DbPool, input: &ContextInput<'_>) -> (Option<Value>, Option<String>) {
+    let key = key(pool, input).await;
+    let reply = match key.as_ref() {
+        Some(key) => previous_reply(pool, input, key).await,
+        None => None,
+    };
+    (key, reply)
+}
 
 const CACHE_KEY: &str = "review_context_key";
 
@@ -9,8 +31,8 @@ const CACHE_KEY: &str = "review_context_key";
 /// paths, dirty trees, changed ticket/request/config, or unknown lineage are a
 /// cache miss. Authors must opt in explicitly; arbitrary agent prompts are not
 /// assumed to be pure.
-pub(super) async fn key(call: &NodeCall<'_>) -> Option<Value> {
-    let paths = call.node.params.get("review_context_paths")?.as_array()?;
+async fn key(pool: &DbPool, input: &ContextInput<'_>) -> Option<Value> {
+    let paths = input.params.get("review_context_paths")?.as_array()?;
     if paths.is_empty() || paths.len() > 32 {
         return None;
     }
@@ -24,11 +46,11 @@ pub(super) async fn key(call: &NodeCall<'_>) -> Option<Value> {
     }) {
         return None;
     }
-    let repo = WorkflowsRepo::new(call.ctx.pool.clone());
-    let current = repo.get_run(&call.env.run_id).await.ok()?;
+    let repo = WorkflowsRepo::new(pool.clone());
+    let current = repo.get_run(input.run_id).await.ok()?;
     let mut request = current.input.as_object()?.clone();
     for k in [
-        otto_workflows::rereview::PREVIOUS_RUN_KEY,
+        crate::rereview::PREVIOUS_RUN_KEY,
         "channel",
         "chat",
         "thread",
@@ -37,29 +59,23 @@ pub(super) async fn key(call: &NodeCall<'_>) -> Option<Value> {
     ] {
         request.remove(k);
     }
-    let upstream = context_input(&call.input);
-    let prompt = call
-        .node
-        .params
-        .get("prompt")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let instructions = prepend_skills(call.ctx, &call.node.params, prompt);
+    let upstream = context_input(input.upstream);
+    let instructions = input.instructions;
     // The standard agent preamble exposes every earlier handoff, not just
     // the immediate input. Include those too; a changed contract brief must
     // invalidate an otherwise unchanged docs-only context result.
     let mut handoffs = Vec::new();
-    for name in call.env.files.list_step_mds() {
-        let body = call.env.files.read_named(&name)?;
+    for name in input.files.list_step_mds() {
+        let body = input.files.read_named(&name)?;
         handoffs.push((name, body));
     }
-    let dependencies = tracked_dependencies(&call.env.files.repos(), &paths).await?;
+    let dependencies = tracked_dependencies(&input.files.repos(), &paths).await?;
     // Store only a digest: handoff files may contain earlier cache metadata,
     // and embedding that again would recursively inflate every next output.
     use sha2::{Digest, Sha256};
-    let inputs = json!({"version":current.workflow_version,"params":call.node.params,"request":request,
-        "jira":call.env.files.read_jira_md(),"dependencies":dependencies,
-        "upstream":upstream,"handoffs":handoffs,"instructions":instructions,"default_provider":call.env.default_provider});
+    let inputs = json!({"version":current.workflow_version,"params":input.params,"request":request,
+        "jira":input.files.read_jira_md(),"dependencies":dependencies,
+        "upstream":upstream,"handoffs":handoffs,"instructions":instructions,"default_provider":input.default_provider});
     Some(json!({"sha256":hex::encode(Sha256::digest(serde_json::to_vec(&inputs).ok()?))}))
 }
 
@@ -75,7 +91,7 @@ fn context_input(input: &Value) -> Value {
             "session_id",
             "context_dir",
             "run_context_dir",
-            otto_workflows::rereview::PREVIOUS_RUN_KEY,
+            crate::rereview::PREVIOUS_RUN_KEY,
         ] {
             map.remove(key);
         }
@@ -83,10 +99,7 @@ fn context_input(input: &Value) -> Value {
     input
 }
 
-async fn tracked_dependencies(
-    entries: &[crate::workflow_context::RepoEntry],
-    paths: &[&str],
-) -> Option<Value> {
+async fn tracked_dependencies(entries: &[RepoEntry], paths: &[&str]) -> Option<Value> {
     let mut dependencies = Vec::new();
     for entry in entries {
         let git = otto_git::LocalGit::new(entry.worktree.as_ref()?);
@@ -117,15 +130,11 @@ async fn tracked_dependencies(
     Some(json!(dependencies))
 }
 
-pub(super) async fn previous_reply(call: &NodeCall<'_>, key: &Value) -> Option<String> {
-    let previous_id = call
-        .env
-        .run_input
-        .get(otto_workflows::rereview::PREVIOUS_RUN_KEY)?
-        .as_str()?;
-    let repo = WorkflowsRepo::new(call.ctx.pool.clone());
+async fn previous_reply(pool: &DbPool, input: &ContextInput<'_>, key: &Value) -> Option<String> {
+    let previous_id = input.previous_run_id?;
+    let repo = WorkflowsRepo::new(pool.clone());
     let previous = repo.get_run(&previous_id.to_string()).await.ok()?;
-    let current = repo.get_run(&call.env.run_id).await.ok()?;
+    let current = repo.get_run(input.run_id).await.ok()?;
     if previous.workspace_id != current.workspace_id || previous.workflow_id != current.workflow_id
     {
         return None;
@@ -133,7 +142,7 @@ pub(super) async fn previous_reply(call: &NodeCall<'_>, key: &Value) -> Option<S
     let node = previous
         .nodes
         .iter()
-        .find(|n| n.node_id == call.node.id && n.status == NodeStatus::Success)?;
+        .find(|n| n.node_id == input.node_id && n.status == NodeStatus::Success)?;
     let output = node.output.as_ref()?;
     if output.get(CACHE_KEY)? != key {
         return None;
@@ -142,7 +151,7 @@ pub(super) async fn previous_reply(call: &NodeCall<'_>, key: &Value) -> Option<S
     Some(reply.to_string())
 }
 
-pub(super) fn attach(output: &mut serde_json::Map<String, Value>, key: Option<Value>) {
+pub fn attach(output: &mut serde_json::Map<String, Value>, key: Option<Value>) {
     if let Some(key) = key {
         output.insert(CACHE_KEY.into(), key);
     }
@@ -189,7 +198,7 @@ mod tests {
         std::fs::write(dir.path().join("code.rs"), "old behavior").unwrap();
         git(&["add", "."]);
         git(&["commit", "-m", "fixture"]);
-        let entries = vec![crate::workflow_context::RepoEntry {
+        let entries = vec![RepoEntry {
             repo: "repo".into(),
             repo_id: Some("repo".into()),
             repo_name: None,
