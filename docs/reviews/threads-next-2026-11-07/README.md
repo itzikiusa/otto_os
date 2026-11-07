@@ -84,4 +84,25 @@ Additional user-authorized scope: enforced dependency graphs, editable suggested
 loops for Angular, Go, general engineering, research, POC (backend/frontend/both),
 rewrite and performance. The templates are informed by a selected recent Claude
 and Codex history sample, with private provenance retained outside the repository.
-Validation and browser results will be recorded after integration.
+Graph runtime: 42 focused Goal Loop tests passed before final helper extraction;
+the full integration gate checks the extracted form. Graph API validation/save/load
+and research report normalization passed against the actual router/state. Two
+browser flows passed in light and dark, each including desktop and 390px phone
+views, template replacement cancellation, cycle rejection, edited graph submission,
+state display and reload. The browser fixtures mock the provider/API result boundary;
+the separate API test verifies real persistence. No provider turn is launched.
+
+Independent source review confirmed human verification cannot be a prerequisite
+invalidated by downstream work; terminal human nodes remain supported. Task prompts
+retain the concrete user goal. Failed final review reopens a task for repair, and
+an optimistic reevaluation cannot pass that task without execution.
+
+- [Graph editor, light](screenshots/goal-graph-editor-light.png) / [dark](screenshots/goal-graph-editor-dark.png)
+- [Phone editor, light](screenshots/goal-graph-phone-light.png) / [dark](screenshots/goal-graph-phone-dark.png)
+- [Phone task evidence, light](screenshots/goal-graph-state-phone-light.png) / [dark](screenshots/goal-graph-state-phone-dark.png)
+
+Seven D2 graphs rendered and passed the diagram quality check. The offline HTML
+guide was checked in Chromium for all seven selections, mobile layout, keyboard
+zoom closure and absence of network requests. The sampled recent session research
+covers both Claude and Codex; it establishes requested patterns, not verified
+historical task outcomes.
