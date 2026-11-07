@@ -10,8 +10,8 @@ use super::super::*;
 use super::NodeCall;
 
 /// Per-severity deductions (percent off 100) over the OPEN findings —
-/// `scoring: { bug, warn, info }`. Defaults (20/5/5) preserve the historical
-/// blocking/advisory formula.
+/// `scoring: { bug, warn, info }`. Defaults (20/5/0) prioritize must-fix
+/// and should-fix defects; optional observations do not lower the score.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::workflow_engine) struct ScoreWeights {
     pub(in crate::workflow_engine) bug: i64,
@@ -24,7 +24,7 @@ impl Default for ScoreWeights {
         Self {
             bug: 20,
             warn: 5,
-            info: 5,
+            info: 0,
         }
     }
 }
@@ -674,19 +674,25 @@ async fn previous_iteration_review(plan: &ReviewPlan<'_>, repo_id: &Id) -> Optio
     {
         return None;
     }
-    let node = previous.nodes.iter().find(|n| n.node_id == plan.node.id)?;
-    let mut ids = node.review_ids.clone();
-    if let Some(out) = &node.output {
-        if let Some(id) = out.get("review_id").and_then(Value::as_str) {
-            ids.push(id.to_string());
+    let mut ids = Vec::new();
+    if let Some(node) = previous.nodes.iter().find(|n| n.node_id == plan.node.id) {
+        ids.extend(node.review_ids.clone());
+        if let Some(output) = &node.output {
+            ids.extend(review_ids_from_output(output));
         }
-        if let Some(reviews) = out.get("reviews").and_then(Value::as_array) {
-            ids.extend(
-                reviews
-                    .iter()
-                    .filter_map(|r| r.get("review_id").and_then(Value::as_str))
-                    .map(str::to_string),
-            );
+    }
+    if plan.scope.iter.is_some() {
+        let logical_step = logical_review_step(&plan.node.id);
+        let mut checkpoints = store.checkpoints(&previous.id).await.ok()?;
+        checkpoints.sort_by_key(|checkpoint| checkpoint.updated_at);
+        for checkpoint in checkpoints {
+            if checkpoint.kind == "review_run"
+                && logical_review_step(&checkpoint.node_id) == logical_step
+            {
+                if let Some(output) = checkpoint.output {
+                    ids.extend(review_ids_from_output(&output));
+                }
+            }
         }
     }
     ids.reverse();
@@ -698,6 +704,65 @@ async fn previous_iteration_review(plan: &ReviewPlan<'_>, repo_id: &Id) -> Optio
         }
     }
     None
+}
+
+fn review_ids_from_output(output: &Value) -> Vec<Id> {
+    let mut ids = Vec::new();
+    if let Some(id) = output.get("review_id").and_then(Value::as_str) {
+        ids.push(id.to_string());
+    }
+    if let Some(reviews) = output.get("reviews").and_then(Value::as_array) {
+        ids.extend(
+            reviews
+                .iter()
+                .filter_map(|review| review.get("review_id").and_then(Value::as_str))
+                .map(str::to_string),
+        );
+    }
+    ids
+}
+
+/// Iteration numbers change between runs; step positions identify the same
+/// nested review. The per-target durable association adds `#review.N`.
+fn logical_review_step(node_id: &str) -> String {
+    let node_id = node_id.split("#review.").next().unwrap_or(node_id);
+    node_id
+        .split('#')
+        .enumerate()
+        .map(|(index, part)| {
+            if index == 0 {
+                return part.to_string();
+            }
+            match part.split_once('.') {
+                Some((iteration, step))
+                    if iteration.parse::<u64>().is_ok() && step.parse::<usize>().is_ok() =>
+                {
+                    format!("#*.{step}")
+                }
+                _ => format!("#{part}"),
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod rereview_lineage_tests {
+    use super::*;
+    #[test]
+    fn nested_loop_lineage_matches_step_not_iteration_or_other_review() {
+        assert_eq!(
+            logical_review_step("loop#1.0#2.1"),
+            logical_review_step("loop#3.0#5.1#review.0")
+        );
+        assert_ne!(
+            logical_review_step("loop#1.0"),
+            logical_review_step("loop#2.1")
+        );
+        assert_eq!(
+            review_ids_from_output(&json!({"reviews":[{"review_id":"a"},{"review_id":"b"}]})),
+            vec!["a", "b"]
+        );
+    }
 }
 
 /// Launch phase: validate the repo, post the start line, and start (or adopt,

@@ -37,11 +37,48 @@ pub(super) async fn key(call: &NodeCall<'_>) -> Option<Value> {
     ] {
         request.remove(k);
     }
+    let upstream = context_input(&call.input);
+    let prompt = call
+        .node
+        .params
+        .get("prompt")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let instructions = prepend_skills(call.ctx, &call.node.params, prompt);
+    // The standard agent preamble exposes every earlier handoff, not just
+    // the immediate input. Include those too; a changed contract brief must
+    // invalidate an otherwise unchanged docs-only context result.
+    let mut handoffs = Vec::new();
+    for name in call.env.files.list_step_mds() {
+        let body = call.env.files.read_named(&name)?;
+        handoffs.push((name, body));
+    }
     let dependencies = tracked_dependencies(&call.env.files.repos(), &paths).await?;
     Some(
         json!({"version":current.workflow_version,"params":call.node.params,"request":request,
-        "jira":call.env.files.read_jira_md(),"dependencies":dependencies}),
+        "jira":call.env.files.read_jira_md(),"dependencies":dependencies,
+        "upstream":upstream,"handoffs":handoffs,"instructions":instructions,"default_provider":call.env.default_provider}),
     )
+}
+
+/// Runtime paths and session identity do not change the context's meaning.
+/// Preserve every substantive upstream value (including a checkout/contract
+/// summary); unknown dependencies must miss rather than reuse stale advice.
+fn context_input(input: &Value) -> Value {
+    let mut input = input.clone();
+    if let Some(map) = input.as_object_mut() {
+        for key in [
+            "working_directory",
+            "worktree",
+            "session_id",
+            "context_dir",
+            "run_context_dir",
+            otto_workflows::rereview::PREVIOUS_RUN_KEY,
+        ] {
+            map.remove(key);
+        }
+    }
+    input
 }
 
 async fn tracked_dependencies(
@@ -112,6 +149,18 @@ pub(super) fn attach(output: &mut serde_json::Map<String, Value>, key: Option<Va
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn context_input_preserves_changed_upstream_contracts() {
+        let before =
+            json!({"reply":"contract accepts USD", "working_directory":"/old", "session_id":"old"});
+        let moved =
+            json!({"reply":"contract accepts USD", "working_directory":"/new", "session_id":"new"});
+        let changed =
+            json!({"reply":"contract accepts EUR", "working_directory":"/new", "session_id":"new"});
+        assert_eq!(context_input(&before), context_input(&moved));
+        assert_ne!(context_input(&before), context_input(&changed));
+    }
+
     #[tokio::test]
     async fn context_cache_tracks_declared_blobs_and_rejects_dirty_or_missing_inputs() {
         let dir = tempfile::tempdir().unwrap();

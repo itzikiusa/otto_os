@@ -6404,10 +6404,17 @@ origin workspace/channel/chat/thread match.
 
 Read-only `agent_prompt` nodes may declare `review_context_paths: string[]`
 (1–32 relative tracked paths). Context reuse requires identical declared Git
-blobs, request, Jira context, node params and workflow version, with clean repos.
+blobs, request, Jira context, substantive upstream inputs and prior handoffs, resolved skill instructions,
+node params and workflow version, with clean repos.
 An output with `context_reused: true` is a background-context cache hit; it is
 never a gate/review pass. Cached replies retain `review_context_key` metadata for
 the next iteration. Unknown or changed dependencies execute normally.
+
+
+Workflow `review_run` scoring defaults to `{bug:20,warn:5,info:0}`; explicit
+per-node weights remain authoritative. Optional findings are visible without
+lowering the default score.
+
 ### Adaptive Git review and local fix goals (2026-11)
 
 `Review.scope_plan?` is persisted in `pr_reviews.scope_plan_json` (migration 0206).

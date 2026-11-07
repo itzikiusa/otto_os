@@ -30,6 +30,23 @@ pub fn next_input(previous: &WorkflowRun, from_chat: bool) -> Value {
     input
 }
 
+/// Loop steps are real review surfaces too, not just top-level graph nodes.
+fn contains_review(kind: &str, params: &Value) -> bool {
+    kind == "review_run"
+        || (kind == "loop"
+            && params
+                .get("steps")
+                .and_then(Value::as_array)
+                .is_some_and(|steps| {
+                    steps.iter().any(|step| {
+                        contains_review(
+                            step.get("kind").and_then(Value::as_str).unwrap_or(""),
+                            step.get("params").unwrap_or(&Value::Null),
+                        )
+                    })
+                }))
+}
+
 /// The caller has already authorized access to `previous` (workspace Editor
 /// for HTTP; an exact origin-workspace/channel/chat/thread match for chat).
 /// Atomic idle admission avoids duplicate re-reviews from repeated clicks.
@@ -51,7 +68,12 @@ pub async fn start<C: WorkflowCtx>(
             "The review workflow moved to a different workspace.".into(),
         ));
     }
-    if !wf.graph.nodes.iter().any(|n| n.kind == "review_run") {
+    if !wf
+        .graph
+        .nodes
+        .iter()
+        .any(|node| contains_review(&node.kind, &node.params))
+    {
         return Err(Error::Invalid("This workflow has no review step.".into()));
     }
     crate::validation::ensure_valid(&wf.graph)?;
@@ -73,6 +95,22 @@ pub async fn start<C: WorkflowCtx>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn review_in_loop_is_an_eligible_review_workflow() {
+        assert!(contains_review(
+            "loop",
+            &json!({"steps":[{"kind":"agent_prompt"},{"kind":"review_run"}]})
+        ));
+        assert!(!contains_review(
+            "loop",
+            &json!({"steps":[{"kind":"agent_prompt"}]})
+        ));
+        assert!(!contains_review(
+            "agent_prompt",
+            &json!({"steps":[{"kind":"review_run"}]})
+        ));
+    }
+
     #[test]
     fn lineage_is_replaced_and_resolved_worktree_is_not_replayed() {
         let mut run: WorkflowRun = serde_json::from_value(json!({

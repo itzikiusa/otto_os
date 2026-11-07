@@ -1848,7 +1848,12 @@ mod review_gate {
     fn three_bugs_score_forty_and_scoring_overrides_apply() {
         let w = ScoreWeights::default();
         assert_eq!(review_score(3, 0, 0, w, false), 40);
-        assert_eq!(review_score(0, 2, 1, w, false), 85);
+        assert_eq!(review_score(0, 2, 1, w, false), 90);
+        assert_eq!(
+            review_score(0, 0, 100, w, false),
+            100,
+            "optional observations do not erase a healthy score"
+        );
         assert_eq!(review_score(9, 0, 0, w, false), 0, "clamped at 0");
         let heavy = ScoreWeights {
             bug: 50,
@@ -1892,7 +1897,7 @@ mod review_gate {
             "a non-integer weight falls back to its default"
         );
         let partial = ScoreWeights::from_params(&json!({"scoring": {"warn": 0}}));
-        assert_eq!((partial.bug, partial.warn, partial.info), (20, 0, 5));
+        assert_eq!((partial.bug, partial.warn, partial.info), (20, 0, 0));
     }
 
     #[test]

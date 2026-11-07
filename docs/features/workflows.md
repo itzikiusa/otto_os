@@ -383,7 +383,7 @@ any "not wired" stub kinds** — the four former product/review stubs are now wi
 | `product_rewrite` | Product Rewrite / Product | Rewrites the story (**`jira-story-writer`**); outputs `{ story_id, body_md, session_id }`; `persist:true` saves a `suggested` product version. | `story_id`, `persist?`, `instruction?` | **Real** ² |
 | `product_plan` | Product Plan / Product | Breaks the story into a plan (**`story-task-breakdown`**); outputs `{ story_id, plan_md, session_id }`; `persist:true` saves a `plan` version. | `story_id`, `persist?`, `instruction?` | **Real** ² |
 | `product_publish` | Product Publish / Product | Publishes a story as a Confluence **RFC** or a **Jira** issue. **`dry_run` defaults true** and captures a real content/destination preview; configure `story_id`, `account_id` and `project_key`/`space_key` before preview. Connect Preview → Human Approval → live Product Publish; live publication consumes that exact approved snapshot. | `kind` (`rfc`/`jira`), `dry_run`, `account_id`, … | **Real** |
-| `review_run` | Review Run / AI | Runs the **PR-review engine** (multi-provider × multi-lens reviewer agents + a scoring summarizer), polls to completion, emits a **0–100 `score`** (`100−20×blocking−5×advisory`), optional `goals` assessment blended in, `passed = score≥threshold && status==done`. `require_pass:true` **errors** the step when below threshold. Output also carries `blocking`/`advisory`/`findings`/`providers`/`lenses`. See *`review_run`, gating & auto-PR* below. | `repo_id`, `base` (default `main`), `providers[]`, `lenses[]` (alias `skills[]`), `threshold` (default 80), `require_pass`, `await`, `timeout_s`, `goals[]`, `mode?` (`fan_out`/`orchestrator` — *Execution mode* below) | **Real** |
+| `review_run` | Review Run / AI | Runs the **PR-review engine** (multi-provider × multi-lens reviewer agents + a scoring summarizer), polls to completion, emits a **0–100 `score`** (`100−20×must-fix−5×should-fix; optional findings deduct 0 by default`), optional `goals` assessment blended in, `passed = score≥threshold && status==done`. `require_pass:true` **errors** the step when below threshold. Output also carries `blocking`/`advisory`/`findings`/`providers`/`lenses`. See *`review_run`, gating & auto-PR* below. | `repo_id`, `base` (default `main`), `providers[]`, `lenses[]` (alias `skills[]`), `threshold` (default 80), `require_pass`, `await`, `timeout_s`, `goals[]`, `mode?` (`fan_out`/`orchestrator` — *Execution mode* below) | **Real** |
 | `canvas` | Canvas Diagram / Product | Asks an agent for a **mermaid/excalidraw** diagram and writes it under the data dir (`workflow-canvas/{run}/{node}.{ext}`); output `{ scene_id, path, diagram, … }`. | `prompt`, `mode` (`mermaid`/`excalidraw`), `provider?`, `model?` | **Real** |
 | `self_improve` | Self-Improve (offer) / AI | Runs the **self-improvement engine** in OFFER-ONLY mode (`Autonomy::Propose` — every skill/memory edit is queued for approval, **never** applied) over recent sessions and posts the offered list to the trigger's chat thread; output `{ run_id, summary, offered, edits }`. | `providers[]` or `provider?` (empty ⇒ the workspace's configured Self-Improvement providers) | **Real** |
 | `git_pr` | Git PR / Network | **Drafts** a pull request for a repo branch — the title/description are crafted by an agent (the node's `provider`/`model`, empty ⇒ run's resolved default; not the claude-only orchestrator). Default is draft-only (`opened:false`); **`open:true`** actually OPENS the PR on the remote (outward-facing, per-step opt-in) — gate it on the incoming edge (e.g. the review passing). | `repo_id`, `base` (default `main`), `open` (default `false`), `worktree_path?`, `provider?`, `model?` | **Real** |
@@ -1517,7 +1517,7 @@ are **append-only** — never edit or renumber an existing one.
 | Symptom | Likely cause / fix |
 |---|---|
 | A `product_*` / `review_run` node errors "missing story_id / repo_id" | These are **wired** now (§4) and need their target: a `story_id` (product) or `repo_id` (review/PR) in the node params or the run input. Provide it (the Run dialog / `Action: Workflow` message / template input). |
-| A `review_run` node "passes" too easily / never passes | `score = 100 − 20×blocking − 5×advisory` (optionally blended with a goals score), `passed` needs `score ≥ threshold` **and** the review reaching `done`. Tune `threshold` (default 80) or check the finding counts in the node output. |
+| A `review_run` node "passes" too easily / never passes | `score = 100 − 20×must-fix − 5×should-fix (optional findings deduct 0 by default)` (optionally blended with a goals score), `passed` needs `score ≥ threshold` **and** the review reaching `done`. Tune `threshold` (default 80) or check the finding counts in the node output. |
 | A scheduled run never starts | The schedule scheduler **is** spawned at boot now (§5). Check the trigger is **enabled**, the cadence/`timezone` is right, and `last_run` shows it isn't mid-window; for cron, validate the `expr`. |
 | Step log: `⚠ handoff file missing — accepted the agent's final reply after 90s idle` | The agent ended its turn but never wrote the step's `.md` handoff (§3), so the engine accepted its final reply after the 90 s grace (a nudge was sent at +10 s). The step's "work product" is the chat reply, not a file — tighten the step prompt to write the handoff, or accept the reply. |
 | Step log: `⚠ handoff written but 3 tasks still pending — waiting (up to 15m)` | The agent wrote its handoff **while** sub-agents / background tasks it launched were still running — against the step protocol (§3). The engine waits up to 15 min for them rather than cutting them off. Fix the prompt so the handoff is written last. |
@@ -1593,14 +1593,16 @@ required target must complete for a multi-repo review to pass.
 A **read-only context-discovery** `agent_prompt` can opt into
 `params.review_context_paths: ["docs/architecture", "README.md"]`. These tracked
 paths must cover **all repository dependencies of that step**. A repeat reuses
-its reply only when those Git blobs, the Jira context, original request, node
-parameters and workflow version match, and every repository is clean. Missing
+its reply only when those Git blobs, the Jira context, original request,
+substantive upstream inputs and prior handoffs, resolved skill instructions, node parameters and
+workflow version match, and every repository is clean. Missing
 metadata, changed dependencies, a changed ticket/config, or a dirty checkout
 runs the step normally. The first run after opting in records the metadata.
 
 Never put this option on checkout, gates, fixes, verification, notifications or
 publishing. When the dependency set is unknown, leave caching off; previous
-outputs remain available for selective verification. Cache hits are recorded in
+outputs remain available for selective verification. This is conservative: changed upstream briefs may require rediscovery even when
+the declared documentation stayed unchanged. Cache hits are recorded in
 the step output (`context_reused`) and log. They do not inherit approval or pass
 results, and current `repos.json` remains the authority for checkout paths.
 
