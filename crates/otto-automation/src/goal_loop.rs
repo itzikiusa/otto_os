@@ -952,6 +952,11 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
                     v["approved"] == true && v["findings"].as_array().is_some_and(Vec::is_empty)
                 });
                 ledger.review_summary = review.unwrap_or_else(|e| e.to_string());
+                if !ledger.review_passed {
+                    if let Some(graph) = &loop_.config.graph {
+                        crate::goal_loop_graph::reopen_completion(graph, &mut ledger);
+                    }
+                }
                 warn_on_err(
                     &loop_id,
                     "set_ledger",

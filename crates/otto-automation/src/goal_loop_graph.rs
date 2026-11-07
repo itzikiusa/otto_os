@@ -210,6 +210,24 @@ pub fn all_passed(graph: &GoalLoopGraph, ledger: &GoalLoopLedger) -> bool {
     !graph.nodes.is_empty() && graph.nodes.iter().all(|n| passed(ledger, &n.id))
 }
 
+/// A failed whole-goal review needs actual repair work on Resume, not another
+/// identical review of an already-passed graph. Reopen the final terminal task.
+pub fn reopen_completion(graph: &GoalLoopGraph, ledger: &mut GoalLoopLedger) {
+    if let Some(node) = graph.nodes.iter().rev().find(|node| {
+        !graph
+            .nodes
+            .iter()
+            .any(|other| other.depends_on.contains(&node.id))
+    }) {
+        if let Some(state) = ledger.graph_nodes.iter_mut().find(|s| s.node_id == node.id) {
+            state.status = "blocked".into();
+            state.evidence =
+                "Completion review requires repair; see the persisted review summary".into();
+            state.criteria.clear();
+        }
+    }
+}
+
 pub fn reconcile_verdict(
     graph: &GoalLoopGraph,
     ledger: &GoalLoopLedger,
@@ -322,6 +340,24 @@ mod tests {
         reconcile(&g, &mut l, &eval(), Some("a"));
         assert_eq!(next_node(&g, &l).unwrap().id, "b");
     }
+    #[test]
+    fn rejected_completion_review_reopens_actual_terminal_work() {
+        let (cfg, _) = fixture();
+        let g = cfg.graph.unwrap();
+        let mut l = GoalLoopLedger::default();
+        initialize(&g, &mut l);
+        for (i, id) in ["a", "b", "c"].iter().enumerate() {
+            l.graph_nodes[i].iteration = i as u32 + 1;
+            reconcile(&g, &mut l, &eval(), Some(id));
+        }
+        assert!(all_passed(&g, &l));
+        reopen_completion(&g, &mut l);
+        assert!(!all_passed(&g, &l));
+        reconcile(&g, &mut l, &eval(), None);
+        assert_eq!(next_node(&g, &l).unwrap().id, "c");
+        assert_eq!(l.graph_nodes[0].status, "passed");
+    }
+
     #[test]
     fn pending_human_task_does_not_block_independent_work() {
         let (mut cfg, _) = fixture();
