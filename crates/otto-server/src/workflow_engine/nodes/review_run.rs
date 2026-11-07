@@ -739,6 +739,7 @@ async fn score_target(
         status,
         coverage_complete,
         no_changes,
+        bugs,
         score,
         threshold,
         base,
@@ -759,7 +760,7 @@ async fn score_target(
         } else if no_changes {
             format!("⚠️ empty diff vs `{base}` — nothing was reviewed")
         } else {
-            "⚠️ below threshold".to_string()
+            format!("⚠️ {reason}")
         };
         // Only headline a score for a COMPLETED review that had a
         // diff — otherwise the "100/100" is an artifact of a review

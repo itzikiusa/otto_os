@@ -70,7 +70,7 @@ pub struct ReviewVerdict {
 }
 
 /// A review must COMPLETE (status "done" with full coverage), have had
-/// something to review, AND clear the threshold to pass. The reasons stay
+/// something to review, have no open must-fix findings, AND clear the threshold to pass. The reasons stay
 /// distinct: an incomplete review (error / timeout / still running) and an
 /// empty diff BOTH produce zero findings, so reporting either as "below
 /// threshold" is nonsense — the score was never the problem.
@@ -78,12 +78,13 @@ pub fn review_verdict(
     status: &str,
     coverage_complete: bool,
     no_changes: bool,
+    must_fix: u64,
     score: i64,
     threshold: i64,
     base: &str,
 ) -> ReviewVerdict {
     let complete = status == "done" && coverage_complete;
-    let passed = complete && !no_changes && score >= threshold;
+    let passed = complete && !no_changes && must_fix == 0 && score >= threshold;
     let reason = if passed {
         "passed".to_string()
     } else if !complete {
@@ -94,6 +95,8 @@ pub fn review_verdict(
         }
     } else if no_changes {
         format!("empty diff vs {base} — nothing was reviewed")
+    } else if must_fix > 0 {
+        format!("{must_fix} must-fix finding(s) remain open")
     } else {
         format!("below threshold ({score} < {threshold})")
     };
@@ -188,4 +191,28 @@ pub fn aggregate(
         Value::Array(outs.into_iter().map(Value::Object).collect()),
     );
     (out, agg_passed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn must_fix_blocks_even_when_weight_or_goals_allow_a_passing_score() {
+        for weights in [
+            ScoreWeights::default(),
+            ScoreWeights {
+                bug: 0,
+                ..ScoreWeights::default()
+            },
+        ] {
+            let score = blended_score(review_score(1, 0, 0, weights, false), Some(100));
+            assert!(score >= 80);
+            let blocked = review_verdict("done", true, false, 1, score, 80, "main");
+            assert!(blocked.complete);
+            assert!(!blocked.passed);
+            assert_eq!(blocked.reason, "1 must-fix finding(s) remain open");
+            assert!(review_verdict("done", true, false, 0, score, 80, "main").passed);
+        }
+    }
 }

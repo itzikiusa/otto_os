@@ -1907,27 +1907,27 @@ mod review_gate {
 
     #[test]
     fn a_score_at_the_threshold_passes_and_one_below_fails() {
-        let at = review_verdict("done", true, false, 80, 80, "main");
+        let at = review_verdict("done", true, false, 0, 80, 80, "main");
         assert!(at.passed && at.complete);
         assert_eq!(at.reason, "passed");
-        let below = review_verdict("done", true, false, 79, 80, "main");
+        let below = review_verdict("done", true, false, 0, 79, 80, "main");
         assert!(!below.passed);
         assert_eq!(below.reason, "below threshold (79 < 80)");
     }
 
     #[test]
     fn an_incomplete_review_never_reads_as_below_threshold() {
-        let err = review_verdict("error", true, false, 100, 80, "main");
+        let err = review_verdict("error", true, false, 0, 100, 80, "main");
         assert!(!err.passed && !err.complete);
         assert_eq!(err.reason, "review did not complete (status: error)");
-        let partial = review_verdict("done", false, false, 100, 80, "main");
+        let partial = review_verdict("done", false, false, 0, 100, 80, "main");
         assert!(!partial.passed);
         assert!(
             partial.reason.contains("coverage incomplete"),
             "{}",
             partial.reason
         );
-        let empty = review_verdict("done", true, true, 100, 80, "develop");
+        let empty = review_verdict("done", true, true, 0, 100, 80, "develop");
         assert!(!empty.passed);
         assert_eq!(empty.reason, "empty diff vs develop — nothing was reviewed");
     }

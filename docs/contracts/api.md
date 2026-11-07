@@ -2680,7 +2680,8 @@ output adds
 `score`/`passed`/`blocking`/`advisory`/`findings`/`providers`/`lenses` (empty
 `providers`+`lenses` ⇒ the stored/default review config). A passing review must be
 finished, nonempty, cover all requested reviewers (including sibling-covered skips),
-and meet the score threshold. Partial/error reviewer rows cannot pass. A failed
+have no open must-fix findings, and meet the score threshold. Custom weights and
+goals scores cannot override the must-fix veto. Partial/error reviewer rows cannot pass. A failed
 `require_pass` gate retains its structured review output and fails without automatic
 transport retries. Completed review associations are checkpointed before launch and
 adopted on reentry only for the same node, iteration, target, configuration and diff.
