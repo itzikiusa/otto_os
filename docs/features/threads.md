@@ -3,9 +3,30 @@
 `Threads` (`#/threads` and `#/threads/<sessionId>`) is Otto's dedicated,
 inbox-style conversational workspace for coding-agent sessions (`claude`,
 `codex`, `agy`, and registered custom providers). It complements classic
-terminal **Agents** (`#/agents`) — both views operate on the exact same live
-PTY-backed sessions in `ottod`, so you can switch between `#/threads` and
-`#/agents` without restarting or duplicating any process.
+terminal **Agents** (`#/agents`). New Claude, Codex and Gemini threads use the
+[structured runtime](threads-structured-runtime.md). Existing terminal coding
+sessions can also open in Threads through their transcript view, keeping the
+same live PTY and conversation.
+
+## Continue an agent in Threads
+
+From an agent's **⋯ → Open in Threads** (or the labelled **Threads** button
+on a phone), continue reading and messaging the same session as a chat. The
+session id, running process, provider conversation, permissions and delegated
+workers stay attached. Only its preferred surface changes; unrelated metadata
+is preserved. If saving the preference fails, Otto stays on the current view
+and shows the error.
+
+Use **Thread actions → Open in Terminal** to return to Agents. This action is
+available for existing coding-agent PTYs, including nested coding agents; it
+does not convert a structured runtime thread or a plain shell into a new agent.
+Structured threads retain their existing project terminal drawer.
+
+On compact screens the sidebar and inspector open on demand. File links,
+`/files`, `/diff` and `/btw` open the corresponding inspector, and Escape or the
+close button returns to the conversation. Unsent runtime messages, attachments,
+model, effort and access choices belong to each thread and are restored when
+switching back to it; they do not carry into another conversation.
 
 ## Layout & Workflows
 

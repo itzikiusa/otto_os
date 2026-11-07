@@ -22,6 +22,7 @@
   import PhoneHandoffButton from '../../lib/components/PhoneHandoffButton.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { startThreadTerminal } from './runtime/threadTerminalStart';
   import { runtimeThreadMenu } from './runtime/runtimeMenu';
   import { asThreadSession, runtimeThreads } from './runtime/runtimeThreads.svelte';
   // The structured-runtime conversation loads with the first runtime thread.
@@ -62,14 +63,13 @@
   // the thread's folder (`meta.terminal_of`, out of the thread lists like the
   // dock's shells), started on first open — once; a failure toasts.
   const runtimeShell = $derived(runtime ? (ws.sessions.find((s) => !s.archived && s.meta?.terminal_of === paneId) ?? null) : null);
-  let shellTried = false;
+  let shellFailed = $state<Record<string, boolean>>({});
+  $effect(() => { if (!showTerminal) delete shellFailed[paneId]; });
   $effect(() => {
-    if (!showTerminal || !runtime || runtimeShell || shellTried || !ws.listSettled) return;
-    shellTried = true;
-    const scratch = runtime.workspace_id === SCRATCH_WORKSPACE_ID && ws.currentId !== SCRATCH_WORKSPACE_ID;
-    const meta = { surface: 'threads', threads_terminal: true, terminal_of: paneId };
-    ws.createSessionQuiet({ kind: 'agent', provider: 'shell', title: `Terminal · ${runtime.title}`, cwd: runtime.cwd, meta }, { scratch })
-      .catch((e: unknown) => toastError('Couldn’t open a terminal', e));
+    if (!showTerminal || !runtime || runtimeShell || shellFailed[paneId] || !ws.listSettled) return;
+    const id = paneId;
+    startThreadTerminal(runtime)
+      .catch((e: unknown) => { shellFailed[id] = true; toastError('Couldn’t open a terminal', e); });
   });
   const showPeerBar = $derived(threads.peerBarFor === paneId);
   const toggleTerminal = (): void => threads.toggleTerminal(paneId);
@@ -362,7 +362,9 @@
         </button>
       </EmptyState>
     {:else if runtime}
-      <LazyMount lazy={RuntimeThread} what="conversation" variant="panel" props={{ sessionId: paneId, focused }} />
+      {#key paneId}
+        <LazyMount lazy={RuntimeThread} what="conversation" variant="panel" props={{ sessionId: paneId, focused }} />
+      {/key}
     {:else if isPlainShellSession(session)}
       <div class="tp-shell-wrap otto-force-dark">
         <LazyTerminal sessionId={paneId} forceDark autoFocus={focused} resumeOnOpen={focused} />

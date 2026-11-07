@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { currentModels, firstLine, nextRunWords, plainText, railOrder, starterPrompts } from '../src/modules/personal-agents/agentHome.ts';
+import { focusAgent, currentModels, firstLine, nextRunWords, plainText, railOrder, starterPrompts } from '../src/modules/personal-agents/agentHome.ts';
 import { daysOf, nextForDays, scheduleForDays, timezones, workdays } from '../src/modules/personal-agents/cadence.ts';
 import { paTab } from '../src/lib/uiCommands/personalAgentsPort.ts';
 import { errorText, isLostConversation, isRunHandoff, plainToolError, runNoticeOf, toolWords, workLabel } from '../src/modules/threads/runtime/timeline.ts';
@@ -151,4 +151,14 @@ test('a run reads as what it found, not its report heading', async () => {
   assert.equal(leadLine('# Late Brief — Sat 7 Nov\n\nYou have 6 routines; two overlap.'), 'You have 6 routines; two overlap.');
   assert.equal(leadLine('# Only a heading'), 'Only a heading');
   assert.equal(leadLine('Plain **first** line\nmore'), 'Plain first line');
+});
+
+
+test('Focus opens the primary agent and keeps explicit agent deep links', () => {
+  const agents = [{ id: 'scout', name: 'Alpha' }, { id: 'main', name: 'Otto' }];
+  assert.equal(focusAgent(agents, '', 'main')?.id, 'main');
+  assert.equal(focusAgent(agents, 'scout', 'main')?.id, 'scout');
+  assert.equal(focusAgent(agents, 'deleted', 'main'), null);
+  assert.equal(focusAgent([], '', null), null);
+  assert.equal(focusAgent(agents, '', null)?.id, 'scout');
 });

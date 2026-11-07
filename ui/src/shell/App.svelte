@@ -1,5 +1,6 @@
 <script lang="ts">
   import { transcript as transcriptStore } from '../lib/stores/transcript.svelte';
+  import { runtimeDrafts } from '../lib/stores/runtimeDrafts.svelte';
   import { NO_WORKSPACE } from '../lib/labels';
   import { toastError } from '../lib/toastError';
   import { onMount, untrack } from 'svelte';
@@ -110,7 +111,7 @@
   // Old bookmarks lead to the workspace's existing context editor.
   $effect(() => { if (router.module === 'projects') router.go('settings/context-soul'); });
   // Transcript cache identity: daemon + signed-in user.
-  $effect(() => {transcriptStore.setIdentity(JSON.stringify([baseUrl(),auth.me?.id ?? '']));});
+  $effect(() => { const identity = JSON.stringify([baseUrl(), auth.me?.id ?? '']); transcriptStore.setIdentity(identity); runtimeDrafts.setIdentity(identity); });
 
   const moduleName = $derived(router.module === '' ? 'agents' : router.module);
 
@@ -212,11 +213,10 @@
     const page = moduleName === 'agents' ? (ws.activeSession?.title ?? 'Agents') : moduleTitle;
     document.title = page ? `${page} — Otto` : 'Otto';
   });
-  // The phone Navigator drawer closes on every navigation (tapping a module or
-  // a session row in it should land on that page, not leave it covered).
-  $effect(() => {
+  // Navigation and breakpoint changes dismiss compact overlays.
+  $effect.pre(() => {
     void router.parts.join('/');
-    ui.navDrawerOpen = false;
+    ui.resetDrawers(compactShell);
   });
 
   // The Side panel (Git/Files/Notes/…, plus a page's own tabs) is on every
@@ -1084,11 +1084,11 @@
     {#if showRightPanel}
       <button
         class="mtop-btn"
-        class:active={ui.rightOpen}
+        class:active={ui.rightOpenNow}
         onclick={() => ui.toggleRight()}
         title={SIDE_PANEL}
         aria-label={SIDE_PANEL}
-        aria-expanded={ui.rightOpen}
+        aria-expanded={ui.rightOpenNow}
       >
         <Icon name="panel" size={20} />
       </button>
@@ -1165,7 +1165,7 @@
                session (`ws.activeSession`); elsewhere a workspace folder. It belongs
                to the main pane, so a side-by-side split keeps it there. -->
           {#if showRightPanel}
-            <Drawer bind:open={ui.rightOpen} inline={!compactShell} side="right" label={SIDE_PANEL} width="min(92vw, 360px)">
+            <Drawer bind:open={() => ui.rightOpenNow, (open) => ui.setRight(open, ui.rightTabNow)} inline={!compactShell} side="right" label={SIDE_PANEL} width="min(92vw, 360px)">
               <!-- Its chunk starts with the Agents page, or on first show (pages.svelte.ts). -->
               {@const RightPanel = loadedRightPanel()}
               {#if RightPanel}<RightPanel forceOpen={compactShell} />{:else}<div class="rp-loading" class:rail-slot={!compactShell}>{#if compactShell}<Skeleton rows={4} height={28} label="the {SIDE_PANEL}" />{/if}</div>{/if}

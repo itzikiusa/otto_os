@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
-import { expectNoHorizontalOverflow } from './helpers';
+import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
 // The Personal Agents home: the agent list (main agent first, with a star,
 // a status line each), one continuous conversation per agent (an intro and a
@@ -71,57 +71,129 @@ async function setup(page: Page): Promise<string> {
   return ws;
 }
 
-test('the home: agent list, ready composer, routines-and-runs panel, settings — light and dark', async ({ page }, info) => {
+test('Focus keeps one conversation with agent switching and contextual sheets — light and dark', async ({ page }, info) => {
   await setup(page);
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/#/personal-agents');
-  const rail = page.getByTestId('pa-rail');
-  // The main agent leads the list, starred; the specialist shows it is working.
-  await expect(rail.getByTestId(`pa-rail-${MAIN}`)).toBeVisible();
-  const rows = rail.locator('[data-testid^="pa-rail-0"]');
-  await expect(rows.first()).toHaveAttribute('data-testid', `pa-rail-${MAIN}`);
-  await expect(rail.getByTestId(`pa-rail-${SCOUT}`)).toHaveAttribute('data-presence', 'working');
-  await expect(rail.getByTestId(`pa-rail-${SCOUT}`)).toContainText('Working…');
-  // Never chatted: the intro and a ready composer; a chip only prefills it
-  // (no tokens are spent until you send).
-  await expect(page.getByTestId('pa-intro')).toContainText('Task me with anything');
+  const picker = page.getByTestId('pa-agent-switcher');
+  await expect(picker).toContainText('Otto');
+  await expect(page.getByTestId('pa-rail')).toHaveCount(0);
+  await expect(page.getByTestId('pa-side-panel')).toHaveCount(0);
+  await expect(page.locator('h1')).toHaveCount(1);
   await page.getByRole('button', { name: 'What are my agents up to?' }).click();
   await expect(page.getByTestId('pa-composer')).toHaveValue('What are my agents up to?');
-  // The main agent's hand-offs are live chips above the chat.
   await expect(page.getByTestId('pa-handoffs')).toContainText('Scout');
-  await expect(page.getByTestId('pa-handoffs')).toContainText('working…');
-  await expectNoHorizontalOverflow(page);
-
-  // The specialist: its routine in plain words with the next run, what it is
-  // doing now, and its recent runs — one panel, no tabs.
-  await rail.getByTestId(`pa-rail-${SCOUT}`).click();
+  await picker.click();
+  await expect(page.getByRole('menuitem').first()).toContainText('Otto');
+  await expectFullyInViewport(page, page.getByRole('menu'));
+  await page.getByRole('menuitem', { name: 'Scout · Working' }).click();
   await expect(page).toHaveURL(new RegExp(`#/personal-agents/${SCOUT}$`));
-  const panel = page.getByTestId('pa-side-panel');
-  await expect(panel).toBeVisible();
-  await expect(panel.getByTestId('pa-routines')).toContainText('Morning brief');
-  await expect(panel.getByTestId('pa-routines')).toContainText('next ');
-  await expect(panel.getByTestId('pa-activity')).toContainText('Working…');
-  await expect(panel.getByTestId('pa-recent')).toContainText('Two builds failed on main');
-  await expect(panel.getByTestId('pa-recent')).toContainText('Scheduled · Morning brief');
-  for (const scheme of ['light', 'dark'] as const) {
-    await setScheme(page, scheme);
-    await expect(panel.getByTestId('pa-routines')).toContainText('Morning brief');
-    await page.screenshot({ path: info.outputPath(`pa-home-${scheme}.png`) });
-  }
-  await setScheme(page, 'light');
+  await expect(page.getByTestId('pa-composer')).toHaveAttribute('aria-label', 'Message Scout');
+  await expect(page.getByTestId('pa-latest-result')).toContainText('Two builds failed on main');
+  await picker.click();
+  await page.getByRole('menuitem', { name: /Otto · Main agent/ }).click();
+  await expect(page.getByTestId('pa-composer')).toHaveAttribute('aria-label', 'Message Otto');
+  await expect(page.getByTestId('pa-composer')).toHaveValue('What are my agents up to?');
+  await picker.click();
+  await page.getByRole('menuitem', { name: 'Scout · Working' }).click();
+  await expect(page.getByTestId('pa-composer')).toHaveAttribute('aria-label', 'Message Scout');
+  await expect(page.getByTestId('pa-composer')).toHaveValue('');
+  await page.getByTestId('pa-composer').fill('Keep this draft while I look around');
+  await page.getByTestId('pa-composer').evaluate((el) => el.setAttribute('data-continuity-probe', 'original'));
 
-  // The panel toggles from the header; Settings opens on About.
-  await page.getByTestId('pa-panel-toggle').click();
-  await expect(panel).toHaveCount(0);
-  await page.getByRole('button', { name: 'More for Scout' }).click();
-  await page.getByRole('menuitem', { name: 'Settings' }).click();
-  await expect(page.getByRole('tab', { name: 'About', exact: true })).toHaveAttribute('aria-selected', 'true');
-  await expect(page.getByTestId('pa-personality').getByLabel('Tone')).toHaveValue('nerdy');
-  await expect(page.getByTestId('pa-personality')).toContainText('How Scout would answer');
+  await page.getByRole('button', { name: 'Routines', exact: true }).click();
+  const routines = page.getByRole('dialog', { name: 'Routines · Scout', exact: true });
+  await expect(routines.getByTestId('pa-routines')).toContainText('Morning brief');
+  await expect(routines.getByTestId('pa-routines')).toContainText('next ');
+  await expect(routines.getByTestId('pa-activity')).toContainText('Working…');
+  await expectFullyInViewport(page, routines);
+  await page.keyboard.press('Escape');
+  await expect(routines).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Routines', exact: true })).toBeFocused();
+  await expect(page.getByTestId('pa-composer')).toHaveAttribute('data-continuity-probe', 'original');
+  await expect(page.getByTestId('pa-composer')).toHaveValue('Keep this draft while I look around');
+
+  await page.getByRole('button', { name: 'History', exact: true }).click();
+  const history = page.getByRole('dialog', { name: 'History · Scout', exact: true });
+  await expect(history).toContainText('Two builds failed on main');
+  await expect(history.getByRole('tab', { name: 'Runs', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Settings for Scout' }).click();
+  const settings = page.getByRole('dialog', { name: 'Settings · Scout', exact: true });
+  await expect(settings.getByRole('tab', { name: 'About', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(settings.getByTestId('pa-personality').getByLabel('Tone')).toHaveValue('nerdy');
+  await settings.getByRole('tab', { name: 'Memory', exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`#/personal-agents/${SCOUT}/memory$`));
+  await expect(page.getByTestId('pa-conversation')).toHaveCount(1);
+  await page.keyboard.press('Escape');
+  await expect(page.getByTestId('pa-composer')).toHaveAttribute('data-continuity-probe', 'original');
+  await expect(page.getByTestId('pa-composer')).toHaveValue('Keep this draft while I look around');
+
   for (const scheme of ['light', 'dark'] as const) {
     await setScheme(page, scheme);
-    await expect(page.getByTestId('pa-personality')).toBeVisible();
-    await page.screenshot({ path: info.outputPath(`pa-settings-${scheme}.png`) });
+    await expect(page.getByTestId('pa-composer')).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    await page.screenshot({ path: info.outputPath(`pa-focus-${scheme}.png`) });
+    await page.getByRole('button', { name: 'Settings for Scout' }).click();
+    await expect(settings.getByTestId('pa-personality')).toBeVisible();
+    await page.screenshot({ path: info.outputPath(`pa-focus-settings-${scheme}.png`) });
+    await page.keyboard.press('Escape');
+  }
+
+  await picker.click();
+  await page.getByRole('menuitem', { name: 'New agent…' }).click();
+  const create = page.getByRole('dialog', { name: 'New agent', exact: true });
+  await expect(create.getByLabel('Name', { exact: true })).toBeVisible();
+  await expect(create.getByLabel('What it does')).toBeVisible();
+  await expect(create.getByLabel('Personality')).toBeHidden();
+  await create.locator('summary').click();
+  await expect(create.getByLabel('Personality')).toBeVisible();
+  await page.keyboard.press('Escape');
+
+  for (const width of [1024, 390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect(page.getByRole('button', { name: 'Routines', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'History', exact: true })).toBeVisible();
+    await expectFullyInViewport(page, picker);
+    await expectNoHorizontalOverflow(page);
+    await page.getByRole('button', { name: 'Routines', exact: true }).click();
+    await expectFullyInViewport(page, routines);
+    await page.keyboard.press('Escape');
+    await expect(routines).toHaveCount(0);
+    await page.screenshot({ path: info.outputPath(`pa-focus-${width}.png`) });
+  }
+});
+
+test('phone Focus keeps settings, memory, history and nested routine forms usable', async ({ page }, info) => {
+  await setup(page);
+  for (const [width, height] of [[390, 844], [844, 390]]) {
+    await page.setViewportSize({ width, height });
+    await page.goto(`/#/personal-agents/${SCOUT}`);
+    await page.getByTestId('pa-composer').fill('Keep my phone draft');
+    await page.getByRole('button', { name: 'More for Scout', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Settings', exact: true }).click();
+    const settings = page.getByRole('dialog').filter({ has: page.getByRole('tablist', { name: 'Agent sections', exact: true }) });
+    for (const name of ['Memory', 'Runs', 'About']) {
+      await settings.getByRole('tab', { name, exact: true }).click();
+      await expect(settings.getByRole('tab', { name, exact: true })).toHaveAttribute('aria-selected', 'true');
+      await expectFullyInViewport(page, settings);
+      await expectNoHorizontalOverflow(page);
+    }
+    await page.screenshot({ path: info.outputPath(`pa-phone-settings-${width}.png`) });
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'Routines', exact: true }).click();
+    await page.getByRole('button', { name: 'Add routine', exact: true }).click();
+    const form = page.getByRole('dialog', { name: 'New routine for Scout', exact: true });
+    await expectFullyInViewport(page, form);
+    await form.getByLabel('What should it do?').fill('Send me a daily summary');
+    await expect(form.getByLabel('Timezone', { exact: true })).toBeAttached();
+    await form.getByRole('button', { name: 'Add routine', exact: true }).scrollIntoViewIfNeeded();
+    await expectFullyInViewport(page, form.getByRole('button', { name: 'Add routine', exact: true }));
+    await page.screenshot({ path: info.outputPath(`pa-phone-routine-${width}.png`) });
+    await form.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(page.getByRole('dialog', { name: 'Routines · Scout', exact: true })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('pa-composer')).toHaveValue('Keep my phone draft');
   }
 });
 
@@ -137,8 +209,8 @@ test('a paused agent says its routines won’t run, with Resume right there', as
   }, SCOUT);
   await expect(page.getByTestId('pa-paused-banner')).toContainText('its routines won’t run');
   await expect(page.getByTestId('pa-paused-banner').getByRole('button', { name: 'Resume' })).toBeVisible();
+  await page.getByRole('button', { name: 'Routines', exact: true }).click();
   await expect(page.getByTestId('pa-side-panel').getByTestId('pa-routines')).toContainText('Won’t run — the agent is paused');
-  await expect(page.getByTestId(`pa-rail-${SCOUT}`)).toContainText('Paused');
 });
 
 test('no chat yet: a running routine replaces the intro, and its first result opens the chat live', async ({ page }) => {
@@ -182,12 +254,36 @@ test('Threads groups agent threads by NAME and badges what started each', async 
   }
 });
 
-test('phone: the rail becomes a top strip and nothing scrolls sideways', async ({ page }, info) => {
+test('phone: agent switcher and conversation fit without a permanent rail', async ({ page }, info) => {
   await setup(page);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`/#/personal-agents/${SCOUT}`);
-  await expect(page.getByTestId('pa-rail')).toBeVisible();
+  await expect(page.getByTestId('pa-agent-switcher')).toBeVisible();
+  await expect(page.getByTestId('pa-rail')).toHaveCount(0);
   await expect(page.getByTestId('pa-conversation')).toBeVisible();
   await expectNoHorizontalOverflow(page);
   await page.screenshot({ path: info.outputPath('pa-home-phone.png') });
+});
+
+test('settings keyboard tabs retain selected focus when unsaved navigation is declined', async ({ page }) => {
+  await setup(page);
+  await page.route('**/api/v1/personal-agents/*/context', (route) => route.fulfill({ json: {
+    content: 'Saved context', version: 'v1', path: '/tmp/context.md', exists: true,
+  } }));
+  await page.goto(`/#/personal-agents/${SCOUT}/memory`);
+  const sheet = page.getByRole('dialog', { name: 'Settings · Scout', exact: true });
+  await sheet.getByTestId('agent-document').getByRole('button', { name: 'Edit context', exact: true }).click();
+  await sheet.getByRole('textbox', { name: 'Context Markdown' }).fill('Unsaved context');
+  const memory = sheet.getByRole('tab', { name: 'Memory', exact: true });
+  await memory.focus();
+  await memory.press('ArrowLeft');
+  await page.getByRole('button', { name: 'Keep editing', exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`/${SCOUT}/memory$`));
+  await expect(memory).toBeFocused();
+  await expect(memory).toHaveAttribute('aria-selected', 'true');
+  await expect(sheet.getByRole('textbox', { name: 'Context Markdown' })).toHaveValue('Unsaved context');
+  await memory.press('ArrowLeft');
+  await page.getByRole('button', { name: 'Discard', exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`/${SCOUT}/activity$`));
+  await expect(page.getByRole('tab', { name: 'Runs', exact: true })).toBeFocused();
 });

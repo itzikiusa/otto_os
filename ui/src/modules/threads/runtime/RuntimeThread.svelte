@@ -20,6 +20,7 @@
   // The access chip beside the model is T3's runtime mode (runtimeModeConfig.ts:
   // labels, icons, descriptions); it rides the next prompt and sticks. PDFs go
   // as file chips to the providers that take them (Claude).
+  import { runtimeDrafts } from '../../../lib/stores/runtimeDrafts.svelte';
   import { tick, untrack } from 'svelte';
   import { announceShown } from '../../../lib/announce.svelte';
   import { ApiError } from '../../../lib/api/client';
@@ -29,9 +30,9 @@
   import ProviderIcon, { hasProviderIcon } from '../../../lib/components/ProviderIcon.svelte';
   import { harnessLabel } from '../../../lib/providers';
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
-  import { formatEffortShort, formatModelLabel, supportsEffortSelection, type EffortLevel } from '../../../lib/providerModels';
+  import { formatEffortShort, formatModelLabel, supportsEffortSelection } from '../../../lib/providerModels';
   import { auth } from '../../../lib/stores/auth.svelte';
-  import type { ApprovalDecision, PromptDelivery, RuntimeAccessMode } from '../../../lib/api/types';
+  import type { ApprovalDecision, PromptDelivery } from '../../../lib/api/types';
   import { INTERACTIVE_SLASH_COMMANDS, isImmediateSlashCommand, parseInteractiveSlashInput, type ComposerSlashCommand } from '../../../lib/slashActions';
   import StageSlashPopup from '../StageSlashPopup.svelte';
   import { threads } from '../threadsStore.svelte';
@@ -41,7 +42,7 @@
   import RuntimeTurnStatus from './RuntimeTurnStatus.svelte';
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
   import { approvalOutcome, errorText, isRunHandoff, isRunning, latestTurn, messageAttribution, pendingApprovals, subagentChildren, timelineRows, turnOutcome, type WorkEntry } from './timeline';
-  import { readAttachments, runViewSlash, type ComposerFile } from './runtimeComposer';
+  import { readAttachments, runViewSlash } from './runtimeComposer';
   import RuntimeAccessChip from './RuntimeAccessChip.svelte';
   import RuntimeApprovalRow from './RuntimeApprovalRow.svelte';
   import RuntimeAttachments from './RuntimeAttachments.svelte';
@@ -63,6 +64,8 @@
     agentChat?: string;
   }
   let { sessionId, focused, onswitch, agentChat }: Props = $props();
+  const ownerId = untrack(() => sessionId);
+  const draft = untrack(() => runtimeDrafts.for(ownerId));
   /** The personal agent this thread runs as (its run notices open their report). */
   const agentChatId = $derived(personalAgentOf(runtimeThreads.get(sessionId)?.meta));
 
@@ -86,9 +89,8 @@
   /** The agent couldn't start (a refused handshake answers the prompt 400;
    *  the session goes dormant with `last_error`) — shown inline, T3 Code's
    *  ThreadErrorBanner, until the next prompt starts it. */
-  let startError = $state<string | null>(null);
   const sessionError = $derived.by(() => {
-    const e = startError ?? (p?.session && (p.session.status === 'stopped' || p.session.status === 'error') ? p.session.last_error : null);
+    const e = draft.startError ?? (p?.session && (p.session.status === 'stopped' || p.session.status === 'error') ? p.session.last_error : null);
     // Said once: the timeline's own error row already carries the same text.
     const last = p?.items.findLast((i) => !i.parent_item_id);
     const said = last?.type === 'error' ? last.failure.message.trim() : '';
@@ -101,17 +103,11 @@
     return pl && pl.steps.some((s) => s.status !== 'completed') ? pl : null;
   });
 
-  let text = $state('');
-  let sending = $state(false);
-  let reopening = $state(false);
-  /** The accepted prompt's first sequence, until the projection reaches it. */
-  let awaitSeq = $state<number | null>(null);
-  let stopping = $state(false);
   let scroller = $state<HTMLDivElement | null>(null);
   let composerEl = $state<HTMLTextAreaElement | null>(null);
   let atBottom = true;
 
-  const running = $derived((p ? isRunning(p) : false) || sending || (awaitSeq !== null && (p?.lastSequence ?? 0) < awaitSeq));
+  const running = $derived((p ? isRunning(p) : false) || draft.sending || (draft.awaitSeq !== null && (p?.lastSequence ?? 0) < draft.awaitSeq));
   // An agent chat that answered needs no "Partly done · Send again": the
   // failed step's row already says what went wrong in words.
   const outcome = $derived.by(() => {
@@ -127,22 +123,19 @@
 
   // ── Model / effort for the next turn ──────────────────────────────────
   const ModelPicker = lazyComponent(() => import('../../../lib/components/ModelPickerPopover.svelte'));
-  let model = $state<string | null>(null);
-  let effort = $state<EffortLevel | null>(null);
   let pickerOpen = $state(false);
   let agentEl = $state<HTMLButtonElement | null>(null);
   const provider = $derived(session?.provider ?? '');
   /** "Claude", for "Withdrawn by Claude". */
   const agentName = $derived(harnessLabel(provider).replace(/ Code$/, ''));
   const agentLabel = $derived.by(() => {
-    const m = model ?? session?.model ?? null;
+    const m = draft.model ?? session?.model ?? null;
     const label = m ? formatModelLabel(provider, m, auth.meta) : harnessLabel(provider);
-    return effort ? `${label} · ${formatEffortShort(effort)}` : label;
+    return draft.effort ? `${label} · ${formatEffortShort(draft.effort)}` : label;
   });
 
   // ── Access mode for the next turn: sticky per thread ────────────────
-  let pickedMode = $state<RuntimeAccessMode | null>(null);
-  const accessMode = $derived(pickedMode ?? session?.access_mode ?? 'approval-required');
+  const accessMode = $derived(draft.pickedMode ?? session?.access_mode ?? 'approval-required');
 
   // ── Images and PDFs (paste or attach; sent with the next message) ─────
   // The drivers that take image input (Claude content blocks, Codex image
@@ -150,11 +143,10 @@
   const canImages = $derived(provider === 'claude' || provider === 'codex');
   const canFiles = $derived(provider === 'claude');
   const takes = (f: File): boolean => f.type.startsWith('image/') || (canFiles && f.type === 'application/pdf');
-  let images = $state<ComposerFile[]>([]);
   let fileEl = $state<HTMLInputElement | null>(null);
   async function addImages(files: Iterable<File>): Promise<void> {
     const read = await readAttachments(files, takes);
-    if (read.length) images = [...images, ...read];
+    if (read.length && runtimeDrafts.owns(ownerId, draft)) draft.images = [...draft.images, ...read];
   }
   function onPaste(e: ClipboardEvent): void {
     const files = [...(e.clipboardData?.files ?? [])].filter(takes);
@@ -164,61 +156,62 @@
   }
 
   async function send(t: string, delivery?: PromptDelivery): Promise<void> {
-    sending = true;
-    const sentImages = images;
-    images = [];
+    if (!runtimeDrafts.owns(ownerId, draft)) return;
+    draft.sending = true;
+    const sentImages = draft.images;
+    draft.images = [];
     const pics = sentImages.filter((f) => f.mime.startsWith('image/'));
     const docs = sentImages.filter((f) => !f.mime.startsWith('image/'));
     try {
-      awaitSeq = (
-        await runtimeThreads.prompt(sessionId, {
+      draft.awaitSeq = (
+        await runtimeThreads.prompt(ownerId, {
           text: t,
-          ...(model ? { model } : {}),
-          ...(effort ? { effort } : {}),
+          ...(draft.model ? { model: draft.model } : {}),
+          ...(draft.effort ? { effort: draft.effort } : {}),
           ...(pics.length ? { images: pics.map(({ mime, data_base64 }) => ({ mime, data_base64 })) } : {}),
           ...(docs.length ? { files: docs } : {}),
           // Only a person's pick changes the mode; otherwise the session keeps its own.
-          ...(pickedMode ? { access_mode: pickedMode } : {}),
+          ...(draft.pickedMode ? { access_mode: draft.pickedMode } : {}),
           // While a turn runs it waits in the thread's queue (never interleaved).
           ...(delivery ? { delivery } : {}),
         })
       ).sequence;
-      if (delivery) awaitSeq = null;
-      startError = null;
+      if (delivery) draft.awaitSeq = null;
+      draft.startError = null;
     } catch (e) {
-      if (e instanceof ApiError && e.status === 400) startError = e.message;
+      if (e instanceof ApiError && e.status === 400) draft.startError = e.message;
       else toastError('Couldn’t send message', e);
-      if (!text) text = t;
-      if (images.length === 0) images = sentImages;
+      if (!draft.text) draft.text = t;
+      if (draft.images.length === 0) draft.images = sentImages;
     } finally {
-      sending = false;
+      draft.sending = false;
     }
   }
 
   /** Reopen a closed thread (its agent resumes); `true` when it is open. */
   async function reopen(): Promise<boolean> {
-    if (!closed || reopening) return !closed;
-    reopening = true;
-    const ok = await runtimeThreads.reopen(sessionId).then(
+    if (!closed || draft.reopening) return !closed;
+    draft.reopening = true;
+    const ok = await runtimeThreads.reopen(ownerId).then(
       () => true,
       (e: unknown) => (toastError('Couldn’t reopen the thread', e), false),
     );
-    reopening = false;
+    draft.reopening = false;
     return ok;
   }
 
   function submit(): void {
-    let t = text.trim();
-    if ((!t && images.length === 0) || reopening) return;
+    let t = draft.text.trim();
+    if ((!t && draft.images.length === 0) || draft.reopening) return;
     const intent = parseInteractiveSlashInput(t);
     if (intent?.kind === 'send-prompt') t = intent.prompt;
     else if (intent && runViewSlash(intent, sessionId, session)) {
-      text = '';
+      draft.text = '';
       return;
     }
-    text = '';
+    draft.text = '';
     // A closed thread reopens first; while a turn runs it waits in the queue.
-    if (closed) void reopen().then((ok) => (ok ? send(t) : void (text ||= t)));
+    if (closed) void reopen().then((ok) => (ok ? send(t) : void (draft.text ||= t)));
     else void send(t, running ? 'queue' : undefined);
   }
 
@@ -229,7 +222,7 @@
   let cmdIdx = $state(0);
   let cmdDismissed = $state(false);
   const suggestions = $derived.by(() => {
-    const prefix = /^\/([\w:-]*)$/.exec(text)?.[1].toLowerCase();
+    const prefix = /^\/([\w:-]*)$/.exec(draft.text)?.[1].toLowerCase();
     return prefix === undefined || cmdDismissed ? [] : SLASH.filter((c) => c.name.includes(prefix));
   });
   $effect(() => {
@@ -237,36 +230,36 @@
     cmdIdx = 0;
   });
   $effect(() => {
-    void text;
+    void draft.text;
     cmdDismissed = false;
   });
 
   function acceptCmd(c: ComposerSlashCommand): void {
     if (isImmediateSlashCommand(c.name)) {
-      text = `/${c.name}`;
+      draft.text = `/${c.name}`;
       submit();
     } else {
-      text = `/${c.name} `;
+      draft.text = `/${c.name} `;
       cmdDismissed = true;
       composerEl?.focus();
     }
   }
 
   async function stop(): Promise<void> {
-    if (stopping) return;
-    stopping = true;
+    if (draft.stopping) return;
+    draft.stopping = true;
     try {
-      await runtimeThreads.interrupt(sessionId);
+      await runtimeThreads.interrupt(ownerId);
     } catch (e) {
       toastError('Couldn’t stop the turn', e);
     } finally {
-      stopping = false;
+      draft.stopping = false;
     }
   }
 
   async function respond(requestId: string, decision: ApprovalDecision): Promise<void> {
     try {
-      await runtimeThreads.respond(sessionId, requestId, decision);
+      await runtimeThreads.respond(ownerId, requestId, decision);
     } catch (e) {
       toastError('Couldn’t answer the approval', e);
     }
@@ -400,10 +393,10 @@
       {running}
       canSteer={provider === 'claude'}
       {closed}
-      {reopening}
+      reopening={draft.reopening}
       onreopen={() => void reopen()}
       onedit={(t) => {
-        text = t;
+        draft.text = t;
         composerEl?.focus();
       }}
     />
@@ -413,10 +406,10 @@
       {/if}
       <textarea
         bind:this={composerEl}
-        bind:value={text}
+        bind:value={draft.text}
         dir="auto"
         rows={2}
-        disabled={reopening}
+        disabled={draft.reopening}
         placeholder={closed
           ? 'Send a message to reopen this thread'
           : approvals.size > 0
@@ -432,12 +425,12 @@
         onkeydown={onKeydown}
         onpaste={onPaste}
       ></textarea>
-      {#if images.length > 0}
+      {#if draft.images.length > 0}
         <div class="rt-images" data-testid="runtime-images">
-          {#each images as img, i (i)}
+          {#each draft.images as img, i (i)}
             <span class="rt-image">
               <Icon name={img.mime.startsWith('image/') ? 'image' : 'file'} size={12} /><span class="ellipsis" dir="auto">{img.name}</span>
-              <button type="button" class="icon-btn" aria-label="Remove {img.name}" title="Remove" onclick={() => (images = images.filter((_, j) => j !== i))}>
+              <button type="button" class="icon-btn" aria-label="Remove {img.name}" title="Remove" onclick={() => (draft.images = draft.images.filter((_, j) => j !== i))}>
                 <Icon name="x" size={12} />
               </button>
             </span>
@@ -452,7 +445,7 @@
           aria-label={canFiles ? 'Attach an image or PDF' : 'Attach an image'}
           title={canFiles ? 'Attach an image or PDF (or paste one)' : 'Attach an image (or paste one)'}
           data-testid="runtime-attach"
-          disabled={reopening}
+          disabled={draft.reopening}
           onclick={() => fileEl?.click()}
         >
           <Icon name="image" size={14} />
@@ -494,18 +487,18 @@
             agent={harnessLabel(provider)}
             cwd={session?.cwd ?? 'this folder'}
             disabled={closed || !session}
-            onpick={(m) => (pickedMode = m)}
+            onpick={(m) => (draft.pickedMode = m)}
           />
           {/if}
         </span>
-        {#if running && !text.trim()}
+        {#if running && !draft.text.trim()}
           <button
             type="button"
             class="rt-send stop"
             aria-label="Stop the turn"
             title="Stop"
             data-testid="runtime-stop"
-            disabled={stopping}
+            disabled={draft.stopping}
             onclick={() => void stop()}
           >
             <Icon name="stop" size={14} />
@@ -517,7 +510,7 @@
             aria-label={running ? 'Queue message' : 'Send message'}
             title={running ? 'Queue (↵)' : 'Send (↵)'}
             data-testid="runtime-send"
-            disabled={reopening || (!text.trim() && images.length === 0)}
+            disabled={draft.reopening || (!draft.text.trim() && draft.images.length === 0)}
             onclick={submit}
           >
             <Icon name="arrowUp" size={16} />
@@ -534,11 +527,11 @@
     providers={[provider]}
     {provider}
     lockProvider
-    model={model ?? session?.model ?? null}
-    {effort}
+    model={draft.model ?? session?.model ?? null}
+    effort={draft.effort}
     mode="full"
-    onmodel={(m) => (model = m)}
-    oneffort={supportsEffortSelection(provider) ? (e) => (effort = e) : undefined}
+    onmodel={(m) => (draft.model = m)}
+    oneffort={supportsEffortSelection(provider) ? (e) => (draft.effort = e) : undefined}
     onclose={() => (pickerOpen = false)}
   />
 {/if}

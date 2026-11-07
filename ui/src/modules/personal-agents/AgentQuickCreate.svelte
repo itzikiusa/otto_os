@@ -121,7 +121,7 @@
       const draft = !t && picked && purpose.trim() === picked.purpose ? picked.routine : null;
       const drafted = !!draft;
       if (draft) personalAgents.routineDrafts = { ...personalAgents.routineDrafts, [a.id]: draft };
-      toasts.success(`Created ${a.name}`, t?.schedule ? 'Chat with it to set up the rest.' : drafted ? 'Its first routine is ready in the panel.' : 'Give it a routine from its panel, or just ask it.');
+      toasts.success(`Created ${a.name}`, t?.schedule ? 'Chat with it to set up the rest.' : drafted ? 'Its first routine is ready in Routines.' : 'Add a routine, or just ask it in chat.');
       oncreated(a);
     } catch (e) {
       error = `Couldn’t create the agent. ${loadErrorText(e)}`;
@@ -143,12 +143,14 @@
     <div class="field">
       <label for="{uid}-purpose">What it does</label>
       <textarea id="{uid}-purpose" class="input" rows="3" dir="auto" bind:value={purpose} placeholder="e.g. Watch my pull requests and tell me when one needs me"></textarea>
+    </div>
+    <details class="qc-options">
+      <summary>Tone, avatar &amp; templates</summary>
       <div class="qc-starts" role="group" aria-label="Or start from">
         {#if needsMain}<button type="button" class="qc-start" aria-pressed={start === 'main-agent'} onclick={() => pick('main-agent')}>Main agent</button>{/if}
         {#each IDEAS as i (i.label)}<button type="button" class="qc-start" aria-pressed={!start && purpose === i.purpose} title={i.purpose} onclick={() => idea(i)}>{i.label}</button>{/each}
         {#each TEMPLATES as t (t.id)}<button type="button" class="qc-start" aria-pressed={start === t.id} title={t.description} onclick={() => pick(t.id)}>{t.title}</button>{/each}
       </div>
-    </div>
     <div class="field">
       <label for="{uid}-tone">Personality</label>
       <select id="{uid}-tone" class="input" value={personality} onchange={(e) => pickPersonality((e.currentTarget as HTMLSelectElement).value)}>
@@ -164,7 +166,8 @@
         </button>
       {/each}
     </fieldset>
-    <p class="qc-hint">Add routines from its panel, or just tell it in chat.</p>
+    </details>
+    <p class="qc-hint">Add routines when you’re ready, or just tell it in chat.</p>
     {#if error}<p class="qc-err" use:announceShown={{ text: error, assertive: true }}>{error}</p>{/if}
     <div class="qc-actions">
       <span class="qc-gap"></span>
@@ -175,6 +178,9 @@
 </Modal>
 
 <style>
+  .qc-options > summary { cursor: pointer; color: var(--text-dim); font-size: var(--fs-s); padding-block: 6px; }
+  .qc-options > summary:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
+  .qc-options[open] { display: grid; gap: 14px; }
   .qc { display: flex; flex-direction: column; gap: 12px; }
   .qc :global(.field) { margin: 0; }
   .qc-who { display: flex; align-items: flex-end; gap: 12px; }

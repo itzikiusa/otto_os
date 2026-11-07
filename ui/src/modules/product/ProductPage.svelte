@@ -238,12 +238,9 @@
     await product.changeView(mode);
   }
 
-  // ── Mobile (≤640px) accordion state ───────────────────────────────────────
-  // On a phone the two panels (story list + the per-story content) stack and
-  // each becomes an independently-scrollable, collapsible section. Exactly one
-  // is expanded at a time so the open panel gets the full remaining height to
-  // scroll in; the other shows just its tappable header. This is a no-op on
-  // desktop/tablet where the CSS for these classes is never applied.
+  // ── Mobile (≤640px) push navigation ───────────────────────────────────────
+  // One panel gets the available height. Keep both mounted so Back preserves
+  // the draft; selection opens content and the header returns to the list.
   let mobileSection = $state<'list' | 'content'>(product.selectedId ? 'content' : 'list');
 
   async function createDraft(): Promise<void> {
@@ -665,8 +662,8 @@
 {:else}
 <div class="product-shell">
 <PageHeader
-  title={headerTitle}
-  crumbs={headerCrumbs}
+  title={viewport.isPhone && mobileSection === 'list' ? 'Product' : headerTitle}
+  crumbs={viewport.isPhone && mobileSection === 'list' ? [] : headerCrumbs}
   subtitle={product.view === 'stories' && selectedStory ? undefined : 'Jira / Confluence stories — analyze, plan, test, publish back'}
 >
   {#snippet leading()}
@@ -675,7 +672,7 @@
     {/if}
   {/snippet}
   {#snippet badge()}
-    {#if product.view === 'stories' && selectedStory}
+    {#if product.view === 'stories' && selectedStory && (!viewport.isPhone || mobileSection === 'content')}
       <!-- Open story: its stage (or tree role), folder and source key sit beside
            the title — the old breadcrumb row is folded into the header. -->
       {#if selectedIsEpic}
@@ -724,19 +721,6 @@
 </PageHeader>
 <PageBody fill padded={false}>
 <div class="product-page" class:no-stories={noStories} class:learn-view={product.view === 'learnings'} class:m-list-open={mobileSection === 'list'} class:m-content-open={mobileSection === 'content'} style={`--product-side-w:${sideW}px`}>
-  <!-- ── Mobile accordion header for the list panel (phone only) ───────── -->
-  <button
-    class="m-acc-head"
-    aria-expanded={mobileSection === 'list'}
-    onclick={() => (mobileSection = 'list')}
-  >
-    <Icon name={mobileSection === 'list' ? 'chevronDown' : 'chevronRight'} size={14} />
-    <span class="m-acc-title">{product.view === 'learnings' ? 'Learnings' : 'Stories'}</span>
-    {#if product.view === 'stories'}
-      <span class="m-acc-count">{product.stories.length}</span>
-    {/if}
-  </button>
-
   <!-- ── Left sidebar — always rendered to avoid layout jump ───────────── -->
   <aside class="product-side">
     {#if product.view === 'stories'}
@@ -813,26 +797,6 @@
   {#if product.view === 'stories' && !noStories}
     <PaneDivider bind:width={sideW} storageKey="product.sideW" label="Resize stories sidebar" />
   {/if}
-
-  <!-- ── Mobile accordion header for the content panel (phone only) ────── -->
-  <button
-    class="m-acc-head"
-    aria-expanded={mobileSection === 'content'}
-    onclick={() => (mobileSection = 'content')}
-  >
-    <Icon name={mobileSection === 'content' ? 'chevronDown' : 'chevronRight'} size={14} />
-    <span class="m-acc-title">
-      {#if product.view === 'learnings'}
-        Knowledge base
-      {:else if product.selectedId && product.detail?.story}
-        {product.detail.story.title}
-      {:else if product.selectedId}
-        Story
-      {:else}
-        Get started
-      {/if}
-    </span>
-  </button>
 
   <!-- ── Main area ──────────────────────────────────────────────────────── -->
   <div class="product-main">
@@ -985,13 +949,11 @@
     min-height: 0;
   }
   /* With no stories, onboarding owns the entire page, including on phones. */
-  .product-page.no-stories .product-side,
-  .product-page.no-stories .m-acc-head {
+  .product-page.no-stories .product-side {
     display: none;
   }
   /* Learnings has no list pane (and no phone accordion): the view fills it. */
-  .product-page.learn-view .product-side,
-  .product-page.learn-view .m-acc-head {
+  .product-page.learn-view .product-side {
     display: none;
   }
 
@@ -1411,57 +1373,9 @@
     color: var(--text-dim);
   }
 
-  /* ── Mobile accordion headers — hidden on desktop/tablet ──────────────── */
-  .m-acc-head {
-    display: none;
-  }
-
+  /* Phone push navigation: the header's Back action returns to the list. */
   @media (max-width: 640px) {
-    /* The page becomes a vertical accordion: two tappable section headers,
-       each followed by its panel. Exactly one panel is expanded at a time and
-       takes all the remaining height to scroll inside; the other collapses to
-       just its header. */
-    .product-page {
-      flex-direction: column;
-    }
-
-    .m-acc-head {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      width: 100%;
-      flex-shrink: 0;
-      padding: 12px 14px;
-      border: none;
-      border-bottom: 1px solid var(--border);
-      background: var(--bg-sidebar);
-      color: var(--text);
-      font-size: var(--fs-l);
-      font-weight: 600;
-      cursor: pointer;
-      text-align: start;
-      -webkit-tap-highlight-color: transparent;
-    }
-    .m-acc-head:active {
-      background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    }
-    .m-acc-title {
-      flex: 1;
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .m-acc-count {
-      flex-shrink: 0;
-      font-size: var(--fs-s);
-      font-weight: 600;
-      color: var(--text-dim);
-      background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-      border-radius: 999px;
-      padding: 1px 8px;
-    }
-
+    .product-page { flex-direction: column; }
     /* Panels: collapsed by default; the open one gets the remaining height and
        scrolls on its own. */
     .product-side {

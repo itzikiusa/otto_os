@@ -3,7 +3,7 @@
 // and reading pasted / attached files into prompt attachments.
 import { harnessLabel } from '../../../lib/providers';
 import type { ParsedSlashIntent } from '../../../lib/slashActions';
-import type { PromptImage, RuntimeSession } from '../../../lib/api/types';
+import type { RuntimeSession } from '../../../lib/api/types';
 import { toastError } from '../../../lib/toastError';
 import { threads } from '../threadsStore.svelte';
 import { runtimeThreads } from './runtimeThreads.svelte';
@@ -11,8 +11,8 @@ import { runtimeThreads } from './runtimeThreads.svelte';
 /** Per file (images and PDFs). */
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 
-/** An attachment waiting in the composer (sent with the next message). */
-export type ComposerFile = PromptImage & { name: string };
+import type { ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
+export type { ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
 
 /** Read the files `takes` accepts as base64 attachments (oversized ones are
  *  refused with a toast). */

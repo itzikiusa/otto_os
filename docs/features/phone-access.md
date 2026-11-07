@@ -59,6 +59,23 @@ Deep links resolve the session's workspace first and switch to it, so opening
 a session from another workspace never lands on an empty view; a session you
 cannot read shows a clear error.
 
+### Reading and typing on a phone
+
+- In **Agents**, drag vertically to read terminal output and horizontally to
+  pan a grid sized by another connected device. Touch scrolling works in both
+  orientations and on tablets. A swipe does not open the keyboard; tap the
+  terminal or use its keyboard button to type. Normal scrollback has short
+  momentum (disabled by reduced-motion settings); full-screen CLI applications
+  receive xterm's wheel behavior without momentum. Read-only viewers never send
+  wheel gestures as terminal input.
+- For a conversation layout, choose **Threads** in the agent header. This keeps
+  the same agent and its conversation. **Thread actions → Open in Terminal**
+  returns to the original terminal view.
+- The global right panel starts closed on phones and tablets, even if it was
+  open on desktop. Open it explicitly with **Side panel**. Navigation, refresh
+  and changing to a compact layout dismiss overlays; the desktop open/closed
+  preference remains intact.
+
 ## 3. Security model
 
 The goal: nobody but you, on a device you approved, can reach this Mac.
@@ -98,6 +115,22 @@ on on the phone and scan again.
 
 **The phone was signed out after an Otto downgrade.** Expected (see rollback
 safety); pair again.
+
+### Other pages on a phone
+
+- **Connections:** search or filter the connection list, then open a profile.
+  An SSH/custom terminal folds the list and uses the remaining screen height;
+  tap **Connections** to reopen the picker. Row **Actions** menus work by tap.
+- **Personal Agents:** switch agents from the header. **Routines** and **History**
+  are always visible; **More → Settings** opens agent settings on a narrow screen.
+  Routine forms open above their sheet, and cancelling returns to the sheet.
+- **Vault:** open a file to read or edit it; the header's **Files** back button
+  returns to browsing. **More actions → More vault actions → Note details** opens
+  backlinks, outline and properties in a closable panel. Failed note loads show
+  **Retry** above the file list as well as above an existing note.
+- **Product:** tap a story to open it and use **Back** to return to the list.
+  **Story details** expands metadata, tags and version controls; the story body
+  gets the space by default. Stories, Designs and Learnings remain reachable.
 
 ## 5. API, code and limits
 

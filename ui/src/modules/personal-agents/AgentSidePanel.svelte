@@ -42,9 +42,10 @@
 
   interface Props {
     agent: PersonalAgent;
+    embedded?: boolean;
     onclose: () => void;
   }
-  let { agent, onclose }: Props = $props();
+  let { agent, onclose, embedded = false }: Props = $props();
 
   const schedules = $derived(personalAgents.schedulesByAgent[agent.id] ?? []);
   const runs = $derived(personalAgents.runsByAgent[agent.id] ?? []);
@@ -250,16 +251,18 @@
 <svelte:window onkeydown={(e) => {
   // Where the panel overlays the chat (narrow windows), Escape closes it —
   // unless a dialog of its own is open (that dialog takes the Escape).
-  if (e.key === 'Escape' && !e.defaultPrevented && !reportRun && !form && window.matchMedia('(max-width: 1024px)').matches) onclose();
+  if (!embedded && e.key === 'Escape' && !e.defaultPrevented && !reportRun && !form && window.matchMedia('(max-width: 1024px)').matches) onclose();
 }} />
 
-<aside class="sp" aria-label="{agent.name}: routines and runs" data-testid="pa-side-panel">
+<aside class="sp" class:embedded aria-label="{agent.name}: routines and runs" data-testid="pa-side-panel">
+  {#if !embedded}
   <div class="sp-head">
     <h2><span class="sp-who" dir="auto">{agent.name}</span> · Routines &amp; runs</h2>
     <button type="button" class="icon-btn" aria-label="Settings for {agent.name}" title="Settings" onclick={() => router.go(`personal-agents/${agent.id}/about`)}><Icon name="gear" size={14} /></button>
     <button type="button" class="icon-btn" aria-label="Close panel" title="Close panel" onclick={onclose}><Icon name="x" size={14} /></button>
   </div>
 
+  {/if}
   <div class="sp-body">
     {#if prop?.proposal}
       <section class="sp-sec sp-card" data-testid="pa-proposal">
@@ -363,6 +366,7 @@
       </section>
     {/if}
 
+    {#if !embedded}
     <section class="sp-sec" data-testid="pa-recent">
       <h3>Recent runs</h3>
       {#if personalAgents.runsByAgent[agent.id] === undefined}
@@ -388,6 +392,7 @@
         <button type="button" class="linklike" onclick={() => router.go(`personal-agents/${agent.id}/runs`)}>All runs</button>
       {/if}
     </section>
+    {/if}
   </div>
 
 </aside>
@@ -405,6 +410,8 @@
     display: flex; flex-direction: column; min-block-size: 0; inline-size: 320px; flex: none;
     border-inline-start: 1px solid var(--border); background: var(--surface);
   }
+  .sp.embedded { position: static; inline-size: 100%; border: 0; box-shadow: none; }
+  .sp.embedded .sp-body { padding: 0; overflow: visible; }
   .sp-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-block-end: 1px solid var(--border); }
   .sp-head h2 { flex: 1; min-inline-size: 0; margin: 0; font-size: var(--fs-m); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sp-body { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 20px; min-block-size: 0; }

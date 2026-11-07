@@ -405,3 +405,43 @@ test('multi-session split canvas, pins, file viewer, and peer-to-peer message re
   await page.setViewportSize({ width: 720, height: 800 });
   await expectNoHorizontalOverflow(page);
 });
+
+test('phone handoff opens the same live agent in Threads and returns to Terminal', async ({ page }, info) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const before = await (await ctx.get(`${base}/api/v1/sessions/${agentOnlySession}`)).json();
+  // A phone legitimately resizes the terminal; ownership metadata must survive.
+  const stableMeta = Object.fromEntries(Object.entries(before.meta).filter(([key]) => !['pty_cols', 'pty_rows'].includes(key)));
+  const spawned: string[] = [];
+  page.on('request', req => {
+    if (req.method() === 'POST' && /\/(?:runtime-)?sessions$/.test(new URL(req.url()).pathname)) spawned.push(req.url());
+  });
+  await page.goto(`/#/agents/${agentOnlySession}`);
+  const handoff = page.locator('.pane-head').getByRole('button', { name: 'Threads', exact: true });
+  await expect(handoff).toBeVisible();
+  expect((await handoff.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  expect((await page.locator('.pane-head').boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  await page.screenshot({ path: info.outputPath('mobile-handoff-agents.png') });
+  await handoff.click();
+  await expect(page).toHaveURL(new RegExp(`#/threads/${agentOnlySession}$`));
+  await expect(page.getByText('Classic agent prompt', { exact: true })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+  const during = await (await ctx.get(`${base}/api/v1/sessions/${agentOnlySession}`)).json();
+  expect(during.id).toBe(before.id);
+  expect(during.provider_session_id).toBe(before.provider_session_id);
+  expect(during.live).toBe(true);
+  expect(during.meta).toMatchObject({ ...stableMeta, surface: 'threads' });
+  const actions = page.getByTestId('threads-thread-menu');
+  if (await actions.isVisible()) await actions.click();
+  else {
+    await page.getByRole('button', { name: 'More actions', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Thread actions', exact: true }).click();
+  }
+  await page.getByRole('menuitem', { name: 'Open in Terminal', exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`#/agents/${agentOnlySession}$`));
+  await expect(page.locator('.term-host')).toBeVisible();
+  const after = await (await ctx.get(`${base}/api/v1/sessions/${agentOnlySession}`)).json();
+  expect(after.id).toBe(before.id);
+  expect(after.live).toBe(true);
+  expect(after.meta).toMatchObject({ ...stableMeta, surface: 'agents' });
+  expect(spawned).toEqual([]);
+});

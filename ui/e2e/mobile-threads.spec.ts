@@ -111,11 +111,11 @@ test('a thread deep link from another workspace opens the thread at phone width'
   await page.getByTestId('threads-toggle-sidebar').click();
   const sidebar = page.getByTestId('threads-sidebar');
   await expectFullyInViewport(page, sidebar, 'threads sidebar drawer');
-  await page.getByTestId('threads-toggle-sidebar').click();
+  await page.getByRole('button', { name: 'Close Threads', exact: true }).click();
   await expect(sidebar).toBeHidden();
   await page.getByTestId('threads-toggle-inspector').click();
   await expectNoHorizontalOverflow(page);
-  await page.getByTestId('threads-toggle-inspector').click();
+  await page.getByRole('button', { name: 'Close Thread details', exact: true }).click();
   await expect(thread).toBeVisible();
 
   // The composer stays in view with the on-screen keyboard up (a shorter

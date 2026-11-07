@@ -1,13 +1,12 @@
 <script lang="ts">
-  // Personal Agents module — a messenger-style home. Routes:
+  // Personal Agents module — conversation-first Focus home. Routes:
   //   `#/personal-agents`                — the home on the main agent
   //   `#/personal-agents/<agentId>`      — the home on that agent
-  //   `#/personal-agents/<agentId>/<tab>` — the agent's settings page
+  //   `#/personal-agents/<agentId>/<tab>` — a contextual sheet
   //                                        (general/routines/history/…)
   //   `#/personal-agents/rooms`          — agent channels
-  // The home is the agent list (main agent first, live presence), the
-  // selected agent's ONE continuous conversation, and a collapsible side
-  // panel with its routines and recent runs.
+  // The home keeps one conversation mounted while route-backed sheets show
+  // routines, history or settings. The roster lives in the labelled switcher.
   import AutomateTasksTabs from '../../lib/components/AutomateTasksTabs.svelte';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -24,8 +23,9 @@
   import PageBody from '../../lib/components/PageBody.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
-  import AgentRail from './AgentRail.svelte';
-  import { railOrder } from './agentHome';
+  import Modal from '../../lib/components/Modal.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { focusAgent, railOrder } from './agentHome';
   import { confirmDeleteAgent } from './confirmDelete';
   import { MASCOT } from './characters';
   import { loadErrorOf } from './loadError';
@@ -46,9 +46,11 @@
 
   const sub = $derived(router.parts[1] ?? '');
   const deepTab = $derived(router.parts[2] ?? '');
-  /** `#/personal-agents/<id>/<tab>` = the full settings page. */
+  /** Deep links open a sheet over the same conversation. */
   const deepId = $derived(sub && sub !== 'rooms' && deepTab ? sub : null);
 
+  // First-message drafts survive switching agents within this page.
+  let introDrafts = $state<Record<string, string>>({});
   let creating = $state(false);
   let fullCreate = $state(false);
   // Agent UI control (lib/uiCommands/personalAgents.ts) opens the full New-agent sheet.
@@ -69,32 +71,30 @@
   const autonomyLoaded = $derived(agents.length > 0 && agents.every((a) => a.id in personalAgents.autonomyById));
   const hasMain = $derived(!!personalAgents.primary);
   const selected = $derived.by<PersonalAgent | null>(() => {
-    if (sub && sub !== 'rooms' && !deepTab) return personalAgents.agent(sub) ?? null;
-    return agents[0] ?? null;
+    return focusAgent(agents, sub === 'rooms' ? '' : sub, personalAgents.primary?.id ?? null);
   });
   const loadError = $derived(loadErrorOf(personalAgents, 'agentsError'));
 
-  // The side panel: open/closed, remembered per viewer.
-  const PANEL_KEY = 'otto.pa.panel';
-  function readPanel(): boolean {
-    try {
-      return (JSON.parse(localStorage.getItem(PANEL_KEY) ?? 'null') as { open?: boolean } | null)?.open ?? true;
-    } catch {
-      return true;
-    }
-  }
-  let panelOpen = $state(readPanel() && typeof window !== 'undefined' && window.innerWidth > 1100);
-  // "Add a routine" (after creating an agent) needs the panel that holds the form.
+  // Sheets are route-backed. Opening one never replaces the conversation.
+  const routinesOpen = $derived(!!deepId && ['routines', 'schedules'].includes(deepTab));
+  const historyOpen = $derived(!!deepId && ['history', 'activity', 'runs'].includes(deepTab));
   $effect(() => {
-    if (personalAgents.routineFormFor && !panelOpen) panelOpen = true;
+    const id = personalAgents.routineFormFor;
+    if (id && !routinesOpen) router.go(`personal-agents/${id}/routines`);
   });
-  function togglePanel(): void {
-    panelOpen = !panelOpen;
-    try {
-      localStorage.setItem(PANEL_KEY, JSON.stringify({ open: panelOpen }));
-    } catch {
-      /* per-viewer convenience only */
-    }
+  function closeSheet(): void {
+    if (selected) router.go(`personal-agents/${selected.id}`);
+  }
+  function chooseAgent(event: MouseEvent): void {
+    ctxMenu.showAt(event.currentTarget as HTMLElement, [
+      ...agents.map((a) => ({
+        label: `${a.name}${personalAgents.autonomyById[a.id]?.primary ? ' · Main agent' : ''}${!a.enabled ? ' · Paused' : personalAgents.presence(a.id) === 'needs_you' ? ' · Needs you' : personalAgents.presence(a.id) === 'working' ? ' · Working' : ''}`,
+        icon: a.id === selected?.id ? 'check' as const : 'user' as const,
+        action: () => select(a.id),
+      })),
+      { separator: true },
+      { label: 'New agent…', icon: 'plus', action: () => { creating = true; } },
+    ]);
   }
 
   function select(id: string): void {
@@ -125,18 +125,8 @@
   }
 </script>
 
-{#if deepId}
-  {#key deepId}
-    {#if AgentPageLazy.error}
-      <LoadState what="this agent" variant="page" error={AgentPageLazy.error} onretry={() => AgentPageLazy.retry()} />
-    {:else if AgentPageLazy.component}
-      <AgentPageLazy.component agentId={deepId} />
-    {:else}
-      <LoadState what="this agent" variant="page" loading />
-    {/if}
-  {/key}
-{:else}
   <div class="pa-page">
+  {#if !selected || sub === 'rooms'}
   <PageHeader
     title="Personal Agents"
   >
@@ -147,6 +137,7 @@
       <AutomateGuideButton current="scheduled-tasks" />
     {/snippet}
   </PageHeader>
+  {/if}
   <PageBody fill padded={sub === 'rooms'}>
     {#if !ws.currentId}
       <EmptyState variant="page" icon="user" title="Add a workspace to get started"
@@ -182,8 +173,7 @@
             <AutomateGuide current="scheduled-tasks" />
           </EmptyState>
         {/snippet}
-        <div class="pa-home" class:panel={panelOpen && !!selected}>
-          <AgentRail {agents} selectedId={selected?.id ?? null} onselect={select} oncreate={() => (creating = true)} />
+        <div class="pa-home">
           <div class="pa-center">
             {#if autonomyLoaded && !hasMain}
               <p class="pa-hint" role="note">
@@ -194,7 +184,8 @@
             {#if selected}
               {#if ConversationLazy.component}
                 {#key selected.id}
-                  <ConversationLazy.component agent={selected} {panelOpen} ontogglepanel={togglePanel} ondelete={(a) => void remove(a)} />
+                  {@const draftOwner = selected.id}
+                  <ConversationLazy.component bind:draft={() => introDrafts[draftOwner] ?? '', (value) => introDrafts[draftOwner] = value} agent={selected} onchooseagent={chooseAgent} ondelete={(a) => void remove(a)} />
                 {/key}
               {:else}
                 <LoadState what="the conversation" error={ConversationLazy.error} loading={!ConversationLazy.error} empty onretry={() => ConversationLazy.retry()} />
@@ -203,15 +194,24 @@
               <EmptyState icon="user" title="Agent not found" body="It may have been deleted, or it belongs to another workspace." actionLabel="Back to your agents" onaction={() => router.go('personal-agents')} />
             {/if}
           </div>
-          {#if panelOpen && selected}
-            {#if SidePanelLazy.component}
-              <SidePanelLazy.component agent={selected} onclose={togglePanel} />
-            {:else}
-              <div class="pa-panel-slot"><LoadState what="routines and runs" error={SidePanelLazy.error} loading={!SidePanelLazy.error} empty onretry={() => SidePanelLazy.retry()} /></div>
-            {/if}
-          {/if}
         </div>
       </LoadState>
+    {/if}
+
+    {#if deepId && selected}
+      <Modal title={`${routinesOpen ? 'Routines' : historyOpen ? 'History' : 'Settings'} · ${selected.name}`} width={routinesOpen ? 560 : 820} onclose={closeSheet}>
+        {#if routinesOpen}
+          {#if SidePanelLazy.component}
+            <SidePanelLazy.component agent={selected} embedded onclose={closeSheet} />
+          {:else}
+            <LoadState what="routines" error={SidePanelLazy.error} loading={!SidePanelLazy.error} empty onretry={() => SidePanelLazy.retry()} />
+          {/if}
+        {:else if AgentPageLazy.component}
+          <AgentPageLazy.component agentId={selected.id} embedded />
+        {:else}
+          <LoadState what="agent settings" error={AgentPageLazy.error} loading={!AgentPageLazy.error} empty onretry={() => AgentPageLazy.retry()} />
+        {/if}
+      </Modal>
     {/if}
 
     {#if creating}
@@ -234,16 +234,14 @@
     {/if}
   </PageBody>
   </div>
-{/if}
 
 <style>
   .pa-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   .pa-mascot { display: block; margin: 24px auto 0; }
   .pa-home {
     position: relative; display: flex; flex: 1; min-block-size: 0; block-size: 100%;
-    border-block-start: 1px solid var(--border); background: var(--bg);
+    background: var(--bg);
   }
-  .pa-panel-slot { inline-size: 320px; flex: none; border-inline-start: 1px solid var(--border); padding: 12px; }
   .pa-center { flex: 1; min-inline-size: 0; display: flex; flex-direction: column; min-block-size: 0; }
   .pa-hint { display: flex; align-items: center; gap: 6px; margin: 0; padding: 6px 12px; color: var(--text-dim); font-size: var(--fs-s); flex-wrap: wrap; border-block-end: 1px solid var(--border); }
   .linklike { border: 0; background: none; padding: 0; color: var(--accent-text); font: inherit; font-weight: 600; cursor: pointer; }

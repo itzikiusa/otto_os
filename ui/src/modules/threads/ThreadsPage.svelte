@@ -3,6 +3,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import Drawer from '../../shell/Drawer.svelte';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import { registry } from '../../lib/commands.svelte';
@@ -15,7 +17,6 @@
   import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
-  import { toastError } from '../../lib/toastError';
   import { sessionState } from '../../lib/status';
   import StartRoomModal from '../rooms/StartRoomModal.svelte'; // ui-guards: allow — shared session room modal
   import NewThreadStage from './NewThreadStage.svelte';
@@ -45,11 +46,15 @@
   let stageWidth = $state(1280);
   let centerWidth = $state(1000);
   let roomSessionId = $state<string | null>(null);
-  let mobileDrawer = $state<'none' | 'sidebar' | 'inspector'>('none');
+  let mobileSidebarOpen = $state(false);
+  $effect(() => { if (threads.inspectorOverlayOpen) mobileSidebarOpen = false; });
 
   const compact = $derived(
     viewport.isPhone || viewport.isTablet || (stageWidth > 0 && stageWidth < 860),
   );
+
+  $effect(() => threads.setInspectorCompact(compact));
+  onMount(() => () => threads.setInspectorCompact(false));
 
   const liveThreadIds = $derived([
     ...ws.sessions.filter((s) => !s.archived && isThreadSession(s)).map((s) => s.id),
@@ -62,7 +67,7 @@
   onMount(() => runtimeThreads.mount());
   $effect(() => {
     for (const wid of new Set([ws.currentId, ws.scratch ? SCRATCH_WORKSPACE_ID : null])) {
-      if (wid) untrack(() => runtimeThreads.load(wid)).catch((e: unknown) => toastError('Couldn’t load threads', e));
+      if (wid) untrack(() => runtimeThreads.load(wid)).catch(() => {});
     }
   });
 
@@ -223,6 +228,11 @@
     ]),
   );
 
+  const failedListId = $derived([ws.currentId, ws.scratch ? SCRATCH_WORKSPACE_ID : null].find((id) => id && runtimeThreads.loadErrors[id]) ?? null);
+  const threadListError = $derived(failedListId ? runtimeThreads.loadErrors[failedListId] : null);
+  function retryThreads(): void {
+    if (failedListId) void runtimeThreads.load(failedListId).catch(() => {});
+  }
   const showWelcomeStage = $derived(threads.newDraftMode || threads.paneIds.length === 0);
   const focused = $derived.by(() => {
     const id = showWelcomeStage ? null : threads.focusedSessionId;
@@ -245,7 +255,7 @@
     return cwd ? projectNameFromCwd(cwd, ws.current?.name ?? 'Workspace') : (ws.current?.name ?? 'Scratch');
   });
   const crumbTitle = $derived(showWelcomeStage ? 'New thread' : (focused?.title ?? 'Thread'));
-  const rightOpen = $derived(compact ? mobileDrawer === 'inspector' : threads.inspectorOpen);
+  const rightOpen = $derived(threads.inspectorVisible);
   const contextCwd = $derived(
     focused?.cwd ?? (showWelcomeStage ? threads.stageCwd : null) ?? ws.current?.root_path ?? null,
   );
@@ -299,13 +309,14 @@
   }
 
   function toggleLeftBar(): void {
-    if (compact) mobileDrawer = mobileDrawer === 'sidebar' ? 'none' : 'sidebar';
-    else threads.toggleSidebar();
+    if (compact) {
+      mobileSidebarOpen = !mobileSidebarOpen;
+      if (mobileSidebarOpen) threads.setInspectorOpen(false);
+    } else threads.toggleSidebar();
   }
 
   function toggleRightBar(): void {
-    if (compact) mobileDrawer = mobileDrawer === 'inspector' ? 'none' : 'inspector';
-    else threads.toggleInspector();
+    threads.toggleInspector();
   }
 
   function pickLayout(mode: ThreadsLayoutMode): void {
@@ -319,8 +330,8 @@
       <button
         type="button"
         class="icon-btn"
-        class:th-btn-on={compact ? mobileDrawer === 'sidebar' : threads.sidebarOpen}
-        aria-pressed={compact ? mobileDrawer === 'sidebar' : threads.sidebarOpen}
+        class:th-btn-on={compact ? mobileSidebarOpen : threads.sidebarOpen}
+        aria-pressed={compact ? mobileSidebarOpen : threads.sidebarOpen}
         aria-label="Toggle threads sidebar"
         title="Toggle sidebar"
         data-testid="threads-toggle-sidebar"
@@ -470,8 +481,13 @@
       {/if}
 
       <div class="th-center-col" class:th-hidden={maximized} bind:clientWidth={centerWidth}>
+        {#if threadListError && liveThreadIds.length > 0}
+          <LoadState what="threads" error={threadListError} onretry={retryThreads} />
+        {/if}
         <div class="th-stage" class:th-card-reserve={cardReserve}>
-          {#if threadsChrome.stageView === 'prs'}
+          {#if threadListError && liveThreadIds.length === 0 && showWelcomeStage}
+            <LoadState what="threads" error={threadListError} empty onretry={retryThreads} />
+          {:else if threadsChrome.stageView === 'prs'}
             <LazyMount lazy={PullRequestsView} what="pull requests" variant="panel" props={{ repo: contextRepo }} />
           {:else if showWelcomeStage}
             <NewThreadStage showCard={showStageCard} />
@@ -502,35 +518,19 @@
         </div>
       {/if}
 
-      {#if compact && mobileDrawer !== 'none'}
-        <button
-          type="button"
-          class="th-scrim"
-          aria-label="Close drawer"
-          title="Close drawer"
-          onclick={() => (mobileDrawer = 'none')}
-        ></button>
-        {#if mobileDrawer === 'sidebar'}
-          <div class="th-drawer start">
-            <ThreadSidebar
-              onselect={() => (mobileDrawer = 'none')}
-              onstartroom={(sid) => {
-                mobileDrawer = 'none';
-                roomSessionId = sid;
-              }}
-            />
-          </div>
-        {:else if mobileDrawer === 'inspector'}
-          <div class="th-drawer end">
-            <ThreadInspector
-              showCard
-              onstartroom={(sid) => {
-                mobileDrawer = 'none';
-                roomSessionId = sid;
-              }}
-            />
-          </div>
-        {/if}
+      {#if compact}
+        <Drawer bind:open={mobileSidebarOpen} side="left" title="Threads" width="min(360px, 100vw)">
+          <ThreadSidebar
+            onselect={() => (mobileSidebarOpen = false)}
+            onstartroom={(sid) => { mobileSidebarOpen = false; roomSessionId = sid; }}
+          />
+        </Drawer>
+        <Drawer bind:open={threads.inspectorOverlayOpen} side="right" title="Thread details" width="min(420px, 100vw)">
+          <ThreadInspector
+            showCard
+            onstartroom={(sid) => { threads.setInspectorOpen(false); roomSessionId = sid; }}
+          />
+        </Drawer>
       {/if}
     </div>
   </PageBody>
@@ -632,31 +632,5 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
-  }
-  .th-scrim {
-    position: absolute;
-    inset: 0;
-    z-index: var(--z-drawer);
-    border: 0;
-    padding: 0;
-    background: var(--scrim);
-    cursor: pointer;
-  }
-  .th-drawer {
-    position: absolute;
-    inset-block: 0;
-    z-index: var(--z-drawer);
-    inline-size: min(360px, 88vw);
-    max-inline-size: 100%;
-    display: flex;
-    flex-direction: column;
-    background: var(--surface);
-    box-shadow: var(--glass-shadow);
-  }
-  .th-drawer.start {
-    inset-inline-start: 0;
-  }
-  .th-drawer.end {
-    inset-inline-end: 0;
   }
 </style>

@@ -7,6 +7,10 @@
   (no tokens are spent until you send).
 -->
 <script lang="ts">
+  import { untrack } from 'svelte';
+  import RelTime from '../../lib/components/RelTime.svelte';
+  import { leadLine } from '../../lib/plainText';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { api } from '../../lib/api/client';
   import { personalAgentsApi } from '../../lib/api/personalAgents';
@@ -16,23 +20,24 @@
   import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { loadErrorText } from '../../lib/loadError';
-  import type { PersonalAgent } from '../../lib/api/types';
+  import type { PersonalAgent, PersonalAgentRun } from '../../lib/api/types';
   import AgentAvatar from './AgentAvatar.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { now } from '../../lib/stores/now.svelte';
   import { routineLabel } from '../../lib/personalAgentBadges';
 
+  const ReportLazy = lazyComponent(() => import('../../lib/components/RunReport.svelte'));
   const ChatLazy = lazyComponent(() => import('./AgentChat.svelte'));
-  import { introLine, nextRunWords, starterPrompts } from './agentHome';
+  import { introLine, starterPrompts } from './agentHome';
 
   interface Props {
     agent: PersonalAgent;
-    panelOpen: boolean;
-    ontogglepanel: () => void;
+    draft?: string;
+    onchooseagent: (event: MouseEvent) => void;
     ondelete: (a: PersonalAgent) => void;
   }
-  let { agent, panelOpen, ontogglepanel, ondelete }: Props = $props();
+  let { agent, draft = $bindable(''), onchooseagent, ondelete }: Props = $props();
 
   const main = $derived(!!personalAgents.autonomyById[agent.id]?.primary);
   const presence = $derived(personalAgents.presence(agent.id));
@@ -46,7 +51,6 @@
     const s = r?.schedule_id ? (personalAgents.schedulesByAgent[agent.id] ?? []).find((x) => x.id === r.schedule_id) : undefined;
     return s ? routineLabel(s.directive) : null;
   });
-  const next = $derived(personalAgents.nextRunAt(agent.id));
   /** A routine whose time has come but the scheduler's minute tick hasn't
    *  started yet (up to ~1 min) — say so, so 09:00 never looks idle. Bounded
    *  to 3 min past due so a stale next-run can't pin it. */
@@ -65,7 +69,6 @@
   // An agent never chatted with opens on its intro; a chat that exists opens.
   let started = $state(false);
   let sending = $state(false);
-  let draft = $state('');
   let composer = $state<HTMLTextAreaElement | undefined>();
   /** Shown at once while a first message is on its way (the chat view takes over). */
   let echo = $state('');
@@ -73,9 +76,15 @@
     void agent.id;
     started = !!agent.chat_session_id;
   });
+  let reportRun = $state<PersonalAgentRun | null>(null);
+  const latestResult = $derived(personalAgents.runsByAgent[agent.id]?.find((run) => run.status === 'ok' && !!run.summary));
   const hasRoutine = $derived((personalAgents.schedulesByAgent[agent.id] ?? []).length > 0);
   $effect(() => {
-    void personalAgents.loadDelegations(agent.id);
+    const id = agent.id;
+    untrack(() => {
+      void personalAgents.loadDelegations(id);
+      void personalAgents.loadRuns(id);
+    });
   });
 
   async function startWith(text: string | null): Promise<void> {
@@ -153,6 +162,9 @@
       { label: 'Settings', icon: 'gear', action: () => router.go(`personal-agents/${agent.id}/about`) },
       ...(agent.chat_session_id ? [{ label: 'Open chat in Threads', icon: 'threads' as const, action: () => router.go(`threads/${agent.chat_session_id}`) }] : []),
       { separator: true },
+      { label: 'Scheduled tasks', icon: 'calendar', action: () => router.go('scheduled-tasks') },
+      { label: 'Agent channels', icon: 'threads', action: () => router.go('personal-agents/rooms') },
+      { separator: true },
       { label: 'Delete…', icon: 'trash', danger: true, action: () => ondelete(agent) },
     ]);
   }
@@ -162,22 +174,20 @@
 </script>
 
 <section class="conv" aria-label="Conversation with {agent.name}" data-testid="pa-conversation">
-  <header class="conv-head">
-    <AgentAvatar avatar={agent.avatar} name={agent.name} size={32} state={agent.enabled ? presence : null} />
-    <div class="conv-who" data-testid="pa-conv-header">
-      <span class="conv-name">
-        <strong class="ellipsis" dir="auto">{agent.name}</strong>
-        {#if main}<span class="conv-main" title="Your main agent — it routes your work to the others"><Icon name="star" size={12} /> Main agent</span>{/if}
-      </span>
-      <span class="conv-status" data-presence={presence}>
-        <span class="conv-dot {agent.enabled ? presence : 'paused'}" aria-hidden="true"></span>
-        {#if !agent.enabled}Paused{:else if startingRoutine && presence === 'idle'}Starting “{startingRoutine}”…{:else}{STATUS[presence]}{/if}
-        {#if agent.enabled && !startingRoutine && next && Date.parse(next) > Date.now()}<span>· next routine {nextRunWords(next)}</span>{/if}
-      </span>
-    </div>
-    <button type="button" class="icon-btn" class:pa-on={panelOpen} aria-expanded={panelOpen} aria-label="{panelOpen ? 'Hide' : 'Show'} routines and runs" title="{panelOpen ? 'Hide' : 'Show'} routines and runs" data-testid="pa-panel-toggle" onclick={ontogglepanel}><Icon name="panel" size={14} /></button>
-    <button type="button" class="icon-btn" aria-label="More for {agent.name}" title="More" onclick={more}><Icon name="more" size={14} /></button>
-  </header>
+  <PageHeader title={agent.name} subtitle={!agent.enabled ? 'Paused' : startingRoutine && presence === 'idle' ? `Starting “${startingRoutine}”…` : `${main ? 'Main agent · ' : ''}${STATUS[presence]}`}>
+    {#snippet titleContent()}
+      <button type="button" class="btn small ghost agent-switcher" aria-label="Switch agent, current {agent.name}" title="Switch agent" aria-haspopup="menu" onclick={onchooseagent} data-testid="pa-agent-switcher">
+        <AgentAvatar avatar={agent.avatar} name={agent.name} size={24} state={agent.enabled ? presence : null} />
+        <span class="ellipsis" dir="auto">{agent.name}</span><Icon name="chevronDown" size={12} />
+      </button>
+    {/snippet}
+    {#snippet actions()}
+      <button type="button" class="btn small ghost" data-keep data-testid="pa-panel-toggle" onclick={() => router.go(`personal-agents/${agent.id}/routines`)}>Routines</button>
+      <button type="button" class="btn small ghost" data-keep onclick={() => router.go(`personal-agents/${agent.id}/history`)}>History</button>
+      <button type="button" class="icon-btn focus-settings" data-keep aria-label="Settings for {agent.name}" title="Settings" data-icon="gear" onclick={() => router.go(`personal-agents/${agent.id}/about`)}><Icon name="gear" size={14} /></button>
+      <button type="button" class="icon-btn" data-keep aria-label="More for {agent.name}" title="More" onclick={more}><Icon name="more" size={14} /></button>
+    {/snippet}
+  </PageHeader>
 
   {#if !agent.enabled}
     <p class="pa-paused" role="note" data-testid="pa-paused-banner">
@@ -230,7 +240,15 @@
           </p>
           <p class="intro-sub">Its result lands here when it’s done.</p>
         {:else}
+          <h2 class="intro-title" dir="auto">What can I help with?</h2>
           <p class="intro-line" dir="auto">{introLine(agent.name, main)}</p>
+          {#if latestResult}
+            <article class="latest-result" data-testid="pa-latest-result">
+              <span class="result-meta">{agent.name} · <RelTime iso={latestResult.finished_at ?? latestResult.started_at} /></span>
+              <p dir="auto">{leadLine(latestResult.summary)}</p>
+              <button type="button" class="btn small" onclick={() => (reportRun = latestResult)}>View result</button>
+            </article>
+          {/if}
           <div class="intro-chips" role="group" aria-label="Try asking">
             {#each starterPrompts(main, hasRoutine, !agent.enabled) as p (p)}
               <button type="button" class="chip-btn" disabled={sending} onclick={() => { draft = p; composer?.focus(); }}>{p}</button>
@@ -262,6 +280,14 @@
   </div>
 </section>
 
+{#if reportRun}
+  {#if ReportLazy.component}
+    <ReportLazy.component run={reportRun} name="Run result" onclose={() => (reportRun = null)} />
+  {:else}
+    <LoadState what="run result" error={ReportLazy.error} loading={!ReportLazy.error} empty onretry={() => ReportLazy.retry()} />
+  {/if}
+{/if}
+
 <style>
   /* Phone: toasts sit above this chat's composer, not on top of it. */
   @media (max-width: 640px) {
@@ -269,10 +295,8 @@
       --toast-lift-phone: 104px;
     }
   }
+  .agent-switcher { min-inline-size: 0; max-inline-size: 260px; }
   .conv { flex: 1; min-inline-size: 0; min-block-size: 0; display: flex; flex-direction: column; }
-  .conv-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-block-end: 1px solid var(--border); flex: none; }
-  .conv-who { flex: 1; min-inline-size: 0; display: flex; flex-direction: column; }
-  .pa-on { color: var(--accent-text); }
   .pa-paused {
     display: flex; align-items: center; gap: 8px; margin: 0; padding: 6px 12px; flex: none;
     /* A neutral surface with an amber edge: 14% amber over the dark theme read as muddy khaki. */
@@ -299,13 +323,6 @@
   }
   .send:disabled { background: var(--surface-3); color: var(--text-dim); cursor: default; }
   .send:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
-  .conv-name { display: flex; align-items: center; gap: 8px; min-inline-size: 0; font-size: var(--fs-l); }
-  .conv-main { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-xs); color: var(--accent-text); white-space: nowrap; }
-  .conv-status { display: flex; align-items: center; gap: 6px; font-size: var(--fs-s); color: var(--text-dim); }
-  .conv-dot { inline-size: 8px; block-size: 8px; border-radius: 50%; background: var(--text-dim); }
-  .conv-dot.idle { background: var(--success); }
-  .conv-dot.working { background: var(--info); }
-  .conv-dot.needs_you { background: var(--warning); }
   .handoffs { list-style: none; margin: 0; padding: 6px 12px; display: flex; gap: 6px; flex-wrap: wrap; border-block-end: 1px solid var(--border); flex: none; }
   .handoff {
     display: inline-flex; align-items: center; gap: 6px; max-inline-size: 260px; padding-block: 2px; padding-inline: 4px 10px; border-radius: 999px;
@@ -321,7 +338,11 @@
   .echo-bubble { margin: 0; padding: 8px 12px; border-radius: var(--radius-l); background: var(--accent-soft); color: var(--text); font-size: var(--fs-m); white-space: pre-wrap; max-inline-size: 80%; }
   .echo-state { margin: 0; display: flex; align-items: center; gap: 6px; color: var(--text-dim); font-size: var(--fs-s); }
   .intro { margin-inline: auto; }
-  .intro { margin: auto auto 16px; max-inline-size: 520px; display: flex; flex-direction: column; align-items: center; gap: 14px; text-align: center; padding: 24px 8px; }
+  .intro { margin: auto auto; max-inline-size: 520px; display: flex; flex-direction: column; align-items: center; gap: 14px; text-align: center; padding: 24px 8px; }
+  .latest-result { inline-size: 100%; box-sizing: border-box; text-align: start; padding: 20px; border: 1px solid var(--border); border-radius: var(--radius-l); background: var(--surface); }
+  .result-meta { color: var(--text-dim); font-size: var(--fs-s); }
+  .latest-result p { margin-block: 10px 16px; font-size: var(--fs-l); line-height: 1.5; overflow-wrap: anywhere; }
+  .intro-title { margin: 0; font-size: var(--fs-2xl); font-weight: 500; letter-spacing: -0.01em; }
   .intro-line { margin: 0; font-size: var(--fs-l); line-height: 1.5; color: var(--text); }
   .run-wait { display: inline-flex; align-items: center; gap: 8px; }
   .intro-sub { margin: 0; color: var(--text-dim); font-size: var(--fs-s); }
@@ -335,8 +356,8 @@
   .chip-btn:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 1px; }
   @media (max-width: 640px) {
     .conv-body { padding: 8px; }
-    .conv-head { padding-block: 6px; }
-    .conv-main { display: none; }
+    .focus-settings { display: none; }
+    .agent-switcher { max-inline-size: 100%; gap: 4px; padding-inline: 2px; }
   }
   .pa-running {
     display: flex; align-items: center; gap: 8px; margin: 0; padding: 6px 12px; flex: none;

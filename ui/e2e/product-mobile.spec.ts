@@ -8,13 +8,11 @@ import { expectNoHorizontalOverflow } from './helpers';
 // not load — these assertions deliberately exercise only LAYOUT, fit, scroll,
 // and navigation of the page chrome + empty/placeholder states:
 //   • content fits the viewport width (no horizontal overflow);
-//   • on a phone (≤640px) the page is a two-section accordion — a story-list
-//     panel and a per-story content panel — each with a tappable header that
-//     expands it, and the expanded panel is independently scrollable;
+//   • on a phone (≤640px) story selection opens its content and Back returns to the list;
 //   • the Stories|Learnings toggle and the story list stay usable;
 //   • on wider screens the original side-by-side layout is preserved.
 
-const PHONE = new Set(['iphone-portrait', 'iphone-se']);
+const PHONE = new Set(['iphone-portrait', 'iphone-se', 'android-phone']);
 
 let workspaceId = '';
 
@@ -42,12 +40,6 @@ async function openProduct(page: Page): Promise<void> {
   await expect(
     page.locator('.m-view-toggle > button:visible').first(),
   ).toBeVisible({ timeout: 20_000 });
-}
-
-/** Visible width of an element, or 0 if absent/hidden. */
-async function visibleWidth(page: Page, selector: string): Promise<number> {
-  const box = await page.locator(selector).first().boundingBox();
-  return box?.width ?? 0;
 }
 
 test('product: content fits the viewport width — no horizontal overflow', async ({ page }) => {
@@ -82,59 +74,31 @@ test('product: Stories|Learnings toggle + story list are usable', async ({ page 
   await expect(page.locator('.story-list')).toBeVisible();
 });
 
-test('product (phone): accordion sections collapse/expand + scroll independently', async ({
-  page,
-}, testInfo) => {
-  test.skip(!PHONE.has(testInfo.project.name), 'accordion is phone-only (≤640px)');
+test('product (phone): story selection and Back use the available reading space', async ({ page }, info) => {
+  test.skip(!PHONE.has(info.project.name), 'phone push navigation');
   await openProduct(page);
-
-  const heads = page.locator('.m-acc-head');
-  await expect(heads).toHaveCount(2);
-  await expect(heads.nth(0)).toBeVisible();
-  await expect(heads.nth(1)).toBeVisible();
-
-  const pageEl = page.locator('.product-page');
-
-  // List panel open by default → side has height, content collapsed to ~0.
-  await heads.nth(0).click();
-  await expect(pageEl).toHaveClass(/m-list-open/);
-  expect(await visibleWidth(page, '.product-side')).toBeGreaterThan(0);
-  const sideH1 = (await page.locator('.product-side').boundingBox())!.height;
-  const mainH1 = (await page.locator('.product-main').boundingBox())?.height ?? 0;
-  expect(sideH1, 'open list panel should have real height').toBeGreaterThan(80);
-  expect(mainH1, 'collapsed content panel should be ~0 tall').toBeLessThan(8);
-
-  // The open list panel is its own scroll container (overflow-y: auto).
-  const sideOverflowY = await page
-    .locator('.product-side')
-    .evaluate((el) => getComputedStyle(el).overflowY);
-  expect(sideOverflowY).toBe('auto');
-
-  // Tap the content header → content panel expands, list collapses.
-  await heads.nth(1).click();
-  await expect(pageEl).toHaveClass(/m-content-open/);
-  const sideH2 = (await page.locator('.product-side').boundingBox())?.height ?? 0;
-  const mainH2 = (await page.locator('.product-main').boundingBox())!.height;
-  expect(mainH2, 'open content panel should have real height').toBeGreaterThan(80);
-  expect(sideH2, 'collapsed list panel should be ~0 tall').toBeLessThan(8);
-
-  // The content panel's body is the scroll container.
-  const bodyOverflowY = await page
-    .locator('.product-body')
-    .evaluate((el) => getComputedStyle(el).overflowY);
-  expect(bodyOverflowY).toBe('auto');
-
-  // Re-open the list — confirm it toggles back.
-  await heads.nth(0).click();
-  await expect(pageEl).toHaveClass(/m-list-open/);
+  await page.locator('.story-row').first().click();
+  const main = page.locator('.product-main');
+  await expect(page.locator('.product-page')).toHaveClass(/m-content-open/);
+  await expect(page.getByRole('button', { name: 'Back to stories' })).toBeVisible();
+  await expect(page.locator('.m-acc-head')).toHaveCount(0);
+  expect((await main.boundingBox())!.height).toBeGreaterThan(200);
+  await expect(page.locator('.story-details')).not.toHaveAttribute('open');
+  await page.locator('.story-details > summary').click();
+  await expect(page.locator('.story-details')).toHaveAttribute('open');
+  await page.getByRole('button', { name: 'Back to stories' }).click();
+  await expect(page.locator('.product-page')).toHaveClass(/m-list-open/);
+  await expect(page.locator('.story-list')).toBeVisible();
+  expect((await main.boundingBox())?.height ?? 0).toBeLessThan(8);
+  await expectNoHorizontalOverflow(page);
 });
 
 test('product (wide): keeps the side-by-side layout, no accordion', async ({ page }, testInfo) => {
   test.skip(PHONE.has(testInfo.project.name), 'wide-layout assertion');
   await openProduct(page);
 
-  // Accordion headers must not be shown above the phone breakpoint.
-  await expect(page.locator('.m-acc-head').first()).toBeHidden();
+  // Push-navigation headers must not duplicate the shared toolbar.
+  await expect(page.locator('.m-acc-head')).toHaveCount(0);
 
   // Sidebar and main sit side by side (sidebar to the left of main).
   const side = (await page.locator('.product-side').boundingBox())!;

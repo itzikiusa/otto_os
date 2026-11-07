@@ -681,6 +681,7 @@
     // Already open as a workbench tab → just focus it (don't spawn a 2nd session).
     if (database.sshTabs.some((t) => t.connId === c.id)) {
       database.focusSsh(c.id);
+      if (viewport.isPhone) { connOpen = false; schemaOpen = false; }
       return;
     }
     const wsId = ws.currentId;
@@ -699,6 +700,7 @@
       // and surface the terminal there. The connection lives only in this hub; the
       // session is killed when the tab closes (see `closeSshTerminal`).
       database.addSshTab({ connId: c.id, sessionId: session.id, name: c.name, kind: c.kind });
+      if (viewport.isPhone) { connOpen = false; schemaOpen = false; }
     } catch (e) {
       toastError('Couldn’t open', e);
     } finally {
@@ -1020,7 +1022,7 @@
   {/snippet}
 </PageHeader>
 <PageBody fill padded={false}>
-<div class="db-page">
+<div class="db-page" class:terminal-active={database.activePane?.kind === 'ssh'}>
   <aside
     id="db-side"
     class="db-side"
@@ -2599,6 +2601,10 @@
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
     }
+    /* Terminal views need a bounded flex height; the query workbench below
+       keeps its document scroll. Opening a terminal folds the picker. */
+    .db-page.terminal-active { overflow: hidden; }
+    .terminal-active .db-main { flex: 1; min-height: 0; }
     /* Sidebar: full-width band on top, no longer fighting for height — the
        connection list and schema each get their own bounded scroll. */
     .db-side {
@@ -2744,18 +2750,8 @@
     }
   }
 
-  /* ───────────────── Tablet (641–1024px) ─────────────────
-     The tablet keeps the desktop side-by-side layout (sidebar + main), but the
-     shell ALSO shows a persistent ~220px Navigator column here, so the main
-     column is doubly squeezed. Two guards keep content on-screen:
-       1. The dense tab/status row wraps (engine chip + Test button drop to their
-          own line) instead of being pushed past the (.content overflow:hidden)
-          edge and becoming unreachable — the same treatment the phone uses.
-       2. The connection sidebar is capped at 45vw. It's flex-shrink:0 at a
-          persisted px width (db.sideW, up to ~640px carried from a desktop
-          session); without the cap that fixed width + the Navigator could force
-          the main pane off-screen. The cap never bites the default 300px sidebar
-          at these widths, so the layout still reads as side-by-side. */
+  /* Tablet keeps two columns. Cap the restored sidebar width and wrap the
+     status row so neither can push the workbench outside the viewport. */
   @media (min-width: 641px) and (max-width: 1024px) {
     .db-side {
       max-width: 45vw;

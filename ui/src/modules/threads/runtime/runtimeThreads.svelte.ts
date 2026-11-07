@@ -3,6 +3,8 @@
 // and the session actions. An open thread's conversation is runtimeView.svelte.ts,
 // loaded with the view.
 
+import { loadErrorText } from '../../../lib/loadError';
+import { runtimeDrafts } from '../../../lib/stores/runtimeDrafts.svelte';
 import { api } from '../../../lib/api/client';
 import { onLive } from '../../../lib/live';
 import { router } from '../../../lib/router.svelte';
@@ -93,6 +95,7 @@ class RuntimeThreads {
   byId = $state<Record<string, RuntimeSession>>({});
   /** Workspaces whose list has loaded once. */
   loaded = $state<Record<string, boolean>>({});
+  loadErrors = $state<Record<string, string>>({});
   private liveRefs = 0;
   private stopLive: (() => void) | null = null;
 
@@ -124,6 +127,10 @@ class RuntimeThreads {
         noteRuntimeWaiting(r.id, r.status === 'awaiting_permission');
       }
       this.byId = next;
+      delete this.loadErrors[workspaceId];
+    } catch (error) {
+      this.loadErrors[workspaceId] = loadErrorText(error);
+      throw error;
     } finally {
       this.loaded = { ...this.loaded, [workspaceId]: true };
     }
@@ -239,6 +246,7 @@ class RuntimeThreads {
   /** Stop the agent and remove the thread with its history. */
   async remove(id: string): Promise<void> {
     await api.del(`/runtime-sessions/${id}`);
+    runtimeDrafts.forget(id);
     const next = { ...this.byId };
     delete next[id];
     this.byId = next;
