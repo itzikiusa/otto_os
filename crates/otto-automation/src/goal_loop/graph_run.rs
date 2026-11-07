@@ -9,6 +9,53 @@ pub(super) struct Task {
     pub execute: bool,
 }
 
+pub(super) async fn before_execution(
+    ctx: &impl AutomationCtx,
+    loop_: &mut GoalLoop,
+    task: &Task,
+    handle: &LoopHandle,
+) -> bool {
+    if task.execute && loop_.config.graph.is_some() {
+        loop_.ledger.verifications.clear();
+        if let Err(e) = ctx
+            .goal_loops_repo()
+            .set_ledger(&loop_.id, &loop_.ledger)
+            .await
+        {
+            let _ = block(
+                ctx,
+                &loop_.id,
+                &format!("Cannot persist task admission: {e}"),
+            )
+            .await;
+            release_honouring_stop(ctx, &loop_.id, handle).await;
+            return false;
+        }
+    }
+    true
+}
+
+pub(super) async fn save_evidence(
+    ctx: &impl AutomationCtx,
+    loop_: &GoalLoop,
+    ledger: &otto_core::domain::GoalLoopLedger,
+    handle: &LoopHandle,
+) -> bool {
+    let saved = ctx.goal_loops_repo().set_ledger(&loop_.id, ledger).await;
+    if loop_.config.graph.is_some() && saved.is_err() {
+        let _ = block(
+            ctx,
+            &loop_.id,
+            "Task evidence could not be persisted; Resume to reverify",
+        )
+        .await;
+        release_honouring_stop(ctx, &loop_.id, handle).await;
+        return false;
+    }
+    warn_on_err(&loop_.id, "set_ledger", saved);
+    true
+}
+
 pub(super) async fn prepare(
     ctx: &impl AutomationCtx,
     loop_: &mut GoalLoop,
@@ -124,6 +171,33 @@ fn scope_task(loop_: &GoalLoop, node: &GoalGraphNode) -> GoalLoop {
         .retain(|c| node.criterion_ids.contains(&c.id));
     scoped.definition.constraints.push("Do not execute other graph tasks. Preserve prerequisites; report regressions for the controller to repair.".into());
     scoped
+}
+
+pub(super) async fn finish_iteration(
+    ctx: &impl AutomationCtx,
+    loop_: &mut GoalLoop,
+    iteration: u32,
+    selected: Option<&str>,
+    eval: &mut GoalLoopEvaluation,
+) -> otto_core::domain::GoalLoopLedger {
+    verify_executor_completion(ctx, loop_, iteration, selected, eval).await;
+    let stagnant = finish(loop_, selected, eval);
+    let mut ledger = loop_.ledger.clone();
+    if stagnant && eval.verdict != "blocked" {
+        eval.verdict = "blocked".into();
+        eval.feedback = "Two iterations produced the same unmet criteria and evidence. Choose a new approach before resuming.".into();
+    }
+    if eval.verdict == "blocked" && !eval.feedback.starts_with("Work is ready for human") {
+        ledger.questions.push(otto_core::domain::GoalQuestion {
+            id: otto_core::new_id(),
+            question: eval.feedback.clone(),
+            answer: None,
+            answered_by: None,
+            answered_at: None,
+        });
+    }
+    ledger.next_action = eval.feedback.clone();
+    ledger
 }
 
 pub(super) async fn verify_executor_completion(

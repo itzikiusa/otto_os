@@ -31,6 +31,7 @@ use crate::agent::{FailReason, RunOutcome, WatchStatus};
 use crate::goal_loop_parse::{parse_evaluation, parse_executor_result};
 use crate::AutomationCtx;
 
+mod completion;
 mod graph_run;
 
 // --- Registry --------------------------------------------------------------
@@ -746,22 +747,8 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
         } else {
             Vec::new()
         };
-        if task.execute && loop_.config.graph.is_some() {
-            loop_.ledger.verifications.clear();
-            if let Err(e) = ctx
-                .goal_loops_repo()
-                .set_ledger(&loop_id, &loop_.ledger)
-                .await
-            {
-                let _ = block(
-                    &ctx,
-                    &loop_id,
-                    &format!("Cannot persist task admission: {e}"),
-                )
-                .await;
-                release_honouring_stop(&ctx, &loop_id, &handle).await;
-                return;
-            }
+        if !graph_run::before_execution(&ctx, &mut loop_, &task, &handle).await {
+            return;
         }
         for (i, exec) in loop_.config.executors.iter().enumerate() {
             if !task.execute {
@@ -820,42 +807,12 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
         if stop_requested(&handle) {
             continue;
         }
-        graph_run::verify_executor_completion(
-            &ctx,
-            &loop_,
-            idx,
-            task.selected.as_deref(),
-            &mut eval,
-        )
-        .await;
-        let stagnant = graph_run::finish(&mut loop_, task.selected.as_deref(), &mut eval);
-        let mut ledger = loop_.ledger.clone();
-        if stagnant && eval.verdict != "blocked" {
-            eval.verdict = "blocked".into();
-            eval.feedback = "Two iterations produced the same unmet criteria and evidence. Choose a new approach before resuming.".into();
-        }
-        if eval.verdict == "blocked" && !eval.feedback.starts_with("Work is ready for human") {
-            ledger.questions.push(otto_core::domain::GoalQuestion {
-                id: otto_core::new_id(),
-                question: eval.feedback.clone(),
-                answer: None,
-                answered_by: None,
-                answered_at: None,
-            });
-        }
-        ledger.next_action = eval.feedback.clone();
-        let saved = ctx.goal_loops_repo().set_ledger(&loop_id, &ledger).await;
-        if loop_.config.graph.is_some() && saved.is_err() {
-            let _ = block(
-                &ctx,
-                &loop_id,
-                "Task evidence could not be persisted; Resume to reverify",
-            )
-            .await;
-            release_honouring_stop(&ctx, &loop_id, &handle).await;
+        let mut ledger =
+            graph_run::finish_iteration(&ctx, &mut loop_, idx, task.selected.as_deref(), &mut eval)
+                .await;
+        if !graph_run::save_evidence(&ctx, &loop_, &ledger, &handle).await {
             return;
         }
-        warn_on_err(&loop_id, "set_ledger", saved);
         warn_on_err(
             &loop_id,
             "set_iter_evaluation",
@@ -931,46 +888,12 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
         // the next action can legitimately start a new work iteration.
 
         // ---- DECISION ----
-        let all_met = !eval.criteria.is_empty() && eval.criteria.iter().all(|c| c.met);
-        if eval.verdict == "achieved"
-            && all_met
-            && loop_
-                .config
-                .graph
-                .as_ref()
-                .is_none_or(|g| crate::goal_loop_graph::all_passed(g, &ledger))
-        {
-            if loop_.config.require_review {
-                let review = run_role(&ctx, &loop_, &iter.id, "Completion reviewer", &loop_.config.evaluator,
-                    format!("{}\nIndependently review the final work against the goal. Report concrete unresolved defects. Return JSON {{\"approved\":true|false,\"findings\":[string]}}. Approve only when no material issue remains.", goal_context(&loop_)),
-                    &wt, limits.per_phase_timeout_secs).await;
-                let result = review
-                    .as_ref()
-                    .ok()
-                    .and_then(|text| crate::goal_loop_parse::parse_review(text));
-                ledger.review_passed = result.as_ref().is_some_and(|v| {
-                    v["approved"] == true && v["findings"].as_array().is_some_and(Vec::is_empty)
-                });
-                ledger.review_summary = review.unwrap_or_else(|e| e.to_string());
-                if !ledger.review_passed {
-                    if let Some(graph) = &loop_.config.graph {
-                        crate::goal_loop_graph::reopen_completion(graph, &mut ledger);
-                    }
-                }
-                warn_on_err(
-                    &loop_id,
-                    "set_ledger",
-                    ctx.goal_loops_repo().set_ledger(&loop_id, &ledger).await,
-                );
+        if completion::ready(&loop_, &ledger, &eval) {
+            if !completion::review(&ctx, &loop_, &iter.id, &wt, &mut ledger, &handle).await {
                 if stop_requested(&handle) {
                     continue;
                 }
-                if !ledger.review_passed {
-                    clear_evaluation_continuation(&ctx, &loop_id).await;
-                    let _ = block(&ctx, &loop_id, "Completion review has unresolved findings. Inspect the review evidence before resuming.").await; // logged + noticed inside
-                    release_honouring_stop(&ctx, &loop_id, &handle).await;
-                    return;
-                }
+                return;
             }
             let summary = format!("Goal achieved in {idx} iteration(s). {}", eval.rationale);
             let _ = finalize(
