@@ -1,11 +1,16 @@
 # Threads — structured agent runtime (how T3 Code does it → how Otto mirrors it)
 
-Status: the daemon side is done: the event model, contracts, runtime, and
-drivers for Claude, Codex, Gemini, Grok and Antigravity (`agy`). Tests use a
-fake ACP agent, a fake `codex app-server` and a fake `agy`. New Claude / Codex /
-Gemini / Grok threads in a workspace (Scratch included) run on
-`/runtime-sessions` (§5); Antigravity (headless `agy` cannot ask for approval),
-other harnesses and existing threads stay on the PTY view, which is unchanged.
+Status: new Claude, Codex, Gemini, Grok, opencode and pi threads use
+`/runtime-sessions` (§5), including Scratch. The daemon also has an Antigravity
+(`agy`) driver; Threads keeps Antigravity, other harnesses and existing PTY
+sessions on their terminal-backed view. Structured threads support recoverable
+composer drafts, typed provider questions, fresh context in the same visible
+thread, tool-result image previews and selected review/diff context. See the
+[Threads walkthrough](threads.md) for the user-facing flows and limits.
+
+Provider comparison citations below describe the historical T3 Code snapshot;
+Otto's current wire contracts are [api.md](../contracts/api.md) and
+[ws.md](../contracts/ws.md).
 
 **Attribution.** Ported from [T3 Code](https://github.com/pingdotgg/t3code)
 (MIT, Copyright (c) 2026 T3 Tools Inc.). The licence is reproduced in
@@ -15,7 +20,8 @@ header. Citations are `path:line` in the clone studied (commit `cefb544af3`,
 
 ## Why
 
-Threads runs the agent CLI in a PTY, types the prompt into it, and rebuilds
+The terminal-backed Threads view runs the agent CLI in a PTY, types the prompt
+into it, and rebuilds
 the chat by tailing the CLI's transcript file (`transcript_tail.rs` →
 `transcript_appended`). The CLI writes a transcript line only after a block
 *completes*. The result is no token streaming, and tool calls, approvals and
@@ -201,8 +207,12 @@ The framing is newline-delimited JSON-RPC **without** a `"jsonrpc"` member:
    | `item/permissions/requestApproval` | permission | the requested profile with scope `turn` / `session`, or an empty profile (`:609-621`) |
 
    `serverRequest/resolved` closes a request that Codex settled itself.
-   `requestUserInput`, elicitations, dynamic tool calls and auth refresh get
-   JSON-RPC `-32601`; Otto's client does not offer them.
+   `item/tool/requestUserInput` produces a typed question request (see §3).
+   Its answers preserve native question IDs and arrays of selected values;
+   skip returns an empty native answer map. Other unsupported server requests,
+   including Codex elicitations, client-executed dynamic tool calls and auth
+   refresh, get JSON-RPC `-32601`. Completed MCP/dynamic tool result items are
+   displayed independently of that unsupported server-call mechanism.
    The v1 `execCommandApproval` / `applyPatchApproval` (`:576-590`) belong
    to the conversation API that Otto does not use.
 7. **Interrupt.** Open requests are answered `cancel`. Then Otto
@@ -401,8 +411,9 @@ working login on the test machine.
 ### Access modes
 
 The session's `access_mode` is T3 Code's `RuntimeMode` without `auto`:
-`approval-required` (default), `auto-accept-edits`, `full-access`. Each
-driver passes it the way T3 Code does (table in `docs/contracts/api.md`
+`approval-required`, `auto-accept-edits`, `full-access`. The creation default
+follows Settings › Providers: full access while skip-permission prompts is
+enabled, approval-required otherwise. Each driver passes it the way T3 Code does (table in `docs/contracts/api.md`
 "Structured agent runtime"): Claude's `--permission-mode` (`default` /
 `acceptEdits` / `bypassPermissions` + `--allow-dangerously-skip-permissions`,
 `ClaudeAdapterV2.ts:2573-2681`), switched live with the control protocol's
@@ -435,7 +446,7 @@ fields are snake_case (Otto's wire convention):
 | `provider_thread.updated` | `provider_thread {native_thread_id, context_usage?, updated_at}` (`:1074-1083`) |
 | `provider_turn.updated` | `provider_turn {id, ordinal, status: pending\|running\|completed\|interrupted\|failed\|cancelled, started_at, completed_at, turn_token_usage?}` (`:1168-1189`) |
 | `turn_item.updated` | `turn_item {id, turn_id, ordinal, status, title, started_at, completed_at, updated_at, error?, type, …}` (`error`: a failed tool's text, ≤ ~2 KB); `type` is one of the item types below (`:1495-1819`) |
-| `runtime_request.updated` | `runtime_request {id, turn_id, kind: command\|file_read\|file_change\|mcp_elicitation\|permission, status: pending\|resolved\|expired\|cancelled, response_capability: live\|not_resumable, created_at, resolved_at, decision?, cancel_reason?}` (`:1205-1231`) |
+| `runtime_request.updated` | `runtime_request {id, turn_id, kind: command\|file_read\|file_change\|mcp_elicitation\|permission\|question, status: pending\|resolved\|expired\|cancelled, response_capability: {type: live\|not_resumable, reason?}, created_at, resolved_at, decision?, cancel_reason?, questions?, question_title?, answers?}` (`:1205-1231`; question fields are Otto additions) |
 | `plan.updated` | `plan {id, turn_id, steps[{id, text, status: pending\|running\|completed}], explanation?}` (`:1320-1370`) |
 | `command_output.delta` | `{item_id, chunk}`. The only delta, never persisted |
 | `turn.terminal` | `{turn_id, status: completed\|interrupted\|cancelled\|failed, failure?, reason?}` |
@@ -450,10 +461,11 @@ Turn item types:
 | `todo_list` | |
 | `file_change` | `file_name`, `diff_str?`, `old_str?`, `new_str?` |
 | `command_execution` | `input`, `output?`, `exit_code?` |
-| `dynamic_tool` | |
+| `dynamic_tool` | `tool_name`, `input`, `output?`, `images?[{mime, data_base64}]` |
 | `web_search` | `patterns` |
 | `approval_request` | `request_id`, `request_kind`, `prompt?`, `reason?`, `options[{decision, label}]`, `tool_item_id?`, `cancel_reason?` (`agent` / `interrupt` / `closed`) |
-| `system_notice` | |
+| `session_boundary` | No extra fields; rendered as **New session** before the accepted fresh prompt |
+| `system_notice` | `message` |
 | `error` | `failure` |
 
 Approval decisions (`ProviderApprovalDecision`, `providerPolicy.ts:58-64`)
@@ -471,8 +483,9 @@ session and the item list.
 
 **Not ported** (no Otto consumer yet): `app_thread.created`,
 `node.updated`, and the item
-types for checkpoints, handoffs, forks, user-input requests and
-file_search. `message.updated` is also not ported, because the
+types for checkpoints, handoffs, forks and file_search. Typed questions live
+on `runtime_request.updated` with `kind: "question"`; they do not require a
+separate user-input turn item. `message.updated` is also not ported, because the
 `assistant_message` item carries the same text.
 
 **Who owns what.** In T3 Code, adapters own their processes and the
@@ -495,6 +508,63 @@ streaming upsert of an item to one per `RuntimeConfig::stream_coalesce`
 - the latest held text is flushed when the window ends, or before any other
   event;
 - text only grows.
+
+### Typed provider questions
+
+`runtime_request.updated` with `kind: "question"` carries the full form:
+`questions[{id, header, prompt, kind: single|multi|text, required,
+allow_free_text, allow_empty?, options[{value, label, description?}]}]` and
+optional `question_title`. It remains available in snapshots even when its
+tool row or the event replay window is no longer visible. The UI renders
+**Needs your answer** separately from permission approvals; settled forms
+remain under **Previous questions**.
+
+| Provider path | Supported input and native reply |
+|---|---|
+| Claude `AskUserQuestion` | Text, single choice and multi-select, with free-text alternatives. The original question text keys `updatedInput.answers`; multi-select values use Claude's comma-separated format. |
+| Codex `item/tool/requestUserInput` | Text and single choice, with free-text alternatives. Native question IDs map to `{answers: [...]}` arrays. |
+| ACP `elicitation/create` | Session-scoped `mode: "form"` with flat text, string enum/titled single choices, and arrays of string choices. Replies preserve schema property names and values. This is the upstream draft extension; not every ACP provider emits it. |
+
+`POST /runtime-sessions/{id}/requests/{request_id}` accepts `{answers: [...]}`
+with tagged `single`, `multi` or `text` entries, or `{question_action:
+"decline"|"cancel"}`. The UI's **Skip question** uses decline. ACP preserves
+the native dismissal action, Claude denies only the question tool, and Codex
+returns an empty answer map. Dismissal marks the request cancelled without
+approving a tool or sending ordinary chat text.
+
+Required IDs, answer types, duplicate entries and offered values are validated
+before consuming the request. Native Claude/Codex required answers must be
+nonempty. Unconstrained ACP text and multi-select fields allow empty values,
+including when required: the property must be present. Numeric/boolean fields,
+nested schemas, extra validation constraints, URL/auth/request-scoped ACP
+elicitations and secret questions are refused with an explicit provider
+error/denial. No answer is fabricated. The pi and agy drivers have no typed
+question adapter.
+
+Public request IDs are scoped to the live process generation; replies map back
+to the preserved native RPC ID. Pending requests can be answered out of order.
+Withdrawn, interrupted or closed requests become cancelled; daemon recovery
+expires them as not resumable. An old card cannot answer a replacement
+process's request. Question payloads and responses are separate from permission
+decisions, so one cannot be used in place of the other.
+
+### Tool-result images
+
+`dynamic_tool.images?` contains `{mime, data_base64}` records alongside
+`output?`, preserving accompanying text and structured MCP metadata. Claude
+(including nested subagent tools), Codex MCP, and ACP/OpenCode image content
+use the shared `tool_images.rs` extraction and validation path. OpenCode inline
+file attachments can also arrive in ACP `rawOutput`.
+
+Only inline PNG, JPEG, GIF and WebP are retained: valid base64 and matching
+raster signatures, at most four images, 1 MiB decoded per image and 2 MiB decoded
+total per result. Unsupported, malformed, remote-only or over-limit images
+produce a text omission notice. No provider image URL is fetched and no HTML
+or SVG is rendered. Old stored tool items without `images` continue to work.
+`RuntimeToolImages` rechecks payloads at the rendering boundary, shows
+thumbnails in expanded work rows, and opens the shared modal for enlargement,
+including keyboard close/focus return and phone layouts. Decoder failures show
+an image error without losing the tool text.
 
 ### Per-turn model, effort and images
 
@@ -593,6 +663,74 @@ and still remembered the image.
   progress, with a 45 min stuck allowance while it is pending. A closed run
   thread can be reopened as a normal conversation (its meta is kept).
 
+### Explicit fresh context (`/clear`)
+
+`/clear` arms the next prompt with `fresh_context: true`; Cancel clears only
+that intent. It does not send a prompt, terminate work or create another Otto
+thread. `/new` retains its separate-thread behavior. Fresh intent is part of
+the saved composer draft.
+
+The runtime serializes admission with ordinary prompts, queue delivery, close
+and reopen. A running turn, background task, queued message or pending request
+causes **409**, before the old process is removed. Fresh prompts are never
+queued, steered or used to interrupt current work. An otherwise idle closed
+thread can reopen straight into a fresh conversation.
+
+On admission, the old process is stopped, the native identity/context projection
+is temporarily cleared and a new provider is initialized without a resume key.
+Only after initialization and local `driver.prompt` acceptance does the runtime
+persist the new identity and emit one `session_boundary` item before the new
+user message. Existing history, files, session ID, ownership and workspace stay
+intact. Failed initialization or rejected local prompt input restores the old
+native identity and closed state when applicable, with no boundary. A later
+provider error after acceptance is a failed turn in the newly committed
+conversation. The frontend keeps the submitted draft and fresh intent on a
+rejected send.
+
+### Durable composer state
+
+`GET/PUT /runtime-sessions/{id}/draft` uses `{revision, draft}` records backed by
+`runtime_composer_drafts`, scoped to user, workspace and runtime session. The
+human-only routes reject managed-agent, MCP and share credentials. Draft
+content includes text, attachments (bytes and names), model, effort,
+`access_mode`, `fresh_context`, and attributed review/diff context chips. Action
+flags such as sending, stopping and replay sequence are live UI state only.
+No draft content is put in browser local storage.
+
+The frontend uses one serialized writer per draft with a 200 ms debounce,
+plus a best-effort flush on page hide. **Restoring / Saving / Saved** and an
+inline **Retry** report persistence. Send waits for recovery; edits during a
+late load survive, and added context merges by stable ID. A revision mismatch
+returns **409**, suspending automatic writes; explicit Retry reloads the
+revision and saves this window's local version. It does not merge competing
+text. An accepted prompt or queue operation acknowledges only the submitted
+snapshot, retaining later edits and model/effort/access preferences. Failed
+sends retain the draft; recovery never sends it automatically.
+
+Limits: 1 MiB text, 12 attachments at 10 MiB decoded each, 32 context chips at
+128 KiB text each, and 24 MiB total serialized draft/request size. Attachment
+MIME types are PNG, JPEG, GIF, WebP and PDF, validated against base64 bytes and
+file signatures; prompt-time provider restrictions still apply. Each
+person/workspace has a 64 MiB / 128 nonempty-draft quota. Clearing content stays
+possible at quota; preference-only records do not consume a nonempty-draft
+slot. Payloads older than 30 days since their last save expire during recovery
+and draft reads/writes, including preferences and attachment bytes. Revision
+tombstones remain until thread deletion, which cascades the row. Quota and
+validation failures are explicit; content is not silently truncated.
+
+### Selected review and diff context
+
+The inspector's Pull request surface loads complete comment conversations;
+**Add to chat** preserves the comment/replies, author, PR URL, location and
+outdated/resolved status. Changes offers whole-file, hunk and line selection
+in unified or split view, preserving the diff target and old/new line numbers.
+Selections are independent chips; repeat selection replaces the matching chip
+without touching typed text. The chips can be removed or opened in a readable
+modal on desktop or phone. They are appended with attribution only on send,
+without an automatic prompt or a canned fix instruction. Loaders abort and
+clear old results on owner changes; the inspector rechecks the focused runtime
+thread before updating its draft or returning focus.
+
 ## 5. How the web client consumes it (T3 Code → Otto Threads)
 
 T3 Code loads a snapshot, then subscribes with `afterSequence`, and folds
@@ -661,10 +799,10 @@ runtime request **that only a person can answer**. Access rules:
 - reads need workspace `viewer` + owner-or-admin;
 - WS delivery is session-family (owner, workspace admin, root).
 
-None of the five drivers passes a skip-permissions flag. Claude:
-`--permission-mode default`. Codex: `untrusted`. Grok:
-`--permission-mode default`. Gemini: its default. Antigravity: its default,
-in which headless agy denies what it would have asked about.
+Provider permissions follow the selected access mode (§2), including explicit
+full-access settings. Remaining permission requests still require a person.
+Typed question answers use a separate payload and never grant a permission;
+secret question forms are refused instead of being collected into history.
 
 ## 8. Code map
 
@@ -672,9 +810,11 @@ in which headless agy denies what it would have asked about.
 |---|---|
 | `crates/otto-core/src/agent_runtime.rs` | event model + REST DTOs |
 | `crates/otto-agent-protocol/src/driver.rs` | `StructuredDriver` contract (sans-IO) |
-| `crates/otto-agent-protocol/src/{claude,codex,acp,agy}.rs` | the drivers |
+| `crates/otto-agent-protocol/src/{claude,codex,acp,agy,pi}.rs` | the drivers |
 | `crates/otto-agent-protocol/src/claude_tasks.rs` | Claude background tasks, subagent cards, their nested activity |
-| `crates/otto-agent-protocol/src/runtime.rs` | processes, turns, sequencing, coalescing, replay, persistence, recovery |
+| `crates/otto-agent-protocol/src/runtime.rs`, `runtime/{fresh,request_ids}.rs` | processes, turns, sequencing, coalescing, replay, recovery, fresh context and process-scoped request IDs |
+| `crates/otto-agent-protocol/src/{questions,tool_images}.rs` | native question schema normalization and bounded tool image extraction |
+| `crates/otto-agent-protocol/src/http/drafts.rs`, `crates/otto-state/src/agent_runtime/drafts.rs` | draft validation, authorization, revision checks, quotas and expiry |
 | `crates/otto-agent-protocol/src/{host,process,ring,http}.rs` | safety host, child I/O, replay ring, `/runtime-sessions` router |
 | `crates/otto-agent-protocol/src/bin/otto-fake-{agent,codex,agy,claude}.rs` | test doubles (ACP agent, `codex app-server`, agy stream-json, Claude SDK stream-json with background work / subagents / steering) |
 | `crates/otto-state/src/agent_runtime.rs`, migration `0197_agent_runtime.sql` | persistence |
@@ -684,39 +824,25 @@ in which headless agy denies what it would have asked about.
 | `ui/src/modules/threads/runtime/runtimeView.svelte.ts` | an open thread's projection: live events, replay after a gap / reconnect (loads with the view) |
 | `ui/src/modules/threads/runtime/Runtime{Thread,WorkRow,ApprovalRow}.svelte` | timeline, work-log rows, inline approvals, composer with Stop (sending to a closed thread reopens it) |
 | `ui/src/modules/threads/runtime/Runtime{SubagentCard,QueueBar,TurnStatus}.svelte` | the subagent card; background work, the queue (Steer / Send now / Edit / Remove) and Closed · Reopen; the turn's status line (working, own turn, stopped, stalled, partly done) |
+| `ui/src/lib/stores/runtimeDraftPersistence.ts`, `runtimeDraftRecovery.svelte.ts`, `runtimeDrafts.svelte.ts` | draft snapshot acknowledgement, serialized persistence and recovery |
+| `ui/src/modules/threads/runtime/Runtime{Questions,QuestionCard,ToolImages,ContextChips,DraftStatus}.svelte` | typed questions, image enlargement, context preview/removal and save status |
+| `ui/src/modules/threads/runtime/composerContext.ts` | attributed review conversations and file/hunk/line excerpts assembled on send |
 | `ui/src/modules/threads/runtime/runtimeMenu.ts` | the thread menu: Reopen, Close, Delete (confirmed unless "Closing a session tab" is Always delete) |
 | `ui/e2e/desktop-threads-runtime.spec.ts` | E2E against `otto-fake-codex` and `otto-fake-claude` (global-setup's shims exec them for `app-server` / `--input-format stream-json`) |
 
 ## 9. Gaps and next steps
 
 - **Threads UI.** Runtime threads raise the shared "needs you" flag while
-  an approval waits, sit in History once closed (renamable; opening or
-  messaging one reopens it),
+  an approval or typed question waits, sit in History once closed (renamable;
+  opening or messaging one reopens it),
   and take the view's slash commands (`/btw` side chat — itself a PTY
-  thread — `/diff`, `/files`, `/terminal`, `/new`, `/fork`, `/review`);
+  thread — `/diff`, `/files`, `/terminal`, `/new`, `/clear`, `/fork`, `/review`);
   any other `/command` goes to the agent as typed (T3 Code's provider
   commands). The thread's terminal drawer is a plain shell in its folder
   (`meta.terminal_of`). The composer's model / effort pick and attached
   images ride `POST …/prompt` (`model`, `effort`, `images`).
-- **Pending driver work** for those prompt fields (the runtime ignores them
-  today): the prompt handler passes them to `StructuredDriver::prompt`, and
-  the drivers apply them as T3 Code does —
-  - **model / effort:** Codex `turn/start {model, effort}` (per turn,
-    `CodexAdapterV2.ts:744-818`); Claude a `control_request {subtype:
-    "set_model", model}` before the user message when the model changed
-    (`ClaudeAdapterV2.ts:1224-1236`), an effort change respawning the CLI
-    with `--resume` (`:1440-1455`, "thinking requires a new process"); ACP
-    respawn with `--model` + `session/load`. The session row's `model`
-    follows.
-  - **images:** Claude `{type:"image", source:{type:"base64", media_type,
-    data}}` content blocks beside the text block in the `user` message;
-    Codex `turn/start input` `{type:"image", url:"data:<media_type>;base64,<data>"}`
-    items; ACP `ContentBlock::Image {data, mimeType}` when the agent's
-    `promptCapabilities.image` is set (else refuse with 400). The prompt
-    route needs a larger body limit (`DefaultBodyLimit`, ~48 MiB for four
-    10 MB images) and the `user_message` item could carry an image count.
-- **`ottod` teardown** calling `AgentRuntime::shutdown()`, and eviction of
-  idle live entries.
+- **Idle live-entry eviction** remains a runtime lifecycle follow-up. Daemon
+  shutdown already calls `AgentRuntime::shutdown()`.
 - **Features T3 Code has that Otto does not yet:** restart continuation,
   steering for Codex (`turn/steer`) and ACP, Codex `thread/unarchive`,
   Claude thinking summaries, subagent / background tracking for the other
