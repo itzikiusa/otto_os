@@ -4,7 +4,7 @@ Goal Loops runs bounded Plan → Execute → Evaluate → Digest iterations towa
 
 ## Define and launch
 
-Open **Goal Loops → New goal loop**, choose Build or Research, select the definer provider/model, and describe the goal. Build mode requires a repository; Research does not. **Define with AI** creates a managed definer session and returns an editable draft. Refine the draft with feedback before launching.
+Open **Goal Loops → New goal loop**. Start from one of the seven suggested templates or describe a goal and choose **Define with AI**. A template creates an editable local draft immediately; it still needs your concrete goal. Build mode requires a repository; Research does not. AI definition uses the selected definer provider/model and creates a managed session. Refine the draft with feedback before launching.
 
 Each criterion specifies how it is verified:
 
@@ -82,7 +82,7 @@ Build/Research mode is fixed when the loop is created, because it determines the
 
 Pause interrupts managed roles and verification commands and releases executor sessions. A short “work is still active or stopping” response means cleanup has not finished yet; wait for it to settle before Resume or recording an approval. Stop is asynchronous while cleanup is in progress. Neither operation resets the worktree.
 
-A blocked loop can retry one executor from its **current** iteration using its saved prompt. The retry becomes Running, owns a cancellation handle and clears stale results, approvals and evaluation. It returns to Blocked when finished. Resume then performs fresh loop work/evaluation. This prevents old approvals from being reused for changed files. Two retries cannot run concurrently in the same loop.
+A blocked sequential loop can retry one executor from its **current** iteration using its saved prompt. Graph loops use **Resume** instead, so prerequisite evidence is checked before retrying a task. The retry becomes Running, owns a cancellation handle and clears stale results, approvals and evaluation. It returns to Blocked when finished. Resume then performs fresh loop work/evaluation. This prevents old approvals from being reused for changed files. Two retries cannot run concurrently in the same loop.
 
 ## Limits and evidence details
 
@@ -132,7 +132,7 @@ All paths below are under `/api/v1`. The authoritative request/response fields a
 | Loop paused after daemon restart | This is intentional recovery. Inspect retained work and Resume explicitly. |
 | A skill or source is missing | Make it available through the provider's normal configuration or revise the goal. There is no automatic skill installation or source-access escalation. |
 
-Goal templates/export/import and pre-launch skill-availability resolution are not currently implemented. The comparison proposal describes these as further design opportunities; it is not the API contract.
+Seven suggested templates and editable task graphs are available; see [Suggested loops and engineering graphs](./goal-loop-templates.md). General template export/import and pre-launch skill-availability resolution are not implemented. Templates do not install skills or guarantee access to source systems.
 
 ## Views, fields and defaults
 
@@ -208,3 +208,39 @@ later mutations invalidate human approval. Research graphs must assign the
 reserved `otto-research-report` criterion to their report task. Graphs use the
 existing isolated work directory and executor policies; they do not authorize
 publishing, pushing or sending messages.
+
+## Engineering graphs
+
+A goal can include `config.graph` with 1–16 tasks. Each task has a stable ID, title,
+instructions, dependency IDs and acceptance-criterion IDs. Every goal criterion
+must belong to a task. Otto rejects cycles, unknown or duplicate references and
+empty tasks before saving or starting a graph. Human-verification tasks must be
+terminal: later code changes invalidate human approvals.
+
+The editor uses task cards and dependency controls, so the graph remains usable
+on a keyboard or phone. The preview groups tasks by dependency level. Nodes on
+the same level are independent prerequisites, not a promise of parallel execution.
+The existing executor lineup works sequentially in one isolated directory.
+
+Each execution iteration admits one ready task. Before admitting a dependent
+task, the evaluator rechecks previously passed prerequisite criteria against
+current work. After execution it evaluates the goal again; regressed prerequisites
+invalidate their descendants. An optimistic assessment cannot pass a task that
+never ran, a failed executor, missing evidence or a still-pending dependency.
+Completion requires all tasks and authoritative criteria to pass, plus the existing
+proof and independent-review gates when configured. If final review finds a
+problem, the final task reopens for repair on Resume.
+
+The persisted `ledger.graph_nodes` records task ID, state, iteration and criterion
+evidence. The detail view shows those records after reload. Pause, cancellation,
+restart recovery and active-time limits retain the existing controller semantics.
+Final human verification can re-evaluate the completed work without consuming
+another execution iteration. A graph needs at least one iteration per task; the
+suggested three-task graphs allow five iterations, leaving two for repairs.
+
+Tasks may be pending, running, passed or blocked. Task blockage can mean failed
+verification while the overall loop is still trying repairs; it does not always
+mean the person must answer a question. Inspect the evidence and overall loop
+status. Existing goals without `config.graph` keep the sequential Plan → Execute
+→ Evaluate → Digest behavior. Graphs are bounded dependency DAGs, not the general
+conditional/external-action graphs provided by [Workflows](./workflows.md).
