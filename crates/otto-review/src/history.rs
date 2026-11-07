@@ -73,3 +73,115 @@ pub async fn prior_review_context(
     }
     Ok((String::new(), vec![]))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn three_run_lineage_keeps_an_inherited_issue_without_a_fresh_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::db::open(&dir.path().join("state.sqlite"))
+            .await
+            .unwrap();
+        let user = otto_state::UsersRepo::new(pool.clone())
+            .create("reviewer", "hash", "Reviewer", true)
+            .await
+            .unwrap();
+        let workspace = otto_state::WorkspacesRepo::new(pool.clone())
+            .create("Review", "/tmp", &user.id)
+            .await
+            .unwrap();
+        let repo = otto_state::GitStore::new(pool.clone())
+            .create_repo(otto_state::NewRepo {
+                workspace_id: workspace.id.clone(),
+                name: "Repo".into(),
+                path: "/tmp/review-fixture".into(),
+                remote_url: None,
+                provider: None,
+                git_account_id: None,
+            })
+            .await
+            .unwrap();
+        let reviews = otto_state::ReviewsRepo::new(pool.clone());
+        let findings = otto_state::ReviewFindingsRepo::new(pool);
+        let first = reviews.create_review(&repo.id, 7).await.unwrap();
+        let mut original = otto_state::NewFinding {
+            review_id: &first.id,
+            workspace_id: &workspace.id,
+            repo_id: &repo.id,
+            pr_number: Some(7),
+            path: Some("auth.rs"),
+            line: Some(2),
+            line_end: None,
+            severity: "bug",
+            category: Some("security"),
+            title: "Permission bypass",
+            body: "Anonymous access reaches protected data",
+            evidence: "auth.rs:2 → api.rs:8",
+            agent_reasoning_summary: "Reachable caller",
+            suggested_fix: None,
+            produced_by_agent: Some("review"),
+            reviewer: "review",
+            fingerprint: "stable",
+            run_id: &first.id,
+        };
+        let (finding, _) = findings.upsert(&original).await.unwrap();
+        reviews
+            .set_status(&first.id, ReviewStatus::Done, None)
+            .await
+            .unwrap();
+        let second = reviews.create_review(&repo.id, 7).await.unwrap();
+        let mut plan =
+            crate::scope::documentation_plan("--- a/docs/a.md\n+++ b/docs/a.md\n+change", "head")
+                .unwrap();
+        plan.prior_findings
+            .push(otto_core::domain::ReviewFindingDisposition {
+                finding_id: finding.id.clone(),
+                disposition: "still_open".into(),
+                evidence: "auth.rs:2 still bypasses the check".into(),
+            });
+        reviews.set_scope_plan(&second.id, &plan).await.unwrap();
+        reviews
+            .set_status(&second.id, ReviewStatus::Done, None)
+            .await
+            .unwrap();
+        let third = reviews.create_review(&repo.id, 7).await.unwrap();
+        assert!(findings
+            .list_full_for_review(&second.id)
+            .await
+            .unwrap()
+            .is_empty());
+        let (context, ids) = prior_review_context(
+            &reviews,
+            &findings,
+            &repo.id,
+            7,
+            &third.id,
+            None,
+            Some(&second.id),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ids, vec![finding.id.clone()]);
+        assert!(context.contains("Anonymous access reaches protected data"));
+        let injected = prior_claims(&plan, &findings).await.unwrap();
+        assert_eq!(injected.len(), 1);
+        assert!(injected[0].body.contains(&finding.id));
+        assert_eq!(injected[0].severity, "high");
+        original.review_id = &third.id;
+        findings.upsert(&original).await.unwrap();
+        let (_, original_ids) = prior_review_context(
+            &reviews,
+            &findings,
+            &repo.id,
+            7,
+            &third.id,
+            None,
+            Some(&first.id),
+        )
+        .await
+        .unwrap();
+        assert_eq!(original_ids, vec![finding.id]);
+    }
+}
