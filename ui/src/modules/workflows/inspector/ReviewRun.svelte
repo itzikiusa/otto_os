@@ -161,8 +161,8 @@
       oninput={(e) => updateScoring('warn', Number(e.currentTarget.value))} />
   </label>
   <label class="rv-sc">
-    Low
-    <input type="number" min="0" max="100" value={scoringField('info', 5)}
+    Optional
+    <input type="number" min="0" max="100" value={scoringField('info', 0)}
       oninput={(e) => updateScoring('info', Number(e.currentTarget.value))} />
   </label>
 </div>

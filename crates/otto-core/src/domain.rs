@@ -1281,6 +1281,41 @@ pub struct SkillReview {
 
 /// A PR agent review run, together with all its draft comments.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewScopeLens {
+    pub name: String,
+    pub reason: String,
+    pub instructions: String,
+}
+
+/// Persisted preflight assessment; evidence describes inspected paths, not a quality score.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewFindingDisposition {
+    pub finding_id: String,
+    /// fixed | still_open | not_relevant; evidence is mandatory.
+    pub disposition: String,
+    pub evidence: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewScopePlan {
+    #[serde(default)]
+    pub base_sha: String,
+    #[serde(default)]
+    pub head_sha: String,
+    pub summary: String,
+    pub related_modules: Vec<String>,
+    pub risks: Vec<String>,
+    pub lenses: Vec<ReviewScopeLens>,
+    #[serde(default)]
+    pub prior_findings: Vec<ReviewFindingDisposition>,
+    #[serde(default)]
+    pub verification_notes: Vec<String>,
+    #[serde(default)]
+    pub source: String,
+}
+
+/// A PR agent review run, together with all its draft comments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Review {
     pub id: Id,
     pub repo_id: Id,
@@ -1308,6 +1343,8 @@ pub struct Review {
     /// `fallback` flags so the UI can badge the summary. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_fallback: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_plan: Option<ReviewScopePlan>,
 }
 
 // ===========================================================================
@@ -1490,10 +1527,39 @@ pub struct GoalLoopRoleCfg {
     pub prompt: String,
 }
 
+/// A bounded task DAG; dependencies are verified before a node can execute.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalLoopGraph {
+    pub nodes: Vec<GoalGraphNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalGraphNode {
+    pub id: String,
+    pub title: String,
+    pub instructions: String,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    pub criterion_ids: Vec<String>,
+}
+
+/// Durable controller evidence, not a task author's completion claim.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalGraphNodeState {
+    pub node_id: String,
+    /// pending | running | passed | blocked
+    pub status: String,
+    pub iteration: u32,
+    pub evidence: String,
+    pub criteria: Vec<EvalCriterion>,
+}
+
 /// Full loop configuration. Sensible defaults ship so a user can launch with
 /// just a goal + budget.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoalLoopConfig {
+    #[serde(default)]
+    pub graph: Option<GoalLoopGraph>,
     /// Local commits require explicit opt-in. Push and publishing are never implicit.
     #[serde(default)]
     pub allow_commits: bool,
@@ -1519,6 +1585,7 @@ fn default_goal_mode() -> String {
 impl Default for GoalLoopConfig {
     fn default() -> Self {
         Self {
+            graph: None,
             allow_commits: false,
             mode: default_goal_mode(),
             source_links: Vec::new(),
@@ -1629,6 +1696,8 @@ pub struct GoalQuestion {
 /// Structured durable handoff alongside the narrative digest.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GoalLoopLedger {
+    #[serde(default)]
+    pub graph_nodes: Vec<GoalGraphNodeState>,
     /// Re-evaluate this existing iteration after explicit executor retry. Kept
     /// through pause/restart until its evaluation/digest/review decision settles.
     #[serde(default)]

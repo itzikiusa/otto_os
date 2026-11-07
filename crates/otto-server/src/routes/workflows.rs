@@ -634,6 +634,21 @@ pub async fn run_workflow(
     Ok(Json(run))
 }
 
+/// A fresh iteration, preserving the old report and refreshing source refs.
+pub async fn rereview_run(
+    Path(id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<WorkflowRun>> {
+    let previous = repo(&ctx).get_run(&id).await.map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &previous.workspace_id, WorkspaceRole::Editor)
+        .await?;
+    otto_workflows::rereview::start(&ctx, &previous, Some(&user.id), false)
+        .await
+        .map(Json)
+        .map_err(ApiError)
+}
+
 /// `POST /workflow-runs/{id}/retry-node` — re-run ONE errored step of a
 /// FINISHED run, in place, without repeating the (possibly hours-long) earlier
 /// steps. The run row is reopened and re-entered with `start_node=node,
@@ -878,6 +893,10 @@ impl RunListQuery {
 /// the searchable run history.
 pub fn workspace_run_routes() -> axum::Router<ServerCtx> {
     axum::Router::new()
+        .route(
+            "/workflow-runs/{id}/re-review",
+            axum::routing::post(rereview_run),
+        )
         .route(
             "/workspaces/{wid}/workflow-runs/active",
             axum::routing::get(list_active_runs),

@@ -14,6 +14,10 @@
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { announceShown } from '../../lib/announce.svelte';
+  import GoalGraphEditor from './GoalGraphEditor.svelte';
+  import { graphError } from './graph';
+  import { goalTemplates, templateDraft, researchDraft, type GoalTemplateId, type PocScope } from './templates';
 
   let { oncancel, oncreated }: { oncancel: () => void; oncreated: (id: string) => void } = $props();
 
@@ -30,6 +34,11 @@
   let launching = $state(false);
 
   let draft = $state<GoalLoopDraft | null>(null);
+  let selectedTemplate = $state<GoalTemplateId | ''>('');
+  let pocScope = $state<PocScope>('both');
+  let draftSource = $state<'template' | 'agent'>('agent');
+  const template = $derived(goalTemplates.find(item => item.id === selectedTemplate));
+  const graphIssue = $derived(draft ? graphError(draft.suggested_config.graph, draft.definition.acceptance_criteria) : null);
   let name = $state('');
   // Budget (edited as friendlier units).
   let maxIterations = $state(5);
@@ -58,7 +67,45 @@
   function formState(): string {
     return JSON.stringify([seed, mode, allowCommits, requireReview, sourceLinks, selectedSkills, repoPath,
       feedback, draft, name, maxIterations, maxMinutes, perPhaseMinutes, executorCount,
-      execProvider, execModel, defProvider, defModel]);
+      execProvider, execModel, defProvider, defModel, selectedTemplate, pocScope, draftSource]);
+  }
+
+  function applyDraft(d: GoalLoopDraft): void {
+    draft = mode === 'research' ? researchDraft(d) : d;
+    name = d.definition.title;
+    maxIterations = d.suggested_limits.max_iterations;
+    maxMinutes = Math.round(d.suggested_limits.max_runtime_secs / 60);
+    perPhaseMinutes = Math.max(1, Math.round(d.suggested_limits.per_phase_timeout_secs / 60));
+    feedback = '';
+  }
+
+  function setMode(next: 'build' | 'research'): void {
+    mode = next;
+    if (!draft) return;
+    if (next === 'research') draft = researchDraft(draft);
+    else {
+      draft.definition.acceptance_criteria = draft.definition.acceptance_criteria.filter(criterion => criterion.id !== 'otto-research-report');
+      if (draft.suggested_config.graph) draft.suggested_config.graph.nodes = draft.suggested_config.graph.nodes.map(node => ({ ...node, criterion_ids: node.criterion_ids.filter(id => id !== 'otto-research-report') }));
+    }
+  }
+
+  async function chooseTemplate(id: GoalTemplateId, scope: PocScope = pocScope): Promise<void> {
+    if (!alive) return;
+    const generation = formGeneration;
+    const wsId = ws.currentId;
+    if (draft && !(await confirmer.ask('Replace the draft, acceptance criteria and graph with this template? Your goal and repository path are kept.', { title: 'Replace goal draft', confirmLabel: 'Use template' }))) return;
+    if (!alive || formGeneration !== generation || ws.currentId !== wsId) return;
+    // A late AI response belongs to the replaced draft, not this template.
+    formGeneration++;
+    defining = false;
+    selectedTemplate = id;
+    pocScope = scope;
+    draftSource = 'template';
+    const next = templateDraft(id, execProvider, scope);
+    mode = next.suggested_config.mode ?? 'build';
+    applyDraft(next);
+    allowCommits = false;
+    requireReview = true;
   }
 
   async function define(): Promise<void> {
@@ -75,12 +122,10 @@
         feedback: feedback.trim() || undefined,
       });
       if (!ownsForm()) return;
-      draft = d;
-      name = d.definition.title;
-      maxIterations = d.suggested_limits.max_iterations;
-      maxMinutes = Math.round(d.suggested_limits.max_runtime_secs / 60);
-      perPhaseMinutes = Math.max(1, Math.round(d.suggested_limits.per_phase_timeout_secs / 60));
-      feedback = '';
+      // Refining the goal does not silently discard a manually edited graph.
+      if (draft?.suggested_config.graph) d.suggested_config.graph = draft.suggested_config.graph;
+      applyDraft(d);
+      draftSource = 'agent';
     } catch (e) {
       if (ownsForm()) toastError('Couldn’t draft the goal', e);
     } finally {
@@ -109,7 +154,10 @@
   }
 
   function canLaunch(): boolean {
-    if (!alive || !ws.currentId || !draft || !name.trim()) return false;
+    if (!alive || !ws.currentId || !draft || !name.trim() || !seed.trim() || (mode === 'build' && !repoPath.trim())) return false;
+    if (graphError(draft.suggested_config.graph, draft.definition.acceptance_criteria)) return false;
+    if (maxIterations < (draft.suggested_config.graph?.nodes.length ?? 1)) return false;
+    if (![maxIterations, maxMinutes, perPhaseMinutes, executorCount].every(value => Number.isInteger(value) && value > 0) || executorCount > 6) return false;
     const cs = draft.definition.acceptance_criteria;
     return (
       cs.length > 0 &&
@@ -145,7 +193,7 @@
       const loop = await loops.create(wsId, {
         name: name.trim(),
         repo_path: repoPath.trim(),
-        definition: draft.definition,
+        definition: { ...draft.definition, title: name.trim(), summary: draftSource === 'template' ? `${seed.trim()}\n\n${draft.definition.summary}` : draft.definition.summary },
         limits: {
           max_iterations: maxIterations,
           max_runtime_secs: maxMinutes * 60,
@@ -221,16 +269,34 @@
   {/if}
 
   <section class="block">
+    <label class="lbl" for="gl-template">Start from a template <span class="hint">(optional)</span></label>
+    <select id="gl-template" class="input in" value={selectedTemplate} disabled={launching} onchange={async (e) => {
+      const select = e.currentTarget;
+      const id = select.value as GoalTemplateId;
+      if (id) await chooseTemplate(id);
+      select.value = selectedTemplate;
+    }}>
+      <option value="" disabled={!!draft}>Describe your own goal</option>
+      {#each goalTemplates as item (item.id)}<option value={item.id}>{item.title}</option>{/each}
+    </select>
+    {#if selectedTemplate === 'poc'}
+      <label class="lbl" for="gl-poc-scope">POC scope</label>
+      <select id="gl-poc-scope" class="input in" value={pocScope} disabled={launching} onchange={async (e) => {
+        const select = e.currentTarget;
+        await chooseTemplate('poc', select.value as PocScope);
+        select.value = pocScope;
+      }}><option value="backend">Backend</option><option value="frontend">Frontend</option><option value="both">Backend and frontend</option></select>
+    {/if}
     <label class="lbl" for="gl-seed">Goal <span class="hint">(what “done” looks like)</span></label>
     <textarea dir="auto"
       id="gl-seed"
       class="input in area"
       bind:value={seed}
       rows="3"
-      placeholder="e.g. Make the export endpoint stream instead of buffering, and add a test."
+      placeholder={template?.example ?? 'e.g. Make the export endpoint stream instead of buffering, and add a test.'}
     ></textarea>
     <label class="lbl" for="gl-mode">Mode</label>
-    <select id="gl-mode" class="input in" bind:value={mode}><option value="build">Build</option><option value="research">Research</option></select>
+    <select id="gl-mode" class="input in" value={mode} onchange={(e) => setMode(e.currentTarget.value as 'build' | 'research')}><option value="build">Build</option><option value="research">Research</option></select>
     <p class="muted small">Build changes code on an isolated branch; Research writes findings to a scratch directory.</p>
     {#if mode === 'build'}
     <label class="lbl" for="gl-repo">Repository path</label>
@@ -239,6 +305,8 @@
       <button type="button" class="btn" onclick={() => (picking = true)}>Browse…</button>
     </div>
     {/if}
+    <details open={!draft} class="agent-drafting">
+    <summary>{draft ? 'Refine with an agent' : 'Draft with an agent'}</summary>
     <label class="lbl" for="gl-define-provider">Drafting agent <span class="hint">(turns your goal into criteria and a budget)</span></label>
     <select id="gl-define-provider" class="input in" bind:value={defProvider} onchange={() => (defModel = '')}>{#each providers as p (p)}<option value={p}>{p}</option>{/each}</select>
     <ModelPicker provider={defProvider} value={defModel} onchange={(m) => (defModel = m)} />
@@ -255,22 +323,23 @@
         </button>
       {/if}
     </div>
+    </details>
   </section>
 
   {#if draft}
     <section class="block">
       <label class="lbl" for="gl-name">Name</label>
       <input dir="auto" id="gl-name" class="input in" bind:value={name} />
-      {#if draft.definition.summary}
-        <p class="muted">{draft.definition.summary}</p>
-      {/if}
+      <p class="muted small">{draftSource === 'template' ? 'Template draft — edit the scope and criteria before launching.' : 'Agent draft — review the scope and criteria before launching.'}</p>
+      <label class="lbl" for="gl-summary">Scope and approach</label>
+      <textarea id="gl-summary" class="input in area" dir="auto" rows="3" bind:value={draft.definition.summary}></textarea>
 
       <div class="lbl">Acceptance criteria <span class="hint">(the loop stops only when all are met)</span></div>
       {#each draft.definition.acceptance_criteria as c, i (c.id)}
         <div class="crit">
           <div class="crit-row">
             <input dir="auto" aria-label="Criterion description" class="input in grow" bind:value={c.text} placeholder="Criterion description" />
-            <button class="icon-btn" onclick={() => removeCriterion(i)} aria-label="Remove criterion" title="Remove criterion"><Icon name="trash" size={13} /></button>
+            <button class="icon-btn" onclick={() => removeCriterion(i)} disabled={mode === 'research' && c.id === 'otto-research-report'} aria-label="Remove criterion" title={mode === 'research' && c.id === 'otto-research-report' ? 'Research requires a retained report' : 'Remove criterion'}><Icon name="trash" size={13} /></button>
           </div>
           <div class="crit-row">
             <select aria-label="Verification kind" class="input in kind" value={c.verify_kind} onchange={(e) => setKind(c, e.currentTarget.value as AcceptanceCriterion['verify_kind'])}>
@@ -295,6 +364,11 @@
         <!-- A form hint, read in place; an inserted status would be silent anyway. -->
         <p class="muted small" id="goal-criteria-hint">Each criterion needs a description and how it is verified.</p>
       {/if}
+    </section>
+
+    <section class="block">
+      <GoalGraphEditor graph={draft.suggested_config.graph} criteria={draft.definition.acceptance_criteria}
+        onchange={(graph) => { if (draft) draft.suggested_config.graph = graph; }} />
     </section>
 
     <section class="block">
@@ -323,6 +397,10 @@
       <p class="muted small">
         Executors run sequentially in an isolated {mode === 'research' ? 'research directory' : 'git worktree'}. Working files remain available after the loop finishes.
       </p>
+      {#if draft.suggested_config.graph}
+        <p class="muted small">{draft.suggested_config.graph.nodes.length} tasks need at least that many iterations. Leave extra iterations for repairs.</p>
+        {#if maxIterations < draft.suggested_config.graph.nodes.length}<p class="form-error" use:announceShown={{ text: 'Increase the iteration budget to cover every graph task.', assertive: true }}>Increase the iteration budget to cover every graph task.</p>{/if}
+      {/if}
     </section>
 
     <section class="block">
@@ -354,6 +432,7 @@
       {/if}
     </section>
     <div class="frow end">
+      {#if graphIssue}<p class="form-error">Fix the execution graph before launching.</p>{/if}
       <button class="btn" onclick={cancel}>Cancel</button>
       <button
         class="btn primary"
@@ -382,6 +461,9 @@
 {/if}
 
 <style>
+  .agent-drafting { margin-block-start: 12px; }
+  .agent-drafting > summary { font-size: var(--fs-s); cursor: pointer; }
+  .form-error { color: var(--danger); font-size: var(--fs-s); }
   .form-page {
     display: flex;
     flex-direction: column;

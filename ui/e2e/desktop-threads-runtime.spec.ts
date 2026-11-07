@@ -532,3 +532,93 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   await expect(chip).toContainText('Supervised');
   await expectNoHorizontalOverflow(page);
 });
+
+test('composer drafts recover after reload and page reopen without sending; failed send keeps them', async ({ page }, info) => {
+  const created = await ctx.post(`${base}/api/v1/workspaces/${wsId}/runtime-sessions`, {
+    data: { provider: 'codex', cwd: fixtureDir, title: 'Recover my unsent draft' },
+  });
+  expect(created.ok(), await created.text()).toBeTruthy();
+  const id = (await created.json()).id as string;
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jWZkAAAAASUVORK5CYII=';
+  let promptRequests = 0;
+  page.context().on('request', r => { if (r.method() === 'POST' && r.url().endsWith(`/runtime-sessions/${id}/prompt`)) promptRequests++; });
+  await page.goto('/#/threads');
+  await page.getByTestId('threads-sidebar').getByText('Recover my unsent draft', { exact: true }).click();
+  const thread = page.getByTestId(`runtime-thread-${id}`);
+  await expect(thread.getByText('Saved', { exact: true })).toBeVisible();
+  await thread.getByTestId('runtime-composer').fill('Unsent browser recovery text');
+  await thread.locator('input[type=file]').setInputFiles({ name: 'recover.png', mimeType: 'image/png', buffer: Buffer.from(png, 'base64') });
+  await expect.poll(async () => {
+    const record = await (await ctx.get(`${base}/api/v1/runtime-sessions/${id}/draft`)).json();
+    return [record.draft?.text, record.draft?.images?.[0]?.name];
+  }).toEqual(['Unsent browser recovery text', 'recover.png']);
+  await page.reload();
+  await expect(thread.getByTestId('runtime-composer')).toHaveValue('Unsent browser recovery text');
+  await expect(thread.getByTestId('runtime-images')).toContainText('recover.png');
+  expect(promptRequests).toBe(0);
+  const storedValues = await page.evaluate(() => Object.values(localStorage).join('\n'));
+  expect(storedValues).not.toContain('Unsent browser recovery text');
+  expect(storedValues).not.toContain(png);
+  const reopened = await page.context().newPage();
+  await page.close();
+  await reopened.goto('/#/threads');
+  await reopened.getByTestId('threads-sidebar').getByText('Recover my unsent draft', { exact: true }).click();
+  const recovered = reopened.getByTestId(`runtime-thread-${id}`);
+  await expect(recovered.getByTestId('runtime-composer')).toHaveValue('Unsent browser recovery text');
+  await expect(recovered.getByTestId('runtime-images')).toContainText('recover.png');
+  expect(promptRequests).toBe(0);
+  await reopened.route(`**/api/v1/runtime-sessions/${id}/prompt`, route => route.fulfill({ status: 400, json: { code: 'invalid', message: 'Test provider cannot start' } }));
+  await recovered.getByTestId('runtime-send').click();
+  await expect(recovered).toContainText('Test provider cannot start');
+  await expect(recovered.getByTestId('runtime-composer')).toHaveValue('Unsent browser recovery text');
+  await expect(recovered.getByTestId('runtime-images')).toContainText('recover.png');
+  await reopened.screenshot({ path: info.outputPath('draft-recovered-light.png') });
+  await reopened.emulateMedia({ colorScheme: 'dark' });
+  await reopened.screenshot({ path: info.outputPath('draft-recovered-dark.png') });
+  await reopened.close();
+});
+
+test('native Codex question forms answer near the composer on phone and desktop', async ({ page }, info) => {
+  const created = await ctx.post(`${base}/api/v1/workspaces/${wsId}/runtime-sessions`, {
+    data: { provider: 'codex', cwd: fixtureDir, title: 'Question forms' },
+  });
+  expect(created.ok(), await created.text()).toBeTruthy();
+  const { id } = await created.json() as { id: string };
+  await page.goto(`/#/threads/${id}`);
+  const thread = page.getByTestId(`runtime-thread-${id}`);
+  await expect(thread).toBeVisible({ timeout: 30_000 });
+  const composer = thread.getByTestId('runtime-composer');
+  await composer.fill('question form');
+  await composer.press('Enter');
+  const card = thread.getByTestId('runtime-question-card');
+  await expect(card).toBeVisible({ timeout: 15_000 });
+  await expect(thread.locator('[data-testid^="runtime-approval-"]')).toHaveCount(0);
+  await card.getByTestId('runtime-question-send').click();
+  await expect(card.getByRole('alert')).toContainText('Answer every required question');
+  await card.getByLabel('Careful', { exact: false }).check();
+  await card.getByLabel('Your answer', { exact: true }).fill('Keep the API stable');
+  await page.screenshot({ path: info.outputPath('runtime-questions-light.png'), animations: 'disabled' });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.screenshot({ path: info.outputPath('runtime-questions-dark.png'), animations: 'disabled' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expectNoHorizontalOverflow(page);
+  await page.screenshot({ path: info.outputPath('runtime-questions-phone.png'), animations: 'disabled' });
+  // A failed HTTP answer must keep form input, never fall through to ordinary chat.
+  let fail = true;
+  await page.route(`**/api/v1/runtime-sessions/${id}/requests/**`, async (route) => {
+    if (fail) { fail = false; await route.fulfill({ status: 409, json: { error: 'Temporarily unavailable' } }); }
+    else await route.continue();
+  });
+  await card.getByTestId('runtime-question-send').click();
+  await expect(card.getByRole('alert')).toContainText('Couldn’t send the answer');
+  await expect(card.getByLabel('Your answer', { exact: true })).toHaveValue('Keep the API stable');
+  const sent = page.waitForRequest((r) => r.method() === 'POST' && r.url().includes(`/runtime-sessions/${id}/requests/`));
+  await card.getByTestId('runtime-question-send').click();
+  expect((await sent).postDataJSON()).toEqual({ answers: [
+    { question_id: 'strategy_native', type: 'single', value: 'Careful' },
+    { question_id: 'note_native', type: 'text', text: 'Keep the API stable' },
+  ] });
+  await expect(thread.getByText(/question answers:.*strategy_native/)).toBeVisible({ timeout: 15_000 });
+  await expect(thread.getByTestId('runtime-question-send')).toHaveCount(0);
+  await expect(composer).toHaveValue('');
+});

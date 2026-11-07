@@ -70,6 +70,7 @@ enum ReqProto {
     V2Decision,
     /// `item/permissions/requestApproval`.
     Permissions,
+    Question,
 }
 
 struct Pending {
@@ -343,19 +344,18 @@ impl CodexDriver {
                     Some(server) => format!("{server}.{tool}"),
                     None => tool,
                 };
-                let output = it
-                    .get("result")
-                    .filter(|v| !v.is_null())
-                    .or_else(|| it.get("error").filter(|v| !v.is_null()))
-                    .map(|v| match v {
-                        Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    });
+                let result = crate::tool_images::extract(
+                    it.get("result")
+                        .filter(|v| !v.is_null())
+                        .or_else(|| it.get("error").filter(|v| !v.is_null())),
+                );
+                let output = (!result.text.is_empty()).then_some(result.text);
                 (
                     TurnItemKind::DynamicTool {
                         tool_name: name.clone(),
                         input: it.get("arguments").cloned().unwrap_or(Value::Null),
                         output,
+                        images: result.images,
                     },
                     Some(name),
                 )
@@ -530,12 +530,40 @@ impl CodexDriver {
         method: &str,
         params: Value,
     ) {
+        if method == "item/tool/requestUserInput" {
+            match crate::questions::native_questions(&params, false) {
+                Ok(questions) => {
+                    let id = format!("codex-{}", rpc_key(&rpc_id));
+                    self.pending.insert(
+                        id.clone(),
+                        Pending {
+                            rpc_id,
+                            proto: ReqProto::Question,
+                            permissions: params.clone(),
+                        },
+                    );
+                    step.push(DriverEvent::Question {
+                        id,
+                        title: None,
+                        questions,
+                        tool_item_id: params
+                            .get("itemId")
+                            .and_then(Value::as_str)
+                            .map(|i| self.item_id(i)),
+                    });
+                }
+                Err(message) => step.write(
+                    json!({"id":rpc_id,"error":{"code":-32602,"message":message}}).to_string(),
+                ),
+            }
+            return;
+        }
         let (proto, kind) = match method {
             "item/commandExecution/requestApproval" => (ReqProto::V2Decision, RequestKind::Command),
             "item/fileChange/requestApproval" => (ReqProto::V2Decision, RequestKind::FileChange),
             "item/permissions/requestApproval" => (ReqProto::Permissions, RequestKind::Permission),
             _ => {
-                // requestUserInput, elicitations, dynamic tool calls, auth
+                // Elicitations, dynamic tool calls, auth
                 // refresh: not offered by Otto's client.
                 step.write(
                     json!({"id": rpc_id, "error": {"code": -32601, "message": format!("method not supported: {method}")}})
@@ -597,6 +625,7 @@ impl CodexDriver {
 
     fn answer(p: &Pending, decision: ApprovalDecision) -> String {
         let result = match p.proto {
+            ReqProto::Question => json!({"answers": {}}),
             ReqProto::V2Decision => json!({"decision": match decision {
                 ApprovalDecision::Accept => "accept",
                 ApprovalDecision::AcceptForSession | ApprovalDecision::AcceptAlways => "acceptForSession",
@@ -812,12 +841,59 @@ impl StructuredDriver for CodexDriver {
         request_id: &str,
         decision: ApprovalDecision,
     ) -> Result<DriverStep, DriverError> {
+        if self
+            .pending
+            .get(request_id)
+            .is_some_and(|p| p.proto == ReqProto::Question)
+        {
+            return Err(DriverError("this request needs question answers".into()));
+        }
         let p = self
             .pending
             .remove(request_id)
             .ok_or_else(|| DriverError(format!("unknown request {request_id}")))?;
         let mut step = DriverStep::default();
         step.write(Self::answer(&p, decision));
+        Ok(step)
+    }
+
+    fn respond_question(
+        &mut self,
+        request_id: &str,
+        answers: &[otto_core::agent_runtime::QuestionAnswer],
+    ) -> Result<DriverStep, DriverError> {
+        let p = self
+            .pending
+            .get(request_id)
+            .filter(|p| p.proto == ReqProto::Question)
+            .ok_or_else(|| DriverError("no such pending question".into()))?;
+        let questions =
+            crate::questions::native_questions(&p.permissions, false).map_err(DriverError)?;
+        otto_core::agent_runtime::validate_question_answers(&questions, answers)
+            .map_err(DriverError)?;
+        let values: serde_json::Map<String, Value> = answers
+            .iter()
+            .map(|a| (a.question_id().to_string(), json!({"answers":a.values()})))
+            .collect();
+        let mut step = DriverStep::default();
+        step.write(json!({"id":p.rpc_id,"result":{"answers":values}}).to_string());
+        self.pending.remove(request_id);
+        Ok(step)
+    }
+
+    fn dismiss_question(
+        &mut self,
+        request_id: &str,
+        _action: otto_core::agent_runtime::QuestionDismissAction,
+    ) -> Result<DriverStep, DriverError> {
+        let p = self
+            .pending
+            .get(request_id)
+            .filter(|p| p.proto == ReqProto::Question)
+            .ok_or_else(|| DriverError("no such pending question".into()))?;
+        let mut step = DriverStep::default();
+        step.write(json!({"id":p.rpc_id,"result":{"answers":{}}}).to_string());
+        self.pending.remove(request_id);
         Ok(step)
     }
 
@@ -1149,7 +1225,7 @@ mod tests {
         ready(&mut d, false);
         let s = feed(
             &mut d,
-            json!({"id": 3, "method": "item/tool/requestUserInput", "params": {}}),
+            json!({"id": 3, "method": "unsupported/method", "params": {}}),
         );
         assert_eq!(parse(&s.writes[0])["error"]["code"], -32601);
     }
@@ -1221,5 +1297,31 @@ mod tests {
         let mut d = CodexDriver::with_program("codex");
         ready(&mut d, false);
         assert!(d.prompt("t1", &pdf).is_err());
+    }
+    #[test]
+    fn questions_preserve_rpc_id_and_validate_before_consuming() {
+        use otto_core::agent_runtime::QuestionAnswer;
+        let mut d = CodexDriver::with_program("codex");
+        ready(&mut d, false);
+        let s = feed(
+            &mut d,
+            json!({"id":"native-7","method":"item/tool/requestUserInput","params":{"questions":[{"id":"q_raw","header":"Choice","question":"Choose?","options":[{"label":"A","description":"First"}]}]}}),
+        );
+        let DriverEvent::Question { id, questions, .. } = &s.events[0] else {
+            panic!("question event missing")
+        };
+        assert_eq!(questions[0].id, "q_raw");
+        assert!(d.respond(id, ApprovalDecision::Accept).is_err());
+        assert!(d.respond_question(id, &[]).is_err());
+        let answer = QuestionAnswer::Text {
+            question_id: "q_raw".into(),
+            text: "Custom".into(),
+        };
+        let response = d.respond_question(id, &[answer]).unwrap();
+        assert_eq!(
+            parse(&response.writes[0]),
+            json!({"id":"native-7","result":{"answers":{"q_raw":{"answers":["Custom"]}}}})
+        );
+        assert!(d.respond_question(id, &[]).is_err());
     }
 }

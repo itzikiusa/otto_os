@@ -32,6 +32,8 @@ use serde::Deserialize;
 
 use crate::RuntimeCtx;
 
+mod drafts;
+
 pub(crate) struct ApiErr(pub Error);
 
 impl From<Error> for ApiErr {
@@ -73,6 +75,12 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
         .route(
             "/runtime-sessions/{id}",
             get(get_one::<S>).patch(rename::<S>).delete(delete_one::<S>),
+        )
+        .route(
+            "/runtime-sessions/{id}/draft",
+            get(drafts::get::<S>)
+                .put(drafts::put::<S>)
+                .layer(DefaultBodyLimit::max(24 * 1024 * 1024)),
         )
         // Inline base64 images ride in the body (axum's default cap is 2 MB).
         .route(
@@ -314,9 +322,23 @@ async fn answer<S: RuntimeCtx>(
 ) -> ApiResult<StatusCode> {
     require_human(&ctx, &auth)?;
     authorized(&ctx, &user, &id).await?;
-    ctx.agent_runtime()
-        .respond(&id, &request_id, req.decision)
-        .await?;
+    match req {
+        RuntimeRequestRespondReq::Approval { decision } => {
+            ctx.agent_runtime()
+                .respond(&id, &request_id, decision)
+                .await?
+        }
+        RuntimeRequestRespondReq::DismissQuestion { question_action } => {
+            ctx.agent_runtime()
+                .dismiss_question(&id, &request_id, question_action)
+                .await?
+        }
+        RuntimeRequestRespondReq::Question { answers } => {
+            ctx.agent_runtime()
+                .respond_question(&id, &request_id, answers)
+                .await?
+        }
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

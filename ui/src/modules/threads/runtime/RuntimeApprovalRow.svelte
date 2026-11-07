@@ -23,6 +23,7 @@
     file_change: 'File change approval',
     file_read: 'File read approval',
     permission: 'Permission approval',
+    question: 'Question',
     mcp_elicitation: 'App access approval',
   };
   const DEFAULT_OPTIONS: ApprovalOption[] = [

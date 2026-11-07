@@ -15,6 +15,7 @@ mod command_output;
 mod ctx;
 pub mod goal_loop;
 pub mod goal_loop_commands;
+pub mod goal_loop_graph;
 pub mod goal_loop_parse;
 pub mod goal_loop_policy;
 pub mod goal_loop_roles;

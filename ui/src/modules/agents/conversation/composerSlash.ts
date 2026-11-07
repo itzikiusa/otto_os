@@ -176,6 +176,10 @@ export async function runComposerSlashIntent(
       if (host.ontoggleterminal) host.ontoggleterminal();
       host.restoreFocus();
       return;
+    case 'fresh-context':
+      // PTY conversations retain their existing new-thread behavior.
+      if (host.onnewthread) host.onnewthread(false);
+      return;
     case 'new-thread':
       if (host.onnewthread) host.onnewthread(intent.beside);
       return;

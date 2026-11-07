@@ -1,0 +1,61 @@
+direction: down
+
+# Matches ui/src/modules/loops/templates.ts: performance.
+# Node IDs and acceptance IDs match the editable template.
+vars: {
+  d2-config: {
+    layout-engine: dagre
+    theme-id: 0
+    pad: 28
+  }
+}
+
+title: "Performance — suggested execution graph" {
+  shape: text
+  near: top-center
+  style.font-size: 24
+}
+
+tasks: {
+  label: "One task per goal-loop iteration"
+  style.stroke: "#94a3b8"
+  style.fill: "#f8fafc"
+  task-1: "Measure the baseline\ntask-1 · c1\nA reproducible baseline identifies the measured bottleneck." {
+    style.fill: "#ffffff"
+    style.stroke: "#475569"
+    style.border-radius: 8
+    style.font-size: 17
+  }
+  task-2: "Optimize the cause\ntask-2 · c2\nThe change addresses the measured cause without changing required behavior." {
+    style.fill: "#ffffff"
+    style.stroke: "#475569"
+    style.border-radius: 8
+    style.font-size: 17
+  }
+  task-3: "Compare and review\ntask-3 · c3\nComparable measurements demonstrate the requested improvement." {
+    style.fill: "#ffffff"
+    style.stroke: "#475569"
+    style.border-radius: 8
+    style.font-size: 17
+  }
+  task-1 -> task-2: "c1 accepted"
+  task-2 -> task-3: "c2 accepted"
+}
+
+completion: "Completion review\nAll goal criteria need evidence" {
+  shape: diamond
+  style.fill: "#e0f2fe"
+  style.stroke: "#0369a1"
+}
+retained: "Succeeded\nWork and proof remain available" {
+  style.fill: "#dcfce7"
+  style.stroke: "#15803d"
+}
+tasks.task-3 -> completion: "c3 accepted"
+completion -> retained: "review accepts"
+
+notes: "Plan → Execute → Evaluate → Digest\nRepairs invalidate dependent tasks.\nEvidence and limits govern completion." {
+  shape: text
+  near: bottom-center
+  style.font-size: 15
+}

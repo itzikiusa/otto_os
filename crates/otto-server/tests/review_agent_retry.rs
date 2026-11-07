@@ -23,6 +23,194 @@ async fn mem_pool() -> DbPool {
     pool.into()
 }
 
+/// A fix launch must be a completed, pinned review and must reuse its existing
+/// paused goal. Exercise the HTTP boundary without starting a real provider.
+#[tokio::test]
+async fn fix_goal_checks_review_identity_and_reuses_the_existing_loop() {
+    use otto_core::domain::{GoalLoopPhase, GoalLoopStatus, ReviewScopePlan, ReviewStatus};
+    let tmp = tempfile::tempdir().unwrap();
+    let pool = mem_pool().await;
+    let ctx = ServerCtx::for_tests(&pool, tmp.path().join("data")).await;
+    let owner = otto_state::UsersRepo::new(pool.clone())
+        .create("owner", "unused", "Owner", true)
+        .await
+        .unwrap();
+    let token = otto_rbac::AuthRepo::new(pool.clone())
+        .issue(&owner.id)
+        .await
+        .unwrap();
+    let ws = ctx
+        .workspaces
+        .create("Fix goal", tmp.path().to_str().unwrap(), &owner.id)
+        .await
+        .unwrap();
+    let repo = ctx
+        .git_store
+        .create_repo(NewRepo {
+            workspace_id: ws.id.clone(),
+            name: "repo".into(),
+            path: tmp.path().to_string_lossy().into_owned(),
+            remote_url: None,
+            provider: None,
+            git_account_id: None,
+        })
+        .await
+        .unwrap();
+    let review = ctx.reviews_store.create_review(&repo.id, 7).await.unwrap();
+    let (api, root) = otto_server::modules::module_routers(&ctx);
+    let app = otto_server::build_router(ctx.clone(), api, root);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!(
+        "http://{}/api/v1/reviews/{}/fix-goal",
+        listener.local_addr().unwrap(),
+        review.id
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let http = reqwest::Client::new();
+    let request = || {
+        http.post(&endpoint)
+            .bearer_auth(&token)
+            .json(&serde_json::json!({"target_score":9.5}))
+    };
+    let viewer = otto_state::UsersRepo::new(pool.clone())
+        .create("viewer", "unused", "Viewer", false)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'viewer')",
+    )
+    .bind(&ws.id)
+    .bind(&viewer.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    otto_state::GrantsRepo::new(pool.clone())
+        .set_grants(
+            &viewer.id,
+            &[(
+                otto_core::domain::Feature::Git,
+                otto_core::domain::Capability::Edit,
+            )],
+        )
+        .await
+        .unwrap();
+    let viewer_token = otto_rbac::AuthRepo::new(pool.clone())
+        .issue(&viewer.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        http.post(&endpoint)
+            .bearer_auth(viewer_token)
+            .json(&serde_json::json!({"target_score":9.5}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403,
+        "feature access cannot bypass workspace Editor requirement"
+    );
+    assert_eq!(
+        request().send().await.unwrap().status(),
+        400,
+        "running review cannot launch fixes"
+    );
+    let head = "a".repeat(40);
+    let mut scope: ReviewScopePlan = serde_json::from_value(serde_json::json!({
+        "head_sha":"b".repeat(40), "base_sha":"c".repeat(40), "summary":"Permission change",
+        "related_modules":[], "risks":[], "lenses":[]
+    }))
+    .unwrap();
+    ctx.reviews_store
+        .set_scope_plan(&review.id, &scope)
+        .await
+        .unwrap();
+    ctx.reviews_store
+        .set_run_context(
+            &review.id,
+            &otto_state::reviews::ReviewRunContext {
+                head_sha: Some(head.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    ctx.reviews_store
+        .set_status(&review.id, ReviewStatus::Done, None)
+        .await
+        .unwrap();
+    let rejected = request().send().await.unwrap();
+    assert_eq!(rejected.status(), 400);
+    assert!(rejected
+        .text()
+        .await
+        .unwrap()
+        .contains("scope and checkout differ"));
+    assert!(ctx
+        .goal_loops_repo
+        .list_by_workspace(&ws.id)
+        .await
+        .unwrap()
+        .is_empty());
+
+    ctx.reviews_store
+        .set_status(&review.id, ReviewStatus::Running, None)
+        .await
+        .unwrap();
+    scope.head_sha = head;
+    ctx.reviews_store
+        .set_scope_plan(&review.id, &scope)
+        .await
+        .unwrap();
+    ctx.reviews_store
+        .set_status(&review.id, ReviewStatus::Done, None)
+        .await
+        .unwrap();
+    let checked = ctx.reviews_store.get_review(&review.id).await.unwrap();
+    let (definition, config) = otto_review::fix_goal::build(&checked, 9.5, "codex").unwrap();
+    let goal = ctx
+        .goal_loops_repo
+        .create(otto_state::NewGoalLoop {
+            workspace_id: ws.id.clone(),
+            name: definition.title.clone(),
+            repo_path: repo.path,
+            definition,
+            config,
+            limits: Default::default(),
+            created_by: owner.id,
+        })
+        .await
+        .unwrap();
+    ctx.goal_loops_repo
+        .update_runtime(
+            &goal.id,
+            GoalLoopStatus::Paused,
+            GoalLoopPhase::Planning,
+            0,
+            0,
+        )
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let response = request().send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["id"], goal.id);
+        assert_eq!(
+            body["status"], "paused",
+            "existing work must not silently resume"
+        );
+    }
+    assert_eq!(
+        ctx.goal_loops_repo
+            .list_by_workspace(&ws.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    server.abort();
+}
+
 fn agent(status: &str) -> ReviewAgentState {
     serde_json::from_value(serde_json::json!({
         "name": "correctness", "provider": "claude", "model": "",

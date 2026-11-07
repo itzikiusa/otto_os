@@ -8,6 +8,7 @@ test('failed runtime list retains rows, exposes retryable error, and clears it a
   const nextRow = { id: 'next', workspace_id: 'ws', status: 'idle' };
   const { runtimeThreads } = loadSource(new URL('../src/modules/threads/runtime/runtimeThreads.svelte.ts', import.meta.url), {
     '../../../lib/api/client': { api: { get: async () => { if (fails) throw new Error('offline'); return [nextRow]; } } },
+    '../../../lib/stores/runtimeDraftRecovery.svelte': { installRuntimeDraftRecovery: () => {} },
     '../../../lib/live': { onLive: () => () => {} }, '../../../lib/router.svelte': { router: {} },
     '../../../lib/stores/runtimeAttention.svelte': { noteRuntimeWaiting: () => {} },
     '../../../lib/stores/uiControl.svelte': { uiControl: { addSource: () => {} } },

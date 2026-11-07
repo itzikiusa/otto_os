@@ -6,6 +6,7 @@
 //!   `item/commandExecution/requestApproval`; `accept*` runs it (output
 //!   delta, exit 0), `decline` marks it declined, `cancel` interrupts the
 //!   turn.
+//! * `tool image` — a completed MCP result with text, metadata and two PNGs.
 //! * `hang`  — one delta, then waits for `turn/interrupt` → `interrupted`.
 //! * `crash` — exit 3 at once (mid-turn).
 //! * `fail`  — a `commandExecution` that fails (exit 1, output `boom`).
@@ -66,6 +67,7 @@ fn main() {
     let mut current: Option<String> = None;
     // The approval this server is waiting on: (rpc id, turn id).
     let mut asking: Option<(u64, String)> = None;
+    let mut question: Option<(u64, String)> = None;
     let mut next_server_id = 100u64;
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
@@ -126,9 +128,39 @@ fn main() {
                     (m, e) => format!(" [{} {} {images}]", m.unwrap_or("-"), e.unwrap_or("-")),
                 };
                 match text.as_str() {
+                    "tool image" => {
+                        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5V8AAAAASUVORK5CYII=";
+                        notify(
+                            "item/completed",
+                            json!({"threadId":thread,"turnId":tid,"item":{
+                            "type":"mcpToolCall","id":"tool-images","server":"preview","tool":"screenshot",
+                            "arguments":{"page":"example"},"status":"completed","result":{
+                                "content":[{"type":"text","text":"Screenshot captured"},
+                                    {"type":"image","mimeType":"image/png","data":png},
+                                    {"type":"image","mimeType":"image/png","data":png}],
+                                "structuredContent":{"width":1,"height":1}
+                            }}}),
+                        );
+                        notify(
+                            "turn/completed",
+                            json!({"threadId":thread,"turn":turn(&tid,"completed")}),
+                        );
+                        current = None;
+                    }
                     "crash" => {
                         eprintln!("fake codex: crashing on purpose");
                         std::process::exit(3);
+                    }
+                    "question form" => {
+                        next_server_id += 1;
+                        question = Some((next_server_id, tid.clone()));
+                        out(
+                            json!({"id":next_server_id,"method":"item/tool/requestUserInput","params":{
+                            "threadId":thread,"turnId":tid,"itemId":"question-1","questions":[
+                                {"id":"strategy_native","header":"Strategy","question":"Which approach should I use?","isOther":true,"options":[{"label":"Careful","description":"Small changes"},{"label":"Broad","description":"Wider changes"}]},
+                                {"id":"note_native","header":"Context","question":"What should I keep in mind?","options":null}
+                            ]}}),
+                        );
                     }
                     "ask" => {
                         notify("item/started", command(&thread, &tid, "inProgress", None));
@@ -181,6 +213,12 @@ fn main() {
             }
             "turn/interrupt" => {
                 out(json!({"id": id, "result": {}}));
+                if let Some((rid, _)) = question.take() {
+                    notify(
+                        "serverRequest/resolved",
+                        json!({"threadId":thread,"requestId":rid}),
+                    );
+                }
                 if let Some((rid, _)) = asking.take() {
                     notify(
                         "serverRequest/resolved",
@@ -195,6 +233,24 @@ fn main() {
                 }
             }
             "" if !id.is_null() => {
+                if question
+                    .as_ref()
+                    .is_some_and(|(rid, _)| id.as_u64() == Some(*rid))
+                {
+                    let (_, tid) = question.take().unwrap();
+                    let response = msg
+                        .pointer("/result/answers")
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    let text = format!("question answers: {response}");
+                    agent_message(&thread, &tid, "question-answer", &[&text]);
+                    notify(
+                        "turn/completed",
+                        json!({"threadId":thread,"turn":turn(&tid,"completed")}),
+                    );
+                    current = None;
+                    continue;
+                }
                 // A response to our approval request.
                 let Some((rid, tid)) = asking.take() else {
                     continue;

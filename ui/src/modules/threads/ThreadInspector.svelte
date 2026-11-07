@@ -3,6 +3,9 @@
   // surfaces (B T F D P S while the panel has focus); opened ones sit as tabs
   // with + (another surface), close and maximize. Every surface is its own
   // lazy chunk, prefetched on hover, so the panel itself stays light.
+  import { tick } from 'svelte';
+  import { runtimeDrafts } from '../../lib/stores/runtimeDrafts.svelte';
+  import { addComposerContext, type ComposerContext } from './runtime/composerContext';
   import Icon from '../../lib/components/Icon.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
@@ -53,6 +56,19 @@
   const branch = $derived(repo ? (git.statusById[repo.id]?.branch ?? null) : null);
   const pr = $derived(threadPrs.prFor(repo, branch));
   const canSide = $derived(!!focusedSession && !isPlainShellSession(focusedSession));
+
+  const contextThreadId = $derived(focusedSession && isRuntimeThread(focusedSession) ? focusedSession.id : null);
+
+  function addContext(context: ComposerContext, ownerId: string): void {
+    if (contextThreadId !== ownerId || threads.focusedSessionId !== ownerId) return;
+    const draft = runtimeDrafts.for(ownerId);
+    draft.context = addComposerContext(draft.context, context);
+    if (threads.inspectorCompact) threads.setInspectorOpen(false);
+    void tick().then(() => {
+      if (threads.focusedSessionId !== ownerId) return;
+      document.querySelector<HTMLTextAreaElement>(`[data-testid="runtime-thread-${CSS.escape(ownerId)}"] [data-testid="runtime-composer"]`)?.focus();
+    });
+  }
 
   interface Surface {
     id: ThreadsInspectorTab | 'terminal';
@@ -197,9 +213,9 @@
     {#if active === 'files'}
       <LazyMount lazy={FilesView} what="files" variant="panel" props={{ rootPath, wsKey }} />
     {:else if active === 'changes'}
-      <LazyMount lazy={ChangesView} what="changes" variant="panel" props={{ workspaceId, sessionCwd: contextCwd, wsKey }} />
+      <LazyMount lazy={ChangesView} what="changes" variant="panel" props={{ workspaceId, sessionCwd: contextCwd, wsKey, threadId: contextThreadId, oncontext: addContext }} />
     {:else if active === 'pr'}
-      <LazyMount lazy={PrSurfaceView} what="the pull request" variant="panel" props={{ repo, branch }} />
+      <LazyMount lazy={PrSurfaceView} what="the pull request" variant="panel" props={{ repo, branch, threadId: contextThreadId, oncontext: addContext }} />
     {:else if active === 'side'}
       <LazyMount lazy={SideChatView} what="the side chat" variant="panel" props={{ mainId: focusedSession?.id ?? null }} />
     {:else if active === 'connections'}

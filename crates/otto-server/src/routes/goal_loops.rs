@@ -182,6 +182,7 @@ async fn create(
             });
     }
 
+    otto_automation::goal_loop_graph::validate(&req.config, &req.definition).map_err(ApiError)?;
     let mut ids = std::collections::HashSet::new();
     for c in &req.definition.acceptance_criteria {
         if c.id.trim().is_empty() || !ids.insert(c.id.as_str()) || c.text.trim().is_empty() {
@@ -323,6 +324,7 @@ async fn patch(
             )));
         }
         require_config_owner(&ctx, &user, &loop_, config).await?;
+        otto_automation::goal_loop_graph::validate(config, &loop_.definition).map_err(ApiError)?;
     }
     if req.limits.is_some() || req.config.is_some() {
         validate_settings(

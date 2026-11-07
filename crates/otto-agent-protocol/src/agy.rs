@@ -118,6 +118,7 @@ impl AgyDriver {
                         tool_name: name.to_string(),
                         input: params,
                         output,
+                        images: Vec::new(),
                     },
                 };
                 let error = info.pointer("/error/message").and_then(Value::as_str);

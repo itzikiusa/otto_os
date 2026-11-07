@@ -120,3 +120,6 @@ fn every_integration_test_file_is_linked() {
         "tests/{missing:?} not linked into tests/it.rs — add `#[path = \"<file>\"] mod <name>;`"
     );
 }
+
+#[path = "goal_graph_routes.rs"]
+mod goal_graph_routes;

@@ -900,6 +900,28 @@ interrupted as stalled: `turn.terminal` `interrupted` with `reason:
 "stalled"` and a `system_notice`. Waiting on a person (a pending approval)
 or on background work never counts as a stall.
 
+**Fresh context in the same thread.** A person may send `fresh_context: true`
+on the prompt endpoint. This keeps the Otto session ID, owner, workspace, folder,
+files and visible history while creating a new native provider conversation.
+Admission is serialized with other prompts and queue delivery: active turns,
+background tasks, queued messages and pending requests (approvals or questions)
+return **409** with an actionable explanation, without stopping that work. This
+operation never queues, steers or interrupts a fresh prompt, even if `delivery`
+is supplied. A closed, otherwise idle thread opens directly into the fresh
+conversation, without resuming its old provider first. The first accepted prompt
+creates exactly one `turn_item.updated` with `type: "session_boundary"`, attached
+to that turn and rendered as **New session**, before its user message. Failed
+initialization or rejected prompt input creates no divider and restores the
+previous native identity for a later resume. Pending draft text, attachments,
+review context and fresh intent stay recoverable until successful acceptance.
+`/clear` arms this behavior in the structured Threads composer; Cancel disarms
+it. `/new` still creates another visible thread.
+
+Public runtime request IDs are opaque and unique to the provider process that
+issued them. Native RPC IDs are preserved internally; a reused native ID in a
+fresh process cannot overwrite retained request history or accept an old card's
+answer. Clients must submit the exact public ID from the request event.
+
 **Reopen and delete.** A closed session can be reopened (its agent respawns
 resuming `native_thread_id`; when the provider refuses the resume — it
 exits before it is ready — it starts a fresh conversation, keeps the
@@ -914,11 +936,13 @@ attachments.
 | POST /workspaces/{id}/runtime-sessions | ws editor, person | `{provider, cwd?, title?, model?, access_mode?}` (`cwd` absolute, default the workspace root; `access_mode` default `full-access` while Settings › Providers skips permission prompts — the `agent_skip_permissions` setting, on by default, the rule terminal sessions follow — else `approval-required`). `provider` ∈ `claude \| codex \| gemini \| grok \| agy \| opencode \| pi` | **201** `RuntimeSession`. The child is spawned (and its handshake started) before the response: a refused folder, a missing CLI or a provider without a driver fails the create (**400**) and leaves no row |
 | GET /runtime-sessions/{id} | ws viewer + owner-or-admin | — | `RuntimeSession` with its live `status` |
 | PATCH /runtime-sessions/{id} | owner-or-admin, person | `UpdateRuntimeSessionReq {title}` (trimmed, non-empty) | `RuntimeSession` with the new title. Allowed on a `closed` session too (it stays listed as history). **400** empty title |
-| POST /runtime-sessions/{id}/prompt | owner-or-admin, person | `{text, model?, effort?, access_mode?, delivery?: "queue"\|"steer"\|"interrupt", images?: [{mime, data_base64}], files?: [{mime, name, data_base64}]}` — `text` non-empty unless `images` / `files` are; `files` only `application/pdf`; body ≤ 32 MiB | **202** `{turn_id, sequence, queued_id?, steered?}` (`sequence` of the turn's first `provider_turn.updated`; with `delivery` while a turn runs: `queued_id` + empty `turn_id` when queued, `steered: true` + the running turn's id when steered — see "Queue and steer"). Respawns a `dormant` session first. `model` sticks (it becomes the session's `model`): Claude switches live (`set_model`), Codex passes it on `turn/start`, ACP and agy restart the CLI with the new model and resume the thread. `effort` (Claude `apply_flag_settings` `effortLevel`, Codex `turn/start` `effort`) and `images` (Claude image blocks, Codex `image` data-URL inputs, ACP `image` blocks when the agent advertises `promptCapabilities.image`) and `files` (Claude base64 `document` blocks, ACP `resource` blobs when the agent advertises `promptCapabilities.embeddedContext`; Codex 0.166.0 has no file input) are refused with **400** where unsupported, with a readable reason; agy takes text only. `access_mode` applies from this turn on (table above). Images and files are stored under the daemon data dir (`runtime-attachments/<session>/`, removed with the session) and listed on the turn's `user_message` item as `attachments: [{id, kind: "image"\|"file", mime, name?}]`. **409** while a turn runs (one turn at a time) or after `close`. A CLI that refuses its handshake (signed out, unsupported account) fails the running turn with that failure, or — when it refused before the prompt reached it — answers **400** `the agent could not start: <reason>`; either way the session goes `dormant` with `provider_session.last_error`, and the next prompt respawns it |
+| GET /runtime-sessions/{id}/draft | ws viewer + owner-or-admin, **person only** | — | `RuntimeDraftRecord {revision, draft: RuntimeDraftContent \| null}` for the authenticated person only. Another admin receives their own draft, never the owner's. Missing/expired content returns `null` with its current revision; a never-written draft has revision `0` |
+| PUT /runtime-sessions/{id}/draft | ws editor + owner-or-admin, **person only** | `{revision, draft: RuntimeDraftContent}`; body ≤ 24 MiB | `RuntimeDraftRecord` with incremented revision. **409** stale revision; **413** size/count quota; **400** malformed attachment or selection; **415** unsupported attachment MIME. No prompt is sent |
+| POST /runtime-sessions/{id}/prompt | owner-or-admin, person | `{text, model?, effort?, access_mode?, fresh_context?: boolean, delivery?: "queue"\|"steer"\|"interrupt", images?: [{mime, data_base64}], files?: [{mime, name, data_base64}]}` — `text` non-empty unless `images` / `files` are; `files` only `application/pdf`; body ≤ 32 MiB | **202** `{turn_id, sequence, queued_id?, steered?}` (`sequence` of the turn's first `provider_turn.updated`; with `delivery` while a turn runs: `queued_id` + empty `turn_id` when queued, `steered: true` + the running turn's id when steered — see "Queue and steer"). Respawns a `dormant` session first. `model` sticks (it becomes the session's `model`): Claude switches live (`set_model`), Codex passes it on `turn/start`, ACP and agy restart the CLI with the new model and resume the thread. `effort` (Claude `apply_flag_settings` `effortLevel`, Codex `turn/start` `effort`) and `images` (Claude image blocks, Codex `image` data-URL inputs, ACP `image` blocks when the agent advertises `promptCapabilities.image`) and `files` (Claude base64 `document` blocks, ACP `resource` blobs when the agent advertises `promptCapabilities.embeddedContext`; Codex 0.166.0 has no file input) are refused with **400** where unsupported, with a readable reason; agy takes text only. `access_mode` applies from this turn on (table above). Images and files are stored under the daemon data dir (`runtime-attachments/<session>/`, removed with the session) and listed on the turn's `user_message` item as `attachments: [{id, kind: "image"\|"file", mime, name?}]`. **409** while a turn runs (one turn at a time) or after `close`. A CLI that refuses its handshake (signed out, unsupported account) fails the running turn with that failure, or — when it refused before the prompt reached it — answers **400** `the agent could not start: <reason>`; either way the session goes `dormant` with `provider_session.last_error`, and the next prompt respawns it |
 | POST /runtime-sessions/{id}/queue/{queued_id} | owner-or-admin, person | `QueuedDeliverReq {delivery: "steer"\|"interrupt"}` | **202** `RuntimePromptResp` — delivers a queued message now (`steer` into the running turn, or stop it and send this next; with no turn running it simply starts one). **404** no longer queued |
 | DELETE /runtime-sessions/{id}/queue/{queued_id} | owner-or-admin, person | — | **204** — removes a queued message. **404** no longer queued |
 | POST /runtime-sessions/{id}/interrupt | owner-or-admin, person | — | `{interrupted}` — `false` when no turn was running. Pending requests → `cancelled` (`cancel_reason: "interrupt"`); the provider ends the turn (`turn.terminal` `interrupted`); if it has not within 10 s its process group is killed and the turn ends `interrupted` anyway |
-| POST /runtime-sessions/{id}/requests/{request_id} | owner-or-admin, person (`Admin` class) | `{decision}` ∈ `accept \| accept_for_session \| accept_always \| decline \| cancel` — one of the request's `approval_request` item `options[].decision` (`cancel` always allowed) | **204**; the request → `resolved` with the decision. **404** unknown / no longer pending, **400** a decision that was not offered |
+| POST /runtime-sessions/{id}/requests/{request_id} | owner-or-admin, person (`Admin` class) | Exactly one of `{decision}` for an approval, `{answers: QuestionAnswer[]}` for a question, or `{question_action: "decline"|"cancel"}` to dismiss a question (see below) | **204** resolved; **404** unknown / no longer pending, **400** wrong response kind, missing/duplicate field, invalid option or unoffered decision, **409** provider cannot accept the response |
 | POST /runtime-sessions/{id}/close | owner-or-admin, person | — | `RuntimeSession` (`status: closed`). Pending requests → `cancelled` (`cancel_reason: "closed"`). Ends a running turn `interrupted`, closes the child's stdin (SIGTERM / SIGKILL to its group after 3 s each). Idempotent; later prompts **409** (reopen first) |
 | POST /runtime-sessions/{id}/reopen | owner-or-admin, person | — | `RuntimeSession` — a `closed` session takes prompts again: its agent respawns now, resuming `native_thread_id` (a refused resume → a fresh conversation + `system_notice`). Its `meta` is kept. No-op on an open session. Spawn failures as for create (**400**; the session stays open, the next prompt retries) |
 | DELETE /runtime-sessions/{id} | owner-or-admin, person | — | **204** — closes the session (as above), then removes its row, projection and attachments. Not undoable |
@@ -929,6 +953,13 @@ attachments.
 | POST /runtime-sessions/{id}/peers/{peer}/message | same | `PeerMessageReq {text}` | **202** `{turn_id, sequence}` — `text` becomes `{peer}`'s next turn, prefixed with the sender. **404** not in the group, **400** `{peer}` = `{id}`, **409** while `{peer}` runs a turn |
 | GET /runtime-sessions/{id}/peers/{peer}/reply?wait_secs= | same | `wait_secs` 0..25 (default 20) | `PeerReply {peer, busy, background_tasks, turn_status?, text}` — waits for `{peer}` to settle (no turn — its own included — and no background work), then the assistant text of its last turn that has any (a subagent's own text excluded); `busy: true` when the wait ran out |
 | POST /runtime-sessions/{id}/peers/{peer}/close | same | — | `RuntimeSession` — closes linked thread `{peer}` of `{id}`'s group (stops its agent; it stays in History). `400` for `{id}` itself, `403` for the group's lead (`parent_id` null — a person closes it), `404` outside the group. MCP: `otto.thread_close` |
+
+**Recoverable composer drafts.** `RuntimeDraftContent` is `{text, images: [{mime, name, data_base64}], model: string|null, effort: string|null, access_mode: RuntimeAccessMode|null, fresh_context: boolean, context: [{id, kind: "review-comment"|"diff", label, text, url?, path?, author?}]}`. Missing content fields default to empty/null/false. Action flags such as sending/awaiting/reopening are never persisted. The SQLite key is `(authenticated user, session workspace, session)`. Neither prompt text nor attachment bytes enter browser storage. Both reads and writes reject managed-agent, MCP and share credentials.
+
+Drafts allow 1 MiB of text, 12 attachments (10 MiB decoded each), 32 context chips (128 KiB text each), 24 MiB total serialized content, and 64 MiB / 128 nonempty drafts per person per workspace. Attachments accept PNG, JPEG, GIF, WebP or PDF; base64, size and file signatures are checked. Quota errors are explicit, with no silent truncation. Clearing content remains possible at quota; model/effort/access choices can remain without consuming a nonempty-draft slot. Empty defaults produce a revision tombstone. Payloads older than 30 days are removed on daemon recovery and draft reads/writes; the revision remains until thread deletion, which cascades the row. Expiry includes attachment bytes and preferences.
+
+The UI serializes saves and reports Restoring/Saving/Saved or an inline Retry. Typing is allowed during recovery; send waits for recovery, and a delayed load cannot replace local text/selection edits. Context added during recovery merges by stable ID. A competing window produces a conflict; explicit Retry saves the local version against a fresh revision. Accepted prompt/queue requests clear only their submitted content, preserving subsequent edits; failure retains the draft. Recovery never sends automatically.
+
 
 **Replay** (T3 Code `subscribeThread`). `sequence` is per session, strictly
 increasing and never reused, also across daemon restarts. With
@@ -2649,7 +2680,8 @@ output adds
 `score`/`passed`/`blocking`/`advisory`/`findings`/`providers`/`lenses` (empty
 `providers`+`lenses` ⇒ the stored/default review config). A passing review must be
 finished, nonempty, cover all requested reviewers (including sibling-covered skips),
-and meet the score threshold. Partial/error reviewer rows cannot pass. A failed
+have no open must-fix findings, and meet the score threshold. Custom weights and
+goals scores cannot override the must-fix veto. Partial/error reviewer rows cannot pass. A failed
 `require_pass` gate retains its structured review output and fails without automatic
 transport retries. Completed review associations are checkpointed before launch and
 adopted on reentry only for the same node, iteration, target, configuration and diff.
@@ -6316,3 +6348,181 @@ An admitted turn continues independently of a disconnected HTTP response, so
 Stop can still find it and wait for cleanup. No other conversation or story-wide
 task is cancelled. Story deletion still
 cancels all its studio turns through the existing story lifecycle.
+
+
+### Structured runtime questions
+
+`runtime_request.kind: "question"` carries `questions: [{id, header, prompt,
+kind: "single"|"multi"|"text", required, allow_free_text, allow_empty?, options:
+[{value, label, description?}]}]` and optional `question_title`. IDs and option
+values are opaque native values, distinct from labels. Full forms live on the
+request entity, independently of compact tool/timeline rows and replay windows.
+Pending questions use the existing session `waiting` state (the legacy session
+row status is `awaiting_permission`), but are never permission approvals.
+
+Answer with `{answers: [...]}` using tagged entries:
+
+```json
+{"answers":[{"question_id":"strategy","type":"single","value":"safe_v1"},
+{"question_id":"targets","type":"multi","values":["api","ui"]},
+{"question_id":"notes","type":"text","text":"Keep the public API stable"}]}
+```
+
+Every required field must be present exactly once. Single/multi values must be
+offered; free text is accepted only when the form allows it. Invalid answers do
+not consume the request. An approval decision cannot answer a question, and a
+question answer cannot approve a tool. Resolved requests include `answers`;
+withdrawn/interrupted requests become `cancelled`. Restarted processes leave
+requests `expired` with `response_capability: {type: "not_resumable", reason}`;
+they cannot be answered through a new provider process. Answers are never sent
+as ordinary chat messages or granted as permission rules.
+
+Supported native forms: Codex `item/tool/requestUserInput` (native question ID
+and answer array), Claude `AskUserQuestion` (question text is the native map key;
+multi-select answers use Claude's comma-separated format), and the draft ACP
+`elicitation/create` session-scoped form subset (strings, string enums/titled
+choices, arrays of string choices). ACP numeric/boolean fields, validation
+constraints, nested schemas, URL/auth/request-scoped elicitations and secret
+questions are explicitly unsupported; the provider receives an error/denial,
+never a fabricated answer. ACP support follows the upstream draft and does not
+imply every ACP provider emits these requests.
+
+A question can also be dismissed without answering via `question_action` (`decline` or `cancel`). ACP preserves that native action; Claude denies only the question tool, and Codex returns an empty native answer map. The request becomes `cancelled`, without granting any permission.
+
+For unconstrained ACP fields, `allow_empty: true` preserves schema semantics: required means the property must be present, so an empty text value or empty multi-select array remains valid. Native Codex/Claude required answers must be nonempty.
+
+### Workflow re-review
+
+`POST /workflow-runs/{id}/re-review` (no body) requires Workflows Edit and
+workspace Editor on the source run. Returns a new `WorkflowRun` (`200`) linked
+by `input.review_previous_run_id`. The old run remains unchanged. Only settled
+runs whose current workflow contains `review_run` qualify (`400` otherwise);
+active source/workflow runs return `409`. All steps run on the new iteration,
+including source refresh and approval gates. Manual requests do not inherit chat
+control origins. `review_previous_run_id` is reserved and stripped from ordinary
+manual/webhook run input. The equivalent chat command uses an exact authorized
+origin workspace/channel/chat/thread match.
+
+Read-only `agent_prompt` nodes may declare `review_context_paths: string[]`
+(1–32 relative tracked paths). Context reuse requires identical declared Git
+blobs, request, Jira context, substantive upstream inputs and prior handoffs, resolved skill instructions,
+node params and workflow version, with clean repos.
+An output with `context_reused: true` is a background-context cache hit; it is
+never a gate/review pass. Cached replies retain `review_context_key` metadata for
+the next iteration. Unknown or changed dependencies execute normally.
+
+
+Workflow `review_run` scoring defaults to `{bug:20,warn:5,info:0}`; explicit
+per-node weights remain authoritative. Optional findings are visible without
+lowering the default score.
+
+### Adaptive Git review and local fix goals (2026-11)
+
+`Review.scope_plan?` is persisted in `pr_reviews.scope_plan_json` (migration 0206).
+Older reviews omit it. Shape:
+
+```json
+{
+  "base_sha": "full merge-base SHA (empty for local review)",
+  "head_sha": "full reviewed SHA",
+  "summary": "Changed behavior and inspected scope",
+  "related_modules": ["path:line and affected consumer relationship"],
+  "risks": ["concrete risk introduced by the change"],
+  "lenses": [{"name": "Security", "reason": "Changed permission boundary", "instructions": "Trace caller permissions"}],
+  "prior_findings": [{"finding_id": "stable finding ID", "disposition": "fixed|still_open|not_relevant", "evidence": "current code/check evidence or causal-scope reason"}],
+  "verification_notes": ["Excluded or unverified claim and evidence"],
+  "source": "deterministic documentation scope or timed agent assessment"
+}
+```
+
+Scope assessment precedes fan-out. Documentation-only changes under `docs/*.md`
+can use a deterministic one-lens plan; other changes use one managed read-only
+assessment with a **120-second absolute limit and one attempt**. Assessment failure
+launches no reviewers and leaves an explicit retryable review error. Exact selected
+lenses, reasons and provider assignments are visible before they run. Assessment
+and reviewer sessions share the daemon reviewer semaphore; cancellation reaches
+queued sessions without waiting for another reviewer to finish.
+
+`ReviewConfig.cross_provider_check?: boolean` defaults to false. Configured
+providers form the pool for one provider per selected lens; true compares each
+selected lens across its configured providers. Relevant configured instructions
+remain available to the assessment and the selected reviewer. Adaptive reviews use
+managed fan-out, including when older stored `mode: orchestrator` values are read,
+so provider-internal subagents cannot bypass the concurrency bound.
+`previous_review_id?: string` is an optional per-run workflow lineage link; it must
+belong to the same repository and PR. Without it, reruns inspect the latest completed
+review for the same PR (local review history is additionally source-branch scoped).
+Inherited finding IDs remain in subsequent scope plans; disappearance is not proof
+of a fix. Dispositions are attributed agent assessments and retain their evidence.
+
+PR reviews materialize the complete local **merge-base → recorded HEAD** patch,
+not a target-tip diff or the 200 KB forge preview. Both revisions are immutable in
+the scope plan. The patch excludes uncommitted checkout changes. Missing ancestry,
+unavailable checkout, or the 32 MiB safety limit fails explicitly instead of
+silently reviewing a truncated patch. The existing durable diff/prompt storage is
+reused by retries at the original reviewed revision.
+
+The final verifier receives stable daemon-assigned source IDs for raw claims and
+must account for each exactly once, including exclusions. One cohesive fix can
+cover multiple source IDs. Retained comments require `disposition: verified` and
+nonempty evidence. Unknown IDs/dispositions, missing evidence, omitted claims,
+unverified claims, and verifier fallback leave the run **error/incomplete**;
+raw claims stay in the agent results, and excluded claims stay in verification
+notes. An unverified claim is never silently promoted to a PR comment. Severity
+is based on concrete impact, not finding count or a desired score. Preexisting
+issues merely widened by the change belong once in summary context. Critical-path
+and false-green test gaps matter; exhaustive hypothetical branch coverage does not.
+
+| Method | Access | Request | Response |
+| --- | --- | --- | --- |
+| POST /reviews/{review_id}/fix-goal | human credential + ws editor | `{ "target_score"?: number }` (default 9.5, finite 1–10) | Existing/new `GoalLoop`; new/draft loops start immediately |
+
+Fix goals require a completed PR review with a scope plan and matching durable
+full head SHA. Legacy/local/running/incomplete reviews are rejected with 400;
+unauthorized identities fail the normal auth/role gates. The endpoint checks the
+agent budget and commit availability. Repeated requests reuse the loop linked by
+`config.source_links = ["review:<review_id>"]`; a partially created draft is pinned
+and started again, while running/stopped/exhausted loops open their current state.
+The original reviewed SHA seeds a new isolated Goal Loop worktree, even if the
+user's repository HEAD moved. Nothing is staged, committed, pushed, merged or
+published. Default limits are six iterations, two active hours, 20 minutes per
+phase; reaching a limit is incomplete, not success. The loop UI owns Stop/Resume.
+
+The 0–10 target is explicitly subjective reviewer judgement supported by evidence.
+Every must-fix/should-fix needs fixed evidence or a justified not-relevant disposition;
+optional low-priority work may remain explicitly deferred. Each cycle re-verifies
+prior findings, performs a fresh review of the original PR plus fixes, and runs
+relevant critical-path checks. Goal Loop criteria and completion review gate success;
+the numeric target alone cannot complete a goal. No additional WebSocket event is
+introduced: scope changes use `review_changed`, fix progress uses Goal Loop events.
+
+### Goal Loop task graphs (2026-11)
+
+`GoalLoopConfig.graph?: {nodes: GoalGraphNode[]}|null` enables a dependency DAG.
+`GoalGraphNode` has `id`, `title`, `instructions`, `depends_on: string[]`, and
+`criterion_ids: string[]`. A graph has 1–16 nodes, unique nonempty ids, titles and
+instructions, no duplicate or unknown dependencies, no cycles, and at least one
+known acceptance criterion per node. Unknown or duplicate criterion references
+are rejected. Every acceptance criterion must be assigned to a task. Tasks with
+human-verification criteria must be terminal (no dependents), since later
+mutations invalidate human approval. Create, draft configuration updates and
+Start validate the graph.
+No graph preserves the existing executor lineup behavior.
+
+Each existing iteration executes one ready task with the configured executors
+sequentially in the loop's isolated directory. Tasks cannot start until their
+prerequisites have fresh passing evidence. Previously executed tasks are
+reverified before reuse and after mutations; a regression invalidates its
+transitive dependents. Future tasks cannot pass without executing. Completion
+requires all tasks and all acceptance criteria to pass. Existing active-runtime,
+iteration and phase budgets and pause/stop controls apply; configure at least one
+iteration per task plus repair headroom. Exhaustion remains incomplete.
+
+`GoalLoopLedger.graph_nodes` defaults to `[]`. Each entry has `node_id`,
+`status: "pending"|"running"|"passed"|"blocked"`, `iteration: number`,
+`evidence: string`, and `criteria: EvalCriterion[]`. This is controller-owned
+progress persisted in the existing ledger JSON; clients refetch on the existing
+Goal Loop change events. Agent prose alone cannot mark a task complete.
+
+Per-executor Retry returns 409 for graph loops: use Resume so prerequisite
+evidence is reverified before another task attempt. Legacy executor Retry is unchanged.

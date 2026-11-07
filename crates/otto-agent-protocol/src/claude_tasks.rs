@@ -36,7 +36,7 @@ use chrono::{DateTime, Utc};
 use otto_core::agent_runtime::{BackgroundTask, TurnItem, TurnItemKind, TurnItemStatus};
 use serde_json::Value;
 
-use super::{classify, result_text, ClaudeDriver, Tool, ToolType};
+use super::{classify, ClaudeDriver, Tool, ToolType};
 use crate::driver::{item, tool_error, DriverEvent, DriverStep};
 
 pub(super) struct Task {
@@ -563,6 +563,7 @@ impl ClaudeDriver {
                                     name: name.clone(),
                                     input: block.get("input").cloned().unwrap_or(Value::Null),
                                     output: None,
+                                    images: Vec::new(),
                                     error: None,
                                     status: TurnItemStatus::Running,
                                 },
@@ -594,7 +595,9 @@ impl ClaudeDriver {
                     let Some(mut t) = self.sub_tools.remove(&id) else {
                         continue;
                     };
-                    let text = result_text(block.get("content"));
+                    let result = crate::tool_images::extract(block.get("content"));
+                    let text = result.text;
+                    t.tool.images = result.images;
                     if block.get("is_error").and_then(Value::as_bool) == Some(true) {
                         t.tool.status = TurnItemStatus::Failed;
                         t.tool.error = tool_error(&text);

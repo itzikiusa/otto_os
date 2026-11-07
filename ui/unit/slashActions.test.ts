@@ -61,3 +61,8 @@ describe('slashActions /btw side chat', () => {
     assert.equal(omitted.find((c) => c.name === 'btw')?.source, 'builtin');
   });
 });
+
+it('clear arms a fresh provider session while new creates a separate thread', () => {
+  assert.deepEqual(parseInteractiveSlashInput('/clear'), { kind: 'fresh-context' });
+  assert.deepEqual(parseInteractiveSlashInput('/new'), { kind: 'new-thread', beside: false });
+});

@@ -21,7 +21,8 @@
   import StartRoomModal from '../rooms/StartRoomModal.svelte'; // ui-guards: allow — shared session room modal
   import NewThreadStage from './NewThreadStage.svelte';
   import ThreadCanvas from './ThreadCanvas.svelte';
-  import ThreadInspector from './ThreadInspector.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  const ThreadInspector = lazyComponent(() => import('./ThreadInspector.svelte'));
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import ThreadProjectCard from './ThreadProjectCard.svelte';
   import ThreadSheets from './ThreadSheets.svelte';
@@ -514,7 +515,7 @@
           label="Resize thread inspector"
         />
         <div class="th-right-col" class:th-max={maximized} style:inline-size={maximized ? null : `${inspectorW}px`}>
-          <ThreadInspector onstartroom={(sid) => (roomSessionId = sid)} />
+          <LazyMount lazy={ThreadInspector} what="the thread details" variant="panel" props={{ onstartroom: (sid: string) => (roomSessionId = sid) }} />
         </div>
       {/if}
 
@@ -526,10 +527,10 @@
           />
         </Drawer>
         <Drawer bind:open={threads.inspectorOverlayOpen} side="right" title="Thread details" width="min(420px, 100vw)">
-          <ThreadInspector
-            showCard
-            onstartroom={(sid) => { threads.setInspectorOpen(false); roomSessionId = sid; }}
-          />
+          <LazyMount lazy={ThreadInspector} what="the thread details" variant="panel" props={{
+            showCard: true,
+            onstartroom: (sid: string) => { threads.setInspectorOpen(false); roomSessionId = sid; },
+          }} />
         </Drawer>
       {/if}
     </div>
@@ -573,6 +574,9 @@
     color: var(--text);
     font-weight: 500;
     min-width: 0;
+  }
+  @media (max-width: 640px) {
+    .th-crumb-project, .th-crumb-sep { display: none; }
   }
   .th-workspace {
     position: relative;

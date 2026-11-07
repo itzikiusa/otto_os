@@ -1551,7 +1551,11 @@ published on the streaming path, never through the internal bus.
   Entities are sent WHOLE (replace by id); `turn_item.type` ∈ `user_message |
   assistant_message | reasoning | todo_list | file_change |
   command_execution | dynamic_tool | web_search | approval_request |
-  system_notice | subagent | error`. A `subagent`'s own activity items carry
+  system_notice | session_boundary | subagent | error`. A `session_boundary`
+  marks the first accepted turn of an explicit fresh provider conversation in
+  the same Otto thread. It has no additional fields; preceding history remains.
+  Request IDs are opaque, scoped to one provider process, and never reused by
+  a replacement process. A `subagent`'s own activity items carry
   `parent_item_id` (the card). `provider_turn.origin: "agent"` marks a turn
   the agent started on its own; `provider_session.background_tasks` lists
   pending background work (api.md "Background work and the agent's own
@@ -1780,3 +1784,35 @@ the mutating request carried one. Emitted by
 Clients keep a slow safety poll (Otto: 5 min, `ui/src/lib/live.ts` `liveQuery`)
 and refetch after a reconnect / `resync`; while the socket is down they fall
 back to their old poll cadence.
+
+### Tool result image previews
+
+`turn_item.updated` / runtime snapshots preserve `dynamic_tool.images?` as
+`[{ mime: string, data_base64: string }]`, alongside the existing `output?`
+text. Omitted or empty `images` means no preview and remains compatible with
+older stored turns. Supported MIME types are `image/png`, `image/jpeg`,
+`image/gif`, and `image/webp`; base64 has no data URL prefix. Provider adapters
+validate base64 and raster signatures before retaining at most four images,
+1 MiB decoded per image and 2 MiB decoded total per tool result. Unsupported,
+malformed, remote-only, or over-limit images become an omission notice in
+`output`; their payload is not copied into the text. Structured MCP metadata
+and accompanying text remain visible. The UI displays bounded inline images
+only; it never fetches a provider image URL or renders HTML/SVG.
+
+
+Structured questions use the same `runtime_request.updated` whole-entity upsert
+and snapshot/replay lifecycle. `kind: "question"` carries `questions`, optional
+`question_title`, and, after resolution, `answers` (shapes in api.md
+"Structured runtime questions"). They do not create `approval_request` items.
+Several forms can be pending at once. Provider withdrawal, interruption,
+terminal turns and daemon restart settle/expire them using the same request
+status and response-capability rules as approvals. The full question data
+remains available even when its original tool row is folded or omitted.
+
+### Adaptive review progress
+
+Adaptive review scope uses the existing `review_changed` event. It is broadcast when
+assessment starts and when the persisted `Review.scope_plan` becomes available;
+clients refetch the review. No extra event shape is introduced. A fix-goal launch
+returns a Goal Loop id and subsequent progress/cancellation uses the existing Goal
+Loop event contract.

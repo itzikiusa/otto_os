@@ -1,14 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { snapshotDraft, acknowledgeComposer } from '../src/lib/stores/runtimeDraftPersistence.ts';
 import { componentFunctions } from './componentFunctions.ts';
 
+const sendHelpers = { snapshotDraft, acknowledgeComposer, assembleComposerMessage: (text: string) => text };
 const component = new URL('../src/modules/threads/runtime/RuntimeThread.svelte', import.meta.url);
 
 test('reopening A then switching to B sends the waiting prompt only to A', async () => {
   let finish!: () => void;
   const calls: string[] = [];
-  const draft = { text: 'for A', images: [], model: null, effort: null, pickedMode: null, sending: false, reopening: false, awaitSeq: null, startError: null };
+  const draft = { flushSave: () => {}, freshContext: false, context: [], text: 'for A', images: [], model: null, effort: null, pickedMode: null, sending: false, reopening: false, awaitSeq: null, startError: null };
   const state = componentFunctions(component, ['submit', 'send', 'reopen'], {
+    ...sendHelpers,
     sessionId: 'A', ownerId: 'A', text: 'for A', images: [], model: null, effort: null, pickedMode: null,
     draft, closed: true, reopening: false, sending: false, running: false, awaitSeq: null, startError: null,
     parseInteractiveSlashInput: () => null,
@@ -56,10 +59,11 @@ test('runtime drafts retain attachments and choices only for their owning thread
 
 test('a failed A send restores A draft while B stays untouched', async () => {
   let reject!: (e: Error) => void;
-  const a = { text: '', images: [{ name: 'a.png', mime: 'image/png', data_base64: 'AA==' }], model: null, effort: null, pickedMode: null, sending: false, awaitSeq: null, startError: null };
+  const a = { flushSave: () => {}, freshContext: false, context: [], text: 'draft A', images: [{ name: 'a.png', mime: 'image/png', data_base64: 'AA==' }], model: null, effort: null, pickedMode: null, sending: false, awaitSeq: null, startError: null };
   const b = { text: 'draft B', images: [] };
   const calls: string[] = [];
   const state = componentFunctions(component, ['send'], {
+    ...sendHelpers,
     sessionId: 'A', ownerId: 'A', draft: a,
     runtimeThreads: { prompt: (id: string) => { calls.push(id); return new Promise((_resolve, fail) => { reject = fail; }); } },
     runtimeDrafts: { owns: () => true },
@@ -102,8 +106,9 @@ test('an identity change while reopening cancels the old pending prompt', async 
   let finish!: () => void;
   let current = true;
   const calls: string[] = [];
-  const draft = { text: 'private A', images: [], model: null, effort: null, pickedMode: null, reopening: false };
+  const draft = { flushSave: () => {}, freshContext: false, context: [], text: 'private A', images: [], model: null, effort: null, pickedMode: null, reopening: false };
   const state = componentFunctions(component, ['submit', 'send', 'reopen'], {
+    ...sendHelpers,
     sessionId: 'A', ownerId: 'A', draft, closed: true, running: false,
     parseInteractiveSlashInput: () => null,
     runtimeDrafts: { owns: () => current },
@@ -118,4 +123,34 @@ test('an identity change while reopening cancels the old pending prompt', async 
   finish();
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(calls, []);
+});
+
+test('successful send removes only its snapshot while newer typing and chips remain', async () => {
+  let finish!: (value: {sequence:number}) => void;
+  const draft = { flushSave: () => {}, freshContext: true, context: [{ id:'old', kind:'diff', label:'old', text:'old' }], text:'submitted', images:[], model:null, effort:null, pickedMode:null, sending:false, awaitSeq:null, startError:null };
+  const state = componentFunctions(component, ['send'], {
+    ...sendHelpers, sessionId:'A', ownerId:'A', draft,
+    runtimeThreads:{prompt:()=>new Promise(resolve=>finish=resolve)},runtimeDrafts:{owns:()=>true}, ApiError:class extends Error{},toastError:()=>{},
+  });
+  const sending=state.send('submitted'); draft.text='next message'; draft.context.push({id:'new',kind:'diff',label:'new',text:'new'});
+  finish({sequence:1}); await sending;
+  assert.equal(draft.text,'next message'); assert.deepEqual(draft.context.map(c=>c.id),['new']); assert.equal(draft.freshContext,false);
+});
+
+test('reopen uses the submitted snapshot and never consumes edits made while reopening', async () => {
+  let finish!:()=>void; const calls:any[]=[];
+  const draft={flushSave:()=>{},freshContext:false,context:[],text:'first',images:[],model:null,effort:null,pickedMode:null,reopening:false,sending:false};
+  const state=componentFunctions(component,['submit','send','reopen'],{
+    ...sendHelpers,sessionId:'A',ownerId:'A',draft,closed:true,running:false,parseInteractiveSlashInput:()=>null,
+    runtimeDrafts:{owns:()=>true},runtimeThreads:{reopen:()=>new Promise<void>(r=>finish=r),prompt:async(_id:string,body:unknown)=>{calls.push(body);return {sequence:1};}},toastError:()=>{},ApiError:class extends Error{},
+  });
+  state.submit(); draft.text='second'; finish(); await new Promise(r=>setTimeout(r,0));
+  assert.equal(calls[0].text,'first'); assert.equal(draft.text,'second');
+});
+
+test('failed send preserves an intentional clear while the request was pending', async () => {
+  let fail!:(error:Error)=>void;
+  const draft={flushSave:()=>{},freshContext:false,context:[],text:'submitted',images:[],model:null,effort:null,pickedMode:null,sending:false};
+  const state=componentFunctions(component,['send'],{...sendHelpers,ownerId:'A',draft,runtimeDrafts:{owns:()=>true},runtimeThreads:{prompt:()=>new Promise((_r,reject)=>fail=reject)},ApiError:class extends Error{},toastError:()=>{}});
+  const sending=state.send('submitted'); draft.text=''; fail(Error('offline')); await sending; assert.equal(draft.text,'');
 });

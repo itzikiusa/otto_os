@@ -3,7 +3,9 @@
   import { ui } from '../../lib/stores/ui.svelte';
   import { loops } from '../../lib/stores/loops.svelte';
   import { loopsPagePort } from '../../lib/uiCommands/loops';
-  import GoalDefineForm from './GoalDefineForm.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  const GoalDefineForm = lazyComponent(() => import('./GoalDefineForm.svelte'));
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -144,7 +146,7 @@
       <LoopDetail id={selectedId} onback={back} actions={loopActions} />
     {/key}
   {:else if creating}
-    <GoalDefineForm oncancel={() => (creating = false)} oncreated={open} />
+    <LazyMount lazy={GoalDefineForm} what="the goal editor" props={{ oncancel: () => (creating = false), oncreated: open }} />
   {:else}
     <PageHeader
       title="Goal Loops"

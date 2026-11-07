@@ -88,7 +88,7 @@ export interface PlanStep {
   status: PlanStepStatus;
 }
 
-export type RequestKind = 'command' | 'file_read' | 'file_change' | 'mcp_elicitation' | 'permission';
+export type RequestKind = 'command' | 'file_read' | 'file_change' | 'mcp_elicitation' | 'permission' | 'question';
 
 export type ApprovalDecision = 'accept' | 'accept_for_session' | 'accept_always' | 'decline' | 'cancel';
 
@@ -114,7 +114,7 @@ export type TurnItemKind =
   /* Tool items carry `error` (the tool's error text, ~2 KB max) when failed. */
   | { type: 'file_change'; file_name: string; diff_str?: string; old_str?: string; new_str?: string; error?: string }
   | { type: 'command_execution'; input: string; output?: string; exit_code?: number; error?: string }
-  | { type: 'dynamic_tool'; tool_name: string; input: unknown; output?: string; error?: string }
+  | { type: 'dynamic_tool'; tool_name: string; input: unknown; output?: string; images?: ToolOutputImage[]; error?: string }
   /** Web search / fetch tools; `patterns` are the queries or URLs. */
   | { type: 'web_search'; patterns?: string[]; error?: string }
   | {
@@ -130,6 +130,7 @@ export type TurnItemKind =
       /** Set when cancelled; `agent` = the provider withdrew it. */
       cancel_reason?: RequestCancelReason;
     }
+  | { type: 'session_boundary' }
   | { type: 'system_notice'; message: string }
   /** A subagent (Claude's Agent / Task tool): its own messages and tools are
    *  items whose `parent_item_id` is this item. A background one stays
@@ -181,6 +182,22 @@ export type RuntimeRequestStatus = 'pending' | 'resolved' | 'expired' | 'cancell
 
 export type ResponseCapability = { type: 'live' } | { type: 'not_resumable'; reason: string };
 
+export interface QuestionOption { value: string; label: string; description?: string; }
+export interface RuntimeQuestion {
+  id: string;
+  header: string;
+  prompt: string;
+  kind: 'single' | 'multi' | 'text';
+  required: boolean;
+  allow_empty?: boolean;
+  allow_free_text: boolean;
+  options: QuestionOption[];
+}
+export type QuestionAnswer =
+  | { question_id: string; type: 'single'; value: string }
+  | { question_id: string; type: 'multi'; values: string[] }
+  | { question_id: string; type: 'text'; text: string };
+
 export interface RuntimeRequest {
   id: Id;
   turn_id: Id | null;
@@ -191,6 +208,9 @@ export interface RuntimeRequest {
   resolved_at: string | null;
   decision?: ApprovalDecision;
   cancel_reason?: RequestCancelReason;
+  questions?: RuntimeQuestion[];
+  question_title?: string;
+  answers?: QuestionAnswer[];
 }
 
 export interface PlanArtifact {
@@ -352,6 +372,8 @@ export interface UpdateRuntimeSessionReq {
  *  Claude, Codex, and ACP agents that advertise them; Antigravity is text
  *  only. Unsupported input is a 400. */
 export interface RuntimePromptReq {
+  /** Start a fresh provider conversation in the same thread; refuses outstanding work. */
+  fresh_context?: boolean;
   text: string;
   model?: string;
   effort?: string;
@@ -393,6 +415,27 @@ export interface RuntimeInterruptResp {
 }
 
 /** Body of POST /runtime-sessions/{id}/requests/{request_id}. */
-export interface RuntimeRequestRespondReq {
-  decision: ApprovalDecision;
+export type RuntimeRequestRespondReq = { decision: ApprovalDecision } | { answers: QuestionAnswer[] } | { question_action: 'decline' | 'cancel' };
+
+
+/** Inline raster tool result; PNG/JPEG/GIF/WebP, 1 MiB each / 2 MiB total, max 4. */
+export interface ToolOutputImage {
+  mime: string;
+  data_base64: string;
 }
+
+/** Durable, person-scoped composer content. Never browser-persisted. */
+export interface RuntimeComposerContext {
+  id: string; kind: 'review-comment' | 'diff'; label: string; text: string;
+  url?: string; path?: string; author?: string;
+}
+export interface RuntimeDraftContent {
+  text: string;
+  images: (PromptImage & { name: string })[];
+  model: string | null;
+  effort: import('../../providerModels').EffortLevel | null;
+  access_mode: RuntimeAccessMode | null;
+  fresh_context: boolean;
+  context: RuntimeComposerContext[];
+}
+export interface RuntimeDraftRecord { revision: number; draft: RuntimeDraftContent | null }

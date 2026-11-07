@@ -7,6 +7,33 @@ use super::NodeCall;
 pub(in crate::workflow_engine) async fn execute(
     call: NodeCall<'_>,
 ) -> Result<(Value, Vec<String>)> {
+    let context_instructions = prepend_skills(
+        call.ctx,
+        &call.node.params,
+        call.node
+            .params
+            .get("prompt")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    );
+    let (context_key, cached) = otto_workflows::review_context::recover(
+        &call.ctx.pool,
+        &otto_workflows::review_context::ContextInput {
+            run_id: &call.env.run_id,
+            node_id: &call.node.id,
+            params: &call.node.params,
+            upstream: &call.input,
+            files: &call.env.files,
+            default_provider: &call.env.default_provider,
+            instructions: &context_instructions,
+            previous_run_id: call
+                .env
+                .run_input
+                .get(otto_workflows::rereview::PREVIOUS_RUN_KEY)
+                .and_then(Value::as_str),
+        },
+    )
+    .await;
     let NodeCall {
         ctx,
         ws,
@@ -67,30 +94,41 @@ pub(in crate::workflow_engine) async fn execute(
             scope.iter,
             scope.inner_idx,
         ));
-    let (reply, sid) = run_node_agent(
-        ctx,
-        ws,
-        user,
-        node,
-        &env.wf_name,
-        &env.run_id,
-        provider,
-        model,
-        &full,
-        &acwd,
-        done,
-        session_tx,
-        log_tx,
-        activity_tx,
-    )
-    .await?;
+    let (reply, sid, reused) = if let Some(reply) = cached {
+        (reply, None, true)
+    } else {
+        let (reply, sid) = run_node_agent(
+            ctx,
+            ws,
+            user,
+            node,
+            &env.wf_name,
+            &env.run_id,
+            provider,
+            model,
+            &full,
+            &acwd,
+            done,
+            session_tx,
+            log_tx,
+            activity_tx,
+        )
+        .await?;
+        (reply, Some(sid), false)
+    };
     // Publish WHERE the implementer worked (+ thread the ambient repo/base)
     // so a downstream review/PR is aware of exactly this directory — even
     // when the agent ran in its own per-node cwd. This is what carries the
     // reference from the implementer to the reviewer and the PR.
     let mut out = serde_json::Map::new();
     out.insert("reply".into(), json!(reply));
-    out.insert("session_id".into(), json!(sid));
+    if let Some(sid) = sid {
+        out.insert("session_id".into(), json!(sid));
+    }
+    if reused {
+        out.insert("context_reused".into(), json!(true));
+    }
+    otto_workflows::review_context::attach(&mut out, context_key);
     out.insert("working_directory".into(), json!(acwd));
     // `repos`/`worktree` forward too so data-flow inspection still
     // shows them — though the run-level registry (RunEnv.files), not
@@ -102,5 +140,12 @@ pub(in crate::workflow_engine) async fn execute(
             }
         }
     }
-    Ok((Value::Object(out), vec!["agent turn complete".into()]))
+    Ok((
+        Value::Object(out),
+        vec![if reused {
+            "context reused: declared dependencies unchanged".into()
+        } else {
+            "agent turn complete".into()
+        }],
+    ))
 }

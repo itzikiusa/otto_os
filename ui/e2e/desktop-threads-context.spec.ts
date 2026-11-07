@@ -26,6 +26,16 @@ test('thread drafts, attachments and permissions stay with their owner; mobile c
       provider_thread: null, turns: [], turn_items: [], runtime_requests: [], plans: [],
     },
   } }));
+  const drafts = new Map<string, { revision: number; draft: unknown }>();
+  await page.route('**/api/v1/runtime-sessions/focus-thread-*/draft', route => {
+    const id = route.request().url().split('/').at(-2)!;
+    const current = drafts.get(id) ?? { revision: 0, draft: null };
+    if (route.request().method() === 'PUT') {
+      const body = route.request().postDataJSON();
+      drafts.set(id, { revision: current.revision + 1, draft: body.draft });
+    }
+    return route.fulfill({ json: drafts.get(id) ?? current });
+  });
   const sent: { id: string; body: Record<string, unknown> }[] = [];
   await page.route('**/api/v1/runtime-sessions/focus-thread-*/prompt', (route) => {
     sent.push({ id: route.request().url().split('/').at(-2)!, body: route.request().postDataJSON() });

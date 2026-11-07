@@ -78,6 +78,8 @@ pub(in crate::workflow_engine) async fn admit(
         prior_nodes,
     )
     .await?;
+    otto_workflows::review_history::write_previous_context(&ctx.pool, workflow, &input, &files)
+        .await;
     let prepared = prepare_input(ctx, ws, workflow, input, &files).await;
     write_brief(
         workflow,
@@ -295,8 +297,36 @@ async fn isolate_repos(
     let synced = sync_run_branches(ctx, &entries, pr_branch.as_deref(), &prs).await;
     run::refs::pin_pr_heads(ctx, &mut prs).await;
     let input = otto_workflows::run_refs::publish_prs(input, &prs, pr_branch.as_deref(), files);
-    let (provisioned_cwd, isolation_failures) =
+    let (provisioned_cwd, mut isolation_failures) =
         provision_wf_worktrees(ctx, run_id, &mut entries, &synced).await;
+    // A re-review must not silently score cached refs after a failed refresh.
+    if input
+        .get(otto_workflows::rereview::PREVIOUS_RUN_KEY)
+        .is_some()
+    {
+        for (rid, report) in &synced {
+            if let Some(error) = &report.fetch_error {
+                isolation_failures.push(format!("cannot refresh {rid} for re-review: {error}"));
+            }
+        }
+        for pr in &prs {
+            if pr.head_ref.is_none() {
+                isolation_failures.push(format!(
+                    "cannot pin current PR #{} head for re-review",
+                    pr.number
+                ));
+            }
+        }
+        let expected = otto_workflows::run_refs::match_pr_targets(
+            &otto_workflows::run_refs::parse_pr_spec(input.get("pr")),
+            &entries,
+        );
+        if prs.len() < expected.len() {
+            isolation_failures.push(
+                "cannot refresh every requested PR; previous refs are not a new review".into(),
+            );
+        }
+    }
     files.set_repos(entries.clone());
     if !isolation_failures.is_empty() {
         // Fail LOUDLY before any step runs: never let agents work in the

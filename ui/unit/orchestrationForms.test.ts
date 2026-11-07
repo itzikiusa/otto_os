@@ -5,6 +5,7 @@ import {runInNewContext} from 'node:vm';
 import ts from 'typescript';
 import {componentFunctions} from './componentFunctions.ts';
 import {deferred,loadSource} from './sourceHarness.ts';
+import {graphError} from '../src/modules/loops/graph.ts';
 
 function handlers(path: string, state: Record<string, any>) {
   const url=new URL(`../src/${path}`,import.meta.url);
@@ -84,6 +85,7 @@ function goal() {
     defining:false,launching:false,draft:null,name:'',maxIterations:5,maxMinutes:30,perPhaseMinutes:10,executorCount:1,
     execProvider:'claude',execModel:'',defProvider:'claude',defModel:'',showAdvanced:false,ws:{currentId:'ws-A'},alive:true,formGeneration:0,
     draftSnapshot:'',initialSnapshot:'',formWorkspaceId:'ws-A',defaultAgentProvider:()=> 'claude',
+    selectedTemplate:'',pocScope:'both',draftSource:'agent',graphError,
     confirmer:{ask:async()=>{prompts++;return confirm;}},oncancel(){},oncreated:(id:string)=>created.push(id),toastError(){},
     loops:{create:()=>result.promise},
   });
@@ -180,7 +182,7 @@ function persistentGoalPage() {
   // Execute the current parent's callback, rather than inventing a parent that
   // unmounts automatically on workspace change (the real page persists).
   const page=readFileSync(new URL('../src/modules/loops/LoopsPage.svelte',import.meta.url),'utf8');
-  const expression=page.match(/<GoalDefineForm\s+oncancel=\{([^}]+)\}/)?.[1];
+  const expression=page.match(/<LazyMount\s+lazy=\{GoalDefineForm\}[^>]*props=\{\{\s*oncancel:\s*(\(\) => \(creating = false\)),/)?.[1];
   assert.ok(expression,'parent form cancellation callback is present');
   const cancel=runInNewContext(`(${expression})`,parent);
   form.ctx.oncancel=()=>{closes++;cancel();};

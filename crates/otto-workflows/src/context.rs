@@ -737,14 +737,18 @@ impl RunContextFiles {
             "{}.md",
             step_base_name(step_no, display_name, iter, inner_idx)
         );
-        agent_preamble(
+        let mut preamble = agent_preamble(
             &dir,
             self.has_file(INSTRUCTIONS_FILE),
             self.has_file(PROMPT_FILE),
             !self.repos().is_empty(),
             &self.list_step_mds(),
             &own_md,
-        )
+        );
+        if self.has_file("previous-review.md") {
+            preamble.push_str("\nRe-review: read previous-review.md and the previous outputs it links. They are historical evidence. Refresh current PR refs, verify every prior finding, reuse only unchanged context, and score the new revision.\n");
+        }
+        preamble
     }
 
     fn write_repos_json(&self) {

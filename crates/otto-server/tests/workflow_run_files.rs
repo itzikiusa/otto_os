@@ -19,6 +19,7 @@ use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
 struct Daemon {
+    pool: DbPool,
     base: String,
     http: reqwest::Client,
     /// Viewer of ws1 (the run's workspace).
@@ -159,6 +160,7 @@ async fn boot() -> Daemon {
         axum::serve(listener, app).await.unwrap();
     });
     Daemon {
+        pool,
         base,
         http: reqwest::Client::new(),
         viewer,
@@ -290,4 +292,99 @@ async fn large_and_binary_files_keep_the_fs_read_caps() {
     assert_eq!(st, 200, "{body}");
     assert_eq!(body["content"], "");
     assert_eq!(body["truncated"], true);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rereview_requires_editor_and_preserves_the_previous_run() {
+    let d = boot().await;
+    // Give both non-root callers the feature capability: workspace membership
+    // (rather than only the feature gate) must still reject these requests.
+    let grants = GrantsRepo::new(d.pool.clone());
+    for user in ["vera", "olaf"] {
+        grants
+            .set_grants(user, &[(Feature::Workflows, Capability::Edit)])
+            .await
+            .unwrap();
+    }
+    let endpoint = format!("{}/api/v1/workflow-runs/run1/re-review", d.base);
+    for token in [&d.viewer, &d.outsider] {
+        let response = d
+            .http
+            .post(&endpoint)
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert!(matches!(response.status().as_u16(), 403 | 404));
+    }
+    let response = d
+        .http
+        .post(&endpoint)
+        .bearer_auth(&d.root)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status().as_u16(),
+        400,
+        "non-review workflow cannot re-review"
+    );
+    // Publish through the real store: execution pins an immutable workflow
+    // version, so changing graph_json alone leaves no runnable snapshot.
+    let runs = otto_state::WorkflowsRepo::new(d.pool.clone());
+    let graph = serde_json::from_str(
+        r#"{"nodes":[{"id":"review","kind":"review_run","params":{}}],"edges":[]}"#,
+    )
+    .unwrap();
+    runs.update(&"wf1".into(), None, None, None, Some(&graph), None)
+        .await
+        .unwrap();
+    // No repository: the review step fails before starting any provider. This
+    // exercises real admission/context wiring without paid agent work.
+    let response = d
+        .http
+        .post(&endpoint)
+        .bearer_auth(&d.root)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status().as_u16(),
+        200,
+        "{}",
+        response.text().await.unwrap()
+    );
+    let previous = runs.get_run(&"run1".into()).await.unwrap();
+    assert_eq!(previous.status, otto_core::workflows::RunStatus::Success);
+    let linked: String = sqlx::query_scalar("SELECT id FROM workflow_runs WHERE json_extract(input_json, '$.review_previous_run_id') = 'run1'")
+        .fetch_one(&d.pool).await.unwrap();
+    assert_ne!(linked, "run1");
+    let next = runs.get_run(&linked).await.unwrap();
+    assert_eq!(next.created_by.as_deref(), Some("root"));
+    assert_eq!(next.input["review_previous_run_id"], "run1");
+    assert_eq!(
+        runs.definition_for_run(&next).await.unwrap().graph.nodes[0].kind,
+        "review_run",
+        "the admitted run must have a published definition before context creation"
+    );
+    let report = d
+        .tmp
+        .path()
+        .join("workflow-context")
+        .join(&linked)
+        .join("previous-review.md");
+    for _ in 0..100 {
+        if report.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let settled = runs.get_run(&linked).await.unwrap();
+    let report = std::fs::read_to_string(report).unwrap_or_else(|error| {
+        panic!(
+            "previous review context missing: {error}; run status={:?}, error={:?}",
+            settled.status, settled.error
+        )
+    });
+    assert!(report.contains("HISTORICAL evidence"));
 }

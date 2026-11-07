@@ -630,6 +630,14 @@ impl ReviewFindingsRepo {
         rows.iter().map(Self::row_to_full).collect()
     }
 
+    /// Rerun lineage includes original discoveries even after dedup moves their
+    /// current review_id to a later run. Inherited ids live in the scope plan.
+    pub async fn list_seen_for_review(&self, review_id: &str) -> Result<Vec<Finding>> {
+        let rows = sqlx::query("SELECT * FROM review_findings WHERE review_id = ? OR first_seen_review_id = ? ORDER BY created_at")
+            .bind(review_id).bind(review_id).fetch_all(&self.pool).await.map_err(dberr("list historical review findings"))?;
+        rows.iter().map(Self::row_to_full).collect()
+    }
+
     /// Transition a finding's workflow `status` (validated against the machine).
     /// `actor` becomes the finding's current `reviewer`. Same-status is an
     /// idempotent no-op; an illegal edge returns `Error::Invalid`.
@@ -815,6 +823,30 @@ mod tests {
             fingerprint: fp,
             run_id: "run1",
         }
+    }
+
+    #[tokio::test]
+    async fn original_review_keeps_finding_identity_after_three_reruns() {
+        let repo = ReviewFindingsRepo::new(mem_pool().await);
+        let (original, _) = repo.upsert(&sample("same-fix", "bug")).await.unwrap();
+        for review_id in ["rev2", "rev3"] {
+            let mut again = sample("same-fix", "bug");
+            again.review_id = review_id;
+            let (updated, created) = repo.upsert(&again).await.unwrap();
+            assert!(!created);
+            assert_eq!(updated.id, original.id);
+        }
+        assert!(repo.list_full_for_review("rev1").await.unwrap().is_empty());
+        let historical = repo.list_seen_for_review("rev1").await.unwrap();
+        assert_eq!(historical.len(), 1);
+        assert_eq!(historical[0].id, original.id);
+        assert_eq!(historical[0].review_id, "rev3");
+        // A persisted prior scope references this stable id even when no fresh
+        // comment re-emits it; the next assessment can still load the evidence.
+        assert_eq!(
+            repo.get_full(&original.id).await.unwrap().evidence,
+            original.evidence
+        );
     }
 
     #[tokio::test]

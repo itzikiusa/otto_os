@@ -1088,14 +1088,21 @@ async fn parallel_approvals_are_live_together_and_answer_out_of_order() {
         .filter(|r| r.status == RuntimeRequestStatus::Pending)
         .map(|r| r.id)
         .collect();
-    assert_eq!(pending, ["acp-p-c1", "acp-p-c2"], "both live at once");
+    assert_eq!(pending.len(), 2, "both live at once");
+    let request = |native: &str| {
+        pending
+            .iter()
+            .find(|id| id.ends_with(&format!(":{native}")))
+            .unwrap()
+            .clone()
+    };
     for c in ["c1", "c2"] {
         let want = format!("{turn}:tool:{c}");
         assert!(host.items().iter().any(|i| matches!(&i.kind,
             TurnItemKind::ApprovalRequest { tool_item_id: Some(t), .. } if *t == want)));
     }
     // The second first: nothing serializes them.
-    rt.respond(&s.id, "acp-p-c2", ApprovalDecision::Accept)
+    rt.respond(&s.id, &request("acp-p-c2"), ApprovalDecision::Accept)
         .await
         .unwrap();
     assert_eq!(
@@ -1103,7 +1110,7 @@ async fn parallel_approvals_are_live_together_and_answer_out_of_order() {
         RuntimeSessionStatus::AwaitingPermission,
         "c1 still waits"
     );
-    rt.respond(&s.id, "acp-p-c1", ApprovalDecision::Decline)
+    rt.respond(&s.id, &request("acp-p-c1"), ApprovalDecision::Decline)
         .await
         .unwrap();
     let fin = host.wait(is_terminal).await;
@@ -1140,8 +1147,12 @@ async fn cancelled_requests_say_why() {
         } else {
             rt.close(&s.id).await.unwrap();
         }
-        let id = format!("acp-perm-{n}");
-        let req = requests(&host).into_iter().find(|r| r.id == id).unwrap();
+        let suffix = format!(":acp-perm-{n}");
+        let req = requests(&host)
+            .into_iter()
+            .find(|r| r.id.ends_with(&suffix))
+            .unwrap();
+        let id = req.id.clone();
         assert_eq!(
             (req.status, req.cancel_reason),
             (RuntimeRequestStatus::Cancelled, Some(reason))
@@ -1899,6 +1910,10 @@ async fn a_silent_turn_is_stopped_as_stalled_but_background_work_is_no_stall() {
         },
     );
     let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    host.wait(is_ready).await;
+    // Let the child pump park between turns. No later provider output may be
+    // needed to arm the watchdog when the next prompt is completely silent.
+    tokio::time::sleep(Duration::from_millis(100)).await;
     rt.prompt(&s.id, "silent").await.unwrap();
     let t = host.wait(is_terminal).await;
     assert_eq!(terminal(&t), Some(TurnTerminalStatus::Interrupted));
@@ -1922,4 +1937,484 @@ async fn a_silent_turn_is_stopped_as_stalled_but_background_work_is_no_stall() {
             TurnTerminalStatus::Completed
         ]
     );
+}
+
+// Explicit fresh context never creates a second Otto thread or rewrites its history.
+#[tokio::test]
+async fn fresh_context_keeps_history_and_changes_native_session_only_on_send() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    rt.prompt(&s.id, "before").await.unwrap();
+    host.wait(is_terminal).await;
+    let old = rt.get(&s.id).await.unwrap().native_thread_id;
+    // A closed thread starts fresh directly, without first resuming the old agent.
+    rt.close(&s.id).await.unwrap();
+    let sent = rt
+        .prompt_with(
+            &s.id,
+            &RuntimePromptReq {
+                text: "after".into(),
+                fresh_context: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    host.wait_n(is_terminal, 2).await;
+    let current = rt.get(&s.id).await.unwrap();
+    assert_eq!(current.id, s.id);
+    assert_eq!(current.cwd, s.cwd);
+    assert_eq!(current.workspace_id, s.workspace_id);
+    assert_ne!(current.native_thread_id, old);
+    let spawns = host.prepared.lock().unwrap().clone();
+    assert_eq!(spawns.len(), 2);
+    assert!(!spawns[1].args.iter().any(|a| a == "--resume"));
+    let items = host.items();
+    let boundaries: Vec<_> = items
+        .iter()
+        .filter(|i| matches!(i.kind, TurnItemKind::SessionBoundary))
+        .collect();
+    assert_eq!(boundaries.len(), 1);
+    assert_eq!(boundaries[0].turn_id.as_ref(), Some(&sent.turn_id));
+    for text in ["before", "after"] {
+        assert!(items
+            .iter()
+            .any(|i| matches!(&i.kind, TurnItemKind::UserMessage { text: t, .. } if t == text)));
+    }
+    rt.flush(&s.id).await;
+    let stored = AgentRuntimeRepo::new(pool.clone())
+        .get(&s.id)
+        .await
+        .unwrap();
+    assert_eq!(stored.session.native_thread_id, current.native_thread_id);
+    assert!(!stored.closed);
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn fresh_context_refuses_pending_and_queued_work_and_scopes_reused_request_ids() {
+    use otto_core::agent_runtime::PromptDelivery;
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, cwd).await;
+    rt.prompt(&s.id, "ask").await.unwrap();
+    let event = host.wait(is_pending_request).await;
+    let RuntimeEventBody::RuntimeRequestUpdated {
+        runtime_request: first,
+    } = event.body
+    else {
+        panic!()
+    };
+    let queued = rt
+        .prompt_with(&s.id, &queued(PromptDelivery::Queue, "queued"))
+        .await
+        .unwrap();
+    let fresh = RuntimePromptReq {
+        text: "ask".into(),
+        fresh_context: true,
+        ..Default::default()
+    };
+    assert!(matches!(
+        rt.prompt_with(&s.id, &fresh).await,
+        Err(Error::Conflict(_))
+    ));
+    assert_eq!(host.prepared.lock().unwrap().len(), 1);
+    assert!(!host
+        .items()
+        .iter()
+        .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary)));
+    rt.unqueue(&s.id, queued.queued_id.as_ref().unwrap())
+        .await
+        .unwrap();
+    rt.respond(&s.id, &first.id, ApprovalDecision::Accept)
+        .await
+        .unwrap();
+    host.wait(is_terminal).await;
+    rt.prompt_with(&s.id, &fresh).await.unwrap();
+    let event = host.wait_n(is_pending_request, 2).await;
+    let RuntimeEventBody::RuntimeRequestUpdated {
+        runtime_request: second,
+    } = event.body
+    else {
+        panic!()
+    };
+    assert_ne!(
+        first.id, second.id,
+        "both providers use native perm-1, UI IDs must differ"
+    );
+    assert!(rt
+        .respond(&s.id, &first.id, ApprovalDecision::Accept)
+        .await
+        .is_err());
+    let all = requests(&host);
+    assert!(all
+        .iter()
+        .any(|r| r.id == first.id && r.status == RuntimeRequestStatus::Resolved));
+    assert!(all
+        .iter()
+        .any(|r| r.id == second.id && r.status == RuntimeRequestStatus::Pending));
+    rt.respond(&s.id, &second.id, ApprovalDecision::Decline)
+        .await
+        .unwrap();
+    host.wait_n(is_terminal, 2).await;
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn rejected_fresh_prompt_preserves_old_native_identity_without_a_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Codex).await;
+    rt.prompt(&s.id, "before").await.unwrap();
+    host.wait(is_terminal).await;
+    let old = rt.get(&s.id).await.unwrap().native_thread_id;
+    let rejected = RuntimePromptReq {
+        text: "unsupported file".into(),
+        fresh_context: true,
+        files: vec![PromptFile {
+            mime: "application/pdf".into(),
+            name: "test.pdf".into(),
+            data_base64: "YQ==".into(),
+        }],
+        ..Default::default()
+    };
+    assert!(rt.prompt_with(&s.id, &rejected).await.is_err());
+    assert_eq!(rt.get(&s.id).await.unwrap().native_thread_id, old);
+    assert!(!host
+        .items()
+        .iter()
+        .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary)));
+    rt.flush(&s.id).await;
+    assert_eq!(
+        AgentRuntimeRepo::new(pool.clone())
+            .get(&s.id)
+            .await
+            .unwrap()
+            .session
+            .native_thread_id,
+        old
+    );
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn fresh_context_refuses_background_work_after_the_foreground_turn_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    rt.prompt(&s.id, "bg 10").await.unwrap();
+    host.wait(is_terminal).await;
+    assert!(!rt.get(&s.id).await.unwrap().background_tasks.is_empty());
+    let fresh = RuntimePromptReq {
+        fresh_context: true,
+        ..RuntimePromptReq::of("after")
+    };
+    assert!(matches!(
+        rt.prompt_with(&s.id, &fresh).await,
+        Err(Error::Conflict(_))
+    ));
+    assert_eq!(host.prepared.lock().unwrap().len(), 1);
+    assert!(!rt.get(&s.id).await.unwrap().background_tasks.is_empty());
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn fresh_context_refuses_closed_threads_with_queued_prompts() {
+    use otto_core::agent_runtime::PromptDelivery;
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, cwd).await;
+    rt.prompt(&s.id, "ask").await.unwrap();
+    host.wait(is_pending_request).await;
+    let q = rt
+        .prompt_with(&s.id, &queued(PromptDelivery::Queue, "later"))
+        .await
+        .unwrap();
+    rt.close(&s.id).await.unwrap();
+    let fresh = RuntimePromptReq {
+        fresh_context: true,
+        ..RuntimePromptReq::of("after")
+    };
+    assert!(matches!(
+        rt.prompt_with(&s.id, &fresh).await,
+        Err(Error::Conflict(_))
+    ));
+    assert_eq!(
+        rt.get(&s.id).await.unwrap().status,
+        RuntimeSessionStatus::Closed
+    );
+    assert_eq!(host.prepared.lock().unwrap().len(), 1);
+    assert!(rt
+        .unqueue(&s.id, q.queued_id.as_ref().unwrap())
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn fresh_context_failed_spawn_preserves_closed_history_and_resume_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    rt.prompt(&s.id, "before").await.unwrap();
+    host.wait(is_terminal).await;
+    rt.close(&s.id).await.unwrap();
+    rt.flush(&s.id).await;
+    let old = rt.get(&s.id).await.unwrap().native_thread_id;
+    // A new daemon whose spawn safety pipeline rejects the launch.
+    let refusing = TestHost::new(cwd, true);
+    let rt = runtime(&pool, &refusing, RuntimeConfig::default());
+    rt.recover().await.unwrap();
+    let fresh = RuntimePromptReq {
+        fresh_context: true,
+        ..RuntimePromptReq::of("after")
+    };
+    assert!(rt.prompt_with(&s.id, &fresh).await.is_err());
+    let current = rt.get(&s.id).await.unwrap();
+    assert_eq!(current.status, RuntimeSessionStatus::Closed);
+    assert_eq!(current.native_thread_id, old);
+    assert!(!refusing
+        .items()
+        .iter()
+        .any(|i| matches!(i.kind, TurnItemKind::SessionBoundary)));
+    rt.flush(&s.id).await;
+    let stored = AgentRuntimeRepo::new(pool.clone())
+        .get(&s.id)
+        .await
+        .unwrap();
+    assert_eq!(stored.session.native_thread_id, old);
+    assert!(stored.closed);
+}
+
+#[tokio::test]
+async fn codex_questions_validate_answers_and_replay_without_tool_rows() {
+    use otto_core::agent_runtime::{QuestionAnswer, RequestKind};
+    let dir = tempfile::tempdir().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(dir.path().to_str().unwrap(), false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, dir.path().to_str().unwrap(), RuntimeProvider::Codex).await;
+    host.wait(is_ready).await;
+    rt.prompt(&s.id, "question form").await.unwrap();
+    let event = host.wait(is_type("runtime_request.updated")).await;
+    let RuntimeEventBody::RuntimeRequestUpdated {
+        runtime_request: request,
+    } = event.body
+    else {
+        panic!("missing request")
+    };
+    assert_eq!(request.kind, RequestKind::Question);
+    assert_eq!(request.questions.len(), 2);
+    assert!(rt
+        .respond(&s.id, &request.id, ApprovalDecision::Accept)
+        .await
+        .is_err());
+    assert!(rt
+        .respond_question(&s.id, &request.id, vec![])
+        .await
+        .is_err());
+    assert_eq!(
+        requests(&host).last().unwrap().status,
+        RuntimeRequestStatus::Pending
+    );
+    let answers = vec![
+        QuestionAnswer::Single {
+            question_id: "strategy_native".into(),
+            value: "Careful".into(),
+        },
+        QuestionAnswer::Text {
+            question_id: "note_native".into(),
+            text: "Keep the API stable".into(),
+        },
+    ];
+    rt.respond_question(&s.id, &request.id, answers.clone())
+        .await
+        .unwrap();
+    host.wait(is_terminal).await;
+    let resolved = requests(&host)
+        .into_iter()
+        .find(|r| r.status == RuntimeRequestStatus::Resolved)
+        .unwrap();
+    assert_eq!(resolved.answers, Some(answers.clone()));
+    assert!(rt
+        .respond_question(&s.id, &request.id, answers)
+        .await
+        .is_err());
+    assert!(host
+        .items()
+        .iter()
+        .all(|i| !matches!(i.kind, TurnItemKind::ApprovalRequest { .. })));
+    assert!(host.items().iter().any(|i| matches!(&i.kind, TurnItemKind::AssistantMessage { text, .. } if text.contains("strategy_native") && text.contains("Keep the API stable"))));
+    // Skip settles only the question; it does not create an approval decision.
+    rt.prompt(&s.id, "question form").await.unwrap();
+    let event = host.wait_n(is_pending_request, 2).await;
+    let RuntimeEventBody::RuntimeRequestUpdated {
+        runtime_request: next,
+    } = event.body
+    else {
+        panic!("missing second question")
+    };
+    rt.dismiss_question(
+        &s.id,
+        &next.id,
+        otto_core::agent_runtime::QuestionDismissAction::Decline,
+    )
+    .await
+    .unwrap();
+    host.wait_n(is_terminal, 2).await;
+    let dismissed = requests(&host)
+        .into_iter()
+        .find(|r| r.id == next.id)
+        .unwrap();
+    assert_eq!(dismissed.status, RuntimeRequestStatus::Cancelled);
+    assert!(dismissed.decision.is_none());
+    // Full request data survives replay and restart; the live answer authority does not.
+    rt.prompt(&s.id, "question form").await.unwrap();
+    let pending = host.wait_n(is_pending_request, 3).await;
+    let RuntimeEventBody::RuntimeRequestUpdated {
+        runtime_request: pending,
+    } = pending.body
+    else {
+        panic!("missing pending question")
+    };
+    rt.flush(&s.id).await;
+    rt.shutdown().await;
+    let host2 = TestHost::new(dir.path().to_str().unwrap(), false);
+    let rt2 = runtime(&pool, &host2, RuntimeConfig::default());
+    rt2.recover().await.unwrap();
+    let RuntimeReplay::Snapshot { snapshot, .. } = rt2.replay(&s.id, 0).await.unwrap() else {
+        panic!("restart must replay a snapshot")
+    };
+    let expired = snapshot
+        .runtime_requests
+        .iter()
+        .find(|r| r.id == pending.id)
+        .unwrap();
+    assert_eq!(expired.questions, pending.questions);
+    assert_eq!(expired.status, RuntimeRequestStatus::Expired);
+    assert!(matches!(
+        expired.response_capability,
+        otto_core::agent_runtime::ResponseCapability::NotResumable { .. }
+    ));
+    assert!(snapshot
+        .runtime_requests
+        .iter()
+        .any(|r| r.id == request.id && r.answers == resolved.answers));
+    assert!(rt2
+        .respond_question(&s.id, &pending.id, vec![])
+        .await
+        .is_err());
+    rt2.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn fresh_context_waits_for_questions_and_old_cards_cannot_answer_new_process() {
+    use otto_core::agent_runtime::{QuestionAnswer, QuestionDismissAction};
+    let dir = tempfile::tempdir().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(dir.path().to_str().unwrap(), false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, dir.path().to_str().unwrap(), RuntimeProvider::Codex).await;
+    host.wait(is_ready).await;
+    rt.prompt(&s.id, "question form").await.unwrap();
+    let event = host.wait(is_pending_request).await;
+    let RuntimeEventBody::RuntimeRequestUpdated {
+        runtime_request: first,
+    } = event.body
+    else {
+        panic!("question missing")
+    };
+    let fresh = RuntimePromptReq {
+        fresh_context: true,
+        ..RuntimePromptReq::of("question form")
+    };
+    assert!(rt.prompt_with(&s.id, &fresh).await.is_err());
+    let answers = vec![
+        QuestionAnswer::Single {
+            question_id: "strategy_native".into(),
+            value: "Careful".into(),
+        },
+        QuestionAnswer::Text {
+            question_id: "note_native".into(),
+            text: "Keep the public API".into(),
+        },
+    ];
+    rt.respond_question(&s.id, &first.id, answers.clone())
+        .await
+        .unwrap();
+    host.wait(is_terminal).await;
+    rt.prompt_with(&s.id, &fresh).await.unwrap();
+    let event = host.wait_n(is_pending_request, 2).await;
+    let RuntimeEventBody::RuntimeRequestUpdated {
+        runtime_request: second,
+    } = event.body
+    else {
+        panic!("replacement question missing")
+    };
+    assert_ne!(
+        first.id, second.id,
+        "new process reuses its native RPC ID but not its public request ID"
+    );
+    assert!(rt
+        .respond_question(&s.id, &first.id, answers.clone())
+        .await
+        .is_err());
+    assert!(rt
+        .dismiss_question(&s.id, &first.id, QuestionDismissAction::Decline)
+        .await
+        .is_err());
+    rt.dismiss_question(&s.id, &second.id, QuestionDismissAction::Decline)
+        .await
+        .unwrap();
+    host.wait_n(is_terminal, 2).await;
+    assert_eq!(
+        host.items()
+            .iter()
+            .filter(|i| matches!(i.kind, TurnItemKind::SessionBoundary))
+            .count(),
+        1
+    );
+    rt.flush(&s.id).await;
+    rt.shutdown().await;
+    let host2 = TestHost::new(dir.path().to_str().unwrap(), false);
+    let recovered = runtime(&pool, &host2, RuntimeConfig::default());
+    recovered.recover().await.unwrap();
+    let RuntimeReplay::Snapshot { snapshot, .. } = recovered.replay(&s.id, 0).await.unwrap() else {
+        panic!("snapshot missing")
+    };
+    let old = snapshot
+        .runtime_requests
+        .iter()
+        .find(|r| r.id == first.id)
+        .unwrap();
+    assert_eq!(old.answers, Some(answers));
+    assert_eq!(old.status, RuntimeRequestStatus::Resolved);
+    assert_eq!(
+        snapshot
+            .runtime_requests
+            .iter()
+            .find(|r| r.id == second.id)
+            .unwrap()
+            .status,
+        RuntimeRequestStatus::Cancelled
+    );
+    recovered.close(&s.id).await.unwrap();
 }

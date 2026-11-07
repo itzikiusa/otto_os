@@ -13,6 +13,12 @@ use super::*;
 /// `GET /api/v1/settings/pr-review` and `PUT /api/v1/settings/pr-review`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewConfig {
+    /// Explicitly compare each selected lens across all its configured providers.
+    #[serde(default)]
+    pub cross_provider_check: bool,
+    /// Explicit workflow rerun lineage; validated against the reviewed repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_review_id: Option<Id>,
     pub agents: Vec<ReviewAgentCfg>,
     pub summarizer: ReviewAgentCfg,
     /// User-defined reusable reviewer presets the UI offers alongside the

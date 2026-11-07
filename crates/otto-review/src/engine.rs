@@ -223,6 +223,8 @@ pub fn reviewer_slots() -> Arc<tokio::sync::Semaphore> {
 /// claude PTY driver (see `run_review_core`).
 pub fn default_review_config(default_provider: &str) -> ReviewConfig {
     ReviewConfig {
+        cross_provider_check: false,
+        previous_review_id: None,
         agents: vec![
             ReviewAgentCfg {
                 name: "Correctness & bugs".to_string(),
@@ -472,8 +474,14 @@ pub fn expand_agent_runs(
                 AgentRun {
                     display_name,
                     lens: a.name.clone(),
+                    // A model belongs to the configured primary provider.
+                    // Secondary providers use their own default model.
+                    model: if p == a.provider {
+                        a.model.clone()
+                    } else {
+                        String::new()
+                    },
                     provider: p,
-                    model: a.model.clone(),
                     prompt_lens,
                     lenses: Vec::new(),
                 }
@@ -585,6 +593,14 @@ pub fn label_findings_with_lens(
 /// A draft review comment as emitted by the summarizer.
 #[derive(Deserialize)]
 pub struct DraftComment {
+    /// Daemon-assigned raw claims accounted for by this verdict. One cohesive
+    /// fix may cover several claims; new verifier discoveries may leave empty.
+    #[serde(default)]
+    pub source_ids: Vec<String>,
+    /// Explicit verifier disposition. Suppressed claims retain their reasoning
+    /// in the review scope plan instead of becoming misleading PR comments.
+    #[serde(default)]
+    pub disposition: Option<String>,
     #[serde(default)]
     pub path: Option<String>,
     #[serde(default)]
@@ -609,8 +625,112 @@ pub struct DraftComment {
     pub suggested_fix: Option<String>,
 }
 
+impl DraftComment {
+    pub fn verification_complete(&self) -> bool {
+        matches!(
+            self.disposition.as_deref(),
+            Some("verified" | "not_relevant" | "duplicate")
+        ) && !self.body.trim().is_empty()
+            && self.evidence.as_ref().is_some_and(|s| !s.trim().is_empty())
+    }
+    pub fn suppressed(&self) -> bool {
+        self.disposition.as_deref() != Some("verified") || !self.verification_complete()
+    }
+}
+
+#[cfg(test)]
+mod verification_tests {
+    use super::*;
+    fn claim(disposition: Option<&str>, evidence: Option<&str>) -> DraftComment {
+        serde_json::from_value(serde_json::json!({"body":"Claim at auth.rs:2", "severity":"bug", "disposition":disposition,"evidence":evidence})).unwrap()
+    }
+    #[test]
+    fn invented_unreachable_and_preexisting_claims_never_become_pr_comments() {
+        for (disposition, evidence) in [
+            (
+                "unverified",
+                "No reachable caller found; this remains a question",
+            ),
+            (
+                "not_relevant",
+                "api.rs:8 guards this path; anonymous caller cannot reach it",
+            ),
+            (
+                "not_relevant",
+                "The claimed defect predates this PR; unchanged at old.rs:1",
+            ),
+            (
+                "duplicate",
+                "Same auth.rs:2 fix as the retained permission finding",
+            ),
+        ] {
+            let c = claim(Some(disposition), Some(evidence));
+            assert!(c.suppressed());
+            assert_eq!(c.verification_complete(), disposition != "unverified");
+        }
+        let critical = claim(Some("verified"), Some("auth.rs:2 skips the check; api.rs:8 accepts an anonymous caller, exposing the protected document"));
+        assert!(!critical.suppressed());
+        assert!(critical.verification_complete());
+    }
+    #[test]
+    fn missing_or_unknown_verifier_dispositions_and_evidence_fail_closed() {
+        for c in [
+            claim(None, None),
+            claim(Some("verified"), None),
+            claim(Some("verified"), Some("  ")),
+            claim(Some("approved"), Some("asserted")),
+        ] {
+            assert!(c.suppressed());
+            assert!(!c.verification_complete());
+        }
+    }
+    #[test]
+    fn verifier_cannot_omit_a_claim_but_can_merge_claims_with_the_same_fix() {
+        let mut a = claim(
+            Some("verified"),
+            Some("auth.rs:2 permits the reachable caller"),
+        );
+        a.source_ids = vec![raw_claim_id(0, 0)];
+        assert!(!verifier_covers_claims(std::slice::from_ref(&a), &[2]));
+        a.source_ids.push(raw_claim_id(0, 1));
+        assert!(verifier_covers_claims(std::slice::from_ref(&a), &[2]));
+        a.source_ids[1] = "invented".into();
+        assert!(!verifier_covers_claims(std::slice::from_ref(&a), &[2]));
+        a.source_ids.pop();
+        let mut b = claim(Some("unverified"), Some("Could not inspect second claim"));
+        b.source_ids = vec![raw_claim_id(0, 1)];
+        assert!(!verifier_covers_claims(&[a, b], &[2]));
+    }
+}
+
 pub fn default_draft_severity() -> String {
     "info".to_string()
+}
+
+pub fn raw_claim_id(batch: usize, claim: usize) -> String {
+    format!("batch:{}:claim:{}", batch + 1, claim + 1)
+}
+
+/// Exactly-once accounting, independent of output count (dedupe may merge
+/// several source claims into one fix). Unknown ids cannot launder omissions.
+pub fn verifier_covers_claims(comments: &[DraftComment], batch_sizes: &[usize]) -> bool {
+    let expected: std::collections::HashSet<_> = batch_sizes
+        .iter()
+        .enumerate()
+        .flat_map(|(batch, count)| (0..*count).map(move |claim| raw_claim_id(batch, claim)))
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    for comment in comments {
+        if !comment.verification_complete() {
+            return false;
+        }
+        for id in &comment.source_ids {
+            if !expected.contains(id) || !seen.insert(id.clone()) {
+                return false;
+            }
+        }
+    }
+    expected == seen
 }
 
 /// Whether a freshly summarized comment is the same one as an already-decided
@@ -1674,7 +1794,7 @@ mod orchestrator_tests {
     }
 
     #[test]
-    fn fan_out_is_default_and_unchanged() {
+    fn fan_out_preserves_primary_model_without_leaking_it_to_other_providers() {
         let (_tmp, lib) = empty_library();
         let cfg = cfg_with(vec![
             agent(UNRESOLVED_A, &["claude", "codex"], "sonnet"),
@@ -1692,6 +1812,7 @@ mod orchestrator_tests {
         assert_eq!(runs[0].lens, "Alpha lens");
         assert_eq!(runs[1].lens, "Alpha lens");
         assert_eq!(runs[0].model, "sonnet");
+        assert_eq!(runs[1].model, "");
         assert_eq!(runs[2].model, "");
         // No sub-agent lenses, and the lens prompt is composed up front — with
         // an unresolvable method that is the reviewer's own instructions alone,

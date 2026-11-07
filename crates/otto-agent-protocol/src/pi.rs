@@ -199,6 +199,7 @@ impl PiDriver {
                 tool_name: name.to_string(),
                 input: args.clone(),
                 output,
+                images: Vec::new(),
             },
         }
     }

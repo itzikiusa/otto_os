@@ -71,7 +71,26 @@ export interface GoalLoopRoleCfg {
   prompt: string;
 }
 
+export interface GoalGraphNode {
+  id: string;
+  title: string;
+  instructions: string;
+  depends_on: string[];
+  criterion_ids: string[];
+}
+export interface GoalLoopGraph {
+  nodes: GoalGraphNode[];
+}
+export interface GoalGraphNodeState {
+  node_id: string;
+  status: 'pending' | 'running' | 'passed' | 'blocked';
+  iteration: number;
+  evidence: string;
+  criteria: EvalCriterion[];
+}
+
 export interface GoalLoopConfig {
+  graph?: GoalLoopGraph | null;
   allow_commits?: boolean;
   mode?: 'build' | 'research';
   source_links?: string[];
@@ -123,6 +142,7 @@ export interface GoalQuestion {
   answered_at: string | null;
 }
 export interface GoalLoopLedger {
+  graph_nodes?: GoalGraphNodeState[];
   resume_evaluation_iteration?: number | null;
   verifications: GoalHumanVerification[];
   questions: GoalQuestion[];

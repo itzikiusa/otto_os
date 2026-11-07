@@ -1,0 +1,61 @@
+direction: down
+
+# Matches ui/src/modules/loops/templates.ts: poc.
+# Node IDs and acceptance IDs match the editable template.
+vars: {
+  d2-config: {
+    layout-engine: dagre
+    theme-id: 0
+    pad: 28
+  }
+}
+
+title: "Proof of concept — suggested execution graph" {
+  shape: text
+  near: top-center
+  style.font-size: 24
+}
+
+tasks: {
+  label: "One task per goal-loop iteration"
+  style.stroke: "#94a3b8"
+  style.fill: "#f8fafc"
+  task-1: "Define the experiment\ntask-1 · c1\nThe backend and frontend experiment has measurable success and failure conditions." {
+    style.fill: "#ffffff"
+    style.stroke: "#475569"
+    style.border-radius: 8
+    style.font-size: 17
+  }
+  task-2: "Build the runnable slice\ntask-2 · c2\nThe backend and frontend experiment runs with documented setup." {
+    style.fill: "#ffffff"
+    style.stroke: "#475569"
+    style.border-radius: 8
+    style.font-size: 17
+  }
+  task-3: "Evaluate feasibility\ntask-3 · c3\nThe feasibility result is supported by observed evidence." {
+    style.fill: "#ffffff"
+    style.stroke: "#475569"
+    style.border-radius: 8
+    style.font-size: 17
+  }
+  task-1 -> task-2: "c1 accepted"
+  task-2 -> task-3: "c2 accepted"
+}
+
+completion: "Completion review\nAll goal criteria need evidence" {
+  shape: diamond
+  style.fill: "#e0f2fe"
+  style.stroke: "#0369a1"
+}
+retained: "Succeeded\nWork and proof remain available" {
+  style.fill: "#dcfce7"
+  style.stroke: "#15803d"
+}
+tasks.task-3 -> completion: "c3 accepted"
+completion -> retained: "review accepts"
+
+notes: "Plan → Execute → Evaluate → Digest\nRepairs invalidate dependent tasks.\nEvidence and limits govern completion." {
+  shape: text
+  near: bottom-center
+  style.font-size: 15
+}

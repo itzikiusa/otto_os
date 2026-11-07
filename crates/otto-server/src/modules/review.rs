@@ -4,10 +4,12 @@
 
 use super::*;
 
+mod fix;
 mod lifecycle;
 mod retry;
 mod routes;
 mod run;
+mod scope;
 mod summarize;
 
 pub(crate) use self::lifecycle::*;

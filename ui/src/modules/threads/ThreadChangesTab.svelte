@@ -12,6 +12,7 @@
   import { onTabKey } from '../../lib/tabKeys';
   import { git } from '../../lib/stores/git.svelte';
   import type { CommitInfo, DiffLine, DiffResp, RepoStatusResp } from '../../lib/api/types';
+  import { diffContext, type ComposerContext } from './runtime/composerContext';
   import { threadRepos } from './threadRepos.svelte';
   import { threads } from './threadsStore.svelte';
 
@@ -19,8 +20,10 @@
     workspaceId: string | null;
     sessionCwd: string | null;
     wsKey: string;
+    threadId?: string | null;
+    oncontext?: (context: ComposerContext, threadId: string) => void;
   }
-  let { workspaceId, sessionCwd, wsKey }: Props = $props();
+  let { workspaceId, sessionCwd, wsKey, threadId = null, oncontext }: Props = $props();
 
   /** One row of the file list, from either the working tree or a commit diff. */
   interface ChangeRow {
@@ -85,6 +88,7 @@
 
   // Load working-tree status + numstat summary for the active repo.
   $effect(() => {
+    void threadId;
     const repoId = repo?.id ?? null;
     void statusRetry;
     if (!repoId) {
@@ -93,6 +97,8 @@
       return;
     }
     const ctl = new AbortController();
+    status = null;
+    summaryByPath = {};
     statusLoading = true;
     statusError = null;
     void Promise.all([
@@ -118,6 +124,7 @@
 
   // Local commits (HEAD's newest `ahead` — what the upstream doesn't have yet).
   $effect(() => {
+    void threadId;
     const repoId = repo?.id ?? null;
     const n = Math.min(ahead, MAX_COMMITS);
     void commitsRetry;
@@ -145,6 +152,7 @@
 
   // Files touched by the chosen commit / range.
   $effect(() => {
+    void threadId;
     const repoId = repo?.id ?? null;
     const target = activeScope === 'commits' ? commitTarget : null;
     void commitsRetry;
@@ -180,6 +188,7 @@
 
   // Load per-file hunks when the selection or the target changes.
   $effect(() => {
+    void threadId;
     const repoId = repo?.id ?? null;
     const path = selectedPath;
     const target = diffTarget;
@@ -191,6 +200,7 @@
       return;
     }
     const ctl = new AbortController();
+    diffResp = null;
     diffLoading = true;
     diffError = null;
     const q = `target=${encodeURIComponent(target)}&path=${encodeURIComponent(path)}${
@@ -213,6 +223,12 @@
   });
 
   const activeFileDiff = $derived(diffResp?.files[0] ?? null);
+
+  function addDiff(selection?: { hunk: number; line?: number }): void {
+    if (repo && activeFileDiff && threadId && !diffLoading) {
+      oncontext?.(diffContext(repo.id, activeFileDiff, selection, diffTarget ?? 'working'), threadId);
+    }
+  }
 
   function kindTone(kind: string): 'ok' | 'warn' | 'bad' | 'info' | 'neutral' {
     switch (kind) {
@@ -425,14 +441,21 @@
             {/snippet}
 
             {#if activeFileDiff}
+              {#if oncontext && threadId}
+                <button type="button" class="btn small" data-testid="diff-file-context" onclick={() => addDiff()}>Add file diff to chat</button>
+              {/if}
               <div class="tch-hunks mono" dir="ltr">
                 {#each activeFileDiff.hunks as hunk, hIdx (hIdx)}
-                  <div class="tch-hunk-head">{hunk.header}</div>
+                  <div class="tch-hunk-head"><span>{hunk.header}</span>
+                    {#if oncontext && threadId}<button type="button" class="btn small ghost" data-testid="diff-hunk-context-{hIdx}" onclick={() => addDiff({ hunk: hIdx })}>Add hunk to chat</button>{/if}
+                  </div>
                   {#if diffMode === 'unified'}
                     {#each hunk.lines as ln, lIdx (lIdx)}
                       <div class="tch-line {ln.origin}">
                         <span class="tch-ln">{ln.old_line ?? ''}</span>
-                        <span class="tch-ln">{ln.new_line ?? ''}</span>
+                        {#if oncontext && threadId}
+                          <button type="button" class="tch-ln tch-line-add" aria-label="Add {activeFileDiff.path} {ln.origin === 'del' ? 'old' : 'new'} line {ln.new_line ?? ln.old_line} to chat" title="Add line to chat" onclick={() => addDiff({ hunk: hIdx, line: lIdx })}>{ln.new_line ?? ln.old_line ?? '+'}</button>
+                        {:else}<span class="tch-ln">{ln.new_line ?? ''}</span>{/if}
                         <span class="tch-sig">{ln.origin === 'add' ? '+' : ln.origin === 'del' ? '-' : ' '}</span>
                         <span class="tch-code">{ln.content}</span>
                       </div>
@@ -441,11 +464,15 @@
                     {#each buildSplitRows(hunk.lines) as pair, pIdx (pIdx)}
                       <div class="tch-split-row">
                         <div class="tch-half {pair.left?.origin ?? 'empty'}">
-                          <span class="tch-ln">{pair.left?.old_line ?? ''}</span>
+                          {#if oncontext && threadId && pair.left}
+                            <button type="button" class="tch-ln tch-line-add" aria-label="Add {activeFileDiff.path} old line {pair.left.old_line} to chat" title="Add line to chat" onclick={() => addDiff({ hunk: hIdx, line: hunk.lines.indexOf(pair.left!) })}>{pair.left.old_line ?? '+'}</button>
+                          {:else}<span class="tch-ln">{pair.left?.old_line ?? ''}</span>{/if}
                           <span class="tch-code">{pair.left?.content ?? ''}</span>
                         </div>
                         <div class="tch-half {pair.right?.origin ?? 'empty'}">
-                          <span class="tch-ln">{pair.right?.new_line ?? ''}</span>
+                          {#if oncontext && threadId && pair.right}
+                            <button type="button" class="tch-ln tch-line-add" aria-label="Add {activeFileDiff.path} new line {pair.right.new_line} to chat" title="Add line to chat" onclick={() => addDiff({ hunk: hIdx, line: hunk.lines.indexOf(pair.right!) })}>{pair.right.new_line ?? '+'}</button>
+                          {:else}<span class="tch-ln">{pair.right?.new_line ?? ''}</span>{/if}
                           <span class="tch-code">{pair.right?.content ?? ''}</span>
                         </div>
                       </div>
@@ -462,6 +489,13 @@
 </div>
 
 <style>
+  .tch-line-add { border: 0; border-radius: 0; background: transparent; font: inherit; cursor: pointer; }
+  .tch-line-add:hover { color: var(--accent-text); background: var(--hover); }
+  .tch-hunk-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  @media (max-width: 640px) {
+    .tch-line-add { min-block-size: 36px; }
+    .tch-line, .tch-half { align-items: center; }
+  }
   .tch-wrap {
     display: flex;
     flex-direction: column;

@@ -4,6 +4,7 @@
 // loaded with the view.
 
 import { loadErrorText } from '../../../lib/loadError';
+import { installRuntimeDraftRecovery } from '../../../lib/stores/runtimeDraftRecovery.svelte';
 import { runtimeDrafts } from '../../../lib/stores/runtimeDrafts.svelte';
 import { api } from '../../../lib/api/client';
 import { onLive } from '../../../lib/live';
@@ -12,6 +13,7 @@ import { noteRuntimeWaiting } from '../../../lib/stores/runtimeAttention.svelte'
 import { uiControl } from '../../../lib/stores/uiControl.svelte';
 import type {
   ApprovalDecision,
+  QuestionAnswer,
   PromptDelivery,
   ProviderSessionStatus,
   RuntimeEvent,
@@ -228,6 +230,14 @@ class RuntimeThreads {
     await api.post(`/runtime-sessions/${id}/requests/${requestId}`, { decision });
   }
 
+  async respondQuestion(id: string, requestId: string, answers: QuestionAnswer[]): Promise<void> {
+    await api.post(`/runtime-sessions/${id}/requests/${encodeURIComponent(requestId)}`, { answers });
+  }
+
+  async dismissQuestion(id: string, requestId: string, action: 'decline' | 'cancel'): Promise<void> {
+    await api.post(`/runtime-sessions/${id}/requests/${encodeURIComponent(requestId)}`, { question_action: action });
+  }
+
   async rename(id: string, title: string): Promise<void> {
     this.byId[id] = await api.patch<RuntimeSession>(`/runtime-sessions/${id}`, { title });
   }
@@ -263,6 +273,9 @@ class RuntimeThreads {
   }
 }
 
+// Install persistence when the runtime surface loads (Threads and embedded chats).
+// Its dependency graph ends at the API/draft store, never back at this module.
+installRuntimeDraftRecovery();
 export const runtimeThreads = new RuntimeThreads();
 
 // Agent UI control (otto.ui_* — the agent drives Otto beside the thread): a
