@@ -343,19 +343,18 @@ impl CodexDriver {
                     Some(server) => format!("{server}.{tool}"),
                     None => tool,
                 };
-                let output = it
-                    .get("result")
-                    .filter(|v| !v.is_null())
-                    .or_else(|| it.get("error").filter(|v| !v.is_null()))
-                    .map(|v| match v {
-                        Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    });
+                let result = crate::tool_images::extract(
+                    it.get("result")
+                        .filter(|v| !v.is_null())
+                        .or_else(|| it.get("error").filter(|v| !v.is_null())),
+                );
+                let output = (!result.text.is_empty()).then_some(result.text);
                 (
                     TurnItemKind::DynamicTool {
                         tool_name: name.clone(),
                         input: it.get("arguments").cloned().unwrap_or(Value::Null),
                         output,
+                        images: result.images,
                     },
                     Some(name),
                 )

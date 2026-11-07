@@ -28,6 +28,9 @@ pub mod pi;
 pub mod process;
 pub mod ring;
 pub mod runtime;
+mod tool_images;
+#[cfg(test)]
+mod tool_images_tests;
 
 use std::sync::Arc;
 

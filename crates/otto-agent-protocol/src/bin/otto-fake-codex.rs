@@ -6,6 +6,7 @@
 //!   `item/commandExecution/requestApproval`; `accept*` runs it (output
 //!   delta, exit 0), `decline` marks it declined, `cancel` interrupts the
 //!   turn.
+//! * `tool image` — a completed MCP result with text, metadata and two PNGs.
 //! * `hang`  — one delta, then waits for `turn/interrupt` → `interrupted`.
 //! * `crash` — exit 3 at once (mid-turn).
 //! * `fail`  — a `commandExecution` that fails (exit 1, output `boom`).
@@ -126,6 +127,25 @@ fn main() {
                     (m, e) => format!(" [{} {} {images}]", m.unwrap_or("-"), e.unwrap_or("-")),
                 };
                 match text.as_str() {
+                    "tool image" => {
+                        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5V8AAAAASUVORK5CYII=";
+                        notify(
+                            "item/completed",
+                            json!({"threadId":thread,"turnId":tid,"item":{
+                            "type":"mcpToolCall","id":"tool-images","server":"preview","tool":"screenshot",
+                            "arguments":{"page":"example"},"status":"completed","result":{
+                                "content":[{"type":"text","text":"Screenshot captured"},
+                                    {"type":"image","mimeType":"image/png","data":png},
+                                    {"type":"image","mimeType":"image/png","data":png}],
+                                "structuredContent":{"width":1,"height":1}
+                            }}}),
+                        );
+                        notify(
+                            "turn/completed",
+                            json!({"threadId":thread,"turn":turn(&tid,"completed")}),
+                        );
+                        current = None;
+                    }
                     "crash" => {
                         eprintln!("fake codex: crashing on purpose");
                         std::process::exit(3);

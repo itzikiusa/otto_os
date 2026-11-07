@@ -1780,3 +1780,17 @@ the mutating request carried one. Emitted by
 Clients keep a slow safety poll (Otto: 5 min, `ui/src/lib/live.ts` `liveQuery`)
 and refetch after a reconnect / `resync`; while the socket is down they fall
 back to their old poll cadence.
+
+### Tool result image previews
+
+`turn_item.updated` / runtime snapshots preserve `dynamic_tool.images?` as
+`[{ mime: string, data_base64: string }]`, alongside the existing `output?`
+text. Omitted or empty `images` means no preview and remains compatible with
+older stored turns. Supported MIME types are `image/png`, `image/jpeg`,
+`image/gif`, and `image/webp`; base64 has no data URL prefix. Provider adapters
+validate base64 and raster signatures before retaining at most four images,
+1 MiB decoded per image and 2 MiB decoded total per tool result. Unsupported,
+malformed, remote-only, or over-limit images become an omission notice in
+`output`; their payload is not copied into the text. Structured MCP metadata
+and accompanying text remain visible. The UI displays bounded inline images
+only; it never fetches a provider image URL or renders HTML/SVG.

@@ -114,7 +114,7 @@ export type TurnItemKind =
   /* Tool items carry `error` (the tool's error text, ~2 KB max) when failed. */
   | { type: 'file_change'; file_name: string; diff_str?: string; old_str?: string; new_str?: string; error?: string }
   | { type: 'command_execution'; input: string; output?: string; exit_code?: number; error?: string }
-  | { type: 'dynamic_tool'; tool_name: string; input: unknown; output?: string; error?: string }
+  | { type: 'dynamic_tool'; tool_name: string; input: unknown; output?: string; images?: ToolOutputImage[]; error?: string }
   /** Web search / fetch tools; `patterns` are the queries or URLs. */
   | { type: 'web_search'; patterns?: string[]; error?: string }
   | {
@@ -395,4 +395,10 @@ export interface RuntimeInterruptResp {
 /** Body of POST /runtime-sessions/{id}/requests/{request_id}. */
 export interface RuntimeRequestRespondReq {
   decision: ApprovalDecision;
+}
+
+/** Inline raster tool result; PNG/JPEG/GIF/WebP, 1 MiB each / 2 MiB total, max 4. */
+export interface ToolOutputImage {
+  mime: string;
+  data_base64: string;
 }

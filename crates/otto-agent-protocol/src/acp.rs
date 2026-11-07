@@ -140,6 +140,7 @@ struct Tool {
     status: ToolCallStatus,
     raw_input: Option<Value>,
     output: String,
+    images: Vec<otto_core::agent_runtime::ToolOutputImage>,
     file: Option<String>,
     diff: Option<(Option<String>, String)>,
     /// Every `(path, old, new)` diff of the call — a multi-file edit renders
@@ -551,6 +552,7 @@ impl AcpDriver {
                 tool_name: t.title.clone(),
                 input: t.raw_input.clone().unwrap_or(Value::Null),
                 output,
+                images: t.images.clone(),
             },
         };
         let mut it = item(
@@ -564,11 +566,14 @@ impl AcpDriver {
     }
 
     fn merge_content(t: &mut Tool, content: &[ToolCallContent]) {
+        let mut media = crate::tool_images::ToolOutput::default();
         for c in content {
             match c {
                 ToolCallContent::Content(c) => {
                     if let ContentBlock::Text(tx) = &c.content {
                         t.output.push_str(&tx.text);
+                    } else if let ContentBlock::Image(image) = &c.content {
+                        media.image(&image.mime_type, &image.data);
                     }
                 }
                 ToolCallContent::Diff(d) => {
@@ -582,6 +587,34 @@ impl AcpDriver {
                 _ => {}
             }
         }
+        if !media.text.is_empty() {
+            if !t.output.is_empty() {
+                t.output.push('\n');
+            }
+            t.output.push_str(&media.text);
+        }
+        t.images = media.images;
+    }
+
+    /// OpenCode may deliver inline file attachments in rawOutput. Content images
+    /// take precedence so the same screenshot is never retained twice.
+    fn merge_raw_images(t: &mut Tool, raw: Option<&Value>) {
+        if !t.images.is_empty() {
+            return;
+        }
+        let Some(raw) =
+            raw.filter(|v| v.get("attachments").is_some() || v.get("content").is_some())
+        else {
+            return;
+        };
+        let media = crate::tool_images::extract(Some(raw));
+        if !media.text.is_empty() && media.text != t.output {
+            if !t.output.is_empty() {
+                t.output.push('\n');
+            }
+            t.output.push_str(&media.text);
+        }
+        t.images = media.images;
     }
 
     fn on_tool_call(&mut self, step: &mut DriverStep, call: ToolCall) {
@@ -596,6 +629,7 @@ impl AcpDriver {
             ..Tool::default()
         };
         Self::merge_content(&mut t, &call.content);
+        Self::merge_raw_images(&mut t, call.raw_output.as_ref());
         step.push(DriverEvent::TurnItem(self.tool_item(&id, &t)));
         self.tools.insert(id, t);
     }
@@ -627,6 +661,14 @@ impl AcpDriver {
             t.output.clear();
             Self::merge_content(&mut t, content);
         }
+        if f.content.is_none()
+            && f.raw_output
+                .as_ref()
+                .is_some_and(|raw| raw.get("attachments").is_some() || raw.get("content").is_some())
+        {
+            t.images.clear();
+        }
+        Self::merge_raw_images(&mut t, f.raw_output.as_ref());
         step.push(DriverEvent::TurnItem(self.tool_item(&id, &t)));
         self.tools.insert(id, t);
     }

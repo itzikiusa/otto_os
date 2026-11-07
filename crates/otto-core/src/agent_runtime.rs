@@ -335,6 +335,8 @@ pub enum TurnItemKind {
         input: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ToolOutputImage>,
     },
     /// Web search / fetch tools (Claude `WebSearch` / `WebFetch`, Codex
     /// `webSearch`); `patterns` are the queries or URLs.
@@ -901,6 +903,14 @@ impl RuntimePromptReq {
             ..Self::default()
         }
     }
+}
+
+/// A bounded inline raster returned by a tool (base64 without a data URL prefix).
+/// Drivers accept PNG/JPEG/GIF/WebP, at most four images, 1 MiB each / 2 MiB total.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolOutputImage {
+    pub mime: String,
+    pub data_base64: String,
 }
 
 /// An inline image attachment (`mime` is `image/*`).

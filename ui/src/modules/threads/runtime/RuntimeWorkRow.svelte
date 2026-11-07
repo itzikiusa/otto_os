@@ -16,6 +16,7 @@
   import { lastLine, patchToDiff } from '../../agents/conversation/format'; // ui-guards: allow — shared chat helpers
   import RuntimeApprovalRow from './RuntimeApprovalRow.svelte';
   import RuntimeRunNotice from './RuntimeRunNotice.svelte';
+  import RuntimeToolImages from './RuntimeToolImages.svelte';
   import { errorText, openedTarget, runNoticeOf, toolError, workLabel, type PendingApproval } from './timeline';
   import { ws } from '../../../lib/stores/workspace.svelte';
   import { threads } from '../threadsStore.svelte';
@@ -167,6 +168,7 @@
       {:else if item.type === 'dynamic_tool'}
         <pre class="rw-pre">{json(item.input)}</pre>
         {#if item.output}<pre class="rw-pre">{item.output}</pre>{/if}
+        <RuntimeToolImages images={item.images} />
       {:else if item.type === 'web_search'}
         <ul class="rw-list">
           {#each item.patterns ?? [] as q (q)}<li dir="auto">{q}</li>{/each}

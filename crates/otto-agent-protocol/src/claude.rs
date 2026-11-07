@@ -126,6 +126,7 @@ struct Tool {
     name: String,
     input: Value,
     output: Option<String>,
+    images: Vec<otto_core::agent_runtime::ToolOutputImage>,
     error: Option<String>,
     status: TurnItemStatus,
 }
@@ -376,6 +377,7 @@ impl ClaudeDriver {
                 tool_name: t.name.clone(),
                 input: t.input.clone(),
                 output: t.output.clone(),
+                images: t.images.clone(),
             },
         };
         let mut it = item(self.tool_item_id(id), t.status, Some(t.name.clone()), kind);
@@ -473,6 +475,7 @@ impl ClaudeDriver {
                         name,
                         input,
                         output: None,
+                        images: Vec::new(),
                         error: None,
                         status: TurnItemStatus::Running,
                     };
@@ -499,7 +502,8 @@ impl ClaudeDriver {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let text = result_text(block.get("content"));
+            let result = crate::tool_images::extract(block.get("content"));
+            let text = result.text;
             let is_error = block.get("is_error").and_then(Value::as_bool) == Some(true);
             if self.on_root_tool_result(step, &id, &text, is_error) {
                 continue;
@@ -514,6 +518,7 @@ impl ClaudeDriver {
                 t.status = TurnItemStatus::Completed;
             }
             t.output = Some(text);
+            t.images = result.images;
             step.push(DriverEvent::TurnItem(self.tool_item(&id, &t)));
         }
     }
@@ -785,19 +790,6 @@ fn terminal_from_result(
         }),
         None,
     )
-}
-
-/// A `tool_result` block's content: a string or an array of text blocks.
-fn result_text(content: Option<&Value>) -> String {
-    match content {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(parts)) => parts
-            .iter()
-            .filter_map(|p| p.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    }
 }
 
 impl StructuredDriver for ClaudeDriver {
