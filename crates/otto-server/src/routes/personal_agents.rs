@@ -29,9 +29,9 @@ use otto_core::domain::{SessionKind, User, WorkspaceRole};
 use otto_core::event::Event;
 use otto_core::Error;
 use otto_state::{
-    AgentRoom, AgentRoomMessage, AgentRoomsRepo, AgentSchedulePatch, NewAgentSchedule,
-    NewPersonalAgent, NewRoomMessage, PersonalAgent, PersonalAgentPatch, PersonalAgentRun,
-    PersonalAgentSchedule, PersonalAgentsRepo, SettingsRepo,
+    AgentRoom, AgentRoomMessage, AgentRoomsRepo, AgentSchedulePatch, NewPersonalAgent,
+    NewRoomMessage, PersonalAgent, PersonalAgentPatch, PersonalAgentRun, PersonalAgentSchedule,
+    PersonalAgentsRepo, SettingsRepo,
 };
 
 use crate::auth::{require_ws_role, CurrentAuthContext, CurrentUser};
@@ -274,15 +274,15 @@ async fn adopt(ctx: &ServerCtx, agent_id: &str, user_id: &str) -> bool {
 
 // --- Agent handlers --------------------------------------------------------
 
-/// `GET /workspaces/{id}/personal-agents` — seeds the example presets (once per
-/// workspace, disabled + fully editable) before the first listing.
+/// `GET /workspaces/{id}/personal-agents` — seeds the main agent (once per
+/// workspace, active) before the first listing.
 async fn list(
     Path(ws_id): Path<String>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Vec<PersonalAgent>>> {
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Viewer).await?;
-    seed_presets(&ctx, &ws_id).await;
+    seed_presets(&ctx, &ws_id, &user).await;
     Ok(Json(
         agents(&ctx)
             .list_by_workspace(&ws_id)
@@ -463,6 +463,13 @@ async fn create_schedule(
     let made = otto_assistant::personal_agent_admin::add_schedule::<ServerCtx>(&repo, &id, req)
         .await
         .map_err(ApiError)?;
+    if made.enabled
+        && otto_assistant::personal_agent_admin::resume_for_routine(&repo, &agent)
+            .await
+            .map_err(ApiError)?
+    {
+        self::changed(&ctx, &agent.workspace_id, &id, "agent");
+    }
     self::changed(&ctx, &agent.workspace_id, &id, "schedules");
     Ok(Json(made))
 }
@@ -1124,10 +1131,14 @@ async fn post_message(
 
 // --- Seed presets -----------------------------------------------------------
 
-/// Seed the four example agents once per workspace (guarded by a settings
-/// marker so deleting them doesn't resurrect them). All DISABLED, all normal
-/// fully-editable rows; model empty = provider default.
-async fn seed_presets(ctx: &ServerCtx, ws_id: &str) {
+/// Seed the workspace's main agent once (guarded by a settings marker so
+/// deleting it doesn't resurrect it). It is ACTIVE: it is the agent the user
+/// talks to, and a routine set up from its chat must fire — a paused seed
+/// silently swallowed "every weekday at 9" routines. It is owned by the
+/// Editor whose listing seeded it (runs act as that person); a Viewer's
+/// listing seeds it ownerless, adopted by the first Editor who changes it.
+/// Other agents come from templates (`+ New agent`) or from the main agent.
+async fn seed_presets(ctx: &ServerCtx, ws_id: &str, user: &User) {
     let settings = SettingsRepo::new(ctx.pool.clone());
     let marker = format!("personal_agents_seeded_{ws_id}");
     if matches!(settings.get(&marker).await, Ok(Some(_))) {
@@ -1141,111 +1152,28 @@ async fn seed_presets(ctx: &ServerCtx, ws_id: &str) {
             return;
         }
     }
-    for (i, (agent, schedules)) in preset_agents(ws_id).into_iter().enumerate() {
-        match repo.create(agent).await {
-            Ok(created) => {
-                for mut s in schedules {
-                    s.agent_id = created.id.clone();
-                    let _ = repo.create_schedule(s).await;
-                }
-                // The first preset is the workspace's main agent: the one
-                // the user talks to, which routes work to the others.
-                if i == 0 {
-                    let _ =
-                        otto_assistant::personal_agent_admin::make_primary(&repo, &created).await;
-                }
-            }
-            Err(e) => tracing::warn!("personal agents: seed preset failed: {e}"),
+    let owner = require_ws_role(ctx, user, &ws_id.to_string(), WorkspaceRole::Editor)
+        .await
+        .is_ok()
+        .then(|| user.id.clone());
+    match repo.create(main_agent_preset(ws_id, owner)).await {
+        Ok(created) => {
+            let _ = otto_assistant::personal_agent_admin::make_primary(&repo, &created).await;
         }
+        Err(e) => tracing::warn!("personal agents: seed main agent failed: {e}"),
     }
     let _ = settings.put(&marker, &json!(true)).await;
 }
 
-/// The built-in example presets: (agent, its schedules). `agent_id` on each
-/// schedule is filled in after the agent row is created.
-/// Seeded with NO owner: a preset seeded by whoever first opened the list
-/// (a Viewer GET) used to run as that person for any Editor who enabled it.
-/// The first Editor to change its instructions adopts it
-/// ([`require_agent_owner`]).
-fn preset_agents(ws_id: &str) -> Vec<(NewPersonalAgent, Vec<NewAgentSchedule>)> {
-    let base = |name: &str, avatar: &str, soul: &str| NewPersonalAgent {
-        avatar: avatar.into(),
-        soul_md: soul.into(),
-        enabled: false,
-        created_by: None,
-        ..NewPersonalAgent::defaults(ws_id.to_string(), name.to_string())
-    };
-    let sched = |spec: Value, directive: &str| NewAgentSchedule {
-        agent_id: String::new(), // filled after the agent row exists
-        schedule: spec,
-        timezone: "UTC".into(),
-        directive: directive.into(),
+/// The seeded main agent; model empty = provider default.
+fn main_agent_preset(ws_id: &str, owner: Option<String>) -> NewPersonalAgent {
+    NewPersonalAgent {
+        avatar: "char:chief".into(),
+        soul_md: otto_assistant::personal_agent_admin::MAIN_AGENT_PERSONA.into(),
         enabled: true,
-    };
-    vec![
-        (
-            base(
-                "Personal Assistant",
-                "char:chief",
-                otto_assistant::personal_agent_admin::MAIN_AGENT_PERSONA,
-            ),
-            vec![],
-        ),
-        (
-            base(
-                "Daily Recap",
-                "📰",
-                "You are a diligent chronicler. You summarize what happened — commits, sessions, \
-                 tickets — into a crisp daily recap, and you watch for anything that needs \
-                 attention between recaps. You never exaggerate; if nothing happened, say so.",
-            ),
-            vec![
-                sched(
-                    json!({"cadence": "daily", "at": "09:00"}),
-                    "Produce the daily recap: summarize the last 24 hours of activity (commits, \
-                     sessions, open work) into a short report with a highlights summary.",
-                ),
-                sched(
-                    json!({"cadence": "interval", "every_min": 15}),
-                    "Quick check: is there anything that needs the user's attention right now \
-                     (failing runs, stuck sessions, urgent tickets)? If nothing needs attention, \
-                     report exactly that in one line.",
-                ),
-            ],
-        ),
-        (
-            base(
-                "Casino Reviewer",
-                "🎰",
-                "You are a meticulous casino site reviewer working WITHOUT logging in. You browse \
-                 public pages only, checking content, offers, and page health, and produce a \
-                 structured review. You never attempt to authenticate or bypass anything.",
-            ),
-            vec![sched(
-                json!({"cadence": "daily", "at": "08:00"}),
-                "Review the configured casino sites' public pages: availability, visible offers, \
-                 and anything broken or changed since your last notes. Batch the findings into \
-                 one structured report.",
-            )],
-        ),
-        (
-            base(
-                "Casino Reviewer Player",
-                "🃏",
-                "You are a casino site reviewer who checks the logged-in player experience. \
-                 IMPORTANT: login credentials are provided to you at runtime via the machine's \
-                 Keychain-backed configuration — they are NEVER written in this persona, in \
-                 prompts, in reports, or in room messages, and you must never echo them anywhere.",
-            ),
-            vec![sched(
-                json!({"cadence": "daily", "at": "08:30"}),
-                "Using the runtime-provided credentials (never printed), review the logged-in \
-                 player experience: login flow health, balance/bonus visibility, and any \
-                 regressions since your last notes. Report findings without including any \
-                 credential material.",
-            )],
-        ),
-    ]
+        created_by: owner,
+        ..NewPersonalAgent::defaults(ws_id.to_string(), "Personal Assistant".to_string())
+    }
 }
 
 #[cfg(test)]
@@ -1267,7 +1195,7 @@ mod tests {
 
     #[test]
     fn owner_only_changes_ignore_unchanged_and_open_fields() {
-        let mut agent = preset_agents("ws1").remove(0).0;
+        let mut agent = main_agent_preset("ws1", None);
         agent.delivery = json!({"type":"none"});
         let stored = PersonalAgent {
             admission_generation: 0,
@@ -1311,40 +1239,12 @@ mod tests {
     }
 
     #[test]
-    fn presets_are_disabled_editable_rows() {
-        let presets = preset_agents("ws1");
-        assert_eq!(presets.len(), 4);
-        assert!(
-            presets.iter().all(|(a, _)| a.created_by.is_none()),
-            "presets seed with no owner (they must not run as whoever listed first)"
-        );
-        assert!(
-            presets.iter().all(|(a, _)| !a.enabled),
-            "presets seed disabled"
-        );
-        assert!(
-            presets.iter().all(|(a, _)| a.model.is_empty()),
-            "model empty = provider default"
-        );
-        // Daily Recap carries TWO schedules (daily + 15-min needs-attention).
-        let recap = presets
-            .iter()
-            .find(|(a, _)| a.name == "Daily Recap")
-            .unwrap();
-        assert_eq!(recap.1.len(), 2);
-        assert_eq!(recap.1[0].schedule["cadence"], "daily");
-        assert_eq!(recap.1[1].schedule["every_min"], 15);
-        // The player reviewer's persona references Keychain, never credentials.
-        let player = presets
-            .iter()
-            .find(|(a, _)| a.name == "Casino Reviewer Player")
-            .unwrap();
-        assert!(player.0.soul_md.contains("Keychain"));
-        for (_, schedules) in &presets {
-            for s in schedules {
-                assert!(crate::cadence::validate(&s.schedule).is_ok());
-            }
-        }
+    fn the_seeded_main_agent_is_active_and_owned_by_the_seeder() {
+        let a = main_agent_preset("ws1", Some("u1".into()));
+        assert!(a.enabled, "a paused main agent never fires its routines");
+        assert_eq!(a.created_by.as_deref(), Some("u1"));
+        assert!(a.model.is_empty(), "model empty = provider default");
+        assert!(main_agent_preset("ws1", None).created_by.is_none());
     }
 
     #[test]

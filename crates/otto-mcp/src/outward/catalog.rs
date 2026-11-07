@@ -1258,6 +1258,7 @@ fn own_tool_specs() -> [Value; 6] {
             "description":"Set up a routine for yourself (no approval). Turn the user's words into `schedule`; omit `timezone` for the user's own. Returns it with next_runs — confirm the schedule and next run in one line.",
             "inputSchema":{"type":"object","required":["schedule","instruction"],"properties":{
                 "schedule":sched,"timezone":{"type":"string","description":"IANA, e.g. Asia/Jerusalem"},
+                "name":{"type":"string","description":"2–5 word title in the user's words, e.g. Morning PR brief"},
                 "instruction":{"type":"string","description":"what each run does"},"deliver":deliver,
                 "enabled":{"type":"boolean"},"permission":{"type":"string","enum":["directed","read_only"]},
                 "agent":agent,"session_id":sid}}}),

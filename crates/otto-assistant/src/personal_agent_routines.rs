@@ -105,8 +105,13 @@ pub fn render_self_section() -> &'static str {
      with `otto_routine_create` — no approval needed — and confirm in one line with its \
      schedule and next run. `otto_routine_list` / `otto_routine_update` (also pause: \
      enabled=false) / `otto_routine_delete` manage them. Turn the user's words into the \
-     structured schedule yourself; omit the timezone to use the user's own. Each result is \
-     posted into this chat automatically.\n\
+     structured schedule yourself; omit the timezone to use the user's own. Always give it a \
+     `name` the user would say (2–5 words, e.g. \"Morning PR brief\") and write the \
+     instruction in the user's voice (\"Remind me to review stale PRs\", never \"Remind the \
+     user …\"). Check \
+     `otto_routine_list` first: if a routine already runs on that schedule, ask before adding \
+     another. If the result has a `note`, pass it on. Always state times in the \
+     user's own timezone (next_runs already are), never in UTC or another zone. Each result is posted into this chat automatically.\n\
      - `otto_personality_set` changes your personality when the user asks (\"be more \
      blunt\").\n\
      - Learning: keep `memory/notes.md` small and curated — one fact per line, rewrite \
@@ -146,6 +151,10 @@ pub struct RoutineIn {
     /// What each run does.
     #[serde(default)]
     pub instruction: Option<String>,
+    /// A short title (create only) — stored as the instruction's first line,
+    /// which is what every list shows.
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(default)]
     pub deliver: Option<Deliver>,
     #[serde(default)]
@@ -267,10 +276,14 @@ pub fn next_runs<C: AssistantCtx>(
 ) -> Vec<String> {
     let mut out = Vec::new();
     let mut at = from;
+    // In the user's own clock, so an agent quoting them never says "UTC".
+    let user_tz = local_timezone()
+        .parse::<chrono_tz::Tz>()
+        .unwrap_or(chrono_tz::UTC);
     for _ in 0..n {
         match C::cadence_next_run(spec, at, tz) {
             Some(t) if t > at => {
-                out.push(t.to_rfc3339());
+                out.push(t.with_timezone(&user_tz).to_rfc3339());
                 at = t;
             }
             _ => break,
@@ -405,7 +418,8 @@ pub async fn create<C: AssistantCtx>(
     req: RoutineIn,
 ) -> Result<Value> {
     let repo = pa_engine::repo(ctx);
-    if repo.list_schedules(&agent.id).await?.len() >= MAX_ROUTINES {
+    let existing = repo.list_schedules(&agent.id).await?;
+    if existing.len() >= MAX_ROUTINES {
         return Err(Error::Conflict(format!(
             "an agent can have at most {MAX_ROUTINES} routines"
         )));
@@ -416,6 +430,10 @@ pub async fn create<C: AssistantCtx>(
             .ok_or_else(|| Error::Invalid("schedule is required".into()))?,
     )?;
     let instruction = req.instruction.unwrap_or_default();
+    let instruction = match req.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        Some(name) => format!("{}\n\n{instruction}", one_line(name)),
+        None => instruction,
+    };
     if instruction.trim().is_empty() || instruction.len() > MAX_TEXT {
         return Err(Error::Invalid("instruction must be 1 byte – 16 KB".into()));
     }
@@ -443,8 +461,30 @@ pub async fn create<C: AssistantCtx>(
         .await?;
     repo.set_schedule_delivery(&s.id, delivery.as_ref()).await?;
     crate::personal_agent_admin::refresh_next_run::<C>(&repo, &s).await;
+    let resumed =
+        s.enabled && crate::personal_agent_admin::resume_for_routine(&repo, agent).await?;
     pa_engine::emit_changed(ctx, &agent.workspace_id, &agent.id, "schedules");
-    Ok(routine_view::<C>(agent, &repo.get_schedule(&s.id).await?))
+    let agent = PersonalAgent {
+        enabled: agent.enabled || resumed,
+        ..agent.clone()
+    };
+    let mut view = routine_view::<C>(&agent, &repo.get_schedule(&s.id).await?);
+    // A near-duplicate is usually a misunderstanding — say so, don't block.
+    if let Some(twin) = existing
+        .iter()
+        .find(|o| o.schedule == s.schedule && o.timezone == s.timezone)
+    {
+        view["note"] = json!(format!(
+            "Another routine already runs on this schedule: \"{}\". Tell the user and ask \
+             whether to keep both.",
+            routine_label(&twin.directive)
+        ));
+    }
+    if resumed {
+        // Tell the agent so it can say so ("I was paused — I'm active again").
+        view["agent_resumed"] = json!(true);
+    }
+    Ok(view)
 }
 
 /// The routine `id` of `agent` (never another agent's).

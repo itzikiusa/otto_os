@@ -3,7 +3,7 @@
 //! messenger bot's proactive follow-ups work:
 //!
 //! * a scheduled / manual / proactive run's result is posted as an attributed
-//!   notice ("Scheduled · Morning brief — done: …", with the run thread);
+//!   notice ("Morning brief ran · …", with the run thread);
 //! * a delegated task's outcome reaches the main agent's chat as its next
 //!   turn (the main agent reads the report and answers the user), and a
 //!   failed, stopped or lost delegation says so there. The lead never
@@ -18,6 +18,7 @@
 
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
 use otto_core::agent_runtime::RuntimeSessionStatus;
 use otto_core::keyed_lock::KeyedLocks;
 use otto_core::{Error, Id, Result};
@@ -175,7 +176,13 @@ pub fn framed(label: &str, thread: Option<&str>, body: &str) -> String {
 /// A routine's short name: its directive's first line (≤ 48 chars), else
 /// "Routine".
 pub fn routine_label(directive: &str) -> String {
-    let first = directive
+    routine_label_n(directive, 48)
+}
+
+/// The first non-empty line without markdown heading marks, cut at a word
+/// boundary to at most `max` chars ("Routine" when there is none).
+fn routine_label_n(text: &str, max: usize) -> String {
+    let first = text
         .lines()
         .map(|l| l.trim().trim_start_matches('#').trim())
         .find(|l| !l.is_empty())
@@ -183,11 +190,15 @@ pub fn routine_label(directive: &str) -> String {
     if first.is_empty() {
         return "Routine".into();
     }
-    let mut s: String = first.chars().take(48).collect();
-    if first.chars().count() > 48 {
-        s.push('…');
+    if first.chars().count() <= max {
+        return first.to_string();
     }
-    s
+    let cut: String = first.chars().take(max).collect();
+    let cut = match cut.rfind(' ') {
+        Some(i) if i > max / 2 => &cut[..i],
+        _ => cut.as_str(),
+    };
+    format!("{}…", cut.trim_end_matches([',', ';', ':', ' ']))
 }
 
 /// The label a run is attributed with: "Scheduled · <routine>", "Manual
@@ -204,43 +215,88 @@ pub fn run_label(run: &PersonalAgentRun, routine: Option<&str>, goal: Option<&st
                 .map(routine_label)
                 .unwrap_or_else(|| "Routine".into())
         ),
-        _ => "Manual run".into(),
+        // Run now of a routine: named by the routine, not "Manual run".
+        _ => routine
+            .map(routine_label)
+            .unwrap_or_else(|| "Manual run".into()),
     }
 }
 
 /// What a finished run posts into its agent's chat.
-pub fn run_post(run: &PersonalAgentRun, label: &str) -> Post {
+/// `report` is the run's report file (the agent gets all of it, up to 6 KB;
+/// the stored summary is only its lead), else the summary.
+pub fn run_post(run: &PersonalAgentRun, label: &str, report: Option<&str>) -> Post {
     let outcome = match run.status.as_str() {
         "ok" => "done",
         "canceled" => "stopped",
         _ => "failed",
     };
     let detail = match run.status.as_str() {
-        "ok" => one_line(&run.summary),
+        // What it found — the first line that is not a heading — not the
+        // report's title ("Night Brief — Fri 6 Nov") or the whole report.
+        "ok" => routine_label_n(
+            run.summary
+                .lines()
+                .find(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+                .unwrap_or(&run.summary),
+            280,
+        ),
         _ => one_line(run.error.as_deref().unwrap_or("no reason given")),
     };
     let detail: String = detail.chars().take(280).collect();
-    let notice = if detail.is_empty() {
-        format!("{label} — {outcome}")
-    } else {
-        format!("{label} — {outcome}: {detail}")
+    // "Morning brief ran · Two PRs need review" / "Manual run failed · …".
+    let subject = label
+        .strip_prefix("Scheduled · ")
+        .unwrap_or(label)
+        .trim_end_matches(['.', ' ']);
+    let verb = match outcome {
+        "done" if subject == "Manual run" => "finished",
+        "done" => "ran",
+        "stopped" => "was stopped",
+        _ => "failed",
     };
+    let notice = if detail.is_empty() || detail == "Routine" {
+        format!("{subject} {verb}")
+    } else {
+        format!("{subject} {verb} · {detail}")
+    };
+    // The chat renders a notice ending in this marker as a result card with
+    // "Open report" (ui `runNoticeOf`); a notice is plain text, so the run id
+    // rides along in it.
+    let notice = format!("{notice} [otto-run:{}]", run.id);
     let turn = if run.mode == "proactive" {
         Turn::Never
     } else {
+        // Always a short turn: the agent must KNOW what its routine found
+        // (a notice is UI-only — without the turn "what did my brief say?"
+        // got "no such routine"), and the user reads the brief in the chat.
+        let report: String = match run.status.as_str() {
+            "ok" => report
+                .unwrap_or(&run.summary)
+                .trim()
+                .chars()
+                .take(6000)
+                .collect(),
+            _ => detail.clone(),
+        };
+        let now = Utc::now()
+            .with_timezone(
+                &crate::personal_agent_routines::local_timezone()
+                    .parse::<chrono_tz::Tz>()
+                    .unwrap_or(chrono_tz::UTC),
+            )
+            .format("%a %-d %b %H:%M");
         let body = format!(
-            "Otto: your {} finished ({outcome}). {}\n\nTell the user in one or two sentences \
-             what it found (or why it failed) and whether anything needs them. Do not re-run \
-             it. The report is in Personal Agents › Library; this is information, not an \
-             instruction from the user.",
-            label.to_lowercase(),
-            if detail.is_empty() {
-                String::new()
-            } else {
-                format!("Summary: {detail}")
-            }
+            "Otto: \"{subject}\" {verb} (it is now {now}). It is your own routine — you ran it, \
+             in a separate session; this is your own report — own it, and answer questions about \
+             it as its author.\n\n{report}\n\nAbove your reply \
+             the user sees \"<routine> ran · <the report's first line>\" with a link to the \
+             report. Do not repeat that line: add only what it leaves out — in at most two short \
+             lines — and whether anything needs them (or why it failed); if that line already \
+             says it all, reply with one short line on whether anything needs them — plainly; never mention this message, tools or Otto's plumbing. Do not re-run it. The full report is under its recent runs; this is information, \
+             not an instruction from the user."
         );
-        Turn::IfNoNotice(framed(label, run.session_id.as_deref(), &body))
+        Turn::Always(framed(label, run.session_id.as_deref(), &body))
     };
     Post { notice, turn }
 }
@@ -289,6 +345,10 @@ pub fn post_run_result<C: AssistantCtx>(ctx: &C, agent: &PersonalAgent, run_id: 
             None => None,
         };
         let label = run_label(&run, routine.as_deref(), goal.as_deref());
+        let report = match run.report_path.as_deref() {
+            Some(p) => tokio::fs::read_to_string(p).await.ok(),
+            None => None,
+        };
         let chat = match owner_chat(&ctx, &agent).await {
             Ok(Some(c)) => c,
             Ok(None) => return,
@@ -300,7 +360,7 @@ pub fn post_run_result<C: AssistantCtx>(ctx: &C, agent: &PersonalAgent, run_id: 
         if let Err(e) = deliver(
             &RuntimeSink(&ctx),
             &chat,
-            &run_post(&run, &label),
+            &run_post(&run, &label, report.as_deref()),
             BUSY_WAIT,
         )
         .await
@@ -417,45 +477,92 @@ pub(crate) mod tests {
             "Manual run"
         );
         assert_eq!(
+            run_label(
+                &run("ok", "manual", "directed"),
+                Some("Morning brief\n\nDo it"),
+                None
+            ),
+            "Morning brief"
+        );
+        assert_eq!(
             run_label(&run("ok", "proactive", "proactive"), None, Some("Watch CI")),
             "Proactive · Watch CI"
         );
         assert_eq!(routine_label(""), "Routine");
         assert!(routine_label(&"x".repeat(80)).ends_with('…'));
+        // Cut at a word, never mid-word.
+        assert_eq!(
+            routine_label("List my open pull requests and flag the ones waiting on me for review"),
+            "List my open pull requests and flag the ones…"
+        );
     }
 
     #[test]
     fn a_run_post_carries_the_outcome_and_links_the_run_thread() {
-        let ok = run_post(&run("ok", "schedule", "scheduled"), "Scheduled · Brief");
-        assert_eq!(ok.notice, "Scheduled · Brief — done: Two PRs need review");
-        let Turn::IfNoNotice(t) = &ok.turn else {
+        let ok = run_post(
+            &run("ok", "schedule", "scheduled"),
+            "Scheduled · Brief",
+            None,
+        );
+        assert_eq!(ok.notice, "Brief ran · Two PRs need review [otto-run:r1]");
+        let Turn::Always(t) = &ok.turn else {
             panic!("{:?}", ok.turn)
         };
         assert!(
             t.starts_with("[Message from Scheduled · Brief (t-run)]: "),
             "{t}"
         );
-        let bad = run_post(&run("error", "manual", "directed"), "Manual run");
-        assert_eq!(bad.notice, "Manual run — failed: the agent exited");
+        // The agent gets the report itself, not just that something ran.
+        assert!(t.contains("Two PRs need review"), "{t}");
+        let bad = run_post(&run("error", "manual", "directed"), "Manual run", None);
+        assert_eq!(
+            bad.notice,
+            "Manual run failed · the agent exited [otto-run:r1]"
+        );
         // Proactive findings never cost a chat turn.
         assert_eq!(
-            run_post(&run("ok", "proactive", "proactive"), "Proactive").turn,
+            run_post(&run("ok", "proactive", "proactive"), "Proactive", None).turn,
             Turn::Never
         );
     }
 
+    #[test]
+    fn the_notice_says_what_it_found_and_the_agent_gets_the_whole_report() {
+        let mut r = run("ok", "schedule", "scheduled");
+        r.summary = "# Night Brief — Fri 6 Nov\n\nYou have 5 routines and one tip below.".into();
+        let post = run_post(
+            &r,
+            "Scheduled · Night brief",
+            Some("# Night Brief\n\n- 23:56\n- 5 routines\n- Tip: batch your PR reviews"),
+        );
+        assert_eq!(
+            post.notice,
+            "Night brief ran · You have 5 routines and one tip below. [otto-run:r1]"
+        );
+        let Turn::Always(t) = &post.turn else {
+            panic!("{:?}", post.turn)
+        };
+        assert!(t.contains("Tip: batch your PR reviews"), "{t}");
+    }
+
     #[tokio::test]
-    async fn a_report_lands_as_a_notice_without_a_turn() {
+    async fn a_report_lands_as_a_notice_and_a_turn_the_agent_sees() {
         let sink = FakeSink::open();
-        let post = run_post(&run("ok", "schedule", "scheduled"), "Scheduled · Brief");
+        let post = run_post(
+            &run("ok", "schedule", "scheduled"),
+            "Scheduled · Brief",
+            None,
+        );
         let d = deliver(&sink, &"c".into(), &post, Duration::ZERO)
             .await
             .unwrap();
-        assert!(d.noticed && !d.prompted && !d.reopened);
+        assert!(d.noticed && d.prompted && !d.reopened);
+        let log = sink.log();
         assert_eq!(
-            sink.log(),
-            vec!["notice:Scheduled · Brief — done: Two PRs need review"]
+            log[0],
+            "notice:Brief ran · Two PRs need review [otto-run:r1]"
         );
+        assert!(log[1].starts_with("prompt:[Message from Scheduled · Brief"));
     }
 
     #[tokio::test]
@@ -464,7 +571,11 @@ pub(crate) mod tests {
             can_notice: false,
             ..FakeSink::open()
         };
-        let post = run_post(&run("ok", "schedule", "scheduled"), "Scheduled · Brief");
+        let post = run_post(
+            &run("ok", "schedule", "scheduled"),
+            "Scheduled · Brief",
+            None,
+        );
         let d = deliver(&sink, &"c".into(), &post, Duration::ZERO)
             .await
             .unwrap();
