@@ -34,7 +34,7 @@ test('re-review keeps the previous report and opens the new iteration after conf
     await page.route('**/api/v1/workflows/wf-rereview', route => route.fulfill({ json: workflow }));
     await page.route('**/api/v1/workflows/wf-rereview/runs?summary=true', route => route.fulfill({ json: [previous] }));
     await page.route('**/api/v1/reviews/finding-review**', route => route.fulfill({ json: { id: 'finding-review', status: 'done', agents: [], comments: [] } }));
-    await page.route('**/api/v1/workflow-runs/review-**', route => {
+    await page.route(/\/api\/v1\/workflow-runs\/review-(old|new)(?:\/.*)?(?:\?.*)?$/, route => {
       const path = new URL(route.request().url()).pathname;
       const run = path.includes('review-new') ? next : previous;
       if (path.endsWith('/re-review')) { requests++; return route.fulfill({ json: next }); }
