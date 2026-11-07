@@ -88,7 +88,7 @@ export interface PlanStep {
   status: PlanStepStatus;
 }
 
-export type RequestKind = 'command' | 'file_read' | 'file_change' | 'mcp_elicitation' | 'permission';
+export type RequestKind = 'command' | 'file_read' | 'file_change' | 'mcp_elicitation' | 'permission' | 'question';
 
 export type ApprovalDecision = 'accept' | 'accept_for_session' | 'accept_always' | 'decline' | 'cancel';
 
@@ -182,6 +182,22 @@ export type RuntimeRequestStatus = 'pending' | 'resolved' | 'expired' | 'cancell
 
 export type ResponseCapability = { type: 'live' } | { type: 'not_resumable'; reason: string };
 
+export interface QuestionOption { value: string; label: string; description?: string; }
+export interface RuntimeQuestion {
+  id: string;
+  header: string;
+  prompt: string;
+  kind: 'single' | 'multi' | 'text';
+  required: boolean;
+  allow_empty?: boolean;
+  allow_free_text: boolean;
+  options: QuestionOption[];
+}
+export type QuestionAnswer =
+  | { question_id: string; type: 'single'; value: string }
+  | { question_id: string; type: 'multi'; values: string[] }
+  | { question_id: string; type: 'text'; text: string };
+
 export interface RuntimeRequest {
   id: Id;
   turn_id: Id | null;
@@ -192,6 +208,9 @@ export interface RuntimeRequest {
   resolved_at: string | null;
   decision?: ApprovalDecision;
   cancel_reason?: RequestCancelReason;
+  questions?: RuntimeQuestion[];
+  question_title?: string;
+  answers?: QuestionAnswer[];
 }
 
 export interface PlanArtifact {
@@ -396,9 +415,8 @@ export interface RuntimeInterruptResp {
 }
 
 /** Body of POST /runtime-sessions/{id}/requests/{request_id}. */
-export interface RuntimeRequestRespondReq {
-  decision: ApprovalDecision;
-}
+export type RuntimeRequestRespondReq = { decision: ApprovalDecision } | { answers: QuestionAnswer[] } | { question_action: 'decline' | 'cancel' };
+
 
 /** Inline raster tool result; PNG/JPEG/GIF/WebP, 1 MiB each / 2 MiB total, max 4. */
 export interface ToolOutputImage {

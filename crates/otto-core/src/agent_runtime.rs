@@ -252,6 +252,7 @@ pub enum RequestKind {
     FileRead,
     FileChange,
     McpElicitation,
+    Question,
     Permission,
 }
 
@@ -464,7 +465,12 @@ pub enum ResponseCapability {
     },
 }
 
-/// An approval the agent is blocked on (`OrchestrationV2RuntimeRequest`).
+mod questions;
+pub use questions::{
+    validate_question_answers, QuestionAnswer, QuestionKind, QuestionOption, RuntimeQuestion,
+};
+
+/// An approval or structured question the agent is blocked on (`OrchestrationV2RuntimeRequest`).
 /// Its options ride the matching `approval_request` turn item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeRequest {
@@ -479,6 +485,13 @@ pub struct RuntimeRequest {
     pub decision: Option<ApprovalDecision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel_reason: Option<CancelReason>,
+    /// Full form data lives outside the compact timeline/tool projection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<RuntimeQuestion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answers: Option<Vec<QuestionAnswer>>,
 }
 
 /// Why a request was cancelled: the provider withdrew it (`agent` — Claude
@@ -965,11 +978,27 @@ pub struct RuntimePromptResp {
     pub steered: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionDismissAction {
+    Decline,
+    Cancel,
+}
+
 /// `POST /runtime-sessions/{id}/requests/{request_id}` (T3 Code
 /// `runtime-request.respond`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuntimeRequestRespondReq {
-    pub decision: ApprovalDecision,
+#[serde(untagged, deny_unknown_fields)]
+pub enum RuntimeRequestRespondReq {
+    Approval {
+        decision: ApprovalDecision,
+    },
+    Question {
+        answers: Vec<QuestionAnswer>,
+    },
+    DismissQuestion {
+        question_action: QuestionDismissAction,
+    },
 }
 
 #[cfg(test)]
@@ -1070,6 +1099,9 @@ mod tests {
                     resolved_at: None,
                     decision: Some(ApprovalDecision::AcceptForSession),
                     cancel_reason: Some(CancelReason::Interrupt),
+                    questions: vec![],
+                    question_title: None,
+                    answers: None,
                 },
             },
             RuntimeEventBody::PlanUpdated {
@@ -1205,5 +1237,21 @@ mod tests {
             assert_eq!(RuntimeAccessMode::parse(m.as_str()), Some(m));
             assert_eq!(serde_json::to_value(m).unwrap(), json!(m.as_str()));
         }
+    }
+    #[test]
+    fn request_response_payloads_never_mix_answers_and_approval() {
+        assert!(serde_json::from_value::<RuntimeRequestRespondReq>(json!({"answers":[]})).is_ok());
+        assert!(serde_json::from_value::<RuntimeRequestRespondReq>(
+            json!({"decision":"accept","answers":[]})
+        )
+        .is_err());
+        assert!(serde_json::from_value::<RuntimeRequestRespondReq>(
+            json!({"question_action":"decline"})
+        )
+        .is_ok());
+        assert!(serde_json::from_value::<RuntimeRequestRespondReq>(
+            json!({"question_action":"decline","answers":[]})
+        )
+        .is_err());
     }
 }

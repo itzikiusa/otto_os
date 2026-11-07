@@ -942,7 +942,7 @@ attachments.
 | POST /runtime-sessions/{id}/queue/{queued_id} | owner-or-admin, person | `QueuedDeliverReq {delivery: "steer"\|"interrupt"}` | **202** `RuntimePromptResp` — delivers a queued message now (`steer` into the running turn, or stop it and send this next; with no turn running it simply starts one). **404** no longer queued |
 | DELETE /runtime-sessions/{id}/queue/{queued_id} | owner-or-admin, person | — | **204** — removes a queued message. **404** no longer queued |
 | POST /runtime-sessions/{id}/interrupt | owner-or-admin, person | — | `{interrupted}` — `false` when no turn was running. Pending requests → `cancelled` (`cancel_reason: "interrupt"`); the provider ends the turn (`turn.terminal` `interrupted`); if it has not within 10 s its process group is killed and the turn ends `interrupted` anyway |
-| POST /runtime-sessions/{id}/requests/{request_id} | owner-or-admin, person (`Admin` class) | `{decision}` ∈ `accept \| accept_for_session \| accept_always \| decline \| cancel` — one of the request's `approval_request` item `options[].decision` (`cancel` always allowed) | **204**; the request → `resolved` with the decision. **404** unknown / no longer pending, **400** a decision that was not offered |
+| POST /runtime-sessions/{id}/requests/{request_id} | owner-or-admin, person (`Admin` class) | Exactly one of `{decision}` for an approval, `{answers: QuestionAnswer[]}` for a question, or `{question_action: "decline"|"cancel"}` to dismiss a question (see below) | **204** resolved; **404** unknown / no longer pending, **400** wrong response kind, missing/duplicate field, invalid option or unoffered decision, **409** provider cannot accept the response |
 | POST /runtime-sessions/{id}/close | owner-or-admin, person | — | `RuntimeSession` (`status: closed`). Pending requests → `cancelled` (`cancel_reason: "closed"`). Ends a running turn `interrupted`, closes the child's stdin (SIGTERM / SIGKILL to its group after 3 s each). Idempotent; later prompts **409** (reopen first) |
 | POST /runtime-sessions/{id}/reopen | owner-or-admin, person | — | `RuntimeSession` — a `closed` session takes prompts again: its agent respawns now, resuming `native_thread_id` (a refused resume → a fresh conversation + `system_notice`). Its `meta` is kept. No-op on an open session. Spawn failures as for create (**400**; the session stays open, the next prompt retries) |
 | DELETE /runtime-sessions/{id} | owner-or-admin, person | — | **204** — closes the session (as above), then removes its row, projection and attachments. Not undoable |
@@ -6347,3 +6347,45 @@ An admitted turn continues independently of a disconnected HTTP response, so
 Stop can still find it and wait for cleanup. No other conversation or story-wide
 task is cancelled. Story deletion still
 cancels all its studio turns through the existing story lifecycle.
+
+
+### Structured runtime questions
+
+`runtime_request.kind: "question"` carries `questions: [{id, header, prompt,
+kind: "single"|"multi"|"text", required, allow_free_text, allow_empty?, options:
+[{value, label, description?}]}]` and optional `question_title`. IDs and option
+values are opaque native values, distinct from labels. Full forms live on the
+request entity, independently of compact tool/timeline rows and replay windows.
+Pending questions use the existing session `waiting` state (the legacy session
+row status is `awaiting_permission`), but are never permission approvals.
+
+Answer with `{answers: [...]}` using tagged entries:
+
+```json
+{"answers":[{"question_id":"strategy","type":"single","value":"safe_v1"},
+{"question_id":"targets","type":"multi","values":["api","ui"]},
+{"question_id":"notes","type":"text","text":"Keep the public API stable"}]}
+```
+
+Every required field must be present exactly once. Single/multi values must be
+offered; free text is accepted only when the form allows it. Invalid answers do
+not consume the request. An approval decision cannot answer a question, and a
+question answer cannot approve a tool. Resolved requests include `answers`;
+withdrawn/interrupted requests become `cancelled`. Restarted processes leave
+requests `expired` with `response_capability: {type: "not_resumable", reason}`;
+they cannot be answered through a new provider process. Answers are never sent
+as ordinary chat messages or granted as permission rules.
+
+Supported native forms: Codex `item/tool/requestUserInput` (native question ID
+and answer array), Claude `AskUserQuestion` (question text is the native map key;
+multi-select answers use Claude's comma-separated format), and the draft ACP
+`elicitation/create` session-scoped form subset (strings, string enums/titled
+choices, arrays of string choices). ACP numeric/boolean fields, validation
+constraints, nested schemas, URL/auth/request-scoped elicitations and secret
+questions are explicitly unsupported; the provider receives an error/denial,
+never a fabricated answer. ACP support follows the upstream draft and does not
+imply every ACP provider emits these requests.
+
+A question can also be dismissed without answering via `question_action` (`decline` or `cancel`). ACP preserves that native action; Claude denies only the question tool, and Codex returns an empty native answer map. The request becomes `cancelled`, without granting any permission.
+
+For unconstrained ACP fields, `allow_empty: true` preserves schema semantics: required means the property must be present, so an empty text value or empty multi-select array remains valid. Native Codex/Claude required answers must be nonempty.

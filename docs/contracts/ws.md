@@ -1798,3 +1798,13 @@ malformed, remote-only, or over-limit images become an omission notice in
 `output`; their payload is not copied into the text. Structured MCP metadata
 and accompanying text remain visible. The UI displays bounded inline images
 only; it never fetches a provider image URL or renders HTML/SVG.
+
+
+Structured questions use the same `runtime_request.updated` whole-entity upsert
+and snapshot/replay lifecycle. `kind: "question"` carries `questions`, optional
+`question_title`, and, after resolution, `answers` (shapes in api.md
+"Structured runtime questions"). They do not create `approval_request` items.
+Several forms can be pending at once. Provider withdrawal, interruption,
+terminal turns and daemon restart settle/expire them using the same request
+status and response-capability rules as approvals. The full question data
+remains available even when its original tool row is folded or omitted.

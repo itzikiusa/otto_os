@@ -104,6 +104,13 @@ pub enum DriverEvent {
         /// The turn item id of the tool call it gates, when known.
         tool_item_id: Option<String>,
     },
+    /// A typed user question, never a permission approval.
+    Question {
+        id: String,
+        title: Option<String>,
+        questions: Vec<otto_core::agent_runtime::RuntimeQuestion>,
+        tool_item_id: Option<String>,
+    },
     /// The provider withdrew or settled an open request itself (Claude
     /// `control_cancel_request`, Codex `serverRequest/resolved`).
     RequestClosed {
@@ -269,6 +276,26 @@ pub trait StructuredDriver: Send + 'static {
         request_id: &str,
         decision: ApprovalDecision,
     ) -> Result<DriverStep, DriverError>;
+
+    fn respond_question(
+        &mut self,
+        _request_id: &str,
+        _answers: &[otto_core::agent_runtime::QuestionAnswer],
+    ) -> Result<DriverStep, DriverError> {
+        Err(DriverError(
+            "this provider does not support structured answers".into(),
+        ))
+    }
+
+    fn dismiss_question(
+        &mut self,
+        _request_id: &str,
+        _action: otto_core::agent_runtime::QuestionDismissAction,
+    ) -> Result<DriverStep, DriverError> {
+        Err(DriverError(
+            "this provider cannot dismiss structured questions".into(),
+        ))
+    }
 
     fn on_line(&mut self, line: &str) -> DriverStep;
 

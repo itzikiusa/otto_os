@@ -580,6 +580,20 @@ impl ClaudeDriver {
             self.sub_tool_item_id(id)
                 .unwrap_or_else(|| self.tool_item_id(id))
         });
+        let questions = if tool_name == "AskUserQuestion" {
+            match crate::questions::native_questions(&input, true) {
+                Ok(q) => Some(q),
+                Err(message) => {
+                    step.write(Self::control_success(
+                        cli_request_id,
+                        json!({"behavior":"deny","message":message}),
+                    ));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         self.pending.insert(
             request_id.clone(),
             Pending {
@@ -594,6 +608,15 @@ impl ClaudeDriver {
                     .unwrap_or_default(),
             },
         );
+        if let Some(questions) = questions {
+            step.push(DriverEvent::Question {
+                id: request_id,
+                title: None,
+                questions,
+                tool_item_id,
+            });
+            return;
+        }
         step.push(DriverEvent::Request {
             id: request_id,
             kind,
@@ -920,6 +943,13 @@ impl StructuredDriver for ClaudeDriver {
         request_id: &str,
         decision: ApprovalDecision,
     ) -> Result<DriverStep, DriverError> {
+        if self
+            .pending
+            .get(request_id)
+            .is_some_and(|p| p.tool_name == "AskUserQuestion")
+        {
+            return Err(DriverError("this request needs question answers".into()));
+        }
         let p = self
             .pending
             .remove(request_id)
@@ -929,6 +959,54 @@ impl StructuredDriver for ClaudeDriver {
             &p.cli_request_id,
             Self::permission_result(&p, decision),
         ));
+        Ok(step)
+    }
+
+    fn respond_question(
+        &mut self,
+        request_id: &str,
+        answers: &[otto_core::agent_runtime::QuestionAnswer],
+    ) -> Result<DriverStep, DriverError> {
+        let p = self
+            .pending
+            .get(request_id)
+            .filter(|p| p.tool_name == "AskUserQuestion")
+            .ok_or_else(|| DriverError("no such pending question".into()))?;
+        let questions = crate::questions::native_questions(&p.input, true).map_err(DriverError)?;
+        otto_core::agent_runtime::validate_question_answers(&questions, answers)
+            .map_err(DriverError)?;
+        // Claude's native answers map uses question text and comma-separated multi selections.
+        let values: serde_json::Map<String, Value> = answers
+            .iter()
+            .map(|a| (a.question_id().to_string(), json!(a.values().join(", "))))
+            .collect();
+        let mut input = p.input.clone();
+        input["answers"] = json!(values);
+        let mut step = DriverStep::default();
+        step.write(Self::control_success(
+            &p.cli_request_id,
+            json!({"behavior":"allow","updatedInput":input,"toolUseID":p.tool_use_id}),
+        ));
+        self.pending.remove(request_id);
+        Ok(step)
+    }
+
+    fn dismiss_question(
+        &mut self,
+        request_id: &str,
+        _action: otto_core::agent_runtime::QuestionDismissAction,
+    ) -> Result<DriverStep, DriverError> {
+        let p = self
+            .pending
+            .get(request_id)
+            .filter(|p| p.tool_name == "AskUserQuestion")
+            .ok_or_else(|| DriverError("no such pending question".into()))?;
+        let mut step = DriverStep::default();
+        step.write(Self::control_success(
+            &p.cli_request_id,
+            json!({"behavior":"deny","message":"The user skipped this question"}),
+        ));
+        self.pending.remove(request_id);
         Ok(step)
     }
 
@@ -1701,5 +1779,62 @@ mod tests {
         assert_eq!(w["type"], "user");
         assert_eq!(w["message"]["content"][0]["text"], "also check b");
         assert!(s.events.is_empty());
+    }
+    #[test]
+    fn ask_user_question_is_not_a_permission_and_returns_updated_input() {
+        use otto_core::agent_runtime::QuestionAnswer;
+        let mut d = ClaudeDriver::new();
+        ready(&mut d);
+        let s = feed(
+            &mut d,
+            json!({"type":"control_request","request_id":"q-raw","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","tool_use_id":"tu-q","input":{"questions":[{"header":"Targets","question":"Which targets?","multiSelect":true,"options":[{"label":"A"},{"label":"B"}]}]}}}),
+        );
+        let DriverEvent::Question { id, .. } = &s.events[0] else {
+            panic!("question event missing")
+        };
+        assert!(d.respond(id, ApprovalDecision::AcceptForSession).is_err());
+        let response = d
+            .respond_question(
+                id,
+                &[QuestionAnswer::Multi {
+                    question_id: "Which targets?".into(),
+                    values: vec!["A".into(), "B".into()],
+                }],
+            )
+            .unwrap();
+        let value: Value = serde_json::from_str(&response.writes[0]).unwrap();
+        assert_eq!(value["response"]["request_id"], "q-raw");
+        let result = &value["response"]["response"];
+        assert_eq!(result["updatedInput"]["answers"]["Which targets?"], "A, B");
+        assert_eq!(result["updatedInput"]["questions"][0]["multiSelect"], true);
+        assert!(result.get("updatedPermissions").is_none());
+    }
+    #[test]
+    fn multiple_typed_questions_withdraw_only_the_named_request() {
+        use otto_core::agent_runtime::QuestionAnswer;
+        let mut d = ClaudeDriver::new();
+        ready(&mut d);
+        for id in ["first", "second"] {
+            let step = feed(
+                &mut d,
+                json!({"type":"control_request","request_id":id,"request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Name?","header":"Name"}]}}}),
+            );
+            assert!(matches!(&step.events[0], DriverEvent::Question { .. }));
+        }
+        let withdrawn = feed(
+            &mut d,
+            json!({"type":"control_cancel_request","request_id":"first"}),
+        );
+        assert!(
+            matches!(&withdrawn.events[0], DriverEvent::RequestClosed { request_id, .. } if request_id == "claude-first")
+        );
+        let answer = QuestionAnswer::Text {
+            question_id: "Name?".into(),
+            text: "Ada".into(),
+        };
+        assert!(d
+            .respond_question("claude-first", std::slice::from_ref(&answer))
+            .is_err());
+        assert!(d.respond_question("claude-second", &[answer]).is_ok());
     }
 }

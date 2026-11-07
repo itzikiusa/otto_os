@@ -42,6 +42,7 @@
   import { threads } from '../threadsStore.svelte';
   import { now } from '../../../lib/stores/now.svelte';
   import { toastError } from '../../../lib/toastError';
+  import RuntimeQuestions from './RuntimeQuestions.svelte';
   import RuntimeQueueBar from './RuntimeQueueBar.svelte';
   import RuntimeTurnStatus from './RuntimeTurnStatus.svelte';
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
@@ -394,6 +395,7 @@
         {/each}
       </ol>
     {/if}
+    <RuntimeQuestions requests={p?.requests ?? []} {sessionId} agent={agentName} onanswered={() => composerEl?.focus()} />
     <RuntimeQueueBar
       {sessionId}
       {background}

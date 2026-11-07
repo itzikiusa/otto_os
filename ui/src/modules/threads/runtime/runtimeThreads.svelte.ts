@@ -12,6 +12,7 @@ import { noteRuntimeWaiting } from '../../../lib/stores/runtimeAttention.svelte'
 import { uiControl } from '../../../lib/stores/uiControl.svelte';
 import type {
   ApprovalDecision,
+  QuestionAnswer,
   PromptDelivery,
   ProviderSessionStatus,
   RuntimeEvent,
@@ -226,6 +227,14 @@ class RuntimeThreads {
 
   async respond(id: string, requestId: string, decision: ApprovalDecision): Promise<void> {
     await api.post(`/runtime-sessions/${id}/requests/${requestId}`, { decision });
+  }
+
+  async respondQuestion(id: string, requestId: string, answers: QuestionAnswer[]): Promise<void> {
+    await api.post(`/runtime-sessions/${id}/requests/${encodeURIComponent(requestId)}`, { answers });
+  }
+
+  async dismissQuestion(id: string, requestId: string, action: 'decline' | 'cancel'): Promise<void> {
+    await api.post(`/runtime-sessions/${id}/requests/${encodeURIComponent(requestId)}`, { question_action: action });
   }
 
   async rename(id: string, title: string): Promise<void> {

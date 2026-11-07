@@ -2199,3 +2199,124 @@ async fn fresh_context_failed_spawn_preserves_closed_history_and_resume_identity
     assert_eq!(stored.session.native_thread_id, old);
     assert!(stored.closed);
 }
+
+#[tokio::test]
+async fn codex_questions_validate_answers_and_replay_without_tool_rows() {
+    use otto_core::agent_runtime::{QuestionAnswer, RequestKind};
+    let dir = tempfile::tempdir().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(dir.path().to_str().unwrap(), false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, dir.path().to_str().unwrap(), RuntimeProvider::Codex).await;
+    host.wait(is_ready).await;
+    rt.prompt(&s.id, "question form").await.unwrap();
+    let event = host.wait(is_type("runtime_request.updated")).await;
+    let RuntimeEventBody::RuntimeRequestUpdated {
+        runtime_request: request,
+    } = event.body
+    else {
+        panic!("missing request")
+    };
+    assert_eq!(request.kind, RequestKind::Question);
+    assert_eq!(request.questions.len(), 2);
+    assert!(rt
+        .respond(&s.id, &request.id, ApprovalDecision::Accept)
+        .await
+        .is_err());
+    assert!(rt
+        .respond_question(&s.id, &request.id, vec![])
+        .await
+        .is_err());
+    assert_eq!(
+        requests(&host).last().unwrap().status,
+        RuntimeRequestStatus::Pending
+    );
+    let answers = vec![
+        QuestionAnswer::Single {
+            question_id: "strategy_native".into(),
+            value: "Careful".into(),
+        },
+        QuestionAnswer::Text {
+            question_id: "note_native".into(),
+            text: "Keep the API stable".into(),
+        },
+    ];
+    rt.respond_question(&s.id, &request.id, answers.clone())
+        .await
+        .unwrap();
+    host.wait(is_terminal).await;
+    let resolved = requests(&host)
+        .into_iter()
+        .find(|r| r.status == RuntimeRequestStatus::Resolved)
+        .unwrap();
+    assert_eq!(resolved.answers, Some(answers.clone()));
+    assert!(rt
+        .respond_question(&s.id, &request.id, answers)
+        .await
+        .is_err());
+    assert!(host
+        .items()
+        .iter()
+        .all(|i| !matches!(i.kind, TurnItemKind::ApprovalRequest { .. })));
+    assert!(host.items().iter().any(|i| matches!(&i.kind, TurnItemKind::AssistantMessage { text, .. } if text.contains("strategy_native") && text.contains("Keep the API stable"))));
+    // Skip settles only the question; it does not create an approval decision.
+    rt.prompt(&s.id, "question form").await.unwrap();
+    let event = host.wait_n(is_pending_request, 2).await;
+    let RuntimeEventBody::RuntimeRequestUpdated {
+        runtime_request: next,
+    } = event.body
+    else {
+        panic!("missing second question")
+    };
+    rt.dismiss_question(
+        &s.id,
+        &next.id,
+        otto_core::agent_runtime::QuestionDismissAction::Decline,
+    )
+    .await
+    .unwrap();
+    host.wait_n(is_terminal, 2).await;
+    let dismissed = requests(&host)
+        .into_iter()
+        .find(|r| r.id == next.id)
+        .unwrap();
+    assert_eq!(dismissed.status, RuntimeRequestStatus::Cancelled);
+    assert!(dismissed.decision.is_none());
+    // Full request data survives replay and restart; the live answer authority does not.
+    rt.prompt(&s.id, "question form").await.unwrap();
+    let pending = host.wait_n(is_pending_request, 3).await;
+    let RuntimeEventBody::RuntimeRequestUpdated {
+        runtime_request: pending,
+    } = pending.body
+    else {
+        panic!("missing pending question")
+    };
+    rt.flush(&s.id).await;
+    rt.shutdown().await;
+    let host2 = TestHost::new(dir.path().to_str().unwrap(), false);
+    let rt2 = runtime(&pool, &host2, RuntimeConfig::default());
+    rt2.recover().await.unwrap();
+    let RuntimeReplay::Snapshot { snapshot, .. } = rt2.replay(&s.id, 0).await.unwrap() else {
+        panic!("restart must replay a snapshot")
+    };
+    let expired = snapshot
+        .runtime_requests
+        .iter()
+        .find(|r| r.id == pending.id)
+        .unwrap();
+    assert_eq!(expired.questions, pending.questions);
+    assert_eq!(expired.status, RuntimeRequestStatus::Expired);
+    assert!(matches!(
+        expired.response_capability,
+        otto_core::agent_runtime::ResponseCapability::NotResumable { .. }
+    ));
+    assert!(snapshot
+        .runtime_requests
+        .iter()
+        .any(|r| r.id == request.id && r.answers == resolved.answers));
+    assert!(rt2
+        .respond_question(&s.id, &pending.id, vec![])
+        .await
+        .is_err());
+    rt2.close(&s.id).await.unwrap();
+}

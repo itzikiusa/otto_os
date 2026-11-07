@@ -1422,6 +1422,100 @@ impl AgentRuntime {
         Ok(())
     }
 
+    /// Answer only a live structured question. Validation precedes consuming the native request.
+    pub async fn respond_question(
+        &self,
+        id: &Id,
+        request_id: &str,
+        answers: Vec<otto_core::agent_runtime::QuestionAnswer>,
+    ) -> Result<()> {
+        let live = self.live(id).await?;
+        let mut st = live.lock();
+        let request = st
+            .proj
+            .requests
+            .get(request_id)
+            .filter(|r| r.status == RuntimeRequestStatus::Pending)
+            .ok_or_else(|| Error::NotFound("no such pending request".into()))?;
+        if request.kind != otto_core::agent_runtime::RequestKind::Question {
+            return Err(Error::Invalid(
+                "this request needs an approval decision".into(),
+            ));
+        }
+        otto_core::agent_runtime::validate_question_answers(&request.questions, &answers)
+            .map_err(Error::Invalid)?;
+        let Some(proc) = st.proc.as_mut() else {
+            return Err(Error::Conflict("the agent process exited".into()));
+        };
+        let native_id = proc.request_ids.native(request_id)?.to_string();
+        let step = proc
+            .driver
+            .respond_question(&native_id, &answers)
+            .map_err(|e| Error::Conflict(e.0))?;
+        if let Some(request) = st.proj.requests.get_mut(request_id) {
+            request.answers = Some(answers);
+        }
+        resolve_request(
+            &self.inner,
+            &live,
+            &mut st,
+            request_id,
+            RuntimeRequestStatus::Resolved,
+            None,
+            None,
+        );
+        if !has_pending(&st) {
+            let next = settled_status(&st);
+            set_session_status(&self.inner, &live, &mut st, next, None);
+        }
+        apply_step(&self.inner, &live, &mut st, step);
+        Ok(())
+    }
+
+    pub async fn dismiss_question(
+        &self,
+        id: &Id,
+        request_id: &str,
+        action: otto_core::agent_runtime::QuestionDismissAction,
+    ) -> Result<()> {
+        let live = self.live(id).await?;
+        let mut st = live.lock();
+        let request = st
+            .proj
+            .requests
+            .get(request_id)
+            .filter(|r| r.status == RuntimeRequestStatus::Pending)
+            .ok_or_else(|| Error::NotFound("no such pending request".into()))?;
+        if request.kind != otto_core::agent_runtime::RequestKind::Question {
+            return Err(Error::Invalid(
+                "this request needs an approval decision".into(),
+            ));
+        }
+        let Some(proc) = st.proc.as_mut() else {
+            return Err(Error::Conflict("the agent process exited".into()));
+        };
+        let native_id = proc.request_ids.native(request_id)?.to_string();
+        let step = proc
+            .driver
+            .dismiss_question(&native_id, action)
+            .map_err(|e| Error::Conflict(e.0))?;
+        resolve_request(
+            &self.inner,
+            &live,
+            &mut st,
+            request_id,
+            RuntimeRequestStatus::Cancelled,
+            None,
+            None,
+        );
+        if !has_pending(&st) {
+            let next = settled_status(&st);
+            set_session_status(&self.inner, &live, &mut st, next, None);
+        }
+        apply_step(&self.inner, &live, &mut st, step);
+        Ok(())
+    }
+
     /// Close the session: end any turn as interrupted, stop the child, refuse
     /// further prompts. Idempotent.
     pub async fn close(&self, id: &Id) -> Result<RuntimeSession> {
@@ -2284,6 +2378,9 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                     resolved_at: None,
                     decision: None,
                     cancel_reason: None,
+                    questions: vec![],
+                    question_title: None,
+                    answers: None,
                 };
                 let mut item = item(
                     format!("{}:approval:{id}", turn_id.as_deref().unwrap_or_default()),
@@ -2309,6 +2406,38 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                     },
                 );
                 upsert_item(inner, live, st, item);
+                set_session_status(inner, live, st, ProviderSessionStatus::Waiting, None);
+            }
+            DriverEvent::Question {
+                id,
+                title,
+                questions,
+                tool_item_id: _,
+            } => {
+                let id = scope_request_id(st, &id);
+                let turn_id = st.turn.as_ref().map(|t| t.id.clone());
+                let request = RuntimeRequest {
+                    id,
+                    turn_id,
+                    kind: otto_core::agent_runtime::RequestKind::Question,
+                    status: RuntimeRequestStatus::Pending,
+                    response_capability: ResponseCapability::Live,
+                    created_at: Utc::now(),
+                    resolved_at: None,
+                    decision: None,
+                    cancel_reason: None,
+                    questions,
+                    question_title: title,
+                    answers: None,
+                };
+                emit(
+                    inner,
+                    live,
+                    st,
+                    RuntimeEventBody::RuntimeRequestUpdated {
+                        runtime_request: request,
+                    },
+                );
                 set_session_status(inner, live, st, ProviderSessionStatus::Waiting, None);
             }
             DriverEvent::RequestClosed { request_id, status } => {

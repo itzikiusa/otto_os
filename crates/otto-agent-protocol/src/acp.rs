@@ -221,6 +221,7 @@ pub struct AcpDriver {
     segments: u32,
     tools: HashMap<String, Tool>,
     pending: HashMap<String, Pending>,
+    questions: HashMap<String, (Value, Vec<otto_core::agent_runtime::RuntimeQuestion>)>,
 }
 
 impl AcpDriver {
@@ -266,6 +267,7 @@ impl AcpDriver {
             segments: 0,
             tools: HashMap::new(),
             pending: HashMap::new(),
+            questions: HashMap::new(),
         }
     }
 
@@ -992,6 +994,9 @@ impl StructuredDriver for AcpDriver {
         if let Some(Value::Object(meta)) = &self.flavor.initialize_meta {
             init.meta = Some(meta.clone());
         }
+        // Elicitation is a draft ACP capability not yet exposed by our pinned SDK.
+        let mut init = serde_json::to_value(init).expect("initialize serializes");
+        init["clientCapabilities"]["elicitation"] = json!({"form":{}});
         let (id, line) = self.request(M_INITIALIZE, init);
         self.init_id = id;
         step.write(line);
@@ -1037,6 +1042,11 @@ impl StructuredDriver for AcpDriver {
     fn interrupt(&mut self) -> DriverStep {
         let mut step = DriverStep::default();
         // ACP: the client answers every open permission request `cancelled`.
+        for (_, (rpc_id, _)) in self.questions.drain() {
+            step.write(
+                json!({"jsonrpc":"2.0","id":rpc_id,"result":{"action":"cancel"}}).to_string(),
+            );
+        }
         let mut open: Vec<(String, Pending)> = self.pending.drain().collect();
         open.sort_by(|a, b| a.0.cmp(&b.0));
         for (_, p) in open {
@@ -1098,6 +1108,51 @@ impl StructuredDriver for AcpDriver {
         Ok(step)
     }
 
+    fn respond_question(
+        &mut self,
+        request_id: &str,
+        answers: &[otto_core::agent_runtime::QuestionAnswer],
+    ) -> Result<DriverStep, DriverError> {
+        let (rpc_id, questions) = self
+            .questions
+            .get(request_id)
+            .ok_or_else(|| DriverError("no such pending question".into()))?;
+        otto_core::agent_runtime::validate_question_answers(questions, answers)
+            .map_err(DriverError)?;
+        let content: serde_json::Map<String, Value> = answers
+            .iter()
+            .map(|a| {
+                let value = match a {
+                    otto_core::agent_runtime::QuestionAnswer::Multi { values, .. } => json!(values),
+                    _ => json!(a.values()[0]),
+                };
+                (a.question_id().to_string(), value)
+            })
+            .collect();
+        let mut step = DriverStep::default();
+        step.write(
+            json!({"jsonrpc":"2.0","id":rpc_id,"result":{"action":"accept","content":content}})
+                .to_string(),
+        );
+        self.questions.remove(request_id);
+        Ok(step)
+    }
+
+    fn dismiss_question(
+        &mut self,
+        request_id: &str,
+        action: otto_core::agent_runtime::QuestionDismissAction,
+    ) -> Result<DriverStep, DriverError> {
+        let (rpc_id, _) = self
+            .questions
+            .get(request_id)
+            .ok_or_else(|| DriverError("no such pending question".into()))?;
+        let mut step = DriverStep::default();
+        step.write(json!({"jsonrpc":"2.0","id":rpc_id,"result":{"action":action}}).to_string());
+        self.questions.remove(request_id);
+        Ok(step)
+    }
+
     fn on_line(&mut self, line: &str) -> DriverStep {
         let mut step = DriverStep::default();
         let Ok(msg) = serde_json::from_str::<Value>(line) else {
@@ -1125,6 +1180,37 @@ impl StructuredDriver for AcpDriver {
                 }
             }
             (Some(_), None) => {} // unknown notification
+            (Some(m), Some(id)) if m == "elicitation/create" => {
+                let parsed = if params.get("sessionId").and_then(Value::as_str)
+                    != self.session_id.as_deref()
+                    || self.session_id.is_none()
+                    || params.get("requestId").is_some()
+                {
+                    Err("elicitation must belong to this live session".to_string())
+                } else {
+                    crate::questions::acp_form(&params)
+                };
+                match parsed {
+                    Ok(questions) => {
+                        let request_id = format!("acp-question-{}", rpc_key(&id));
+                        self.questions
+                            .insert(request_id.clone(), (id, questions.clone()));
+                        step.push(DriverEvent::Question {
+                            id: request_id,
+                            title: params
+                                .get("message")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                            questions,
+                            tool_item_id: None,
+                        });
+                    }
+                    Err(message) => step.write(
+                        json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":message}})
+                            .to_string(),
+                    ),
+                }
+            }
             (Some(m), Some(id)) if m == M_REQUEST_PERMISSION => {
                 match serde_json::from_value::<RequestPermissionRequest>(params) {
                     Ok(req) => self.on_permission(&mut step, id, req),
@@ -1155,6 +1241,7 @@ impl StructuredDriver for AcpDriver {
 
     fn on_exit(&mut self, _code: Option<i32>) -> DriverStep {
         self.pending.clear();
+        self.questions.clear();
         self.tools.clear();
         self.segment = None;
         DriverStep::default()
@@ -1536,5 +1623,64 @@ mod tests {
                 (TurnItemStatus::Failed, Some("403 Forbidden"))
             );
         }
+    }
+    #[test]
+    fn form_elicitation_preserves_values_and_rejects_wrong_session() {
+        use otto_core::agent_runtime::QuestionAnswer;
+        let mut d = AcpDriver::gemini("gemini");
+        d.session_id = Some("s1".into());
+        let form = json!({"jsonrpc":"2.0","id":7,"method":"elicitation/create","params":{"sessionId":"s1","mode":"form","message":"Choose","requestedSchema":{"type":"object","properties":{"strategy":{"type":"string","oneOf":[{"const":"safe_v1","title":"Safe"}]}},"required":["strategy"]}}});
+        let s = d.on_line(&form.to_string());
+        let DriverEvent::Question { id, .. } = &s.events[0] else {
+            panic!("question event missing")
+        };
+        let response = d
+            .respond_question(
+                id,
+                &[QuestionAnswer::Single {
+                    question_id: "strategy".into(),
+                    value: "safe_v1".into(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            sent(&response, 0),
+            json!({"jsonrpc":"2.0","id":7,"result":{"action":"accept","content":{"strategy":"safe_v1"}}})
+        );
+        let mut invalid = form;
+        invalid["params"]["sessionId"] = json!("foreign");
+        assert_eq!(
+            sent(&d.on_line(&invalid.to_string()), 0)["error"]["code"],
+            -32602
+        );
+    }
+    #[test]
+    fn required_unconstrained_acp_fields_keep_empty_values() {
+        use otto_core::agent_runtime::QuestionAnswer;
+        let mut d = AcpDriver::gemini("gemini");
+        d.session_id = Some("s1".into());
+        let step = d.on_line(&json!({"jsonrpc":"2.0","id":"empty-form","method":"elicitation/create","params":{"sessionId":"s1","mode":"form","requestedSchema":{"type":"object","properties":{"tags":{"type":"array","items":{"type":"string","enum":["api"]}},"name":{"type":"string"}},"required":["tags","name"]}}}).to_string());
+        let DriverEvent::Question { id, .. } = &step.events[0] else {
+            panic!("missing question")
+        };
+        let response = d
+            .respond_question(
+                id,
+                &[
+                    QuestionAnswer::Multi {
+                        question_id: "tags".into(),
+                        values: vec![],
+                    },
+                    QuestionAnswer::Text {
+                        question_id: "name".into(),
+                        text: "".into(),
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            sent(&response, 0)["result"]["content"],
+            json!({"tags":[],"name":""})
+        );
     }
 }

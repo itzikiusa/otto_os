@@ -26,6 +26,7 @@ pub mod host;
 mod http;
 pub mod pi;
 pub mod process;
+mod questions;
 pub mod ring;
 pub mod runtime;
 mod tool_images;

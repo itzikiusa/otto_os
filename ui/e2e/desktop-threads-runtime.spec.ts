@@ -577,3 +577,48 @@ test('composer drafts recover after reload and page reopen without sending; fail
   await reopened.screenshot({ path: info.outputPath('draft-recovered-dark.png') });
   await reopened.close();
 });
+
+test('native Codex question forms answer near the composer on phone and desktop', async ({ page }, info) => {
+  const created = await ctx.post(`${base}/api/v1/workspaces/${wsId}/runtime-sessions`, {
+    data: { provider: 'codex', cwd: fixtureDir, title: 'Question forms' },
+  });
+  expect(created.ok(), await created.text()).toBeTruthy();
+  const { id } = await created.json() as { id: string };
+  await page.goto(`/#/threads/${id}`);
+  const thread = page.getByTestId(`runtime-thread-${id}`);
+  await expect(thread).toBeVisible({ timeout: 30_000 });
+  const composer = thread.getByTestId('runtime-composer');
+  await composer.fill('question form');
+  await composer.press('Enter');
+  const card = thread.getByTestId('runtime-question-card');
+  await expect(card).toBeVisible({ timeout: 15_000 });
+  await expect(thread.locator('[data-testid^="runtime-approval-"]')).toHaveCount(0);
+  await card.getByTestId('runtime-question-send').click();
+  await expect(card.getByRole('alert')).toContainText('Answer every required question');
+  await card.getByLabel('Careful', { exact: false }).check();
+  await card.getByLabel('Your answer', { exact: true }).fill('Keep the API stable');
+  await page.screenshot({ path: info.outputPath('runtime-questions-light.png'), animations: 'disabled' });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.screenshot({ path: info.outputPath('runtime-questions-dark.png'), animations: 'disabled' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expectNoHorizontalOverflow(page);
+  await page.screenshot({ path: info.outputPath('runtime-questions-phone.png'), animations: 'disabled' });
+  // A failed HTTP answer must keep form input, never fall through to ordinary chat.
+  let fail = true;
+  await page.route(`**/api/v1/runtime-sessions/${id}/requests/**`, async (route) => {
+    if (fail) { fail = false; await route.fulfill({ status: 409, json: { error: 'Temporarily unavailable' } }); }
+    else await route.continue();
+  });
+  await card.getByTestId('runtime-question-send').click();
+  await expect(card.getByRole('alert')).toContainText('Couldn’t send the answer');
+  await expect(card.getByLabel('Your answer', { exact: true })).toHaveValue('Keep the API stable');
+  const sent = page.waitForRequest((r) => r.method() === 'POST' && r.url().includes(`/runtime-sessions/${id}/requests/`));
+  await card.getByTestId('runtime-question-send').click();
+  expect((await sent).postDataJSON()).toEqual({ answers: [
+    { question_id: 'strategy_native', type: 'single', value: 'Careful' },
+    { question_id: 'note_native', type: 'text', text: 'Keep the API stable' },
+  ] });
+  await expect(thread.getByText(/question answers:.*strategy_native/)).toBeVisible({ timeout: 15_000 });
+  await expect(thread.getByTestId('runtime-question-send')).toHaveCount(0);
+  await expect(composer).toHaveValue('');
+});

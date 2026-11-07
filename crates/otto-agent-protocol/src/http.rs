@@ -322,9 +322,23 @@ async fn answer<S: RuntimeCtx>(
 ) -> ApiResult<StatusCode> {
     require_human(&ctx, &auth)?;
     authorized(&ctx, &user, &id).await?;
-    ctx.agent_runtime()
-        .respond(&id, &request_id, req.decision)
-        .await?;
+    match req {
+        RuntimeRequestRespondReq::Approval { decision } => {
+            ctx.agent_runtime()
+                .respond(&id, &request_id, decision)
+                .await?
+        }
+        RuntimeRequestRespondReq::DismissQuestion { question_action } => {
+            ctx.agent_runtime()
+                .dismiss_question(&id, &request_id, question_action)
+                .await?
+        }
+        RuntimeRequestRespondReq::Question { answers } => {
+            ctx.agent_runtime()
+                .respond_question(&id, &request_id, answers)
+                .await?
+        }
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
