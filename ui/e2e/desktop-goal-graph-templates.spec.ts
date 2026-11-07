@@ -79,5 +79,13 @@ for (const scheme of ['light', 'dark']) {
     await expect(graph).toContainText('Regression check still fails');
     await expectNoHorizontalOverflow(page);
     await page.screenshot({ path: info.outputPath(`goal-graph-state-phone-${scheme}.png`) });
+    // Pause retains the attempt ledger; it must not advertise live execution.
+    const paused = saved as GoalLoop | null;
+    expect(paused).not.toBeNull();
+    paused!.status = 'paused';
+    paused!.ledger!.graph_nodes![1].status = 'running';
+    await page.reload();
+    await expect(graph.locator('[data-node-id="task-2"] summary')).toContainText('Paused');
+    await expect(graph.locator('[data-node-id="task-2"] summary')).not.toContainText('Running');
   });
 }

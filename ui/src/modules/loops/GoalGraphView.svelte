@@ -1,10 +1,15 @@
 <script lang="ts">
-  import type { AcceptanceCriterion, GoalGraphNodeState, GoalLoopGraph } from '../../lib/api/types';
-  let { graph, states, criteria }: { graph: GoalLoopGraph; states: GoalGraphNodeState[]; criteria: AcceptanceCriterion[] } = $props();
+  import type { AcceptanceCriterion, GoalGraphNodeState, GoalLoopGraph, GoalLoopStatus } from '../../lib/api/types';
+  let { graph, states, criteria, loopStatus }: { graph: GoalLoopGraph; states: GoalGraphNodeState[]; criteria: AcceptanceCriterion[]; loopStatus: GoalLoopStatus } = $props();
   const stateById = $derived(new Map(states.map(state => [state.node_id, state])));
   const titleById = $derived(new Map(graph.nodes.map(node => [node.id, node.title])));
   const criteriaById = $derived(new Map(criteria.map(criterion => [criterion.id, criterion.text])));
   const labels = { pending: 'Pending', running: 'Running', passed: 'Passed', blocked: 'Blocked' };
+  function stateLabel(state: GoalGraphNodeState | undefined): string {
+    if (!state) return 'Not started';
+    if (state.status === 'running' && loopStatus !== 'running') return loopStatus === 'paused' ? 'Paused' : 'Interrupted';
+    return labels[state.status];
+  }
 </script>
 
 <section class="graph-view" aria-label="Execution graph" data-testid="goal-graph-state">
@@ -15,12 +20,12 @@
       {@const state = stateById.get(node.id)}
       <li data-testid="goal-graph-node" data-node-id={node.id}>
         <details>
-          <summary><span class="title">{node.title}</span><span class="state" class:passed={state?.status === 'passed'} class:blocked={state?.status === 'blocked'} class:running={state?.status === 'running'}>{state ? labels[state.status] : 'Not started'}</span></summary>
+          <summary><span class="title">{node.title}</span><span class="state" class:passed={state?.status === 'passed'} class:blocked={state?.status === 'blocked'} class:running={state?.status === 'running' && loopStatus === 'running'}>{stateLabel(state)}</span></summary>
           {#if node.depends_on.length}<p class="hint">After: {node.depends_on.map(id => titleById.get(id) ?? id).join(', ')}</p>{/if}
           <p>{node.instructions}</p>
           <ul>{#each node.criterion_ids as id (id)}<li>{criteriaById.get(id) ?? id}</li>{/each}</ul>
           {#if state}
-            {#if state.iteration > 0}<p class="hint">Last evaluated in iteration {state.iteration}</p>{/if}
+            {#if state.iteration > 0}<p class="hint">Last attempted in iteration {state.iteration}</p>{/if}
             {#if state.evidence}<p class="evidence">{state.evidence}</p>{/if}
             {#each state.criteria as criterion (criterion.id)}
               <p class="evidence"><strong>{criterion.met ? 'Met' : 'Not met'} — {criteriaById.get(criterion.id) ?? criterion.id}:</strong> {criterion.evidence || 'No evidence recorded'}</p>

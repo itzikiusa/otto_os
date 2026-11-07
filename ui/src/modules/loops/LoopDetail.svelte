@@ -327,7 +327,7 @@
 
     {#if loop.config.graph}
       <div class="card-box">
-        <GoalGraphView graph={loop.config.graph} states={loop.ledger?.graph_nodes ?? []} criteria={loop.definition.acceptance_criteria} />
+        <GoalGraphView graph={loop.config.graph} states={loop.ledger?.graph_nodes ?? []} criteria={loop.definition.acceptance_criteria} loopStatus={loop.status} />
       </div>
     {/if}
 
