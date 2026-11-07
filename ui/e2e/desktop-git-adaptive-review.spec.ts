@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx, seedWorkspace } from './seed';
+import type { Finding } from '../src/lib/api/types';
 
 // Real isolated app/repository; forge/review/goal responses are fixtures. No agent is launched.
 test.use({ serviceWorkers: 'block' });
@@ -46,7 +47,19 @@ async function openReview(page: Page, status = 'done') {
   await page.route('**/api/v1/repos/*/prs/1/reviews', r => r.fulfill({ json: [review(status)] }));
   await page.route('**/api/v1/repos/*/prs/1/diff*', r => r.fulfill({ json: { files: [] } }));
   await page.route('**/api/v1/repos/*/prs/1/commits', r => r.fulfill({ json: [] }));
-  await page.route('**/api/v1/reviews/review-adaptive/findings', r => r.fulfill({ json: [] }));
+  const finding: Finding = {
+    id: 'finding-real', review_id: 'review-adaptive', workspace_id: workspaceId, repo_id: repoId,
+    pr_number: 1, fingerprint: 'permission-check', severity: 'high', category: 'Security',
+    path: 'auth.rs', line: 2, line_end: 2, title: 'Permission check can be bypassed',
+    body: 'An anonymous request reaches the new action without permission.',
+    evidence: 'auth.rs:2 → api.rs:8', agent_reasoning_summary: 'Traced anonymous caller access.',
+    suggested_fix: 'Require caller permission before the action.', status: 'open', state: 'open',
+    linked_commit: null, linked_test: null, reviewer: 'Security', regressed: false,
+    requires_human_approval: false, approval_decision: null, approved_by: null, approved_at: null,
+    jira_key: null, jira_url: null, produced_by_agent: null, repo_rule_id: null,
+    fix_session_id: null, occurrence_count: 1, created_at: now, updated_at: now,
+  };
+  await page.route('**/api/v1/reviews/review-adaptive/findings', r => r.fulfill({ json: [finding] }));
   await page.route('**/api/v1/reviews/review-adaptive/merge-readiness', r => r.fulfill({ json: { unresolved_total: 1, unresolved_blocker: 1, total: 1, complete: true } }));
   await page.goto(`/#/git/${repoId}/pr/1`);
   await expect(page.getByRole('tab', { name: 'Review', exact: true })).toBeVisible();
@@ -67,15 +80,19 @@ test('scope explains exact lenses and keeps excluded claims out of comments', as
     await page.emulateMedia({ colorScheme: scheme });
     await page.screenshot({ path: info.outputPath(`adaptive-review-${scheme}.png`), fullPage: true });
   }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(panel).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBeTruthy();
+  await page.screenshot({ path: info.outputPath('adaptive-review-phone.png'), fullPage: true });
 });
 
 test('fix goal uses reviewed id/default target once, retries inline, and opens progress', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
   const calls: unknown[] = [];
   await page.route('**/api/v1/reviews/*/fix-goal', async r => {
     expect(new URL(r.request().url()).pathname.endsWith('/reviews/review-adaptive/fix-goal')).toBeTruthy();
     calls.push(r.request().postDataJSON());
-    if (calls.length === 1) return r.fulfill({ status: 503, json: { error: 'Temporary launch failure' } });
+    if (calls.length === 1) return r.fulfill({ status: 503, json: { code: 'upstream', message: 'Temporary launch failure' } });
     await r.fulfill({ json: { id: 'goal-review-fixture' } });
   });
   await openReview(page);
@@ -89,6 +106,7 @@ test('fix goal uses reviewed id/default target once, retries inline, and opens p
   await dialog.getByRole('spinbutton').fill('9.5');
   await dialog.getByRole('button', { name: 'Run agent to fix', exact: true }).click();
   await expect(dialog).toContainText('Temporary launch failure');
+  await expect(dialog).toContainText('Couldn’t start fixes');
   expect(calls).toEqual([{ target_score: 9.5 }]);
   await dialog.getByRole('button', { name: 'Retry', exact: true }).click();
   await expect(page).toHaveURL(/#\/loops\/goal-review-fixture$/);

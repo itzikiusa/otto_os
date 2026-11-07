@@ -5,7 +5,7 @@
 
 {#if review.scope_plan}
   <details class="review-scope" open={review.status === 'running'}>
-    <summary>Review scope · {review.scope_plan.lenses.length} lenses</summary>
+    <summary>Review scope · {review.scope_plan.lenses.length} {review.scope_plan.lenses.length === 1 ? 'lens' : 'lenses'}</summary>
     <p>{review.scope_plan.summary}</p>
     <p class="dim">{review.scope_plan.source} · {review.scope_plan.head_sha.slice(0, 12)}</p>
     <ul>

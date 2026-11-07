@@ -52,3 +52,36 @@ phone, live provider account, or Tailscale network was exercised. Screenshots:
 - [Phone questions, light](screenshots/questions-phone-light.png) / [dark](screenshots/questions-phone-dark.png)
 - [Recovered draft, light](screenshots/draft-desktop-light.png) / [dark](screenshots/draft-desktop-dark.png)
 - [Tool image preview, light](screenshots/tool-image-desktop-light.png) / [dark](screenshots/tool-image-desktop-dark.png)
+
+## Review of review changes
+
+Independent source reviews identified the following required corrections. All are
+implemented, with the integrated review/workflow suites passing (66 and 79 tests):
+
+- Context reuse must include resolved upstream input and skill/provider dependencies.
+- Nested workflow review steps must support admission and prior-review lineage.
+- Explicitly unverified claims must keep the review incomplete.
+- Prior-finding identities must survive more than two iterations, including findings
+  already marked fixed/not relevant and mutable finding rows later seen again.
+- The final verifier must account for every input claim by stable identity; a valid
+  response that silently omits another claim is incomplete.
+
+No additional concrete authorization or pinned-fix-worktree defect was found in the
+bounded independent passes. These were source traces, not executed exploit tests.
+
+Review/workflow UI verification: four desktop Chromium checks passed, including
+390×844 phone viewport checks for scope and fix-launch retry. No actual provider
+was launched by these UI fixtures. Review fix-launch API regression passed for
+workspace permissions, incomplete/mismatched review rejection and idempotent paused
+goal reuse. Route policy coverage: three passed. Python workflow-upgrade checks:
+two passed; the original gate prompt and graph are preserved.
+
+- [Adaptive review, light](screenshots/adaptive-review-light.png) / [dark](screenshots/adaptive-review-dark.png) / [phone](screenshots/adaptive-review-phone.png)
+
+## Goal graph extension
+
+Additional user-authorized scope: enforced dependency graphs, editable suggested
+loops for Angular, Go, general engineering, research, POC (backend/frontend/both),
+rewrite and performance. The templates are informed by a selected recent Claude
+and Codex history sample, with private provenance retained outside the repository.
+Validation and browser results will be recorded after integration.

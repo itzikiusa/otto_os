@@ -40,7 +40,7 @@
       <label class="fix-target">Reviewer target (out of 10)<input type="number" min="1" max="10" step="0.1" bind:value={target} /></label>
       <p class="dim">The score is an agent assessment backed by evidence. Unresolved important findings prevent success. Work runs locally from reviewed commit {review.scope_plan?.head_sha.slice(0, 12)}; nothing is committed or published.</p>
       <p class="dim">Up to 6 cohesive iterations or 2 hours. Reaching a limit stays incomplete. Progress, evidence, Stop and Resume are available in Goal Loops.</p>
-      {#if error}<LoadState what="fix goal" {error} onretry={() => void start()} variant="compact" />{/if}
+      {#if error}<LoadState what="fix goal" errorTitle="Couldn’t start fixes" empty {error} onretry={() => void start()} variant="compact" />{/if}
       {#if unavailable}<p class="dim">{unavailable}</p>{/if}
     {/snippet}
     {#snippet footer()}
