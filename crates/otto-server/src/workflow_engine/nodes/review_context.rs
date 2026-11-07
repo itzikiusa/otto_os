@@ -54,11 +54,13 @@ pub(super) async fn key(call: &NodeCall<'_>) -> Option<Value> {
         handoffs.push((name, body));
     }
     let dependencies = tracked_dependencies(&call.env.files.repos(), &paths).await?;
-    Some(
-        json!({"version":current.workflow_version,"params":call.node.params,"request":request,
+    // Store only a digest: handoff files may contain earlier cache metadata,
+    // and embedding that again would recursively inflate every next output.
+    use sha2::{Digest, Sha256};
+    let inputs = json!({"version":current.workflow_version,"params":call.node.params,"request":request,
         "jira":call.env.files.read_jira_md(),"dependencies":dependencies,
-        "upstream":upstream,"handoffs":handoffs,"instructions":instructions,"default_provider":call.env.default_provider}),
-    )
+        "upstream":upstream,"handoffs":handoffs,"instructions":instructions,"default_provider":call.env.default_provider});
+    Some(json!({"sha256":hex::encode(Sha256::digest(serde_json::to_vec(&inputs).ok()?))}))
 }
 
 /// Runtime paths and session identity do not change the context's meaning.
