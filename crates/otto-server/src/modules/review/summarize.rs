@@ -6,6 +6,7 @@
 //! resolution ([`resolve_absent`]) and the proof pack.
 
 use super::*;
+use otto_review::prompts::*;
 
 /// How often a running summarizer re-reads the durable review status when no
 /// `ReviewChanged` arrives (the flagless cancel paths: restart, a cancel that
@@ -16,15 +17,8 @@ const SUMMARIZER_CANCEL_RECHECK: Duration = Duration::from_secs(5);
 /// comments; the in-memory cancel flag is checked for every one.
 const CANCEL_CHECK_BATCH: usize = 25;
 
-/// Run the summarizer over the reviewers' findings and persist the result:
-/// the summarizer live-state row (last element), the draft comments, and the
-/// promoted workflow findings (+ resolve_absent_scoped + proof pack).
-///
-/// Guard rails: a summarizer error falls back to the deterministic Rust-side
-/// summary, and — CRITICALLY — so does a summarizer reply that parses to ZERO
-/// comments while the reviewers produced findings. Without that second guard a
-/// confused summarizer answering `[]` silently threw away a whole run's work
-/// (45 findings → "done", 0 comments, no error).
+/// Independently verify every raw claim before promoting comments. Incomplete
+/// evidence or provider failure keeps the review retryable, never clean.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn summarize_and_persist(
     ctx: &ServerCtx,
@@ -164,7 +158,7 @@ pub(crate) async fn summarize_and_persist(
         .set_agent_at(review_id, summarizer_idx, &agent_states[summarizer_idx])
         .await?;
 
-    let Some(seen_fingerprints) = persist_comments(
+    let Some(_seen_fingerprints) = persist_comments(
         ctx,
         review_id,
         repo_path,
@@ -181,21 +175,15 @@ pub(crate) async fn summarize_and_persist(
     if is_cancelled().await {
         return Ok(());
     }
-    if verification_incomplete {
+    if verification_incomplete || resolve_blocked.is_some() {
         return Err(Error::Invalid("Final verification is incomplete; raw claims remain in agent results. Retry the verifier or re-run review.".into()));
     }
-    let complete = review_run_complete(&agent_states[..summarizer_idx], summary_fallback);
-    resolve_absent(
-        ctx,
-        review_id,
-        workspace,
-        repo_id,
-        pr_number,
-        &seen_fingerprints,
-        complete,
-        resolve_blocked.or(Some("Prior findings require explicit evidence-backed disposition; absence is not verification")),
-    )
-    .await;
+    if !review_run_complete(&agent_states[..summarizer_idx], summary_fallback) {
+        return Err(Error::Invalid(
+            "Review is incomplete: one or more selected reviewers did not finish successfully"
+                .into(),
+        ));
+    }
 
     Ok(())
 }
@@ -215,97 +203,6 @@ fn attempt_cancel_flag(
             .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
             .clone()
     })
-}
-
-/// The summarizer's turn budget for `total_findings` findings in.
-fn summarizer_budget(total_findings: usize) -> Duration {
-    // The summarizer used to get a flat 120s regardless of how much it had to
-    // consolidate. That was survivable while it was capped at 20 items; with the
-    // cap gone it must dedupe and re-emit EVERY finding, and a 180-file review
-    // (12 agents, 36k-line diff) blew straight through it — dropping to the
-    // deterministic fallback, whose own cap then produced exactly 20 findings,
-    // all `high`. The run looked clean; it was truncated twice over. Scale the
-    // budget with the work, capped so a wedged summarizer still fails rather
-    // than hanging. The budget also covers the CLI's cold start and the paste,
-    // and at ~1s/finding on a 2-minute floor 9 of 10 runs on one day hit the
-    // absolute deadline and fell back to the deterministic summary (which only
-    // dedupes exact text): ~3s per finding on a 5-minute floor, capped at 30.
-    Duration::from_secs((300 + 3 * total_findings as u64).clamp(300, 1_800))
-}
-
-/// The summarizer row once the summary is in: done, its comment count, and
-/// the fallback badge. The cause rides in the note (error-handling-5-05): the
-/// badge tooltip and the note line show WHY, not a blanket "claude
-/// unavailable".
-fn mark_summarizer_done(
-    row: &mut otto_core::domain::ReviewAgentState,
-    fallback_cause: Option<&str>,
-    count: usize,
-) {
-    row.status = "done".to_string();
-    row.comment_count = count as u32;
-    row.fallback = fallback_cause.is_some();
-    row.note = fallback_note(fallback_cause, count);
-}
-
-/// The deterministic floor (design 2026-07-04 §C): dedupe + rank the raw
-/// per-agent batches Rust-side instead of the old raw concatenation.
-fn deterministic_comments(
-    review_id: &Id,
-    agent_findings: &[Vec<otto_core::domain::ReviewFinding>],
-) -> Vec<otto_review::engine::DraftComment> {
-    parse_draft_comments(
-        review_id,
-        &crate::review_fallback::deterministic_summary(agent_findings),
-    )
-}
-
-/// The summarizer row as a fresh attempt starts (always the LAST row).
-fn mark_summarizer_starting(
-    row: &mut otto_core::domain::ReviewAgentState,
-    summarizer_cfg: &ReviewAgentCfg,
-) {
-    row.status = "running".to_string();
-    row.session_id = None;
-    row.fallback = false;
-    row.note = "Starting summarizer".into();
-    row.provider = if summarizer_cfg.provider.trim().is_empty() {
-        "claude".into()
-    } else {
-        summarizer_cfg.provider.trim().into()
-    };
-    row.model = summarizer_cfg.model.trim().into();
-}
-
-/// Context first (it frames how to judge every batch below it), then the
-/// configured summarizer prompt, then one labelled batch per reviewer.
-fn summarizer_prompt(
-    context: &str,
-    summarizer_cfg: &ReviewAgentCfg,
-    agent_findings: &[Vec<otto_core::domain::ReviewFinding>],
-) -> String {
-    let batches = agent_findings
-        .iter()
-        .enumerate()
-        .map(|(i, f)| {
-            let labelled: Vec<_> = label_findings_with_lens(f)
-                .iter()
-                .enumerate()
-                .map(|(j, finding)| {
-                    let mut value = serde_json::to_value(finding).unwrap_or_default();
-                    value["source_id"] = serde_json::json!(otto_review::engine::raw_claim_id(i, j));
-                    value
-                })
-                .collect();
-            format!(
-                "Batch {}:\n{}",
-                i + 1,
-                serde_json::to_string(&labelled).unwrap_or_else(|_| "[]".to_string())
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    format!("{}{}\n\n{}\n\nFINAL VERIFIER (these rules take precedence over the configured summarizer wording):\nRead the actual changed code, definitions and affected consumers. Independently trace each claimed defect; do not merely combine reviewer opinions. Only report a concrete NEW defect caused by this PR causal diff. A preexisting issue merely widened by the change belongs once in a not_relevant summary note, not a finding thread. Deduplicate findings with the same fix. Prioritize must-fix/should-fix; optional polish is secondary. Do not demand exhaustive tests: only newly changed critical-path gaps and demonstrable false greens. Calibrate severity by realistic impact and trigger; never demote a real issue because there are many, or inflate a score. Every output item MUST carry source_ids:[the exact source_id values it accounts for]. Account for every input source_id exactly once across the output; one same-fix comment may cover several source IDs. Never invent source IDs. New independently discovered defects may have an empty source_ids array with concrete evidence. Every retained comment MUST have disposition=verified and nonempty evidence with inspected file:line and causal trigger. Unknown dispositions or absent evidence cannot be published. Preserve important uncertainty explicitly.\nFor EVERY discarded/unconfirmed/duplicate claim, return an item in the same JSON array with disposition=not_relevant|unverified|duplicate, body identifying the original claim, and evidence explaining the concrete reason (for duplicate, identify the retained fix). These items are persisted as verification notes, not PR comments. If all claims are rejected return these dispositions rather than an unexplained empty array. Verify prior-finding dispositions against current code too. Never describe a code trace as an executed test.", context, summarizer_cfg.prompt, batches)
 }
 
 /// Persist the summary's draft comments AND promote each into a tracked
@@ -385,81 +282,6 @@ async fn persist_comments(
         seen_fingerprints.push(fp);
     }
     Ok(Some(seen_fingerprints))
-}
-
-// Findings present in a prior run but absent now flip open→resolved (the
-// "verification" leg: a re-run that no longer surfaces a finding resolves it).
-//
-// Only a run that really re-evaluated the code may resolve anything:
-// - a PARTIAL run (a reviewer errored / was cut off, or the deterministic
-//   fallback stood in for the summarizer) resolves nothing — a missing lens
-//   is not evidence its findings were fixed;
-// - a LOCAL run (the shared `pr_number = 0` sentinel) resolves only findings
-//   in files its diff touched — one branch's review used to resolve every
-//   open local finding in the repo (3128/3804 rows);
-// - a PR run keeps the whole-PR scope (every run reviews the same change).
-#[allow(clippy::too_many_arguments)]
-async fn resolve_absent(
-    ctx: &ServerCtx,
-    review_id: &Id,
-    workspace: &Workspace,
-    repo_id: &Id,
-    pr_number: u64,
-    seen_fingerprints: &[String],
-    complete: bool,
-    resolve_blocked: Option<&str>,
-) {
-    let seen_refs: Vec<&str> = seen_fingerprints.iter().map(|s| s.as_str()).collect();
-    let local_scope: Option<Vec<String>> = if pr_number == 0 {
-        match ctx.reviews_store.get_diff(review_id).await {
-            Ok(Some(diff)) => Some(diff_file_paths(&diff)),
-            _ => None,
-        }
-    } else {
-        None
-    };
-    if let Some(why) = resolve_blocked {
-        tracing::info!(review = %review_id, "{why} — not resolving absent findings");
-    } else if !complete {
-        tracing::info!(review = %review_id, "partial review run — not resolving absent findings");
-    } else if pr_number == 0 && local_scope.is_none() {
-        tracing::info!(review = %review_id, "local review without a stored diff — not resolving absent findings");
-    } else {
-        let scope_refs: Option<Vec<&str>> = local_scope
-            .as_ref()
-            .map(|v| v.iter().map(|s| s.as_str()).collect());
-        // Local runs share `pr_number = 0` across branches: only this run's
-        // source branch's findings are its to resolve (S2-05).
-        let branch = if pr_number == 0 {
-            ctx.reviews_store
-                .get_run_context(review_id)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|c| c.source_branch)
-        } else {
-            None
-        };
-        if pr_number == 0 && branch.is_none() {
-            // No recorded branch (detached HEAD, or a pre-context review):
-            // which branch's findings these are is unknown — resolve nothing.
-            tracing::info!(review = %review_id, "local review without a source branch — not resolving absent findings");
-        } else if let Err(e) = ctx
-            .findings_store
-            .resolve_absent_scoped(
-                &workspace.id,
-                repo_id,
-                pr_number,
-                &seen_refs,
-                review_id,
-                scope_refs.as_deref(),
-                branch.as_deref(),
-            )
-            .await
-        {
-            tracing::warn!(review = %review_id, "resolve_absent_scoped failed: {e}");
-        }
-    }
 }
 
 /// Promote one draft comment into a tracked workflow Finding (created →
@@ -724,16 +546,6 @@ impl SummarizerTurn<'_> {
             },
         )
         .await
-    }
-}
-
-/// The summarizer row's note: "N final comments", or with the fallback cause
-/// ("deterministic fallback (summarizer: <cause>) — N final comments").
-fn fallback_note(cause: Option<&str>, n: usize) -> String {
-    let s = if n == 1 { "" } else { "s" };
-    match cause {
-        Some(why) => format!("deterministic fallback (summarizer: {why}) — {n} final comment{s}"),
-        None => format!("{n} final comment{s}"),
     }
 }
 

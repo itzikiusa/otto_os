@@ -41,11 +41,10 @@ use otto_core::cancel::{CancelGuard, CancelRegistryExt};
 // are the review code's own imports (children see them through `use super::*`).
 use otto_review::engine::{
     anchored_line_text, append_to_review_file, compose_orchestrator_prompt, default_review_config,
-    diff_file_paths, expand_agent_runs, general_comment_body, inline_anchor_rejected,
-    is_blocking_severity, label_findings_with_lens, mode_source, orchestrator_budget,
-    parse_draft_comments, render_diff, repo_review_binding_key, resolve_blocker,
-    review_agent_cancel_key, review_agent_timeout, review_run_complete, reviewer_slots,
-    same_draft_comment, severity_rank, ReviewBranches, REVIEW_SPAWN_STAGGER,
+    expand_agent_runs, general_comment_body, inline_anchor_rejected, is_blocking_severity,
+    mode_source, orchestrator_budget, parse_draft_comments, render_diff, repo_review_binding_key,
+    resolve_blocker, review_agent_cancel_key, review_agent_timeout, review_run_complete,
+    reviewer_slots, same_draft_comment, severity_rank, ReviewBranches, REVIEW_SPAWN_STAGGER,
 };
 pub(crate) use otto_review::engine::{
     resolve_skill_inline, workflow_review_config, workflow_review_config_from_json,

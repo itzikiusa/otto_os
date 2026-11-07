@@ -14,6 +14,8 @@
 pub mod engine;
 pub mod fallback;
 pub mod fix_goal;
+pub mod history;
+pub mod prompts;
 pub mod scope;
 pub mod session;
 pub mod summarizer;
