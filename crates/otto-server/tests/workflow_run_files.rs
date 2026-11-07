@@ -329,9 +329,14 @@ async fn rereview_requires_editor_and_preserves_the_previous_run() {
         400,
         "non-review workflow cannot re-review"
     );
-    sqlx::query("UPDATE workflows SET graph_json = ? WHERE id = 'wf1'")
-        .bind(r#"{"nodes":[{"id":"review","kind":"review_run","params":{}}],"edges":[]}"#)
-        .execute(&d.pool)
+    // Publish through the real store: execution pins an immutable workflow
+    // version, so changing graph_json alone leaves no runnable snapshot.
+    let runs = otto_state::WorkflowsRepo::new(d.pool.clone());
+    let graph = serde_json::from_str(
+        r#"{"nodes":[{"id":"review","kind":"review_run","params":{}}],"edges":[]}"#,
+    )
+    .unwrap();
+    runs.update(&"wf1".into(), None, None, None, Some(&graph), None)
         .await
         .unwrap();
     // No repository: the review step fails before starting any provider. This
@@ -349,7 +354,6 @@ async fn rereview_requires_editor_and_preserves_the_previous_run() {
         "{}",
         response.text().await.unwrap()
     );
-    let runs = otto_state::WorkflowsRepo::new(d.pool.clone());
     let previous = runs.get_run(&"run1".into()).await.unwrap();
     assert_eq!(previous.status, otto_core::workflows::RunStatus::Success);
     let linked: String = sqlx::query_scalar("SELECT id FROM workflow_runs WHERE json_extract(input_json, '$.review_previous_run_id') = 'run1'")
@@ -358,11 +362,16 @@ async fn rereview_requires_editor_and_preserves_the_previous_run() {
     let next = runs.get_run(&linked).await.unwrap();
     assert_eq!(next.created_by.as_deref(), Some("root"));
     assert_eq!(next.input["review_previous_run_id"], "run1");
+    assert_eq!(
+        runs.definition_for_run(&next).await.unwrap().graph.nodes[0].kind,
+        "review_run",
+        "the admitted run must have a published definition before context creation"
+    );
     let report = d
         .tmp
         .path()
         .join("workflow-context")
-        .join(linked)
+        .join(&linked)
         .join("previous-review.md");
     for _ in 0..100 {
         if report.exists() {
@@ -370,7 +379,12 @@ async fn rereview_requires_editor_and_preserves_the_previous_run() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    assert!(std::fs::read_to_string(report)
-        .unwrap()
-        .contains("HISTORICAL evidence"));
+    let settled = runs.get_run(&linked).await.unwrap();
+    let report = std::fs::read_to_string(report).unwrap_or_else(|error| {
+        panic!(
+            "previous review context missing: {error}; run status={:?}, error={:?}",
+            settled.status, settled.error
+        )
+    });
+    assert!(report.contains("HISTORICAL evidence"));
 }
