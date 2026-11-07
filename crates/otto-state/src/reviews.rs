@@ -66,6 +66,11 @@ fn row_to_review(r: &sqlx::sqlite::SqliteRow, comments: Vec<ReviewComment>) -> R
         blocker_count: None,
         summary_md: None,
         summary_fallback,
+        scope_plan: r
+            .try_get::<Option<String>, _>("scope_plan_json")
+            .ok()
+            .flatten()
+            .and_then(|text| serde_json::from_str(&text).ok()),
     })
 }
 
@@ -74,6 +79,23 @@ fn row_to_review(r: &sqlx::sqlite::SqliteRow, comments: Vec<ReviewComment>) -> R
 // ---------------------------------------------------------------------------
 
 impl ReviewsRepo {
+    pub async fn set_scope_plan(
+        &self,
+        id: &Id,
+        plan: &otto_core::domain::ReviewScopePlan,
+    ) -> Result<()> {
+        let json = serde_json::to_string(plan).map_err(|e| Error::Internal(e.to_string()))?;
+        sqlx::query(
+            "UPDATE pr_reviews SET scope_plan_json = ? WHERE id = ? AND status = 'running'",
+        )
+        .bind(json)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("set review scope plan"))?;
+        Ok(())
+    }
+
     pub fn new(pool: impl Into<DbPool>) -> Self {
         let pool: DbPool = pool.into();
         Self { pool }

@@ -250,7 +250,7 @@ pub(crate) async fn run_review_core(
     // Build the optional free-text guidance block (prepended to every agent
     // prompt before the Jira block). Empty/absent => no block, identical to old
     // behaviour.
-    let user_ctx = match user_context {
+    let mut user_ctx = match user_context {
         Some(c) if !c.trim().is_empty() => {
             format!("## Reviewer guidance\n{}\n\n---\n\n", c.trim())
         }
@@ -291,13 +291,45 @@ pub(crate) async fn run_review_core(
     // 1. Load config: a per-call override (e.g. a workflow `review_run` step that
     //    sets its own providers + lenses) wins; otherwise the repo's binding
     //    (inline > preset) and finally the stored/default global config.
-    let cfg = match cfg_override {
+    let mut cfg = match cfg_override {
         Some(c) => c,
         None => load_review_config_for_repo(ctx, repo_id).await,
     };
+    let (prior_context, prior_ids) = super::scope::prior_review_context(
+        ctx,
+        repo_id,
+        pr_number,
+        review_id,
+        branches,
+        cfg.previous_review_id.as_ref(),
+    )
+    .await?;
+    user_ctx.push_str(&prior_context);
+    let diff_path = materialize_review_diff(ctx, review_id, &diff_text).await?;
+    let scope_plan = super::scope::assess_scope(
+        ctx,
+        review_id,
+        repo_path,
+        &diff_text,
+        &diff_path.to_string_lossy(),
+        &branch_ctx,
+        &format!("{user_ctx}{jira_ctx}"),
+        workspace,
+        &cfg,
+        &prior_ids,
+    )
+    .await?;
+    cfg.agents = otto_review::scope::selected_agents(&scope_plan, &cfg);
+    user_ctx.push_str(&format!(
+        "\n## Assessed scope and exact selected lenses\n{}\n",
+        serde_json::to_string(&scope_plan).unwrap_or_default()
+    ));
     // Execution mode: the caller's override (the run input, then the
     // `review_run` node) wins over the stored config, which wins over fan-out.
-    let mode = mode_override.or(cfg.mode).unwrap_or_default();
+    let _requested_mode = mode_override.or(cfg.mode).unwrap_or_default();
+    // Adaptive sessions always use managed slots, including cross-provider checks.
+    // Provider-internal delegation cannot enforce the machine-wide concurrency bound.
+    let mode = otto_core::domain::ReviewMode::FanOut;
     tracing::info!(review = %review_id, mode = mode.as_str(), "review mode");
 
     // 2. Expand agent×provider pairs (fan-out) or one orchestrator per provider.
@@ -376,7 +408,6 @@ pub(crate) async fn run_review_core(
         }
     }
 
-    let diff_path = materialize_review_diff(ctx, review_id, &diff_text).await?;
     // Where this run reads the code: the source branch scopes local finding
     // resolution (S2-05) and the checkout + head are what a Retry re-enters
     // instead of the user's main checkout (S2-06).
@@ -523,15 +554,21 @@ pub(crate) async fn run_review_core(
              contradicts your hypothesis, DROP the finding. An UNVERIFIED claim is worse than a \
              missed one — so verify, then report. This is a rule about EVIDENCE, not about volume: \
              once you have verified a real defect, report it. Do NOT drop a confirmed finding \
-             because it seems small, because you already have several, or because you are unsure \
-             it is worth someone's time. Severity is the summarizer's job; completeness is yours.\n\n\
-             COVERAGE — this is a {} -file diff ({} changed lines). It is LARGE, and a handful of \
-             findings from the first few files is NOT a review of it. You are not done when you \
+             because there are already many findings. Prioritize concrete must-fix and should-fix issues; \
+             optional polish is secondary. Never inflate severity to meet a score target.\n\n\
+             COVERAGE — this is a {}-file diff ({} changed lines). Scope and risk, not raw line count, \
+             determine the review depth. You are not done when you \
              have found something worth reporting; you are done when every changed file has been \
              looked at through your lens. Work through the diff file-by-file to the end — budget \
              your time across the whole set rather than spending it all on the first interesting \
              file. If your lens genuinely does not apply to a file, that is fine — but you must \
              have LOOKED. Do not stop early because the findings you have feel sufficient.\n\n\
+             CAUSAL SCOPE: compare only the supplied merge-base PR diff. Report newly introduced defects. \
+             Preexisting issues merely widened belong once in summary context, not finding threads. Do not report unrelated \
+             old issues. Trace entrypoint to affected consumer and cite both sides. Tests matter for newly changed \
+             critical paths and false greens, not exhaustive branch coverage. Each finding needs a concrete trigger, \
+             observed/traced consequence, file:line evidence, and cohesive fix. Label questions as unverified; \
+             never present them as verified defects. Deduplicate issues sharing the same causal fix.\n\n\
              Do NOT diff against other branches.\n\n\
              {}\n\n{}{}Diff file — read it fully (it may be large; read it in chunks if needed):\n\
              {}\n\nReview the change as described above and output ONLY a JSON array of findings \
@@ -619,7 +656,7 @@ pub(crate) async fn run_review_core(
         &cfg.summarizer,
         &agent_findings,
         &format!("{user_ctx}{jira_ctx}"),
-        resolve_blocker(pr_number, branches, &diff_text),
+        resolve_blocker(pr_number, branches, &diff_text).or(Some("Prior findings require explicit evidence-backed disposition; absence is not verification")),
     )
     .await;
 

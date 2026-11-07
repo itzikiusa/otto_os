@@ -82,8 +82,16 @@ pub async fn provision_worktree(
     }
 
     // True fresh launch. Capture the launch HEAD as the diff base.
-    let base = match git.rev_parse("HEAD").await {
+    let base = match git
+        .rev_parse(loop_.base_commit.as_deref().unwrap_or("HEAD"))
+        .await
+    {
         Ok(sha) => sha,
+        Err(e) if loop_.base_commit.is_some() => {
+            return Err(Error::Invalid(format!(
+                "Reviewed commit is unavailable: {e}"
+            )))
+        }
         Err(_) => git
             .current_branch()
             .await

@@ -90,6 +90,7 @@ export interface EditReviewCommentReq {
 }
 
 export interface Review {
+  scope_plan?: ReviewScopePlan | null;
   id: string;
   repo_id: string;
   pr_number: number;
@@ -104,6 +105,17 @@ export interface Review {
   /** true when the final comments came from the deterministic summarizer
    *  fallback (configured summarizer unavailable) — derived from the agents' fallback flags. */
   summary_fallback?: boolean;
+}
+
+export interface ReviewScopePlan {
+  head_sha: string;
+  summary: string;
+  related_modules: string[];
+  risks: string[];
+  lenses: { name: string; reason: string; instructions: string }[];
+  prior_findings: { finding_id: string; disposition: 'fixed' | 'still_open' | 'not_relevant'; evidence: string }[];
+  verification_notes: string[];
+  source: string;
 }
 
 export interface ReviewAgentCfg {
@@ -126,6 +138,9 @@ export interface ReviewAgentCfg {
 export type ReviewMode = 'fan_out' | 'orchestrator';
 
 export interface ReviewConfig {
+  /** One provider per assessed lens by default; explicit comparison opts into more sessions. */
+  cross_provider_check?: boolean;
+  previous_review_id?: Id | null;
   agents: ReviewAgentCfg[];
   summarizer: ReviewAgentCfg;
   custom_presets?: ReviewAgentCfg[];

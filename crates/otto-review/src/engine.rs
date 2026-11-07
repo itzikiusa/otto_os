@@ -223,6 +223,8 @@ pub fn reviewer_slots() -> Arc<tokio::sync::Semaphore> {
 /// claude PTY driver (see `run_review_core`).
 pub fn default_review_config(default_provider: &str) -> ReviewConfig {
     ReviewConfig {
+        cross_provider_check: false,
+        previous_review_id: None,
         agents: vec![
             ReviewAgentCfg {
                 name: "Correctness & bugs".to_string(),
@@ -585,6 +587,10 @@ pub fn label_findings_with_lens(
 /// A draft review comment as emitted by the summarizer.
 #[derive(Deserialize)]
 pub struct DraftComment {
+    /// Explicit verifier disposition. Suppressed claims retain their reasoning
+    /// in the review scope plan instead of becoming misleading PR comments.
+    #[serde(default)]
+    pub disposition: Option<String>,
     #[serde(default)]
     pub path: Option<String>,
     #[serde(default)]
@@ -607,6 +613,19 @@ pub struct DraftComment {
     pub reasoning: Option<String>,
     #[serde(default)]
     pub suggested_fix: Option<String>,
+}
+
+impl DraftComment {
+    pub fn verification_complete(&self) -> bool {
+        matches!(
+            self.disposition.as_deref(),
+            Some("verified" | "not_relevant" | "unverified" | "duplicate")
+        ) && !self.body.trim().is_empty()
+            && self.evidence.as_ref().is_some_and(|s| !s.trim().is_empty())
+    }
+    pub fn suppressed(&self) -> bool {
+        self.disposition.as_deref() != Some("verified") || !self.verification_complete()
+    }
 }
 
 pub fn default_draft_severity() -> String {

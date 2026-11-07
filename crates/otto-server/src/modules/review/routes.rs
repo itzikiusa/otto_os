@@ -21,6 +21,10 @@ pub fn pr_review_routes() -> Router<ServerCtx> {
         )
         .route("/reviews/{review_id}", get(get_review_by_id))
         .route("/reviews/{review_id}/handoff", post(handoff_review))
+        .route(
+            "/reviews/{review_id}/fix-goal",
+            post(super::fix::fix_review),
+        )
         .route("/reviews/{review_id}/cancel", post(cancel_review))
         .route(
             "/reviews/{review_id}/agents/{index}/retry",

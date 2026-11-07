@@ -490,6 +490,19 @@ async fn review_config(
         cfg.agents
             .push(checks_review_agent(&default_provider, check_specs));
     }
+    if p.get("cross_provider_check").is_some() || p.get("previous_review_id").is_some() {
+        let provider = crate::modules::default_review_provider(ctx).await;
+        let cfg = cfg_override
+            .get_or_insert_with(|| crate::modules::workflow_review_config(&provider, &[], &[]));
+        cfg.cross_provider_check = p
+            .get("cross_provider_check")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        cfg.previous_review_id = p
+            .get("previous_review_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    }
     cfg_override
 }
 

@@ -127,7 +127,26 @@ pub(crate) async fn summarize_and_persist(
     if let Some(e) = &fallback_cause {
         tracing::warn!(review = %review_id, "summarizer failed: {e}; deterministic fallback");
     }
-    let parsed = summary.value;
+    let mut parsed = summary.value;
+    let verification_incomplete =
+        fallback_cause.is_some() || parsed.iter().any(|c| !c.verification_complete());
+    let verification_notes: Vec<_> = parsed
+        .iter()
+        .filter(|c| c.suppressed())
+        .map(|c| {
+            format!(
+                "{}: {} — {}",
+                c.disposition.as_deref().unwrap_or("unverified"),
+                c.body,
+                c.evidence.as_deref().unwrap_or_default()
+            )
+        })
+        .collect();
+    if let Some(mut plan) = ctx.reviews_store.get_review(review_id).await?.scope_plan {
+        plan.verification_notes = verification_notes;
+        ctx.reviews_store.set_scope_plan(review_id, &plan).await?;
+    }
+    parsed.retain(|c| !c.suppressed());
 
     let summary_fallback = fallback_cause.is_some();
     mark_summarizer_done(
@@ -155,6 +174,9 @@ pub(crate) async fn summarize_and_persist(
     };
     if is_cancelled().await {
         return Ok(());
+    }
+    if verification_incomplete {
+        return Err(Error::Invalid("Final verification is incomplete; raw claims remain in agent results. Retry the verifier or re-run review.".into()));
     }
     let complete = review_run_complete(&agent_states[..summarizer_idx], summary_fallback);
     resolve_absent(
@@ -269,7 +291,7 @@ fn summarizer_prompt(
         })
         .collect::<Vec<_>>()
         .join("\n\n");
-    format!("{}{}\n\n{}", context, summarizer_cfg.prompt, batches)
+    format!("{}{}\n\n{}\n\nFINAL VERIFIER (these rules take precedence over the configured summarizer wording):\nRead the actual changed code, definitions and affected consumers. Independently trace each claimed defect; do not merely combine reviewer opinions. Only report a concrete NEW defect caused by this PR causal diff. A preexisting issue merely widened by the change belongs once in a not_relevant summary note, not a finding thread. Deduplicate findings with the same fix. Prioritize must-fix/should-fix; optional polish is secondary. Do not demand exhaustive tests: only newly changed critical-path gaps and demonstrable false greens. Calibrate severity by realistic impact and trigger; never demote a real issue because there are many, or inflate a score. Every retained comment MUST have disposition=verified and nonempty evidence with inspected file:line and causal trigger. Unknown dispositions or absent evidence cannot be published. Preserve important uncertainty explicitly.\nFor EVERY discarded/unconfirmed/duplicate claim, return an item in the same JSON array with disposition=not_relevant|unverified|duplicate, body identifying the original claim, and evidence explaining the concrete reason (for duplicate, identify the retained fix). These items are persisted as verification notes, not PR comments. If all claims are rejected return these dispositions rather than an unexplained empty array. Verify prior-finding dispositions against current code too. Never describe a code trace as an executed test.", context, summarizer_cfg.prompt, batches)
 }
 
 /// Persist the summary's draft comments AND promote each into a tracked

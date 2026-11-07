@@ -32,6 +32,8 @@
   import { confirmOutward } from '../../lib/confirmOutward';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import ReviewAgents from './ReviewAgents.svelte';
+  import ReviewScope from './ReviewScope.svelte';
+  import FixReviewButton from './FixReviewButton.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus } from '../../lib/status';
   import FindingsBoard from './FindingsBoard.svelte';
@@ -116,7 +118,6 @@
     if (count < 15) return 5000;
     return 10000;
   }
-  // Which older run indices are expanded (history[1+])
   let historyExpanded: Record<number, boolean> = $state({});
   // A child <ReviewAgents> retried one agent: adopt the refreshed review and
   // resume polling so we keep tracking the re-run.
@@ -129,12 +130,10 @@
     schedulePoll();
   }
 
-  // Per-comment action busy state keyed by comment id
   let actionBusy: Record<string, 'approve' | 'decline' | 'edit'> = $state({});
   /** Comment id → the body being edited (a person's edit of the agent draft). */
   let editingBody: Record<string, string> = $state({});
 
-  // Jira story attachment state
   let showJiraPicker = $state(false);
   // The currently attached issue (persists across re-runs within this component)
   let attachedIssue: { account_id: string; key: string; summary: string } | null = $state(null);
@@ -143,10 +142,10 @@
   // persists across re-runs within this component.
   let reviewContext = $state('');
 
-  // Config modal state
   let showConfig = $state(false);
   let configLoading = $state(false);
   let configSaving = $state(false);
+  let crossProviderCheck = $state(false);
   let editAgents: ReviewAgentCfg[] = $state([]);
   let editSummarizer: ReviewAgentCfg = $state({
     name: 'Summarizer',
@@ -155,19 +154,13 @@
     model: '',
     prompt: '',
   });
-  // Custom presets (persisted in ReviewConfig.custom_presets)
   let editPresets: ReviewAgentCfg[] = $state([]);
-  // ── Per-repo scope ──────────────────────────────────────────────────────
-  // The modal edits either the GLOBAL config (all repos without an override)
-  // or THIS repository's config (a named preset or a repo-only custom config).
   let configScope: 'global' | 'repo' = $state('global');
   let globalCfg: ReviewConfig | null = $state(null);
   let repoCfg: RepoReviewConfigResp | null = $state(null);
-  // Named full-config presets ("conf A" / "conf Y") shared across repos.
   let namedPresets: ReviewConfigPreset[] = $state([]);
   // '' = repo-only custom config (no preset backing it).
   let selectedPresetId = $state('');
-  // Inline "save as preset" name row.
   let presetSaveOpen = $state(false);
   let presetNameDraft = $state('');
 
@@ -541,8 +534,6 @@
     }
   }
 
-  // --- Jira picker ---
-
   function openJiraPicker(): void {
     showJiraPicker = true;
   }
@@ -770,6 +761,7 @@
 
   /** Seed the edit fields from a config (normalizing `providers` arrays). */
   function seedEditFields(cfg: ReviewConfig): void {
+    crossProviderCheck = cfg.cross_provider_check ?? false;
     editAgents = cfg.agents.map((a) => normalizeAgent({ ...a }));
     editSummarizer = { ...cfg.summarizer };
   }
@@ -901,6 +893,7 @@
       return { ...a, provider: ps[0], providers: ps };
     });
     return {
+      cross_provider_check: crossProviderCheck,
       agents: syncedAgents,
       summarizer: editSummarizer,
       custom_presets: presets.map((a) => {
@@ -1227,6 +1220,7 @@
     </div>
     <!-- Live agent cards (shared with the local review) -->
     {#if review.agents && review.agents.length > 0}
+      <ReviewScope {review} />
       <ReviewAgents {review} view="running" onretried={onAgentRetried} />
     {:else}
       <p class="dim" style="font-size: var(--fs-s);padding:8px 0">Agents starting…</p>
@@ -1238,6 +1232,8 @@
     </div>
     {@render reviewLaunchControls()}
   {:else if review.status === 'error'}
+    <ReviewScope {review} />
+    <ReviewAgents {review} view="done" onretried={onAgentRetried} />
     <div class="rp-error card" role="alert">
       <Icon name="warning" size={14} />
       <span class="rp-error-msg">The review failed. <span class="dim">{review.error ?? 'No reason was reported — check Settings → Logs.'}</span></span>
@@ -1280,6 +1276,7 @@
           <span class="chip rp-cfg-chip" title="This repository has its own review config">{repoCfgBadge}</span>
         {/if}
       </button>
+      <FixReviewButton {review} />
       <button class="btn small ghost" disabled={starting} onclick={startReview}>
         <Icon name="refresh" size={12} /> {starting ? 'Starting…' : 'Re-run review'}
       </button>
@@ -1376,6 +1373,7 @@
     <!-- Per-agent breakdown: open each agent’s (archived) session + its own
          findings. Shared with the local review; excludes the summarizer. -->
     {#if review.agents.length > 1}
+      <ReviewScope {review} />
       <ReviewAgents {review} view="done" onretried={onAgentRetried} />
     {/if}
 
@@ -1592,8 +1590,10 @@
         <Skeleton rows={3} height={36} />
       {:else}
         <p class="dim cfg-note">
-          Each agent reviews the diff with its own lens. The summarizer merges all results into the final comment list.
+          Otto assesses the change first, selects relevant lenses and assigns one enabled provider per lens. The final verifier checks claims against the code.
         </p>
+
+        <label class="cfg-note"><input type="checkbox" bind:checked={crossProviderCheck} /> Cross-provider check — run selected lenses on every enabled provider</label>
 
         <!-- Scope: the global default vs. a config bound to THIS repository. -->
         <div class="segmented cfg-scope" role="group" aria-label="Review config scope">

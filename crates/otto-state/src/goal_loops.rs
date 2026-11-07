@@ -379,6 +379,17 @@ impl GoalLoopsRepo {
         Ok(())
     }
 
+    /// Pin a review-created draft to the exact commit that was reviewed.
+    pub async fn set_review_base(&self, id: &Id, head: &str) -> Result<()> {
+        sqlx::query("UPDATE goal_loops SET base_commit = ? WHERE id = ? AND status = 'draft'")
+            .bind(head)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("pin review goal base"))?;
+        Ok(())
+    }
+
     /// Persist one validated settings patch atomically, including on a storage
     /// error. Missing fields retain their current values.
     pub async fn update_settings(

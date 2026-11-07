@@ -1281,6 +1281,39 @@ pub struct SkillReview {
 
 /// A PR agent review run, together with all its draft comments.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewScopeLens {
+    pub name: String,
+    pub reason: String,
+    pub instructions: String,
+}
+
+/// Persisted preflight assessment; evidence describes inspected paths, not a quality score.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewFindingDisposition {
+    pub finding_id: String,
+    /// fixed | still_open | not_relevant; evidence is mandatory.
+    pub disposition: String,
+    pub evidence: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewScopePlan {
+    #[serde(default)]
+    pub head_sha: String,
+    pub summary: String,
+    pub related_modules: Vec<String>,
+    pub risks: Vec<String>,
+    pub lenses: Vec<ReviewScopeLens>,
+    #[serde(default)]
+    pub prior_findings: Vec<ReviewFindingDisposition>,
+    #[serde(default)]
+    pub verification_notes: Vec<String>,
+    #[serde(default)]
+    pub source: String,
+}
+
+/// A PR agent review run, together with all its draft comments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Review {
     pub id: Id,
     pub repo_id: Id,
@@ -1308,6 +1341,8 @@ pub struct Review {
     /// `fallback` flags so the UI can badge the summary. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_fallback: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_plan: Option<ReviewScopePlan>,
 }
 
 // ===========================================================================
