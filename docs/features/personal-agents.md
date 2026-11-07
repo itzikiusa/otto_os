@@ -9,33 +9,35 @@ delivery, chat-anytime, and fully user-visible inter-agent rooms.
 
 ## 0. The home — one conversation per agent
 
-`#/personal-agents` is a messenger-style home (`PersonalAgentsPage.svelte`):
+`#/personal-agents` opens the **main agent's conversation** in the Focus layout
+(`PersonalAgentsPage.svelte`). An explicit agent link selects that agent instead.
 
-- **Rail** (`AgentRail.svelte`) — one avatar tile per agent: the **main agent
-  first, with a star**, then enabled before paused. Each tile has a live
-  presence dot — *working* (a run or a thread turn is going), *needs you* (a
-  thread waits on an approval), idle — fed by `personal_agent_run_updated` and
-  `agent_runtime_event`. **+** quick-creates an agent (name, personality,
-  avatar, optional template; "More options…" opens the full sheet). ⌘1–9
-  switch agents. On a phone the rail is a top strip.
-- **Conversation** (`AgentConversation.svelte`) — the agent's ONE continuous
-  chat (its Threads thread, rendered by the Threads conversation view). Before
-  the first message an intro stands in with "Try asking" chips (no tokens
-  until one is picked). The main agent's hand-offs show as live chips above
-  the chat (agent avatar · *working…* / *done* / *failed* / *stopped*; click →
-  the delegated thread). The header (avatar, name, status, next routine)
-  opens the side panel; ⋯ has Run now, Pause, Open chat in Threads, All
-  settings, Delete.
-- **Side panel** (`AgentSidePanel.svelte`): **Details** — who it is, model,
-  main-agent role, an "Update instructions?" card when the agent proposed a
-  change, **Personality**, **Routines** (live, with the next 3 runs, pause /
-  resume, "Describe a routine" → the agent sets it up in chat), what it can
-  use, Slack-as-me, **What it has learned** (its memory items, editable);
-  **Library** — run reports newest first (badged *Scheduled · …* / *Manual
-  run* / *Proactive*), memory, context; **Activity** — running runs (Stop),
-  hand-offs it led or works, its threads with what started each.
-- **All settings** — `#/personal-agents/<id>/<tab>` keeps the full page
-  (Overview, Activity, Autonomy, Schedules, Runs, Chat, Memory, Context).
+- **Agent switcher** — click the agent's name in the single toolbar to switch.
+  The main agent comes first; live working, approval and paused states appear
+  beside agent names. **New agent…** starts with name and purpose; tone, avatar
+  and templates are optional details. Scheduled tasks and Agent channels stay
+  available in the toolbar's **More** menu.
+- **Conversation** (`AgentConversation.svelte`) — one continuous chat per agent.
+  Before the first message, an intro and ready composer explain how to start.
+  The latest completed result appears here when available, with its author,
+  time and report link. Suggested prompts only fill the composer; Send starts the work. Live hand-offs
+  show who is working and link to their thread. A paused agent explains that
+  routines will not run and offers Resume; chat remains available.
+- **Routines** — a labelled toolbar button opens a shared sheet containing the
+  existing routines, their next run and timezone, pause/edit/run controls, live
+  work, and pending instruction proposals. Add routine keeps the current
+  permission and delivery review. Saving follows the existing routine form's
+  resume semantics; opening the sheet never resumes an agent.
+- **History** — a labelled toolbar button opens the complete run history, with
+  results, reports, failures, Stop and retry/run actions. It remains one click
+  away even while the routines sheet is closed.
+- **Settings** — the gear opens settings over the conversation. About, Runs and
+  Memory retain personality, provider/model, working folder, delivery, autonomy,
+  owner restrictions, memory and background documents. Existing deep links
+  (`#/personal-agents/<id>/<tab>`) open the matching sheet; routines/schedules
+  open Routines, runs/history/activity open History, and other settings aliases
+  keep their existing section mapping. Escape closes a sheet and returns focus;
+  opening or closing it preserves the conversation and unsent chat draft.
 
 Avatars are in-repo character art (`ui/src/lib/assets/agents`, one per
 personality; stored as `avatar: "char:<id>"`; a glyph or initials still work)

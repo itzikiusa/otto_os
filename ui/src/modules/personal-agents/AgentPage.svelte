@@ -2,6 +2,7 @@
   // One personal agent's settings: About · Activity · Memory. Its chat and
   // routines live on the home (`#/personal-agents/<id>`); older section slugs
   // (overview, runs, routines, …) land on the section holding them.
+  import Tabs from '../../lib/components/Tabs.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { tabKeys } from '../../lib/tabKeys';
   import { tick, untrack } from 'svelte';
@@ -48,8 +49,9 @@
 
   interface Props {
     agentId: string;
+    embedded?: boolean;
   }
-  let { agentId }: Props = $props();
+  let { agentId, embedded = false }: Props = $props();
 
   type Tab = PaTab;
   const TABS: { id: Tab; label: string }[] = [
@@ -61,8 +63,10 @@
   // land on History and a reload / back keeps the section.
   const tab = $derived<Tab>(paTab(router.parts[2]));
   let tabTransition = 0;
+  let sheetTools = $state<HTMLDivElement>();
+  const tabBase = $props.id();
   async function goTab(t: Tab, event?: MouseEvent): Promise<void> {
-    const list = (event?.currentTarget as HTMLElement | undefined)?.closest('[role="tablist"]');
+    const list = (event?.currentTarget as HTMLElement | undefined)?.closest('[role="tablist"]') ?? sheetTools?.querySelector('[role="tablist"]');
     const seq = ++tabTransition;
     // `#/personal-agents/<id>` alone is the agent's home (its conversation);
     // every tab of this settings page has its own path, Overview included.
@@ -71,7 +75,8 @@
     await Promise.resolve();
     if (seq !== tabTransition || !list?.isConnected || list.closest('[inert]')) return;
     // hashchange may follow this microtask; focus the accepted target only.
-    list.querySelector<HTMLButtonElement>(`[role="tab"][data-tab="${accepted ? t : tab}"]`)?.focus();
+    const target = accepted ? t : tab;
+    list.querySelector<HTMLButtonElement>(`[role="tab"][data-tab="${target}"], [id="${tabBase}-tab-${target}"]`)?.focus();
   }
   /** The edit sheet's open section (null = closed). */
   let editing = $state<null | 'about' | 'setup'>(null);
@@ -313,7 +318,7 @@
   function moreMenu(e: MouseEvent): void {
     if (!agent) return;
     ctxMenu.showAt(e.currentTarget as HTMLElement, [
-      ...(agent.enabled ? [{ label: 'Pause', icon: 'pause' as const, action: () => void toggleAgent() }] : []),
+      { label: agent.enabled ? 'Pause' : 'Resume', icon: agent.enabled ? 'pause' : 'refresh', action: () => void toggleAgent() },
       { label: 'Reset agent…', icon: 'undo', action: () => void resetAgent() },
       { separator: true },
       { label: 'Delete agent…', icon: 'trash', danger: true, action: () => void removeAgent() },
@@ -331,7 +336,8 @@
   }
 </script>
 
-<div class="agent-page">
+<div class="agent-page" class:embedded>
+{#if !embedded}
 <!-- Settings is a page of the agent inside Personal Agents, not a separate
      place: the trail leads back to the hub and to the agent's chat. -->
 <PageHeader
@@ -380,8 +386,14 @@
     </div>
   {/snippet}
 </PageHeader>
-<PageBody width="readable">
-<div class="agent-body">
+{:else}
+  <div class="sheet-tools" bind:this={sheetTools}>
+    <Tabs tabs={TABS} value={tab} activate="click" idBase={tabBase} onchange={(id) => void goTab(id as Tab)} label="Agent sections" />
+    <button type="button" class="icon-btn" aria-label="More for {agent?.name ?? 'agent'}" title="Pause, reset or delete" onclick={moreMenu}><Icon name="more" size={14} /></button>
+  </div>
+{/if}
+<PageBody width="readable" padded={!embedded}>
+<div class="agent-body" id={embedded ? `${tabBase}-panel-${tab}` : undefined} role={embedded ? 'tabpanel' : undefined} aria-labelledby={embedded ? `${tabBase}-tab-${tab}` : undefined}>
   {#if !agent}
     {#if personalAgents.loadingAgents}
       <Skeleton rows={3} height={64} label="the agent" />
@@ -562,6 +574,8 @@
 </div>
 
 <style>
+  .agent-page.embedded { height: auto; }
+  .sheet-tools { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-block-end: 16px; }
   .agent-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   .pa-accent-text { display: inline-flex; align-items: center; gap: 4px; color: var(--accent-text); }
   .pa-more { margin-top: 16px; }

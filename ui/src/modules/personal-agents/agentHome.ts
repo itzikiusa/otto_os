@@ -22,6 +22,12 @@ export function railOrder<T extends Pick<PersonalAgent, 'id' | 'name'>>(agents: 
   return [...agents].sort((a, b) => Number(isMain(b.id)) - Number(isMain(a.id)) || a.name.localeCompare(b.name));
 }
 
+/** Explicit links always win; a missing linked agent must never show another chat. */
+export function focusAgent<T extends Pick<PersonalAgent, 'id'>>(agents: T[], id: string, primaryId: string | null): T | null {
+  if (id) return agents.find((agent) => agent.id === id) ?? null;
+  return agents.find((agent) => agent.id === primaryId) ?? agents[0] ?? null;
+}
+
 /** A time in the viewer's local time — THE one format of this module:
  *  "Today, 09:00", "Tomorrow, 09:00", else "Sun 8 Nov, 09:00". */
 export function nextRunWords(iso: string | Date, now = new Date()): string {
