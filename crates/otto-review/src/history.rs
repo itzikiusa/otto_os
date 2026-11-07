@@ -3,6 +3,27 @@ use crate::engine::ReviewBranches;
 use otto_core::domain::ReviewStatus;
 use otto_core::{Error, Id, Result};
 
+/// Prior issues are verifier inputs even when every fresh lens overlooks them.
+/// Rebuild from the persisted scope on retry, so restart cannot erase coverage.
+pub async fn prior_claims(
+    plan: &otto_core::domain::ReviewScopePlan,
+    findings: &otto_state::ReviewFindingsRepo,
+) -> Result<Vec<otto_core::domain::ReviewFinding>> {
+    let mut claims = Vec::new();
+    for prior in &plan.prior_findings {
+        let original = findings.get_full(&prior.finding_id).await?;
+        claims.push(otto_core::domain::ReviewFinding {
+            path: original.path,
+            line: original.line,
+            line_end: original.line_end,
+            severity: original.severity.as_str().into(),
+            body: format!("Prior finding {}: {}\nEarlier scope disposition (re-verify independently): {} — {}\nOriginal evidence: {}", prior.finding_id, original.body, prior.disposition, prior.evidence, original.evidence),
+            lens: Some("prior-finding-verification".into()),
+        });
+    }
+    Ok(claims)
+}
+
 pub async fn prior_review_context(
     reviews: &otto_state::ReviewsRepo,
     findings_store: &otto_state::ReviewFindingsRepo,

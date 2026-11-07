@@ -65,7 +65,7 @@ pub(crate) async fn summarize_and_persist(
 
     // A finding with an empty body carries nothing reviewable — feeding husks
     // to the summarizer just teaches it to answer `[]`. Drop them up front.
-    let agent_findings: Vec<Vec<otto_core::domain::ReviewFinding>> = agent_findings
+    let mut agent_findings: Vec<Vec<otto_core::domain::ReviewFinding>> = agent_findings
         .iter()
         .map(|fs| {
             fs.iter()
@@ -74,6 +74,12 @@ pub(crate) async fn summarize_and_persist(
                 .collect()
         })
         .collect();
+    if let Some(plan) = ctx.reviews_store.get_review(review_id).await?.scope_plan {
+        let prior = otto_review::history::prior_claims(&plan, &ctx.findings_store).await?;
+        if !prior.is_empty() {
+            agent_findings.push(prior);
+        }
+    }
     let agent_findings = agent_findings.as_slice();
     let total_findings: usize = agent_findings.iter().map(|f| f.len()).sum();
     let summarizer_prompt = summarizer_prompt(context, summarizer_cfg, agent_findings);
