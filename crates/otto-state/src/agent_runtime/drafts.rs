@@ -11,7 +11,7 @@ impl AgentRuntimeRepo {
     pub async fn expire_drafts(&self) -> Result<()> {
         sqlx::query("UPDATE runtime_composer_drafts SET payload_json = NULL, revision = revision + 1 WHERE payload_json IS NOT NULL AND updated_at < ?")
             .bind(Utc::now().timestamp() - RETENTION_SECONDS)
-            .execute(&self.pool).await.map_err(dberr)?;
+            .execute(&self.pool).await.map_err(dberr("expire composer drafts"))?;
         Ok(())
     }
     pub async fn composer_draft(
@@ -22,7 +22,7 @@ impl AgentRuntimeRepo {
     ) -> Result<RuntimeDraftRecord> {
         self.expire_drafts().await?;
         let row = sqlx::query("SELECT revision, payload_json FROM runtime_composer_drafts WHERE user_id=? AND workspace_id=? AND session_id=?")
-            .bind(user).bind(workspace).bind(session).fetch_optional(&self.pool).await.map_err(dberr)?;
+            .bind(user).bind(workspace).bind(session).fetch_optional(&self.pool).await.map_err(dberr("load composer draft"))?;
         let Some(row) = row else {
             return Ok(RuntimeDraftRecord {
                 revision: 0,
@@ -63,14 +63,18 @@ impl AgentRuntimeRepo {
         let has_preferences =
             draft.model.is_some() || draft.effort.is_some() || draft.access_mode.is_some();
         let payload = (has_content || has_preferences).then_some(json.as_str());
-        let mut tx = self.pool.begin().await.map_err(dberr)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("begin composer draft update"))?;
         // The first write acquires SQLite's writer lock before reading quota/revision.
         sqlx::query("INSERT OR IGNORE INTO runtime_composer_drafts (user_id,workspace_id,session_id,revision,payload_json,updated_at) VALUES (?,?,?,0,NULL,?)")
-            .bind(user).bind(workspace).bind(session).bind(Utc::now().timestamp()).execute(&mut *tx).await.map_err(dberr)?;
+            .bind(user).bind(workspace).bind(session).bind(Utc::now().timestamp()).execute(&mut *tx).await.map_err(dberr("initialize composer draft revision"))?;
         let used: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(length(CAST(payload_json AS BLOB))),0) FROM runtime_composer_drafts WHERE user_id=? AND workspace_id=? AND session_id != ?")
-            .bind(user).bind(workspace).bind(session).fetch_one(&mut *tx).await.map_err(dberr)?;
+            .bind(user).bind(workspace).bind(session).fetch_one(&mut *tx).await.map_err(dberr("read composer draft storage usage"))?;
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runtime_composer_drafts WHERE user_id=? AND workspace_id=? AND payload_json IS NOT NULL AND (json_extract(payload_json,'$.text') != '' OR json_array_length(payload_json,'$.images') > 0 OR json_array_length(payload_json,'$.context') > 0 OR json_extract(payload_json,'$.fresh_context') = 1) AND session_id != ?")
-            .bind(user).bind(workspace).bind(session).fetch_one(&mut *tx).await.map_err(dberr)?;
+            .bind(user).bind(workspace).bind(session).fetch_one(&mut *tx).await.map_err(dberr("count active composer drafts"))?;
         if has_content && (used + json.len() as i64 > MAX_SCOPE_BYTES || count >= 128) {
             return Err(Error::PayloadTooLarge(
                 "Draft storage is full (64 MiB / 128 drafts). Clear an older draft and retry."
@@ -79,13 +83,15 @@ impl AgentRuntimeRepo {
         }
         let changed = sqlx::query("UPDATE runtime_composer_drafts SET revision=revision+1,payload_json=?,updated_at=? WHERE user_id=? AND workspace_id=? AND session_id=? AND revision=?")
             .bind(payload).bind(Utc::now().timestamp()).bind(user).bind(workspace).bind(session).bind(revision)
-            .execute(&mut *tx).await.map_err(dberr)?.rows_affected();
+            .execute(&mut *tx).await.map_err(dberr("save composer draft"))?.rows_affected();
         if changed != 1 {
             return Err(Error::Conflict(
                 "Draft changed in another window. Reload its revision before saving.".into(),
             ));
         }
-        tx.commit().await.map_err(dberr)?;
+        tx.commit()
+            .await
+            .map_err(dberr("commit composer draft update"))?;
         Ok(RuntimeDraftRecord {
             revision: revision + 1,
             draft: payload.map(|_| draft.clone()),
