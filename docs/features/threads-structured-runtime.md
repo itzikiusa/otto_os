@@ -647,9 +647,9 @@ and still remembered the image.
   of its tools runs) is interrupted with `turn.terminal reason: "stalled"`
   and a `system_notice`. A pending approval or pending background work is
   never a stall (`RuntimeConfig::stall_after` / `stall_tool_after`).
-- **Reopen and delete.** `POST /runtime-sessions/{id}/reopen` clears
-  `closed` (in order with the close's own write) and respawns the agent with
-  its resume key. If the process exits before it is ready (the provider lost
+- **Revive and delete.** `POST /runtime-sessions/{id}/reopen` clears
+  `closed` (in order with the close's own write) and respawns a closed or dormant agent with
+  its resume key, without sending a prompt. An already-live process is preserved. If the process exits before it is ready (the provider lost
   the conversation), the runtime starts a fresh provider thread, keeps the
   timeline, and adds a notice that the agent does not remember it; the old
   key is kept until the fresh one is up. Concurrent reopens and prompts share
@@ -867,3 +867,9 @@ secret question forms are refused instead of being collected into history.
   (`parent_id` = the group's root), messages them and reads their replies —
   an orchestrator driving codex / gemini / grok workers. The Threads sidebar
   nests the group; the thread header shows the group as switchable chips.
+
+### Revive and responsive width
+
+A stopped agent shows **Revive** above the composer and **Revive thread** in its menu. This starts the agent again without sending a message, keeps the same Otto thread and history, and resumes the provider conversation when available. A live agent is left alone. Closed threads in History have the same action; sending a message also revives them. If the provider has lost its conversation, Otto keeps the visible history and explicitly says the provider started fresh.
+
+The conversation and composer use the available pane width with matching, responsive gutters. Wide screens can show wider answers and code; split panes and phones size themselves independently.

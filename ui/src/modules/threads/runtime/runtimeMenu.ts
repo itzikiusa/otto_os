@@ -27,21 +27,22 @@ export function runtimeThreadMenu(id: string): MenuItem[] {
     ...uiControlItem(id),
     ...phoneHandoff.menuItem(`threads/${id}`, 'this thread'),
     { separator: true },
-    runtimeThreads.get(id)?.status === 'closed'
-      ? { label: 'Reopen thread', icon: 'refresh', action: () => void reopenThread(id) }
-      : { label: 'Close thread…', icon: 'x', danger: true, action: () => void closeThread(id) },
+    ...(['closed', 'dormant'].includes(runtimeThreads.get(id)?.status ?? '')
+      ? [{ label: 'Revive thread', icon: 'refresh', action: () => void reopenThread(id) }] : []),
+    ...(runtimeThreads.get(id)?.status !== 'closed'
+      ? [{ label: 'Close thread…', icon: 'x', danger: true, action: () => void closeThread(id) }] : []),
     { label: 'Delete thread…', icon: 'trash', danger: true, action: () => void deleteThread(id) },
   ];
 }
 
-/** Reopen a closed thread (its agent resumes); `show` focuses it. */
+/** Revive a closed or dormant thread (its agent resumes); `show` focuses it. */
 export async function reopenThread(id: string, show = true): Promise<boolean> {
   try {
     await runtimeThreads.reopen(id);
     if (show) threads.selectThread(id);
     return true;
   } catch (e) {
-    toastError('Couldn’t reopen thread', e);
+    toastError('Couldn’t revive thread', e);
     return false;
   }
 }

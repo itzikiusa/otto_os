@@ -922,7 +922,7 @@ issued them. Native RPC IDs are preserved internally; a reused native ID in a
 fresh process cannot overwrite retained request history or accept an old card's
 answer. Clients must submit the exact public ID from the request event.
 
-**Reopen and delete.** A closed session can be reopened (its agent respawns
+**Revive and delete.** A closed or dormant session can be revived without sending a prompt (its agent respawns
 resuming `native_thread_id`; when the provider refuses the resume — it
 exits before it is ready — it starts a fresh conversation, keeps the
 timeline, and adds a `system_notice` saying the agent does not remember it).
@@ -944,7 +944,7 @@ attachments.
 | POST /runtime-sessions/{id}/interrupt | owner-or-admin, person | — | `{interrupted}` — `false` when no turn was running. Pending requests → `cancelled` (`cancel_reason: "interrupt"`); the provider ends the turn (`turn.terminal` `interrupted`); if it has not within 10 s its process group is killed and the turn ends `interrupted` anyway |
 | POST /runtime-sessions/{id}/requests/{request_id} | owner-or-admin, person (`Admin` class) | Exactly one of `{decision}` for an approval, `{answers: QuestionAnswer[]}` for a question, or `{question_action: "decline"|"cancel"}` to dismiss a question (see below) | **204** resolved; **404** unknown / no longer pending, **400** wrong response kind, missing/duplicate field, invalid option or unoffered decision, **409** provider cannot accept the response |
 | POST /runtime-sessions/{id}/close | owner-or-admin, person | — | `RuntimeSession` (`status: closed`). Pending requests → `cancelled` (`cancel_reason: "closed"`). Ends a running turn `interrupted`, closes the child's stdin (SIGTERM / SIGKILL to its group after 3 s each). Idempotent; later prompts **409** (reopen first) |
-| POST /runtime-sessions/{id}/reopen | owner-or-admin, person | — | `RuntimeSession` — a `closed` session takes prompts again: its agent respawns now, resuming `native_thread_id` (a refused resume → a fresh conversation + `system_notice`). Its `meta` is kept. No-op on an open session. Spawn failures as for create (**400**; the session stays open, the next prompt retries) |
+| POST /runtime-sessions/{id}/reopen | owner-or-admin, person | — | `RuntimeSession` — revives a `closed` or `dormant` session without sending a prompt: its agent respawns now, resuming `native_thread_id` (a refused resume → a fresh conversation + `system_notice`). Its `meta` is kept. No-op while the agent process is live. Spawn failures as for create (**400**; the session stays open, the next prompt retries) |
 | DELETE /runtime-sessions/{id} | owner-or-admin, person | — | **204** — closes the session (as above), then removes its row, projection and attachments. Not undoable |
 | GET /runtime-sessions/{id}/attachments/{attachment_id} | ws viewer + owner-or-admin | — | the raw bytes, `Content-Type: <mime>` (`Content-Security-Policy: sandbox`, `nosniff`). **404** an id that is not one of the session's `user_message` attachments |
 | GET /runtime-sessions/{id}/events?after_sequence= | ws viewer + owner-or-admin | `after_sequence` (default 0) | `RuntimeReplay` — `{kind:"events", events, last_sequence}` or `{kind:"snapshot", snapshot_sequence, snapshot}` |

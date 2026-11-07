@@ -27,6 +27,25 @@ export async function promptRenameThread(s: Session): Promise<void> {
   }
 }
 
+/** Resume the same legacy agent session; never restart an already-live runner. */
+export async function reviveLegacyThread(s: Session, show = true): Promise<boolean> {
+  try {
+    if (s.archived) await ws.unarchiveSession(s.id);
+    if (!isPlainShellSession(s)) await ws.resumeSession(s.id);
+    threads.unsettle(s.id);
+    if (show) threads.selectThread(s.id);
+    return true;
+  } catch (e) {
+    toastError('Couldn’t revive thread', e);
+    return false;
+  }
+}
+
+export function legacyReviveItem(s: Session): MenuItem[] {
+  return !isPlainShellSession(s) && ['exited', 'reconnectable'].includes(ws.statusMap[s.id] ?? s.status)
+    ? [{ label: 'Revive thread', icon: 'refresh', action: () => void reviveLegacyThread(s) }] : [];
+}
+
 export function buildThreadMenu(s: Session, opts: { onstartroom: (id: string) => void }): MenuItem[] {
   const id = s.id;
   const parentId = delegatedParentId(s);
@@ -58,6 +77,7 @@ export function buildThreadMenu(s: Session, opts: { onstartroom: (id: string) =>
     ...(parentId
       ? [{ label: 'Open with parent in Split', icon: 'split', action: () => threads.openPairInSplit(parentId, id) }]
       : []),
+    ...legacyReviveItem(s),
     { separator: true },
     {
       label: threads.isSettled(id) ? 'Move back to Active' : 'Settle to History',

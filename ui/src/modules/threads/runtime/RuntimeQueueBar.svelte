@@ -3,7 +3,7 @@
   // is still running, the messages waiting in the thread's (durable,
   // server-side) queue — Steer (into the running turn; Claude), Send now
   // (stop the turn and send it), Edit, Remove — and, on a closed thread, the
-  // "Closed · Reopen" line.
+  // "Revive" line for a closed or dormant agent.
   import Icon from '../../../lib/components/Icon.svelte';
   import type { BackgroundTask, PromptDelivery, QueuedPrompt } from '../../../lib/api/types';
   import { toastError } from '../../../lib/toastError';
@@ -16,12 +16,13 @@
     running: boolean;
     canSteer: boolean;
     closed: boolean;
+    dormant: boolean;
     reopening: boolean;
     onreopen: () => void;
     /** Put a queued message back in the composer. */
     onedit: (text: string) => void;
   }
-  let { sessionId, background, queued, running, canSteer, closed, reopening, onreopen, onedit }: Props = $props();
+  let { sessionId, background, queued, running, canSteer, closed, dormant, reopening, onreopen, onedit }: Props = $props();
 
   async function deliver(q: QueuedPrompt, delivery: PromptDelivery): Promise<void> {
     try {
@@ -71,10 +72,10 @@
     </button>
   </div>
 {/each}
-{#if closed}
+{#if closed || dormant}
   <div class="qb" data-testid="runtime-closed">
-    <span class="ellipsis">Closed — in History. Send a message to pick it up again.</span>
-    <button type="button" class="btn small" disabled={reopening} onclick={onreopen} data-testid="runtime-reopen">Reopen</button>
+    <span class="ellipsis">{closed ? 'Closed — in History.' : 'Agent stopped.'} Revive to continue this conversation.</span>
+    <button type="button" class="btn small" disabled={reopening} onclick={onreopen} data-testid="runtime-reopen">{reopening ? 'Reviving…' : 'Revive'}</button>
   </div>
 {/if}
 
