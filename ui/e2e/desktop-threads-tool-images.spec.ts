@@ -55,7 +55,7 @@ test('tool images retain text, enlarge with keyboard, survive reload and fit pho
   await page.keyboard.press('Enter');
   const enlarged = page.getByTestId('runtime-tool-image-enlarged');
   await expect(enlarged).toBeVisible();
-  await expectFullyInViewport(enlarged);
+  await expectFullyInViewport(page, enlarged);
   await page.keyboard.press('Escape');
   await expect(enlarged).toHaveCount(0);
   await expect(opener).toBeFocused();
@@ -67,7 +67,7 @@ test('tool images retain text, enlarge with keyboard, survive reload and fit pho
   }
   await page.setViewportSize({ width: 390, height: 844 });
   await opener.click();
-  await expectFullyInViewport(enlarged);
+  await expectFullyInViewport(page, enlarged);
   await expectNoHorizontalOverflow(page);
   await page.screenshot({ path: info.outputPath('tool-image-phone.png'), animations: 'disabled' });
   await page.keyboard.press('Escape');

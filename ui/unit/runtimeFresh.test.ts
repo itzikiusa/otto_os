@@ -5,7 +5,7 @@ import { timelineRows } from '../src/modules/threads/runtime/timeline.ts';
 import type { RuntimeEvent, TurnItem } from '../src/lib/api/types';
 
 const ts = '2026-11-07T12:00:00Z';
-const base = { status: 'completed', started_at: ts, completed_at: ts, updated_at: ts } as const;
+const base = { title: null, status: 'completed', started_at: ts, completed_at: ts, updated_at: ts } as const;
 const items: TurnItem[] = [
   { ...base, id: 'old', turn_id: 'old-turn', ordinal: 1, type: 'user_message', text: 'Earlier question' },
   { ...base, id: 'boundary', turn_id: 'new-turn', ordinal: 2, type: 'session_boundary' },

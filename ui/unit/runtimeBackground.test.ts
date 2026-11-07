@@ -57,7 +57,7 @@ test("a subagent's activity renders inside its card, not in the timeline", () =>
     it('a', 5, 't1', { type: 'assistant_message', message_id: 'm', text: 'Waiting for the sweep', streaming: false }),
   ];
   const rows = timelineRows(items);
-  const ids = rows.flatMap((r) => (r.kind === 'message' ? [r.item.id] : r.kind === 'day' ? [] : r.parts.flatMap((x) => (x.kind === 'item' ? [x.entry.item.id] : x.entries.map((e) => e.item.id)))));
+  const ids = rows.flatMap((r) => (r.kind === 'message' ? [r.item.id] : r.kind === 'day' || r.kind === 'session' ? [] : r.parts.flatMap((x) => (x.kind === 'item' ? [x.entry.item.id] : x.entries.map((e) => e.item.id)))));
   assert.deepEqual(ids, ['u', 't1:tool:a', 'a']);
   assert.deepEqual(subagentChildren(items).get('t1:tool:a')?.map((i) => i.id), ['t1:sub:a:s1:0', 't1:tool:r']);
   assert.equal(workLabel(card), 'PR sweep');

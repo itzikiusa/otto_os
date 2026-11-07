@@ -2320,3 +2320,97 @@ async fn codex_questions_validate_answers_and_replay_without_tool_rows() {
         .is_err());
     rt2.close(&s.id).await.unwrap();
 }
+
+#[tokio::test]
+async fn fresh_context_waits_for_questions_and_old_cards_cannot_answer_new_process() {
+    use otto_core::agent_runtime::{QuestionAnswer, QuestionDismissAction};
+    let dir = tempfile::tempdir().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(dir.path().to_str().unwrap(), false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, dir.path().to_str().unwrap(), RuntimeProvider::Codex).await;
+    host.wait(is_ready).await;
+    rt.prompt(&s.id, "question form").await.unwrap();
+    let event = host.wait(is_pending_request).await;
+    let RuntimeEventBody::RuntimeRequestUpdated {
+        runtime_request: first,
+    } = event.body
+    else {
+        panic!("question missing")
+    };
+    let fresh = RuntimePromptReq {
+        fresh_context: true,
+        ..RuntimePromptReq::of("question form")
+    };
+    assert!(rt.prompt_with(&s.id, &fresh).await.is_err());
+    let answers = vec![
+        QuestionAnswer::Single {
+            question_id: "strategy_native".into(),
+            value: "Careful".into(),
+        },
+        QuestionAnswer::Text {
+            question_id: "note_native".into(),
+            text: "Keep the public API".into(),
+        },
+    ];
+    rt.respond_question(&s.id, &first.id, answers.clone())
+        .await
+        .unwrap();
+    host.wait(is_terminal).await;
+    rt.prompt_with(&s.id, &fresh).await.unwrap();
+    let event = host.wait_n(is_pending_request, 2).await;
+    let RuntimeEventBody::RuntimeRequestUpdated {
+        runtime_request: second,
+    } = event.body
+    else {
+        panic!("replacement question missing")
+    };
+    assert_ne!(
+        first.id, second.id,
+        "new process reuses its native RPC ID but not its public request ID"
+    );
+    assert!(rt
+        .respond_question(&s.id, &first.id, answers.clone())
+        .await
+        .is_err());
+    assert!(rt
+        .dismiss_question(&s.id, &first.id, QuestionDismissAction::Decline)
+        .await
+        .is_err());
+    rt.dismiss_question(&s.id, &second.id, QuestionDismissAction::Decline)
+        .await
+        .unwrap();
+    host.wait_n(is_terminal, 2).await;
+    assert_eq!(
+        host.items()
+            .iter()
+            .filter(|i| matches!(i.kind, TurnItemKind::SessionBoundary))
+            .count(),
+        1
+    );
+    rt.flush(&s.id).await;
+    rt.shutdown().await;
+    let host2 = TestHost::new(dir.path().to_str().unwrap(), false);
+    let recovered = runtime(&pool, &host2, RuntimeConfig::default());
+    recovered.recover().await.unwrap();
+    let RuntimeReplay::Snapshot { snapshot, .. } = recovered.replay(&s.id, 0).await.unwrap() else {
+        panic!("snapshot missing")
+    };
+    let old = snapshot
+        .runtime_requests
+        .iter()
+        .find(|r| r.id == first.id)
+        .unwrap();
+    assert_eq!(old.answers, Some(answers));
+    assert_eq!(old.status, RuntimeRequestStatus::Resolved);
+    assert_eq!(
+        snapshot
+            .runtime_requests
+            .iter()
+            .find(|r| r.id == second.id)
+            .unwrap()
+            .status,
+        RuntimeRequestStatus::Cancelled
+    );
+    recovered.close(&s.id).await.unwrap();
+}

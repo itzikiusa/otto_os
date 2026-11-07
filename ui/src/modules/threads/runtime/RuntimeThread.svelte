@@ -121,7 +121,7 @@
   });
   const ownTurn = $derived(turn?.origin === 'agent');
   const workingFor = $derived.by(() => {
-    if (!running || !turn?.started_at || turn.status !== 'running') return null;
+    if (!running || approvals.size > 0 || !turn?.started_at || turn.status !== 'running') return null;
     const s = Math.max(0, Math.floor((now() - Date.parse(turn.started_at)) / 1000));
     return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
   });
@@ -430,7 +430,9 @@
         placeholder={closed
           ? 'Send a message to reopen this thread'
           : approvals.size > 0
-            ? 'Waiting for your approval above'
+            ? Array.from(approvals.values()).some((request) => request.kind === 'question')
+              ? 'Answer the question above'
+              : 'Waiting for your approval above'
             : running
               ? 'Queue a follow-up for when this turn ends'
               : agentChat ? `Message ${agentChat}…` : 'Ask anything. / commands'}

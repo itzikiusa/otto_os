@@ -574,6 +574,9 @@
     font-weight: 500;
     min-width: 0;
   }
+  @media (max-width: 640px) {
+    .th-crumb-project, .th-crumb-sep { display: none; }
+  }
   .th-workspace {
     position: relative;
     display: flex;
