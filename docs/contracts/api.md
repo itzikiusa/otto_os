@@ -6495,3 +6495,28 @@ prior findings, performs a fresh review of the original PR plus fixes, and runs
 relevant critical-path checks. Goal Loop criteria and completion review gate success;
 the numeric target alone cannot complete a goal. No additional WebSocket event is
 introduced: scope changes use `review_changed`, fix progress uses Goal Loop events.
+
+### Goal Loop task graphs (2026-11)
+
+`GoalLoopConfig.graph?: {nodes: GoalGraphNode[]}|null` enables a dependency DAG.
+`GoalGraphNode` has `id`, `title`, `instructions`, `depends_on: string[]`, and
+`criterion_ids: string[]`. A graph has 1–16 nodes, unique nonempty ids, titles and
+instructions, no duplicate or unknown dependencies, no cycles, and at least one
+known acceptance criterion per node. Unknown or duplicate criterion references
+are rejected. Create, draft configuration updates and Start validate the graph.
+No graph preserves the existing executor lineup behavior.
+
+Each existing iteration executes one ready task with the configured executors
+sequentially in the loop's isolated directory. Tasks cannot start until their
+prerequisites have fresh passing evidence. Previously executed tasks are
+reverified before reuse and after mutations; a regression invalidates its
+transitive dependents. Future tasks cannot pass without executing. Completion
+requires all tasks and all acceptance criteria to pass. Existing active-runtime,
+iteration and phase budgets and pause/stop controls apply; configure at least one
+iteration per task plus repair headroom. Exhaustion remains incomplete.
+
+`GoalLoopLedger.graph_nodes` defaults to `[]`. Each entry has `node_id`,
+`status: "pending"|"running"|"passed"|"blocked"`, `iteration: number`,
+`evidence: string`, and `criteria: EvalCriterion[]`. This is controller-owned
+progress persisted in the existing ledger JSON; clients refetch on the existing
+Goal Loop change events. Agent prose alone cannot mark a task complete.
