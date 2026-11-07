@@ -359,6 +359,8 @@ pub enum TurnItemKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cancel_reason: Option<CancelReason>,
     },
+    /// A fresh provider conversation began in this same visible thread.
+    SessionBoundary,
     SystemNotice {
         message: String,
     },
@@ -845,6 +847,9 @@ pub struct UpdateRuntimeSessionReq {
 /// `access_mode` applies from this turn on and sticks, like `model`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuntimePromptReq {
+    /// Start a new provider conversation in this thread; refuses outstanding work.
+    #[serde(default)]
+    pub fresh_context: bool,
     #[serde(default)]
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

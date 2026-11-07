@@ -28,6 +28,7 @@ export type ParsedSlashIntent =
   | { kind: 'open-files' }
   | { kind: 'toggle-terminal' }
   | { kind: 'new-thread'; beside: boolean }
+  | { kind: 'fresh-context' }
   | { kind: 'side-chat'; question: string }
   | { kind: 'send-prompt'; prompt: string };
 
@@ -94,7 +95,7 @@ export const INTERACTIVE_SLASH_COMMANDS: readonly ComposerSlashCommand[] = [
   },
   {
     name: 'clear',
-    description: 'Start a clean thread in this folder',
+    description: 'Start the next message with fresh context in this thread',
     source: 'interactive',
   },
   {
@@ -217,8 +218,9 @@ export function parseInteractiveSlashInput(raw: string): ParsedSlashIntent | nul
     case 'terminal':
       return { kind: 'toggle-terminal' };
     case 'new':
-    case 'clear':
       return { kind: 'new-thread', beside: false };
+    case 'clear':
+      return { kind: 'fresh-context' };
     case 'fork':
       return { kind: 'new-thread', beside: true };
     case 'btw':

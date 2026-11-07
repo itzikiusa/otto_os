@@ -14,6 +14,10 @@
 //! the persistence op all happen under it, so they agree on order; DB writes
 //! run on a per-session persister task fed in that order.
 
+mod fresh;
+mod request_ids;
+use request_ids::RequestIds;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -124,6 +128,7 @@ enum PersistOp {
     Upsert(Vec<RuntimeEntityRow>),
     Reserve(u64),
     NativeThreadId(String),
+    ClearNativeThreadId,
     Closed,
     Opened,
     Flush(oneshot::Sender<()>),
@@ -272,6 +277,7 @@ mod erased {
 
 struct Proc {
     epoch: u64,
+    request_ids: RequestIds,
     pid: u32,
     stdin: mpsc::UnboundedSender<String>,
     driver: Box<dyn StructuredDriver>,
@@ -289,6 +295,8 @@ struct State {
     next_seq: u64,
     reserved: u64,
     epoch: u64,
+    /// Native identity is committed only after the first fresh prompt is accepted.
+    fresh_starting: bool,
     ring: EventRing,
     proj: Projection,
     turn: Option<ActiveTurn>,
@@ -313,6 +321,8 @@ impl State {
 }
 
 struct Live {
+    /// Serializes prompt admission, queue delivery and fresh provider replacement.
+    prompt_lock: tokio::sync::Mutex<()>,
     spawn_lock: tokio::sync::Mutex<()>,
     /// One queue drain at a time (a queued message is sent exactly once).
     drain_lock: tokio::sync::Mutex<()>,
@@ -833,6 +843,7 @@ impl AgentRuntime {
         let (tx, rx) = mpsc::unbounded_channel();
         let next_seq = rec.seq_reserved.max(rec.session.last_sequence) + 1;
         let live = Arc::new(Live {
+            prompt_lock: tokio::sync::Mutex::new(()),
             spawn_lock: tokio::sync::Mutex::new(()),
             drain_lock: tokio::sync::Mutex::new(()),
             state: Mutex::new(State {
@@ -840,6 +851,7 @@ impl AgentRuntime {
                 next_seq,
                 reserved: rec.seq_reserved,
                 epoch: 0,
+                fresh_starting: false,
                 ring: EventRing::new(self.inner.config.ring),
                 proj,
                 turn: None,
@@ -914,6 +926,7 @@ impl AgentRuntime {
             let step = driver.start(&ctx);
             st.proc = Some(Proc {
                 epoch,
+                request_ids: RequestIds::new(),
                 pid: child.pid,
                 stdin: child.stdin,
                 driver,
@@ -952,6 +965,17 @@ impl AgentRuntime {
     /// A prompt with an optional model / effort / access mode and inline
     /// images and files.
     pub async fn prompt_with(&self, id: &Id, req: &RuntimePromptReq) -> Result<RuntimePromptResp> {
+        let live = self.live(id).await?;
+        let _prompt = live.prompt_lock.lock().await;
+        self.prompt_locked(id, &live, req).await
+    }
+
+    async fn prompt_locked(
+        &self,
+        id: &Id,
+        live: &Arc<Live>,
+        req: &RuntimePromptReq,
+    ) -> Result<RuntimePromptResp> {
         if req.text.trim().is_empty() && req.images.is_empty() && req.files.is_empty() {
             return Err(Error::Invalid("prompt text is empty".into()));
         }
@@ -967,18 +991,20 @@ impl AgentRuntime {
                 bad.name, bad.mime
             )));
         }
-        let live = self.live(id).await?;
+        if req.fresh_context {
+            return self.prompt_fresh(id, live, req).await;
+        }
         let first = check_can_prompt(&live.lock());
         match (first, req.delivery) {
             (Err(Error::Conflict(m)), Some(d)) if m == TURN_RUNNING => {
-                return self.deliver_busy(id, &live, req, d).await;
+                return self.deliver_busy(id, live, req, d).await;
             }
             (r, _) => r?,
         }
-        match self.prompt_now(id, &live, req).await {
+        match self.prompt_now(id, live, req).await {
             Err(Error::Conflict(m)) if m == TURN_RUNNING && req.delivery.is_some() => {
                 let d = req.delivery.unwrap_or(PromptDelivery::Queue);
-                self.deliver_busy(id, &live, req, d).await
+                self.deliver_busy(id, live, req, d).await
             }
             other => other,
         }
@@ -1030,6 +1056,11 @@ impl AgentRuntime {
             }
         }
         self.spawn_resuming(id, &live).await?;
+        if req.fresh_context && !self.fresh_process_ready(&live).await {
+            return Err(Error::Invalid(
+                "the fresh agent could not start — retry the message".into(),
+            ));
+        }
         let attachments = self.store_attachments(id, req).await?;
         let res = self.start_turn(&live, req, attachments.clone());
         if res.is_err() {
@@ -1062,6 +1093,9 @@ impl AgentRuntime {
             .driver
             .prompt(&turn_id, req)
             .map_err(|e| Error::Invalid(e.0))?;
+        if req.fresh_context {
+            self.commit_fresh(live, &mut st, &turn_id);
+        }
         let now = Utc::now();
         st.proj.next_turn_ordinal += 1;
         let turn = ProviderTurn {
@@ -1191,6 +1225,7 @@ impl AgentRuntime {
         delivery: PromptDelivery,
     ) -> Result<RuntimePromptResp> {
         let live = self.live(id).await?;
+        let _prompt = live.prompt_lock.lock().await;
         let rec = {
             let mut st = live.lock();
             let Some(n) = st.proj.queue.iter().position(|q| q.id == queued_id) else {
@@ -1212,7 +1247,7 @@ impl AgentRuntime {
             delivery: Some(delivery),
             ..rec.req.clone()
         };
-        let res = self.prompt_with(id, &req).await;
+        let res = self.prompt_locked(id, &live, &req).await;
         if res.is_err() {
             // Back where it was, so nothing is lost.
             let mut st = live.lock();
@@ -1235,6 +1270,7 @@ impl AgentRuntime {
             return;
         };
         let _one = live.drain_lock.lock().await;
+        let _prompt = live.prompt_lock.lock().await;
         let next = {
             let st = live.lock();
             if st.session.status == RuntimeSessionStatus::Closed || st.turn.is_some() {
@@ -1363,9 +1399,10 @@ impl AgentRuntime {
         let Some(proc) = st.proc.as_mut() else {
             return Err(Error::Conflict("the agent process exited".into()));
         };
+        let native_id = proc.request_ids.native(request_id)?.to_string();
         let step = proc
             .driver
-            .respond(request_id, decision)
+            .respond(&native_id, decision)
             .map_err(|e| Error::Conflict(e.0))?;
         resolve_request(
             &self.inner,
@@ -1388,6 +1425,7 @@ impl AgentRuntime {
     /// further prompts. Idempotent.
     pub async fn close(&self, id: &Id) -> Result<RuntimeSession> {
         let live = self.live(id).await?;
+        let _prompt = live.prompt_lock.lock().await;
         let mut st = live.lock();
         if st.session.status == RuntimeSessionStatus::Closed {
             return Ok(st.session.clone());
@@ -1425,6 +1463,7 @@ impl AgentRuntime {
     /// `system_notice`). Its meta is kept. No-op on an open session.
     pub async fn reopen(&self, id: &Id) -> Result<RuntimeSession> {
         let live = self.live(id).await?;
+        let _prompt = live.prompt_lock.lock().await;
         {
             let mut st = live.lock();
             if st.session.status != RuntimeSessionStatus::Closed {
@@ -2156,7 +2195,9 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                 if let Some(native) = native_thread_id {
                     if st.session.native_thread_id.as_deref() != Some(native.as_str()) {
                         st.session.native_thread_id = Some(native.clone());
-                        let _ = live.persist.send(PersistOp::NativeThreadId(native));
+                        if !st.fresh_starting {
+                            let _ = live.persist.send(PersistOp::NativeThreadId(native));
+                        }
                     }
                 }
                 if model.is_some() && st.session.model.is_none() {
@@ -2230,6 +2271,7 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                 options,
                 tool_item_id,
             } => {
+                let id = scope_request_id(st, &id);
                 let turn_id = st.turn.as_ref().map(|t| t.id.clone());
                 let request = RuntimeRequest {
                     id: id.clone(),
@@ -2269,6 +2311,7 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                 set_session_status(inner, live, st, ProviderSessionStatus::Waiting, None);
             }
             DriverEvent::RequestClosed { request_id, status } => {
+                let request_id = scope_request_id(st, &request_id);
                 let open = st
                     .proj
                     .requests
@@ -2500,6 +2543,7 @@ async fn persister(repo: AgentRuntimeRepo, id: Id, mut rx: mpsc::UnboundedReceiv
             PersistOp::Upsert(rows) => repo.upsert_entities(&id, &rows).await,
             PersistOp::Reserve(upto) => repo.reserve_seq(&id, upto).await,
             PersistOp::NativeThreadId(n) => repo.set_native_thread_id(&id, &n).await,
+            PersistOp::ClearNativeThreadId => repo.clear_native_thread_id(&id).await,
             PersistOp::Closed => repo.set_closed(&id).await,
             PersistOp::Opened => repo.set_open(&id).await,
             PersistOp::Flush(done) => {
@@ -2518,4 +2562,12 @@ fn retire(inner: &Arc<Inner>, session: &RuntimeSession) {
     let host = Arc::clone(&inner.host);
     let session = session.clone();
     tokio::spawn(async move { host.retire(&session).await });
+}
+
+fn scope_request_id(st: &State, native: &str) -> String {
+    st.proc
+        .as_ref()
+        .expect("driver event has a live process")
+        .request_ids
+        .scoped(native)
 }

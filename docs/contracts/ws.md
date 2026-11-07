@@ -1551,7 +1551,11 @@ published on the streaming path, never through the internal bus.
   Entities are sent WHOLE (replace by id); `turn_item.type` ∈ `user_message |
   assistant_message | reasoning | todo_list | file_change |
   command_execution | dynamic_tool | web_search | approval_request |
-  system_notice | subagent | error`. A `subagent`'s own activity items carry
+  system_notice | session_boundary | subagent | error`. A `session_boundary`
+  marks the first accepted turn of an explicit fresh provider conversation in
+  the same Otto thread. It has no additional fields; preceding history remains.
+  Request IDs are opaque, scoped to one provider process, and never reused by
+  a replacement process. A `subagent`'s own activity items carry
   `parent_item_id` (the card). `provider_turn.origin: "agent"` marks a turn
   the agent started on its own; `provider_session.background_tasks` lists
   pending background work (api.md "Background work and the agent's own

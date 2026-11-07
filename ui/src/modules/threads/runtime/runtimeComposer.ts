@@ -11,7 +11,7 @@ import { runtimeThreads } from './runtimeThreads.svelte';
 /** Per file (images and PDFs). */
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 
-import type { ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
+import { runtimeDrafts, type ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
 export type { ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
 
 /** Read the files `takes` accepts as base64 attachments (oversized ones are
@@ -43,6 +43,9 @@ export function runViewSlash(intent: ParsedSlashIntent, sessionId: string, sessi
       return true;
     case 'toggle-terminal':
       threads.toggleTerminal(sessionId);
+      return true;
+    case 'fresh-context':
+      runtimeDrafts.for(sessionId).freshContext = true;
       return true;
     case 'new-thread':
       void newThread(session, intent.beside);

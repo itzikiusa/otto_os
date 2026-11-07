@@ -130,6 +130,7 @@ export type TurnItemKind =
       /** Set when cancelled; `agent` = the provider withdrew it. */
       cancel_reason?: RequestCancelReason;
     }
+  | { type: 'session_boundary' }
   | { type: 'system_notice'; message: string }
   /** A subagent (Claude's Agent / Task tool): its own messages and tools are
    *  items whose `parent_item_id` is this item. A background one stays
@@ -352,6 +353,8 @@ export interface UpdateRuntimeSessionReq {
  *  Claude, Codex, and ACP agents that advertise them; Antigravity is text
  *  only. Unsupported input is a 400. */
 export interface RuntimePromptReq {
+  /** Start a fresh provider conversation in the same thread; refuses outstanding work. */
+  fresh_context?: boolean;
   text: string;
   model?: string;
   effort?: string;

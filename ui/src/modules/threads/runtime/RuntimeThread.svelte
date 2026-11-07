@@ -216,7 +216,7 @@
   }
 
   // ── Slash commands: the ones that act on this view ─────────────────────
-  const SLASH_NAMES = new Set(['diff', 'files', 'terminal', 'new', 'fork', 'review', 'btw']);
+  const SLASH_NAMES = new Set(['diff', 'files', 'terminal', 'new', 'clear', 'fork', 'review', 'btw']);
   const SLASH = INTERACTIVE_SLASH_COMMANDS.filter((c) => SLASH_NAMES.has(c.name));
   const popId = $props.id();
   let cmdIdx = $state(0);
@@ -340,7 +340,9 @@
           />
         {/if}
         {#each rows as row (row.kind === 'message' ? row.item.id : row.id)}
-          {#if row.kind === 'day'}
+          {#if row.kind === 'session'}
+            <div class="rt-day" role="separator" aria-label="New session" data-testid="runtime-session-boundary"><span>New session</span></div>
+          {:else if row.kind === 'day'}
             <div class="rt-day" role="separator" aria-label={row.label}><span>{row.label}</span></div>
           {:else if row.kind === 'message' && row.item.type === 'user_message' && isRunHandoff(row.item.text)}
             <!-- A routine's report handed to the agent: its result card and the agent's reply show it. -->
@@ -400,6 +402,12 @@
         composerEl?.focus();
       }}
     />
+    {#if draft.freshContext}
+      <div class="rt-fresh" data-testid="runtime-fresh-notice" use:announceShown={'Next message starts fresh'}>
+        <span>Next message starts fresh</span>
+        <button type="button" class="btn small ghost" onclick={() => { draft.freshContext = false; composerEl?.focus(); }}>Cancel</button>
+      </div>
+    {/if}
     <div class="rt-composer">
       {#if suggestions.length > 0}
         <StageSlashPopup id={popId} items={suggestions} active={cmdIdx} onaccept={acceptCmd} onhover={(i) => (cmdIdx = i)} />
@@ -653,6 +661,14 @@
   }
   .rt-plan .step-completed {
     color: var(--success);
+  }
+  .rt-fresh {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    color: var(--text-dim);
+    font-size: var(--fs-s);
   }
   .rt-composer {
     display: flex;

@@ -71,7 +71,8 @@ export type TimelineRow =
   | { kind: 'message'; item: Extract<TurnItem, { type: 'user_message' | 'assistant_message' }> }
   | { kind: 'work'; id: string; parts: WorkPart[] }
   /** A date separator, only in a thread that spans more than one day. */
-  | { kind: 'day'; id: string; label: string };
+  | { kind: 'day'; id: string; label: string }
+  | { kind: 'session'; id: string };
 
 const TOOL_TYPES: ReadonlySet<TurnItem['type']> = new Set(['command_execution', 'dynamic_tool', 'web_search', 'file_change']);
 const isTool = (i: TurnItem): boolean => TOOL_TYPES.has(i.type);
@@ -208,7 +209,10 @@ export function timelineRows(items: readonly TurnItem[]): TimelineRow[] {
     work = [];
   };
   for (const item of items) {
-    if (item.type === 'user_message' || item.type === 'assistant_message') {
+    if (item.type === 'session_boundary') {
+      flush();
+      rows.push({ kind: 'session', id: item.id });
+    } else if (item.type === 'user_message' || item.type === 'assistant_message') {
       flush();
       rows.push({ kind: 'message', item });
     } else if (!foldedIds.has(item.id)) {
@@ -240,7 +244,7 @@ export function dayLabel(ms: number, now: Date = new Date()): string {
 function withDays(rows: TimelineRow[], items: readonly TurnItem[], now: Date = new Date()): TimelineRow[] {
   const at = new Map(items.map((i) => [i.id, itemTime(i)]));
   const rowTime = (r: TimelineRow): number =>
-    (r.kind === 'message' ? at.get(r.item.id) : r.kind === 'work' ? at.get(r.id) : undefined) ?? NaN;
+    (r.kind === 'message' ? at.get(r.item.id) : r.kind === 'work' || r.kind === 'session' ? at.get(r.id) : undefined) ?? NaN;
   const days = new Set(rows.map(rowTime).filter(Number.isFinite).map(dayKey));
   if (days.size < 2) return rows;
   const out: TimelineRow[] = [];
