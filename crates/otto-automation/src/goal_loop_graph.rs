@@ -78,12 +78,9 @@ pub fn validate(config: &GoalLoopConfig, definition: &GoalLoopDefinition) -> Res
 fn order(graph: &GoalLoopGraph) -> Vec<usize> {
     let mut done = HashSet::new();
     let mut result = Vec::new();
-    loop {
-        let Some((i, node)) = graph.nodes.iter().enumerate().find(|(_, n)| {
-            !done.contains(n.id.as_str()) && n.depends_on.iter().all(|d| done.contains(d.as_str()))
-        }) else {
-            break;
-        };
+    while let Some((i, node)) = graph.nodes.iter().enumerate().find(|(_, n)| {
+        !done.contains(n.id.as_str()) && n.depends_on.iter().all(|d| done.contains(d.as_str()))
+    }) {
         done.insert(node.id.as_str());
         result.push(i);
     }
@@ -259,12 +256,11 @@ pub fn reconcile_verdict(
 mod tests {
     use super::*;
     fn fixture() -> (GoalLoopConfig, GoalLoopDefinition) {
-        let mut cfg = GoalLoopConfig::default();
-        cfg.graph = Some(serde_json::from_value(serde_json::json!({"nodes":[
+        let cfg = GoalLoopConfig { graph: Some(serde_json::from_value(serde_json::json!({"nodes":[
             {"id":"a","title":"A","instructions":"First","depends_on":[],"criterion_ids":["ca"]},
             {"id":"b","title":"B","instructions":"Second","depends_on":["a"],"criterion_ids":["cb"]},
             {"id":"c","title":"C","instructions":"Third","depends_on":["b"],"criterion_ids":["cc"]}
-        ]})).unwrap());
+        ]})).unwrap()), ..Default::default() };
         let d = serde_json::from_value(serde_json::json!({"title":"Goal","acceptance_criteria":[
             {"id":"ca","text":"A","verify":"inspect"},{"id":"cb","text":"B","verify":"inspect"},{"id":"cc","text":"C","verify":"inspect"}
         ]})).unwrap();

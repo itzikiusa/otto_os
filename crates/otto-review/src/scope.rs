@@ -25,7 +25,7 @@ pub fn selected_agents(
         otto_core::domain::ReviewAgentCfg {
             name: lens.name.clone(), provider: providers[0].clone(), providers,
             model,
-            prompt: format!("Selected because: {}\n{}\nOutput JSON findings with path, line, severity (bug=must fix, warn=should fix, info=optional), body. Include code-traced evidence and a concrete causal trigger in body.", lens.reason, format!("{}\n{}", lens.instructions, template.map(|a| a.prompt.as_str()).unwrap_or_default())),
+            prompt: format!("Selected because: {}\n{}\n{}\nOutput JSON findings with path, line, severity (bug=must fix, warn=should fix, info=optional), body. Include code-traced evidence and a concrete causal trigger in body.", lens.reason, lens.instructions, template.map(|a| a.prompt.as_str()).unwrap_or_default()),
             // The method is the selected instructions. A skill is never required.
             skill: String::new(),
         }

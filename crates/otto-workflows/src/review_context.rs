@@ -175,8 +175,8 @@ mod tests {
     #[tokio::test]
     async fn context_cache_tracks_declared_blobs_and_rejects_dirty_or_missing_inputs() {
         let dir = tempfile::tempdir().unwrap();
-        let git = |args: &[&str]| {
-            let result = otto_git::local::hardened_std_command()
+        let git = async |args: &[&str]| {
+            let result = tokio::process::Command::from(otto_git::local::hardened_std_command())
                 .current_dir(dir.path())
                 .args([
                     "-c",
@@ -186,6 +186,7 @@ mod tests {
                 ])
                 .args(args)
                 .output()
+                .await
                 .unwrap();
             assert!(
                 result.status.success(),
@@ -193,11 +194,11 @@ mod tests {
                 String::from_utf8_lossy(&result.stderr)
             );
         };
-        git(&["init"]);
+        git(&["init"]).await;
         std::fs::write(dir.path().join("context.md"), "architecture").unwrap();
         std::fs::write(dir.path().join("code.rs"), "old behavior").unwrap();
-        git(&["add", "."]);
-        git(&["commit", "-m", "fixture"]);
+        git(&["add", "."]).await;
+        git(&["commit", "-m", "fixture"]).await;
         let entries = vec![RepoEntry {
             repo: "repo".into(),
             repo_id: Some("repo".into()),
@@ -219,8 +220,8 @@ mod tests {
                 .is_none(),
             "dirty checkout cannot reuse"
         );
-        git(&["add", "."]);
-        git(&["commit", "-m", "fix"]);
+        git(&["add", "."]).await;
+        git(&["commit", "-m", "fix"]).await;
         assert_eq!(
             tracked_dependencies(&entries, &["context.md"])
                 .await
@@ -234,8 +235,8 @@ mod tests {
                 .is_none()
         );
         std::fs::write(dir.path().join("context.md"), "changed architecture").unwrap();
-        git(&["add", "."]);
-        git(&["commit", "-m", "context change"]);
+        git(&["add", "."]).await;
+        git(&["commit", "-m", "context change"]).await;
         assert_ne!(
             tracked_dependencies(&entries, &["context.md"])
                 .await
