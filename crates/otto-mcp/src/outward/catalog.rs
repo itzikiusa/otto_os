@@ -457,7 +457,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["workspace_id"],"properties":{
                 "workspace_id":{"type":"string"},"query":{"type":"string"},"story_id":{"type":"string"}}}}),
         json!({"name":"otto.run_goal_loop","mutating":true,"category":"Agents",
-            "description":"Create and start a bounded goal loop (Plan→Execute→Evaluate→Digest). `definition` = {title, acceptance_criteria:[{id, text, verify:\"command\"|\"agent\"|…, verify_cmd (command kind)}] (non-empty)}; `limits` = {max_iterations, max_runtime_secs, per_phase_timeout_secs}; `config` = {executors:[{provider, prompt}] (non-empty), planner, evaluator, digester, definer — each {provider, prompt}}. DANGEROUS: spawns autonomous agents — approval-gated.",
+            "description":"Create/start a bounded goal loop. definition={title,acceptance_criteria:[{id,text,verify,verify_kind:command|agent|human,verify_cmd?}]}; limits={max_iterations,max_runtime_secs,per_phase_timeout_secs}; config={executors:[{name,provider,model?,prompt_extra?}],planner,evaluator,digester,definer:{provider,prompt,model?},graph?:{nodes:[{id,title,instructions,depends_on:[],criterion_ids:[]}]}}. Graph: 1–16 acyclic tasks, all criteria assigned, one task/iteration; human acceptance final. DANGEROUS: spawns agents; approval-gated.",
             "inputSchema":{"type":"object","required":["workspace_id","name","repo_path","definition","limits","config"],"properties":{
                 "workspace_id":{"type":"string"},"name":{"type":"string"},"repo_path":{"type":"string"},
                 "definition":{"type":"object"},"limits":{"type":"object"},"config":{"type":"object"}}}}),
