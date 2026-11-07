@@ -1835,6 +1835,73 @@ async fn reopen_resumes_the_thread_or_starts_fresh_with_a_notice() {
     assert_eq!(last_assistant_text(&host), "echo: fresh");
 }
 
+#[tokio::test]
+async fn revive_dormant_thread_resumes_without_sending_and_keeps_live_runner() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    rt.prompt(&s.id, "keep this history").await.unwrap();
+    host.wait(is_terminal).await;
+    rt.flush(&s.id).await;
+    let native = rt.get(&s.id).await.unwrap().native_thread_id.unwrap();
+    let before = AgentRuntimeRepo::new(pool.clone())
+        .entities(&s.id)
+        .await
+        .unwrap();
+    rt.shutdown().await;
+
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    assert_eq!(
+        rt.get(&s.id).await.unwrap().status,
+        RuntimeSessionStatus::Dormant
+    );
+    let (a, b) = tokio::join!(rt.reopen(&s.id), rt.reopen(&s.id));
+    assert_eq!(a.unwrap().id, s.id);
+    assert_eq!(b.unwrap().id, s.id);
+    assert_eq!(
+        host.prepared.lock().unwrap().len(),
+        1,
+        "revival starts one runner"
+    );
+    host.wait(is_ready).await;
+    assert_eq!(
+        rt.get(&s.id).await.unwrap().native_thread_id.as_deref(),
+        Some(native.as_str())
+    );
+    assert!(
+        !host.all().iter().any(is_terminal),
+        "revival sends no prompt"
+    );
+    rt.reopen(&s.id).await.unwrap();
+    assert_eq!(
+        host.prepared.lock().unwrap().len(),
+        1,
+        "a live runner is preserved"
+    );
+    rt.flush(&s.id).await;
+    let after = AgentRuntimeRepo::new(pool.clone())
+        .entities(&s.id)
+        .await
+        .unwrap();
+    assert!(before.iter().any(|row| row.kind == "turn_item"));
+    for item in before.iter().filter(|row| row.kind == "turn_item") {
+        assert!(
+            after
+                .iter()
+                .any(|row| row.entity_id == item.entity_id && row.payload == item.payload),
+            "history item is preserved"
+        );
+    }
+    rt.prompt(&s.id, "continue").await.unwrap();
+    host.wait(is_terminal).await;
+    assert_eq!(last_assistant_text(&host), "echo: continue");
+    rt.shutdown().await;
+}
+
 /// After a restart the chat is dormant; a prompt respawns the agent with
 /// `--resume`. If the provider lost (or never saved) that conversation, the
 /// prompt still gets an answer on a fresh thread instead of failing forever.

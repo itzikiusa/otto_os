@@ -10,13 +10,14 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import type { AcceptanceCriterion, GoalLoopDraft } from '../../lib/api/types';
+  import type { AcceptanceCriterion, GoalLoopDraft, GoalLoopGraph } from '../../lib/api/types';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { announceShown } from '../../lib/announce.svelte';
   import GoalGraphEditor from './GoalGraphEditor.svelte';
-  import { graphError } from './graph';
+  import IterationDiagram from './IterationDiagram.svelte';
+  import { graphError, initialGraph, restoreGraph } from './graph';
   import { goalTemplates, templateDraft, researchDraft, type GoalTemplateId, type PocScope } from './templates';
 
   let { oncancel, oncreated }: { oncancel: () => void; oncreated: (id: string) => void } = $props();
@@ -37,6 +38,8 @@
   let selectedTemplate = $state<GoalTemplateId | ''>('');
   let pocScope = $state<PocScope>('both');
   let draftSource = $state<'template' | 'agent'>('agent');
+  let execution = $state<'loop' | 'graph'>('loop');
+  let savedGraph = $state<GoalLoopGraph | null>(null);
   const template = $derived(goalTemplates.find(item => item.id === selectedTemplate));
   const graphIssue = $derived(draft ? graphError(draft.suggested_config.graph, draft.definition.acceptance_criteria) : null);
   let name = $state('');
@@ -67,16 +70,41 @@
   function formState(): string {
     return JSON.stringify([seed, mode, allowCommits, requireReview, sourceLinks, selectedSkills, repoPath,
       feedback, draft, name, maxIterations, maxMinutes, perPhaseMinutes, executorCount,
-      execProvider, execModel, defProvider, defModel, selectedTemplate, pocScope, draftSource]);
+      execProvider, execModel, defProvider, defModel, selectedTemplate, pocScope, draftSource, execution, savedGraph]);
   }
 
   function applyDraft(d: GoalLoopDraft): void {
     draft = mode === 'research' ? researchDraft(d) : d;
+    // A new template/agent response owns a new task plan. The cache is only for
+    // switching execution type within this exact draft.
+    savedGraph = draft.suggested_config.graph ?? null;
+    if (execution === 'loop') {
+      draft.suggested_config.graph = null;
+    } else if (!draft.suggested_config.graph) {
+      draft.suggested_config.graph = initialGraph(draft.definition.acceptance_criteria, seed);
+    }
     name = d.definition.title;
     maxIterations = d.suggested_limits.max_iterations;
     maxMinutes = Math.round(d.suggested_limits.max_runtime_secs / 60);
     perPhaseMinutes = Math.max(1, Math.round(d.suggested_limits.per_phase_timeout_secs / 60));
     feedback = '';
+  }
+
+  async function setExecution(next: 'loop' | 'graph'): Promise<void> {
+    if (!alive || next === execution) return;
+    const generation = formGeneration;
+    const workspace = ws.currentId;
+    if (next === 'loop' && draft?.suggested_config.graph && !(await confirmer.ask('Work toward the whole goal each iteration? Your tasks and dependencies stay in this draft so you can switch back.', { title: 'Use a goal loop', confirmLabel: 'Use goal loop' }))) return;
+    if (!alive || generation !== formGeneration || workspace !== ws.currentId) return;
+    execution = next;
+    if (!draft) return;
+    if (next === 'loop') {
+      savedGraph = draft.suggested_config.graph ?? null;
+      draft.suggested_config.graph = null;
+    } else {
+      draft.suggested_config.graph = savedGraph ? restoreGraph(savedGraph, draft.definition.acceptance_criteria) : initialGraph(draft.definition.acceptance_criteria, seed);
+      if (mode === 'research') draft = researchDraft(draft);
+    }
   }
 
   function setMode(next: 'build' | 'research'): void {
@@ -86,6 +114,7 @@
     else {
       draft.definition.acceptance_criteria = draft.definition.acceptance_criteria.filter(criterion => criterion.id !== 'otto-research-report');
       if (draft.suggested_config.graph) draft.suggested_config.graph.nodes = draft.suggested_config.graph.nodes.map(node => ({ ...node, criterion_ids: node.criterion_ids.filter(id => id !== 'otto-research-report') }));
+      if (savedGraph) savedGraph = { nodes: savedGraph.nodes.map(node => ({ ...node, criterion_ids: node.criterion_ids.filter(id => id !== 'otto-research-report') })) };
     }
   }
 
@@ -102,6 +131,7 @@
     pocScope = scope;
     draftSource = 'template';
     const next = templateDraft(id, execProvider, scope);
+    savedGraph = next.suggested_config.graph ?? null;
     mode = next.suggested_config.mode ?? 'build';
     applyDraft(next);
     allowCommits = false;
@@ -113,6 +143,8 @@
     if (!alive || !wsId || !seed.trim() || (mode === 'build' && !repoPath.trim())) return;
     const generation = formGeneration;
     const ownsForm = () => alive && generation === formGeneration && ws.currentId === wsId;
+    if (draft && (draft.suggested_config.graph || savedGraph) && !(await confirmer.ask('Updating with an agent replaces this draft’s criteria and task plan. Your goal and repository path are kept.', { title: 'Update goal draft', confirmLabel: 'Update draft' }))) return;
+    if (!ownsForm()) return;
     defining = true;
     try {
       const d = await loops.define(wsId, {
@@ -122,8 +154,6 @@
         feedback: feedback.trim() || undefined,
       });
       if (!ownsForm()) return;
-      // Refining the goal does not silently discard a manually edited graph.
-      if (draft?.suggested_config.graph) d.suggested_config.graph = draft.suggested_config.graph;
       applyDraft(d);
       draftSource = 'agent';
     } catch (e) {
@@ -269,6 +299,12 @@
   {/if}
 
   <section class="block">
+    <label class="lbl" for="gl-execution">Execution</label>
+    <select id="gl-execution" class="input in" value={execution} disabled={launching || defining} onchange={async (e) => {
+      const select = e.currentTarget;
+      await setExecution(select.value as 'loop' | 'graph');
+      select.value = execution;
+    }}><option value="loop">Goal loop — iterate on the whole goal</option><option value="graph">Engineering graph — tasks with prerequisites</option></select>
     <label class="lbl" for="gl-template">Start from a template <span class="hint">(optional)</span></label>
     <select id="gl-template" class="input in" value={selectedTemplate} disabled={launching} onchange={async (e) => {
       const select = e.currentTarget;
@@ -295,7 +331,7 @@
       rows="3"
       placeholder={template?.example ?? 'e.g. Make the export endpoint stream instead of buffering, and add a test.'}
     ></textarea>
-    <label class="lbl" for="gl-mode">Mode</label>
+    <label class="lbl" for="gl-mode">Work type</label>
     <select id="gl-mode" class="input in" value={mode} onchange={(e) => setMode(e.currentTarget.value as 'build' | 'research')}><option value="build">Build</option><option value="research">Research</option></select>
     <p class="muted small">Build changes code on an isolated branch; Research writes findings to a scratch directory.</p>
     {#if mode === 'build'}
@@ -324,6 +360,18 @@
       {/if}
     </div>
     </details>
+  </section>
+
+  <section class="block">
+    {#if execution === 'loop'}
+      <IterationDiagram />
+    {:else if draft}
+      <GoalGraphEditor graph={draft.suggested_config.graph} criteria={draft.definition.acceptance_criteria}
+        onchange={(graph) => { if (draft) draft.suggested_config.graph = graph; }} />
+    {:else}
+      <h2 class="execution-title">Engineering graph</h2>
+      <p class="muted small">Choose a template or draft your goal to create its tasks. Connect prerequisites, link evidence criteria, and run one ready task per iteration.</p>
+    {/if}
   </section>
 
   {#if draft}
@@ -364,11 +412,6 @@
         <!-- A form hint, read in place; an inserted status would be silent anyway. -->
         <p class="muted small" id="goal-criteria-hint">Each criterion needs a description and how it is verified.</p>
       {/if}
-    </section>
-
-    <section class="block">
-      <GoalGraphEditor graph={draft.suggested_config.graph} criteria={draft.definition.acceptance_criteria}
-        onchange={(graph) => { if (draft) draft.suggested_config.graph = graph; }} />
     </section>
 
     <section class="block">
@@ -461,6 +504,7 @@
 {/if}
 
 <style>
+  .execution-title { font-size: var(--fs-m); font-weight: 600; margin: 0; }
   .agent-drafting { margin-block-start: 12px; }
   .agent-drafting > summary { font-size: var(--fs-s); cursor: pointer; }
   .form-error { color: var(--danger); font-size: var(--fs-s); }

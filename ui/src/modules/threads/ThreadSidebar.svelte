@@ -22,6 +22,7 @@
   import { threadRepos } from './threadRepos.svelte';
   import { FilterPopover, PullRequestsView, SettingsView, UsageView } from './threadLazy.svelte';
   import { threadsChrome } from './threadsChrome.svelte';
+  import { legacyReviveItem, reviveLegacyThread } from './threadMenu';
   import { promptNewScript } from './threadGitMenus';
   import { reopenThread, runtimeThreadMenu } from './runtime/runtimeMenu';
   import { isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
@@ -264,12 +265,7 @@
     if (s.archived && isRuntimeThread(s)) {
       if (!(await reopenThread(s.id, false))) return;
     } else if (s.archived) {
-      try {
-        await ws.unarchiveSession(s.id);
-      } catch (e) {
-        toastError('Couldn’t reopen thread', e);
-        return;
-      }
+      if (!(await reviveLegacyThread(s, false))) return;
     }
     if (beside) threads.openBeside(s.id);
     else threads.selectThread(s.id);
@@ -313,6 +309,7 @@
             },
           ]
         : []),
+      ...(!s.archived ? legacyReviveItem(s) : []),
       ...(!s.archived
         ? [
             {
@@ -328,7 +325,7 @@
           ]
         : [
             {
-              label: 'Reopen thread',
+              label: 'Revive thread',
               icon: 'refresh',
               action: () => void reopenArchived(s, false),
             },

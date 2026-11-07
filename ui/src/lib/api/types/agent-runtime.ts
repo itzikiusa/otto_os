@@ -288,6 +288,7 @@ export type RuntimeReplay =
   | { kind: 'events'; events: RuntimeEvent[]; last_sequence: number }
   | { kind: 'snapshot'; snapshot_sequence: number; snapshot: RuntimeSnapshot };
 
+/** POST /runtime-sessions/:id/reopen revives closed/dormant sessions without a prompt; live agents are preserved. */
 export type RuntimeSessionStatus =
   | 'starting' | 'idle' | 'working' | 'awaiting_permission' | 'dormant' | 'closed';
 

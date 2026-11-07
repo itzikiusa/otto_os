@@ -1,5 +1,16 @@
 import type { AcceptanceCriterion, GoalGraphNode, GoalLoopGraph } from '../../lib/api/types';
 
+export function initialGraph(criteria: AcceptanceCriterion[], goal: string): GoalLoopGraph {
+  return { nodes: [{ id: 'task-1', title: 'Work toward the goal', instructions: goal.trim() || 'Implement the goal and verify the associated acceptance criteria.', depends_on: [], criterion_ids: criteria.map(criterion => criterion.id) }] };
+}
+
+/** Keep task edits across a mode toggle without resurrecting deleted criteria.
+ * Unassigned tasks stay visibly invalid for the user to reconnect deliberately. */
+export function restoreGraph(graph: GoalLoopGraph, criteria: AcceptanceCriterion[]): GoalLoopGraph {
+  const ids = new Set(criteria.map(criterion => criterion.id));
+  return { nodes: graph.nodes.map(node => ({ ...node, criterion_ids: node.criterion_ids.filter(id => ids.has(id)) })) };
+}
+
 /** Presentation layers follow dependency edges; execution itself stays serial. */
 export function graphLayers(graph: GoalLoopGraph): GoalGraphNode[][] {
   const remaining = new Map(graph.nodes.map(node => [node.id, node]));

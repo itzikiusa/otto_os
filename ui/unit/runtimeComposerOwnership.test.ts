@@ -13,7 +13,7 @@ test('reopening A then switching to B sends the waiting prompt only to A', async
   const state = componentFunctions(component, ['submit', 'send', 'reopen'], {
     ...sendHelpers,
     sessionId: 'A', ownerId: 'A', text: 'for A', images: [], model: null, effort: null, pickedMode: null,
-    draft, closed: true, reopening: false, sending: false, running: false, awaitSeq: null, startError: null,
+    draft, needsRevive: true, reopening: false, sending: false, running: false, awaitSeq: null, startError: null,
     parseInteractiveSlashInput: () => null,
     runtimeThreads: {
       reopen: () => new Promise<void>((resolve) => { finish = resolve; }),
@@ -109,7 +109,7 @@ test('an identity change while reopening cancels the old pending prompt', async 
   const draft = { flushSave: () => {}, freshContext: false, context: [], text: 'private A', images: [], model: null, effort: null, pickedMode: null, reopening: false };
   const state = componentFunctions(component, ['submit', 'send', 'reopen'], {
     ...sendHelpers,
-    sessionId: 'A', ownerId: 'A', draft, closed: true, running: false,
+    sessionId: 'A', ownerId: 'A', draft, needsRevive: true, running: false,
     parseInteractiveSlashInput: () => null,
     runtimeDrafts: { owns: () => current },
     runtimeThreads: {
@@ -141,7 +141,7 @@ test('reopen uses the submitted snapshot and never consumes edits made while reo
   let finish!:()=>void; const calls:any[]=[];
   const draft={flushSave:()=>{},freshContext:false,context:[],text:'first',images:[],model:null,effort:null,pickedMode:null,reopening:false,sending:false};
   const state=componentFunctions(component,['submit','send','reopen'],{
-    ...sendHelpers,sessionId:'A',ownerId:'A',draft,closed:true,running:false,parseInteractiveSlashInput:()=>null,
+    ...sendHelpers,sessionId:'A',ownerId:'A',draft,needsRevive:true,running:false,parseInteractiveSlashInput:()=>null,
     runtimeDrafts:{owns:()=>true},runtimeThreads:{reopen:()=>new Promise<void>(r=>finish=r),prompt:async(_id:string,body:unknown)=>{calls.push(body);return {sequence:1};}},toastError:()=>{},ApiError:class extends Error{},
   });
   state.submit(); draft.text='second'; finish(); await new Promise(r=>setTimeout(r,0));

@@ -1554,22 +1554,23 @@ impl AgentRuntime {
         Ok(st.session.clone())
     }
 
-    /// Reopen a closed session: it takes prompts again and its agent is
+    /// Revive a closed or dormant session: it takes prompts again and its agent is
     /// respawned now, resuming the provider's own thread (`native_thread_id`).
     /// A provider that cannot resume it (its process dies before it is
     /// ready) gets a fresh thread instead and the timeline says so (a
-    /// `system_notice`). Its meta is kept. No-op on an open session.
+    /// `system_notice`). Its meta is kept. A live process is left alone.
     pub async fn reopen(&self, id: &Id) -> Result<RuntimeSession> {
         let live = self.live(id).await?;
         let _prompt = live.prompt_lock.lock().await;
         {
             let mut st = live.lock();
-            if st.session.status != RuntimeSessionStatus::Closed {
+            if st.session.status == RuntimeSessionStatus::Closed {
+                st.session.status = RuntimeSessionStatus::Dormant;
+                // After the close's own write, in order.
+                let _ = live.persist.send(PersistOp::Opened);
+            } else if st.proc.is_some() {
                 return Ok(st.session.clone());
             }
-            st.session.status = RuntimeSessionStatus::Dormant;
-            // After the close's own write, in order.
-            let _ = live.persist.send(PersistOp::Opened);
         }
         self.flush(id).await;
         self.spawn_resuming(id, &live).await?;

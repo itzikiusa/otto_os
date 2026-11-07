@@ -264,8 +264,14 @@ test('a Claude thread: background work, its own turn, a subagent card, reopen an
   await expect(thread.getByTestId('runtime-closed')).toBeVisible({ timeout: 15_000 });
   await expect(composer).toBeEnabled();
   await page.getByTestId('threads-thread-menu').click();
-  await expect(page.locator('.ctx-menu').getByRole('menuitem', { name: 'Reopen thread' })).toBeVisible();
+  await expect(page.locator('.ctx-menu').getByRole('menuitem', { name: 'Revive thread' })).toBeVisible();
   await page.keyboard.press('Escape');
+  // Explicit revival does not send the unfinished draft or erase prior answers.
+  await composer.fill('unfinished after close');
+  await thread.getByTestId('runtime-reopen').click();
+  await expect(thread.getByTestId('runtime-closed')).toHaveCount(0);
+  await expect(composer).toHaveValue('unfinished after close');
+  await expect(thread.getByText('echo: unfinished after close')).toHaveCount(0);
   await composer.fill('after reopening');
   await composer.press('Enter');
   await expect(thread.getByText('echo: after reopening')).toBeVisible({ timeout: 20_000 });
@@ -396,7 +402,8 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   // The bubble hugs the inline-end (right) edge of the column.
   const col = (await thread.locator('.rt-col').boundingBox())!;
   const bb = (await bubble.boundingBox())!;
-  expect(col.x + col.width - (bb.x + bb.width)).toBeLessThan(24);
+  const gutter = await thread.locator('.rt-col').evaluate(el => parseFloat(getComputedStyle(el).paddingInlineEnd));
+  expect(Math.abs(col.x + col.width - (bb.x + bb.width) - gutter)).toBeLessThan(2);
 
   // Attachments: a lazy thumbnail and a file chip; the thumbnail opens full.
   const atts = thread.getByTestId('runtime-attachments');

@@ -1063,14 +1063,14 @@
 
 <style>
   .conv {
-    /* The column uses the pane: only a very wide window caps it (and centres
-       it); the composer box matches. Prose alone keeps a reading measure. */
+    /* Default reading measure; Threads overrides it to use its whole pane. */
     --chat-measure: 1440px;
     --prose-measure: 104ch;
   }
-  /* Threads keeps T3's readable centred column (messages + composer). */
+  /* Threads uses the available pane width; messages and composer stay aligned. */
   .conv[data-surface='threads'] {
-    --chat-measure: 800px;
+    --chat-measure: none;
+    --prose-measure: none;
     /* Two speakers: you = blue (accent), the agent = NEUTRAL (patterns §2:
        agent identity is never a status colour — running is not success green).
        `--agent` is the neutral tint source; the agent's rule is --border-strong. */

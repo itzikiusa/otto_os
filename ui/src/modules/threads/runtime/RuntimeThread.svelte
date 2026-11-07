@@ -88,6 +88,8 @@
   const requests = $derived(new Map((p?.requests ?? []).map((r) => [r.id, r] as const)));
   const turn = $derived(p ? latestTurn(p) : null);
   const closed = $derived(session?.status === 'closed');
+  const dormant = $derived(session?.status === 'dormant');
+  const needsRevive = $derived(closed || dormant);
   /** Each subagent card's own activity. */
   const children = $derived(p ? subagentChildren(p.items) : new Map<string, never[]>());
   /** Background work still pending (the live session entity first). */
@@ -196,13 +198,13 @@
     }
   }
 
-  /** Reopen a closed thread (its agent resumes); `true` when it is open. */
+  /** Revive without sending a message or replacing the conversation. */
   async function reopen(): Promise<boolean> {
-    if (!closed || draft.reopening) return !closed;
+    if (!needsRevive || draft.reopening) return !needsRevive;
     draft.reopening = true;
     const ok = await runtimeThreads.reopen(ownerId).then(
-      () => true,
-      (e: unknown) => (toastError('Couldn’t reopen the thread', e), false),
+      () => { draft.startError = null; return true; },
+      (e: unknown) => { draft.startError = e instanceof Error ? e.message : 'Couldn’t revive the thread. Try again.'; return false; },
     );
     draft.reopening = false;
     return ok;
@@ -219,7 +221,7 @@
     }
     const submitted = snapshotDraft(draft);
     // A closed thread reopens first; while a turn runs it waits in the queue.
-    if (closed && !submitted.fresh_context) void reopen().then((ok) => (ok ? send(t, undefined, submitted) : undefined));
+    if (needsRevive && !submitted.fresh_context) void reopen().then((ok) => (ok ? send(t, undefined, submitted) : undefined));
     else void send(t, running && !submitted.fresh_context ? 'queue' : undefined, submitted);
   }
 
@@ -406,6 +408,7 @@
       {running}
       canSteer={provider === 'claude'}
       {closed}
+      {dormant}
       reopening={draft.reopening}
       onreopen={() => void reopen()}
       onedit={(t) => {
@@ -565,6 +568,8 @@
     flex-direction: column;
     min-block-size: 0;
     block-size: 100%;
+    min-inline-size: 0;
+    container-type: inline-size;
     background: var(--bg);
   }
   .rt-scroll {
@@ -576,9 +581,8 @@
   .rt-col,
   .rt-dock {
     inline-size: 100%;
-    max-inline-size: 760px;
     margin-inline: auto;
-    padding-inline: 16px;
+    padding-inline: clamp(12px, 3.2cqi, 48px);
   }
   /* T3's MessagesTimeline rhythm: a turn opens with clear air above the
      user bubble; the answer and its work log sit close beneath it. */

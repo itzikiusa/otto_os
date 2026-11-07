@@ -246,7 +246,7 @@ class RuntimeThreads {
     this.byId[id] = await api.post<RuntimeSession>(`/runtime-sessions/${id}/close`);
   }
 
-  /** A closed thread takes messages again (its agent resumes). */
+  /** Revive a closed or dormant thread; a live agent is preserved. */
   async reopen(id: string): Promise<RuntimeSession> {
     const r = await api.post<RuntimeSession>(`/runtime-sessions/${id}/reopen`);
     this.byId[id] = r;

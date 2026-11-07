@@ -1,9 +1,9 @@
 <script lang="ts">
   import type { AcceptanceCriterion, GoalGraphNode, GoalLoopGraph } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
-  import { confirmer } from '../../lib/confirm.svelte';
   import { announceShown } from '../../lib/announce.svelte';
-  import { graphError, graphLayers, newGraphNode, removeGraphNode } from './graph';
+  import { graphError, newGraphNode, removeGraphNode } from './graph';
+  import ExecutionDiagram from './ExecutionDiagram.svelte';
 
   let { graph, criteria, onchange }: {
     graph: GoalLoopGraph | null | undefined;
@@ -13,7 +13,8 @@
   let selected = $state('');
   const active = $derived(graph?.nodes.find(node => node.id === selected) ?? graph?.nodes[0]);
   const error = $derived(graphError(graph, criteria));
-  const layers = $derived(graph ? graphLayers(graph) : []);
+  const nodes = $derived((graph?.nodes ?? []).map(node => ({ id: node.id, title: node.title || 'Untitled task', note: `${node.criterion_ids.length} ${node.criterion_ids.length === 1 ? 'criterion' : 'criteria'}` })));
+  const edges = $derived((graph?.nodes ?? []).flatMap(node => node.depends_on.map(id => ({ from: id, to: node.id }))));
 
   function update(id: string, patch: Partial<GoalGraphNode>): void {
     if (graph) onchange({ nodes: graph.nodes.map(node => node.id === id ? { ...node, ...patch } : node) });
@@ -34,27 +35,16 @@
     selected = next.nodes[0]?.id ?? '';
     onchange(next);
   }
-  async function standardLoop(): Promise<void> {
-    if (await confirmer.ask('Remove the execution graph? Acceptance criteria stay in the draft. Each iteration will work toward the whole goal.', { title: 'Use a standard loop', confirmLabel: 'Remove graph', danger: true })) onchange(null);
-  }
 </script>
 
-<section class="graph-editor" aria-label="Execution graph">
-  <div class="heading"><h2>Execution graph</h2>
-    {#if graph}<button type="button" class="btn small" onclick={standardLoop}>Use standard loop</button>{/if}
-  </div>
+<section class="graph-editor" aria-label="Engineering graph">
+  <h2>Engineering graph</h2>
   {#if !graph}
-    <p class="hint">A standard loop works toward every criterion each iteration. Add a graph to enforce task prerequisites.</p>
-    <button type="button" class="btn small" onclick={add}>Add execution graph</button>
+    <p class="hint">Add tasks and connect their prerequisites. Each task verifies its linked acceptance criteria.</p>
+    <button type="button" class="btn small" onclick={add}>Add first task</button>
   {:else}
-    <p class="hint">One ready task runs per iteration using the configured executors. Dependencies must pass before a task starts.</p>
-    <div class="nodes" aria-label="Graph tasks">
-      {#each graph.nodes as node, i (node.id)}
-        <button type="button" class="node-select" class:selected={active?.id === node.id} aria-pressed={active?.id === node.id} onclick={() => selected = node.id}>
-          <span class="index">{i + 1}</span><span class="node-title">{node.title || 'Untitled task'}</span>
-        </button>
-      {/each}
-    </div>
+    <p class="hint">Arrows show prerequisites. One ready task runs per iteration, sequentially. Select a task to edit its work and evidence criteria.</p>
+    <ExecutionDiagram {nodes} {edges} selected={active?.id ?? ''} onselect={(id) => selected = id} label="Engineering graph tasks" />
     {#if active}
       <div class="node-fields" data-testid="graph-node-editor">
         <label>Task title<input class="input graph-input" dir="auto" value={active.title} oninput={(e) => update(active.id, { title: e.currentTarget.value })} /></label>
@@ -67,33 +57,21 @@
         <fieldset><legend>Acceptance criteria</legend>
           {#each criteria as criterion (criterion.id)}
             <label class="check"><input type="checkbox" checked={active.criterion_ids.includes(criterion.id)} onchange={() => toggle(active, 'criterion_ids', criterion.id)} /><span>{criterion.text || 'Untitled criterion'}</span></label>
-          {:else}<p class="hint">Add an acceptance criterion above.</p>{/each}
+          {:else}<p class="hint">Add an acceptance criterion to the goal.</p>{/each}
         </fieldset>
-        <button type="button" class="btn small" disabled={graph.nodes.length === 1} title={graph.nodes.length === 1 ? 'A graph needs one task. Use standard loop to remove the graph.' : undefined} onclick={() => remove(active.id)}><Icon name="trash" size={12} /> Remove task</button>
+        <button type="button" class="btn small" disabled={graph.nodes.length === 1} title={graph.nodes.length === 1 ? 'A graph needs one task. Choose Goal loop in Execution to use whole-goal iterations.' : undefined} onclick={() => remove(active.id)}><Icon name="trash" size={12} /> Remove task</button>
       </div>
     {/if}
     <button type="button" class="btn small" disabled={graph.nodes.length >= 16} onclick={add}><Icon name="plus" size={12} /> Add task</button>
     {#if error}<p class="error" use:announceShown={{ text: error, assertive: true }}>{error}</p>{/if}
-    <details class="preview"><summary>Preview dependencies</summary>
-      {#if !error}
-        <ol>{#each layers as layer, i (i)}<li>{layer.map(node => node.title).join(' · ')}</li>{/each}</ol>
-        <p class="hint">Tasks on the same level share no prerequisites with each other; execution remains sequential.</p>
-      {:else}<p class="hint">Resolve the graph error to preview the order.</p>{/if}
-    </details>
   {/if}
 </section>
 
 <style>
   .graph-editor { min-width: 0; }
-  .heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
   h2 { font-size: var(--fs-m); font-weight: 600; margin: 0; }
   .hint { color: var(--text-dim); font-size: var(--fs-s); line-height: 1.5; margin: 8px 0; }
-  .nodes { display: flex; flex-wrap: wrap; gap: 6px; margin-block: 12px; }
-  .node-select { display: flex; align-items: center; gap: 6px; max-width: 100%; border: 1px solid var(--border); border-radius: var(--radius-s); padding: 8px; background: var(--surface); color: var(--text); text-align: start; font: inherit; font-size: var(--fs-s); cursor: pointer; }
-  .node-select.selected { border-color: var(--accent-solid); background: var(--accent-soft); }
-  .node-title { min-width: 0; overflow-wrap: anywhere; }
-  .index { color: var(--text-dim); }
-  .node-fields { display: flex; flex-direction: column; gap: 12px; border: 1px solid var(--border); border-radius: var(--radius-s); padding: 12px; margin-block-end: 12px; }
+  .node-fields { display: flex; flex-direction: column; gap: 12px; border: 1px solid var(--border); border-radius: var(--radius-s); padding: 12px; margin-block: 12px; }
   .node-fields > label { display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-s); }
   .graph-input { width: 100%; box-sizing: border-box; min-width: 0; font: inherit; }
   fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
@@ -102,9 +80,5 @@
   .check input { flex: none; margin-block-start: 2px; }
   .node-fields > button { align-self: flex-start; }
   .error { color: var(--danger); font-size: var(--fs-s); }
-  .preview { margin-block-start: 12px; font-size: var(--fs-s); }
-  summary { cursor: pointer; }
-  ol { padding-inline-start: 24px; overflow-wrap: anywhere; }
-  li { padding-block: 4px; }
-  @media (max-width: 640px) { .node-select, .check { min-height: var(--hit-min); } }
+  @media (max-width: 640px) { .check { min-height: var(--hit-min); } }
 </style>

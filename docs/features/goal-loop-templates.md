@@ -4,11 +4,17 @@ Seven suggested templates turn a concrete goal into an editable draft with three
 
 ## Choose and edit a template
 
-Open **Goal Loops → New goal loop**, choose a suggested template, and enter the concrete outcome you want. The example is a placeholder, not an executable goal. Selecting a template creates a local draft without calling a provider. It does not launch work.
+Open **Goal Loops → New goal loop**. The **Execution** selector offers **Goal loop** and **Engineering graph** in the same module. Choose a suggested template and enter the concrete outcome you want. The example is a placeholder, not an executable goal. Selecting a template creates a local draft without calling a provider. It does not launch work.
 
 Edit the summary, acceptance criteria, task instructions and dependencies before launching. Proof of concept offers **Backend**, **Frontend** or **Both**. Research creates a research loop; the other templates create build loops and require a repository.
 
-Templates start with an execution graph. **Use standard loop** removes that graph after confirmation, retaining the goal and its criteria. A standard loop repeats Plan → Execute → Evaluate → Digest against the goal. **Add execution graph** gives a draft an explicit task/dependency structure.
+Templates respect the selected execution type. **Goal loop** works toward the whole goal each iteration; its interactive phase diagram shows Plan → Execute → Evaluate → Digest and the feedback path. Select a phase for a short explanation. The live view marks the current phase without implying unobserved phases ran.
+
+**Engineering graph** runs one ready task per iteration after its prerequisites pass. The visible diagram draws arrows from prerequisites to dependent tasks. Select a task to edit its instructions, dependencies and linked criteria; in a saved run, selection opens its status and recorded evidence. Branching arrows describe dependencies, not parallel execution. Tab and arrow keys move between task buttons; Enter or Space selects. Phone layouts keep nodes readable, with scrolling inside large diagrams.
+
+Switching an edited graph to **Goal loop** asks for confirmation and keeps its task structure in the current draft. Switching back restores those edits. A saved standard loop persists the whole-goal mode; unsaved cached graph edits are not part of that run. **Work type** separately chooses Build or Research. List cards and run details identify the execution type explicitly.
+
+Regenerating a draft with an agent replaces its task plan after confirmation. Old tasks do not carry into regenerated criteria. If you remove criteria while using whole-goal mode, switching back drops those old links and asks you to associate any now-unassigned tasks explicitly.
 
 ## How graph execution works
 
