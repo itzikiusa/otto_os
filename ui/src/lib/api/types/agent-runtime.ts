@@ -405,3 +405,19 @@ export interface ToolOutputImage {
   mime: string;
   data_base64: string;
 }
+
+/** Durable, person-scoped composer content. Never browser-persisted. */
+export interface RuntimeComposerContext {
+  id: string; kind: 'review-comment' | 'diff'; label: string; text: string;
+  url?: string; path?: string; author?: string;
+}
+export interface RuntimeDraftContent {
+  text: string;
+  images: (PromptImage & { name: string })[];
+  model: string | null;
+  effort: import('../../providerModels').EffortLevel | null;
+  access_mode: RuntimeAccessMode | null;
+  fresh_context: boolean;
+  context: RuntimeComposerContext[];
+}
+export interface RuntimeDraftRecord { revision: number; draft: RuntimeDraftContent | null }

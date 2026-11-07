@@ -4,6 +4,8 @@
 //! the T3 Code projection model). The live event ring lives in memory
 //! (`otto-agent-protocol`); this is what survives a daemon restart.
 
+mod drafts;
+
 use chrono::Utc;
 use otto_core::agent_runtime::{
     RuntimeAccessMode, RuntimeProvider, RuntimeSession, RuntimeSessionStatus,

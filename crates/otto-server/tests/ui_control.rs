@@ -1225,3 +1225,105 @@ async fn a_personal_agent_threads_meta_binds_and_confines_it() {
     assert_eq!(status, 403, "{body}");
     assert!(body.contains("read-only"), "{body}");
 }
+
+/// Unsent composer content is a person's private work, even when an agent
+/// or another administrator may read that thread's already-sent history.
+#[tokio::test]
+async fn runtime_drafts_are_human_only_person_scoped_and_revision_checked() {
+    let d = boot().await;
+    let pool = file_pool(d._tmp.path()).await;
+    otto_state::AgentRuntimeRepo::new(pool.clone())
+        .create(otto_state::NewRuntimeSession {
+            id: "draft-thread".into(),
+            workspace_id: "ws1".into(),
+            provider: otto_core::agent_runtime::RuntimeProvider::Claude,
+            title: "Unsent work".into(),
+            cwd: "/tmp".into(),
+            model: None,
+            access_mode: Default::default(),
+            created_by: "alice".into(),
+            parent_id: None,
+            meta: None,
+        })
+        .await
+        .unwrap();
+    let (agent, _) = AuthRepo::new(pool.clone())
+        .issue_session_api_token(&"alice".into(), &"draft-thread".into())
+        .await
+        .unwrap();
+    seed_user(&pool, "another-admin", true).await;
+    let (admin, _) = AuthRepo::new(pool.clone())
+        .issue_api_token(&"another-admin".into(), Some("test"))
+        .await
+        .unwrap();
+    let url = format!("{}/api/v1/runtime-sessions/draft-thread/draft", d.base);
+    let value = json!({"revision":0,"draft":{"text":"private unsent","context":[],"images":[]}});
+    assert_eq!(
+        d.http
+            .put(&url)
+            .bearer_auth(&d.human)
+            .json(&value)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(
+        d.http
+            .put(&url)
+            .bearer_auth(&d.human)
+            .json(&value)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        409
+    );
+    for token in [&agent, &d.bob] {
+        assert_eq!(
+            d.http
+                .get(&url)
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+        assert_eq!(
+            d.http
+                .put(&url)
+                .bearer_auth(token)
+                .json(&value)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+    }
+    let other: Value = d
+        .http
+        .get(&url)
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(other, json!({"revision":0,"draft":null}));
+    let own: Value = d
+        .http
+        .get(&url)
+        .bearer_auth(&d.human)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(own["draft"]["text"], "private unsent");
+    assert_eq!(own["revision"], 1);
+}

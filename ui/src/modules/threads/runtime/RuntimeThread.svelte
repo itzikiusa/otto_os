@@ -20,6 +20,10 @@
   // The access chip beside the model is T3's runtime mode (runtimeModeConfig.ts:
   // labels, icons, descriptions); it rides the next prompt and sticks. PDFs go
   // as file chips to the providers that take them (Claude).
+  import { snapshotDraft, acknowledgeComposer } from '../../../lib/stores/runtimeDraftPersistence';
+  import RuntimeDraftStatus from './RuntimeDraftStatus.svelte';
+  import RuntimeContextChips from './RuntimeContextChips.svelte';
+  import { assembleComposerMessage } from './composerContext';
   import { runtimeDrafts } from '../../../lib/stores/runtimeDrafts.svelte';
   import { tick, untrack } from 'svelte';
   import { announceShown } from '../../../lib/announce.svelte';
@@ -32,7 +36,7 @@
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import { formatEffortShort, formatModelLabel, supportsEffortSelection } from '../../../lib/providerModels';
   import { auth } from '../../../lib/stores/auth.svelte';
-  import type { ApprovalDecision, PromptDelivery } from '../../../lib/api/types';
+  import type { ApprovalDecision, PromptDelivery, RuntimeDraftContent } from '../../../lib/api/types';
   import { INTERACTIVE_SLASH_COMMANDS, isImmediateSlashCommand, parseInteractiveSlashInput, type ComposerSlashCommand } from '../../../lib/slashActions';
   import StageSlashPopup from '../StageSlashPopup.svelte';
   import { threads } from '../threadsStore.svelte';
@@ -155,34 +159,36 @@
     void addImages(files);
   }
 
-  async function send(t: string, delivery?: PromptDelivery): Promise<void> {
-    if (!runtimeDrafts.owns(ownerId, draft)) return;
+  async function send(t: string, delivery?: PromptDelivery, sent: RuntimeDraftContent = snapshotDraft(draft)): Promise<void> {
+    if (!runtimeDrafts.owns(ownerId, draft) || draft.recovered === false) return;
     draft.sending = true;
-    const sentImages = draft.images;
-    draft.images = [];
-    const pics = sentImages.filter((f) => f.mime.startsWith('image/'));
-    const docs = sentImages.filter((f) => !f.mime.startsWith('image/'));
+    const pics = sent.images.filter((f) => f.mime.startsWith('image/'));
+    const docs = sent.images.filter((f) => !f.mime.startsWith('image/'));
     try {
       draft.awaitSeq = (
         await runtimeThreads.prompt(ownerId, {
-          text: t,
-          ...(draft.model ? { model: draft.model } : {}),
-          ...(draft.effort ? { effort: draft.effort } : {}),
+          text: assembleComposerMessage(t, sent.context),
+          ...(sent.model ? { model: sent.model } : {}),
+          ...(sent.effort ? { effort: sent.effort } : {}),
           ...(pics.length ? { images: pics.map(({ mime, data_base64 }) => ({ mime, data_base64 })) } : {}),
           ...(docs.length ? { files: docs } : {}),
           // Only a person's pick changes the mode; otherwise the session keeps its own.
-          ...(draft.pickedMode ? { access_mode: draft.pickedMode } : {}),
+          ...(sent.access_mode ? { access_mode: sent.access_mode } : {}),
+          ...(sent.fresh_context ? { fresh_context: true } : {}),
           // While a turn runs it waits in the thread's queue (never interleaved).
           ...(delivery ? { delivery } : {}),
         })
       ).sequence;
+      if (!runtimeDrafts.owns(ownerId, draft)) return;
+      acknowledgeComposer(draft, sent);
+      draft.flushSave();
       if (delivery) draft.awaitSeq = null;
       draft.startError = null;
     } catch (e) {
-      if (e instanceof ApiError && e.status === 400) draft.startError = e.message;
+      if (!runtimeDrafts.owns(ownerId, draft)) return;
+      if (e instanceof ApiError && (e.status === 400 || e.status === 409)) draft.startError = e.message;
       else toastError('Couldn’t send message', e);
-      if (!draft.text) draft.text = t;
-      if (draft.images.length === 0) draft.images = sentImages;
+
     } finally {
       draft.sending = false;
     }
@@ -202,17 +208,17 @@
 
   function submit(): void {
     let t = draft.text.trim();
-    if ((!t && draft.images.length === 0) || draft.reopening) return;
+    if ((!t && draft.images.length === 0 && draft.context.length === 0) || draft.reopening || draft.sending || draft.recovered === false) return;
     const intent = parseInteractiveSlashInput(t);
     if (intent?.kind === 'send-prompt') t = intent.prompt;
     else if (intent && runViewSlash(intent, sessionId, session)) {
       draft.text = '';
       return;
     }
-    draft.text = '';
+    const submitted = snapshotDraft(draft);
     // A closed thread reopens first; while a turn runs it waits in the queue.
-    if (closed) void reopen().then((ok) => (ok ? send(t) : void (draft.text ||= t)));
-    else void send(t, running ? 'queue' : undefined);
+    if (closed && !submitted.fresh_context) void reopen().then((ok) => (ok ? send(t, undefined, submitted) : undefined));
+    else void send(t, running && !submitted.fresh_context ? 'queue' : undefined, submitted);
   }
 
   // ── Slash commands: the ones that act on this view ─────────────────────
@@ -372,7 +378,7 @@
             </div>
           {/if}
         {/each}
-        <RuntimeTurnStatus {workingFor} {ownTurn} {outcome} disabled={closed} onresend={(t) => void send(t)} />
+        <RuntimeTurnStatus {workingFor} {ownTurn} {outcome} disabled={closed} onresend={(t) => void send(t, undefined, { ...snapshotDraft(draft), text: t, images: [], context: [], fresh_context: false })} />
       </LoadState>
     </div>
   </div>
@@ -412,6 +418,7 @@
       {#if suggestions.length > 0}
         <StageSlashPopup id={popId} items={suggestions} active={cmdIdx} onaccept={acceptCmd} onhover={(i) => (cmdIdx = i)} />
       {/if}
+      <RuntimeContextChips context={draft.context} onremove={(id) => { draft.context = draft.context.filter(c => c.id !== id); }} onfocus={() => composerEl?.focus()} />
       <textarea
         bind:this={composerEl}
         bind:value={draft.text}
@@ -446,6 +453,7 @@
         </div>
       {/if}
       <div class="rt-foot">
+        <RuntimeDraftStatus {draft} />
         {#if canImages}
         <button
           type="button"
@@ -499,7 +507,7 @@
           />
           {/if}
         </span>
-        {#if running && !draft.text.trim()}
+        {#if running && !draft.text.trim() && draft.images.length === 0 && draft.context.length === 0}
           <button
             type="button"
             class="rt-send stop"
@@ -518,7 +526,7 @@
             aria-label={running ? 'Queue message' : 'Send message'}
             title={running ? 'Queue (↵)' : 'Send (↵)'}
             data-testid="runtime-send"
-            disabled={draft.reopening || (!draft.text.trim() && draft.images.length === 0)}
+            disabled={!draft.recovered || draft.reopening || draft.sending || (!draft.text.trim() && draft.images.length === 0 && draft.context.length === 0)}
             onclick={submit}
           >
             <Icon name="arrowUp" size={16} />

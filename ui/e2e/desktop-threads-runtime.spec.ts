@@ -532,3 +532,48 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   await expect(chip).toContainText('Supervised');
   await expectNoHorizontalOverflow(page);
 });
+
+test('composer drafts recover after reload and page reopen without sending; failed send keeps them', async ({ page }, info) => {
+  const created = await ctx.post(`${base}/api/v1/workspaces/${wsId}/runtime-sessions`, {
+    data: { provider: 'codex', cwd: fixtureDir, title: 'Recover my unsent draft' },
+  });
+  expect(created.ok(), await created.text()).toBeTruthy();
+  const id = (await created.json()).id as string;
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jWZkAAAAASUVORK5CYII=';
+  let promptRequests = 0;
+  page.context().on('request', r => { if (r.method() === 'POST' && r.url().endsWith(`/runtime-sessions/${id}/prompt`)) promptRequests++; });
+  await page.goto('/#/threads');
+  await page.getByTestId('threads-sidebar').getByText('Recover my unsent draft', { exact: true }).click();
+  const thread = page.getByTestId(`runtime-thread-${id}`);
+  await expect(thread.getByText('Saved', { exact: true })).toBeVisible();
+  await thread.getByTestId('runtime-composer').fill('Unsent browser recovery text');
+  await thread.locator('input[type=file]').setInputFiles({ name: 'recover.png', mimeType: 'image/png', buffer: Buffer.from(png, 'base64') });
+  await expect.poll(async () => {
+    const record = await (await ctx.get(`${base}/api/v1/runtime-sessions/${id}/draft`)).json();
+    return [record.draft?.text, record.draft?.images?.[0]?.name];
+  }).toEqual(['Unsent browser recovery text', 'recover.png']);
+  await page.reload();
+  await expect(thread.getByTestId('runtime-composer')).toHaveValue('Unsent browser recovery text');
+  await expect(thread.getByTestId('runtime-images')).toContainText('recover.png');
+  expect(promptRequests).toBe(0);
+  const storedValues = await page.evaluate(() => Object.values(localStorage).join('\n'));
+  expect(storedValues).not.toContain('Unsent browser recovery text');
+  expect(storedValues).not.toContain(png);
+  const reopened = await page.context().newPage();
+  await page.close();
+  await reopened.goto('/#/threads');
+  await reopened.getByTestId('threads-sidebar').getByText('Recover my unsent draft', { exact: true }).click();
+  const recovered = reopened.getByTestId(`runtime-thread-${id}`);
+  await expect(recovered.getByTestId('runtime-composer')).toHaveValue('Unsent browser recovery text');
+  await expect(recovered.getByTestId('runtime-images')).toContainText('recover.png');
+  expect(promptRequests).toBe(0);
+  await reopened.route(`**/api/v1/runtime-sessions/${id}/prompt`, route => route.fulfill({ status: 400, json: { code: 'invalid', message: 'Test provider cannot start' } }));
+  await recovered.getByTestId('runtime-send').click();
+  await expect(recovered).toContainText('Test provider cannot start');
+  await expect(recovered.getByTestId('runtime-composer')).toHaveValue('Unsent browser recovery text');
+  await expect(recovered.getByTestId('runtime-images')).toContainText('recover.png');
+  await reopened.screenshot({ path: info.outputPath('draft-recovered-light.png') });
+  await reopened.emulateMedia({ colorScheme: 'dark' });
+  await reopened.screenshot({ path: info.outputPath('draft-recovered-dark.png') });
+  await reopened.close();
+});

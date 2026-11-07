@@ -385,6 +385,7 @@ impl AgentRuntime {
     /// session id. Also removes the attachments of sessions that no longer
     /// exist (a workspace delete cascades their rows). Returns sessions touched.
     pub async fn recover(&self) -> Result<usize> {
+        self.inner.repo.expire_drafts().await?;
         let mut touched = 0;
         let mut queued = Vec::new();
         for sid in self.inner.repo.session_ids().await? {
