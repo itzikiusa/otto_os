@@ -122,3 +122,9 @@ budgets. Goal editing, question cards, tool images and the Threads inspector
 load on demand; budget thresholds remain unchanged. Final browser checks passed:
 two graph flows (including paused-state labels), four iPhone WebKit/Android
 Chromium question and image checks, and the desktop review/diff-context flow.
+
+CI also exposed an idle-pump watchdog race: a completely silent prompt could
+start after the pump parked without waking its stall timer. The integration
+test now establishes that idle state and reproduced the timeout before the fix.
+State changes now notify the pump, with registration before deadline calculation
+and process-generation checks. All 102 protocol tests passed after the fix.

@@ -327,6 +327,8 @@ struct Live {
     /// One queue drain at a time (a queued message is sent exactly once).
     drain_lock: tokio::sync::Mutex<()>,
     state: Mutex<State>,
+    /// External turn/request changes can arm a deadline while the child is silent.
+    deadline_changed: tokio::sync::Notify,
     persist: mpsc::UnboundedSender<PersistOp>,
 }
 
@@ -847,6 +849,7 @@ impl AgentRuntime {
             prompt_lock: tokio::sync::Mutex::new(()),
             spawn_lock: tokio::sync::Mutex::new(()),
             drain_lock: tokio::sync::Mutex::new(()),
+            deadline_changed: tokio::sync::Notify::new(),
             state: Mutex::new(State {
                 session: rec.session,
                 next_seq,
@@ -1975,6 +1978,9 @@ fn emit(inner: &Inner, live: &Live, st: &mut State, body: RuntimeEventBody) -> u
         let _ = live.persist.send(PersistOp::Upsert(vec![row]));
     }
     st.last_activity = Instant::now();
+    // Prompt admission and request responses need not produce child stdout.
+    // Broadcast: a superseded process pump must not consume the new one's wake.
+    live.deadline_changed.notify_waiters();
     let ev = Arc::new(RuntimeEvent {
         session_id: st.session.id.clone(),
         sequence: seq,
@@ -2562,35 +2568,46 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
 async fn pump(inner: Arc<Inner>, live: Arc<Live>, epoch: u64, mut rx: mpsc::Receiver<ChildMsg>) {
     let window = inner.config.stream_coalesce;
     loop {
+        // Register before reading state, so a change between the snapshot and
+        // select cannot leave an idle pump waiting indefinitely on child output.
+        let changed = live.deadline_changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
         let due = {
             let st = live.lock();
+            if st.proc.as_ref().map(|p| p.epoch) != Some(epoch) {
+                return; // closed or superseded
+            }
             let held = st.held_deadline(window);
             let stall = stall_deadline(&st, &inner.config);
             held.into_iter().chain(stall).min()
         };
-        let msg = match due {
-            Some(at) => match tokio::time::timeout_at(at.into(), rx.recv()).await {
-                Ok(m) => m,
-                Err(_) => {
-                    let mut st = live.lock();
-                    if st.proc.as_ref().map(|p| p.epoch) != Some(epoch) {
-                        return; // closed or superseded
-                    }
-                    flush_held(&inner, &live, &mut st);
-                    let stalled =
-                        stall_deadline(&st, &inner.config).is_some_and(|at| at <= Instant::now());
-                    if stalled {
-                        tracing::warn!(session = %st.session.id, "runtime turn stalled; stopping it");
-                        if let Some(t) = st.turn.as_mut() {
-                            t.stalled = true;
-                        }
-                        drop(st);
-                        interrupt_turn(&inner, &live);
-                    }
-                    continue;
+        let msg = tokio::select! {
+            _ = &mut changed => continue,
+            msg = rx.recv() => msg,
+            _ = async {
+                match due {
+                    Some(at) => tokio::time::sleep_until(at.into()).await,
+                    None => std::future::pending::<()>().await,
                 }
-            },
-            None => rx.recv().await,
+            } => {
+                let mut st = live.lock();
+                if st.proc.as_ref().map(|p| p.epoch) != Some(epoch) {
+                    return; // closed or superseded
+                }
+                flush_held(&inner, &live, &mut st);
+                let stalled =
+                    stall_deadline(&st, &inner.config).is_some_and(|at| at <= Instant::now());
+                if stalled {
+                    tracing::warn!(session = %st.session.id, "runtime turn stalled; stopping it");
+                    if let Some(t) = st.turn.as_mut() {
+                        t.stalled = true;
+                    }
+                    drop(st);
+                    interrupt_turn(&inner, &live);
+                }
+                continue;
+            }
         };
         let Some(msg) = msg else { break };
         let mut st = live.lock();

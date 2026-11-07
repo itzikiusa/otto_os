@@ -1910,6 +1910,10 @@ async fn a_silent_turn_is_stopped_as_stalled_but_background_work_is_no_stall() {
         },
     );
     let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    host.wait(is_ready).await;
+    // Let the child pump park between turns. No later provider output may be
+    // needed to arm the watchdog when the next prompt is completely silent.
+    tokio::time::sleep(Duration::from_millis(100)).await;
     rt.prompt(&s.id, "silent").await.unwrap();
     let t = host.wait(is_terminal).await;
     assert_eq!(terminal(&t), Some(TurnTerminalStatus::Interrupted));
