@@ -195,7 +195,8 @@ pub fn strip_reserved_input(input: &mut Value, source: InputSource) -> Vec<Strin
         return Vec::new();
     };
     let reserved = |k: &str| {
-        k.starts_with("origin_")
+        k == crate::rereview::PREVIOUS_RUN_KEY
+            || k.starts_with("origin_")
             || ORIGIN_KEYS.contains(&k)
             || (source == InputSource::Webhook
                 && (DELIVERY_KEYS.contains(&k)

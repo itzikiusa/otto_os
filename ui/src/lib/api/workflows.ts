@@ -83,3 +83,8 @@ export function readRunContext(runId: string, path: string, signal?: AbortSignal
     signal,
   );
 }
+
+/** New review iteration; preserves the previous report and refreshes PR refs. */
+export function rereviewWorkflowRun(runId: string): Promise<WorkflowRun> {
+  return api.post(`/workflow-runs/${encodeURIComponent(runId)}/re-review`, {});
+}

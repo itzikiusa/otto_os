@@ -5,6 +5,9 @@
   // those live in RunContextSidebar). Live state comes from the page's
   // RunSync (runSync.svelte.ts).
   import { announceShown } from '../../lib/announce.svelte';
+  import { rereviewWorkflowRun } from '../../lib/api/workflows';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import { toastError } from '../../lib/toastError';
   import Icon from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus } from '../../lib/status';
@@ -31,6 +34,20 @@
   // Whether the run is still active (so Stop makes sense even when this
   // editor didn't start it — e.g. opened from the Running list).
   const runActive = $derived(!!run && isLive(run.status));
+  let rereviewing = $state(false);
+  const hasReview = $derived(!!run?.nodes.some(node => node.review_ids?.length || (node.output && typeof node.output === 'object' && 'review_id' in node.output)));
+  async function rereview() {
+    if (!run || rereviewing) return;
+    const previousId = run.id;
+    const approved = await confirmer.ask('Start a new review of the latest PR revision? Previous findings will be checked again. This repeats the workflow’s configured notifications and PR comments, with the same destinations and audience.', { title: 'Re-review PR', confirmLabel: 'Re-review' });
+    if (!approved || run?.id !== previousId) return;
+    rereviewing = true;
+    try {
+      const next = await rereviewWorkflowRun(previousId);
+      if (mon.run?.id === previousId) mon.run = next;
+    } catch (error) { toastError('Couldn’t re-review', error); }
+    finally { rereviewing = false; }
+  }
   const fmtMs = fmtStepMs;
   function runStatusLabel(status: string): string {
     return runStatus(status).label;
@@ -46,6 +63,11 @@
   <div class="insp-bar">
     <span class="tl-label"><StatusBadge status={runStatus(run.status)} testid="run-status" /></span>
     <span class="grow"></span>
+    {#if !runActive && hasReview}
+      <button class="btn small" onclick={rereview} disabled={rereviewing} data-testid="workflow-re-review" title="Review the latest revision and verify previous findings">
+        <Icon name="refresh" size={12} /> {rereviewing ? 'Starting…' : 'Re-review'}
+      </button>
+    {/if}
     {#if runActive}
       <button
         class="btn small danger"

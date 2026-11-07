@@ -270,24 +270,41 @@ pub(in crate::workflow_engine) async fn execute(
     // Review every target; a per-target failure in the multi-repo case
     // is logged and skipped (one bad repo never sinks the others), the
     // single-target case keeps its hard error.
-    let mut outs: Vec<serde_json::Map<String, Value>> = Vec::new();
-    for (t_idx, target) in targets.iter().enumerate() {
-        let Some(launched) = launch(&plan, t_idx, target, &mut logs).await? else {
-            continue;
-        };
-        let status = await_review(
-            plan.ctx,
-            plan.ws,
-            &plan.env.run_id,
-            &launched.review_id,
-            plan.await_done.then_some(plan.timeout_s),
-            otto_review::engine::REVIEW_STALL_GRACE,
-            plan.session_tx,
-            &launched.tag,
-            &mut logs,
-        )
-        .await?;
-        outs.push(score_target(&plan, &launched, &status, &mut logs).await);
+    // Two repositories may make progress together, while every reviewer still
+    // acquires the SAME process-wide semaphore in the shared review engine.
+    // Results are restored to input order to preserve the original first-repo contract.
+    let results =
+        super::review_parallel::collect(targets.iter().enumerate().map(|(t_idx, target)| {
+            let plan = &plan;
+            async move {
+                let mut target_logs = Vec::new();
+                let Some(launched) = launch(plan, t_idx, target, &mut target_logs).await? else {
+                    return Ok::<_, otto_core::Error>((None, target_logs));
+                };
+                let status = await_review(
+                    plan.ctx,
+                    plan.ws,
+                    &plan.env.run_id,
+                    &launched.review_id,
+                    plan.await_done.then_some(plan.timeout_s),
+                    otto_review::engine::REVIEW_STALL_GRACE,
+                    plan.session_tx,
+                    &launched.tag,
+                    &mut target_logs,
+                )
+                .await?;
+                let out = score_target(plan, &launched, &status, &mut target_logs).await;
+                Ok((Some(out), target_logs))
+            }
+        }))
+        .await;
+    let mut outs = Vec::new();
+    for result in results {
+        let (out, target_logs) = result?;
+        logs.extend(target_logs);
+        if let Some(out) = out {
+            outs.push(out);
+        }
     }
     if outs.is_empty() {
         return Err(otto_core::Error::Upstream(format!(
@@ -588,10 +605,15 @@ fn prior_run_context(
             }
             brief.push_str(&format!("\n\n### {name}\n\n{body}"));
         }
+        if let Some(previous) = env.files.read_named("previous-review.md") {
+            brief.push_str(&format!(
+                "\n\nHISTORICAL PRIOR ITERATION (not current authority):\n{previous}"
+            ));
+        }
         let framed = (!brief.trim().is_empty()).then(|| {
             format!(
-                "These steps ran BEFORE this review, in this workflow, over this same \
-                         change. Treat them as established fact about the system — not as claims \
+                "The current-run steps below ran BEFORE this review over this same \
+                         change. The explicitly marked HISTORICAL PRIOR ITERATION is different: verify its findings against current code and do not treat it as current authority. Treat them as established fact about the system — not as claims \
                          to re-verify from the diff. In particular: behavior they record as \
                          existing, documented or intentional was NOT introduced by this change, \
                          and impact they already assessed is not yours to re-litigate. Use them \

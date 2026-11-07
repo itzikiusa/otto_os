@@ -6389,3 +6389,22 @@ imply every ACP provider emits these requests.
 A question can also be dismissed without answering via `question_action` (`decline` or `cancel`). ACP preserves that native action; Claude denies only the question tool, and Codex returns an empty native answer map. The request becomes `cancelled`, without granting any permission.
 
 For unconstrained ACP fields, `allow_empty: true` preserves schema semantics: required means the property must be present, so an empty text value or empty multi-select array remains valid. Native Codex/Claude required answers must be nonempty.
+
+### Workflow re-review
+
+`POST /workflow-runs/{id}/re-review` (no body) requires Workflows Edit and
+workspace Editor on the source run. Returns a new `WorkflowRun` (`200`) linked
+by `input.review_previous_run_id`. The old run remains unchanged. Only settled
+runs whose current workflow contains `review_run` qualify (`400` otherwise);
+active source/workflow runs return `409`. All steps run on the new iteration,
+including source refresh and approval gates. Manual requests do not inherit chat
+control origins. `review_previous_run_id` is reserved and stripped from ordinary
+manual/webhook run input. The equivalent chat command uses an exact authorized
+origin workspace/channel/chat/thread match.
+
+Read-only `agent_prompt` nodes may declare `review_context_paths: string[]`
+(1–32 relative tracked paths). Context reuse requires identical declared Git
+blobs, request, Jira context, node params and workflow version, with clean repos.
+An output with `context_reused: true` is a background-context cache hit; it is
+never a gate/review pass. Cached replies retain `review_context_key` metadata for
+the next iteration. Unknown or changed dependencies execute normally.

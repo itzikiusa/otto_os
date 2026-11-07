@@ -919,6 +919,33 @@ impl WorkflowsRepo {
         .map_err(dberr("active run for chat"))
     }
 
+    /// Re-review targets an exact thread only. Never fall back to another
+    /// conversation in the same channel after a run has finished.
+    pub async fn latest_run_for_chat_thread(
+        &self,
+        workspace_id: &str,
+        channel: &str,
+        chat: &str,
+        thread: &str,
+    ) -> Result<Option<Id>> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT id FROM workflow_runs WHERE json_valid(input_json)
+             AND json_extract(input_json, '$.channel') = ?
+             AND json_extract(input_json, '$.chat') = ?
+             AND json_extract(input_json, '$.thread') = ?
+             AND (json_extract(input_json, '$.origin_workspace_id') = ? OR workspace_id = ?)
+             ORDER BY started_at DESC, id DESC LIMIT 1",
+        )
+        .bind(channel)
+        .bind(chat)
+        .bind(thread)
+        .bind(workspace_id)
+        .bind(workspace_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("latest run for chat thread"))
+    }
+
     // --- versioning -------------------------------------------------------
 
     /// Import an explicit history row. Duplicate version keys fail rather than
@@ -2863,6 +2890,61 @@ mod tests {
             repo.is_canceled(&run.id).await,
             "a run whose row is gone must read as canceled"
         );
+    }
+
+    #[tokio::test]
+    async fn rereview_thread_lookup_never_falls_back_or_crosses_workspace() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool);
+        let wf = repo
+            .create(
+                &"ws1".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
+            .await
+            .unwrap();
+        let prior = repo
+            .create_run(
+                &wf.id,
+                &"ws1".into(),
+                &serde_json::json!({"channel":"slack","chat":"C1","thread":"t1"}),
+                None,
+            )
+            .await
+            .unwrap();
+        repo.update_run(&prior.id, RunStatus::Success, &[], None, true)
+            .await
+            .unwrap();
+        repo.create_run(
+            &wf.id,
+            &"ws1".into(),
+            &serde_json::json!({"channel":"slack","chat":"C1","thread":"t2"}),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            repo.latest_run_for_chat_thread("ws1", "slack", "C1", "t1")
+                .await
+                .unwrap(),
+            Some(prior.id)
+        );
+        for (ws, chat, thread) in [
+            ("ws2", "C1", "t1"),
+            ("ws1", "C2", "t1"),
+            ("ws1", "C1", "absent"),
+        ] {
+            assert_eq!(
+                repo.latest_run_for_chat_thread(ws, "slack", chat, thread)
+                    .await
+                    .unwrap(),
+                None
+            );
+        }
     }
 
     /// S3-09: chat control resolves the run by SQL on the input keys — exact

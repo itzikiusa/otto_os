@@ -11,6 +11,7 @@ pub mod checkpoint;
 pub mod context;
 pub mod location;
 pub mod prepare;
+pub mod rereview;
 pub mod retry;
 pub mod run_refs;
 pub mod templates;

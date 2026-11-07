@@ -1566,3 +1566,63 @@ are **append-only** — never edit or renumber an existing one.
 - `./connections-ssh-sftp.md` / Database Explorer — connections used by `db_query`.
 - Contracts: `docs/contracts/api.md` (§"Workflow engine", §"API client",
   Wave-3/Wave-4) and `docs/contracts/ws.md` (Workflow run progress).
+
+## Re-review a PR after fixes
+
+A finished run with a review exposes **Re-review** in its run bar. In the
+original Slack/Telegram review thread, reply **`re-review`** or **`review again`**.
+This creates a new run and retains the old report. The workflow's current
+configuration is used, source PR refs are refreshed, and all configured approval,
+notification and PR-comment steps execute again. An active workflow refuses a
+second launch. Chat re-review requires the exact original thread; it never picks
+a different review merely because it ran in the same channel.
+
+The new context includes `previous-review.md` plus each previous step's full
+output. Reviewers verify every earlier finding (fixed with evidence, still open,
+or not relevant with a reason), then review the current diff and score it again.
+Previous conclusions and gate results are historical evidence. A failed source
+refresh fails re-review instead of silently reviewing cached refs.
+
+Independent repositories now progress two at a time. All reviewers still share
+the existing process-wide agent concurrency limit; adding repositories does not
+multiply that limit. Results retain the original repository order and every
+required target must complete for a multi-repo review to pass.
+
+### Reuse background context safely
+
+A **read-only context-discovery** `agent_prompt` can opt into
+`params.review_context_paths: ["docs/architecture", "README.md"]`. These tracked
+paths must cover **all repository dependencies of that step**. A repeat reuses
+its reply only when those Git blobs, the Jira context, original request, node
+parameters and workflow version match, and every repository is clean. Missing
+metadata, changed dependencies, a changed ticket/config, or a dirty checkout
+runs the step normally. The first run after opting in records the metadata.
+
+Never put this option on checkout, gates, fixes, verification, notifications or
+publishing. When the dependency set is unknown, leave caching off; previous
+outputs remain available for selective verification. Cache hits are recorded in
+the step output (`context_reused`) and log. They do not inherit approval or pass
+results, and current `repos.json` remains the authority for checkout paths.
+
+### Upgrade a workflow on another machine
+
+The custom PR Reviewer shown in the examples is machine-local data, so upgrading
+the app does not rewrite its prompts. Export it on its owning machine and run:
+
+```bash
+python3 scripts/upgrade-pr-review-workflow.py pr-review.json pr-review-upgraded.json
+```
+
+Review the output and import it on that machine. The script preserves the graph,
+Go-gates prompt, summarizer instructions, thresholds and critical/high weights.
+It opts out of duplicated provider-per-lens checks, makes optional observations
+non-penalizing, and appends the iteration/evidence policy. Optional
+`--context-paths CONTEXT_NODE=docs/architecture,README.md` declares a complete,
+read-only context dependency set. It never writes to the running daemon.
+
+The existing Go-gates contract remains: the prescribed `pr_gates.sh` runs once
+per changed-Go repository and reviewed HEAD in the iteration. Keep all table
+rows including NOT RUN, NEW-at-HEAD standards findings, and the nightly skill
+evaluation date/status. No extra manual gates, Docker-backed suites, module
+tidy/download, or skill-eval executions are added. Changed HEAD invalidates old
+passes; reviewers consume this iteration's gate report instead of repeating it.

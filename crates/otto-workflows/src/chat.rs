@@ -59,6 +59,8 @@ pub enum WfControl {
     /// Report the run's current step + progress (non-intrusive; never prompts
     /// the running agent).
     Status,
+    /// Review the latest PR revision, retaining this run as historical evidence.
+    ReReview,
     /// Skip the currently-running step and continue the run.
     Skip,
     /// Cancel the run and stop its agents.
@@ -98,6 +100,14 @@ const WF_OPS: &[WfOp] = &[
         ],
         description: "current step + progress",
         example: "`status` or `progress`",
+    },
+    WfOp {
+        canonical: "re-review",
+        variant: WfControl::ReReview,
+        synonyms: &["re-review", "rereview", "review again", "re review"],
+        description:
+            "review the latest revision and verify previous findings (in the original thread)",
+        example: "`re-review` or `review again`",
     },
     WfOp {
         canonical: "skip",
@@ -1057,6 +1067,25 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
             });
         }
 
+        if control == WfControl::ReReview {
+            let Some(thread) = thread.filter(|t| !t.is_empty()) else {
+                return Some(WorkflowChatAck {
+                    reply: "Reply `re-review` in the original review thread.".into(),
+                });
+            };
+            let repo = WorkflowsRepo::new(self.ctx.pool().clone());
+            let id = repo
+                .latest_run_for_chat_thread(workspace_id, channel, chat, thread)
+                .await
+                .ok()??;
+            let previous = repo.get_run(&id).await.ok()?;
+            let reply = match crate::rereview::start(&self.ctx, &previous, None, true).await {
+                Ok(run) => format!("{ACK_PREFIX} re-review (run `{}`, previous `{}`). Refreshing the PR revision, checking every previous finding, then reviewing and scoring again. This repeats the workflow's configured notifications and PR-comment steps.", run.id, previous.id),
+                Err(error) => format!("Can't re-review: {error}"),
+            };
+            return Some(WorkflowChatAck { reply });
+        }
+
         // status / skip / abort target the run active on THIS thread.
         let repo = WorkflowsRepo::new(self.ctx.pool().clone());
         let run = self
@@ -1140,7 +1169,7 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
                     reply: abort_reply(&short, &outcome),
                 })
             }
-            WfControl::Help => unreachable!("handled above"),
+            WfControl::Help | WfControl::ReReview => unreachable!("handled above"),
         }
     }
 }
@@ -1340,6 +1369,14 @@ mod tests {
         }
         for s in ["help", "commands", "usage", "h", "?help"] {
             assert_eq!(parse_wf_control(s), Some(Help), "{s}");
+        }
+        for s in [
+            "re-review",
+            "rereview",
+            "review again",
+            "<@U1> re-review please",
+        ] {
+            assert_eq!(parse_wf_control(s), Some(ReReview), "{s}");
         }
         // `?` is a quick status, NOT help.
         assert_eq!(parse_wf_control("?"), Some(Status));
