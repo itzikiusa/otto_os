@@ -78,7 +78,8 @@ async fn tick<C: AssistantCtx>(
     cancel: &CancelSignal,
 ) -> otto_core::Result<()> {
     let now = Utc::now();
-    let due = repo.list_enabled_schedules().await?;
+    let mut due = repo.list_enabled_schedules().await?;
+    fixed_times_first(&mut due);
     // Stop can land while the schedule list is in flight. Do not claim or spawn.
     if !launch_after_await(cancel) {
         return Ok(());
@@ -124,6 +125,18 @@ async fn tick<C: AssistantCtx>(
     }
     proactive_tick(ctx, repo, now, cancel).await;
     Ok(())
+}
+
+/// An agent runs one routine at a time, and a busy agent's routine is
+/// skipped until a later tick. Tried in creation order, a frequent interval
+/// routine ("every 15 min") that is due again by the time its run ends kept
+/// winning the agent, and a fixed-time routine of the same agent ("Sun–Thu at
+/// 09:00") was skipped every tick and never ran. Fixed times go first; the
+/// interval simply runs on the next free tick.
+fn fixed_times_first<A>(due: &mut [(otto_state::PersonalAgentSchedule, A)]) {
+    due.sort_by_key(|(s, _)| {
+        s.schedule.get("cadence").and_then(|c| c.as_str()) == Some("interval")
+    });
 }
 
 /// Proactive mode: each enabled agent with proactive on works its standing
@@ -266,6 +279,46 @@ mod tests {
             ..goal("x", None)
         }];
         assert_eq!(next_proactive_goal(&cfg, 0, now), None);
+    }
+
+    #[test]
+    fn a_fixed_time_routine_is_tried_before_an_interval_of_the_same_agent() {
+        let sched = |id: &str, spec: serde_json::Value| otto_state::PersonalAgentSchedule {
+            id: id.into(),
+            schedule: spec,
+            ..serde_json::from_value(serde_json::json!({
+                "id": "", "agent_id": "a", "schedule": {}, "timezone": "Asia/Jerusalem",
+                "directive": "", "enabled": true, "created_at": "", "updated_at": ""
+            }))
+            .unwrap()
+        };
+        // Created first, so it used to win every tick.
+        let mut due = vec![
+            (
+                sched(
+                    "poll",
+                    serde_json::json!({"cadence": "interval", "every_min": 15}),
+                ),
+                (),
+            ),
+            (
+                sched(
+                    "brief",
+                    serde_json::json!({"cadence": "cron", "expr": "0 9 * * 0,1,2,3,4"}),
+                ),
+                (),
+            ),
+            (
+                sched(
+                    "daily",
+                    serde_json::json!({"cadence": "daily", "at": "18:00"}),
+                ),
+                (),
+            ),
+        ];
+        fixed_times_first(&mut due);
+        let order: Vec<&str> = due.iter().map(|(s, _)| s.id.as_str()).collect();
+        assert_eq!(order, ["brief", "daily", "poll"]);
     }
 
     #[test]
