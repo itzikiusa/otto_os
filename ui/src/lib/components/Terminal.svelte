@@ -220,6 +220,7 @@
   import { wsConnect, wsUrl, WS_BEARER_SUBPROTOCOL } from '../api/client';
   import type { SessionStatus, TermSearchMatch, WsSearchResultFrame, WsTermFlowFrame, WsTermProbeFrame, WsTermResyncFrame, WsTermScrollbackRequestFrame } from '../api/types';
   import type { CompactClient } from './termCompactQueue';
+  import { createTerminalTouch } from './termTouch';
   import { TermGridSync, resizeSendStep, shouldDeferLocalResize } from './termGridSync';
   import { EMBED_SCROLLBACK, QuietRepaint, TermFlow, WriteQueue, hasCursorOrErase, resizeDecision } from './termFlow';
   import { reconnectDelay } from './guestReconnect';
@@ -567,14 +568,7 @@
   /** Whether the on-screen key accessory bar is shown on phone. */
   let keybarVisible = $state(false);
 
-  // Touch-scroll state (Task 5.3): track single-finger pointer drags and convert
-  // them to xterm line-scroll deltas. Only active on phone; desktop mouse-wheel
-  // scroll uses xterm's own built-in handler (untouched here).
-  let touchScrolling = $state(false);
-  let touchScrollStartY = 0;
-  let touchScrollAccum = 0;     // accumulated px before rounding to lines
-  /** Pixels of dragged distance per terminal line (approximate; refined at runtime). */
-  const PX_PER_LINE = 20;
+  const touchGesture = createTerminalTouch(() => term, () => readOnly);
 
   // ── Find / ring-search bar ──────────────────────────────────────────────────
   // Two complementary search modes share the single find bar:
@@ -719,48 +713,26 @@
     resyncOnInput();
   }
 
-  // ── Touch scroll handlers (Task 5.3) ─────────────────────────────────────
-  // These are only wired to the container on phone (see the template below).
-  // Desktop mouse-wheel scroll goes through xterm's own built-in — untouched.
-
+  // Touch input is independent of width (including landscape and tablets).
   function onTouchPointerDown(e: PointerEvent): void {
-    if (!viewport.isPhone || e.pointerType === 'mouse') return;
-    // Only handle single-finger primary pointer
-    if (!e.isPrimary) return;
-    // Focus the terminal on tap. iOS/Android only raise the soft keyboard when
-    // .focus() runs synchronously inside a user-gesture handler — so a tap on the
-    // canvas must focus here (we preventDefault below, which would otherwise stop
-    // xterm's own focus). Without this, the phone keyboard never appears and the
-    // user can't type. readOnly viewers stay unfocused (no input anyway).
-    if (!readOnly) term?.focus();
-    touchScrolling = true;
-    touchScrollStartY = e.clientY;
-    touchScrollAccum = 0;
+    if (e.pointerType !== 'touch' || !e.isPrimary) return;
+    touchGesture.start(e);
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    // Prevent xterm from receiving this as a text-selection drag
     e.preventDefault();
   }
 
   function onTouchPointerMove(e: PointerEvent): void {
-    if (!touchScrolling || !viewport.isPhone) return;
-    if (!e.isPrimary) return;
-    const dy = touchScrollStartY - e.clientY; // positive = scrolled up (toward older output)
-    touchScrollAccum += dy;
-    touchScrollStartY = e.clientY;
-
-    // Convert accumulated pixels to whole lines and flush
-    const lines = Math.trunc(touchScrollAccum / PX_PER_LINE);
-    if (lines !== 0) {
-      touchScrollAccum -= lines * PX_PER_LINE;
-      term?.scrollLines(lines);
-    }
+    if (e.pointerType !== 'touch' || !e.isPrimary) return;
+    touchGesture.move(e);
     e.preventDefault();
   }
 
   function onTouchPointerUp(e: PointerEvent): void {
-    if (!e.isPrimary) return;
-    touchScrolling = false;
+    if (e.pointerType !== 'touch' || !e.isPrimary) return;
+    touchGesture.end(e);
   }
+
+  function onTouchPointerCancel(): void { touchGesture.cancel(); }
 
   // ── Pasted-image upload ───────────────────────────────────────────────────
   /** Store a pasted image on the DAEMON and type its path into the PTY.
@@ -2220,6 +2192,7 @@
     sock?.close();
     sock = null;
     dropWebgl();
+    touchGesture.cancel();
     term?.dispose();
     term = null;
     fit = null;
@@ -2702,6 +2675,7 @@
   //   5. Open a fresh WS for the new sessionId and request scrollback.
   $effect(() => {
     const _id = sessionId; // tracked: re-runs when sessionId changes
+    touchGesture.cancel();
     // termDidInit is set by Effect 1 once the first fit fires; until then the xterm
     // canvas isn't ready and Effect 1's initial untrack(connect) handles the first WS.
     if (!termDidInit || !term) return;
@@ -3067,7 +3041,7 @@
       onpointerdown={onTouchPointerDown}
       onpointermove={onTouchPointerMove}
       onpointerup={onTouchPointerUp}
-      onpointercancel={onTouchPointerUp}
+      onpointercancel={onTouchPointerCancel}
     ></div>
 
     {#if exitCode !== null}
@@ -3225,6 +3199,7 @@
     overflow-y: hidden;
     direction: ltr;
     contain: strict;
+    touch-action: none;
   }
   .term-host.force-dark {
     background: var(--term-bg);

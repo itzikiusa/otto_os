@@ -30,8 +30,8 @@
   import { copyText } from '../../lib/clipboard';
   import StartRoomModal from '../rooms/StartRoomModal.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
-  import { phoneHandoff } from '../../lib/stores/phoneHandoff.svelte';
-  import PhoneHandoffButton from '../../lib/components/PhoneHandoffButton.svelte';
+  import { sessionHandoffItems } from './sessionHandoff';
+  import SessionHandoffButtons from './SessionHandoffButtons.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { popoutItems } from '../../lib/popoutMenu';
   import { now, nowMinute, rel } from '../../lib/stores/now.svelte';
@@ -650,7 +650,7 @@
             // tab to right-click, so Share was unreachable from here.
             ...((session?.kind === 'agent') ? [{ label: 'Start room…', icon: 'people', action: () => (roomOpen = true) } as MenuItem] : []),
             { label: 'Share…', icon: 'share', action: () => void openShare() } as MenuItem,
-            ...phoneHandoff.menuItem(`agents/${sessionId}`, 'this session'),
+            ...sessionHandoffItems(session),
             { separator: true } as MenuItem,
             {
               label: attachedIssue ? 'Change issue…' : 'Attach issue…',
@@ -715,7 +715,7 @@
        status + title always; then ⋯; everything secondary
        sits in the details chip or the ⋯ menu. `data-tier` mirrors the script's
        twin of the breakpoints (which rows ⋯ adds back) for tests. -->
-  <header class="pane-head" class:grip-on={gripOn} data-tier={tier} bind:clientWidth={headW}>
+  <header style:height={!viewport.isDesktop ? 'var(--mobile-topbar-h)' : undefined} class="pane-head" class:grip-on={gripOn} data-tier={tier} bind:clientWidth={headW}>
     {#if gripOn}
       <!-- C3a: drag this pane onto another to swap (centre) or move (edge). It
            sits in the header's leading padding and only shows on hover/focus;
@@ -839,7 +839,7 @@
         data-testid="ui-control-toggle"
       ><Icon name="cursor" size={13} /></button>
     {/if}
-    <span class="pane-phone"><PhoneHandoffButton route={`agents/${sessionId}`} what="this session" name={session?.title ?? sessionId} testid="pane-continue-phone" /></span>
+    <span class="pane-phone" class:mobile-handoff={!viewport.isDesktop}><SessionHandoffButtons {session} {sessionId} {readOnly} /></span>
     <button
       class="icon-btn pane-find"
       data-testid="pane-find"
@@ -1387,7 +1387,7 @@
     .pane-head .handover-crumb {
       padding: 0 4px;
     }
-    .pane-head :is(.pane-find, .pane-phone) {
+    .pane-head :is(.pane-find, .pane-phone:not(.mobile-handoff)) {
       display: none;
     }
   }

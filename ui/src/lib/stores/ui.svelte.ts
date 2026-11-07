@@ -219,6 +219,9 @@ function clampApiBuilder(px: number): number {
 class UiStore {
   railExpanded = $state(lsGet(LS.rail) !== '0');
   rightOpen = $state(lsGet(LS.right) === '1');
+  /** Compact overlays are temporary, never a restored desktop preference. */
+  rightOverlayMode = $state(false);
+  rightOverlayOpen = $state(false);
   rightTab: RightPanelTab = $state((lsGet(LS.rightTab) as RightPanelTab) ?? 'git');
   rightWidth = $state(clampRight(Number(lsGet(LS.rightWidth)) || 300));
   railWidth = $state(clampRail(Number(lsGet(LS.railWidth)) || 240));
@@ -548,34 +551,31 @@ class UiStore {
   rightTransient: { open: boolean; tab: RightPanelTab } | null = $state(null);
   /** What the Side panel shows now: the page's transient view, else the saved state. */
   get rightOpenNow(): boolean {
+    if (this.rightOverlayMode) return this.rightOverlayOpen;
     return this.rightTransient?.open ?? this.rightOpen;
   }
   get rightTabNow(): RightPanelTab {
     return this.rightTransient?.tab ?? this.rightTab;
   }
 
-  toggleRight(): void {
-    // Acting on the panel ends a page's transient view; the result is saved.
-    const open = this.rightOpenNow;
-    if (this.rightTransient) this.rightTab = this.rightTransient.tab;
-    this.rightTransient = null;
-    this.rightOpen = !open;
-    lsSet(LS.right, this.rightOpen ? '1' : '0');
-    lsSet(LS.rightTab, this.rightTab);
+  /** Close compact overlays without changing the desktop preference. */
+  resetDrawers(compact: boolean): void {
+    this.navDrawerOpen = false;
+    this.rightOverlayMode = compact;
+    this.rightOverlayOpen = false;
   }
 
-  openRight(tab: RightPanelTab): void {
-    this.rightTransient = null;
-    this.rightTab = tab;
-    this.rightOpen = true;
-    lsSet(LS.right, '1');
-    lsSet(LS.rightTab, tab);
-  }
+  toggleRight(): void { this.setRight(!this.rightOpenNow, this.rightTabNow); }
+  openRight(tab: RightPanelTab): void { this.setRight(true, tab); }
 
   /** Set open + tab together (a rail click), persisting both. */
   setRight(open: boolean, tab: RightPanelTab): void {
     this.rightTransient = null;
     this.rightTab = tab;
+    if (this.rightOverlayMode) {
+      this.rightOverlayOpen = open;
+      return;
+    }
     this.rightOpen = open;
     lsSet(LS.right, open ? '1' : '0');
     lsSet(LS.rightTab, tab);

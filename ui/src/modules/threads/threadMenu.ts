@@ -1,6 +1,7 @@
 // The one per-thread action menu — shared by a split pane's ⋯ and the page's
 // top-bar ⋯ (single view has no pane header). Everything goes through the
 // threads store so either caller drives the same pane state.
+import { canSwitchSessionSurface, openSessionSurface } from '../../lib/sessionSurface';
 import type { Session } from '../../lib/api/types';
 import { confirmer } from '../../lib/confirm.svelte';
 import type { MenuItem } from '../../lib/contextmenu.svelte';
@@ -31,6 +32,7 @@ export function buildThreadMenu(s: Session, opts: { onstartroom: (id: string) =>
   const parentId = delegatedParentId(s);
   const shell = isPlainShellSession(s);
   return [
+    ...(ws.myRole !== 'viewer' && canSwitchSessionSurface(s) ? [{ label: 'Open in Terminal', icon: 'terminal', title: 'Continue with the same agent in Agents', action: () => void openSessionSurface(s, 'agents') }] : []),
     { label: 'Rename thread…', icon: 'edit', action: () => void promptRenameThread(s) },
     { label: threads.isPinned(id) ? 'Unpin thread' : 'Pin thread', icon: 'star', action: () => threads.togglePin(id) },
     ...(!shell

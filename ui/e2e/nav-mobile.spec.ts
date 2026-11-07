@@ -58,3 +58,29 @@ test('phone: tapping a module in the drawer navigates and closes it', async ({ p
   await expect(drawer(page)).toHaveCount(0);
   await expect(title(page)).toHaveText('Vault');
 });
+
+test('phone: desktop side-panel preference never opens a drawer on load or navigation', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(() => localStorage.setItem('otto_right_open', '1'));
+  await page.goto('/#/home');
+  await expect(page.locator('.shell')).toBeVisible();
+  const right = page.locator('.drawer.right:not(.inline)');
+  await expect(right).toBeHidden();
+  await page.getByRole('button', { name: 'Side panel', exact: true }).click();
+  await expect(right).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(right).toBeHidden();
+  await page.getByRole('button', { name: 'Open navigator', exact: true }).click();
+  await drawer(page).getByRole('button', { name: 'Vault', exact: true }).click();
+  await expect(right).toBeHidden();
+  await page.reload();
+  await expect(page.locator('.shell')).toBeVisible();
+  await expect(right).toBeHidden();
+  expect(await page.evaluate(() => localStorage.getItem('otto_right_open'))).toBe('1');
+  // Going back to a wide layout restores the saved desktop panel; returning
+  // to phone starts with the overlay closed again.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(page.locator('.drawer.right.inline')).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(right).toBeHidden();
+});

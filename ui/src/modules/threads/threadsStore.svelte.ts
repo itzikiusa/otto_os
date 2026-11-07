@@ -107,6 +107,22 @@ class ThreadsStore {
   draftCwd = $state<string | null>(null);
   sidebarOpen = $state(true);
   inspectorOpen = $state(false);
+  /** Desktop preference stays separate from a phone/tablet's temporary sheet. */
+  inspectorCompact = $state(false);
+  inspectorOverlayOpen = $state(false);
+  get inspectorVisible(): boolean {
+    return this.inspectorCompact ? this.inspectorOverlayOpen : this.inspectorOpen;
+  }
+  setInspectorCompact(compact: boolean): void {
+    if (this.inspectorCompact === compact) return;
+    this.inspectorCompact = compact;
+    this.inspectorOverlayOpen = false;
+  }
+  setInspectorOpen(open: boolean): void {
+    if (this.inspectorCompact) this.inspectorOverlayOpen = open;
+    else this.inspectorOpen = open;
+  }
+
   inspectorTab = $state<ThreadsInspectorTab>('changes');
   collapseNav = $state(true);
   openFilesByWorkspace = $state<Record<string, WorkspaceFileTabs>>({});
@@ -490,7 +506,7 @@ class ThreadsStore {
   openSideChat(mainId: string, question = ''): void {
     if (question.trim()) this.sideAsk = { mainId, question: question.trim() };
     this.inspectorTab = 'side';
-    this.inspectorOpen = true;
+    this.setInspectorOpen(true);
     threadsChrome.addSurface('side');
     this.save();
   }
@@ -576,22 +592,22 @@ class ThreadsStore {
 
   toggleInspector(tab?: ThreadsInspectorTab): void {
     if (tab) {
-      if (this.inspectorOpen && this.inspectorTab === tab) {
-        this.inspectorOpen = false;
+      if (this.inspectorVisible && this.inspectorTab === tab) {
+        this.setInspectorOpen(false);
       } else {
         this.inspectorTab = tab;
-        this.inspectorOpen = true;
+        this.setInspectorOpen(true);
         threadsChrome.addSurface(tab);
       }
     } else {
-      this.inspectorOpen = !this.inspectorOpen;
+      this.setInspectorOpen(!this.inspectorVisible);
     }
     this.save();
   }
 
   setInspectorTab(tab: ThreadsInspectorTab): void {
     this.inspectorTab = tab;
-    this.inspectorOpen = true;
+    this.setInspectorOpen(true);
     threadsChrome.addSurface(tab);
     this.save();
   }
@@ -599,7 +615,7 @@ class ThreadsStore {
   openPeerComposerTo(targetSessionId: string): void {
     this.peerRelayTarget = targetSessionId;
     this.inspectorTab = 'peers';
-    this.inspectorOpen = true;
+    this.setInspectorOpen(true);
     threadsChrome.addSurface('peers');
     this.save();
   }
@@ -633,7 +649,7 @@ class ThreadsStore {
       [wsKey]: { tabs, activeFilePath: path },
     };
     this.inspectorTab = 'files';
-    this.inspectorOpen = true;
+    this.setInspectorOpen(true);
     threadsChrome.addSurface('files');
     this.save();
   }
