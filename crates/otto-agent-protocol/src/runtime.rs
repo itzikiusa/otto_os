@@ -1029,7 +1029,7 @@ impl AgentRuntime {
                 self.inner.repo.set_access_mode(id, m).await?;
             }
         }
-        self.ensure_process(&live).await?;
+        self.spawn_resuming(id, &live).await?;
         let attachments = self.store_attachments(id, req).await?;
         let res = self.start_turn(&live, req, attachments.clone());
         if res.is_err() {
@@ -1435,32 +1435,45 @@ impl AgentRuntime {
             let _ = live.persist.send(PersistOp::Opened);
         }
         self.flush(id).await;
-        self.ensure_process(&live).await?;
-        let resume = live.lock().session.native_thread_id.clone();
-        if resume.is_some() && !self.wait_started(&live).await {
-            // The provider refused the resume: start a fresh thread, keeping
-            // the old key until the fresh one is up.
-            live.lock().session.native_thread_id = None;
-            let fresh = self.ensure_process(&live).await;
-            if fresh.is_err() || !self.wait_started(&live).await {
-                live.lock().session.native_thread_id = resume;
-                fresh?;
-                return Err(Error::Invalid(
-                    "the agent could not start again — send a message to retry".into(),
-                ));
-            }
-            if live.lock().session.native_thread_id.is_none() {
-                self.inner.repo.clear_native_thread_id(id).await?;
-            }
-            self.notice(
-                id,
-                "The earlier conversation could not be resumed, so the agent starts fresh: \
-                 the history above is kept here, but the agent does not remember it.",
-            )
-            .await?;
-        }
+        self.spawn_resuming(id, &live).await?;
         let s = live.lock().session.clone();
         Ok(s)
+    }
+
+    /// Spawn the agent if it is not running, resuming the provider's own
+    /// thread. A provider that refuses the resume (its process dies before
+    /// it is ready — e.g. Claude's "No conversation found" for a thread that
+    /// never got a message before a restart) gets a fresh thread instead and
+    /// the timeline says so; without this every later prompt failed the same
+    /// way and the chat was dead for good.
+    async fn spawn_resuming(&self, id: &Id, live: &Arc<Live>) -> Result<()> {
+        if live.lock().proc.is_some() {
+            return Ok(());
+        }
+        self.ensure_process(live).await?;
+        let resume = live.lock().session.native_thread_id.clone();
+        if resume.is_none() || self.wait_started(live).await {
+            return Ok(());
+        }
+        // Keep the old key until the fresh thread is up.
+        live.lock().session.native_thread_id = None;
+        let fresh = self.ensure_process(live).await;
+        if fresh.is_err() || !self.wait_started(live).await {
+            live.lock().session.native_thread_id = resume;
+            fresh?;
+            return Err(Error::Invalid(
+                "the agent could not start again — send a message to retry".into(),
+            ));
+        }
+        if live.lock().session.native_thread_id.is_none() {
+            self.inner.repo.clear_native_thread_id(id).await?;
+        }
+        self.notice(
+            id,
+            "The earlier conversation could not be resumed, so the agent starts fresh: \
+             the history above is kept here, but the agent does not remember it.",
+        )
+        .await
     }
 
     /// Whether the spawned process got ready (`false` = it exited first).

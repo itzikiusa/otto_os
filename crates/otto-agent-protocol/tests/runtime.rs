@@ -1824,6 +1824,46 @@ async fn reopen_resumes_the_thread_or_starts_fresh_with_a_notice() {
     assert_eq!(last_assistant_text(&host), "echo: fresh");
 }
 
+/// After a restart the chat is dormant; a prompt respawns the agent with
+/// `--resume`. If the provider lost (or never saved) that conversation, the
+/// prompt still gets an answer on a fresh thread instead of failing forever.
+#[tokio::test]
+async fn a_prompt_to_a_dormant_thread_the_provider_lost_starts_fresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let s = {
+        let rt = runtime(&pool, &host, RuntimeConfig::default());
+        let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+        rt.prompt(&s.id, "hi").await.unwrap();
+        host.wait(is_terminal).await;
+        rt.flush(&s.id).await;
+        rt.shutdown().await;
+        s
+    };
+    let native = AgentRuntimeRepo::new(pool.clone())
+        .get(&s.id)
+        .await
+        .unwrap()
+        .session
+        .native_thread_id
+        .unwrap();
+    tokio::fs::remove_dir_all(dir.path().join(".fake-claude"))
+        .await
+        .unwrap();
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    rt.prompt(&s.id, "still there?").await.unwrap();
+    host.wait(is_terminal).await;
+    assert_eq!(last_assistant_text(&host), "echo: still there?");
+    assert!(notices(&host)
+        .iter()
+        .any(|n| n.contains("could not be resumed")));
+    let fresh = rt.get(&s.id).await.unwrap().native_thread_id.unwrap();
+    assert_ne!(fresh, native);
+}
+
 #[tokio::test]
 async fn delete_removes_the_thread_and_its_history() {
     let dir = tempfile::tempdir().unwrap();
