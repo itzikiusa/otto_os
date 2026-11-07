@@ -62,3 +62,13 @@ test('recovery of an unchanged composer does not write a new revision', async ()
   const p=new DraftPersistence(composerContent(composer),{load:async()=>({revision:4,draft:emptyDraft()}),save:async d=>{writes++;return {revision:5,draft:d};}},()=>true);
   await p.save(); assert.equal(writes,0);
 });
+
+test('acknowledgement consumes only the submitted count of identical attachments', () => {
+  const draft=emptyDraft();
+  const image={name:'same.png',mime:'image/png',data_base64:'AA=='};
+  draft.images=[{...image}];
+  const submitted=structuredClone(draft);
+  draft.images.push({...image});
+  acknowledgeDraft(draft,submitted);
+  assert.deepEqual(draft.images,[image]);
+});

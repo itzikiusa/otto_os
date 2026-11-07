@@ -27,6 +27,8 @@
   interface Props {
     /** Noun for the headline: "Couldn’t load {what}". */
     what: string;
+    /** Optional exact failure headline for recoverable operations other than loads. */
+    errorTitle?: string;
     loading?: boolean;
     /** Human cause of the last failed load (see `loadErrorText`); null/'' = ok. */
     error?: string | null;
@@ -41,7 +43,7 @@
     errorActions?: Snippet;
     children?: Snippet;
   }
-  let { what, loading = false, error = null, empty = false, onretry, variant = 'panel', rows = 4, emptyView, errorActions, children }: Props = $props();
+  let { what, errorTitle, loading = false, error = null, empty = false, onretry, variant = 'panel', rows = 4, emptyView, errorActions, children }: Props = $props();
 
   // First-load skeleton waits ~150 ms so a fast response never flashes it; the
   // block keeps its height meanwhile so nothing below jumps when it appears.
@@ -77,14 +79,14 @@
 {#if error && empty}
   {#if variant === 'compact'}
     <div class="ls-compact" role="alert" data-testid="load-error">
-      <span class="ls-compact-text"><Icon name="warning" size={12} /> Couldn’t load {what}. <span class="ls-detail">{error}</span></span>
+      <span class="ls-compact-text"><Icon name="warning" size={12} /> {errorTitle ?? `Couldn’t load ${what}`}. <span class="ls-detail">{error}</span></span>
       {#if onretry}<button class="btn small" onclick={onretry} disabled={loading}>{loading ? 'Retrying…' : 'Retry'}</button>{/if}
       {#if errorActions}{@render errorActions()}{/if}
     </div>
   {:else}
     <div class="ls-error" class:page={variant === 'page'} role="alert" data-testid="load-error">
       <div class="ls-icon"><Icon name="warning" size={variant === 'page' ? 26 : 24} /></div>
-      <h3>Couldn’t load {what}</h3>
+      <h3>{errorTitle ?? `Couldn’t load ${what}`}</h3>
       <p class="ls-detail">{error}</p>
       {#if onretry || errorActions}
         <div class="ls-actions">

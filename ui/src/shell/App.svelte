@@ -1,6 +1,5 @@
 <script lang="ts">
   import { transcript as transcriptStore } from '../lib/stores/transcript.svelte';
-  import { installRuntimeDraftRecovery } from '../lib/stores/runtimeDraftRecovery.svelte';
   import { runtimeDrafts } from '../lib/stores/runtimeDrafts.svelte';
   import { NO_WORKSPACE } from '../lib/labels';
   import { toastError } from '../lib/toastError';
@@ -112,7 +111,6 @@
   // Old bookmarks lead to the workspace's existing context editor.
   $effect(() => { if (router.module === 'projects') router.go('settings/context-soul'); });
   // Transcript cache identity: daemon + signed-in user.
-  installRuntimeDraftRecovery();
   $effect(() => { const identity = JSON.stringify([baseUrl(), auth.me?.id ?? '']); transcriptStore.setIdentity(identity); runtimeDrafts.setIdentity(identity); });
 
   const moduleName = $derived(router.module === '' ? 'agents' : router.module);

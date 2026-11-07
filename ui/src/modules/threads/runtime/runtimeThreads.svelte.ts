@@ -4,6 +4,7 @@
 // loaded with the view.
 
 import { loadErrorText } from '../../../lib/loadError';
+import { installRuntimeDraftRecovery } from '../../../lib/stores/runtimeDraftRecovery.svelte';
 import { runtimeDrafts } from '../../../lib/stores/runtimeDrafts.svelte';
 import { api } from '../../../lib/api/client';
 import { onLive } from '../../../lib/live';
@@ -272,6 +273,9 @@ class RuntimeThreads {
   }
 }
 
+// Install persistence when the runtime surface loads (Threads and embedded chats).
+// Its dependency graph ends at the API/draft store, never back at this module.
+installRuntimeDraftRecovery();
 export const runtimeThreads = new RuntimeThreads();
 
 // Agent UI control (otto.ui_* — the agent drives Otto beside the thread): a

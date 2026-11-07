@@ -38,7 +38,13 @@ const equal = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.st
 /** Only acknowledged content is removed; edits made during the request survive. */
 export function acknowledgeDraft(current: RuntimeDraftContent, sent: RuntimeDraftContent): void {
   if (current.text === sent.text) current.text = '';
-  current.images = current.images.filter(x => !sent.images.some(s => equal(s, x)));
+  const remaining = [...sent.images];
+  current.images = current.images.filter(image => {
+    const index = remaining.findIndex(sentImage => equal(sentImage, image));
+    if (index === -1) return true;
+    remaining.splice(index, 1);
+    return false;
+  });
   current.context = current.context.filter(x => !sent.context.some(s => equal(s, x)));
   if (current.fresh_context === sent.fresh_context) current.fresh_context = false;
 }

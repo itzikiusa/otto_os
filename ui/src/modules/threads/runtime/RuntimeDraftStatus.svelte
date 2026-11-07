@@ -1,13 +1,14 @@
 <script lang="ts">
+  import LoadState from '../../../lib/components/LoadState.svelte';
   import type { RuntimeComposerDraft } from '../../../lib/stores/runtimeDrafts.svelte';
   let { draft }: { draft: RuntimeComposerDraft } = $props();
 </script>
-{#if draft.saveStatus === 'error'}
-  <button type="button" class="draft-retry" onclick={draft.retrySave} title={draft.saveError ?? 'Draft not saved'}>Draft not saved · Retry</button>
-{:else}
-  <span class="draft-status" aria-live="polite">{draft.saveStatus === 'loading' ? 'Restoring…' : draft.saveStatus === 'saving' ? 'Saving…' : 'Saved'}</span>
-{/if}
+<div class="draft-status">
+  <span aria-live="polite">{draft.saveStatus === 'error' ? '' : draft.saveStatus === 'loading' ? 'Restoring…' : draft.saveStatus === 'saving' ? 'Saving…' : 'Saved'}</span>
+  {#if draft.saveStatus === 'error'}
+    <LoadState what="draft" errorTitle="Draft not saved" variant="compact" empty error={draft.saveError ?? 'Retry to save your draft.'} onretry={draft.retrySave} />
+  {/if}
+</div>
 <style>
-  .draft-status, .draft-retry { font-size: var(--fs-xs); color: var(--text-dim); white-space: nowrap; }
-  .draft-retry { color: var(--warning); background: none; border: 0; cursor: pointer; }
+  .draft-status { font-size: var(--fs-xs); color: var(--text-dim); min-width: 0; }
 </style>
