@@ -159,7 +159,9 @@
      usually gone there), so the stack sits above it and spans the width. */
   @media (max-width: 640px) {
     .toasts {
-      bottom: calc(var(--mobile-bottomnav-h) + env(safe-area-inset-bottom, 0px) + 8px);
+      /* --toast-lift-phone: a page with a composer at the bottom (an agent
+         chat) raises the stack above it. */
+      bottom: calc(var(--mobile-bottomnav-h) + env(safe-area-inset-bottom, 0px) + 8px + var(--toast-lift-phone, 0px));
       inset-inline: 12px;
       width: auto;
     }

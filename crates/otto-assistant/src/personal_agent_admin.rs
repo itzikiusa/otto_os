@@ -207,7 +207,7 @@ pub async fn add_schedule<C: AssistantCtx>(
     let timezone = s
         .timezone
         .filter(|t| !t.trim().is_empty())
-        .unwrap_or_else(|| "UTC".into());
+        .unwrap_or_else(crate::personal_agent_routines::local_timezone);
     let schedule = repo
         .create_schedule_once(
             NewAgentSchedule {
@@ -245,6 +245,24 @@ pub async fn make_primary(repo: &PersonalAgentsRepo, agent: &PersonalAgent) -> R
         repo.save_autonomy(&agent.id, &cfg).await?;
     }
     clear_other_primaries(repo, agent).await
+}
+
+/// Setting up a routine means "run this": a paused agent is resumed, or the
+/// routine would silently never fire while showing a next run. `true` when
+/// it was paused.
+pub async fn resume_for_routine(repo: &PersonalAgentsRepo, agent: &PersonalAgent) -> Result<bool> {
+    if agent.enabled {
+        return Ok(false);
+    }
+    repo.update(
+        &agent.id,
+        otto_state::PersonalAgentPatch {
+            enabled: Some(true),
+            ..Default::default()
+        },
+    )
+    .await?;
+    Ok(true)
 }
 
 /// Clear `primary` on every other agent of `agent`'s workspace.

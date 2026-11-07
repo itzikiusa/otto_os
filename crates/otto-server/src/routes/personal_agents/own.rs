@@ -112,7 +112,15 @@ async fn create(
     Json(req): Json<RoutineReq>,
 ) -> ApiResult<Json<Value>> {
     let me = caller(&ctx, &user, &auth, req.session_id.as_deref(), Editor).await?;
-    let agent = own::target(&ctx, &me, req.agent.as_deref()).await?;
+    let mut agent = own::target(&ctx, &me, req.agent.as_deref()).await?;
+    // An ownerless (seeded) agent has no one to run as, so its routine would
+    // run headless and never reach the chat. The person whose chat set it up
+    // adopts it.
+    if agent.created_by.as_deref().is_none_or(str::is_empty)
+        && super::adopt(&ctx, &agent.id, &user.id).await
+    {
+        agent.created_by = Some(user.id.clone());
+    }
     Ok(Json(own::create(&ctx, &agent, req.routine).await?))
 }
 

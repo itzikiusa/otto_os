@@ -68,6 +68,9 @@
     id?: string;
     /** Table-cell use: the label is visually hidden (still announced) and there is no hint. */
     compact?: boolean;
+    /** Models to offer besides the catalog route's (e.g. the known aliases),
+     *  so a model chosen elsewhere never reads as "Custom…". */
+    extra?: { id: string; label: string }[];
   }
   let {
     provider,
@@ -76,6 +79,7 @@
     hint = "Pins the model for this session only (passed as the CLI’s model flag).",
     id = 'model-picker',
     compact = false,
+    extra = [],
   }: Props = $props();
 
   const CUSTOM = '\u0000custom'; // sentinel select value, never a real model id
@@ -94,7 +98,14 @@
     void catalogPromise.then((c) => (catalog = c));
   });
 
-  const models = $derived(catalog?.[provider] ?? []);
+  // The catalog route plus `extra` (the caller's known models).
+  const models = $derived.by((): CatalogModel[] => {
+    const out: CatalogModel[] = [...(catalog?.[provider] ?? [])];
+    for (const m of extra) {
+      if (!out.some((x) => x.id === m.id)) out.push({ id: m.id, label: m.label });
+    }
+    return out;
+  });
   const inCatalog = $derived(value !== '' && models.some((m) => m.id === value));
   // A saved value not in the catalog behaves as custom, so it's never dropped.
   const selectValue = $derived(

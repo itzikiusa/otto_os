@@ -5,7 +5,7 @@
       "id": "main-agent",
       "title": "Main agent",
       "description": "Your one point of contact: task it with anything — it routes work to your other agents, and comes back with what they found.",
-      "avatar": "",
+      "avatar": "char:chief",
       "name": "Main agent",
       "schedule": null,
       "directive": "",

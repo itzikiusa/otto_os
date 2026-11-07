@@ -8,7 +8,7 @@
 -->
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { announce } from '../../lib/announce.svelte';
+  import { announce, unannounce } from '../../lib/announce.svelte';
   import { personalAgentsApi } from '../../lib/api/personalAgents';
   import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -37,7 +37,11 @@
     const id = agentId;
     chat = null;
     error = '';
-    announce(`Opening ${untrack(() => agentName)}’s chat…`);
+    const opening = `Opening ${untrack(() => agentName)}’s chat…`;
+    announce(opening);
+    // Clear it once the chat is up (or this agent is left), so a stale
+    // "Opening X’s chat…" never lingers in the live region.
+    const done = (): void => unannounce(opening);
     // The server serialises the get-or-create per agent; a stale answer for
     // another agent is dropped.
     personalAgentsApi
@@ -47,7 +51,9 @@
       })
       .catch((e) => {
         if (id === agentId) error = loadErrorText(e);
-      });
+      })
+      .finally(done);
+    return done;
   });
 </script>
 
@@ -58,7 +64,7 @@
     {#if ThreadView.error}
       <LoadState what="the chat" error={ThreadView.error} onretry={() => ThreadView.retry()} />
     {:else if ThreadView.component}
-      <ThreadView.component sessionId={chat.id} {workspaceId} />
+      <ThreadView.component sessionId={chat.id} {workspaceId} {agentName} />
     {:else}
       <LoadState what="the chat" loading />
     {/if}
@@ -77,8 +83,6 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
     overflow: hidden;
   }
 </style>

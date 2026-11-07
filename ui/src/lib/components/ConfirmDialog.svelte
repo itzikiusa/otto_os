@@ -74,6 +74,7 @@
           class:primary={!confirmer.danger}
           class:danger-solid={confirmer.danger}
           data-autofocus={confirmer.danger ? undefined : ''}
+          disabled={confirmer.isPrompt && !!confirmer.mustMatch && confirmer.inputValue.trim() !== confirmer.mustMatch}
           onclick={onPrimary}
         >
           {confirmer.confirmLabel}

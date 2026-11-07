@@ -69,9 +69,18 @@ A personal agent is a small persistent entity (`personal_agents`,
   `email` / `webhook`), reusing the scheduled-task delivery pipeline
   (redaction, report upload, notify-on-change hashing).
 
-Ships with four **disabled, editable example agents** seeded on first list:
-Personal Assistant, Daily Recap (two schedules), Casino Reviewer (no login),
-Casino Reviewer Player (login via Keychain).
+A new workspace seeds one agent on first list: the **Personal Assistant**,
+your main agent — **active**, owned by the Editor whose listing seeded it
+(a Viewer's listing seeds it ownerless; the first Editor to change it, or
+whose chat sets up a routine on it, adopts it). Other agents come from the
+templates (`+ New agent`) or from the main agent's chat.
+
+**Routines only fire on an active agent.** Setting one up — from chat
+(`otto.routine_create`) or the Routines form — resumes a paused agent, since a
+routine on a paused agent would show a next run and never fire (migration
+`0204` resumes a paused main agent that already has an active routine). A
+routine's times are in its timezone; omitted, that is this Mac's timezone
+(`/etc/localtime`), never UTC.
 
 ## 2. Runs
 
@@ -139,11 +148,14 @@ daemon build, the hook refuses and a fresh chat is opened, as before.)
 
 **Everything reports into it** (`personal_agent_feed.rs`). Every finished run
 — scheduled, manual or proactive, ok / failed / stopped — posts an attributed
-line into the owner's chat with the agent ("Scheduled · Morning brief — done:
-Two PRs need review"), as a turn-less system notice (`AgentRuntime::notice`).
-Where the runtime cannot show a notice yet, a scheduled or manual result is
-sent as a framed follow-up turn (`[Message from Scheduled · Morning brief
-(<run thread>)]: …`) so the agent tells you what it found; proactive runs never
+line into the owner's chat with the agent ("Morning brief ran · Two PRs need
+review [otto-run:<run id>]"), as a system notice (`AgentRuntime::notice`); the
+chat renders the `[otto-run:…]` marker as a result card with **Open report**.
+A scheduled or manual result is then also sent as a framed follow-up turn
+(`[Message from Scheduled · Morning brief (<run thread>)]: …` carrying the
+report and the current time), so the agent itself knows what its routine found
+and adds, in at most two lines, what else matters — a notice alone is UI-only, and the agent used to
+answer "what did my brief say?" with "no such routine". Proactive runs never
 cost a turn. A busy chat is waited for (≤ 30 min); a closed one is reopened
 first.
 
@@ -151,7 +163,7 @@ first.
 
 One agent per workspace is the **main agent** — your one point of contact
 ("Task me with anything; I'll make sure it gets to the right agent"). A new
-workspace seeds it (the first preset, with the `chief` personality); the
+workspace seeds it (active, with the `chief` personality); the
 `main-agent` template and the quick create's "Main agent" start make one; any
 agent becomes it from Details → *Make main agent*. Its persona lists your
 other agents and the team tools:

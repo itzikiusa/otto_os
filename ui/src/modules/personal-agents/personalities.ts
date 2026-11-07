@@ -10,7 +10,7 @@ export interface PersonalityPreset {
   label: string;
   description: string;
   prompt: string;
-  /** How the agent would answer "Can you check why the nightly build failed?". */
+  /** How the agent would answer "Can you look into this for me?". */
   sample: string;
   default_for?: 'main' | 'agent';
 }

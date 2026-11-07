@@ -129,29 +129,28 @@ test('workflow instructions: late save cannot switch the active workflow', async
   await expect(page.getByTestId(`wf-row-${second}`)).toHaveClass(/active/);
 });
 
-test('personal agent: failed save preserves form and a retry creates the paused agent', async ({ page }) => {
+test('personal agent: failed save preserves form and a retry creates the agent', async ({ page }) => {
   const { ctx, ws } = await setup(page); await ctx.dispose();
   let fail = true;
   await page.route(`**/api/v1/workspaces/${ws}/personal-agents`, r => r.request().method() === 'POST' && fail
     ? r.fulfill({ status: 503, json: { code: 'upstream', message: 'Agent storage temporarily unavailable' } }) : r.continue());
   await page.setViewportSize({ width: 375, height: 812 });
   await page.goto('/#/personal-agents');
-  // The rail's "+" opens the quick create; the full form is behind "More options…".
+  // The rail's "+" opens the quick create.
   const add = page.getByTestId('pa-rail-add').or(page.getByRole('button', { name: 'Set up your main agent', exact: true }));
   await add.first().click();
-  await page.getByRole('dialog').getByRole('button', { name: 'More options…', exact: true }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByLabel('Name', { exact: true }).fill('Offline review assistant');
-  await dialog.getByLabel('Enabled', { exact: false }).uncheck();
-  await dialog.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(dialog.locator('.err')).toContainText('Agent storage temporarily unavailable');
-  await expectFullyInViewport(page, dialog.locator('.err'));
+  await dialog.getByRole('button', { name: 'Create', exact: true }).click();
+  await expect(dialog.locator('.qc-err')).toContainText('Agent storage temporarily unavailable');
+  await expectFullyInViewport(page, dialog.locator('.qc-err'));
   await expect(dialog.getByLabel('Name', { exact: true })).toHaveValue('Offline review assistant');
   await page.screenshot({ path: '/tmp/otto-ux-r3-automation-screens/phone-agent-save-retry.png' });
   fail = false;
-  await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Create', exact: true }).click();
   await expect(dialog).toHaveCount(0);
-  await expect(page.getByText('Offline review assistant', { exact: true }).first()).toBeVisible();
+  // On a phone the rail is a strip of faces; each keeps its name as its label.
+  await expect(page.getByRole('button', { name: 'Offline review assistant', exact: true }).first()).toBeVisible();
 });
 
 test('workflow graph: completing Save retains edits made while saving', async ({ page }) => {

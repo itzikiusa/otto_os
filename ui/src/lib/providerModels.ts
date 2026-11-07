@@ -213,7 +213,10 @@ export function formatModelLabel(
 ): string {
   const trimmed = (modelId ?? '').trim();
   if (!trimmed) return 'Default model';
-  const found = modelsForProvider(provider, meta).find((m) => m.id === trimmed);
+  // The live catalog first, then the built-in aliases ("opus" → "Claude Opus").
+  const found =
+    modelsForProvider(provider, meta).find((m) => m.id === trimmed) ??
+    FALLBACK_PROVIDER_MODELS[provider]?.find((m) => m.id === trimmed);
   if (found) return found.label;
   return trimmed;
 }

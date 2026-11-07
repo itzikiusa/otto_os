@@ -2457,6 +2457,10 @@
           "type": "string",
           "description": "IANA, e.g. Asia/Jerusalem"
         },
+        "name": {
+          "type": "string",
+          "description": "2–5 word title in the user's words, e.g. Morning PR brief"
+        },
         "instruction": {
           "type": "string",
           "description": "what each run does"

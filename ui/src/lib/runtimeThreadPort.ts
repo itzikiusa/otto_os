@@ -5,7 +5,7 @@
 // (shell/installShell.svelte.ts) and hosts load it through here.
 import type { Component } from 'svelte';
 
-export type RuntimeThreadViewProps = { sessionId: string; workspaceId: string };
+export type RuntimeThreadViewProps = { sessionId: string; workspaceId: string; agentName?: string };
 type RuntimeThreadViewModule = { default: Component<RuntimeThreadViewProps> };
 let loader: (() => Promise<RuntimeThreadViewModule>) | null = null;
 

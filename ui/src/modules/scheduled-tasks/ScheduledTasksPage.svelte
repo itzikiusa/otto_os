@@ -884,8 +884,7 @@
 
 <div class="sched-page">
 <PageHeader
-  title={creating || editId ? (editId ? `Edit “${list.find((t) => t.id === editId)?.name ?? 'task'}”` : 'New scheduled task') : 'Scheduled Tasks'}
-  subtitle={creating || editId ? undefined : 'Run an agent on a cadence and deliver its report'}
+  title={creating || editId ? (editId ? `Edit “${list.find((t) => t.id === editId)?.name ?? 'task'}”` : 'New scheduled task') : 'Personal Agents'}
 >
   {#snippet leading()}
     {#if creating || editId}
@@ -1234,7 +1233,7 @@
           variant="page"
           icon="calendar"
           title="No scheduled tasks yet"
-          body="Create one to run an agent on a cadence and deliver its report."
+          body="A workspace task runs a prompt on a cadence and delivers its report. Agent routines live with each agent under Agents."
           actionLabel="New task"
           actionIcon="plus"
           onaction={startCreate}

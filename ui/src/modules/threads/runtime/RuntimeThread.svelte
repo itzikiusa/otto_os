@@ -40,7 +40,7 @@
   import RuntimeQueueBar from './RuntimeQueueBar.svelte';
   import RuntimeTurnStatus from './RuntimeTurnStatus.svelte';
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
-  import { approvalOutcome, isRunning, latestTurn, messageAttribution, pendingApprovals, subagentChildren, timelineRows, turnOutcome, type WorkEntry } from './timeline';
+  import { approvalOutcome, errorText, isRunHandoff, isRunning, latestTurn, messageAttribution, pendingApprovals, subagentChildren, timelineRows, turnOutcome, type WorkEntry } from './timeline';
   import { readAttachments, runViewSlash, type ComposerFile } from './runtimeComposer';
   import RuntimeAccessChip from './RuntimeAccessChip.svelte';
   import RuntimeApprovalRow from './RuntimeApprovalRow.svelte';
@@ -51,6 +51,7 @@
   import RuntimeSubagentCard from './RuntimeSubagentCard.svelte';
   import RuntimeWorkRow from './RuntimeWorkRow.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
+  import { personalAgentOf } from '../../../lib/personalAgentBadges';
   import { runtimeViews } from './runtimeView.svelte';
 
   interface Props {
@@ -58,8 +59,12 @@
     focused: boolean;
     /** Hosted outside Threads (Personal Agents' chat): a linked-thread chip switches the host's view. */
     onswitch?: (id: string) => void;
+    /** A personal agent's chat: "Message <name>…", and its full access reads calm. */
+    agentChat?: string;
   }
-  let { sessionId, focused, onswitch }: Props = $props();
+  let { sessionId, focused, onswitch, agentChat }: Props = $props();
+  /** The personal agent this thread runs as (its run notices open their report). */
+  const agentChatId = $derived(personalAgentOf(runtimeThreads.get(sessionId)?.meta));
 
   $effect(() => {
     const id = sessionId;
@@ -82,9 +87,14 @@
    *  the session goes dormant with `last_error`) — shown inline, T3 Code's
    *  ThreadErrorBanner, until the next prompt starts it. */
   let startError = $state<string | null>(null);
-  const sessionError = $derived(
-    startError ?? (p?.session && (p.session.status === 'stopped' || p.session.status === 'error') ? p.session.last_error : null),
-  );
+  const sessionError = $derived.by(() => {
+    const e = startError ?? (p?.session && (p.session.status === 'stopped' || p.session.status === 'error') ? p.session.last_error : null);
+    // Said once: the timeline's own error row already carries the same text.
+    const last = p?.items.findLast((i) => !i.parent_item_id);
+    const said = last?.type === 'error' ? last.failure.message.trim() : '';
+    if (!e || /no conversation found/i.test(e)) return null;
+    return said && (e.includes(said) || said.includes(e.trim())) ? null : errorText(e);
+  });
   const plan = $derived.by(() => {
     if (!p || !turn) return null;
     const pl = p.plans.findLast((x) => x.turn_id === turn.id);
@@ -102,7 +112,12 @@
   let atBottom = true;
 
   const running = $derived((p ? isRunning(p) : false) || sending || (awaitSeq !== null && (p?.lastSequence ?? 0) < awaitSeq));
-  const outcome = $derived(p && !running ? turnOutcome(p, turn) : null);
+  // An agent chat that answered needs no "Partly done · Send again": the
+  // failed step's row already says what went wrong in words.
+  const outcome = $derived.by(() => {
+    const o = p && !running ? turnOutcome(p, turn) : null;
+    return o?.kind === 'partial' && agentChatId ? null : o;
+  });
   const ownTurn = $derived(turn?.origin === 'agent');
   const workingFor = $derived.by(() => {
     if (!running || !turn?.started_at || turn.status !== 'running') return null;
@@ -313,6 +328,7 @@
       pending={gate}
       note={ask && !gate ? approvalOutcome(ask, requests.get(ask.request_id), agentName) : null}
       onrespond={respond}
+      agentId={agentChatId}
     />
   {/if}
 {/snippet}
@@ -333,6 +349,8 @@
         {#each rows as row (row.kind === 'message' ? row.item.id : row.id)}
           {#if row.kind === 'day'}
             <div class="rt-day" role="separator" aria-label={row.label}><span>{row.label}</span></div>
+          {:else if row.kind === 'message' && row.item.type === 'user_message' && isRunHandoff(row.item.text)}
+            <!-- A routine's report handed to the agent: its result card and the agent's reply show it. -->
           {:else if row.kind === 'message' && row.item.type === 'user_message' && messageAttribution(row.item.text)}
             {@const a = messageAttribution(row.item.text)!}
             <div class="rt-from" data-testid="rt-from"><span class="rt-from-h"><Icon name="send" size={12} /> From {a.from}</span><Markdown md={a.body} /></div>
@@ -405,7 +423,7 @@
             ? 'Waiting for your approval above'
             : running
               ? 'Queue a follow-up for when this turn ends'
-              : 'Ask anything. / commands'}
+              : agentChat ? `Message ${agentChat}…` : 'Ask anything. / commands'}
         aria-label="Message"
         aria-autocomplete="list"
         aria-controls={suggestions.length > 0 ? `${popId}-list` : undefined}
@@ -452,6 +470,9 @@
         />
         {/if}
         <span class="rt-grow">
+          <!-- A personal agent's model and access are its settings (Settings ›
+               About); a per-turn picker here disagreed with them. -->
+          {#if !agentChat}
           <button
             bind:this={agentEl}
             type="button"
@@ -475,6 +496,7 @@
             disabled={closed || !session}
             onpick={(m) => (pickedMode = m)}
           />
+          {/if}
         </span>
         {#if running && !text.trim()}
           <button

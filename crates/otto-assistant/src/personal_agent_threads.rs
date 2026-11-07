@@ -475,6 +475,10 @@ pub async fn chat_thread<C: AssistantCtx>(
         pa_engine::repo(ctx)
             .set_chat_session(&agent.id, Some(&thread.id))
             .await?;
+        // An open page must learn the agent now has a chat: a routine's first
+        // result opens it, and without this the page kept the intro and the
+        // result only showed after a reload.
+        pa_engine::emit_changed(ctx, &agent.workspace_id, &agent.id, "agent");
     }
     Ok(Some(ChatThread {
         session_id: thread.id,

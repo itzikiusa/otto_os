@@ -25,6 +25,8 @@ class Announcer {
 export const announcer = new Announcer();
 
 const pending: Record<AnnounceChannel, (() => void) | null> = { polite: null, assertive: null };
+/** The text a pending (next-frame) announce will set, per channel. */
+const pendingText: Record<AnnounceChannel, string> = { polite: '', assertive: '' };
 
 /** Run `fn` on the next frame (a timer outside a browser), returning a canceller. */
 function nextFrame(fn: () => void): () => void {
@@ -51,12 +53,21 @@ export function announce(text: string, opts?: { assertive?: boolean }): void {
   const channel: AnnounceChannel = opts?.assertive ? 'assertive' : 'polite';
   pending[channel]?.();
   pending[channel] = null;
+  pendingText[channel] = '';
   announcer[channel] = '';
   if (!text) return;
+  pendingText[channel] = text;
   pending[channel] = nextFrame(() => {
     pending[channel] = null;
+    pendingText[channel] = '';
     announcer[channel] = text;
   });
+}
+
+/** Withdraw `text` from the polite channel — whether it is showing or still
+ *  waiting for its frame — and leave any newer announcement alone. */
+export function unannounce(text: string): void {
+  if (pendingText.polite === text || announcer.polite === text) announce('');
 }
 
 /** An edge detector over `announce`: call it with the CURRENT message on every

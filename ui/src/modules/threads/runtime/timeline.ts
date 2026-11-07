@@ -131,16 +131,70 @@ export function turnOutcome(p: RuntimeProjection, turn: ProviderTurn | null): Tu
   }
   if (turn.status !== 'completed') return null;
   const answered = own.some((i) => i.type === 'assistant_message' && i.text.trim() !== '');
-  const failed = own.filter((i) => i.type !== 'system_notice' && (i.status === 'failed' || i.type === 'error'));
+  const failed = own.filter((i) => i.type !== 'system_notice' && !isLostConversation(i) && (i.status === 'failed' || i.type === 'error'));
   if (!answered || failed.length === 0) return null;
   // Retry re-sends the message that started it (none for the agent's own turn).
   const first = own.find((i) => i.type === 'user_message');
   return { kind: 'partial', failed, retryText: first?.type === 'user_message' ? first.text : null };
 }
 
+/** The provider no longer has this thread's conversation (Claude's "No
+ *  conversation found with session ID …" after a restart). Nothing the
+ *  person can act on: the daemon starts a fresh conversation on the next
+ *  message and says so in its own notice, so the row is not shown. */
+export function isLostConversation(item: TurnItem): boolean {
+  return item.type === 'error' && /no conversation found/i.test(item.failure.message);
+}
+
+/** An error message without raw session / thread ids (UUIDs and ULIDs). */
+export function errorText(message: string): string {
+  return message
+    .replace(/\s*(?:with )?(?:session|thread)(?: id)?:?\s*[0-9a-f]{8}-[0-9a-f-]{27}/gi, '')
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '…')
+    .trim();
+}
+
+/** Tool calls that are plumbing, not work (Claude's deferred-tool lookup). */
+const HIDDEN_TOOLS: ReadonlySet<string> = new Set(['ToolSearch']);
+
+/** Otto's own tools in words; anything else from an MCP server reads as
+ *  "<tool words> (<server>)". */
+const OTTO_TOOL_WORDS: Record<string, string> = {
+  routine_create: 'Created a routine',
+  routine_update: 'Updated a routine',
+  routine_delete: 'Deleted a routine',
+  routine_list: 'Checked its routines',
+  personality_set: 'Changed its personality',
+  instructions_propose: 'Proposed new instructions',
+  personal_agent_create: 'Created an agent',
+  personal_agent_delegate: 'Handed work to an agent',
+  personal_agent_list: 'Checked your agents',
+  thread_open: 'Opened a thread',
+  thread_message: 'Messaged a thread',
+  thread_read: 'Read a thread',
+  search_memory: 'Searched its memory',
+  send_message: 'Sent a message',
+};
+
+/** A tool's name as people say it: `mcp__otto__otto_routine_create` →
+ *  "Created a routine", `mcp__github__list_pulls` → "List pulls (github)". */
+export function toolWords(name: string): string {
+  const m = /^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/.exec(name);
+  if (!m) return name;
+  const [, server, tool] = m;
+  if (server === 'otto') {
+    const bare = tool.replace(/^otto_/, '');
+    const words = OTTO_TOOL_WORDS[bare] ?? bare.replaceAll('_', ' ');
+    return words.charAt(0).toUpperCase() + words.slice(1);
+  }
+  const words = tool.replaceAll('_', ' ');
+  return `${words.charAt(0).toUpperCase()}${words.slice(1)} (${server})`;
+}
+
 export function timelineRows(items: readonly TurnItem[]): TimelineRow[] {
-  // A subagent's own items render inside its card, not in the timeline.
-  items = items.filter((i) => !i.parent_item_id);
+  // A subagent's own items render inside its card, not in the timeline;
+  // plumbing tool calls and a lost-conversation error not at all.
+  items = items.filter((i) => !i.parent_item_id && !isLostConversation(i) && !(i.type === 'dynamic_tool' && HIDDEN_TOOLS.has(i.tool_name)));
   // An approval naming a tool item we have folds into that tool's row.
   const tools = new Set(items.filter(isTool).map((i) => i.id));
   const folded = new Map<string, ApprovalItem>();
@@ -213,6 +267,15 @@ export function messageAttribution(text: string): { from: string; body: string }
   return feed ? { from: feed[1], body: feed[2] } : null;
 }
 
+/** The daemon handing a finished routine's report to its agent
+ *  (`[Message from Scheduled · Brief (t)]: Otto: "Brief" ran …`). The result
+ *  card above already shows the run, and the agent's reply is the brief, so
+ *  the chat hides this context message. */
+export function isRunHandoff(text: string): boolean {
+  const a = messageAttribution(text);
+  return !!a && a.body.startsWith('Otto: "');
+}
+
 /** T3's `summarizeToolGroup` sentence: "Ran 2 commands and searched the web 3 times". */
 export function groupSummary(entries: readonly WorkEntry[]): string {
   const counts = new Map<string, number>();
@@ -260,7 +323,41 @@ export function approvalOutcome(item: ApprovalItem, request: RuntimeRequest | un
 
 /** A failed tool's error text (`error` on tool items). */
 export function toolError(item: TurnItem): string | null {
-  return 'error' in item && typeof item.error === 'string' && item.error ? item.error : null;
+  return 'error' in item && typeof item.error === 'string' && item.error ? plainToolError(item.error) : null;
+}
+
+/** A tool error in words: a governance refusal (`{"decision":"denied",
+ *  "reason":…}`) reads "Not allowed: <reason>", a JSON error its message;
+ *  anything else as is (session ids stripped). */
+export function plainToolError(raw: string): string {
+  const t = raw.trim();
+  if (t.startsWith('{')) {
+    try {
+      const v = JSON.parse(t) as Record<string, unknown>;
+      const reason = [v.reason, v.message, v.error].find((x): x is string => typeof x === 'string' && x.trim() !== '');
+      if (v.decision === 'denied') return `Not allowed${reason ? `: ${errorText(reason)}` : ''}`;
+      if (reason) return errorText(reason);
+    } catch {
+      /* not JSON — fall through */
+    }
+  }
+  return errorText(t);
+}
+
+/** A personal agent's run result posted into its chat: the daemon ends the
+ *  notice with ` [otto-run:<id>]` (personal_agent_feed.rs `run_post`) so the
+ *  chat can open that run's report. Null for any other notice. */
+export interface RunNotice {
+  text: string;
+  runId: string;
+  outcome: 'ok' | 'failed' | 'stopped';
+}
+export function runNoticeOf(message: string): RunNotice | null {
+  const m = /\s*\[otto-run:([A-Za-z0-9_-]+)\]\s*$/.exec(message);
+  if (!m) return null;
+  const text = message.slice(0, m.index).trim();
+  const outcome = /\swas stopped(\s·|$)/.test(text) ? 'stopped' : /\sfailed(\s·|$)/.test(text) ? 'failed' : 'ok';
+  return { text, runId: m[1], outcome };
 }
 
 /** T3's one-line work-log label (`projectedWorkEntry`). */
@@ -276,7 +373,7 @@ export function workLabel(item: TurnItem): string {
     case 'web_search':
       return title ?? (item.patterns?.length ? `Searched ${item.patterns.join(', ')}` : 'Searched the web');
     case 'dynamic_tool':
-      return title ?? item.tool_name;
+      return toolWords(title ?? item.tool_name);
     case 'todo_list': {
       const done = item.steps.filter((s) => s.status === 'completed').length;
       const current = item.steps.find((s) => s.status === 'running') ?? item.steps.find((s) => s.status === 'pending');
@@ -285,7 +382,8 @@ export function workLabel(item: TurnItem): string {
     case 'approval_request':
       return title ?? item.prompt ?? 'Approval requested';
     case 'system_notice':
-      return item.message;
+      // A run's notice quotes its result's first line, which is often a heading.
+      return (runNoticeOf(item.message)?.text ?? item.message).replace(/(^|\s)#{1,6}\s+/g, '$1');
     case 'subagent':
       return title ?? item.description ?? item.subagent_type ?? 'Subagent';
     case 'error':

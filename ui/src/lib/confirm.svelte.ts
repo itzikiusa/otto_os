@@ -42,6 +42,8 @@ class ConfirmStore {
   validate: ((v: string) => string | null) | null = null;
   /** The current inline field error — set on a rejected OK, cleared on edit. */
   inputError = $state('');
+  /** Prompt-mode: OK stays disabled until the input equals this (type-to-confirm). */
+  mustMatch = $state('');
   // Choice mode: N labeled buttons + an optional "remember" checkbox.
   choices: ChoiceOption[] | null = $state(null);
   checkboxLabel = $state('');
@@ -85,6 +87,7 @@ class ConfirmStore {
       browseFolder?: boolean;
       danger?: boolean;
       validate?: (v: string) => string | null;
+      mustMatch?: string;
     },
   ): Promise<string | null> {
     this.supersede();
@@ -99,6 +102,7 @@ class ConfirmStore {
     this.placeholder = opts?.placeholder ?? '';
     this.browseFolder = opts?.browseFolder ?? false;
     this.validate = opts?.validate ?? null;
+    this.mustMatch = opts?.mustMatch ?? '';
     this.inputError = '';
     this.open = true;
     return new Promise<string | null>((resolve) => {
@@ -150,6 +154,7 @@ class ConfirmStore {
   /** Prompt-mode OK — resolve the trimmed input (null when empty). */
   submit(): void {
     const v = this.inputValue.trim();
+    if (this.mustMatch && v !== this.mustMatch) return;
     if (v && this.validate) {
       const err = this.validate(v);
       if (err) {

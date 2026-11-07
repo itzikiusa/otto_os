@@ -13,16 +13,17 @@ test('schedule refresh failure retains cadence and Retry recovers in light, dark
   await page.route('**/api/v1/personal-agents/r09-scout/schedules', r => r.fulfill(fail
     ? { status: 503, json: { code: 'upstream', message: 'Fixture schedule service unavailable' } }
     : { json: [{ id: 'r09-daily', agent_id: agent.id, schedule: { cadence: 'daily', at: '09:00' }, timezone: 'UTC', directive: 'Daily fixture recap', enabled: true, permission: 'read_only', last_run_at: null, next_run_at: '2026-10-09T09:00:00Z' }] }));
-  await page.goto('/#/personal-agents/r09-scout/schedules');
+  // Routines live in the side panel beside the agent's chat.
+  await page.goto('/#/personal-agents/r09-scout');
   await expect(page.getByText('Daily fixture recap', { exact: true })).toBeVisible();
   fail = true;
   await page.evaluate(async () => {
     const path = '/src/lib/stores/personalAgents.svelte.ts';
     await (await import(path)).personalAgents.loadSchedules('r09-scout');
   });
-  await expect(page.getByTestId('load-stale')).toContainText('Couldn’t refresh this agent’s schedules');
+  await expect(page.getByTestId('load-stale')).toContainText('Couldn’t refresh this agent’s routines');
   await expect(page.getByText('Daily fixture recap', { exact: true })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'No schedules', exact: true })).toHaveCount(0);
+  await expect(page.getByText('Nothing scheduled yet.', { exact: true })).toHaveCount(0);
   for (const [scheme, width] of [['light', 1440], ['dark', 1440], ['dark', 390]] as const) {
     await page.setViewportSize({ width, height: 900 });
     await page.evaluate(s => { document.documentElement.dataset.scheme = s; }, scheme);
