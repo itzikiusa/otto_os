@@ -105,10 +105,19 @@ fn scope_task(loop_: &GoalLoop, node: &GoalGraphNode) -> GoalLoop {
     let mut scoped = loop_.clone();
     scoped.definition.title = format!("{} — task: {}", loop_.definition.title, node.title);
     scoped.definition.summary = format!(
-        "Execute ONLY graph task {} this iteration.\n{}",
-        node.id, node.instructions
+        "Overall goal context: {}\n\nExecute ONLY graph task {} this iteration.\n{}",
+        loop_.definition.summary, node.id, node.instructions
     );
-    scoped.definition.objectives = vec![node.instructions.clone()];
+    scoped.definition.objectives = loop_
+        .definition
+        .objectives
+        .iter()
+        .map(|objective| format!("Overall goal context: {objective}"))
+        .chain(std::iter::once(format!(
+            "This task only: {}",
+            node.instructions
+        )))
+        .collect();
     scoped
         .definition
         .acceptance_criteria
@@ -181,7 +190,7 @@ mod tests {
     fn fixture() -> GoalLoop {
         serde_json::from_value(serde_json::json!({
             "id":"g", "workspace_id":"w", "name":"Goal", "repo_path":"/tmp/isolated",
-            "definition":{"title":"Goal","objectives":["Do all work"],"acceptance_criteria":[
+            "definition":{"title":"Goal","summary":"Reject duplicate deposit callbacks", "objectives":["Preserve idempotency"],"acceptance_criteria":[
                 {"id":"a","text":"Current","verify":"inspect"},{"id":"b","text":"Future","verify":"inspect"}
             ]},
             "config":otto_core::domain::GoalLoopConfig::default(),
@@ -206,7 +215,16 @@ mod tests {
         let scoped = scope_task(&original, &node());
         assert_eq!(scoped.definition.acceptance_criteria.len(), 1);
         assert_eq!(scoped.definition.acceptance_criteria[0].id, "a");
-        assert_eq!(scoped.definition.objectives, vec!["Trace entrypoint"]);
+        assert!(scoped
+            .definition
+            .objectives
+            .iter()
+            .any(|s| s.contains("Trace entrypoint")));
+        assert!(scoped
+            .definition
+            .objectives
+            .iter()
+            .any(|s| s.contains("Preserve idempotency")));
         let prompt = executor_prompt(
             &scoped,
             &scoped.config.executors[0],
@@ -215,6 +233,7 @@ mod tests {
             "/tmp/result",
         );
         assert!(prompt.contains("Execute ONLY graph task a"));
+        assert!(prompt.contains("Reject duplicate deposit callbacks"));
         assert!(!prompt.contains("[b] Future"));
         assert_eq!(original.definition.acceptance_criteria.len(), 2);
     }
