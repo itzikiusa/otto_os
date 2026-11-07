@@ -1,18 +1,23 @@
 //! Bounded repository-level fanout. Reviewer-level concurrency remains owned
 //! by otto-review; this only avoids serial idle waits between repositories.
 use futures_util::future::BoxFuture;
-use futures_util::{stream, StreamExt};
+use futures_util::{stream::FuturesUnordered, StreamExt};
 
 pub(super) async fn collect<'a, T: Send + 'a>(tasks: Vec<BoxFuture<'a, T>>) -> Vec<T> {
-    let mut results = stream::iter(
-        tasks
-            .into_iter()
-            .enumerate()
-            .map(|(index, task)| async move { (index, task.await) }),
-    )
-    .buffer_unordered(2)
-    .collect::<Vec<_>>()
-    .await;
+    let mut pending = tasks.into_iter().enumerate();
+    let mut running: FuturesUnordered<BoxFuture<'a, (usize, T)>> = FuturesUnordered::new();
+    for _ in 0..2 {
+        if let Some((index, task)) = pending.next() {
+            running.push(Box::pin(async move { (index, task.await) }));
+        }
+    }
+    let mut results = Vec::new();
+    while let Some(result) = running.next().await {
+        results.push(result);
+        if let Some((index, task)) = pending.next() {
+            running.push(Box::pin(async move { (index, task.await) }));
+        }
+    }
     results.sort_unstable_by_key(|(index, _)| *index);
     results.into_iter().map(|(_, output)| output).collect()
 }
