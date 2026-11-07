@@ -15,11 +15,11 @@ export function composerContent(d: ComposerContent): RuntimeDraftContent {
   return {
     get text() { return d.text; }, set text(v) { d.text = v; },
     get images() { return d.images; }, set images(v) { d.images = v; },
-    get context() { return d.context; }, set context(v) { d.context = v; },
     get model() { return d.model; }, set model(v) { d.model = v; },
     get effort() { return d.effort; }, set effort(v) { d.effort = v; },
     get access_mode() { return d.pickedMode; }, set access_mode(v) { d.pickedMode = v; },
     get fresh_context() { return d.freshContext; }, set fresh_context(v) { d.freshContext = v; },
+    get context() { return d.context; }, set context(v) { d.context = v; },
   };
 }
 export function snapshotDraft(d: ComposerContent): RuntimeDraftContent {

@@ -54,3 +54,11 @@ test('conflict retry compares local content against the refreshed remote draft',
   await p.load(); remote.text='other window'; draft.text='edited'; await p.save(); draft.text='original'; await p.retry();
   assert.equal(remote.text,'original'); assert.equal(attempts,2);
 });
+
+test('recovery of an unchanged composer does not write a new revision', async () => {
+  const { composerContent } = await import('../src/lib/stores/runtimeDraftPersistence.ts');
+  const composer={text:'',images:[],context:[],model:null,effort:null,pickedMode:null,freshContext:false};
+  let writes=0;
+  const p=new DraftPersistence(composerContent(composer),{load:async()=>({revision:4,draft:emptyDraft()}),save:async d=>{writes++;return {revision:5,draft:d};}},()=>true);
+  await p.save(); assert.equal(writes,0);
+});
