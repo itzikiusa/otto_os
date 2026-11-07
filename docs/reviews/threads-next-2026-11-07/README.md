@@ -22,9 +22,9 @@ and review/diff context attached to a message.
 
 ## Verification record
 
-Implementation and integrated verification are in progress. Results and screenshots
-will be recorded here after the corresponding checks run. No physical-phone or
-Tailscale verification is implied by browser emulation.
+Local implementation and integration checks are complete. CI checks the final
+PR revision before merge. No physical-phone or Tailscale verification is implied
+by browser emulation.
 
 Baseline at `ffa907b27`: `cargo test -p otto-agent-protocol --lib` — 44 passed.
 
@@ -106,3 +106,19 @@ guide was checked in Chromium for all seven selections, mobile layout, keyboard
 zoom closure and absence of network requests. The sampled recent session research
 covers both Claude and Codex; it establishes requested patterns, not verified
 historical task outcomes.
+
+## Final local gate
+
+Workspace formatting and strict all-target Clippy passed. The workspace nextest
+run executed 6,454 tests: 6,453 passed and one re-review fixture failed because
+it bypassed immutable workflow version publication. The fixture now uses the
+real workflow store; all six tests in that route suite passed on rerun. The
+workspace doc-test command also passed (one ignored example). No production
+check was weakened to resolve the fixture.
+
+The correction gate passed formatting, strict server Clippy, structural guards,
+Svelte/TypeScript checks, all 2,415 UI unit tests, the production build and bundle
+budgets. Goal editing, question cards, tool images and the Threads inspector
+load on demand; budget thresholds remain unchanged. Final browser checks passed:
+two graph flows (including paused-state labels), four iPhone WebKit/Android
+Chromium question and image checks, and the desktop review/diff-context flow.
