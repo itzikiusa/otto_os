@@ -4887,6 +4887,8 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "dirs",
+ "futures-util",
+ "hex",
  "otto-channels",
  "otto-core",
  "otto-git",
