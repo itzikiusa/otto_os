@@ -474,8 +474,14 @@ pub fn expand_agent_runs(
                 AgentRun {
                     display_name,
                     lens: a.name.clone(),
+                    // A model belongs to the configured primary provider.
+                    // Secondary providers use their own default model.
+                    model: if p == a.provider {
+                        a.model.clone()
+                    } else {
+                        String::new()
+                    },
                     provider: p,
-                    model: a.model.clone(),
                     prompt_lens,
                     lenses: Vec::new(),
                 }
@@ -1788,7 +1794,7 @@ mod orchestrator_tests {
     }
 
     #[test]
-    fn fan_out_is_default_and_unchanged() {
+    fn fan_out_preserves_primary_model_without_leaking_it_to_other_providers() {
         let (_tmp, lib) = empty_library();
         let cfg = cfg_with(vec![
             agent(UNRESOLVED_A, &["claude", "codex"], "sonnet"),
@@ -1806,6 +1812,7 @@ mod orchestrator_tests {
         assert_eq!(runs[0].lens, "Alpha lens");
         assert_eq!(runs[1].lens, "Alpha lens");
         assert_eq!(runs[0].model, "sonnet");
+        assert_eq!(runs[1].model, "");
         assert_eq!(runs[2].model, "");
         // No sub-agent lenses, and the lens prompt is composed up front — with
         // an unresolvable method that is the reviewer's own instructions alone,
