@@ -42,7 +42,8 @@
   import { threads } from '../threadsStore.svelte';
   import { now } from '../../../lib/stores/now.svelte';
   import { toastError } from '../../../lib/toastError';
-  import RuntimeQuestions from './RuntimeQuestions.svelte';
+  import LazyMount from '../../../lib/components/LazyMount.svelte';
+  const RuntimeQuestions = lazyComponent(() => import('./RuntimeQuestions.svelte'));
   import RuntimeQueueBar from './RuntimeQueueBar.svelte';
   import RuntimeTurnStatus from './RuntimeTurnStatus.svelte';
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
@@ -395,7 +396,9 @@
         {/each}
       </ol>
     {/if}
-    <RuntimeQuestions requests={p?.requests ?? []} {sessionId} agent={agentName} onanswered={() => composerEl?.focus()} />
+    {#if p?.requests.some(request => request.kind === 'question')}
+      <LazyMount lazy={RuntimeQuestions} what="the questions" variant="compact" props={{ requests: p.requests, sessionId, agent: agentName, onanswered: () => composerEl?.focus() }} />
+    {/if}
     <RuntimeQueueBar
       {sessionId}
       {background}

@@ -182,7 +182,7 @@ function persistentGoalPage() {
   // Execute the current parent's callback, rather than inventing a parent that
   // unmounts automatically on workspace change (the real page persists).
   const page=readFileSync(new URL('../src/modules/loops/LoopsPage.svelte',import.meta.url),'utf8');
-  const expression=page.match(/<GoalDefineForm\s+oncancel=\{([^}]+)\}/)?.[1];
+  const expression=page.match(/<LazyMount\s+lazy=\{GoalDefineForm\}[^>]*props=\{\{\s*oncancel:\s*(\(\) => \(creating = false\)),/)?.[1];
   assert.ok(expression,'parent form cancellation callback is present');
   const cancel=runInNewContext(`(${expression})`,parent);
   form.ctx.oncancel=()=>{closes++;cancel();};
