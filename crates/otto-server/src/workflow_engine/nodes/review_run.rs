@@ -10,7 +10,8 @@ use super::super::*;
 use super::NodeCall;
 
 pub(in crate::workflow_engine) use otto_workflows::review_scoring::{
-    aggregate, blended_score, goals_from_reply, review_score, review_verdict, ScoreWeights,
+    aggregate, blended_score, goals_from_reply, review_score, review_verdict, ReviewVerdict,
+    ScoreWeights,
 };
 
 /// What every target of one `review_run` step shares: the node call, the
