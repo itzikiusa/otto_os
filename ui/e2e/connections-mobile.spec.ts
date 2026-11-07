@@ -128,13 +128,13 @@ test.describe('connections hub — responsive', () => {
     await assertFitsWidth(page);
   });
 
-  test('rows carry per-kind tags; env badges still show', async ({ page }) => {
+  test('rows identify their kind accessibly and show environment badges', async ({ page }) => {
     await gotoPage(page);
     const bastion = page.locator('.conn-row', { hasText: 'prod-web-bastion' }).first();
-    await expect(bastion.locator('.badge')).toHaveText('ssh');
+    await expect(bastion.locator('.conn-item')).toHaveAccessibleName('prod-web-bastion ssh prod');
     await expect(bastion.locator('.env-badge')).toHaveText('prod');
     const custom = page.locator('.conn-row', { hasText: 'my-custom-cli' }).first();
-    await expect(custom.locator('.badge')).toHaveText('custom');
+    await expect(custom.locator('.conn-item')).toHaveAccessibleName(/my-custom-cli custom/);
     await assertFitsWidth(page);
   });
 

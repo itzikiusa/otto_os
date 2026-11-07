@@ -4,12 +4,9 @@
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   import Badge from '../../lib/components/Badge.svelte';
-  // Overview tab — shows the selected story's detail: title, source link, stage
-  // badge, issue_type, a version dropdown (with body_md rendering), Refresh
-  // button, watch toggle, and (for Jira stories) a rich section with status,
-  // assignee, details, linked issues, comments, history, and attachments (the
-  // Details sidebar is JiraIssueSection).
+  // Story body, editable draft or Jira details, with metadata under a phone disclosure.
   import { untrack } from 'svelte';
+  import StoryDetails from './StoryDetails.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { kindLabel } from '../../lib/labels';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -527,6 +524,7 @@
   <div class="muted">No story selected.</div>
 {:else}
   <div class="overview">
+    <StoryDetails>
     <!-- ── Story header (full width) ────────────────────────────── -->
     <div class="story-header">
       <div class="story-meta-row">
@@ -681,6 +679,8 @@
       </button>
       {/if}
     </div>
+
+    </StoryDetails>
 
     <!-- ── Body area ──────────────────────────────────────────────── -->
     {#if isDraft}

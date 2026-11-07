@@ -72,6 +72,8 @@ export default defineConfig({
     { name: 'ipad-portrait', testIgnore: MOBILE_IGNORE, use: { ...devices['iPad Pro 11'], storageState: STATE } },
     { name: 'ipad-landscape', testIgnore: MOBILE_IGNORE, use: { ...devices['iPad Pro 11 landscape'], storageState: STATE } },
     { name: 'iphone-se', testIgnore: MOBILE_IGNORE, use: { ...devices['iPhone SE'], storageState: STATE } },
+    // Android Chrome exercises touch layout on Chromium as well as iPhone WebKit.
+    { name: 'android-phone', testIgnore: MOBILE_IGNORE, use: { ...devices['Pixel 7'], storageState: STATE } },
     // Desktop BROWSER (non-Tauri): exercises the ≥1025px 3-pane shell (the
     // remote-desktop path). testMatch restricts it to the desktop-* spec so the
     // mobile specs don't run at desktop width.

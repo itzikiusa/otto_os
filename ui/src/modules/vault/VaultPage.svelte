@@ -70,7 +70,8 @@
   }
   function toggleRight(): void {
     const show = !rightOpen;
-    ui.rightTransient = { open: show, tab: DETAILS_TAB };
+    if (ui.rightOverlayMode) ui.setRight(show, DETAILS_TAB);
+    else ui.rightTransient = { open: show, tab: DETAILS_TAB };
     rememberDetails(show);
   }
   $effect(() => {
@@ -87,7 +88,6 @@
       });
   });
 
-  // -- create-vault dialog -------------------------------------------------------
   let createOpen = $state(false);
   let cName = $state('');
   let cPath = $state('');
@@ -422,6 +422,13 @@
     />
   {:else if vault.current}
     <PageBody fill padded={false}>
+    {#if vault.noteOpenError}
+      <div class="note-open-error" role="alert" data-testid="note-open-error">
+        <span>Couldn’t open <bdi>{vault.noteOpenError.path}</bdi>. {vault.noteOpenError.message}</span>
+        <button class="btn small" onclick={() => { const failed = vault.noteOpenError; if (failed) void vault.open(failed.path, failed.opts); }}>Retry</button>
+        <button class="btn small ghost" onclick={() => (vault.noteOpenError = null)}>Dismiss</button>
+      </div>
+    {/if}
     <div class="panes">
       {#if phoneInSidebar || (!viewport.isPhone && leftOpen)}
       <aside class="left" style="width:{leftW}px">
@@ -478,13 +485,6 @@
 
       {#if !phoneInSidebar}
       <main class="center">
-        {#if vault.noteOpenError}
-          <div class="note-open-error" role="alert" data-testid="note-open-error">
-            <span>Couldn’t open <bdi>{vault.noteOpenError.path}</bdi>. {vault.noteOpenError.message}</span>
-            <button class="btn small" onclick={() => { const failed = vault.noteOpenError; if (failed) void vault.open(failed.path, failed.opts); }}>Retry</button>
-            <button class="btn small ghost" onclick={() => (vault.noteOpenError = null)}>Dismiss</button>
-          </div>
-        {/if}
         {#if vault.tabs.length > 0}
           <!-- Each tab is a presentational wrapper around TWO real buttons (the
                tab + its close), so the close control isn't nested inside an
@@ -627,7 +627,7 @@
 <Switcher />
 
 <style>
-  .center > .note-open-error {
+  .note-open-error {
     flex: 0 0 auto;
     display: flex;
     align-items: center;
