@@ -15,7 +15,8 @@
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
   import { lastLine, patchToDiff } from '../../agents/conversation/format'; // ui-guards: allow — shared chat helpers
   import RuntimeApprovalRow from './RuntimeApprovalRow.svelte';
-  import { openedTarget, toolError, workLabel, type PendingApproval } from './timeline';
+  import RuntimeRunNotice from './RuntimeRunNotice.svelte';
+  import { errorText, openedTarget, runNoticeOf, toolError, workLabel, type PendingApproval } from './timeline';
   import { ws } from '../../../lib/stores/workspace.svelte';
   import { threads } from '../threadsStore.svelte';
 
@@ -28,8 +29,11 @@
     /** What became of its approval ("Withdrawn by Claude", "Declined"). */
     note?: string | null;
     onrespond?: (requestId: string, decision: ApprovalDecision) => Promise<void>;
+    /** The personal agent whose chat this is: a run-result notice opens its report. */
+    agentId?: string | null;
   }
-  let { item, output = '', pending, note = null, onrespond }: Props = $props();
+  let { item, output = '', pending, note = null, onrespond, agentId = null }: Props = $props();
+  const runNotice = $derived(item.type === 'system_notice' ? runNoticeOf(item.message) : null);
 
   let open = $state(false);
   let outEl = $state<HTMLPreElement | null>(null);
@@ -97,6 +101,9 @@
   const json = (v: unknown): string => (typeof v === 'string' ? v : JSON.stringify(v, null, 2));
 </script>
 
+{#if runNotice}
+  <RuntimeRunNotice notice={runNotice} {agentId} />
+{:else}
 <div class="rw" class:failed class:stopped={stopped && !note} data-item-type={item.type} data-testid="runtime-item-{item.id}">
   {#if hasDetail}
     <button type="button" class="rw-line" aria-expanded={open} onclick={() => (open = !open)}>
@@ -126,7 +133,7 @@
     </button>
   {/if}
   {#if item.type === 'error'}
-    <p class="rw-error" dir="auto">{item.failure.message}</p>
+    <p class="rw-error" dir="auto">{errorText(item.failure.message)}</p>
   {/if}
   {#if note}
     <p class="rw-note" dir="auto" data-testid="runtime-approval-note">{note}</p>
@@ -135,7 +142,9 @@
     <RuntimeApprovalRow approval={pending} {onrespond} inline />
   {/if}
   {#if error && !open}
-    <p class="rw-error ellipsis mono" dir="auto">{error}</p>
+    <!-- A tool that didn't work, in one calm plain-language line (the full
+         text is a click away); the turn usually recovers on its own. -->
+    <p class="rw-tail ellipsis" dir="auto" title={error}>{error}</p>
   {/if}
   {#if tail && !open}
     <p class="rw-tail ellipsis mono" dir="auto">{tail}</p>
@@ -176,6 +185,7 @@
     </div>
   {/if}
 </div>
+{/if}
 
 <style>
   .rw {

@@ -14,7 +14,7 @@ const errorText = (e: unknown) => String(e);
 function personal(api: Record<string, unknown>) {
   return loadSource(new URL('../src/lib/stores/personalAgents.svelte.ts', import.meta.url), {
     '../api/personalAgents': { personalAgentsApi: api },
-    '../loadError': { loadErrorText: errorText }, '../lazyModule': { announceModule() {} },
+    '../loadError': { loadErrorText: errorText }, '../lazyModule': { announceModule() {} }, './agentRunsWorking.svelte': { agentRunsWorking: { set() {} } },
   }).personalAgents;
 }
 for (const [method, endpoint, map] of [

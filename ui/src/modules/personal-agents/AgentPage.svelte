@@ -1,8 +1,7 @@
 <script lang="ts">
-  import { announceShown } from '../../lib/announce.svelte';
-  // One personal agent: Overview / Activity / Autonomy / Schedules / Runs /
-  // Chat / Memory / Context tabs.
-  import { latestOnly } from '../../lib/latest';
+  // One personal agent's settings: About · Activity · Memory. Its chat and
+  // routines live on the home (`#/personal-agents/<id>`); older section slugs
+  // (overview, runs, routines, …) land on the section holding them.
   import RelTime from '../../lib/components/RelTime.svelte';
   import { tabKeys } from '../../lib/tabKeys';
   import { tick, untrack } from 'svelte';
@@ -10,13 +9,11 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { confirmRunAndDeliver } from '../../lib/confirmOutward';
   import { personalAgentsApi } from '../../lib/api/personalAgents';
-  import { authedText } from '../../lib/api/client';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import Modal from '../../lib/components/Modal.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -29,13 +26,21 @@
   import AgentEditSheet from './AgentEditSheet.svelte';
   import AgentAutonomy from './AgentAutonomy.svelte';
   import AgentActivity from './AgentActivity.svelte';
-  import AgentChat from './AgentChat.svelte';
   import { openAgentSession } from '../../lib/openAgentSession';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
-  import { browserTz, buildCadence, cadenceLabel, defaultCadence, loadCadence, WEEKDAYS, type CadenceForm } from './cadence';
-  import type { PersonalAgentAutonomy, PersonalAgentPermission, PersonalAgentRun, PersonalAgentSchedule } from '../../lib/api/types';
-  import { paAgentPort } from '../../lib/uiCommands/personalAgentsPort';
+  import { viewport } from '../../lib/stores/viewport.svelte';
+  import { formatModelLabel, modelsForProvider } from '../../lib/providerModels';
+  import { harnessLabel } from '../../lib/providers';
+  import { routineWhen } from './cadence';
+  import type { PersonalAgentAutonomy, PersonalAgentRun } from '../../lib/api/types';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { currentModels, firstLine } from './agentHome';
+  import { leadLine } from '../../lib/plainText';
+  import RunReport from '../../lib/components/RunReport.svelte';
+  import { paAgentPort, paTab, type PaTab } from '../../lib/uiCommands/personalAgentsPort';
+  import AgentPersonality from './AgentPersonality.svelte';
+  import { confirmDeleteAgent } from './confirmDelete';
   import { routineLabel, runBadge } from '../../lib/personalAgentBadges';
 
   const AgentMemoryInspectorLazy = lazyComponent(() => import('./AgentMemoryInspector.svelte'));
@@ -45,23 +50,16 @@
     agentId: string;
   }
   let { agentId }: Props = $props();
-  /** Prefix for the schedule form's label↔control ids. */
-  const uid = $props.id();
 
-  type Tab = 'overview' | 'activity' | 'autonomy' | 'schedules' | 'runs' | 'chat' | 'memory' | 'context';
+  type Tab = PaTab;
   const TABS: { id: Tab; label: string }[] = [
-    { id: 'overview', label: 'Overview' },
-    { id: 'activity', label: 'Activity' },
-    { id: 'autonomy', label: 'Autonomy' },
-    { id: 'schedules', label: 'Schedules' },
-    { id: 'runs', label: 'Runs' },
-    { id: 'chat', label: 'Chat' },
+    { id: 'about', label: 'About' },
+    { id: 'activity', label: 'Runs' },
     { id: 'memory', label: 'Memory' },
-    { id: 'context', label: 'Context' },
   ];
   // The tab is part of the URL (`#/personal-agents/<id>/<tab>`), so Run now can
-  // land on Runs and a reload / back keeps the section.
-  const tab = $derived<Tab>(TABS.some((t) => t.id === router.parts[2]) ? (router.parts[2] as Tab) : 'overview');
+  // land on History and a reload / back keeps the section.
+  const tab = $derived<Tab>(paTab(router.parts[2]));
   let tabTransition = 0;
   async function goTab(t: Tab, event?: MouseEvent): Promise<void> {
     const list = (event?.currentTarget as HTMLElement | undefined)?.closest('[role="tablist"]');
@@ -75,9 +73,12 @@
     // hashchange may follow this microtask; focus the accepted target only.
     list.querySelector<HTMLButtonElement>(`[role="tab"][data-tab="${accepted ? t : tab}"]`)?.focus();
   }
-  let editing = $state(false);
+  /** The edit sheet's open section (null = closed). */
+  let editing = $state<null | 'about' | 'setup'>(null);
+  let soulOpen = $state(false);
+  let advancedOpen = $state(false);
+  let activityOpen = $state(false);
   let busy = $state(false);
-  let error = $state('');
 
   const agent = $derived(personalAgents.agent(agentId));
   const schedules = $derived(personalAgents.schedulesByAgent[agentId] ?? []);
@@ -100,7 +101,7 @@
   const retryAgents = (wsId: string | null) => (wsId ? personalAgents.loadAgents(wsId) : Promise.resolve());
 
   $effect(() => {
-    if (tab === 'runs') void personalAgents.loadRuns(agentId);
+    if (tab === 'activity') void personalAgents.loadRuns(agentId);
   });
 
   // Autonomy summary for the header badges (primary / proactive). Best-effort:
@@ -122,7 +123,7 @@
     if (!agent) return;
     const name = agent.name;
     const typed = await confirmer.promptText(
-      `Reset “${name}”? It forgets everything it learned (memory), its chat is closed, and its schedules and run history are deleted. Its persona, rules, goals and model stay. Type the agent’s name to confirm.`,
+      `Reset “${name}”? It forgets everything it learned (memory), its chat is closed, and its routines and run history are deleted. Its persona, rules, goals and model stay. Type the agent’s name to confirm.`,
       { title: 'Reset agent', confirmLabel: 'Reset agent', placeholder: name, danger: true },
     );
     if (typed === null) return;
@@ -146,7 +147,7 @@
     const what = scheduleName(r);
     const when = new Date(r.started_at).toLocaleString();
     const ok = await confirmer.ask(
-      `Stop the ${what} run that started ${when}? Its agent session is stopped and nothing is delivered. The agent’s schedules keep running.`,
+      `Stop the ${what} run that started ${when}? Its agent session is stopped and nothing is delivered. Its routines keep running.`,
       { title: `Stop ${what}?`, danger: true, confirmLabel: 'Stop run' },
     );
     if (!ok) return;
@@ -159,88 +160,13 @@
     void personalAgents.loadRuns(agentId);
   }
 
-  // --- Schedules form -------------------------------------------------------
-  let schedFormOpen = $state(false);
-  let schedEditId = $state<string | null>(null);
-  let sf = $state<CadenceForm>(defaultCadence());
-  let sfTimezone = $state(browserTz());
-  let sfDirective = $state('');
-  let sfEnabled = $state(true);
-  let sfPermission = $state<PersonalAgentPermission>('directed');
-
-  function openSchedCreate(): void {
-    schedEditId = null;
-    sf = defaultCadence();
-    sfTimezone = browserTz();
-    sfDirective = '';
-    sfEnabled = true;
-    sfPermission = 'directed';
-    schedFormOpen = true;
-    error = '';
-  }
-
-  function openSchedEdit(s: PersonalAgentSchedule): void {
-    schedEditId = s.id;
-    sf = loadCadence(s.schedule, s.timezone || browserTz());
-    sfTimezone = s.timezone || browserTz();
-    sfDirective = s.directive;
-    sfEnabled = s.enabled;
-    sfPermission = s.permission ?? 'directed';
-    schedFormOpen = true;
-    error = '';
-  }
-
-  async function saveSchedule(): Promise<void> {
-    if (sf.cadence === 'once' && !sf.runAt) {
-      error = 'Pick the date and time it runs.';
-      return;
-    }
-    busy = true;
-    error = '';
-    const body = {
-      schedule: buildCadence(sf),
-      timezone: sfTimezone.trim() || 'UTC',
-      directive: sfDirective,
-      enabled: sfEnabled,
-      permission: sfPermission,
-    };
-    try {
-      if (schedEditId) await personalAgents.updateSchedule(agentId, schedEditId, body);
-      else await personalAgents.createSchedule(agentId, body);
-      schedFormOpen = false;
-    } catch (e) {
-      // Stays inline next to the form: it's usually a field problem (cron, tz).
-      error = `Couldn’t save the schedule. ${loadErrorText(e)}`;
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function toggleSchedule(s: PersonalAgentSchedule): Promise<void> {
-    try {
-      await personalAgents.updateSchedule(agentId, s.id, { enabled: !s.enabled });
-    } catch (e) {
-      toasts.error(s.enabled ? 'Couldn’t pause the schedule' : 'Couldn’t enable the schedule', loadErrorText(e));
-    }
-  }
-
-  async function deleteSchedule(s: PersonalAgentSchedule): Promise<void> {
-    const what = cadenceLabel(s.schedule, s.timezone, { cronWords: true });
-    if (!(await confirmer.ask(`Delete the schedule “${what}”? Past runs stay in Runs.`, { title: 'Delete schedule', danger: true, confirmLabel: 'Delete' }))) return;
-    try {
-      await personalAgents.deleteSchedule(agentId, s.id);
-    } catch (e) {
-      toasts.error('Couldn’t delete the schedule', loadErrorText(e));
-    }
-  }
-
   async function runNow(scheduleId?: string): Promise<void> {
     // Outward-facing: the run delivers its report the moment it finishes.
     if (agent && !(await confirmRunAndDeliver(agent.name, agent.delivery))) return;
     busy = true;
     try {
       await personalAgents.runNow(agentId, scheduleId);
-      goTab('runs');
+      goTab('activity');
     } catch (e) {
       toasts.error(`Couldn’t run ${agent?.name ?? 'the agent'}`, loadErrorText(e));
     } finally {
@@ -264,7 +190,7 @@
   async function removeAgent(): Promise<void> {
     if (!agent) return;
     const name = agent.name;
-    if (!(await confirmer.ask(`Delete personal agent “${name}”? Its schedules, memory and run history go with it.`, { title: 'Delete personal agent', danger: true, confirmLabel: 'Delete' }))) return;
+    if (!(await confirmDeleteAgent(agent, !!autonomy?.primary))) return;
     try {
       await personalAgents.remove(agentId);
       toasts.success(`Deleted ${name}`);
@@ -285,35 +211,22 @@
 
   // --- Runs / report viewer -------------------------------------------------
   let reportRun = $state<PersonalAgentRun | null>(null);
-  let reportText = $state('');
-  let reportError = $state('');
-  let reportLoading = $state(false);
-
-  const reportSeq = latestOnly();
-  async function viewReport(run: PersonalAgentRun): Promise<void> {
+  function viewReport(run: PersonalAgentRun): void {
     reportRun = run;
-    reportLoading = true;
-    reportText = '';
-    reportError = '';
-    // Only the report last asked for may land (A's slow text used to fill
-    // the modal opened for B).
-    const t = reportSeq.begin();
-    try {
-      const text = await authedText(personalAgentsApi.reportPath(run.id));
-      if (t.current) reportText = text;
-    } catch (e) {
-      if (t.current) reportError = loadErrorText(e);
-    } finally {
-      if (t.current) reportLoading = false;
-    }
   }
 
   function duration(r: PersonalAgentRun): string {
     if (!r.finished_at) return '…';
     const ms = Date.parse(r.finished_at) - Date.parse(r.started_at);
     if (!Number.isFinite(ms) || ms < 0) return '';
-    if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
-    return `${Math.round(ms / 60_000)}m`;
+    if (ms < 60_000) return `took ${Math.round(ms / 1000)}s`;
+    return `took ${Math.round(ms / 60_000)}m`;
+  }
+
+  /** The run's routine name ('' for a run without one). */
+  function routineOf(r: PersonalAgentRun): string {
+    const s = r.schedule_id ? schedules.find((x) => x.id === r.schedule_id) : undefined;
+    return s ? routineLabel(s.directive) : '';
   }
 
   function scheduleName(r: PersonalAgentRun): string {
@@ -323,7 +236,7 @@
     }
     const s = r.schedule_id ? schedules.find((x) => x.id === r.schedule_id) : undefined;
     if (r.schedule_id && !s) return 'Scheduled · deleted routine';
-    return runBadge(r, s ? `${routineLabel(s.directive)} (${cadenceLabel(s.schedule, s.timezone, { cronWords: true })})` : null).label;
+    return runBadge(r, s ? `${routineLabel(s.directive)} (${routineWhen(s)})` : null).label;
   }
 
   /** Where each run's report goes, in words (outward destinations named). */
@@ -335,9 +248,50 @@
       case 'telegram': return str('chat_id') ? `Telegram · ${str('chat_id')}` : 'Telegram · the integration’s chat';
       case 'email': return `Email · ${str('to') || 'no address set'}`;
       case 'webhook': return `Webhook · ${str('url') || 'no URL set'}`;
-      default: return 'None — reports stay on this page';
+      default: return 'Its chat only';
     }
   }
+  /** One model label: the pinned model, else the provider's default. */
+  const modelChoices = $derived(agent ? currentModels(modelsForProvider(agent.provider, auth.meta), agent.model) : []);
+  /** "What it does", edited in place: saved on blur (no Edit → dialog). */
+  let soulDraft = $state('');
+  let soulSave = $state<'' | 'saving' | 'saved'>('');
+  let soulTimer: ReturnType<typeof setTimeout> | undefined;
+  // Follows the stored text — but never over what is being typed.
+  $effect(() => {
+    const stored = agent?.soul_md ?? '';
+    untrack(() => { if (document.activeElement?.id !== `pa-soul-${agentId}`) soulDraft = stored; });
+  });
+  async function saveSoul(): Promise<void> {
+    if (!agent || soulDraft === agent.soul_md) return;
+    soulSave = 'saving';
+    clearTimeout(soulTimer);
+    try {
+      await personalAgents.update(agent.id, { soul_md: soulDraft });
+      soulSave = 'saved';
+      soulTimer = setTimeout(() => (soulSave = ''), 2500);
+    } catch (e) {
+      soulSave = '';
+      toasts.error('Couldn’t save what it does', loadErrorText(e));
+    }
+  }
+  /** The Setup card's calm save cue (the rules section's pattern). */
+  let setupSave = $state<'' | 'saving' | 'saved'>('');
+  let setupTimer: ReturnType<typeof setTimeout> | undefined;
+  async function setModel(model: string): Promise<void> {
+    if (!agent || model === '__other' || model === agent.model) return;
+    setupSave = 'saving';
+    clearTimeout(setupTimer);
+    try {
+      await personalAgents.update(agent.id, { model });
+      setupSave = 'saved';
+      setupTimer = setTimeout(() => (setupSave = ''), 2000);
+    } catch (e) {
+      setupSave = '';
+      toasts.error('Couldn’t change the model', loadErrorText(e));
+    }
+  }
+  const modelLabel = $derived(agent ? (agent.model ? formatModelLabel(agent.provider, agent.model, auth.meta) : `${harnessLabel(agent.provider).replace(/ Code$/, '')} · default model`) : '');
   const runsLoaded = $derived(personalAgents.runsByAgent[agentId] !== undefined);
   /** A failed runs load is shown inline with Retry — never as "No runs yet". */
   const runsErr = $derived(personalAgents.runsError[agentId] ?? null);
@@ -355,44 +309,53 @@
   const ownerNote = $derived(canEditDocuments && !canEditOwnerFields
     ? 'Runs as its owner; only the owner or a workspace admin can change this.'
     : '');
+
+  function moreMenu(e: MouseEvent): void {
+    if (!agent) return;
+    ctxMenu.showAt(e.currentTarget as HTMLElement, [
+      ...(agent.enabled ? [{ label: 'Pause', icon: 'pause' as const, action: () => void toggleAgent() }] : []),
+      { label: 'Reset agent…', icon: 'undo', action: () => void resetAgent() },
+      { separator: true },
+      { label: 'Delete agent…', icon: 'trash', danger: true, action: () => void removeAgent() },
+    ]);
+  }
+
+  async function makeMain(): Promise<void> {
+    try {
+      autonomy = await personalAgentsApi.saveAutonomy(agentId, { primary: true });
+      await Promise.all(personalAgents.agents.map((a) => personalAgents.loadAutonomy(a.id)));
+      toasts.success(`${agent?.name ?? 'It'} is your main agent`, 'It routes your work to the other agents.');
+    } catch (e) {
+      toasts.error('Couldn’t make it the main agent', loadErrorText(e));
+    }
+  }
 </script>
 
 <div class="agent-page">
-<PageHeader title={agent ? agent.name : 'Personal agent'} tabsPlacement="below">
-  {#snippet leading()}
-    <button class="icon-btn" title="Back to the conversation" aria-label="Back to the conversation" onclick={() => router.go(`personal-agents/${agentId}`)}>
-      <Icon name="chevronLeft" size={16} />
-    </button>
-    {#if agent}<AgentAvatar avatar={agent.avatar} name={agent.name} size={24} />{/if}
-  {/snippet}
+<!-- Settings is a page of the agent inside Personal Agents, not a separate
+     place: the trail leads back to the hub and to the agent's chat. -->
+<PageHeader
+  title={!agent ? 'Personal agent' : viewport.isPhone ? agent.name : (TABS.find((t) => t.id === tab)?.label ?? 'Settings')}
+  crumbs={viewport.isPhone ? [] : [
+    { label: 'Personal Agents', onclick: () => router.go('personal-agents') },
+    ...(agent ? [{ label: agent.name, onclick: () => router.go(`personal-agents/${agentId}`) }] : []),
+  ]}
+  tabsPlacement="below"
+>
   {#snippet badge()}
     {#if agent}
-      <span class="chip prov" title={agent.model ? `${agent.provider} · ${agent.model}` : agent.provider}>
-        <ProviderIcon provider={agent.provider} size={12} />{agent.provider}{agent.model ? ` · ${agent.model}` : ''}
-      </span>
-      {#if !agent.enabled}<span class="chip" title="Schedules don’t fire while paused. Run now and chat still work.">Paused</span>{/if}
-      {#if agent.browser}<span class="chip" title="Runs and chat can use the Otto browser tool">Browser</span>{/if}
-      {#if autonomy?.primary}<span class="chip pa-accent" title="Your main agent — creates agents, delegates to them, and they report back to it"><Icon name="star" size={12} /> Main agent</span>{/if}
-      {#if agent.created_by_agent}<span class="chip" title="Created by your main agent">Created by {personalAgents.agent(agent.created_by_agent)?.name ?? 'your main agent'}</span>{/if}
-      {#if autonomy?.proactive.enabled}<span class="chip" title="Works its standing goals in the background, read-only"><Icon name="eye" size={12} /> Proactive</span>{/if}
+      {#if !agent.enabled}<span class="chip pa-warn" title="Routines don’t run while paused. Run now and chat still work.">Paused</span>{/if}
+      {#if autonomy?.primary && !viewport.isPhone}<span class="chip pa-accent" title="Your main agent — creates agents, delegates to them, and they report back to it"><Icon name="star" size={12} /> Main agent</span>{/if}
     {/if}
   {/snippet}
   {#snippet actions()}
     {#if agent}
-      {#if agent.enabled}
-        <button class="btn small primary" data-icon="play" disabled={busy} aria-label="Run now {agent.name}" onclick={() => runNow()}><Icon name="play" size={12} /> Run now</button>
-        <button class="btn small" data-icon="clock" disabled={busy} aria-label="Pause {agent.name}" onclick={toggleAgent} title="Stop its schedules from firing">Pause</button>
-      {:else}
-        <button class="btn small primary" data-icon="check" disabled={busy} aria-label="Enable {agent.name}" onclick={toggleAgent}><Icon name="check" size={12} /> Enable</button>
-        <button class="btn small" data-icon="play" disabled={busy} aria-label="Run once {agent.name}" onclick={() => runNow()} title="Run it once without enabling its schedules">Run once</button>
+      {#if !agent.enabled}
+        <button class="btn small primary" data-icon="refresh" disabled={busy} aria-label="Resume {agent.name}" onclick={toggleAgent} title="Let its routines run again"><Icon name="refresh" size={12} /> Resume</button>
       {/if}
-      <button class="btn small" data-icon="edit" onclick={() => (editing = true)}><Icon name="edit" size={12} /> Edit</button>
-      <button class="icon-btn" data-overflow="-1" data-icon="undo" data-label="Reset agent…" onclick={resetAgent} aria-label="Reset agent" title="Reset agent — forget memory, chat, schedules and runs">
-        <Icon name="undo" size={14} />
-      </button>
-      <button class="icon-btn" data-overflow="-2" data-icon="trash" data-label="Delete agent…" onclick={removeAgent} aria-label="Delete agent" title="Delete agent">
-        <Icon name="trash" size={14} />
-      </button>
+      <button class="btn small" data-keep aria-label="Back to chat with {agent.name}" title="Back to chat" onclick={() => router.go(`personal-agents/${agentId}`)}><Icon name="chevronLeft" size={12} />{#if !viewport.isPhone} Back to chat{/if}</button>
+      <button class="btn small" data-icon="play" disabled={busy} aria-label="Run now {agent.name}" onclick={() => runNow()}><Icon name="play" size={12} /> Run now</button>
+      <button class="icon-btn" data-keep aria-label="More for {agent.name}" title="Pause, reset or delete" onclick={moreMenu}><Icon name="more" size={14} /></button>
     {/if}
   {/snippet}
   {#snippet tabs()}
@@ -417,8 +380,8 @@
     </div>
   {/snippet}
 </PageHeader>
-<PageBody width="readable" fill={tab === 'chat'}>
-<div class="agent-body" class:chat-fill={tab === 'chat'}>
+<PageBody width="readable">
+<div class="agent-body">
   {#if !agent}
     {#if personalAgents.loadingAgents}
       <Skeleton rows={3} height={64} label="the agent" />
@@ -435,169 +398,83 @@
         onaction={() => router.go('personal-agents')}
       />
     {/if}
-  {:else if tab === 'overview'}
-    <div class="overview">
-      <section class="pa-panel" data-pa-persona>
-        <div class="card-head">
-          <h2>Persona</h2>
-          <button class="btn small ghost" onclick={() => (editing = true)}>Edit</button>
+  {:else if tab === 'about'}
+    <p class="muted about-note">Changes save as you go.</p>
+    <div class="about">
+      <section class="pa-panel who" data-pa-persona>
+        <div class="who-head">
+          <AgentAvatar avatar={agent.avatar} name={agent.name} size={40} />
+          <div class="who-t">
+            <h2 dir="auto">{agent.name}</h2>
+            <span class="muted">{agent.enabled ? 'Active' : 'Paused — its routines don’t run'}{autonomy?.primary ? ' · your main agent' : ''}</span>
+          </div>
+          {#if canEditDocuments}<button class="btn small" onclick={() => (editing = 'about')}><Icon name="edit" size={12} /> Name &amp; avatar</button>{/if}
         </div>
-        {#if agent.soul_md.trim()}
-          <pre class="soul">{agent.soul_md}</pre>
+        <div class="setup-head">
+          <h3><label for="pa-soul-{agent.id}">What it does <span class="muted">(its instructions)</span></label></h3>
+          <span class="muted" aria-live="polite">{soulSave === 'saving' ? 'Saving…' : soulSave === 'saved' ? 'Saved' : ''}</span>
+        </div>
+        {#if canEditOwnerFields}
+          <!-- Edited in place, saved when you leave the field — like every
+               other setting on this page. -->
+          <textarea id="pa-soul-{agent.id}" class="input soul-edit" rows={Math.min(14, Math.max(5, soulDraft.split('\n').length + 1))} dir="auto"
+            placeholder="Who it is and how it works — or just tell {agent.name} in chat."
+            bind:value={soulDraft} onblur={() => void saveSoul()}></textarea>
+        {:else if agent.soul_md.trim()}
+          <pre class="soul" class:clamped={!soulOpen}>{agent.soul_md}</pre>
+          {#if agent.soul_md.split('\n').length > 6}<button class="link" onclick={() => (soulOpen = !soulOpen)}>{soulOpen ? 'Show less' : 'Show all'}</button>{/if}
         {:else}
-          <p class="muted">No persona yet. Edit the agent to say who it is and how it works.</p>
+          <p class="muted">None yet. Just tell {agent.name} in chat who it is and how it works.</p>
         {/if}
       </section>
+      <AgentPersonality {agentId} name={agent.name} {autonomy} editable={canEditDocuments} ownerEditable={canEditOwnerFields} onsaved={(a) => (autonomy = a)} />
       <section class="pa-panel">
-        <h2>Configuration</h2>
+        <div class="setup-head">
+          <h2>Setup</h2>
+          <span class="muted" aria-live="polite">{setupSave === 'saving' ? 'Saving…' : setupSave === 'saved' ? 'Saved' : ''}</span>
+          {#if canEditDocuments}<button class="btn small" onclick={() => (editing = 'setup')}><Icon name="edit" size={12} /> More setup…</button>{/if}
+        </div>
         <dl class="props">
-          <dt>Provider</dt><dd class="prov-dd"><ProviderIcon provider={agent.provider} size={12} /><span class="mono">{agent.provider}</span></dd>
-          <dt>Model</dt><dd class:mono={!!agent.model}>{agent.model || 'Provider default'}</dd>
-          <dt>Delivery</dt><dd class="clip" title={deliveryLabel()}>{deliveryLabel()}</dd>
-          <dt>Browser use</dt><dd>{agent.browser ? 'On' : 'Off'}</dd>
-          <dt>Status</dt><dd>{agent.enabled ? 'Enabled' : 'Paused — schedules don’t fire'}</dd>
-          <dt>Working folder</dt>
+          <dt>Main agent</dt>
+          <dd>
+            {#if autonomy?.primary}
+              <span class="pa-accent-text"><Icon name="star" size={12} /> Yes — it routes your work to the others</span>
+            {:else}
+              No{#if canEditDocuments}<button class="link" onclick={() => void makeMain()}>Make it the main agent</button>{/if}
+            {/if}
+          </dd>
+          <dt>Model</dt>
+          <dd class="prov-dd">
+            <ProviderIcon provider={agent.provider} size={12} />
+            {#if canEditOwnerFields && modelChoices.length > 0}
+              <select class="input model-sel" aria-label="Model for {agent.name}" value={modelChoices.some((m) => m.id === agent.model) || !agent.model ? agent.model : '__other'} onchange={(e) => void setModel((e.currentTarget as HTMLSelectElement).value)}>
+                <option value="">{harnessLabel(agent.provider).replace(/ Code$/, '')} · default model</option>
+                {#each modelChoices as m (m.id)}<option value={m.id}>{m.label}</option>{/each}
+                {#if agent.model && !modelChoices.some((m) => m.id === agent.model)}<option value="__other">{modelLabel}</option>{/if}
+              </select>
+            {:else}
+              <span>{modelLabel}</span>
+            {/if}
+          </dd>
+          <dt>Results go to</dt><dd class="clip" title={deliveryLabel()}>{deliveryLabel()}</dd>
+          <dt>Browser</dt><dd>{agent.browser ? 'Can use the in-app browser' : 'Off'}</dd>
+          <dt>Folder</dt>
           {#if agent.cwd}
             <dd class="mono path" dir="ltr" title={agent.cwd}>{agent.cwd}</dd>
           {:else}
-            <!-- The default is a private per-agent folder; its ULID path is in
-                 the tooltip, not the primary text. -->
-            <dd title={`…/personal/${agent.id}/`}>Its own private folder (default)</dd>
+            <dd>Its own private folder</dd>
           {/if}
-          <dt>Schedules</dt>
-          <dd>
-            {schedules.length === 0 ? 'None' : schedules.length}
-            {#if schedules.length > 0}
-              · {#if agent.enabled}next run <RelTime iso={personalAgents.nextRunAt(agent.id)} fallback="not scheduled" />{:else}paused{/if}
-            {/if}
-            <button class="link" onclick={() => goTab('schedules')}>Manage</button>
-          </dd>
+          {#if agent.created_by_agent}<dt>Created by</dt><dd>{personalAgents.agent(agent.created_by_agent)?.name ?? 'your main agent'}</dd>{/if}
         </dl>
       </section>
     </div>
+    <details class="pa-more" ontoggle={(e) => (advancedOpen = (e.currentTarget as HTMLDetailsElement).open)}>
+      <summary>Rules, background work and Slack</summary>
+      {#if advancedOpen}
+        {#key `${agentId}:${autonomyReload}`}<AgentAutonomy {agentId} editable={canEditDocuments} ownerEditable={canEditOwnerFields} {ownerNote} onsaved={(a) => (autonomy = a)} />{/key}
+      {/if}
+    </details>
   {:else if tab === 'activity'}
-    {#key agentId}<AgentActivity {agentId} />{/key}
-  {:else if tab === 'autonomy'}
-    {#key `${agentId}:${autonomyReload}`}<AgentAutonomy {agentId} editable={canEditDocuments} ownerEditable={canEditOwnerFields} {ownerNote} onsaved={(a) => (autonomy = a)} />{/key}
-  {:else if tab === 'schedules'}
-    {#if schedules.length > 0 || schedFormOpen}
-      <div class="section-head">
-        <p class="hint">Each schedule has its own cadence, directive and run cursor.{#if !agent.enabled}{' They don’t fire while the agent is paused.'}{/if}</p>
-        {#if !schedFormOpen}
-          <button class="btn small" onclick={openSchedCreate}><Icon name="plus" size={12} /> Add schedule</button>
-        {/if}
-      </div>
-    {/if}
-    {#if schedFormOpen}
-      <div class="form pa-panel">
-        <h2>{schedEditId ? 'Edit schedule' : 'New schedule'}</h2>
-        {#if error}<div class="err" use:announceShown={{ text: error, assertive: true }}>{error}</div>{/if}
-        <div class="field-row">
-          <div class="field">
-            <label for="{uid}-cadence">Cadence</label>
-            <select id="{uid}-cadence" class="input" bind:value={sf.cadence}>
-              <option value="interval">Interval</option>
-              <option value="daily">Daily</option>
-              <option value="weekly">Weekly</option>
-              <option value="cron">Cron</option>
-              <option value="once">Once</option>
-            </select>
-          </div>
-          {#if sf.cadence === 'interval'}
-            <div class="field">
-              <label for="{uid}-every">Every (minutes, min 5)</label>
-              <input id="{uid}-every" class="input" type="number" min="5" bind:value={sf.everyMin} />
-            </div>
-          {:else if sf.cadence === 'once'}
-            <div class="field">
-              <label for="{uid}-run-at">Runs once at (in the timezone)</label>
-              <input id="{uid}-run-at" class="input" type="datetime-local" bind:value={sf.runAt} />
-            </div>
-          {:else if sf.cadence === 'cron'}
-            <div class="field">
-              <label for="{uid}-cron">Cron expression (5 fields)</label>
-              <input id="{uid}-cron" class="input" bind:value={sf.cronExpr} placeholder="0 9 * * 1" dir="ltr" />
-            </div>
-          {:else}
-            <div class="field">
-              <label for="{uid}-at">At (HH:MM)</label>
-              <input id="{uid}-at" class="input" bind:value={sf.at} placeholder="09:00" dir="ltr" />
-            </div>
-            {#if sf.cadence === 'weekly'}
-              <div class="field">
-                <label for="{uid}-weekday">Weekday</label>
-                <select id="{uid}-weekday" class="input" bind:value={sf.weekday}>
-                  {#each WEEKDAYS as d, i (d)}<option value={i}>{d}</option>{/each}
-                </select>
-              </div>
-            {/if}
-          {/if}
-          {#if sf.cadence !== 'interval'}
-            <div class="field">
-              <label for="{uid}-tz">Timezone</label>
-              <input id="{uid}-tz" class="input" bind:value={sfTimezone} placeholder="e.g. Europe/London" dir="ltr" />
-            </div>
-          {/if}
-        </div>
-        <div class="field">
-          <label for="{uid}-directive">Directive (the run’s task prompt)</label>
-          <textarea dir="auto" id="{uid}-directive" class="input" bind:value={sfDirective} rows="4" placeholder="Produce the daily recap…"></textarea>
-        </div>
-        <div class="field">
-          <label for="{uid}-permission">Permissions for its runs</label>
-          <select id="{uid}-permission" class="input" bind:value={sfPermission}>
-            <option value="directed">Directed — your normal approvals and auto-approve rules</option>
-            <option value="read_only">Read-only — can read and report, can’t change anything</option>
-          </select>
-        </div>
-        <label class="chk"><input type="checkbox" bind:checked={sfEnabled} /> Enabled</label>
-        <div class="actions">
-          <button class="btn" disabled={busy} onclick={() => { schedFormOpen = false; error = ''; }}>Cancel</button>
-          <button class="btn primary" disabled={busy} onclick={saveSchedule}>{busy ? 'Saving…' : schedEditId ? 'Save schedule' : 'Add schedule'}</button>
-        </div>
-      </div>
-    {/if}
-    <LoadState what="this agent’s schedules" variant="compact"
-      loading={personalAgents.schedulesLoading[agentId] ?? false}
-      error={personalAgents.schedulesError[agentId] ?? null}
-      empty={schedules.length === 0}
-      onretry={() => void personalAgents.loadSchedules(agentId)} />
-    {#if schedules.length === 0 && !schedFormOpen && !personalAgents.schedulesLoading[agentId] && !personalAgents.schedulesError[agentId]}
-      <EmptyState
-        icon="calendar"
-        title="No schedules"
-        body="This agent only runs when you press Run now, or when you chat with it. Add a schedule to run it on a cadence."
-        actionLabel="Add schedule"
-        actionIcon="plus"
-        onaction={openSchedCreate}
-      />
-    {:else}
-      <ul class="rows">
-        {#each schedules as s (s.id)}
-          <li class="rowline" data-schedule-id={s.id}>
-            <div class="rowmain">
-              <div class="rowtitle">
-                <strong>{cadenceLabel(s.schedule, s.timezone, { cronWords: true })}</strong>
-                {#if !s.enabled}<span class="chip">Paused</span>{/if}
-                {#if s.permission === 'read_only'}<span class="chip" title="Its runs can read and report, but can’t send, post, write or change anything"><Icon name="lock" size={12} /> Read-only</span>{/if}
-              </div>
-              <!-- a paused schedule (or paused agent) never fires: no "next" promise -->
-              <span class="meta">{#if s.enabled && agent.enabled}Next <RelTime iso={s.next_run_at} /> · {/if}Last <RelTime iso={s.last_run_at} fallback="never" /></span>
-              <p class="directive">{s.directive || 'No directive — runs on the persona alone.'}</p>
-            </div>
-            <div class="rowactions">
-              <button class="btn small" disabled={busy} aria-label="Run now {cadenceLabel(s.schedule, s.timezone, { cronWords: true })}" onclick={() => runNow(s.id)}>Run now</button>
-              <button class="btn small" aria-label="{s.enabled ? 'Pause' : 'Enable'} {cadenceLabel(s.schedule, s.timezone, { cronWords: true })}" onclick={() => toggleSchedule(s)}>{s.enabled ? 'Pause' : 'Enable'}</button>
-              <button class="btn small" onclick={() => openSchedEdit(s)}>Edit</button>
-              <button class="icon-btn" onclick={() => deleteSchedule(s)} aria-label="Delete schedule {cadenceLabel(s.schedule, s.timezone, { cronWords: true })}" title="Delete schedule">
-                <Icon name="trash" size={14} />
-              </button>
-            </div>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-  {:else if tab === 'runs'}
     <LoadState
       what="this agent’s runs"
       loading={!runsLoaded}
@@ -611,33 +488,33 @@
           icon="play"
           title="No runs yet"
           body={agent.enabled
-            ? 'Runs appear here with their report and delivery status — from a schedule firing, or from Run once above.'
-            : 'Runs appear here with their report and delivery status. Enable the agent to let its schedules fire, or use Run once above.'}
+            ? 'Each routine run and Run now shows here with its result.'
+            : 'Each routine run and Run now shows here with its result. Resume the agent to let its routines run.'}
         />
       {/snippet}
       <ul class="rows">
         {#each runs as r (r.id)}
+          {@const sum = (r.summary ? leadLine(r.summary) : firstLine(r.error ?? '')) || 'No summary'}
           <li class="run" data-run-id={r.id}>
             <StatusBadge status={runStatus(r.status)} variant="text" />
             <span class="run-when"><RelTime iso={r.started_at} /></span>
-            <span class="chip clip-chip" title="What started this run">{scheduleName(r)}</span>
+            <span class="chip clip-chip" title={scheduleName(r)}>{scheduleName(r)}</span>
             {#if r.read_only}<span class="chip" title="This run could read and report, but not change anything"><Icon name="lock" size={12} /> Read-only</span>{/if}
             {#if duration(r)}<span class="meta">{duration(r)}</span>{/if}
-            <span class="run-sum" title={r.summary || r.error || undefined}>{r.summary || r.error || 'No summary'}</span>
+            <span class="run-sum" dir="auto" title={sum}>{sum}</span>
             {#if (r.attempts ?? 1) > 1}<span class="chip pa-warn">{r.attempts} attempts</span>{/if}
             {#if r.delivered}<span class="chip ok">Delivered</span>{/if}
-            {#if r.skipped_delivery}<span class="chip" title="The report didn’t change since the last run, so nothing was sent">No change</span>{/if}
+            {#if r.skipped_delivery}<span class="chip" title="The result didn’t change since the last run, so nothing was sent">No change</span>{/if}
             {#if r.delivery_error}<span class="chip bad" title={r.delivery_error}>Delivery failed</span>{/if}
             {#if r.report_rel}
-              <button class="btn small" onclick={() => viewReport(r)}>View report</button>
+              <button class="btn small" onclick={() => viewReport(r)}>Result</button>
             {/if}
             {#if r.session_id}
-              <button class="btn small" title="Open the thread (or session) this run drove" onclick={() => void openAgentSession(r.session_id ?? '')}>Open thread</button>
+              <button class="btn small" title="Open the thread this run worked in" onclick={() => void openAgentSession(r.session_id ?? '')}>Thread</button>
             {/if}
             {#if r.status === 'running'}
               <button class="btn small danger" title="Stop this run (its agent session is stopped)" aria-label="Stop {scheduleName(r)}" onclick={() => void stopRun(r)}>Stop…</button>
             {/if}
-            <!-- Readable without hovering: the error used to hide behind a summary. -->
             {#if r.status === 'error' && r.error && r.summary}
               <p class="run-err" role="note">{r.error}</p>
             {/if}
@@ -648,44 +525,37 @@
         {/each}
       </ul>
     </LoadState>
-  {:else if tab === 'chat'}
-    <AgentChat {agentId} agentName={agent.name} workspaceId={agent.workspace_id} reloadKey={memoryReload} />
-  {:else if (tab === 'memory' || tab === 'context') && agent}
-    {#if tab === 'memory'}
-      {#if AgentMemoryInspectorLazy.error}
-        <LoadState what="this agent’s memory" error={AgentMemoryInspectorLazy.error} onretry={() => AgentMemoryInspectorLazy.retry()} />
-      {:else if AgentMemoryInspectorLazy.component}
-        <AgentMemoryInspectorLazy.component {agentId} editable={canEditOwnerFields} reloadKey={memoryReload} />
-      {:else}
-        <LoadState what="this agent’s memory" loading />
-      {/if}
+    <details class="pa-more" ontoggle={(e) => (activityOpen = (e.currentTarget as HTMLDetailsElement).open)}>
+      <summary>Tool calls and approvals — across all of its runs</summary>
+      {#if activityOpen}{#key agentId}<AgentActivity {agentId} />{/key}{/if}
+    </details>
+  {:else if tab === 'memory'}
+    <div class="pa-stack">
+    {#if AgentMemoryInspectorLazy.error}
+      <LoadState what="this agent’s memory" error={AgentMemoryInspectorLazy.error} onretry={() => AgentMemoryInspectorLazy.retry()} />
+    {:else if AgentMemoryInspectorLazy.component}
+      <AgentMemoryInspectorLazy.component {agentId} editable={canEditOwnerFields} reloadKey={memoryReload} />
+    {:else}
+      <LoadState what="this agent’s memory" loading />
     {/if}
-    {#key `${agentId}:${tab}:${memoryReload}`}
+    {#key `${agentId}:context:${memoryReload}`}
       {#if AgentDocumentsLazy.error}
-        <LoadState what={tab === 'memory' ? 'this agent’s document' : 'this agent’s context'} error={AgentDocumentsLazy.error} onretry={() => AgentDocumentsLazy.retry()} />
+        <LoadState what="this agent’s background notes" error={AgentDocumentsLazy.error} onretry={() => AgentDocumentsLazy.retry()} />
       {:else if AgentDocumentsLazy.component}
-        <AgentDocumentsLazy.component {agentId} workspaceId={agent.workspace_id} kind={tab === 'context' ? 'context' : 'memory'} editable={canEditOwnerFields} sharedWorkspace={!!agent.cwd.trim()} />
+        <AgentDocumentsLazy.component {agentId} workspaceId={agent.workspace_id} kind="context" editable={canEditOwnerFields} sharedWorkspace={!!agent.cwd.trim()} />
       {:else}
-        <LoadState what={tab === 'memory' ? 'this agent’s document' : 'this agent’s context'} loading />
+        <LoadState what="this agent’s background notes" loading />
       {/if}
     {/key}
+    </div>
   {/if}
 
   {#if editing && agent}
-    <AgentEditSheet {agent} onclose={() => (editing = false)} />
+    <AgentEditSheet {agent} section={editing} onclose={() => (editing = null)} />
   {/if}
 
   {#if reportRun}
-    <!-- the shared sheet: Esc works from anywhere, focus is trapped + restored -->
-    <Modal title="Report" width={760} onclose={() => (reportRun = null)}>
-      {#if reportLoading}
-        <Skeleton rows={6} height={18} label="the report" />
-      {:else if reportError}
-        <LoadState what="the report" error={reportError} empty onretry={() => reportRun && viewReport(reportRun)} />
-      {:else}
-        <pre class="report">{reportText}</pre>
-      {/if}
-    </Modal>
+    <RunReport run={reportRun} routine={routineOf(reportRun)} name={scheduleName(reportRun)} onclose={() => (reportRun = null)} />
   {/if}
 </div>
 </PageBody>
@@ -693,10 +563,13 @@
 
 <style>
   .agent-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-  .prov { max-width: 260px; }
+  .pa-accent-text { display: inline-flex; align-items: center; gap: 4px; color: var(--accent-text); }
+  .pa-more { margin-top: 16px; }
+  .pa-more > summary { cursor: pointer; font-size: var(--fs-m); font-weight: 600; color: var(--text); padding: 6px 0; }
+  .pa-more > summary:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
+  .pa-stack { display: flex; flex-direction: column; gap: 16px; }
   .pa-accent { color: var(--accent-text); border-color: var(--accent-line); display: inline-flex; align-items: center; gap: 4px; }
-  .clip-chip { max-width: 28ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .prov :global(svg) { flex-shrink: 0; }
+  .clip-chip { display: inline-block; max-width: 100%; white-space: normal; overflow-wrap: anywhere; vertical-align: middle; }
   .mono { font-family: var(--font-mono); }
   .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tab-picker { display: none; }
@@ -716,36 +589,36 @@
   .tab:hover { color: var(--text); }
   .tab.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 500; }
   .tab:focus-visible { outline: 2px solid var(--accent-text); outline-offset: -2px; border-radius: var(--radius-s); }
-  .err {
-    background: var(--danger-soft); color: var(--danger); padding: 8px 12px;
-    border-radius: var(--radius-s); font-size: var(--fs-s);
-  }
-  .muted, .hint { color: var(--text-dim); font-size: var(--fs-m); }
-  .hint { margin: 0; }
-  .overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+  .about { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start; }
+  @media (max-width: 640px) { .about { grid-template-columns: minmax(0, 1fr); } }
+  /* "Who it is" spans the row; Personality and Setup share the next one — no half-empty row. */
+  .about > .who { grid-column: 1 / -1; }
+  .who { grid-column: 1 / -1; }
+  .who-head { display: flex; align-items: center; gap: 12px; margin-block-end: 12px; }
+  .setup-head { display: flex; align-items: baseline; gap: 8px; margin-block-end: 8px; }
+  .setup-head h2 { margin: 0; flex: 1; }
+  .setup-head h3 { margin: 0; flex: 1; font-size: var(--fs-m); font-weight: 600; }
+  .who-t { flex: 1; min-inline-size: 0; display: flex; flex-direction: column; }
+  .who-t h2 { margin: 0; }
+  .who h3 { margin: 0 0 4px; font-size: var(--fs-s); font-weight: 600; color: var(--text-dim); }
+  .soul.clamped { display: -webkit-box; -webkit-line-clamp: 6; line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
   .pa-panel { border: 1px solid var(--border); background: var(--surface); border-radius: var(--radius-m); padding: 12px 14px; color: var(--text); min-width: 0; }
+  .muted { color: var(--text-dim); font-size: var(--fs-m); }
   .pa-panel h2 { margin: 0 0 8px; font-size: var(--fs-l); font-weight: 600; color: var(--text); }
-  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  .card-head h2 { margin: 0 0 8px; }
+  .soul-edit { inline-size: 100%; resize: vertical; font-size: var(--fs-m); line-height: 1.5; }
+  .about-note { margin: 0 0 8px; }
   .soul { white-space: pre-wrap; word-break: break-word; font-family: inherit; font-size: var(--fs-m); line-height: 1.5; margin: 0; color: var(--text); }
   .props { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 12px; margin: 0; font-size: var(--fs-m); }
   .props dt { color: var(--text-dim); }
   .props dd { margin: 0; color: var(--text); min-width: 0; }
+  .model-sel { padding: 2px 6px; font-size: var(--fs-s); max-width: 100%; }
   .prov-dd { display: flex; align-items: center; gap: 6px; }
   .clip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .link { border: 0; background: none; padding: 0; margin-inline-start: 6px; font: inherit; color: var(--accent-text); cursor: pointer; }
+  .who .link { margin: 6px 0 0; font-size: var(--fs-s); }
   .link:hover { text-decoration: underline; }
-  .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
   .rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-  .rowline {
-    border: 1px solid var(--border); background: var(--surface); border-radius: var(--radius-m);
-    padding: 10px 12px; display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
-  }
-  .rowmain { min-width: 16ch; flex: 1; color: var(--text); font-size: var(--fs-m); display: flex; flex-direction: column; gap: 2px; }
-  .rowtitle { display: flex; align-items: center; gap: 8px; }
   .meta { color: var(--text-dim); font-size: var(--fs-s); }
-  .directive { margin: 4px 0 0; color: var(--text-dim); font-size: var(--fs-s); white-space: pre-wrap; word-break: break-word; }
-  .rowactions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
   .run {
     display: flex; align-items: center; gap: 8px; font-size: var(--fs-s); flex-wrap: wrap; color: var(--text);
     border: 1px solid var(--border); background: var(--surface); border-radius: var(--radius-m); padding: 8px 12px;
@@ -755,14 +628,4 @@
   .run-err { flex-basis: 100%; margin: 0; font-size: var(--fs-xs); color: var(--danger); overflow-wrap: anywhere; }
   .run-err.warn { color: var(--warning); }
   .pa-warn { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 35%, transparent); }
-  .form { display: flex; flex-direction: column; gap: 12px; margin-bottom: 12px; }
-  .form h2 { margin: 0; }
-  /* Global .field/.input; the form's own gap spaces them, rows share a line. */
-  .form .field { margin-bottom: 0; }
-  .field-row { display: flex; gap: 12px; flex-wrap: wrap; }
-  .field-row > .field { flex: 1; min-width: 160px; }
-  .chk { display: flex; align-items: center; gap: 6px; font-size: var(--fs-m); color: var(--text); }
-  .actions { display: flex; gap: 8px; justify-content: flex-end; }
-  .agent-body.chat-fill { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-  .report { white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: var(--fs-s); line-height: 1.45; color: var(--text); margin: 0; }
 </style>

@@ -6,7 +6,7 @@ function setup(schedules: (id: string) => Promise<unknown[]>) {
   return loadSource(new URL('../src/lib/stores/personalAgents.svelte.ts', import.meta.url), {
     '../api/personalAgents': { personalAgentsApi: { schedules } },
     '../loadError': { loadErrorText: (e: unknown) => String(e) },
-    '../lazyModule': { announceModule() {} },
+    '../lazyModule': { announceModule() {} }, './agentRunsWorking.svelte': { agentRunsWorking: { set() {} } },
   }).personalAgents;
 }
 
@@ -43,7 +43,7 @@ test('agent list detail fanout is bounded and obsolete queued work is skipped', 
       list: async (ws: string) => ws === 'old' ? Array.from({ length: 1000 }, (_, i) => ({ id: `a${i}` })) : [],
       schedules: async () => { calls++; peak = Math.max(peak, ++active); await release.promise; active--; return []; },
     } },
-    '../loadError': { loadErrorText: String }, '../lazyModule': { announceModule() {} },
+    '../loadError': { loadErrorText: String }, '../lazyModule': { announceModule() {} }, './agentRunsWorking.svelte': { agentRunsWorking: { set() {} } },
   }).personalAgents;
   const old = store.loadAgents('old');
   await new Promise((resolve) => setImmediate(resolve));

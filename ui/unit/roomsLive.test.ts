@@ -21,6 +21,7 @@ function setup() {
     '../api/personalAgents': { personalAgentsApi: api },
     '../loadError': { loadErrorText: (e: unknown) => String(e) },
     '../lazyModule': { announceModule: () => {} },
+    './agentRunsWorking.svelte': { agentRunsWorking: { set: () => {} } },
   });
   const store = mod.personalAgents;
   store.rooms = [{ room: { id: 'r1' }, members: [], message_count: 1, last_message_at: null }];

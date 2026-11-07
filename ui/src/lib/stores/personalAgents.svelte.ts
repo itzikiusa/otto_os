@@ -22,6 +22,7 @@ import { loadErrorText } from '../loadError';
 import { personalAgentOf } from '../personalAgentBadges';
 import { announceModule } from '../lazyModule';
 import { mapLimit } from '../poll';
+import { agentRunsWorking } from './agentRunsWorking.svelte';
 
 /** `set_session_status` in otto-agent-protocol's runtime.rs (as Threads maps it). */
 const THREAD_STATUS: Record<ProviderSessionStatus, RuntimeSessionStatus> = {
@@ -66,6 +67,11 @@ class PersonalAgentsStore {
   threads: RuntimeSession[] = $state([]);
   /** agent_id → a run of it is `running` (from run events). */
   runningByAgent: Record<string, boolean> = $state({});
+  /** Set to an agent id to open its "Add routine" form (the side panel takes it). */
+  routineFormFor: string | null = $state(null);
+  /** A suggested first routine for a just-created agent (its "Watch my PRs"
+   *  idea): prefills the routine form until one is saved. */
+  routineDrafts: Record<string, { name: string; instruction: string }> = $state({});
   rooms: AgentRoomWithMembers[] = $state([]);
   /** room_id → its messages, oldest first (appended via `after` paging).
    *  Raw (replaced wholesale) and capped at ROOM_KEEP on live appends — a busy
@@ -111,7 +117,7 @@ class PersonalAgentsStore {
   presence(agentId: string): AgentPresence {
     const live = this.threadsOf(agentId, false);
     if (live.some((t) => t.status === 'awaiting_permission')) return 'needs_you';
-    if (this.runningByAgent[agentId] || live.some((t) => t.status === 'working' || t.status === 'starting')) return 'working';
+    if (this.runningByAgent[agentId] || this.runsByAgent[agentId]?.some((r) => r.status === 'running') || live.some((t) => t.status === 'working' || t.status === 'starting')) return 'working';
     return 'idle';
   }
 
@@ -120,6 +126,9 @@ class PersonalAgentsStore {
       const rows = await personalAgentsApi.threads(workspaceId);
       if (this.wsId && this.wsId !== workspaceId) return;
       this.threads = rows.filter((r) => personalAgentOf(r.meta) !== null);
+      for (const id of new Set(this.threads.map((t) => personalAgentOf(t.meta) as string))) {
+        agentRunsWorking.set(id, this.threadsOf(id, false).some((t) => t.status === 'working' || t.status === 'starting'), 'chat');
+      }
     } catch {
       /* Presence and Activity fall back to idle / empty; the next event retries. */
     }
@@ -151,6 +160,10 @@ class PersonalAgentsStore {
     const next = [...this.threads];
     next[i] = { ...row, status, last_active_at: ev.ts };
     this.threads = next;
+    const agentId = personalAgentOf(row.meta);
+    if (agentId) {
+      agentRunsWorking.set(agentId, this.threadsOf(agentId, false).some((t) => t.status === 'working' || t.status === 'starting'), 'chat');
+    }
   }
 
   async loadAutonomy(agentId: string): Promise<void> {
@@ -172,10 +185,26 @@ class PersonalAgentsStore {
   }
 
   /** Earliest next_run_at across an agent's enabled schedules (card display). */
+  /** A routine whose time has come but the scheduler's minute tick hasn't
+   *  started it yet (or whose finished run hasn't refreshed next_run_at) —
+   *  bounded to 3 min past due so a stale next-run can't pin it. */
+  startingRoutine(agentId: string, t: number): PersonalAgentSchedule | null {
+    if (this.runningByAgent[agentId] || this.runsByAgent[agentId]?.some((r) => r.status === 'running')) return null;
+    return (
+      (this.schedulesByAgent[agentId] ?? []).find((x) => {
+        if (!x.enabled || !x.next_run_at) return false;
+        const due = Date.parse(x.next_run_at);
+        return due <= t && t - due < 180_000;
+      }) ?? null
+    );
+  }
+
   nextRunAt(agentId: string): string | null {
     const times = (this.schedulesByAgent[agentId] ?? [])
       .filter((s) => s.enabled && s.next_run_at)
       .map((s) => s.next_run_at as string)
+      // A slot already passed is being run (or was missed) — not "next".
+      .filter((t) => Date.parse(t) > Date.now())
       .sort();
     return times[0] ?? null;
   }
@@ -234,6 +263,8 @@ class PersonalAgentsStore {
       const runs = await personalAgentsApi.runs(agentId);
       if (this.runRequests.get(agentId) !== request) return;
       this.runsByAgent = { ...this.runsByAgent, [agentId]: runs };
+      // A run already going when this window opened counts as working too.
+      agentRunsWorking.set(agentId, runs.some((r) => r.status === 'running'));
       if (agentId in this.runsError) {
         const { [agentId]: _cleared, ...rest } = this.runsError;
         this.runsError = rest;

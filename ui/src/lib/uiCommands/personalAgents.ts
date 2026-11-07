@@ -23,7 +23,7 @@ import { toasts } from '../toast.svelte';
 import type { PersonalAgent, PersonalAgentAutonomy, PersonalAgentSchedule, PersonalAgentSlackGrant } from '../api/types';
 import templates from '../../../../docs/contracts/personal-agent-templates.json';
 import { agentLabel, asUiError, dismissOnAbort, highlightWhenReady, resolveByIdOrName, waitFor } from './pagePort';
-import { paAgentPort, paListPort, paSheetPort } from './personalAgentsPort';
+import { PA_TABS, paAgentPort, paListPort, paSheetPort, paTab } from './personalAgentsPort';
 import {
   agentChanges,
   checkCadence,
@@ -51,7 +51,8 @@ function browserTz(): string {
   }
 }
 
-const TABS = ['overview', 'activity', 'autonomy', 'schedules', 'runs', 'chat', 'memory', 'context'] as const;
+/** `otto.ui_pa_open` tabs: today's sections plus the older names (mapped by `paTab`). */
+const TABS = [...PA_TABS, 'overview', 'general', 'autonomy', 'advanced', 'schedules', 'routines', 'runs', 'history', 'chat', 'knowledge', 'context'] as const;
 type Tab = (typeof TABS)[number];
 
 /** Plan-file argument errors → `invalid_args`. */
@@ -85,7 +86,7 @@ async function agentFor(key: string, ctx: UiCommandCtx): Promise<PersonalAgent> 
 /** Show one agent on `tab` and wait for its page to bind. */
 async function openAgent(a: PersonalAgent, tab: Tab, ctx: UiCommandCtx) {
   // `personal-agents/<id>` alone is the conversation home; every settings tab has its own path.
-  const path = `personal-agents/${a.id}/${tab}`;
+  const path = `personal-agents/${a.id}/${paTab(tab)}`;
   if (router.parts.join('/') !== path) router.go(path);
   return waitFor(() => {
     const p = paAgentPort.peek();
@@ -145,8 +146,8 @@ registerUiCommands('scheduled-tasks', {
     if (!TABS.includes(tab)) throw new UiCommandError('invalid_args', `tab must be one of ${TABS.join(' | ')}.`);
     const agent = await agentFor(a.agent, ctx);
     await openAgent(agent, tab, ctx);
-    void highlightWhenReady(ctx, `[role="tab"][data-tab="${tab}"]`);
-    if (tab === 'schedules' || tab === 'overview') await personalAgents.loadSchedules(agent.id);
+    void highlightWhenReady(ctx, `[role="tab"][data-tab="${paTab(tab)}"]`);
+    if (paTab(tab) === 'about') await personalAgents.loadSchedules(agent.id);
     return {
       agent: summary(agent),
       tab,

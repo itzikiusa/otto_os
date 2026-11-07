@@ -30,29 +30,28 @@ async function openFirstAgentSettings(page: import('@playwright/test').Page): Pr
   const tile = page.locator('[data-testid^="pa-rail-"]:not([data-testid="pa-rail-add"])').first();
   await expect(tile).toBeVisible();
   const id = (await tile.getAttribute('data-testid'))!.replace('pa-rail-', '');
-  await page.goto(`/#/personal-agents/${id}/overview`);
+  await page.goto(`/#/personal-agents/${id}/about`);
 }
 
 test('agent detail: arrow keys and End move focus with selection', async ({ page }) => {
   await workspace(page);
   await page.goto('/#/personal-agents');
   await openFirstAgentSettings(page);
-  const overview = page.getByRole('tab', { name: 'Overview', exact: true });
-  await overview.focus();
+  const about = page.getByRole('tab', { name: 'About', exact: true });
+  await about.focus();
   await page.keyboard.press('ArrowRight');
-  // Overview's neighbour is Activity (Overview · Activity · Autonomy · Schedules …).
-  const activity = page.getByRole('tab', { name: 'Activity', exact: true });
+  // About's neighbour is Runs (About · Runs · Memory).
+  const activity = page.getByRole('tab', { name: 'Runs', exact: true });
   await expect(activity).toHaveAttribute('aria-selected', 'true');
   await expect(activity).toBeFocused();
   await page.keyboard.press('End');
-  await expect(page.getByRole('tab', { name: 'Context', exact: true })).toBeFocused();
+  await expect(page.getByRole('tab', { name: 'Memory', exact: true })).toBeFocused();
 });
 
 test('agent form: losing workspace preserves typed fields and explains how to save', async ({ page }) => {
   await workspace(page);
   await page.goto('/#/personal-agents');
   await page.getByTestId('pa-rail-add').click();
-  await page.getByRole('dialog').getByRole('button', { name: 'More options…', exact: true }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByLabel('Name', { exact: true }).fill('Keep my new agent');
   await page.evaluate(async () => {
@@ -60,12 +59,12 @@ test('agent form: losing workspace preserves typed fields and explains how to sa
     const { ws } = await import(/* @vite-ignore */ path);
     ws.currentId = null;
   });
-  await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Create', exact: true }).click();
   await expect(dialog).toBeVisible();
   await expect(dialog.getByLabel('Name', { exact: true })).toHaveValue('Keep my new agent');
   // The form's error line has no live role; it is spoken via the announcer.
-  await expect(dialog.locator('.err')).toContainText('workspace');
-  await expect(page.getByTestId('announcer-assertive')).toContainText('select a workspace');
+  await expect(dialog.locator('.qc-err')).toContainText('workspace');
+  await expect(page.getByTestId('announcer-assertive')).toContainText('Select a workspace');
 });
 
 test('goal definition: workspace switching asks before discarding the complete draft', async ({ page }) => {
@@ -181,8 +180,8 @@ test.describe('loaded automation visual and interaction fixtures', () => {
       await page.goto('/#/personal-agents');
       await openFirstAgentSettings(page);
       // ≤640px the agent's sections are a picker instead of a tab strip.
-      if (width <= 640) await page.getByRole('combobox', { name: 'Agent sections' }).selectOption({ label: 'Schedules' });
-      else await page.getByRole('tab', { name: 'Schedules', exact: true }).click();
+      if (width <= 640) await page.getByRole('combobox', { name: 'Agent sections' }).selectOption({ label: 'Runs' });
+      else await page.getByRole('tab', { name: 'Runs', exact: true }).click();
       await shot('agent-schedules');
       await page.goto('/#/scheduled-tasks');
       await expect(page.getByText('Weekly review — security and release readiness', { exact: true }).first()).toBeVisible();
@@ -217,9 +216,9 @@ test('agent detail: RTL arrow keys follow visual tab direction', async ({ page }
   await page.goto('/#/personal-agents');
   await openFirstAgentSettings(page);
   await page.evaluate(() => document.documentElement.dir = 'rtl');
-  await page.getByRole('tab', { name: 'Overview', exact: true }).focus();
+  await page.getByRole('tab', { name: 'About', exact: true }).focus();
   await page.keyboard.press('ArrowLeft');
-  await expect(page.getByRole('tab', { name: 'Activity', exact: true })).toBeFocused();
+  await expect(page.getByRole('tab', { name: 'Runs', exact: true })).toBeFocused();
 });
 
 test('rooms: phone conversation keeps its header and composer in view', async ({ page }) => {

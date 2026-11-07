@@ -30,6 +30,7 @@
   let vaultId = $state('');
   let generation = 0;
   const label = $derived(kind === 'memory' ? 'Memory' : 'Context');
+  const heading = $derived(kind === 'memory' ? 'What it remembers' : 'Background you give it');
   $effect(() => router.guard(() => !saving));
   $effect(() => guardUnsaved(() => editing && draft !== (document?.content ?? ''), { what: 'this agent’s document' }));
 
@@ -79,11 +80,10 @@
 </script>
 
 <section class="document" data-testid="agent-document">
-  <h2>{label}</h2>
+  <h2>{heading}</h2>
   <p class="hint">{kind === 'memory'
-    ? 'Notes the agent reads and updates between runs. Saving edits preserves the rest of your workspace.'
-    : 'Background notes and references you maintain. New runs and new chats receive a snapshot; existing chats keep their current context.'}</p>
-  {#if document?.path}<code class="path">{document.path}</code>{/if}
+    ? 'Notes the agent reads and updates between runs.'
+    : 'Notes and file references it reads at the start of every run and new chat.'}</p>
   {#if kind === 'memory' && sharedWorkspace}<p class="hint">Agents using this same working folder share this memory file.</p>{/if}
   {#if loading}<Skeleton rows={3} label={label.toLowerCase()} />
   {:else}
@@ -110,10 +110,9 @@
           {#if error}<button type="button" class="btn" disabled={saving} onclick={load}>Load saved version</button>{/if}
         </div>
       {:else}
-        {#if document.content}<Markdown md={document.content} />{:else}<p class="hint">No {label.toLowerCase()} yet.</p>{/if}
+        {#if document.content}<Markdown md={document.content} />{:else}<p class="hint">Nothing yet.</p>{/if}
         <div class="actions">
-          {#if editable}<button type="button" class="btn" data-edit-for={`doc-${kind}`} aria-label={`Edit ${label.toLowerCase()}`} onclick={() => (editing = true)}>Edit {label.toLowerCase()}</button>{/if}
-          <button type="button" class="btn" onclick={load}>Refresh</button>
+          {#if editable}<button type="button" class="btn" data-edit-for={`doc-${kind}`} aria-label={`Edit ${label.toLowerCase()}`} onclick={() => (editing = true)}>Edit</button>{/if}
         </div>
       {/if}
     {:else}<button type="button" class="btn" onclick={load}>Retry</button>{/if}
@@ -124,7 +123,6 @@
   .document { padding: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-m); min-width: 0; }
   h2 { margin: 0 0 8px; font-size: var(--fs-l); font-weight: 600; }
   .hint { color: var(--text-dim); font-size: var(--fs-s); line-height: 1.5; }
-  .path { display: block; overflow-wrap: anywhere; margin-bottom: 10px; font-size: var(--fs-s); color: var(--text-dim); }
   textarea { width: 100%; box-sizing: border-box; min-height: 280px; resize: vertical; padding: 10px; font-family: var(--font-mono); font-size: var(--fs-s); color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-s); }
   .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
   select { min-width: 0; max-width: 100%; }

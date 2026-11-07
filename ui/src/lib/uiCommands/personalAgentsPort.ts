@@ -44,3 +44,13 @@ export const paAgentPort = port<{
   /** Open a run's report in the page's report sheet. */
   viewReport(run: PersonalAgentRun): void;
 }>();
+
+/** The agent settings page's sections (`#/personal-agents/<id>/<tab>`). */
+export const PA_TABS = ['about', 'activity', 'memory'] as const;
+export type PaTab = (typeof PA_TABS)[number];
+/** A URL slug as a section. Older slugs (notifications, `otto.ui_pa_open`,
+ *  bookmarks) map to the section that holds them now; anything else → `about`. */
+export function paTab(slug: string | undefined): PaTab {
+  if ((PA_TABS as readonly string[]).includes(slug ?? '')) return slug as PaTab;
+  return slug === 'runs' || slug === 'history' ? 'activity' : slug === 'knowledge' || slug === 'context' ? 'memory' : 'about';
+}

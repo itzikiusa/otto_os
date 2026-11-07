@@ -3,7 +3,7 @@ import { test, expect } from '@playwright/test';
 // Personal-agent autonomy (modes, goals, rules) + the memory inspector, mounted
 // in a fixture page against routed APIs — no daemon needed.
 
-test('autonomy: proactive budget, goals and rules save; enforced rules are labelled', async ({ page }) => {
+test('autonomy: proactive budget, goals and rules save as you go; enforced rules are labelled', async ({ page }) => {
   let saved = {
     proactive: { enabled: false, runs_per_day: 4, max_minutes: 15 },
     goals: [] as { id: string; text: string; enabled: boolean; last_run_at: string | null }[],
@@ -34,24 +34,26 @@ test('autonomy: proactive budget, goals and rules save; enforced rules are label
     return route.fulfill({ json: [] });
   });
   await page.goto('/e2e/fixtures/personal-autonomy.html');
-  await expect(page.getByRole('heading', { name: 'Permission modes' })).toBeVisible();
-  await expect(page.getByText('can’t send, post, write or change anything')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Background work' })).toBeVisible();
+  await expect(page.getByText('never send or change anything')).toBeVisible();
   await expect(page.getByText('Account, credential and sharing actions always ask you first')).toBeVisible();
-  const save = page.getByRole('button', { name: 'Save', exact: true });
-  await expect(save).toBeDisabled();
-  await page.getByLabel('Work on standing goals in the background').check();
-  await page.getByLabel('Runs per day (max)').fill('6');
+  // No Save button: every change saves on its own, like the tone select.
+  await expect(page.getByRole('button', { name: 'Save', exact: true })).toHaveCount(0);
+  await page.getByLabel('Work on these goals in the background').check();
+  await page.getByLabel('At most, runs a day').fill('6');
+  await page.getByLabel('At most, runs a day').press('Tab');
   await page.getByRole('button', { name: 'Add goal' }).click();
   await page.getByLabel('Goal', { exact: true }).fill('Watch release CI');
+  await page.keyboard.press('Tab'); // leaving the field saves it
   await page.getByRole('button', { name: 'Add rule' }).click();
   await page.getByLabel('Rule', { exact: true }).fill('Ask before touching prod');
-  await save.click();
+  await page.keyboard.press('Tab');
   await expect(page.getByText('Enforced: asks you before actions mentioning “prod”')).toBeVisible();
   expect(lastBody).toMatchObject({ proactive: { enabled: true, runs_per_day: 6 }, goals: [{ text: 'Watch release CI' }] });
-  await expect(save).toBeDisabled();
+  await expect(page.getByText('Saved', { exact: true })).toBeVisible();
   // Read-only viewers see the settings but can't change them.
   await page.goto('/e2e/fixtures/personal-autonomy.html?viewer');
-  await expect(page.getByLabel('Work on standing goals in the background')).toBeDisabled();
+  await expect(page.getByLabel('Work on these goals in the background')).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Save', exact: true })).toHaveCount(0);
 });
 
@@ -109,24 +111,18 @@ test('autonomy draft blocks navigation through pending and failed saves', async 
     return r.fulfill({ json: saved });
   });
   await page.goto('/e2e/fixtures/personal-autonomy.html');
-  const budget = page.getByLabel('Runs per day (max)');
-  await budget.fill('9');
   await page.getByRole('button', { name: 'Add rule' }).click();
   const rule = page.getByLabel('Rule', { exact: true });
   await rule.fill('Ask before touching release');
-  await page.getByRole('button', { name: 'Leave autonomy' }).click();
-  await page.getByRole('button', { name: 'Keep editing', exact: true }).click();
-  await expect(budget).toHaveValue('9');
-  await expect(rule).toHaveValue('Ask before touching release');
-  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await page.keyboard.press('Tab'); // leaving the field saves it
   await expect.poll(() => !!release).toBe(true);
-  await expect(rule).toBeDisabled();
+  await expect(page.getByText('Saving…')).toBeVisible();
+  // A save in flight blocks leaving.
   await page.getByRole('button', { name: 'Leave autonomy' }).click();
   await expect(page).not.toHaveURL(/#\/fixture-away$/);
   release();
-  await expect(rule).toBeEnabled();
-  await page.getByRole('button', { name: 'Leave autonomy' }).click();
-  await page.getByRole('button', { name: 'Keep editing', exact: true }).click();
+  await expect(page.getByText('Saving…')).toHaveCount(0);
+  // The failed save keeps the draft; leaving now asks to discard it.
   await expect(rule).toHaveValue('Ask before touching release');
   await page.getByRole('button', { name: 'Leave autonomy' }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Discard', exact: true }).click();

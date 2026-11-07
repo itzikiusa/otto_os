@@ -87,14 +87,18 @@ export function runBadge(run: { trigger: string; mode?: string; schedule_id?: st
   return { kind: 'manual', label: 'Manual run', title: 'A run someone started with Run now' };
 }
 
-/** A routine's short name: its directive's first line (≤ 48 chars), as the
- *  daemon names it (`routine_label`, personal_agent_feed.rs). */
+/** A routine's short name: its directive's first line, cut at the first
+ *  sentence and at a word boundary (≤ 40 chars), markdown marks dropped. */
 export function routineLabel(directive: string): string {
   const first = directive
     .split('\n')
-    .map((l) => l.trim().replace(/^#+/, '').trim())
+    .map((l) => l.trim().replace(/^#+/, '').replace(/[*_`]+/g, '').trim())
     .find((l) => l !== '') ?? '';
   if (!first) return 'Routine';
-  const chars = [...first];
-  return chars.length > 48 ? `${chars.slice(0, 48).join('')}…` : first;
+  const sentence = first.replace(/^(.{12,}?[.!?])\s.*$/, '$1').replace(/[.:]$/, '');
+  const chars = [...sentence];
+  if (chars.length <= 40) return sentence;
+  const cut = chars.slice(0, 40).join('');
+  const space = cut.lastIndexOf(' ');
+  return `${(space > 20 ? cut.slice(0, space) : cut).replace(/[,;:\s]+$/, '')}…`;
 }

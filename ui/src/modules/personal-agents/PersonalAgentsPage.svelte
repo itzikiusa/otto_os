@@ -2,16 +2,14 @@
   // Personal Agents module — a messenger-style home. Routes:
   //   `#/personal-agents`                — the home on the main agent
   //   `#/personal-agents/<agentId>`      — the home on that agent
-  //   `#/personal-agents/<agentId>/<tab>` — the agent's full settings page
-  //                                        (overview/activity/autonomy/…)
+  //   `#/personal-agents/<agentId>/<tab>` — the agent's settings page
+  //                                        (general/routines/history/…)
   //   `#/personal-agents/rooms`          — agent channels
-  // The home is a rail of agent tiles (main agent first, live presence), the
-  // selected agent's ONE continuous conversation, and its side panel
-  // (Details · Library · Activity). The first list GET seeds disabled
-  // example agents server-side; the first of them is the main agent.
+  // The home is the agent list (main agent first, live presence), the
+  // selected agent's ONE continuous conversation, and a collapsible side
+  // panel with its routines and recent runs.
   import AutomateTasksTabs from '../../lib/components/AutomateTasksTabs.svelte';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
-  import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -27,9 +25,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import AgentRail from './AgentRail.svelte';
-  import AgentConversation from './AgentConversation.svelte';
-  import type { PanelTab } from './AgentSidePanel.svelte';
   import { railOrder } from './agentHome';
+  import { confirmDeleteAgent } from './confirmDelete';
   import { MASCOT } from './characters';
   import { loadErrorOf } from './loadError';
   import type { PersonalAgent, RuntimeEvent } from '../../lib/api/types';
@@ -41,6 +38,9 @@
   // The side panel and the quick create carry the personality / template
   // catalogs: loaded when first shown, never with the page.
   const SidePanelLazy = lazyComponent(() => import('./AgentSidePanel.svelte'));
+  // The conversation (header, intro, composer) loads beside the list; its
+  // chat view is lazy again inside it.
+  const ConversationLazy = lazyComponent(() => import('./AgentConversation.svelte'));
   const RoomsLazy = lazyComponent(() => import('./RoomsView.svelte'));
   const QuickCreateLazy = lazyComponent(() => import('./AgentQuickCreate.svelte'));
 
@@ -74,27 +74,28 @@
   });
   const loadError = $derived(loadErrorOf(personalAgents, 'agentsError'));
 
-  // The side panel: open/closed and its tab, remembered per viewer.
+  // The side panel: open/closed, remembered per viewer.
   const PANEL_KEY = 'otto.pa.panel';
-  function readPanel(): { open: boolean; tab: PanelTab } {
+  function readPanel(): boolean {
     try {
-      const v = JSON.parse(localStorage.getItem(PANEL_KEY) ?? 'null') as { open?: boolean; tab?: PanelTab } | null;
-      return { open: v?.open ?? true, tab: v?.tab ?? 'details' };
+      return (JSON.parse(localStorage.getItem(PANEL_KEY) ?? 'null') as { open?: boolean } | null)?.open ?? true;
     } catch {
-      return { open: true, tab: 'details' };
+      return true;
     }
   }
-  const initial = readPanel();
-  let panelOpen = $state(initial.open && typeof window !== 'undefined' && window.innerWidth > 1100);
-  let panelTab = $state<PanelTab>(initial.tab);
+  let panelOpen = $state(readPanel() && typeof window !== 'undefined' && window.innerWidth > 1100);
+  // "Add a routine" (after creating an agent) needs the panel that holds the form.
   $effect(() => {
-    const v = { open: panelOpen, tab: panelTab };
+    if (personalAgents.routineFormFor && !panelOpen) panelOpen = true;
+  });
+  function togglePanel(): void {
+    panelOpen = !panelOpen;
     try {
-      localStorage.setItem(PANEL_KEY, JSON.stringify(v));
+      localStorage.setItem(PANEL_KEY, JSON.stringify({ open: panelOpen }));
     } catch {
       /* per-viewer convenience only */
     }
-  });
+  }
 
   function select(id: string): void {
     router.go(`personal-agents/${id}`);
@@ -107,13 +108,13 @@
       { id: 'personal-agents.rooms', title: 'Open agent channels', group: 'Personal Agents', keywords: 'channel agent rooms talk', run: () => router.go('personal-agents/rooms') },
       ...agents.flatMap((a) => [
         { id: `personal-agents.chat.${a.id}`, title: `Chat with ${a.name}`, group: 'Personal Agents', keywords: 'agent message talk', run: () => router.go(`personal-agents/${a.id}`) },
-        { id: `personal-agents.open.${a.id}`, title: `${a.name}: all settings`, group: 'Personal Agents', detail: 'Personal agent', keywords: 'agent page settings runs', run: () => router.go(`personal-agents/${a.id}/overview`) },
+        { id: `personal-agents.open.${a.id}`, title: `${a.name}: settings`, group: 'Personal Agents', detail: 'Personal agent', keywords: 'agent page settings runs routines', run: () => router.go(`personal-agents/${a.id}/about`) },
       ]),
     ]),
   );
 
   async function remove(a: PersonalAgent): Promise<void> {
-    if (!(await confirmer.ask(`Delete personal agent “${a.name}”? Its routines, memory and run history go with it.`, { title: 'Delete personal agent', danger: true, confirmLabel: 'Delete' }))) return;
+    if (!(await confirmDeleteAgent(a, !!personalAgents.autonomyById[a.id]?.primary))) return;
     try {
       await personalAgents.remove(a.id);
       toasts.success(`Deleted ${a.name}`);
@@ -137,8 +138,7 @@
 {:else}
   <div class="pa-page">
   <PageHeader
-    title="Scheduled Tasks"
-    subtitle={sub === 'rooms' ? 'Shared channels where personal agents coordinate' : 'Your agents — task the main one with anything'}
+    title="Personal Agents"
   >
     {#snippet tabs()}
       <AutomateTasksTabs active={sub === 'rooms' ? 'rooms' : 'agents'} />
@@ -192,18 +192,22 @@
               </p>
             {/if}
             {#if selected}
-              {#key selected.id}
-                <AgentConversation agent={selected} {panelOpen} ontogglepanel={() => (panelOpen = !panelOpen)} ondelete={(a) => void remove(a)} />
-              {/key}
+              {#if ConversationLazy.component}
+                {#key selected.id}
+                  <ConversationLazy.component agent={selected} {panelOpen} ontogglepanel={togglePanel} ondelete={(a) => void remove(a)} />
+                {/key}
+              {:else}
+                <LoadState what="the conversation" error={ConversationLazy.error} loading={!ConversationLazy.error} empty onretry={() => ConversationLazy.retry()} />
+              {/if}
             {:else}
               <EmptyState icon="user" title="Agent not found" body="It may have been deleted, or it belongs to another workspace." actionLabel="Back to your agents" onaction={() => router.go('personal-agents')} />
             {/if}
           </div>
           {#if panelOpen && selected}
             {#if SidePanelLazy.component}
-              <SidePanelLazy.component agent={selected} tab={panelTab} ontab={(t: PanelTab) => (panelTab = t)} onclose={() => (panelOpen = false)} />
+              <SidePanelLazy.component agent={selected} onclose={togglePanel} />
             {:else}
-              <div class="pa-panel-slot"><LoadState what="the agent’s details" error={SidePanelLazy.error} loading={!SidePanelLazy.error} empty onretry={() => SidePanelLazy.retry()} /></div>
+              <div class="pa-panel-slot"><LoadState what="routines and runs" error={SidePanelLazy.error} loading={!SidePanelLazy.error} empty onretry={() => SidePanelLazy.retry()} /></div>
             {/if}
           {/if}
         </div>
@@ -215,7 +219,6 @@
         <QuickCreateLazy.component
           needsMain={!hasMain}
           oncreated={(a: PersonalAgent) => { creating = false; select(a.id); }}
-          onmore={() => { creating = false; fullCreate = true; }}
           onclose={() => (creating = false)}
         />
       {:else}
@@ -240,7 +243,7 @@
     position: relative; display: flex; flex: 1; min-block-size: 0; block-size: 100%;
     border-block-start: 1px solid var(--border); background: var(--bg);
   }
-  .pa-panel-slot { inline-size: 340px; flex: none; border-inline-start: 1px solid var(--border); padding: 12px; }
+  .pa-panel-slot { inline-size: 320px; flex: none; border-inline-start: 1px solid var(--border); padding: 12px; }
   .pa-center { flex: 1; min-inline-size: 0; display: flex; flex-direction: column; min-block-size: 0; }
   .pa-hint { display: flex; align-items: center; gap: 6px; margin: 0; padding: 6px 12px; color: var(--text-dim); font-size: var(--fs-s); flex-wrap: wrap; border-block-end: 1px solid var(--border); }
   .linklike { border: 0; background: none; padding: 0; color: var(--accent-text); font: inherit; font-weight: 600; cursor: pointer; }

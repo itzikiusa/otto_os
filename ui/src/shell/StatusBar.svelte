@@ -5,6 +5,7 @@
   // "Reconnecting…" (patterns.md §1, "Stale is a state").
   import Icon from '../lib/components/Icon.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
+  import { agentRunsWorking } from '../lib/stores/agentRunsWorking.svelte';
   import { auth } from '../lib/stores/auth.svelte';
   import { events } from '../lib/events.svelte';
   import { pageChrome } from '../lib/stores/pageChrome.svelte';
@@ -36,8 +37,8 @@
       onclick={() => router.go('agents')}
       title={live ? 'Agents working — open Agents' : 'Agents working (last known — reconnecting) — open Agents'}
     >
-      <span class="working-dot" class:on={ws.workingCount > 0} class:stale={!live} aria-hidden="true"></span>
-      {ws.workingCount} working
+      <span class="working-dot" class:on={ws.workingCount + agentRunsWorking.count > 0} class:stale={!live} aria-hidden="true"></span>
+      {ws.workingCount + agentRunsWorking.count} working
     </button>
     <!-- Persistent live region: the needs-you count appears/changes silently
          otherwise. Only that count is announced (the working count churns). -->

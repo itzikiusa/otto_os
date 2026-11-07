@@ -7,7 +7,9 @@
   // scheduled-tasks destination form. Schedules are edited on the agent page.
   import Modal from '../../lib/components/Modal.svelte';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
-  import { agentProvidersWith, defaultAgentProvider } from '../../lib/providers';
+  import { modelsForProvider } from '../../lib/providerModels';
+  import { auth } from '../../lib/stores/auth.svelte';
+  import { agentProvidersWith, defaultAgentProvider, harnessLabel } from '../../lib/providers';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -19,15 +21,23 @@
   import { paSheetPort } from '../../lib/uiCommands/personalAgentsPort';
   import type { PaCreateFill, PaScheduleArg } from '../../lib/uiCommands/personalAgentsPlan';
   import { cadenceLabel } from './cadence';
+  import AgentAvatar from './AgentAvatar.svelte';
+  import { CHARACTERS } from './characters';
 
   interface Props {
     /** null = create a new agent. */
     agent: PersonalAgent | null;
     /** Pre-select a template (id from `templates.ts`) when creating. */
     template?: string | null;
+    /** Editing: `about` = name and avatar; `setup` = provider,
+     *  folder, where results go, browser (the model is the Setup card's own
+     *  select). Creating shows everything. */
+    section?: 'about' | 'setup';
     onclose: () => void;
   }
-  let { agent, template = null, onclose }: Props = $props();
+  let { agent, template = null, section = 'about', onclose }: Props = $props();
+  const showAbout = $derived(!agent || section === 'about');
+  const showSetup = $derived(!agent || section === 'setup');
   /** Prefix for the label↔control ids (several sheets can be mounted). */
   const uid = $props.id();
 
@@ -82,7 +92,7 @@
   let fModel = $state(init?.model ?? ''); // '' = provider default
   let fCwd = $state(init?.cwd ?? '');
   let fBrowser = $state(init?.browser ?? false);
-  let fEnabled = $state(init?.enabled ?? true);
+  const fEnabled = init?.enabled ?? true;
   let fDestType = $state<'none' | 'slack' | 'telegram' | 'email' | 'webhook'>(
     ['slack', 'telegram', 'email', 'webhook'].includes(savedDest)
       ? (savedDest as 'slack' | 'telegram' | 'email' | 'webhook')
@@ -229,7 +239,7 @@
           await personalAgents.createSchedule(createdAgent.id, pendingSchedule);
           pendingSchedule = null;
         }
-        toasts.success(`Created ${body.name}`, body.enabled ? undefined : 'It’s paused — enable it to let its schedules fire.');
+        toasts.success(`Created ${body.name}`);
       }
       onclose();
     } catch (e) {
@@ -267,7 +277,7 @@
   });
 </script>
 
-<Modal title={agent ? `Edit ${agent.name}` : 'New personal agent'} width={620} {onclose}>
+<Modal title={agent ? (section === 'setup' ? `${agent.name} · Setup` : `Edit ${agent.name}`) : 'New agent'} width={620} {onclose}>
   <div class="sheet" data-pa-sheet>
     {#if error}<div class="err" use:announceShown={{ text: error, assertive: true }} bind:this={errorEl}>{error}</div>{/if}
     {#if !agent && !ws.currentId}
@@ -285,23 +295,35 @@
       </div>
     {/if}
 
-    <div class="field-row">
+    {#if showAbout}
+    <div class="who">
+      <AgentAvatar avatar={fAvatar} name={fName || '?'} size={44} />
       <div class="field grow">
         <label for="{uid}-name">Name</label>
-        <input dir="auto" id="{uid}-name" class="input" bind:value={fName} placeholder="Daily Recap" />
-      </div>
-      <div class="field narrow">
-        <label for="{uid}-avatar">Avatar (optional)</label>
-        <input dir="auto" id="{uid}-avatar" class="input" bind:value={fAvatar} maxlength="8" />
-        <span class="hint">Empty shows the name’s initial.</span>
+        <input dir="auto" id="{uid}-name" class="input" bind:value={fName} placeholder="e.g. PR watcher" />
       </div>
     </div>
+    <fieldset class="avatars">
+      <legend>Avatar</legend>
+      {#each CHARACTERS as c (c.id)}
+        <button type="button" class="glyph" class:on={fAvatar === `char:${c.id}`} aria-label="Avatar: {c.label}" title={c.label} aria-pressed={fAvatar === `char:${c.id}`} onclick={() => (fAvatar = `char:${c.id}`)}>
+          <img src={c.url} alt="" width="22" height="22" loading="lazy" decoding="async" />
+        </button>
+      {/each}
+    </fieldset>
 
+    {#if !agent}
+    <!-- Editing an existing agent, "What it does" is edited in place on its
+         About page; this sheet keeps the name and avatar. -->
     <div class="field">
-      <label for="{uid}-soul">Persona (soul) — who this agent is, materialized into its workspace</label>
-      <textarea dir="auto" id="{uid}-soul" class="input" bind:value={fSoul} rows="6" placeholder="You are a diligent chronicler…"></textarea>
+      <label for="{uid}-soul">What it does</label>
+      <textarea dir="auto" id="{uid}-soul" class="input" bind:value={fSoul} rows="6" placeholder="You watch my pull requests and tell me when one needs me…"></textarea>
     </div>
+    {/if}
 
+    {/if}
+
+    {#if showSetup}
     <div class="field-row">
       <div class="field">
         <label for="{uid}-provider">Provider</label>
@@ -311,13 +333,15 @@
           value={PROVIDERS.includes(fProvider) ? fProvider : 'custom'}
           onchange={(e) => onProviderSelect((e.currentTarget as HTMLSelectElement).value)}
         >
-          {#each PROVIDERS as p (p)}<option value={p}>{p}</option>{/each}
+          {#each PROVIDERS as p (p)}<option value={p}>{harnessLabel(p)}</option>{/each}
           <option value="custom">Custom…</option>
         </select>
       </div>
-      <div class="cell">
-        <ModelPicker provider={fProvider} value={fModel} onchange={(m) => (fModel = m)} />
-      </div>
+      {#if !agent}
+        <div class="cell">
+          <ModelPicker provider={fProvider} value={fModel} extra={modelsForProvider(fProvider, auth.meta)} onchange={(m) => (fModel = m)} hint="Every run and chat of this agent uses it. Empty = the provider’s default." />
+        </div>
+      {/if}
     </div>
 
     {#if !PROVIDERS.includes(fProvider)}
@@ -334,9 +358,9 @@
 
     <div class="field-row">
       <div class="field">
-        <label for="{uid}-dest">Delivery</label>
+        <label for="{uid}-dest">Also send results to</label>
         <select id="{uid}-dest" class="input" bind:value={fDestType}>
-          <option value="none">None (reports on the agent page only)</option>
+          <option value="none">Its chat only</option>
           <option value="slack">Slack</option>
           <option value="telegram">Telegram</option>
           <option value="email">Email</option>
@@ -379,8 +403,8 @@
         <input type="checkbox" bind:checked={fBrowser} />
         Browser use (give runs and chat the Otto browser tool)
       </label>
-      <label class="chk"><input type="checkbox" bind:checked={fEnabled} /> Enabled — its schedules fire on their cadence</label>
     </div>
+    {/if}
   </div>
 
   {#snippet footer()}
@@ -401,7 +425,13 @@
   .sheet .field { margin-bottom: 0; }
   .field-row { display: flex; gap: 12px; flex-wrap: wrap; }
   .field-row > .field, .field-row > .cell { flex: 1; min-width: 180px; }
-  .field-row > .narrow { flex: 0 0 10rem; min-width: 10rem; }
+  .who { display: flex; align-items: flex-end; gap: 12px; }
+  .who > .grow { flex: 1; margin: 0; }
+  .avatars { display: flex; flex-wrap: wrap; gap: 6px; border: 0; padding: 0; margin: 0; }
+  .avatars legend { font-size: var(--fs-s); color: var(--text-dim); margin-block-end: 4px; }
+  .glyph { inline-size: 30px; block-size: 30px; border-radius: var(--radius-m); border: 1px solid var(--border); background: var(--surface-2); cursor: pointer; padding: 2px; display: grid; place-items: center; }
+  .glyph.on { border-color: var(--accent-line-strong); background: var(--accent-soft); }
+  .glyph:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 1px; }
   .toggles { display: flex; flex-direction: column; gap: 6px; }
   .chk { display: flex; align-items: center; gap: 6px; font-size: var(--fs-m); color: var(--text); }
 </style>
