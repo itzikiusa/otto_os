@@ -185,3 +185,26 @@ For build goals the directory is `<data>/goal-loops/<id>/work`, on `goal-loop/<i
 - [Agent Swarm](./agent-swarm.md): related bounded multi-agent coordination.
 - [Mission Control](./mission-control.md): Goal Loops as work-graph items.
 - [API contract](../contracts/api.md) and [WebSocket contract](../contracts/ws.md): authoritative transport definitions.
+
+## Task graphs
+
+An optional task graph orders work by verified dependencies. Each task has a
+name, instructions and acceptance criteria; dependent tasks wait for fresh
+passing evidence from their prerequisites. One task uses one iteration, with
+the configured executor lineup running sequentially. Budget at least the number
+of tasks plus repair iterations, and allow time for prerequisite rechecks.
+
+Only tasks that executed can pass. Before reuse, the evaluator rechecks prior
+work in the current directory; regressions invalidate dependent tasks. The
+ledger shows pending, running, passed or blocked tasks with their actual
+criterion evidence. An optimistic agent verdict cannot skip future tasks or
+complete a graph with unfinished work. Existing pause, stop and runtime limits
+still apply. Use **Resume** to retry graph work; individual executor Retry is
+reserved for loops without a graph.
+
+Graphs support up to 16 tasks and reject cycles, unknown references and
+unassigned criteria. Put human acceptance on final tasks with no dependents:
+later mutations invalidate human approval. Research graphs must assign the
+reserved `otto-research-report` criterion to their report task. Graphs use the
+existing isolated work directory and executor policies; they do not authorize
+publishing, pushing or sending messages.

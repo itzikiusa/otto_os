@@ -6503,7 +6503,10 @@ introduced: scope changes use `review_changed`, fix progress uses Goal Loop even
 `criterion_ids: string[]`. A graph has 1–16 nodes, unique nonempty ids, titles and
 instructions, no duplicate or unknown dependencies, no cycles, and at least one
 known acceptance criterion per node. Unknown or duplicate criterion references
-are rejected. Create, draft configuration updates and Start validate the graph.
+are rejected. Every acceptance criterion must be assigned to a task. Tasks with
+human-verification criteria must be terminal (no dependents), since later
+mutations invalidate human approval. Create, draft configuration updates and
+Start validate the graph.
 No graph preserves the existing executor lineup behavior.
 
 Each existing iteration executes one ready task with the configured executors
@@ -6520,3 +6523,6 @@ iteration per task plus repair headroom. Exhaustion remains incomplete.
 `evidence: string`, and `criteria: EvalCriterion[]`. This is controller-owned
 progress persisted in the existing ledger JSON; clients refetch on the existing
 Goal Loop change events. Agent prose alone cannot mark a task complete.
+
+Per-executor Retry returns 409 for graph loops: use Resume so prerequisite
+evidence is reverified before another task attempt. Legacy executor Retry is unchanged.

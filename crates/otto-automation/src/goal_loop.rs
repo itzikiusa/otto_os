@@ -31,6 +31,8 @@ use crate::agent::{FailReason, RunOutcome, WatchStatus};
 use crate::goal_loop_parse::{parse_evaluation, parse_executor_result};
 use crate::AutomationCtx;
 
+mod graph_run;
+
 // --- Registry --------------------------------------------------------------
 
 /// A running loop controller's control handles.
@@ -185,6 +187,7 @@ fn remaining_runtime(loop_: &GoalLoop) -> Duration {
 pub async fn start_loop(ctx: &impl AutomationCtx, loop_id: &Id) -> Result<()> {
     ctx.goal_loops().require_idle(loop_id)?;
     let loop_ = ctx.goal_loops_repo().get(loop_id).await?;
+    crate::goal_loop_graph::validate(&loop_.config, &loop_.definition)?;
     // Zero remaining runtime must not provision a worktree or flip the loop
     // to Running. The controller's within_budget guard runs only after that.
     if !may_start_work(remaining_runtime(&loop_)) {
@@ -319,6 +322,11 @@ pub async fn retry_executor(
     if loop_.status != GoalLoopStatus::Blocked {
         return Err(Error::Invalid(
             "can only retry an executor while the loop is blocked".into(),
+        ));
+    }
+    if loop_.config.graph.is_some() {
+        return Err(Error::Conflict(
+            "Use Resume to retry this graph task; prerequisites must be reverified first.".into(),
         ));
     }
     // Before any ledger, evaluation, or result-file change. A loop that is
@@ -621,7 +629,9 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
                 .await
         } else {
             // Any further executor work invalidates approvals of the earlier state.
-            loop_.ledger.verifications.clear();
+            if loop_.config.graph.is_none() {
+                loop_.ledger.verifications.clear();
+            }
             loop_.ledger.review_passed = false;
             loop_.ledger.resume_evaluation_iteration = None;
             warn_on_err(
@@ -665,9 +675,30 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
             .clone()
             .unwrap_or_else(|| loop_.repo_path.clone());
 
+        let task = match graph_run::prepare(
+            &ctx,
+            &mut loop_,
+            &iter,
+            &wt,
+            &handle,
+            verification_only,
+        )
+        .await
+        {
+            Ok(task) => task,
+            Err(e) => {
+                if stop_requested(&handle) {
+                    continue;
+                }
+                let _ = block(&ctx, &loop_id, &format!("Task admission failed: {e}")).await;
+                release_honouring_stop(&ctx, &loop_id, &handle).await;
+                return;
+            }
+        };
+
         // ---- PLAN ----
         set_phase(&ctx, &ws, &loop_, GoalLoopPhase::Planning, idx).await;
-        let plan = if verification_only {
+        let plan = if !task.execute {
             iter.plan.clone()
         } else {
             match run_role(
@@ -676,7 +707,7 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
                 &iter.id,
                 "Planner",
                 &loop_.config.planner,
-                planner_prompt(&loop_, &context_in, prior_eval.as_ref(), idx),
+                planner_prompt(&task.scoped, &context_in, prior_eval.as_ref(), idx),
                 &wt,
                 limits.per_phase_timeout_secs,
             )
@@ -715,8 +746,25 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
         } else {
             Vec::new()
         };
+        if task.execute && loop_.config.graph.is_some() {
+            loop_.ledger.verifications.clear();
+            if let Err(e) = ctx
+                .goal_loops_repo()
+                .set_ledger(&loop_id, &loop_.ledger)
+                .await
+            {
+                let _ = block(
+                    &ctx,
+                    &loop_id,
+                    &format!("Cannot persist task admission: {e}"),
+                )
+                .await;
+                release_honouring_stop(&ctx, &loop_id, &handle).await;
+                return;
+            }
+        }
         for (i, exec) in loop_.config.executors.iter().enumerate() {
-            if verification_only {
+            if !task.execute {
                 break;
             }
             if stop_requested(&handle) {
@@ -725,7 +773,7 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
             let out_path = executor_out_path(&loop_id, idx, i);
             let _ = std::fs::remove_file(&out_path);
             let prompt = executor_prompt(
-                &loop_,
+                &task.scoped,
                 exec,
                 &plan,
                 &context_in,
@@ -772,8 +820,16 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
         if stop_requested(&handle) {
             continue;
         }
+        graph_run::verify_executor_completion(
+            &ctx,
+            &loop_,
+            idx,
+            task.selected.as_deref(),
+            &mut eval,
+        )
+        .await;
+        let stagnant = graph_run::finish(&mut loop_, task.selected.as_deref(), &mut eval);
         let mut ledger = loop_.ledger.clone();
-        let stagnant = crate::goal_loop_policy::record_progress(&mut ledger, &eval);
         if stagnant && eval.verdict != "blocked" {
             eval.verdict = "blocked".into();
             eval.feedback = "Two iterations produced the same unmet criteria and evidence. Choose a new approach before resuming.".into();
@@ -788,11 +844,18 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
             });
         }
         ledger.next_action = eval.feedback.clone();
-        warn_on_err(
-            &loop_id,
-            "set_ledger",
-            ctx.goal_loops_repo().set_ledger(&loop_id, &ledger).await,
-        );
+        let saved = ctx.goal_loops_repo().set_ledger(&loop_id, &ledger).await;
+        if loop_.config.graph.is_some() && saved.is_err() {
+            let _ = block(
+                &ctx,
+                &loop_id,
+                "Task evidence could not be persisted; Resume to reverify",
+            )
+            .await;
+            release_honouring_stop(&ctx, &loop_id, &handle).await;
+            return;
+        }
+        warn_on_err(&loop_id, "set_ledger", saved);
         warn_on_err(
             &loop_id,
             "set_iter_evaluation",
@@ -869,7 +932,14 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
 
         // ---- DECISION ----
         let all_met = !eval.criteria.is_empty() && eval.criteria.iter().all(|c| c.met);
-        if eval.verdict == "achieved" && all_met {
+        if eval.verdict == "achieved"
+            && all_met
+            && loop_
+                .config
+                .graph
+                .as_ref()
+                .is_none_or(|g| crate::goal_loop_graph::all_passed(g, &ledger))
+        {
             if loop_.config.require_review {
                 let review = run_role(&ctx, &loop_, &iter.id, "Completion reviewer", &loop_.config.evaluator,
                     format!("{}\nIndependently review the final work against the goal. Report concrete unresolved defects. Return JSON {{\"approved\":true|false,\"findings\":[string]}}. Approve only when no material issue remains.", goal_context(&loop_)),
@@ -941,6 +1011,21 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
 fn evaluation_only(loop_: &GoalLoop, prior_eval: Option<&GoalLoopEvaluation>) -> bool {
     if loop_.current_iteration > 0
         && loop_.ledger.resume_evaluation_iteration == Some(loop_.current_iteration)
+    {
+        return true;
+    }
+    if loop_.config.graph.is_some()
+        && loop_.ledger.graph_nodes.iter().any(|s| {
+            s.status == "blocked"
+                && s.criteria.iter().any(|c| {
+                    c.evidence == "Awaiting human verification"
+                        && loop_
+                            .definition
+                            .acceptance_criteria
+                            .iter()
+                            .any(|d| d.id == c.id && loop_.ledger.verification(d).is_some())
+                })
+        })
     {
         return true;
     }
