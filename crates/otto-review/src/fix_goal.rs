@@ -27,6 +27,14 @@ pub fn build(
             verify_kind: "agent".into(), verify_cmd: None,
         });
     }
+    for prior in &plan.prior_findings {
+        criteria.push(AcceptanceCriterion {
+            id: format!("prior-{}", prior.finding_id),
+            text: format!("Re-verify inherited finding {}", prior.finding_id),
+            verify: format!("Reinspect prior finding {} and its earlier disposition {} against current code: {}. Preserve a fixed/still_open/not_relevant disposition with independent evidence. Must/should issues still open cannot pass; explicitly deferred optional low-priority issues may pass when accounted for.", prior.finding_id, prior.disposition, prior.evidence),
+            verify_kind: "agent".into(), verify_cmd: None,
+        });
+    }
     for (id, text, verify) in [
         ("fresh-review", "A fresh independent review has no open must-fix or should-fix issues and no unaccounted findings", "Re-read the full causal diff and affected consumers after fixes, through every selected relevant lens. Verify every previously reported issue and each newly found issue; record dispositions and file:line evidence. Questions and optional lows must be explicitly accounted for, not silently discarded. Do not equate missing output to verification.".to_string()),
         ("critical-checks", "Relevant critical-path checks pass with recorded evidence", "Run the relevant repository checks for changed critical paths. Record exact commands, exit status and output summary. Tests must fail for the original defect; do not demand exhaustive hypothetical branch coverage. Skipped or unavailable material checks leave this criterion unmet.".to_string()),
@@ -36,7 +44,7 @@ pub fn build(
     }
     let definition = GoalLoopDefinition {
         title: format!("Fix PR #{} review findings", review.pr_number),
-        summary: format!("Original review {} at {}. Target {target:.1}/10 (subjective reviewer assessment). Scope: {}\nSelected lenses and rationale:\n{}\nOriginal findings:\n{}", review.id, plan.head_sha, plan.summary,
+        summary: format!("Original review {} at {} (causal merge-base {}). Review the original PR plus fixes with git diff from that merge-base, not merely changes since the fix worktree was created. Target {target:.1}/10 (subjective reviewer assessment). Scope: {}\nSelected lenses and rationale:\n{}\nOriginal findings:\n{}", review.id, plan.head_sha, plan.base_sha, plan.summary,
             serde_json::to_string(&plan.lenses).unwrap_or_default(), serde_json::to_string(&comments).unwrap_or_default()),
         objectives: vec!["Batch related fixes by cause into cohesive substantial iterations; address must-fix and should-fix before optional polish.".into(), "Each iteration verifies EVERY prior finding then performs a fresh independent review.".into()],
         acceptance_criteria: criteria,

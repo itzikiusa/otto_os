@@ -108,6 +108,7 @@ export interface Review {
 }
 
 export interface ReviewScopePlan {
+  base_sha: string;
   head_sha: string;
   summary: string;
   related_modules: string[];

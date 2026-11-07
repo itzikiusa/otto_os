@@ -1808,3 +1808,11 @@ Several forms can be pending at once. Provider withdrawal, interruption,
 terminal turns and daemon restart settle/expire them using the same request
 status and response-capability rules as approvals. The full question data
 remains available even when its original tool row is folded or omitted.
+
+### Adaptive review progress
+
+Adaptive review scope uses the existing `review_changed` event. It is broadcast when
+assessment starts and when the persisted `Review.scope_plan` becomes available;
+clients refetch the review. No extra event shape is introduced. A fix-goal launch
+returns a Goal Loop id and subsequent progress/cancellation uses the existing Goal
+Loop event contract.

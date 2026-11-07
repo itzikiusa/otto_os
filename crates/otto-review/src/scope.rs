@@ -64,6 +64,39 @@ pub fn validate(plan: &ReviewScopePlan) -> Result<(), String> {
     Ok(())
 }
 
+pub fn validate_prior_findings(plan: &ReviewScopePlan, ids: &[String]) -> Result<(), String> {
+    validate(plan)?;
+    if plan.prior_findings.len() != ids.len()
+        || ids
+            .iter()
+            .any(|id| !plan.prior_findings.iter().any(|p| p.finding_id == *id))
+    {
+        return Err("Scope assessment must account for exactly every previous finding".into());
+    }
+    Ok(())
+}
+
+/// Queued lenses consume no CLI process and cancellation does not wait for a
+/// busy sibling to release its slot.
+pub async fn acquire_slot(
+    slots: std::sync::Arc<tokio::sync::Semaphore>,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<tokio::sync::OwnedSemaphorePermit, String> {
+    let stopped = async {
+        loop {
+            if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    };
+    tokio::select! {
+        biased;
+        _ = stopped => Err("review cancelled while queued".into()),
+        permit = slots.acquire_owned() => permit.map_err(|e| e.to_string()),
+    }
+}
+
 /// Only prose under docs/ has a safe deterministic scope. Agent instructions,
 /// executable examples and root manifests always require repository assessment.
 pub fn documentation_plan(diff: &str, head: &str) -> Option<ReviewScopePlan> {
@@ -79,6 +112,7 @@ pub fn documentation_plan(diff: &str, head: &str) -> Option<ReviewScopePlan> {
         return None;
     }
     Some(ReviewScopePlan {
+        base_sha: String::new(),
         head_sha: head.into(),
         summary: "Documentation-only change; verify changed claims against their referenced implementation.".into(),
         related_modules: paths,
@@ -105,17 +139,17 @@ mod tests {
     #[test]
     fn fast_path_is_documentation_only_not_a_line_count_heuristic() {
         assert!(documentation_plan(
-            "diff --git a/docs/help.md b/docs/help.md\n+++ b/docs/help.md\n+Help",
+            "diff --git a/docs/help.md b/docs/help.md\n--- a/docs/help.md\n+++ b/docs/help.md\n+Help",
             "abc"
         )
         .is_some());
         assert!(documentation_plan(
-            "diff --git a/auth.rs b/auth.rs\n+++ b/auth.rs\n+allow = true",
+            "diff --git a/auth.rs b/auth.rs\n--- a/auth.rs\n+++ b/auth.rs\n+allow = true",
             "abc"
         )
         .is_none());
         assert!(documentation_plan(
-            "diff --git a/AGENTS.md b/AGENTS.md\n+++ b/AGENTS.md\n+Run hooks",
+            "diff --git a/AGENTS.md b/AGENTS.md\n--- a/AGENTS.md\n+++ b/AGENTS.md\n+Run hooks",
             "abc"
         )
         .is_none());
@@ -124,7 +158,8 @@ mod tests {
 
     #[test]
     fn rejects_missing_rationale_and_duplicate_lenses() {
-        let mut plan = documentation_plan("+++ b/docs/help.md\n+Help", "abc").unwrap();
+        let mut plan =
+            documentation_plan("--- a/docs/help.md\n+++ b/docs/help.md\n+Help", "abc").unwrap();
         assert!(validate(&plan).is_ok());
         plan.lenses.push(plan.lenses[0].clone());
         assert!(validate(&plan).is_err());
@@ -135,11 +170,102 @@ mod tests {
 
     #[test]
     fn configured_provider_pool_does_not_multiply_lenses_unless_opted_in() {
-        let plan = documentation_plan("+++ b/docs/help.md\n+Help", "abc").unwrap();
+        let plan =
+            documentation_plan("--- a/docs/help.md\n+++ b/docs/help.md\n+Help", "abc").unwrap();
         let mut cfg = crate::engine::default_review_config("claude");
         cfg.agents[0].providers = vec!["claude".into(), "codex".into()];
         assert_eq!(selected_agents(&plan, &cfg)[0].providers.len(), 1);
         cfg.cross_provider_check = true;
         assert_eq!(selected_agents(&plan, &cfg)[0].providers.len(), 2);
+    }
+
+    #[test]
+    fn small_permission_change_keeps_security_and_broad_plan_keeps_distinct_lenses() {
+        let mut plan =
+            documentation_plan("--- a/docs/help.md\n+++ b/docs/help.md\n+Help", "abc").unwrap();
+        plan.lenses = vec![ReviewScopeLens {
+            name: "Security".into(),
+            reason: "One permission predicate changes access for anonymous callers at auth.rs:2"
+                .into(),
+            instructions: "Trace access through api.rs:8".into(),
+        }];
+        let mut cfg = crate::engine::default_review_config("claude");
+        cfg.agents[0].model = "claude-only-model".into();
+        cfg.agents[0].providers = vec!["claude".into(), "codex".into()];
+        assert_eq!(selected_agents(&plan, &cfg).len(), 1);
+        assert_eq!(selected_agents(&plan, &cfg)[0].name, "Security");
+        for name in [
+            "Contracts",
+            "Data consistency",
+            "Concurrency",
+            "Critical path checks",
+            "UX",
+            "Compatibility",
+        ] {
+            plan.lenses.push(ReviewScopeLens {
+                name: name.into(),
+                reason: format!("Changed {name} boundary with identified consumer"),
+                instructions: format!("Trace changed {name} behavior"),
+            });
+        }
+        let agents = selected_agents(&plan, &cfg);
+        assert_eq!(agents.len(), 7);
+        assert!(agents.iter().all(|a| a.providers.len() == 1));
+        assert_eq!(agents[1].provider, "codex");
+        assert_eq!(agents[1].model, "");
+        cfg.cross_provider_check = true;
+        assert_eq!(
+            selected_agents(&plan, &cfg)
+                .iter()
+                .map(|a| a.providers.len())
+                .sum::<usize>(),
+            14
+        );
+    }
+
+    #[test]
+    fn prior_findings_cannot_disappear_or_be_replaced_by_invented_ids() {
+        let mut plan =
+            documentation_plan("--- a/docs/help.md\n+++ b/docs/help.md\n+Help", "abc").unwrap();
+        let ids = vec!["original".into()];
+        assert!(validate_prior_findings(&plan, &ids).is_err());
+        plan.prior_findings
+            .push(otto_core::domain::ReviewFindingDisposition {
+                finding_id: "original".into(),
+                disposition: "fixed".into(),
+                evidence: "src/api.rs:8 now rejects anonymous callers".into(),
+            });
+        assert!(validate_prior_findings(&plan, &ids).is_ok());
+        plan.prior_findings[0].finding_id = "invented".into();
+        assert!(validate_prior_findings(&plan, &ids).is_err());
+        plan.prior_findings[0].finding_id = "original".into();
+        plan.prior_findings[0].evidence.clear();
+        assert!(validate_prior_findings(&plan, &ids).is_err());
+    }
+
+    #[tokio::test]
+    async fn cancellation_releases_queued_work_without_waiting_for_a_live_reviewer() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let active = slots.clone().acquire_owned().await.unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let task = {
+            let (slots, cancel) = (slots.clone(), cancel.clone());
+            tokio::spawn(async move { acquire_slot(slots, &cancel).await })
+        };
+        cancel.store(true, Ordering::SeqCst);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(500), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(slots.available_permits(), 0);
+        drop(active);
+        assert_eq!(slots.available_permits(), 1);
     }
 }

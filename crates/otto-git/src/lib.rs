@@ -5,6 +5,7 @@
 #[cfg(test)]
 mod argv_guard_tests;
 pub mod branch_sync;
+pub mod causal_diff;
 pub mod collections;
 #[cfg(test)]
 mod config_hardening_tests;

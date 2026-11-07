@@ -236,7 +236,7 @@ pub(crate) async fn run_review_core(
     ctx: &ServerCtx,
     review_id: &Id,
     repo_path: &str,
-    diff_text: String,
+    mut diff_text: String,
     jira_context: Option<String>,
     user_context: Option<String>,
     workspace: &Workspace,
@@ -295,6 +295,32 @@ pub(crate) async fn run_review_core(
         Some(c) => c,
         None => load_review_config_for_repo(ctx, repo_id).await,
     };
+    if branches.is_some_and(|b| !b.checked_out) {
+        return Err(Error::Invalid("The PR revision could not be checked out; review cannot verify claims against a different revision. Retry after fetching the branch.".into()));
+    }
+    let causal_base = if pr_number != LOCAL_REVIEW_PR_NUMBER {
+        let destination = branches
+            .map(|b| b.dest.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                Error::Invalid(
+                    "PR target branch is unavailable; causal scope cannot be established".into(),
+                )
+            })?;
+        let git = otto_git::LocalGit::new(repo_path);
+        let remote_target = format!("origin/{destination}");
+        let target = if git.rev_parse(&remote_target).await.is_ok() {
+            remote_target
+        } else {
+            destination.to_string()
+        };
+        let causal = git.causal_review_diff(&target).await?;
+        user_ctx.push_str(&format!("\nCausal PR scope is immutable merge-base {} to reviewed HEAD {}. The complete diff is in the supplied file; read in chunks as needed. Target-tip commits and worktree dirt are excluded.\n", causal.base_sha, causal.head_sha));
+        diff_text = causal.text;
+        Some(causal.base_sha)
+    } else {
+        None
+    };
     let (prior_context, prior_ids) = super::scope::prior_review_context(
         ctx,
         repo_id,
@@ -306,7 +332,7 @@ pub(crate) async fn run_review_core(
     .await?;
     user_ctx.push_str(&prior_context);
     let diff_path = materialize_review_diff(ctx, review_id, &diff_text).await?;
-    let scope_plan = super::scope::assess_scope(
+    let mut scope_plan = super::scope::assess_scope(
         ctx,
         review_id,
         repo_path,
@@ -319,6 +345,10 @@ pub(crate) async fn run_review_core(
         &prior_ids,
     )
     .await?;
+    scope_plan.base_sha = causal_base.unwrap_or_default();
+    ctx.reviews_store
+        .set_scope_plan(review_id, &scope_plan)
+        .await?;
     cfg.agents = otto_review::scope::selected_agents(&scope_plan, &cfg);
     user_ctx.push_str(&format!(
         "\n## Assessed scope and exact selected lenses\n{}\n",
@@ -593,7 +623,15 @@ pub(crate) async fn run_review_core(
         set.spawn(async move {
             // SI-11: wait for a reviewer slot (a closed semaphore never
             // happens — it lives for the process).
-            let _slot = slots.acquire_owned().await.ok();
+            let Ok(_slot) = otto_review::scope::acquire_slot(slots, &agent_cancel).await else {
+                return (
+                    i,
+                    otto_review::session::AgentRunResult {
+                        findings: vec![],
+                        errored: true,
+                    },
+                );
+            };
             let res = otto_review::session::run_agent_session_with_recovery(
                 &manager,
                 &reviews,
@@ -880,21 +918,9 @@ pub(crate) async fn run_pr_review_inner(
     let workspace = ctx.workspaces.get(&repo.workspace_id).await?;
     let (provider, remote) = resolve_provider_remote(ctx, user, &repo).await?;
 
-    // 2. Fetch the PR diff.
-    tracing::info!(review = %review_id, "fetching PR diff for PR #{pr_number}");
-    let diff_resp = provider.get_pr_diff(&remote, pr_number).await?;
-    // Cap at 200 KB of rendered diff text — beyond that single agents struggle
-    // to produce useful output and timeouts are hit. too_large is surfaced to
-    // the UI per-file so the user knows which files were skipped.
-    const DIFF_RENDER_CAP: usize = 200_000;
-    let (diff_for_agents, diff_truncated) = render_diff(&diff_resp, DIFF_RENDER_CAP);
-    if diff_truncated {
-        tracing::warn!(
-            "diff partial (cap {} chars / binary / too-large files omitted) for review {}",
-            DIFF_RENDER_CAP,
-            review_id
-        );
-    }
+    // The authoritative diff is built from local immutable objects after the
+    // reviewed checkout exists. Do not fetch/render a truncated forge preview.
+    let diff_for_agents = String::new();
 
     // 3. Optionally fetch the linked Jira story.
     let jira_context = match (issue_account_id, issue_key) {

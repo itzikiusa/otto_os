@@ -87,6 +87,21 @@ pub(super) async fn fix_review(
         .into_iter()
         .find(|g| g.config.source_links.contains(&link))
     {
+        if existing.status == otto_core::domain::GoalLoopStatus::Draft {
+            ctx.goal_loops_repo
+                .set_review_base(&existing.id, head)
+                .await
+                .map_err(ApiError)?;
+            crate::goal_loop::start_loop(&ctx, &existing.id)
+                .await
+                .map_err(ApiError)?;
+            return Ok(Json(
+                ctx.goal_loops_repo
+                    .get(&existing.id)
+                    .await
+                    .map_err(ApiError)?,
+            ));
+        }
         return Ok(Json(existing));
     }
     // Verify the object exists before persisting the goal; provisioning resolves

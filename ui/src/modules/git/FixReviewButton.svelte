@@ -15,6 +15,7 @@
   let alive = true;
   onDestroy(() => { alive = false; });
   const unavailable = $derived(reviewFixError(review, target));
+  const ineligible = $derived(reviewFixError(review, 9.5));
   async function start(): Promise<void> {
     if (busy || unavailable) return;
     const owner = review.id;
@@ -31,9 +32,9 @@
   }
 </script>
 
-<button class="btn small primary" disabled={!!unavailable} title={unavailable ?? 'Fix and independently verify findings in an isolated local worktree'} onclick={() => { open = true; error = null; }}>Run agent to fix…</button>
+<button class="btn small primary" disabled={!!ineligible} title={ineligible ?? 'Fix and independently verify findings in an isolated local worktree'} onclick={() => { open = true; error = null; }}>Run agent to fix…</button>
 {#if open}
-  <Modal title="Fix review findings" width={460} onclose={() => { if (!busy) open = false; }}>
+  <Modal title="Fix review findings" width={460} dismissable={!busy} onclose={() => { if (!busy) open = false; }}>
     {#snippet children()}
       <p>Batch related fixes, verify every previous finding, then run a fresh review.</p>
       <label class="fix-target">Reviewer target (out of 10)<input type="number" min="1" max="10" step="0.1" bind:value={target} /></label>

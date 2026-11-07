@@ -6408,3 +6408,82 @@ blobs, request, Jira context, node params and workflow version, with clean repos
 An output with `context_reused: true` is a background-context cache hit; it is
 never a gate/review pass. Cached replies retain `review_context_key` metadata for
 the next iteration. Unknown or changed dependencies execute normally.
+### Adaptive Git review and local fix goals (2026-11)
+
+`Review.scope_plan?` is persisted in `pr_reviews.scope_plan_json` (migration 0206).
+Older reviews omit it. Shape:
+
+```json
+{
+  "base_sha": "full merge-base SHA (empty for local review)",
+  "head_sha": "full reviewed SHA",
+  "summary": "Changed behavior and inspected scope",
+  "related_modules": ["path:line and affected consumer relationship"],
+  "risks": ["concrete risk introduced by the change"],
+  "lenses": [{"name": "Security", "reason": "Changed permission boundary", "instructions": "Trace caller permissions"}],
+  "prior_findings": [{"finding_id": "stable finding ID", "disposition": "fixed|still_open|not_relevant", "evidence": "current code/check evidence or causal-scope reason"}],
+  "verification_notes": ["Excluded or unverified claim and evidence"],
+  "source": "deterministic documentation scope or timed agent assessment"
+}
+```
+
+Scope assessment precedes fan-out. Documentation-only changes under `docs/*.md`
+can use a deterministic one-lens plan; other changes use one managed read-only
+assessment with a **120-second absolute limit and one attempt**. Assessment failure
+launches no reviewers and leaves an explicit retryable review error. Exact selected
+lenses, reasons and provider assignments are visible before they run. Assessment
+and reviewer sessions share the daemon reviewer semaphore; cancellation reaches
+queued sessions without waiting for another reviewer to finish.
+
+`ReviewConfig.cross_provider_check?: boolean` defaults to false. Configured
+providers form the pool for one provider per selected lens; true compares each
+selected lens across its configured providers. Relevant configured instructions
+remain available to the assessment and the selected reviewer. Adaptive reviews use
+managed fan-out, including when older stored `mode: orchestrator` values are read,
+so provider-internal subagents cannot bypass the concurrency bound.
+`previous_review_id?: string` is an optional per-run workflow lineage link; it must
+belong to the same repository and PR. Without it, reruns inspect the latest completed
+review for the same PR (local review history is additionally source-branch scoped).
+Inherited finding IDs remain in subsequent scope plans; disappearance is not proof
+of a fix. Dispositions are attributed agent assessments and retain their evidence.
+
+PR reviews materialize the complete local **merge-base → recorded HEAD** patch,
+not a target-tip diff or the 200 KB forge preview. Both revisions are immutable in
+the scope plan. The patch excludes uncommitted checkout changes. Missing ancestry,
+unavailable checkout, or the 32 MiB safety limit fails explicitly instead of
+silently reviewing a truncated patch. The existing durable diff/prompt storage is
+reused by retries at the original reviewed revision.
+
+The final verifier receives stable daemon-assigned source IDs for raw claims and
+must account for each exactly once, including exclusions. One cohesive fix can
+cover multiple source IDs. Retained comments require `disposition: verified` and
+nonempty evidence. Unknown IDs/dispositions, missing evidence, omitted claims,
+unverified claims, and verifier fallback leave the run **error/incomplete**;
+raw claims stay in the agent results, and excluded claims stay in verification
+notes. An unverified claim is never silently promoted to a PR comment. Severity
+is based on concrete impact, not finding count or a desired score. Preexisting
+issues merely widened by the change belong once in summary context. Critical-path
+and false-green test gaps matter; exhaustive hypothetical branch coverage does not.
+
+| Method | Access | Request | Response |
+| --- | --- | --- | --- |
+| POST /reviews/{review_id}/fix-goal | human credential + ws editor | `{ "target_score"?: number }` (default 9.5, finite 1–10) | Existing/new `GoalLoop`; new/draft loops start immediately |
+
+Fix goals require a completed PR review with a scope plan and matching durable
+full head SHA. Legacy/local/running/incomplete reviews are rejected with 400;
+unauthorized identities fail the normal auth/role gates. The endpoint checks the
+agent budget and commit availability. Repeated requests reuse the loop linked by
+`config.source_links = ["review:<review_id>"]`; a partially created draft is pinned
+and started again, while running/stopped/exhausted loops open their current state.
+The original reviewed SHA seeds a new isolated Goal Loop worktree, even if the
+user's repository HEAD moved. Nothing is staged, committed, pushed, merged or
+published. Default limits are six iterations, two active hours, 20 minutes per
+phase; reaching a limit is incomplete, not success. The loop UI owns Stop/Resume.
+
+The 0–10 target is explicitly subjective reviewer judgement supported by evidence.
+Every must-fix/should-fix needs fixed evidence or a justified not-relevant disposition;
+optional low-priority work may remain explicitly deferred. Each cycle re-verifies
+prior findings, performs a fresh review of the original PR plus fixes, and runs
+relevant critical-path checks. Goal Loop criteria and completion review gate success;
+the numeric target alone cannot complete a goal. No additional WebSocket event is
+introduced: scope changes use `review_changed`, fix progress uses Goal Loop events.

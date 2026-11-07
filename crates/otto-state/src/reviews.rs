@@ -685,6 +685,47 @@ mod tests {
         pool.into()
     }
 
+    #[tokio::test]
+    async fn scope_plan_survives_restart_and_cancel_prevents_late_replacement() {
+        let pool = mem_pool().await;
+        let store = ReviewsRepo::new(pool.clone());
+        let review = store.create_review(&"repo".into(), 7).await.unwrap();
+        let mut plan: otto_core::domain::ReviewScopePlan = serde_json::from_value(serde_json::json!({
+            "head_sha":"abc", "summary":"A permission boundary changed", "related_modules":["auth.rs → api.rs"], "risks":["Anonymous access"],
+            "lenses":[{"name":"Security","reason":"The permission check changed","instructions":"Trace caller permissions"}],
+            "prior_findings":[{"finding_id":"old","disposition":"not_relevant","evidence":"Unchanged at old.rs:2"}],
+            "verification_notes":["unverified: caller cannot be established"],"source":"agent assessment"
+        })).unwrap();
+        store.set_scope_plan(&review.id, &plan).await.unwrap();
+        let reopened = ReviewsRepo::new(pool);
+        let saved = reopened
+            .get_review(&review.id)
+            .await
+            .unwrap()
+            .scope_plan
+            .unwrap();
+        assert_eq!(saved.head_sha, "abc");
+        assert_eq!(saved.lenses[0].reason, "The permission check changed");
+        assert_eq!(saved.prior_findings[0].finding_id, "old");
+        assert_eq!(saved.verification_notes.len(), 1);
+        reopened
+            .set_status(&review.id, ReviewStatus::Cancelled, None)
+            .await
+            .unwrap();
+        plan.summary = "late stale result".into();
+        reopened.set_scope_plan(&review.id, &plan).await.unwrap();
+        assert_eq!(
+            reopened
+                .get_review(&review.id)
+                .await
+                .unwrap()
+                .scope_plan
+                .unwrap()
+                .summary,
+            "A permission boundary changed"
+        );
+    }
+
     fn agent(name: &str, status: &str) -> ReviewAgentState {
         ReviewAgentState {
             name: name.into(),

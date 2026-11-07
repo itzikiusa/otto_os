@@ -1299,6 +1299,8 @@ pub struct ReviewFindingDisposition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewScopePlan {
     #[serde(default)]
+    pub base_sha: String,
+    #[serde(default)]
     pub head_sha: String,
     pub summary: String,
     pub related_modules: Vec<String>,

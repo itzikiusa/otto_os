@@ -61,10 +61,9 @@ pub(super) async fn assess_scope(
     let prompt = format!("{}\nConfigured lenses (reuse exact names when relevant; omit irrelevant lenses and add missing ones):\n{}\nIf configured, the Required checks lens is mandatory and its commands must be preserved. For every prior finding in context, add prior_findings:[{{finding_id,disposition:fixed|still_open|not_relevant,evidence}}] to the scope object. Read current code before claiming fixed; evidence must cite concrete code or an actually executed check. Preserve every ID, including previously waived items. Transport requirement: return a JSON ARRAY with exactly one object: {{\"severity\":\"info\",\"body\":\"the JSON scope object above, encoded as a string\"}}. This is a scope plan, not a code finding.",
         otto_review::scope::assessment_prompt(diff_path, branch_context, guidance), candidates);
     let slots = reviewer_slots();
-    let _slot = slots
-        .acquire_owned()
+    let _slot = otto_review::scope::acquire_slot(slots, guard.flag())
         .await
-        .map_err(|e| Error::Internal(e.to_string()))?;
+        .map_err(Error::Invalid)?;
     let started = std::time::Instant::now();
     let result = tokio::time::timeout(
         Duration::from_secs(120),
@@ -112,15 +111,7 @@ pub(super) async fn assess_scope(
         .trim();
     let mut plan: ReviewScopePlan = serde_json::from_str(body)
         .map_err(|e| Error::Invalid(format!("Invalid scope assessment: {e}")))?;
-    otto_review::scope::validate(&plan).map_err(Error::Invalid)?;
-    if prior_ids
-        .iter()
-        .any(|id| !plan.prior_findings.iter().any(|p| p.finding_id == *id))
-    {
-        return Err(Error::Invalid(
-            "Scope assessment omitted a prior finding disposition; re-run review".into(),
-        ));
-    }
+    otto_review::scope::validate_prior_findings(&plan, prior_ids).map_err(Error::Invalid)?;
     if cfg.agents.iter().any(|a| a.name == CHECKS_REVIEWER_NAME)
         && !plan.lenses.iter().any(|l| l.name == CHECKS_REVIEWER_NAME)
     {
@@ -172,7 +163,14 @@ pub(super) async fn prior_review_context(
                 continue;
             }
         }
-        let findings = ctx.findings_store.list_full_for_review(&review.id).await?;
+        let mut findings = ctx.findings_store.list_seen_for_review(&review.id).await?;
+        if let Some(plan) = &review.scope_plan {
+            for prior in &plan.prior_findings {
+                if !findings.iter().any(|f| f.id == prior.finding_id) {
+                    findings.push(ctx.findings_store.get_full(&prior.finding_id).await?);
+                }
+            }
+        }
         let ids = findings.iter().map(|f| f.id.clone()).collect();
         return Ok((format!("\n## Prior review {} — verify before fresh review\nFor EACH prior finding, cite its ID and record fixed + concrete current-code/check evidence, still_open + trigger/evidence, or not_relevant + causal-scope reason. Missing from fresh output is NOT proof of a fix. Do not inherit earlier claims without rechecking. Then perform an additional fresh review of the current causal diff.\n{}\n",
             review.id, serde_json::to_string(&findings).map_err(|e| Error::Internal(e.to_string()))?), ids));

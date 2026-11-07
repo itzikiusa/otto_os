@@ -1773,6 +1773,30 @@ async fn diff_text_against_uses_merge_base_and_review_adds_untracked() {
         "{r}"
     );
     assert!(!r.contains("main_only.txt"));
+
+    // The PR review excludes both later target commits and uncommitted local
+    // changes, and preserves a complete patch beyond the old 200KB forge cap.
+    write(
+        &dir,
+        "large.txt",
+        &("line of reviewed code\n".repeat(15_000)),
+    );
+    sh_git(&dir, &["add", "large.txt"]);
+    sh_git(&dir, &["commit", "-m", "large PR content"]);
+    write(
+        &dir,
+        "feature.txt",
+        "dirty worktree must not enter PR scope\n",
+    );
+    let causal = git.causal_review_diff("main").await.unwrap();
+    assert!(causal.text.len() > 200_000);
+    assert!(causal.text.contains("+mine"));
+    assert!(!causal.text.contains("main_only.txt"));
+    assert!(!causal.text.contains("brand_new.rs"));
+    assert!(!causal.text.contains("dirty worktree"));
+    assert_eq!(causal.head_sha, git.rev_parse("HEAD").await.unwrap());
+    assert_ne!(causal.base_sha, git.rev_parse("main").await.unwrap());
+    assert!(git.causal_review_diff("missing-target").await.is_err());
 }
 
 #[tokio::test]

@@ -597,3 +597,39 @@ with `status: "running"` so open panels refresh the agent rows.) The UI matches
   credential-ownership (S4) enforced here.
 - `docs/contracts/api.md`, `docs/contracts/ws.md` — authoritative endpoint + WS
   contract.
+
+## Scope first, then verified findings
+
+Git reviews now inspect the change and affected consumers before selecting lenses.
+Open **Review scope** to see the exact lenses, why they apply, and their assigned
+providers. A small change gets a proportionate review; a broad change can select up
+to ten distinct lenses. Documentation-only changes have a short deterministic path.
+Code scope assessment has a two-minute limit; failure is shown rather than launching
+every configured lens as a fallback.
+
+Enabled providers are a pool: the default runs one provider per selected lens.
+Enable **Cross-provider check** in Configure review agents when comparing providers
+is useful. Both modes use the existing bounded reviewer queue. The old orchestrator
+setting remains readable but adaptive reviews use managed fan-out.
+
+Reviewers read the complete causal PR patch from the merge-base to the reviewed
+commit, together with affected definitions and consumers. The final verifier traces
+claims independently, groups issues sharing a fix, and records exclusions separately.
+A claim with missing evidence or an omitted verification disposition leaves the review
+incomplete. A prior issue disappearing is never treated as verified; each rerun keeps
+an explicit fixed/still-open/not-relevant disposition with evidence.
+
+## Run an agent to fix
+
+A completed PR review offers **Run agent to fix…**. The dialog defaults to a 9.5/10
+reviewer target and starts the existing Goal Loop on an isolated worktree at the
+reviewed commit. Follow progress, evidence, Stop and Resume in Goal Loops. Fixes remain
+local and uncommitted for inspection; the action does not authorize publication.
+
+The agent batches related must-fix and should-fix work, verifies previous findings,
+then performs a fresh review. Optional lows may be explicitly deferred. A score is a
+subjective assessment with evidence, never an objective measurement, and cannot bypass
+unresolved important findings or unavailable material checks. Six iterations or two
+active hours is the default budget; exhaustion stays incomplete and can be resumed.
+Legacy reviews need a fresh scope assessment first. Local uncommitted reviews cannot
+seed this commit-based fix flow.
