@@ -120,7 +120,7 @@
   };
   // ⌘K: create on the list; Pause / Resume / Extend budget / Stop while a loop is open.
   $effect(() => {
-    const create = { id: 'loops.new', title: 'New goal loop…', group: 'Goal Loops', keywords: 'create goal iterate objective', run: () => { if (selectedId) back(); creating = true; } };
+    const create = { id: 'loops.new', title: 'New goal loop or engineering graph…', group: 'Goal Loops', keywords: 'create goal iterate objective engineering graph dependencies', run: () => { if (selectedId) back(); creating = true; } };
     const openId = selectedId;
     if (!openId) return registry.register('loops', [create]);
     const loop = loops.detail?.loop.id === openId ? loops.detail.loop : null;
@@ -150,7 +150,7 @@
   {:else}
     <PageHeader
       title="Goal Loops"
-      subtitle="Agents iterate toward a goal within a budget"
+      subtitle="Goal loops and engineering graphs, bounded by evidence and budget"
     >
       {#snippet actions()}
         <AutomateGuideButton current="loops" />
@@ -181,7 +181,7 @@
           variant="page"
           icon="refresh"
           title="No goal loops yet"
-          body="Define a goal and a budget — agents iterate on an isolated branch until it’s met."
+          body="Choose a whole-goal loop or an engineering graph with task prerequisites. Set a concrete goal and a budget."
           actionLabel="New goal loop"
           actionIcon="plus"
           onaction={() => (creating = true)}
@@ -200,6 +200,7 @@
               {#if l.definition?.summary}<span class="goal" title={l.definition.summary}>{l.definition.summary}</span>{/if}
               <div class="bar" aria-hidden="true"><span class="bar-fill status-{l.status}" style:width={`${l.progress_pct}%`}></span></div>
               <div class="card-meta">
+                <span>{l.config.graph ? 'Engineering graph' : 'Goal loop'}</span>
                 <span>Iteration {l.current_iteration} of {l.limits.max_iterations}</span>
                 <span>{l.progress_pct}% complete</span>
                 {#if l.status === 'running' && PHASE_LABEL[l.phase]}<span class="phase">{PHASE_LABEL[l.phase]}</span>

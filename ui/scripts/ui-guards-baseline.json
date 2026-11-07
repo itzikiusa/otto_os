@@ -220,7 +220,6 @@
     "src/modules/kubernetes/ClusterWorkspace.svelte": 866,
     "src/modules/kubernetes/monitor/MonitorCluster.svelte": 924,
     "src/modules/kubernetes/monitor/MonitorFleet.svelte": 1123,
-    "src/modules/loops/LoopDetail.svelte": 827,
     "src/modules/mcp/OttoServerHome.svelte": 805,
     "src/modules/panels/BrowserPanel.svelte": 1051,
     "src/modules/panels/FileTree.svelte": 989,

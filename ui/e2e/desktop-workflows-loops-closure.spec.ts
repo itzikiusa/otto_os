@@ -174,11 +174,12 @@ test.describe('Workflows & Goal Loops UX closure (phone + tablet, light + dark)'
       await page.goto(`/#/loops/${blockedLoop.id}`);
       await expect(page.getByRole('heading', { name: 'Migrate Auth Service', exact: true })).toBeVisible();
 
-      // 02-GL-01: Stepper marks Evaluate as current step (aria-current="step") and Plan/Execute as past
-      const evalStep = page.locator('.stepper .step', { hasText: 'Evaluate' });
-      await expect(evalStep).toHaveAttribute('aria-current', 'step');
-      await expect(evalStep).toHaveClass(/current/);
-      await expect(evalStep).not.toHaveClass(/active/);
+      // 02-GL-01: The blocked evaluation remains selected without advertising live execution.
+      const phases = page.getByRole('group', { name: 'Goal loop phases', exact: true });
+      const evalStep = phases.getByRole('button', { name: 'Evaluate — Blocked', exact: true });
+      await expect(evalStep).toHaveAttribute('aria-pressed', 'true');
+      await expect(evalStep).toHaveClass(/selected/);
+      await expect(phases.locator('.diagram-node.running')).toHaveCount(0);
 
       // 02-GL-02: Blocked loop progress bar uses warning fill (.bar-fill.warn)
       await expect(page.locator('.overview .bar-fill.warn')).toBeVisible();

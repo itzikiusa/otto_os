@@ -10,10 +10,11 @@
   import SessionView from '../agents/SessionView.svelte';
   import IterationRow from './IterationRow.svelte';
   import GoalGraphView from './GoalGraphView.svelte';
+  import IterationDiagram from './IterationDiagram.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import { PHASES, PHASE_LABEL, stepVisual, progressFill, criterionMark } from './loopPresentation';
+  import { PHASE_LABEL, progressFill, criterionMark } from './loopPresentation';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { humanVerification } from './verification';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -233,7 +234,7 @@
 </script>
 
 <div class="detail-page">
-<PageHeader title={loop?.name ?? 'Goal loop'}>
+<PageHeader class="loop-header" title={loop?.name ?? 'Goal loop'} subtitle={loop ? (loop.config.graph ? 'Engineering graph' : 'Goal loop') : undefined}>
   {#snippet leading()}
     <button class="icon-btn" title="Back to Goal Loops" aria-label="Back to Goal Loops" onclick={onback}>
       <Icon name="chevronLeft" size={14} />
@@ -300,20 +301,13 @@
         <span class="pct">{loop.progress_pct}%</span>
       </div>
 
-      <ol class="stepper" aria-label="Iteration phases">
-        {#each PHASES as p, i (p)}
-          {@const vis = stepVisual(loop, i)}
-          <li class="step" class:active={vis.active} class:current={vis.current && !vis.active} class:past={vis.past} aria-current={vis.current ? 'step' : undefined}>
-            <span class="step-dot">{#if vis.past}<Icon name="check" size={12} />{/if}</span>{PHASE_LABEL[p]}
-          </li>
-        {/each}
-        {#if loop.status === 'running' && loop.phase === 'waiting'}<li class="step waiting">Waiting on an agent</li>{/if}
-      </ol>
+      {#if !loop.config.graph}<IterationDiagram {loop} />
+      {:else if loop.phase !== 'done'}<p class="summary">Current phase: {loop.phase === 'waiting' ? 'Waiting on an agent' : PHASE_LABEL[loop.phase]}</p>{/if}
 
       <dl class="stats">
         <div><dt>Iteration</dt><dd>{loop.current_iteration} <span class="of" class:cap-hit={cap === 'iterations'}>/ {loop.limits.max_iterations}</span>{#if cap === 'iterations'} <span class="cap-hit">cap reached</span>{/if}</dd></div>
         <div><dt>Time used</dt><dd>{formatSeconds(Math.round(elapsedSecs(loop)))} <span class="of" class:cap-hit={cap === 'runtime'}>/ {formatSeconds(loop.limits.max_runtime_secs)}</span>{#if cap === 'runtime'} <span class="cap-hit">cap reached</span>{/if}</dd></div>
-        <div><dt>Mode</dt><dd>{loop.config.mode === 'research' ? 'Research' : 'Build'}</dd></div>
+        <div><dt>Work type</dt><dd>{loop.config.mode === 'research' ? 'Research' : 'Build'}</dd></div>
         {#if loop.branch}<div class="wide"><dt>Branch</dt><dd class="mono" title={loop.branch}>{loop.branch}</dd></div>{/if}
       </dl>
 
@@ -460,6 +454,10 @@
 {/if}
 
 <style>
+  /* Keep Resume and the overflow menu reachable beside a long goal name. */
+  @media (max-width: 640px) {
+    .detail-page :global(.loop-header .ph-title-block) { min-width: 0; max-width: 45%; }
+  }
   .extend { display: grid; gap: 6px; }
   .extend-lede { margin: 0 0 6px; color: var(--text-dim); font-size: var(--fs-s); }
   .extend-lbl { font-size: var(--fs-s); font-weight: 600; margin-block-start: 6px; }
@@ -513,53 +511,6 @@
     font-variant-numeric: tabular-nums;
     min-width: 4ch;
     text-align: end;
-  }
-  .stepper {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px 18px;
-    list-style: none;
-    margin: 12px 0 0;
-    padding: 0;
-  }
-  .step {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
-  .step.active,
-  .step.current {
-    color: var(--text);
-    font-weight: 600;
-  }
-  .step.waiting {
-    color: var(--warning);
-  }
-  .step-dot {
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    border: 1.5px solid var(--border-strong);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-dim);
-  }
-  .step.past .step-dot {
-    border-color: var(--status-working);
-    color: var(--success);
-  }
-  .step.current .step-dot {
-    border-color: var(--text);
-  }
-  .step.active .step-dot {
-    background: var(--status-working);
-    border-color: var(--status-working);
-  }
-  @media (prefers-reduced-motion: no-preference) {
-    .step.active .step-dot { animation: otto-pulse 1.6s ease-in-out infinite; }
   }
   .stats {
     display: flex;

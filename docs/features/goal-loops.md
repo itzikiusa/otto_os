@@ -62,6 +62,14 @@ The controller is `crates/otto-automation/src/goal_loop.rs`; managed roles are i
 6. When the loop requests a decision, read the question and record an answer. When automated work is ready but a human criterion is pending, inspect the retained files or running product and record specific evidence. Resume is a separate action.
 7. Review the final proof and retained files. Integrating, committing, pushing or publishing the result remains a separate operation. You can use the displayed directory in your editor or Git tools.
 
+## Goal loop or engineering graph
+
+Both are under **Goal Loops**. In **New goal loop**, choose **Execution → Goal loop** for whole-goal iterations, or **Engineering graph** for tasks with explicit prerequisites. This is separate from **Work type → Build / Research**.
+
+The standard loop has an interactive Plan → Execute → Evaluate → Digest diagram with a feedback arrow; select a phase to see what it does. The engineering graph draws the actual task dependencies. Select a node to edit its work and acceptance links before launch, or inspect its persisted status and evidence afterward. One ready task runs per iteration, sequentially. Changed work can invalidate prior evidence and dependent tasks.
+
+Switching modes preserves the current goal and criteria. Disabling an edited graph asks first, and its task edits remain available if you switch back before launching. The seven [suggested templates](goal-loop-templates.md) work with either execution type. Diagram nodes are keyboard-selectable and adapt to phone widths; large graphs scroll within their diagram.
+
 ## Research workflow
 
 Choose Research to investigate a question without requiring a repository. Add useful source links and request citations in the goal. Otto creates a dedicated directory and requires a nonempty `findings.md`; the report becomes a proof artifact. Add separate acceptance criteria for source quality, confidence, unresolved questions or a human decision. A nonempty report alone does not establish that its claims are correct.
