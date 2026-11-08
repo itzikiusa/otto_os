@@ -443,12 +443,9 @@ async fn mongo_shell_fallback_preserves_options_and_returns_values() {
             )),
         )
         .await
-        .expect("findOne shell fallback");
-    assert!(result
-        .rows
-        .iter()
-        .flatten()
-        .any(|v| v.to_string().contains("value")));
+        .expect("native findOne");
+    assert_eq!(result.columns[0].name, "value");
+    assert_eq!(result.rows, vec![vec![json!(9)]]);
     let count = driver
         .run(
             &config,
@@ -572,10 +569,10 @@ async fn mongo_shell_fallback_preserves_options_and_returns_values() {
             )),
         )
         .await
-        .expect("shell cursor");
+        .expect("native skip");
     assert_eq!(cursor.rows.len(), 2);
     assert!(cursor.truncated);
-    assert!(cursor.rows[0][0].as_str().unwrap().contains("4"));
+    assert_eq!(cursor.rows[0][0], json!(4));
     let count = driver
         .run(
             &config,
@@ -745,4 +742,73 @@ async fn mongo_cancellation_isolates_repeated_client_query_ids() {
             .unwrap()
             .is_err()
     );
+}
+
+/// The read forms the write gate verifies must really run natively, on a live
+/// server, and return what they ask for.
+#[tokio::test]
+#[ignore = "requires OTTO_DBV_E2E Mongo fixture"]
+async fn mongo_verified_read_forms_execute() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let driver = MongoDriver::default();
+    let config = cfg();
+    let collection = format!("otto_read_forms_{}", std::process::id());
+    let run = |statement: String| QueryRequest {
+        statement,
+        max_rows: Some(50),
+        timeout_ms: Some(10_000),
+        ..Default::default()
+    };
+    driver
+        .run(
+            &config,
+            &run(format!(
+                "db.{collection}.insertMany([{{n: 1}}, {{n: 2}}, {{n: 3}}, {{n: 4}}])"
+            )),
+        )
+        .await
+        .expect("seed");
+    let rows = |sort_tail: String| {
+        let (driver, config, run, collection) = (&driver, &config, &run, &collection);
+        async move {
+            driver
+                .run(config, &run(format!("db.{collection}.{sort_tail}")))
+                .await
+                .unwrap_or_else(|e| panic!("{sort_tail}: {e}"))
+                .rows
+                .len()
+        }
+    };
+    assert_eq!(
+        rows("find({}).sort({n: 1}).skip(3).limit(5)".into()).await,
+        1
+    );
+    assert_eq!(rows("find({}).skip(1).toArray()".into()).await, 3);
+    assert_eq!(rows("find({}).pretty()".into()).await, 4);
+    assert_eq!(rows("find({}).maxTimeMS(5000)".into()).await, 4);
+    assert_eq!(rows("findOne({n: 2})".into()).await, 1);
+    let by_name = driver
+        .run(
+            &config,
+            &run(format!(
+                r#"db.getCollection("{collection}").find({{n: 3}})"#
+            )),
+        )
+        .await
+        .expect("getCollection");
+    assert_eq!(by_name.rows.len(), 1);
+    let estimated = driver
+        .run(
+            &config,
+            &run(format!("db.{collection}.estimatedDocumentCount()")),
+        )
+        .await
+        .expect("estimatedDocumentCount");
+    assert_eq!(estimated.rows, vec![vec![json!(4)]]);
+    driver
+        .run(&config, &run(format!("db.{collection}.deleteMany({{}})")))
+        .await
+        .expect("cleanup");
 }

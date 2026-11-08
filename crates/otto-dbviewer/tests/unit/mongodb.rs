@@ -1379,3 +1379,55 @@ fn keyset_after_a_string_id_reaches_later_bson_types() {
         doc! { "_id": { "$gt": Bson::MaxKey } }
     );
 }
+
+#[test]
+fn everyday_read_forms_are_verified_reads() {
+    for stmt in [
+        "db.users.find({a: 1}).skip(10).limit(5)",
+        "db.users.find({a: 1}).toArray()",
+        "db.users.find({a: 1}).pretty()",
+        "db.users.find({a: 1}).maxTimeMS(1000)",
+        "db.users.findOne({a: 1})",
+        "db.users.findOne({a: 1}, {b: 1})",
+        "db.users.estimatedDocumentCount()",
+        r#"db.getCollection("users").find({})"#,
+        "db.getCollection('my-users').find({}).sort({a: 1}).limit(1)",
+        "db.users.aggregate([{$limit: 1}]).toArray()",
+        "db.getCollection.find({})",
+    ] {
+        assert!(statement_is_read_only(stmt), "{stmt}");
+    }
+}
+
+#[test]
+fn new_read_forms_do_not_open_a_write_or_a_silent_rewrite() {
+    for stmt in [
+        r#"db.getCollection("users").deleteMany({a: 1})"#,
+        r#"db.getCollection("users").aggregate([{$merge: "copy"}])"#,
+        "db.users.findOne({}).limit(2)",
+        "db.users.find({}).toArray().map(d => d.a)",
+        "db.users.find({}).skip(-1)",
+        "db.users.find({}).maxTimeMS(-1)",
+        "db.users.skip(1)",
+        "db.users.estimatedDocumentCount({maxTimeMS: 1})",
+    ] {
+        assert!(!statement_is_read_only(stmt), "{stmt}");
+    }
+}
+
+#[test]
+fn new_read_forms_parse_to_what_they_ask_for() {
+    let p = parse_command("db.users.find({}).skip(10).maxTimeMS(500)").unwrap();
+    assert_eq!(
+        (p.skip, p.max_time_ms, p.limit),
+        (Some(10), Some(500), None)
+    );
+    let p = parse_command(r#"db.getCollection("a.b-c").findOne({x: 1})"#).unwrap();
+    assert_eq!(
+        (p.collection.as_str(), p.op, p.limit),
+        ("a.b-c", MongoOp::Find, Some(1))
+    );
+    let p = parse_command("db.users.estimatedDocumentCount()").unwrap();
+    assert_eq!(p.op, MongoOp::Count);
+    assert!(p.filter.is_none());
+}
