@@ -846,6 +846,9 @@ impl Driver for MongoDriver {
                 if let Some(l) = parsed.limit {
                     action = action.limit(l);
                 }
+                if let Some(n) = parsed.skip {
+                    action = action.skip(n);
+                }
                 action.await.map_err(types::upstream)?
             }
             MongoOp::Aggregate => coll
@@ -1007,7 +1010,10 @@ impl MongoDriver {
         let max_time_ms = req
             .timeout_ms
             .filter(|&t| t > 0)
-            .map(|t| i64::try_from(t).unwrap_or(i64::MAX));
+            .map(|t| i64::try_from(t).unwrap_or(i64::MAX))
+            .into_iter()
+            .chain(parsed.max_time_ms)
+            .min();
         let started = Instant::now();
 
         // `.explain()` (or the request's explain flag) → return the query plan.
@@ -1077,7 +1083,7 @@ impl MongoDriver {
                 let keyset = keyset_filter(
                     parsed.filter.as_ref(),
                     parsed.sort.as_ref(),
-                    parsed.limit.is_some(),
+                    parsed.limit.is_some() || parsed.skip.is_some(),
                     req.cursor.as_ref(),
                 )?;
                 let keyset_eligible = keyset.is_some();
@@ -1102,11 +1108,15 @@ impl MongoDriver {
                 // (SQL engines map it to `OFFSET`). Applied only when there's no
                 // explicit user `.limit(n)` — same rule as the SQL auto-limiter, so
                 // the pager and the server never disagree — and not when the
-                // keyset cursor already positioned the page.
-                if let Some(off) = req.offset.filter(|&o| o > 0) {
-                    if parsed.limit.is_none() && !cursor_applied {
-                        action = action.skip(off);
-                    }
+                // keyset cursor already positioned the page. It pages on top of
+                // the statement's own `.skip(n)`.
+                let pager_skip = req
+                    .offset
+                    .filter(|_| parsed.limit.is_none() && !cursor_applied)
+                    .unwrap_or(0);
+                let skip = parsed.skip.unwrap_or(0).saturating_add(pager_skip);
+                if skip > 0 {
+                    action = action.skip(skip);
                 }
                 if let Some(ms) = max_time_ms {
                     // maxTimeMS on the cursor tells the server to abort the query
@@ -2259,6 +2269,9 @@ struct ParsedCommand {
     projection: Option<Document>,
     sort: Option<Document>,
     limit: Option<i64>,
+    skip: Option<u64>,
+    /// `.maxTimeMS(n)`; the tighter of this and the request timeout applies.
+    max_time_ms: Option<i64>,
     pipeline: Option<Vec<Document>>,
     /// Update modifications for update{One,Many} (e.g. `{ "$set": {…} }`).
     update: Option<Document>,
@@ -2285,6 +2298,9 @@ struct Parsed {
     projection: Option<Document>,
     sort: Option<Document>,
     limit: Option<i64>,
+    skip: Option<u64>,
+    /// `.maxTimeMS(n)`; the tighter of this and the request timeout applies.
+    max_time_ms: Option<i64>,
     pipeline: Option<Vec<Document>>,
     update: Option<Document>,
     documents: Option<Vec<Document>>,
@@ -2434,6 +2450,8 @@ fn parse_command(statement: &str) -> Result<Parsed> {
         projection: parsed.projection,
         sort: parsed.sort,
         limit: parsed.limit,
+        skip: parsed.skip,
+        max_time_ms: parsed.max_time_ms,
         pipeline: parsed.pipeline,
         update: parsed.update,
         documents: parsed.documents,
@@ -2449,8 +2467,8 @@ fn parse_command(statement: &str) -> Result<Parsed> {
 /// the same parser the executor uses (`parse_command`) and anchoring the
 /// decision to the resolved [`MongoOp`] — never a substring scan, which a
 /// `.find(` inside a string literal can spoof. Parse failure ⇒ NOT read-only
-/// (the conservative default: the guard refuses what it can't vet; an
-/// unparseable statement errors at execution anyway).
+/// (the conservative default: the guard refuses what it can't vet; a shell
+/// expression the parser can't read would run through `mongosh`).
 pub(crate) fn statement_is_read_only(stmt: &str) -> bool {
     let Ok(parsed) = parse_command(stmt.trim()) else {
         return false;
@@ -2471,6 +2489,14 @@ pub(crate) fn statement_is_read_only(stmt: &str) -> bool {
             .any(|stage| stage.keys().any(|k| k == "$out" || k == "$merge")),
         _ => false,
     }
+}
+
+/// Why the executor's parser can't read one split statement, `None` if it can.
+pub(crate) fn statement_parse_error(stmt: &str) -> Option<String> {
+    parse_command(stmt.trim()).err().map(|e| match e {
+        otto_core::Error::Invalid(why) => why,
+        other => other.to_string(),
+    })
 }
 
 fn parse_json_command(raw: &str) -> Result<ParsedCommand> {
@@ -2614,245 +2640,8 @@ fn parse_json_command(raw: &str) -> Result<ParsedCommand> {
             .map(str::to_string),
         distinct_field: obj.get("field").and_then(Value::as_str).map(str::to_string),
         explain: obj.get("explain").and_then(Value::as_bool).unwrap_or(false),
-    })
-}
-
-/// Tolerant `db.<coll>.<op>(<arg>)` parser with optional `.limit(n)`/`.sort({})`.
-fn parse_shorthand(raw: &str) -> Result<ParsedCommand> {
-    let s = raw.strip_prefix("db.").unwrap_or(raw);
-    // The last dot before the first call separates a dotted collection name
-    // from its method (e.g. db.system.profile.find()).
-    let head = s.split_once('(').map(|(head, _)| head).unwrap_or(s);
-    let dot = head
-        .rfind('.')
-        .ok_or_else(|| types::invalid("expected db.<collection>.<op>(...)"))?;
-    let collection = s[..dot].trim().to_string();
-    let rest = &s[dot + 1..];
-
-    let mut cmd = ParsedCommand {
-        collection,
         ..Default::default()
-    };
-
-    // Walk method calls: name(args) ['.' name(args)]*
-    let mut cursor = rest;
-    while !cursor.trim().is_empty() {
-        let cursor_t = cursor.trim_start();
-        let paren = cursor_t
-            .find('(')
-            .ok_or_else(|| types::invalid("expected method call like find(...)"))?;
-        let method = cursor_t[..paren].trim().to_string();
-        let (arg, after) = extract_balanced(&cursor_t[paren..])?;
-
-        // Only cursor operations can be chained. Never reinterpret an invalid
-        // chain as a different collection operation or silently drop options.
-        if let Some(op) = cmd.op_kind {
-            let allowed = match op {
-                MongoOp::Find => matches!(
-                    method.as_str(),
-                    "sort" | "limit" | "projection" | "explain" | "count"
-                ),
-                MongoOp::Aggregate => method == "explain",
-                _ => false,
-            };
-            if !allowed || cmd.explain || (method == "count" && !arg.trim().is_empty()) {
-                return Err(types::invalid("unsupported Mongo method chain"));
-            }
-        } else if matches!(method.as_str(), "sort" | "limit" | "projection" | "explain") {
-            return Err(types::invalid("cursor method requires find or aggregate"));
-        }
-        let max_args = match method.as_str() {
-            "find" | "distinct" | "updateOne" | "updateMany" | "replaceOne" | "createIndex" => 2,
-            "explain" | "getIndexes" | "getIndices" => 0,
-            _ => 1,
-        };
-        let argc = if arg.trim().is_empty() {
-            0
-        } else {
-            split_top_level_args(&arg).len()
-        };
-        if argc > max_args {
-            return Err(types::invalid("Mongo options require mongosh execution"));
-        }
-        match method.as_str() {
-            "find" => {
-                cmd.op_kind = Some(MongoOp::Find);
-                // `find(filter)` or `find(filter, projection)` (mongosh 2-arg form).
-                let parts = split_top_level_args(&arg);
-                if let Some(f) = parts.first() {
-                    if !f.trim().is_empty() {
-                        cmd.filter = Some(parse_doc_arg(f)?);
-                    }
-                }
-                if let Some(p) = parts.get(1) {
-                    if !p.trim().is_empty() {
-                        cmd.projection = Some(parse_doc_arg(p)?);
-                    }
-                }
-            }
-            "aggregate" => {
-                cmd.op_kind = Some(MongoOp::Aggregate);
-                cmd.pipeline = Some(parse_pipeline_arg(&arg)?);
-            }
-            "distinct" => {
-                if cmd.op_kind.is_some()
-                    || cmd.limit.is_some()
-                    || cmd.sort.is_some()
-                    || cmd.projection.is_some()
-                    || cmd.explain
-                {
-                    return Err(types::invalid(
-                        "distinct must be called directly on a collection",
-                    ));
-                }
-                let parts = split_top_level_args(&arg);
-                if !(1..=2).contains(&parts.len()) {
-                    return Err(types::invalid("distinct expects a field name and an optional filter; options are unsupported"));
-                }
-                let field = mongo_parse::parse_value(parts[0].trim())?;
-                cmd.distinct_field = Some(
-                    field
-                        .as_str()
-                        .filter(|f| !f.is_empty())
-                        .ok_or_else(|| {
-                            types::invalid("distinct requires a non-empty string field name")
-                        })?
-                        .to_string(),
-                );
-                if let Some(filter) = parts.get(1) {
-                    cmd.filter = Some(parse_doc_arg(filter)?);
-                }
-                cmd.op_kind = Some(MongoOp::Distinct);
-            }
-            "countDocuments" | "count" => {
-                cmd.op_kind = Some(if method == "count" {
-                    MongoOp::Count
-                } else {
-                    MongoOp::CountDocuments
-                });
-                if !arg.trim().is_empty() {
-                    cmd.filter = Some(parse_doc_arg(&arg)?);
-                }
-            }
-            "updateOne" | "updateMany" => {
-                cmd.op_kind = Some(if method == "updateOne" {
-                    MongoOp::UpdateOne
-                } else {
-                    MongoOp::UpdateMany
-                });
-                let parts = split_top_level_args(&arg);
-                let filter = parts
-                    .first()
-                    .filter(|s| !s.trim().is_empty())
-                    .ok_or_else(|| types::invalid("update requires a filter"))?;
-                let update = parts
-                    .get(1)
-                    .filter(|s| !s.trim().is_empty())
-                    .ok_or_else(|| types::invalid("update requires an update document"))?;
-                cmd.filter = Some(parse_doc_arg(filter)?);
-                cmd.update = Some(parse_doc_arg(update)?);
-            }
-            "replaceOne" => {
-                // Whole-document replacement (the grid's JSON-view editor emits
-                // this); the replacement rides the `update` slot like updateOne.
-                cmd.op_kind = Some(MongoOp::ReplaceOne);
-                let parts = split_top_level_args(&arg);
-                let filter = parts
-                    .first()
-                    .filter(|s| !s.trim().is_empty())
-                    .ok_or_else(|| types::invalid("replaceOne requires a filter"))?;
-                let replacement = parts
-                    .get(1)
-                    .filter(|s| !s.trim().is_empty())
-                    .ok_or_else(|| types::invalid("replaceOne requires a replacement document"))?;
-                cmd.filter = Some(parse_doc_arg(filter)?);
-                cmd.update = Some(parse_doc_arg(replacement)?);
-            }
-            "insertOne" => {
-                cmd.op_kind = Some(MongoOp::InsertOne);
-                cmd.documents = Some(vec![parse_doc_arg(&arg)?]);
-            }
-            "insertMany" => {
-                cmd.op_kind = Some(MongoOp::InsertMany);
-                cmd.documents = Some(parse_pipeline_arg(&arg)?);
-            }
-            "deleteOne" | "deleteMany" => {
-                if arg.trim().is_empty() {
-                    return Err(types::invalid("delete requires an explicit filter"));
-                }
-                cmd.op_kind = Some(if method == "deleteOne" {
-                    MongoOp::DeleteOne
-                } else {
-                    MongoOp::DeleteMany
-                });
-                if !arg.trim().is_empty() {
-                    cmd.filter = Some(parse_doc_arg(&arg)?);
-                }
-            }
-            "createIndex" => {
-                cmd.op_kind = Some(MongoOp::CreateIndex);
-                let parts = split_top_level_args(&arg);
-                let keys = parts
-                    .first()
-                    .filter(|s| !s.trim().is_empty())
-                    .ok_or_else(|| types::invalid("createIndex requires a key spec"))?;
-                cmd.index_keys = Some(parse_doc_arg(keys)?);
-                if let Some(opts) = parts.get(1).filter(|s| !s.trim().is_empty()) {
-                    cmd.index_options = Some(parse_doc_arg(opts)?);
-                }
-            }
-            "dropIndex" => {
-                cmd.op_kind = Some(MongoOp::DropIndex);
-                let name = mongo_parse::parse_value(arg.trim())?;
-                cmd.index_name = Some(
-                    name.as_str()
-                        .ok_or_else(|| types::invalid("dropIndex key documents require mongosh"))?
-                        .to_string(),
-                );
-            }
-            // Takes no arguments; anything passed is ignored, as in mongosh.
-            "getIndexes" | "getIndices" => {
-                cmd.op_kind = Some(MongoOp::GetIndexes);
-            }
-            "explain" => {
-                // A trailing `.explain()` modifies the preceding find/aggregate.
-                cmd.explain = true;
-            }
-            "limit" => {
-                let limit = arg
-                    .trim()
-                    .parse::<i64>()
-                    .map_err(|_| types::invalid("limit must be an integer"))?;
-                if limit < 0 {
-                    return Err(types::invalid(
-                        "negative single-batch limits require mongosh",
-                    ));
-                }
-                cmd.limit = (limit > 0).then_some(limit);
-            }
-            "sort" => {
-                cmd.sort = Some(parse_doc_arg(&arg)?);
-            }
-            "projection" => {
-                cmd.projection = Some(parse_doc_arg(&arg)?);
-            }
-            other => {
-                return Err(types::invalid(format!("unsupported method '{other}'")));
-            }
-        }
-
-        // Comments after a method are trivia, not another method or option.
-        // Reject unclosed block comments instead of swallowing malformed input.
-        cursor = skip_mongo_trivia(after)?;
-        if !cursor.is_empty() {
-            cursor = cursor
-                .strip_prefix('.')
-                .filter(|rest| !rest.trim().is_empty())
-                .ok_or_else(|| types::invalid("expected '.' between Mongo method calls"))?;
-        }
-    }
-
-    Ok(cmd)
+    })
 }
 
 fn skip_mongo_trivia(mut source: &str) -> Result<&str> {
@@ -3043,9 +2832,11 @@ fn is_unauthorized(e: &impl std::fmt::Display) -> bool {
 // --- keyset pagination -------------------------------------------------------
 
 mod keyset;
+mod shorthand;
 #[cfg(test)]
 use keyset::id_after;
 use keyset::{keyset_filter, last_row_id};
+use shorthand::parse_shorthand;
 
 // --- bson / json helpers ----------------------------------------------------
 
@@ -3739,6 +3530,9 @@ fn explain_inner(parsed: &Parsed) -> Result<Document> {
             }
             if let Some(l) = parsed.limit {
                 d.insert("limit", l);
+            }
+            if let Some(n) = parsed.skip {
+                d.insert("skip", n as i64);
             }
             Ok(d)
         }

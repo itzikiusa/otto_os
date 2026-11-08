@@ -190,9 +190,11 @@ fn classify_read_only(engine: Engine, statement: &str, prefix: &str, why: &str) 
         return Err(Error::Invalid("empty statement".into()));
     }
     if statement_is_write(engine, statement) {
-        return Err(Error::Forbidden(format!(
-            "{prefix}{why}; this statement is classified as a write/DDL"
-        )));
+        let detail = (engine == Engine::Mongodb)
+            .then(|| crate::types::mongo_unverified_reason(statement))
+            .flatten()
+            .unwrap_or_else(|| "this statement is classified as a write/DDL".into());
+        return Err(Error::Forbidden(format!("{prefix}{why}; {detail}")));
     }
     if engine == Engine::Redis && crate::types::redis_uses_keys(statement) {
         return Err(Error::Forbidden(format!(
@@ -4156,6 +4158,31 @@ mod tests {
     }
 
     // --- ensure_read_only_request: the UI's `read_only` run (agent-driven) ----
+
+    #[test]
+    fn mongo_refusal_says_unverifiable_rather_than_write() {
+        let refusal = |stmt| match ensure_read_only(Engine::Mongodb, stmt).unwrap_err() {
+            Error::Forbidden(m) => m,
+            other => panic!("{stmt:?}: expected Forbidden, got {other:?}"),
+        };
+        let m = refusal("db.users.stats()");
+        assert!(m.starts_with(MCP_READ_ONLY_PREFIX), "{m}");
+        assert!(m.contains("unsupported method 'stats'"), "{m}");
+        assert!(!m.contains("write/DDL"), "{m}");
+        let m = refusal(r#"db.getSiblingDB("ams").users.find({})"#);
+        assert!(
+            m.contains("mongosh script") && !m.contains("write/DDL"),
+            "{m}"
+        );
+        // Real writes keep the write wording, including a write after a read.
+        for stmt in [
+            "db.users.deleteOne({a: 1})",
+            "db.users.find({}); db.users.deleteMany({a: 1})",
+            "db.users.aggregate([{$out: 'copy'}])",
+        ] {
+            assert!(refusal(stmt).contains("write/DDL"), "{stmt}");
+        }
+    }
 
     #[test]
     fn read_only_request_refuses_writes_with_its_own_marker() {

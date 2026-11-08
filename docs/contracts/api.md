@@ -241,7 +241,8 @@ Notes:
 - DB read-only MCP query (`POST /api/v1/connections/{id}/db/mcp-query`, ws **viewer**;
   global connections: `Database:View`) — the agent-facing query path used by `ottod mcp-tools`. Body
   `{statement, max_rows?, node?}` → `QueryResult`. Read-only is enforced **unconditionally**
-  (independent of the connection's write-guard): a statement classified as a write/DDL is
+  (independent of the connection's write-guard): a statement classified as a write/DDL (on
+  MongoDB, also one Otto can't verify as a read; the message then says why) is
   rejected with `403 forbidden` and a `Problem.message` prefixed `mcp_read_only: ` **before**
   any driver runs; non-queryable connection kinds (ssh/custom) → `400 invalid`. Rows are
   hard-capped (200) and cell values are PII-masked server-side.

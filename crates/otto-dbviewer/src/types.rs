@@ -1551,6 +1551,33 @@ fn mongo_is_write(statement: &str) -> bool {
         })
 }
 
+/// Why [`mongo_is_write`] could not vet `statement`, for a refusal that says so
+/// instead of calling a harmless but unreadable statement a write. `None` when
+/// Otto recognised a real write. Such a statement stays refused: past the gate
+/// it would run through `mongosh` as arbitrary JavaScript.
+pub(crate) fn mongo_unverified_reason(statement: &str) -> Option<String> {
+    let s = statement.trim();
+    if looks_like_mongosh_script(s) {
+        return Some(
+            "this is a mongosh script (variables, functions, print or getSiblingDB), which \
+             can't be verified as read-only; run a single statement and select the database \
+             instead of using getSiblingDB"
+                .into(),
+        );
+    }
+    crate::drivers::mongodb::split_statements(s)
+        .iter()
+        .filter(|stmt| !crate::drivers::mongo_sql::looks_like_sql(stmt))
+        .find_map(|stmt| crate::drivers::mongodb::statement_parse_error(stmt))
+        .map(|why| {
+            format!(
+                "Otto can't verify this Mongo statement is read-only ({why}); verifiable reads \
+                 are find (with sort, limit, skip, projection), findOne, count, countDocuments, \
+                 estimatedDocumentCount, distinct, getIndexes and aggregate without options"
+            )
+        })
+}
+
 /// `GET /db/mongosh` response: whether the `mongosh` CLI — used to execute
 /// pasted mongosh SCRIPTS (see [`looks_like_mongosh_script`]) and by Mongo
 /// terminal sessions — is on the daemon's PATH, and its version when it is.
