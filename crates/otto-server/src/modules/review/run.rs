@@ -304,19 +304,25 @@ pub(crate) async fn run_review_core(
     .await?;
     user_ctx.push_str(&prior_context);
     let diff_path = materialize_review_diff(ctx, review_id, &diff_text).await?;
-    let assessed = super::scope::assess_scope(
-        ctx,
-        review_id,
-        repo_path,
-        &diff_text,
-        &diff_path.to_string_lossy(),
-        &branch_ctx,
-        &format!("{user_ctx}{jira_ctx}"),
-        workspace,
-        &cfg,
-        &prior_ids,
-    )
-    .await;
+    let lines = otto_review::scope::changed_lines(&diff_text);
+    let size = otto_review::scope::pr_size(lines, &cfg);
+    let assessed = if size == "large" {
+        Ok(otto_review::scope::large_pr_plan(&cfg, &prior_ids, lines))
+    } else {
+        super::scope::assess_scope(
+            ctx,
+            review_id,
+            repo_path,
+            &diff_text,
+            &diff_path.to_string_lossy(),
+            &branch_ctx,
+            &format!("{user_ctx}{jira_ctx}"),
+            workspace,
+            &cfg,
+            &prior_ids,
+        )
+        .await
+    };
     // Scope selection narrows the lenses; it must never stop the review.
     let mut scope_plan = match assessed {
         Ok(plan) => plan,
@@ -327,6 +333,7 @@ pub(crate) async fn run_review_core(
         }
     };
     scope_plan.base_sha = causal_base.unwrap_or_default();
+    (scope_plan.size, scope_plan.changed_lines) = (size.into(), lines);
     ctx.reviews_store
         .set_scope_plan(review_id, &scope_plan)
         .await?;

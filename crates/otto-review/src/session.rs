@@ -540,10 +540,14 @@ pub async fn run_agent_session(
     if !model.trim().is_empty() {
         meta["model"] = serde_json::json!(model.trim());
     }
+    // Titled after its row ("Scope assessment", "Correctness review"): an
+    // untitled session got a random name, and once the scope row is replaced
+    // by the lens rows only the session title identifies it.
+    let title = states.lock().await.get(agent_index).map(|s| s.name.clone());
     let req = CreateSessionReq {
         kind: SessionKind::Agent,
         provider: Some(provider.to_string()),
-        title: None,
+        title,
         cwd: Some(cwd.to_string()),
         connection_id: None,
         model: None,

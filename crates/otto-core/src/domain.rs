@@ -1324,6 +1324,15 @@ pub struct ReviewScopePlan {
     pub verification_notes: Vec<String>,
     #[serde(default)]
     pub source: String,
+    /// Run every selected lens on every configured provider (LARGE PRs).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all_providers: bool,
+    /// `small` | `medium` | `large` by changed lines; empty on older plans.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub size: String,
+    /// Changed lines (tests included) in the reviewed diff.
+    #[serde(default)]
+    pub changed_lines: u64,
 }
 
 /// Deserialize a list of free-text scope entries that a model may emit as

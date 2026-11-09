@@ -18,7 +18,10 @@ pub fn selected_agents(
     }
     plan.lenses.iter().enumerate().map(|(i, lens)| {
         let template = cfg.agents.iter().find(|a| a.name.eq_ignore_ascii_case(&lens.name));
-        let providers = if cfg.cross_provider_check {
+        let providers = if plan.all_providers {
+            // LARGE PR: every lens on every configured provider.
+            pool.clone()
+        } else if cfg.cross_provider_check {
             template.map(crate::engine::effective_providers).unwrap_or_else(|| pool.clone())
         } else { vec![pool[i % pool.len()].clone()] };
         let model = template.filter(|a| a.provider == providers[0]).map(|a| a.model.clone()).unwrap_or_default();
@@ -125,7 +128,57 @@ pub fn documentation_plan(diff: &str, head: &str) -> Option<ReviewScopePlan> {
         source: "deterministic documentation scope".into(),
         prior_findings: vec![],
         verification_notes: vec![],
+        all_providers: false,
+        size: String::new(),
+        changed_lines: 0,
     })
+}
+
+/// Default changed-line thresholds (tests included).
+pub const DEFAULT_LARGE_PR_LINES: u64 = 5_000;
+pub const DEFAULT_MEDIUM_PR_LINES: u64 = 1_000;
+
+/// Added + removed lines in a unified diff (file headers excluded).
+pub fn changed_lines(diff: &str) -> u64 {
+    diff.lines()
+        .filter(|l| {
+            (l.starts_with('+') && !l.starts_with("+++"))
+                || (l.starts_with('-') && !l.starts_with("---"))
+        })
+        .count() as u64
+}
+
+/// `small` (< medium) | `medium` | `large` (> large threshold) by changed lines.
+pub fn pr_size(lines: u64, cfg: &otto_core::api::ReviewConfig) -> &'static str {
+    if lines > cfg.large_pr_lines.unwrap_or(DEFAULT_LARGE_PR_LINES) {
+        "large"
+    } else if lines > cfg.medium_pr_lines.unwrap_or(DEFAULT_MEDIUM_PR_LINES) {
+        "medium"
+    } else {
+        "small"
+    }
+}
+
+/// LARGE PR: no scope agent. Every configured lens runs on every configured
+/// provider, so lenses start immediately and each gets two independent reads.
+pub fn large_pr_plan(
+    cfg: &otto_core::api::ReviewConfig,
+    prior_ids: &[String],
+    lines: u64,
+) -> ReviewScopePlan {
+    let mut plan = all_lenses_plan(
+        cfg,
+        prior_ids,
+        format!("Large PR ({lines} changed lines): every configured lens on every provider."),
+        "Configured lens (large PR: full lens set).",
+        "Not assessed (large PR: full lens set); re-verify against current code.",
+    );
+    plan.source = format!(
+        "large PR rule (> {} lines): full lens set, all providers",
+        cfg.large_pr_lines.unwrap_or(DEFAULT_LARGE_PR_LINES)
+    );
+    plan.all_providers = true;
+    plan
 }
 
 /// The plan when scope assessment fails (timeout, unusable answer, crash):
@@ -137,10 +190,31 @@ pub fn configured_plan(
     why: &str,
 ) -> ReviewScopePlan {
     let why = otto_core::text::clip_chars(why.trim(), 200);
+    let mut plan = all_lenses_plan(
+        cfg,
+        prior_ids,
+        format!("Scope assessment unavailable ({why}); every configured lens runs."),
+        "Configured lens (scope assessment unavailable).",
+        "Not assessed (scope assessment unavailable); re-verify against current code.",
+    );
+    plan.verification_notes = vec![format!(
+        "Scope assessment fell back to the configured lenses: {why}"
+    )];
+    plan.source = "configured lenses (scope assessment unavailable)".into();
+    plan
+}
+
+fn all_lenses_plan(
+    cfg: &otto_core::api::ReviewConfig,
+    prior_ids: &[String],
+    summary: String,
+    reason: &str,
+    prior_evidence: &str,
+) -> ReviewScopePlan {
     ReviewScopePlan {
         base_sha: String::new(),
         head_sha: String::new(),
-        summary: format!("Scope assessment unavailable ({why}); every configured lens runs."),
+        summary,
         related_modules: vec![],
         risks: vec![],
         lenses: cfg
@@ -148,7 +222,7 @@ pub fn configured_plan(
             .iter()
             .map(|a| ReviewScopeLens {
                 name: a.name.clone(),
-                reason: "Configured lens (scope assessment unavailable).".into(),
+                reason: reason.into(),
                 instructions: if a.prompt.trim().is_empty() {
                     format!("Review the change through the {} lens.", a.name)
                 } else {
@@ -161,15 +235,60 @@ pub fn configured_plan(
             .map(|id| otto_core::domain::ReviewFindingDisposition {
                 finding_id: id.clone(),
                 disposition: "still_open".into(),
-                evidence:
-                    "Not assessed (scope assessment unavailable); re-verify against current code."
-                        .into(),
+                evidence: prior_evidence.into(),
             })
             .collect(),
-        verification_notes: vec![format!(
-            "Scope assessment fell back to the configured lenses: {why}"
-        )],
-        source: "configured lenses (scope assessment unavailable)".into(),
+        verification_notes: vec![],
+        source: String::new(),
+        all_providers: false,
+        size: String::new(),
+        changed_lines: 0,
+    }
+}
+
+/// One line for logs / chat: tier, how lenses were chosen, and which ran.
+pub fn scope_summary_line(plan: &ReviewScopePlan) -> String {
+    let lenses: Vec<&str> = plan.lenses.iter().map(|l| l.name.as_str()).collect();
+    let size = if plan.size.is_empty() {
+        String::new()
+    } else {
+        format!("{} PR ({} lines) · ", plan.size, plan.changed_lines)
+    };
+    format!(
+        "{size}{} · {} lens{}{}: {}",
+        if plan.source.is_empty() {
+            "scope"
+        } else {
+            &plan.source
+        },
+        lenses.len(),
+        if lenses.len() == 1 { "" } else { "es" },
+        if plan.all_providers {
+            " × all providers"
+        } else {
+            ""
+        },
+        lenses.join(", ")
+    )
+}
+
+/// The review's only row while scope is assessed. Named for what it does:
+/// the panel labels an unnamed last row "Summarizer".
+pub fn scope_row(provider: &str, model: &str) -> otto_core::domain::ReviewAgentState {
+    otto_core::domain::ReviewAgentState {
+        name: "Scope assessment".into(),
+        provider: provider.into(),
+        model: model.into(),
+        status: "pending".into(),
+        note: "Reading the diff and affected consumers to select lenses".into(),
+        comment_count: 0,
+        session_id: None,
+        findings: vec![],
+        fallback: false,
+        lens: String::new(),
+        lens_slugs: vec![],
+        score: None,
+        score_reason: String::new(),
     }
 }
 
@@ -238,6 +357,43 @@ mod tests {
             plan.risks,
             vec!["contract drift — models.go:12", "plain risk"]
         );
+    }
+
+    #[test]
+    fn size_tiers_follow_changed_lines_with_tests_included() {
+        let cfg = crate::engine::default_review_config("claude");
+        let diff = "diff --git a/x b/x\n--- a/x\n+++ b/x\n+a\n-b\n c\n+d\n";
+        assert_eq!(changed_lines(diff), 3);
+        assert_eq!(pr_size(999, &cfg), "small");
+        assert_eq!(pr_size(1_000, &cfg), "small");
+        assert_eq!(pr_size(1_001, &cfg), "medium");
+        assert_eq!(pr_size(5_000, &cfg), "medium");
+        assert_eq!(pr_size(5_001, &cfg), "large");
+        let mut tuned = cfg.clone();
+        tuned.large_pr_lines = Some(100);
+        assert_eq!(pr_size(101, &tuned), "large");
+    }
+
+    #[test]
+    fn a_large_pr_runs_every_configured_lens_on_every_provider() {
+        let mut cfg = crate::engine::default_review_config("claude");
+        cfg.agents[0].provider = "claude".into();
+        cfg.agents[0].providers = vec!["claude".into()];
+        if cfg.agents.len() > 1 {
+            cfg.agents[1].provider = "codex".into();
+            cfg.agents[1].providers = vec!["codex".into()];
+        }
+        let prior = vec!["01P".to_string()];
+        let plan = large_pr_plan(&cfg, &prior, 12_000);
+        validate_prior_findings(&plan, &prior).expect("large plan is valid");
+        let agents = selected_agents(&plan, &cfg);
+        assert_eq!(agents.len(), cfg.agents.len(), "one row per lens");
+        let pool_len = if cfg.agents.len() > 1 { 2 } else { 1 };
+        assert!(
+            agents.iter().all(|a| a.providers.len() == pool_len),
+            "every provider per lens"
+        );
+        assert!(scope_summary_line(&plan).contains("all providers"));
     }
 
     #[test]

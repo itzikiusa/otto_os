@@ -31,6 +31,15 @@ pub struct ReviewConfig {
     /// Per-agent timeout in seconds. When set, overrides the diff-size heuristic.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Changed lines (tests included) above which a PR is LARGE: no scope
+    /// assessment, every configured lens on every configured provider.
+    /// `None` → 5000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub large_pr_lines: Option<u64>,
+    /// Changed lines above which a PR is MEDIUM (recorded; scope assessment
+    /// still selects the lenses, as for SMALL). `None` → 1000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub medium_pr_lines: Option<u64>,
     /// Execution mode (`fan_out` | `orchestrator`). `None` ⇒ fan-out; kept
     /// as an Option so the engine can tell "stored" from "defaulted".
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -31,22 +31,7 @@ pub(super) async fn assess_scope(
         .find(|u| u.is_root)
         .ok_or_else(|| Error::Internal("no root user to assess review scope".into()))?;
     let cfg_agent = &cfg.summarizer;
-    let row = ReviewAgentState {
-        name: "Assessing change scope".into(),
-        provider: cfg_agent.provider.clone(),
-        model: cfg_agent.model.clone(),
-        status: "pending".into(),
-        note: "Inspecting changed behavior, affected consumers and risks before selecting lenses"
-            .into(),
-        comment_count: 0,
-        session_id: None,
-        findings: vec![],
-        fallback: false,
-        lens: String::new(),
-        lens_slugs: vec![],
-        score: None,
-        score_reason: String::new(),
-    };
+    let row = otto_review::scope::scope_row(&cfg_agent.provider, &cfg_agent.model);
     ctx.reviews_store
         .set_agents(review_id, std::slice::from_ref(&row))
         .await?;
