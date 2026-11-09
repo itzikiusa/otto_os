@@ -157,6 +157,16 @@
             fallback
           </span>
         {/if}
+        {#if agent.score != null}
+          <!-- The lens's own 0–10 rating (summarizer row: the verifier's overall). -->
+          <span
+            class="chip rp-score-chip"
+            data-tone={agent.score >= 8 ? 'good' : agent.score >= 5 ? 'warn' : 'bad'}
+            title={agent.score_reason || `${agent.name} score`}
+          >
+            {agent.score}/10
+          </span>
+        {/if}
         {#if agent.findings && agent.findings.length > 0}
           <button class="btn small ghost" onclick={() => toggleAgent(agent.name)}>
             {agentExpanded[agent.name]
@@ -239,6 +249,13 @@
     background: var(--warning-soft);
     color: var(--warning);
   }
+  .rp-score-chip {
+    font-size: var(--fs-xs);
+    font-variant-numeric: tabular-nums;
+  }
+  .rp-score-chip[data-tone='good'] { background: var(--success-soft); color: var(--success); }
+  .rp-score-chip[data-tone='warn'] { background: var(--warning-soft); color: var(--warning); }
+  .rp-score-chip[data-tone='bad'] { background: var(--danger-soft); color: var(--danger); }
   .rp-agent-note {
     margin: 4px 0 0;
     font-size: var(--fs-xs);

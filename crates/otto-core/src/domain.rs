@@ -1172,6 +1172,14 @@ pub struct ReviewAgentState {
     /// prompt. Empty for fan-out rows, the summarizer and pre-field rows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lens_slugs: Vec<String>,
+    /// The lens's own 0–10 rating of the change through its lens (10 = no
+    /// concern, 0 = must not merge). On the summarizer row: the verifier's
+    /// overall rating. None when the agent omitted it, and on older rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<u8>,
+    /// One sentence on why that score.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub score_reason: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -1303,7 +1311,11 @@ pub struct ReviewScopePlan {
     #[serde(default)]
     pub head_sha: String,
     pub summary: String,
+    /// Agents often answer `{path, relationship}` objects for these; that
+    /// must never abort the review, so any shape folds into one line each.
+    #[serde(default, deserialize_with = "scope_text_list")]
     pub related_modules: Vec<String>,
+    #[serde(default, deserialize_with = "scope_text_list")]
     pub risks: Vec<String>,
     pub lenses: Vec<ReviewScopeLens>,
     #[serde(default)]
@@ -1312,6 +1324,38 @@ pub struct ReviewScopePlan {
     pub verification_notes: Vec<String>,
     #[serde(default)]
     pub source: String,
+}
+
+/// Deserialize a list of free-text scope entries that a model may emit as
+/// strings, objects (`{path, relationship}`, `{risk, evidence}`, …) or a
+/// single string. Objects become their string values joined with " — ".
+fn scope_text_list<'de, D>(de: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    fn text(v: Value) -> Option<String> {
+        let s = match v {
+            Value::Null => return None,
+            Value::String(s) => s,
+            Value::Object(map) => map
+                .into_iter()
+                .filter_map(|(_, v)| text(v))
+                .collect::<Vec<_>>()
+                .join(" — "),
+            Value::Array(items) => items
+                .into_iter()
+                .filter_map(text)
+                .collect::<Vec<_>>()
+                .join(", "),
+            other => other.to_string(),
+        };
+        let s = s.trim().to_string();
+        (!s.is_empty()).then_some(s)
+    }
+    Ok(match Value::deserialize(de)? {
+        Value::Array(items) => items.into_iter().filter_map(text).collect(),
+        other => text(other).into_iter().collect(),
+    })
 }
 
 /// A PR agent review run, together with all its draft comments.
@@ -2835,6 +2879,25 @@ impl Feature {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scope_plan_accepts_object_shaped_modules_and_risks() {
+        // The exact shape that made every review error with "invalid type:
+        // map, expected a string" (2026-11-08/09): no lens ever ran.
+        let plan: super::ReviewScopePlan = serde_json::from_str(
+            r#"{"summary":"s","related_modules":[{"path":"a.go:1-9","relationship":"used by b"},"c.go"],
+               "risks":[{"risk":"drift","evidence":"x.go:3"}],
+               "lenses":[{"name":"Correctness review","reason":"r","instructions":"i"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(plan.related_modules, vec!["a.go:1-9 — used by b", "c.go"]);
+        assert_eq!(plan.risks, vec!["drift — x.go:3"]);
+        let plan: super::ReviewScopePlan =
+            serde_json::from_str(r#"{"summary":"s","related_modules":"one.go","lenses":[]}"#)
+                .unwrap();
+        assert_eq!(plan.related_modules, vec!["one.go"]);
+        assert!(plan.risks.is_empty());
+    }
+
     /// Summarizer severities beyond `info|warn|bug` (any case) keep their
     /// weight instead of collapsing to `info`.
     #[test]

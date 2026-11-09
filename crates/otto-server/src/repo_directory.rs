@@ -225,6 +225,12 @@ pub(crate) fn normalize_remote(raw: &str) -> String {
         rest.split_once('/').unwrap_or((rest, ""))
     };
     let host = host.split(':').next().unwrap_or(host);
+    // Bitbucket Cloud serves SSH from ssh.bitbucket.org (bitbucket.org refuses
+    // SSH from 2026-11-12); both spellings name the same repo.
+    let host = match host {
+        "ssh.bitbucket.org" | "altssh.bitbucket.org" | "www.bitbucket.org" => "bitbucket.org",
+        h => h,
+    };
     let path = path.trim_matches('/');
     let path = path
         .strip_suffix(".git")
@@ -795,6 +801,8 @@ mod tests {
             "https://bitbucket.org/team/app",
             "git@bitbucket.org:team/app.git",
             "ssh://git@bitbucket.org:22/team/app.git",
+            "git@ssh.bitbucket.org:team/app.git",
+            "ssh://git@altssh.bitbucket.org:443/team/app.git",
             "HTTPS://BITBUCKET.ORG/team/app/",
         ] {
             assert_eq!(normalize_remote(raw), want, "{raw}");

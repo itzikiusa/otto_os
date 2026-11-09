@@ -765,7 +765,18 @@ pub fn parse_draft_comments(review_id: &Id, summary_text: &str) -> Vec<DraftComm
         return vec![];
     }
     let slice = &stripped[start..end];
-    serde_json::from_str(slice).unwrap_or_else(|e| {
+    // The verifier's overall score rides in the same array; it is not a comment.
+    let items = match serde_json::from_str::<Vec<serde_json::Value>>(slice) {
+        Ok(items) => items
+            .into_iter()
+            .filter(|v| v.get(crate::session::LENS_SCORE_KEY).is_none())
+            .collect(),
+        Err(e) => {
+            tracing::warn!(review = %review_id, "failed to parse final JSON ({e}); no comments stored");
+            return vec![];
+        }
+    };
+    serde_json::from_value(serde_json::Value::Array(items)).unwrap_or_else(|e| {
         tracing::warn!(review = %review_id, "failed to parse final JSON ({e}); no comments stored");
         vec![]
     })
@@ -1109,6 +1120,11 @@ mod review_r10_tests {
         let id: Id = "r".into();
         assert!(parse_draft_comments(&id, "see ] then [ nothing").is_empty());
         assert!(parse_draft_comments(&id, "no json at all").is_empty());
+        let scored = parse_draft_comments(
+            &id,
+            r#"[{"body": "x"}, {"lens_score": 6, "score_reason": "one should-fix"}]"#,
+        );
+        assert_eq!(scored.len(), 1, "the score element is not a comment");
         let ok = parse_draft_comments(&id, r#"[{"body": "x", "severity": "Critical"}]"#);
         assert_eq!(ok.len(), 1);
         assert_eq!(

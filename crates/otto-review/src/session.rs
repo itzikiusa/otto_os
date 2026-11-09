@@ -298,6 +298,10 @@ pub fn parse_findings_array(text: &str) -> Option<Vec<ReviewFinding>> {
         items
             .into_iter()
             .filter_map(|v| {
+                // The lens's own score rides in the same array; it is not a finding.
+                if v.get(LENS_SCORE_KEY).is_some() {
+                    return None;
+                }
                 let v = coerce_finding_value(v)?;
                 serde_json::from_value::<RawFinding>(v)
                     .ok()
@@ -307,7 +311,39 @@ pub fn parse_findings_array(text: &str) -> Option<Vec<ReviewFinding>> {
     )
 }
 
-/// Leading unsigned integer of `s` (`"42"`, `"42-45"`, `" L42 "` → 42).
+/// Key of the one array element carrying the lens's 0–10 score:
+/// `{"lens_score": 7, "score_reason": "…"}`.
+pub const LENS_SCORE_KEY: &str = "lens_score";
+
+/// The `{"lens_score": n, "score_reason": "…"}` element of a reviewer's (or
+/// the summarizer's) JSON array, clamped to 0–10. A number or numeric string
+/// is accepted ("7", "7/10", 7.5 → 7); None when the agent gave no score.
+pub fn parse_lens_score(text: &str) -> Option<(u8, String)> {
+    let stripped = text.trim();
+    let start = stripped.find('[')?;
+    let end = stripped.rfind(']').map(|i| i + 1)?;
+    if start >= end {
+        return None;
+    }
+    let items = serde_json::from_str::<Vec<serde_json::Value>>(&stripped[start..end]).ok()?;
+    items.iter().find_map(|v| {
+        let raw = v.get(LENS_SCORE_KEY)?;
+        let n = match raw {
+            serde_json::Value::Number(n) => n.as_f64()?,
+            serde_json::Value::String(s) => numeric_prefix(s)? as f64,
+            _ => return None,
+        };
+        let reason = v
+            .get("score_reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        Some((n.clamp(0.0, 10.0) as u8, reason))
+    })
+}
+
+/// Leading unsigned integer of `s`/// Leading unsigned integer of `s` (`"42"`, `"42-45"`, `" L42 "` → 42).
 fn numeric_prefix(s: &str) -> Option<u32> {
     let t = s.trim().trim_start_matches(['L', 'l', '#']);
     let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
@@ -819,11 +855,16 @@ pub async fn run_agent_session_with_recovery(
         };
         let count = findings.len();
         let persisted = findings.clone();
+        let score = parse_lens_score(raw);
         persist_agent(states, reviews, review_id, agent_index, move |s| {
             s.status = "done".into();
             s.note = partial_or_count_note(count, &missing);
             s.comment_count = count as u32;
             s.findings = persisted;
+            if let Some((n, why)) = score {
+                s.score = Some(n);
+                s.score_reason = why;
+            }
         })
         .await;
         AgentRunResult {
@@ -1148,6 +1189,8 @@ mod tests {
             fallback: false,
             lens: lens.into(),
             lens_slugs: Vec::new(),
+            score: None,
+            score_reason: String::new(),
         }
     }
 
@@ -1186,6 +1229,21 @@ mod tests {
             review_error_note(Some(FailReason::Stuck)),
             "stuck — no output for 15m"
         );
+    }
+
+    #[test]
+    fn lens_score_element_is_read_and_never_becomes_a_finding() {
+        let raw = r#"[{"path":"a.rs","line":3,"severity":"warn","body":"x"},
+                     {"lens_score":"7/10","score_reason":"one should-fix"}]"#;
+        assert_eq!(parse_findings(raw).len(), 1);
+        assert_eq!(parse_lens_score(raw), Some((7, "one should-fix".into())));
+        let clean = r#"[{"lens_score": 10, "score_reason": "no concern"}]"#;
+        assert!(parse_findings_array(clean).is_some_and(|v| v.is_empty()));
+        assert_eq!(
+            parse_lens_score(r#"[{"lens_score": 42}]"#),
+            Some((10, String::new()))
+        );
+        assert_eq!(parse_lens_score("[]"), None);
     }
 
     #[test]

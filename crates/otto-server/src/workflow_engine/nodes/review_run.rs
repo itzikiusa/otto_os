@@ -717,13 +717,13 @@ async fn score_target(
     let review_score = review_score(bugs, warns, infos, plan.weights, no_changes);
     let (goals_score, goals_detail) = grade_goals(plan, t, review_score, logs).await;
     let score = blended_score(review_score, goals_score);
-    let coverage_complete = ctx
-        .reviews_store
-        .get_review(review_id)
-        .await
+    let review_row = ctx.reviews_store.get_review(review_id).await;
+    let lens_scores = otto_review::prompts::lens_scores_json(review_row.as_ref().ok());
+    let coverage_complete = review_row
+        .as_ref()
         .map(|review| {
             review_coverage_complete(
-                &review,
+                review,
                 plan.node
                     .params
                     .get("allow_summary_fallback")
@@ -771,6 +771,7 @@ async fn score_target(
         } else {
             format!("🔍 *{iter_label}{tag}* — {verdict}")
         };
+        msg.push_str(&otto_review::prompts::lens_scores_chat(&lens_scores));
         if no_changes {
             msg.push_str("\nNo reviewers ran. Check the base branch this run declared.");
         } else if finding_briefs.is_empty() {
@@ -803,6 +804,7 @@ async fn score_target(
         // branch on it rather than on the finding counts.
         "no_changes": no_changes, "coverage_complete": coverage_complete, "reason": reason,
         "findings": finding_briefs, "providers": plan.providers, "lenses": plan.lenses,
+        "lens_scores": lens_scores, // [{lens, score 0–10, reason}]
     });
     out.as_object().cloned().unwrap_or_default()
 }

@@ -739,6 +739,8 @@ mod tests {
             fallback: false,
             lens: String::new(),
             lens_slugs: Vec::new(),
+            score: None,
+            score_reason: String::new(),
         }
     }
 

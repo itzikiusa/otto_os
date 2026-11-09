@@ -42,6 +42,8 @@ pub(super) async fn assess_scope(
         fallback: false,
         lens: String::new(),
         lens_slugs: vec![],
+        score: None,
+        score_reason: String::new(),
     };
     ctx.reviews_store
         .set_agents(review_id, std::slice::from_ref(&row))
