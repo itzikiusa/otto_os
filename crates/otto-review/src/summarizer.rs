@@ -53,8 +53,19 @@ The final file is the completion signal; a chat reply alone does not complete th
     }
 }
 
+/// The handoff file is complete when every item is a draft comment. The
+/// verifier's `{"lens_score"}` element is part of a valid result, never a
+/// comment: rejecting it left the summarizer "working" until its deadline.
 pub fn valid_result(text: &str) -> bool {
-    serde_json::from_str::<Vec<crate::engine::DraftComment>>(text).is_ok()
+    let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(text) else {
+        return false;
+    };
+    let comments: Vec<_> = items
+        .into_iter()
+        .filter(|v| v.get(crate::session::LENS_SCORE_KEY).is_none())
+        .collect();
+    serde_json::from_value::<Vec<crate::engine::DraftComment>>(serde_json::Value::Array(comments))
+        .is_ok()
 }
 
 #[cfg(test)]
@@ -238,5 +249,12 @@ mod tests {
         assert!(!valid_result(r#"[{"title":"no body"}]"#));
         assert!(!valid_result(r#"{"body":"not an array"}"#));
         assert!(valid_result("[]"));
+        assert!(valid_result(
+            r#"[{"body":"x"},{"lens_score":7,"score_reason":"one should-fix"}]"#
+        ));
+        assert!(valid_result(
+            r#"[{"lens_score":10,"score_reason":"clean"}]"#
+        ));
+        assert!(!valid_result(r#"[{"lens_score":7},{"title":"no body"}]"#));
     }
 }
