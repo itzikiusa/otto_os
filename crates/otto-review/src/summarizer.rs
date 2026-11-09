@@ -53,19 +53,10 @@ The final file is the completion signal; a chat reply alone does not complete th
     }
 }
 
-/// The handoff file is complete when every item is a draft comment. The
-/// verifier's `{"lens_score"}` element is part of a valid result, never a
-/// comment: rejecting it left the summarizer "working" until its deadline.
+/// The handoff file is complete when it parses through the same reader as
+/// the comments themselves ([`crate::engine::draft_comments_from_json`]).
 pub fn valid_result(text: &str) -> bool {
-    let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(text) else {
-        return false;
-    };
-    let comments: Vec<_> = items
-        .into_iter()
-        .filter(|v| v.get(crate::session::LENS_SCORE_KEY).is_none())
-        .collect();
-    serde_json::from_value::<Vec<crate::engine::DraftComment>>(serde_json::Value::Array(comments))
-        .is_ok()
+    crate::engine::draft_comments_from_json(text).is_ok()
 }
 
 #[cfg(test)]
@@ -249,6 +240,23 @@ mod tests {
         assert!(!valid_result(r#"[{"title":"no body"}]"#));
         assert!(!valid_result(r#"{"body":"not an array"}"#));
         assert!(valid_result("[]"));
+        // Contract: the exact shape the verifier prompt asks for (a verified
+        // comment with source_ids + evidence, a suppressed note, and the
+        // mandatory overall score) must pass the handoff check AND yield the
+        // comments. Two readers disagreeing here cost a release (2026-11-09).
+        let example = r#"[
+            {"path":"a.go","line":3,"severity":"warn","body":"x","disposition":"verified",
+             "evidence":"a.go:3 traced","source_ids":["r0-0"]},
+            {"body":"claim y","disposition":"not_relevant","evidence":"b.go:9","source_ids":["r1-0"]},
+            {"lens_score":6,"score_reason":"one should-fix"}
+        ]"#;
+        assert!(valid_result(example));
+        let id = otto_core::Id::from("r");
+        assert_eq!(crate::engine::parse_draft_comments(&id, example).len(), 2);
+        assert_eq!(
+            crate::session::parse_lens_score(example).map(|s| s.0),
+            Some(6)
+        );
         assert!(valid_result(
             r#"[{"body":"x"},{"lens_score":7,"score_reason":"one should-fix"}]"#
         ));
