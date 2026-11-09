@@ -49,6 +49,8 @@ pub fn seed_states(agent_runs: &[AgentRun], summarizer: &ReviewAgentCfg) -> Vec<
             fallback: false,
             lens: r.lens.clone(),
             lens_slugs: r.lens_slugs(),
+            score: None,
+            score_reason: String::new(),
         })
         .collect();
     agent_states.push(ReviewAgentState {
@@ -63,6 +65,8 @@ pub fn seed_states(agent_runs: &[AgentRun], summarizer: &ReviewAgentCfg) -> Vec<
         fallback: false,
         lens: String::new(),
         lens_slugs: Vec::new(),
+        score: None,
+        score_reason: String::new(),
     });
     agent_states
 }
@@ -129,8 +133,12 @@ pub fn reviewer_prompt(
              {}\n\n{}{}Diff file — read it fully (it may be large; read it in chunks if needed):\n\
              {}\n\nReview the change as described above and output ONLY a JSON array of findings \
              (no prose, no markdown fence, NO file edits). Every finding must be one you verified \
-             against the actual code. Output [] ONLY if you swept every changed file and found no \
-             real, verified defect — not as a shortcut when the diff is large.",
+             against the actual code. Output no findings ONLY if you swept every changed file and found no \
+             real, verified defect — not as a shortcut when the diff is large.\n\n\
+             LENS SCORE — mandatory: end the SAME array with exactly one object \
+             {{\"lens_score\": <0-10>, \"score_reason\": \"<one sentence>\"}} rating this change through \
+             your lens: 10 = no concern, 8-9 = optional polish only, 5-7 = should-fix issues, 0-4 = \
+             must-fix defects. It is not a finding and is required even when there are no findings.",
             changed_files, changed_lines, prompt_lens, user_ctx, jira_ctx, diff_path_str
         )
 }
@@ -186,6 +194,8 @@ pub fn mark_summarizer_starting(
     row.status = "running".to_string();
     row.session_id = None;
     row.fallback = false;
+    row.score = None;
+    row.score_reason.clear();
     row.note = "Starting summarizer".into();
     row.provider = if summarizer_cfg.provider.trim().is_empty() {
         "claude".into()
@@ -224,6 +234,33 @@ pub fn summarizer_prompt(
         .collect::<Vec<_>>()
         .join("\n\n");
     format!("{}{}\n\n{}\n\nFINAL VERIFIER (these rules take precedence over the configured summarizer wording):\nRead the actual changed code, definitions and affected consumers. Independently trace each claimed defect; do not merely combine reviewer opinions. Only report a concrete NEW defect caused by this PR causal diff. A preexisting issue merely widened by the change belongs once in a not_relevant summary note, not a finding thread. Deduplicate findings with the same fix. Prioritize must-fix/should-fix; optional polish is secondary. Do not demand exhaustive tests: only newly changed critical-path gaps and demonstrable false greens. Calibrate severity by realistic impact and trigger; never demote a real issue because there are many, or inflate a score. Every output item MUST carry source_ids:[the exact source_id values it accounts for]. Account for every input source_id exactly once across the output; one same-fix comment may cover several source IDs. Never invent source IDs. New independently discovered defects may have an empty source_ids array with concrete evidence. Every retained comment MUST have disposition=verified and nonempty evidence with inspected file:line and causal trigger. Unknown dispositions or absent evidence cannot be published. Preserve important uncertainty explicitly.\nFor EVERY discarded/unconfirmed/duplicate claim, return an item in the same JSON array with disposition=not_relevant|unverified|duplicate, body identifying the original claim, and evidence explaining the concrete reason (for duplicate, identify the retained fix). These items are persisted as verification notes, not PR comments. If all claims are rejected return these dispositions rather than an unexplained empty array. Verify prior-finding dispositions against current code too. Never describe a code trace as an executed test.", context, summarizer_cfg.prompt, batches)
+}
+
+/// The reviewers' own 0–10 lens scores, as a block appended to the
+/// summarizer context, plus the instruction for the verifier's overall score.
+pub fn lens_scores_block(reviewers: &[otto_core::domain::ReviewAgentState]) -> String {
+    let lines: Vec<String> = reviewers
+        .iter()
+        .filter(|a| a.status == "done")
+        .map(|a| match a.score {
+            Some(n) if a.score_reason.is_empty() => format!("- {}: {n}/10", a.name),
+            Some(n) => format!("- {}: {n}/10 — {}", a.name, a.score_reason),
+            None => format!("- {}: no score given", a.name),
+        })
+        .collect();
+    format!(
+        "\n\nLENS SCORES (each reviewer's own 0-10 rating of the change through its lens; \
+         a claim, not proof):\n{}\n\nOVERALL SCORE — mandatory: end the SAME JSON array with \
+         exactly one object {{\"lens_score\": <0-10>, \"score_reason\": \"<one sentence>\"}}: your \
+         overall rating AFTER verification (10 = no concern, 8-9 = optional polish only, 5-7 = \
+         should-fix issues, 0-4 = must-fix defects). Adjust the lens scores for claims you rejected \
+         or confirmed. It is not a comment and needs no source_ids.",
+        if lines.is_empty() {
+            "- (none reported)".to_string()
+        } else {
+            lines.join("\n")
+        }
+    )
 }
 
 /// The summarizer row's note: "N final comments", or with the fallback cause

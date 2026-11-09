@@ -717,13 +717,23 @@ async fn score_target(
     let review_score = review_score(bugs, warns, infos, plan.weights, no_changes);
     let (goals_score, goals_detail) = grade_goals(plan, t, review_score, logs).await;
     let score = blended_score(review_score, goals_score);
-    let coverage_complete = ctx
-        .reviews_store
-        .get_review(review_id)
-        .await
+    let review_row = ctx.reviews_store.get_review(review_id).await;
+    // Each lens's own 0–10 score; the summarizer row is the verifier's overall.
+    let lens_scores: Vec<Value> = review_row
+        .as_ref()
+        .map(|r| {
+            r.agents
+                .iter()
+                .filter(|a| a.score.is_some())
+                .map(|a| json!({ "lens": a.name, "score": a.score, "reason": a.score_reason }))
+                .collect()
+        })
+        .unwrap_or_default();
+    let coverage_complete = review_row
+        .as_ref()
         .map(|review| {
             review_coverage_complete(
-                &review,
+                review,
                 plan.node
                     .params
                     .get("allow_summary_fallback")
@@ -771,6 +781,16 @@ async fn score_target(
         } else {
             format!("🔍 *{iter_label}{tag}* — {verdict}")
         };
+        if !lens_scores.is_empty() {
+            msg.push_str("\nLens scores:");
+            for l in &lens_scores {
+                msg.push_str(&format!(
+                    "\n • {}: *{}/10*",
+                    l["lens"].as_str().unwrap_or_default(),
+                    l["score"]
+                ));
+            }
+        }
         if no_changes {
             msg.push_str("\nNo reviewers ran. Check the base branch this run declared.");
         } else if finding_briefs.is_empty() {
@@ -803,6 +823,9 @@ async fn score_target(
         // branch on it rather than on the finding counts.
         "no_changes": no_changes, "coverage_complete": coverage_complete, "reason": reason,
         "findings": finding_briefs, "providers": plan.providers, "lenses": plan.lenses,
+        // [{lens, score 0–10, reason}] — each reviewer's own rating; the
+        // summarizer row is the verifier's overall rating after verification.
+        "lens_scores": lens_scores,
     });
     out.as_object().cloned().unwrap_or_default()
 }

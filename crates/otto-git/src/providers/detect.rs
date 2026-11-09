@@ -14,7 +14,11 @@ pub fn detect(remote_url: &str) -> Option<(GitProviderKind, RemoteRef)> {
         "github.com" | "www.github.com" => GitProviderKind::Github,
         // `altssh.*` / `ssh.github.com`: each forge's documented SSH-over-443
         // host for networks that block port 22 — the public forge itself.
-        "bitbucket.org" | "www.bitbucket.org" | "altssh.bitbucket.org" => {
+        "bitbucket.org"
+        | "www.bitbucket.org"
+        | "altssh.bitbucket.org"
+        // Bitbucket Cloud's SSH host since 2026-11-12 (bitbucket.org refuses SSH).
+        | "ssh.bitbucket.org" => {
             GitProviderKind::Bitbucket
         }
         "gitlab.com" | "www.gitlab.com" => GitProviderKind::Gitlab,
@@ -121,6 +125,10 @@ mod tests {
         assert!(check_remote_reachable(Gitlab, gl, None).is_ok());
         assert_eq!(
             detect("ssh://git@altssh.bitbucket.org:443/ws/app.git"),
+            Some((Bitbucket, rr("ws", "app")))
+        );
+        assert_eq!(
+            detect("git@ssh.bitbucket.org:ws/app.git"),
             Some((Bitbucket, rr("ws", "app")))
         );
         // A real GitHub Enterprise / self-hosted GitLab is still refused.

@@ -85,12 +85,12 @@ pub(crate) fn forge_identity(remote: &str) -> Option<String> {
     let host = url.host_str()?.to_ascii_lowercase();
     let public_ssh_alias = matches!(
         host.as_str(),
-        "ssh.github.com" | "altssh.gitlab.com" | "altssh.bitbucket.org"
+        "ssh.github.com" | "altssh.gitlab.com" | "altssh.bitbucket.org" | "ssh.bitbucket.org"
     );
     let host = match host.as_str() {
         "www.github.com" | "ssh.github.com" => "github.com",
         "www.gitlab.com" | "altssh.gitlab.com" => "gitlab.com",
-        "www.bitbucket.org" | "altssh.bitbucket.org" => "bitbucket.org",
+        "www.bitbucket.org" | "altssh.bitbucket.org" | "ssh.bitbucket.org" => "bitbucket.org",
         _ => &host,
     };
     let port = url
@@ -169,6 +169,10 @@ mod tests {
         assert_eq!(
             forge_identity("ssh://git@ssh.github.com:443/o/r"),
             forge_identity("https://github.com/o/r")
+        );
+        assert_eq!(
+            forge_identity("git@ssh.bitbucket.org:ws/r.git"),
+            forge_identity("https://bitbucket.org/ws/r")
         );
         assert_ne!(
             forge_identity("https://gitlab.example:8443/o/r"),

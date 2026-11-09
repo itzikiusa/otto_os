@@ -66,6 +66,11 @@ export interface ReviewAgentState {
   /** Orchestrator rows only: the lens slugs delegated to sub-agents. A retry
    *  re-spawns the row as the same orchestrator. */
   lens_slugs?: string[];
+  /** The lens's own 0–10 rating (10 = no concern). On the summarizer row: the
+   *  verifier's overall rating after verification. Absent when not given. */
+  score?: number | null;
+  /** One sentence on why that score. */
+  score_reason?: string;
 }
 
 export interface ReviewComment {

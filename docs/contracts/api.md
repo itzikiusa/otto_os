@@ -1662,6 +1662,14 @@ on the summarizer row and on pre-field reviews) is the configured reviewer name
 the row expanded from, so rows sharing a `lens` are the same lens on different
 providers. `lens_slugs` (optional, orchestrator rows only) lists the lenses the
 row delegates to sub-agents; a Retry re-spawns the row as the same orchestrator.
+`score` (optional, 0–10) + `score_reason` are the row's own rating of the change
+through its lens (10 = no concern, 8–9 optional polish, 5–7 should-fix, 0–4
+must-fix); on the summarizer row they are the verifier's overall rating after
+verification. Agents emit it as one `{"lens_score": n, "score_reason": "…"}`
+element of their JSON array, which is never stored as a finding or comment.
+The workflow `review_run` node outputs them as `lens_scores: [{lens, score, reason}]`.
+A scope assessment's `related_modules`/`risks` entries may arrive as strings or
+objects; objects are folded into one `"a — b"` string each.
 Recovery policy for a failed agent: up to `ReviewConfig.max_attempts`
 (default 3) fresh sessions, EXCEPT that once a sibling row with the same `lens`
 is `done` no further retry is spawned — the row ends `skipped` ("skipped — <provider>
