@@ -237,6 +237,10 @@ strip = "debuginfo"
 vt100 = { path = "vendor/vt100" }
 # Preserve MySQL result metadata and authorize explicit LOCAL INFILE transfers.
 sqlx-mysql = { path = "vendor/sqlx-mysql" }
+# RUSTSEC-2026-0459 (bundled SQLite CVE): the fix is libsqlite3-sys >= 0.39, but
+# sqlx-sqlite 0.9.0 (latest) caps it at < 0.38. Only the bound is widened; see
+# vendor/sqlx-sqlite/README-OTTO.md. Drop this once sqlx releases the bump.
+sqlx-sqlite = { path = "vendor/sqlx-sqlite" }
 
 # Permit native ClickHouse startup under server-enforced readonly=1 profiles.
 klickhouse = { path = "vendor/klickhouse" }
