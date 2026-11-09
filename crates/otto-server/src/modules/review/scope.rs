@@ -2,7 +2,6 @@
 use super::*;
 use otto_core::domain::ReviewScopePlan;
 
-/// Backstop only; a quiet assessor fails far sooner through its grace period.
 const SCOPE_ABSOLUTE_CAP: Duration = Duration::from_secs(60 * 60);
 
 #[allow(clippy::too_many_arguments)]
@@ -70,8 +69,7 @@ pub(super) async fn assess_scope(
         .await
         .map_err(Error::Invalid)?;
     let started = std::time::Instant::now();
-    // Same rule as the reviewers: the grace only fails a QUIET agent and scales
-    // with the diff; a working assessor is never cut off. The hour is a backstop.
+    // Reviewer rule: the grace fails only a QUIET assessor; the hour is a backstop.
     let grace = otto_review::engine::review_agent_timeout(diff.len(), cfg.timeout_secs);
     let result = tokio::time::timeout(
         SCOPE_ABSOLUTE_CAP,
