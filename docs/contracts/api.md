@@ -3267,6 +3267,9 @@ Filesystem paths are on the **daemon host**, including when the caller uses a re
 **`ReviewConfig` DTO additions (A2 — additive, optional):**
 - `max_attempts?: number | null` — max total agent attempts per run (default 3); overrides the compiled-in constant.
 - `timeout_secs?: number | null` — per-agent timeout in seconds; overrides the diff-size heuristic when set.
+- `large_pr_lines?: number | null` — changed lines (tests included) above which a PR is LARGE: no scope assessment, every configured lens on every configured provider. Default 5000.
+- `medium_pr_lines?: number | null` — changed lines above which a PR is MEDIUM (recorded on the plan; lenses stay agent-selected, as for SMALL). Default 1000.
+- `ReviewScopePlan` additionally carries `size` (`small|medium|large`), `changed_lines` and `all_providers` (true for LARGE PRs). A failed scope assessment never stops a review: it falls back to every configured lens (`source` says so).
 
 **`Review` DTO additions (A2 — additive, optional):**
 - `verdict?: "approved" | "changes_requested" | "needs_review" | null`

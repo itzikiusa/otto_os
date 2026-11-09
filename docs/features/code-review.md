@@ -57,7 +57,7 @@ work and is useful when the additional comparison is wanted. Adaptive reviews
 always use managed fan-out, including configurations retaining the legacy
 `orchestrator` setting.
 
-The daemon-wide reviewer limit defaults to four; operators can override it with
+The daemon-wide reviewer limit defaults to eight; operators can override it with
 `OTTO_REVIEWER_CONCURRENCY`. Queued reviewers consume no CLI process, and their
 execution timeout starts when admitted. Scope assessment shares this queue.
 Workflow multi-repository reviews additionally admit at most two repository

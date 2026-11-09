@@ -91,3 +91,37 @@ test('another window sizing the PTY: the pane offers a take-over and reclaims it
   await expect.poll(() => last(probe), { timeout: 10_000 }).toMatchObject({ cols: paneCols, owner: 'other' });
   probe.close();
 });
+
+test('a viewer that merely (re)connects never takes the size from the pane in use', async ({ page }) => {
+  // 2026-11-09: a second device's Otto tab re-attached every few seconds; each
+  // attach sent a bare claim and re-pinned the working pane's PTY to its own
+  // grid, garbling the TUI. A bare (attach) claim must not move authority away
+  // from another ATTACHED viewer; only a claim WITH a grid (focus, typing,
+  // "Use this pane") does.
+  const wsId = await seedWorkspace(ctx, base);
+  const r = await ctx.post(`${base}/api/v1/workspaces/${wsId}/sessions`, {
+    data: { kind: 'agent', provider: 'shell', title: 'GridReattach', cwd: '/tmp', meta: { origin: 'e2e' } },
+  });
+  expect(r.ok(), await r.text()).toBeTruthy();
+  const id = ((await r.json()) as { id: string }).id;
+  await page.addInitScript((w) => localStorage.setItem('otto_workspace', w as string), wsId);
+  await page.goto(`/#/agents/${id}`);
+  const host = page.locator('.term-host');
+  await expect(host).toBeVisible({ timeout: 30_000 });
+  const cols = () => host.getAttribute('data-cols').then((v) => Number(v ?? '0'));
+  await expect.poll(cols, { timeout: 15_000 }).toBeGreaterThan(80);
+  const paneCols = await cols();
+
+  // Three reconnects of "another device": attach, bare claim, its own resize.
+  for (let i = 0; i < 3; i++) {
+    const remote = await attach(id);
+    await expect.poll(() => remote.grids.length, { timeout: 10_000 }).toBeGreaterThan(0);
+    remote.send({ type: 'claim' });
+    remote.send({ type: 'resize', cols: 60, rows: 15 });
+    await page.waitForTimeout(500); // ui-guards: allow — absence: the bare claim must NOT move the size
+    expect(last(remote)).toMatchObject({ cols: paneCols, owner: 'other' });
+    remote.close();
+  }
+  await expect(page.locator('.term-overlay[data-foreign-grid]')).toHaveCount(0);
+  await expect.poll(cols).toBe(paneCols);
+});

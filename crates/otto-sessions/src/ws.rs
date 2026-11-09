@@ -1901,6 +1901,27 @@ impl<S: SessionsCtx> TerminalConn<S> {
     }
 
     async fn on_claim(&mut self, cols: Option<u16>, rows: Option<u16>) {
+        // A bare claim is the automatic one a pane sends on every (re)connect.
+        // It must not take the size from another ATTACHED viewer: a second
+        // device's tab reconnecting re-pinned the working pane's grid every few
+        // seconds and garbled its TUI. Typing, focusing or "Use this pane"
+        // (a claim WITH a grid) still transfers authority.
+        if cols.is_none()
+            && rows.is_none()
+            && self
+                .ctx
+                .manager()
+                .grid_state(&self.session_id)
+                .owner
+                .is_some_and(|o| o != self.conn_id)
+        {
+            tracing::info!(
+                session = %self.session_id,
+                conn = self.conn_id,
+                "attach claim ignored: another attached viewer owns the size"
+            );
+            return;
+        }
         if self.can_input
             && self
                 .ctx

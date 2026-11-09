@@ -2,6 +2,8 @@
 use super::*;
 use otto_core::domain::ReviewScopePlan;
 
+const SCOPE_ABSOLUTE_CAP: Duration = Duration::from_secs(60 * 60);
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn assess_scope(
     ctx: &ServerCtx,
@@ -29,22 +31,7 @@ pub(super) async fn assess_scope(
         .find(|u| u.is_root)
         .ok_or_else(|| Error::Internal("no root user to assess review scope".into()))?;
     let cfg_agent = &cfg.summarizer;
-    let row = ReviewAgentState {
-        name: "Assessing change scope".into(),
-        provider: cfg_agent.provider.clone(),
-        model: cfg_agent.model.clone(),
-        status: "pending".into(),
-        note: "Inspecting changed behavior, affected consumers and risks before selecting lenses"
-            .into(),
-        comment_count: 0,
-        session_id: None,
-        findings: vec![],
-        fallback: false,
-        lens: String::new(),
-        lens_slugs: vec![],
-        score: None,
-        score_reason: String::new(),
-    };
+    let row = otto_review::scope::scope_row(&cfg_agent.provider, &cfg_agent.model);
     ctx.reviews_store
         .set_agents(review_id, std::slice::from_ref(&row))
         .await?;
@@ -67,8 +54,10 @@ pub(super) async fn assess_scope(
         .await
         .map_err(Error::Invalid)?;
     let started = std::time::Instant::now();
+    // Reviewer rule: the grace fails only a QUIET assessor; the hour is a backstop.
+    let grace = otto_review::engine::review_agent_timeout(diff.len(), cfg.timeout_secs);
     let result = tokio::time::timeout(
-        Duration::from_secs(120),
+        SCOPE_ABSOLUTE_CAP,
         otto_review::session::run_agent_session_with_recovery(
             &ctx.manager,
             &ctx.reviews_store,
@@ -81,7 +70,7 @@ pub(super) async fn assess_scope(
             review_id,
             0,
             &prompt,
-            Duration::from_secs(120),
+            grace,
             Some(1),
             Some(guard.flag()),
             None,
@@ -99,11 +88,10 @@ pub(super) async fn assess_scope(
     if review_is_cancelled(ctx, review_id).await {
         return Err(Error::Invalid("review cancelled".into()));
     }
-    let result = result.map_err(|_| Error::Invalid("Scope assessment exceeded its 120-second budget; no reviewers launched. Re-run review.".into()))?;
+    let result =
+        result.map_err(|_| Error::Invalid("scope assessment ran past its 1-hour cap".into()))?;
     if result.errored || result.findings.len() != 1 {
-        return Err(Error::Invalid(
-            "Scope assessment failed; no reviewers launched. Re-run review to retry.".into(),
-        ));
+        return Err(Error::Invalid("scope assessment returned no plan".into()));
     }
     let body = result.findings[0]
         .body

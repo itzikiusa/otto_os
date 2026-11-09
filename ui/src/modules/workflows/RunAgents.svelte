@@ -152,11 +152,16 @@
   function sessOf(sid: string) {
     return ws.getSession(sid) ?? sessionDetails[sid] ?? null;
   }
+  // The summarizer is the LAST of several rows. While scope is assessed the
+  // review has ONE row (the scope agent), which is not the summarizer.
+  function isSummarizer(review: { agents: unknown[] }, agent: unknown): boolean {
+    return review.agents.length > 1 && review.agents.at(-1) === agent;
+  }
   function reviewAgent(sid: string) {
     for (const id of relatedIds) {
       const review = reviews[id];
       const agent = review?.agents.find((a) => a.session_id === sid);
-      if (agent) return { review, agent, summarizer: review.agents.at(-1) === agent };
+      if (agent) return { review, agent, summarizer: isSummarizer(review, agent) };
     }
     return null;
   }
@@ -198,7 +203,7 @@
       case 'waiting':
         return sessionState(null, 'idle', true, { stale });
       case 'pending': {
-        const summarizer = review.agents.at(-1) === agent;
+        const summarizer = isSummarizer(review, agent);
         return { ...sessionState(null, 'idle', false, { stale }), label: 'Queued', hint: summarizer ? 'Starts when every reviewer has finished' : 'Waiting for a free reviewer slot — slots are shared by every review on this Mac' };
       }
       case 'done':
@@ -304,10 +309,10 @@
               {@render sessRow(agent.session_id)}
             {:else}
               {@const st = agentState(review, agent)}
-              <div class="sess queued" data-testid={review.agents.at(-1) === agent ? 'summarizer-without-session' : 'agent-without-session'} title={st.hint}>
+              <div class="sess queued" data-testid={isSummarizer(review, agent) ? 'summarizer-without-session' : 'agent-without-session'} title={st.hint}>
                 <div class="sess-h static">
                   <StatusDot state={st} size={8} />
-                  <span class="s-title">{review.agents.at(-1) === agent && review.agents.length > 1 ? 'Summarizer' : agent.name}</span>
+                  <span class="s-title">{isSummarizer(review, agent) ? 'Summarizer' : agent.name}</span>
                   <span class="s-provider">{agent.provider || 'claude'}</span>
                   <span class="s-status">{st.label}</span>
                 </div>

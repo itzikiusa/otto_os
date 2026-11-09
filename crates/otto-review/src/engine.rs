@@ -195,7 +195,10 @@ pub fn review_agent_cancel_key(review_id: &str, index: usize) -> String {
 /// the daemon — `OTTO_REVIEWER_CONCURRENCY` overrides (≥ 1). Each lens is a CLI
 /// process + whole-diff read + transcript watcher; a 10-lens review next to a
 /// workflow's `review_run` node used to start them all at once (perf SI-11).
-pub const DEFAULT_REVIEWER_CONCURRENCY: usize = 4;
+/// 8, not 4: reviewers wait on the model, not the CPU (~0.3–0.6 GB RAM each),
+/// and a LARGE PR runs every lens on every provider; 4 queued half of one
+/// review behind the other (2026-11-09).
+pub const DEFAULT_REVIEWER_CONCURRENCY: usize = 8;
 
 pub fn reviewer_concurrency(env: Option<&str>) -> usize {
     env.and_then(|v| v.trim().parse::<usize>().ok())
@@ -279,6 +282,8 @@ pub fn default_review_config(default_provider: &str) -> ReviewConfig {
         custom_presets: vec![],
         max_attempts: None,
         timeout_secs: None,
+        large_pr_lines: None,
+        medium_pr_lines: None,
         mode: None,
     }
 }
