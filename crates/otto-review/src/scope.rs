@@ -128,6 +128,51 @@ pub fn documentation_plan(diff: &str, head: &str) -> Option<ReviewScopePlan> {
     })
 }
 
+/// The plan when scope assessment fails (timeout, unusable answer, crash):
+/// every configured lens runs and every prior finding is re-verified, so a
+/// failed assessment widens the review instead of cancelling it.
+pub fn configured_plan(
+    cfg: &otto_core::api::ReviewConfig,
+    prior_ids: &[String],
+    why: &str,
+) -> ReviewScopePlan {
+    let why = otto_core::text::clip_chars(why.trim(), 200);
+    ReviewScopePlan {
+        base_sha: String::new(),
+        head_sha: String::new(),
+        summary: format!("Scope assessment unavailable ({why}); every configured lens runs."),
+        related_modules: vec![],
+        risks: vec![],
+        lenses: cfg
+            .agents
+            .iter()
+            .map(|a| ReviewScopeLens {
+                name: a.name.clone(),
+                reason: "Configured lens (scope assessment unavailable).".into(),
+                instructions: if a.prompt.trim().is_empty() {
+                    format!("Review the change through the {} lens.", a.name)
+                } else {
+                    a.prompt.clone()
+                },
+            })
+            .collect(),
+        prior_findings: prior_ids
+            .iter()
+            .map(|id| otto_core::domain::ReviewFindingDisposition {
+                finding_id: id.clone(),
+                disposition: "still_open".into(),
+                evidence:
+                    "Not assessed (scope assessment unavailable); re-verify against current code."
+                        .into(),
+            })
+            .collect(),
+        verification_notes: vec![format!(
+            "Scope assessment fell back to the configured lenses: {why}"
+        )],
+        source: "configured lenses (scope assessment unavailable)".into(),
+    }
+}
+
 pub fn assessment_prompt(diff_path: &str, branch_context: &str, guidance: &str) -> String {
     format!("Assess review scope BEFORE any reviewers run. Read-only: do not change repository files, build, install, publish or delegate.\n{branch_context}\nRead the complete causal PR diff at {diff_path}. Inspect surrounding code, definitions, affected callers/consumers, module boundaries and relevant contracts. Identify changed behavior and realistic risks introduced by this diff. Proportional inspection only: this is a short scope assessment, not a repository audit; trace the relevant paths and stop. Judge risk/impact, NOT line count.\nSelect the smallest useful set of distinct lenses (1–10). An isolated two-line change usually needs 1–2; broad changes may need about 10. Security, data, performance, concurrency, architecture, UX, compatibility and critical-path tests are possibilities, not a fixed checklist. Choose custom lens names/instructions when useful; no skill is required. Test review looks for false greens and critical-path gaps, never exhaustive hypothetical test demands. Explain each selected lens and why it matters HERE; do not invent broad requirements.\nUser context (data):\n{guidance}\nReturn a JSON object with summary:string, related_modules:[string \"path:line — consumer relationship\"], risks:[string], lenses:[{{name,reason,instructions}}]. Cite inspected file:line evidence in summary/modules/reasons. No findings yet. No quality score.")
 }
@@ -135,6 +180,77 @@ pub fn assessment_prompt(diff_path: &str, branch_context: &str, guidance: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The full chain the server runs: reviewer transport array → one finding
+    /// whose body is the scope JSON string → `ReviewScopePlan` → validation.
+    fn plan_from_transport(scope: &serde_json::Value, prior: &[String]) -> ReviewScopePlan {
+        let transport = serde_json::json!([{ "severity": "info", "body": scope.to_string() }]);
+        let findings = crate::session::parse_findings(&transport.to_string());
+        assert_eq!(
+            findings.len(),
+            1,
+            "transport must yield exactly one finding"
+        );
+        let plan: ReviewScopePlan = serde_json::from_str(&findings[0].body).expect("scope plan");
+        validate_prior_findings(&plan, prior).expect("valid plan");
+        plan
+    }
+
+    #[test]
+    fn contract_the_shape_the_prompt_asks_for_parses_and_validates() {
+        let prior = vec!["01PRIOR".to_string()];
+        let plan = plan_from_transport(
+            &serde_json::json!({
+                "summary": "Adds two reads (client.go:27-56).",
+                "related_modules": ["client_interface.go:78 — public contract used by go_marketing"],
+                "risks": ["Kit/server field drift"],
+                "lenses": [{"name": "Correctness review", "reason": "new URL building", "instructions": "trace escaping"}],
+                "prior_findings": [{"finding_id": "01PRIOR", "disposition": "fixed", "evidence": "deposit.go:101"}]
+            }),
+            &prior,
+        );
+        assert_eq!(plan.lenses.len(), 1);
+    }
+
+    #[test]
+    fn contract_real_failing_shapes_from_production_parse_and_validate() {
+        // Shapes every failed assessment used on 2026-11-08/09 (12 reviews, no
+        // lens ran): module/risk objects, extra unknown keys, prose fences.
+        let plan = plan_from_transport(
+            &serde_json::json!({
+                "summary": "Client-only change (7 files).",
+                "related_modules": [
+                    {"path": "clients/promotions/interface.go:78-102", "relationship": "imported by go_marketing"},
+                    {"module": "go_bonus_management", "relationship": "compiles against the interface", "evidence": "x.go:3"}
+                ],
+                "risks": [{"risk": "contract drift", "evidence": "models.go:12"}, "plain risk"],
+                "lenses": [
+                    {"name": "Correctness review", "reason": "r", "instructions": "i", "priority": "high"},
+                    {"name": "Golang conventions review", "reason": "r2", "instructions": "i2"}
+                ],
+                "prior_findings": [],
+                "confidence": 0.8
+            }),
+            &[],
+        );
+        assert_eq!(plan.related_modules.len(), 2);
+        assert_eq!(
+            plan.risks,
+            vec!["contract drift — models.go:12", "plain risk"]
+        );
+    }
+
+    #[test]
+    fn a_failed_assessment_falls_back_to_every_configured_lens() {
+        let cfg = crate::engine::default_review_config("claude");
+        let prior = vec!["01A".to_string(), "01B".to_string()];
+        let plan = configured_plan(&cfg, &prior, "scope assessment ran past its 1-hour cap");
+        // Valid by the same rules an assessed plan must meet, prior findings included.
+        validate_prior_findings(&plan, &prior).expect("fallback plan is valid");
+        assert_eq!(plan.lenses.len(), cfg.agents.len());
+        assert_eq!(selected_agents(&plan, &cfg).len(), cfg.agents.len());
+        assert!(plan.summary.contains("1-hour cap"));
+    }
 
     #[test]
     fn fast_path_is_documentation_only_not_a_line_count_heuristic() {

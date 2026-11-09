@@ -2,6 +2,9 @@
 use super::*;
 use otto_core::domain::ReviewScopePlan;
 
+/// Backstop only; a quiet assessor fails far sooner through its grace period.
+const SCOPE_ABSOLUTE_CAP: Duration = Duration::from_secs(60 * 60);
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn assess_scope(
     ctx: &ServerCtx,
@@ -67,8 +70,11 @@ pub(super) async fn assess_scope(
         .await
         .map_err(Error::Invalid)?;
     let started = std::time::Instant::now();
+    // Same rule as the reviewers: the grace only fails a QUIET agent and scales
+    // with the diff; a working assessor is never cut off. The hour is a backstop.
+    let grace = otto_review::engine::review_agent_timeout(diff.len(), cfg.timeout_secs);
     let result = tokio::time::timeout(
-        Duration::from_secs(120),
+        SCOPE_ABSOLUTE_CAP,
         otto_review::session::run_agent_session_with_recovery(
             &ctx.manager,
             &ctx.reviews_store,
@@ -81,7 +87,7 @@ pub(super) async fn assess_scope(
             review_id,
             0,
             &prompt,
-            Duration::from_secs(120),
+            grace,
             Some(1),
             Some(guard.flag()),
             None,
@@ -99,11 +105,10 @@ pub(super) async fn assess_scope(
     if review_is_cancelled(ctx, review_id).await {
         return Err(Error::Invalid("review cancelled".into()));
     }
-    let result = result.map_err(|_| Error::Invalid("Scope assessment exceeded its 120-second budget; no reviewers launched. Re-run review.".into()))?;
+    let result =
+        result.map_err(|_| Error::Invalid("scope assessment ran past its 1-hour cap".into()))?;
     if result.errored || result.findings.len() != 1 {
-        return Err(Error::Invalid(
-            "Scope assessment failed; no reviewers launched. Re-run review to retry.".into(),
-        ));
+        return Err(Error::Invalid("scope assessment returned no plan".into()));
     }
     let body = result.findings[0]
         .body

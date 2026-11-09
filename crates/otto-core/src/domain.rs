@@ -1337,11 +1337,19 @@ where
         let s = match v {
             Value::Null => return None,
             Value::String(s) => s,
-            Value::Object(map) => map
-                .into_iter()
-                .filter_map(|(_, v)| text(v))
-                .collect::<Vec<_>>()
-                .join(" — "),
+            Value::Object(map) => {
+                // serde_json maps iterate alphabetically; lead with the subject
+                // so `{risk, evidence}` reads "risk — evidence", not backwards.
+                const LEAD: [&str; 7] =
+                    ["path", "file", "module", "name", "risk", "title", "summary"];
+                let mut pairs: Vec<_> = map.into_iter().collect();
+                pairs.sort_by_key(|(k, _)| LEAD.iter().position(|l| l == k).unwrap_or(LEAD.len()));
+                pairs
+                    .into_iter()
+                    .filter_map(|(_, v)| text(v))
+                    .collect::<Vec<_>>()
+                    .join(" — ")
+            }
             Value::Array(items) => items
                 .into_iter()
                 .filter_map(text)

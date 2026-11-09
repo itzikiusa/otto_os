@@ -304,7 +304,7 @@ pub(crate) async fn run_review_core(
     .await?;
     user_ctx.push_str(&prior_context);
     let diff_path = materialize_review_diff(ctx, review_id, &diff_text).await?;
-    let mut scope_plan = super::scope::assess_scope(
+    let assessed = super::scope::assess_scope(
         ctx,
         review_id,
         repo_path,
@@ -316,7 +316,16 @@ pub(crate) async fn run_review_core(
         &cfg,
         &prior_ids,
     )
-    .await?;
+    .await;
+    // Scope selection narrows the lenses; it must never stop the review.
+    let mut scope_plan = match assessed {
+        Ok(plan) => plan,
+        Err(e) if review_is_cancelled(ctx, review_id).await => return Err(e),
+        Err(e) => {
+            tracing::warn!(review = %review_id, "scope assessment failed ({e}); running configured lenses");
+            otto_review::scope::configured_plan(&cfg, &prior_ids, &e.to_string())
+        }
+    };
     scope_plan.base_sha = causal_base.unwrap_or_default();
     ctx.reviews_store
         .set_scope_plan(review_id, &scope_plan)
