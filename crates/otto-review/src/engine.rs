@@ -764,22 +764,24 @@ pub fn parse_draft_comments(review_id: &Id, summary_text: &str) -> Vec<DraftComm
         tracing::warn!(review = %review_id, "final reply holds no JSON array; no comments stored");
         return vec![];
     }
-    let slice = &stripped[start..end];
-    // The verifier's overall score rides in the same array; it is not a comment.
-    let items = match serde_json::from_str::<Vec<serde_json::Value>>(slice) {
-        Ok(items) => items
-            .into_iter()
-            .filter(|v| v.get(crate::session::LENS_SCORE_KEY).is_none())
-            .collect(),
-        Err(e) => {
-            tracing::warn!(review = %review_id, "failed to parse final JSON ({e}); no comments stored");
-            return vec![];
-        }
-    };
-    serde_json::from_value(serde_json::Value::Array(items)).unwrap_or_else(|e| {
+    draft_comments_from_json(&stripped[start..end]).unwrap_or_else(|e| {
         tracing::warn!(review = %review_id, "failed to parse final JSON ({e}); no comments stored");
         vec![]
     })
+}
+
+/// THE reader of the summarizer's JSON array — both the handoff-file check
+/// (`summarizer::valid_result`) and [`parse_draft_comments`] go through it, so
+/// the two can never disagree about what a valid result is. The verifier's
+/// `{"lens_score"}` element is part of the format and is never a comment.
+pub fn draft_comments_from_json(json: &str) -> Result<Vec<DraftComment>, serde_json::Error> {
+    let items: Vec<serde_json::Value> = serde_json::from_str(json)?;
+    serde_json::from_value(serde_json::Value::Array(
+        items
+            .into_iter()
+            .filter(|v| v.get(crate::session::LENS_SCORE_KEY).is_none())
+            .collect(),
+    ))
 }
 
 /// Whether every reviewer row finished cleanly and the real summarizer ran —

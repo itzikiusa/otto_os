@@ -745,6 +745,13 @@ async fn score_target(
         threshold,
         base,
     );
+    // An unfinished review has no verified findings; 0 open findings must not
+    // read as a perfect 100 in downstream notify templates.
+    let (score, review_score) = if complete {
+        (score, review_score)
+    } else {
+        (0, 0)
+    };
     logs.push(format!(
         "review_run{tag}: score {score} (review {review_score}{}) — {reason}",
         goals_score
