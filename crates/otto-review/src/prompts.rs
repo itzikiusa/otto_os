@@ -263,6 +263,46 @@ pub fn lens_scores_block(reviewers: &[otto_core::domain::ReviewAgentState]) -> S
     )
 }
 
+/// Record the `{"lens_score"}` element of an agent's final reply on its row.
+pub fn apply_lens_score(row: &mut otto_core::domain::ReviewAgentState, reply: &str) {
+    if let Some((n, why)) = crate::session::parse_lens_score(reply) {
+        row.score = Some(n);
+        row.score_reason = why;
+    }
+}
+
+/// `[{lens, score, reason}]` for every scored row; the summarizer row is the
+/// verifier's overall rating after verification.
+pub fn lens_scores_json(review: Option<&otto_core::domain::Review>) -> Vec<serde_json::Value> {
+    review
+        .map(|r| {
+            r.agents
+                .iter()
+                .filter(|a| a.score.is_some())
+                .map(|a| serde_json::json!({ "lens": a.name, "score": a.score, "reason": a.score_reason }))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The chat lines for [`lens_scores_json`]; empty when no lens scored.
+pub fn lens_scores_chat(scores: &[serde_json::Value]) -> String {
+    if scores.is_empty() {
+        return String::new();
+    }
+    let lines: String = scores
+        .iter()
+        .map(|l| {
+            format!(
+                "\n • {}: *{}/10*",
+                l["lens"].as_str().unwrap_or_default(),
+                l["score"]
+            )
+        })
+        .collect();
+    format!("\nLens scores:{lines}")
+}
+
 /// The summarizer row's note: "N final comments", or with the fallback cause
 /// ("deterministic fallback (summarizer: <cause>) — N final comments").
 pub fn fallback_note(cause: Option<&str>, n: usize) -> String {

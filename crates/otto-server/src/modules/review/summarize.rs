@@ -82,10 +82,7 @@ pub(crate) async fn summarize_and_persist(
     }
     let agent_findings = agent_findings.as_slice();
     let total_findings: usize = agent_findings.iter().map(|f| f.len()).sum();
-    let context = format!(
-        "{context}{}",
-        lens_scores_block(&agent_states[..summarizer_idx])
-    );
+    let context = context.to_string() + &lens_scores_block(&agent_states[..summarizer_idx]);
     let summarizer_prompt = summarizer_prompt(&context, summarizer_cfg, agent_findings);
 
     let summarizer_timeout = summarizer_budget(total_findings);
@@ -445,10 +442,7 @@ impl SummarizerTurn<'_> {
             .await
             .map_err(|e| otto_core::text::clip_chars(e.trim(), 200))?;
         let parsed = parse_draft_comments(self.review_id, &text);
-        if let Some((n, why)) = otto_review::session::parse_lens_score(&text) {
-            agent_states[self.row].score = Some(n);
-            agent_states[self.row].score_reason = why;
-        }
+        apply_lens_score(&mut agent_states[self.row], &text);
         if parsed.is_empty() && self.total_findings > 0 {
             return Err(format!(
                 "returned no comments for {} findings",
