@@ -122,6 +122,12 @@ export interface ReviewScopePlan {
   prior_findings: { finding_id: string; disposition: 'fixed' | 'still_open' | 'not_relevant'; evidence: string }[];
   verification_notes: string[];
   source: string;
+  /** Every selected lens runs on every configured provider (LARGE PRs). */
+  all_providers?: boolean;
+  /** 'small' | 'medium' | 'large' by changed lines; absent on older plans. */
+  size?: string;
+  /** Changed lines (tests included) in the reviewed diff. */
+  changed_lines?: number;
 }
 
 export interface ReviewAgentCfg {
@@ -154,6 +160,11 @@ export interface ReviewConfig {
   max_attempts?: number | null;
   /** Per-agent timeout in seconds; overrides diff-size heuristic. */
   timeout_secs?: number | null;
+  /** Changed lines above which a PR is LARGE (no scope assessment; every lens on every
+   *  provider). Absent ⇒ 5000. */
+  large_pr_lines?: number | null;
+  /** Changed lines above which a PR is MEDIUM (recorded; lenses still agent-selected). Absent ⇒ 1000. */
+  medium_pr_lines?: number | null;
   /** Execution mode; absent/null ⇒ fan_out. A review_run step's `params.mode` and a run's
    *  `review_mode` both override it. */
   mode?: ReviewMode | null;
