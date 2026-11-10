@@ -265,4 +265,61 @@ mod tests {
         ));
         assert!(!valid_result(r#"[{"lens_score":7},{"title":"no body"}]"#));
     }
+
+    /// Contract: every rejection word the verifier PROMPT offers is accepted
+    /// by the completeness CHECK (as a suppressed note, never a PR comment).
+    /// go_marketing #249 (2026-11-10) failed: the prompt offered `unverified`,
+    /// the check knew only `not_relevant|duplicate`, so a finished review with
+    /// 7 verified comments was marked incomplete and its workflow scored 0.
+    #[test]
+    fn contract_every_disposition_the_prompt_offers_passes_the_check() {
+        let cfg = crate::engine::default_review_config("claude").summarizer;
+        let prompt = crate::prompts::summarizer_prompt("ctx", &cfg, &[]);
+        let offered = prompt
+            .split("disposition=")
+            .nth(2)
+            .and_then(|rest| rest.split(',').next())
+            .expect("prompt lists the rejection dispositions");
+        assert_eq!(offered, "not_relevant|unverified|duplicate");
+        for d in offered.split('|') {
+            let c: crate::engine::DraftComment = serde_json::from_value(serde_json::json!(
+                {"body":"claim","disposition":d,"evidence":"x.go:1 unreachable"}
+            ))
+            .unwrap();
+            assert!(c.verification_complete(), "{d} rejected by the check");
+            assert!(c.suppressed(), "{d} must never be published");
+        }
+    }
+
+    /// The go_marketing #249 handoff, shape for shape (texts anonymised):
+    /// 8 batches with 1,0,0,1,3,1,4,1 raw claims, one merged comment, an
+    /// `unverified` rejection, two `not_relevant` notes and the score.
+    #[test]
+    fn contract_real_go_marketing_handoff_counts_as_complete() {
+        let v = |ids: &[&str], d: &str| {
+            serde_json::json!({"path":"a.go","line":1,"severity":"warn","body":"b",
+                "evidence":"a.go:1 traced","disposition":d,"source_ids":ids})
+        };
+        let payload = serde_json::json!([
+            v(&["batch:1:claim:1", "batch:4:claim:1"], "verified"),
+            v(&["batch:6:claim:1"], "verified"),
+            v(&["batch:5:claim:1"], "verified"),
+            v(&["batch:5:claim:2"], "verified"),
+            v(&["batch:7:claim:2"], "verified"),
+            v(&["batch:7:claim:4"], "verified"),
+            v(&["batch:7:claim:3"], "verified"),
+            v(&["batch:7:claim:1"], "unverified"),
+            v(&["batch:5:claim:3"], "not_relevant"),
+            v(&["batch:8:claim:1"], "not_relevant"),
+            {"lens_score":7,"score_reason":"should-fix only"}
+        ])
+        .to_string();
+        assert!(valid_result(&payload));
+        let comments = crate::engine::draft_comments_from_json(&payload).unwrap();
+        assert!(crate::engine::verifier_covers_claims(
+            &comments,
+            &[1, 0, 0, 1, 3, 1, 4, 1]
+        ));
+        assert_eq!(comments.iter().filter(|c| !c.suppressed()).count(), 7);
+    }
 }

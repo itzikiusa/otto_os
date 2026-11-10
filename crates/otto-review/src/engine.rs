@@ -630,12 +630,18 @@ pub struct DraftComment {
     pub suggested_fix: Option<String>,
 }
 
+/// The dispositions the verifier may give a claim it does NOT publish. The
+/// verifier prompt lists exactly these, so the checker can never reject a
+/// word the prompt told the agent to use (go_marketing #249 failed on
+/// `unverified` that way, 2026-11-10).
+pub const NOTE_DISPOSITIONS: [&str; 3] = ["not_relevant", "unverified", "duplicate"];
+
 impl DraftComment {
     pub fn verification_complete(&self) -> bool {
-        matches!(
-            self.disposition.as_deref(),
-            Some("verified" | "not_relevant" | "duplicate")
-        ) && !self.body.trim().is_empty()
+        self.disposition
+            .as_deref()
+            .is_some_and(|d| d == "verified" || NOTE_DISPOSITIONS.contains(&d))
+            && !self.body.trim().is_empty()
             && self.evidence.as_ref().is_some_and(|s| !s.trim().is_empty())
     }
     pub fn suppressed(&self) -> bool {
@@ -671,7 +677,8 @@ mod verification_tests {
         ] {
             let c = claim(Some(disposition), Some(evidence));
             assert!(c.suppressed());
-            assert_eq!(c.verification_complete(), disposition != "unverified");
+            // Accounted for (a note), never published.
+            assert!(c.verification_complete());
         }
         let critical = claim(Some("verified"), Some("auth.rs:2 skips the check; api.rs:8 accepts an anonymous caller, exposing the protected document"));
         assert!(!critical.suppressed());
@@ -702,9 +709,16 @@ mod verification_tests {
         a.source_ids[1] = "invented".into();
         assert!(!verifier_covers_claims(std::slice::from_ref(&a), &[2]));
         a.source_ids.pop();
+        // A claim with no disposition or evidence is not accounted for; an
+        // evidenced `unverified` note is (it stays out of the PR).
+        let mut b = claim(None, None);
+        b.source_ids = vec![raw_claim_id(0, 1)];
+        let mut a2 = claim(Some("verified"), Some("auth.rs:2 permits it"));
+        a2.source_ids = a.source_ids.clone();
+        assert!(!verifier_covers_claims(&[a2, b], &[2]));
         let mut b = claim(Some("unverified"), Some("Could not inspect second claim"));
         b.source_ids = vec![raw_claim_id(0, 1)];
-        assert!(!verifier_covers_claims(&[a, b], &[2]));
+        assert!(verifier_covers_claims(&[a, b], &[2]));
     }
 }
 

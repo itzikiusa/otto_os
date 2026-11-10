@@ -6477,10 +6477,12 @@ reused by retries at the original reviewed revision.
 The final verifier receives stable daemon-assigned source IDs for raw claims and
 must account for each exactly once, including exclusions. One cohesive fix can
 cover multiple source IDs. Retained comments require `disposition: verified` and
-nonempty evidence. Unknown IDs/dispositions, missing evidence, omitted claims,
-unverified claims, and verifier fallback leave the run **error/incomplete**;
-raw claims stay in the agent results, and excluded claims stay in verification
-notes. An unverified claim is never silently promoted to a PR comment. Severity
+nonempty evidence. `not_relevant`, `unverified` and `duplicate` (the exact list
+the verifier prompt offers, `engine::NOTE_DISPOSITIONS`) account for a claim
+without publishing it: it stays in the verification notes. Unknown
+IDs/dispositions, missing evidence, omitted claims and verifier fallback leave
+the run **error/incomplete**, and raw claims stay in the agent results. An
+unverified claim is never promoted to a PR comment. Severity
 is based on concrete impact, not finding count or a desired score. Preexisting
 issues merely widened by the change belong once in summary context. Critical-path
 and false-green test gaps matter; exhaustive hypothetical branch coverage does not.
