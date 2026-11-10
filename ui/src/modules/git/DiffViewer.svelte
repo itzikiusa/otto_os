@@ -3,9 +3,8 @@
   import { loadErrorText } from '../../lib/loadError';
   import { plural } from '../../lib/plural';
   import Skeleton from '../../lib/components/Skeleton.svelte';
-  // Shared diff renderer (Changes / commit / PR views): unified or
-  // side-by-side, per-file collapse, syntax highlight, and (PR mode) inline
-  // comment threads + line-gutter composer, file-navigator sidebar, search.
+  // Shared diff renderer (Changes / commit / PR views): unified or side-by-side, collapse,
+  // highlight; PR mode adds threads, composer and a file tree + toolbar (lazy chunks).
   //
   // Huge diffs (100k+ changed lines) stay O(viewport):
   //  • the whole diff is flattened into ONE row model (file header, hunk
@@ -23,9 +22,10 @@
   import { tick, untrack, type Snippet } from 'svelte';
   import { isTestPath } from './testFiles';
   import { loadViewed, saveViewed } from './diff-viewed-store';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { PREF_HIDE_TESTS, PREF_TREE, PREF_WRAP, buildNavTree, fileStatus, readPref, writePref } from './diff-pr';
-  import DiffPrToolbar from './DiffPrToolbar.svelte';
-  import DiffNav from './DiffNav.svelte';
+  const DiffPrToolbarLazy = lazyComponent(() => import('./DiffPrToolbar.svelte'));
+  const DiffNavLazy = lazyComponent(() => import('./DiffNav.svelte'));
   import './diff-pr.css';
   import type { DiffResp, FileDiff, DiffLine, Hunk, HunkOp, PrComment, StageHunkResp } from '../../lib/api/types';
   import { refocusRow } from './diffRowFocus';
@@ -1104,7 +1104,7 @@
     {/if}
   {/snippet}
 
-  {#if navShown}
+  {#if navShown && DiffNavLazy.component}{@const DiffNav = DiffNavLazy.component}
     <DiffNav
       tree={navTree}
       {matchSet}
@@ -1321,7 +1321,7 @@
   <!-- Diff main area -->
   <div class="diff">
     {#if prMode}
-      <DiffPrToolbar
+      {@const DiffPrToolbar = DiffPrToolbarLazy.component}{#if DiffPrToolbar}<DiffPrToolbar
         lead={toolbarLead}
         {totalFiles}
         {matchCount}
@@ -1345,7 +1345,7 @@
         ontogglewrap={toggleWrap}
         ontoggletests={toggleHideTests}
         onfold={() => setAllCollapsed(!allCollapsed)}
-      />
+      />{:else}<div class="diff-toolbar" aria-hidden="true"></div>{/if}
     {:else}
     <div class="diff-toolbar">
       <span class="diff-stats">
