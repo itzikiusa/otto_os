@@ -3,6 +3,7 @@
 // It monkey-patches window.fetch (for /api/v1/*) and window.WebSocket (for
 // /ws/*) so client.ts stays untouched.
 
+import { mockBigPrDiff, mockCommitDiff, mockExtraPrs, mockPrCommits } from './mock-prs';
 import type {
   AwsAccount,
   AwsPermissions,
@@ -557,7 +558,7 @@ const prs: MockPr[] = [
     comments: [],
     approved_by: ['dana'],
     mergeable: null,
-  },
+  }, ...mockExtraPrs,
   {
     repo_id: 'rep_wallet',
     summary: {
@@ -648,7 +649,6 @@ function newSessionFor(workspaceId: Id, req: any): Session {
   sessions.push(s);
   return s;
 }
-
 
 // ---------------------------------------------------------------------------
 // AWS console fixtures (mirrors docs/design/aws-k8s-consoles.md §2)
@@ -779,7 +779,6 @@ const athenaHistory: AthenaExecution[] = [
 function awsAccount(id: string): AwsAccount | undefined {
   return awsAccounts.find((a) => a.id === id);
 }
-
 
 // ---------------------------------------------------------------------------
 // Kubernetes console (/k8s/*) — two clusters, a handful of pods/deployments
@@ -1654,7 +1653,7 @@ const routes: Route[] = [
       return { json: rows.slice(skip, skip + limit) };
     },
   },
-  { method: 'GET', re: /^\/repos\/([^/]+)\/diff$/, handle: () => ({ json: sampleDiff }) },
+  { method: 'GET', re: /^\/repos\/([^/]+)\/diff$/, handle: (_m, _b, q) => ({ json: mockCommitDiff(q.get('target'), q.get('path')) ?? sampleDiff }) },
   {
     method: 'POST',
     re: /^\/repos\/([^/]+)\/(stage|unstage)$/,
@@ -1847,7 +1846,8 @@ const routes: Route[] = [
       return { json: detail };
     },
   },
-  { method: 'GET', re: /^\/repos\/([^/]+)\/prs\/(\d+)\/diff$/, handle: () => ({ json: sampleDiff }) },
+  { method: 'GET', re: /^\/repos\/([^/]+)\/prs\/(\d+)\/diff$/, handle: (m, _b, q) => ({ json: m[2] === '51' ? mockBigPrDiff(q.get('path')) : sampleDiff }) },
+  { method: 'GET', re: /^\/repos\/([^/]+)\/prs\/(\d+)\/commits$/, handle: (m) => ({ json: mockPrCommits(m[2]) }) },
   // The Git page is workspace-independent and reads every repo from here; the
   // mock had no handler, so a PR deep-link found no repo to render.
   { method: 'GET', re: /^\/git\/repos$/, handle: () => ({ json: repos }) },
@@ -1984,7 +1984,6 @@ const routes: Route[] = [
       return { status: 204 };
     },
   },
-
 
   // --- AWS console ---
   { method: 'GET', re: /^\/aws\/status$/, handle: () => ({ json: awsStatus }) },

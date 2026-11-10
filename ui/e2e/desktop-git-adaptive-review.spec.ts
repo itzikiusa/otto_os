@@ -62,8 +62,8 @@ async function openReview(page: Page, status = 'done') {
   await page.route('**/api/v1/reviews/review-adaptive/findings', r => r.fulfill({ json: [finding] }));
   await page.route('**/api/v1/reviews/review-adaptive/merge-readiness', r => r.fulfill({ json: { unresolved_total: 1, unresolved_blocker: 1, total: 1, complete: true } }));
   await page.goto(`/#/git/${repoId}/pr/1`);
-  await expect(page.getByRole('tab', { name: 'Review', exact: true })).toBeVisible();
-  await page.getByRole('tab', { name: 'Review', exact: true }).click();
+  await expect(page.getByRole('tab', { name: 'AI review', exact: true })).toBeVisible();
+  await page.getByRole('tab', { name: 'AI review', exact: true }).click();
 }
 
 test('scope explains exact lenses and keeps excluded claims out of comments', async ({ page }, info) => {

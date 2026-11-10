@@ -65,6 +65,6 @@ test('the long lists that window through ListWindow register the provider', () =
   assert.match(src('modules/git/WipPanel.svelte'), /unstagedWin\.findRows\(/);
   assert.match(src('modules/git/WipPanel.svelte'), /stagedWin\.findRows\(/);
   assert.match(src('modules/panels/FileTree.svelte'), /treeWin\.findRows\(/);
-  assert.match(src('modules/git/DiffViewer.svelte'), /navWin\.findRows\(/);
+  assert.match(src('modules/git/DiffNav.svelte'), /navWin\.findRows\(/);
   assert.match(src('modules/git/BlamePanel.svelte'), /tw\.findRows\(/);
 });

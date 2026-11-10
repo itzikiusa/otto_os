@@ -6,7 +6,7 @@
   // per-check CI, approvals, mergeability, open blocker findings, and the two
   // facts only the local checkout knows (unpushed commits, branch freshness).
   // Blocking reasons disable Merge until "Merge anyway" is ticked.
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { api, ApiError } from '../../lib/api/client';
   import type { MergeStrategy, PrChecksResp, PrDetail, PrReadiness } from '../../lib/api/types';
   import { router } from '../../lib/router.svelte';
@@ -25,13 +25,15 @@
     /** The PR moved under the modal (a pinned merge 409'd): the parent should
      *  re-read its own (now stale) copy of the PR. */
     onstale?: () => void;
+    /** Pre-selected strategy (the PR header's ⋯ "Squash and merge" etc.). */
+    initialStrategy?: MergeStrategy;
   }
-  let { repoId, number, pr, onclose, onmerged, onstale }: Props = $props();
+  let { repoId, number, pr, onclose, onmerged, onstale, initialStrategy }: Props = $props();
 
   let disposed = false;
   onDestroy(() => { disposed = true; });
 
-  let strategy: MergeStrategy = $state('merge');
+  let strategy: MergeStrategy = $state(untrack(() => initialStrategy) ?? 'merge');
   let deleteSource = $state(false);
   let mergeAnyway = $state(false);
   let merging = $state(false);

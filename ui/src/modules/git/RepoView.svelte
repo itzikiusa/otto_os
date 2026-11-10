@@ -26,7 +26,7 @@
   // list (+ CreatePr), the local review, the merge dialog and the conflict
   // resolver load on first use, then mount synchronously (lazyComponent).
   // Graph and WIP — what every visit shows — stay eager.
-  const PrListLazy = lazyComponent(() => import('./PrList.svelte'));
+  const PrWorkspaceLazy = lazyComponent(() => import('./PrWorkspace.svelte'));
   const LocalReviewLazy = lazyComponent(() => import('./LocalReviewPanel.svelte'));
   const MergeApprovalLazy = lazyComponent(() => import('./MergeApprovalModal.svelte'));
   const ConflictResolverLazy = lazyComponent(() => import('./ConflictResolverView.svelte'));
@@ -426,7 +426,9 @@
           body="Otto supports GitHub, Bitbucket Cloud, and GitLab. This repository’s remote isn’t one of them, so there’s no pull request view here."
         />
       {:else}
-        <LazyMount lazy={PrListLazy} what="pull requests" props={{ repoId: repo.id }} />
+        <div class="rv-prs">
+          <LazyMount lazy={PrWorkspaceLazy} what="pull requests" props={{ repoId: repo.id }} />
+        </div>
       {/if}
     {:else if effTab === 'review'}
       <div class="rv-tab-scroll">
@@ -641,6 +643,11 @@
     flex: 1;
     min-height: 0;
     overflow: hidden;
+  }
+  /* The PR workspace fills the pane (list | open PRs), each side scrolls. */
+  .rv-prs {
+    height: 100%;
+    min-height: 0;
   }
   .rv-graph {
     display: flex;

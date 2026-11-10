@@ -1,0 +1,109 @@
+/* DiffViewer — PR-mode (T3-style Code tab) row styles: the file-header status
+   glyph and "Viewed" checkbox, dimmed viewed files, the tighter file list and
+   the wrap-off layout. Global (imported by DiffViewer.svelte) but every rule
+   is anchored on `.diff-root.pr`, so no other view is affected. Selectors are
+   one class deeper than DiffViewer's scoped rules they refine. */
+
+/* File status glyph: a small outlined square; shape + label carry the meaning. */
+.diff-root.pr .fstat {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid currentColor;
+  border-radius: var(--radius-s);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 1;
+}
+.diff-root.pr .fstat-added { color: var(--success); }
+.diff-root.pr .fstat-deleted { color: var(--danger); }
+.diff-root.pr .fstat-renamed { color: var(--warning); }
+.diff-root.pr .fstat-modified { color: var(--info); }
+[dir='rtl'] .diff-root.pr .fstat-renamed {
+  transform: scaleX(-1);
+}
+
+/* Trailing "Viewed" checkbox — a sibling of the collapse button. */
+.diff-root.pr .dfile-viewed {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding-inline: 10px;
+  border-inline-start: 1px solid var(--border);
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+.diff-root.pr .dfile-viewed input {
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.diff-root.pr .dfile-viewed:hover {
+  color: var(--text);
+}
+.diff-root.pr .drow-file.viewed .dfile-head {
+  color: var(--text-dim);
+}
+.diff-root.pr .drow-file.viewed .dfile-path,
+.diff-root.pr .drow-file.viewed .dfile-head .add,
+.diff-root.pr .drow-file.viewed .dfile-head .del {
+  opacity: 0.6;
+}
+.diff-root.pr .drow-file.viewed .dfile-viewed {
+  color: var(--accent-text);
+}
+
+/* The PR file list reads as a tight list, not spaced cards. */
+.diff-root.pr .drow-file {
+  padding-top: 6px;
+}
+.diff-root.pr .drow-file.first {
+  padding-top: 0;
+}
+
+/* Wrap off (desktop only — ≤1024 always wraps): each hunk block scrolls
+   sideways as one unit; every row spans the widest line so add/del tints
+   reach the end, and the gutters stay pinned while the code scrolls. */
+@media (min-width: 1025px) {
+  .diff-root.pr.nowrap .dtable {
+    display: grid;
+    grid-template-columns: minmax(100%, max-content);
+    overflow-x: auto;
+  }
+  .diff-root.pr.nowrap .dtable .vrow .code {
+    white-space: pre;
+    word-break: normal;
+  }
+  .diff-root.pr.nowrap .dtable:not(.split) .vrow {
+    grid-template-columns: 42px 42px 16px max-content;
+  }
+  .diff-root.pr.nowrap .dtable:not(.split) .vrow .gut,
+  .diff-root.pr.nowrap .dtable:not(.split) .vrow .sign {
+    position: sticky;
+    z-index: 1;
+    background: var(--surface);
+  }
+  .diff-root.pr.nowrap .dtable:not(.split) .vrow .gut.old { inset-inline-start: 0; }
+  .diff-root.pr.nowrap .dtable:not(.split) .vrow .gut.new { inset-inline-start: 42px; }
+  .diff-root.pr.nowrap .dtable:not(.split) .vrow .sign { inset-inline-start: 84px; }
+  /* Side by side: each half scrolls on its own inside its column. */
+  .diff-root.pr.nowrap .dtable.split {
+    display: block;
+    overflow-x: visible;
+  }
+  .diff-root.pr.nowrap .dtable .split-vrow .code.half {
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+}
+
+@media (max-width: 1024px) {
+  .diff-root.pr .dfile-viewed { font-size: var(--fs-s); }
+  .diff-root.pr .dfile-viewed input { width: 18px; height: 18px; }
+}
