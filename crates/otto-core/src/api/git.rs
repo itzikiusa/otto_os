@@ -705,6 +705,10 @@ pub struct PrSummary {
     pub source_branch: String,
     pub target_branch: String,
     pub updated_at: DateTime<Utc>,
+    /// When the PR was opened (absent when the provider omits it). Feeds the
+    /// PR list's "newest" sort and the timeline's "opened" event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
     pub url: String,
     /// True if this is a draft PR.
     #[serde(default)]
