@@ -86,6 +86,8 @@ test.beforeEach(async ({ page }) => {
     localStorage.setItem('otto_workspace', id);
     localStorage.setItem('otto_rail_expanded', '0');
     localStorage.setItem('otto_git_auto_fetch', JSON.stringify({ enabled: false }));
+    // The PR Code tab's file tree is opt-in; these checks drive it.
+    localStorage.setItem('otto_pr_tree', '1');
     // Long-task log (Chromium): every main-thread block over 50 ms.
     const w = window as unknown as { __lt: number[] };
     w.__lt = [];
@@ -198,11 +200,11 @@ for (const mode of ['summary', 'legacy'] as const) {
     page.on('pageerror', (e) => loopHit(e.message));
     await prRoutes(page, mode, perFile);
     await page.goto(`/#/git/${repoId}/pr/1`);
-    await expect(page.getByRole('tab', { name: 'Files', exact: true })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('tab', { name: 'Code', exact: true })).toBeVisible({ timeout: 15_000 });
     await resetLongTasks(page);
 
     const t0 = Date.now();
-    await page.getByRole('tab', { name: 'Files', exact: true }).click();
+    await page.getByRole('tab', { name: 'Code', exact: true }).click();
     await expect(page.locator('.dfile-head').first()).toBeVisible();
     const openMs = Date.now() - t0;
     // > 40 files ⇒ everything starts collapsed: headers only, no line rows.
@@ -324,9 +326,12 @@ test('PR diff with a 1 MB single-line (minified) file: line cut, expand on deman
   await page.route('**/api/v1/repos/*/prs/*/commits', (r) => r.fulfill({ json: [] }));
   await page.route('**/api/v1/repos/*/prs/*/reviews', (r) => r.fulfill({ json: [] }));
   await page.goto(`/#/git/${repoId}/pr/2`);
-  await expect(page.getByRole('tab', { name: 'Files', exact: true })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('tab', { name: 'Code', exact: true })).toBeVisible({ timeout: 15_000 });
   await resetLongTasks(page);
-  await page.getByRole('tab', { name: 'Files', exact: true }).click();
+  await page.getByRole('tab', { name: 'Code', exact: true }).click();
+  // A *.min.js is "generated": it starts collapsed — open it.
+  const head = page.locator('.dfile-head', { hasText: 'bundle.min.js' });
+  if ((await head.getAttribute('aria-expanded')) === 'false') await head.click();
   const expand = page.getByRole('button', { name: /Expand line \(1\.0 MB\)/ });
   await expect(expand).toBeVisible({ timeout: 15_000 });
   await page.waitForTimeout(300);

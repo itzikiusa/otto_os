@@ -101,6 +101,8 @@ export interface PrSummary {
   source_branch: string;
   target_branch: string;
   updated_at: string;
+  /** When the PR was opened (omitted when the provider doesn't say). */
+  created_at?: string | null;
   url: string;
   draft?: boolean | null;
   ci_status?: string | null;

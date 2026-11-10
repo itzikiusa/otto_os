@@ -3,9 +3,8 @@
   import { loadErrorText } from '../../lib/loadError';
   import { plural } from '../../lib/plural';
   import Skeleton from '../../lib/components/Skeleton.svelte';
-  // Shared diff renderer (Changes / commit / PR views): unified or
-  // side-by-side, per-file collapse, syntax highlight, and (PR mode) inline
-  // comment threads + line-gutter composer, file-navigator sidebar, search.
+  // Shared diff renderer (Changes / commit / PR views): unified or side-by-side, collapse,
+  // highlight; PR mode adds threads, composer and a file tree + toolbar (lazy chunks).
   //
   // Huge diffs (100k+ changed lines) stay O(viewport):
   //  • the whole diff is flattened into ONE row model (file header, hunk
@@ -20,7 +19,14 @@
   //    lists files first and each file's hunks are fetched (`loadFile`) only
   //    once it is expanded and near the viewport, abortable;
   //  • syntax highlighting is deferred to rAF slices for mounted rows only.
-  import { tick, untrack } from 'svelte';
+  import { tick, untrack, type Snippet } from 'svelte';
+  import { isTestPath } from './testFiles';
+  import { loadViewed, saveViewed } from './diff-viewed-store';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  import { PREF_HIDE_TESTS, PREF_TREE, PREF_WRAP, buildNavTree, fileStatus, readPref, writePref } from './diff-pr';
+  const DiffPrToolbarLazy = lazyComponent(() => import('./DiffPrToolbar.svelte'));
+  const DiffNavLazy = lazyComponent(() => import('./DiffNav.svelte'));
+  import './diff-pr.css';
   import type { DiffResp, FileDiff, DiffLine, Hunk, HunkOp, PrComment, StageHunkResp } from '../../lib/api/types';
   import { refocusRow } from './diffRowFocus';
   import { langFromPath, ensureHljs } from '../../lib/hl';
@@ -51,11 +57,8 @@
   import { findScroller, resum, rowAt } from './diff-virtual';
   import { carryViewState, carryViewed, unchangedPaths } from './diff-viewstate';
   import { registerFindProvider } from '../../lib/findProviders';
-  import { startMouseDrag } from '../../lib/dragCursor';
-  import { ListWindow } from '../../lib/listWindow.svelte';
   import { DeferredHighlighter } from './diff-highlight.svelte';
   import { SvelteSet } from 'svelte/reactivity';
-  import { paneResizer } from '../../lib/paneResizer';
 
   interface Props {
     diff: DiffResp;
@@ -97,6 +100,13 @@
      *  re-fetched diff with the same key keeps viewed marks, expansions and
      *  the open composer for paths that still exist (a push re-fetches). */
     stateKey?: string;
+    /** PR mode: rendered at the very start of the diff toolbar (e.g. the
+     *  host's "All commits ▾" picker). */
+    toolbarLead?: Snippet;
+    /** PR mode: persist "Viewed" marks in localStorage under this key. A mark
+     *  is pinned to the file's status + line counts, so a push that changes
+     *  the file drops it; an untouched file stays viewed across reloads. */
+    viewedStorageKey?: string;
   }
   let {
     diff,
@@ -110,7 +120,25 @@
     wip,
     loadFile,
     stateKey,
+    toolbarLead,
+    viewedStorageKey,
   }: Props = $props();
+
+  // ── PR-mode view preferences (persisted; helpers in diff-pr.ts) ──────────
+  /** File tree (the nav sidebar) shown — PR mode, hidden by default. */
+  let treeOpen = $state(readPref(PREF_TREE, false));
+  /** Test files filtered out of rows, tree and counts — PR mode. */
+  let hideTests = $state(readPref(PREF_HIDE_TESTS, false));
+  /** Soft-wrap long code lines (desktop; ≤1024 always wraps). */
+  let wrapLines = $state(readPref(PREF_WRAP, true));
+  function toggleTree(): void { treeOpen = !treeOpen; writePref(PREF_TREE, treeOpen); }
+  function toggleHideTests(): void { hideTests = !hideTests; writePref(PREF_HIDE_TESTS, hideTests); }
+  function toggleWrap(): void { wrapLines = !wrapLines; writePref(PREF_WRAP, wrapLines); }
+  /** The nav sidebar is on screen (host asked for it AND, in PR mode, the tree toggle is on). */
+  const navShown = $derived(showNav && prMode && treeOpen);
+  /** The files this view shows: everything, minus test files when hidden (PR mode). */
+  const visibleFiles = $derived(prMode && hideTests ? diff.files.filter((f) => !isTestPath(f.path)) : diff.files);
+  const hiddenTests = $derived(diff.files.length - visibleFiles.length);
 
   let mode = $state<'unified' | 'split'>('unified');
   let hlReady = $state(false);
@@ -207,107 +235,17 @@
       ? viewedRaw.v
       : sameKey(viewedRaw.key)
         ? carryViewed(viewedRaw.v, unchangedPaths(viewedRaw.for, diff))
-        : new Set<string>(),
+        : prMode && viewedStorageKey
+          ? loadViewed(viewedStorageKey, diff.files)
+          : new Set<string>(),
   );
 
   let composerText = $state('');
   let composerBusy = $state(false);
 
-  // Drag-resizable nav width (desktop), persisted. The ≤1024 media query still
-  // wins via !important-free specificity because the width is a CSS var the
-  // mobile rules simply ignore.
-  let navCollapsed = $state(false);
-  const NAV_W_KEY = 'otto_diffnav_w';
-  let navW = $state(Number(localStorage.getItem(NAV_W_KEY)) || 240);
-  let navResizing = $state(false);
-  const clampNavW = (w: number): number => Math.max(180, Math.min(520, Math.round(w)));
-  function persistNavW(): void {
-    try {
-      localStorage.setItem(NAV_W_KEY, String(navW));
-    } catch {
-      /* blocked storage: the width just doesn't persist */
-    }
-  }
-  function setNavW(w: number): void {
-    navW = clampNavW(w);
-    persistNavW();
-  }
-  // Through lib/dragCursor (r3-03-08): an overlay carries the cursor instead
-  // of an INHERITED `body.style` write (65–690 ms of whole-document restyle
-  // on this very page, at drag start and end), moves are coalesced to one
-  // per frame, and localStorage is written once on release, not per move.
-  function startNavResize(e: MouseEvent): void {
-    navResizing = true;
-    const startX = e.clientX;
-    const startW = navW;
-    startMouseDrag(e, {
-      cursor: 'col-resize',
-      // Physical left-anchored sidebar: dragging right widens it.
-      onMove: (ev) => {
-        navW = clampNavW(startW + (ev.clientX - startX));
-      },
-      onEnd: () => {
-        navResizing = false;
-        persistNavW();
-      },
-    });
-  }
-
-  // ── Nav tree: group files by directory (GitHub-style), compressing
-  // single-child chains ("apps" → "sinatra" → "src" renders once as
-  // "apps/sinatra/src"). Directories are collapsible; files keep the viewed
-  // checkbox / stats / comment badge of the old flat rows.
-  interface NavDir {
-    /** Compressed display label, e.g. "apps/sinatra/src". */
-    label: string;
-    /** Full prefix path (unique key), e.g. "apps/sinatra/src". */
-    path: string;
-    dirs: NavDir[];
-    files: FileDiff[];
-  }
-  const navTree = $derived.by(() => {
-    interface Node {
-      dirs: Map<string, Node>;
-      files: FileDiff[];
-    }
-    const root: Node = { dirs: new Map(), files: [] };
-    for (const f of diff.files) {
-      const parts = f.path.split('/');
-      let cur = root;
-      for (const p of parts.slice(0, -1)) {
-        let next = cur.dirs.get(p);
-        if (!next) {
-          next = { dirs: new Map(), files: [] };
-          cur.dirs.set(p, next);
-        }
-        cur = next;
-      }
-      cur.files.push(f);
-    }
-    // Compress chains + emit sorted (dirs first, then files, both A→Z).
-    const emit = (node: Node, label: string, path: string): NavDir => {
-      let n = node;
-      let lbl = label;
-      let pth = path;
-      while (n.files.length === 0 && n.dirs.size === 1) {
-        const [k, child] = [...n.dirs.entries()][0];
-        lbl = lbl === '' ? k : `${lbl}/${k}`;
-        pth = pth === '' ? k : `${pth}/${k}`;
-        n = child;
-      }
-      const dirs = [...n.dirs.entries()]
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([k, child]) => emit(child, k, pth === '' ? k : `${pth}/${k}`));
-      const files = [...n.files].sort((a, b) => a.path.localeCompare(b.path));
-      return { label: lbl, path: pth, dirs, files };
-    };
-    return emit(root, '', '');
-  });
-  let navDirCollapsed: Record<string, boolean> = $state({});
-  function toggleNavDir(path: string): void {
-    navDirCollapsed = { ...navDirCollapsed, [path]: !navDirCollapsed[path] };
-  }
-
+  // ── Nav tree (diff-pr.ts): directories collapsible, files keep the viewed
+  // checkbox / stats / comment badge.
+  const navTree = $derived(buildNavTree(visibleFiles));
   // ── Search: one debounced pass per term ──────────────────────────────────
   let rawSearch = $state('');
   let search = $state('');
@@ -322,52 +260,10 @@
   const matchSet = $derived.by(() => {
     if (!search) return null;
     const s = new Set<string>();
-    for (const f of diff.files) if (fileMatches(vs.loaded.get(f.path) ?? f, search)) s.add(f.path);
+    for (const f of visibleFiles) if (fileMatches(vs.loaded.get(f.path) ?? f, search)) s.add(f.path);
     return s;
   });
-  /** Dirs with at least one matching file beneath (bottom-up, once per term). */
-  const navVisibleDirs = $derived.by(() => {
-    const m = matchSet;
-    if (!m) return null;
-    const vis = new Set<string>();
-    const walk = (d: NavDir): boolean => {
-      let any = d.files.some((f) => m.has(f.path));
-      for (const sub of d.dirs) if (walk(sub)) any = true;
-      if (any) vis.add(d.path);
-      return any;
-    };
-    walk(navTree);
-    return vis;
-  });
-  // The nav tree as the flat list of VISIBLE rows (folded dirs and search misses
-  // skipped), windowed against `.nav-files` (`ListWindow`, with ⌘F over every
-  // row): dir and file rows share one fixed pitch (CSS) so the math is exact.
-  type NavRow =
-    | { kind: 'dir'; d: NavDir; depth: number; key: string }
-    | { kind: 'file'; f: FileDiff; depth: number; key: string };
-  const navRows = $derived.by(() => {
-    const out: NavRow[] = [];
-    const vis = navVisibleDirs;
-    const m = matchSet;
-    const shut = navDirCollapsed;
-    const walk = (d: NavDir, depth: number): void => {
-      for (const sub of d.dirs) {
-        if (vis !== null && !vis.has(sub.path)) continue;
-        out.push({ kind: 'dir', d: sub, depth, key: `d:${sub.path}` });
-        if (!shut[sub.path]) walk(sub, depth + 1);
-      }
-      for (const f of d.files) {
-        if (m !== null && !m.has(f.path)) continue;
-        out.push({ kind: 'file', f, depth, key: `f:${f.path}` });
-      }
-    };
-    walk(navTree, 0);
-    return out;
-  });
-  const navWin = new ListWindow('.nav-file, .nav-dir-row', { min: 200, overscan: 15 });
-  const navRange = $derived(navWin.range(navRows.length));
-  $effect(() => navWin.findRows(() => null, () => navRows, (r) => (r.kind === 'dir' ? r.d.label : (r.f.path.split('/').pop() ?? ''))));
-  const filteredFiles = $derived(matchSet ? diff.files.filter((f) => matchSet.has(f.path)) : diff.files);
+  const filteredFiles = $derived(matchSet ? visibleFiles.filter((f) => matchSet.has(f.path)) : visibleFiles);
   const matchCount = $derived(filteredFiles.length);
 
   $effect(() => {
@@ -376,12 +272,12 @@
 
   // ── Stats + collapse defaults (derived — never an after-render effect) ────
   const totals = $derived.by(() => {
-    if (diff.total_added != null && diff.total_deleted != null) {
+    if (hiddenTests === 0 && diff.total_added != null && diff.total_deleted != null) {
       return { add: diff.total_added, del: diff.total_deleted };
     }
     let add = 0;
     let del = 0;
-    for (const f of diff.files) {
+    for (const f of visibleFiles) {
       const s = fileStat(f);
       add += s.add;
       del += s.del;
@@ -391,8 +287,11 @@
   const collapseAll = $derived(
     diff.files.length > COLLAPSE_ALL_FILES || totals.add + totals.del > COLLAPSE_ALL_LINES,
   );
+  /** PR mode opens on a collapsed file list (T3/GitHub style) past this many files. */
+  const PR_COLLAPSED_FILES = 5;
   function defaultCollapsed(f: FileDiff): boolean {
     if (collapseAll || isGenerated(f.path)) return true;
+    if (prMode && (diff.files.length > PR_COLLAPSED_FILES || viewed.has(f.path))) return true;
     const s = fileStat(f);
     return s.add + s.del > FILE_COLLAPSE_LINES;
   }
@@ -402,7 +301,7 @@
   function toggleCollapsed(f: FileDiff): void {
     patchVs({ overrides: { ...vs.overrides, [f.path]: !isCollapsed(f) } });
   }
-  const allCollapsed = $derived(diff.files.every((f) => isCollapsed(f)));
+  const allCollapsed = $derived(visibleFiles.every((f) => isCollapsed(f)));
   /** Files per frame for a chunked Expand / Collapse all. */
   const EXPAND_CHUNK = 150;
   let expandFrame = 0;
@@ -421,7 +320,7 @@
     if (expandFrame) cancelAnimationFrame(expandFrame);
     expandFrame = 0;
     const d = diff;
-    const files = d.files;
+    const files = visibleFiles;
     if (files.length <= EXPAND_CHUNK) {
       const next: Record<string, boolean> = {};
       for (const f of files) next[f.path] = v;
@@ -1041,11 +940,6 @@
     ]);
   }
 
-  // Nav: basename (the tree rows carry the directory context).
-  function baseName(path: string): string {
-    return path.split('/').pop() ?? path;
-  }
-
   // ── ⌘F over the whole diff (lib/findProviders.ts) ──────────────────────
   // The body mounts only the window (+800 px), so find-in-page searched one
   // screen of a 100k-line diff. It now searches the row model — every file,
@@ -1121,13 +1015,17 @@
 
   function toggleViewed(path: string): void {
     const next = new Set(viewed);
-    if (next.has(path)) next.delete(path);
-    else next.add(path);
+    const nowViewed = !next.has(path);
+    if (nowViewed) next.add(path);
+    else next.delete(path);
     viewedRaw = { for: diff, key: stateKey, v: next };
+    // GitHub-style: ticking "Viewed" folds the file away; unticking reopens it.
+    if (prMode) patchVs({ overrides: { ...vs.overrides, [path]: nowViewed } });
+    if (prMode && viewedStorageKey) saveViewed(viewedStorageKey, diff.files, next);
   }
 
-  const viewedCount = $derived(viewed.size);
-  const totalFiles = $derived(diff.files.length);
+  const viewedCount = $derived(visibleFiles.reduce((n, f) => n + (viewed.has(f.path) ? 1 : 0), 0));
+  const totalFiles = $derived(visibleFiles.length);
   const lazyCount = $derived(diff.files.reduce((n, f) => n + (f.hunks_omitted ? 1 : 0), 0));
 
   // --- Keyboard file navigation: ] / n = next file, [ / N = prev file --------
@@ -1174,53 +1072,15 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
   class="diff-root"
-  class:with-nav={showNav && prMode}
+  class:with-nav={navShown}
+  class:pr={prMode}
+  class:nowrap={prMode && !wrapLines}
   bind:this={rootEl}
   onkeydown={onDiffKeydown}
   role="region"
   aria-label="Diff viewer"
   tabindex="-1"
 >
-  <!-- File Navigator Sidebar -->
-  {#snippet navFileRow(file: FileDiff, depth: number)}
-    {@const stats = fileStat(file)}
-    {@const cCount = commentCounts.get(file.path) ?? 0}
-    {@const isViewed = viewed.has(file.path)}
-    <!-- The row is a plain box holding TWO controls side by side — the "viewed"
-         checkbox and a real button that jumps to the file — so nothing interactive
-         is nested inside a role=button. Enter / Space both activate the button. -->
-    <div
-      class="nav-file"
-      class:nav-file-viewed={isViewed}
-      style="padding-inline-start: {8 + depth * 12}px"
-      title={file.path}
-    >
-      <span class="nav-viewed-cb">
-        <input
-          type="checkbox"
-          checked={isViewed}
-          title="Mark as viewed"
-          onchange={() => toggleViewed(file.path)}
-          aria-label="Mark {file.path} as viewed"
-        />
-      </span>
-      <button class="nav-file-open" onclick={() => void scrollToFile(file.path)} aria-label="Go to {file.path}">
-        <span class="nav-file-path">
-          <span class="nav-base">{baseName(file.path)}</span>
-        </span>
-        <span class="nav-file-stats">
-          <span class="add">+{stats.add}</span>
-          <span class="del">−{stats.del}</span>
-        </span>
-        {#if cCount > 0}
-          <span class="nav-comment-badge" title="{plural(cCount, 'comment')}">
-            💬{cCount}
-          </span>
-        {/if}
-      </button>
-    </div>
-  {/snippet}
-
   <!-- A line-number gutter. When it can act (comment on the line / select it for
        staging) it is a real <button> with a spoken label; of a row's two gutters
        only one is a tab stop (the other stays mouse-clickable) so a diff does not
@@ -1244,88 +1104,21 @@
     {/if}
   {/snippet}
 
-  {#snippet navDirRow(sub: NavDir, depth: number)}
-    <button
-      class="nav-dir-row"
-      style="padding-inline-start: {8 + depth * 12}px"
-      aria-expanded={!navDirCollapsed[sub.path]}
-      onclick={() => toggleNavDir(sub.path)}
-      title={sub.path}
-    >
-      <span class="nav-dir-chevron">
-        <Icon name={navDirCollapsed[sub.path] ? 'chevronRight' : 'chevronDown'} size={12} />
-      </span>
-      <Icon name="folder" size={12} />
-      <span class="nav-dir-label">{sub.label}</span>
-    </button>
-  {/snippet}
-
-  {#if showNav && prMode}
-    <aside
-      class="diff-nav"
-      class:nav-collapsed={navCollapsed}
-      class:nav-resizing={navResizing}
-      style={`--nav-max:${Math.max(160, view.h)}px;${navCollapsed ? '' : `--navw:${navW}px`}`}
-    >
-      <div class="nav-header">
-        {#if !navCollapsed}
-          <span class="nav-title">
-            {plural(totalFiles, 'file')}
-            <span class="nav-viewed-count">· {viewedCount}/{totalFiles} viewed</span>
-          </span>
-        {/if}
-        <button
-          class="nav-collapse-btn"
-          onclick={() => (navCollapsed = !navCollapsed)}
-          title={navCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          aria-label={navCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-        >
-          <!-- Physical chevron mirrored in RTL (the rail sits on the start side). -->
-          <span class="nav-collapse-ico">
-            <Icon name={navCollapsed ? 'chevronRight' : 'chevronLeft'} size={12} />
-          </span>
-        </button>
-      </div>
-
-      {#if !navCollapsed}
-        <!-- Search inside nav -->
-        <div class="nav-search-wrap">
-          <input dir="ltr"
-            class="nav-search input"
-            type="text"
-            placeholder="Filter files…"
-            bind:value={rawSearch}
-            aria-label="Filter files by path or content"
-          />
-          {#if search}
-            <span class="nav-match-count">{matchCount}</span>
-          {/if}
-        </div>
-
-        <div class="nav-files">
-          <div class="nav-rows" {@attach navWin.attach}>
-            {#if navRange.top > 0}<div style="height:{navRange.top}px" aria-hidden="true"></div>{/if}
-            {#each navRows.slice(navRange.start, navRange.end) as r (r.key)}
-              {#if r.kind === 'dir'}
-                {@render navDirRow(r.d, r.depth)}
-              {:else}
-                {@render navFileRow(r.f, r.depth)}
-              {/if}
-            {/each}
-            {#if navRange.bottom > 0}<div style="height:{navRange.bottom}px" aria-hidden="true"></div>{/if}
-          </div>
-        </div>
-        <!-- Drag the trailing edge to resize (desktop); double-click resets. -->
-        <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End, Enter). -->
-        <div
-          class="nav-resize-handle"
-          role="separator"
-          aria-label="Resize file sidebar"
-          title="Drag or use ←/→ to resize · double-click or Enter to reset"
-          use:paneResizer={{ value: navW, min: 180, max: 520, onChange: setNavW, onReset: () => setNavW(240), onDragStart: startNavResize, text: (v) => `${Math.round(v)} pixels wide` }}
-        ></div>
-      {/if}
-    </aside>
+  {#if navShown && DiffNavLazy.component}{@const DiffNav = DiffNavLazy.component}
+    <DiffNav
+      tree={navTree}
+      {matchSet}
+      {viewed}
+      {commentCounts}
+      {totalFiles}
+      {viewedCount}
+      {matchCount}
+      searching={!!search}
+      maxH={view.h}
+      bind:rawSearch
+      onjump={(path) => void scrollToFile(path)}
+      ontoggleviewed={toggleViewed}
+    />
   {/if}
 
   {#snippet composerBox()}
@@ -1365,10 +1158,13 @@
     {#if r.kind === 'file'}
       {@const stats = fileStat(r.file)}
       {@const cCount = commentCounts.get(r.file.path) ?? 0}
+      {@const isViewed = prMode && viewed.has(r.file.path)}
+      {@const st = prMode ? fileStatus(r.file) : null}
       <div
         class="drow drow-file"
         class:first={r.first}
         class:open={!r.collapsed}
+        class:viewed={isViewed}
         id="dfile-{r.file.path}"
         data-rk={r.key}
         use:measure={[r.key, i]}
@@ -1380,6 +1176,9 @@
             <span class="dfile-chevron">
               <Icon name={r.collapsed ? 'chevronRight' : 'chevronDown'} size={12} />
             </span>
+            {#if st}
+              <span class="fstat fstat-{st.kind}" data-find-skip role="img" aria-label={st.label} title={st.label}>{st.glyph}</span>
+            {/if}
             <span class="dfile-path mono" dir="ltr">
               {#if r.file.old_path}{r.file.old_path}<span class="rename-arrow"> → </span>{/if}{r.file.path}
             </span>
@@ -1392,6 +1191,18 @@
             <span class="add" data-find-skip>+{stats.add}</span>
             <span class="del" data-find-skip>−{stats.del}</span>
           </button>
+          {#if prMode}
+            <!-- Sibling of the collapse button, never nested inside it. -->
+            <label class="dfile-viewed" data-find-skip title={isViewed ? 'Viewed — untick to reopen' : 'Mark as viewed (folds the file away)'}>
+              <input
+                type="checkbox"
+                checked={isViewed}
+                onchange={() => toggleViewed(r.file.path)}
+                aria-label="Mark {r.file.path} as viewed"
+              />
+              <span>Viewed</span>
+            </label>
+          {/if}
           {#if repoId}
             <button
               class="dfile-tools"
@@ -1509,6 +1320,33 @@
 
   <!-- Diff main area -->
   <div class="diff">
+    {#if prMode}
+      {@const DiffPrToolbar = DiffPrToolbarLazy.component}{#if DiffPrToolbar}<DiffPrToolbar
+        lead={toolbarLead}
+        {totalFiles}
+        {matchCount}
+        searching={!!search}
+        {viewedCount}
+        {hideTests}
+        {hiddenTests}
+        add={totals.add}
+        del={totals.del}
+        largeNote={!!diff.truncated || (lazyCount > 0 && !loadFile)}
+        bind:rawSearch
+        showSearch={!navShown}
+        canTree={showNav}
+        {treeOpen}
+        {isMobile}
+        bind:mode
+        {wrapLines}
+        canFold={visibleFiles.length > 1}
+        {allCollapsed}
+        ontoggletree={toggleTree}
+        ontogglewrap={toggleWrap}
+        ontoggletests={toggleHideTests}
+        onfold={() => setAllCollapsed(!allCollapsed)}
+      />{:else}<div class="diff-toolbar" aria-hidden="true"></div>{/if}
+    {:else}
     <div class="diff-toolbar">
       <span class="diff-stats">
         {#if search}
@@ -1556,9 +1394,11 @@
       {/if}
     </div>
 
+    {/if}
+
     {#if filteredFiles.length === 0}
       <div class="dim diff-empty">
-        {search ? 'No files match your search.' : 'No changes.'}
+        {search ? 'No files match your search.' : hiddenTests > 0 ? 'Only test files changed — they’re hidden.' : 'No changes.'}
       </div>
     {:else}
       <!-- Windowed body: padding stands in for the rows above/below the window;
@@ -1603,225 +1443,6 @@
     flex-direction: row;
     align-items: flex-start;
     gap: 0;
-  }
-
-  /* ── Navigator sidebar ── */
-  .diff-nav {
-    /* Drag-resizable: --navw is set inline (persisted); default 240px. */
-    width: var(--navw, 240px);
-    min-width: var(--navw, 240px);
-    max-width: var(--navw, 240px);
-    position: relative;
-    flex-shrink: 0;
-    border-inline-end: 1px solid var(--border);
-    background: var(--surface-2);
-    display: flex;
-    flex-direction: column;
-    position: sticky;
-    top: 0;
-    /* Capped at the visible height of the diff's scroll container (measured
-       in `readView`), not 100vh: in WKWebView 100vh is the SCREEN height, so
-       the rail ran past the scrollport and its last files were unreachable
-       until the diff itself was scrolled to the end. */
-    max-height: var(--nav-max, 480px);
-    overflow: hidden;
-    /* Let the inner .nav-files (flex:1, overflow-y:auto) own the scroll: a flex
-       column child can't scroll unless the column allows itself to shrink. */
-    min-height: 0;
-  }
-  .diff-nav.nav-collapsed {
-    width: 32px;
-    min-width: 32px;
-    max-width: 32px;
-  }
-  .nav-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 10px 6px;
-    border-bottom: 1px solid var(--border);
-    gap: 6px;
-    flex-shrink: 0;
-  }
-  .nav-title {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    color: var(--text-dim);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    flex: 1;
-  }
-  .nav-viewed-count {
-    font-weight: 400;
-  }
-  .nav-collapse-btn {
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: var(--text-dim);
-    padding: 2px 4px;
-    border-radius: var(--radius-s);
-    display: flex;
-    align-items: center;
-    flex-shrink: 0;
-  }
-  .nav-collapse-btn:hover {
-    background: var(--hover);
-    color: var(--text);
-  }
-  .nav-search-wrap {
-    position: relative;
-    padding: 6px 8px;
-    flex-shrink: 0;
-  }
-  .nav-search {
-    width: 100%;
-    font-size: var(--fs-xs);
-    height: 26px;
-    padding: 0 6px;
-    box-sizing: border-box;
-  }
-  .nav-match-count {
-    position: absolute;
-    inset-inline-end: 14px;
-    top: 50%;
-    transform: translateY(-50%);
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    pointer-events: none;
-  }
-  .nav-files {
-    overflow-y: auto;
-    flex: 1;
-    padding: 2px 0 8px;
-  }
-  /* Directory group rows (tree). */
-  /* One fixed pitch for dir and file rows: the nav is windowed (ListWindow
-     measures it from a rendered row), so every row must be the same height. */
-  .nav-dir-row,
-  .nav-file {
-    height: 26px;
-    box-sizing: border-box;
-    overflow: hidden;
-  }
-  .nav-dir-row {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 2px 8px;
-    inline-size: 100%;
-    border: 0;
-    background: transparent;
-    font: inherit;
-    font-size: var(--fs-xs);
-    text-align: start;
-    cursor: pointer;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    min-width: 0;
-    white-space: nowrap;
-  }
-  .nav-dir-row:hover {
-    background: var(--hover);
-    color: var(--text);
-  }
-  .nav-dir-chevron {
-    display: flex;
-    align-items: center;
-    flex-shrink: 0;
-  }
-  .nav-dir-label {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    font-weight: 600;
-  }
-  /* Drag handle on the trailing edge of the sidebar. Fully INSIDE the aside —
-     it has overflow:hidden, so any part hanging outside is unclickable. */
-  .nav-resize-handle {
-    position: absolute;
-    inset-block: 0;
-    inset-inline-end: 0;
-    width: 6px;
-    cursor: col-resize;
-    z-index: 2;
-  }
-  .nav-resize-handle:hover,
-  .nav-resize-handle:focus-visible,
-  .nav-resizing .nav-resize-handle {
-    outline: none;
-    background: var(--accent-line);
-  }
-  .nav-file {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 8px;
-    padding-inline-start: 6px;
-    cursor: pointer;
-    font-size: var(--fs-xs);
-    color: var(--text);
-    border-radius: 0;
-    transition: background var(--dur-fast);
-    min-width: 0;
-  }
-  .nav-file:hover {
-    background: var(--hover);
-  }
-  .nav-file.nav-file-viewed {
-    opacity: 0.45;
-  }
-  /* The file-jump button fills the row beside the checkbox. */
-  .nav-file-open {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    block-size: 100%;
-    padding: 0;
-    border: 0;
-    background: transparent;
-    color: inherit;
-    font: inherit;
-    font-size: var(--fs-xs);
-    text-align: start;
-    cursor: pointer;
-  }
-  .nav-viewed-cb {
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-  }
-  .nav-viewed-cb input[type='checkbox'] {
-    width: 12px;
-    height: 12px;
-    cursor: pointer;
-    accent-color: var(--accent);
-  }
-  .nav-file-path {
-    flex: 1;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-    min-width: 0;
-    line-height: 1.3;
-  }
-  .nav-base {
-    font-weight: 600;
-    font-size: var(--fs-xs);
-  }
-  .nav-file-stats {
-    display: flex;
-    gap: 4px;
-    flex-shrink: 0;
-    font-size: var(--fs-xs);
-  }
-  .nav-comment-badge {
-    flex-shrink: 0;
-    font-size: var(--fs-xs);
-    color: var(--accent-text);
-    white-space: nowrap;
   }
 
   /* ── Toolbar search (no-nav mode) ── */
@@ -1957,7 +1578,6 @@
   /* Direction-aware glyphs: the sidebar-collapse and file-collapse chevrons
      mirror under RTL via Icon's DIRECTIONAL set; the literal "→" of a
      "from → to" rename is text, so it is mirrored here. */
-  .nav-collapse-ico,
   .dfile-chevron,
   .rename-arrow {
     display: inline-flex;
@@ -2148,15 +1768,6 @@
     gap: 6px;
   }
 
-  /* Responsive: collapse nav to a thin rail on small screens */
-  @media (max-width: 640px) {
-    .diff-nav {
-      width: 32px;
-      min-width: 32px;
-      max-width: 32px;
-    }
-  }
-
   /* ── Mobile + tablet (≤1024px): readable diffs that fit the viewport width.
      Wrap long code lines (no horizontal page overflow), bump the tiny code +
      gutter + toolbar text up to a legible size, and let the file-navigator (PR
@@ -2187,27 +1798,9 @@
     .diff-root.with-nav {
       flex-direction: column;
     }
-    .diff-nav,
-    .diff-nav.nav-collapsed {
-      width: 100%;
-      min-width: 0;
-      max-width: 100%;
-      position: static;
-      max-height: 34vh;
-      border-inline-end: none;
-      border-bottom: 1px solid var(--border);
-    }
     .diff-root.with-nav .diff {
       padding-inline-start: 0;
     }
-    .nav-title { font-size: var(--fs-m); }
-    .nav-file { font-size: var(--fs-m); padding: 8px; height: 38px; }
-    .nav-base { font-size: var(--fs-m); }
-    .nav-dir-row { font-size: var(--fs-m); padding: 6px 8px; height: 38px; }
-    .nav-file-stats { font-size: var(--fs-s); }
-    .nav-search { font-size: var(--fs-m); height: 32px; }
-    /* No drag-resize on touch layouts — the sidebar is full-width there. */
-    .nav-resize-handle { display: none; }
 
     .diff-toolbar { flex-wrap: wrap; gap: 8px; }
     .toolbar-search-wrap { flex: 1; min-width: 120px; }
@@ -2243,10 +1836,6 @@
     .vrow .code { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
 
     /* ── Touch targets (no hover on touch → affordances must be persistent). ── */
-    /* "Mark as viewed" checkbox: 12px is below the touch minimum. */
-    .nav-viewed-cb input[type='checkbox'] { width: 18px; height: 18px; }
-    /* Sidebar collapse button. */
-    .nav-collapse-btn { min-width: 36px; min-height: 36px; justify-content: center; }
     /* "Show N more lines" hunk-cap button. */
     .hunk-cap-btn { font-size: var(--fs-s); min-height: 32px; padding: 6px 12px; }
     /* Comment composer Cancel/Comment buttons. */

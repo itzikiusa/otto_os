@@ -18,6 +18,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import GitTabs from './GitTabs.svelte';
   import { focusPath, parseGitRoute } from './gitRoute';
+  import { prWorkspace } from './prWorkspaceStore.svelte';
   import RepoView from './RepoView.svelte';
   import GitToolbar from './GitToolbar.svelte';
   import { gitBridge } from './gitBridge.svelte';
@@ -36,17 +37,13 @@
 
   // The PR detail (+ its review panel, comment threads and merge dialog) is a
   // deep-linked route most Git visits never open: its own chunk (perf R7).
-  const PrDetailLazy = lazyComponent(() => import('./PrDetail.svelte'));
 
   // Route awareness is now limited to PR detail + deep-links into a repo tab.
-  const routeRepoId = $derived(router.parts[1] ?? null);
-  const isPr = $derived(router.parts[2] === 'pr' && router.parts[3] !== undefined);
 
   // The active repo is driven by the tab store, not the route.
   const activeRepo = $derived(git.allRepos.find((r) => r.id === git.activeRepoId) ?? null);
   const activeStatus = $derived(activeRepo ? (git.statusById[activeRepo.id] ?? null) : null);
   let repoView = $state<{ openMoreMenu: (e: MouseEvent) => void } | undefined>();
-  const prRepo = $derived(git.allRepos.find((r) => r.id === routeRepoId) ?? null);
 
   // Focus (my PRs + my Jira work across every repo) is a PAGE-level view, not
   // a repo sub-tab, and it lives in the URL (gitRoute.ts): the Focus entry
@@ -169,7 +166,6 @@
     })();
   });
 
-  // PrDetail's "back to PRs" routes to #/git/:id/prs; honour that as a tab open.
   // CRITICAL: `openRepoTab` WRITES subTab/activeRepoId/openRepoIds (fresh refs via
   // spread) AND reads them — and this effect tracks those reads — so calling it
   // bare here is a read→write→re-run INFINITE LOOP that froze the whole app on the
@@ -178,6 +174,16 @@
   $effect(() => {
     const r = route;
     const known = r.repo != null && git.allRepos.some((x) => x.id === r.repo);
+    // A PR deep link opens that PR as a tab of the repo's PR workspace.
+    if (r.repo && r.pr && known) {
+      const n = Number(router.parts[3]);
+      untrack(() => {
+        git.openRepoTab(r.repo!, 'prs');
+        if (Number.isInteger(n) && n > 0) prWorkspace.open(r.repo!, n);
+        router.replace('git');
+      });
+      return;
+    }
     if (r.repo && !r.pr && known && (r.tab || r.legacyFocus)) {
       untrack(() => {
         git.openRepoTab(r.repo!, r.tab ?? undefined);
@@ -324,12 +330,6 @@
   }
 </script>
 
-{#if prRepo && isPr}
-  <!-- PR detail is still routed (deep-linkable). -->
-  {#key `${prRepo.id}:${router.parts[3]}`}
-    <LazyMount lazy={PrDetailLazy} what="the pull request" props={{ repoId: prRepo.id, number: Number(router.parts[3]) }} />
-  {/key}
-{:else}
   <div class="gitpage">
     <!-- Unified toolbar: the open-repo tabs sit inline in the page header
          (like a document window's tab strip), so an open repo costs no extra
@@ -498,7 +498,6 @@
       </PageBody>
     {/if}
   </div>
-{/if}
 
 {#if addOpen}
   <Modal title="Add repository" onclose={() => (addOpen = false)}>

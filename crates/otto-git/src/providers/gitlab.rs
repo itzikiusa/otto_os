@@ -249,6 +249,7 @@ fn summary_from(v: &Value) -> PrSummary {
         source_branch: vstr(v, &["source_branch"]),
         target_branch: vstr(v, &["target_branch"]),
         updated_at: ts(&vstr(v, &["updated_at"])),
+        created_at: super::ts_opt(&vstr(v, &["created_at"])),
         reviewer_warnings: Vec::new(),
         head_sha: super::vstr_opt(v, &["sha"]),
         draft: Some(draft),

@@ -331,6 +331,14 @@ pub(crate) fn ts(s: &str) -> DateTime<Utc> {
         .unwrap_or_else(|_| DateTime::<Utc>::from_timestamp(0, 0).unwrap_or_default())
 }
 
+/// Strict twin of [`ts`]: `None` when the field is missing or unparsable, so
+/// an absent timestamp never shows up as 1970.
+pub(crate) fn ts_opt(s: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
+}
+
 // -- serde_json::Value navigation helpers ----------------------------------
 
 use serde_json::Value;

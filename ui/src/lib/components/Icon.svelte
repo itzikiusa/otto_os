@@ -45,6 +45,12 @@
     sigma: 'M12 3.5H4.5L8.6 8l-4.1 4.5H12',
     // two side-by-side panes — Compare
     columns: 'M2.5 3h4.5v10H2.5V3Zm6.5 0h4.5v10H9V3Z',
+    // Diff toolbar (PR Code tab): unified rows, soft-wrap, expand/collapse all, tests.
+    unified: 'M3 3h10a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm-1 5h12',
+    wrap: 'M2.5 4h11M2.5 8h9a2 2 0 0 1 0 4H8.5m1.5-1.5L8.5 12 10 13.5M2.5 12h3',
+    unfold: 'M8 6.5V2M5.5 4.5 8 2l2.5 2.5M8 9.5V14M5.5 11.5 8 14l2.5-2.5M3 8h10',
+    fold: 'M8 2v4.5M5.5 4 8 6.5 10.5 4M8 14V9.5M5.5 12 8 9.5l2.5 2.5M3 8h10',
+    flask: 'M6.2 2.5h3.6M6.8 2.5v4L3.2 12.4a.8.8 0 0 0 .7 1.1h8.2a.8.8 0 0 0 .7-1.1L9.2 6.5v-4M4.8 10h6.4',
     // two opposed arrows — swap the side-by-side panes
     swap: 'M2.5 5.5h10M10 3l2.5 2.5L10 8M13.5 10.5h-10M6 8l-2.5 2.5L6 13',
     // stored procedure — a runnable block (rounded card + play glyph)

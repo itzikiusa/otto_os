@@ -80,15 +80,15 @@ async function prFixtures(page: Page, inline = false) {
   await page.route('**/api/v1/reviews/review-1/merge-readiness', r => r.fulfill({ json: { unresolved_blocker_count: 1, unresolved_total: 1, resolved_count: 0, ci_status: 'success', approvals: 0, mergeable: true } }));
 }
 
-test('summary reply survives Files and Commits subtab round trips', async ({ page }) => {
+test('summary reply survives Code and Timeline subtab round trips', async ({ page }) => {
   await prFixtures(page);
   await page.goto(`/#/git/${repoId}/pr/1`);
   const thread = page.locator('.cmt').first();
   await thread.getByRole('button', {name: 'Reply', exact: true}).click();
   await thread.getByPlaceholder('Reply…').fill('Keep this reply while I inspect the diff');
-  await page.getByRole('tab', {name: 'Files', exact: true}).click();
-  await expect(page.locator('.prd-diff')).toBeVisible();
-  await page.getByRole('tab', {name: 'Commits', exact: true}).click();
+  await page.getByRole('tab', { name: 'Code', exact: true }).click();
+  await expect(page.locator('.prd-code')).toBeVisible();
+  await page.getByRole('tab', {name: 'Timeline', exact: true}).click();
   await page.getByRole('tab', {name: 'Summary', exact: true}).click();
   await expect(thread.getByPlaceholder('Reply…')).toHaveValue('Keep this reply while I inspect the diff');
   await page.evaluate(id => { location.hash = `#/git/${id}/pr/2`; }, repoId);
@@ -171,7 +171,7 @@ test('cancelled active PR review cannot be resurrected by an older poll', async 
   await page.route('**/api/v1/repos/*/prs/1/review', r => {poll = r;});
   await page.route('**/api/v1/reviews/review-4/cancel', r => r.fulfill({json: {...active, status: 'cancelled'}}));
   await page.goto(`/#/git/${repoId}/pr/1`);
-  await page.getByRole('tab', {name: 'Review', exact: true}).click();
+  await page.getByRole('tab', {name: 'AI review', exact: true}).click();
   await expect(page.locator('.rp-agent').first()).toContainText('Correctness reviewer');
   await expect.poll(() => !!sendEvent).toBe(true);
   sendEvent!(JSON.stringify({type: 'review_changed', workspace_id: workspaceId, review_id: 'review-4', status: 'running'}));
@@ -261,7 +261,7 @@ test('active PR agent output and progress update without remounting the terminal
   await page.route('**/api/v1/repos/*/prs/1/reviews', r => r.fulfill({json: [active]}));
   await page.route('**/api/v1/repos/*/prs/1/review', r => r.fulfill({json: active}));
   await page.goto(`/#/git/${repoId}/pr/1`);
-  await page.getByRole('tab', {name: 'Review', exact: true}).click();
+  await page.getByRole('tab', {name: 'AI review', exact: true}).click();
   await page.locator('.rp-agent').first().getByRole('button', {name: 'Open', exact: true}).click();
   await expect(page.locator('.rp-term')).toContainText('Synthetic live reviewer output');
   active.agents[0].note = 'Verified the delayed response; checking cancellation next';
@@ -277,12 +277,12 @@ test('active PR agent output and progress update without remounting the terminal
 test('inline reply survives switching from Files to Summary and back', async ({page}) => {
   await prFixtures(page, true);
   await page.goto(`/#/git/${repoId}/pr/1`);
-  await page.getByRole('tab', {name: 'Files', exact: true}).click();
-  const thread = page.locator('.prd-diff .cmt').first();
+  await page.getByRole('tab', { name: 'Code', exact: true }).click();
+  const thread = page.locator('.prd-code .cmt').first();
   await thread.getByRole('button', {name: 'Reply', exact: true}).click();
   await thread.getByPlaceholder('Reply…').fill('Keep the inline review explanation');
   await page.getByRole('tab', {name: 'Summary', exact: true}).click();
   await expect(thread).toBeHidden();
-  await page.getByRole('tab', {name: 'Files', exact: true}).click();
+  await page.getByRole('tab', { name: 'Code', exact: true }).click();
   await expect(thread.getByPlaceholder('Reply…')).toHaveValue('Keep the inline review explanation');
 });

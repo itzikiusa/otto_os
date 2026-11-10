@@ -418,6 +418,7 @@ fn summary_from(v: &Value) -> PrSummary {
         source_branch: vstr(v, &["source", "branch", "name"]),
         target_branch: vstr(v, &["destination", "branch", "name"]),
         updated_at: ts(&vstr(v, &["updated_on"])),
+        created_at: super::ts_opt(&vstr(v, &["created_on"])),
         url: vstr(v, &["links", "html", "href"]),
         // Bitbucket Cloud exposes a real `draft` boolean on the PR object.
         draft: Some(vbool(v, &["draft"]).unwrap_or(false)),
