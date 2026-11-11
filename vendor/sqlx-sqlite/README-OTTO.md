@@ -15,6 +15,14 @@ so cargo cannot resolve the fixed version.
 
 ## Patch
 
-The only change: `[dependencies.libsqlite3-sys] version` is `>=0.39.1, <0.40.0`.
-No source file is modified. Remove this vendor directory and its
-`[patch.crates-io]` entry once an sqlx release accepts libsqlite3-sys 0.39.
+1. `[dependencies.libsqlite3-sys] version` is `>=0.39.1, <0.40.0`.
+2. `src/types/time.rs` `mod formats`: the `time` 0.3.48+ replacements for the
+   deprecated `Year` / `Month` / `Hour` components and byte `Literal`s
+   (`CalendarYearFullExtendedRange`, `MonthNumerical`, `Hour24`, `StringLiteral`)
+   — each is exactly what `time` converts the deprecated form to, so parsing is
+   unchanged. The deprecated forms built ~40 warnings on every build with
+   time 0.3.55. `tests::new_formats_parse_like_the_deprecated_ones` parses the
+   same samples with the old and new descriptions and requires identical results.
+
+Remove this vendor directory and its `[patch.crates-io]` entry once an sqlx
+release accepts libsqlite3-sys 0.39 and the new `time` API.
