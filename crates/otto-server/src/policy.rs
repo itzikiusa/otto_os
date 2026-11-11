@@ -941,7 +941,10 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/webhooks/{workspace_id}" {
         return Exempt;
     }
-    if p.starts_with("/workspaces/{id}/integrations") || p.starts_with("/integrations/slack/me") {
+    if p.starts_with("/workspaces/{id}/integrations")
+        || p.starts_with("/integrations/slack/me")
+        || p == "/integrations/slack/as-me-default"
+    {
         return Require(Channels, if get { View } else { Edit });
     }
 
@@ -1546,6 +1549,10 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
                     | "/workspaces/{id}/integrations/seed-from-loom"
             )
             || p.starts_with("/integrations/slack/me") || p == "/personal-agents/{id}/slack-as-me"
+            // Which of your Slack teams as-me sends default to: the same
+            // person-only posture as the tokens it picks between.
+            || p == "/integrations/slack/as-me-default"
+            || p == "/workspaces/{id}/integrations/slack/as-me-default"
             // Self-improvement autonomy flips edits to auto-apply into shared
             // skills (S8-304); the email sender carries share links + OTPs;
             // notification settings silence the owner; revoking the owner's

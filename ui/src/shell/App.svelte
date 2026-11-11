@@ -29,6 +29,7 @@
     BroadcastModalChunk,
     NewSessionChunk,
     NewWorkspaceChunk,
+    SlackSendChunk,
   } from './overlays.svelte';
   import { loadErrorText } from '../lib/loadError';
   import StatusBar from './StatusBar.svelte';
@@ -41,7 +42,7 @@
   import NotificationBell from './NotificationBell.svelte';
   import { serviceHealth } from '../lib/stores/serviceHealth.svelte';
   import ConfirmDialog from '../lib/components/ConfirmDialog.svelte';
-  import SlackSendDialog from '../lib/components/slack/SlackSendDialog.svelte';
+  import { slackSend } from '../lib/slackSend.svelte';
   import ContextMenu from '../lib/components/ContextMenu.svelte';
   import FindInPage from '../lib/components/FindInPage.svelte';
   import { findInPage } from '../lib/findinpage.svelte';
@@ -1233,7 +1234,7 @@
 {/if}
 
 <ConfirmDialog />
-<SlackSendDialog />
+{#if slackSend.req}<LazyMount lazy={SlackSendChunk} what="the Slack dialog" quiet onerror={() => slackSend.close()} />{/if}
 <ContextMenu />
 <PhoneHandoffHost />
 <FindInPage />

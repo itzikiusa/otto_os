@@ -245,7 +245,7 @@
     "src/modules/vault/vault.svelte.ts": 1388,
     "src/modules/workbench/WorkbenchPage.svelte": 970,
     "src/modules/workflows/WorkflowsPage.svelte": 2556,
-    "src/shell/App.svelte": 1516,
+    "src/shell/App.svelte": 1517,
     "src/shell/Navigator.svelte": 2499,
     "src/shell/NotificationBell.svelte": 820,
     "src/shell/Palette.svelte": 920
