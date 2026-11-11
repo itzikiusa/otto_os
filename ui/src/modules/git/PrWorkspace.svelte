@@ -16,6 +16,8 @@
   import { prDetailCache, prKey } from './pr-cache';
   import PrList from './PrList.svelte';
   import PrDetail from './PrDetail.svelte';
+  import PrFilesPanel from './PrFilesPanel.svelte';
+  import { RESIZE_TITLE_VERTICAL } from '../../lib/paneResizer';
 
   interface Props {
     repoId: string;
@@ -47,6 +49,32 @@
     listW = clampW(w);
     persist(LIST_W_KEY, String(listW));
   }
+  // The Files panel under the list (the open PR's files): its height and
+  // whether it is folded to its header, both persisted.
+  const FILES_H_KEY = 'otto_pr_files_h';
+  const FILES_FOLDED_KEY = 'otto_pr_files_folded';
+  const clampH = (h: number): number => Math.max(120, Math.min(900, Math.round(h)));
+  let filesH = $state(clampH(readNum(FILES_H_KEY, 320)));
+  let filesFolded = $state((() => { try { return localStorage.getItem(FILES_FOLDED_KEY) === '1'; } catch { return false; } })());
+  function setFilesH(h: number): void {
+    filesH = clampH(h);
+    persist(FILES_H_KEY, String(filesH));
+  }
+  function toggleFilesFolded(): void {
+    filesFolded = !filesFolded;
+    persist(FILES_FOLDED_KEY, filesFolded ? '1' : '0');
+  }
+  function startFilesResize(e: MouseEvent): void {
+    const startY = e.clientY;
+    const startH = filesH;
+    startMouseDrag(e, {
+      cursor: 'row-resize',
+      // The bar sits on the panel's top edge: dragging up grows it.
+      onMove: (ev) => { filesH = clampH(startH - (ev.clientY - startY)); },
+      onEnd: () => persist(FILES_H_KEY, String(filesH)),
+    });
+  }
+
   function toggleList(): void {
     listHidden = !listHidden;
     persist(LIST_HIDDEN_KEY, listHidden ? '1' : '0');
@@ -110,14 +138,30 @@
 <div class="prw" class:m-list={mobileList || tabs.active === null} class:list-hidden={listHidden || (tabs.active !== null && maximized)} style="--listw:{listW}px">
   {#if !(listHidden || (tabs.active !== null && maximized))}
     <section class="prw-list" aria-label="Pull requests">
-      <PrList
-        {repoId}
-        activeNumber={tabs.active}
-        openNumbers={tabs.open}
-        onopen={openPr}
-        onopenmany={openMany}
-        {patch}
-      />
+      <div class="prw-list-main">
+        <PrList
+          {repoId}
+          activeNumber={tabs.active}
+          openNumbers={tabs.open}
+          onopen={openPr}
+          onopenmany={openMany}
+          {patch}
+        />
+      </div>
+      {#if tabs.active !== null}
+        {#if !filesFolded}
+          <div
+            class="prw-files-resize"
+            role="separator"
+            aria-label="Resize the files panel"
+            title={RESIZE_TITLE_VERTICAL}
+            use:paneResizer={{ value: filesH, min: 120, max: 900, orientation: 'horizontal', invert: true, onChange: setFilesH, onReset: () => setFilesH(320), onDragStart: startFilesResize, text: (v) => `${Math.round(v)} pixels tall` }}
+          ></div>
+        {/if}
+        <div class="prw-files" style={filesFolded ? undefined : `block-size:${filesH}px`}>
+          <PrFilesPanel {repoId} number={tabs.active} collapsed={filesFolded} ontogglecollapsed={toggleFilesFolded} />
+        </div>
+      {/if}
       <div
         class="prw-resize"
         role="separator"
@@ -208,6 +252,17 @@
     display: flex;
     flex-direction: column;
   }
+  .prw-list-main { flex: 1 1 auto; min-height: 140px; display: flex; flex-direction: column; }
+  .prw-files { flex: none; min-height: 0; max-block-size: 70%; display: flex; flex-direction: column; }
+  .prw-files-resize {
+    flex: none;
+    height: 6px;
+    margin-block: -4px -2px;
+    position: relative;
+    z-index: 2;
+    cursor: row-resize;
+  }
+  .prw-files-resize:hover, .prw-files-resize:focus-visible { background: var(--accent-line); }
   .prw-resize {
     position: absolute;
     inset-block: 0;
@@ -278,6 +333,8 @@
     .prw { grid-template-columns: minmax(0, 1fr); }
     .prw-list { border-inline-end: none; }
     .prw-resize { display: none; }
+    /* One pane at a time: the files jump into a PR pane that is hidden here. */
+    .prw-files, .prw-files-resize { display: none; }
     .prw:not(.m-list) .prw-list { display: none; }
     .prw.m-list .prw-detail { display: none; }
     .prw-back { display: inline-flex; }
