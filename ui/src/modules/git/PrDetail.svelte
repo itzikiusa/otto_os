@@ -45,6 +45,10 @@
   import { defaultAgentProvider } from '../../lib/providers';
   import DiffViewer from './DiffViewer.svelte';
   import { prFilesBridge, prFilesKey } from './prFilesBridge.svelte';
+  import PrReviewButtons from './PrReviewButtons.svelte';
+  import { myGitHandles } from './myGitHandles.svelte';
+  import { myReview, withMyReview } from './pr-review-state';
+  import { prAgentRequest, type PrAgentKind } from './pr-agent';
   import { fileStat } from './diff-model';
   import { notePrHead, prDiffFileLoader, prDiffHead, prDiffSummary, repoDiffFileLoader } from './diff-load';
   import CommentThread from './CommentThread.svelte';
@@ -382,6 +386,21 @@
     }
   }
 
+  // ── Your review: shown in the header, patched the moment a write lands ──
+  myGitHandles.load();
+  const isMe = (name: string): boolean => myGitHandles.isMe(name);
+  const myName = $derived([...myGitHandles.handles][0] ?? 'You');
+  const mine = $derived(pr ? myReview(pr, isMe) : null);
+  function patchNow(next: PrDetail): void {
+    pr = next;
+    prDetailCache.set(prKey(repoId, number), next);
+    onloaded?.(next);
+  }
+  function openRequestChanges(): void {
+    selectTab('summary');
+    showRequestChanges = true;
+  }
+
   async function action(kind: 'approve' | 'decline'): Promise<void> {
     const approve = kind === 'approve';
     const ok = await confirmOutward({
@@ -399,7 +418,8 @@
       await api.post(`/repos/${repoId}/prs/${number}/${kind}`);
       if (disposed) return;
       toasts.success(`PR ${approve ? 'approved' : 'declined'}`, `#${number}`);
-      await load(repoId, number);
+      if (pr) patchNow(approve ? withMyReview(pr, 'approved', isMe, myName) : { ...pr, state: 'declined' });
+      await load(repoId, number, true);
     } catch (e) {
       toastError(approve ? 'Couldn’t approve the PR' : 'Couldn’t decline the PR', e);
     } finally {
@@ -425,7 +445,8 @@
       toasts.success('Changes requested', `PR #${number}`);
       showRequestChanges = false;
       requestChangesBody = '';
-      await load(repoId, number);
+      if (pr) patchNow(withMyReview(pr, 'changes', isMe, myName));
+      await load(repoId, number, true);
     } catch (e) {
       toastError('Couldn’t request changes', e);
     } finally {
@@ -464,37 +485,12 @@
   }
 
   // ── Agent sessions that already know which PR is meant ───────────────────
-  async function openAgent(kind: 'ask' | 'explain' | 'fix'): Promise<void> {
+  async function openAgent(kind: PrAgentKind): Promise<void> {
     if (!pr || busy !== '') return;
-    const ref = `pull request #${pr.number} “${pr.title}” in ${repoSlug} (${pr.source_branch} → ${pr.target_branch}${pr.url ? `, ${pr.url}` : ''})`;
-    const read = 'Read it with the otto MCP tools (otto_get_pr, otto_get_pr_diff) or git.';
-    const prompt =
-      kind === 'ask'
-        ? `We are talking about ${ref}. ${read} Load the context, reply with a one-paragraph summary, then wait for my question.`
-        : kind === 'explain'
-          ? `Explain ${ref}. ${read} Walk me through the diff: what it changes and why, how the pieces fit, and which files and lines deserve the closest reading (risky logic, missing tests). Be concrete, cite file:line.`
-          : `Address the open review findings on ${ref}. ${read} Check out ${pr.source_branch}, fix each unresolved comment, run the relevant tests, and show me the diff. Do not push or post anything without asking me first.`;
     busy = 'session';
     try {
-      await ws.openSessionWithPrompt(
-        {
-          provider: defaultAgentProvider(),
-          title: `${kind === 'ask' ? 'Ask' : kind === 'explain' ? 'Explain' : 'Fix'} PR #${pr.number}`,
-          cwd: prRepo?.path ?? null,
-          prompt,
-          meta: {
-            pr_context: {
-              repo_id: repoId,
-              number: pr.number,
-              title: pr.title,
-              url: pr.url,
-              source_branch: pr.source_branch,
-              target_branch: pr.target_branch,
-            },
-          },
-        },
-        { route: true },
-      );
+      const req = prAgentRequest(kind, pr, { repoId, repoSlug, cwd: prRepo?.path ?? null, provider: defaultAgentProvider() });
+      await ws.openSessionWithPrompt(req, { route: true });
     } catch (e) {
       toastError('Couldn’t open a session', e);
     } finally {
@@ -517,7 +513,7 @@
       { label: 'Rebase and merge', icon: 'merge', disabled: !open, action: () => openMerge('rebase') },
       { separator: true },
       { label: 'Approve…', icon: 'check', disabled: !open, action: () => void action('approve') },
-      { label: 'Request changes…', icon: 'warning', disabled: !open, action: () => { selectTab('summary'); showRequestChanges = true; } },
+      { label: 'Request changes…', icon: 'warning', disabled: !open, action: openRequestChanges },
       { label: 'Edit title and description', icon: 'edit', action: startEdit },
       { separator: true },
       { label: `Open on ${providerName}`, icon: 'external', action: () => openExternal(pr?.url) },
@@ -621,6 +617,7 @@
         {/if}
         <div class="prd-actions">
           {#if pr.state === 'open'}
+            <PrReviewButtons review={mine} {busy} onapprove={() => void action('approve')} onrequestchanges={openRequestChanges} />
             <button class="btn small primary" disabled={busy !== ''} onclick={() => openMerge()} title="Merge this pull request (asks first)">
               <Icon name="merge" size={12} /> Merge
             </button>
@@ -699,12 +696,6 @@
 
           {#if pr.state === 'open'}
             <section class="prd-review-bar">
-              <button class="btn small" disabled={busy !== ''} onclick={() => action('approve')}>
-                <Icon name="check" size={12} /> {busy === 'approve' ? 'Approving…' : 'Approve…'}
-              </button>
-              <button class="btn small" disabled={busy !== ''} aria-expanded={showRequestChanges} onclick={() => (showRequestChanges = !showRequestChanges)}>
-                <Icon name="warning" size={12} /> Request changes
-              </button>
               <span class="grow"></span>
               <button class="btn small ghost danger-text" data-testid="prd-decline" disabled={busy !== ''} title="Close PR #{number} without merging (asks first)" onclick={() => action('decline')}>
                 {busy === 'decline' ? 'Declining…' : 'Decline…'}
@@ -712,7 +703,7 @@
             </section>
             {#if showRequestChanges}
               <section class="prd-request-changes card">
-                <textarea dir="auto" class="input" rows="3" bind:value={requestChangesBody} disabled={busy === 'request-changes'}
+                <textarea dir="auto" class="input" rows="3" bind:value={requestChangesBody} disabled={busy === 'request-changes'} use:focusFirstField
                   aria-label="What needs to change" placeholder="The retry loop needs a cap before this can merge."></textarea>
                 <div class="row prd-compose-foot">
                   <span class="hint dim">Posts to PR #{number} on {repoLabel} · visible to the author and reviewers</span>
@@ -973,8 +964,16 @@
   :global([dir='rtl']) .dir-arrow { transform: scaleX(-1); }
 
   @media (max-width: 1024px) {
+    /* One scroller for the whole PR: the header scrolls away with the content
+       (a fixed header left a phone in landscape 0 px for the diff), and the
+       diff's toolbar pins to the top of THIS scroller — so the diff must not
+       be a scroller of its own here (its phone default for bare hosts). */
+    .prd { overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
+    .prd-head, .prd-body, .prd-code { flex: none; min-height: auto; overflow: visible; }
+    .prd-code :global(.diff) { overflow-y: visible; }
     .prd-head { padding: 10px 12px 0; }
     .prd-row-top { flex-wrap: wrap; }
+    .prd-actions { flex-wrap: wrap; flex: 1 1 100%; }
     .prd-actions .btn { height: 34px; }
     .prd-meta { flex-wrap: wrap; }
     .prd-cmd { flex-basis: 100%; }

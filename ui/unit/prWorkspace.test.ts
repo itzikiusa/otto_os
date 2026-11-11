@@ -58,8 +58,8 @@ test('timeline: opened, folded commit bursts, comments and approvals in order', 
       { id: 'c2', author: 'bo', body: 'x', path: null, line: null, created_at: 'not a date', replies: [], resolved: false },
     ],
     reviewers: [
-      { name: 'bo', approved: true, avatar_url: null, reviewed_at: '2026-01-03T00:00:00Z' },
-      { name: 'cy', approved: true, avatar_url: null, reviewed_at: null },
+      { name: 'bo', approved: true, changes_requested: false, avatar_url: null, reviewed_at: '2026-01-03T00:00:00Z' },
+      { name: 'cy', approved: true, changes_requested: false, avatar_url: null, reviewed_at: null },
     ],
   });
   const ev = buildTimeline(pr, [

@@ -108,6 +108,8 @@ interface ExtraPr {
   description_md: string;
   comments: PrComment[];
   approved_by: string[];
+  /** Reviewers whose current opinion is "changes requested". */
+  changes_by?: string[];
   mergeable: boolean | null;
 }
 

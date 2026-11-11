@@ -210,7 +210,7 @@ test('request changes composer locks pending content and can retry a failed send
   let pending: Route | undefined;
   await page.route('**/api/v1/repos/*/prs/1/request-changes', route => { pending = route; });
   await page.goto(`/#/git/${repoId}/pr/1`);
-  await page.locator('.prd-review-bar').getByRole('button', { name: 'Request changes', exact: true }).click();
+  await page.locator('.prd-actions').getByRole('button', { name: 'Request changes', exact: true }).click();
   const panel = page.locator('.prd-request-changes');
   await panel.getByLabel('What needs to change').fill('Please cover the retry failure');
   await panel.getByRole('button', { name: 'Request changes', exact: true }).click();

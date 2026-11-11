@@ -27,6 +27,7 @@
       case 'commits': return 'commit';
       case 'comment': return 'comment';
       case 'approved': return 'check';
+      case 'changes': return 'warning';
       case 'closed': return ev.state === 'merged' ? 'merge' : 'x';
     }
   }
@@ -48,6 +49,7 @@
               {:else if ev.kind === 'commits'} pushed {plural(ev.commits.length, 'commit')}
               {:else if ev.kind === 'comment'} commented{#if ev.comment.path}{' '}on <button class="link mono" onclick={onopencode}>{ev.comment.path.split('/').pop()}{ev.comment.line != null ? `:${ev.comment.line}` : ''}</button>{/if}{#if ev.replies > 0}<span class="dim">{' · '}{plural(ev.replies, 'reply', 'replies')}</span>{/if}{#if ev.comment.resolved}<span class="chip ok chip-gap">Resolved</span>{/if}
               {:else if ev.kind === 'approved'} approved these changes
+              {:else if ev.kind === 'changes'} requested changes
               {:else if ev.kind === 'closed'}{ev.state === 'merged' ? 'Merged' : 'Closed without merging'}
               {/if}
               <span class="dim at" title={new Date(ev.at).toLocaleString()}>{rel(ev.at)}</span>
@@ -99,6 +101,7 @@
     color: var(--text-dim);
   }
   .k-approved .dot, .k-opened .dot { color: var(--success); background: var(--success-soft); }
+  .k-changes .dot { color: var(--warning); background: var(--warning-soft); }
   .k-closed .dot { color: var(--accent-text); background: var(--accent-soft); }
   .body { min-width: 0; flex: 1; padding-block-start: 2px; }
   .line { font-size: var(--fs-s); overflow-wrap: anywhere; }

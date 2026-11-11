@@ -821,6 +821,11 @@ pub struct IssueLite {
 pub struct PrReviewer {
     pub name: String,
     pub approved: bool,
+    /// The reviewer's current opinion is "changes requested" (GitHub
+    /// `CHANGES_REQUESTED` review, Bitbucket participant `state`). GitLab
+    /// has no such reviewer state in its REST API: always false there.
+    #[serde(default)]
+    pub changes_requested: bool,
     #[serde(default)]
     pub avatar_url: Option<String>,
     #[serde(default)]

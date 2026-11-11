@@ -59,6 +59,14 @@ test('Code tab: hide tests, viewed marks persist, tree, one commit', async ({ pa
   await page.getByRole('tab', { name: 'Code', exact: true }).click();
   await expect(page.locator('.diff-root')).toContainText('1 / 17 viewed');
 
+  // The diff toolbar stays pinned while the PR pane scrolls a long diff.
+  await page.getByRole('button', { name: /expand all/i }).first().click();
+  const tb = page.locator('.diff-toolbar.pr-toolbar');
+  const paneTop = (await page.locator('.prd-body').boundingBox())!.y;
+  await page.locator('.prd-body').evaluate((el) => { el.scrollTop += 2000; });
+  await expect.poll(async () => Math.round((await tb.boundingBox())!.y - paneTop)).toBe(0);
+  await expect(tb.getByRole('textbox', { name: /search/i })).toBeInViewport();
+
   await page.getByRole('button', { name: 'Show file tree' }).click();
   await expect(page.locator('.diff-nav .nav-file').first()).toBeVisible();
 
@@ -99,6 +107,29 @@ test('Files panel under the list: a tree that jumps into Code and shares Viewed 
   await panel.getByRole('button', { name: 'Next unviewed file', exact: true }).click();
   await panel.getByRole('button', { name: 'Hide viewed files' }).click();
   await expect(panel.locator(`.nav-file[title="${path}"]`)).toHaveCount(0);
+});
+
+test('Approve / Request changes live in the header and update at once', async ({ page }) => {
+  await page.goto('/#/git/rep_otto/pr/51');
+  await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
+  const head = page.locator('.prd-actions');
+  const side = page.getByRole('complementary', { name: 'Pull request details' });
+
+  // Request changes: the header button opens the message box on Summary.
+  await head.getByRole('button', { name: 'Request changes' }).click();
+  await page.getByRole('textbox', { name: 'What needs to change' }).fill('Cap the retry loop.');
+  await page.locator('.prd-request-changes').getByRole('button', { name: 'Request changes' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Request changes' }).click();
+  // No refresh needed: the header and the reviewer list change right away.
+  await expect(head.getByText('Changes requested')).toBeVisible();
+  await expect(side.getByText('Changes requested')).toBeVisible();
+
+  // Approve flips your opinion.
+  await head.getByRole('button', { name: 'Approve', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Approve PR' }).click();
+  await expect(head.getByText('Approved', { exact: true })).toBeVisible();
+  await expect(head.getByText('Changes requested')).toHaveCount(0);
+  await expect(side.getByText('Changes requested')).toHaveCount(0);
 });
 
 test('select several PRs in the list and open them together as tabs', async ({ page }) => {

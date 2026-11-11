@@ -483,6 +483,7 @@ interface MockPr {
   description_md: string;
   comments: PrComment[];
   approved_by: string[];
+  changes_by?: string[];
   mergeable: boolean | null;
 }
 
@@ -1840,7 +1841,7 @@ const routes: Route[] = [
         description_md: pr.description_md,
         comments: pr.comments,
         approved_by: pr.approved_by,
-        reviewers: pr.approved_by.map((name) => ({ name, approved: true, avatar_url: null, reviewed_at: null })),
+        reviewers: [...pr.approved_by, ...(pr.changes_by ?? [])].map((name) => ({ name, approved: pr.approved_by.includes(name), changes_requested: !pr.approved_by.includes(name), avatar_url: null, reviewed_at: null })),
         mergeable: pr.mergeable,
       };
       return { json: detail };
@@ -1958,11 +1959,12 @@ const routes: Route[] = [
     },
   },
   {
-    method: 'POST',
-    re: /^\/repos\/([^/]+)\/prs\/(\d+)\/approve$/,
+    method: 'POST', // your review ('dev-otto' is the mock git account)
+    re: /^\/repos\/([^/]+)\/prs\/(\d+)\/(approve|request-changes)$/,
     handle: (m) => {
       const pr = prs.find((p) => p.repo_id === m[1] && p.summary.number === Number(m[2]));
-      if (pr && !pr.approved_by.includes('root')) pr.approved_by.push('root');
+      const others = (l: string[] | undefined) => (l ?? []).filter((n) => n !== 'dev-otto');
+      if (pr) [pr.approved_by, pr.changes_by] = m[3] === 'approve' ? [[...others(pr.approved_by), 'dev-otto'], others(pr.changes_by)] : [others(pr.approved_by), [...others(pr.changes_by), 'dev-otto']];
       return { status: 204 };
     },
   },
