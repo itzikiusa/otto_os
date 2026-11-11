@@ -941,10 +941,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/webhooks/{workspace_id}" {
         return Exempt;
     }
-    if p.starts_with("/workspaces/{id}/integrations")
-        || p.starts_with("/integrations/slack/me")
-        || p == "/integrations/slack/as-me-default"
-    {
+    if p.starts_with("/workspaces/{id}/integrations") || p.starts_with("/integrations/slack/") {
         return Require(Channels, if get { View } else { Edit });
     }
 
