@@ -193,25 +193,24 @@ fn decode_datetime_from_text(value: &str) -> Option<PrimitiveDateTime> {
 }
 
 mod formats {
-    use time::format_description::BorrowedFormatItem::{Component, Literal, Optional};
+    // Otto patch: the time 0.3.48+ replacements for the deprecated `Year` /
+    // `Month` / `Hour` components and byte `Literal`s (see README-OTTO.md). Each
+    // is what `time` itself converts the deprecated form to, so parsing is
+    // unchanged — `tests::new_formats_parse_like_the_deprecated_ones` checks it.
+    use time::format_description::BorrowedFormatItem::{Component, Optional, StringLiteral};
     use time::format_description::{modifier, BorrowedFormatItem, Component::*};
 
-    const YEAR: BorrowedFormatItem<'_> = Component(Year({
-        let mut value = modifier::Year::default();
-        value.padding = modifier::Padding::Zero;
-        value.repr = modifier::YearRepr::Full;
-        value.iso_week_based = false;
-        value.sign_is_mandatory = false;
-        value
-    }));
+    // Deprecated `Year { repr: Full, iso_week_based: false, range: Extended (the
+    // default) }` is `CalendarYearFullExtendedRange`.
+    const YEAR: BorrowedFormatItem<'_> = Component(CalendarYearFullExtendedRange(
+        modifier::CalendarYearFullExtendedRange::default()
+            .with_padding(modifier::Padding::Zero)
+            .with_sign_is_mandatory(false),
+    ));
 
-    const MONTH: BorrowedFormatItem<'_> = Component(Month({
-        let mut value = modifier::Month::default();
-        value.padding = modifier::Padding::Zero;
-        value.repr = modifier::MonthRepr::Numerical;
-        value.case_sensitive = true;
-        value
-    }));
+    const MONTH: BorrowedFormatItem<'_> = Component(MonthNumerical(
+        modifier::MonthNumerical::default().with_padding(modifier::Padding::Zero),
+    ));
 
     const DAY: BorrowedFormatItem<'_> = Component(Day({
         let mut value = modifier::Day::default();
@@ -219,12 +218,9 @@ mod formats {
         value
     }));
 
-    const HOUR: BorrowedFormatItem<'_> = Component(Hour({
-        let mut value = modifier::Hour::default();
-        value.padding = modifier::Padding::Zero;
-        value.is_12_hour_clock = false;
-        value
-    }));
+    const HOUR: BorrowedFormatItem<'_> = Component(Hour24(
+        modifier::Hour24::default().with_padding(modifier::Padding::Zero),
+    ));
 
     const MINUTE: BorrowedFormatItem<'_> = Component(Minute({
         let mut value = modifier::Minute::default();
@@ -260,21 +256,21 @@ mod formats {
     pub(super) const OFFSET_DATE_TIME: &[BorrowedFormatItem<'_>] = {
         &[
             YEAR,
-            Literal(b"-"),
+            StringLiteral("-"),
             MONTH,
-            Literal(b"-"),
+            StringLiteral("-"),
             DAY,
-            Optional(&Literal(b" ")),
-            Optional(&Literal(b"T")),
+            Optional(&StringLiteral(" ")),
+            Optional(&StringLiteral("T")),
             HOUR,
-            Literal(b":"),
+            StringLiteral(":"),
             MINUTE,
-            Optional(&Literal(b":")),
+            Optional(&StringLiteral(":")),
             Optional(&SECOND),
-            Optional(&Literal(b".")),
+            Optional(&StringLiteral(".")),
             Optional(&SUBSECOND),
             Optional(&OFFSET_HOUR),
-            Optional(&Literal(b":")),
+            Optional(&StringLiteral(":")),
             Optional(&OFFSET_MINUTE),
         ]
     };
@@ -282,38 +278,136 @@ mod formats {
     pub(super) const PRIMITIVE_DATE_TIME_SPACE_SEPARATED: &[BorrowedFormatItem<'_>] = {
         &[
             YEAR,
-            Literal(b"-"),
+            StringLiteral("-"),
             MONTH,
-            Literal(b"-"),
+            StringLiteral("-"),
             DAY,
-            Literal(b" "),
+            StringLiteral(" "),
             HOUR,
-            Literal(b":"),
+            StringLiteral(":"),
             MINUTE,
-            Optional(&Literal(b":")),
+            Optional(&StringLiteral(":")),
             Optional(&SECOND),
-            Optional(&Literal(b".")),
+            Optional(&StringLiteral(".")),
             Optional(&SUBSECOND),
-            Optional(&Literal(b"Z")),
+            Optional(&StringLiteral("Z")),
         ]
     };
 
     pub(super) const PRIMITIVE_DATE_TIME_T_SEPARATED: &[BorrowedFormatItem<'_>] = {
         &[
             YEAR,
-            Literal(b"-"),
+            StringLiteral("-"),
             MONTH,
-            Literal(b"-"),
+            StringLiteral("-"),
             DAY,
-            Literal(b"T"),
+            StringLiteral("T"),
             HOUR,
-            Literal(b":"),
+            StringLiteral(":"),
             MINUTE,
-            Optional(&Literal(b":")),
+            Optional(&StringLiteral(":")),
             Optional(&SECOND),
-            Optional(&Literal(b".")),
+            Optional(&StringLiteral(".")),
             Optional(&SUBSECOND),
-            Optional(&Literal(b"Z")),
+            Optional(&StringLiteral("Z")),
         ]
     };
+}
+
+// Otto patch: proof that the de-deprecated `formats` parse exactly like the
+// upstream (deprecated) ones did — same values, same failures.
+#[cfg(test)]
+#[allow(deprecated)]
+mod tests {
+    use super::formats;
+    use time::format_description::BorrowedFormatItem::{Component, Literal, Optional};
+    use time::format_description::{modifier, BorrowedFormatItem, Component::*};
+    use time::{OffsetDateTime, PrimitiveDateTime};
+
+    const YEAR: BorrowedFormatItem<'_> = Component(Year({
+        let mut value = modifier::Year::default();
+        value.padding = modifier::Padding::Zero;
+        value.repr = modifier::YearRepr::Full;
+        value.iso_week_based = false;
+        value.sign_is_mandatory = false;
+        value
+    }));
+    const MONTH: BorrowedFormatItem<'_> = Component(Month({
+        let mut value = modifier::Month::default();
+        value.padding = modifier::Padding::Zero;
+        value.repr = modifier::MonthRepr::Numerical;
+        value.case_sensitive = true;
+        value
+    }));
+    const DAY: BorrowedFormatItem<'_> = Component(Day(modifier::Day::default()));
+    const HOUR: BorrowedFormatItem<'_> = Component(Hour({
+        let mut value = modifier::Hour::default();
+        value.padding = modifier::Padding::Zero;
+        value.is_12_hour_clock = false;
+        value
+    }));
+    const MINUTE: BorrowedFormatItem<'_> = Component(Minute(modifier::Minute::default()));
+    const SECOND: BorrowedFormatItem<'_> = Component(Second(modifier::Second::default()));
+    const SUBSECOND: BorrowedFormatItem<'_> = Component(Subsecond({
+        let mut value = modifier::Subsecond::default();
+        value.digits = modifier::SubsecondDigits::OneOrMore;
+        value
+    }));
+    const OFFSET_HOUR: BorrowedFormatItem<'_> = Component(OffsetHour({
+        let mut value = modifier::OffsetHour::default();
+        value.sign_is_mandatory = true;
+        value
+    }));
+    const OFFSET_MINUTE: BorrowedFormatItem<'_> = Component(OffsetMinute(modifier::OffsetMinute::default()));
+
+    const OLD_OFFSET: &[BorrowedFormatItem<'_>] = &[
+        YEAR, Literal(b"-"), MONTH, Literal(b"-"), DAY,
+        Optional(&Literal(b" ")), Optional(&Literal(b"T")),
+        HOUR, Literal(b":"), MINUTE, Optional(&Literal(b":")), Optional(&SECOND),
+        Optional(&Literal(b".")), Optional(&SUBSECOND),
+        Optional(&OFFSET_HOUR), Optional(&Literal(b":")), Optional(&OFFSET_MINUTE),
+    ];
+    const OLD_SPACE: &[BorrowedFormatItem<'_>] = &[
+        YEAR, Literal(b"-"), MONTH, Literal(b"-"), DAY, Literal(b" "),
+        HOUR, Literal(b":"), MINUTE, Optional(&Literal(b":")), Optional(&SECOND),
+        Optional(&Literal(b".")), Optional(&SUBSECOND), Optional(&Literal(b"Z")),
+    ];
+    const OLD_T: &[BorrowedFormatItem<'_>] = &[
+        YEAR, Literal(b"-"), MONTH, Literal(b"-"), DAY, Literal(b"T"),
+        HOUR, Literal(b":"), MINUTE, Optional(&Literal(b":")), Optional(&SECOND),
+        Optional(&Literal(b".")), Optional(&SUBSECOND), Optional(&Literal(b"Z")),
+    ];
+
+    const SAMPLES: &[&str] = &[
+        "2026-11-11 17:35:50", "2026-11-11T17:35:50", "2026-11-11 17:35", "2026-11-11T17:35",
+        "2026-11-11 17:35:50.123", "2026-11-11T17:35:50.123456789Z", "2026-11-11 17:35:50Z",
+        "2026-11-11T17:35:50+02:00", "2026-11-11 17:35:50.5-05:30", "2026-11-11T17:35:50+0200",
+        "0001-01-01 00:00:00", "9999-12-31T23:59:59.999999999", "+12026-01-01T00:00:00",
+        "2026-02-30 10:00:00", "2026-1-5 7:05:00", "2026-11-11", "not a date", "",
+    ];
+
+    #[test]
+    fn new_formats_parse_like_the_deprecated_ones() {
+        // Not vacuous: the common SQLite shapes do parse.
+        assert!(PrimitiveDateTime::parse("2026-11-11 17:35:50.123", &formats::PRIMITIVE_DATE_TIME_SPACE_SEPARATED).is_ok());
+        assert!(PrimitiveDateTime::parse("2026-11-11T17:35:50Z", &formats::PRIMITIVE_DATE_TIME_T_SEPARATED).is_ok());
+        assert!(OffsetDateTime::parse("2026-11-11T17:35:50+02:00", &formats::OFFSET_DATE_TIME).is_ok());
+        for s in SAMPLES {
+            for (old, new) in [
+                (OLD_SPACE, formats::PRIMITIVE_DATE_TIME_SPACE_SEPARATED),
+                (OLD_T, formats::PRIMITIVE_DATE_TIME_T_SEPARATED),
+            ] {
+                assert_eq!(
+                    PrimitiveDateTime::parse(s, &old).ok(),
+                    PrimitiveDateTime::parse(s, &new).ok(),
+                    "PrimitiveDateTime {s:?}"
+                );
+            }
+            assert_eq!(
+                OffsetDateTime::parse(s, &OLD_OFFSET).ok(),
+                OffsetDateTime::parse(s, &formats::OFFSET_DATE_TIME).ok(),
+                "OffsetDateTime {s:?}"
+            );
+        }
+    }
 }
