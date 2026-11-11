@@ -65,6 +65,7 @@ test('the long lists that window through ListWindow register the provider', () =
   assert.match(src('modules/git/WipPanel.svelte'), /unstagedWin\.findRows\(/);
   assert.match(src('modules/git/WipPanel.svelte'), /stagedWin\.findRows\(/);
   assert.match(src('modules/panels/FileTree.svelte'), /treeWin\.findRows\(/);
-  assert.match(src('modules/git/DiffNav.svelte'), /navWin\.findRows\(/);
+  // The PR file tree (DiffNav's rail and the PR workspace's Files panel).
+  assert.match(src('modules/git/DiffFileTree.svelte'), /win\.findRows\(/);
   assert.match(src('modules/git/BlamePanel.svelte'), /tw\.findRows\(/);
 });
