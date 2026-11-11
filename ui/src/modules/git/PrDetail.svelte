@@ -44,6 +44,7 @@
   import { pollWhileVisible } from '../../lib/poll';
   import { defaultAgentProvider } from '../../lib/providers';
   import DiffViewer from './DiffViewer.svelte';
+  import { prFilesBridge, prFilesKey } from './prFilesBridge.svelte';
   import { fileStat } from './diff-model';
   import { notePrHead, prDiffFileLoader, prDiffHead, prDiffSummary, repoDiffFileLoader } from './diff-load';
   import CommentThread from './CommentThread.svelte';
@@ -89,6 +90,7 @@
     activeTab = t;
     try { localStorage.setItem(tabKey(), t); } catch { /* not persisted */ }
   }
+  $effect(() => prFilesBridge.onReveal(prFilesKey(repoId, number), () => selectTab('code'))); // the workspace Files panel
 
   // Server payloads are replaced wholesale: `$state.raw` (no deep proxy over
   // a 100k-line diff).

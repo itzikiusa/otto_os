@@ -22,6 +22,7 @@
   import { tick, untrack, type Snippet } from 'svelte';
   import { isTestPath } from './testFiles';
   import { loadViewed, saveViewed } from './diff-viewed-store';
+  import { publishPrFiles } from './prFilesBridge.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { PREF_HIDE_TESTS, PREF_TREE, PREF_WRAP, buildNavTree, fileStatus, readPref, writePref } from './diff-pr';
   const DiffPrToolbarLazy = lazyComponent(() => import('./DiffPrToolbar.svelte'));
@@ -809,12 +810,14 @@
       composerBusy = false;
     }
   }
-  // When the comment composer gains focus the soft keyboard can cover it; pull it
-  // into view so the textarea + actions stay visible while typing on a phone.
+  // Touch: the soft keyboard can cover the composer — centre it. Mouse: only bring the whole box (buttons
+  // too) into view, at once; a smooth re-centre on each focus slid Comment away under the pointer.
   function composerFocus(e: FocusEvent): void {
     const el = e.currentTarget as HTMLElement | null;
     if (!el) return;
-    requestAnimationFrame(() => el.scrollIntoView({ block: 'center', behavior: scrollBehavior() }));
+    const touch = matchMedia('(pointer: coarse)').matches;
+    const box = touch ? el : (el.closest('.composer') ?? el);
+    requestAnimationFrame(() => box.scrollIntoView(touch ? { block: 'center', behavior: scrollBehavior() } : { block: 'nearest' }));
   }
 
   // ── Hunk / line staging (WIP mode) ─────────────────────────────────────────
@@ -1024,6 +1027,8 @@
     if (prMode && viewedStorageKey) saveViewed(viewedStorageKey, diff.files, next);
   }
 
+  // The PR workspace's Files panel mirrors these files, marks and jumps (prFilesBridge).
+  publishPrFiles(() => (prMode && viewedStorageKey ? { key: viewedStorageKey, files: visibleFiles, viewed, commentCounts, current: rows[rowAt(layout.offsets, layout.n, view.top + 1)]?.file.path ?? null, jump: scrollToFile, toggleViewed } : null));
   const viewedCount = $derived(visibleFiles.reduce((n, f) => n + (viewed.has(f.path) ? 1 : 0), 0));
   const totalFiles = $derived(visibleFiles.length);
   const lazyCount = $derived(diff.files.reduce((n, f) => n + (f.hunks_omitted ? 1 : 0), 0));

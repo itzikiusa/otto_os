@@ -246,7 +246,7 @@ for (const mode of ['summary', 'legacy'] as const) {
     // Jump to a file near the end from the navigator (filter to reach it — its
     // row is outside the nav window): its comment renders.
     await page.locator('.nav-search').fill(`file_${FILES - 3}.ts`);
-    await page.locator('.nav-file', { hasText: `file_${FILES - 3}.ts` }).click();
+    await page.locator('.diff-nav .nav-file', { hasText: `file_${FILES - 3}.ts` }).click();
     await expect(page.getByText('Deep comment far down the diff')).toBeVisible({ timeout: 15_000 });
     expect(await domRows(page)).toBeLessThan(ROW_BUDGET);
     expect(resizeLoops, 'no "ResizeObserver loop" errors').toBe(0);
