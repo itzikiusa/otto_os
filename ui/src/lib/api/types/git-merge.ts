@@ -153,6 +153,8 @@ export type PrCommentSide = 'old' | 'new';
 export interface PrReviewer {
   name: string;
   approved: boolean;
+  /** Current opinion is "changes requested" (GitHub, Bitbucket; always false on GitLab). */
+  changes_requested: boolean;
   avatar_url: string | null;
   reviewed_at: string | null;
 }

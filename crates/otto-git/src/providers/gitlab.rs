@@ -451,6 +451,7 @@ impl super::GitProvider for Gitlab {
                     .map(|e| PrReviewer {
                         name: vstr(e, &["user", "name"]),
                         approved: true,
+                        changes_requested: false,
                         avatar_url: vstr_opt(e, &["user", "avatar_url"]),
                         reviewed_at: None,
                     })

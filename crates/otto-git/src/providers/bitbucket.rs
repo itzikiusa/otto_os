@@ -607,6 +607,8 @@ impl super::GitProvider for Bitbucket {
             .map(|p| PrReviewer {
                 name: vstr(p, &["user", "display_name"]),
                 approved: vbool(p, &["approved"]).unwrap_or(false),
+                // `state`: "approved" | "changes_requested" | null.
+                changes_requested: vstr(p, &["state"]) == "changes_requested",
                 avatar_url: vstr_opt(p, &["user", "links", "avatar", "href"]),
                 reviewed_at: vstr_opt(p, &["participated_on"]).map(|s| ts(&s)),
             })

@@ -9,6 +9,7 @@ export type TimelineEvent =
   | { kind: 'commits'; at: string; who: string; commits: PrCommit[] }
   | { kind: 'comment'; at: string; who: string; comment: PrComment; replies: number }
   | { kind: 'approved'; at: string; who: string }
+  | { kind: 'changes'; at: string; who: string }
   | { kind: 'closed'; at: string; who: string; state: 'merged' | 'declined' };
 
 const ms = (iso: string): number => {
@@ -45,7 +46,9 @@ export function buildTimeline(pr: PrDetail, commits: PrCommit[] | null, burstMs 
     out.push({ kind: 'comment', at: c.created_at, who: c.author, comment: c, replies: c.replies?.length ?? 0 });
   }
   for (const r of pr.reviewers) {
-    if (r.approved && r.reviewed_at && ms(r.reviewed_at) > 0) out.push({ kind: 'approved', at: r.reviewed_at, who: r.name });
+    if (!r.reviewed_at || ms(r.reviewed_at) === 0) continue;
+    if (r.approved) out.push({ kind: 'approved', at: r.reviewed_at, who: r.name });
+    else if (r.changes_requested) out.push({ kind: 'changes', at: r.reviewed_at, who: r.name });
   }
   if (pr.state === 'merged' || pr.state === 'declined') {
     out.push({ kind: 'closed', at: pr.updated_at, who: '', state: pr.state });

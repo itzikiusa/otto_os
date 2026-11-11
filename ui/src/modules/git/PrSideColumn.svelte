@@ -26,6 +26,8 @@
         <span class="grow"></span>
         {#if r.approved}
           <span class="ok" title="Approved{r.reviewed_at ? ` ${rel(r.reviewed_at)}` : ''}"><Icon name="check" size={12} /> Approved</span>
+        {:else if r.changes_requested}
+          <span class="warn" title="Changes requested{r.reviewed_at ? ` ${rel(r.reviewed_at)}` : ''}"><Icon name="warning" size={12} /> Changes requested</span>
         {:else}
           <span class="dim">Pending</span>
         {/if}
@@ -83,6 +85,7 @@
   .sc-row { display: flex; align-items: center; gap: 8px; padding-block: 4px; min-width: 0; }
   .ell { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: start; }
   .ok { display: inline-flex; align-items: center; gap: 4px; color: var(--success); font-size: var(--fs-xs); white-space: nowrap; }
+  .warn { display: inline-flex; align-items: center; gap: 4px; color: var(--warning); font-size: var(--fs-xs); white-space: nowrap; }
   .none { font-size: var(--fs-s); margin: 0; }
   .ck { display: inline-flex; flex: none; }
   .ck-success { color: var(--success); }

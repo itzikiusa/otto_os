@@ -797,6 +797,7 @@ impl super::GitProvider for Github {
             let state = vstr(rv, &["state"]);
             let mut entry = PrReviewer {
                 approved: state == "APPROVED",
+                changes_requested: state == "CHANGES_REQUESTED",
                 avatar_url: vstr_opt(rv, &["user", "avatar_url"]),
                 reviewed_at: vstr_opt(rv, &["submitted_at"]).map(|s| ts(&s)),
                 name: name.clone(),
@@ -808,6 +809,7 @@ impl super::GitProvider for Github {
                         "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED"
                     ) {
                         entry.approved = existing.approved;
+                        entry.changes_requested = existing.changes_requested;
                     }
                     *existing = entry;
                 }

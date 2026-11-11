@@ -5,7 +5,8 @@
   // "Open N together", and a quiet background refresh every 2 minutes that
   // never resets scroll, selection or the search.
   import { api, ApiError } from '../../lib/api/client';
-  import type { GitAccount, PrListResp, PrState, PrSummary } from '../../lib/api/types';
+  import type { PrListResp, PrState, PrSummary } from '../../lib/api/types';
+  import { myGitHandles } from './myGitHandles.svelte';
   import { router } from '../../lib/router.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -260,26 +261,8 @@
   });
 
   // ── Identity ("Authored by you") ────────────────────────────────────────
-  let myHandles = $state.raw<ReadonlySet<string>>(new Set());
-  $effect(() => {
-    let live = true;
-    void api
-      .get<GitAccount[]>('/git/accounts')
-      .then((accs) => {
-        if (!live) return;
-        const s = new Set<string>();
-        for (const a of accs) {
-          if (a.username) s.add(a.username.toLowerCase());
-          const dn = (a as GitAccount & { display_name?: string | null }).display_name;
-          if (dn) s.add(dn.toLowerCase());
-        }
-        myHandles = s;
-      })
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
-  });
+  myGitHandles.load();
+  const myHandles = $derived(myGitHandles.handles);
 
   // ── Lazy +/- counts ─────────────────────────────────────────────────────
   let stats = $state.raw<PrStatsLoader | null>(null);

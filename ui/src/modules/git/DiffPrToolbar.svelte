@@ -146,11 +146,21 @@
 </div>
 
 <style>
+  /* Pinned to the top of whatever scrolls the diff (the PR pane on desktop,
+     the diff itself on a phone), so commits / viewed / search / view toggles
+     stay at hand on a long PR. `flex: none`: in the phone's flex-column
+     scroller a shrinkable toolbar collapsed to one row and its wrapped
+     search row slid under the first file. */
   .pr-toolbar {
     display: flex;
     align-items: center;
     gap: 8px;
     min-height: 30px;
+    flex: none;
+    position: sticky;
+    top: 0;
+    z-index: var(--z-sticky);
+    background: var(--surface);
   }
   .pt-stats {
     display: inline-flex;

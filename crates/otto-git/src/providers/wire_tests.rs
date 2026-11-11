@@ -65,16 +65,16 @@ mod github {
         let opinions: Vec<_> = detail
             .reviewers
             .iter()
-            .map(|r| (r.name.as_str(), r.approved))
+            .map(|r| (r.name.as_str(), r.approved, r.changes_requested))
             .collect();
         assert_eq!(
             opinions,
             [
-                ("alice", false),
-                ("bob", true),
-                ("carol", false),
-                ("dan", true),
-                ("eve", false)
+                ("alice", false, true),
+                ("bob", true, false),
+                ("carol", false, false),
+                ("dan", true, false),
+                ("eve", false, false)
             ]
         );
     }
@@ -780,6 +780,48 @@ mod bitbucket {
             "user": { "display_name": "Dev" },
             "created_on": "2026-09-01T10:00:00Z",
         })
+    }
+
+    /// A participant's `state` carries "changes requested" — the reviewer
+    /// list used to show everyone without an approval as pending.
+    #[tokio::test]
+    async fn participant_state_marks_changes_requested() {
+        let server = MockServer::start().await;
+        let bb = Bitbucket::with_base("user".into(), "tok".into(), server.uri());
+        let mut body = pr(7);
+        let who = |name: &str, approved: bool, state: serde_json::Value| json!({"user": {"display_name": name}, "role": "REVIEWER", "approved": approved, "state": state});
+        body["participants"] = json!([
+            who("Ann", true, json!("approved")),
+            who("Ben", false, json!("changes_requested")),
+            who("Cy", false, serde_json::Value::Null)
+        ]);
+        Mock::given(method("GET"))
+            .and(path("/repositories/acme/app/pullrequests/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(
+                r"^/repositories/acme/app/pullrequests/7/(comments|statuses)$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"values": []})))
+            .mount(&server)
+            .await;
+        let d = bb.get_pr(&rr(), 7).await.unwrap();
+        let got: Vec<_> = d
+            .reviewers
+            .iter()
+            .map(|r| (r.name.as_str(), r.approved, r.changes_requested))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("Ann", true, false),
+                ("Ben", false, true),
+                ("Cy", false, false)
+            ]
+        );
+        assert_eq!(d.approved_by, ["Ann"]);
     }
 
     /// Build statuses follow `next`: a FAILED build on page 2 used to be
