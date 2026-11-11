@@ -7,6 +7,7 @@
 // source is its own effect, so one source's reads never re-register another's.
 
 import { untrack } from 'svelte';
+import { slackSend } from '../lib/slackSend.svelte';
 import { registry } from '../lib/commands.svelte';
 import { activeNavId, availableModules, goToEntries, moduleLabel } from '../lib/sidebar';
 import { availableSections, groupLabel as settingsGroupLabel } from '../modules/settings/sections';
@@ -50,6 +51,7 @@ export function installPaletteSources(deps: PaletteDeps): () => void {
         { id: 'core.split-v', title: 'Split vertically', group: 'Pane', shortcut: '⌘D', run: () => ws.split('col') },
         { id: 'core.split-h', title: 'Split horizontally', group: 'Pane', shortcut: '⌘⇧D', run: () => ws.split('row') },
         { id: 'core.new-workspace', title: 'New workspace…', group: 'Session', keywords: 'create new project folder directory', run: () => (ui.newWorkspaceOpen = true) },
+        { id: 'core.slack-send', title: 'Send a Slack message as me…', group: 'Tools', keywords: 'slack message dm post channel send as me reviewer bot', run: () => slackSend.open() },
         { id: 'core.update-clis', title: 'Update all CLIs', group: 'Tools', shortcut: '⌘U / ⌘⇧U', keywords: 'upgrade claude codex agy cli version', run: () => void deps.updateAllCLIs() },
         { id: 'core.snip', title: 'Take a screenshot (snip)', group: 'Tools', shortcut: '⌘⇧S', keywords: 'snip screenshot capture screen region annotate clipboard grab shot', run: () => void startSnip() },
         { id: 'core.go-settings', title: 'Go to Settings', group: 'Navigate', shortcut: '⌘,', keywords: 'preferences appearance', run: () => router.go('settings/appearance') },

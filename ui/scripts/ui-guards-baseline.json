@@ -164,7 +164,7 @@
   "empty-state-error": {},
   "file-loc": {
     "src/lib/api/client.ts": 1011,
-    "src/lib/api/mock.ts": 2725,
+    "src/lib/api/mock.ts": 2727,
     "src/lib/components/CodeEditor.svelte": 1272,
     "src/lib/components/FloatingBar.svelte": 1579,
     "src/lib/components/Terminal.svelte": 3499,
@@ -213,7 +213,7 @@
     "src/modules/git/GitPage.svelte": 934,
     "src/modules/git/GraphView.svelte": 1064,
     "src/modules/git/LocalReviewPanel.svelte": 1032,
-    "src/modules/git/PrDetail.svelte": 986,
+    "src/modules/git/PrDetail.svelte": 989,
     "src/modules/git/ReviewPanel.svelte": 2431,
     "src/modules/git/WipPanel.svelte": 1271,
     "src/modules/insights/InsightsPage.svelte": 1101,
@@ -245,7 +245,7 @@
     "src/modules/vault/vault.svelte.ts": 1388,
     "src/modules/workbench/WorkbenchPage.svelte": 970,
     "src/modules/workflows/WorkflowsPage.svelte": 2556,
-    "src/shell/App.svelte": 1514,
+    "src/shell/App.svelte": 1516,
     "src/shell/Navigator.svelte": 2499,
     "src/shell/NotificationBell.svelte": 820,
     "src/shell/Palette.svelte": 920

@@ -41,6 +41,7 @@
   import NotificationBell from './NotificationBell.svelte';
   import { serviceHealth } from '../lib/stores/serviceHealth.svelte';
   import ConfirmDialog from '../lib/components/ConfirmDialog.svelte';
+  import SlackSendDialog from '../lib/components/slack/SlackSendDialog.svelte';
   import ContextMenu from '../lib/components/ContextMenu.svelte';
   import FindInPage from '../lib/components/FindInPage.svelte';
   import { findInPage } from '../lib/findinpage.svelte';
@@ -1232,6 +1233,7 @@
 {/if}
 
 <ConfirmDialog />
+<SlackSendDialog />
 <ContextMenu />
 <PhoneHandoffHost />
 <FindInPage />

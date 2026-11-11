@@ -1106,7 +1106,7 @@ fn slack_tool_specs() -> [Value; 9] {
     let ch = json!({"type":"string","description":"id, #name or @user"});
     [
         json!({"name":"otto.slack_my_workspaces","mutating":false,"category":"Channels",
-            "description":"The Slack workspaces (teams) you can act in as yourself, and whether this Otto workspace has a Slack bot. Read-only.",
+            "description":"The Slack workspaces (teams) you can act in as yourself, your `default_team` here (used when as=user omits `team`), and whether this Otto workspace has a Slack bot. Read-only.",
             "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":ws}}}),
         json!({"name":"otto.slack_list_conversations","mutating":false,"category":"Channels",
             "description":"List Slack channels, DMs (kind im, named by person) and group DMs. as=user lists yours. `q` filters by name. Read-only.",

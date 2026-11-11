@@ -155,6 +155,50 @@ export interface SlackMeTeam {
   missing_scopes: string[];
 }
 
+/** `GET|PUT /integrations/slack/as-me-default` (global) and
+ *  `/workspaces/{id}/integrations/slack/as-me-default` (adds `workspace`):
+ *  the team an as-me send uses when it names none — your override for the
+ *  workspace, else your global default (team ids; per person). */
+export interface SlackAsMeDefault {
+  global: string | null;
+  workspace?: string | null;
+  /** What applies: workspace ?? global ?? your only connected team ?? null. */
+  effective: string | null;
+}
+
+/** `GET /workspaces/{id}/integrations/slack/teams`. */
+export interface SlackTeamsResp {
+  teams: SlackMeTeam[];
+  bot: boolean;
+  as_me_restricted: boolean;
+  /** The team an as-me send without `team` uses here. */
+  default_team: string | null;
+}
+
+/** One Slack member (`…/slack/users?as=user&q=`). */
+export interface SlackDirUser {
+  id: string;
+  name: string;
+  handle: string;
+  is_bot: boolean;
+}
+
+/** One Slack conversation (`…/slack/conversations?as=user&q=`). */
+export interface SlackConv {
+  id: string;
+  name: string;
+  kind: 'channel' | 'private' | 'im' | 'mpim';
+}
+
+/** `POST /workspaces/{id}/integrations/slack/messages` answer. */
+export interface SlackPosted {
+  channel: string;
+  ts: string;
+  permalink?: string;
+  team?: string;
+  team_id?: string;
+}
+
 /** `POST /integrations/slack/me/{team_id}/test`. */
 export interface SlackMeTestResp {
   ok: boolean;

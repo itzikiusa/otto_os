@@ -132,6 +132,25 @@ test('Approve / Request changes live in the header and update at once', async ({
   await expect(side.getByText('Changes requested')).toHaveCount(0);
 });
 
+test('PR header never overlaps: repo · #n · state stay whole as the window narrows', async ({ page }) => {
+  for (const width of [1600, 1440, 1280, 1100]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto('/#/git/rep_otto/pr/51');
+    await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
+    const boxes = await page.evaluate(() => {
+      const r = (sel: string) => document.querySelector(sel)!.getBoundingClientRect();
+      return { num: r('.prd-num'), state: r('.prd-state'), actions: r('.prd-actions'), slug: r('.prd-slug') };
+    });
+    const overlap = (a: DOMRect, b: DOMRect) => a.left < b.right - 1 && b.left < a.right - 1 && a.top < b.bottom - 1 && b.top < a.bottom - 1;
+    expect(overlap(boxes.num, boxes.state), `#n over the state chip at ${width}px`).toBe(false);
+    expect(overlap(boxes.state, boxes.actions), `state chip under the actions at ${width}px`).toBe(false);
+    expect(boxes.slug.width, `repo name visible at ${width}px`).toBeGreaterThan(40);
+    for (const name of ['Request changes', 'Approve', 'Merge']) {
+      await expect(page.locator('.prd-actions').getByRole('button', { name, exact: true })).toBeInViewport({ ratio: 1 });
+    }
+  }
+});
+
 test('select several PRs in the list and open them together as tabs', async ({ page }) => {
   await page.goto('/#/git/rep_otto/pr/51');
   await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
