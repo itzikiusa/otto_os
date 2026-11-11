@@ -91,6 +91,14 @@ pub(crate) fn routes<S: ChannelsCtx>(r: Router<S>) -> Router<S> {
             put(me_replace::<S>).delete(me_remove::<S>),
         )
         .route("/integrations/slack/me/{team_id}/test", post(me_test::<S>))
+        .route(
+            "/integrations/slack/as-me-default",
+            get(default_get_global::<S>).put(default_put_global::<S>),
+        )
+        .route(
+            "/workspaces/{id}/integrations/slack/as-me-default",
+            get(default_get_ws::<S>).put(default_put_ws::<S>),
+        )
         .route("/workspaces/{id}/integrations/slack/teams", get(teams::<S>))
         .route(
             "/workspaces/{id}/integrations/slack/conversations",
@@ -162,9 +170,32 @@ async fn identity<S: ChannelsCtx>(
     store::refuse_impersonation(auth)?;
     let scope = s.slack_as_me(auth).await?;
     let teams = store::list(s.secrets(), &user.0.id).await?;
-    let me = store::pick(&teams, team, &scope)?.clone();
+    // No team named: the person's default for this workspace (its override,
+    // else their global default) — when this credential may act there.
+    let fallback = match team.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(_) => None,
+        None => default_team(s, &user.0.id, Some(ws_id), &teams, &scope).await?,
+    };
+    let me = store::pick(&teams, team.or(fallback.as_deref()), &scope)?.clone();
     let token = store::token(s.secrets(), &user.0.id, &me.team_id).await?;
     Ok((SlackApi::with_base(token, base), Some(me)))
+}
+
+/// The default team (workspace override, else global) if it is still
+/// connected and `scope` allows it; `None` keeps `pick`'s own rules.
+async fn default_team<S: ChannelsCtx>(
+    s: &S,
+    user: &Id,
+    ws: Option<&Id>,
+    teams: &[SlackMe],
+    scope: &store::AsMe,
+) -> Result<Option<String>, Error> {
+    let d = otto_state::SlackAsMeDefaultsRepo::new(s.integrations().pool())
+        .get(user, ws.map(|w| w.as_str()))
+        .await?;
+    Ok(d.effective()
+        .filter(|t| scope.allows(t) && teams.iter().any(|m| m.team_id == *t))
+        .map(str::to_string))
 }
 
 fn q<'a>(p: &'a HashMap<String, String>, k: &str) -> Option<&'a str> {
@@ -269,6 +300,10 @@ async fn me_remove<S: ChannelsCtx>(
 ) -> ApiResult<StatusCode> {
     store::refuse_impersonation(&auth)?;
     store::remove(s.secrets(), &user.0.id, &team_id).await?;
+    // A default that pointed at the removed team would silently fail later.
+    otto_state::SlackAsMeDefaultsRepo::new(s.integrations().pool())
+        .forget_team(&user.0.id, &team_id)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -292,6 +327,114 @@ async fn me_test<S: ChannelsCtx>(
 }
 
 // ---------------------------------------------------------------------------
+// Default team for "act as me": global, and a per-workspace override
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct DefaultTeamReq {
+    /// A connected team id; `null` clears this level.
+    pub team_id: Option<String>,
+}
+
+/// `{global, workspace, effective}` — team ids (`workspace` only on the
+/// workspace route). A stored default whose team is no longer connected
+/// reads as absent.
+async fn default_view<S: ChannelsCtx>(s: &S, user: &Id, ws: Option<&Id>) -> Result<Value, Error> {
+    let teams = store::list(s.secrets(), user).await?;
+    let live = |t: Option<String>| t.filter(|t| teams.iter().any(|m| m.team_id == *t));
+    let d = otto_state::SlackAsMeDefaultsRepo::new(s.integrations().pool())
+        .get(user, ws.map(|w| w.as_str()))
+        .await?;
+    let (global, workspace) = (live(d.global), live(d.workspace));
+    let effective =
+        workspace
+            .clone()
+            .or_else(|| global.clone())
+            .or_else(|| match teams.as_slice() {
+                [one] => Some(one.team_id.clone()),
+                _ => None,
+            });
+    let mut out = json!({"global": global, "effective": effective});
+    if ws.is_some() {
+        out["workspace"] = json!(workspace);
+    }
+    Ok(out)
+}
+
+async fn set_default<S: ChannelsCtx>(
+    s: &S,
+    user: &Id,
+    auth: &AuthContext,
+    ws: Option<&Id>,
+    req: DefaultTeamReq,
+) -> Result<(), Error> {
+    store::refuse_impersonation(auth)?;
+    let team = req
+        .team_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    if let Some(t) = team {
+        let teams = store::list(s.secrets(), user).await?;
+        if !teams.iter().any(|m| m.team_id == t) {
+            return Err(Error::Invalid(format!(
+                "Slack workspace {t} is not connected — add its user token first (Settings → Channels → Act as me in Slack)"
+            )));
+        }
+    }
+    otto_state::SlackAsMeDefaultsRepo::new(s.integrations().pool())
+        .set(user, ws.map(|w| w.as_str()), team)
+        .await
+}
+
+/// `GET /integrations/slack/as-me-default` — the caller's global default.
+async fn default_get_global<S: ChannelsCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(default_view(&s, &user.0.id, None).await?))
+}
+
+/// `PUT /integrations/slack/as-me-default` `{team_id|null}`.
+async fn default_put_global<S: ChannelsCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<DefaultTeamReq>,
+) -> ApiResult<Json<Value>> {
+    set_default(&s, &user.0.id, &auth, None, req).await?;
+    Ok(Json(default_view(&s, &user.0.id, None).await?))
+}
+
+/// `GET /workspaces/{id}/integrations/slack/as-me-default`.
+async fn default_get_ws<S: ChannelsCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(ws_id): Path<Id>,
+) -> ApiResult<Json<Value>> {
+    s.roles()
+        .check(&user.0, &ws_id, WorkspaceRole::Viewer)
+        .await?;
+    Ok(Json(default_view(&s, &user.0.id, Some(&ws_id)).await?))
+}
+
+/// `PUT /workspaces/{id}/integrations/slack/as-me-default` `{team_id|null}` —
+/// your own override for this workspace (other members are unaffected).
+async fn default_put_ws<S: ChannelsCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path(ws_id): Path<Id>,
+    Json(req): Json<DefaultTeamReq>,
+) -> ApiResult<Json<Value>> {
+    s.roles()
+        .check(&user.0, &ws_id, WorkspaceRole::Viewer)
+        .await?;
+    set_default(&s, &user.0.id, &auth, Some(&ws_id), req).await?;
+    Ok(Json(default_view(&s, &user.0.id, Some(&ws_id)).await?))
+}
+
+// ---------------------------------------------------------------------------
 // Tool routes
 // ---------------------------------------------------------------------------
 
@@ -308,8 +451,10 @@ async fn teams<S: ChannelsCtx>(
         .check(&user.0, &ws_id, WorkspaceRole::Viewer)
         .await?;
     let scope = s.slack_as_me(&auth).await?;
-    let teams: Vec<SlackMeView> = store::list(s.secrets(), &user.0.id)
-        .await?
+    let all = store::list(s.secrets(), &user.0.id).await?;
+    // The team an as-me call without `team` uses here (when this credential may).
+    let default_team = default_team(&s, &user.0.id, Some(&ws_id), &all, &scope).await?;
+    let teams: Vec<SlackMeView> = all
         .into_iter()
         .filter(|m| scope.allows(&m.team_id))
         .map(Into::into)
@@ -323,6 +468,7 @@ async fn teams<S: ChannelsCtx>(
         "teams": teams,
         "bot": bot,
         "as_me_restricted": matches!(scope, AsMe::Teams(_)),
+        "default_team": default_team,
     })))
 }
 

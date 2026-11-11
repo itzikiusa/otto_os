@@ -374,3 +374,189 @@ fn the_digest_keeps_only_recent_hits_and_flags_my_own() {
     assert_eq!(d[0].ts, "130.000000", "newest first");
     assert!(d[1].from_me && !d[0].from_me);
 }
+
+/// With several teams connected, a send that names no team uses the person's
+/// default: this workspace's override, else their global default — never a
+/// team the credential may not act in, and a disconnected team's default is
+/// dropped.
+#[tokio::test]
+async fn as_me_without_a_team_uses_the_workspace_then_global_default() {
+    let (slack, calls) = mock::serve(
+        vec![
+            ("users.list", json!({"ok": true, "members": []})),
+            (
+                "chat.postMessage",
+                json!({"ok": true, "channel": "C9", "ts": "1730800000.000200"}),
+            ),
+            (
+                "chat.getPermalink",
+                json!({"ok": true, "permalink": "https://p"}),
+            ),
+        ],
+        "",
+    )
+    .await;
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+    for t in ["T1", "T2"] {
+        secrets
+            .put(&format!("slack-user-u1-{t}"), &format!("xoxp-{t}"))
+            .unwrap();
+    }
+    let index = json!([
+        {"team_id": "T1", "team": "Acme", "url": "https://acme.slack.com/", "user_id": "U1", "user": "dana", "added_at": ""},
+        {"team_id": "T2", "team": "Globex", "url": "https://globex.slack.com/", "user_id": "U5", "user": "dana", "added_at": ""}
+    ]);
+    secrets.put("slack-user-u1", &index.to_string()).unwrap();
+    let api = serve(&slack, "u1", AsMe::All, secrets.clone()).await;
+    let last_bearer = || {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|c| c.0 == "chat.postMessage")
+            .map(|c| c.2.clone())
+            .unwrap()
+    };
+    let post = |ws: &'static str| {
+        let url = format!("{api}/workspaces/{ws}/integrations/slack/messages");
+        async move {
+            send(
+                reqwest::Method::POST,
+                url,
+                Some(json!({"as": "user", "channel": "C0123ABCD", "text": "hi"})),
+            )
+            .await
+        }
+    };
+
+    // An unknown team is refused as a default.
+    let (st, _) = send(
+        reqwest::Method::PUT,
+        format!("{api}/integrations/slack/as-me-default"),
+        Some(json!({"team_id": "T9"})),
+    )
+    .await;
+    assert_eq!(st, 400);
+
+    // Global default → used in every workspace.
+    let (st, body) = send(
+        reqwest::Method::PUT,
+        format!("{api}/integrations/slack/as-me-default"),
+        Some(json!({"team_id": "T1"})),
+    )
+    .await;
+    assert_eq!((st, body["global"].clone()), (200, json!("T1")), "{body}");
+    let (st, body) = post("ws1").await;
+    assert_eq!((st, body["team_id"].clone()), (200, json!("T1")), "{body}");
+    assert_eq!(last_bearer(), "xoxp-T1");
+
+    // ws1 overrides it; ws2 still follows the global default.
+    let (st, body) = send(
+        reqwest::Method::PUT,
+        format!("{api}/workspaces/ws1/integrations/slack/as-me-default"),
+        Some(json!({"team_id": "T2"})),
+    )
+    .await;
+    assert_eq!(
+        (st, body["workspace"].clone(), body["effective"].clone()),
+        (200, json!("T2"), json!("T2")),
+        "{body}"
+    );
+    assert_eq!(post("ws1").await.1["team_id"], "T2");
+    assert_eq!(last_bearer(), "xoxp-T2");
+    assert_eq!(post("ws2").await.1["team_id"], "T1");
+
+    // An explicit team still wins over any default.
+    let (_, body) = send(
+        reqwest::Method::POST,
+        format!("{api}/workspaces/ws1/integrations/slack/messages"),
+        Some(json!({"as": "user", "team": "acme", "channel": "C0123ABCD", "text": "hi"})),
+    )
+    .await;
+    assert_eq!(body["team_id"], "T1");
+
+    // Disconnecting T2 drops the ws1 override: ws1 falls back to global.
+    let (st, _) = send(
+        reqwest::Method::DELETE,
+        format!("{api}/integrations/slack/me/T2"),
+        None,
+    )
+    .await;
+    assert_eq!(st, 204);
+    let (_, body) = send(
+        reqwest::Method::GET,
+        format!("{api}/workspaces/ws1/integrations/slack/as-me-default"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        (body["workspace"].clone(), body["effective"].clone()),
+        (Value::Null, json!("T1")),
+        "{body}"
+    );
+}
+
+/// A personal agent allowed only T2 never acts in T1, even when T1 is the
+/// person's default: the default is ignored and the agent's own team is used.
+#[tokio::test]
+async fn a_default_never_widens_a_personal_agents_teams() {
+    let (slack, calls) = mock::serve(
+        vec![
+            ("users.list", json!({"ok": true, "members": []})),
+            (
+                "chat.postMessage",
+                json!({"ok": true, "channel": "C9", "ts": "1730800000.000200"}),
+            ),
+            (
+                "chat.getPermalink",
+                json!({"ok": true, "permalink": "https://p"}),
+            ),
+        ],
+        "",
+    )
+    .await;
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+    for t in ["T1", "T2"] {
+        secrets
+            .put(&format!("slack-user-u1-{t}"), &format!("xoxp-{t}"))
+            .unwrap();
+    }
+    let index = json!([
+        {"team_id": "T1", "team": "Acme", "url": "https://acme.slack.com/", "user_id": "U1", "user": "dana", "added_at": ""},
+        {"team_id": "T2", "team": "Globex", "url": "https://globex.slack.com/", "user_id": "U5", "user": "dana", "added_at": ""}
+    ]);
+    secrets.put("slack-user-u1", &index.to_string()).unwrap();
+    // The person's global default is T1 (set through this server: each
+    // `serve` has its own DB).
+    let agent = serve(
+        &slack,
+        "u1",
+        AsMe::Teams(vec!["T2".into()]),
+        secrets.clone(),
+    )
+    .await;
+    let (st, _) = send(
+        reqwest::Method::PUT,
+        format!("{agent}/integrations/slack/as-me-default"),
+        Some(json!({"team_id": "T1"})),
+    )
+    .await;
+    assert_eq!(st, 200);
+    let (st, body) = send(
+        reqwest::Method::POST,
+        format!("{agent}/workspaces/ws1/integrations/slack/messages"),
+        Some(json!({"as": "user", "channel": "C0123ABCD", "text": "hi"})),
+    )
+    .await;
+    assert_eq!((st, body["team_id"].clone()), (200, json!("T2")), "{body}");
+    let bearer = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|c| c.0 == "chat.postMessage")
+        .map(|c| c.2.clone())
+        .unwrap();
+    assert_eq!(bearer, "xoxp-T2");
+}

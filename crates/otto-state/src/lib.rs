@@ -63,6 +63,7 @@ pub mod sessions;
 pub mod settings;
 pub mod skill_evals;
 pub mod skill_reviews;
+pub mod slack_as_me_defaults;
 pub mod users;
 pub mod vault_docs_runs;
 pub mod workflow_run_search;
@@ -96,6 +97,7 @@ pub use browser_credentials::{
 pub use connection_sections::ConnectionSectionsRepo;
 pub use connections::{ConnectionsRepo, NewConnection};
 pub use db::open;
+pub use slack_as_me_defaults::{SlackAsMeDefaults, SlackAsMeDefaultsRepo};
 // Re-exported so daemon-side background tasks can name the pool type without
 // taking a direct sqlx dependency.
 pub use db_explorer::{

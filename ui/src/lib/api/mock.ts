@@ -4,6 +4,7 @@
 // /ws/*) so client.ts stays untouched.
 
 import { mockBigPrDiff, mockCommitDiff, mockExtraPrs, mockPrCommits } from './mock-prs';
+import { slackMockRoutes } from './mock-slack';
 import type {
   AwsAccount,
   AwsPermissions,
@@ -966,6 +967,7 @@ const k8sRoutes: Route[] = [
 
 const routes: Route[] = [
   ...k8sRoutes,
+  ...slackMockRoutes,
   { method: 'GET', re: /^\/health$/, handle: () => ({ json: { ok: true } }) },
   { method: 'GET', re: /^\/meta$/, handle: () => ({ json: { ...meta, needs_onboarding: localStorage.getItem('otto_mock_onboarding') === '1' } }) },
   {

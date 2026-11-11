@@ -14,5 +14,6 @@ export const AttachProductStoryChunk = lazyComponent(() => import('../modules/ag
 export const BroadcastModalChunk = lazyComponent(() => import('../lib/components/BroadcastModal.svelte'));
 export const NewSessionChunk = lazyComponent(() => import('../modules/agents/NewSession.svelte'));
 export const NewWorkspaceChunk = lazyComponent(() => import('../modules/settings/NewWorkspace.svelte'));
+export const SlackSendChunk = lazyComponent(() => import('../lib/components/slack/SlackSendDialog.svelte'));
 /** Shared by the Navigator and the TabBar; it bundles the QR encoder. */
 export const ShareModalChunk = lazyComponent(() => import('../modules/agents/ShareModal.svelte'));

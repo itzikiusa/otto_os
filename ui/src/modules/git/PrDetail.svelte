@@ -49,6 +49,7 @@
   import { myGitHandles } from './myGitHandles.svelte';
   import { myReview, withMyReview } from './pr-review-state';
   import { prAgentRequest, type PrAgentKind } from './pr-agent';
+  import { openReviewDoneSlack } from './pr-slack';
   import { fileStat } from './diff-model';
   import { notePrHead, prDiffFileLoader, prDiffHead, prDiffSummary, repoDiffFileLoader } from './diff-load';
   import CommentThread from './CommentThread.svelte';
@@ -507,6 +508,7 @@
       { label: 'Ask a question', icon: 'comment', hint: 'agent', action: () => void openAgent('ask') },
       { label: 'Explain this PR', icon: 'sparkle', hint: 'agent', action: () => void openAgent('explain') },
       { label: 'Fix findings in a session', icon: 'zap', hint: 'agent', disabled: !open, action: () => void openAgent('fix') },
+      { label: 'Tell the author on Slack…', icon: 'send', action: () => pr && openReviewDoneSlack(pr, repoSlug) },
       { separator: true },
       { label: 'Merge', icon: 'merge', disabled: !open, action: () => openMerge('merge') },
       { label: 'Squash and merge', icon: 'merge', disabled: !open, action: () => openMerge('squash') },
@@ -834,11 +836,13 @@
     gap: 8px;
     min-width: 0;
   }
+  .prd-row-top { flex-wrap: wrap; row-gap: 6px; } /* actions wrap, never crush repo · #n · state */
   .prd-repo {
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    min-width: 0;
+    min-width: min(14ch, 100%);
+    overflow: hidden;
     font-size: var(--fs-s);
     color: var(--text-dim);
   }
@@ -858,7 +862,7 @@
   .st-merged { color: var(--accent-text); background: var(--accent-soft); }
   .st-declined { color: var(--danger); background: var(--danger-soft); }
   .st-draft { color: var(--text-dim); background: var(--surface-2); }
-  .prd-actions { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+  .prd-actions { display: inline-flex; align-items: center; gap: 6px; flex: none; margin-inline-start: auto; }
   .icon-only { padding-inline: 6px; }
   .prd-pending { color: var(--info); border-color: color-mix(in srgb, var(--info) 40%, var(--border)); }
   .prd-title {
@@ -972,7 +976,6 @@
     .prd-head, .prd-body, .prd-code { flex: none; min-height: auto; overflow: visible; }
     .prd-code :global(.diff) { overflow-y: visible; }
     .prd-head { padding: 10px 12px 0; }
-    .prd-row-top { flex-wrap: wrap; }
     .prd-actions { flex-wrap: wrap; flex: 1 1 100%; }
     .prd-actions .btn { height: 34px; }
     .prd-meta { flex-wrap: wrap; }

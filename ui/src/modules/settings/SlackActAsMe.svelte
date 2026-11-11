@@ -14,6 +14,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import SlackAsMeDefaults from './SlackAsMeDefaults.svelte';
 
   let teams = $state<SlackMeTeam[]>([]);
   let loading = $state(true);
@@ -145,6 +146,7 @@
           </li>
         {/each}
       </ul>
+      {#if teams.length > 1}<SlackAsMeDefaults {teams} />{/if}
     {/if}
   </LoadState>
 </section>
