@@ -6,20 +6,34 @@
   import { rel } from '../../lib/stores/now.svelte';
   import PrAvatar from './PrAvatar.svelte';
   import PrMergeChecks from './PrMergeChecks.svelte';
+  import PrReviewersEdit from './PrReviewersEdit.svelte';
+  import { currentReviewers } from './pr-reviewers-edit';
 
   interface Props {
     pr: PrDetail;
     checks: PrChecksResp | null;
     commits: PrCommit[] | null;
     providerName: string;
+    /** With these, an open PR's reviewers can be edited (PrReviewersEdit). */
+    repoId?: string;
+    /** The confirm's "Where" line. */
+    where?: string;
+    onreviewerschanged?: () => void;
   }
-  let { pr, checks, commits, providerName }: Props = $props();
+  let { pr, checks, commits, providerName, repoId, where, onreviewerschanged }: Props = $props();
+  let editing = $state(false);
+  const canEdit = $derived(!!repoId && !!onreviewerschanged && pr.state === 'open');
   const glyph = (s: string) => (s === 'success' ? 'check' : s === 'failure' ? 'x' : s === 'pending' ? 'clock' : 'dot') as 'check' | 'x' | 'clock' | 'dot';
 </script>
 
 <aside class="side" aria-label="Pull request details">
   <section>
-    <h3 class="h">Reviewers</h3>
+    <h3 class="h h-row">Reviewers
+      {#if canEdit}
+        <button class="sc-edit" data-testid="pr-reviewers-edit" aria-label="Edit reviewers" title="Add or remove reviewers (asks first)"
+          onclick={() => (editing = true)}><Icon name="edit" size={12} /></button>
+      {/if}
+    </h3>
     {#each pr.reviewers as r, i (i)}
       <div class="sc-row">
         <PrAvatar name={r.name} url={r.avatar_url} />
@@ -74,6 +88,11 @@
   </section>
 </aside>
 
+{#if editing && repoId}
+  <PrReviewersEdit {repoId} number={pr.number} current={currentReviewers(pr)} where={where ?? `PR #${pr.number}`} {providerName}
+    onclose={() => (editing = false)} onsaved={() => { editing = false; onreviewerschanged?.(); }} />
+{/if}
+
 <style>
   .side { display: flex; flex-direction: column; gap: 18px; font-size: var(--fs-s); min-width: 0; }
   .h {
@@ -84,6 +103,10 @@
     letter-spacing: .06em;
     color: var(--text-dim);
   }
+  .h-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+  .sc-edit { background: none; border: none; padding: 4px; margin: -4px; color: var(--text-dim); cursor: pointer; display: inline-flex; border-radius: var(--radius-s); }
+  .sc-edit:hover, .sc-edit:focus-visible { color: var(--text); }
+  @media (max-width: 1024px) { .sc-edit { padding: 8px; margin: -8px; } }
   .sc-row { display: flex; align-items: center; gap: 8px; padding-block: 4px; min-width: 0; }
   .ell { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: start; }
   .ok { display: inline-flex; align-items: center; gap: 4px; color: var(--success); font-size: var(--fs-xs); white-space: nowrap; }

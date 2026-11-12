@@ -602,7 +602,13 @@ pub async fn start_query(
     }
     let ctx;
     let rc;
-    let mut args: Vec<&str> = vec!["athena", "start-query-execution", "--query-string", sql];
+    // The SQL goes through stdin, never argv (`ps` shows argv).
+    let mut args: Vec<&str> = vec![
+        "athena",
+        "start-query-execution",
+        "--query-string",
+        crate::accounts::STDIN_PARAM,
+    ];
     if let Some(db) = req
         .database
         .as_deref()
@@ -620,7 +626,7 @@ pub async fn start_query(
         rc = format!("OutputLocation={o}");
         args.extend(["--result-configuration", rc.as_str()]);
     }
-    let v = svc.run_json(a, region, &args).await?;
+    let v = svc.run_json_stdin(a, region, &args, sql.as_bytes()).await?;
     let query_execution_id = v
         .get("QueryExecutionId")
         .and_then(|q| q.as_str())

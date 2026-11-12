@@ -64,6 +64,10 @@ fn headless_exec(provider: &str) -> (String, Vec<String>, PromptArg<'static>) {
     }
 }
 
+/// The admission label of a self-improvement analysis turn (one of
+/// `otto_sessions::admission::ADMISSION_GATED_SOURCES`).
+pub const ADMISSION_SOURCE: &str = "self_improvement";
+
 /// Real producer: drives the chosen agent CLI, parses the reply, and retries
 /// once on a malformed proposal.
 pub struct RealProposalProducer {
@@ -113,6 +117,12 @@ impl ProposalProducer for RealProposalProducer {
         provider: &'a str,
     ) -> BoxFuture<'a, Result<ImprovementProposal>> {
         Box::pin(async move {
+            // An unattended engine turn: wait for the daemon's admission gate
+            // (load / memory / background ceiling) and hold the place across
+            // both attempts, whichever CLI runs them. The wait counts toward
+            // the engine's analysis budget; a run that times out waiting fails
+            // without consuming its evidence, so the next pass retries it.
+            let _place = self.orchestrator.admit_background(ADMISSION_SOURCE).await;
             // Attempt 1.
             let reply = self.run_one(prompt, cwd, provider).await?;
             if let Ok(p) = parse_proposal(&reply) {
@@ -134,5 +144,17 @@ impl ProposalProducer for RealProposalProducer {
                 ))
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The producer's label is one the daemon's gate holds back — otherwise
+    /// the hook would admit it at once and the turn would skip the gate.
+    #[test]
+    fn the_analysis_turn_is_admission_gated() {
+        assert!(otto_sessions::admission::is_gated_source(ADMISSION_SOURCE));
     }
 }

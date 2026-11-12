@@ -540,6 +540,19 @@ the agent's Runs tab. A clean run ends the streak.
   change its avatar, enable or pause it, change cadence, Run now (a goal's
   "Work on it now" too — the run acts as the owner), toggle a goal's
   `enabled`, proactive on/budget and `primary`, cancel a run and manage rooms.
+- **403 "an agent cannot change its own …"** — the same owner-only fields
+  (and applying / undoing an instructions proposal, a personality note) need a
+  PERSON's credential: an agent session's own token or MCP credential acts as
+  its owner, so it is refused outright. An agent proposes new instructions
+  with `otto.instructions_propose`; the person decides on the page.
+- **A routine update asks for approval** — `otto.routine_update` (and the REST
+  `PATCH /personal-agents/routines/{id}` from an agent token) on a routine that
+  ALREADY posts outside the chat is judged against its stored destination:
+  any change other than a pause needs the owner's approval card.
+- **400 "gemini can't load a persona for one launch …"** — a personal agent
+  runs on Claude, Codex, agy, Grok or opencode only: Gemini, Pi and custom CLIs
+  have no per-launch context file, so they would run without the persona. The
+  editor only offers the supported providers and explains a saved other one.
 - **403 "This agent runs as its owner; only the owner or a workspace admin can
   give it a directive."** from Assistant delegation (`POST
   /assistant/threads/{id}/delegate`, the `assistant_delegate` tool) — a

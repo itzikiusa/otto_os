@@ -11,7 +11,8 @@ test('open is first, unknown server actions are hidden', () => {
 test("the canvas hit's legacy 'Open in Canvas' label still opens", () => {
   assert.equal(normalizeHitAction('Open in Canvas'), 'open');
   assert.deepEqual(hitActions({ actions: ['Open in Canvas'] }), ['open']);
-  assert.equal(hitRoute({ kind: 'canvas', id: 'c1' }), 'canvas');
+  // …and opens the board itself (`#/canvas/<id>` forwards to its Hall mirror).
+  assert.equal(hitRoute({ kind: 'canvas', id: 'c1' }), 'canvas/c1');
 });
 
 test('a repo hit routes to its repo', () => {

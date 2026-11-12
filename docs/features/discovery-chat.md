@@ -1,5 +1,11 @@
 # Discovery Chat
 
+> **Read-only history now.** A story's discovery chats are kept and readable,
+> but nothing writes to them any more: the live conversation with the story
+> agent is **Product ▸ Chat** (see [product.md §4.7a](./product.md)), where
+> older discovery chats appear as earlier conversations. The rest of this page
+> describes how discovery chats worked and what their records hold.
+
 A lightweight, conversational agent on the **Product** page that you can talk to
 **before you have written anything** — from a brand-new Untitled story — to help
 with early **discovery and research**. Tell it a rough idea or a problem; it

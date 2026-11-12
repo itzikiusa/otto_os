@@ -76,6 +76,12 @@ class CanvasStore {
   // A per-scene queue keeps delayed older PUTs from overwriting newer edits.
   #drafts = new Map<string, CanvasDoc>();
   docSaveErrors = $state<Record<string, string>>({});
+  /** A save refused with 409: the scene changed since this tab read it (an
+   *  agent, another tab or person). Its draft is kept until the person picks
+   *  "Reload theirs" or "Keep mine as a copy" — never dropped silently. */
+  conflict = $state<{ id: string; doc: CanvasDoc } | null>(null);
+  /** Scene id → the `updated_at` this tab last saw (the PUT's guard). */
+  #stamps = new Map<string, string>();
   #writes = new Map<string, Promise<void>>();
   #authToken = getToken();
   #saveContext = 0;
@@ -90,6 +96,8 @@ class CanvasStore {
     this.#saveContext++;
     this.closeScene();
     this.#drafts.clear();
+    this.#stamps.clear();
+    this.conflict = null;
     this.docSaveErrors = {};
     this.scenes = [];
     this.rawDoc = null;
@@ -132,9 +140,13 @@ class CanvasStore {
       // Superseded while queued: a newer draft is already chained behind this
       // write and will carry the latest doc — skip sending a stale multi-MB body.
       if (this.#drafts.get(id) !== doc) return;
-      await api.put(`/canvas/scenes/${id}?summary=true`, { doc }); // list row back, not the doc (SD-22)
+      // List row back, not the doc (SD-22); guarded by the last stamp seen.
+      const guard = this.#stamps.get(id);
+      const body = guard ? { doc, expect_updated_at: guard } : { doc };
+      const row = await api.put<{ updated_at?: string } | null>(`/canvas/scenes/${id}?summary=true`, body);
       sent = true;
       if (context !== this.#saveContext) return;
+      if (row?.updated_at) this.#stamps.set(id, row.updated_at);
       if (this.#drafts.get(id) !== doc) return;
       this.#drafts.delete(id);
       delete this.docSaveErrors[id];
@@ -151,7 +163,9 @@ class CanvasStore {
     try { await write; }
     catch (e) {
       if (context !== this.#saveContext) return false;
-      this.docSaveErrors[id] = loadErrorText(e); throw e;
+      if ((e as { status?: number } | null)?.status === 409) this.conflict = { id, doc: this.#drafts.get(id) ?? doc };
+      else this.docSaveErrors[id] = loadErrorText(e);
+      throw e;
     }
     finally { if (this.#writes.get(id) === write) this.#writes.delete(id); }
     return sent;
@@ -161,6 +175,36 @@ class CanvasStore {
   async retryDoc(id: string): Promise<void> {
     const doc = this.#drafts.get(id);
     if (doc) await this.persistDoc(id, doc);
+  }
+
+  /** Conflict: drop this tab's draft and load the board as it is stored now. */
+  async reloadTheirs(): Promise<void> {
+    const c = this.conflict;
+    if (!c) return;
+    this.conflict = null;
+    this.#drafts.delete(c.id);
+    this.#stamps.delete(c.id);
+    delete this.docSaveErrors[c.id];
+    if (this.currentId === c.id) {
+      this.dirty = false;
+      await this.open(c.id);
+    }
+  }
+
+  /** Conflict: save this tab's board as a new scene FIRST (a failure keeps the
+   *  draft and the banner), then show theirs on the original and open the copy. */
+  async keepMineAsCopy(): Promise<CanvasScene | null> {
+    const c = this.conflict;
+    if (!c) return null;
+    const row = this.scenes.find((s) => s.id === c.id);
+    const wsId = row?.workspace_id ?? ws.currentId;
+    if (!wsId) throw new Error(NO_WORKSPACE);
+    const title = `${row?.title ?? this.scene?.title ?? 'Canvas'} (my copy)`;
+    const copy = await api.post<CanvasScene>(`/workspaces/${wsId}/canvas/scenes`, { title, doc: c.doc });
+    await this.reloadTheirs();
+    await this.loadScenes().catch(() => {});
+    await this.open(copy.id);
+    return copy;
   }
 
   // -- list --------------------------------------------------------------
@@ -212,6 +256,8 @@ class CanvasStore {
       } catch {
         doc = null;
       }
+      // Unsaved local edits keep the stamp they were made on.
+      if (!this.#drafts.has(id) || !this.#stamps.has(id)) this.#stamps.set(id, row.updated_at);
       doc = this.#drafts.get(id) ?? doc;
       this.rawDoc = doc;
       this.source = typeof doc?.source === 'string' ? doc.source : null;
@@ -245,6 +291,8 @@ class CanvasStore {
     if (context !== this.#saveContext) return;
     await api.del(`/canvas/scenes/${id}`);
     this.#drafts.delete(id);
+    this.#stamps.delete(id);
+    if (this.conflict?.id === id) this.conflict = null;
     delete this.docSaveErrors[id];
     if (this.currentId === id) this.closeScene();
     await this.loadScenes().catch(() => {});
@@ -288,6 +336,9 @@ class CanvasStore {
    *  wrote scene A's drawing into scene B on the next autosave. (The server
    *  already committed it to its own scene; opening that scene shows it.) */
   ingestDoc(doc: CanvasDoc, sceneId?: string | null): boolean {
+    // An agent wrote this scene: its stamp is unknown, and the turn's own
+    // guard (above) arbitrates, so the next save goes unguarded and re-stamps.
+    this.#stamps.delete(sceneId ?? this.currentId ?? '');
     if (sceneId !== undefined && sceneId !== this.currentId) return false;
     if (typeof doc.source !== 'string') return false;
     if (this.dirty) return false;
@@ -420,6 +471,7 @@ class CanvasStore {
   ingestPush(tick: number, sceneId: string, doc: unknown): boolean {
     if (!tick || tick <= this.#consumedPushTick) return false;
     this.#consumedPushTick = tick;
+    this.#stamps.delete(sceneId);
     if (sceneId !== this.currentId) return false;
     const d = doc as CanvasDoc | null;
     if (!d || typeof d.source !== 'string' || this.dirty) return false;
@@ -471,6 +523,7 @@ class CanvasStore {
     }
     this.dirty = false;
     if (doc) this.ingestDoc(doc);
+    if (restored.updated_at) this.#stamps.set(id, restored.updated_at);
     this.savedAt = Date.parse(restored.updated_at) || Date.now();
   }
 
@@ -487,7 +540,9 @@ class CanvasStore {
     id: string,
     patch: { title?: string; section?: string | null; provider?: string; story_id?: string },
   ): Promise<void> {
-    await api.put(`/canvas/scenes/${id}?summary=true`, patch);
+    // A metadata write bumps `updated_at` too: adopt it, or the next doc save 409s.
+    const row = await api.put<{ updated_at?: string } | null>(`/canvas/scenes/${id}?summary=true`, patch);
+    if (row?.updated_at && this.#stamps.has(id)) this.#stamps.set(id, row.updated_at);
     if (this.currentId === id) {
       if (patch.title != null && this.scene) this.scene = { ...this.scene, title: patch.title };
       if (patch.provider != null) this.provider = patch.provider;
@@ -558,6 +613,7 @@ class CanvasStore {
       this.#stopHold = false;
       const applied = this.ingestDoc(doc, sceneId);
       if (applied && typeof doc.source === 'string') this.#pinnedSource = doc.source;
+      if (applied) this.#stamps.set(sceneId, row.updated_at);
       return applied;
     } catch {
       return false;

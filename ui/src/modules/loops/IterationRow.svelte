@@ -7,6 +7,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus } from '../../lib/status';
+  import CriterionEvidence from './CriterionEvidence.svelte';
 
   let {
     iter,
@@ -146,16 +147,12 @@
       {#if iter.evaluation}
         <section>
           <h4>Evaluation</h4>
-          <div class="crits">
-            {#each iter.evaluation.criteria as c (c.id)}
-              <span class="crit-chip" class:met={c.met} title={c.evidence || undefined}>
-                <Icon name={c.met ? 'check' : 'dot'} size={12} />
-                <span class="crit-label">{criteria[c.id] || c.id}</span>
-              </span>
-            {/each}
-          </div>
+          <CriterionEvidence criteria={iter.evaluation.criteria} names={criteria} />
           {#if iter.evaluation.feedback}
             <p class="fb"><strong>Feedback:</strong> {iter.evaluation.feedback}</p>
+          {/if}
+          {#if iter.evaluation.rationale}
+            <p class="fb"><strong>Why:</strong> {iter.evaluation.rationale}</p>
           {/if}
         </section>
       {/if}
@@ -272,33 +269,6 @@
   }
   .dot.bad {
     background: var(--status-exited);
-  }
-  .crits {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-  .crit-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: var(--fs-xs);
-    padding: 1px 8px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    color: var(--text-dim);
-    max-width: 100%;
-    min-width: 0;
-  }
-  .crit-chip.met {
-    background: var(--success-soft);
-    color: var(--success);
-  }
-  .crit-label {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 40ch;
   }
   .fb {
     font-size: var(--fs-s);

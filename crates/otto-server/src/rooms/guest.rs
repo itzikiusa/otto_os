@@ -54,8 +54,15 @@ pub async fn transcript(
 ) -> ApiResult<Json<Transcript>> {
     // Subagent transcripts stay owner-only (they can carry other workspaces' paths).
     let q = TranscriptQuery { sub: None, ..q };
-    let session = member_session(&ctx, &id, &headers).await?;
-    Ok(Json(transcript_page(&ctx, &session.id, &session, q).await?))
+    let (sid, since) = ctx
+        .rooms
+        .member_session_since(&id, token(&headers)?)
+        .await?;
+    let session = ctx.manager.get(&sid).await?;
+    let mut page = transcript_page(&ctx, &session.id, &session, q).await?;
+    // Only the room's own lifetime; nothing to page back to before it.
+    page.has_earlier &= !otto_rooms::retain_since(&mut page.turns, since, |t| t.ts.as_deref());
+    Ok(Json(page))
 }
 
 pub async fn transcript_image(

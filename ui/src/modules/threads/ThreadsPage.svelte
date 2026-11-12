@@ -31,7 +31,11 @@
   import { threadsChrome } from './threadsChrome.svelte';
   import ThreadSidebar from './ThreadSidebar.svelte';
   import { buildThreadMenu } from './threadMenu';
-  import PhoneHandoffButton from '../../lib/components/PhoneHandoffButton.svelte';
+  import RelatedThreadsChip from './RelatedThreadsChip.svelte';
+  import { relatedPopover } from './relatedPopover.svelte';
+  import { councilOf } from './runtime/council';
+  import { council } from './runtime/councilStore.svelte';
+  import { threadsPageMenu } from './threadsPageMenu';
   import { prepareDeepLink } from '../../lib/deepLinkOpen';
   import { runtimeThreadMenu } from './runtime/runtimeMenu';
   import { asThreadSession, isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
@@ -265,7 +269,13 @@
     const cwd = focused?.cwd ?? (showWelcomeStage ? threads.stageCwd : null) ?? ws.current?.root_path ?? null;
     return cwd ? projectNameFromCwd(cwd, ws.current?.name ?? 'Workspace') : (ws.current?.name ?? 'Scratch');
   });
-  const crumbTitle = $derived(showWelcomeStage ? 'New thread' : (focused?.title ?? 'Thread'));
+  /** The focused thread is a council shown as its columns: its title without the seat's agent. */
+  const councilShown = $derived(!!focused && council.showsCouncil(focused.id));
+  /** A council seat continued as a plain thread ("Continue here"): the header offers the way back. */
+  const councilLeft = $derived(!!focused && !councilShown && !!councilOf(runtimeThreads.get(focused.id)));
+  const crumbTitle = $derived(
+    showWelcomeStage ? 'New thread' : councilShown ? (focused?.title ?? 'Council').replace(/ · [^·]*$/, '') : (focused?.title ?? 'Thread'),
+  );
   const rightOpen = $derived(threads.inspectorVisible);
   const contextCwd = $derived(
     focused?.cwd ?? (showWelcomeStage ? threads.stageCwd : null) ?? ws.current?.root_path ?? null,
@@ -292,7 +302,7 @@
     const onDown = (e: PointerEvent): void => {
       const t = e.target as Element | null;
       // Menus and sheets the card opens live outside it.
-      if (!t?.closest('.th-card-pop, [data-testid="threads-toggle-card"], .ctx-menu, [role="dialog"]')) cardOpen = false;
+      if (!t?.closest('.th-card-pop, [data-testid="threads-thread-menu"], .ctx-menu, [role="dialog"]')) cardOpen = false;
     };
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape' && !document.querySelector('.ctx-menu, [role="dialog"]')) cardOpen = false;
@@ -305,18 +315,28 @@
     };
   });
 
-  function openLayoutMenu(e: MouseEvent): void {
-    const items: MenuItem[] = [
-      { label: 'Single thread', hint: '1-up', checked: threads.layoutMode === 'single', action: () => pickLayout('single') },
-      { label: 'Split', hint: '2-up', checked: threads.layoutMode === 'split', action: () => pickLayout('split') },
-      { label: 'Grid', hint: '4-up', checked: threads.layoutMode === 'grid', action: () => pickLayout('grid') },
-    ];
-    ctxMenu.show(e, items);
-  }
-
+  // The toolbar's one ⋯: the focused thread's actions, then the view toggles
+  // that used to be their own toolbar buttons (threadsPageMenu.ts).
   function openThreadMenu(e: MouseEvent): void {
-    if (focused && isRuntimeThread(focused)) ctxMenu.show(e, runtimeThreadMenu(focused.id));
-    else if (focused) ctxMenu.show(e, buildThreadMenu(focused, { onstartroom: (sid) => (roomSessionId = sid) }));
+    const threadItems: MenuItem[] = !focused ? []
+      : isRuntimeThread(focused) ? runtimeThreadMenu(focused.id)
+      : buildThreadMenu(focused);
+    ctxMenu.show(e, threadsPageMenu(
+      {
+        threadItems,
+        layout: threads.layoutMode,
+        terminalOpen: threadsChrome.terminalOpen,
+        cardOn: compact ? null : showWelcomeStage ? threadsChrome.cardVisible : cardPopover,
+        threadId: focused?.id ?? null,
+      },
+      {
+        newThread: () => threads.startNewThread({ workspaceId: ws.currentId }),
+        related: (id) => relatedPopover.open(id),
+        toggleCard: () => (showWelcomeStage ? threadsChrome.toggleCard() : (cardOpen = !cardPopover)),
+        layout: pickLayout,
+        toggleTerminal: () => threadsChrome.setTerminal(!threadsChrome.terminalOpen),
+      },
+    ));
   }
 
   function toggleLeftBar(): void {
@@ -350,42 +370,6 @@
       >
         <Icon name="sidebar" size={14} />
       </button>
-      {#if !viewport.isPhone}
-        <button
-          type="button"
-          class="icon-btn"
-          aria-label="Back"
-          title="Back (⌘[)"
-          disabled={!router.canBack}
-          data-testid="threads-back"
-          onclick={() => router.back()}
-        >
-          <Icon name="chevronLeft" size={14} />
-        </button>
-        <button
-          type="button"
-          class="icon-btn"
-          aria-label="Forward"
-          title="Forward (⌘])"
-          disabled={!router.canForward}
-          data-testid="threads-forward"
-          onclick={() => router.forward()}
-        >
-          <Icon name="chevronRight" size={14} />
-        </button>
-      {/if}
-      {#if compact || !threads.sidebarOpen}
-        <button
-          type="button"
-          class="icon-btn"
-          aria-label="New thread"
-          title="New thread"
-          data-testid="threads-new-btn-top"
-          onclick={() => threads.startNewThread({ workspaceId: ws.currentId })}
-        >
-          <Icon name="edit" size={14} />
-        </button>
-      {/if}
     {/snippet}
 
     {#snippet titleContent()}
@@ -394,84 +378,43 @@
         <span class="th-crumb-sep" aria-hidden="true">/</span>
         {#if focusedState}<StatusDot state={focusedState} />{/if}
         <span class="th-crumb-title ellipsis" dir="auto">{crumbTitle}</span>
+        {#if focused}<RelatedThreadsChip threadId={focused.id} onstartroom={(sid) => (roomSessionId = sid)} />{/if}
+        {#if focused && councilLeft}
+          {@const id = focused.id}
+          <button type="button" class="th-council-back" title="Back to the council’s columns" data-testid="threads-back-to-council" onclick={() => council.showCouncil(id)}>
+            <Icon name="people" size={12} />Back to council
+          </button>
+        {/if}
       </span>
     {/snippet}
 
     {#snippet actions()}
-      {#if !compact}
-        <button
-          type="button"
-          class="icon-btn"
-          class:th-btn-on={showWelcomeStage ? threadsChrome.cardVisible : cardPopover}
-          data-overflow="2"
-          aria-pressed={showWelcomeStage ? threadsChrome.cardVisible : undefined}
-          aria-expanded={showWelcomeStage ? undefined : cardPopover}
-          aria-label="Toggle project card"
-          title="Project card (folder, branch, PR, changes)"
-          data-icon="note"
-          data-testid="threads-toggle-card"
-          onclick={() => (showWelcomeStage ? threadsChrome.toggleCard() : (cardOpen = !cardPopover))}
-        >
-          <Icon name="note" size={14} />
-        </button>
-      {/if}
-      <button
-        type="button"
-        class="icon-btn"
-        data-overflow="1"
-        aria-haspopup="menu"
-        aria-label="Layout: single, split or grid"
-        title="Layout (single · split · grid)"
-        data-icon="grid"
-        data-testid="threads-layout-switch"
-        onclick={openLayoutMenu}
-      >
-        <Icon name="grid" size={14} />
-      </button>
-      <button
-        type="button"
-        class="icon-btn"
-        class:th-btn-on={threadsChrome.terminalOpen}
-        data-overflow="2"
-        aria-pressed={threadsChrome.terminalOpen}
-        aria-label="Toggle terminal drawer"
-        title="Terminal (project shell under the stage)"
-        data-icon="terminal"
-        data-testid="threads-toggle-terminal"
-        onpointerenter={() => TerminalDock.prefetch()}
-        onclick={() => threadsChrome.setTerminal(!threadsChrome.terminalOpen)}
-      >
-        <Icon name="terminal" size={14} />
-      </button>
       <button
         type="button"
         class="icon-btn"
         class:th-btn-on={rightOpen}
-        data-overflow="3"
         aria-pressed={rightOpen}
         aria-label="Toggle right panel"
-        title="Right panel (project, files, changes, peers)"
+        title="Right panel (files, diff, pull request, side chat)"
         data-icon="panel"
         data-testid="threads-toggle-inspector"
         onclick={toggleRightBar}
       >
         <Icon name="panel" size={14} />
       </button>
-      {#if focused}
-        <PhoneHandoffButton route={`threads/${focused.id}`} what="this thread" size={14} overflow={4} testid="threads-continue-phone" />
-        <button
-          type="button"
-          class="icon-btn"
-          aria-haspopup="menu"
-          aria-label="Thread actions"
-          title="Thread actions"
-          data-icon="more"
-          data-testid="threads-thread-menu"
-          onclick={openThreadMenu}
-        >
-          <Icon name="more" size={14} />
-        </button>
-      {/if}
+      <button
+        type="button"
+        class="icon-btn"
+        aria-haspopup="menu"
+        aria-label="Thread and view actions"
+        title="More: thread actions, project card, terminal, layout"
+        data-icon="more"
+        data-testid="threads-thread-menu"
+        onpointerenter={() => TerminalDock.prefetch()}
+        onclick={openThreadMenu}
+      >
+        <Icon name="more" size={14} />
+      </button>
     {/snippet}
   </PageHeader>
 
@@ -525,7 +468,7 @@
           label="Resize thread inspector"
         />
         <div class="th-right-col" class:th-max={maximized} style:inline-size={maximized ? null : `${inspectorW}px`}>
-          <LazyMount lazy={ThreadInspector} what="the thread details" variant="panel" props={{ onstartroom: (sid: string) => (roomSessionId = sid) }} />
+          <LazyMount lazy={ThreadInspector} what="the thread details" variant="panel" props={{}} />
         </div>
       {/if}
 
@@ -537,10 +480,7 @@
           />
         </Drawer>
         <Drawer bind:open={threads.inspectorOverlayOpen} side="right" title="Thread details" width="min(420px, 100vw)">
-          <LazyMount lazy={ThreadInspector} what="the thread details" variant="panel" props={{
-            showCard: true,
-            onstartroom: (sid: string) => { threads.setInspectorOpen(false); roomSessionId = sid; },
-          }} />
+          <LazyMount lazy={ThreadInspector} what="the thread details" variant="panel" props={{ showCard: true }} />
         </Drawer>
       {/if}
     </div>
@@ -579,6 +519,35 @@
   }
   .th-crumb-sep {
     color: var(--text-dim);
+  }
+  .th-council-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+    block-size: 24px;
+    padding-inline: 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: var(--fs-xs);
+    font-weight: 400;
+    cursor: pointer;
+  }
+  .th-council-back:hover {
+    background: var(--hover);
+    color: var(--text);
+  }
+  .th-council-back:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: 1px;
+  }
+  @media (pointer: coarse) {
+    .th-council-back {
+      min-block-size: var(--hit-min);
+    }
   }
   .th-crumb-title {
     color: var(--text);

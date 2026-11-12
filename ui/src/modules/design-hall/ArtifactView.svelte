@@ -2,27 +2,30 @@
   import { announceShown } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
-  import { onTabKey } from './tabKeys';
   // One design, open (canvas/studio archetype):
   //
-  //   PageHeader: Design Hall › Project › Title · status ▾ · vN      Compare  ⋯  [Save]
-  //   ┌ stage toolbar + ArtifactStage ────────────────────────────┬ Otto | Links | References ┐
-  //   │  existing viewers/editors per format                      │                          │
-  //   └───────────────────────────────────────────────────────────┴──────────────────────────┘
-  //   (a `scene3d` design opens the 3D Studio layout instead — studio3d/Studio3D.svelte —
-  //    over the same working copy, save path and Otto/Links/References panels)
-  //   version strip: v1 · v2 (Otto) · v3 (you, current) …                  Compare
+  //   PageHeader: Design Hall › Project › Title · status ▾ · vN      Saved ✓  ⋯
+  //   [mirror banner: "This design mirrors a story attachment" · Edit here]
+  //   ┌ stage toolbar + ArtifactStage ────────────────────────────┬ Otto | Versions | Links ┐
+  //   │  existing viewers/editors per format                      │ (DetailsPanel)          │
+  //   └───────────────────────────────────────────────────────────┴─────────────────────────┘
+  //   (a `scene3d` design opens the 3D Studio layout and an `otto-site` design
+  //    Site Studio's own three-column layout instead — each over the same
+  //    working copy, save path and Otto/Versions/Links panels)
   //
   // This view owns the working copy of the source, the base version it was
-  // loaded from, and every save: `PUT …/content` with `base_version`, so a head
-  // that moved (an agent, another window) comes back as 409 and the person
-  // chooses — never a silent overwrite. Versions are the undo model: restore
-  // saves old bytes as a NEW version. Live `design_*` events refresh what they
-  // touch; every loader is sequence-guarded against stale responses. The UI
-  // posts the decisions it makes (restore, keep/replace vs an agent version) as
-  // design signals; approve/status/edit-after-draft signals are recorded by the
+  // loaded from, and every save: an autosave ~1.5 s after the last edit
+  // (`PUT …/content` with `base_version`; the daemon labels and squashes
+  // autosaves) and ⌘S / ⋯ for a named version. A head that moved (an agent,
+  // another window) comes back as 409 and the person chooses — never a silent
+  // overwrite. Versions are the undo model: restore saves old bytes as a NEW
+  // version. A mirror of a Product/Canvas source is read-only until "Edit
+  // here" adopts it. Live `design_*` events refresh what they touch; every
+  // loader is sequence-guarded against stale responses. The UI posts the
+  // decisions it makes (restore, keep/replace vs an agent version) as design
+  // signals; approve/status/edit-after-draft signals are recorded by the
   // daemon itself.
-  import { tick, untrack } from 'svelte';
+  import { tick, untrack, type Snippet } from 'svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -39,7 +42,6 @@
   import { registry } from '../../lib/commands.svelte';
   import { designBus } from '../../lib/events.svelte';
   import { ApiError } from '../../lib/api/client';
-  import { downloadText } from '../../lib/components/exporters';
   import * as api from '../../lib/api/design';
   import type {
     DesignArtifact, DesignArtifactDetail, DesignArtifactFormat,
@@ -47,8 +49,14 @@
   } from '../../lib/api/types';
   import { DEVICES, type DeviceKind } from '../../lib/design/DeviceFrame.svelte';
   import Studio3D from './studio3d/Studio3D.svelte';
-  import ArtifactStage from './ArtifactStage.svelte';
-  import VersionStrip from './VersionStrip.svelte';
+  import SiteStudio from './site/SiteStudio.svelte';
+  import ArtifactStage, { d2Svg } from './ArtifactStage.svelte';
+  import VersionsPanel from './VersionsPanel.svelte';
+  import DetailsPanel, { type DetailsTab } from './DetailsPanel.svelte';
+  import LinksTab from './LinksTab.svelte';
+  import MirrorBanner from './MirrorBanner.svelte';
+  import SaveIndicator from './SaveIndicator.svelte';
+  import ViewingBar, { type Viewing } from './ViewingBar.svelte';
   import CompareModal, { type CompareSide } from './CompareModal.svelte';
   import LinksPanel from './LinksPanel.svelte';
   import ReferencesPanel from './ReferencesPanel.svelte';
@@ -57,14 +65,28 @@
   import StatusPill from './StatusPill.svelte';
   import StudioBadge from './StudioBadge.svelte';
   import { formatLabel, isTextFormat, newerHeadAfterTypedLoad, renderKind, seqLookup, splitLinks, statusLabel, studioInfo } from './model';
+  import { canAutosave, isMirrored, isMirroredError, mirrorSourceLabel, statusPillOf } from './versionRows';
+  import { VersionList } from './versionList.svelte';
+  import { Autosaver } from './autosave.svelte';
+  import { exportItems } from './exportMenu';
   import { library } from './library.svelte';
-  import { originOf } from './nav';
+  import { openStoryInProduct } from './nav';
   import { guardUnsaved } from '../../lib/leaveGuard';
 
   interface Props {
     id: string;
   }
-  let { id }: Props = $props();
+  let { id: routeId }: Props = $props();
+  // `#/design/a/<id>?from=story/<storyId>` (opened from a Product story): the
+  // id is the part before `?`; the story is read from the hash.
+  const id = $derived(routeId.split('?')[0]);
+  /** `#/design/a/<id>/otto` (the Generate hand-off) — the query may ride on it. */
+  const ottoHandoff = $derived(router.parts[3]?.split('?')[0] === 'otto');
+  const fromStory = $derived.by(() => {
+    void router.parts;
+    const m = /[?&]from=story\/([^&/]+)/.exec(typeof location === 'undefined' ? '' : location.hash);
+    return m ? decodeURIComponent(m[1]) : null;
+  });
 
   // ── State ─────────────────────────────────────────────────────────────────
   let detail = $state<DesignArtifactDetail | null>(null);
@@ -78,15 +100,18 @@
   let saving = $state(false);
   /** A newer head arrived while there were unsaved edits. */
   let newerHead = $state<string | null>(null);
+  /** A write was refused as `mirrored` (the meta we hold may be stale). */
+  let mirrorRefused = $state(false);
+  let adopting = $state(false);
+  /** An older version shown alone in the stage (read-only). */
+  let viewing = $state<Viewing | null>(null);
 
-  let versions = $state<DesignVersion[]>([]);
-  let versionsLoading = $state(false);
-  let versionsError = $state<string | null>(null);
+  const vlist = new VersionList();
+  const versions = $derived(vlist.items);
   let links = $state<DesignLinksResp | null>(null);
   let linksLoading = $state(false);
   let linksError = $state<string | null>(null);
 
-  let selected = $state<string[]>([]);
   let compare = $state<{ left: CompareSide; right: CompareSide } | null>(null);
   let detailsOpen = $state(false);
   let detailsButton: HTMLButtonElement | undefined = $state();
@@ -97,20 +122,19 @@
     const target = open ? designButton : detailsButton;
     if (target?.getClientRects().length) target.focus();
   }
-  let rightTab = $state<'otto' | 'links' | 'references'>('links');
+  let rightTab = $state<DetailsTab>('otto');
+  let refs = $state(false);
   let showSource = $state(false);
   let device = $state<DeviceKind>('none');
 
   const artifact = $derived<DesignArtifact | null>(detail?.artifact ?? null);
   const kind = $derived(artifact ? renderKind(artifact.format) : 'other');
   const textual = $derived(!!artifact && isTextFormat(artifact.format));
-  const origin = $derived(artifact ? originOf(artifact) : null);
-  /** Imported rows mirror Product/Canvas — they're edited at the origin (or forked). */
-  const imported = $derived(!!artifact?.source_kind);
+  const mirrored = $derived(isMirrored(artifact) || mirrorRefused);
   const canEdit = $derived(!!artifact && auth.can('design', 'edit') && artifact.status !== 'archived');
-  const readonly = $derived(!canEdit || imported || !textual);
+  const readonly = $derived(!canEdit || mirrored || !textual);
   const dirty = $derived(textual && source !== null && source !== baseSource);
-  // Leaving the page (sidebar, link, back) with unsaved source edits asks first.
+  // Leaving the page (sidebar, link, back) with edits not yet saved asks first.
   $effect(() => guardUnsaved(() => dirty, { what: 'this design' }));
   const head = $derived<DesignVersion | null>(detail?.head ?? null);
   const project = $derived(library.projectOf(artifact?.project_id));
@@ -120,7 +144,12 @@
   const seqOf = $derived((vid: string): number | null => ownSeq(vid) ?? pinnedSeqs[vid] ?? null);
   const split = $derived(artifact ? splitLinks(artifact.id, links?.links ?? [], links?.artifacts ?? [], storyLabel) : { uses: [], usedIn: [] });
   const meId = $derived(auth.me?.id ?? null);
-  const brief = $derived(typeof artifact?.meta?.brief === 'string' ? (artifact.meta.brief as string) : null);
+  const approvedSeq = $derived(detail?.approved?.seq ?? (artifact?.approved_version_id ? ownSeq(artifact.approved_version_id) : null));
+  const pill = $derived(artifact ? statusPillOf(artifact, head?.id ?? null, approvedSeq) : null);
+  /** What the stage shows: an older version alone, else the working copy. */
+  const shownSource = $derived(viewing ? viewing.text : source);
+  const shownBlob = $derived(viewing ? viewing.blobUrl : blobUrl);
+  const stageReadonly = $derived(readonly || !!viewing);
 
   function storyLabel(kind: string, dstId: string): string {
     if (kind === 'story') {
@@ -132,7 +161,6 @@
 
   // ── Loading (sequence-guarded) ────────────────────────────────────────────
   let loadSeq = 0;
-  let versionsSeq = 0;
   let linksSeq = 0;
 
   function setBlob(u: string | null): void {
@@ -207,46 +235,6 @@
     }
   }
 
-  async function loadVersions(): Promise<void> {
-    const my = ++versionsSeq;
-    versionsLoading = true;
-    try {
-      const v = await api.listVersions(id);
-      if (my !== versionsSeq) return;
-      versions = v;
-      versionsError = null;
-      selected = selected.filter((s) => v.some((x) => x.id === s));
-    } catch (e) {
-      if (my === versionsSeq) versionsError = loadErrorText(e);
-    } finally {
-      if (my === versionsSeq) versionsLoading = false;
-    }
-  }
-
-  /**
-   * A live `content` event only ADDS versions at the head: fetch the newest
-   * few and prepend the unseen ones instead of re-listing the whole history.
-   * No overlap with what we hold (a gap, or nothing loaded yet) → full reload.
-   */
-  async function loadNewVersions(): Promise<void> {
-    if (versions.length === 0) return loadVersions();
-    const my = ++versionsSeq;
-    try {
-      const v = await api.listVersions(id, { limit: 10 });
-      if (my !== versionsSeq) return;
-      const have = new Set(versions.map((x) => x.id));
-      const fresh = v.filter((x) => !have.has(x.id));
-      if (fresh.length === v.length) return loadVersions();
-      if (fresh.length) versions = [...fresh, ...versions];
-      versionsError = null;
-    } catch {
-      if (my === versionsSeq) return loadVersions();
-    } finally {
-      // This bumped versionsSeq, so a superseded full load won't clear it.
-      if (my === versionsSeq) versionsLoading = false;
-    }
-  }
-
   async function loadLinks(): Promise<void> {
     const my = ++linksSeq;
     linksLoading = true;
@@ -287,22 +275,34 @@
   $effect(() => {
     const target = id;
     untrack(() => {
+      autosaver.cancel();
       detail = null;
       links = null;
-      versions = [];
-      selected = [];
+      vlist.reset(target);
       compare = null;
+      mirrorRefused = false;
+      void view(null);
       // `#/design/a/<id>/otto` (the lobby's Generate hand-off) opens on Otto.
-      rightTab = router.parts[3] === 'otto' ? 'otto' : 'links';
-      detailsOpen = router.parts[3] === 'otto';
+      rightTab = 'otto';
+      refs = false;
+      detailsOpen = ottoHandoff;
       phase = 'loading';
       void load(target);
-      void loadVersions();
+      void vlist.load();
       void loadLinks();
       if (!library.loaded) void library.load();
     });
   });
   $effect(() => () => setBlob(null));
+  // Site Studio opens its side column on the Design inspector (once per
+  // design; the lobby's Otto hand-off still opens Otto).
+  let tabSetFor = '';
+  $effect(() => {
+    const a = artifact;
+    if (!a || tabSetFor === a.id) return;
+    tabSetFor = a.id;
+    if (a.format === 'otto-site' && !untrack(() => ottoHandoff)) untrack(() => (rightTab = 'design'));
+  });
 
   // ── Live updates ──────────────────────────────────────────────────────────
   let seen = designBus.seq;
@@ -319,7 +319,7 @@
             continue;
           }
           if (ev.change === 'content' || ev.change === 'created') {
-            void loadNewVersions();
+            void vlist.loadNew();
             if (ev.version_id && ev.version_id === baseVersionId) continue; // our own save
             if (dirty) {
               newerHead = ev.version_id;
@@ -333,7 +333,7 @@
             }
           } else {
             void refreshMeta();
-            if (ev.change === 'approved') void loadVersions();
+            if (ev.change === 'approved') void vlist.load();
           }
         } else if (ev.type === 'design_artifact_updated' && links?.artifacts.some((a) => a.id === ev.artifact_id)) {
           reloadLinks = true;
@@ -348,13 +348,26 @@
     const t = designBus.resyncTick;
     if (t === 0) return;
     untrack(() => {
-      if (dirty) void loadVersions();
+      if (dirty) void vlist.load();
       else void load(id);
       void loadLinks();
     });
   });
 
   // ── Saving ────────────────────────────────────────────────────────────────
+  // Autosave: ~1.5 s after the last edit; never for a mirror, an archived or
+  // read-only design, or while an older version is shown.
+  const autosaver = new Autosaver(() => save());
+  const autosaveOk = $derived(canAutosave({ readonly, mirrored, archived: artifact?.status === 'archived', viewing: !!viewing }));
+  $effect(() => {
+    void source;
+    const d = dirty;
+    const ok = autosaveOk;
+    untrack(() => (d && ok ? autosaver.schedule() : autosaver.cancel()));
+  });
+  $effect(() => () => autosaver.cancel());
+
+  /** Throws when the save failed (the autosaver shows it beside Retry). */
   async function save(message?: string, named = false): Promise<void> {
     if (!artifact || readonly || saving || source === null) return;
     if (!dirty && !named) return;
@@ -363,10 +376,15 @@
     try {
       const res = named ? await api.commitVersion(id, { ...body, message: message ?? '' }) : await api.putContent(id, body);
       applySaved(res, body.content);
-      if (!res.created) toasts.info('No changes to save', 'The content matches the current version.');
+      if (named && !res.created) toasts.info('No changes to save', 'The content matches the current version.');
     } catch (e) {
+      if (isMirroredError(e)) {
+        mirrorRefused = true;
+        void refreshMeta();
+        throw e;
+      }
       if (e instanceof ApiError && e.status === 409) await resolveConflict(named ? message : undefined);
-      else toastError('Couldn’t save the design', e);
+      else throw e;
     } finally {
       saving = false;
     }
@@ -377,7 +395,7 @@
     baseVersionId = res.version.id;
     newerHead = null;
     if (detail) detail = { ...detail, artifact: res.artifact, head: res.version };
-    if (res.created && !versions.some((v) => v.id === res.version.id)) versions = [res.version, ...versions];
+    if (res.created) vlist.prepend(res.version);
     const r = res.links;
     if (r.broken.length || r.cycles.length) {
       const parts: string[] = [];
@@ -418,10 +436,10 @@
         api.captureSignal({ artifact_id: id, kind: 'variant_chosen', version_id: latest.id, payload: { source: 'conflict', chosen_version_id: latest.id, chosen_seq: latest.seq, over: 'unsaved local edits' } });
       }
       await load(id);
-      void loadVersions();
+      void vlist.load();
     } else if (value === 'mine') {
       if (!latest) {
-        toasts.error('Couldn’t read the current version', 'Your edits are kept. Try Save again to retry.');
+        toasts.error('Couldn’t read the current version', 'Your edits are kept. Choose Retry to try again.');
         return;
       }
       try {
@@ -431,7 +449,7 @@
         if (byAgent) {
           api.captureSignal({ artifact_id: id, kind: 'variant_rejected', version_id: latest.id, payload: { source: 'conflict', rejected_version_id: latest.id, rejected_seq: latest.seq, kept_version_id: res.version.id, reason: 'kept my edits' } });
         }
-        void loadVersions();
+        void vlist.load();
       } catch (e) {
         toastError('Couldn’t save the design', e);
       }
@@ -439,19 +457,59 @@
   }
 
   async function saveNamed(): Promise<void> {
+    if (readonly) return;
     const msg = await confirmer.promptText('Describe this version (shown in history).', {
       title: 'Save named version',
       confirmLabel: 'Save version',
       placeholder: 'Hero v2 — bolder headline',
     });
-    if (msg) await save(msg, true);
+    if (!msg) return;
+    autosaver.cancel();
+    await save(msg, true).catch((e) => toastError('Couldn’t save the design', e));
   }
 
-  // ── Restore (from Compare) ────────────────────────────────────────────────
+  // ── "Edit here": adopt a mirror ───────────────────────────────────────────
+  async function adopt(): Promise<void> {
+    if (!artifact || adopting) return;
+    adopting = true;
+    try {
+      const a = await api.adoptArtifact(id);
+      if (detail) detail = { ...detail, artifact: a };
+      mirrorRefused = false;
+      toasts.success('You can edit this design here now', `Later changes in ${a.source_kind === 'canvas_scene' ? 'Canvas' : 'the story'} arrive as a version you can accept or skip.`);
+    } catch (e) {
+      toastError('Couldn’t take over this design', e);
+    } finally {
+      adopting = false;
+    }
+  }
+
+  // ── View one version / restore ────────────────────────────────────────────
+  let viewSeq = 0;
+  async function view(v: DesignVersion | null): Promise<void> {
+    const my = ++viewSeq;
+    if (viewing?.blobUrl) URL.revokeObjectURL(viewing.blobUrl);
+    if (!v || v.id === head?.id || !artifact) {
+      viewing = null;
+      return;
+    }
+    viewing = { v, text: null, blobUrl: null, loading: true, error: null };
+    try {
+      const c = await api.fetchContent(id, { version: v.id, asText: textual });
+      if (my !== viewSeq) {
+        if (c.blobUrl) URL.revokeObjectURL(c.blobUrl);
+        return;
+      }
+      viewing = { v, text: c.text, blobUrl: c.blobUrl, loading: false, error: null };
+    } catch (e) {
+      if (my === viewSeq) viewing = { v, text: null, blobUrl: null, loading: false, error: loadErrorText(e) };
+    }
+  }
+
   async function restore(versionId: string, seq: number): Promise<void> {
     if (!artifact || !head) return;
     if (dirty) {
-      toasts.warn('Save or discard your edits first', 'Restoring replaces the working copy.');
+      toasts.warn('Your latest edits are still saving', 'Wait for “Saved”, then restore.');
       return;
     }
     const next = (versions[0]?.seq ?? head.seq) + 1;
@@ -471,12 +529,13 @@
         payload: { from_version_id: versionId, from_seq: seq, over_version_id: head.id, over_seq: head.seq, new_seq: res.version.seq },
       });
       compare = null;
-      selected = [];
+      void view(null);
       await load(id);
-      void loadVersions();
+      void vlist.load();
       toasts.success(`Restored v${seq} as v${res.version.seq}`);
     } catch (e) {
-      if (e instanceof ApiError && e.status === 409) toasts.error('Couldn’t restore', 'The design changed meanwhile. Refresh and try again.');
+      if (isMirroredError(e)) mirrorRefused = true;
+      else if (e instanceof ApiError && e.status === 409) toasts.error('Couldn’t restore', 'The design changed meanwhile. Refresh and try again.');
       else toastError('Couldn’t restore', e);
     }
   }
@@ -486,17 +545,15 @@
     if (!artifact) return;
     const cur = artifact.status;
     const set = (s: DesignStatus) => void setStatus(s);
-    const items: MenuItem[] = [
-      { label: 'Draft', icon: 'edit', disabled: cur === 'draft' || !canEdit, action: () => set('draft') },
-      { label: 'In review', icon: 'eye', disabled: cur === 'review' || !canEdit, action: () => set('review') },
-      {
-        label: dirty ? 'Approve (save first)' : `Approve v${head?.seq ?? ''}…`,
-        icon: 'check',
-        disabled: !canEdit || dirty || !head || (cur === 'approved' && artifact.approved_version_id === head?.id),
-        action: () => void approve(),
-      },
-      { label: 'Shipped', icon: 'send', disabled: cur === 'shipped' || !canEdit, action: () => set('shipped') },
-    ];
+    const headApproved = artifact.approved_version_id === head?.id;
+    const items: MenuItem[] = cur === 'archived'
+      ? [{ label: 'Unarchive', icon: 'archive', disabled: !auth.can('design', 'edit'), action: () => void unarchive() }]
+      : [
+          { label: 'Draft', icon: 'edit', disabled: cur === 'draft' || !canEdit, action: () => set('draft') },
+          { label: 'In review', icon: 'eye', disabled: cur === 'review' || !canEdit, action: () => set('review') },
+          { label: dirty ? 'Approve (saving…)' : `Approve v${head?.seq ?? ''}…`, icon: 'check', disabled: !canEdit || dirty || !head || headApproved, action: () => void approve() },
+          { label: 'Shipped', icon: 'send', disabled: cur === 'shipped' || !canEdit, action: () => set('shipped') },
+        ];
     ctxMenu.show(e, items);
   }
 
@@ -505,16 +562,30 @@
       const a = await api.updateArtifact(id, { status: s });
       if (detail) detail = { ...detail, artifact: a };
     } catch (e) {
-      toastError(`Couldn’t move to ${statusLabel(s)}`, e);
+      // A design ships from an approved version: the daemon says so with a 409.
+      if (s === 'shipped' && e instanceof ApiError && e.status === 409) toasts.warn('Approve a version before shipping', e.message || 'A design ships from its approved version.');
+      else toastError(`Couldn’t move to ${statusLabel(s)}`, e);
     }
   }
 
-  async function approve(): Promise<void> {
+  async function unarchive(): Promise<void> {
+    try {
+      const a = await api.updateArtifact(id, { status: 'draft' });
+      if (detail) detail = { ...detail, artifact: a };
+      void library.load();
+      toasts.success('Moved back to Draft', a.title);
+    } catch (e) {
+      toastError('Couldn’t unarchive the design', e);
+    }
+  }
+
+  /** Approve `v` (default: the current version). */
+  async function approve(v?: DesignVersion): Promise<void> {
     if (!artifact || !head) return;
     // Approval belongs to the version the person sees in this sheet. Live
     // content updates may move head while the confirmation is open.
     const target = id;
-    const version = head;
+    const version = v ?? head;
     const followers = split.usedIn.filter((r) => r.link.policy === 'follow_approved').length;
     const ok = await confirmer.ask(
       `Approve v${version.seq} of “${artifact.title}”?` +
@@ -607,42 +678,24 @@
     }
   }
 
-  function download(): void {
-    if (!artifact) return;
-    if (source !== null) {
-      const ext = ({ html: 'html', svg: 'svg', mermaid: 'mmd', d2: 'd2' } as Record<string, string>)[artifact.format] ?? 'json';
-      downloadText(source, `${artifact.title.replace(/[^\w.-]+/g, '-')}.${ext}`, artifact.mime || 'text/plain');
-    } else if (blobUrl) {
-      const a = document.createElement('a');
-      a.href = blobUrl;
-      a.download = artifact.title;
-      a.click();
-    }
-  }
-
   async function discard(): Promise<void> {
     const ok = await confirmer.ask('Discard your unsaved edits? The design goes back to the last saved version.', {
       title: 'Discard edits',
       danger: true, confirmLabel: 'Discard',
     });
     if (ok) {
+      autosaver.cancel();
       source = baseSource;
       if (newerHead) void load(id);
     }
   }
 
   // ── Compare ───────────────────────────────────────────────────────────────
-  function toggleSelect(vid: string): void {
-    if (selected.includes(vid)) selected = selected.filter((s) => s !== vid);
-    else selected = [...selected, vid].slice(-2);
-  }
-  function openCompare(): void {
+  /** `v` against the current version (default: the one before it). */
+  function openCompare(v?: DesignVersion): void {
     if (!artifact || !head || !versions.length) return;
-    const bySeq = (x: string) => versions.find((v) => v.id === x)?.seq ?? 0;
-    let [a, b] = selected.length >= 2 ? [...selected].sort((x, y) => bySeq(x) - bySeq(y)) : [selected[0], head.id];
-    if (!a) a = versions[1]?.id ?? head.id;
-    if (a === b) b = head.id;
-    compare = { left: { artifact, versionId: a }, right: { artifact, versionId: b } };
+    const left = v?.id ?? versions.find((x) => x.id !== head.id)?.id ?? head.id;
+    compare = { left: { artifact, versionId: left }, right: { artifact, versionId: head.id } };
   }
   function compareWithRef(ref: DesignArtifact): void {
     if (!artifact || !head) return;
@@ -654,39 +707,49 @@
     if (!target.head_version_id) return;
     compare = { left: { artifact: target, versionId: pinned }, right: { artifact: target, versionId: target.head_version_id } };
   }
+  function versionById(vid: string): DesignVersion | undefined {
+    return versions.find((v) => v.id === vid);
+  }
 
   // What the Otto tab focuses a turn on: the 3D Studio passes its selected
   // object (the `ottoPanel` snippet's argument); Site Studio's section
-  // selection plugs in the same way when it lands.
+  // selection plugs in the same way.
   const assistBlocked = $derived(
     !canEdit
       ? 'You can view this design, but asking Otto to change it needs edit access.'
-      : imported
-        ? 'Mirrored from Product/Canvas — make an editable copy to work on it with Otto.'
+      : mirrored
+        ? `This design mirrors ${mirrorSourceLabel(artifact?.source_kind)} — choose Edit here to work on it with Otto.`
         : !textual
           ? 'Otto edits text and JSON designs. Images, PDFs and 3D models can’t be changed by an agent.'
           : null,
   );
 
+  function openTab(t: DetailsTab, findRefs = false): void {
+    rightTab = t;
+    refs = findRefs;
+    void setDetails(true);
+  }
+
   // ── ⌘K commands (only while a design is open) ─────────────────────────────
   $effect(() => {
     if (!artifact) return registry.register('design-artifact', []);
     return registry.register('design-artifact', [
-      { id: 'design.save', title: 'Save design', group: 'Design Hall', shortcut: '⌘S', keywords: 'version commit', run: () => void save() },
-      { id: 'design.named', title: 'Save named version…', group: 'Design Hall', keywords: 'commit message', run: () => void saveNamed() },
-      { id: 'design.compare', title: 'Compare versions', group: 'Design Hall', keywords: 'diff history restore', run: openCompare },
-      { id: 'design.references', title: 'Find references', group: 'Design Hall', keywords: 'inspiration library search', run: () => { rightTab = 'references'; void setDetails(true); } },
-      { id: 'design.otto', title: 'Ask Otto about this design', group: 'Design Hall', keywords: 'agent assist variants accessibility refine', run: () => { rightTab = 'otto'; void setDetails(true); } },
+      { id: 'design.named', title: 'Save named version…', group: 'Design Hall', shortcut: '⌘S', keywords: 'save commit message', run: () => void saveNamed() },
+      { id: 'design.compare', title: 'Compare versions', group: 'Design Hall', keywords: 'diff history restore', run: () => openCompare() },
+      { id: 'design.versions', title: 'Show versions', group: 'Design Hall', keywords: 'history restore undo', run: () => openTab('versions') },
+      { id: 'design.approve', title: 'Approve this version…', group: 'Design Hall', keywords: 'status review sign off', run: () => void approve() },
+      { id: 'design.references', title: 'Find references', group: 'Design Hall', keywords: 'inspiration library search', run: () => openTab('links', true) },
+      { id: 'design.otto', title: 'Ask Otto about this design', group: 'Design Hall', keywords: 'agent assist variants accessibility refine', run: () => openTab('otto') },
     ]);
   });
 
-  // ⌘S saves while focus is anywhere inside this view (editor, panels) — a
-  // scoped listener, not a global shortcut (plain ⌘S stays free elsewhere).
+  // ⌘S saves a named version while focus is anywhere inside this view (edits
+  // autosave) — a scoped listener, not a global shortcut.
   let rootEl = $state<HTMLDivElement | null>(null);
   function onKeydown(e: KeyboardEvent): void {
     if ((e.metaKey || e.ctrlKey) && e.key === 's') {
       e.preventDefault();
-      void save();
+      void saveNamed();
     }
   }
   $effect(() => {
@@ -697,57 +760,65 @@
   });
 
   function moreMenu(e: MouseEvent): void {
+    if (!artifact) return;
+    const a = artifact;
+    const archived = a.status === 'archived';
     const items: MenuItem[] = [
-      { label: 'Save named version…', icon: 'commit', disabled: readonly, action: () => void saveNamed() },
+      { label: 'Save named version…', icon: 'commit', hint: '⌘S', disabled: readonly, action: () => void saveNamed() },
       { label: 'Discard edits…', icon: 'refresh', disabled: !dirty, action: () => void discard() },
-      { label: 'Compare versions…', icon: 'columns', disabled: versions.length < 2, action: openCompare },
+      { label: 'Compare versions…', icon: 'columns', disabled: versions.length < 2, action: () => openCompare() },
+      { label: `Approve v${head?.seq ?? ''}…`, icon: 'check', disabled: !canEdit || dirty || !head || a.approved_version_id === head?.id, action: () => void approve() },
       { separator: true },
       { label: 'Rename…', icon: 'edit', disabled: !canEdit, action: () => void rename() },
       { label: 'Move to project…', icon: 'folder', disabled: !canEdit, action: () => queueMicrotask(() => moveMenu(e)) },
-      { label: 'Make an editable copy', icon: 'copy', action: () => void duplicateHere() },
-      { label: 'Download', icon: 'download', action: download },
-      ...(artifact ? popoutItems(`design/a/${encodeURIComponent(artifact.id)}`, artifact.title) : []),
+      { label: 'Make a copy', icon: 'copy', action: () => void duplicateHere() },
+      { label: 'Export…', icon: 'download', action: () => queueMicrotask(() => ctxMenu.show(e, exportItems(a, shownSource, shownBlob, false, d2Svg))) },
+      ...popoutItems(`design/a/${encodeURIComponent(a.id)}`, a.title),
       { separator: true },
-      { label: 'Archive…', icon: 'archive', danger: true, disabled: !canEdit, action: () => void archive() },
+      archived
+        ? { label: 'Unarchive', icon: 'archive', disabled: !auth.can('design', 'edit'), action: () => void unarchive() }
+        : { label: 'Archive…', icon: 'archive', danger: true, disabled: !canEdit, action: () => void archive() },
     ];
     ctxMenu.show(e, items);
   }
 
   // An unfiled design has no project crumb: "Unfiled" only led back to the
-  // lobby (the first crumb already does) and ate the title's room.
+  // lobby (the first crumb already does) and ate the title's room. Opened
+  // from a Product story, the first crumb returns to that story's Design tab.
+  const storyTitle = $derived(fromStory ? (library.stories[fromStory]?.title ?? 'Back to the story') : null);
   const crumbs = $derived([
+    ...(fromStory ? [{ label: `‹ ${storyTitle}`, onclick: () => openStoryInProduct(fromStory) }] : []),
     { label: 'Design Hall', onclick: () => router.go('design') },
     ...(project ? [{ label: project.name, onclick: () => router.go(`design/p/${encodeURIComponent(project.id)}`) }] : []),
   ]);
+  function back(): void {
+    if (fromStory) openStoryInProduct(fromStory);
+    else router.go(project ? `design/p/${encodeURIComponent(project.id)}` : 'design');
+  }
 </script>
 
 <div class="view" bind:this={rootEl}>
   <PageHeader title={artifact?.title ?? 'Design'} crumbs={viewport.isPhone ? [] : crumbs}>
     {#snippet leading()}
       {#if viewport.isPhone}
-        <button class="icon-btn" onclick={() => router.go(project ? `design/p/${encodeURIComponent(project.id)}` : 'design')} aria-label="Back" title="Back">
+        <button class="icon-btn" onclick={back} aria-label={storyTitle ? `Back to ${storyTitle}` : 'Back'} title={storyTitle ? `Back to ${storyTitle}` : 'Back'}>
           <Icon name="chevronLeft" size={16} />
         </button>
       {/if}
     {/snippet}
     {#snippet badge()}
-      {#if artifact}
+      {#if artifact && pill}
         <span class="badges">
           {#if !viewport.isPhone}<StudioBadge studio={artifact.studio} />{/if}
-          <StatusPill status={artifact.status === 'approved' && head?.id !== artifact.approved_version_id ? 'draft' : artifact.status} onclick={statusMenu} />
+          <StatusPill status={pill.status} suffix={pill.suffix} onclick={statusMenu} />
           {#if head && !viewport.isPhone}<span class="ver" title={`Current version: v${head.seq}`}>v{head.seq}</span>{/if}
-          {#if dirty && !viewport.isPhone}<span class="chip edited" data-testid="design-dirty">Edited</span>{/if}
         </span>
       {/if}
     {/snippet}
     {#snippet actions()}
       {#if artifact}
-        <!-- Compare lives on the version strip (where versions are picked) and
-             in ⋯ / ⌘K — a second header copy was a duplicate CTA. -->
         {#if !readonly}
-          <button class="btn small primary" onclick={() => void save()} disabled={!dirty || saving} title="Save a new version (⌘S)" data-testid="design-save">
-            {saving ? 'Saving…' : 'Save'}
-          </button>
+          <SaveIndicator state={autosaver.state} {dirty} error={autosaver.error} onretry={() => void autosaver.flush()} />
         {/if}
         <button class="icon-btn" data-overflow="-10" data-icon="more" data-label="More actions" onclick={moreMenu} aria-label="More actions" title="More actions" aria-haspopup="menu" data-testid="design-more">
           <Icon name="more" size={14} />
@@ -772,53 +843,54 @@
         <button class="btn small" onclick={() => void load(id)}>Retry</button>
       </div>
     {:else}
+      <MirrorBanner {artifact} canEdit={auth.can('design', 'edit') && artifact.status !== 'archived'} refused={mirrorRefused} {adopting} onadopt={() => void adopt()} />
       {#snippet notices()}
-        {#if newerHead}
+        {#if viewing}
+          <ViewingBar {viewing} {canEdit} approved={viewing.v.id === artifact.approved_version_id} onback={() => void view(null)}
+            oncompare={() => viewing && openCompare(viewing.v)} onrestore={() => viewing && void restore(viewing.v.id, viewing.v.seq)}
+            onapprove={() => viewing && void approve(viewing.v)} onretry={() => viewing && void view(viewing.v)} />
+        {:else if newerHead}
           <span class="notice warnc" use:announceShown={'A newer version was saved.'}>
             <Icon name="info" size={12} /> A newer version was saved.
             <button class="linkbtn" onclick={() => void discard()}>Load it (discard mine)</button>
           </span>
         {/if}
-        {#if imported}
-          <span class="notice">
-            <Icon name="info" size={12} /> Mirrored from {artifact.source_kind === 'canvas_scene' ? 'Canvas' : 'Product'} — edit it there, or make a copy here.
-            {#if origin}<button class="linkbtn" onclick={origin.open}>{origin.label}</button>{/if}
-            <button class="linkbtn" onclick={() => void duplicateHere()}>Make an editable copy</button>
-          </span>
-        {:else if !canEdit}
-          <span class="notice"><Icon name="lock" size={12} /> Read-only</span>
-        {/if}
+        {#if !canEdit && !mirrored}<span class="notice"><Icon name="lock" size={12} /> Read-only</span>{/if}
       {/snippet}
       {#snippet ottoPanel(selection: AssistSelection | null)}
         <OttoPanel {artifact} {versions} {head} uses={split.uses} {dirty} {selection}
           readonlyReason={assistBlocked} oncompare={(left, right) => (compare = { left, right })} />
       {/snippet}
-      {#snippet linksPanel()}
+      {#snippet versionsPanel()}
+        <VersionsPanel list={vlist} headId={head?.id ?? null} approvedId={artifact.approved_version_id} {meId} viewingId={viewing?.v.id ?? null}
+          {canEdit} onview={(v) => void view(v)} oncompare={openCompare} onrestore={(v) => void restore(v.id, v.seq)} onapprove={(v) => void approve(v)} />
+      {/snippet}
+      {#snippet linksOnly()}
         <LinksPanel {artifact} uses={split.uses} usedIn={split.usedIn} loading={linksLoading} error={linksError}
-          readonly={!canEdit} {seqOf} onreload={() => void loadLinks()} oncompare={comparePinned} />
+          readonly={!canEdit} {seqOf} onreload={() => void loadLinks()} oncompare={comparePinned} onmirrored={() => (mirrorRefused = true)} />
       {/snippet}
       {#snippet referencesPanel()}
         <ReferencesPanel {artifact} uses={split.uses} readonly={!canEdit} {seqOf} onreload={() => void loadLinks()}
-          oncompare={compareWithRef} />
+          oncompare={compareWithRef} onmirrored={() => (mirrorRefused = true)} />
+      {/snippet}
+      {#snippet linksPanel()}
+        <LinksTab bind:refs links={linksOnly} references={referencesPanel} />
+      {/snippet}
+      {#snippet ottoTab()}{@render ottoPanel(null)}{/snippet}
+      {#snippet details(design: Snippet | undefined)}
+        <DetailsPanel bind:tab={rightTab} bind:backButton={designButton} linkCount={split.uses.length + split.usedIn.length}
+          versionCount={vlist.total ?? (versions.length || null)} otto={ottoTab} versions={versionsPanel} links={linksPanel} {design}
+          onback={design ? undefined : () => void setDetails(false)} />
       {/snippet}
       {#if kind === 'scene3d'}
         {#key artifact.id}
-          <Studio3D
-            {artifact}
-            {source}
-            {readonly}
-            {dirty}
-            {head}
-            usedIn={split.usedIn}
-            linkCount={split.uses.length + split.usedIn.length}
-            {seqOf}
-            openOtto={rightTab === 'otto'}
-            onchange={(s) => (source = s)}
-            otto={ottoPanel}
-            links={linksPanel}
-            references={referencesPanel}
-            {notices}
-          />
+          <Studio3D {artifact} source={shownSource} readonly={stageReadonly} {dirty} {head} usedIn={split.usedIn}
+            linkCount={split.uses.length + split.usedIn.length} {seqOf} openOtto={ottoHandoff}
+            onchange={(s) => (source = s)} otto={ottoPanel} links={linksPanel} versions={versionsPanel} {notices} />
+        {/key}
+      {:else if artifact.format === 'otto-site'}
+        {#key artifact.id}
+          <SiteStudio {artifact} source={shownSource} {dirty} readonly={stageReadonly} onchange={(s) => (source = s)} {notices} {details} />
         {/key}
       {:else}
       <div class="studio" class:wide-right={rightTab === 'otto'} class:details-open={detailsOpen}>
@@ -842,64 +914,15 @@
             {@render notices()}
           </div>
           <div class="stage-host">
-            {#key artifact.id}
-              <ArtifactStage
-                {artifact}
-                {source}
-                {dirty}
-                {blobUrl}
-                noVersion={!head}
-                {readonly}
-                {showSource}
-                {device}
-                onchange={(s) => (source = s)}
-              />
+            {#key `${artifact.id}:${viewing?.v.id ?? ''}`}
+              <ArtifactStage {artifact} source={shownSource} {dirty} blobUrl={shownBlob} noVersion={!head} readonly={stageReadonly}
+                {showSource} {device} onchange={(s) => (source = s)} />
             {/key}
           </div>
         </section>
-        <aside class="right" aria-label="Design details">
-          <button class="btn small ghost compact-details back-design" bind:this={designButton} onclick={() => void setDetails(false)}>Back to design</button>
-          <div class="tabs segmented" role="tablist" aria-label="Details panel">
-            <button role="tab" id="dh-tab-otto" aria-controls="dh-panel" aria-selected={rightTab === 'otto'} tabindex={rightTab === 'otto' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'otto'} onclick={() => (rightTab = 'otto')} data-testid="design-tab-otto">
-              Otto
-            </button>
-            <button role="tab" id="dh-tab-links" aria-controls="dh-panel" aria-selected={rightTab === 'links'} tabindex={rightTab === 'links' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'links'} onclick={() => (rightTab = 'links')} data-testid="design-tab-links">
-              Links <span class="count">{split.uses.length + split.usedIn.length}</span>
-            </button>
-            <button role="tab" id="dh-tab-references" aria-controls="dh-panel" aria-selected={rightTab === 'references'} tabindex={rightTab === 'references' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'references'} onclick={() => (rightTab = 'references')} data-testid="design-tab-references">
-              References
-            </button>
-          </div>
-          <div class="panel" role="tabpanel" id="dh-panel" aria-labelledby="dh-tab-{rightTab}">
-            {#if brief && rightTab !== 'otto'}
-              <div class="brief">
-                <span class="k"><Icon name="sparkle" size={12} /> Brief</span>
-                <p>{brief}</p>
-              </div>
-            {/if}
-            {#if rightTab === 'otto'}
-              {@render ottoPanel(null)}
-            {:else if rightTab === 'links'}
-              {@render linksPanel()}
-            {:else}
-              {@render referencesPanel()}
-            {/if}
-          </div>
-        </aside>
+        {@render details(undefined)}
       </div>
       {/if}
-      <VersionStrip
-        {versions}
-        headId={head?.id ?? null}
-        approvedId={artifact.approved_version_id}
-        {meId}
-        {selected}
-        loading={versionsLoading}
-        error={versionsError}
-        onselect={toggleSelect}
-        oncompare={openCompare}
-        onretry={() => void loadVersions()}
-      />
     {/if}
   </PageBody>
 </div>
@@ -910,9 +933,15 @@
     right={compare.right}
     currentId={artifact.id}
     headId={head?.id ?? null}
+    approvedId={artifact.approved_version_id}
+    canApprove={canEdit}
     {meId}
     onclose={() => (compare = null)}
     onrestore={(v, s) => void restore(v, s)}
+    onapprove={(v) => {
+      const ver = versionById(v);
+      if (ver) void approve(ver);
+    }}
   />
 {/if}
 
@@ -933,11 +962,6 @@
     font-size: var(--fs-s);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
-  }
-  .edited {
-    color: var(--warning);
-    border-color: color-mix(in srgb, var(--warning) 35%, transparent);
-    background: var(--warning-soft);
   }
   .pad {
     padding: 20px;
@@ -1026,48 +1050,6 @@
   .stage-host > :global(*) {
     flex: 1;
   }
-  .right {
-    border-inline-start: 1px solid var(--border);
-    background: var(--surface);
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-  }
-  .tabs {
-    margin: 10px 14px 0;
-    align-self: flex-start;
-  }
-  .count {
-    color: var(--text-dim);
-    margin-inline-start: 2px;
-  }
-  .panel {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    margin-block-start: 10px;
-    border-block-start: 1px solid var(--border);
-  }
-  .brief {
-    margin: 12px 14px 0;
-    padding: 8px 10px;
-    border-inline-start: 2px solid var(--border-strong);
-    background: var(--surface-2);
-    border-radius: var(--radius-s);
-  }
-  .brief .k {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    color: var(--text-dim);
-  }
-  .brief p {
-    margin: 4px 0 0;
-    font-size: var(--fs-s);
-    white-space: pre-wrap;
-  }
   .compact-details { display: none; }
   @container (max-width: 900px) {
     .studio,
@@ -1077,9 +1059,7 @@
       overflow: hidden;
     }
     .compact-details { display: inline-flex; }
-    .back-design { align-self: flex-start; margin: 10px 14px 0; }
-    .studio:not(.details-open) .right,
+    .studio:not(.details-open) > :global(.right),
     .studio.details-open .center { display: none; }
-    .right { border-inline-start: 0; }
   }
 </style>

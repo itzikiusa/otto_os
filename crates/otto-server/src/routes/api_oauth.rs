@@ -282,9 +282,7 @@ async fn exchange(ctx: &ServerCtx, flow: &Flow, code: &str) -> Result<(), String
     }
     let token_url = auth["token_url"].as_str().unwrap_or("");
     let allow_local = otto_apiclient::engine::workspace_allows_local(ctx, &flow.wid).await;
-    if !allow_local {
-        otto_netguard::check_url(token_url).await?;
-    }
+    otto_netguard::check_url_for(token_url, allow_local).await?;
     let mut form = vec![
         ("grant_type", "authorization_code"),
         ("code", code),
@@ -307,9 +305,9 @@ async fn exchange(ctx: &ServerCtx, flow: &Flow, code: &str) -> Result<(), String
         .await
         .map_err(|_| "Token endpoint DNS lookup failed".to_string())?
         .collect();
-    if addrs.is_empty()
-        || (!allow_local && addrs.iter().any(|a| otto_netguard::is_blocked_ip(a.ip())))
-    {
+    let blocked =
+        |a: &std::net::SocketAddr| otto_netguard::is_blocked_ip_for(a.ip(), a.port(), allow_local);
+    if addrs.is_empty() || addrs.iter().any(blocked) {
         return Err("Token endpoint resolves to a blocked address".into());
     }
     let client = reqwest::Client::builder()

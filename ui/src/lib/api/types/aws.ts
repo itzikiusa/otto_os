@@ -212,6 +212,8 @@ export interface S3UploadResp {
 export interface AwsRegionError {
   region: string;
   message: string;
+  /** The region was listed only partly (EC2's 20-page cap), not failed. */
+  truncated?: boolean;
 }
 
 // --- CloudWatch Logs (`/aws/accounts/{id}/logs/*`) ---
@@ -325,6 +327,8 @@ export interface SqsSendReq {
 export interface SqsRedriveReq {
   source_arn: string;
   destination_arn?: string;
+  /** The source queue's name — required on a prod account. */
+  confirm_name?: string;
 }
 
 // --- EC2 ---

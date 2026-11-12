@@ -4,7 +4,7 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Design Hall co-design (desktop-browser) — the Otto panel, the variants tray,
-// the lobby's Generate hand-off and "What Otto learned", against the REAL
+// the lobby's Generate hand-off and "Team design rules", against the REAL
 // /design/* assist routes. The isolated daemon runs with OTTO_E2E=1, so every
 // agent turn is answered by the offline stub (crates/otto-orchestrator/src/
 // e2e_stub.rs → `design_assist_reply`): an HTML fence titled "E2E design"
@@ -17,7 +17,7 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 //   • Check accessibility → a review that edits nothing;
 //   • 3 variants → a tray of 3 cards; ✕ asks why and posts variant_rejected
 //     with the reason chip; Apply fast-forwards main (daemon-recorded accept);
-//   • What Otto learned → seeded reject signals become a pending rule, Approve
+//   • Team design rules → seeded reject signals become a proposed rule, Approve
 //     asks first and moves it to Rules; Roll back asks first; Settings writes
 //     the workspace `design_learning` setting.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -95,7 +95,7 @@ test('lobby Generate opens the draft on Otto and the turn lands as a version', a
   // The stub cites [R1] — the reference the lobby offered first — and the
   // server verified it, so it is a clickable provenance chip.
   await expect(turn.getByTestId('design-prov-chip').first()).toContainText('R1');
-  await expect(page.getByTestId('design-version-chip')).toHaveCount(2);
+  await expect(page.getByTitle('Current version: v2')).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });
 
@@ -104,12 +104,12 @@ test('Check accessibility is a review that changes nothing', async ({ page }) =>
   await open(page, `design/a/${busyId}/otto`);
   const panel = page.getByTestId('design-otto-panel');
   await expect(panel).toBeVisible();
-  await expect(page.getByTestId('design-version-chip')).toHaveCount(1);
+  await expect(page.getByTitle('Current version: v1')).toBeVisible();
   await page.getByTestId('design-quick-a11y_check').click();
   const turn = panel.getByTestId('design-assist-turn').last();
   await expect(turn.getByTestId('design-assist-status')).toHaveText(/Review ready/, { timeout: 60_000 });
   await expect(turn).toContainText('Top finding');
-  await expect(page.getByTestId('design-version-chip')).toHaveCount(1);
+  await expect(page.getByTitle('Current version: v1')).toBeVisible();
 });
 
 test('3 variants: reject asks why, Apply makes the pick the new version', async ({ page }) => {
@@ -147,7 +147,7 @@ test('3 variants: reject asks why, Apply makes the pick the new version', async 
   await ctx.dispose();
 });
 
-test('What Otto learned: a proposal is approved and rolled back only after asking', async ({ page }) => {
+test('Team design rules: a proposal is approved and rolled back only after asking', async ({ page }) => {
   test.setTimeout(90_000);
   const { ctx, base } = await apiCtx();
   // Three "too busy" rejects across two designs → a ready candidate.
@@ -165,7 +165,10 @@ test('What Otto learned: a proposal is approved and rolled back only after askin
   const confirm = page.getByRole('dialog', { name: 'Accept team rule' });
   await expect(confirm).toContainText('roll it back');
   await confirm.getByRole('button', { name: 'Accept rule' }).click();
+  // The tabs read Proposed · Active (route ids stay `pending` / `rules`).
+  await expect(page.getByTestId('design-learned-tab-pending')).toContainText('Proposed');
   await page.getByTestId('design-learned-tab-rules').click();
+  await expect(page.getByTestId('design-learned-tab-rules')).toContainText('Active');
   const rule = page.getByTestId('design-active-rule').first();
   await expect(rule).toContainText(/too busy/i);
 
@@ -180,8 +183,11 @@ test('What Otto learned: a proposal is approved and rolled back only after askin
   await rb.getByRole('button', { name: 'Roll back' }).click();
   await expect(page.getByTestId('design-active-rule')).toHaveCount(0);
 
-  // Settings → Off writes the workspace setting; back to Suggest only.
-  await page.getByTestId('design-learned-tab-settings').click();
+  // Settings (now in the page's ⋯ menu) → Off writes the workspace setting;
+  // back to Suggest only.
+  await page.getByTestId('design-learned-more').click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Learning settings' }).click();
+  await expect(page).toHaveURL(/#\/design\/learned\/settings$/);
   const settings = page.getByTestId('design-learned-settings');
   await settings.getByRole('button', { name: 'Off' }).click();
   await expect

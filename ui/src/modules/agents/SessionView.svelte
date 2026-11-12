@@ -460,13 +460,13 @@
   }
 
   /** Agent sessions open the Canvas panel beside the terminal; other session
-   *  kinds (connections) have no right panel, so navigate to the Canvas
-   *  module directly instead. */
+   *  kinds (connections) have no right panel, so open Design Hall's Whiteboard
+   *  studio (where Canvas boards live now) instead. */
   function openCanvas(): void {
     if (isAgent) {
       ui.openRight('canvas');
     } else {
-      router.go('canvas');
+      router.go('design/studio/whiteboard');
     }
   }
 

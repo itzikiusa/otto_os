@@ -10,7 +10,8 @@
   import { announce } from '../../lib/announce.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import { mcpCpApi } from '../../lib/api/mcp';
+  import { mcpApi, mcpCpApi } from '../../lib/api/mcp';
+  import { NOT_GOVERNED_NOTE, type McpRunMode } from './runMode';
   import { toasts } from '../../lib/toast.svelte';
   import type {
     CreateMcpControlServerReq,
@@ -28,6 +29,9 @@
   let { wsId, onclose, onsaved }: Props = $props();
 
   let name = $state('');
+  // Governed: Otto's gateway runs it. Native: the agent CLI launches it from
+  // `.mcp.json` (stdio only, nothing governed) through `/mcp-servers`.
+  let runs = $state<McpRunMode>('governed');
   let transport = $state<McpTransport>('stdio');
   let description = $state('');
   // stdio
@@ -102,8 +106,25 @@
     return null;
   }
 
+  async function saveNative(): Promise<void> {
+    const secret_env = Object.fromEntries(Object.entries(parseKv(secretEnvText)).filter(([, v]) => v !== ''));
+    saving = true;
+    try {
+      const body = { name: name.trim(), command: command.trim(), args: parseLines(argsText), env: parseKv(envText), secret_env, enabled };
+      await mcpApi.create(wsId, body);
+      toasts.success('Native MCP server added', name.trim());
+      onsaved();
+      onclose();
+    } catch (e) {
+      toastError('Couldn’t add server', e);
+    } finally {
+      saving = false;
+    }
+  }
+
   async function save(): Promise<void> {
     if (!auth.isRoot) return;
+    if (runs === 'native') transport = 'stdio'; // a template may have picked http
     nameError = name.trim() ? null : 'Give the server a name.';
     commandError = transport === 'stdio' && !command.trim() ? 'A stdio server needs a command.' : null;
     urlError = transport === 'http' && !url.trim() ? 'An HTTP server needs a URL.' : null;
@@ -119,6 +140,7 @@
       announce(invalid, { assertive: true });
       return;
     }
+    if (runs === 'native') return saveNative();
     const body: CreateMcpControlServerReq = {
       name: name.trim(),
       transport,
@@ -183,16 +205,27 @@
     </label>
 
     <label class="field">
+      <span>Runs</span>
+      <select bind:value={runs} data-testid="mcp-server-runs" onchange={() => { if (runs === 'native') transport = 'stdio'; }}>
+        <option value="governed">Governed: through Otto’s gateway (policies, approvals, audit)</option>
+        <option value="native">Native: launched by the agent CLI from .mcp.json</option>
+      </select>
+      {#if runs === 'native'}<span class="env-note">{NOT_GOVERNED_NOTE}</span>{/if}
+    </label>
+
+    {#if runs === 'governed'}
+    <label class="field">
       <span>Transport</span>
       <select bind:value={transport}>
         <option value="stdio">stdio (spawn a local command)</option>
         <option value="http">http (Streamable HTTP / JSON-RPC)</option>
       </select>
     </label>
+    {/if}
 
     {#if transport === 'stdio'}
       <p class="warn">
-        <Icon name="warning" size={12} /> A stdio server runs an arbitrary command <strong>as the Otto daemon</strong>. Registering
+        <Icon name="warning" size={12} /> A stdio server runs an arbitrary command <strong>{runs === 'native' ? 'in every agent session' : 'as the Otto daemon'}</strong>. Registering
         one requires the owner and is audited.
       </p>
       <label class="field">
@@ -234,6 +267,7 @@
       </label>
     {/if}
 
+    {#if runs === 'governed'}
     <label class="field">
       <span>Description</span>
       <input dir="auto" bind:value={description} placeholder="What this server provides (optional)" />
@@ -267,10 +301,11 @@
         </label>
       </div>
     {/if}
+    {/if}
 
     <label class="check">
       <input type="checkbox" bind:checked={enabled} />
-      <span>Enable now (governed by the control plane)</span>
+      <span>{runs === 'native' ? 'Enable now (written to .mcp.json for new sessions)' : 'Enable now (governed by the control plane)'}</span>
     </label>
   </div>
 

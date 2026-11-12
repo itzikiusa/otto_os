@@ -252,8 +252,8 @@
 <Modal title="Import file into a table" width={520} onclose={close}>
   <div class="imp-form">
     <p class="imp-hint">
-      Inserts a file into an existing table through the same write guard as a query — a Prod/read-only
-      connection asks you to type its name first. {#if clickhouse}ClickHouse reads the file itself
+      Inserts a file into an existing table through the same write guard as a query — a Prod
+      connection asks you to type its name first; a Read-only one refuses it. {#if clickhouse}ClickHouse reads the file itself
       (<span class="mono">INSERT … FORMAT</span>), so column types come from the table.{:else}Rows go in as
       batched INSERTs.{/if}
     </p>

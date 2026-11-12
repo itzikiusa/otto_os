@@ -74,6 +74,12 @@ Object.assign(log(), {
       appLive.dispatch({ type: 'agent_runtime_event', event: { session_id: sid, sequence: seqs.get(sid) ?? 0, ts: now(), type: 'turn_item.updated', turn_item: it } });
     }
   },
+  /** `sid`'s agent starts (`running`) or stops (`ready`) working. */
+  status: (sid: string, status: 'running' | 'ready'): void => {
+    const t = threads.find((x) => x.id === sid);
+    if (t) t.status = status === 'running' ? 'working' : 'idle';
+    emit(sid, { type: 'provider_session.updated', provider_session: { status, cwd: t?.cwd ?? '/', model: null, updated_at: now(), last_error: null } });
+  },
   /** A turn of `sid` ended (done). */
   finish: (sid: string): void => emit(sid, { type: 'turn.terminal', turn_id: `trn_${sid}`, status: 'completed' }),
   /** A message waits in `sid`'s queue. */
@@ -85,7 +91,69 @@ Object.assign(log(), {
 
 const find = (id: string): RuntimeSession | undefined => threads.find((t) => t.id === id);
 
+/** A mock thread row: idle, the prompt asked and answered at once. */
+function addThread(ws: string, row: Partial<RuntimeSession> & { title: string; provider: RuntimeSession['provider'] }, prompt: string, answer: string): RuntimeSession {
+  n += 1;
+  const t = {
+    id: `rts_mock${n}`, workspace_id: ws, cwd: '/Users/dev/otto', status: 'idle', access_mode: 'approval-required',
+    created_by: 'usr_root', created_at: now(), last_active_at: now(), last_sequence: 0, meta: null, ...row,
+  } as RuntimeSession;
+  threads.push(t);
+  item(t.id, { type: 'user_message', text: prompt });
+  item(t.id, { type: 'assistant_message', message_id: `msg_${t.id}`, text: answer, streaming: false });
+  return t;
+}
+
+const councilOf = (t: RuntimeSession | undefined): { id: string; seat: number; role: string } | undefined =>
+  t?.meta?.council as { id: string; seat: number; role: string } | undefined;
+
+// Council (docs/features/threads-structured-runtime.md "Council"). e2e:
+// `__mockRuntime.councilFail = 'codex'` makes that provider's seat fail to start.
+const councilRoutes: MockRoute[] = [
+  {
+    method: 'POST', re: /^\/workspaces\/([^/]+)\/runtime-sessions\/council$/,
+    handle: (m, b) => {
+      const l = log() as any;
+      (l.councils ??= []).push(b);
+      const seats: any[] = b?.seats ?? [];
+      if (seats.length < 2 || seats.length > 4) return { status: 400, json: { code: 'invalid', message: `invalid: a council has 2 to 4 seats, not ${seats.length}` } };
+      const bad = seats.findIndex((x) => x.provider === l.councilFail);
+      if (bad >= 0) return { status: 400, json: { code: 'invalid', message: `invalid: seat ${bad + 1} (${seats[bad].provider}): could not start ${seats[bad].provider}` } };
+      const id = `cnc_mock${n + 1}`;
+      const out: RuntimeSession[] = [];
+      seats.forEach((x, i) => {
+        const label = x.model ? `${x.provider} ${x.model}` : x.provider;
+        out.push(addThread(m[1], {
+          provider: x.provider, model: x.model, title: `${b?.title ?? 'Council'} · ${label}`, cwd: b?.cwd ?? '/Users/dev/otto',
+          parent_id: out[0]?.id ?? null,
+          meta: { council: { id, seat: i + 1, role: 'seat', ...(x.effort ? { effort: x.effort } : {}) }, read_only: true },
+        }, String(b?.prompt ?? ''), `Mock ${x.provider} (seat ${i + 1}): my answer.`));
+      });
+      return { status: 201, json: { seats: out } };
+    },
+  },
+  {
+    method: 'POST', re: /^\/runtime-sessions\/([^/]+)\/council\/synthesize$/,
+    handle: (m, b) => {
+      const me = find(m[1]);
+      const c = councilOf(me);
+      if (!me || !c) return { status: 400, json: { code: 'invalid', message: 'invalid: this thread is not part of a council' } };
+      const root = me.parent_id ?? me.id;
+      const members = threads.filter((t) => (t.id === root || t.parent_id === root) && councilOf(t)?.id === c.id);
+      const busy = members.find((t) => t.status === 'working');
+      if (busy) return { status: 409, json: { code: 'conflict', message: `conflict: seat ${councilOf(busy)?.seat} is still working` } };
+      const base = (find(root)?.title ?? 'Council').replace(/ · [^·]*$/, '');
+      const judge = addThread(me.workspace_id, {
+        provider: b?.provider ?? 'claude', title: `${base} · synthesis`, parent_id: root,
+        meta: { council: { id: c.id, seat: 0, role: 'synthesis' }, read_only: true },
+      }, 'Compare the answers.', 'Mock synthesis: they agree on the approach.');
+      return { status: 201, json: judge };
+    },
+  },
+];
+
 export const runtimeMockRoutes: MockRoute[] = [
+  ...councilRoutes,
   {
     method: 'GET', re: /^\/workspaces\/([^/]+)\/runtime-sessions$/,
     handle: (m, _b, q) => {

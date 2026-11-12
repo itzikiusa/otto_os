@@ -1,11 +1,13 @@
 <script lang="ts">
   import { rowMenu } from '../../lib/rowMenu';
-  // One design as a card (Continue strip, project and studio pages): preview,
-  // title + head version, studio + status, when it last changed, and link chips
-  // (the stories it implements, how often it is referenced). The whole card is
-  // a link to the artifact view.
+  // One design as a card (the lobby's All designs, project / studio / story
+  // pages): preview, title + head version, studio + status, when it last
+  // changed, and chips — where a mirrored design comes from, Archived, the
+  // stories it implements and how often it is referenced. The card is a link
+  // to the artifact view; an archived card with `onunarchive` also carries a
+  // real Unarchive button (outside the link: a button can't nest in an <a>).
   import Icon from '../../lib/components/Icon.svelte';
-  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { router } from '../../lib/router.svelte';
   import { canPopout, popoutItems } from '../../lib/popoutMenu';
   import { rel } from '../../lib/stores/now.svelte';
@@ -13,6 +15,7 @@
   import ArtifactThumb from './ArtifactThumb.svelte';
   import StudioBadge from './StudioBadge.svelte';
   import StatusPill from './StatusPill.svelte';
+  import { mirrorLabel } from './designGrid';
 
   interface Props {
     artifact: DesignArtifact;
@@ -21,23 +24,26 @@
     /** Incoming references (`DesignSearchHit.reference_count`). */
     referenceCount?: number;
     live?: boolean;
+    /** Restore an archived design (status → draft). Omitted: no action. */
+    onunarchive?: (a: DesignArtifact) => void;
   }
-  let { artifact, stories = [], referenceCount = 0, live = false }: Props = $props();
+  let { artifact, stories = [], referenceCount = 0, live = false, onunarchive }: Props = $props();
   const by = $derived(artifact.created_by_kind === 'agent' ? ' · drafted by Otto' : '');
+  const archived = $derived(artifact.status === 'archived');
+  const mirror = $derived(mirrorLabel(artifact.source_kind));
+  const href = $derived(`#/design/a/${encodeURIComponent(artifact.id)}`);
+
+  function menu(e: MouseEvent): void {
+    const items: MenuItem[] = [
+      { label: 'Open', icon: 'chevronRight', action: () => router.go(`design/a/${encodeURIComponent(artifact.id)}`) },
+    ];
+    if (archived && onunarchive) items.push({ label: 'Unarchive', icon: 'undo', action: () => onunarchive?.(artifact) });
+    if (canPopout) items.push(...popoutItems(`design/a/${encodeURIComponent(artifact.id)}`, artifact.title));
+    ctxMenu.show(e, items);
+  }
 </script>
 
-<a use:rowMenu
-  class="acard"
-  href={`#/design/a/${encodeURIComponent(artifact.id)}`}
-  data-testid="design-artifact-card"
-  oncontextmenu={canPopout
-    ? (e) =>
-        ctxMenu.show(e, [
-          { label: 'Open', icon: 'chevronRight', action: () => router.go(`design/a/${encodeURIComponent(artifact.id)}`) },
-          ...popoutItems(`design/a/${encodeURIComponent(artifact.id)}`, artifact.title),
-        ])
-    : undefined}
->
+{#snippet inner()}
   <div class="pic"><ArtifactThumb {artifact} {live} /></div>
   <div class="body">
     <div class="line1">
@@ -46,13 +52,21 @@
     </div>
     <div class="line2">
       <StudioBadge studio={artifact.studio} showName />
-      <StatusPill status={artifact.status} />
+      {#if !archived}<StatusPill status={artifact.status} />{/if}
     </div>
     <div class="meta" title={new Date(artifact.updated_at).toLocaleString()}>
       edited {rel(artifact.updated_at)}{by}
     </div>
-    {#if stories.length || referenceCount}
+    {#if archived || mirror || stories.length || referenceCount}
       <div class="chips">
+        {#if archived}
+          <span class="chip tag" data-testid="design-card-archived"><Icon name="archive" size={12} /> Archived</span>
+        {/if}
+        {#if mirror}
+          <span class="chip tag" data-testid="design-card-mirror" title="Kept in sync with where it was made; edit it there">
+            <Icon name={mirror.icon} size={12} /> {mirror.label}
+          </span>
+        {/if}
         {#if referenceCount}
           <span class="chip"><Icon name="link" size={12} /> used in {referenceCount}</span>
         {/if}
@@ -62,7 +76,24 @@
       </div>
     {/if}
   </div>
-</a>
+{/snippet}
+
+{#if archived && onunarchive}
+  <div class="acard has-foot" class:archived data-testid="design-artifact-card">
+    <a use:rowMenu class="link" {href} oncontextmenu={menu}>{@render inner()}</a>
+    <div class="foot">
+      <button class="btn small" onclick={() => onunarchive?.(artifact)} data-testid="design-card-unarchive"
+        title="Move this design back to Draft">
+        <Icon name="undo" size={12} /> Unarchive
+      </button>
+    </div>
+  </div>
+{:else}
+  <a use:rowMenu class="acard link" class:archived {href} data-testid="design-artifact-card"
+    oncontextmenu={canPopout || (archived && onunarchive) ? menu : undefined}>
+    {@render inner()}
+  </a>
+{/if}
 
 <style>
   .acard {
@@ -83,6 +114,14 @@
   .acard:hover {
     border-color: var(--border-strong);
   }
+  .link {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    color: var(--text);
+    text-decoration: none;
+  }
+  .has-foot .link:focus-visible,
   .acard:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--accent-text) 70%, transparent);
     outline-offset: 1px;
@@ -135,5 +174,17 @@
   }
   .mono-chip {
     font-family: var(--font-mono);
+  }
+  /* Archived reads from the chip text + a dimmed preview, never colour alone. */
+  .archived .pic {
+    opacity: 0.6;
+  }
+  .tag {
+    font-weight: 500;
+  }
+  .foot {
+    display: flex;
+    justify-content: flex-end;
+    padding: 0 12px 12px;
   }
 </style>

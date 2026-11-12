@@ -29,6 +29,7 @@
   import { reopenThread, runtimeThreadMenu } from './runtime/runtimeMenu';
   import { isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
   import { threads } from './threadsStore.svelte';
+  import { messageThread } from './relatedMessage';
 
   interface Props {
     onselect?: () => void;
@@ -311,7 +312,7 @@
             {
               label: 'Send message from active thread…',
               icon: 'send',
-              action: () => threads.openPeerComposerTo(s.id),
+              action: () => void messageThread(threads.focusedSessionId, s.id),
             },
           ]
         : []),

@@ -15,6 +15,9 @@
   import { harnessLabel, sessionBranch } from './threadsHelpers';
   import { threads } from './threadsStore.svelte';
   import { runtimeThreads } from './runtime/runtimeThreads.svelte';
+  import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
+  import { councilMembers, councilOf } from './runtime/council';
+  import { council } from './runtime/councilStore.svelte';
 
   interface Props {
     session: Session;
@@ -52,14 +55,69 @@
    *  routine / Manual run / Proactive / Delegated by … */
   const badge = $derived(agentThreadBadge(s.meta as Record<string, unknown> | undefined));
 
+  // A council (one prompt, several agents) is ONE row — "Council · 3" with
+  // its seats' provider icons — on seat 1; it unfolds into the seats (and
+  // the synthesis), which otherwise hide under it.
+  const cmeta = $derived(councilOf(runtimeThreads.get(s.id)));
+  const members = $derived(cmeta ? councilMembers(Object.values(runtimeThreads.byId), s.id) : null);
+  const head = $derived(variant === 'active' && cmeta?.role === 'seat' && !runtimeThreads.get(s.id)?.parent_id);
+  const unfolded = $derived(!!cmeta && council.expanded[cmeta.id] === true);
+  const folded = $derived(!!cmeta && child && !head && !unfolded && !selected);
+  const councilState = $derived.by(() => {
+    const ids = members ? [...members.seats, ...(members.synthesis ? [members.synthesis] : [])].map((m) => m.id) : [s.id];
+    const working = ids.some((id) => runtimeThreads.get(id)?.status === 'working' || runtimeThreads.get(id)?.status === 'starting');
+    return sessionState(s, working ? 'working' : 'idle', ids.some((id) => ws.needsYou[id] === true), { stale: events.state !== 'connected' });
+  });
+
   const testid = $derived(
     variant === 'pinned' ? `thread-pinned-${s.id}` : variant === 'history' ? `thread-history-${s.id}` : `thread-row-${s.id}`,
   );
 </script>
 
+{#if head && cmeta && members}
+  <div class="tr-row tr-council" class:selected={selected && council.showsCouncil(s.id)} data-testid="thread-council-{cmeta.id}">
+    <button
+      type="button"
+      class="icon-btn tr-fold"
+      aria-expanded={unfolded}
+      aria-label="{unfolded ? 'Fold' : 'Show'} the council’s threads"
+      title={unfolded ? 'Fold the seats' : 'Show the seats'}
+      data-testid="thread-council-fold-{cmeta.id}"
+      onclick={() => council.toggleExpanded(cmeta.id)}
+    >
+      <Icon name={unfolded ? 'chevronDown' : 'chevronRight'} size={12} />
+    </button>
+    <button
+      type="button"
+      class="tr-main"
+      title="Council · {members.seats.length}: {s.title}"
+      aria-current={selected ? 'true' : undefined}
+      onclick={() => {
+        council.showCouncil(s.id);
+        onselect?.();
+      }}
+      oncontextmenu={(e) => onmenu(e, s)}
+    >
+      <StatusDot state={councilState} />
+      <span class="tr-stack" aria-hidden="true">
+        {#each members.seats.slice(0, 4) as m (m.id)}
+          {#if hasProviderIcon(m.provider)}<ProviderIcon provider={m.provider} size={12} />{/if}
+        {/each}
+      </span>
+      <span class="tr-title ellipsis" dir="auto">{s.title.replace(/ · [^·]*$/, '')}</span>
+      <span class="tr-badge">Council · {members.seats.length}</span>
+      <span class="tr-time">{rel(s.last_active_at)}</span>
+    </button>
+  </div>
+  {#if unfolded}{@render row(true)}{/if}
+{:else if !folded}
+  {@render row(child)}
+{/if}
+
+{#snippet row(nested: boolean)}
 <div
   class="tr-row reveal-host"
-  class:child
+  class:child={nested}
   class:needs-you={needs}
   class:unread
   class:selected
@@ -131,6 +189,7 @@
     </button>
   </div>
 </div>
+{/snippet}
 
 <style>
   .tr-row {
@@ -252,6 +311,26 @@
     .tr-main {
       padding-inline-end: 80px;
     }
+  }
+  .tr-council .tr-main {
+    padding-inline-start: 0;
+  }
+  .tr-fold {
+    flex: none;
+  }
+  .tr-stack {
+    display: inline-flex;
+    flex: none;
+  }
+  .tr-stack > :global(*:not(:first-child)) {
+    margin-inline-start: -4px;
+  }
+  /* The council row has no hover actions: keep its time, no reserved end. */
+  .tr-row.tr-council .tr-main {
+    padding-inline-end: 8px;
+  }
+  .tr-row.tr-council .tr-time {
+    display: inline;
   }
   .tr-pin-on {
     color: var(--warning);

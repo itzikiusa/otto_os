@@ -274,12 +274,18 @@ export interface K8sExecReq {
   pod: string;
   container?: string | null;
   command?: string[] | null;
+  /** Required on a prod cluster: the pod name. Agent credentials are refused (403). */
+  confirm_name?: string | null;
 }
 
 /** `POST /k8s/clusters/{id}/k9s` → `Session`. */
 export interface K8sK9sReq {
   workspace_id: Id;
   ns?: string | null;
+  /** On a prod cluster k9s starts `--readonly` unless a person sets this. */
+  write?: boolean;
+  /** Write mode on a prod cluster: the cluster name. */
+  confirm_name?: string | null;
 }
 
 /** Mutating actions (`POST /k8s/clusters/{id}/actions`, §4.6). */
@@ -303,7 +309,9 @@ export type K8sAction =
   | 'cronjob_resume';
 
 /** Destructive actions (`delete_pod`, `scale` to 0, `rollout_undo`,
- *  `argocd_sync` with prune) must carry `params.confirm_name === name`. */
+ *  `argocd_sync` with prune) — and every mutating action on a prod cluster —
+ *  must carry `params.confirm_name === name`; an agent credential's confirm is
+ *  refused (403). */
 export interface K8sActionReq {
   action: K8sAction;
   kind: K8sResourceKind;
@@ -316,6 +324,15 @@ export interface K8sActionResp {
   ok: boolean;
   message: string;
   output?: string | null;
+  /** Only when a multi-step plan stopped partway: every step's fate. */
+  steps?: K8sActionStep[];
+}
+
+export interface K8sActionStep {
+  /** `patch rollouts.argoproj.io/web (status)`, `rollout restart deployments/api`… */
+  step: string;
+  status: 'done' | 'failed' | 'skipped';
+  error?: string;
 }
 
 // --- Kubernetes pod HTTP actions (K-3; docs/contracts/api.md "Pod HTTP actions") ---

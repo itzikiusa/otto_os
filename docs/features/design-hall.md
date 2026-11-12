@@ -8,8 +8,10 @@
 > Studio 1.5** (§10: scene3d v2, the studio layout, Generate, exports and the
 > embed runtime) and **Site Studio v1** (§11: sections, breakpoints, static
 > export + local preview) ship now. The remaining studios are the next phases
-> (see the proposal's roadmap). The existing Product → Design arena and Canvas
-> keep working unchanged meanwhile.
+> (see the proposal's roadmap). Design Hall is the one home for designs: a
+> story's Design tab lists its Hall designs and `#/canvas` opens the Hall (§4.1);
+> the old Product arena stays one menu away while it still owns pinned review
+> notes and the Blender bridge.
 
 Design Hall is the home for everything visual a product team makes — UI
 frames, marketing graphics, sites, 3D scenes, whiteboards and brand kits —
@@ -52,8 +54,10 @@ Contract: [`docs/contracts/api.md` § Design Hall](../contracts/api.md) and the
 Nothing to configure. On every daemon start Otto:
 
 1. creates the FTS5 search index `design_search_fts` (if the linked SQLite has
-   no FTS5, search falls back to a LIKE scan over titles and tags), and
-2. runs the **legacy import** in the background (see §4).
+   no FTS5, search falls back to a LIKE scan over titles and tags),
+2. runs the **legacy import** catch-up pass in the background (see §4), and
+3. keeps every Canvas scene and story design attachment mirrored **live** from
+   then on (§4).
 
 Access is the `design` feature grant (Settings → Users → Design Hall): View
 reads, Edit writes, Admin runs the import/prune actions. The migration grants
@@ -139,7 +143,8 @@ link — the "Start from this" action of the References drawer.
 
 ### Versions
 
-`GET …/versions` lists them newest first; `GET …/versions/v3/content` (or a
+`GET …/versions?offset=&limit=` lists them newest first (default 200, cap
+1000) with the full count in `X-Total-Count`; `GET …/versions/v3/content` (or a
 version id) returns the bytes. `POST …/versions {"message":"Hero v2"}` makes a
 named commit from the working copy. Restoring an older version is simply
 saving its bytes again — history never rewinds.
@@ -218,9 +223,11 @@ version saved again — `payload.from_version_id`), `reference_added`
 key. `GET /design/signals` reads the log; §5.3 turns repeated signals into
 team-rule proposals.
 
-## 4. Legacy import
+## 4. Legacy sources: live sync, read-only mirrors, "Edit here"
 
-Idempotent, runs at startup and on `POST /design/admin/import`:
+Design Hall is the one home for designs. Canvas scenes and Product story
+design attachments keep their own storage and routes, and the Hall holds a
+**mirror** of each (`source_kind` / `source_id` on the artifact):
 
 | Source | Becomes | Links |
 |---|---|---|
@@ -230,11 +237,108 @@ Idempotent, runs at startup and on `POST /design/admin/import`:
 - **Nothing moves.** The original rows, files and routes are untouched; the
   graph row records the original id in `source_kind`/`source_id` (unique) and
   in `meta.imported_from`.
-- A source whose `updated_at` is unchanged is skipped without reading its
-  bytes. A changed source gets a new `sync` version (history kept). A source
-  that disappears leaves its artifact alone.
+- **Live sync.** `otto_design::sync` listens on the event bus for
+  `canvas_updated` (scene edits by agents), `mockup_updated` (attachment
+  saves, agent turns, Blender outputs) and `design_source_changed` (a
+  person's Canvas save/create/delete, attachment upload/patch/delete) and
+  re-mirrors that ONE source (`import::sync_one`) once it has been quiet for
+  1.5 s — an agent's per-poll mid-turn writes merge into one sync. A new
+  source becomes an artifact, a changed one a `sync` head (history kept), a
+  deleted one **archives** its mirror (`meta.source_missing: true`; never
+  deleted). If the event receiver lags, the full pass runs instead.
+- **Catch-up pass.** The same logic over every source runs at startup and on
+  `POST /design/admin/import` (it also archives mirrors whose rows vanished
+  while the daemon was down). A source whose `updated_at` is unchanged is
+  skipped without reading its bytes.
 - Imported artifacts start unfiled (`project_id: null`) with a v1 of kind
   `import`, authored by `system:import`.
+
+**Read-only until adopted.** A mirror's head follows its source, so an edit
+made in the Hall would be overwritten by the next sync. The server refuses
+every content write on an unadopted mirror with **409 `{code: "mirrored"}`**:
+`PUT …/content`, `POST …/versions`, `POST …/versions/{v}/restore`, `POST
+…/links`, `POST …/assist`, `POST …/variants` and `…/variants/{v}/accept`
+(the MCP `design_assist` / `design_link` tools ride the same routes). Reads,
+metadata PATCH, approve, thumbnails and archive stay open.
+
+**"Edit here" — `POST /design/artifacts/{id}/adopt`** (Editor) sets
+`meta.adopted = true` (+ `adopted_at`, `adopted_by`), records an `adopted`
+signal and lifts the 409. From then on the Hall owns the head: when the
+source changes again, the sync commits it as the side version
+`variant/sync-<timestamp>/1` (`kind: sync`) — it shows in the variants tray
+(`GET …/variants`, a run whose id starts with `sync-`) and can be compared
+and accepted like any variant; nothing is overwritten. An adopted mirror
+whose source disappears is only flagged `source_missing`, never archived.
+Only the adopt route writes the `adopted*` keys (a PATCH can't clear them).
+
+`GET /design/artifacts?source_kind=canvas_scene&source_id=<scene>` (or
+`product_attachment` + the attachment id; add `include_archived=true` for an
+archived mirror) finds the Hall artifact that mirrors a given scene or
+attachment, so Canvas and the story page can open it.
+
+### 4.1 One home: the story Design tab and Canvas fold into the Hall
+
+Before, one story page had three places to make a design, each with its own
+store and its own AI: Overview → *Linked canvases* (a Canvas scene, Canvas Ask
+AI), the Design tab's arena (a story attachment, the mockup assistant) and the
+Design tab's graph strip → *Open in Design Hall* (a Hall design). Now there is
+one (UI only, no server change):
+
+- **The story's Design tab** (`product/StoryDesigns.svelte`, tab id `mockups`
+  kept) is the Hall's `DesignGrid` scoped to the story (`story_id`, plus
+  `include_children` for an epic, grouped by story), the grid's filter row, ONE
+  primary **New design** (the Hall's New design sheet with the story preset)
+  and an **Ask Otto** line: it creates a draft that implements the story (the
+  brief in `meta.brief`), starts one `generate` turn and opens it on its Otto
+  tab — the lobby's Generate with the story set. Cards open
+  `#/design/a/<id>?from=story/<storyId>`; the artifact view reads `from` and
+  shows a way back to the story. A person without the `design` grant sees why,
+  with the classic arena as the way in.
+- **Overview** shows one line instead of *Linked canvases*: "N designs →
+  Design" (`StoryDesignsLine.svelte`, a capped count of the same scope that
+  follows design events).
+- **Mirrors land in the grid by themselves.** An agent's mockup (the arena's
+  Create with AI / `mockup_assist` turn, or the `otto-mockup` helper — both
+  write a story attachment and broadcast `mockup_updated`), an upload, or a
+  Canvas board linked to the story is mirrored ~1.5 s after its last change
+  (§4); the mirror's create event reloads the grid (coalesced, 600 ms), so the
+  card appears within about two seconds, badged **From a story** / **From
+  Canvas**, read-only until someone presses **Edit here**.
+- **Canvas folded into the Hall.** `#/canvas` loads `canvas/CanvasRedirect.svelte`,
+  which forwards to a scene's mirror (`canvas.pendingOpenId` from a caller
+  still using the old hand-off, or `#/canvas/<scene id>`) through
+  `openSceneInHall(sceneId)` (`design-hall/nav.ts`): it looks the mirror up by
+  `source_kind=canvas_scene&source_id=<id>`, polls ~3 s for a scene the sync
+  hasn't reached yet, then falls back to the Whiteboard studio with a note.
+  Bare `#/canvas` lands on `#/design/studio/whiteboard`. The session Canvas
+  panel's **Open in Design Hall** uses the same helper; a non-agent session's
+  Canvas button opens the Whiteboard studio. `routeAllowed('canvas')` checks
+  the `design` grant (the page it lands on). A mirrored board's banner no
+  longer offers "Open in Canvas" (its mirror IS where it opens).
+- **Reversible.** Nothing was deleted: `CanvasPage.svelte`, `SceneList`,
+  `ConversationPanel`, the canvas store, `DesignArena`, `DesignGraphStrip` and
+  `LinkedCanvases` are only unmounted. Pointing the `canvas` loader in
+  `shell/pages.svelte.ts` back at `CanvasPage.svelte` restores the Canvas
+  page; rendering `<DesignArena />` in `MockupsTab.svelte` restores the arena.
+
+**Temporary: "Open the classic arena".** The story Design tab's ⋯ keeps one
+entry that mounts the old `DesignArena` for the story, because two things
+exist only there: **pinned review annotations** (`MockupAnnotations`, the
+board/screen pin layer) and the **Blender bridge** (Render in Blender, the
+generated Blender script). Telling whether a story has pinned notes costs one
+request per attachment, so the entry is always offered. It goes away when the
+Hall has both.
+
+| Was | Now |
+|---|---|
+| Overview → Linked canvases → open / New canvas | The story's Design tab (cards) / **New design** → Whiteboard studio |
+| Linked canvases → Link an existing canvas | Open the board's design → **Edit here** → Links → Add → A story |
+| Design tab → arena: new screen / board / diagram / 3D, templates, import | **New design** (studio, format, template; the story preset), or Design Hall → Import |
+| Design tab → arena: Create with AI / Refine | **Ask Otto** on the tab, then the design's Otto tab |
+| Design tab → arena: export PNG / SVG / source / GLB | The artifact view's Export ▾ / 3D Studio Export ▾ |
+| Design tab → arena: pinned annotations, Render in Blender, Blender script | ⋯ → **Open the classic arena** (temporary) |
+| Design tab → graph strip → Open in Design Hall | ⋯ → **Open in Design Hall** (`#/design/story/<id>`) |
+| Canvas page (`#/canvas`), session panel "Open in Canvas" | The scene's Hall mirror; the Whiteboard studio |
 
 ## 5. Agents
 
@@ -303,9 +407,9 @@ version with `provenance.accepted_variant`; 409 if main moved meanwhile unless
 
 `mockup_assist` (Product arena) and `canvas_assist` (Canvas) keep serving
 their legacy routes unchanged for this release: they write legacy storage and
-return legacy shapes, and the import mirrors their results into the graph as
-`sync` versions. Graph artifacts — including the imported ones — are assisted
-here.
+return legacy shapes, and the live sync mirrors their results into the graph
+as `sync` versions moments later (§4). Graph artifacts are assisted here; a
+mirrored one only after it is adopted (409 `mirrored` before).
 
 ### 5.2 References and citations
 
@@ -374,11 +478,14 @@ with people.
 - Learning v1 only proposes; rules apply after a person approves them. A rule
   approved after another pending one was approved re-appears as `conflict` and
   is re-proposed on the next pass.
-- The Product Design tab and Canvas keep their own storage and routes. Edits
-  made there reach the graph through the import's `sync` versions (next start
-  or `POST /design/admin/import`), not live — so Design Hall opens imported
-  artifacts read-only, with "Open in Product/Canvas" and "Make an editable
-  copy" (a `derived_from` fork).
+- Story attachments and Canvas scenes keep their own storage and routes. Edits
+  made there (an agent's mockup, the classic arena, a Canvas agent turn) reach
+  the graph live (§4: ~1.5 s after the last change), and the server keeps a
+  mirror read-only (409 `mirrored`) until someone adopts it ("Edit here") — or
+  makes an editable copy (a `derived_from` fork).
+- Version history pages: `GET …/versions?offset=&limit=` (default 200, cap
+  1000) answers the newest-first page plus `X-Total-Count`.
+- `shipped` names what shipped: it needs an approved version (409 otherwise).
 - `otto-site`, `otto-layout`, `otto-exhibit` are stored and link-indexed as
   generic JSON; their own validators land with their studios. `otto-brand`
   has its own validator and indexer (§9).
@@ -419,6 +526,12 @@ with people.
 
 - **409 on save** — the head moved since you loaded it; re-fetch
   `GET …/content` (its `X-Design-Version` header is the new base).
+- **409 with `code: "mirrored"`** — the artifact mirrors a Canvas scene or a
+  story attachment; edit it there, or "Edit here" (`POST …/adopt`) first.
+- **A Canvas / story edit doesn't show in the Hall** — the live sync logs
+  `design: live sync failed` / `design sync:` with the reason; `POST
+  /design/admin/import` re-runs the full pass.
+- **409 marking a design shipped** — approve a version first.
 - **A link shows `broken`** — the target artifact, version (`@vN`) or node
   (`#id`) doesn't exist; the save's `links.broken[].reason` says which.
 - **Search finds nothing** — check the daemon log for
@@ -431,27 +544,69 @@ with people.
 
 ## 8. The UI (`#/design`, `ui/src/modules/design-hall/`)
 
-The sidebar's **Design Hall** entry (Build group) replaces Canvas; `#/canvas`
-still routes (it is the Whiteboard studio, one ⌘K "Go to Canvas" away).
+Design Hall shares the sidebar's **Product** entry and is reached from ⌘K
+"Go to Product" / the Designs switch; `#/canvas` forwards here (§4.1) and has
+no ⌘K entry of its own.
 
 | Route | View |
 |---|---|
-| `#/design` · `#/design/spatial` | Lobby — Grid (prompt hero, the seven studios, Continue, Projects, Linked to Product, the learning + agent-activity rail) or the Spatial (beta) CSS gallery of project bays |
-| `#/design/a/<id>` | One artifact: breadcrumb, status ▾ (Approve is explicit and human-only), version strip, Compare (side by side / text Changes; Restore saves a NEW version), right panel Links (Uses / Used in, add/remove explicit links) + References (library search, Add as reference, Start from this, Compare, provenance lineage); a `scene3d` design opens the 3D Studio (§10) |
-| `#/design/p/<id>` · `#/design/studio/<studio>` · `#/design/story/<id>` | A project / a studio (with its classic-or-planned note) / the designs implementing a story |
-| `#/design/brand[/<id>]` · `#/design/learned[/rules\|/memory]` | The Brand Kit editor (§9; without an id it opens the most recent kit) · What Otto learned: Pending, Rules, Memory, Signals and Settings (approve / reject / roll back are human-only, via the self-improvement edit flow) |
+| `#/design` | Lobby — one prompt line (studio ▾ · brief · ⋯ · **Generate**), **All designs** (server-paged by keyset cursor, "Load more" past the first 60; Group by Recent · Story · Project; chips Studio ▾, Status ▾, Mine, Archived) and a rail with **Needs review** and **Agent activity**. Header: search, Import, New ▾ (one row per studio, Import file…, New project…) and ⋯ (Brand Kit, Team design rules, Archived designs). A workspace with no designs shows only a heading, the prompt and "Import a file". The retired `#/design/spatial` lands here |
+| `#/design/a/<id>` | One artifact: breadcrumb (a `?from=story/<id>` link adds "‹ <story>" back to that story's Design tab), status ▾ (Approve is explicit and human-only), a quiet save state (Saved / Saving… / Couldn’t save · Save again), ⋯, and a side panel **Otto · Versions · Links** (Otto first, the brief pinned on top; Links holds **Find references**: library search, Add as reference, Start from this, Compare, provenance lineage). A `scene3d` design opens the 3D Studio (§10) and an `otto-site` design Site Studio's own layout (§11); both carry the same panels |
+| `#/design/p/<id>` · `#/design/studio/<studio>` · `#/design/story/<id>` | A project / a studio (with a note on what it edits) / the designs implementing a story (an epic: its stories' too) — each a paged `DesignGrid` |
+| `#/design/brand[/<id>]` · `#/design/learned[/<tab>]` | The Brand Kit editor (§9; without an id it opens the most recent kit) · **Team design rules**: two tabs, Proposed (`pending`, alias `proposed`) and Active (`rules`, alias `active`); Signals, Design memory, Learning settings, the learning mode and Export rules are in its ⋯ menu (`signals` / `memory` / `settings` still route). Approve / reject / roll back are human-only, via the self-improvement edit flow |
 
-- **Generate.** The lobby prompt creates a draft in the chosen studio (the
-  brief is kept in `meta.brief`) and starts an agent turn — or a variants run
-  when Variants is 2–4 — opening the design on its Otto tab
-  (`#/design/a/<id>/otto`); "Draft only" skips generation. "Use references"
-  sends the team's closest past designs first as R1–R3. Frames/Graphics
+- **Generate.** The lobby prompt (Enter or Generate) creates a draft in the
+  chosen studio (the brief is kept in `meta.brief`) and starts an agent turn —
+  or a variants run when the ⋯ popover asks for 2–4 variants — opening the
+  design on its Otto tab (`#/design/a/<id>/otto`). The same ⋯ holds "Draft
+  only" (skip generation), "Use team references" (the team's closest past
+  designs go first as R1–R3, previewed under the box) and the project to file
+  it in; a line under the box names any non-default option. Frames/Graphics
   edit HTML (and SVG) as source with a live preview, 3D opens 3D Studio 1.5
   (§10), Whiteboard edits Mermaid/D2/Excalidraw, Site Studio opens its
-  section editor (§11); Spatial Hall shows its planned release instead of an
-  editor.
-- **Saving** is explicit (Save / ⌘S): `PUT …/content` with `base_version`; a
-  409 asks "Save mine on top" or "Load vN (discard my edits)".
+  section editor (§11).
+- **Cards** carry a text badge for a mirrored design (`source_kind`:
+  "From a story" / "From Canvas") and for an archived one. With the Archived
+  chip on (`GET /design/search?q=&status=archived&include_archived=true`),
+  each card offers **Unarchive** (`PATCH /design/artifacts/{id}` with
+  `{"status":"draft"}`). Mine filters the loaded pages on the client (the
+  list API has no author filter), so "Load more" keeps paging under it.
+- **New design sheet:** "Implements story" is a search-as-you-type menu over
+  every story in the workspace.
+- **Saving is automatic.** About 1.5 s after the last edit the view saves
+  (`PUT …/content` with `base_version`; the daemon labels it `autosave` and
+  squashes runs of them). The header shows **Saved / Saving… / Couldn’t save
+  · Save again**; leaving the page between an edit and its save still asks
+  first. A mirror, an archived or read-only design, or a version being viewed
+  is never autosaved. ⌘S (and ⋯ → **Save named version…**) commits a named
+  version with a message. A 409 asks "Save mine on top" or "Load vN (discard
+  my edits)".
+- **Versions tab.** Newest first: each row shows its message (named versions
+  stand out), author (agents marked), kind and an **Approved** mark; runs of
+  autosaves fold into "N autosaves". A row's **View** shows that version
+  alone, read-only, with **Back to current**; its ⋯ (and the viewed row)
+  offer **Compare with current**, **Restore** (a NEW version) and **Approve
+  this version**. ↑/↓ (Home/End) move through the list; **Load older** pages
+  with `offset`/`limit` against `X-Total-Count`. Compare (⋯ / ⌘K) shows a
+  version that failed to load inline with Retry, and its footer approves the
+  left version.
+- **Status.** An approved design edited afterwards reads **Approved v5 ·
+  edited** (followers keep v5). Approve is in the status menu, the Versions
+  rows, Compare, ⋯ and ⌘K. **Shipped** without an approved version answers
+  409 and the view says to approve one first. An archived design offers
+  **Unarchive** (back to Draft) in ⋯ and the status menu.
+- **Mirrors.** A design that mirrors a story attachment or a Canvas board
+  shows one banner — "From a story · This design mirrors a story attachment"
+  — with the origin link and **Edit here** (`POST …/adopt`), which turns
+  editing on in place; any write refused with 409 `mirrored` shows the same
+  banner. After adoption a newer source arrives in the Otto thread as
+  **Newer version from Product/Canvas** with **Accept** / **Keep mine** (Keep
+  mine hides it on this Mac) and Compare. A vanished source is a quiet note.
+  ⋯ → **Make a copy** still forks it.
+- **Export** (⋯ → Export…): PNG and SVG for Mermaid, D2 and Excalidraw; the
+  source file for every text format; the original file for a binary; and the
+  Blender script for a 3D scene that came from a story (a scene born in the
+  Hall has no script route yet). Helpers live in `ui/src/lib/design/exporters.ts`.
 - **Otto tab** (every studio): agent + model picker, live status from
   `design_assist_updated`, an attributed thread with verified citation chips
   (unverified ones flagged), quick actions (more engaging, accessibility,
@@ -466,9 +621,9 @@ still routes (it is the Whiteboard studio, one ⌘K "Go to Canvas" away).
 - **Live:** the `design_*` events refresh the lobby, the open artifact (a new
   head while you have unsaved edits shows a "newer version" notice instead of
   replacing your copy), its Links panel and the learning log.
-- **Product:** the story's Design tab shows a small graph of the designs that
-  implement it (an epic: its children's too) above the unchanged arena, with
-  "Open in Design Hall".
+- **Product:** the story's Design tab IS this library scoped to the story
+  (an epic: its children's too) — New design, Ask Otto, cards that open here
+  with `?from=story/<id>`; see §4.1.
 - **Approve** says what moves: "Rewards+ landing page follows Approved → now
   shows v8 · Launch social kit pins an older version (update available)".
 
@@ -528,7 +683,7 @@ local family stacks only: nothing is downloaded from a web-font CDN.
   swatch re-tint as you type (CSS custom properties; nothing is saved).
 - **Rule from team** chips: approved learned rules (`GET /design/learned`)
   that mention brand words, a token name or a colour's hue ("amber is never
-  text" for a `#FFB547` accent) link to What Otto learned.
+  text" for a `#FFB547` accent) link to Team design rules.
 - **Impact before save.** While token changes are unsaved, a banner says how
   many designs in how many studios they reach (`POST …/brand/impact`,
   debounced). **Save as vN** shows the impact preview first whenever designs
@@ -562,12 +717,13 @@ local family stacks only: nothing is downloaded from a web-font CDN.
 ## 10. 3D Studio 1.5 (`ui/src/modules/design-hall/studio3d/`)
 
 A `scene3d` design opens the studio layout (mockup S4). It edits the same
-working copy as every other design — Save / ⌘S, `base_version` conflicts,
-versions, Compare and Restore are the artifact view's — so everything below
+working copy as every other design — autosave, ⌘S named versions,
+`base_version` conflicts, versions, Compare and Restore are the artifact
+view's — so everything below
 is either an edit of the scene document, an agent turn, or a local export.
 
 ```
-┌ HIERARCHY ─────┬ ✨ Generate ▾ · Turntable · Play · Export ▾ · Source ─┬ Inspector · Otto · Links · Refs ┐
+┌ HIERARCHY ─────┬ ✨ Generate ▾ · Turntable · Play · Export ▾ · Source ─┬ Inspector · Otto · Versions · Links ┐
 │ tree (+ add)   │ VIEWPORT (three.js)                    view cube ⌝  │ transform · corner radius      │
 │ Environment    │                                                     │ material preset grid           │
 │ Views          │                                                     │ brand swatches · sliders       │
@@ -641,8 +797,11 @@ key, its host on the netguard allow-list, and a daemon route — none exist yet.
 
 Export ▾: **GLB** (three `GLTFExporter` from the live scene), **USDZ** (three
 `USDZExporter`, for iOS AR Quick Look), **PNG snapshot**, **PNG turntable** (8
-frames around the target in one sprite sheet), **Scene JSON**. The Blender
-script stays a Product-arena export for now.
+frames around the target in one sprite sheet), **Scene JSON**, and the
+**Blender script (.py)** for a scene that came from a Product story. An Otto
+turn started here (Generate, Refine in Blender) is followed by the
+`design_assist_updated` push events, not polling; two failed reads of its
+outcome show an inline error with Retry.
 
 **Optimize for web** exports the GLB and runs gltf-transform + meshoptimizer
 in the webview (a lazy chunk, loaded on first use; no network): dedup → prune
@@ -697,22 +856,28 @@ Studio](../contracts/api.md).
 
 ### Create a site
 
-**New design → Site Studio** (the lobby's studio tile or the New ▾ menu)
+**New design → Site Studio** (the New ▾ menu, or Site Studio in the prompt's studio picker)
 offers six starters in **Start from**: Landing page, Product launch, Event,
 Portfolio, Docs home and Waitlist — real copy, motion presets and brand
 tokens only (no raw colours), each passing the contrast checks with the
 default palette. **Blank** opens the same six as live, brand-themed
 thumbnails inside the studio ("Start your site"). Picking one edits the working
-copy only; **Save** (⌘S) makes it a version. When the project has a brand kit,
+copy, which autosaves as a version (⌘S makes a named one). When the project has a brand kit,
 the template names it in the document (`brand`), so the kit's impact preview
 counts the site.
 
 ### The editor
 
+- **Layout.** The artifact view mounts Site Studio directly (one toolbar, no
+  Source toggle): Pages · Layers · Blocks | canvas | a right column with
+  **Design · Otto · Versions · Links** (Design — the inspector — first). At
+  ≤ 900 px the right column stacks under the left one; at ≤ 700 px the Page /
+  Blocks / Design switch shows one panel at a time (Design holds all four tabs).
 - **Toolbar**: Desktop 1280 / Tablet 834 / Mobile 390, zoom (Fit, 50–100 %),
   **Motion** (play the presets on the canvas; editing keeps them still),
-  undo / redo (⌘Z / ⇧⌘Z), a "N to fix" chip when a check fails, **Preview**
-  and **Publish ▾**.
+  undo / redo (⌘Z / ⇧⌘Z), a "N to fix" chip when a check fails, the view's
+  notices (viewing an older version, a newer version saved), **Preview** and
+  **Publish ▾**.
 - **Left — Pages · Layers · Blocks.** Pages: add, rename, make home, delete
   (confirmed; undo brings it back). Layers: the page's sections (drag to
   reorder, eye = hide everywhere, a glyph when hidden at a breakpoint, a link
@@ -780,9 +945,7 @@ counts the site.
 - Both record a publish whose **pinned set** is the site version, its kit and
   the exact version of every embed and image it rendered — reproducible, and
   protected from the retention prune. "Recent publishes" lists them.
-- **Export as Svelte project** (v2) and **Publish as claude.ai artifact**
-  (coming soon) are shown disabled; nothing is ever sent outside this Mac
-  from Site Studio today.
+- Nothing is ever sent outside this Mac from Site Studio.
 
 ### Troubleshooting
 
@@ -794,7 +957,7 @@ counts the site.
   one (Design inspector → Brand) or set the project's kit.
 - **A 3D embed shows a stand-in card** — no 3D artifact picked, it was
   deleted, you can't view its workspace, or (export) it has no thumbnail yet.
-- **The export lacks my latest change** — it exports the saved version; press
-  Save first.
+- **The export lacks my latest change** — it exports the saved version; wait
+  for "Saved" in the header.
 - **Local preview opens in the browser as 401** — it is bearer-authenticated;
   open it from Publish ▾ inside Otto.

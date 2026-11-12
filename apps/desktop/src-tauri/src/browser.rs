@@ -43,6 +43,43 @@ fn label(id: &str) -> String {
     format!("{PREFIX}{id}")
 }
 
+/// The in-app browser's OWN WebKit data store (cookies, cache, site storage),
+/// apart from the default store Otto's own window uses — so "Clear browsing
+/// data" can never sign Otto itself out. One store for every tab of every
+/// workspace and window. Any 16 bytes name a store; fixed so it persists.
+const BROWSER_DATA_STORE: [u8; 16] = *b"otto-browser-v1\0";
+
+/// `WKWebsiteDataStore(forIdentifier:)` needs macOS 14. Below it wry silently
+/// falls back to the DEFAULT store (wry `wkwebview/mod.rs`), i.e. Otto's own:
+/// tabs then share it as before, and clearing is refused.
+fn own_data_store() -> bool {
+    static OK: OnceLock<bool> = OnceLock::new();
+    *OK.get_or_init(|| {
+        std::fs::read_to_string("/System/Library/CoreServices/SystemVersion.plist")
+            .ok()
+            .and_then(|p| macos_major(&p))
+            .is_some_and(|v| v >= 14)
+    })
+}
+
+/// The major version in a `SystemVersion.plist` body (`ProductVersion`).
+fn macos_major(plist: &str) -> Option<u32> {
+    let after = plist.split("<key>ProductVersion</key>").nth(1)?;
+    let v = after.split("<string>").nth(1)?.split('<').next()?;
+    v.trim().split('.').next()?.parse().ok()
+}
+
+/// `builder` on the browser's own data store, where macOS has one.
+fn with_browser_store<R: tauri::Runtime>(
+    builder: tauri::webview::WebviewBuilder<R>,
+) -> tauri::webview::WebviewBuilder<R> {
+    if own_data_store() {
+        builder.data_store_identifier(BROWSER_DATA_STORE)
+    } else {
+        builder
+    }
+}
+
 /// Browser tabs are for web pages only: `http(s)` plus `about:blank`. Anything
 /// else (`file:`, `tauri:`, `asset:`, custom app schemes, `javascript:`…) is
 /// refused — a tab must never become a way to read local files or reach an
@@ -139,7 +176,8 @@ pub fn browser_open(
     let app_new = app.clone();
     let lbl_seen = lbl.clone();
     set_shown(&lbl, Some(&parsed));
-    let builder = tauri::webview::WebviewBuilder::new(&lbl, WebviewUrl::External(parsed))
+    let builder = tauri::webview::WebviewBuilder::new(&lbl, WebviewUrl::External(parsed));
+    let builder = with_browser_store(builder)
         .transparent(false)
         // Track in-page navigation for the address bar (never calls url()).
         .on_navigation(move |u: &tauri::Url| {
@@ -348,9 +386,73 @@ pub fn browser_close_all(app: tauri::AppHandle, window: tauri::Window) {
     }));
 }
 
+/// Clear the in-app browser's cookies, cache and site storage — every tab of
+/// every workspace (one shared store), signing the person out of the sites
+/// they opened in it. Otto's own window is a different store and is never
+/// touched; on macOS before 14 (no separate store) this is refused instead.
+/// WebKit clears asynchronously; a page already loaded keeps its in-memory
+/// state until it reloads.
+#[tauri::command]
+pub fn browser_clear_data(app: tauri::AppHandle, window: tauri::Window) -> Result<(), String> {
+    if !own_data_store() {
+        return Err(
+            "Clearing browsing data needs macOS 14 or later — before it the browser \
+                    shares its storage with Otto itself."
+                .into(),
+        );
+    }
+    // Every tab (and a helper still closing) shares the store: any one clears it all.
+    if let Some((_, wv)) = app
+        .webviews()
+        .into_iter()
+        .find(|(l, _)| l.starts_with(PREFIX) || l == CLEAR_LABEL)
+    {
+        return catch_unwind(AssertUnwindSafe(|| wv.clear_all_browsing_data()))
+            .map_err(|_| "browser webview panicked while clearing".to_string())?
+            .map_err(|e| e.to_string());
+    }
+    // No tab open: a hidden blank webview on the same store does it, then goes.
+    let blank = tauri::Url::parse("about:blank").map_err(|e| e.to_string())?;
+    let builder = with_browser_store(tauri::webview::WebviewBuilder::new(
+        CLEAR_LABEL,
+        WebviewUrl::External(blank),
+    ));
+    let wv = window
+        .add_child(
+            builder,
+            LogicalPosition::new(0.0, 0.0),
+            LogicalSize::new(1.0, 1.0),
+        )
+        .map_err(|e| e.to_string())?;
+    let _ = wv.hide();
+    let cleared = wv.clear_all_browsing_data().map_err(|e| e.to_string());
+    // Let WebKit's removal start before the webview goes.
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let _ = wv.close();
+    });
+    cleared
+}
+
+/// The hidden helper webview of [`browser_clear_data`] (not a tab: no `PREFIX`).
+const CLEAR_LABEL: &str = "otto-clear-browser-data";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_browser_store_is_its_own_and_needs_macos_14() {
+        assert_eq!(BROWSER_DATA_STORE.len(), 16);
+        assert!(!CLEAR_LABEL.starts_with(PREFIX));
+        let plist = |v: &str| {
+            format!("<dict>\n\t<key>ProductName</key>\n\t<string>macOS</string>\n\t<key>ProductVersion</key>\n\t<string>{v}</string>\n</dict>")
+        };
+        assert_eq!(macos_major(&plist("14.5")), Some(14));
+        assert_eq!(macos_major(&plist("26.1")), Some(26));
+        assert_eq!(macos_major(&plist("13.6.7")), Some(13));
+        assert_eq!(macos_major("<dict></dict>"), None);
+    }
 
     #[test]
     fn tabs_accept_only_web_urls() {

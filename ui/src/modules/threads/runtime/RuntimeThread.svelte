@@ -58,6 +58,13 @@
   import RuntimeAttachments from './RuntimeAttachments.svelte';
   import RuntimeLinkedThreads from './RuntimeLinkedThreads.svelte';
   import RuntimeUiControl from './RuntimeUiControl.svelte';
+  import RuntimeBannerStack from './RuntimeBannerStack.svelte';
+  import RuntimeWorkFold from './RuntimeWorkFold.svelte';
+  import type { BannerBlock } from './banners';
+  import { shouldFold } from './workLog';
+  import { threadCall } from './agentRows';
+  import RuntimeThreadCallRow from './RuntimeThreadCallRow.svelte';
+  import { uiControl } from '../../../lib/stores/uiControl.svelte';
   import RuntimeWorkGroup from './RuntimeWorkGroup.svelte';
   import RuntimeSubagentCard from './RuntimeSubagentCard.svelte';
   import RuntimeWorkRow from './RuntimeWorkRow.svelte';
@@ -120,6 +127,19 @@
     const pl = p.plans.findLast((x) => x.turn_id === turn.id);
     return pl && pl.steps.some((s) => s.status !== 'completed') ? pl : null;
   });
+
+  // ── Above the composer: one stack, one order (RuntimeBannerStack) ──────
+  const uiAsk = $derived(!!session && !closed && !auth.isImpersonating && session.created_by === auth.me?.id && !!uiControl.promptFor(sessionId));
+  const queueShown = $derived((background.length > 0 && !closed) || (p?.queued.length ?? 0) > 0 || needsRevive);
+  const banners = $derived.by((): BannerBlock[] => [
+    ...(sessionError ? [{ key: 'error', label: 'error', urgent: true }] : []),
+    ...(uiAsk ? [{ key: 'ui', label: 'UI control request', urgent: true }] : []),
+    ...(p?.requests.some((r) => r.kind === 'question') ? [{ key: 'questions', label: 'questions', urgent: true }] : []),
+    ...(plan ? [{ key: 'plan', label: 'plan' }] : []),
+    ...(queueShown ? [{ key: 'queue', label: needsRevive ? 'revive' : 'queue' }] : []),
+    ...(draft.freshContext ? [{ key: 'fresh', label: 'fresh context' }] : []),
+  ]);
+  const pendingIds = $derived(new Set(approvals.keys()));
 
   let scroller = $state<HTMLDivElement | null>(null);
   let composerEl = $state<HTMLTextAreaElement | null>(null);
@@ -317,8 +337,11 @@
 
 {#snippet entryRow({ item, approval }: WorkEntry)}
   {@const pending = item.type === 'approval_request' ? approvals.get(item.request_id) : undefined}
+  {@const call = item.type === 'dynamic_tool' && !item.error && !approval ? threadCall(item) : null}
   {#if item.type === 'subagent'}
     <RuntimeSubagentCard {item} activity={children.get(item.id) ?? []} output={p?.output} />
+  {:else if call}
+    <RuntimeThreadCallRow {item} {call} />
   {:else if pending}
     <RuntimeApprovalRow approval={pending} onrespond={respond} />
   {:else}
@@ -331,13 +354,15 @@
       note={ask && !gate ? approvalOutcome(ask, requests.get(ask.request_id), agentName) : null}
       onrespond={respond}
       agentId={agentChatId}
+      cwd={session?.cwd}
     />
   {/if}
 {/snippet}
 
 <section class="rt" class:compact aria-label="Conversation" data-testid="runtime-thread-{sessionId}">
-  <RuntimeLinkedThreads {sessionId} {onswitch} />
-  <RuntimeUiControl {sessionId} />
+  <!-- In Threads the header's Related threads chip carries the group; an
+       embed (Personal Agents, a PR, Connections) gets a chip of its own. -->
+  {#if onswitch}<RuntimeLinkedThreads {sessionId} {onswitch} />{/if}
   <div class="rt-scroll" bind:this={scroller}>
     <div class="rt-col">
       <LoadState what="conversation" loading={!p && !loadError} error={p ? staleError : loadError} empty={!p} onretry={() => runtimeViews.retry(sessionId)}>
@@ -368,16 +393,19 @@
               <Markdown md={row.item.text} />
             </div>
           {:else if row.kind === 'work'}
+            {@const flat = row.parts.flatMap((part) => (part.kind === 'group' ? part.entries : [part.entry]))}
             <div class="rt-work">
-              {#each row.parts as part (part.kind === 'group' ? part.id : part.entry.item.id)}
-                {#if part.kind === 'item'}
-                  {@render entryRow(part.entry)}
-                {:else}
-                  <RuntimeWorkGroup id={part.id} entries={part.entries} open={part.entries.some((e) => e.approval && approvals.has(e.approval.request_id))}>
-                    {#each part.entries as e (e.item.id)}{@render entryRow(e)}{/each}
-                  </RuntimeWorkGroup>
-                {/if}
-              {/each}
+              <RuntimeWorkFold id={row.id} entries={flat} fold={!!p && shouldFold(flat, p.turns, pendingIds)}>
+                {#each row.parts as part (part.kind === 'group' ? part.id : part.entry.item.id)}
+                  {#if part.kind === 'item'}
+                    {@render entryRow(part.entry)}
+                  {:else}
+                    <RuntimeWorkGroup id={part.id} entries={part.entries} cwd={session?.cwd} open={part.entries.some((e) => e.approval && approvals.has(e.approval.request_id))}>
+                      {#each part.entries as e (e.item.id)}{@render entryRow(e)}{/each}
+                    </RuntimeWorkGroup>
+                  {/if}
+                {/each}
+              </RuntimeWorkFold>
             </div>
           {/if}
         {/each}
@@ -388,34 +416,40 @@
   <RuntimeFollow {scroller} seq={p?.lastSequence} messageIds={rows.flatMap((r) => (r.kind === 'message' ? [r.item.id] : []))} />
 
   <div class="rt-dock">
-    {#if sessionError}
-      <p class="rt-banner" dir="auto" use:announceShown={{ text: sessionError, assertive: true }}><Icon name="warning" size={13} />{sessionError}</p>
-    {/if}
-    {#if plan}<RuntimePlan {plan} />{/if}
-    {#if p?.requests.some(request => request.kind === 'question')}
-      <LazyMount lazy={RuntimeQuestions} what="the questions" variant="compact" props={{ requests: p.requests, sessionId, agent: agentName, onanswered: () => composerEl?.focus() }} />
-    {/if}
-    <RuntimeQueueBar
-      {sessionId}
-      {background}
-      queued={p?.queued ?? []}
-      {running}
-      canSteer={provider === 'claude'}
-      {closed}
-      {dormant}
-      reopening={draft.reopening}
-      onreopen={() => void reopen()}
-      onedit={(t) => {
-        draft.text = mergeQueuedEdit(draft.text, t);
-        composerEl?.focus();
-      }}
-    />
-    {#if draft.freshContext}
-      <div class="rt-fresh" data-testid="runtime-fresh-notice" use:announceShown={'Next message starts fresh'}>
-        <span>Next message starts fresh</span>
-        <button type="button" class="btn small ghost" onclick={() => { draft.freshContext = false; composerEl?.focus(); }}>Cancel</button>
-      </div>
-    {/if}
+    <RuntimeBannerStack blocks={banners}>
+      {#snippet block(key: string)}
+        {#if key === 'error' && sessionError}
+          <p class="rt-banner" dir="auto" use:announceShown={{ text: sessionError, assertive: true }}><Icon name="warning" size={13} />{sessionError}</p>
+        {:else if key === 'ui'}
+          <RuntimeUiControl {sessionId} />
+        {:else if key === 'questions' && p}
+          <LazyMount lazy={RuntimeQuestions} what="the questions" variant="compact" props={{ requests: p.requests, sessionId, agent: agentName, onanswered: () => composerEl?.focus() }} />
+        {:else if key === 'plan' && plan}
+          <RuntimePlan {plan} />
+        {:else if key === 'queue'}
+          <RuntimeQueueBar
+            {sessionId}
+            {background}
+            queued={p?.queued ?? []}
+            {running}
+            canSteer={provider === 'claude'}
+            {closed}
+            {dormant}
+            reopening={draft.reopening}
+            onreopen={() => void reopen()}
+            onedit={(t) => {
+              draft.text = mergeQueuedEdit(draft.text, t);
+              composerEl?.focus();
+            }}
+          />
+        {:else if key === 'fresh'}
+          <div class="rt-fresh" data-testid="runtime-fresh-notice" use:announceShown={'Next message starts fresh'}>
+            <span>Next message starts fresh</span>
+            <button type="button" class="btn small ghost" onclick={() => { draft.freshContext = false; composerEl?.focus(); }}>Cancel</button>
+          </div>
+        {/if}
+      {/snippet}
+    </RuntimeBannerStack>
     <div class="rt-composer">
       {#if suggestions.length > 0}
         <StageSlashPopup id={popId} items={suggestions} active={cmdIdx} onaccept={acceptCmd} onhover={(i) => (cmdIdx = i)} />

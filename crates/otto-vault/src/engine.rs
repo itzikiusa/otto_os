@@ -125,6 +125,9 @@ pub struct VaultEngine {
     fts_ok: std::sync::atomic::AtomicU8, // 0 unknown / 1 yes / 2 no
     fts_probe: tokio::sync::Mutex<()>,
     fts_failed_at: Mutex<Option<std::time::Instant>>,
+    /// Full-text backfill/rebuild state and the snippet scratch connection
+    /// (`search_index.rs`).
+    pub(crate) search_index: crate::search_index::SearchIndexes,
     #[cfg(test)]
     pub(crate) okf_pause: Mutex<
         Option<(
@@ -175,6 +178,7 @@ impl VaultEngine {
             fts_ok: std::sync::atomic::AtomicU8::new(0),
             fts_probe: Default::default(),
             fts_failed_at: Default::default(),
+            search_index: Default::default(),
             #[cfg(test)]
             okf_pause: Default::default(),
             watches: Mutex::new(HashMap::new()),
@@ -190,7 +194,7 @@ impl VaultEngine {
         &self.store
     }
 
-    async fn fts_ready(&self) -> bool {
+    pub(crate) async fn fts_ready(&self) -> bool {
         match self.fts_ok.load(Ordering::Relaxed) {
             1 => true,
             2 => false,
@@ -230,6 +234,11 @@ impl VaultEngine {
                 }
             }
         }
+    }
+
+    /// FTS5 already probed and available (no probe, no await).
+    pub(crate) fn fts_known_ready(&self) -> bool {
+        self.fts_ok.load(Ordering::Relaxed) == 1
     }
 
     async fn fts_indexing(&self) -> crate::store::FtsIndexing {
@@ -682,6 +691,9 @@ impl VaultEngine {
                     break;
                 }
             }
+            // The scan probed FTS5: a first start after the v2 upgrade (or a
+            // lost index) begins its background backfill here.
+            eng.kick_search_backfill(id);
         });
     }
 
@@ -697,6 +709,7 @@ impl VaultEngine {
         if now - cell.load(Ordering::Relaxed) > window {
             self.kick_scan(id);
         }
+        self.kick_search_backfill(id);
     }
 
     /// Rescan after a filesystem mutation that has ALREADY succeeded (move to
@@ -1038,6 +1051,7 @@ impl VaultEngine {
         status.generation = Some(key.0.to_string());
         status.graph_generation = Some(key.1.to_string());
         status.tracked_recovery = Self::tracked_recovery_dirs(&v_root).await;
+        status.search_index = self.search_index_status(id).await;
         Ok(status)
     }
 
@@ -1837,8 +1851,13 @@ impl VaultEngine {
         }
         let src_now = src.to_string();
         let abs = Self::abs_guarded(root, &src_now)?;
-        let Ok(content) = tokio::fs::read_to_string(&abs).await else {
-            return Ok(0);
+        // A source removed since the index was read has nothing left to fix;
+        // any other read failure (not UTF-8, permissions) must surface in
+        // `links_failed` — it used to count as "0 links, success".
+        let content = match tokio::fs::read_to_string(&abs).await {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(Error::Internal(format!("read {src_now}: {e}"))),
         };
         // The source itself may have moved: resolve raw targets from its OLD
         // location (that is how they were written).
@@ -1873,6 +1892,14 @@ impl VaultEngine {
             Some(fixed)
         });
         if new_content != content && count_here > 0 {
+            // An external editor that saved since the read above wins: the
+            // source is reported in `links_failed`, never overwritten.
+            let (parent, name) = Self::text_parent(root, &src_now)?;
+            if Self::text_file_bytes(&parent, &name).await?.as_deref() != Some(content.as_bytes()) {
+                return Err(Error::Conflict(format!(
+                    "{src_now} changed while its links were being rewritten"
+                )));
+            }
             let revision = Self::prepare_revision(
                 root,
                 &src_now,
@@ -1882,7 +1909,6 @@ impl VaultEngine {
                 false,
             )
             .await?;
-            let (parent, name) = Self::text_parent(root, &src_now)?;
             state.mutated(&[&src_now]);
             Self::atomic_replace_at(&parent, &name, new_content.as_bytes()).await?;
             Self::commit_revision(root, revision).await?;
@@ -1898,7 +1924,17 @@ impl VaultEngine {
         id: i64,
         req: &SearchReq,
     ) -> Result<Vec<SearchHit>> {
-        self.get_scoped(ws, id).await?;
+        Ok(self.search_page(ws, id, req).await?.hits)
+    }
+
+    /// [`Self::search`] plus the index completeness the hits were drawn from.
+    pub async fn search_page(
+        self: &Arc<Self>,
+        ws: &str,
+        id: i64,
+        req: &SearchReq,
+    ) -> Result<SearchPage> {
+        let v = self.get_scoped(ws, id).await?;
         self.ensure_fresh(id);
         let limit = if req.limit == 0 || req.limit > 200 {
             50
@@ -1932,6 +1968,7 @@ impl VaultEngine {
             okf_type: okf_type.as_deref().filter(|t| !t.is_empty()),
         };
         use crate::store::SearchMode;
+        let mut fts_page = None;
         let hits = if !text.trim().is_empty() && self.fts_ready().await {
             let expr = fts_expr(&text);
             let got = self
@@ -1939,6 +1976,9 @@ impl VaultEngine {
                 .search_filtered(id, SearchMode::Fts(&expr), &filters, limit)
                 .await
                 .unwrap_or_default();
+            if !got.is_empty() {
+                fts_page = Some(expr);
+            }
             if got.is_empty() {
                 self.store
                     .search_filtered(id, SearchMode::Like(&text), &filters, limit)
@@ -1955,7 +1995,7 @@ impl VaultEngine {
                 .search_filtered(id, SearchMode::FilterOnly, &filters, limit)
                 .await?
         };
-        Ok(hits
+        let mut hits: Vec<SearchHit> = hits
             .into_iter()
             .map(|(path, title, snippet, score, reserved)| SearchHit {
                 path,
@@ -1964,7 +2004,16 @@ impl VaultEngine {
                 score,
                 reserved,
             })
-            .collect())
+            .collect();
+        if let Some(expr) = fts_page {
+            self.fill_snippets(&v.root_path, &expr, &mut hits).await;
+        }
+        let index = if text.trim().is_empty() {
+            None
+        } else {
+            self.search_index_status(id).await
+        };
+        Ok(SearchPage { hits, index })
     }
 
     pub async fn switcher(self: &Arc<Self>, ws: &str, id: i64, q: &str) -> Result<Vec<SwitchHit>> {
@@ -2783,7 +2832,7 @@ fn fuzzy_score(query: &str, cand: &str) -> Option<f32> {
 }
 
 /// Build a safe FTS5 MATCH expression: bare terms, quoted, prefix-matched.
-fn fts_expr(text: &str) -> String {
+pub(crate) fn fts_expr(text: &str) -> String {
     text.split_whitespace()
         .map(|t| format!("\"{}\"*", t.replace('"', "")))
         .collect::<Vec<_>>()
@@ -2824,6 +2873,10 @@ mod performance_tests;
 #[cfg(test)]
 #[path = "durability_tests.rs"]
 mod durability_tests;
+
+#[cfg(test)]
+#[path = "rename_tests.rs"]
+mod rename_tests;
 
 /// The first line of `content` mentioning the backlink target (its lowercased
 /// stem or path), trimmed and capped at 240 chars.

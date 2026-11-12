@@ -115,7 +115,11 @@ export interface LoopAgentState {
 
 export interface EvalCriterion {
   id: string;
+  /** Never true with blank evidence (the engine stores that as not met). */
   met: boolean;
+  /** For a command criterion: its exit-status line, then
+   *  "\n--- verify output ---\n" and the output's last 8 KB
+   *  (split with `splitEvidence` in modules/loops/loopSafety.ts). */
   evidence: string;
 }
 

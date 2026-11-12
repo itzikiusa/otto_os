@@ -186,6 +186,10 @@ export function groupSkills(
       } else if (bun.bundledState === 'ahead') {
         drift.push(`Library copy (v${bun.installedVersion ?? '?'}) is ahead of bundled v${bun.bundledVersion}`);
         driftedSources.push('bundled');
+      } else if (bun.bundledState === 'modified') {
+        // Edited since Otto installed it, whatever `version:` says.
+        drift.push(`Library copy was edited since it was installed from bundled v${bun.bundledVersion}`);
+        driftedSources.push('bundled');
       }
     }
 

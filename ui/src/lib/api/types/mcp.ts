@@ -97,6 +97,8 @@ export interface McpServerDetail {
   secret_header_keys: string[];
   has_secret: boolean;
   injection_risk: McpInjectionRisk;
+  /** The run mode: `true` governed (Otto's gateway), `false` native (the
+   *  agent CLI launches it from `.mcp.json`; nothing governed). */
   managed: boolean;
   default_tool_access: McpToolAccess;
   enabled: boolean;
@@ -127,6 +129,12 @@ export interface McpToolView {
   enabled: boolean;
   require_approval: boolean;
   risk_overridden: boolean;
+  /** New to an already-reviewed server: discovered disabled, not yet enabled
+   *  or acknowledged by a person. */
+  unreviewed: boolean;
+  /** Description / schema / annotations changed since a person reviewed the
+   *  tool: every call needs approval until it is acknowledged. */
+  changed_since_review: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -171,6 +179,9 @@ export interface UpdateMcpControlServerReq {
   injection_risk?: McpInjectionRisk;
   default_tool_access?: McpToolAccess;
   enabled?: boolean;
+  /** Native ⇄ governed (owner only). `native` needs a stdio server. The
+   *  response's `managed` is the new mode (`false` = native). */
+  runs?: 'native' | 'governed';
 }
 
 /** `PATCH /mcp/tools/{toolId}` — per-tool permission + risk override. */
@@ -179,6 +190,8 @@ export interface PatchMcpToolReq {
   require_approval?: boolean;
   risk_label?: McpRiskLabel;
   injection_risk?: McpInjectionRisk;
+  /** A person reviewed the tool's current description / schema. */
+  acknowledge?: boolean;
 }
 
 /** `POST /mcp/servers/{id}/tools/{name}/invoke` body. */

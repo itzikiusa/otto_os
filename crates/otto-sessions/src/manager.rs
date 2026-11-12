@@ -2509,7 +2509,7 @@ impl SessionManager {
                 let hook = Arc::clone(hook);
                 let ws_owned = ws.clone();
                 let cwd = session.cwd.clone();
-                let prov = session.provider.clone();
+                let (prov, persona) = (session.provider.clone(), runtime_spawn::persona(&session));
                 let context = (account.is_some() || project_context.is_some()).then(|| {
                     otto_core::hooks::SessionSpawnContext {
                         namespace: session.id.clone(),
@@ -2519,7 +2519,7 @@ impl SessionManager {
                 });
                 let injection = tokio::task::spawn_blocking(move || match context {
                     Some(context) => hook.before_spawn_session(&ws_owned, &cwd, &prov, &context),
-                    None => hook.before_spawn(&ws_owned, &cwd, &prov),
+                    None => runtime_spawn::inject(&*hook, &ws_owned, &cwd, &prov, persona),
                 })
                 .await
                 .unwrap_or_default();
@@ -5126,7 +5126,7 @@ impl SessionManager {
         if let (Some(hook), Some(workspace)) = (&self.pre_spawn_hook, workspace) {
             let hook = Arc::clone(hook);
             let cwd = session.cwd.clone();
-            let provider = session.provider.clone();
+            let (provider, persona) = (session.provider.clone(), runtime_spawn::persona(&session));
             let context = (account.is_some() || project_context.is_some()).then(|| {
                 otto_core::hooks::SessionSpawnContext {
                     namespace: session.id.clone(),
@@ -5136,7 +5136,7 @@ impl SessionManager {
             });
             let injection = tokio::task::spawn_blocking(move || match context {
                 Some(context) => hook.before_spawn_session(&workspace, &cwd, &provider, &context),
-                None => hook.before_spawn(&workspace, &cwd, &provider),
+                None => runtime_spawn::inject(&*hook, &workspace, &cwd, &provider, persona),
             })
             .await
             .unwrap_or_default();

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { budgetCap, extendDefaults, hasBudgetLeft } from '../src/modules/loops/budget.ts';
+import { budgetCap, extendBlocker, extendDefaults, hasBudgetLeft } from '../src/modules/loops/budget.ts';
 
 function loop(over: Record<string, unknown> = {}) {
   return {
@@ -19,6 +19,14 @@ test('the cap named by the engine error wins, else the counters decide', () => {
   assert.equal(budgetCap(loop({ iterations_started: 1 }), 10), null);
 });
 
+test('an exhausted loop’s summary names the cap, including Otto’s 4 h run cap', () => {
+  const runCap = 'time cap reached: Otto stops a run after 4 hours of active time';
+  assert.equal(budgetCap(loop({ iterations_started: 1, status: 'exhausted', summary: runCap }), 10), 'runtime');
+  assert.equal(budgetCap(loop({ iterations_started: 1, status: 'exhausted', summary: 'iteration cap reached' }), 10), 'iterations');
+  // A resumed loop keeps its old summary; only the counters speak then.
+  assert.equal(budgetCap(loop({ iterations_started: 1, status: 'paused', summary: runCap }), 10), null);
+});
+
 test('a plain resume is offered only while budget remains', () => {
   assert.equal(hasBudgetLeft(loop(), 10), false);
   assert.equal(hasBudgetLeft(loop({ iterations_started: 4 }), 10), true);
@@ -32,4 +40,18 @@ test('the extend prefill is current + 50% and always above what is used', () => 
   // Tiny caps still grow by at least one.
   const tiny = loop({ iterations_started: 1, limits: { max_iterations: 1, max_runtime_secs: 60, per_phase_timeout_secs: 60, max_attempts_per_executor: 1 } });
   assert.deepEqual(extendDefaults(tiny, 60), { max_iterations: 2, runtime_minutes: 2 });
+});
+
+test('the extend dialog names the limit that still has no room', () => {
+  const used = { iterations_started: 5 } as never;
+  assert.equal(extendBlocker(used, 3600, 0, 90), 'Iterations and runtime must be positive whole numbers.');
+  assert.equal(extendBlocker(used, 3600, 5, 90), 'Raise Max iterations to at least 6: 5 are already used.');
+  assert.equal(extendBlocker({ iterations_started: 1 } as never, 10, 1, 90), 'Raise Max iterations to at least 2: 1 is already used.');
+  assert.equal(
+    extendBlocker(used, 3600, 8, 60),
+    'Raise Max runtime to at least 61 minutes: 60 min of active time is already used.',
+  );
+  assert.equal(extendBlocker(used, 3600, 8, 61), null);
+  // A loop Otto's 4 h run cap stopped already has room under its own limits.
+  assert.equal(extendBlocker(used, 4 * 3600, 8, 12 * 60), null);
 });

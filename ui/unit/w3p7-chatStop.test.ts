@@ -34,7 +34,6 @@ function announcer() {
 }
 
 for (const [file, idKey, load, stop, reloadLabel] of [
-  ['DiscoveryChat', 'cid', 'loadChat', 'stopDiscoveryTurn', 'Reload chat'],
   ['RefineChat', 'tid', 'loadThread', 'stopRefinementTurn', 'Reload thread'],
 ] as const) {
   const url = new URL(`../src/modules/product/${file}.svelte`, import.meta.url);

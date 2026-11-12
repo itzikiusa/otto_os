@@ -290,7 +290,7 @@ registerUiCommands('kubernetes', {
           confirmLabel: verb,
         }),
       );
-      if (ok && destructive) merged.confirm_name = args.name;
+      if (ok && (destructive || c.environment === 'prod')) merged.confirm_name = args.name;
     } else if (def.danger) {
       ctx.progress(`Waiting for you to confirm: ${what}`, true);
       ok = await dismissOnAbort(

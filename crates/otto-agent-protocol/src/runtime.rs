@@ -15,6 +15,8 @@
 //! run on a per-session persister task fed in that order.
 
 mod auto_close;
+mod council;
+mod descendants;
 mod fresh;
 mod request_ids;
 use request_ids::RequestIds;
@@ -310,6 +312,11 @@ struct State {
     stream_emitted: HashMap<Id, Instant>,
     /// When the session last emitted anything (the stall watchdog's clock).
     last_activity: Instant,
+    /// Prompts between admission and their turn's start (spawn, resume,
+    /// attachments), and a Stop that landed meanwhile: it stops the turn
+    /// once it runs (T3 Code #34912) instead of finding nothing to stop.
+    starting: u32,
+    stop_requested: bool,
 }
 
 impl State {
@@ -597,6 +604,19 @@ impl AgentRuntime {
             .collect())
     }
 
+    /// 409 when `c`'s linked group has no room for another thread. One
+    /// confused agent must not fan out without bound: `group` lists the OPEN
+    /// threads of this linked group, the root included.
+    async fn ensure_group_room(&self, c: &RuntimeSession) -> Result<()> {
+        if self.group(c).await?.len() > MAX_LINKED_OPEN {
+            return Err(Error::Conflict(format!(
+                "this thread group already has {MAX_LINKED_OPEN} open linked threads — close \
+                 one (otto_thread_close) before opening another"
+            )));
+        }
+        Ok(())
+    }
+
     fn peer_info(s: &RuntimeSession, caller: &Id) -> PeerInfo {
         PeerInfo {
             id: s.id.clone(),
@@ -643,18 +663,23 @@ impl AgentRuntime {
     /// meta (a delegated personal agent); a read-only opener's thread is
     /// read-only too, whatever `req.meta` says.
     pub async fn open_peer(&self, caller: &Id, req: OpenPeerReq) -> Result<RuntimeSession> {
+        self.open_linked(caller, req, true).await
+    }
+
+    /// [`Self::open_peer`]. `framed = false` (daemon-only) sends the opening
+    /// prompt as it is, without the "Opened by …" header: a prompt the daemon
+    /// built itself (a council synthesis) that no thread's agent wrote.
+    async fn open_linked(
+        &self,
+        caller: &Id,
+        req: OpenPeerReq,
+        framed: bool,
+    ) -> Result<RuntimeSession> {
         let c = self.get(caller).await?;
         if c.status == RuntimeSessionStatus::Closed {
             return Err(Error::Conflict("the session is closed".into()));
         }
-        // One confused agent must not fan out without bound: `group` lists
-        // the OPEN threads of this linked group, the root included.
-        if self.group(&c).await?.len() > MAX_LINKED_OPEN {
-            return Err(Error::Conflict(format!(
-                "this thread group already has {MAX_LINKED_OPEN} open linked threads — close \
-                 one (otto_thread_close) before opening another"
-            )));
-        }
+        self.ensure_group_room(&c).await?;
         let root = c.parent_id.clone().unwrap_or_else(|| c.id.clone());
         let mut meta = req.meta;
         if c.meta_flag("read_only") {
@@ -680,7 +705,11 @@ impl AgentRuntime {
             )
             .await?;
         if let Some(p) = req.prompt.filter(|p| !p.trim().is_empty()) {
-            let text = format!("{}\n\n{p}", Self::peer_header(&c, "Opened by"));
+            let text = if framed {
+                format!("{}\n\n{p}", Self::peer_header(&c, "Opened by"))
+            } else {
+                p
+            };
             let mut prompt = RuntimePromptReq::of(&text);
             prompt.effort = req.effort.filter(|e| !e.trim().is_empty());
             self.prompt_with(&created.id, &prompt).await?;
@@ -897,6 +926,8 @@ impl AgentRuntime {
                 held: Vec::new(),
                 stream_emitted: HashMap::new(),
                 last_activity: Instant::now(),
+                starting: 0,
+                stop_requested: false,
             }),
             persist: tx,
         });
@@ -944,6 +975,15 @@ impl AgentRuntime {
         // A host that left the tail in place (tests) still gets it last.
         let mut args = spec.args;
         args.append(&mut spec.tail_args);
+        // Which Claude login this child runs as (its plan limits are recorded
+        // per login); `None` = not Claude, `Some(None)` = the default login.
+        let claude_login = (session.provider == otto_core::agent_runtime::RuntimeProvider::Claude)
+            .then(|| {
+                spec.env
+                    .iter()
+                    .find(|(k, _)| k == "CLAUDE_CONFIG_DIR")
+                    .map(|(_, v)| PathBuf::from(v))
+            });
         let child = spawn_child(&ChildCommand {
             program: spec.program.clone(),
             args,
@@ -957,6 +997,7 @@ impl AgentRuntime {
                 spec.program
             ))
         })?;
+        let cli_pid = child.pid;
         let (epoch, flushed) = {
             let mut st = live.lock();
             st.epoch += 1;
@@ -983,11 +1024,16 @@ impl AgentRuntime {
             apply_step(&self.inner, live, &mut st, step);
             (epoch, frx)
         };
+        if claude_login.is_some() {
+            // Claude Code moves some jobs out of its group (see the module).
+            descendants::watch(Arc::clone(live), epoch, cli_pid);
+        }
         tokio::spawn(pump(
             Arc::clone(&self.inner),
             Arc::clone(live),
             epoch,
             child.messages,
+            claude_login,
         ));
         // This life's sequence floor is durable before we return.
         let _ = flushed.await;
@@ -1056,6 +1102,7 @@ impl AgentRuntime {
         req: &RuntimePromptReq,
     ) -> Result<RuntimePromptResp> {
         let live = Arc::clone(live);
+        let _starting = Starting::new(&live);
         let model = req.model.clone().filter(|m| !m.trim().is_empty());
         if model.is_some() || req.access_mode.is_some() {
             let _spawning = live.spawn_lock.lock().await;
@@ -1178,6 +1225,11 @@ impl AgentRuntime {
         );
         st.session.last_active_at = now;
         apply_step(&self.inner, live, &mut st, step);
+        let stop = std::mem::take(&mut st.stop_requested);
+        drop(st);
+        if stop {
+            interrupt_turn(&self.inner, live);
+        }
         Ok(RuntimePromptResp {
             turn_id,
             sequence,
@@ -1601,6 +1653,15 @@ impl AgentRuntime {
         if resume.is_none() || self.wait_started(live).await {
             return Ok(());
         }
+        // A refusal that does not say the conversation is gone may pass (a
+        // network blip, a busy transcript): resume once more before giving
+        // the thread up (T3 Code #34762 keeps the native session too).
+        if !resume_refused_for_good(&live.lock()) {
+            self.ensure_process(live).await?;
+            if self.wait_started(live).await {
+                return Ok(());
+            }
+        }
         // Keep the old key until the fresh thread is up.
         live.lock().session.native_thread_id = None;
         let fresh = self.ensure_process(live).await;
@@ -1792,9 +1853,15 @@ fn close_locked(inner: &Arc<Inner>, live: &Arc<Live>, st: &mut State) -> Runtime
 /// group is killed. `false` when no turn was running.
 fn interrupt_turn(inner: &Arc<Inner>, live: &Arc<Live>) -> bool {
     let mut st = live.lock();
-    let Some(turn) = st.turn.as_mut() else {
+    if st.turn.is_none() {
+        // A prompt is still starting: its turn stops as soon as it runs.
+        if st.starting > 0 {
+            st.stop_requested = true;
+            return true;
+        }
         return false;
-    };
+    }
+    let turn = st.turn.as_mut().expect("checked above");
     if turn.interrupting {
         return true;
     }
@@ -1829,6 +1896,27 @@ fn interrupt_turn(inner: &Arc<Inner>, live: &Arc<Live>) -> bool {
         }
     });
     true
+}
+
+/// Counts a prompt as starting while it lives (see `State::starting`); the
+/// last one out clears a Stop no turn took.
+struct Starting(Arc<Live>);
+
+impl Starting {
+    fn new(live: &Arc<Live>) -> Self {
+        live.lock().starting += 1;
+        Self(Arc::clone(live))
+    }
+}
+
+impl Drop for Starting {
+    fn drop(&mut self) {
+        let mut st = self.0.lock();
+        st.starting = st.starting.saturating_sub(1);
+        if st.starting == 0 {
+            st.stop_requested = false;
+        }
+    }
 }
 
 /// Steer `req` into the running turn when its driver takes it.
@@ -2010,6 +2098,26 @@ fn has_pending(st: &State) -> bool {
         .requests
         .values()
         .any(|r| r.status == RuntimeRequestStatus::Pending)
+}
+
+/// The provider's exit said it has no such conversation (Claude: "No
+/// conversation found with session ID"), so resuming again cannot help.
+fn resume_refused_for_good(st: &State) -> bool {
+    let error = st
+        .proj
+        .session
+        .as_ref()
+        .and_then(|s| s.last_error.as_deref());
+    error.is_some_and(|e| {
+        let e = e.to_lowercase();
+        [
+            "no conversation found",
+            "session not found",
+            "no such session",
+        ]
+        .iter()
+        .any(|m| e.contains(m))
+    })
 }
 
 /// Close stdin (EOF), then SIGTERM and SIGKILL the group after `grace`.
@@ -2625,7 +2733,13 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
 }
 
 /// Feed one child's messages to its driver until it exits.
-async fn pump(inner: Arc<Inner>, live: Arc<Live>, epoch: u64, mut rx: mpsc::Receiver<ChildMsg>) {
+async fn pump(
+    inner: Arc<Inner>,
+    live: Arc<Live>,
+    epoch: u64,
+    mut rx: mpsc::Receiver<ChildMsg>,
+    claude_login: Option<Option<PathBuf>>,
+) {
     let window = inner.config.stream_coalesce;
     loop {
         // Register before reading state, so a change between the snapshot and
@@ -2670,6 +2784,11 @@ async fn pump(inner: Arc<Inner>, live: Arc<Live>, epoch: u64, mut rx: mpsc::Rece
             }
         };
         let Some(msg) = msg else { break };
+        // Claude's plan limits ride `rate_limit_event` frames: recorded
+        // passively, outside the session lock (a substring test skips the rest).
+        if let (Some(dir), ChildMsg::Line(line)) = (&claude_login, &msg) {
+            otto_usage::limits::record_claude_line(dir.as_deref(), line, Utc::now());
+        }
         let mut st = live.lock();
         if st.proc.as_ref().map(|p| p.epoch) != Some(epoch) {
             return; // closed or superseded

@@ -83,6 +83,9 @@ pub struct SendResp {
 pub struct DeleteMessageReq {
     pub url: String,
     pub receipt_handle: String,
+    /// On a PROD account: must equal the queue name ([`check_prod_confirm`]).
+    #[serde(default)]
+    pub confirm_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -95,6 +98,9 @@ pub struct PurgeReq {
 pub struct RedriveReq {
     pub source_arn: String,
     pub destination_arn: Option<String>,
+    /// On a PROD account: must equal the source queue's name.
+    #[serde(default)]
+    pub confirm_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -325,7 +331,7 @@ pub async fn send(
         "--queue-url",
         &req.url,
         "--message-body",
-        &req.body,
+        crate::accounts::STDIN_PARAM,
     ];
     if let Some(d) = req.delay_seconds {
         delay = d.min(900).to_string();
@@ -343,7 +349,10 @@ pub async fn send(
             args.extend(["--message-attributes", attrs.as_str()]);
         }
     }
-    let v = svc.run_json(a, region, &args).await?;
+    // The body goes through stdin, never argv (`ps` shows argv).
+    let v = svc
+        .run_json_stdin(a, region, &args, req.body.as_bytes())
+        .await?;
     let message_id = v
         .get("MessageId")
         .and_then(|m| m.as_str())
@@ -362,6 +371,12 @@ pub async fn delete_message(
     if req.receipt_handle.is_empty() {
         return Err(Error::Invalid("receipt_handle is required".into()));
     }
+    check_prod_confirm(
+        a.environment,
+        req.confirm_name.as_deref(),
+        &queue_name(&req.url),
+        "delete a message",
+    )?;
     svc.run(
         a,
         region,
@@ -378,12 +393,32 @@ pub async fn delete_message(
     Ok(())
 }
 
-pub async fn purge(
-    svc: &AwsService,
-    a: &AwsAccountRow,
-    req: &PurgeReq,
-    region: Option<&str>,
+/// On a PROD account deleting a message or starting a redrive needs
+/// `confirm_name ==` the queue name, given by a person (an agent credential's
+/// confirm is refused, see [`crate::access::refuse_agent_confirm`]). Other
+/// accounts need neither.
+pub fn check_prod_confirm(
+    env: otto_core::domain::Environment,
+    confirm_name: Option<&str>,
+    name: &str,
+    what: &str,
 ) -> Result<()> {
+    if env != otto_core::domain::Environment::Prod {
+        return Ok(());
+    }
+    if confirm_name.map(str::trim) != Some(name) {
+        return Err(Error::Invalid(format!(
+            "this is a production account — confirm_name must equal the queue name '{name}' to \
+             {what}"
+        )));
+    }
+    crate::access::refuse_agent_confirm(&format!("{what} on queue {name}"))
+}
+
+/// A purge needs `confirm_name ==` the queue name, given by a person (an
+/// agent credential's confirm is refused, see
+/// [`crate::access::refuse_agent_confirm`]).
+pub fn check_purge_confirm(req: &PurgeReq) -> Result<()> {
     validate_url(&req.url)?;
     let name = queue_name(&req.url);
     if req.confirm_name != name {
@@ -391,6 +426,16 @@ pub async fn purge(
             "confirm_name must equal the queue name '{name}'"
         )));
     }
+    crate::access::refuse_agent_confirm(&format!("purging queue {name}"))
+}
+
+pub async fn purge(
+    svc: &AwsService,
+    a: &AwsAccountRow,
+    req: &PurgeReq,
+    region: Option<&str>,
+) -> Result<()> {
+    check_purge_confirm(req)?;
     svc.run(a, region, &["sqs", "purge-queue", "--queue-url", &req.url])
         .await?;
     Ok(())
@@ -403,6 +448,13 @@ pub async fn redrive(
     region: Option<&str>,
 ) -> Result<RedriveResp> {
     validate_arn(&req.source_arn)?;
+    let source = req.source_arn.rsplit(':').next().unwrap_or_default();
+    check_prod_confirm(
+        a.environment,
+        req.confirm_name.as_deref(),
+        source,
+        "redrive",
+    )?;
     let mut args = vec![
         "sqs",
         "start-message-move-task",
@@ -425,6 +477,52 @@ pub async fn redrive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S6-304: an agent credential's correct purge confirm is refused; a
+    /// person's is accepted.
+    #[tokio::test]
+    async fn an_agent_credential_cannot_confirm_a_purge() {
+        use otto_core::auth::{with_request_credential, RequestCredential};
+        let req = PurgeReq {
+            url: "https://sqs.eu-west-1.amazonaws.com/123456789012/orders".into(),
+            confirm_name: "orders".into(),
+        };
+        let agent = RequestCredential {
+            agent: true,
+            root_withheld: false,
+        };
+        let refused = with_request_credential(agent, async { check_purge_confirm(&req) }).await;
+        assert!(matches!(refused, Err(Error::Forbidden(_))), "{refused:?}");
+        let person = RequestCredential::default();
+        let ok = with_request_credential(person, async { check_purge_confirm(&req) }).await;
+        assert!(ok.is_ok(), "{ok:?}");
+    }
+
+    /// Delete-message / redrive on prod: a person's typed queue name passes,
+    /// an agent credential's is refused, and off prod nothing is asked.
+    #[tokio::test]
+    async fn prod_message_delete_and_redrive_need_a_persons_confirm() {
+        use otto_core::auth::{with_request_credential, RequestCredential};
+        use otto_core::domain::Environment;
+        let agent = RequestCredential {
+            agent: true,
+            root_withheld: false,
+        };
+        let person = RequestCredential::default();
+        let check = |cred: RequestCredential, env: Environment, confirm: Option<&'static str>| {
+            with_request_credential(cred, async move {
+                check_prod_confirm(env, confirm, "orders", "redrive")
+            })
+        };
+        let refused = check(agent, Environment::Prod, Some("orders")).await;
+        assert!(matches!(refused, Err(Error::Forbidden(_))), "{refused:?}");
+        assert!(check(person, Environment::Prod, Some("orders"))
+            .await
+            .is_ok());
+        let missing = check(person, Environment::Prod, None).await;
+        assert!(matches!(missing, Err(Error::Invalid(_))), "{missing:?}");
+        assert!(check(agent, Environment::Dev, None).await.is_ok());
+    }
 
     #[test]
     fn peek_pins_visibility_timeout_to_zero() {

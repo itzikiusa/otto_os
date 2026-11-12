@@ -40,6 +40,16 @@ pub struct UpdateSceneReq {
     /// Link/relink this scene to a product story.
     #[serde(default)]
     pub story_id: Option<String>,
+    /// Optimistic-concurrency guard: the scene's `updated_at` as the writer
+    /// last read it (RFC 3339). When the stored row is newer the PUT answers
+    /// 409 instead of silently overwriting the other writer's board.
+    #[serde(default)]
+    pub expect_updated_at: Option<String>,
+    /// `"agent"` for an agent's write (the `canvas_update_scene` MCP tool):
+    /// the pre-save snapshot is an unthrottled `agent` version. Anything else
+    /// is a user save (snapshot throttled per [`otto_state::USER_SNAPSHOT_EVERY_SECS`]).
+    #[serde(default)]
+    pub origin: Option<String>,
 }
 
 /// The default empty Scene document stored when `CreateSceneReq.doc` is absent.

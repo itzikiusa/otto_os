@@ -69,6 +69,7 @@
   } from './model';
   import TurnMessage from './TurnMessage.svelte';
   import VariantsTray from './VariantsTray.svelte';
+  import SyncOffer, { isSyncRun } from './SyncOffer.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
 
   interface Props {
@@ -437,7 +438,6 @@
   }
   function rejectMenu(e: MouseEvent, run: DesignVariantRun, card: VariantCard): void {
     ctxMenu.show(e, [
-      { label: `Why not ${directionName(card.direction)}?`, disabled: true },
       ...REJECT_REASONS.map((r) => ({
         label: r.label,
         action: () => {
@@ -513,6 +513,7 @@
         <p class="hint">Applies to your next ask. A turn resumes this design’s earlier session when the agent matches.</p>
       </div>
     {/if}
+    {#if brief}<p class="brief" data-testid="design-brief"><Icon name="sparkle" size={12} /> <strong>Brief</strong> {brief}</p>{/if}
   </header>
 
   <div class="thread" bind:this={threadEl} aria-label="Conversation with Otto" data-testid="design-otto-thread">
@@ -522,9 +523,6 @@
       <LoadState variant="compact" what="Otto’s turns" error={loadError || 'No details were reported.'} empty onretry={() => void loadAll()} />
     {:else if thread.length === 0}
       <div class="intro">
-        {#if brief}
-          <p class="brief"><Icon name="sparkle" size={12} /> <strong>Brief</strong> {brief}</p>
-        {/if}
         <p>Ask Otto to change this design. Each answer is a new version you can compare or undo; variants wait until you apply one.</p>
         <p class="dim">Otto sees the saved version, the story it implements, the brand kit, your references and your team’s approved rules.</p>
       </div>
@@ -550,6 +548,8 @@
             onkeepcurrent={() => keepCurrent(item.turn)}
             onopensession={openSession}
           />
+        {:else if isSyncRun(item.run)}
+          <SyncOffer {artifact} run={item.run} {head} {readonly} {dirty} {oncompare} />
         {:else}
           {@const run = item.run}
           {@const ask = asks.get(run.run_id)}
@@ -591,7 +591,7 @@
       {/each}
     {/if}
     {#if appliedNote}
-      <p class="applied" use:announceShown={appliedNote}><Icon name="check" size={12} /> {appliedNote} <a href="#/design/learned">See what Otto learned</a></p>
+      <p class="applied" use:announceShown={appliedNote}><Icon name="check" size={12} /> {appliedNote} <a href="#/design/learned">See team design rules</a></p>
     {/if}
   </div>
 
@@ -681,12 +681,8 @@
   .picker:hover {
     background: var(--hover);
   }
-  .grow {
-    flex: 1;
-  }
-  .dim {
-    color: var(--text-dim);
-  }
+  .grow { flex: 1; }
+  .dim { color: var(--text-dim); }
   .state {
     display: flex;
     align-items: center;
@@ -694,9 +690,7 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  .warnc {
-    color: var(--warning);
-  }
+  .warnc { color: var(--warning); }
   .agent-settings {
     display: flex;
     flex-direction: column;
@@ -737,13 +731,13 @@
     flex-direction: column;
     gap: 16px;
   }
-  .intro {
-    font-size: var(--fs-s);
-  }
-  .intro p {
-    margin: 0 0 8px;
-  }
+  .intro { font-size: var(--fs-s); }
+  .intro p { margin: 0 0 8px; }
   .brief {
+    margin: 8px 0 0;
+    max-block-size: 7.5em;
+    overflow-y: auto;
+    font-size: var(--fs-s);
     padding: 8px 10px;
     border-inline-start: 2px solid var(--border-strong);
     background: var(--surface-2);

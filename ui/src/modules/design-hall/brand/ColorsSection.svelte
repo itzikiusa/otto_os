@@ -86,7 +86,7 @@
     <span class="meta">Contrast is checked against white and {ink.name ? tokenLabel(ink.name) : 'black'}</span>
     <span class="grow"></span>
     {#each rules.slice(0, 2) as r (r.key)}
-      <button class="chip rule" title="An approved team rule — open it in What Otto learned" onclick={() => router.go('design/learned/rules')} data-testid="brand-rule-chip">
+      <button class="chip rule" title="An approved team rule — open it in Team design rules" onclick={() => router.go('design/learned/rules')} data-testid="brand-rule-chip">
         <Icon name="bulb" size={12} /> Rule from team: {r.rule}
       </button>
     {/each}

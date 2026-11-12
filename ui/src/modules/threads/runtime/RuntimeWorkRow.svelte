@@ -19,7 +19,8 @@
   import LazyMount from '../../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   const RuntimeToolImages = lazyComponent(() => import('./RuntimeToolImages.svelte'));
-  import { errorText, openedTarget, runNoticeOf, toolError, workLabel, type PendingApproval } from './timeline';
+  import { errorText, openedTarget, runNoticeOf, toolError, type PendingApproval } from './timeline';
+  import { exitText, itemDuration, relativeToCwd, rowLabel } from './workLog';
   import { ws } from '../../../lib/stores/workspace.svelte';
   import { threads } from '../threadsStore.svelte';
 
@@ -34,8 +35,10 @@
     onrespond?: (requestId: string, decision: ApprovalDecision) => Promise<void>;
     /** The personal agent whose chat this is: a run-result notice opens its report. */
     agentId?: string | null;
+    /** The thread's folder: paths and `cd <it> &&` drop out of the label. */
+    cwd?: string | null;
   }
-  let { item, output = '', pending, note = null, onrespond, agentId = null }: Props = $props();
+  let { item, output = '', pending, note = null, onrespond, agentId = null, cwd = null }: Props = $props();
   const runNotice = $derived(item.type === 'system_notice' ? runNoticeOf(item.message) : null);
 
   let open = $state(false);
@@ -57,7 +60,11 @@
   const running = $derived(item.status === 'running' || item.status === 'pending' || item.status === 'waiting');
   const failed = $derived(item.status === 'failed' || item.type === 'error');
   const stopped = $derived(item.status === 'cancelled' || item.status === 'interrupted');
-  const label = $derived(workLabel(item));
+  const label = $derived(rowLabel(item, cwd));
+  const took = $derived(itemDuration(item));
+  /** Thinking reads inline (T3): its text under a quiet line, clamped until opened. */
+  const thinking = $derived(item.type === 'reasoning' && !!item.text);
+  const longThought = $derived(item.type === 'reasoning' && (item.text.length > 240 || item.text.split('\n').length > 3));
   /** The thread / session this call opened or spoke to — a one-click link. */
   const target = $derived(running ? null : openedTarget(item));
   function goTarget(e: MouseEvent): void {
@@ -65,7 +72,10 @@
     if (target.kind === 'session') ws.navigateToSession(target.id);
     else threads.selectThread(target.id, { split: e.shiftKey });
   }
-  const error = $derived(toolError(item));
+  const error = $derived.by(() => {
+    const e = toolError(item);
+    return e ? relativeToCwd(exitText(e), cwd) : null;
+  });
   const commandOut = $derived(item.type === 'command_execution' ? (item.output ?? output) : '');
   const tail = $derived(running && commandOut ? lastLine(commandOut) : '');
   const patch = $derived.by(() => {
@@ -81,7 +91,7 @@
     error
       ? true
       : item.type === 'reasoning'
-      ? !!item.text
+      ? false
       : item.type === 'command_execution' || item.type === 'dynamic_tool' || item.type === 'todo_list'
         ? true
         : item.type === 'file_change'
@@ -112,6 +122,7 @@
     <button type="button" class="rw-line" aria-expanded={open} onclick={() => (open = !open)}>
       <Icon name={icon} size={13} />
       <span class="rw-label ellipsis" dir="auto">{label}</span>
+      {#if took}<span class="rw-took">{took}</span>{/if}
       {#if running}<span class="spinner" aria-label="Running"></span>{:else if failed}<Icon name="x" size={12} />{/if}
       <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
     </button>
@@ -119,8 +130,16 @@
     <div class="rw-line">
       <Icon name={icon} size={13} />
       <span class="rw-label wrap" dir="auto">{label}</span>
+      {#if took}<span class="rw-took">{took}</span>{/if}
       {#if running}<span class="spinner" aria-label="Running"></span>{/if}
     </div>
+  {/if}
+  {#if thinking && item.type === 'reasoning'}
+    <!-- Clamped to three lines until "More" (a long thought). -->
+    <div class="rw-think" class:all={open || !longThought}><Markdown md={item.text} small /></div>
+    {#if longThought}
+      <button type="button" class="rw-more" aria-expanded={open} onclick={() => (open = !open)}>{open ? 'Less' : 'More'}</button>
+    {/if}
   {/if}
   {#if target}
     <button
@@ -161,12 +180,10 @@
         <pre class="rw-pre" bind:this={outEl} onscroll={onOutScroll}><span class="rw-cmd">$ {item.input}</span>
 {commandOut || (running ? '' : 'No output.')}</pre>
         {#if item.exit_code != null && item.exit_code !== 0}
-          <p class="rw-error">Exit code {item.exit_code}</p>
+          <p class="rw-error">exit {item.exit_code}</p>
         {/if}
       {:else if item.type === 'file_change' && patch}
         <InlineDiff diff={patchToDiff(patch, item.file_name)} />
-      {:else if item.type === 'reasoning'}
-        <div class="rw-reasoning"><Markdown md={item.text} small /></div>
       {:else if item.type === 'dynamic_tool'}
         <pre class="rw-pre">{json(item.input)}</pre>
         {#if item.output}<pre class="rw-pre">{item.output}</pre>{/if}
@@ -301,8 +318,37 @@
   .rw-cmd {
     color: var(--text-dim);
   }
-  .rw-reasoning {
+  .rw-took {
+    flex: none;
     color: var(--text-dim);
+    font-size: var(--fs-xs);
+    font-variant-numeric: tabular-nums;
+  }
+  .rw-think {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    overflow: hidden;
+    margin-inline-start: 28px;
+    color: var(--text-dim);
+  }
+  .rw-think.all {
+    display: block;
+  }
+  .rw-more {
+    margin-inline-start: 28px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--accent-text);
+    font: inherit;
+    font-size: var(--fs-xs);
+    cursor: pointer;
+  }
+  .rw-more:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: 2px;
   }
   .rw-list {
     margin: 0;

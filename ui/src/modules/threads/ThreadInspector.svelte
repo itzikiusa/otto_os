@@ -1,6 +1,6 @@
 <script lang="ts">
   // The right panel as T3's "Open a surface": with nothing open it lists the
-  // surfaces (B T F D P S while the panel has focus); opened ones sit as tabs
+  // surfaces (B F D P S while the panel has focus); opened ones sit as tabs
   // with + (another surface), close and maximize. Every surface is its own
   // lazy chunk, prefetched on hover, so the panel itself stays light.
   import { tick } from 'svelte';
@@ -28,17 +28,15 @@
   const FilesView = lazyComponent(() => import('./ThreadFileTabs.svelte'));
   const ChangesView = lazyComponent(() => import('./ThreadChangesTab.svelte'));
   const ConnectionsView = lazyComponent(() => import('./ThreadConnectionsTab.svelte'));
-  const PeersView = lazyComponent(() => import('./ThreadPeersTab.svelte'));
   // The Browser opens HERE, as an inspector tab — never the shell's Side
   // panel, which Threads hides (it would be a second right column).
   const BrowserTab = lazyComponent(loadBrowserView);
 
   interface Props {
-    onstartroom: (sessionId: string) => void;
     /** Phone / tablet drawer: the project card can't float there, so it heads the panel. */
     showCard?: boolean;
   }
-  let { onstartroom, showCard = false }: Props = $props();
+  let { showCard = false }: Props = $props();
 
   // On the new-thread stage the panel follows the draft's folder.
   const focusedSession = $derived.by(() => {
@@ -71,7 +69,7 @@
   }
 
   interface Surface {
-    id: ThreadsInspectorTab | 'terminal';
+    id: ThreadsInspectorTab;
     label: string;
     key: string;
     icon: IconName;
@@ -84,12 +82,10 @@
     pr: 'Pull request',
     side: 'Side chat',
     connections: 'Connections',
-    peers: 'Peers',
     browser: 'Browser',
   };
   const launcher = $derived<Surface[]>([
     { id: 'browser', label: 'Browser', key: 'B', icon: 'globe', prefetch: () => BrowserTab.prefetch() },
-    { id: 'terminal', label: 'Terminal', key: 'T', icon: 'terminal' },
     { id: 'files', label: 'Files', key: 'F', icon: 'file', prefetch: () => FilesView.prefetch() },
     { id: 'changes', label: 'Diff', key: 'D', icon: 'branch', disabled: repo ? null : 'Not a git repository', prefetch: () => ChangesView.prefetch() },
     {
@@ -109,10 +105,16 @@
     open.map((id) => ({ id, label: SURFACE_LABEL[id], testid: `threads-tab-${id}` })),
   );
 
+  // No Terminal surface: the drawer is the toolbar ⋯ › Terminal drawer, the
+  // pane's own button and /terminal. Connections shows once the thread has
+  // touched a database (or its tab is already open); related threads live in
+  // the header's Related threads popover.
+  const dbActive = $derived(
+    open.includes('connections') || threads.mcpActivities.some((a) => a.session_id === focusedSession?.id),
+  );
+
   function launch(s: Surface): void {
-    if (s.disabled) return;
-    if (s.id === 'terminal') threadsChrome.setTerminal(true);
-    else threads.setInspectorTab(s.id);
+    if (!s.disabled) threads.setInspectorTab(s.id);
   }
 
   function closeActive(): void {
@@ -122,10 +124,9 @@
   }
 
   function openAddMenu(e: MouseEvent): void {
-    const extra: Surface[] = [
-      { id: 'connections', label: 'Connections', key: '', icon: 'plug', prefetch: () => ConnectionsView.prefetch() },
-      { id: 'peers', label: 'Peers', key: '', icon: 'people', prefetch: () => PeersView.prefetch() },
-    ];
+    const extra: Surface[] = dbActive
+      ? [{ id: 'connections', label: 'Connections', key: '', icon: 'plug', prefetch: () => ConnectionsView.prefetch() }]
+      : [];
     const items: MenuItem[] = [...launcher, ...extra].map((s) => ({
       label: s.label,
       icon: s.icon,
@@ -224,8 +225,6 @@
       <!-- The ask bar submits to the focused terminal thread; a structured
            thread has no PTY to type into, so it gets the unbound hint. -->
       <LazyMount lazy={BrowserTab} what="the browser" variant="panel" props={{ embedded: true, targetSessionId: focusedSession && !isRuntimeThread(focusedSession) && focusedSession.kind === 'agent' ? focusedSession.id : null }} />
-    {:else if active === 'peers'}
-      <LazyMount lazy={PeersView} what="peers" variant="panel" props={{ workspaceId, focusedSessionId: threads.focusedSessionId, onstartroom }} />
     {:else}
       <ul class="ti-launch" data-testid="threads-surface-launcher">
         {#each launcher as s (s.id)}

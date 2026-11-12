@@ -13,7 +13,7 @@ Design Hall is where your team's visual work lives. Every design is an artifact 
 ## Getting started
 
 1. Open **Product** in the sidebar and switch to **Designs**.
-2. In the lobby, describe what you want in the prompt, pick a studio, and choose how many variants (1 to 4). Tick **Use references** to give the agent your team's closest past designs, or **Draft only** to skip generation.
+2. In the lobby, describe what you want in the prompt and pick a studio. The prompt's **⋯** sets how many variants (1 to 4), **Use team references** (your team's closest past designs go to the agent first) and **Draft only** (skip generation).
 3. The design opens on its **Otto** tab while the agent works. When it finishes, the result is a new version.
 4. Edit the design, then choose **Save** (`⌘S`). Use **Compare** to see what changed between versions.
 5. When it's ready, set the status to **Approved**. Designs that follow the approved version update to it.
@@ -21,25 +21,25 @@ Design Hall is where your team's visual work lives. Every design is an artifact 
 ## Everything it can do
 
 **The lobby**
-- A prompt to generate a design, the seven studios, recently edited designs, projects, designs linked to Product stories, and a panel of what Otto learned and recent agent activity.
-- Search designs, stories and references. **Spatial** shows your projects as a gallery (beta).
-- ⌘K commands: **New design…**, **New design project…**, **Import design file…** (PNG, SVG, GLB, HTML, Excalidraw and more), **Open Brand Kit** and **Open what Otto learned**.
+- One prompt line to generate a design, then **All designs**: group them by Recent, Story or Project and filter by studio, status, **Mine** or **Archived**. Older designs are one **Load more** away.
+- A side rail with **Needs review** and **Agent activity**.
+- The header has search, **Import**, **New ▾** (one row per studio, a file import and a new project) and **⋯** (Brand Kit, **Team design rules**, archived designs).
+- ⌘K commands: **New design…**, **New design project…**, **Import design file…** (PNG, SVG, GLB, HTML, Excalidraw and more), **Go to Brand Kit** and **Go to team design rules**.
 
 **Studios**
 - **Frames**: UI screens as HTML with a live device preview.
 - **Graphics**: HTML boards, SVGs and imported images.
 - **Site Studio**: websites built from sections, with brand themes.
 - **3D Studio**: scenes, models and text-to-3D.
-- **Whiteboard**: Excalidraw, Mermaid and D2 diagrams (the Canvas page).
+- **Whiteboard**: Excalidraw, Mermaid and D2 diagrams. Canvas boards live here now.
 - **Brand Kit**: the colours, type and logos every studio uses.
-- **Spatial Hall**: a showcase of your projects (planned; a preview of the room layout is available).
 
 **A design**
 - A breadcrumb to its project, a status menu (draft, review, approved, shipped, archived), and a version strip. Only a person can approve.
 - **Compare** shows two versions side by side or as text changes. **Restore** saves the older version as a new one; history never goes back.
 - ⋯ menu: **Save named version…**, **Discard edits…**, **Rename…**, **Move to project…**, **Make an editable copy**, **Download**, open in a new window, and **Archive…**.
 - **Links** shows what the design uses and where it is used, and lets you add or remove links. **References** searches the library: add a design as a reference, start from it, or compare with it.
-- Designs imported from Product or Canvas open read-only here, with a link back and **Make an editable copy**.
+- Designs that come from a Product story or a Canvas board are badged **From a story** / **From Canvas** and stay in sync with it, read-only, until you press **Edit here**. After that the design is yours: a later change at the source arrives as a version you can accept. **Make an editable copy** forks it instead.
 - If someone else saves while you edit, you choose between saving yours on top or loading theirs.
 
 **The Otto tab (every studio)**
@@ -68,14 +68,16 @@ Design Hall is where your team's visual work lives. Every design is an artifact 
 - **Approve** a version separately. **Export ▾** as CSS variables, a Tailwind `@theme` block or DTCG tokens (JSON).
 - Start a new kit from the Vivid, Editorial or Minimal starter.
 
-**Whiteboard (Canvas)**
-- Choose an Excalidraw board, a Mermaid diagram or a D2 diagram when you create a canvas.
-- Describe what you want in **Ask Otto**; the agent edits the diagram and the board redraws as it changes.
-- Edit Mermaid and D2 source in the **Code** panel. D2 has a hand-drawn sketch style.
-- Zoom, fit to screen, **Download PNG**, **Download SVG** and **Copy source**.
-- Rename, duplicate, delete or move a canvas to a section from its row’s **⋯** menu (or right-click; `F2` renames). A canvas can also be attached to an agent session.
+**Whiteboard**
+- Choose an Excalidraw board, a Mermaid diagram or a D2 diagram when you create a whiteboard design.
+- Ask for changes on the design's **Otto** tab; the result is a new version.
+- The old Canvas page opens Design Hall now: a Canvas link, or a board attached to an agent session (its **Open in Design Hall** button), opens the board's design here, and ⌘K **Go to Product** finds it under canvas or whiteboard.
 
-**What Otto learned**
+**In Product**
+- A story's **Design** tab lists the designs that implement it (an epic: its stories' designs too), with **New design** and an **Ask Otto** line that drafts one for the story. Cards open here, with a way back to the story.
+- The story's ⋯ menu keeps **Open the classic arena** for pinned review notes and Blender rendering, until Design Hall has them.
+
+**Team design rules**
 - Otto notices choices your team repeats, such as a variant direction you keep picking or a fix you keep making after agent drafts, and proposes a team rule.
 - Rules are only proposed. A person approves, rejects or rolls back each one, and approved rules are included in every design turn.
 
@@ -97,18 +99,16 @@ Design Hall is where your team's visual work lives. Every design is an artifact 
 | `F2` | Rename the selected item in the 3D hierarchy |
 | `←` / `→` | Move between versions in the version strip |
 | `Esc` | Clear the lobby search |
-| `Enter` | Send a message to the Whiteboard assistant |
-| `⇧Enter` | New line in the Whiteboard assistant |
 
 ## Tips and limits
 
-- Access needs the **Design Hall** feature: View to read, Edit to change, Admin for import and pruning. The Whiteboard page (Canvas) uses the **Canvas** feature.
+- Access needs the **Design Hall** feature: View to read, Edit to change, Admin for import and pruning.
 - One agent turn runs per design at a time, for up to 20 minutes. A variants run makes at most 4 variants.
 - A design can be up to 25 MB per version. Images, GLB and PDF files can't be edited by an agent.
 - Agents see the last thumbnail the app stored, not a fresh render.
 - Text and image to 3D build models from primitives through the agent. Cloud 3D providers are listed but disabled.
 - Frames and Graphics currently edit HTML or SVG as source; their dedicated canvases are planned.
-- Changes made in Product's Design tab or on the Canvas page reach Design Hall at the next import, not live.
+- Changes made to a story attachment (an agent's mockup included) or a Canvas board reach Design Hall within a few seconds.
 
 ## Related
 

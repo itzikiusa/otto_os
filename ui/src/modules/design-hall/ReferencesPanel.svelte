@@ -21,6 +21,7 @@
   import { STUDIOS, buildLineage, statusLabel, type LinkRow } from './model';
   import { library } from './library.svelte';
   import { openArtifact } from './nav';
+  import { isMirroredError } from './versionRows';
 
   interface Props {
     artifact: DesignArtifact;
@@ -29,8 +30,10 @@
     seqOf: (versionId: string) => number | null;
     onreload: () => void;
     oncompare: (ref: DesignArtifact) => void;
+    /** A write was refused as `mirrored` (409): the artifact view shows its "Edit here" banner. */
+    onmirrored?: () => void;
   }
-  let { artifact, uses, readonly, seqOf, onreload, oncompare }: Props = $props();
+  let { artifact, uses, readonly, seqOf, onreload, oncompare, onmirrored }: Props = $props();
 
   let q = $state('');
   let studio = $state<'' | DesignStudio>('');
@@ -98,7 +101,8 @@
       toasts.success('Added as reference', `${ref.title} is pinned at v${ref.head_seq ?? '?'}.`);
       onreload();
     } catch (e) {
-      toastError('Couldn’t add the reference', e);
+      if (isMirroredError(e)) onmirrored?.();
+      else toastError('Couldn’t add the reference', e);
     } finally {
       busyId = null;
     }

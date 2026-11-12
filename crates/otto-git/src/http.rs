@@ -196,6 +196,8 @@ pub fn router<S: GitCtx>() -> Router<S> {
         .merge(crate::patch::router::<S>())
         .merge(crate::pr_checks::router::<S>())
         .merge(crate::pr_reactions::router::<S>())
+        .merge(crate::pr_reviewers::router::<S>())
+        .merge(crate::pr_branch_update::router::<S>())
         .merge(crate::history::router::<S>())
         .merge(crate::ops::router::<S>())
         .merge(crate::recovery::router::<S>())
@@ -2728,6 +2730,8 @@ struct PrListQuery {
     state: Option<String>,
     page: Option<u32>,
     per_page: Option<u32>,
+    /// `me`: only open PRs that ask the caller's forge account for a review.
+    review: Option<String>,
 }
 
 async fn pr_list<S: GitCtx>(
@@ -2749,7 +2753,15 @@ async fn pr_list<S: GitCtx>(
     let page = q.page.unwrap_or(1).clamp(1, 10_000);
     let per_page = q.per_page.unwrap_or(50).clamp(1, 100);
     let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
-    let p = provider.list_prs(&remote, state, page, per_page).await?;
+    let p = match q.review.as_deref() {
+        None | Some("") => provider.list_prs(&remote, state, page, per_page).await?,
+        Some("me") => {
+            provider
+                .list_review_requested(&remote, page, per_page)
+                .await?
+        }
+        Some(other) => return Err(Error::Invalid(format!("bad review filter: {other}")).into()),
+    };
     Ok(Json(otto_core::api::PrListResp {
         items: p.items,
         has_more: p.has_more,
@@ -2865,7 +2877,9 @@ async fn pr_diff<S: GitCtx>(
     }
     let provider = ws_provider.unwrap_or(provider);
     let rev = q.rev.as_deref().unwrap_or("");
-    let ttl = crate::diff_cache::pr_diff_ttl(rev);
+    // A miss is pinned for long only when the forge agrees `rev` is the head.
+    let rev_owned = rev.to_string();
+    let ttl_for = crate::diff_cache::pr_diff_ttl_for;
     let key = format!(
         "{}\0{}/{}\0{number}\0{account}\0{rev}{}",
         repo.id,
@@ -2902,7 +2916,8 @@ async fn pr_diff<S: GitCtx>(
                 Some(d) => Some((d, "hit")),
                 None => {
                     let (provider, remote) = (provider.clone(), remote.clone());
-                    let (path, old_path) = (q.path.clone(), q.old_path.clone());
+                    let (path, old_path, rev) =
+                        (q.path.clone(), q.old_path.clone(), rev_owned.clone());
                     crate::diff_cache::pr_narrow_flights()
                         .run(&nk, || {
                             let nk = nk.clone();
@@ -2920,6 +2935,7 @@ async fn pr_diff<S: GitCtx>(
                                     }
                                     None => provider.get_pr_diff_summary(&remote, number).await?,
                                 };
+                                let ttl = ttl_for(&*provider, &remote, number, &rev).await;
                                 Ok(got.map(|mut d| {
                                     for f in &mut d.files {
                                         crate::parse::fill_counts(f);
@@ -2949,6 +2965,7 @@ async fn pr_diff<S: GitCtx>(
                     let key = key.clone();
                     async move {
                         let mut d = provider.get_pr_diff(&remote, number).await?;
+                        let ttl = ttl_for(&*provider, &remote, number, &rev_owned).await;
                         for f in &mut d.files {
                             crate::parse::fill_counts(f);
                         }

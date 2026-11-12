@@ -23,6 +23,7 @@
   import CompareView from './CompareView.svelte';
   import GoldenTasksView from './GoldenTasksView.svelte';
   import MatrixView from './MatrixView.svelte';
+  import EvalDefaultsSheet from './EvalDefaultsSheet.svelte';
 
   type Mode = 'form' | 'detail';
   type Tab = 'runs' | 'golden' | 'matrix';
@@ -189,6 +190,19 @@
     if (tab === 'matrix') matrixView?.back();
     else phoneListOpen = true;
   }
+
+  // Evaluator defaults (was Settings → Skills evaluator): the Lab's page ⋯
+  // opens it, and `#/skills-eval/evaluator/defaults` — where the old Settings
+  // route forwards — opens it on arrival.
+  let defaultsOpen = $state(false);
+  export function openDefaults(): void {
+    defaultsOpen = true;
+  }
+  $effect(() => {
+    if (router.parts[2] !== 'defaults') return;
+    defaultsOpen = true;
+    router.replace('skills-eval/evaluator');
+  });
 
   function toggleCompare(): void {
     compareMode = !compareMode;
@@ -453,6 +467,10 @@
     {/if}
   </div>
 </div>
+
+{#if defaultsOpen}
+  <EvalDefaultsSheet onclose={() => (defaultsOpen = false)} />
+{/if}
 
 <style>
   .se-page.list-hidden .se-side { display: none; }

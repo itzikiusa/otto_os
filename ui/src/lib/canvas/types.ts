@@ -207,6 +207,10 @@ export interface UpdateSceneReq {
   section?: string | null;
   /** Link/relink this scene to a product story. */
   story_id?: string | null;
+  /** The `updated_at` the writer last read: a newer stored row answers 409. */
+  expect_updated_at?: string;
+  /** `'agent'`: snapshot the replaced doc as an unthrottled agent version. */
+  origin?: 'agent';
 }
 
 export type AssistMode = 'auto' | 'sequence' | 'flow' | 'uml' | 'nodes';

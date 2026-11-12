@@ -1,6 +1,7 @@
-//! Idempotent legacy import — mirrors existing design data into the graph
-//! WITHOUT moving or modifying it (the old rows, files and routes keep
-//! working exactly as before).
+//! Legacy-source mirror — keeps the graph's copy of every Product story
+//! design attachment and Canvas scene in step with its source WITHOUT moving
+//! or modifying the source (the old rows, files and routes keep working
+//! exactly as before).
 //!
 //! Sources:
 //!   - `product_attachments` of kind `design` | `mockup`, plus every image
@@ -11,17 +12,21 @@
 //!   - `canvas_scenes` → one `otto-canvas` whiteboard artifact each (the scene
 //!     document made self-contained with its image bytes), linked to its story.
 //!
-//! Idempotency: `design_artifacts(source_kind, source_id)` is unique, and the
-//! import remembers each source's `updated_at` + content sha in
-//! `meta.imported_from`. An unchanged source is skipped without reading its
-//! bytes; a changed one gets a new `sync` version (history kept — nothing is
-//! overwritten). A source row that disappears leaves its artifact untouched.
+//! [`sync_one`] mirrors ONE source: create the artifact, or commit a `sync`
+//! version when the source changed (history kept), or — when a person
+//! adopted the mirror (`crate::mirror`) — a side version
+//! `variant/sync-<ts>/1` that never moves the head. A source that has
+//! disappeared ARCHIVES its (unadopted) mirror; nothing is ever deleted.
+//! `crate::sync` calls it live, debounced per source; [`run`] is the
+//! catch-up pass over every source (daemon start, `POST /design/admin/import`,
+//! a lagged event receiver).
 //!
-//! Runs at daemon startup (cheap: one indexed query per table plus a map
-//! lookup per row) and on demand via `POST /design/admin/import`. A process-
-//! wide lock serializes concurrent runs.
+//! Idempotency: `design_artifacts(source_kind, source_id)` is unique, and the
+//! mirror remembers each source's `updated_at` + content sha in
+//! `meta.imported_from`. An unchanged source is skipped without reading its
+//! bytes. A process-wide lock serializes every pass and single-source sync.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -33,8 +38,10 @@ use tokio::sync::Mutex;
 
 use crate::blobs;
 use crate::format;
+use crate::mirror;
 use crate::service::{Author, CreateInput, DesignService, SaveOpts};
-use crate::types::{DesignArtifact, ImportReport};
+use crate::sync::SourceRef;
+use crate::types::{DesignArtifact, ImportReport, UpdateArtifactReq};
 
 pub const SOURCE_ATTACHMENT: &str = "product_attachment";
 pub const SOURCE_SCENE: &str = "canvas_scene";
@@ -43,6 +50,8 @@ pub const ATTACH_ROOT: &str = "product/attachments";
 const MAX_REPORTED_ERRORS: usize = 50;
 /// Legacy attachment `meta_json` keys worth carrying into the graph row.
 const LEGACY_META_KEYS: &[&str] = &["group", "format", "derived_from", "session_id", "run_id"];
+const ATTACHMENT_COLS: &str = "id, story_id, workspace_id, filename, mime, storage_path, kind, \
+                               source, meta_json, created_by, created_at, updated_at";
 
 fn import_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -140,54 +149,234 @@ async fn stamp_source(
     Ok(())
 }
 
-/// Commit a `sync` version from a changed legacy source (history is kept;
-/// an unchanged sha writes nothing).
-async fn sync_version(
+/// A changed source reached an existing mirror: a `sync` head for a mirror
+/// (guarded on the head it has — nothing can have edited it, the write
+/// routes refuse mirrors), a side version `variant/sync-<ts>/1` for an
+/// adopted one (the Hall owns its head now; nothing is overwritten), nothing
+/// for an unchanged sha. Then the source stamp moves.
+#[allow(clippy::too_many_arguments)]
+async fn sync_existing(
     svc: &DesignService,
-    a: &DesignArtifact,
+    mirror_id: &str,
     bytes: Vec<u8>,
+    sha: &str,
+    updated_at: &str,
     source_kind: &str,
     source_id: &str,
-    message: &str,
+    report: &mut ImportReport,
 ) -> Result<()> {
-    svc.commit_bytes(
-        a,
-        bytes,
-        SaveOpts {
-            base: None,
-            kind: "sync".into(),
-            author: Author::system("import"),
-            message: message.into(),
-            provenance: json!({ "imported_from": { "kind": source_kind, "id": source_id } }),
-            force: false,
-            validate: false,
-            change: "content",
+    // Fresh: the index snapshot may predate an adopt.
+    let a = svc.store().require_artifact(mirror_id).await?;
+    let label = match source_kind {
+        SOURCE_SCENE => "the Canvas scene",
+        _ => "the product attachment",
+    };
+    let provenance = json!({ "imported_from": { "kind": source_kind, "id": source_id } });
+    if a.meta["imported_from"]["source_sha256"].as_str() == Some(sha) {
+        report.unchanged += 1;
+    } else if mirror::is_adopted(&a) {
+        let run = format!("sync-{}", Utc::now().format("%Y%m%dT%H%M%S%3fZ"));
+        let side = svc
+            .commit_side(
+                &a,
+                bytes,
+                crate::variants::branch_name(&run, 1),
+                "sync",
+                a.head_version_id.as_deref(),
+                Author::system("import"),
+                format!("Changed in {label} since you adopted it"),
+                provenance,
+            )
+            .await;
+        if let Err(e) = side {
+            push_err(
+                report,
+                format!("{source_kind} {source_id}: sync failed: {e}"),
+            );
+            return Ok(());
+        }
+        report.side_versions += 1;
+    } else {
+        let synced = svc
+            .commit_bytes(
+                &a,
+                bytes,
+                SaveOpts {
+                    base: a.head_version_id.clone(),
+                    kind: "sync".into(),
+                    author: Author::system("import"),
+                    message: format!("Synced from {label}"),
+                    provenance,
+                    force: false,
+                    validate: false,
+                    change: "content",
+                },
+            )
+            .await;
+        if let Err(e) = synced {
+            push_err(
+                report,
+                format!("{source_kind} {source_id}: sync failed: {e}"),
+            );
+            return Ok(());
+        }
+        report.synced += 1;
+    }
+    let fresh = svc.store().require_artifact(&a.id).await?;
+    stamp_source(svc, &fresh, updated_at, sha).await
+}
+
+/// The source row is gone: archive its mirror (never delete it) and flag
+/// `meta.source_missing`. An adopted mirror is the Hall's own design now —
+/// it only gets the flag.
+async fn archive_vanished(
+    svc: &DesignService,
+    mirror_id: &str,
+    report: &mut ImportReport,
+) -> Result<()> {
+    let a = svc.store().require_artifact(mirror_id).await?;
+    let archive = !mirror::is_adopted(&a) && a.status != "archived";
+    if !archive && a.meta.get("source_missing") == Some(&json!(true)) {
+        return Ok(());
+    }
+    svc.update_meta(
+        &a.id,
+        UpdateArtifactReq {
+            status: if archive {
+                Some("archived".to_string())
+            } else {
+                None
+            },
+            meta: Some(json!({ "source_missing": true })),
+            ..Default::default()
         },
+        &Author::system("import"),
     )
     .await?;
+    if archive {
+        report.archived += 1;
+    }
     Ok(())
 }
 
-/// Run the import once. Per-row failures are reported, never fatal.
+/// Mirror ONE legacy source now (create / sync / side version / archive).
+/// The returned report counts what happened to it.
+pub async fn sync_one(svc: &DesignService, src: &SourceRef) -> Result<ImportReport> {
+    let _guard = import_lock().lock().await;
+    let mut report = ImportReport::default();
+    let existing = svc.store().find_by_source(src.kind(), src.id()).await?;
+    match src {
+        SourceRef::Attachment(id) => {
+            let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT {ATTACHMENT_COLS} FROM product_attachments WHERE id = ?"
+            )))
+            .bind(id)
+            .fetch_optional(svc.store().pool())
+            .await
+            .map_err(|e| Error::Internal(format!("design sync: read attachment: {e}")))?;
+            let Some(row) = row.as_ref().map(AttachmentRow::from_row) else {
+                if let Some(a) = &existing {
+                    archive_vanished(svc, &a.id, &mut report).await?;
+                }
+                return Ok(report);
+            };
+            let mut derived = Vec::new();
+            sync_attachment(svc, &row, existing.as_ref(), &mut derived, &mut report).await?;
+            link_derived(svc, derived, &mut report).await?;
+        }
+        SourceRef::Scene(id) => {
+            let updated_at: Option<String> =
+                sqlx::query_scalar("SELECT updated_at FROM canvas_scenes WHERE id = ?")
+                    .bind(id)
+                    .fetch_optional(svc.store().pool())
+                    .await
+                    .map_err(|e| Error::Internal(format!("design sync: read scene: {e}")))?;
+            match updated_at {
+                Some(at) => sync_scene(svc, id, &at, existing.as_ref(), &mut report).await?,
+                None => {
+                    if let Some(a) = &existing {
+                        archive_vanished(svc, &a.id, &mut report).await?;
+                    }
+                }
+            }
+        }
+    }
+    for e in &report.errors {
+        tracing::warn!(kind = src.kind(), id = src.id(), "design sync: {e}");
+    }
+    Ok(report)
+}
+
+/// The catch-up pass over every source. Per-row failures are reported,
+/// never fatal.
 pub async fn run(svc: &DesignService) -> Result<ImportReport> {
     let _guard = import_lock().lock().await;
     let mut report = ImportReport::default();
     let index = svc.store().source_index().await?;
-    import_attachments(svc, &index, &mut report).await?;
-    import_scenes(svc, &index, &mut report).await?;
+    let attachments = import_attachments(svc, &index, &mut report).await?;
+    let scenes = import_scenes(svc, &index, &mut report).await?;
+    // Mirrors whose source row is gone (deleted while the daemon was down,
+    // or a missed event) are archived.
+    for ((kind, id), a) in &index {
+        let gone = match kind.as_str() {
+            SOURCE_ATTACHMENT => !attachments.contains(id),
+            SOURCE_SCENE => !scenes.contains(id),
+            _ => false,
+        };
+        if gone {
+            if let Err(e) = archive_vanished(svc, &a.id, &mut report).await {
+                push_err(&mut report, format!("{kind} {id}: archive failed: {e}"));
+            }
+        }
+    }
     Ok(report)
 }
 
+/// One `product_attachments` row ([`ATTACHMENT_COLS`]).
+struct AttachmentRow {
+    id: String,
+    story_id: String,
+    workspace_id: String,
+    filename: String,
+    mime: String,
+    storage_path: String,
+    kind: String,
+    source: String,
+    meta_json: Option<String>,
+    created_by: String,
+    created_at: String,
+    updated_at: String,
+}
+
+impl AttachmentRow {
+    fn from_row(r: &sqlx::sqlite::SqliteRow) -> Self {
+        Self {
+            id: r.get("id"),
+            story_id: r.get("story_id"),
+            workspace_id: r.get("workspace_id"),
+            filename: r.get("filename"),
+            mime: r.get("mime"),
+            storage_path: r.get("storage_path"),
+            kind: r.get("kind"),
+            source: r.get("source"),
+            meta_json: r.get("meta_json"),
+            created_by: r.get("created_by"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
+        }
+    }
+}
+
+/// Every attachment, mirrored; returns the ids of ALL attachment rows (the
+/// vanished-source check needs to know which still exist).
 async fn import_attachments(
     svc: &DesignService,
     index: &HashMap<(String, String), DesignArtifact>,
     report: &mut ImportReport,
-) -> Result<()> {
-    let rows = sqlx::query(
-        "SELECT id, story_id, workspace_id, filename, mime, storage_path, kind, source,
-                meta_json, created_by, created_at, updated_at
-         FROM product_attachments ORDER BY created_at",
-    )
+) -> Result<HashSet<String>> {
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT {ATTACHMENT_COLS} FROM product_attachments ORDER BY created_at"
+    )))
     .fetch_all(svc.store().pool())
     .await
     .map_err(|e| Error::Internal(format!("design import: list attachments: {e}")))?;
@@ -195,140 +384,145 @@ async fn import_attachments(
     // (new artifact id, the attachment it was rendered from) — resolved after
     // every attachment is mirrored.
     let mut derived: Vec<(String, String)> = Vec::new();
+    let mut seen = HashSet::new();
     for r in &rows {
-        let kind: String = r.get("kind");
-        let mime: String = r.get("mime");
-        if !is_design_attachment(&kind, &mime) {
-            continue;
-        }
-        report.attachments_scanned += 1;
-        let id: String = r.get("id");
-        let Some(spec) = format::from_mime(&mime) else {
-            report.skipped += 1;
-            continue;
-        };
-        let updated_at: String = r.get("updated_at");
-        let existing = index.get(&(SOURCE_ATTACHMENT.to_string(), id.clone()));
-        if let Some(a) = existing {
-            if a.meta["imported_from"]["source_updated_at"].as_str() == Some(updated_at.as_str()) {
-                report.unchanged += 1;
-                continue;
-            }
-        }
-        let storage_path: String = r.get("storage_path");
-        let bytes = match read_attachment(svc.data_dir(), &storage_path).await {
-            Ok(b) => b,
-            Err(e) => {
-                push_err(report, format!("attachment {id}: {e}"));
-                report.skipped += 1;
-                continue;
-            }
-        };
-        let sha = blobs::sha256_hex(&bytes);
-
-        if let Some(a) = existing {
-            if a.meta["imported_from"]["source_sha256"].as_str() != Some(sha.as_str()) {
-                if let Err(e) = sync_version(
-                    svc,
-                    a,
-                    bytes,
-                    SOURCE_ATTACHMENT,
-                    &id,
-                    "Synced from the product attachment",
-                )
-                .await
-                {
-                    push_err(report, format!("attachment {id}: sync failed: {e}"));
-                    continue;
-                }
-                report.synced += 1;
-            } else {
-                report.unchanged += 1;
-            }
-            let fresh = svc.store().require_artifact(&a.id).await?;
-            stamp_source(svc, &fresh, &updated_at, &sha).await?;
-            continue;
-        }
-
-        let story_id: String = r.get("story_id");
-        let workspace_id: String = r.get("workspace_id");
-        let filename: String = r.get("filename");
-        let source: String = r.get("source");
-        let created_by: String = r.get("created_by");
-        let created_at: String = r.get("created_at");
-        let legacy: Value = r
-            .get::<Option<String>, _>("meta_json")
-            .as_deref()
-            .and_then(|m| serde_json::from_str(m).ok())
-            .unwrap_or_else(|| json!({}));
-        let mut legacy_meta = serde_json::Map::new();
-        for k in LEGACY_META_KEYS {
-            if let Some(v) = legacy.get(*k).filter(|v| v.is_string() || v.is_number()) {
-                legacy_meta.insert((*k).to_string(), v.clone());
-            }
-        }
-        let tags: Vec<String> = legacy
-            .get("group")
-            .and_then(Value::as_str)
-            .map(|g| vec![g.to_string()])
-            .unwrap_or_default();
-        let derived_from = legacy
-            .get("derived_from")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let meta = json!({
-            "imported_from": {
-                "kind": SOURCE_ATTACHMENT,
-                "id": id,
-                "story_id": story_id,
-                "filename": filename,
-                "attachment_kind": kind,
-                "source": source,
-                "source_sha256": sha,
-                "source_updated_at": updated_at,
-            },
-            "legacy_meta": Value::Object(legacy_meta),
-        });
-        let input = CreateInput {
-            workspace_id,
-            project_id: None,
-            studio: None,
-            format: spec.name.to_string(),
-            title: title_from_filename(&filename),
-            tags,
-            meta,
-            content: Some(bytes),
-            story_id: Some(story_id),
-            derived_from: None,
-            created_by,
-            author: Author::system("import"),
-            message: Some("Imported from a product story attachment".into()),
-            source: Some((SOURCE_ATTACHMENT.to_string(), id.clone())),
-            created_at: parse_ts(&created_at),
-            version_kind: Some("import".into()),
-            validate: false,
-        };
-        match svc.create_artifact(input).await {
-            Ok(saved) => {
-                report.created += 1;
-                report.links_created += svc
-                    .store()
-                    .story_ids_for(&saved.artifact.id)
-                    .await
-                    .map(|v| v.len())
-                    .unwrap_or(0);
-                if let Some(d) = derived_from {
-                    derived.push((saved.artifact.id.clone(), d));
-                }
-            }
-            // A concurrent run mirrored it first — idempotent by the unique key.
-            Err(Error::Conflict(_)) => report.unchanged += 1,
-            Err(e) => push_err(report, format!("attachment {id}: {e}")),
+        let row = AttachmentRow::from_row(r);
+        seen.insert(row.id.clone());
+        let existing = index.get(&(SOURCE_ATTACHMENT.to_string(), row.id.clone()));
+        if let Err(e) = sync_attachment(svc, &row, existing, &mut derived, report).await {
+            push_err(report, format!("attachment {}: {e}", row.id));
         }
     }
+    link_derived(svc, derived, report).await?;
+    Ok(seen)
+}
 
-    // Blender renders / exports → `derived_from` their source scene (pinned to
-    // the version mirrored now).
+/// Mirror one attachment row (`existing`: its mirror, if any).
+async fn sync_attachment(
+    svc: &DesignService,
+    r: &AttachmentRow,
+    existing: Option<&DesignArtifact>,
+    derived: &mut Vec<(String, String)>,
+    report: &mut ImportReport,
+) -> Result<()> {
+    if !is_design_attachment(&r.kind, &r.mime) {
+        return Ok(());
+    }
+    report.attachments_scanned += 1;
+    let id = &r.id;
+    let Some(spec) = format::from_mime(&r.mime) else {
+        report.skipped += 1;
+        return Ok(());
+    };
+    if let Some(a) = existing {
+        if a.meta["imported_from"]["source_updated_at"].as_str() == Some(r.updated_at.as_str()) {
+            report.unchanged += 1;
+            return Ok(());
+        }
+    }
+    let bytes = match read_attachment(svc.data_dir(), &r.storage_path).await {
+        Ok(b) => b,
+        Err(e) => {
+            push_err(report, format!("attachment {id}: {e}"));
+            report.skipped += 1;
+            return Ok(());
+        }
+    };
+    let sha = blobs::sha256_hex(&bytes);
+
+    if let Some(a) = existing {
+        return sync_existing(
+            svc,
+            &a.id,
+            bytes,
+            &sha,
+            &r.updated_at,
+            SOURCE_ATTACHMENT,
+            id,
+            report,
+        )
+        .await;
+    }
+
+    let legacy: Value = r
+        .meta_json
+        .as_deref()
+        .and_then(|m| serde_json::from_str(m).ok())
+        .unwrap_or_else(|| json!({}));
+    let mut legacy_meta = serde_json::Map::new();
+    for k in LEGACY_META_KEYS {
+        if let Some(v) = legacy.get(*k).filter(|v| v.is_string() || v.is_number()) {
+            legacy_meta.insert((*k).to_string(), v.clone());
+        }
+    }
+    let tags: Vec<String> = legacy
+        .get("group")
+        .and_then(Value::as_str)
+        .map(|g| vec![g.to_string()])
+        .unwrap_or_default();
+    let derived_from = legacy
+        .get("derived_from")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let meta = json!({
+        "imported_from": {
+            "kind": SOURCE_ATTACHMENT,
+            "id": id,
+            "story_id": r.story_id,
+            "filename": r.filename,
+            "attachment_kind": r.kind,
+            "source": r.source,
+            "source_sha256": sha,
+            "source_updated_at": r.updated_at,
+        },
+        "legacy_meta": Value::Object(legacy_meta),
+    });
+    let input = CreateInput {
+        workspace_id: r.workspace_id.clone(),
+        project_id: None,
+        studio: None,
+        format: spec.name.to_string(),
+        title: title_from_filename(&r.filename),
+        tags,
+        meta,
+        content: Some(bytes),
+        story_id: Some(r.story_id.clone()),
+        derived_from: None,
+        created_by: r.created_by.clone(),
+        author: Author::system("import"),
+        message: Some("Imported from a product story attachment".into()),
+        source: Some((SOURCE_ATTACHMENT.to_string(), id.clone())),
+        created_at: parse_ts(&r.created_at),
+        version_kind: Some("import".into()),
+        validate: false,
+    };
+    match svc.create_artifact(input).await {
+        Ok(saved) => {
+            report.created += 1;
+            report.links_created += svc
+                .store()
+                .story_ids_for(&saved.artifact.id)
+                .await
+                .map(|v| v.len())
+                .unwrap_or(0);
+            if let Some(d) = derived_from {
+                derived.push((saved.artifact.id.clone(), d));
+            }
+        }
+        // A concurrent run mirrored it first — idempotent by the unique key.
+        Err(Error::Conflict(_)) => report.unchanged += 1,
+        Err(e) => push_err(report, format!("attachment {id}: {e}")),
+    }
+    Ok(())
+}
+
+/// Blender renders / exports → `derived_from` their source scene (pinned to
+/// the version mirrored now).
+async fn link_derived(
+    svc: &DesignService,
+    derived: Vec<(String, String)>,
+    report: &mut ImportReport,
+) -> Result<()> {
     for (artifact_id, source_attachment) in derived {
         let Some(src) = svc
             .store()
@@ -359,11 +553,12 @@ async fn import_attachments(
     Ok(())
 }
 
+/// Every scene, mirrored; returns the ids of all scene rows.
 async fn import_scenes(
     svc: &DesignService,
     index: &HashMap<(String, String), DesignArtifact>,
     report: &mut ImportReport,
-) -> Result<()> {
+) -> Result<HashSet<String>> {
     // D13: list ids + stamps only; a scene's (up to 25 MB) `doc_json` is read
     // only when it changed since the last import — the boot import used to
     // load every scene document to skip nearly all of them.
@@ -372,133 +567,143 @@ async fn import_scenes(
         .await
         .map_err(|e| Error::Internal(format!("design import: list canvas scenes: {e}")))?;
 
+    let mut seen = HashSet::new();
     for h in &heads {
-        report.scenes_scanned += 1;
         let id: String = h.get("id");
         let updated_at: String = h.get("updated_at");
+        seen.insert(id.clone());
         let existing = index.get(&(SOURCE_SCENE.to_string(), id.clone()));
-        if let Some(a) = existing {
-            if a.meta["imported_from"]["source_updated_at"].as_str() == Some(updated_at.as_str())
-                && a.meta["imported_from"]["portable_images"] == true
-            {
-                report.unchanged += 1;
-                continue;
-            }
+        if let Err(e) = sync_scene(svc, &id, &updated_at, existing, report).await {
+            push_err(report, format!("canvas scene {id}: {e}"));
         }
-        let repo = otto_state::CanvasRepo::new(svc.store().pool().clone());
-        let scene = match repo.portable_scene(&id).await {
-            Ok(Some(scene)) => scene,
-            Ok(None) => continue,
-            Err(e) => {
-                push_err(report, format!("canvas scene {id}: {e}"));
-                continue;
-            }
-        };
-        let updated_at = scene.updated_at.to_rfc3339();
-        let doc = scene.doc_json;
-        let bytes = doc.clone().into_bytes();
-        if bytes.len() > format::MAX_CONTENT_BYTES {
-            push_err(
-                report,
-                format!("canvas scene {id}: document over the design cap"),
-            );
-            report.skipped += 1;
-            continue;
-        }
-        let sha = blobs::sha256_hex(&bytes);
+    }
+    Ok(seen)
+}
 
-        if let Some(a) = existing {
-            if a.meta["imported_from"]["source_sha256"].as_str() != Some(sha.as_str()) {
-                if let Err(e) = sync_version(
-                    svc,
-                    a,
-                    bytes,
-                    SOURCE_SCENE,
-                    &id,
-                    "Synced from the Canvas scene",
-                )
+/// Mirror one scene (`updated_at`: its row's stamp; `existing`: its mirror).
+async fn sync_scene(
+    svc: &DesignService,
+    id: &str,
+    updated_at: &str,
+    existing: Option<&DesignArtifact>,
+    report: &mut ImportReport,
+) -> Result<()> {
+    report.scenes_scanned += 1;
+    if let Some(a) = existing {
+        if a.meta["imported_from"]["source_updated_at"].as_str() == Some(updated_at)
+            && a.meta["imported_from"]["portable_images"] == true
+        {
+            report.unchanged += 1;
+            return Ok(());
+        }
+    }
+    let repo = otto_state::CanvasRepo::new(svc.store().pool().clone());
+    let scene = match repo.portable_scene(&id.to_string()).await {
+        Ok(Some(scene)) => scene,
+        Ok(None) => return Ok(()),
+        Err(e) => {
+            push_err(report, format!("canvas scene {id}: {e}"));
+            return Ok(());
+        }
+    };
+    let updated_at = scene.updated_at.to_rfc3339();
+    let doc = scene.doc_json;
+    let bytes = doc.clone().into_bytes();
+    if bytes.len() > format::MAX_CONTENT_BYTES {
+        push_err(
+            report,
+            format!("canvas scene {id}: document over the design cap"),
+        );
+        report.skipped += 1;
+        return Ok(());
+    }
+    let sha = blobs::sha256_hex(&bytes);
+
+    if let Some(a) = existing {
+        return sync_existing(
+            svc,
+            &a.id,
+            bytes,
+            &sha,
+            &updated_at,
+            SOURCE_SCENE,
+            id,
+            report,
+        )
+        .await;
+    }
+
+    let canvas_format = serde_json::from_str::<Value>(&doc)
+        .ok()
+        .and_then(|v| {
+            v.get("format")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| v.get("type").and_then(Value::as_str).map(str::to_string))
+        })
+        .unwrap_or_else(|| "mermaid".to_string());
+    let section = scene.section;
+    let story_id = scene.story_id;
+    let title = scene.title;
+    let created_at = scene.created_at;
+    let meta = json!({
+        "imported_from": {
+            "kind": SOURCE_SCENE,
+            "id": id,
+            "story_id": story_id,
+            "section": section,
+            "canvas_format": canvas_format,
+            "portable_images": true,
+            "source_sha256": sha,
+            "source_updated_at": updated_at,
+        }
+    });
+    let input = CreateInput {
+        workspace_id: scene.workspace_id,
+        project_id: None,
+        studio: Some("whiteboard".into()),
+        format: "otto-canvas".into(),
+        title: if title.trim().is_empty() {
+            "Untitled board".into()
+        } else {
+            title
+        },
+        tags: section.into_iter().collect(),
+        meta,
+        content: Some(bytes),
+        story_id,
+        derived_from: None,
+        created_by: scene.created_by,
+        author: Author::system("import"),
+        message: Some("Imported from Canvas".into()),
+        source: Some((SOURCE_SCENE.to_string(), id.to_string())),
+        created_at: Some(created_at),
+        version_kind: Some("import".into()),
+        validate: false,
+    };
+    match svc.create_artifact(input).await {
+        Ok(saved) => {
+            report.created += 1;
+            report.links_created += svc
+                .store()
+                .story_ids_for(&saved.artifact.id)
                 .await
-                {
-                    push_err(report, format!("canvas scene {id}: sync failed: {e}"));
-                    continue;
-                }
-                report.synced += 1;
-            } else {
-                report.unchanged += 1;
-            }
-            let fresh = svc.store().require_artifact(&a.id).await?;
-            stamp_source(svc, &fresh, &updated_at, &sha).await?;
-            continue;
+                .map(|v| v.len())
+                .unwrap_or(0);
         }
-
-        let canvas_format = serde_json::from_str::<Value>(&doc)
-            .ok()
-            .and_then(|v| {
-                v.get("format")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .or_else(|| v.get("type").and_then(Value::as_str).map(str::to_string))
-            })
-            .unwrap_or_else(|| "mermaid".to_string());
-        let section = scene.section;
-        let story_id = scene.story_id;
-        let title = scene.title;
-        let created_at = scene.created_at;
-        let meta = json!({
-            "imported_from": {
-                "kind": SOURCE_SCENE,
-                "id": id,
-                "story_id": story_id,
-                "section": section,
-                "canvas_format": canvas_format,
-                "portable_images": true,
-                "source_sha256": sha,
-                "source_updated_at": updated_at,
-            }
-        });
-        let input = CreateInput {
-            workspace_id: scene.workspace_id,
-            project_id: None,
-            studio: Some("whiteboard".into()),
-            format: "otto-canvas".into(),
-            title: if title.trim().is_empty() {
-                "Untitled board".into()
-            } else {
-                title
-            },
-            tags: section.into_iter().collect(),
-            meta,
-            content: Some(bytes),
-            story_id,
-            derived_from: None,
-            created_by: scene.created_by,
-            author: Author::system("import"),
-            message: Some("Imported from Canvas".into()),
-            source: Some((SOURCE_SCENE.to_string(), id.clone())),
-            created_at: Some(created_at),
-            version_kind: Some("import".into()),
-            validate: false,
-        };
-        match svc.create_artifact(input).await {
-            Ok(saved) => {
-                report.created += 1;
-                report.links_created += svc
-                    .store()
-                    .story_ids_for(&saved.artifact.id)
-                    .await
-                    .map(|v| v.len())
-                    .unwrap_or(0);
-            }
-            Err(Error::Conflict(_)) => report.unchanged += 1,
-            Err(e) => push_err(report, format!("canvas scene {id}: {e}")),
-        }
+        Err(Error::Conflict(_)) => report.unchanged += 1,
+        Err(e) => push_err(report, format!("canvas scene {id}: {e}")),
     }
     Ok(())
 }
 
 /// Daemon-startup hook: create the FTS index (backfilling it when it is new),
-/// then run the import. Logs; never fails the boot.
+/// run the catch-up pass, then keep every source in step live
+/// ([`crate::sync::run_live`], until the bus closes). Logs; never fails the
+/// boot.
 pub async fn startup(svc: DesignService) {
+    // Subscribe BEFORE the catch-up pass so nothing saved meanwhile is missed.
+    let live = svc.subscribe();
     let had_rows = svc
         .store()
         .all_artifact_ids()
@@ -528,10 +733,15 @@ pub async fn startup(svc: DesignService) {
             synced = r.synced,
             unchanged = r.unchanged,
             skipped = r.skipped,
+            archived = r.archived,
+            side_versions = r.side_versions,
             errors = r.errors.len(),
             "design: legacy import done"
         ),
         Err(e) => tracing::warn!("design: legacy import failed: {e}"),
+    }
+    if let Some(rx) = live {
+        crate::sync::run_live(svc, rx, crate::sync::DEBOUNCE).await;
     }
 }
 
@@ -867,5 +1077,228 @@ mod tests {
             let inner: Value = serde_json::from_str(doc["source"].as_str().unwrap()).unwrap();
             assert_eq!(inner["files"]["img"]["dataURL"], image);
         }
+    }
+
+    async fn touch_scene(pool: &otto_state::DbPool, id: &str, source: &str) -> String {
+        let doc = json!({"type":"otto-canvas", "version":1, "format":"mermaid", "source":source})
+            .to_string();
+        sqlx::query("UPDATE canvas_scenes SET doc_json = ?, updated_at = ? WHERE id = ?")
+            .bind(&doc)
+            .bind(Utc::now().to_rfc3339())
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+        doc
+    }
+
+    fn scene_doc(source: &str) -> String {
+        json!({"type":"otto-canvas", "version":1, "format":"mermaid", "source":source}).to_string()
+    }
+
+    #[tokio::test]
+    async fn sync_one_mirrors_then_syncs_an_attachment() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::db::test_pool().await;
+        let svc = DesignService::new(pool.clone(), dir.path(), None);
+        seed_story(&pool, "st1", "w1").await;
+        seed_attachment(
+            &pool,
+            dir.path(),
+            "att1",
+            "st1",
+            "mockup",
+            "text/html",
+            b"<h1>One</h1>",
+            None,
+        )
+        .await;
+        let src = SourceRef::Attachment("att1".into());
+        let r = sync_one(&svc, &src).await.unwrap();
+        assert_eq!(r.created, 1, "{r:?}");
+        let a = svc
+            .store()
+            .find_by_source(SOURCE_ATTACHMENT, "att1")
+            .await
+            .unwrap()
+            .expect("mirrored");
+        assert_eq!(svc.store().story_ids_for(&a.id).await.unwrap(), vec!["st1"]);
+        // Unchanged → nothing written.
+        assert_eq!(sync_one(&svc, &src).await.unwrap().unchanged, 1);
+        // The attachment is saved again → one `sync` head with its bytes.
+        std::fs::write(
+            dir.path().join(format!("{ATTACH_ROOT}/st1/att1.bin")),
+            b"<h1>Two</h1>",
+        )
+        .unwrap();
+        sqlx::query("UPDATE product_attachments SET updated_at = ? WHERE id = 'att1'")
+            .bind(Utc::now().to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let r = sync_one(&svc, &src).await.unwrap();
+        assert_eq!(r.synced, 1, "{r:?}");
+        let a = svc.store().require_artifact(&a.id).await.unwrap();
+        let (head, bytes) = svc.head_content(&a).await.unwrap();
+        assert_eq!(head.kind, "sync");
+        assert_eq!(bytes, b"<h1>Two</h1>");
+    }
+
+    #[tokio::test]
+    async fn sync_one_mirrors_then_syncs_a_scene() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::db::test_pool().await;
+        let svc = DesignService::new(pool.clone(), dir.path(), None);
+        seed_scene(&pool, "sc1", None, &scene_doc("flowchart TD\n A --> B\n")).await;
+        let src = SourceRef::Scene("sc1".into());
+        assert_eq!(sync_one(&svc, &src).await.unwrap().created, 1);
+        let a = svc
+            .store()
+            .find_by_source(SOURCE_SCENE, "sc1")
+            .await
+            .unwrap()
+            .expect("mirrored");
+        assert_eq!(a.format, "otto-canvas");
+        let changed = touch_scene(&pool, "sc1", "flowchart TD\n A --> C\n").await;
+        let r = sync_one(&svc, &src).await.unwrap();
+        assert_eq!(r.synced, 1, "{r:?}");
+        let (head, bytes) = svc
+            .head_content(&svc.store().require_artifact(&a.id).await.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(head.kind, "sync");
+        assert_eq!(String::from_utf8(bytes).unwrap(), changed);
+    }
+
+    #[tokio::test]
+    async fn a_vanished_source_archives_its_mirror_and_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::db::test_pool().await;
+        let svc = DesignService::new(pool.clone(), dir.path(), None);
+        seed_story(&pool, "st1", "w1").await;
+        seed_scene(&pool, "sc1", None, &scene_doc("flowchart TD\n A --> B\n")).await;
+        seed_attachment(
+            &pool,
+            dir.path(),
+            "att1",
+            "st1",
+            "design",
+            "text/html",
+            b"<p>x</p>",
+            None,
+        )
+        .await;
+        run(&svc).await.unwrap();
+        let board = svc
+            .store()
+            .find_by_source(SOURCE_SCENE, "sc1")
+            .await
+            .unwrap()
+            .unwrap();
+        // Live: the scene is deleted → its mirror is archived, never deleted.
+        sqlx::query("DELETE FROM canvas_scenes WHERE id = 'sc1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let r = sync_one(&svc, &SourceRef::Scene("sc1".into()))
+            .await
+            .unwrap();
+        assert_eq!(r.archived, 1, "{r:?}");
+        let board = svc.store().require_artifact(&board.id).await.unwrap();
+        assert_eq!(board.status, "archived");
+        assert_eq!(board.meta["source_missing"], true);
+        assert!(svc.head_content(&board).await.is_ok(), "history kept");
+        // Catch-up: an attachment deleted while the daemon was down.
+        sqlx::query("DELETE FROM product_attachments WHERE id = 'att1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let r = run(&svc).await.unwrap();
+        assert_eq!(r.archived, 1, "{r:?}");
+        let att = svc
+            .store()
+            .find_by_source(SOURCE_ATTACHMENT, "att1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(att.status, "archived");
+        // Idempotent: nothing more to archive.
+        assert_eq!(run(&svc).await.unwrap().archived, 0);
+    }
+
+    #[tokio::test]
+    async fn an_adopted_mirror_gets_a_side_version_not_a_new_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::db::test_pool().await;
+        let svc = DesignService::new(pool.clone(), dir.path(), None);
+        seed_scene(&pool, "sc1", None, &scene_doc("flowchart TD\n A --> B\n")).await;
+        let src = SourceRef::Scene("sc1".into());
+        sync_one(&svc, &src).await.unwrap();
+        let a = svc
+            .store()
+            .find_by_source(SOURCE_SCENE, "sc1")
+            .await
+            .unwrap()
+            .unwrap();
+        let adopted = svc.adopt(&a.id, &Author::user("u1")).await.unwrap();
+        assert!(mirror::is_adopted(&adopted));
+        let signals = svc
+            .store()
+            .list_signals(None, Some(a.id.as_str()), Some("adopted"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(signals.len(), 1);
+        // A Hall edit after adopting…
+        let edited = scene_doc("flowchart TD\n A --> Hall\n");
+        svc.commit_bytes(
+            &adopted,
+            edited.clone().into_bytes(),
+            SaveOpts {
+                base: adopted.head_version_id.clone(),
+                kind: "autosave".into(),
+                author: Author::user("u1"),
+                message: String::new(),
+                provenance: Value::Null,
+                force: false,
+                validate: true,
+                change: "content",
+            },
+        )
+        .await
+        .unwrap();
+        // …then the Canvas scene changes too: a side version, head untouched.
+        let canvas = touch_scene(&pool, "sc1", "flowchart TD\n A --> Canvas\n").await;
+        let r = sync_one(&svc, &src).await.unwrap();
+        assert_eq!((r.synced, r.side_versions), (0, 1), "{r:?}");
+        let fresh = svc.store().require_artifact(&a.id).await.unwrap();
+        let (_, head) = svc.head_content(&fresh).await.unwrap();
+        assert_eq!(String::from_utf8(head).unwrap(), edited);
+        let side = svc
+            .store()
+            .versions_on_branch_prefix(&a.id, "variant/sync-")
+            .await
+            .unwrap();
+        assert_eq!(side.len(), 1);
+        assert_eq!(side[0].kind, "sync");
+        assert_eq!(side[0].parent_version_id, fresh.head_version_id);
+        let (run_id, k) = crate::variants::parse_branch(&side[0].branch).unwrap();
+        assert!(run_id.starts_with("sync-") && k == 1, "{}", side[0].branch);
+        assert_eq!(
+            svc.version_bytes(&side[0]).await.unwrap(),
+            canvas.into_bytes()
+        );
+        // Unchanged since → no second side version.
+        assert_eq!(sync_one(&svc, &src).await.unwrap().side_versions, 0);
+        // The source disappears: an adopted design is the Hall's own now —
+        // flagged, not archived.
+        sqlx::query("DELETE FROM canvas_scenes WHERE id = 'sc1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(sync_one(&svc, &src).await.unwrap().archived, 0);
+        let fresh = svc.store().require_artifact(&a.id).await.unwrap();
+        assert_ne!(fresh.status, "archived");
+        assert_eq!(fresh.meta["source_missing"], true);
+        assert_eq!(fresh.meta["adopted"], true);
     }
 }

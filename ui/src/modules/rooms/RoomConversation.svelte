@@ -3,8 +3,10 @@
   // the owner's ConversationView, read through the room capability
   // (`/room-transcript/…`, never owner auth). Everyone admitted reads it; the
   // member driving the terminal also gets a composer (`/room-prompt/…`).
-  // The transcript is polled — rooms have no owner event stream.
-  import { onMount, setContext, tick, untrack } from 'svelte';
+  // The transcript is polled — rooms have no owner event stream — backing off
+  // while nothing changes (chatCadence.ts), and only while the chat is on
+  // screen: a hidden window or a pane hidden by layout stops the poll.
+  import { setContext, tick, untrack } from 'svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { TurnItem, CONV_CTX, groupTurns, type ConvContext, type RenderItem } from '../agents/conversation';
@@ -12,7 +14,8 @@
   import { openExternal } from '../../lib/external';
   import { loadErrorText } from '../../lib/loadError';
   import { announceShown } from '../../lib/announce.svelte';
-  import { pollWhileVisible } from '../../lib/poll';
+  import { pollWhileVisible, type Poller } from '../../lib/poll';
+  import { ChatCadence } from './chatCadence';
   import { detectBlockDirection } from '../../lib/textDirection';
   import type { RoomCredential } from '../../lib/api/room-types';
   import type { Transcript, TranscriptProvider } from '../../lib/api/types';
@@ -27,7 +30,8 @@
   }
   let { origin, credential, sessionId, grantEpoch }: Props = $props();
 
-  const POLL_MS = 2500;
+  const cadence = new ChatCadence();
+  let poller: Poller | null = null;
   // The room's session never changes under one mount (RoomPage remounts on a
   // new room), so the initial id is the id.
   const sid = untrack(() => sessionId);
@@ -67,8 +71,12 @@
       const turns = t.turns ?? [];
       const last = turns[turns.length - 1];
       const key = `${turns.length}:${last?.id ?? ''}:${JSON.stringify(last ?? null).length}`;
-      if (key === lastKey) return true;
+      if (key === lastKey) {
+        cadence.unchanged();
+        return true;
+      }
       lastKey = key;
+      cadence.active();
       ctx.provider = (t.provider ?? 'claude') as TranscriptProvider;
       const follow = nearBottom();
       conv.transcript = t;
@@ -81,22 +89,40 @@
       return false;
     }
   }
-  onMount(() => {
-    const poller = pollWhileVisible(() => refresh(), { ms: POLL_MS, immediate: true });
-    return () => poller.stop();
+  // On screen = laid out and in the viewport; a pane hidden by layout (or
+  // scrolled away) reports not intersecting. No IntersectionObserver: always on.
+  let onScreen = $state(true);
+  $effect(() => {
+    const el = scroller;
+    if (!el || typeof IntersectionObserver !== 'function') return;
+    const io = new IntersectionObserver((entries) => { onScreen = entries.some((e) => e.isIntersecting); });
+    io.observe(el);
+    return () => io.disconnect();
   });
+  $effect(() => {
+    if (!onScreen) return;
+    // Untracked: the first run reads props/state that must not restart the poll.
+    const p = untrack(() => pollWhileVisible(() => refresh(), { get ms() { return cadence.ms; }, immediate: true }));
+    poller = p;
+    return () => { p.stop(); if (poller === p) poller = null; };
+  });
+  /** Activity: back to the fast cadence and poll now (one chain, lib/poll.ts). */
+  function wake(): void {
+    cadence.active();
+    poller?.now({ background: true });
+  }
 
   async function submit(): Promise<void> {
     const text = draft.trim();
     if (!text || grantEpoch === null) return;
     sending = true; sendError = '';
-    try { await roomPrompt(origin, credential, grantEpoch, text, true); draft = ''; setTimeout(() => void refresh(), 800); }
+    try { await roomPrompt(origin, credential, grantEpoch, text, true); draft = ''; cadence.active(); setTimeout(wake, 800); }
     catch (e) { sendError = loadErrorText(e); }
     finally { sending = false; }
   }
   async function interrupt(): Promise<void> {
     if (grantEpoch === null) return;
-    try { await roomPrompt(origin, credential, grantEpoch, '\u001b', false); } catch (e) { sendError = loadErrorText(e); }
+    try { await roomPrompt(origin, credential, grantEpoch, '\u001b', false); wake(); } catch (e) { sendError = loadErrorText(e); }
   }
   function onKey(e: KeyboardEvent) {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); void submit(); }
@@ -106,7 +132,7 @@
 <section class="room-conv" aria-label="Agent conversation">
   <div class="turns" bind:this={scroller}>
     {#if error && !loaded}
-      <EmptyState variant="page" icon="comment" tone="error" title="Couldn’t load the conversation" body={error} actionLabel="Retry" onaction={() => void refresh()} />
+      <EmptyState variant="page" icon="comment" tone="error" title="Couldn’t load the conversation" body={error} actionLabel="Retry" onaction={() => (poller ? poller.now() : void refresh())} />
     {:else if !loaded}
       <Skeleton rows={4} label="the conversation" />
     {:else if unavailable}

@@ -10,6 +10,9 @@
   import type { SkillFileEntry } from '../../lib/api/types';
   import { confirmer } from '../../lib/confirm.svelte';
   import { skillLabApi } from '../../lib/api/skillLab';
+  import { ApiError } from '../../lib/api/client';
+  import { sha256Hex } from './sha256';
+  import { announceShown } from '../../lib/announce.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { formatBytes } from '../../lib/metric-format';
   import Icon from '../../lib/components/Icon.svelte';
@@ -51,6 +54,10 @@
   let disposed = false;
   onDestroy(() => { disposed = true; loadGeneration++; });
   let loadError = $state<string | null>(null);
+  // A save refused because the file changed underneath (the self-improvement
+  // engine, a review fix, another window): their version, kept beside the
+  // person's draft until they pick "Reload theirs" or "Keep mine".
+  let conflict = $state<{ path: string; theirs: string; hash: string | null } | null>(null);
   // Bumped whenever the text is replaced from outside (another file, Revert,
   // a reload) so the uncontrolled CodeEditor remounts on the new document.
   let docKey = $state(0);
@@ -69,6 +76,7 @@
     const generation = ++loadGeneration;
     currentFile = path;
     loadError = null;
+    conflict = null;
     binary = false;
     content = original = '';
     loading = path !== 'SKILL.md';
@@ -142,14 +150,63 @@
     const generation = loadGeneration;
     saving = true;
     try {
-      const next = await skillLabApi.putFile(target, { path, content: submitted });
+      // `if_hash`: what this draft was based on. A newer write on disk turns
+      // the save into a 409 instead of silently replacing it.
+      const next = await skillLabApi.putFile(target, { path, content: submitted, if_hash: sha256Hex(original) });
       // A save acknowledges only the submitted snapshot, never later typing.
       if (disposed || owner !== `${source}:${name}` || generation !== loadGeneration) return;
       original = submitted;
       onsaved(next, path === 'SKILL.md' ? submitted : null);
       toasts.success('Saved', path);
     } catch (e) {
-      toastError(`Couldn’t save ${path}`, e);
+      if (e instanceof ApiError && e.status === 409) await loadTheirs(target, path, owner, generation);
+      else toastError(`Couldn’t save ${path}`, e);
+    } finally {
+      saving = false;
+    }
+  }
+
+  /** After a 409: fetch the version now on disk. The draft stays in the editor. */
+  async function loadTheirs(target: string, path: string, owner: string, generation: number): Promise<void> {
+    try {
+      const r = await skillLabApi.getFile(target, path);
+      if (disposed || owner !== `${source}:${name}` || generation !== loadGeneration) return;
+      conflict = { path, theirs: r.content, hash: r.hash ?? sha256Hex(r.content) };
+    } catch {
+      // Gone since: "Keep mine" writes it back, "Reload theirs" empties it.
+      if (disposed || owner !== `${source}:${name}` || generation !== loadGeneration) return;
+      conflict = { path, theirs: '', hash: null };
+    }
+  }
+
+  function reloadTheirs(): void {
+    const c = conflict;
+    if (!c || c.path !== currentFile) return;
+    content = original = c.theirs;
+    conflict = null;
+    docKey++;
+    if (c.path === 'SKILL.md') onsaved(files, c.theirs);
+  }
+
+  async function keepMine(): Promise<void> {
+    const c = conflict;
+    if (!c || saving || c.path !== currentFile) return;
+    const owner = `${source}:${name}`;
+    const target = name;
+    const submitted = content;
+    const generation = loadGeneration;
+    saving = true;
+    try {
+      // Based on THEIR version now: a third write in between conflicts again.
+      const next = await skillLabApi.putFile(target, { path: c.path, content: submitted, ...(c.hash ? { if_hash: c.hash } : {}) });
+      if (disposed || owner !== `${source}:${name}` || generation !== loadGeneration) return;
+      original = submitted;
+      conflict = null;
+      onsaved(next, c.path === 'SKILL.md' ? submitted : null);
+      toasts.success('Saved your version', c.path);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) await loadTheirs(target, c.path, owner, generation);
+      else toastError(`Couldn’t save ${c.path}`, e);
     } finally {
       saving = false;
     }
@@ -263,7 +320,7 @@
         <span class="mono path" dir="ltr" title={currentFile}>{currentFile}</span>
         {#if dirty}<Badge tone="warn" label="Unsaved" />{/if}
         <span class="grow"></span>
-        {#if editable && !loading && !binary && !loadError}
+        {#if editable && !loading && !binary && !loadError && !conflict}
           {#if dirty}
             <button class="btn small ghost" onclick={revert} title="Drop your changes to {currentFile}">Revert</button>
           {:else}
@@ -272,6 +329,14 @@
           <button class="btn small primary" disabled={saving || !dirty} title={dirty ? 'Save (⌘S)' : 'No changes to save'} onclick={save} data-testid="save-skill">{saving ? 'Saving…' : 'Save'}</button>
         {/if}
       </div>
+      {#if conflict && conflict.path === currentFile}
+        <div class="conflict" data-testid="skill-conflict" use:announceShown={{ text: `${currentFile} changed since you opened it. Your text is still in the editor.`, assertive: true }}>
+          <Icon name="warning" size={14} />
+          <span class="grow">{currentFile} changed since you opened it — by a review fix, the self-improvement engine or another window. Your text is still in the editor; nothing was saved.</span>
+          <button class="btn small ghost" onclick={reloadTheirs} disabled={saving} title="Drop your text and load the version on disk">Reload theirs</button>
+          <button class="btn small primary" onclick={keepMine} disabled={saving} title="Save your text over the version on disk">{saving ? 'Saving…' : 'Keep mine'}</button>
+        </div>
+      {/if}
       {#if loadError && source === 'bundled'}
         <!-- Not a failure: a bundled skill's other files open once installed. -->
         <p class="dim msg">{loadError}</p>
@@ -424,6 +489,25 @@
   .code > :global(*) {
     flex: 1;
     min-height: 0;
+  }
+  .conflict {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--warning-soft);
+    font-size: var(--fs-s);
+    color: var(--text);
+  }
+  .conflict > :global(svg) {
+    flex: none;
+    color: var(--warning);
+  }
+  .conflict .grow {
+    flex: 1 1 220px;
+    min-width: 0;
   }
   .save-hint {
     font-size: var(--fs-xs);

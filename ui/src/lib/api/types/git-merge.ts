@@ -120,9 +120,11 @@ export interface PrSummary {
   is_mine?: boolean;
 }
 
-/** `GET /repos/{id}/prs?state=&page=&per_page=` — one page. `has_more` is the
- *  provider's own next-page signal; `page`/`per_page` echo the clamped request
- *  (`per_page` 1..=100, `page` 1..=10000). */
+/** `GET /repos/{id}/prs?state=&page=&per_page=[&review=me]` — one page.
+ *  `has_more` is the provider's own next-page signal; `page`/`per_page` echo
+ *  the clamped request (`per_page` 1..=100, `page` 1..=10000). `review=me`
+ *  lists only OPEN PRs that ask the caller's forge account for a review
+ *  (`state` is then ignored; a GitHub page may hold fewer rows). */
 export interface PrListResp {
   items: PrSummary[];
   has_more: boolean;
@@ -287,6 +289,15 @@ export interface NewPrCommentReq {
  *  `PrComment.id`. Answers the updated `PrComment`. */
 export interface EditPrCommentReq {
   body: string;
+}
+
+/** Body for PUT /repos/{id}/prs/{number}/reviewers → 204. Names as the
+ *  collaborator typeahead / `PrReviewer.name` show them; a name on both sides,
+ *  an empty edit or more than 30 names is a 400, a name the forge can't
+ *  resolve a 409 (Bitbucket, GitLab: before anything is written). */
+export interface EditPrReviewersReq {
+  add?: string[];
+  remove?: string[];
 }
 
 /** Body for POST /repos/{id}/prs/{number}/comments/{cid}/resolve — `{cid}` is

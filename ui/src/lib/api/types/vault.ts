@@ -58,6 +58,32 @@ export interface VaultStatus {
   /** Recovery dirs (`.otto-history`, `.trash`) git already tracks — committed
    *  before Otto ignored them; untrack with `git rm --cached -r <dir>`. Omitted when none. */
   tracked_recovery?: string[];
+  /** Present only while the full-text index is incomplete (rebuilding after
+   *  an upgrade or an explicit rebuild); search answers from the indexed part. */
+  search_index?: VaultSearchIndexStatus;
+}
+
+/** Progress of an incomplete full-text index. */
+export interface VaultSearchIndexStatus {
+  /** `rebuilding` (running) | `pending` (missing notes, not started) | `ready`
+   *  (only in the `POST …/search-index` answer). */
+  state: 'rebuilding' | 'pending' | 'ready';
+  indexed: number;
+  total: number;
+}
+
+/** `POST …/search` with `with_index: true`. `index` is absent when complete. */
+export interface VaultSearchPage {
+  hits: VaultSearchHit[];
+  index?: VaultSearchIndexStatus;
+}
+
+/** `POST …/attachment` — the saved (never pre-existing) file and its embed. */
+export interface VaultAttachment {
+  path: string;
+  size: number;
+  /** In the vault's link style, e.g. `![[attachments/Pasted image 20261112.png]]`. */
+  embed: string;
 }
 
 export interface VaultDirEntry {
@@ -147,6 +173,8 @@ export interface VaultSearchReq {
   path_prefix?: string;
   okf_type?: string;
   limit?: number;
+  /** Answer `VaultSearchPage` (hits + index completeness) instead of a bare array. */
+  with_index?: boolean;
 }
 
 export interface VaultSearchHit {

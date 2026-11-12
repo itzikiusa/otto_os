@@ -104,6 +104,17 @@ impl Drop for Busy<'_> {
     }
 }
 
+/// The wake log's name for a request: its statement on one line, cut to 100
+/// characters (enough to tell the usage summary from a budget gate or the
+/// flusher's insert, never a whole query).
+fn wake_cause(what: &str) -> String {
+    let line = what.split_whitespace().collect::<Vec<_>>().join(" ");
+    match line.char_indices().nth(100) {
+        Some((cut, _)) => format!("{}…", &line[..cut]),
+        None => line,
+    }
+}
+
 /// An explicit lifetime lease for a sibling service using the HTTP endpoint.
 /// Shares the request counter with parking, so acquisition and parking are atomic.
 ///
@@ -142,7 +153,7 @@ impl ClickHouse {
             stamp: false,
         };
         if parked {
-            self.unpark().await?;
+            self.unpark("a background export lease").await?;
         }
         lease.endpoint = self.proc.lock().unwrap().base_url.clone();
         Ok(lease)
@@ -309,7 +320,10 @@ impl ClickHouse {
     /// restarting a parked server first. The in-flight mark is taken BEFORE
     /// the parked check (under the same lock `maybe_park` decides under), so a
     /// request can never race onto a server that is being stopped.
-    async fn begin(&self) -> Result<(Busy<'_>, String)> {
+    ///
+    /// `what` (the statement, or `INSERT INTO <table>`) names the caller in
+    /// the wake log line when this request is the one that restarts it.
+    async fn begin(&self, what: &str) -> Result<(Busy<'_>, String)> {
         let parked = {
             let mut p = self.proc.lock().unwrap();
             p.inflight += 1;
@@ -320,7 +334,7 @@ impl ClickHouse {
             stamp: true,
         };
         if parked {
-            self.unpark().await?;
+            self.unpark(&wake_cause(what)).await?;
         }
         let url = self.proc.lock().unwrap().base_url.clone();
         Ok((busy, url))
@@ -329,7 +343,9 @@ impl ClickHouse {
     /// Restart a parked server (serialized; a no-op if another request
     /// already did). A failed restart leaves `parked = false` with no child,
     /// so [`Self::server_alive`] reports dead and the engine's heal reinits.
-    async fn unpark(&self) -> Result<()> {
+    /// `cause` says who woke it (2026-11-12: 58 starts and 33 parks in a day
+    /// and nothing said which caller kept waking it).
+    async fn unpark(&self, cause: &str) -> Result<()> {
         let _g = self.life.lock().await;
         if !self.proc.lock().unwrap().parked {
             return Ok(());
@@ -345,7 +361,7 @@ impl ClickHouse {
                 self.restarts
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 tracing::info!(
-                    "usage: clickhouse woke from idle-stop in {} ms",
+                    "usage: clickhouse woke from idle-stop in {} ms (woken by: {cause})",
                     started.elapsed().as_millis()
                 );
                 if let Some(hook) = self.wake_hook.get() {
@@ -393,7 +409,7 @@ impl ClickHouse {
     /// a non-2xx (ClickHouse returns a readable message in the body). `timeout`
     /// bounds the request — short for queries, long for DDL/OPTIMIZE.
     async fn post(&self, sql: String, settings: &str, timeout: Duration) -> Result<String> {
-        let (busy, base_url) = self.begin().await?;
+        let (busy, base_url) = self.begin(&sql).await?;
         self.post_on(busy, &base_url, sql, settings, timeout).await
     }
 
@@ -522,7 +538,8 @@ impl ClickHouse {
             stamp: false,
         };
         let base_url = if parked {
-            self.unpark().await?;
+            self.unpark(&format!("a background read: {}", wake_cause(sql)))
+                .await?;
             self.proc.lock().unwrap().base_url.clone()
         } else {
             base_url
@@ -561,7 +578,7 @@ impl ClickHouse {
         if ndjson.trim().is_empty() {
             return Ok(());
         }
-        let (busy, base_url) = self.begin().await?;
+        let (busy, base_url) = self.begin(&format!("INSERT INTO {table}")).await?;
         self.send_insert(busy, &base_url, table, ndjson).await
     }
 
@@ -1120,6 +1137,24 @@ fn parse_status_pid(text: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_wake_log_names_the_statement_on_one_short_line() {
+        assert_eq!(
+            wake_cause("SELECT sum(tokens)\n  FROM usage_events\n\tWHERE ts > now()"),
+            "SELECT sum(tokens) FROM usage_events WHERE ts > now()"
+        );
+        let long = format!("SELECT {}", "x, ".repeat(200));
+        let cause = wake_cause(&long);
+        assert_eq!(cause.chars().count(), 101, "100 characters and an ellipsis");
+        assert!(cause.ends_with('…'));
+        // Multi-byte text is cut on a character boundary.
+        assert_eq!(wake_cause(&"é".repeat(150)).chars().count(), 101);
+        assert_eq!(
+            wake_cause("INSERT INTO usage_events"),
+            "INSERT INTO usage_events"
+        );
+    }
 
     #[tokio::test]
     async fn exec_rejects_truncated_success_response() {

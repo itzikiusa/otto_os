@@ -7,9 +7,15 @@
 //! reference resolution) — those differ by nature. What follows is the same
 //! decision in the same order, and lives only here:
 //!
-//!   [policy-as-code] → approval gate ([auto-approve] may clear it) →
-//!   approval (unless a dry-run was requested) → dry-run → audit insert
+//!   [policy-as-code] → (policy require-dry-run with no matching preview yet:
+//!   the preview, nothing else) → approval gate ([auto-approve] may clear it)
+//!   → approval (unless a dry-run was requested) → dry-run → audit insert
 //!   (fail-closed) → hand back for execution.
+//!
+//! "Require dry run" means: a call runs only after a preview of the SAME
+//! arguments (same args hash, caller, server, tool). The first call returns
+//! that preview and consumes no approval; the repeat runs, and only then is a
+//! required approval requested/consumed and the preview used up.
 //!
 //! The bracketed stages are optional members of a [`StageSet`]; each entry
 //! point passes a named constant that says which apply and why. The entry
@@ -123,8 +129,17 @@ pub trait Stages: Send {
     async fn auto_approve(&mut self) -> bool;
     /// Find/consume or request the human approval.
     async fn approval(&mut self) -> Result<Approval<Self::Outcome>, Self::Error>;
-    /// Audit and return the dry-run preview (nothing executes).
+    /// Audit and return the dry-run preview (nothing executes). An entry
+    /// point with policy-as-code records it as this call's preview.
     async fn dry_run(&mut self) -> Result<Self::Outcome, Self::Error>;
+    /// Whether a preview of these exact arguments was returned to this caller
+    /// (and not used up yet). Only a policy's require-dry-run asks.
+    async fn has_prior_dry_run(&mut self) -> bool {
+        false
+    }
+    /// Use up the preview [`Self::has_prior_dry_run`] found: the call it
+    /// licensed is about to execute.
+    async fn consume_prior_dry_run(&mut self) {}
     /// Insert the audit row BEFORE executing; an error aborts the call.
     async fn audit(&mut self, decision: Decision) -> Result<Self::Row, Self::Error>;
 }
@@ -148,20 +163,28 @@ pub async fn run<S: Stages>(
             PolicyVerdict::Allow => {}
         }
     }
+    // A policy-forced dry run: without a preview of these arguments, the call
+    // IS the preview — before the approval stage, so it never spends (or
+    // requests) an approval for a call that does not execute.
+    if policy_dry_run && !dry_run_requested && !stages.has_prior_dry_run().await {
+        return Ok(Verdict::Done(stages.dry_run().await?));
+    }
     let gate = stages.approval_gate(policy_approval).await;
     let auto =
         set.auto_approve && gate.needed && gate.auto_approvable && stages.auto_approve().await;
     let mut approved = false;
-    // A dry-run request skips the approval (a preview executes nothing); a
-    // policy's require-dry-run does not.
+    // A dry-run request skips the approval (a preview executes nothing).
     if gate.needed && !auto && !dry_run_requested {
         match stages.approval().await? {
             Approval::Granted => approved = true,
             Approval::Stop(outcome) => return Ok(Verdict::Done(outcome)),
         }
     }
-    if dry_run_requested || policy_dry_run {
+    if dry_run_requested {
         return Ok(Verdict::Done(stages.dry_run().await?));
+    }
+    if policy_dry_run {
+        stages.consume_prior_dry_run().await;
     }
     let decision = if approved {
         Decision::Approved
@@ -186,6 +209,8 @@ mod tests {
         rule: bool,
         approval: Option<&'static str>, // None = granted, Some(stop outcome)
         audit_fails: bool,
+        /// A matching preview of these arguments exists.
+        previewed: bool,
         ran: Vec<String>,
     }
 
@@ -223,6 +248,13 @@ mod tests {
         async fn dry_run(&mut self) -> Result<String, &'static str> {
             self.ran.push("dry_run".into());
             Ok("dry_run".into())
+        }
+        async fn has_prior_dry_run(&mut self) -> bool {
+            self.ran.push(format!("previewed?:{}", self.previewed));
+            self.previewed
+        }
+        async fn consume_prior_dry_run(&mut self) {
+            self.ran.push("use_preview".into());
         }
         async fn audit(&mut self, d: Decision) -> Result<&'static str, &'static str> {
             self.ran.push(format!("audit:{}", d.as_str()));
@@ -281,14 +313,92 @@ mod tests {
                 "exec:allowed:row",
                 &["gate:false", "audit:allowed"],
             ),
+            // Require dry-run: the first call is the preview and touches no
+            // approval; the repeat of the same args runs and uses it up.
             (
-                "server: policy require-dry-run",
+                "server: policy require-dry-run, first call",
                 REGISTERED_SERVERS,
                 Fake {
                     policy: Some(PolicyVerdict::RequireDryRun),
                     ..Fake::default()
                 },
                 false,
+                "dry_run",
+                &["policy", "previewed?:false", "dry_run"],
+            ),
+            (
+                "server: policy require-dry-run, after a matching preview",
+                REGISTERED_SERVERS,
+                Fake {
+                    policy: Some(PolicyVerdict::RequireDryRun),
+                    previewed: true,
+                    ..Fake::default()
+                },
+                false,
+                "exec:allowed:row",
+                &[
+                    "policy",
+                    "previewed?:true",
+                    "gate:false",
+                    "use_preview",
+                    "audit:allowed",
+                ],
+            ),
+            (
+                "server: require-dry-run + approval, first call spends no approval",
+                REGISTERED_SERVERS,
+                Fake {
+                    policy: Some(PolicyVerdict::RequireDryRun),
+                    gate: dangerous(),
+                    ..Fake::default()
+                },
+                false,
+                "dry_run",
+                &["policy", "previewed?:false", "dry_run"],
+            ),
+            (
+                "server: require-dry-run + approval, previewed: approval then run",
+                REGISTERED_SERVERS,
+                Fake {
+                    policy: Some(PolicyVerdict::RequireDryRun),
+                    gate: dangerous(),
+                    previewed: true,
+                    ..Fake::default()
+                },
+                false,
+                "exec:approved:row",
+                &[
+                    "policy",
+                    "previewed?:true",
+                    "gate:false",
+                    "approval",
+                    "use_preview",
+                    "audit:approved",
+                ],
+            ),
+            (
+                "server: require-dry-run + approval pending keeps the preview",
+                REGISTERED_SERVERS,
+                Fake {
+                    policy: Some(PolicyVerdict::RequireDryRun),
+                    gate: dangerous(),
+                    previewed: true,
+                    approval: Some("pending"),
+                    ..Fake::default()
+                },
+                false,
+                "pending",
+                &["policy", "previewed?:true", "gate:false", "approval"],
+            ),
+            (
+                "server: require-dry-run, an explicit dry-run request",
+                REGISTERED_SERVERS,
+                Fake {
+                    policy: Some(PolicyVerdict::RequireDryRun),
+                    gate: dangerous(),
+                    ..Fake::default()
+                },
+                true,
                 "dry_run",
                 &["policy", "gate:false", "dry_run"],
             ),

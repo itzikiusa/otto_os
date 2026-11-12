@@ -1688,6 +1688,20 @@ async fn load_editable<C: DesignAssistCtx>(
     Ok(a)
 }
 
+/// [`load_editable`] at Editor for a turn / variants run / accept: a mirrored
+/// Canvas scene or story attachment is refused with 409 `mirrored` until a
+/// person adopts it (the source would overwrite the agent's work otherwise).
+async fn load_writable<C: DesignAssistCtx>(
+    ctx: &C,
+    svc: &DesignService,
+    user: &User,
+    id: &str,
+) -> ApiResult<DesignArtifact> {
+    let a = load_editable(ctx, svc, user, id, WorkspaceRole::Editor).await?;
+    otto_design::mirror::ensure_editable(&a)?;
+    Ok(a)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn new_turn(
     turn_id: &str,
@@ -1738,7 +1752,7 @@ pub async fn start_assist<C: DesignAssistCtx>(
     let mode = Mode::parse(req.mode.as_deref())?;
     let selection = clean_selection(req.selection)?;
     let svc = ctx.design();
-    let a = load_editable(&ctx, &svc, &user, &id, WorkspaceRole::Editor).await?;
+    let a = load_writable(&ctx, &svc, &user, &id).await?;
     let (head, base_doc) = svc.head_content(&a).await?;
     let adapter = adapter_for(&a.format, &base_doc)?;
     let work_file = svc.work_file(&a).ok_or_else(|| {
@@ -1873,7 +1887,7 @@ pub async fn start_variants<C: DesignAssistCtx>(
     }
     let selection = clean_selection(req.selection)?;
     let svc = ctx.design();
-    let a = load_editable(&ctx, &svc, &user, &id, WorkspaceRole::Editor).await?;
+    let a = load_writable(&ctx, &svc, &user, &id).await?;
     let (head, base_doc) = svc.head_content(&a).await?;
     let adapter = adapter_for(&a.format, &base_doc)?;
     let run_id = new_id();
@@ -2137,7 +2151,7 @@ pub async fn accept_variant<C: DesignAssistCtx>(
 ) -> ApiResult<Json<DesignVariantAcceptResp>> {
     let force = body.map(|Json(b)| b.force).unwrap_or(false);
     let svc = ctx.design();
-    let a = load_editable(&ctx, &svc, &user, &id, WorkspaceRole::Editor).await?;
+    let a = load_writable(&ctx, &svc, &user, &id).await?;
     if let Some(b) = busy_of(&a.id) {
         return Err(ApiError(Error::Conflict(format!(
             "an agent is still working on this artifact ({b}); accept once it finished"

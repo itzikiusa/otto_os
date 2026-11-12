@@ -312,6 +312,62 @@ pub fn needs_confirm(
     env == Environment::Prod && mutating && confirm_name.map(str::trim) != Some(target_name)
 }
 
+/// The refusal for a pod-HTTP / action confirm an agent credential asserted.
+pub const AGENT_CONFIRM_REFUSED: &str =
+    "an agent session's credential cannot confirm a change to a cluster — a person signed in \
+     to Otto must run it, or approve the agent's tool call";
+
+/// `confirm_name` is a body field the client asserts: an agent session's own
+/// credential cannot give a person's confirmation (S6-304, the rule Athena's
+/// prod DDL guard applies). A person's request — or a governed tool call a
+/// person approved, which replays as that person — may carry one.
+pub fn refuse_agent_confirm(confirm_name: Option<&str>) -> Result<()> {
+    if confirm_name.is_some_and(|c| !c.trim().is_empty()) && otto_core::auth::request_is_agent() {
+        return Err(Error::Forbidden(AGENT_CONFIRM_REFUSED.into()));
+    }
+    Ok(())
+}
+
+/// Actuator-style endpoints whose GET returns secrets: resolved properties
+/// (`env`, `configprops`), a heap dump holding every in-memory credential, and
+/// Jolokia (JMX reads/writes). Matched as a path segment so a custom
+/// management base path (`/manage/env`, `/management/heapdump`, Boot 1's
+/// root `/env`) is covered too.
+const SENSITIVE_SEGMENTS: &[&str] = &["env", "heapdump", "configprops", "jolokia"];
+
+/// Whether a pod-HTTP path reads a secret-bearing endpoint (case-insensitive,
+/// `%xx`-decoded, `;matrix` params and a `.json` suffix ignored). Such a GET
+/// needs the same `exec` grant as a mutating call, not `workloads_view`.
+pub fn is_sensitive_path(path: &str) -> bool {
+    let path_only = path.split('?').next().unwrap_or(path);
+    let decoded = percent_decode_lossy(path_only).to_ascii_lowercase();
+    decoded.split('/').any(|seg| {
+        let seg = seg.split(';').next().unwrap_or(seg);
+        let stem = seg.split('.').next().unwrap_or(seg);
+        SENSITIVE_SEGMENTS.contains(&stem)
+    })
+}
+
+/// `%xx` → byte (invalid escapes kept verbatim), for the classifier only.
+fn percent_decode_lossy(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            let hex = std::str::from_utf8(&b[i + 1..i + 3]).ok();
+            if let Some(v) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Headers whose values never leave the daemon (responses + audit).
 pub fn is_secret_header(name: &str) -> bool {
     matches!(
@@ -892,5 +948,63 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         assert!(body_sha256(None).is_none());
+    }
+
+    /// A view-only user must not GET secret-bearing actuator endpoints,
+    /// under any management base path or spelling.
+    #[test]
+    fn sensitive_actuator_paths_are_classified() {
+        for p in [
+            "/actuator/env",
+            "/actuator/env/spring.datasource.password",
+            "/ACTUATOR/Env",
+            "/actuator/heapdump",
+            "/actuator/configprops?prefix=spring",
+            "/manage/env",
+            "/management/heapdump",
+            "/env",
+            "/env.json",
+            "/actuator/%65nv",
+            "/actuator/env;jsessionid=1",
+            "/actuator/jolokia/read/java.lang:type=Memory",
+        ] {
+            assert!(is_sensitive_path(p), "{p}");
+        }
+        for p in [
+            "/actuator/health",
+            "/actuator/loggers/com.acme",
+            "/actuator/info",
+            "/api/environment",
+            "/envoy/stats",
+            "/orders?env=prod",
+            "/%",
+        ] {
+            assert!(!is_sensitive_path(p), "{p}");
+        }
+    }
+
+    /// S6-304: an agent credential's confirm never counts; a person's does.
+    #[tokio::test]
+    async fn an_agent_credential_cannot_confirm_a_pod_http_call() {
+        use otto_core::auth::{with_request_credential, RequestCredential};
+        let agent = RequestCredential {
+            agent: true,
+            root_withheld: false,
+        };
+        let refused =
+            with_request_credential(agent, async { refuse_agent_confirm(Some("api")) }).await;
+        assert!(matches!(refused, Err(Error::Forbidden(_))), "{refused:?}");
+        // No confirm: nothing to refuse (the prod guard decides separately).
+        assert!(
+            with_request_credential(agent, async { refuse_agent_confirm(None) })
+                .await
+                .is_ok()
+        );
+        let person = RequestCredential::default();
+        assert!(
+            with_request_credential(person, async { refuse_agent_confirm(Some("api")) })
+                .await
+                .is_ok()
+        );
     }
 }

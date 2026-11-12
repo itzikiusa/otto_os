@@ -82,14 +82,42 @@ impl DesignService {
         message: String,
         provenance: Value,
     ) -> Result<DesignVersion> {
-        let spec = format::spec(&a.format)
-            .ok_or_else(|| Error::Invalid(format!("unknown design format {:?}", a.format)))?;
-        format::validate(spec, &bytes)?;
         if k == 0 || k > MAX_VARIANTS {
             return Err(Error::Invalid(format!(
                 "variant index must be 1..={MAX_VARIANTS}"
             )));
         }
+        self.commit_side(
+            a,
+            bytes,
+            branch_name(run_id, k),
+            "agent",
+            base_version_id,
+            author,
+            message,
+            provenance,
+        )
+        .await
+    }
+
+    /// The side-branch commit behind [`Self::commit_variant`]; live sync uses
+    /// it for an adopted mirror's changed source (`variant/sync-<ts>/1`, kind
+    /// `sync`). Head, working copy and links never move.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn commit_side(
+        &self,
+        a: &DesignArtifact,
+        bytes: Vec<u8>,
+        branch: String,
+        kind: &str,
+        base_version_id: Option<&str>,
+        author: Author,
+        message: String,
+        provenance: Value,
+    ) -> Result<DesignVersion> {
+        let spec = format::spec(&a.format)
+            .ok_or_else(|| Error::Invalid(format!("unknown design format {:?}", a.format)))?;
+        format::validate(spec, &bytes)?;
         if !one_of(AUTHOR_KINDS, &author.kind) {
             return Err(Error::Invalid(format!(
                 "unknown author kind {:?}",
@@ -107,8 +135,8 @@ impl DesignService {
                     artifact_id: a.id.clone(),
                     blob_sha256: sha,
                     size_bytes: bytes.len() as i64,
-                    kind: "agent".into(),
-                    branch: branch_name(run_id, k),
+                    kind: kind.into(),
+                    branch,
                     author_kind: author.kind.clone(),
                     author_id: author.id.clone(),
                     session_id: author.session_id.clone(),

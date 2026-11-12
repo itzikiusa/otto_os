@@ -8,7 +8,7 @@
   import { loadErrorText } from '../lib/loadError';
   import { closeConfirm } from './closeConfirm';
   import { changeWorkspaceDir, removeWorkspace, renameWorkspace } from './workspaceActions';
-  import RemovedWorkspaces from './RemovedWorkspaces.svelte';
+  import { RemovedWorkspacesChunk } from './lazyDialogs';
   import { checkOpenTabs } from './openTabsCheck';
   import { LS_WS_RECENT, activityText, parseRecent, switcherItems, workspaceActivity } from './workspaceSwitch';
   import { lsGet } from '../lib/storage';
@@ -1046,7 +1046,7 @@
   {@const id = shareSessionId}
   <LazyMount lazy={ShareModalChunk} what="the share dialog" quiet onerror={() => (shareSessionId = null)} props={{ sessionId: id, onclose: () => (shareSessionId = null) }} />
 {/if}
-{#if removedOpen}<RemovedWorkspaces onclose={() => (removedOpen = false)} />{/if}
+{#if removedOpen}<LazyMount lazy={RemovedWorkspacesChunk} what="removed workspaces" quiet onerror={() => (removedOpen = false)} props={{ onclose: () => (removedOpen = false) }} />{/if}
 
 <!-- The module the side-by-side pane shows: a quiet trailing glyph. -->
 {#snippet sideMark(id: string)}

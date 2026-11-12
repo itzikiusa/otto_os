@@ -1,16 +1,16 @@
-// Mock layer — lets the whole SPA run with no daemon. Activated when
-// `import.meta.env.VITE_OTTO_MOCK === '1'` or `localStorage.otto_mock === '1'`.
-// It monkey-patches window.fetch (for /api/v1/*) and window.WebSocket (for
-// /ws/*) so client.ts stays untouched.
+// Mock layer — lets the whole SPA run with no daemon. Activated when `import.meta.env.VITE_OTTO_MOCK
+// === '1'` or `localStorage.otto_mock === '1'`. It monkey-patches window.fetch (for /api/v1/*) and
+// window.WebSocket (for /ws/*) so client.ts stays untouched.
 
 import { MOCK_ME, mockBigPrDiff, mockCommitDiff, mockExtraPrs, mockIsMine, mockPrCommits, mockPrExtras, mockPrLive } from './mock-prs';
-import { prReviewMockRoutes } from './mock-pr-comments';
+import { prReviewMockRoutes, type MockPrRef } from './mock-pr-comments';
 import { slackMockRoutes } from './mock-slack';
 import { machineMockRoutes } from './mock-machine';
+import { usageLimitsMockRoutes } from './mock-usage-limits';
 import { runtimeMockRoutes } from './mock-runtime';
+import { workflowsMockRoutes } from './mock-workflows';
 import type {
-  AwsAccount,
-  AwsPermissions,
+  AwsAccount, AwsPermissions,
   MetricUnit,
   RdsInstance,
   AwsStatus,
@@ -481,7 +481,7 @@ const sampleDiff: DiffResp = {
   ],
 };
 
-interface MockPr {
+interface MockPr extends MockPrRef {
   repo_id: Id;
   summary: PrSummary;
   description_md: string;
@@ -971,8 +971,8 @@ const k8sRoutes: Route[] = [
 const routes: Route[] = [
   ...k8sRoutes,
   ...slackMockRoutes,
-  ...machineMockRoutes,
-  ...runtimeMockRoutes,
+  ...machineMockRoutes, ...usageLimitsMockRoutes,
+  ...runtimeMockRoutes, ...workflowsMockRoutes,
   ...prReviewMockRoutes((rid, num) => prs.find((p) => p.repo_id === rid && p.summary.number === num)),
   { method: 'GET', re: /^\/health$/, handle: () => ({ json: { ok: true } }) },
   { method: 'GET', re: /^\/meta$/, handle: () => ({ json: { ...meta, needs_onboarding: localStorage.getItem('otto_mock_onboarding') === '1' } }) },
@@ -1802,7 +1802,7 @@ const routes: Route[] = [
     handle: (m, _b, q) => {
       const state = q.get('state') ?? 'open';
       let list = prs.filter((p) => p.repo_id === m[1]);
-      if (state !== 'all') list = list.filter((p) => p.summary.state === state);
+      if (state !== 'all' || q.get('review') === 'me') list = list.filter((p) => (q.get('review') === 'me' ? p.summary.state === 'open' && !mockIsMine(p.summary.author) : p.summary.state === state));
       // One page, always the last one — the fixture set never overflows.
       return {
         json: {
@@ -1851,7 +1851,7 @@ const routes: Route[] = [
         description_md: pr.description_md,
         comments: pr.comments,
         approved_by: pr.approved_by,
-        reviewers: [...pr.approved_by, ...(pr.changes_by ?? [])].map((name) => ({ name, approved: pr.approved_by.includes(name), changes_requested: !pr.approved_by.includes(name), avatar_url: null, reviewed_at: null, is_me: name === MOCK_ME })),
+        reviewers: [...pr.approved_by, ...(pr.changes_by ?? []), ...(pr.requested ?? [])].map((name) => ({ name, approved: pr.approved_by.includes(name), changes_requested: (pr.changes_by ?? []).includes(name) && !pr.approved_by.includes(name), avatar_url: null, reviewed_at: null, is_me: name === MOCK_ME })),
         mergeable: pr.mergeable,
       };
       return { json: detail };

@@ -563,6 +563,7 @@ fn scope_of(event: &Event) -> Scope<'_> {
         // members, like the canvas/mockup agent-session-started signals.
         | Event::DesignAssistUpdated { workspace_id, .. }
         | Event::DesignVariantsReady { workspace_id, .. }
+        | Event::DesignSourceChanged { workspace_id, .. }
         // Live DB-Assistant answer edits + the assist-agent-started signal +
         // live agent MCP DB activity go to the workspace members.
         | Event::DbAssistUpdated { workspace_id, .. }

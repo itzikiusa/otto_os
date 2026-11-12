@@ -17,7 +17,9 @@
 //! wait gives way after `agent_admission_max_wait_secs` (default 300 s) and
 //! a ceiling wait after [`CEILING_WAIT_FACTOR`] times that, both with a
 //! logged warning — a stuck engine holding its sessions live must not freeze
-//! every review behind it. Sessions the user starts (Agents page, terminals,
+//! every review behind it. The orchestrator's own headless claude turns take
+//! the same gate when an unattended engine runs them
+//! ([`ORCHESTRATOR_TURN_SOURCES`]). Sessions the user starts (Agents page, terminals,
 //! connections) and the interactive assists a person is watching (canvas /
 //! design / db assists, PR and commit drafts, channel replies, discovery
 //! chats) never wait.
@@ -103,7 +105,11 @@ pub const PERMIT_META_KEY: &str = "admission_permit";
 /// Not `swarm`: its roles are started together and talk to each other, so
 /// a ceiling that admits four of six would stall the four on the two it
 /// holds back until the ceiling's long wait ran out.
-pub const ADMISSION_GATED_SOURCES: [&str; 14] = [
+///
+/// Also the [`ORCHESTRATOR_TURN_SOURCES`]: headless one-shot turns engines run
+/// through the orchestrator's own claude PTY, gated via
+/// `SessionManager::background_admission_hook`.
+pub const ADMISSION_GATED_SOURCES: [&str; 17] = [
     "review",
     "review_summarizer",
     "skilleval",
@@ -118,7 +124,16 @@ pub const ADMISSION_GATED_SOURCES: [&str; 14] = [
     "scheduled_task",
     "finding",
     "personal_agent",
+    "self_improvement",
+    "product",
+    "plugin",
 ];
+
+/// Labels of UNATTENDED headless orchestrator turns (no session row, so never
+/// a session's `meta.source` nor a `BACKGROUND_SESSION_SOURCES` entry): the
+/// self-improvement analysis (`self_improvement`), the story watcher's
+/// reconcile (`product`) and a runtime plugin's agent turn (`plugin`).
+pub const ORCHESTRATOR_TURN_SOURCES: [&str; 3] = ["self_improvement", "product", "plugin"];
 
 /// Whether `source` is one the gate holds back.
 pub fn is_gated_source(source: &str) -> bool {
@@ -288,6 +303,41 @@ pub fn decide(
         Some(r) if waited >= policy.max_wait => Verdict::AdmitOverdue(r),
         Some(r) => Verdict::Wait(r),
     }
+}
+
+/// How soon a deferred maintenance pass looks again ([`defer_maintenance`]).
+pub const MAINTENANCE_RETRY: Duration = Duration::from_secs(5 * 60);
+/// The longest a maintenance pass waits for a quiet machine before it runs
+/// anyway: retention must not starve on a machine that never calms down.
+pub const MAINTENANCE_MAX_DEFER: Duration = Duration::from_secs(6 * 3600);
+
+/// The machine is over the gate's load / memory threshold (the live ceiling
+/// is about agents, not the machine, so it is ignored here). Never busy
+/// while the gate is off.
+pub fn machine_busy(sample: &MachineSample, policy: &AdmissionPolicy) -> bool {
+    let no_ceiling = AdmissionPolicy {
+        max_live: None,
+        ..*policy
+    };
+    policy.enabled && decide(sample, &no_ceiling, 0, Duration::ZERO) != Verdict::Admit
+}
+
+/// Whether a periodic maintenance pass (retention DELETEs, WAL checkpoint,
+/// vacuum) should wait for a quieter tick. On 2026-11-12 the hourly pass ran
+/// during an overnight overload and a single retention DELETE took 29 s.
+/// `deferred_since` is the caller's episode clock (start it `None`): after
+/// [`MAINTENANCE_MAX_DEFER`] of continuous deferral the pass runs anyway.
+pub fn defer_maintenance(busy: bool, deferred_since: &mut Option<Instant>, now: Instant) -> bool {
+    if !busy {
+        *deferred_since = None;
+        return false;
+    }
+    let since = *deferred_since.get_or_insert(now);
+    if now.saturating_duration_since(since) >= MAINTENANCE_MAX_DEFER {
+        *deferred_since = None;
+        return false;
+    }
+    true
 }
 
 /// Outcome of one [`AdmissionGate::poll`].
@@ -899,13 +949,70 @@ mod tests {
             gated_source(SessionKind::Connection, Some(&meta("review"))),
             None
         );
-        // Every gated source except personal_agent is a background source.
+        // Every gated source except personal_agent and the headless turn
+        // labels is a background session source.
         for s in ADMISSION_GATED_SOURCES {
             assert!(
-                s == "personal_agent" || otto_core::domain::BACKGROUND_SESSION_SOURCES.contains(&s),
+                s == "personal_agent"
+                    || ORCHESTRATOR_TURN_SOURCES.contains(&s)
+                    || otto_core::domain::BACKGROUND_SESSION_SOURCES.contains(&s),
                 "{s} is not a background source"
             );
         }
+        // Every headless turn label is gated, and none doubles as a session
+        // source (it would then also gate that engine's sessions).
+        for s in ORCHESTRATOR_TURN_SOURCES {
+            assert!(is_gated_source(s), "{s}");
+            assert!(
+                !otto_core::domain::BACKGROUND_SESSION_SOURCES.contains(&s),
+                "{s}"
+            );
+        }
+    }
+
+    #[test]
+    fn maintenance_waits_for_a_quiet_machine_but_not_forever() {
+        let loaded = sample(13.0, 8, MemoryPressure::Normal);
+        let tight = sample(0.5, 8, MemoryPressure::Warn);
+        assert!(machine_busy(&loaded, &policy()));
+        assert!(machine_busy(&tight, &policy()));
+        assert!(!machine_busy(&calm(), &policy()));
+        assert!(
+            !machine_busy(&loaded, &AdmissionPolicy::disabled(8)),
+            "gate off"
+        );
+        // A configured zero wait still counts as busy.
+        let no_wait = AdmissionPolicy {
+            max_wait: Duration::ZERO,
+            ..policy()
+        };
+        assert!(machine_busy(&loaded, &no_wait));
+
+        let t0 = Instant::now();
+        let mut since = None;
+        assert!(!defer_maintenance(false, &mut since, t0), "quiet: run now");
+        assert!(defer_maintenance(true, &mut since, t0));
+        assert!(defer_maintenance(true, &mut since, t0 + MAINTENANCE_RETRY));
+        // Quiet again: run, and the episode clock resets.
+        assert!(!defer_maintenance(
+            false,
+            &mut since,
+            t0 + MAINTENANCE_RETRY * 2
+        ));
+        assert_eq!(since, None);
+        // Busy for the whole maximum: run anyway, then a new episode starts.
+        let t1 = t0 + Duration::from_secs(3600);
+        assert!(defer_maintenance(true, &mut since, t1));
+        assert!(!defer_maintenance(
+            true,
+            &mut since,
+            t1 + MAINTENANCE_MAX_DEFER
+        ));
+        assert!(defer_maintenance(
+            true,
+            &mut since,
+            t1 + MAINTENANCE_MAX_DEFER
+        ));
     }
 
     #[test]

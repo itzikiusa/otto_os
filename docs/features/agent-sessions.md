@@ -1430,7 +1430,8 @@ mechanisms now keep agent work inside what the machine can take
 unattended background agent is spawned — `meta.source` one of `review`,
 `review_summarizer`, `skilleval`, `skillreview`, `product-analysis`,
 `workflow`, `vault-docs`, `vault-docs-review`, `insights`, `run_with_otto`,
-`goal_loop`, `scheduled_task`, `finding`, `personal_agent` — `create` waits
+`goal_loop`, `scheduled_task`, `finding`, `personal_agent` (plus the headless
+turn labels below) — `create` waits
 until all of these hold:
 
 - fewer than `agent_background_max_live` of those agents are running or
@@ -1449,6 +1450,33 @@ together and talk to each other, so holding some back would stall the rest). The
 "Background agents queued" notice (at most every 10 minutes). Only engine
 creates are gated; a resume of a suspended background session is not, but its
 process still counts toward the ceiling once it runs.
+
+**Headless engine turns.** Some engines skip sessions altogether and run a
+one-shot claude turn through the orchestrator's own PTY
+(`Orchestrator::run_agent`). The daemon hands the orchestrator an admission
+hook at boot (`SessionManager::background_admission_hook`), and a caller that
+runs an UNATTENDED turn uses `run_agent_background` /
+`run_agent_untrusted_background` (or `admit_background`) with one of the turn
+labels `self_improvement`, `product` or `plugin`. The place is held for the
+whole turn (no session process registers with the gate) and counts toward the
+same ceiling. Wired today:
+
+| Caller | Turn | Gated |
+|---|---|---|
+| Self-improvement analysis (`otto-improve` `RealProposalProducer`, every provider) | unattended | yes (`self_improvement`) |
+| Scheduled-task no-owner fallback, personal-agent no-owner run, story watcher reconcile, skill-review summarizer, runtime plugin agent turns | unattended | not yet: each must switch to the `*_background` call (label `scheduled_task`, `personal_agent`, `product`, `skillreview`, `plugin`) |
+| ⌘K planning / prompt optimise, handover briefs, workflow drafting, database query drafting | a person is waiting | never |
+
+The wait counts toward a caller's own time budget (the self-improvement
+analysis has 600 s): a turn that times out waiting fails without consuming its
+evidence, and the next pass retries it.
+
+**Maintenance waits for a quiet tick.** The hourly retention / SQLite
+maintenance pass (backup-restore.md, "Data retention") checks the same load
+and memory thresholds first (`admission::machine_busy`; the live ceiling is
+ignored, and nothing is deferred while the gate is off). While the machine is
+over them it retries every 5 minutes instead of running; after 6 hours of
+continuous deferral it runs anyway, logged.
 
 **Build budget (every agent session).** At spawn, the agent's environment gets
 parallelism hints its tools — and the CLI's own helper sub-agents, which

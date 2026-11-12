@@ -19,6 +19,7 @@
   import { EXPLICIT_RELS, policyLabel, relLabel, type LinkRow } from './model';
   import { library } from './library.svelte';
   import { openArtifact, openStoryInProduct } from './nav';
+  import { isMirroredError } from './versionRows';
 
   interface Props {
     artifact: DesignArtifact;
@@ -31,8 +32,10 @@
     onreload: () => void;
     /** Compare a pinned target's pinned version with its head. */
     oncompare: (target: DesignArtifact, pinnedVersionId: string) => void;
+    /** A write was refused as `mirrored` (409): the artifact view shows its "Edit here" banner. */
+    onmirrored?: () => void;
   }
-  let { artifact, uses, usedIn, loading, error, readonly, seqOf, onreload, oncompare }: Props = $props();
+  let { artifact, uses, usedIn, loading, error, readonly, seqOf, onreload, oncompare, onmirrored }: Props = $props();
 
   function iconFor(kind: DesignLinkDstKind | string): IconName {
     switch (kind) {
@@ -85,7 +88,8 @@
       toasts.success('Link removed');
       onreload();
     } catch (e) {
-      toastError('Couldn’t remove the link', e);
+      if (isMirroredError(e)) onmirrored?.();
+      else toastError('Couldn’t remove the link', e);
     }
   }
 
@@ -167,7 +171,11 @@
       toasts.success('Link added');
       onreload();
     } catch (e) {
-      if (e instanceof ApiError && e.status === 409) {
+      if (isMirroredError(e)) {
+        // An unadopted mirror: close the sheet so the view's "Edit here" banner shows.
+        adding = false;
+        onmirrored?.();
+      } else if (e instanceof ApiError && e.status === 409) {
         addError = /cycle/i.test(e.message)
           ? `That link would make a loop — ${picked?.title ?? 'the target'} already ${relLabel(rel)} this design, directly or through another design.`
           : `This link already exists. ${e.message}`;

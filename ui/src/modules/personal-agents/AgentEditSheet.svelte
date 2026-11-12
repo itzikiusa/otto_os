@@ -10,6 +10,7 @@
   import { modelsForProvider } from '../../lib/providerModels';
   import { auth } from '../../lib/stores/auth.svelte';
   import { agentProvidersWith, defaultAgentProvider, harnessLabel } from '../../lib/providers';
+  import { canCarryPersona, personaDefault, personaProviders, personaRefusal } from './personaProviders';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -88,7 +89,7 @@
   let fName = $state(init?.name ?? '');
   let fAvatar = $state(init?.avatar ?? '');
   let fSoul = $state(init?.soul_md ?? '');
-  let fProvider = $state(init?.provider || defaultAgentProvider());
+  let fProvider = $state(init?.provider || personaDefault(defaultAgentProvider()));
   let fModel = $state(init?.model ?? ''); // '' = provider default
   let fCwd = $state(init?.cwd ?? '');
   let fBrowser = $state(init?.browser ?? false);
@@ -105,8 +106,9 @@
   // svelte-ignore state_referenced_locally
   if (!agent && template) applyTemplate(template);
 
-  // Live registry (built-ins + custom), never dropping a saved custom slug.
-  const PROVIDERS = $derived(agentProvidersWith(agent?.provider));
+  // Live registry, only the CLIs that can load a persona (personaProviders.ts);
+  // a saved other one shows as itself, with why it can't run.
+  const PROVIDERS = $derived(personaProviders(agentProvidersWith(agent?.provider)));
 
   function onProviderSelect(v: string): void {
     // A model id belongs to one provider — switching clears it, so a hidden
@@ -334,7 +336,7 @@
           onchange={(e) => onProviderSelect((e.currentTarget as HTMLSelectElement).value)}
         >
           {#each PROVIDERS as p (p)}<option value={p}>{harnessLabel(p)}</option>{/each}
-          <option value="custom">Custom…</option>
+          {#if !PROVIDERS.includes(fProvider)}<option value="custom" disabled>{harnessLabel(fProvider.trim() || 'custom')}</option>{/if}
         </select>
       </div>
       {#if !agent}
@@ -344,11 +346,8 @@
       {/if}
     </div>
 
-    {#if !PROVIDERS.includes(fProvider)}
-      <div class="field">
-        <label for="{uid}-slug">Custom provider slug</label>
-        <input dir="ltr" id="{uid}-slug" class="input" bind:value={fProvider} placeholder="my-custom-agent (register it in Settings first)" />
-      </div>
+    {#if !canCarryPersona(fProvider)}
+      <p class="note warn" role="note" data-testid="persona-provider-note">{personaRefusal(fProvider)}</p>
     {/if}
 
     <div class="field">
@@ -421,6 +420,7 @@
   }
   .note { margin: 0; font-size: var(--fs-s); color: var(--accent-text); }
   .note.dim { color: var(--text-dim); }
+  .note.warn { color: var(--warning); }
   /* Global .field/.input; the sheet's own gap spaces them, rows share a line. */
   .sheet .field { margin-bottom: 0; }
   .field-row { display: flex; gap: 12px; flex-wrap: wrap; }

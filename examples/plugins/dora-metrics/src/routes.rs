@@ -136,6 +136,24 @@ fn internal(e: String) -> (u16, Value) {
     (500, json!({ "error": "internal error" }))
 }
 
+/// Whether a request may be served: `/health` always (Otto's readiness
+/// probe), everything else only with the `x-otto-plugin-token` header Otto's
+/// proxy adds, equal to `OTTO_PLUGIN_TOKEN` (`expected`). Fails closed when no
+/// token was configured. Constant-time over the token bytes.
+pub fn authorized(path: &str, presented: Option<&str>, expected: &str) -> bool {
+    if path == "/health" {
+        return true;
+    }
+    let Some(got) = presented else { return false };
+    if expected.is_empty() || got.len() != expected.len() {
+        return false;
+    }
+    got.bytes()
+        .zip(expected.bytes())
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
+}
+
 pub fn handle(method: &str, path: &str, query: &str, body: &str) -> (u16, Value) {
     match (method, path) {
         ("GET", "/health") => (200, json!({ "ok": true })),
@@ -223,6 +241,17 @@ pub fn handle(method: &str, path: &str, query: &str, body: &str) -> (u16, Value)
 #[cfg(test)]
 mod decoder_tests {
     use super::*;
+
+    #[test]
+    fn only_the_proxy_token_is_served_and_health_stays_open() {
+        assert!(authorized("/health", None, "tok"));
+        assert!(authorized("/metrics", Some("tok"), "tok"));
+        assert!(!authorized("/metrics", None, "tok"));
+        assert!(!authorized("/metrics", Some("tox"), "tok"));
+        assert!(!authorized("/metrics", Some("to"), "tok"));
+        // No configured token: nothing but /health is served.
+        assert!(!authorized("/metrics", Some(""), ""));
+    }
     #[test]
     fn malformed_percent_sequences_with_unicode_never_panic() {
         assert_eq!(urldecode("%€"), "%€");

@@ -42,6 +42,7 @@ pub fn decode_payload(bytes: Option<&[u8]>, requested: ValueFormat) -> DecodedPa
             schema_id: None,
             raw_base64: None,
             truncated: false,
+            notice: None,
         };
     };
     match requested {
@@ -51,6 +52,7 @@ pub fn decode_payload(bytes: Option<&[u8]>, requested: ValueFormat) -> DecodedPa
             schema_id: None,
             raw_base64: raw_for(bytes),
             truncated: false,
+            notice: None,
         },
         ValueFormat::Base64 => DecodedPayload {
             format: "base64".into(),
@@ -58,6 +60,7 @@ pub fn decode_payload(bytes: Option<&[u8]>, requested: ValueFormat) -> DecodedPa
             schema_id: None,
             raw_base64: raw_for(bytes),
             truncated: false,
+            notice: None,
         },
         ValueFormat::Utf8 => as_string(bytes),
         ValueFormat::Json => match serde_json::from_slice::<Value>(bytes) {
@@ -67,6 +70,7 @@ pub fn decode_payload(bytes: Option<&[u8]>, requested: ValueFormat) -> DecodedPa
                 schema_id: None,
                 raw_base64: raw_for(bytes),
                 truncated: false,
+                notice: None,
             },
             Err(_) => as_string(bytes),
         },
@@ -77,6 +81,7 @@ pub fn decode_payload(bytes: Option<&[u8]>, requested: ValueFormat) -> DecodedPa
                 schema_id: None,
                 raw_base64: raw_for(bytes),
                 truncated: false,
+                notice: None,
             },
             None => as_hex(bytes),
         },
@@ -94,6 +99,7 @@ fn as_string(bytes: &[u8]) -> DecodedPayload {
             schema_id: None,
             raw_base64: raw_for(bytes),
             truncated: false,
+            notice: None,
         },
         _ => as_hex(bytes),
     }
@@ -106,6 +112,7 @@ fn as_hex(bytes: &[u8]) -> DecodedPayload {
         schema_id: None,
         raw_base64: raw_for(bytes),
         truncated: false,
+        notice: None,
     }
 }
 
@@ -121,6 +128,7 @@ fn auto_decode(bytes: &[u8]) -> DecodedPayload {
                 schema_id: None,
                 raw_base64: raw_for(bytes),
                 truncated: false,
+                notice: None,
             };
         }
     }
@@ -132,6 +140,7 @@ fn auto_decode(bytes: &[u8]) -> DecodedPayload {
                 schema_id: None,
                 raw_base64: raw_for(bytes),
                 truncated: false,
+                notice: None,
             };
         }
     }
@@ -142,6 +151,7 @@ fn auto_decode(bytes: &[u8]) -> DecodedPayload {
             schema_id: None,
             raw_base64: raw_for(bytes),
             truncated: false,
+            notice: None,
         };
     }
     as_hex(bytes)
@@ -156,7 +166,31 @@ pub fn avro_payload(value: &Value, schema_id: i32, raw: &[u8]) -> DecodedPayload
         schema_id: Some(schema_id),
         raw_base64: raw_for(raw),
         truncated: false,
+        notice: None,
     }
+}
+
+/// A Confluent-framed payload whose registry schema is not Avro (`JSON`,
+/// `PROTOBUF`): the body after the 5-byte frame, rendered as-is (no schema
+/// applied), with a one-line notice instead of a decode error.
+pub fn undecoded_schema_payload(
+    schema_type: &str,
+    schema_id: i32,
+    body: &[u8],
+    raw: &[u8],
+) -> DecodedPayload {
+    let label = match schema_type.to_ascii_uppercase().as_str() {
+        "JSON" => "JSON Schema".to_string(),
+        "PROTOBUF" => "Protobuf".to_string(),
+        other => other.to_string(),
+    };
+    let mut p = decode_payload(Some(body), ValueFormat::Auto);
+    p.schema_id = Some(schema_id);
+    p.raw_base64 = raw_for(raw);
+    p.notice = Some(format!(
+        "Schema {schema_id} is {label}; only Avro is decoded, so this is the raw payload."
+    ));
+    p
 }
 
 // ---------------------------------------------------------------------------
@@ -364,6 +398,29 @@ fn avro_value_to_json(v: apache_avro::types::Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_schema_payload_is_shown_raw_with_a_notice() {
+        let raw = [&[0u8, 0, 0, 0, 9][..], br#"{"id":7}"#].concat();
+        let (sid, body) = confluent_frame(&raw).unwrap();
+        let d = undecoded_schema_payload("JSON", sid, body, &raw);
+        assert_eq!(d.format, "json");
+        assert!(d.text.contains("\"id\": 7"), "{}", d.text);
+        assert_eq!(d.schema_id, Some(9));
+        assert_eq!(d.raw_base64.as_deref(), Some(b64(&raw).as_str()));
+        let notice = d.notice.unwrap();
+        assert!(
+            notice.contains("JSON Schema") && notice.contains("only Avro"),
+            "{notice}"
+        );
+
+        let p = undecoded_schema_payload("PROTOBUF", 3, &[0x00, 0x08, 0x96, 0x01], &raw);
+        assert!(p.notice.unwrap().contains("Protobuf"));
+        // A normal decode carries no notice.
+        assert!(decode_payload(Some(b"hi"), ValueFormat::Auto)
+            .notice
+            .is_none());
+    }
 
     #[test]
     fn decode_json_object() {

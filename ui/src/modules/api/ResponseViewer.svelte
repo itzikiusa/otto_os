@@ -280,8 +280,8 @@
     ctxMenu.show(e, items);
   }
 
-  // ── Failure hints ───────────────────────────────────────────────────────────
-  const blockedPrivate = $derived(!!failure && /ssrf|blocked address|private|loopback/i.test(failure));
+  // ── Failure hints ("always blocked" = metadata / Otto's own port: allowing private can't help)
+  const blockedPrivate = $derived(!!failure && !/always blocked/i.test(failure) && /ssrf|blocked address|private|loopback/i.test(failure));
   const timedOut = $derived(!!failure && /timed? ?out/i.test(failure));
   const failureTitle = $derived(
     blockedPrivate ? 'Blocked: this address is on a private network'
@@ -291,7 +291,7 @@
   );
   async function allowPrivate(): Promise<void> {
     if (!(await confirmer.ask(
-      'API requests in this workspace will be able to reach localhost and private-network addresses (10.x, 192.168.x, …). Use this for local development servers. Everyone in the workspace is affected; you can block them again from a request’s Settings tab.',
+      'API requests in this workspace will be able to reach localhost and private-network addresses (10.x, 192.168.x, …). Use this for local development servers. Cloud-metadata addresses (169.254.x) and Otto’s own port (7700) stay blocked. Everyone in the workspace is affected; you can block them again from a request’s Settings tab.',
       { title: 'Allow private addresses?', confirmLabel: 'Allow private addresses', danger: false },
     ))) return;
     try {

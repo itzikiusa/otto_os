@@ -1,7 +1,7 @@
 <script lang="ts">
   import { SvelteMap } from 'svelte/reactivity';
   import type { QuestionAnswer, RuntimeRequest } from '../../../lib/api/types';
-  import { questionAnswerError, questionOutcome } from './questions';
+  import { offersOther, otherAnswer, questionAnswerError, questionOutcome } from './questions';
   import { runtimeThreads } from './runtimeThreads.svelte';
   import { announce } from '../../../lib/announce.svelte';
   import { loadErrorText } from '../../../lib/loadError';
@@ -71,14 +71,14 @@
             <span dir="auto">{option.label}{#if option.description}<small>{option.description}</small>{/if}</span>
           </label>
         {/each}
-        {#if q.allow_free_text && q.kind !== 'text'}
+        {#if offersOther(q)}
           <label class="question-option"><input type="radio" name={`${request.id}-${index}`} checked={other.get(q.id) === true}
-            onchange={() => { other.set(q.id, true); answers.set(q.id, { question_id: q.id, type: 'text', text: '' }); }} />Write another answer</label>
+            onchange={() => { other.set(q.id, true); answers.set(q.id, otherAnswer(q.id, '')); }} data-testid="runtime-question-other" />Other</label>
         {/if}
         {#if q.kind === 'text' || other.get(q.id)}
           <label class="question-text">Your answer
             <textarea rows="2" dir="auto" value={answers.get(q.id)?.type === 'text' ? (answers.get(q.id) as Extract<QuestionAnswer, { type: 'text' }>).text : ''}
-              oninput={(e) => { answers.set(q.id, { question_id: q.id, type: 'text', text: e.currentTarget.value }); }}></textarea>
+              oninput={(e) => { answers.set(q.id, otherAnswer(q.id, e.currentTarget.value)); }}></textarea>
           </label>
         {/if}
       {:else}

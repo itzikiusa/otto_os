@@ -11,7 +11,7 @@
 //! - window close requests and destroys (label, user close vs programmatic
 //!   destroy, app windows remaining), every `app.exit` with its reason, and
 //!   `RunEvent::ExitRequested` / `Exit`;
-//! - SIGTERM / SIGINT / SIGHUP (then the default action still runs), panics,
+//! - SIGTERM / SIGINT / SIGHUP (then a deadline-bounded quit), panics,
 //!   contained panics, WebContent process crashes, uncaught NSExceptions;
 //! - a heartbeat every [`HEARTBEAT`], bounding when a silent death happened.
 //!
@@ -200,8 +200,9 @@ pub fn clean_exit(what: &str) {
 }
 
 /// Log SIGTERM / SIGINT / SIGHUP from a thread (signal-hook's self-pipe keeps
-/// the handler async-signal-safe), then run the signal's DEFAULT action — the
-/// app still terminates exactly as before, with the cause now on record.
+/// the handler async-signal-safe), then quit: gracefully under a hard
+/// deadline once the app is up, else the signal's DEFAULT action
+/// (`quit::handle_signal`).
 pub fn watch_signals() {
     use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
     let Ok(mut signals) = signal_hook::iterator::Signals::new([SIGTERM, SIGINT, SIGHUP]) else {
@@ -213,8 +214,7 @@ pub fn watch_signals() {
         .spawn(move || {
             for sig in signals.forever() {
                 let name = signal_hook::low_level::signal_name(sig).unwrap_or("signal");
-                durable(&format!("{name} received — terminating (default action)"));
-                let _ = signal_hook::low_level::emulate_default_handler(sig);
+                crate::quit::handle_signal(sig, name);
             }
         });
 }

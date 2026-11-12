@@ -345,7 +345,19 @@ pub async fn upload_attachment<C: ProductStudioHost>(
         })
         .await
         .map_err(ApiError)?;
+    design_source_changed(&ctx, &att.workspace_id, &att.id);
     Ok(Json(att))
+}
+
+/// Tell Design Hall a story attachment was added, renamed or removed, so its
+/// mirror follows now instead of at the next daemon start (a content save
+/// already broadcasts `MockupUpdated`). Best-effort: nobody listening is fine.
+fn design_source_changed<C: ProductStudioHost>(ctx: &C, workspace_id: &Id, id: &Id) {
+    let _ = ctx.events().send(Event::DesignSourceChanged {
+        workspace_id: workspace_id.clone(),
+        kind: "product_attachment".into(),
+        id: id.clone(),
+    });
 }
 
 /// `GET /product/stories/{sid}/attachments` — Viewer.
@@ -498,6 +510,7 @@ pub async fn patch_attachment<C: ProductStudioHost>(
         )
         .await
         .map_err(ApiError)?;
+    design_source_changed(&ctx, &updated.workspace_id, &updated.id);
     Ok(Json(updated))
 }
 
@@ -679,6 +692,7 @@ pub async fn delete_attachment<C: ProductStudioHost>(
             let _ = tokio::fs::remove_file(&full).await;
         }
     }
+    design_source_changed(&ctx, &att.workspace_id, &aid);
     Ok(StatusCode::NO_CONTENT)
 }
 

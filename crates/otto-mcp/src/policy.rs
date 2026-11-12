@@ -71,6 +71,67 @@ fn glob_match(pat: &str, s: &str) -> bool {
     true
 }
 
+/// Every key a rule's `match` object may use, with what its value must be.
+/// An unknown key used to be ignored, so a typo (`"tool_name"`, `"risk"`)
+/// silently made the rule match EVERY call.
+const MATCH_KEYS: &[(&str, MatchValue)] = &[
+    ("server_id", MatchValue::Text),
+    ("server_name", MatchValue::Text),
+    ("tool", MatchValue::Text),
+    ("tool_glob", MatchValue::Text),
+    (
+        "risk_label",
+        MatchValue::OneOf(&["read", "write", "dangerous"]),
+    ),
+    (
+        "min_injection_risk",
+        MatchValue::OneOf(&["low", "medium", "high"]),
+    ),
+    ("mutating", MatchValue::Bool),
+    ("direction", MatchValue::Text),
+    ("caller_kind", MatchValue::Text),
+    ("workspace_id", MatchValue::Text),
+];
+
+#[derive(Clone, Copy)]
+enum MatchValue {
+    Text,
+    Bool,
+    OneOf(&'static [&'static str]),
+}
+
+/// Check a rule's `match` object before it is stored (create, update,
+/// import): an object whose keys are all known and whose values have the
+/// right type. `Err` is the 400 message.
+pub fn validate_match(m: &Value) -> Result<(), String> {
+    let Some(obj) = m.as_object() else {
+        return Err("policy match must be a JSON object".into());
+    };
+    for (key, value) in obj {
+        let Some((_, kind)) = MATCH_KEYS.iter().find(|(k, _)| k == key) else {
+            let known: Vec<&str> = MATCH_KEYS.iter().map(|(k, _)| *k).collect();
+            return Err(format!(
+                "unknown policy match key {key:?}; use one of: {}",
+                known.join(", ")
+            ));
+        };
+        let ok = match kind {
+            MatchValue::Text => value.as_str().is_some_and(|v| !v.trim().is_empty()),
+            MatchValue::Bool => value.is_boolean(),
+            MatchValue::OneOf(allowed) => value.as_str().is_some_and(|v| allowed.contains(&v)),
+        };
+        if !ok {
+            let want = match kind {
+                MatchValue::Text => "a non-empty string".to_string(),
+                MatchValue::Bool => "true or false".to_string(),
+                MatchValue::OneOf(allowed) => format!("one of {}", allowed.join(", ")),
+            };
+            return Err(format!("policy match key {key:?} must be {want}"));
+        }
+    }
+    Ok(())
+}
+
 fn str_field<'a>(m: &'a Value, key: &str) -> Option<&'a str> {
     m.get(key).and_then(Value::as_str)
 }
@@ -271,6 +332,25 @@ mod tests {
             evaluate(&rules, &ctx()),
             Effect::RequireApproval(_)
         ));
+    }
+
+    #[test]
+    fn match_validation_rejects_unknown_keys_and_bad_values() {
+        assert!(validate_match(&json!({})).is_ok());
+        assert!(validate_match(&json!({
+            "server_name": "github", "tool_glob": "delete_*", "risk_label": "dangerous",
+            "min_injection_risk": "high", "mutating": true, "direction": "outbound",
+        }))
+        .is_ok());
+        // A typo used to be ignored → the rule matched every call.
+        let err = validate_match(&json!({"tool_name": "delete_repo"})).unwrap_err();
+        assert!(err.contains("\"tool_name\""), "{err}");
+        assert!(validate_match(&json!({"risk_label": "risky"})).is_err());
+        assert!(validate_match(&json!({"min_injection_risk": 2})).is_err());
+        assert!(validate_match(&json!({"mutating": "yes"})).is_err());
+        assert!(validate_match(&json!({"tool": ""})).is_err());
+        assert!(validate_match(&json!(["tool"])).is_err());
+        assert!(validate_match(&Value::Null).is_err());
     }
 
     #[test]

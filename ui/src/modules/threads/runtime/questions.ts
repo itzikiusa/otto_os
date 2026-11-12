@@ -4,6 +4,17 @@ export function pendingQuestions(requests: RuntimeRequest[]): RuntimeRequest[] {
   return requests.filter((r) => r.kind === 'question' && r.status === 'pending' && r.response_capability.type === 'live');
 }
 
+/** An "Other" box beside the options: a choice question that also takes free
+ *  text (the runtime folds an optional choice + its "other" field into one
+ *  question with `allow_free_text`). Its answer is a `text` answer. */
+export function offersOther(q: RuntimeQuestion): boolean {
+  return q.allow_free_text && q.kind !== 'text';
+}
+
+export function otherAnswer(questionId: string, text: string): QuestionAnswer {
+  return { question_id: questionId, type: 'text', text };
+}
+
 export function questionAnswerError(questions: RuntimeQuestion[], answers: QuestionAnswer[]): string | null {
   const seen = new Set<string>();
   for (const answer of answers) {

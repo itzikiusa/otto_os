@@ -5,6 +5,7 @@
   // row under it: checkout on the start, branch + access mode on the end. Every
   // other launch option (empty thread, open beside) lives in the agent chip's
   // menu; the project card floats top-right on wide screens.
+  import { untrack } from 'svelte';
   import { announceShown } from '../../lib/announce.svelte';
   import { api } from '../../lib/api/client';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
@@ -47,6 +48,8 @@
   import { threadRepos } from './threadRepos.svelte';
   import { threads } from './threadsStore.svelte';
   import { isRuntimeProvider, runtimeThreads } from './runtime/runtimeThreads.svelte';
+  import { council, councilAgentLabel } from './runtime/councilStore.svelte';
+  import CouncilStagePicker from './runtime/CouncilStagePicker.svelte';
 
   interface Props {
     /** Float the project card top-right (wide screen, right panel closed). */
@@ -93,6 +96,7 @@
   );
   const agentLabel = $derived.by(() => {
     const meta = auth.meta;
+    if (council.on) return councilAgentLabel(meta);
     const model = selectedModel ? formatModelLabel(provider, selectedModel, meta) : harnessLabel(provider);
     return supportsEffortSelection(provider) && selectedEffort ? `${model} · ${formatEffortShort(selectedEffort)}` : model;
   });
@@ -159,6 +163,8 @@
     if (agentEl) pickerOpen = true;
   }
   const openEffortMenu = openModelMenu;
+  // A ⌘ / Shift-click on a model starts "Ask several" with the current pick.
+  $effect(() => (pickerOpen ? untrack(() => council.watchModifiers({ provider, model: selectedModel, effort: selectedEffort })) : undefined));
 
   function openModeMenu(): void {
     if (!modeEl || !modeSupported) return;
@@ -256,6 +262,7 @@
       composerEl?.focus();
       return;
     }
+    if (withPrompt && council.on && !council.ready) { cwdError = 'Pick at least two agents to ask, or turn Ask several off.'; return; }
     let dir = cwd.trim();
     if (homePath !== '~' && (dir === '~' || dir.startsWith('~/'))) dir = homePath + dir.slice(1);
     if (dir !== '') {
@@ -276,14 +283,17 @@
       };
       const title = firstMsg ? firstMsg.replace(/\s+/g, ' ').slice(0, 56) : `${harnessLabel(provider)} thread`;
       const opts = { scratch: scratchActive && ws.currentId !== SCRATCH_WORKSPACE_ID };
-      const created = runtime && isRuntimeProvider(provider)
+      const asCouncil = withPrompt && council.ready;
+      const created = asCouncil
+        ? (await council.start(targetWs, { prompt: firstMsg, title, cwd: dir || null }))[0]
+        : runtime && isRuntimeProvider(provider)
         ? await runtimeThreads.start(targetWs, {
             provider, title, cwd: dir || null, model: selectedModel, effort: selectedEffort ?? undefined, prompt: firstMsg,
           })
         : firstMsg
           ? await ws.openSessionWithPrompt({ provider, title, cwd: dir || null, prompt: firstMsg, meta }, opts)
           : await ws.createSessionQuiet({ kind: 'agent', provider, title, cwd: dir || null, meta }, opts);
-      if (firstMsg && !runtime) transcript.recordOptimisticPrompt(created.id, firstMsg);
+      if (firstMsg && !runtime && !asCouncil) transcript.recordOptimisticPrompt(created.id, firstMsg);
       prompt = '';
       threads.draftCwd = null;
       threads.rememberProject(dir || null);
@@ -437,6 +447,7 @@
         <p class="nt-error" use:announceShown={{ text: cwdError, assertive: true }}>{cwdError}</p>
       {/if}
 
+      <CouncilStagePicker part="seats" {provider} model={selectedModel} effort={selectedEffort} />
       <div class="nt-foot">
         <button
           type="button"
@@ -450,6 +461,7 @@
           <Icon name="link" size={16} />
         </button>
         <span class="nt-spacer"></span>
+        <CouncilStagePicker part="toggle" {provider} model={selectedModel} effort={selectedEffort} disabled={busy} />
         <button
           bind:this={agentEl}
           type="button"
@@ -473,7 +485,8 @@
         <button
           type="button"
           class="nt-send"
-          aria-label={busy ? 'Starting thread' : 'Start thread'}
+          class:ask={council.ready}
+          aria-label={busy ? 'Starting thread' : council.ready ? `Ask ${council.seats.length} agents` : 'Start thread'}
           title="Start thread (↵) — ⌘↵ with no text opens an empty one"
           data-testid="new-thread-send-btn"
           disabled={busy || !prompt.trim()}
@@ -481,6 +494,8 @@
         >
           {#if busy}
             <span class="spinner" aria-hidden="true"></span>
+          {:else if council.ready}
+            Ask {council.seats.length}
           {:else}
             <Icon name="arrowUp" size={16} />
           {/if}
@@ -575,7 +590,7 @@
     effort={selectedEffort}
     mode={interactionMode}
     onprovider={selectProvider}
-    onmodel={(m) => (selectedModel = m)}
+    onmodel={(m) => { council.pick({ provider, model: m, effort: selectedEffort }); selectedModel = m; }}
     oneffort={(e) => (selectedEffort = e)}
     onmode={modeSupported ? (m) => (interactionMode = m) : undefined}
     onclose={() => (pickerOpen = false)}
@@ -729,6 +744,7 @@
     color: var(--text-dim);
     cursor: default;
   }
+  .nt-send.ask { inline-size: auto; padding-inline: 12px; border-radius: 999px; font-weight: 600; }
   .nt-send .spinner {
     --spinner-size: 14px;
   }

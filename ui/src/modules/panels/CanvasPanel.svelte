@@ -11,7 +11,6 @@
   import { toastError } from '../../lib/toastError';
   import { loadErrorText } from '../../lib/loadError';
   import { ui } from '../../lib/stores/ui.svelte';
-  import { router } from '../../lib/router.svelte';
   import { canvasRefsBus, canvasDocBus } from '../../lib/events.svelte';
   import { api } from '../../lib/api/client';
   import { rel } from '../../lib/stores/now.svelte';
@@ -144,13 +143,14 @@
 
   // -- row actions ---------------------------------------------------------
 
+  /** Canvas folded into Design Hall: a scene opens as its Hall mirror (lazy:
+   *  the Hall's nav pulls in the product store, too heavy for this panel). */
   async function openInCanvas(sceneId: string): Promise<void> {
     try {
-      const { canvas } = await import('../../lib/stores/canvas.svelte');
-      canvas.pendingOpenId = sceneId;
-      router.go('canvas');
+      const { openSceneInHall } = await import('../design-hall/nav'); // ui-guards: allow — Canvas boards open in Design Hall
+      void openSceneInHall(sceneId);
     } catch (e) {
-      toastError('Couldn’t open Canvas', e);
+      toastError('Couldn’t open Design Hall', e);
     }
   }
 
@@ -293,7 +293,7 @@
                   </span>
                 </button>
                 <div class="ref-actions">
-                  <button class="icon-btn" title="Open in Canvas" aria-label="Open in Canvas" onclick={() => openInCanvas(ref.id)}>
+                  <button class="icon-btn" title="Open in Design Hall" aria-label="Open in Design Hall" onclick={() => openInCanvas(ref.id)}>
                     <Icon name="shapes" size={13} />
                   </button>
                   <button

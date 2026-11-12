@@ -1375,6 +1375,7 @@ async fn assert_scale_budgets(n: usize, read_budget_ms: u128) {
             path_prefix: None,
             okf_type: None,
             limit: 20,
+            with_index: false,
         };
         e.search("ws", id, &req).await.unwrap();
         worst[1] = worst[1].max(t.elapsed().as_millis());

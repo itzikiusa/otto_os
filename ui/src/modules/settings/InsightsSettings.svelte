@@ -185,7 +185,7 @@
       <p class="skill-warn" role={anyOn ? 'alert' : undefined}>
         <Icon name="warning" size={12} />
         <span>The <span class="mono">insights</span> skill isn’t installed, so {anyOn ? 'scheduled reports can’t be generated' : 'reports can’t be generated yet'}.</span>
-        <button class="btn small" onclick={() => router.go('settings/skills')}>Open Skills</button>
+        <button class="btn small" onclick={() => router.go('skills-eval/bundled')}>Open Skills Lab → Bundled</button>
       </p>
     {/if}
     <h2 class="section-title">Schedule {#if savedIn === 'schedule'}<span class="saved">Saved</span>{/if}</h2>
@@ -235,7 +235,7 @@
         Written by the installed <span class="mono">insights</span> skill.
       {:else if skillState === null}
         Requires the <span class="mono">insights</span> skill to be installed
-        (<button class="link" onclick={() => router.go('settings/skills')}>Settings → Skills</button>).
+        (<button class="link" onclick={() => router.go('skills-eval/bundled')}>Skills Lab → Bundled</button>).
       {/if}
       Generated reports appear in
       <button class="link" onclick={() => router.go('insights')}>Insights</button>, where you

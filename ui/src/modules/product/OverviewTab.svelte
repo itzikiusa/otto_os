@@ -26,7 +26,7 @@
   import PublishDialog from './PublishDialog.svelte';
   import AttachmentsPanel from './AttachmentsPanel.svelte';
   import DraftEditor from './DraftEditor.svelte';
-  import LinkedCanvases from './LinkedCanvases.svelte';
+  import StoryDesignsLine from './StoryDesignsLine.svelte';
   import ChildrenBoard from './ChildrenBoard.svelte';
   import { escapeHtml, unescapeHtml } from '../../lib/html';
   import JiraIssueSection from './JiraIssueSection.svelte';
@@ -972,8 +972,8 @@
       <ChildrenBoard epicId={story.id} />
     {/if}
 
-    <!-- ── Canvases linked to this story ─────────────────────────── -->
-    <LinkedCanvases storyId={story.id} />
+    <!-- ── This story's designs (Design Hall; Canvas boards included) ── -->
+    <StoryDesignsLine storyId={story.id} isEpic={story.tree_kind === 'epic' || product.childrenOf(story.id).length > 0} />
 
     <!-- ── Related by tag ───────────────────────────────────────── -->
     {#if relatedStories.length > 0}

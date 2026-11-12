@@ -12,6 +12,7 @@ MCP (Model Context Protocol) is how coding agents call tools. The MCP Control Pl
 
 - **Otto server** — Otto's own built-in MCP server. Choose which `otto.*` tools exist, whether each risky tool asks a human before every call, and connect external clients (Claude Code elsewhere, Copilot, scripts) with scoped access tokens.
 - **External servers** — register third-party MCP servers (GitHub, Linear, Blender…) so every call to them runs through one governance pipeline: allowlist → per-tool switch → policy → risk and approval → optional dry run → execute → audit.
+  Every server shows how it **runs**: *Governed* (that pipeline) or *Native* (the agent CLI launches it from `.mcp.json` under its own tool names, badged **Not governed**: no policy, approval or audit applies). ⋯ switches a server between the two; the governed tools then reach agents as `mcp__<server>__<tool>`, so skills and prompts that name the native tools need updating. Settings ▸ MCP servers now opens this page.
 - **Activity** — the approval queue, the audit log of every governed call, and per-tool stats.
 
 The page opens on the Otto server section (`#/mcp`). The other sections live at `#/mcp/servers` and `#/mcp/activity`.

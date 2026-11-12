@@ -13,6 +13,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { livePageText } from './livePageText';
 
   interface Props {
     /** The session the question goes to; null disables the bar with a hint. */
@@ -74,7 +75,9 @@
     const ids = includeMarks ? marks.slice(-20).map((a) => a.id) : [];
     sending = true;
     try {
-      await browser.ask({ session_id: sessionId, url, text: q, annotation_ids: ids });
+      // A live tab's visible text rides along (the agent can't fetch a logged-in page).
+      const page_text = await livePageText(browser.activeTab);
+      await browser.ask({ session_id: sessionId, url, text: q, annotation_ids: ids, page_text });
       text = '';
       justMarked = false;
       // The answer streams into the agent's terminal; when that isn't on

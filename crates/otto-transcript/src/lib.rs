@@ -25,6 +25,7 @@ pub mod codex;
 pub mod fold;
 pub mod grok_usage;
 pub mod images;
+pub mod limits;
 pub mod model;
 pub mod peek;
 pub mod records;

@@ -121,12 +121,11 @@ async function selectStory(page: Page, info: TestInfo): Promise<void> {
 const GROUP_OF: Record<string, string> = {
   Overview: 'Story',
   Rewrite: 'Story',
-  Mockups: 'Story',
+  Design: 'Story',
   Chat: 'Discover',
   Analysis: 'Discover',
   Questions: 'Discover',
   Notes: 'Discover',
-  Refine: 'Discover',
   Plan: 'Deliver',
   'Test cases': 'Deliver',
   Inject: 'Deliver',

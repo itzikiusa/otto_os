@@ -1,16 +1,17 @@
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
 import { componentFunctions } from './componentFunctions.ts';
 
 // accessibility-responsive-6w2-01: status lines inserted with their text in an
 // `{:else if}` / `{:else}` branch (or a line or two into an `{#if}`) were
-// silent. VersionStrip's stale-refresh failure is now spoken by
+// silent. The Versions panel's stale-refresh failure is now spoken by
 // `use:announceShown` (assertive, with the error); Walkthroughs' search count
 // lives in one always-mounted region whose text starts empty, so the first
 // count after typing is a change the reader speaks.
 
-const VERSION_STRIP = new URL('../src/modules/design-hall/VersionStrip.svelte', import.meta.url);
+const VERSION_STRIP = new URL('../src/modules/design-hall/VersionsPanel.svelte', import.meta.url);
 const WALKTHROUGHS = new URL('../src/modules/help/Walkthroughs.svelte', import.meta.url);
 
 /** The real announce module on a manual frame clock; `heard` is every
@@ -34,19 +35,22 @@ function announcer() {
   return { ...mod, heard, flush } as Record<string, any>;
 }
 
-test('VersionStrip: a refresh failure is announced once, assertively, with the error', () => {
+test('VersionsPanel: a refresh failure is announced once, assertively, with the error', () => {
+  // The panel hands every load error to LoadState, whose stale bar speaks a
+  // refresh that failed over loaded rows (the strip's own line is gone).
+  const src = readFileSync(VERSION_STRIP, 'utf8');
+  assert.match(src, /<LoadState what="versions"[^>]*\berror=\{list\.error\}/);
   const a = announcer();
-  const { refreshFailedText } = componentFunctions(VERSION_STRIP, ['refreshFailedText'], {});
-  // The span mounts with the error (`{#if error}`), then re-renders with the same one.
-  const act = a.announceShown({}, { text: refreshFailedText('Daemon unreachable'), assertive: true });
+  const { staleAnnouncement } = componentFunctions(new URL('../src/lib/components/LoadState.svelte', import.meta.url), ['staleAnnouncement'], {});
+  const act = a.announceShown({}, { text: staleAnnouncement('versions', 'Daemon unreachable', false), assertive: true });
   a.flush();
-  act.update({ text: refreshFailedText('Daemon unreachable'), assertive: true });
+  act.update({ text: staleAnnouncement('versions', 'Daemon unreachable', false), assertive: true });
   a.flush();
-  assert.deepEqual(a.heard, [['assertive', 'Couldn’t refresh the versions. Daemon unreachable']]);
-  // A different error while the strip is still stale speaks again.
-  act.update({ text: refreshFailedText('Timed out'), assertive: true });
+  assert.deepEqual(a.heard, [['assertive', 'Couldn’t refresh versions. Daemon unreachable']]);
+  // A different error while the list is still stale speaks again.
+  act.update({ text: staleAnnouncement('versions', 'Timed out', false), assertive: true });
   a.flush();
-  assert.deepEqual(a.heard.at(-1), ['assertive', 'Couldn’t refresh the versions. Timed out']);
+  assert.deepEqual(a.heard.at(-1), ['assertive', 'Couldn’t refresh versions. Timed out']);
 });
 
 test('Walkthroughs: the count region is empty until a search, then says the first count', () => {

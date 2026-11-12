@@ -26,6 +26,8 @@ use crate::client::{CheckedCallError, McpClient, Transport};
 
 #[path = "service_preflight.rs"]
 mod preflight;
+#[path = "service_run_mode.rs"]
+pub mod run_mode;
 #[path = "service_stages.rs"]
 mod stages;
 use crate::governance;
@@ -43,6 +45,10 @@ pub struct InvokeCtx {
     pub caller_user_id: Option<String>,
     pub caller_kind: String, // ui|agent|agent_readonly|mcp_server|gateway
     pub direction: String,   // outbound|inbound
+    /// The agent session making the call (the live-agent gateway knows it):
+    /// recorded on the approval card and every audit row, so a reviewer can
+    /// see which session asked.
+    pub caller_session_id: Option<String>,
 }
 
 /// The terminal outcome of `invoke`.
@@ -101,6 +107,11 @@ pub struct McpService {
     /// [`Self::lock_secrets`] from its read through `set_secret_meta`, so one
     /// save can't silently revert the other's map (CA-5-03).
     secret_locks: Arc<otto_core::keyed_lock::KeyedLocks<String>>,
+    /// Previews returned under a policy's require-dry-run, keyed by
+    /// `stages::preview_key` (caller, server, tool, args hash) → when. The
+    /// repeat of the same call within the approval TTL may execute; it uses
+    /// the preview up. In memory: a restart just asks for a fresh preview.
+    previews: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 /// The save-time rule for an MCP server's env keys (plain and secret): a POSIX
@@ -159,6 +170,7 @@ impl McpService {
             clients: Arc::new(Mutex::new(HashMap::new())),
             last_use: Arc::new(Mutex::new(HashMap::new())),
             secret_locks: Arc::new(otto_core::keyed_lock::KeyedLocks::new()),
+            previews: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -714,7 +726,9 @@ impl McpService {
                     t.injection_risk.clone(),
                     t.mutating,
                     t.enabled,
-                    t.require_approval,
+                    // A description/schema changed since a person reviewed
+                    // it: approval on every call until acknowledged.
+                    t.require_approval || t.changed_since_review,
                 ),
                 // Unknown/undiscovered tool: fail closed (treat as dangerous + disabled).
                 None => ("dangerous".into(), "high".into(), true, false, true),
@@ -839,6 +853,7 @@ impl McpService {
             tool_require_approval,
             args_hash: canonical_hash(args),
             approval_id_used: None,
+            preview_used: false,
         };
         let audit_id = match governance::run(
             governance::REGISTERED_SERVERS,
@@ -851,6 +866,7 @@ impl McpService {
             governance::Verdict::Execute { row, .. } => row,
         };
         let approval_id_used = stages.approval_id_used;
+        let preview_used = stages.preview_used;
         // Until disarmed by an explicit finalize below, dropping this guard
         // (an early `?`, or the caller cancelling the future mid-call) marks
         // the row failed — it never stays a bare "allowed, ok=false" row with
@@ -863,7 +879,12 @@ impl McpService {
         // so credentials/admission waits cannot carry stale authorization.
         let checked = client
             .call_tool_checked(tool_name, args, || {
-                self.authorize_before_send(&server, tool_name, ctx, approval_id_used.is_some())
+                self.authorize_before_send(
+                    &server,
+                    tool_name,
+                    ctx,
+                    (approval_id_used.is_some(), preview_used),
+                )
             })
             .await;
         let res = match checked {
@@ -1040,7 +1061,7 @@ impl McpService {
                 bytes: None,
                 rows: None,
                 approval_id: approval_id.map(str::to_string),
-                caller_session_id: None,
+                caller_session_id: ctx.caller_session_id.clone(),
             })
             .await
             .map(|_| ())
@@ -1260,6 +1281,36 @@ mod tests {
         assert!(other_surface.secret_locks.try_lock("s2").is_some());
         drop(held);
         assert!(other_surface.secret_locks.try_lock("s1").is_some());
+    }
+
+    /// Require-dry-run: a preview licenses ONE repeat of the same call, the
+    /// check alone does not use it up, and a clone sees the same previews.
+    #[tokio::test]
+    async fn a_preview_licenses_one_matching_call() {
+        struct NoSecrets;
+        impl SecretStore for NoSecrets {
+            fn put(&self, _: &str, _: &str) -> otto_core::Result<()> {
+                Ok(())
+            }
+            fn get(&self, _: &str) -> otto_core::Result<Option<String>> {
+                Ok(None)
+            }
+            fn delete(&self, _: &str) -> otto_core::Result<()> {
+                Ok(())
+            }
+        }
+        let pool: DbPool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect_lazy("sqlite::memory:")
+            .unwrap()
+            .into();
+        let svc = McpService::new(pool, Arc::new(NoSecrets));
+        assert!(!svc.take_preview("k", false), "no preview yet");
+        svc.record_preview("k".into());
+        let other = svc.clone();
+        assert!(other.take_preview("k", false), "checking keeps it");
+        assert!(!svc.take_preview("other-args", false));
+        assert!(svc.take_preview("k", true), "the real call uses it");
+        assert!(!svc.take_preview("k", false), "used up");
     }
 }
 
@@ -1580,6 +1631,7 @@ done
             caller_user_id: Some("bob".into()),
             caller_kind: "ui".into(),
             direction: "outbound".into(),
+            caller_session_id: None,
         };
         let args = json!({"q": 1});
         let run = || svc.invoke(&server.id, "echo", &args, &ctx);
@@ -1635,6 +1687,97 @@ done
         );
         svc.evict_client(&server.id);
     }
+    fn bob_ctx(session: Option<&str>) -> InvokeCtx {
+        InvokeCtx {
+            workspace_id: Some("w".into()),
+            dry_run: false,
+            caller_user_id: Some("bob".into()),
+            caller_kind: "gateway".into(),
+            direction: "outbound".into(),
+            caller_session_id: session.map(str::to_string),
+        }
+    }
+
+    /// The calling agent session reaches the approval card and the audit row
+    /// (it used to be dropped on the way in).
+    #[tokio::test]
+    async fn the_calling_session_is_kept_on_the_approval_and_the_audit_row() {
+        let (svc, _, _) = setup(0).await;
+        let server = stdio_server(&svc).await;
+        set_policy(&svc, &server, AccessMode::Legacy, vec![]).await;
+        let echo = svc.tools().get_by_name(&server.id, "echo").await.unwrap();
+        svc.tools()
+            .patch(&echo.id, None, Some(true), None, None)
+            .await
+            .unwrap();
+        let out = svc
+            .invoke(
+                &server.id,
+                "echo",
+                &json!({"q": 1}),
+                &bob_ctx(Some("sess-1")),
+            )
+            .await
+            .unwrap();
+        let InvokeOutcome::Pending { approval_id, .. } = out else {
+            panic!("expected a pending approval, got {out:?}");
+        };
+        let approval = svc.approvals().get(&approval_id).await.unwrap();
+        assert_eq!(approval.requested_by_session_id.as_deref(), Some("sess-1"));
+        let (session,): (Option<String>,) =
+            sqlx::query_as("SELECT caller_session_id FROM mcp_call_log WHERE approval_id = ?")
+                .bind(&approval_id)
+                .fetch_one(&svc.pool)
+                .await
+                .unwrap();
+        assert_eq!(session.as_deref(), Some("sess-1"));
+        svc.evict_client(&server.id);
+    }
+
+    /// Policy "require dry run", end to end: the first call is the preview,
+    /// the identical repeat executes, the next one needs a fresh preview, and
+    /// different arguments never ride on another call's preview.
+    #[tokio::test]
+    async fn require_dry_run_previews_then_runs_the_identical_repeat() {
+        let (svc, _, _) = setup(0).await;
+        let server = stdio_server(&svc).await;
+        set_policy(&svc, &server, AccessMode::Legacy, vec![]).await;
+        svc.policies()
+            .create(otto_state::NewPolicy {
+                workspace_id: None,
+                name: "preview echo".into(),
+                enabled: true,
+                priority: 100,
+                match_json: json!({"tool": "echo"}),
+                effect: "require_dry_run".into(),
+                reason: None,
+                created_by: "root".into(),
+            })
+            .await
+            .unwrap();
+        let ctx = bob_ctx(None);
+        async fn call(
+            svc: &McpService,
+            server: &McpServerDetail,
+            ctx: &InvokeCtx,
+            args: Value,
+        ) -> InvokeOutcome {
+            svc.invoke(&server.id, "echo", &args, ctx).await.unwrap()
+        }
+        let first = call(&svc, &server, &ctx, json!({"q": 1})).await;
+        assert!(matches!(first, InvokeOutcome::DryRun { .. }), "{first:?}");
+        let other = call(&svc, &server, &ctx, json!({"q": 2})).await;
+        assert!(matches!(other, InvokeOutcome::DryRun { .. }), "{other:?}");
+        let repeat = call(&svc, &server, &ctx, json!({"q": 1})).await;
+        assert!(
+            matches!(repeat, InvokeOutcome::Executed { .. }),
+            "{repeat:?}"
+        );
+        let again = call(&svc, &server, &ctx, json!({"q": 1})).await;
+        assert!(matches!(again, InvokeOutcome::DryRun { .. }), "{again:?}");
+        svc.evict_client(&server.id);
+    }
+
     /// Measured 12: entry server/tool/access/allowlist/policy, audit insert,
     /// the same five live reads AFTER transport admission, and audit finalize.
     /// Four extra reads close server/tool/allowlist/policy revocation races;

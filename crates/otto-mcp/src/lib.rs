@@ -28,6 +28,7 @@ pub mod service;
 pub mod types;
 
 pub use http::{api_router, outcome_to_resp, McpCtx};
+pub use service::run_mode::RunMode;
 pub use service::{
     canonical_hash, CallerAccess, InvokeCtx, InvokeOutcome, McpService, PendingAuditRow,
 };

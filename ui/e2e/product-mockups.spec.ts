@@ -2,12 +2,15 @@ import { test, expect, type Page } from '@playwright/test';
 import { join } from 'node:path';
 import { apiCtx, seedWorkspace } from './seed';
 import { seedProductStory } from './seed-product';
+import { openClassicArena } from './storyDesigns';
 
 // ── E2E: mockup viewer + pinned annotations (now inside the Design Arena) ──────
 //
-// The Mockups tab became **Design** (tab id `mockups` kept as an alias — see
-// docs/design/product-design-arena.md §6); the arena keeps the viewer / annotation
-// / assistant surfaces this spec drives, so the selectors below are unchanged.
+// The Mockups tab became **Design** (tab id `mockups` kept as an alias). The tab
+// now lists the story's Design Hall designs (desktop-story-designs.spec.ts); the
+// arena this spec drives — viewer, PINNED ANNOTATIONS, the in-place assistant —
+// opens from the tab's ⋯ → "Open the classic arena" (openClassicArena), which
+// stays until Design Hall has pinned notes. The selectors below are unchanged.
 //
 // Attaches a small HTML mockup on the Overview (file input), marks it as a
 // mockup, opens the Design tab, selects it, and asserts it renders inside a
@@ -93,7 +96,7 @@ test('mockups: attach HTML → mark as mockup → renders in sandboxed iframe �
 
   // ── 3. Open the Design tab and select the mockup. ──────────────────────────
   await openTab(page, 'Design');
-  await expect(page.locator('.mockups-tab')).toBeVisible({ timeout: 15_000 });
+  await openClassicArena(page);
 
   const row = page.locator('.mockup-row', { hasText: 'mockup.html' }).first();
   await expect(row).toBeVisible({ timeout: 15_000 });
@@ -128,7 +131,7 @@ test('mockups: attach HTML → mark as mockup → renders in sandboxed iframe �
   await expect(page.locator('.product-page')).toBeVisible({ timeout: 30_000 });
   await selectStory(page);
   await openTab(page, 'Design');
-  await expect(page.locator('.mockups-tab')).toBeVisible({ timeout: 15_000 });
+  await openClassicArena(page);
   await page.locator('.mockup-row', { hasText: 'mockup.html' }).first().click();
   await expect(page.locator('.mockup-stage iframe.mockup-frame')).toBeVisible({ timeout: 15_000 });
 
@@ -149,7 +152,7 @@ test('mockups: attach HTML → mark as mockup → renders in sandboxed iframe �
 async function openMockups(page: Page): Promise<void> {
   await selectStory(page);
   await openTab(page, 'Design');
-  await expect(page.locator('.mockups-tab')).toBeVisible({ timeout: 15_000 });
+  await openClassicArena(page);
 }
 
 /** The newest agent mockup of `mime`, via the API (tests run serially → newest

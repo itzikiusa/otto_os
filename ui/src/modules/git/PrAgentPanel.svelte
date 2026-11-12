@@ -42,11 +42,15 @@
     onrestore?: () => void;
     /** An ask arrived (any entry point): the host brings the panel forward. */
     onasked?: () => void;
+    /** Phone, sheet closed: only the thread's embed, hidden, so its state still
+     *  reaches the bridge (the opener's dot, the ⋯ hint). Takes no asks: the
+     *  sheet's own panel does, once the ask opens it. */
+    statusOnly?: boolean;
   }
-  let { repoId, number, title, layout, folded = false, ontogglefolded, onmaximize, onrestore, onasked }: Props = $props();
+  let { repoId, number, title, layout, folded = false, ontogglefolded, onmaximize, onrestore, onasked, statusOnly = false }: Props = $props();
   let disposed = false;
   $effect(() => () => { disposed = true; });
-  const hidden = $derived(folded && layout === 'dock');
+  const hidden = $derived((folded && layout === 'dock') || statusOnly);
 
   const ThreadView = lazyComponent(loadRuntimeThreadView);
   const originId = $derived(prAgentOriginId(repoId, number));
@@ -88,7 +92,7 @@
   // in flight, which may be creating it).
   $effect(() => {
     const p = prAgentBridge.pending;
-    if (!p || p.key !== originId || found.state !== 'ready' || sending) return;
+    if (statusOnly || !p || p.key !== originId || found.state !== 'ready' || sending) return;
     untrack(() => {
       const ask = prAgentBridge.take(originId);
       if (ask) void run(ask);
@@ -202,7 +206,7 @@
   let kb = $state(0);
   $effect(() => {
     const vv = window.visualViewport;
-    if (layout !== 'sheet' || !vv) return;
+    if (layout !== 'sheet' || statusOnly || !vv) return;
     const sync = (): void => { kb = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop)); };
     sync();
     vv.addEventListener('resize', sync);
@@ -220,7 +224,7 @@
   class:folded={folded && layout === 'dock'}
   style={kb ? `padding-block-end:${kb}px` : undefined}
   aria-label="Agent thread for pull request #{number}"
-  data-testid="pr-agent-panel"
+  data-testid={statusOnly ? 'pr-agent-status' : 'pr-agent-panel'}
 >
   {#if layout !== 'sheet'}
     <div class="pra-head">

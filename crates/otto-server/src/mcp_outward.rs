@@ -209,6 +209,14 @@ async fn in_thread(ctx: &ServerCtx, auth: &AuthContext, tool: &str) -> bool {
     }
 }
 
+/// A call only a person may make: a person-only tool, a cluster write that
+/// carries a typed confirm, or a routine that posts outward.
+fn person_only_call(short: &str, arguments: &Value) -> bool {
+    use otto_assistant::personal_agent_routines::outward_delivery_reason;
+    otto_mcp::outward::call_is_person_only(short, arguments)
+        || outward_delivery_reason(short, arguments).is_some()
+}
+
 pub(crate) async fn governed_invoke(
     ctx: &ServerCtx,
     auth: &AuthContext,
@@ -331,15 +339,15 @@ pub(crate) async fn governed_invoke(
     // therefore ALWAYS a person's call for a non-human caller: force the
     // approval (never covered by an auto-approve rule or a token grant), and
     // only the approved call replays as that person (`SelfCallAs` below).
+    // Same for a cluster write carrying a typed confirm (`call_is_person_only`).
     let person_only_by_agent =
-        otto_mcp::outward::tool_is_person_only(&short) && !crate::ui_bridge::is_human(auth);
+        person_only_call(&short, arguments) && !crate::ui_bridge::is_human(auth);
     let forced_approval = match &agent_gate {
         crate::personal_agent_policy::AgentGate::ForceApproval { reason, risk } => {
             Some((reason.clone(), *risk))
         }
         _ if person_only_by_agent => Some((
-            "deciding an improvement edit is a person's decision — approve to apply it as yourself"
-                .to_string(),
+            otto_mcp::outward::person_only_reason(&short).to_string(),
             "dangerous",
         )),
         _ => None,
@@ -740,9 +748,10 @@ impl governance::Stages for OttoStages<'_> {
                     Some(id) => id,
                     None => {
                         // A personal-agent write names exactly what changes.
-                        let detail = admin_detail(&ctx.pool, tool, self.arguments)
-                            .await
-                            .unwrap_or_else(|| dangerous_detail(tool, self.arguments));
+                        let detail = match admin_detail(&ctx.pool, tool, self.arguments).await {
+                            Some(d) => d,
+                            None => detail_with_target(&ctx.pool, tool, self.arguments).await,
+                        };
                         // A saved request's id says nothing: name its method and host.
                         let rid = self.arguments.get("request_id").and_then(Value::as_str);
                         let detail = match (self.short, self.ws, rid) {
@@ -2063,13 +2072,13 @@ pub async fn gateway_invoke(
     {
         return Err(Error::Forbidden("MCP tool access denied".into()).into());
     }
-    let _ = &req.session_id;
     let ictx = InvokeCtx {
         workspace_id: Some(req.workspace_id.clone()),
         dry_run: req.dry_run,
         caller_user_id: Some(user.id.clone()),
         caller_kind: "gateway".into(),
         direction: "outbound".into(),
+        caller_session_id: req.session_id.clone(),
     };
     let outcome = ctx
         .mcp

@@ -19,16 +19,16 @@ for (const scheme of ['light', 'dark'] as const) {
       id: 'chat-phone-1',
       story_id: sid,
       workspace_id: ws,
-      title: 'Phone discovery',
+      title: 'Phone chat',
       status: 'active',
       model: 'claude-3-7-sonnet',
       created_at: '2026-10-18T10:00:00Z',
       updated_at: '2026-10-18T10:00:00Z',
     };
     let persistedMessages: Array<Record<string, unknown>> = [];
-    await page.context().route(`**/product/stories/${sid}/discovery-chats`, (r) => r.fulfill({ json: [chatObj] }));
-    await page.context().route('**/product/discovery-chats/chat-phone-1', (r) =>
-      r.fulfill({ json: { chat: chatObj, messages: persistedMessages } }),
+    await page.context().route(`**/product/stories/${sid}/refinement-threads`, (r) => r.fulfill({ json: [chatObj] }));
+    await page.context().route('**/product/refinement-threads/chat-phone-1', (r) =>
+      r.fulfill({ json: { thread: chatObj, messages: persistedMessages } }),
     );
     let releaseSend!: () => void;
     let sendStarted!: () => void;
@@ -41,16 +41,15 @@ for (const scheme of ['light', 'dark'] as const) {
     const heldStop = new Promise<void>((res) => (releaseStop = res));
     const startedStop = new Promise<void>((res) => (stopStarted = res));
 
-    await page.context().route('**/product/discovery-chats/chat-phone-1/messages', async (r) => {
+    await page.context().route('**/product/refinement-threads/chat-phone-1/messages', async (r) => {
       const payload = r.request().postDataJSON() as { body: string; turn_id?: string };
       capturedSendTurnId = payload.turn_id;
       persistedMessages = [
         {
           id: 'u-1',
-          chat_id: 'chat-phone-1',
+          thread_id: 'chat-phone-1',
           role: 'user',
           body: payload.body,
-          actions_json: null,
           meta_json: null,
           created_at: '2026-10-18T10:01:00Z',
         },
@@ -63,7 +62,7 @@ for (const scheme of ['light', 'dark'] as const) {
       });
     });
 
-    await page.context().route('**/product/discovery-chats/chat-phone-1/stop', async (r) => {
+    await page.context().route('**/product/refinement-threads/chat-phone-1/stop', async (r) => {
       const payload = r.request().postDataJSON() as { turn_id: string };
       capturedStopTurnId = payload.turn_id;
       stopStarted();
@@ -98,90 +97,32 @@ for (const scheme of ['light', 'dark'] as const) {
     await storyRow.click();
     await expect(page.locator('.product-page')).toHaveClass(/m-content-open/);
 
-    // Switch to Discover -> Chat and exercise server-backed Stop (exact turn_id, Stopping… state, reload, preserved bubble).
+    // Switch to Discover -> Chat (the merged Chat + Refine tab) and exercise server-backed Stop (exact turn_id, Stopping… state, reload, preserved bubble).
     await page.getByRole('tab', { name: 'Discover', exact: true }).click();
     await page.locator('.sub-tab-strip .st', { hasText: 'Chat' }).click();
-    const composer = page.locator('.discovery-chat textarea');
+    const composer = page.locator('.refine-chat textarea');
     await expect(composer).toBeVisible();
     await composer.fill('Keep my prompt');
-    await page.locator('.discovery-chat').getByRole('button', { name: 'Send', exact: true }).click();
+    await page.locator('.refine-chat').getByRole('button', { name: 'Send', exact: true }).click();
     await startedSend;
     expect(capturedSendTurnId).toBeTruthy();
 
     try {
-      const stopBtn = page.locator('.discovery-chat').getByRole('button', { name: 'Stop', exact: true });
-      const stopWaitingBtn = page.locator('.discovery-chat').getByRole('button', { name: 'Stop waiting', exact: true });
+      const stopBtn = page.locator('.refine-chat').getByRole('button', { name: 'Stop', exact: true });
+      const stopWaitingBtn = page.locator('.refine-chat').getByRole('button', { name: 'Stop waiting', exact: true });
       await expect(stopBtn).toBeVisible();
       await expect(stopWaitingBtn).toBeVisible();
       await stopBtn.click();
       await startedStop;
       expect(capturedStopTurnId).toBe(capturedSendTurnId);
-      await expect(page.locator('.discovery-chat').getByRole('button', { name: 'Stopping…', exact: true }).first()).toBeDisabled();
+      await expect(page.locator('.refine-chat').getByRole('button', { name: 'Stopping…', exact: true }).first()).toBeDisabled();
       releaseStop();
 
       // Accepted user bubble stays visible after reload and composer stays empty (no duplicate draft restoration).
-      await expect(page.locator('.discovery-chat .bubble-user')).toContainText('Keep my prompt');
+      await expect(page.locator('.refine-chat .bubble-user')).toContainText('Keep my prompt');
       await expect(composer).toHaveValue('');
-      await expect(page.locator('.discovery-chat')).toContainText('Turn stopped.');
-      await expect(page.locator('.discovery-chat').getByRole('button', { name: 'Reload chat', exact: true })).toBeVisible();
-      // Also switch to Refine tab and verify server-backed Stop on RefineChat.
-      const threadObj = {
-        id: 'thread-phone-1',
-        story_id: sid,
-        workspace_id: ws,
-        title: 'Phone refinement',
-        status: 'active',
-        model: 'claude-3-7-sonnet',
-        created_at: '2026-10-18T10:00:00Z',
-        updated_at: '2026-10-18T10:00:00Z',
-      };
-      let persistedRefineMsgs: Array<Record<string, unknown>> = [];
-      let refineSendTurnId: string | undefined;
-      let refineStopTurnId: string | undefined;
-      let releaseRefineSend!: () => void;
-      let refineSendStarted!: () => void;
-      const heldRefineSend = new Promise<void>((res) => (releaseRefineSend = res));
-      const startedRefineSend = new Promise<void>((res) => (refineSendStarted = res));
-      await page.context().route(`**/product/stories/${sid}/refinement-threads`, (r) => r.fulfill({ json: [threadObj] }));
-      await page.context().route('**/product/refinement-threads/thread-phone-1', (r) =>
-        r.fulfill({ json: { thread: threadObj, messages: persistedRefineMsgs } }),
-      );
-      await page.context().route('**/product/refinement-threads/thread-phone-1/messages', async (r) => {
-        const payload = r.request().postDataJSON() as { body: string; turn_id?: string };
-        refineSendTurnId = payload.turn_id;
-        persistedRefineMsgs = [
-          {
-            id: 'ru-1',
-            thread_id: 'thread-phone-1',
-            role: 'user',
-            body: payload.body,
-            meta_json: null,
-            created_at: '2026-10-18T10:02:00Z',
-          },
-        ];
-        refineSendStarted();
-        await heldRefineSend;
-        await r.fulfill({ status: 499, json: { code: 'cancelled', message: 'Turn stopped by user' } });
-      });
-      await page.context().route('**/product/refinement-threads/thread-phone-1/stop', async (r) => {
-        const payload = r.request().postDataJSON() as { turn_id: string };
-        refineStopTurnId = payload.turn_id;
-        releaseRefineSend();
-        await r.fulfill({ json: { stopped: true } });
-      });
-
-      await page.getByRole('tab', { name: 'Refine', exact: true }).click();
-      const refineComposer = page.locator('.refine-chat textarea');
-      await expect(refineComposer).toBeVisible();
-      await refineComposer.fill('Refine AC');
-      await page.locator('.refine-chat').getByRole('button', { name: 'Send', exact: true }).click();
-      await startedRefineSend;
-      expect(refineSendTurnId).toBeTruthy();
-      await page.locator('.refine-chat').getByRole('button', { name: 'Stop', exact: true }).click();
-      expect(refineStopTurnId).toBe(refineSendTurnId);
-      await expect(page.locator('.refine-chat .bubble-user')).toContainText('Refine AC');
-      await expect(refineComposer).toHaveValue('');
       await expect(page.locator('.refine-chat')).toContainText('Turn stopped.');
+      await expect(page.locator('.refine-chat').getByRole('button', { name: 'Reload thread', exact: true })).toBeVisible();
     } finally {
       releaseStop();
       releaseSend();

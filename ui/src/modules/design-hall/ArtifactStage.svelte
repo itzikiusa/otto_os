@@ -1,3 +1,13 @@
+<script lang="ts" module>
+  import { renderD2 } from '../canvas/d2';
+  /** D2 → standalone SVG (⋯ → Export): the same renderer this stage previews with. */
+  export async function d2Svg(source: string): Promise<string> {
+    const r = await renderD2(`otto-design-export-${Date.now()}`, source);
+    if (!r.svg) throw new Error(r.error ?? 'Diagram error');
+    return r.svg;
+  }
+</script>
+
 <script lang="ts">
   import { announceShown } from '../../lib/announce.svelte';
   // The stage of the artifact view (and each side of Compare): renders one
@@ -25,7 +35,6 @@
     type Scene3dObject,
   } from '../../lib/design/scene3d';
   import { renderMermaid } from '../../lib/render/mermaid';
-  import { renderD2 } from '../canvas/d2';
   import { brandColors, contrastRatio, renderKind } from './model';
   import SiteStudio from './site/SiteStudio.svelte';
   import { modelScope } from './studio3d/sources';
@@ -219,7 +228,7 @@
     ] ?? 'design.json',
   );
   const hasSourcePane = $derived(
-    !compact && showSource && (inner.kind === 'html' || inner.kind === 'svg' || inner.kind === 'mermaid' || inner.kind === 'd2' || kind === 'brand' || kind === 'json' || kind === 'scene3d'),
+    !compact && showSource && artifact.format !== 'otto-site' && (inner.kind === 'html' || inner.kind === 'svg' || inner.kind === 'mermaid' || inner.kind === 'd2' || kind === 'brand' || kind === 'json' || kind === 'scene3d'),
   );
   /** The source pane edits the INNER source for canvas docs, the document otherwise. */
   const paneSource = $derived(kind === 'canvas' ? inner.src : (source ?? ''));
@@ -336,7 +345,12 @@
         <p class="msg err">The brand kit document isn’t valid JSON.</p>
       {/if}
     {:else if kind === 'json'}
-      <p class="msg">This studio’s editor isn’t built yet (planned). The document is stored and versioned; view it as source.</p>
+      <p class="msg">Design Hall has no editor for this format. It is stored and versioned; view it as source.</p>
+      {#if !compact && !hasSourcePane}
+        <div class="source ro" aria-label="Source (read-only)">
+          <CodeEditor path="design.json" root="" content={source ?? ''} readOnly={true} completionSource={() => null} onchange={() => {}} />
+        </div>
+      {/if}
     {:else if (kind === 'image' || kind === 'model' || kind === 'pdf') && !blobUrl}
       <!-- A plain line: it is replaced by the preview itself in a moment. -->
       <p class="msg">{noVersion ? 'No preview yet — this design has no saved version.' : `Loading ${kind === 'pdf' ? 'the PDF' : kind === 'model' ? 'the 3D model' : 'the image'}…`}</p>
@@ -383,6 +397,12 @@
     background: var(--surface);
     display: flex;
     flex-direction: column;
+  }
+  .source.ro {
+    flex: 1;
+    min-height: 240px;
+    border-inline-start: 0;
+    border-block-start: 1px solid var(--border);
   }
   .source > :global(*) {
     flex: 1;

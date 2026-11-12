@@ -1,7 +1,7 @@
 // Vault v3 API — file-backed markdown vaults (the docs home).
 // Mirrors docs/contracts/api.md "Vault v3" + crates/otto-vault/src/http.rs.
 
-import { api } from './client';
+import { api, postBlob } from './client';
 import type {
   OkfReport,
   Vault,
@@ -13,7 +13,10 @@ import type {
   VaultNote,
   VaultNoteMeta,
   VaultRenameResult,
+  VaultAttachment,
   VaultSearchHit,
+  VaultSearchIndexStatus,
+  VaultSearchPage,
   VaultSearchReq,
   VaultStatus,
   VaultSwitchHit,
@@ -86,6 +89,23 @@ export function vaultBacklinks(ws: string, id: number, path: string, contextOffs
 
 export function vaultSearch(ws: string, id: number, req: VaultSearchReq) {
   return api.post<VaultSearchHit[]>(`${base(ws)}/${id}/search`, req);
+}
+
+/** Search with the index completeness (`index` while the index is rebuilding). */
+export function vaultSearchPage(ws: string, id: number, req: VaultSearchReq) {
+  return api.post<VaultSearchPage>(`${base(ws)}/${id}/search`, { ...req, with_index: true });
+}
+
+/** Rebuild (background; poll `vaultStatus().search_index`) or optimize the full-text index. */
+export function vaultSearchIndex(ws: string, id: number, action: 'rebuild' | 'optimize') {
+  return api.post<VaultSearchIndexStatus>(`${base(ws)}/${id}/search-index`, { action });
+}
+
+/** Save pasted/dropped bytes as a new attachment; returns the embed to insert. */
+export function uploadVaultAttachment(ws: string, id: number, note: string | null, name: string, file: Blob) {
+  const q = new URLSearchParams({ name });
+  if (note) q.set('note', note);
+  return postBlob<VaultAttachment>(`${base(ws)}/${id}/attachment?${q.toString()}`, file, file.type || 'application/octet-stream');
 }
 
 export function vaultSwitcher(ws: string, id: number, q: string) {

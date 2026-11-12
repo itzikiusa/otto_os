@@ -21,6 +21,8 @@ import {
   type SidebarSection,
   moduleHome,
   navIdForModule,
+  routeAllowed,
+  goToEntries,
 } from '../src/lib/sidebar.ts';
 
 const all = () => availableModules(() => true, []);
@@ -185,6 +187,16 @@ test('Personal Agents keeps the scheduled-tasks id but opens on its Agents tab',
   assert.equal(moduleHome('scheduled-tasks'), 'personal-agents');
   assert.equal(moduleHome('git'), 'git');
   assert.equal(navIdForModule('personal-agents'), 'scheduled-tasks');
+});
+
+test('Canvas is no separate destination: #/canvas is gated by Design Hall and highlights Product', () => {
+  // The Canvas page folded into Design Hall (`#/canvas` only forwards there).
+  assert.equal(routeAllowed('canvas', (f) => f === 'design'), true);
+  assert.equal(routeAllowed('canvas', (f) => f === 'canvas'), false);
+  assert.equal(routeAllowed('canvas/scene-1', (f) => f === 'design'), true);
+  assert.equal(navIdForModule('canvas'), 'product');
+  assert.ok(!SIDEBAR_MODULES.some((m) => m.id === 'canvas'));
+  assert.ok(!goToEntries(all()).some((e) => /canvas/i.test(e.title)), 'no "Go to Canvas" in ⌘K');
 });
 
 // ── A module that becomes available later keeps its place (owner report) ──

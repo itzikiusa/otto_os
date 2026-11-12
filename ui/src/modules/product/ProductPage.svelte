@@ -30,7 +30,7 @@
   import TestCasesTab from './TestCasesTab.svelte';
   import PlanTab from './PlanTab.svelte';
   import MockupsTab from './MockupsTab.svelte';
-  import RefineTab from './RefineTab.svelte';
+  import { canonicalProductTab } from './chatActions';
   import ChatTab from './ChatTab.svelte';
   import ProductModeTabs, { type ProductMode } from '../../lib/components/ProductModeTabs.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -428,7 +428,6 @@
         { id: 'analysis', label: 'Analysis' },
         { id: 'questions', label: 'Questions' },
         { id: 'notes', label: 'Notes' },
-        { id: 'refine', label: 'Refine' },
       ],
     },
     {
@@ -457,7 +456,8 @@
   });
   // A doc landing on a hidden tab (deep link / kind change) falls back to overview.
   $effect(() => {
-    if ((product.tab as string) === 'discovery') product.tab = 'chat';
+    // Merged tabs (discovery, refine → chat): old deep links land on the merged one.
+    if (canonicalProductTab(product.tab) !== product.tab) product.tab = canonicalProductTab(product.tab);
     else if (selectedStory?.tree_kind === 'doc' && tabsHiddenForDoc.has(product.tab)) product.tab = 'overview';
   });
 
@@ -914,8 +914,6 @@
         <LazyMount lazy={HistoryLazy} what="the story history" variant="panel" />
       {:else if product.tab === 'inject'}
         <LazyMount lazy={InjectLazy} what="the inject tab" variant="panel" />
-      {:else if product.tab === 'refine'}
-        <RefineTab />
       {:else if product.tab === 'mockups'}
         <MockupsTab />
       {/if}

@@ -128,9 +128,14 @@ pub async fn prepare_request_with(
     // and dials, so the local check only false-blocks bastion-only hostnames
     // and RFC1918 targets the tunnel exists to reach; or (b) the workspace has
     // explicitly opted in to local/private targets (dev servers on localhost
-    // are the #1 thing an API client is pointed at).
-    if proxy.is_none() && !allow_local {
-        otto_netguard::check_url(&url).await?;
+    // are the #1 thing an API client is pointed at) — then the allow-local
+    // rules still refuse cloud metadata and the daemon's own listener.
+    match otto_netguard::Guard::for_fetch(proxy.is_some(), allow_local) {
+        otto_netguard::Guard::Strict => otto_netguard::check_url(&url).await?,
+        // No DNS while preparing: the allow-local client's resolver vets the
+        // addresses it dials; literals and the daemon's port are checked here.
+        otto_netguard::Guard::AllowLocal => otto_netguard::precheck_url_allow_local(&url)?,
+        otto_netguard::Guard::Tunnelled => {}
     }
     let method = reqwest::Method::from_bytes(req.method.to_uppercase().as_bytes())
         .map_err(|_| format!("invalid HTTP method '{}'", req.method))?;
@@ -260,7 +265,7 @@ pub async fn build_and_send_with(
     credentialed: bool,
 ) -> Result<(ApiResponse, Vec<u8>), String> {
     let credentialed = credentialed || api_key_header_set(&req.auth);
-    let guarded = proxy.is_none() && !allow_local;
+    let guarded = otto_netguard::Guard::for_fetch(proxy.is_some(), allow_local);
     let (builder, url, header_count) =
         prepare_request_with(wid, req, vars, proxy, allow_local, true, credentialed).await?;
     // Trace: resolved request + per-phase timing for the response "Trace" tab.
@@ -562,6 +567,10 @@ pub(crate) fn classify_send_failure(chain: &[String]) -> Option<String> {
         })
     }
     let find = |needles: &[&str]| first_with(chain, needles);
+    // Metadata / the daemon's own port: allowing private addresses won't help.
+    if let Some(guard) = find(&["always blocked"]) {
+        return Some(format!("blocked by the private-address guard: {guard}"));
+    }
     if let Some(guard) = find(&["ssrf guard", "blocked address"]) {
         return Some(format!(
             "blocked by the private-address guard: {guard} — allow private addresses for this workspace to reach it"
@@ -629,15 +638,16 @@ pub(crate) fn api_key_header_set(auth: &Value) -> bool {
 
 /// Why a redirect came back unfollowed, for the response trace: a
 /// credential-carrying request stops at a hop to another host
-/// ([`credential_redirect_policy`]), and the SSRF guard stops at a hop to a
-/// private address literal. `None` for anything else (not a redirect, no
-/// `Location`, following was simply turned off).
+/// ([`credential_redirect_policy`]), and the SSRF guard stops at a hop its
+/// mode refuses (a private address literal; in allow-local mode a metadata
+/// address or the daemon's port). `None` for anything else (not a redirect,
+/// no `Location`, following was simply turned off).
 pub(crate) fn unfollowed_redirect_note(
     status: reqwest::StatusCode,
     current: &reqwest::Url,
     location: Option<&str>,
     credentialed: bool,
-    guarded: bool,
+    guarded: otto_netguard::Guard,
 ) -> Option<String> {
     if !status.is_redirection() {
         return None;
@@ -649,7 +659,7 @@ pub(crate) fn unfollowed_redirect_note(
             "redirect to another host ({host}) not followed because this request carries credentials"
         ));
     }
-    if guarded && !otto_netguard::check_url_literal(&next) {
+    if !guarded.hop_allowed(&next) {
         return Some(format!(
             "redirect to {host} not followed: blocked address (SSRF guard)"
         ));

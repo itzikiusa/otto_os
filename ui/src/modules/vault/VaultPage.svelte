@@ -1,10 +1,8 @@
 <script lang="ts">
   import { loadErrorText } from '../../lib/loadError';
   import { announce } from '../../lib/announce.svelte';
-  // Vault v3 — the docs home. Obsidian-style three-pane layout: left sidebar (Files / Search / Tags
-  // over the active vault), center (note edit⇄read or the graph), and the note's details (backlinks /
-  // outgoing / outline / properties / OKF) as a "Note details" tab of the shell's Side panel — one
-  // right panel, not two. Files on disk are the truth; the daemon keeps a derived index.
+  // Vault v3 — the docs home: Files / Search / Tags sidebar, note or graph center, and Note details as a
+  // Side-panel tab (one right panel). Files on disk are the truth; the daemon keeps a derived index.
   import { onMount, untrack } from 'svelte';
   import { focusOnMount } from '../../lib/focusOnMount';
   import Icon from '../../lib/components/Icon.svelte';
@@ -33,6 +31,7 @@
   import NoteView from './NoteView.svelte';
   import RightPanel from './RightPanel.svelte';
   import SearchPanel from './SearchPanel.svelte';
+  import SearchIndexChip, { rebuildSearchIndex } from './SearchIndexChip.svelte';
   import Switcher from './Switcher.svelte';
   import TagsPanel from './TagsPanel.svelte';
   import { vault } from './vault.svelte';
@@ -176,12 +175,12 @@
       : []);
   });
 
-  /** Header ⋯: the less-used views (history, trash) and the pane toggles —
-   *  the toolbar keeps ≤5 controls (graph, docs agent, switcher, new note, ⋯). */
+  /** Header ⋯: less-used views and actions + pane toggles (the toolbar keeps ≤5 controls). */
   function moreMenu(e: MouseEvent): void {
     const items: MenuItem[] = [
       { label: 'Edit history', icon: 'clock', action: () => void vault.openHistory() },
       { label: 'Trash and restore', icon: 'trash', action: () => void vault.openTrash() },
+      { label: 'Rebuild search index', icon: 'refresh', action: () => void rebuildSearchIndex() },
       { separator: true },
       { label: 'File tree', checked: leftOpen, action: toggleLeft },
       ...(vault.centerMode === 'note' ? [{ label: 'Note details', checked: rightOpen, hint: '⌘J', action: toggleRight }] : []),
@@ -327,6 +326,7 @@
           <Icon name="warning" size={12} /> Indexing failed · Rescan
         </button>
       {/if}
+      <SearchIndexChip />
       {#if (vault.status?.tracked_recovery?.length ?? 0) > 0}
         <!-- S7-07: private note history / trash committed before Otto ignored
              them keeps being pushed with the repo. -->

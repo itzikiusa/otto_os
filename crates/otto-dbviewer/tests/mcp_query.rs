@@ -15,7 +15,9 @@ use otto_core::auth::{with_request_credential, RequestCredential};
 use otto_core::domain::{ConnectionKind, Environment};
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id, Result};
-use otto_dbviewer::service::{MCP_READ_ONLY_PREFIX, READ_ONLY_PREFIX, WRITE_BLOCKED_PREFIX};
+use otto_dbviewer::service::{
+    MCP_READ_ONLY_PREFIX, READ_ONLY_CONNECTION_PREFIX, READ_ONLY_PREFIX, WRITE_BLOCKED_PREFIX,
+};
 use otto_dbviewer::types::QueryRequest;
 use otto_dbviewer::DbViewerService;
 use otto_state::{ConnectionsRepo, DbExplorerRepo, DbPool, NewConnection};
@@ -502,12 +504,9 @@ async fn an_agent_write_on_a_read_only_connection_names_the_setting() {
             .await
             .expect_err("a read-only connection refuses an agent's write");
         let msg = err.to_string();
-        if q.confirm_write {
-            assert!(matches!(err, Error::Forbidden(_)), "{err:?}");
-            continue;
-        }
-        assert!(matches!(err, Error::Conflict(_)), "{err:?}");
-        assert!(msg.contains(WRITE_BLOCKED_PREFIX), "{msg}");
+        // Read-only refuses outright (no confirm path), confirmed or not.
+        assert!(matches!(err, Error::Forbidden(_)), "{err:?}");
+        assert!(msg.contains(READ_ONLY_CONNECTION_PREFIX), "{msg}");
         assert!(msg.contains("read-only connection 't'"), "{msg}");
         assert!(
             msg.contains("turn off Read-only in the connection's settings"),
@@ -569,8 +568,10 @@ async fn an_agent_write_on_a_production_connection_names_the_environment() {
 
 #[tokio::test]
 async fn a_person_still_gets_the_typed_confirmation_prompt() {
-    // The UI's own run: the message the Explorer keys its typed confirm on is
-    // unchanged for a person, and their confirmation still lifts the guard.
+    // The UI's own run on a PRODUCTION connection: the message the Explorer
+    // keys its typed confirm on is unchanged for a person, and their
+    // confirmation still lifts the guard. (Read-only has no confirm path —
+    // see `a_person_cannot_confirm_past_read_only`.)
     let pool = mem_pool().await;
     let user = seed_user(&pool).await;
     let ws = seed_ws(&pool).await;
@@ -579,8 +580,8 @@ async fn a_person_still_gets_the_typed_confirmation_prompt() {
         Some(ws),
         &user,
         ConnectionKind::Mysql,
-        Environment::Dev,
-        true,
+        Environment::Prod,
+        false,
     )
     .await;
     let svc = service(&pool);
@@ -602,6 +603,53 @@ async fn a_person_still_gets_the_typed_confirmation_prompt() {
         assert!(
             !matches!(e, Error::Forbidden(_) | Error::Conflict(_)),
             "a person's confirmation lifts the guard: {e:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_person_cannot_confirm_past_read_only() {
+    // The bypass this closes: typing the connection name used to lift the
+    // Read-only guard exactly like production's. Now a person's confirmed
+    // write is refused, with no `write_blocked:` (which the UI would answer
+    // with the typed confirm again).
+    let pool = mem_pool().await;
+    let user = seed_user(&pool).await;
+    let ws = seed_ws(&pool).await;
+    let conn = seed_guarded(
+        &pool,
+        Some(ws),
+        &user,
+        ConnectionKind::Mysql,
+        Environment::Dev,
+        true,
+    )
+    .await;
+    let svc = service(&pool);
+    let person = RequestCredential::default();
+    for confirm_write in [false, true] {
+        let q = QueryRequest {
+            confirm_write,
+            ..req("DELETE FROM t WHERE id = 1")
+        };
+        let err = with_request_credential(person, svc.run(&conn, &user, &q))
+            .await
+            .expect_err("a read-only connection refuses a person's write");
+        // `Display` prefixes the kind ("forbidden: …"); the tag starts the
+        // inner message — what the API's `Problem.message` carries.
+        let Error::Forbidden(msg) = &err else {
+            panic!("expected a 403 refusal: {err:?}");
+        };
+        assert!(msg.starts_with(READ_ONLY_CONNECTION_PREFIX), "{msg}");
+        assert!(!msg.contains(WRITE_BLOCKED_PREFIX), "{msg}");
+    }
+    // A read still passes every gate (it fails at connect, not at a guard).
+    if let Some(Err(e)) =
+        with_request_credential(person, run_bounded(&svc, &conn, &user, &req("SELECT 1"))).await
+    {
+        assert!(
+            !matches!(e, Error::Forbidden(_) | Error::Conflict(_)),
+            "{e:?}"
         );
     }
 }

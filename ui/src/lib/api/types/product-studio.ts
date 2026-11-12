@@ -109,15 +109,21 @@ export interface RefineSendReq {
   model?: string;
 }
 
+/** One story Chat turn. A proposed body is saved as a `suggested` version
+ *  (`story_updated` + `version_no`); `actions` are the cards (questions, notes,
+ *  a diagram), also kept in `agent_message.meta_json.actions`. */
 export interface RefineTurnResp {
   user_message: RefinementMessage;
   agent_message: RefinementMessage;
   story_updated: boolean;
   version_no: number | null;
+  /** Absent from a daemon older than the merged Chat. */
+  actions?: DiscoveryAction[];
 }
 
 // ---------------------------------------------------------------------------
-// Discovery Chat types  (talk-to-agent from an empty draft — early discovery)
+// Discovery Chat types — the story Chat's earlier engine, now read-only
+// history ("Earlier chats"); its action shapes are the Chat's cards.
 // ---------------------------------------------------------------------------
 
 export interface DiscoveryChat {
@@ -155,8 +161,12 @@ export type DiscoveryAction =
 
 export interface ApplyActionReq { action: DiscoveryAction }
 
+/** `POST /product/refinement-threads/{tid}/apply` (and the legacy
+ *  `/product/discovery-chats/{cid}/apply`). */
 export interface ApplyResult {
   story_updated: boolean;
+  /** The suggested version an `apply_draft` wrote (legacy route only). */
+  version_no?: number | null;
   created_question_ids: string[];
   created_note_ids: string[];
   canvas_id: string | null;

@@ -17,7 +17,6 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
-use otto_core::api::Problem;
 use otto_core::auth::{AuthUser, RoleChecker};
 use otto_core::domain::{User, WorkspaceRole};
 use otto_core::{Error, Id};
@@ -80,11 +79,9 @@ impl IntoResponse for ApiErr {
             Error::Upstream(_) => StatusCode::BAD_GATEWAY,
             Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        let problem = Problem {
-            code: self.0.code().to_string(),
-            message: self.0.to_string(),
-        };
-        (status, Json(problem)).into_response()
+        // `crate::mirror::problem`: the usual `{code, message}`, plus the
+        // stable `mirrored` code of a write refused on a mirrored artifact.
+        (status, Json(crate::mirror::problem(&self.0))).into_response()
     }
 }
 
@@ -154,6 +151,12 @@ struct ArtifactQuery {
     include_children: Option<bool>,
     #[serde(default)]
     author_kind: Option<String>,
+    /// `product_attachment` | `canvas_scene`: only mirrors of that source kind.
+    #[serde(default)]
+    source_kind: Option<String>,
+    /// With `source_kind`: the mirror of that one scene / attachment.
+    #[serde(default)]
+    source_id: Option<Id>,
     #[serde(default)]
     since: Option<String>,
     #[serde(default)]
@@ -272,6 +275,7 @@ pub fn router<S: DesignCtx>() -> Router<S> {
             post(restore_version::<S>),
         )
         .route("/design/artifacts/{id}/approve", post(approve::<S>))
+        .route("/design/artifacts/{id}/adopt", post(adopt::<S>))
         .route(
             "/design/artifacts/{id}/links",
             get(list_links::<S>).post(create_link::<S>),
@@ -376,6 +380,19 @@ fn filter_from(
             return Err(ApiErr(Error::Invalid(format!("unknown status {s:?}"))));
         }
     }
+    if let Some(k) = &q.source_kind {
+        if !one_of(
+            &[
+                crate::import::SOURCE_ATTACHMENT,
+                crate::import::SOURCE_SCENE,
+            ],
+            k,
+        ) {
+            return Err(ApiErr(Error::Invalid(format!(
+                "source_kind must be product_attachment | canvas_scene, not {k:?}"
+            ))));
+        }
+    }
     Ok(ArtifactFilter {
         workspaces,
         project_id: q.project_id,
@@ -385,6 +402,8 @@ fn filter_from(
         story_id: q.story_id,
         include_children: q.include_children.unwrap_or(false),
         author_kind: q.author_kind,
+        source_kind: q.source_kind,
+        source_id: q.source_id,
         since: norm_time(q.since)?,
         until: norm_time(q.until)?,
         include_archived: q.include_archived.unwrap_or(false),
@@ -816,6 +835,7 @@ async fn put_content<S: DesignCtx>(
 ) -> ApiResult<Response> {
     let svc = ctx.design();
     let a = load_artifact(&ctx, &svc, &user, &id, WorkspaceRole::Editor).await?;
+    crate::mirror::ensure_editable(&a)?;
     let (req, bytes) = content_put_body(&ctx, &a.format, &headers, body).await?;
     let author = Author::from_request(&user.id, req.author_kind.as_deref(), req.session_id)?;
     let kind = if author.kind == "agent" {
@@ -916,7 +936,13 @@ async fn list_versions<S: DesignCtx>(
             q.offset.unwrap_or(0),
         )
         .await?;
-    Ok(Json(versions).into_response())
+    // Paging: `?offset=&limit=` (default 200, cap 1000); the full count rides
+    // in `X-Total-Count` so the body stays the plain newest-first array.
+    let total = svc.store().count_versions(&a.id, q.kind.as_deref()).await?;
+    let mut resp = Json(versions).into_response();
+    resp.headers_mut()
+        .insert("x-total-count", axum::http::HeaderValue::from(total));
+    Ok(resp)
 }
 
 /// Named commit: `content`/`content_b64` if sent, else the working copy.
@@ -928,6 +954,7 @@ async fn commit_version<S: DesignCtx>(
 ) -> ApiResult<Response> {
     let svc = ctx.design();
     let a = load_artifact(&ctx, &svc, &user, &id, WorkspaceRole::Editor).await?;
+    crate::mirror::ensure_editable(&a)?;
     let bytes = match decode_content(req.content, req.content_b64)? {
         Some(b) => b,
         None => svc.working_bytes(&a).await?,
@@ -974,6 +1001,7 @@ async fn restore_version<S: DesignCtx>(
 ) -> ApiResult<Response> {
     let svc = ctx.design();
     let a = load_artifact(&ctx, &svc, &user, &id, WorkspaceRole::Editor).await?;
+    crate::mirror::ensure_editable(&a)?;
     let version = svc.resolve_version(&a, &v).await?;
     let saved = svc
         .restore_version(
@@ -999,6 +1027,20 @@ async fn approve<S: DesignCtx>(
         .approve(&a.id, req.version_id.as_deref(), &Author::user(&user.id))
         .await?;
     Ok(Json(updated).into_response())
+}
+
+/// "Edit here": the Hall takes over a mirrored artifact (`meta.adopted`);
+/// the write routes stop answering 409 `mirrored` for it and a changed
+/// source lands as a side version from then on. Idempotent.
+async fn adopt<S: DesignCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(IdPath { id }): Path<IdPath>,
+) -> ApiResult<Response> {
+    let svc = ctx.design();
+    let a = load_artifact(&ctx, &svc, &user, &id, WorkspaceRole::Editor).await?;
+    let adopted = svc.adopt(&a.id, &Author::user(&user.id)).await?;
+    Ok(Json(adopted).into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -1160,6 +1202,7 @@ async fn create_link<S: DesignCtx>(
 ) -> ApiResult<Response> {
     let svc = ctx.design();
     let a = load_artifact(&ctx, &svc, &user, &id, WorkspaceRole::Editor).await?;
+    crate::mirror::ensure_editable(&a)?;
     if req.dst_kind == "artifact" {
         // Linking to an artifact needs read access to it.
         load_artifact(&ctx, &svc, &user, &req.dst_id, WorkspaceRole::Viewer).await?;
@@ -2199,5 +2242,300 @@ mod tests {
         let (st, _, _) = call(&app, Method::GET, "/design/admin/storage", None).await;
         assert_eq!(st, StatusCode::FORBIDDEN);
         assert!(!ctx.design().auto_tidy_setting().await.unwrap());
+    }
+
+    /// A graph row mirrored from a legacy source, the way `import` makes one.
+    async fn mirror_of(ctx: &TestCtx, kind: &str, id: &str) -> String {
+        ctx.design()
+            .create_artifact(CreateInput {
+                workspace_id: "w1".into(),
+                project_id: None,
+                studio: None,
+                format: "html".into(),
+                title: "Mirror".into(),
+                tags: vec![],
+                meta: Value::Null,
+                content: Some(b"<p>legacy</p>".to_vec()),
+                story_id: None,
+                derived_from: None,
+                created_by: "u1".into(),
+                author: Author::system("import"),
+                message: None,
+                source: Some((kind.to_string(), id.to_string())),
+                created_at: None,
+                version_kind: Some("import".into()),
+                validate: false,
+            })
+            .await
+            .unwrap()
+            .artifact
+            .id
+    }
+
+    #[tokio::test]
+    async fn mirrored_artifacts_refuse_writes_until_adopted() {
+        let (app, ctx) = app().await;
+        let aid = mirror_of(&ctx, crate::import::SOURCE_SCENE, "sc1").await;
+        let writes = |aid: &str| {
+            vec![
+                (
+                    Method::PUT,
+                    format!("/design/artifacts/{aid}/content"),
+                    serde_json::json!({ "content": "<p>here</p>" }),
+                ),
+                (
+                    Method::POST,
+                    format!("/design/artifacts/{aid}/versions"),
+                    serde_json::json!({ "message": "named", "content": "<p>named</p>" }),
+                ),
+                (
+                    Method::POST,
+                    format!("/design/artifacts/{aid}/versions/v1/restore"),
+                    serde_json::json!({}),
+                ),
+                (
+                    Method::POST,
+                    format!("/design/artifacts/{aid}/links"),
+                    serde_json::json!({ "rel": "references", "dst_kind": "url", "dst_id": "https://example.com" }),
+                ),
+            ]
+        };
+        for (method, uri, body) in writes(&aid) {
+            let (st, b, _) = call(&app, method.clone(), &uri, Some(body)).await;
+            assert_eq!(st, StatusCode::CONFLICT, "{method} {uri}");
+            let p = json_of(&b);
+            assert_eq!(
+                p["code"],
+                crate::mirror::MIRRORED_CODE,
+                "{method} {uri}: {p}"
+            );
+            assert!(p["message"].as_str().unwrap().contains("/adopt"), "{p}");
+        }
+        // Reads and metadata stay open; nothing was written.
+        let (_, b, _) = call(
+            &app,
+            Method::GET,
+            &format!("/design/artifacts/{aid}/versions"),
+            None,
+        )
+        .await;
+        assert_eq!(json_of(&b).as_array().unwrap().len(), 1);
+
+        // "Edit here" (idempotent), then every write works.
+        for _ in 0..2 {
+            let (st, b, _) = call(
+                &app,
+                Method::POST,
+                &format!("/design/artifacts/{aid}/adopt"),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+            assert_eq!(json_of(&b)["meta"]["adopted"], true);
+        }
+        let expected = [
+            StatusCode::OK,
+            StatusCode::CREATED,
+            StatusCode::OK,
+            StatusCode::CREATED,
+        ];
+        for ((method, uri, body), want) in writes(&aid).into_iter().zip(expected) {
+            let (st, b, _) = call(&app, method.clone(), &uri, Some(body)).await;
+            assert_eq!(st, want, "{method} {uri}: {}", String::from_utf8_lossy(&b));
+        }
+        let signals = ctx
+            .design()
+            .store()
+            .list_signals(None, Some(aid.as_str()), Some("adopted"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            signals.len(),
+            1,
+            "one adopt signal, however often it is called"
+        );
+        // A PATCH can't un-adopt (only the adopt route writes the flag).
+        let (st, b, _) = call(
+            &app,
+            Method::PATCH,
+            &format!("/design/artifacts/{aid}"),
+            Some(serde_json::json!({ "meta": { "adopted": null, "note": "x" } })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json_of(&b)["meta"]["adopted"], true);
+        assert_eq!(json_of(&b)["meta"]["note"], "x");
+
+        // Adopting a design that mirrors nothing is a 400.
+        let (_, b, _) = call(
+            &app,
+            Method::POST,
+            "/design/artifacts",
+            Some(serde_json::json!({ "workspace_id": "w1", "format": "html", "title": "Own" })),
+        )
+        .await;
+        let own = json_of(&b)["artifact"]["id"].as_str().unwrap().to_string();
+        let (st, _, _) = call(
+            &app,
+            Method::POST,
+            &format!("/design/artifacts/{own}/adopt"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_filters_by_source() {
+        let (app, ctx) = app().await;
+        let scene = mirror_of(&ctx, crate::import::SOURCE_SCENE, "sc1").await;
+        let att = mirror_of(&ctx, crate::import::SOURCE_ATTACHMENT, "att1").await;
+        call(
+            &app,
+            Method::POST,
+            "/design/artifacts",
+            Some(serde_json::json!({ "workspace_id": "w1", "format": "html", "title": "Own" })),
+        )
+        .await;
+        let ids = |b: &[u8]| -> Vec<String> {
+            json_of(b)
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a["id"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let (_, b, _) = call(&app, Method::GET, "/design/artifacts", None).await;
+        assert_eq!(ids(&b).len(), 3);
+        let (st, b, _) = call(
+            &app,
+            Method::GET,
+            "/design/artifacts?source_kind=canvas_scene&source_id=sc1",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(ids(&b), vec![scene.clone()]);
+        let (_, b, _) = call(
+            &app,
+            Method::GET,
+            "/design/artifacts?source_kind=product_attachment",
+            None,
+        )
+        .await;
+        assert_eq!(ids(&b), vec![att]);
+        let (_, b, _) = call(
+            &app,
+            Method::GET,
+            "/design/artifacts?source_kind=canvas_scene&source_id=nope",
+            None,
+        )
+        .await;
+        assert!(ids(&b).is_empty());
+        let (st, _, _) = call(
+            &app,
+            Method::GET,
+            "/design/artifacts?source_kind=nope",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        // An archived mirror (its source vanished) is found with include_archived.
+        call(
+            &app,
+            Method::DELETE,
+            &format!("/design/artifacts/{scene}"),
+            None,
+        )
+        .await;
+        let q = "/design/artifacts?source_kind=canvas_scene&source_id=sc1";
+        let (_, b, _) = call(&app, Method::GET, q, None).await;
+        assert!(ids(&b).is_empty());
+        let (_, b, _) = call(
+            &app,
+            Method::GET,
+            &format!("{q}&include_archived=true"),
+            None,
+        )
+        .await;
+        assert_eq!(ids(&b), vec![scene]);
+    }
+
+    #[tokio::test]
+    async fn versions_page_with_a_total() {
+        let (app, _ctx) = app().await;
+        let (_, b, _) = call(
+            &app,
+            Method::POST,
+            "/design/artifacts",
+            Some(serde_json::json!({ "workspace_id": "w1", "format": "html", "title": "P", "content": "<p>1</p>" })),
+        )
+        .await;
+        let aid = json_of(&b)["artifact"]["id"].as_str().unwrap().to_string();
+        for n in 2..=5 {
+            let (st, _, _) = call(
+                &app,
+                Method::PUT,
+                &format!("/design/artifacts/{aid}/content"),
+                Some(serde_json::json!({ "content": format!("<p>{n}</p>") })),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+        }
+        let (st, b, h) = call(
+            &app,
+            Method::GET,
+            &format!("/design/artifacts/{aid}/versions?limit=2&offset=1"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let seqs: Vec<i64> = json_of(&b)
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["seq"].as_i64().unwrap())
+            .collect();
+        assert_eq!(seqs, vec![4, 3], "newest first, one skipped");
+        assert_eq!(h.get("x-total-count").unwrap(), "5");
+        // The total follows the kind filter.
+        let (_, b, h) = call(
+            &app,
+            Method::GET,
+            &format!("/design/artifacts/{aid}/versions?kind=autosave"),
+            None,
+        )
+        .await;
+        assert_eq!(json_of(&b).as_array().unwrap().len(), 4);
+        assert_eq!(h.get("x-total-count").unwrap(), "4");
+    }
+
+    #[tokio::test]
+    async fn shipped_needs_an_approved_version() {
+        let (app, _ctx) = app().await;
+        let (_, b, _) = call(
+            &app,
+            Method::POST,
+            "/design/artifacts",
+            Some(serde_json::json!({ "workspace_id": "w1", "format": "html", "title": "S", "content": "<p>s</p>" })),
+        )
+        .await;
+        let aid = json_of(&b)["artifact"]["id"].as_str().unwrap().to_string();
+        let ship = serde_json::json!({ "status": "shipped" });
+        let uri = format!("/design/artifacts/{aid}");
+        let (st, _, _) = call(&app, Method::PATCH, &uri, Some(ship.clone())).await;
+        assert_eq!(st, StatusCode::CONFLICT);
+        let (_, b, _) = call(&app, Method::GET, &uri, None).await;
+        assert_eq!(json_of(&b)["artifact"]["status"], "draft");
+        call(
+            &app,
+            Method::POST,
+            &format!("{uri}/approve"),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        let (st, b, _) = call(&app, Method::PATCH, &uri, Some(ship)).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+        assert_eq!(json_of(&b)["status"], "shipped");
     }
 }

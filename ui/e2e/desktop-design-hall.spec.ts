@@ -6,7 +6,8 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 // Design Hall (desktop-browser) — against the REAL /design/* routes, so it needs
 // a daemon built from this tree (OTTO_E2E_BIN=<repo>/target/debug/ottod).
 //
-//   • the lobby shows all seven studios, and the header "New ▾" menu, the status
+//   • the lobby is one prompt, All designs and a rail (no studio tiles, Spatial,
+//     Continue or Linked-to-Product); the header "New ▾" and ⋯ menus, the status
 //     menu and a data-driven "Move to project…" menu (40 projects, enough to
 //     overflow the window) stay fully inside the viewport;
 //   • create a draft from the lobby prompt → it opens → edit the source → Save
@@ -60,68 +61,82 @@ async function openDesign(page: Page, route = 'design'): Promise<void> {
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
 }
 
-test('the lobby shows every studio and its menus stay inside the viewport', async ({ page }) => {
+test('the lobby is one prompt, All designs and a rail; its menus stay inside the viewport', async ({ page }) => {
   await openDesign(page);
   await expect(page.getByTestId('design-lobby')).toBeVisible();
-  const studios = page.getByTestId('design-studios').locator('button');
-  await expect(studios).toHaveCount(7);
-  for (const name of ['Frames', 'Graphics', 'Site Studio', '3D Studio', 'Whiteboard', 'Brand Kit', 'Spatial Hall']) {
-    await expect(studios.filter({ hasText: name })).toHaveCount(1);
-  }
+  // The retired regions are gone: no studio tiles, no Spatial tab, no
+  // Continue strip, no Linked-to-Product tree.
+  await expect(page.getByTestId('design-studios')).toHaveCount(0);
+  await expect(page.getByTestId('design-spatial-tab')).toHaveCount(0);
+  await expect(page.getByTestId('design-continue')).toHaveCount(0);
+  await expect(page.getByText('Linked to Product')).toHaveCount(0);
+  await expect(page.getByTestId('design-all')).toBeVisible();
+  await expect(page.getByTestId('design-grid').getByTestId('design-artifact-card').first()).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId('design-needs-review')).toBeVisible();
+  // One primary action on the page: Generate.
+  await expect(page.locator('.btn.primary:visible')).toHaveCount(1);
+  await expect(page.getByTestId('design-prompt-generate')).toHaveClass(/primary/);
   await expectNoHorizontalOverflow(page);
 
-  // "New ▾" — every studio row, planned ones visible but disabled.
+  // "New ▾" — one row per studio, every one enabled; no roadmap rows.
   await page.getByTestId('design-new').click();
   const menu = page.locator('.ctx-menu');
-  await page.waitForTimeout(100); // post-render clamp
+  await page.waitForTimeout(100); // ui-guards: allow — post-render clamp before measuring
   await expectFullyInViewport(page, menu, 'New menu');
-  await expect(menu.getByRole('menuitem', { name: 'Frame screen (HTML)' })).toBeVisible();
+  for (const name of ['Frame screen', 'Graphic', 'Site', '3D scene', 'Whiteboard diagram or board', 'Brand kit', 'Import file…', 'New project…']) {
+    await expect(menu.getByRole('menuitem', { name, exact: true })).toBeEnabled();
+  }
+  await expect(menu.getByText(/Exhibition|planned/)).toHaveCount(0);
   await page.keyboard.press('Escape');
 
-  // A studio still on its classic editor explains what opens today and when
-  // its own studio lands.
-  await page.getByTestId('design-studio-frames').click();
-  await expect(page.getByTestId('design-studio-note')).toContainText('planned for v2');
-  await openDesign(page);
+  // Brand Kit and Team design rules live in the header ⋯.
+  await page.getByTestId('design-more').click();
+  await expectFullyInViewport(page, menu, 'More menu');
+  await menu.getByRole('menuitem', { name: 'Team design rules' }).click();
+  await expect(page).toHaveURL(/#\/design\/learned$/);
+  await expect(page.getByTestId('design-learned-tab-pending')).toContainText('Proposed');
 
-  // A planned studio says when it lands, and its tile is never a dead click.
-  // Spatial Hall (the one planned studio since Site Studio shipped) carries
-  // its roadmap tag and opens the room-layout preview with an explanation —
-  // it never routed to a studio page, so there is no `design-studio-note`.
-  const spatial = page.getByTestId('design-studio-spatial');
-  await expect(spatial.locator('.s-tag')).toHaveText('v3');
-  await expect(spatial.locator('.s-tag')).toHaveAttribute('title', 'Planned for v3');
-  await spatial.click();
-  await expect(page).toHaveURL(/#\/design\/spatial$/);
-  await expect(page.getByTestId('design-spatial').getByRole('note')).toContainText('showcases');
+  // A studio page explains what the studio edits — no roadmap notes.
+  await openDesign(page, 'design/studio/frames');
+  await expect(page.getByTestId('design-studio-note')).toContainText('HTML screen');
+  await expect(page.getByTestId('design-studio-note')).not.toContainText(/v2|planned/);
+
+  // The retired Spatial route lands on the lobby.
+  await openDesign(page, 'design/spatial');
+  await expect(page.getByTestId('design-all')).toBeVisible();
 });
 
 test('create → edit → new version → compare → restore', async ({ page }) => {
   await openDesign(page);
   const brief = `Checkout confirmation screen ${stamp}`;
   await page.getByTestId('design-prompt').fill(brief);
-  await page.getByTestId('design-prompt-create').click();
+  // "Draft only" sits in the prompt's ⋯ popover (Generate is the primary).
+  await page.getByTestId('design-prompt-more').click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: /Draft only/ }).click();
 
   // The draft opens in the artifact view at v1.
   await expect(page).toHaveURL(/#\/design\/a\//);
   await expect(page.getByTestId('design-stage')).toBeVisible();
-  const chips = page.getByTestId('design-version-chip');
+  // History lives in the side panel's Versions tab.
+  await page.getByTestId('design-tab-versions').click();
+  const chips = page.getByTestId('design-version-row');
   await expect(chips).toHaveCount(1);
 
-  // Edit the HTML source, then Save → v2.
+  // Edit the HTML source; it autosaves → v2.
   await page.getByTestId('design-source-toggle').click();
   const editor = page.locator('.cm-content').first();
   await editor.click();
   await page.keyboard.press('ControlOrMeta+End');
   await page.keyboard.type('\n<!-- e2e edit -->');
   await expect(page.getByTestId('design-dirty')).toBeVisible();
-  await page.getByTestId('design-save').click();
+  await expect(page.getByTestId('design-save-state')).toHaveAttribute('data-state', 'saved');
   await expect(chips).toHaveCount(2);
   await expect(page.getByTestId('design-dirty')).toHaveCount(0);
 
-  // Compare v1 with the current version, then Restore v1 (asks first).
-  await chips.filter({ hasText: 'v1' }).first().click();
-  await page.getByTestId('design-compare').click();
+  // View v1 on its own, compare it with the current version, then Restore v1 (asks first).
+  await chips.filter({ hasText: 'v1' }).first().locator('button.row-main').click();
+  await expect(page.getByTestId('design-viewing')).toContainText('Viewing v1');
+  await page.getByTestId('design-version-compare').click();
   const cmp = page.getByTestId('design-compare-modal');
   await expect(cmp).toBeVisible();
   await page.getByRole('tab', { name: 'Changes' }).click();
@@ -187,7 +202,8 @@ test('references search finds designs in the team library', async ({ page }) => 
   await ctx.dispose();
 
   await openDesign(page, `design/a/${other.artifact.id}`);
-  await page.getByTestId('design-tab-references').click();
+  await page.getByTestId('design-tab-links').click();
+  await page.getByTestId('design-find-references').click();
   await page.getByTestId('design-ref-search').fill('Tier card');
   await expect(page.getByTestId('design-ref-hit').filter({ hasText: TARGET_TITLE })).toBeVisible();
   // Adding it as a reference marks it as referenced (a pinned `references` link).

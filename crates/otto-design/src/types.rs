@@ -75,7 +75,8 @@ pub const VERSION_KINDS: &[&str] = &["autosave", "named", "agent", "import", "sy
 /// again as the new head), `reference_added` (a library artifact added as a
 /// reference) and `forked` ("Start from this" — a `derived_from` copy) are
 /// client-recorded and carry a required payload key, see
-/// [`SIGNAL_PAYLOAD_KEYS`].
+/// [`SIGNAL_PAYLOAD_KEYS`]. `adopted` is recorded by `POST …/adopt` (a
+/// mirrored Canvas scene / story attachment became editable in the Hall).
 pub const SIGNAL_KINDS: &[&str] = &[
     "variant_chosen",
     "variant_accepted",
@@ -92,6 +93,7 @@ pub const SIGNAL_KINDS: &[&str] = &[
     "restored",
     "reference_added",
     "forked",
+    "adopted",
 ];
 
 /// Signal kinds whose API payload must name what they point at: `(kind,
@@ -566,6 +568,13 @@ pub struct ImportReport {
     pub unchanged: usize,
     pub skipped: usize,
     pub links_created: usize,
+    /// Mirrors archived because their source row is gone.
+    #[serde(default)]
+    pub archived: usize,
+    /// Adopted mirrors whose changed source became a side version
+    /// (`variant/sync-<ts>/1`) instead of a new head.
+    #[serde(default)]
+    pub side_versions: usize,
     pub errors: Vec<String>,
 }
 

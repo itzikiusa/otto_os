@@ -11,6 +11,7 @@ import { availableModules } from '../lib/sidebar';
 import { untrack } from 'svelte';
 import { router } from '../lib/router.svelte';
 import { lsGet, lsSet } from '../lib/storage';
+import { LIGHT_HOME, lightMode } from '../lib/lightMode.svelte';
 import { checkOpenTabs } from './openTabsCheck';
 import { LS_WS_RECENT, noteRecent, parseRecent } from './workspaceSwitch';
 import { ws } from '../lib/stores/workspace.svelte';
@@ -38,8 +39,17 @@ export function installShell(deps: PaletteDeps): () => void {
     // one granted later is still placed and surfaced like a new one.
     $effect(() => {
       if (auth.phase !== 'ready' || !auth.me || auth.capabilitiesError) return;
-      const ids = availableModules((f) => auth.can(f, 'view'), []).map((m) => m.id);
+      // Unscoped: the phone's light version must not make the other modules
+      // look "new" (and re-surface ones the person hid) when it is switched off.
+      const ids = availableModules((f) => auth.can(f, 'view'), [], { unscoped: true }).map((m) => m.id);
       untrack(() => ui.noteSidebarAvailable(ids));
+    });
+  });
+  // The phone's light version lands on Threads (lib/lightMode.svelte.ts): the
+  // bare route (opening the app, a home-screen launch) would be Agents.
+  const stopLight = $effect.root(() => {
+    $effect(() => {
+      if (lightMode.active && router.parts.length === 0) untrack(() => router.replace(LIGHT_HOME));
     });
   });
   // Per workspace: the modules' resume points (router) and the switcher's
@@ -64,6 +74,7 @@ export function installShell(deps: PaletteDeps): () => void {
     window.removeEventListener('focus', onReturn);
     document.removeEventListener('visibilitychange', onReturn);
     stopRecent();
+    stopLight();
     stopKnown();
     stopBadge();
     stopPalette();

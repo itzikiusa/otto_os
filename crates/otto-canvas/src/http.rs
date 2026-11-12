@@ -13,6 +13,7 @@ use otto_state::{CanvasRepo, NewScene, SceneUpdate};
 use serde::Deserialize;
 use std::sync::Arc;
 
+use crate::assist_ctx::CanvasAssistCtx;
 use crate::types::{empty_doc, raw_doc, CreateSceneReq, UpdateSceneReq};
 use axum::body::Bytes;
 use axum::http::{header, HeaderMap};
@@ -124,7 +125,7 @@ async fn scene_out<S: CanvasCtx>(
 /// Build the canvas router. Paths are relative to the `/api/v1` mount point.
 /// The collection routes MUST use the literal `{ws}` placeholder so the server
 /// policy rule (`/workspaces/{ws}/canvas/`) matches in `policy_coverage`.
-pub fn router<S: CanvasCtx>() -> Router<S> {
+pub fn router<S: CanvasAssistCtx>() -> Router<S> {
     Router::new()
         // Global list — Canvas is a workspace-independent tool, so you see your
         // scenes regardless of the active workspace. (Covered by the `/canvas/`
@@ -254,18 +255,30 @@ async fn list_scenes<S: CanvasCtx>(
     Ok(Json(scenes).into_response())
 }
 
-/// Global list: the caller's own scenes across every workspace (Canvas is a
-/// workspace-independent tool). The `Feature::Canvas` capability is enforced
-/// upstream by the policy middleware.
+/// Global list: the scenes of every workspace the caller can view (Canvas is a
+/// workspace-independent tool; a teammate's board in a shared workspace is
+/// listed too, not only the caller's own). The `Feature::Canvas` capability is
+/// enforced upstream by the policy middleware.
 async fn list_scenes_global<S: CanvasCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
 ) -> ApiResult<Response> {
-    let scenes = ctx.canvas_repo().list_for_user(&user.id).await?;
+    let mut visible = Vec::new();
+    for ws in ctx.canvas_repo().scene_workspaces().await? {
+        if ctx
+            .roles()
+            .check(&user, &ws, WorkspaceRole::Viewer)
+            .await
+            .is_ok()
+        {
+            visible.push(ws);
+        }
+    }
+    let scenes = ctx.canvas_repo().list_for_workspaces(&visible).await?;
     Ok(Json(scenes).into_response())
 }
 
-async fn create_scene<S: CanvasCtx>(
+async fn create_scene<S: CanvasAssistCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(WsPath { ws }): Path<WsPath>,
@@ -291,6 +304,7 @@ async fn create_scene<S: CanvasCtx>(
             created_by: user.id,
         })
         .await?;
+    scene_changed(&ctx, &scene.id, None).await;
     let scene = scene_out(&ctx, scene, &fq).await?;
     Ok((StatusCode::CREATED, Json(scene)).into_response())
 }
@@ -310,7 +324,7 @@ async fn get_scene<S: CanvasCtx>(
     Ok(Json(scene).into_response())
 }
 
-async fn update_scene<S: CanvasCtx>(
+async fn update_scene<S: CanvasAssistCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(SceneIdPath { id }): Path<SceneIdPath>,
@@ -321,21 +335,23 @@ async fn update_scene<S: CanvasCtx>(
 ) -> ApiResult<Response> {
     check_scene_role(&ctx, &user, &id, WorkspaceRole::Editor).await?;
     let req: UpdateSceneReq = json_body(&headers, body).await?;
+    let expect_updated_at = req
+        .expect_updated_at
+        .as_deref()
+        .map(otto_state::canvas::scene_stamp)
+        .transpose()?;
     if req.doc.is_some() {
         // Keep the pre-save document in the scene's history — at most one
         // user snapshot per window, so a 700 ms autosave stream doesn't churn
-        // the 30-entry ring. Best-effort: a failed snapshot never blocks a save.
+        // the 30-entry ring; an agent's write is always kept (it replaces the
+        // whole board at once). Best-effort: a failed snapshot never blocks a save.
+        let (origin, throttle) = snapshot_policy(req.origin.as_deref());
         if let Err(e) = ctx
             .canvas_repo()
-            .snapshot(
-                &id,
-                "user",
-                Some(&user.id),
-                Some(otto_state::USER_SNAPSHOT_EVERY_SECS),
-            )
+            .snapshot(&id, origin, Some(&user.id), throttle)
             .await
         {
-            tracing::warn!(scene = %id, error = %e, "canvas user-save snapshot failed");
+            tracing::warn!(scene = %id, error = %e, "canvas pre-save snapshot failed");
         }
     }
     let patch = SceneUpdate {
@@ -345,24 +361,55 @@ async fn update_scene<S: CanvasCtx>(
         provider: req.provider,
         section: req.section,
         story_id: req.story_id,
-        ..Default::default()
+        expect_updated_at,
     };
     if q.summary {
         let row = ctx.canvas_repo().update_summary(&id, patch).await?;
+        scene_changed(&ctx, &id, None).await;
         return Ok(Json(row).into_response());
     }
     let updated = ctx.canvas_repo().update(&id, patch).await?;
+    scene_changed(&ctx, &id, None).await;
     let updated = scene_out(&ctx, updated, &fq).await?;
     Ok(Json(updated).into_response())
 }
 
-async fn delete_scene<S: CanvasCtx>(
+/// Tell Design Hall a scene changed, so its mirror follows now instead of at
+/// the next daemon start. Best-effort: nobody listening is fine. `workspace`
+/// is passed when the row is already gone (a delete).
+async fn scene_changed<S: CanvasAssistCtx>(ctx: &S, id: &Id, workspace: Option<Id>) {
+    let workspace = match workspace {
+        Some(w) => Some(w),
+        None => ctx.canvas_repo().workspace_of(id).await.ok().flatten(),
+    };
+    if let Some(workspace_id) = workspace {
+        let _ = ctx
+            .events()
+            .send(otto_core::event::Event::DesignSourceChanged {
+                workspace_id,
+                kind: "canvas_scene".into(),
+                id: id.clone(),
+            });
+    }
+}
+
+/// Snapshot origin + throttle for a PUT that carries a document.
+fn snapshot_policy(origin: Option<&str>) -> (&'static str, Option<i64>) {
+    match origin {
+        Some("agent") => ("agent", None),
+        _ => ("user", Some(otto_state::USER_SNAPSHOT_EVERY_SECS)),
+    }
+}
+
+async fn delete_scene<S: CanvasAssistCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(SceneIdPath { id }): Path<SceneIdPath>,
 ) -> ApiResult<Response> {
     check_scene_role(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let workspace = ctx.canvas_repo().workspace_of(&id).await?;
     ctx.canvas_repo().delete(&id).await?;
+    scene_changed(&ctx, &id, workspace).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -382,7 +429,7 @@ async fn list_versions<S: CanvasCtx>(
 
 /// Restore a version: the current document is snapshotted first (origin
 /// `restore`), so a restore is itself undoable. Answers with the full scene.
-async fn restore_version<S: CanvasCtx>(
+async fn restore_version<S: CanvasAssistCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(VersionPath { id, vid }): Path<VersionPath>,
@@ -407,6 +454,7 @@ async fn restore_version<S: CanvasCtx>(
             },
         )
         .await?;
+    scene_changed(&ctx, &id, None).await;
     let updated = scene_out(&ctx, updated, &fq).await?;
     Ok(Json(updated).into_response())
 }
@@ -494,6 +542,33 @@ mod tests {
         let req: UpdateSceneReq = json_body(&json_headers(), body).await.unwrap();
         assert_eq!(raw_doc(req.doc.unwrap()), r#"{"b": 1,  "a": [1, 2]}"#);
         assert_eq!(req.title.as_deref(), Some("t"));
+    }
+
+    #[tokio::test]
+    async fn the_guard_stamp_and_origin_are_read_and_a_bad_stamp_is_a_400() {
+        let body = Bytes::from_static(
+            br#"{"doc": {}, "expect_updated_at": "2026-11-12T10:00:00.123456Z", "origin": "agent"}"#,
+        );
+        let req: UpdateSceneReq = json_body(&json_headers(), body).await.unwrap();
+        let stamp = otto_state::canvas::scene_stamp(req.expect_updated_at.as_deref().unwrap());
+        assert_eq!(stamp.unwrap().timestamp_subsec_micros(), 123_456);
+        assert_eq!(req.origin.as_deref(), Some("agent"));
+        assert!(matches!(
+            otto_state::canvas::scene_stamp("yesterday"),
+            Err(Error::Invalid(_))
+        ));
+    }
+
+    /// An agent's write is always snapshotted (its own origin, no throttle);
+    /// anything else is a throttled user save — a client cannot pick another
+    /// origin such as `restore`.
+    #[test]
+    fn agent_writes_snapshot_unthrottled_and_user_saves_stay_throttled() {
+        assert_eq!(snapshot_policy(Some("agent")), ("agent", None));
+        let user = ("user", Some(otto_state::USER_SNAPSHOT_EVERY_SECS));
+        for origin in [None, Some("user"), Some("restore"), Some("")] {
+            assert_eq!(snapshot_policy(origin), user, "{origin:?}");
+        }
     }
 
     #[tokio::test]

@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { seedProductStory } from './seed-product';
+import { openClassicArena } from './storyDesigns';
 
 // ── E2E: Design Arena (docs/design/product-design-arena.md §4) ─────────────────
 //
@@ -12,6 +13,11 @@ import { seedProductStory } from './seed-product';
 // survive a reload, New ▾ → template creates an HTML screen that renders inside a
 // SANDBOXED iframe inside a device frame, and the phone layout collapses to the
 // segmented single pane.
+//
+// The story Design tab now lists the story's Design Hall designs; this arena is
+// the CLASSIC one, opened from the tab's ⋯ → "Open the classic arena" (kept for
+// pinned review notes and the Blender bridge). The new tab is covered by
+// desktop-story-designs.spec.ts and story-designs-mobile.spec.ts.
 // These cases exercise the full three-pane workbench. Narrow available panes
 // now use tabs; desktop-ux-r3-content covers the 1280/1024px transition.
 test.use({ viewport: { width: 1800, height: 900 }, actionTimeout: 12_000 });
@@ -98,6 +104,7 @@ async function openArena(page: Page, navigate = true): Promise<void> {
   await expect(page.locator('.overview')).toBeVisible({ timeout: 20_000 });
   await page.getByRole('tab', { name: 'Story', exact: true }).click();
   await page.locator('.tab-strip .st', { hasText: 'Design' }).first().click();
+  await openClassicArena(page);
   await expect(page.locator('.design-arena')).toBeVisible({ timeout: 15_000 });
 }
 
@@ -231,6 +238,7 @@ test('arena: ≤640px collapses to a segmented single pane', async ({ page }) =>
   await page.locator('.story-row', { hasText: STORY_TITLE }).first().click();
   await page.getByRole('tab', { name: 'Story', exact: true }).click();
   await page.locator('.tab-strip .st', { hasText: 'Design' }).first().click();
+  await openClassicArena(page);
   const arena = page.locator('.design-arena');
   await expect(arena).toBeVisible({ timeout: 15_000 });
   const seg = arena.locator('.arena-seg');

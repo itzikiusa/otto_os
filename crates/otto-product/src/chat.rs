@@ -1,20 +1,18 @@
-//! Discovery Chat — talk to an agent on a Product story from an empty/Untitled
-//! draft to help with EARLY discovery and research (before anything is written).
+//! Discovery Chat — the story Chat's earlier engine, now READ-ONLY history.
 //!
-//! Distinct from refinement (which edits an existing version) and from the
-//! swarm discovery run (a heavyweight multi-agent report). Each turn assembles a
-//! relevance-bounded context bundle — the latest relevant version, the story's
-//! mockups/attachments (text ones inlined), the most recent discovery report,
-//! open questions and notes — and replays the chat history into a single
-//! `run_agent` turn. The agent answers in prose AND may emit a fenced ```json
-//! `{actions:[...]}` block; actions are NEVER auto-applied — the UI renders them
-//! as cards the user explicitly applies via `/apply`.
+//! The story Chat runs on the refinement engine (`refine`): one conversation
+//! that writes a proposed body as a `suggested` version and carries this
+//! chat's action cards (`chat_actions`). What stays here:
+//! - the old chats and their transcripts, readable as "Earlier chats" (nothing
+//!   is deleted or migrated);
+//! - the relevance-bounded context bundle (`assemble_context`) and the reply
+//!   splitter (`split_actions`), which the merged Chat reuses.
 //!
 //! Routes (registered in modules.rs under the `/product/` policy prefix):
 //!   POST /api/v1/product/stories/{sid}/discovery-chats   (ws editor) → DiscoveryChat
 //!   GET  /api/v1/product/stories/{sid}/discovery-chats   (ws viewer) → DiscoveryChat[]
 //!   GET  /api/v1/product/discovery-chats/{cid}           (ws viewer) → ChatDetail
-//!   POST /api/v1/product/discovery-chats/{cid}/messages  (ws editor) → ChatTurn
+//!   POST /api/v1/product/discovery-chats/{cid}/messages  (ws editor) → 409, read-only
 //!   POST /api/v1/product/discovery-chats/{cid}/archive   (ws editor) → DiscoveryChat
 //!   POST /api/v1/product/discovery-chats/{cid}/apply     (ws editor) → ApplyResult
 
@@ -22,13 +20,11 @@ use axum::extract::{Path, State};
 use axum::Json;
 use otto_core::domain::{User, WorkspaceRole};
 use otto_core::{new_id, Error, Id};
-use otto_state::{
-    DiscoveryChat, DiscoveryChatMessage, NewDiscoveryChat, NewDiscoveryChatMessage, NewNote,
-    NewQuestion, NewScene,
-};
+use otto_state::{DiscoveryChat, DiscoveryChatMessage, NewDiscoveryChat};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 
+use crate::chat_actions::{apply_story_action, ActionTarget, ApplyReq, ApplyResult};
 use crate::host::ProductStudioHost;
 use crate::http::{ApiError, ApiResult, CurrentUser};
 
@@ -53,42 +49,6 @@ pub struct CreateChatReq {
 pub struct ChatDetail {
     pub chat: DiscoveryChat,
     pub messages: Vec<DiscoveryChatMessage>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SendMessageReq {
-    pub body: String,
-    /// Unique per-request identity used by Stop; omit for legacy callers.
-    #[serde(default)]
-    pub turn_id: Option<String>,
-    /// Agent provider to run the chat on (built-in or custom, e.g. grok). Only
-    /// used when the chat's persistent session is FIRST created; later messages
-    /// resume the existing session regardless. Empty/absent = default agent.
-    #[serde(default)]
-    pub provider: Option<String>,
-    /// Optional model alias for the first turn (empty = provider default).
-    #[serde(default)]
-    pub model: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ChatTurn {
-    pub user_message: DiscoveryChatMessage,
-    pub agent_message: DiscoveryChatMessage,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ApplyReq {
-    /// The action object the agent emitted (tolerant — dispatched by `type`).
-    pub action: Value,
-}
-
-#[derive(Debug, Default, Serialize)]
-pub struct ApplyResult {
-    pub story_updated: bool,
-    pub created_question_ids: Vec<Id>,
-    pub created_note_ids: Vec<Id>,
-    pub canvas_id: Option<Id>,
 }
 
 // ---------------------------------------------------------------------------
@@ -208,128 +168,24 @@ pub async fn archive_chat<C: ProductStudioHost>(
     Ok(Json(chat))
 }
 
-/// `POST /product/discovery-chats/{cid}/messages` — one conversational turn
-/// (Editor). Assembles context, runs the agent, splits prose from proposed
-/// actions, persists both messages.
+/// `POST /product/discovery-chats/{cid}/messages` — refused (409): a
+/// discovery chat is read-only history. The conversation continues in the
+/// story Chat (`refine`), which writes suggestions instead of replacing text.
+/// Kept as a route so an old client gets a clear answer, not a 404.
 pub async fn send_message<C: ProductStudioHost>(
     Path(cid): Path<Id>,
     State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
-    Json(req): Json<SendMessageReq>,
-) -> ApiResult<Json<ChatTurn>> {
-    // Dropping the HTTP response must not release the turn while its managed
-    // session still owns cleanup. Stop continues to address the same task.
-    crate::studio_turn::complete(async move {
-        send_message_inner(Path(cid), State(ctx), CurrentUser(user), Json(req)).await
-    })
-    .await
+) -> ApiResult<Json<Value>> {
+    chat_with_role(&ctx, &user, &cid, WorkspaceRole::Editor).await?;
+    Err(ApiError(Error::Conflict(
+        "this discovery chat is read-only; continue in the story's Chat tab".into(),
+    )))
 }
 
-async fn send_message_inner<C: ProductStudioHost>(
-    Path(cid): Path<Id>,
-    State(ctx): State<C>,
-    CurrentUser(user): CurrentUser,
-    Json(req): Json<SendMessageReq>,
-) -> ApiResult<Json<ChatTurn>> {
-    let chat = chat_with_role(&ctx, &user, &cid, WorkspaceRole::Editor).await?;
-    let _story_turn = crate::story_lifecycle::claim(&chat.story_id).await?;
-    let turn = crate::studio_turn::claim_with_id(
-        "discovery",
-        &chat.workspace_id,
-        &cid,
-        req.turn_id.as_deref(),
-    )?;
-    // The earlier authorization read may predate a just-completed first turn.
-    // Reload under ownership so its newly persisted session is reused.
-    let chat = chat_with_role(&ctx, &user, &cid, WorkspaceRole::Editor).await?;
-
-    // Assemble the context bundle (also stored on the user message for audit).
-    let context = assemble_context(&ctx, &chat.story_id).await;
-
-    // Persist the user message with the bundle in meta.
-    let user_message = ctx
-        .discovery_chat_repo()
-        .add_message(NewDiscoveryChatMessage {
-            chat_id: cid.clone(),
-            role: "user".into(),
-            body: req.body.clone(),
-            actions_json: None,
-            meta_json: Some(json!({ "context": context }).to_string()),
-        })
-        .await
-        .map_err(ApiError)?;
-
-    // The chat runs as ONE persistent, resumable Otto session (visible in
-    // Agents, MCP-wired), so the agent RETAINS the conversation itself — we send
-    // framing + the refreshed context + the new message, NOT a replayed history.
-    let prompt = build_chat_prompt(&context, &[], &req.body);
-    let ws = ctx
-        .workspaces()
-        .get(&chat.workspace_id)
-        .await
-        .map_err(ApiError)?;
-    // Provider is honored only on FIRST message (session create); resumes ignore
-    // it. Default to the workspace default, else the global default, else claude.
-    let default_provider = ctx
-        .resolve_provider(Some(&ws), req.provider.as_deref())
-        .await
-        .map_err(ApiError)?;
-    let mut meta = json!({ "source": "discovery_chat", "story_id": chat.story_id, "chat_id": cid });
-    if let Some(m) = req
-        .model
-        .as_deref()
-        .map(str::trim)
-        .filter(|m| !m.is_empty())
-    {
-        meta["model"] = json!(m);
-    }
-    turn.check_running()?;
-    let (raw, sid) = ctx
-        .run_session_turn(
-            &ws,
-            &user,
-            chat.session_id.as_ref(),
-            &format!("Discovery: {}", chat.title),
-            &chat.cwd,
-            &default_provider,
-            meta,
-            &prompt,
-            ctx.session_stuck_idle(),
-            turn.cancel(),
-        )
-        .await?;
-    turn.check_running()?;
-    // The host may replace a deleted session; the next turn must resume its actual ID.
-    if session_link_changed(chat.session_id.as_ref(), &sid) {
-        ctx.discovery_chat_repo().set_session(&cid, &sid).await?;
-    }
-
-    let (markdown, actions_json) = split_actions(&raw);
-
-    let agent_message = ctx
-        .discovery_chat_repo()
-        .add_message(NewDiscoveryChatMessage {
-            chat_id: cid.clone(),
-            role: "agent".into(),
-            body: markdown,
-            actions_json,
-            meta_json: None,
-        })
-        .await
-        .map_err(ApiError)?;
-
-    Ok(Json(ChatTurn {
-        user_message,
-        agent_message,
-    }))
-}
-
-fn session_link_changed(previous: Option<&Id>, actual: &Id) -> bool {
-    previous != Some(actual)
-}
-
-/// `POST /product/discovery-chats/{cid}/apply` — apply ONE proposed action
-/// (Editor). Dispatched by the action's `type` field.
+/// `POST /product/discovery-chats/{cid}/apply` — apply ONE action proposed
+/// in an earlier chat (Editor), on the same rules as the story Chat
+/// (`chat_actions`): a proposed body becomes a `suggested` version.
 pub async fn apply_action<C: ProductStudioHost>(
     Path(cid): Path<Id>,
     State(ctx): State<C>,
@@ -337,116 +193,14 @@ pub async fn apply_action<C: ProductStudioHost>(
     Json(req): Json<ApplyReq>,
 ) -> ApiResult<Json<ApplyResult>> {
     let chat = chat_with_role(&ctx, &user, &cid, WorkspaceRole::Editor).await?;
-    let action = &req.action;
-    let kind = action.get("type").and_then(|t| t.as_str()).unwrap_or("");
-    let mut result = ApplyResult::default();
-
-    match kind {
-        "apply_draft" => {
-            let body_md = action.get("body_md").and_then(|b| b.as_str()).unwrap_or("");
-            // Don't blank the story title when the agent omits it — keep the
-            // current one.
-            let title = match action.get("title").and_then(|t| t.as_str()) {
-                Some(t) if !t.trim().is_empty() => t.to_string(),
-                _ => {
-                    ctx.product_repo()
-                        .get_story(&chat.story_id)
-                        .await
-                        .map_err(ApiError)?
-                        .title
-                }
-            };
-            ctx.product()
-                .update_draft_body(&chat.story_id, &title, body_md, &user.id)
-                .await
-                .map_err(ApiError)?;
-            result.story_updated = true;
-        }
-        "add_questions" => {
-            if let Some(qs) = action.get("questions").and_then(|q| q.as_array()) {
-                for q in qs {
-                    let text = q.get("text").and_then(|t| t.as_str()).unwrap_or("");
-                    if text.trim().is_empty() {
-                        continue;
-                    }
-                    let created = ctx
-                        .product_repo()
-                        .create_question(NewQuestion {
-                            story_id: chat.story_id.clone(),
-                            analysis_id: None,
-                            text: text.to_string(),
-                            rationale: q
-                                .get("rationale")
-                                .and_then(|r| r.as_str())
-                                .unwrap_or("")
-                                .to_string(),
-                            category: q
-                                .get("category")
-                                .and_then(|c| c.as_str())
-                                .unwrap_or("other")
-                                .to_string(),
-                            created_by: user.id.clone(),
-                        })
-                        .await
-                        .map_err(ApiError)?;
-                    result.created_question_ids.push(created.id);
-                }
-            }
-        }
-        "add_notes" => {
-            if let Some(ns) = action.get("notes").and_then(|n| n.as_array()) {
-                for n in ns {
-                    let body = n.get("body").and_then(|b| b.as_str()).unwrap_or("");
-                    if body.trim().is_empty() {
-                        continue;
-                    }
-                    let created = ctx
-                        .product_repo()
-                        .create_note(NewNote {
-                            story_id: chat.story_id.clone(),
-                            section: Some("discovery".into()),
-                            body: body.to_string(),
-                            author_id: user.id.clone(),
-                        })
-                        .await
-                        .map_err(ApiError)?;
-                    result.created_note_ids.push(created.id);
-                }
-            }
-        }
-        "create_canvas" => {
-            // Note: this route is gated on Product (the `/product/` policy prefix),
-            // so a Product-Editor creates the scene as a byproduct of discovery —
-            // the Canvas capability axis is intentionally NOT additionally required
-            // here (the scene lands in the user's own workspace; Canvas:View gates
-            // whether they can then open the Canvas module to see it).
-            let title = action
-                .get("title")
-                .and_then(|t| t.as_str())
-                .unwrap_or("Discovery diagram")
-                .to_string();
-            let doc = canvas_doc_from_action(action, &title);
-            let scene = ctx
-                .canvas_repo()
-                .create(NewScene {
-                    workspace_id: chat.workspace_id.clone(),
-                    story_id: Some(chat.story_id.clone()),
-                    title,
-                    doc_json: doc.to_string(),
-                    provider: "claude".into(),
-                    section: None,
-                    created_by: user.id.clone(),
-                })
-                .await
-                .map_err(ApiError)?;
-            result.canvas_id = Some(scene.id);
-        }
-        other => {
-            return Err(ApiError(Error::Invalid(format!(
-                "unknown discovery action type: {other}"
-            ))));
-        }
-    }
+    let target = ActionTarget {
+        story_id: &chat.story_id,
+        workspace_id: &chat.workspace_id,
+        user_id: &user.id,
+    };
+    let result = apply_story_action(ctx.product(), ctx.canvas_repo(), &target, &req.action)
+        .await
+        .map_err(ApiError)?;
     Ok(Json(result))
 }
 
@@ -457,7 +211,7 @@ pub async fn apply_action<C: ProductStudioHost>(
 /// Build the relevance-bounded context string for a story. Pulls the latest
 /// relevant version, attachments (text mockups inlined), the most recent
 /// discovery report, open questions and notes. Bounded by `CTX_BUDGET`.
-async fn assemble_context<C: ProductStudioHost>(ctx: &C, story_id: &Id) -> String {
+pub(crate) async fn assemble_context<C: ProductStudioHost>(ctx: &C, story_id: &Id) -> String {
     let story = match ctx.product_repo().get_story(story_id).await {
         Ok(s) => s,
         Err(_) => return String::new(),
@@ -591,52 +345,6 @@ fn format_context(
     truncate(&s, CTX_BUDGET)
 }
 
-/// Build the one-shot discovery-chat prompt. The `OTTO_TASK: discovery_chat`
-/// sentinel routes the deterministic E2E stub; the actions contract is
-/// load-bearing (the turn engine parses the reply against it).
-fn build_chat_prompt(context: &str, history: &[DiscoveryChatMessage], new_message: &str) -> String {
-    let mut s = String::new();
-    s.push_str(
-        "OTTO_TASK: discovery_chat\n\
-         You are a product discovery partner. The user may have NOTHING written yet — \
-         help them research, ask the right questions, surface edge cases, and shape a \
-         story. Be concrete and use the context below (their draft, mockups, discovery \
-         notes). Reply conversationally in markdown. When useful, ALSO emit a SINGLE \
-         fenced ```json block with an `actions` array to propose concrete next steps. \
-         Supported actions (never auto-applied — the user approves each):\n\
-         {\"actions\":[\n\
-           {\"type\":\"apply_draft\",\"title\":\"…\",\"body_md\":\"full story markdown\"},\n\
-           {\"type\":\"add_questions\",\"questions\":[{\"text\":\"…\",\"rationale\":\"…\",\"category\":\"…\"}]},\n\
-           {\"type\":\"add_notes\",\"notes\":[{\"body\":\"…\"}]},\n\
-           {\"type\":\"create_canvas\",\"title\":\"…\",\"mermaid\":\"sequenceDiagram…\"}\n\
-         ]}\n\
-         Omit the json block entirely when you have no concrete proposal.\n\n",
-    );
-
-    if !context.trim().is_empty() {
-        s.push_str("# Context\n");
-        s.push_str(context);
-        s.push('\n');
-    }
-
-    if history.len() > 1 {
-        s.push_str("## Conversation so far\n");
-        // Skip the just-added user message (it's appended last below).
-        for m in &history[..history.len().saturating_sub(1)] {
-            let who = if m.role == "agent" {
-                "Assistant"
-            } else {
-                "User"
-            };
-            s.push_str(&format!("{who}: {}\n", m.body));
-        }
-        s.push('\n');
-    }
-
-    s.push_str(&format!("## New message\nUser: {new_message}\n"));
-    s
-}
-
 /// Split an agent reply into `(markdown, actions_json)`. The `actions` array
 /// (when present, non-empty and valid) is returned as a JSON string; the
 /// markdown is the reply with ONLY the block that carried it removed — an
@@ -644,7 +352,7 @@ fn build_chat_prompt(context: &str, history: &[DiscoveryChatMessage], new_messag
 /// stay. (It used to cut at the first ```` ```json ```` or `{`, so a reply that
 /// showed an example payload lost it, everything after it, and — since the
 /// example parsed first — the actions too.) Tolerant — never panics.
-fn split_actions(raw: &str) -> (String, Option<String>) {
+pub(crate) fn split_actions(raw: &str) -> (String, Option<String>) {
     let has_actions = |v: &Value| {
         v.get("actions")
             .and_then(Value::as_array)
@@ -716,85 +424,6 @@ fn actions_span(raw: &str, found: &Value) -> Option<std::ops::Range<usize>> {
     None
 }
 
-/// Build a Scene doc from a `create_canvas` action (mermaid or nodes) in the
-/// FILE-BACKED canvas shape (`{type:"otto-canvas", version:1, format, source}`)
-/// — the only shape Canvas Studio renders. The legacy Svelte-Flow doc
-/// (`{schema:1, nodes:[{kind:"mermaid",…}]}`) this used to emit has no
-/// top-level `source`, so every "Open in Canvas" from Discovery Chat landed on
-/// a permanently blank board.
-fn canvas_doc_from_action(action: &Value, title: &str) -> Value {
-    let source = match action.get("mermaid").and_then(|m| m.as_str()) {
-        Some(src) => src.to_string(),
-        // Structured nodes/edges → synthesize a mermaid flowchart so the
-        // proposed diagram still lands editable instead of being dropped.
-        None => {
-            let nodes = action
-                .get("nodes")
-                .and_then(|n| n.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let edges = action
-                .get("edges")
-                .and_then(|e| e.as_array())
-                .cloned()
-                .unwrap_or_default();
-            mermaid_from_nodes(&nodes, &edges)
-        }
-    };
-    json!({
-        "type": "otto-canvas",
-        "version": 1,
-        "format": "mermaid",
-        "title": title,
-        "source": source,
-    })
-}
-
-/// Best-effort mermaid flowchart from a `create_canvas` action's node/edge
-/// lists. Node ids are sanitized to mermaid-safe tokens; labels are quoted.
-fn mermaid_from_nodes(nodes: &[Value], edges: &[Value]) -> String {
-    let sid = |raw: &str| -> String {
-        let s: String = raw
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect();
-        if s.is_empty() {
-            "n".to_string()
-        } else {
-            s
-        }
-    };
-    let mut out = String::from("flowchart TD\n");
-    for (i, n) in nodes.iter().enumerate() {
-        let id = n
-            .get("id")
-            .and_then(Value::as_str)
-            .map(sid)
-            .unwrap_or_else(|| format!("n{i}"));
-        let label = n
-            .get("label")
-            .or_else(|| n.get("title"))
-            .or_else(|| n.get("text"))
-            .and_then(Value::as_str)
-            .unwrap_or(&id);
-        out.push_str(&format!("  {id}[\"{}\"]\n", label.replace('"', "'")));
-    }
-    for e in edges {
-        let from = e
-            .get("from")
-            .or_else(|| e.get("source"))
-            .and_then(Value::as_str);
-        let to = e
-            .get("to")
-            .or_else(|| e.get("target"))
-            .and_then(Value::as_str);
-        if let (Some(f), Some(t)) = (from, to) {
-            out.push_str(&format!("  {} --> {}\n", sid(f), sid(t)));
-        }
-    }
-    out
-}
-
 fn truncate(text: &str, max: usize) -> String {
     otto_core::text::clip_chars_with(text, max, "\n…[truncated]")
 }
@@ -828,28 +457,55 @@ pub struct StopTurnResp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
+    use otto_state::{DiscoveryChatRepo, NewDiscoveryChatMessage};
 
-    fn msg(role: &str, body: &str) -> DiscoveryChatMessage {
-        DiscoveryChatMessage {
-            id: "m".into(),
-            chat_id: "c".into(),
-            role: role.into(),
-            body: body.into(),
-            actions_json: None,
-            meta_json: None,
-            created_at: Utc::now(),
+    #[tokio::test]
+    async fn earlier_chats_stay_listable_and_readable_with_their_proposals() {
+        // Nothing migrates or deletes the old Discovery Chat rows: the story's
+        // list and each transcript (with the agent's `actions_json`) are what
+        // the merged tab's "Earlier chats" renders.
+        let (_svc, pool, user, ws, sid) = crate::chat_actions::tests::fixture_with_pool().await;
+        let repo = DiscoveryChatRepo::new(pool);
+        let chat = repo
+            .create_chat(NewDiscoveryChat {
+                story_id: sid.clone(),
+                workspace_id: ws,
+                cwd: "/tmp/discovery".into(),
+                title: "Discovery".into(),
+                model: None,
+                created_by: user,
+            })
+            .await
+            .unwrap();
+        for (role, body, actions) in [
+            ("user", "help me scope login", None),
+            (
+                "agent",
+                "Two questions first.",
+                Some(r#"[{"type":"add_questions","questions":[{"text":"SLA?"}]}]"#),
+            ),
+        ] {
+            repo.add_message(NewDiscoveryChatMessage {
+                chat_id: chat.id.clone(),
+                role: role.into(),
+                body: body.into(),
+                actions_json: actions.map(str::to_string),
+                meta_json: None,
+            })
+            .await
+            .unwrap();
         }
-    }
 
-    #[test]
-    fn discovery_relinks_a_replacement_session() {
-        assert!(session_link_changed(
-            Some(&"deleted".into()),
-            &"replacement".into()
-        ));
-        assert!(session_link_changed(None, &"first".into()));
-        assert!(!session_link_changed(Some(&"same".into()), &"same".into()));
+        let listed = repo.list_for_story(&sid).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, chat.id);
+        let messages = repo.get_messages(&chat.id).await.unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert!(messages[1]
+            .actions_json
+            .as_deref()
+            .is_some_and(|a| a.contains("add_questions")));
     }
 
     #[test]
@@ -882,15 +538,6 @@ mod tests {
         let s = format_context("T", &big, &[], None, &[], &[]);
         assert!(s.chars().count() <= CTX_BUDGET + 32); // bounded + marker
         assert!(s.contains("[truncated]"));
-    }
-
-    #[test]
-    fn prompt_has_sentinel_and_actions_contract() {
-        let p = build_chat_prompt("# Context\nbody", &[msg("user", "hi")], "scope X");
-        assert!(p.contains("OTTO_TASK: discovery_chat"));
-        assert!(p.contains("apply_draft"));
-        assert!(p.contains("create_canvas"));
-        assert!(p.contains("scope X"));
     }
 
     #[test]
@@ -933,39 +580,5 @@ mod tests {
         let (md, actions) = split_actions(raw);
         assert_eq!(md, raw);
         assert!(actions.is_none());
-    }
-
-    #[test]
-    fn canvas_doc_from_mermaid_action() {
-        // Regression: must be the FILE-BACKED shape (format+source) — the
-        // legacy nodes[] shape rendered a permanently blank canvas.
-        let action =
-            json!({"type":"create_canvas","title":"Seq","mermaid":"sequenceDiagram\n A->>B: x"});
-        let doc = canvas_doc_from_action(&action, "Seq");
-        assert_eq!(doc["type"], "otto-canvas");
-        assert_eq!(doc["format"], "mermaid");
-        assert!(doc["source"].as_str().unwrap().contains("A->>B"));
-    }
-
-    #[test]
-    fn canvas_doc_from_nodes_action_synthesizes_mermaid() {
-        let action = json!({
-            "type": "create_canvas",
-            "nodes": [
-                {"id": "a", "label": "Start"},
-                {"id": "b-2", "label": "End \"quoted\""},
-            ],
-            "edges": [{"from": "a", "to": "b-2"}],
-        });
-        let doc = canvas_doc_from_action(&action, "Flow");
-        assert_eq!(doc["format"], "mermaid");
-        let src = doc["source"].as_str().unwrap();
-        assert!(src.starts_with("flowchart TD"));
-        assert!(src.contains("a[\"Start\"]"));
-        assert!(
-            src.contains("b_2[\"End 'quoted'\"]"),
-            "sanitized id + quotes: {src}"
-        );
-        assert!(src.contains("a --> b_2"));
     }
 }

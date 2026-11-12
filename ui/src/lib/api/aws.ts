@@ -155,10 +155,12 @@ export const awsApi = {
     api.post<{ messages: SqsMessage[] }>(`${acct(id)}/sqs/queues/peek${qs({ region })}`, body),
   sqsSend: (id: string, body: SqsSendReq, region?: string) =>
     api.post<{ message_id: string }>(`${acct(id)}/sqs/queues/send${qs({ region })}`, body),
-  sqsDeleteMessage: (id: string, url: string, receipt_handle: string, region?: string) =>
+  /** `confirm_name` (the queue name) is required on a prod account. */
+  sqsDeleteMessage: (id: string, url: string, receipt_handle: string, region?: string, confirm_name?: string) =>
     api.post<void>(`${acct(id)}/sqs/queues/delete-message${qs({ region })}`, {
       url,
       receipt_handle,
+      confirm_name,
     }),
   sqsPurge: (id: string, url: string, confirm_name: string, region?: string) =>
     api.post<void>(`${acct(id)}/sqs/queues/purge${qs({ region })}`, { url, confirm_name }),

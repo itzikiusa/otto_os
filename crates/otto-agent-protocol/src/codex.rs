@@ -49,6 +49,9 @@
 //!   profile (`:609-621`). `serverRequest/resolved` closes a request Codex
 //!   settled. The v1 `execCommandApproval` / `applyPatchApproval` belong to
 //!   the conversation API Otto does not use.
+//! * `mcpServer/startupStatus/updated` with `status: "failed"` becomes a
+//!   `system_notice` in the running turn, or the next one when it arrives
+//!   between turns (T3 Code #34771); another status clears that server.
 
 use std::collections::HashMap;
 
@@ -106,6 +109,8 @@ pub struct CodexDriver {
     items: HashMap<String, Item>,
     pending: HashMap<String, Pending>,
     failure: Option<ProviderFailure>,
+    /// MCP servers that failed to start and are not shown yet: (name, error).
+    mcp_failures: Vec<(String, String)>,
 }
 
 impl CodexDriver {
@@ -130,6 +135,7 @@ impl CodexDriver {
             items: HashMap::new(),
             pending: HashMap::new(),
             failure: None,
+            mcp_failures: Vec::new(),
         }
     }
 
@@ -223,6 +229,46 @@ impl CodexDriver {
         let (id, line) = self.request("turn/start", params);
         self.turn_req = Some(id);
         step.write(line);
+    }
+
+    /// `mcpServer/startupStatus/updated`: remember a failed server (once),
+    /// forget one that recovered, and show what is pending when a turn runs.
+    fn on_mcp_startup(&mut self, step: &mut DriverStep, params: &Value) {
+        let Some(name) = params.get("name").and_then(Value::as_str) else {
+            return;
+        };
+        let thread = params.get("threadId").and_then(Value::as_str);
+        if thread.is_none() || (self.thread_id.is_some() && thread != self.thread_id.as_deref()) {
+            return;
+        }
+        self.mcp_failures.retain(|(n, _)| n != name);
+        if params.get("status").and_then(Value::as_str) != Some("failed") {
+            return;
+        }
+        let error = params
+            .get("error")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("MCP server {name} failed to start."));
+        self.mcp_failures.push((name.to_string(), error));
+        self.flush_mcp_failures(step);
+    }
+
+    /// Each recorded failure as a notice in the running turn, then dropped.
+    fn flush_mcp_failures(&mut self, step: &mut DriverStep) {
+        if self.turn_id.is_none() {
+            return;
+        }
+        for (name, error) in std::mem::take(&mut self.mcp_failures) {
+            step.push(DriverEvent::TurnItem(item(
+                format!("{}:mcp-startup-failed:{name}", self.turn()),
+                TurnItemStatus::Completed,
+                Some(format!("MCP server {name} failed to start")),
+                TurnItemKind::SystemNotice { message: error },
+            )));
+        }
     }
 
     fn item_id(&self, codex_id: &str) -> String {
@@ -798,6 +844,7 @@ impl StructuredDriver for CodexDriver {
         self.turn_id = Some(turn_id.to_string());
         self.failure = None;
         let mut step = DriverStep::default();
+        self.flush_mcp_failures(&mut step);
         if self.ready {
             self.send_turn(&mut step, req);
         } else {
@@ -966,6 +1013,7 @@ impl StructuredDriver for CodexDriver {
                 }
                 "turn/plan/updated" if self.turn_id.is_some() => self.on_plan(&mut step, &params),
                 "thread/tokenUsage/updated" => self.on_usage(&mut step, &params),
+                "mcpServer/startupStatus/updated" => self.on_mcp_startup(&mut step, &params),
                 "error" => {
                     if params.get("willRetry").and_then(Value::as_bool) != Some(true) {
                         if let Some(e) = params.get("error") {
@@ -1323,5 +1371,56 @@ mod tests {
             json!({"id":"native-7","result":{"answers":{"q_raw":{"answers":["Custom"]}}}})
         );
         assert!(d.respond_question(id, &[]).is_err());
+    }
+
+    /// T3 Code #34771: an MCP server that fails to start is a notice in the
+    /// thread (once), whether Codex reports it before or during a turn.
+    #[test]
+    fn an_mcp_server_that_fails_to_start_shows_a_notice_once() {
+        let mut d = CodexDriver::with_program("codex");
+        ready(&mut d, false);
+        let status = |name: &str, status: &str, error: Value| json!({"method":"mcpServer/startupStatus/updated","params":{"threadId":"th1","name":name,"status":status,"error":error}});
+        // Before the turn: held until one runs; a recovered server is dropped.
+        assert!(feed(
+            &mut d,
+            status("jira", "failed", json!("spawn jira-mcp: ENOENT"))
+        )
+        .events
+        .is_empty());
+        feed(&mut d, status("slack", "failed", Value::Null));
+        feed(&mut d, status("slack", "ready", Value::Null));
+        // Another thread's report is not this one's.
+        let mut other = status("db", "failed", Value::Null);
+        other["params"]["threadId"] = json!("th9");
+        feed(&mut d, other);
+        let s = d.prompt("t1", &RuntimePromptReq::of("hi")).unwrap();
+        let notices: Vec<&TurnItem> = s
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                DriverEvent::TurnItem(i) => Some(i),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].id, "t1:mcp-startup-failed:jira");
+        assert_eq!(
+            notices[0].title.as_deref(),
+            Some("MCP server jira failed to start")
+        );
+        assert!(
+            matches!(&notices[0].kind, TurnItemKind::SystemNotice { message } if message == "spawn jira-mcp: ENOENT")
+        );
+        // During a turn: shown at once, with a fallback text.
+        let s = feed(&mut d, status("slack", "failed", json!("  ")));
+        assert!(matches!(&s.events[0], DriverEvent::TurnItem(i)
+            if matches!(&i.kind, TurnItemKind::SystemNotice { message } if message == "MCP server slack failed to start.")));
+        // Shown once: the next turn carries nothing.
+        feed(
+            &mut d,
+            json!({"method":"turn/completed","params":{"turn":{"id":"c1","status":"completed"}}}),
+        );
+        let s = d.prompt("t2", &RuntimePromptReq::of("again")).unwrap();
+        assert!(s.events.is_empty(), "{:?}", s.events);
     }
 }

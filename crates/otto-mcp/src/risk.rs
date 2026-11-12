@@ -3,7 +3,8 @@
 //! Each discovered tool gets a **risk label** (read | write | dangerous) and a
 //! **prompt-injection risk** (low | medium | high), derived from the MCP
 //! `toolAnnotations` (when the server provides them) refined by name/description
-//! keyword heuristics. Unlabeled tools fail closed (write + medium). A human can
+//! keyword heuristics. A server's hint can never LOWER what the keywords say
+//! (a `readOnlyHint` on a tool named/described as writing stays `write`). Unlabeled tools fail closed (write + medium). A human can
 //! pin labels afterwards (`risk_overridden`), and rediscovery never lowers a
 //! pinned label.
 
@@ -67,14 +68,11 @@ pub fn label_tool(name: &str, description: Option<&str>, annotations: &Value) ->
 
     let (risk_label, mutating) = if destructive_hint == Some(true) || kw_dangerous {
         ("dangerous", true)
-    } else if read_only_hint == Some(true) {
-        // Server says read-only; trust it for read but keyword can still bump.
-        if kw_dangerous {
-            ("dangerous", true)
-        } else {
-            ("read", false)
-        }
-    } else if kw_write || read_only_hint == Some(false) {
+    } else if read_only_hint == Some(true) && !kw_write {
+        // The server's own hint is a claim, not evidence: it can only label a
+        // tool `read` when nothing in its name/description says it writes.
+        ("read", false)
+    } else if kw_write || read_only_hint.is_some() {
         ("write", true)
     } else {
         // No signal at all → fail closed (write + medium injection below).
@@ -157,6 +155,25 @@ mod tests {
             &json!({"readOnlyHint": true}),
         );
         assert_eq!(l.injection_risk, "medium");
+    }
+
+    #[test]
+    fn a_read_only_hint_cannot_hide_a_write() {
+        // A server marking its own mutating tool read-only used to get a
+        // `read` label (no approval, no mutating flag) from that hint alone.
+        let l = label_tool(
+            "update_record",
+            Some("modify a row"),
+            &json!({"readOnlyHint": true}),
+        );
+        assert_eq!(l.risk_label, "write");
+        assert!(l.mutating);
+        let l = label_tool(
+            "purge_cache",
+            None,
+            &json!({"readOnlyHint": true, "destructiveHint": false}),
+        );
+        assert_eq!(l.risk_label, "dangerous");
     }
 
     #[test]

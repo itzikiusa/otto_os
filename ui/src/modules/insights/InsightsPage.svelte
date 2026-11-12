@@ -748,7 +748,7 @@
               {#if runFailKind === 'ended' && endedRunId}
                 <button class="btn small" onclick={() => endedRunId && ws.navigateToSession(endedRunId)}><Icon name="terminal" size={12} /> View live session</button>
               {:else}
-                <button class="btn small" onclick={() => router.go('settings/skills')}>Open skills settings</button>
+                <button class="btn small" onclick={() => router.go('skills-eval/bundled')}>Open Skills Lab → Bundled</button>
               {/if}
               <button class="icon-btn" onclick={() => { runFailReason = null; runFailKind = null; endedRunId = null; }} aria-label="Dismiss" title="Dismiss"><Icon name="x" size={14} /></button>
             </div>

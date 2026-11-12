@@ -79,18 +79,20 @@ test('every nav row opens a page titled with the same label', async ({ page }) =
 test('⌘K "Settings: <section>" opens that section', async ({ page }) => {
   await boot(page, 'home');
   await page.keyboard.press('Meta+k');
-  await page.keyboard.type('mcp servers settings');
+  // (MCP servers used to be the example; it moved to the MCP Control Plane —
+  // desktop-mcp-one-home.spec.ts covers its redirect.)
+  await page.keyboard.type('language servers settings');
   const item = page
     .getByTestId('floating-bar')
     .getByRole('option')
-    .filter({ hasText: 'Go to MCP servers settings' })
+    .filter({ hasText: 'Go to Language servers settings' })
     .first();
   await expect(item).toBeVisible();
   await expect(item.locator('.opt-detail')).toHaveText('Integrations');
   await item.click();
-  await expect.poll(() => page.evaluate(() => location.hash)).toBe('#/settings/mcp-servers');
-  await expect(title(page)).toHaveText('MCP servers');
-  await expect(activeRow(page)).toHaveText('MCP servers');
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe('#/settings/language-servers');
+  await expect(title(page)).toHaveText('Language servers');
+  await expect(activeRow(page)).toHaveText('Language servers');
 });
 
 test('an unknown section shows an empty state with a way back', async ({ page }) => {

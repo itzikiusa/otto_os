@@ -296,12 +296,14 @@
     const appState = excaliApi.getAppState();
     // Images the server holds go as refs — the stringify (and the PUT) stay
     // small however big the pasted screenshots are.
-    const { files, inline } = filesForSave(excaliApi.getFiles?.() ?? {}, knownFiles);
+    const elements = excaliApi.getSceneElements();
+    // Elements too: an image whose file failed to load keeps its ref.
+    const { files, inline } = filesForSave(excaliApi.getFiles?.() ?? {}, knownFiles, elements);
     const doc: CanvasDoc = {
       type: 'otto-canvas', version: 1, format: 'excalidraw',
       source: JSON.stringify({
         type: 'excalidraw', version: 2, source: 'otto',
-        elements: excaliApi.getSceneElements(),
+        elements,
         appState: { viewBackgroundColor: appState.viewBackgroundColor, gridSize: appState.gridSize ?? 20, gridModeEnabled: appState.gridModeEnabled ?? false },
         files,
       }),

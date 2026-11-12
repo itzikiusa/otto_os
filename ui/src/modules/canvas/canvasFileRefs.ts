@@ -14,14 +14,32 @@ export function refSha(dataURL: unknown): string | null {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ExFile = { id: string; dataURL: string; [k: string]: any };
 
+/** Per board (keyed by its `known` map): ref entries whose fetch failed. The
+ *  board shows a placeholder and Excalidraw's `getFiles()` lacks them. */
+const unloadedOf = new WeakMap<ReadonlyMap<string, string>, Map<string, ExFile>>();
+
+/** A ref file could not be fetched: keep its entry so a save still carries it. */
+export function markUnloaded(known: ReadonlyMap<string, string>, id: string, ref: ExFile): void {
+  let m = unloadedOf.get(known);
+  if (!m) unloadedOf.set(known, (m = new Map()));
+  m.set(id, ref);
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type SceneElement = { type?: string; fileId?: string | null; isDeleted?: boolean; [k: string]: any };
+
 /**
  * The `files` map an autosave sends: every file the server already holds
  * (`known`: file id → sha) becomes a ref; the rest stay inline. Returns the
  * map plus the inline entries, whose shas are learned after the save lands.
+ * An image element whose file never loaded (a failed fetch) keeps its ref:
+ * rebuilding `files` from `getFiles()` alone dropped it, and the image was
+ * lost for good on the next edit.
  */
 export function filesForSave(
   files: Record<string, ExFile> | null | undefined,
   known: ReadonlyMap<string, string>,
+  elements: readonly SceneElement[] = [],
 ): { files: Record<string, ExFile>; inline: ExFile[] } {
   const out: Record<string, ExFile> = {};
   const inline: ExFile[] = [];
@@ -36,6 +54,14 @@ export function filesForSave(
       out[id] = f;
       if (typeof f.dataURL === 'string' && f.dataURL.startsWith('data:')) inline.push(f);
     }
+  }
+  const unloaded = unloadedOf.get(known);
+  for (const el of elements) {
+    const id = el?.type === 'image' && !el.isDeleted ? el.fileId : null;
+    if (!id || id in out) continue;
+    const ref = unloaded?.get(id);
+    const sha = known.get(id) ?? refSha(ref?.dataURL);
+    if (sha) out[id] = { ...(ref ?? { id }), id, dataURL: FILE_REF_PREFIX + sha };
   }
   return { files: out, inline };
 }

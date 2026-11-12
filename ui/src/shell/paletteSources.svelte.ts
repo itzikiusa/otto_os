@@ -10,7 +10,7 @@ import { untrack } from 'svelte';
 import { slackSend } from '../lib/slackSend.svelte';
 import { registry } from '../lib/commands.svelte';
 import { activeNavId, availableModules, goToEntries, moduleLabel } from '../lib/sidebar';
-import { availableSections, groupLabel as settingsGroupLabel } from '../modules/settings/sections';
+import { availableSections, movedSections, groupLabel as settingsGroupLabel } from '../modules/settings/sections';
 import { loadConnectionCommands } from '../modules/connections/paletteCommands';
 import { repoCommands } from './paletteSources/repos';
 import { plugins } from '../lib/stores/plugins.svelte';
@@ -25,6 +25,7 @@ import { auth } from '../lib/stores/auth.svelte';
 import { toasts } from '../lib/toast.svelte';
 import { toastError } from '../lib/toastError';
 import { startSnip } from '../lib/snip';
+import { lightMode } from '../lib/lightMode.svelte';
 
 /** What the sources need from the app root (its local state and helpers). */
 export interface PaletteDeps {
@@ -89,7 +90,8 @@ export function installPaletteSources(deps: PaletteDeps): () => void {
     // Derived from the sidebar registry (RBAC-filtered + permitted plugins), so
     // every module is reachable by ⌘K and the list can never drift from the
     // sidebar. Hidden modules are included on purpose — ⌘K is the way back to
-    // one you've hidden. The sidebar section shows as secondary text.
+    // one you've hidden. The sidebar section shows as secondary text. The
+    // phone's light version narrows it to its five (availableModules' scope).
     $effect(() => {
       const pluginEntries = plugins.list
         .filter((p) => auth.canPlugin(p.slug, 'view'))
@@ -108,6 +110,25 @@ export function installPaletteSources(deps: PaletteDeps): () => void {
           run: () => (e.viaModule ? router.openModule(e.route) : router.go(e.route)),
         })),
       );
+    });
+
+    // ---- palette commands: the phone's light version ----
+    // Only on a phone-sized screen (lib/lightMode.svelte.ts): one command that
+    // switches to the other side. A phone on its side has no bottom nav, so
+    // this and Settings ▸ Appearance are its ways back to the full app.
+    $effect(() => {
+      if (!lightMode.phoneSized) return;
+      const on = lightMode.active;
+      return registry.register('light', [
+        {
+          id: 'core.light-version',
+          title: on ? 'Show the full app' : 'Use the light version',
+          group: 'View',
+          detail: on ? 'Every module' : 'Threads, Connections, Git, API, Usage',
+          keywords: 'light lite version phone mobile full app modules simple',
+          run: () => lightMode.set(!on),
+        },
+      ]);
     });
 
     // ---- palette commands: Favorites (the current page) ----
@@ -149,7 +170,17 @@ export function installPaletteSources(deps: PaletteDeps): () => void {
           detail: settingsGroupLabel(s.group),
           keywords: `settings preferences ${s.id.replace(/-/g, ' ')} ${s.keywords ?? ''}`,
           run: () => router.go(`settings/${s.id}`),
-        })),
+        })).concat(
+          // Sections that moved out of Settings keep a ⌘K entry at their new home.
+          movedSections(auth).map((s) => ({
+            id: `settings.${s.id}`,
+            title: `Go to ${s.movedLabel ?? s.label}`,
+            group: 'Settings',
+            detail: 'Moved from Settings',
+            keywords: `settings ${s.label} ${s.keywords ?? ''}`,
+            run: () => router.go(s.movedTo ?? 'skills-eval'),
+          })),
+        ),
       );
     });
 

@@ -183,6 +183,49 @@ Other retention passes:
   scheduled-task run references, is never deleted. Each pruned run's
   checkpoints and `workflow-context/<run_id>/` folder go with it. Deletes run
   in 100-row transactions.
+- **Orphaned workflow-context folders** (daily, first pass 10 minutes after
+  start; `crates/ottod/src/context_sweep.rs`): a `workflow-context/<run_id>/`
+  folder whose run row is gone (the workflow was deleted, a manual cleanup, a
+  delete that failed) is removed once it has been untouched for
+  `workflow_context_orphan_days` (default **30**, floored at 7, `0` = off).
+  Only real directories named like a run id directly under `workflow-context/`
+  qualify, never a symlink; the run is looked up in the database first and a
+  query error ends the pass with nothing removed. At most 100 folders per pass,
+  logged with counts.
+- **Orphaned skill bundles** (same daily pass;
+  `crates/ottod/src/context_sweep/bundles.rs`). Every agent launch writes a
+  bundle for its working directory under
+  `~/.otto/context/<provider>/<encoded cwd>/` (context file plus a copy of
+  every active skill, about 2 MB), and each one names its real directory in a
+  `.otto-cwd` marker, rewritten on every launch and resume. A pass deletes
+  exactly these, and nothing else:
+  - a bundle whose marker names an absolute directory that no longer exists
+    (only a "not found" answer counts; any other error keeps it) and that
+    nothing touched (the folder or a file directly in it) for
+    `context_bundle_orphan_days` (default **7**, `0` = off);
+  - a bundle **without** a marker (made before markers existed) only when it
+    is untouched for 30 days (or the setting, if longer), its folder name is a
+    workflow worktree's (`<encoded data dir>/workflow-runs-<run id>-…`) and
+    that run's `workflow-runs/<run id>/` folder is gone. Your own repositories'
+    unmarked bundles are never removed; they get a marker on their next launch.
+
+  Only real directories directly under `claude/`, `codex/`, `agy/`, `grok/`
+  and `opencode/` are looked at (never a symlink, never `review-skills/` or
+  `vault-docs-skills/`); the codex bundle's links into `~/.codex` are unlinked,
+  never followed. At most 100 bundles per pass, logged with counts. Never in
+  an isolated E2E daemon.
+
+Both sweeps also stop when `data_retention.enabled` is `false`. Set either
+grace with `PUT /settings` (root), e.g.
+`{"workflow_context_orphan_days": 0, "context_bundle_orphan_days": 14}`.
+
+**Busy machine.** The hourly pass (retention deletes, expired sign-ins and the
+database maintenance below) first checks the admission gate's load and memory
+thresholds (agent-sessions.md, "Machine resources"). While the machine is over
+them the pass waits and looks again every 5 minutes; after 6 hours of waiting
+it runs anyway. On 2026-11-12 the pass ran during an overnight overload and a
+single retention delete took 29 s. Nothing is deferred while
+`agent_admission_enabled` is `false`.
 
 ### Database maintenance
 

@@ -37,6 +37,7 @@ export const featureRoutes: EventRoutes = {
  *  decision, not a default — `unit/eventRoutes.test.ts` fails on a type that
  *  is neither routed nor listed. */
 export const LIVE_ONLY_EVENTS: readonly EventType[] = [
+  'design_source_changed',
   'improvement_run_started',
   'improvement_run_finished',
   'improvement_edit_applied',

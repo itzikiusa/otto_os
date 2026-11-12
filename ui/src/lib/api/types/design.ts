@@ -90,7 +90,10 @@ export type DesignSignalKind =
   | 'reference_added'
   /** "Start from this": recorded on the NEW artifact, `payload.source_artifact_id`
    *  (required; `source_version_id` optional). */
-  | 'forked';
+  | 'forked'
+  /** Server-recorded by `POST …/adopt` ("Edit here" on a mirrored Canvas
+   *  scene / story attachment) — `payload {source_kind, source_id}`. */
+  | 'adopted';
 export type DesignArtifactChange =
   | 'created'
   | 'content'
@@ -111,6 +114,28 @@ export type DesignLinkUpdateReason =
   | 'target_approved'
   | 'target_updated'
   | 'target_deleted';
+
+/** What a mirrored artifact mirrors (`DesignArtifact.source_kind`). */
+export type DesignSourceKind = 'product_attachment' | 'canvas_scene';
+
+/** `Problem.code` of a write refused on an unadopted mirror (HTTP 409):
+ *  `PUT …/content`, `POST …/versions`, `POST …/versions/{v}/restore`,
+ *  `POST …/links`, `POST …/assist`, `POST …/variants`,
+ *  `POST …/variants/{v}/accept`. Offer "Edit here" (`POST …/adopt`). */
+export const DESIGN_MIRRORED_CODE = 'mirrored' as const;
+
+/** The `meta` keys of a mirrored artifact (all optional). `adopted*` are
+ *  written only by `POST …/adopt`; `source_missing` by the sync when the
+ *  scene / attachment row is gone (the mirror is then archived unless
+ *  adopted). */
+export interface DesignMirrorMeta {
+  adopted?: boolean;
+  /** RFC 3339. */
+  adopted_at?: string;
+  /** User id. */
+  adopted_by?: Id;
+  source_missing?: boolean;
+}
 
 export interface DesignProject {
   id: Id;
@@ -148,9 +173,13 @@ export interface DesignArtifact {
   /** sha256 of the thumbnail blob — PNG or WebP (`GET …/thumbnail` serves
    *  it; `PUT …/thumbnail` stores a UI-rendered one). */
   thumb_blob: string | null;
-  /** Imported rows carry `meta.imported_from = {kind, id, story_id?, …}`. */
+  /** Imported rows carry `meta.imported_from = {kind, id, story_id?, …}`;
+   *  mirrors also `DesignMirrorMeta` (`adopted`, `source_missing`, …). */
   meta: Record<string, unknown>;
-  source_kind: 'product_attachment' | 'canvas_scene' | null;
+  /** Set on a MIRROR of a legacy source (synced live). Read-only — writes
+   *  answer 409 `DESIGN_MIRRORED_CODE` — until `meta.adopted === true`
+   *  (`POST /design/artifacts/{id}/adopt`). */
+  source_kind: DesignSourceKind | null;
   source_id: Id | null;
   created_by: Id;
   created_by_kind: DesignAuthorKind;
@@ -285,6 +314,11 @@ export interface DesignImportReport {
   unchanged: number;
   skipped: number;
   links_created: number;
+  /** Mirrors archived because their source row is gone. */
+  archived: number;
+  /** Adopted mirrors whose changed source became a `variant/sync-<ts>/1`
+   *  side version instead of a new head. */
+  side_versions: number;
   errors: string[];
 }
 

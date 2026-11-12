@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime};
 pub const RESIGNED_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
 
 /// launchd appends the daemon's stderr to one file forever; once it passes
-/// this size it is truncated — at boot and then every
+/// this size it is rotated once (`.1`) and truncated — at boot and then every
 /// [`STDERR_LOG_CHECK_EVERY`] (the daemon's own log rotates daily).
 pub const STDERR_LOG_MAX_BYTES: u64 = 20 * 1024 * 1024;
 
@@ -116,14 +116,21 @@ pub fn sweep_data_dir(data_dir: &Path, now: SystemTime) -> Vec<PathBuf> {
     removed
 }
 
-/// Truncate launchd's append-only stderr log once it outgrows
-/// [`STDERR_LOG_MAX_BYTES`]. launchd opens it O_APPEND, so truncating in place
-/// is safe while the file is held open. Returns the size it was cut from.
+/// Rotate launchd's append-only stderr log once it outgrows
+/// [`STDERR_LOG_MAX_BYTES`]: copy it to `<name>.1` (one generation, replacing
+/// the older one — the warnings just before a cap are usually the ones being
+/// looked for), then truncate in place. A rename would not work: launchd
+/// holds the file open O_APPEND and would keep writing to the renamed copy;
+/// truncating is safe under that open fd. Returns the size it was cut from.
 pub fn cap_stderr_log(path: &Path, max: u64) -> Option<u64> {
     let len = std::fs::metadata(path).ok()?.len();
     if len <= max {
         return None;
     }
+    let mut previous = path.as_os_str().to_owned();
+    previous.push(".1");
+    // Best-effort: a failed copy (disk full) must still let the cap apply.
+    let _ = std::fs::copy(path, PathBuf::from(previous));
     let f = std::fs::OpenOptions::new().write(true).open(path).ok()?;
     f.set_len(0).ok()?;
     Some(len)
@@ -252,6 +259,22 @@ mod tests {
         std::fs::write(&log, "much more than ten bytes").unwrap();
         assert_eq!(cap_stderr_log(&log, 10), Some(24));
         assert_eq!(std::fs::metadata(&log).unwrap().len(), 0);
+        // One generation is kept, and a later cap replaces it.
+        let previous = dir.join("ottod.stderr.log.1");
+        assert_eq!(
+            std::fs::read_to_string(&previous).unwrap(),
+            "much more than ten bytes"
+        );
+        std::fs::write(&log, "a second, newer overflow").unwrap();
+        assert_eq!(cap_stderr_log(&log, 10), Some(24));
+        assert_eq!(
+            std::fs::read_to_string(&previous).unwrap(),
+            "a second, newer overflow"
+        );
+        assert!(
+            !dir.join("ottod.stderr.log.1.1").exists(),
+            "never more than one"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

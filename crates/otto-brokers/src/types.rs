@@ -509,6 +509,10 @@ pub struct DecodedPayload {
     /// it's opened.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
+    /// One-line notice when the payload is shown undecoded (a JSON Schema /
+    /// Protobuf registry schema — only Avro is decoded).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -553,6 +557,13 @@ pub struct GroupSummary {
     pub state: String,
     pub protocol_type: String,
     pub members: usize,
+    /// Total lag across the group's committed partitions (bounded, cached —
+    /// see `group_lag_cache`). `None` = not known: no committed offsets, an
+    /// unreadable watermark, not a consumer group, or still computing. Never
+    /// a guessed 0.
+    pub total_lag: Option<i64>,
+    /// The lag is still being computed in the background; re-fetch shortly.
+    pub lag_pending: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -632,8 +643,11 @@ pub struct GroupResetReq {
 pub struct ClusterMetrics {
     /// Sampled throughput series (oldest → newest).
     pub throughput: Vec<ThroughputPoint>,
-    pub messages_per_sec: f64,
-    pub total_messages: i64,
+    /// `null` until two watermark sweeps exist (the first is a baseline) —
+    /// "measuring", never a measured 0.
+    pub messages_per_sec: Option<f64>,
+    /// `null` until the first sweep lands.
+    pub total_messages: Option<i64>,
     pub brokers: Vec<BrokerResourceMetrics>,
     pub prometheus_available: bool,
     pub sampled_at: DateTime<Utc>,

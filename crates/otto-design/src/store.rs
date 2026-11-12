@@ -393,6 +393,10 @@ pub struct ArtifactFilter {
     /// children (an epic's Design tab).
     pub include_children: bool,
     pub author_kind: Option<String>,
+    /// The mirror of one legacy source: `product_attachment` | `canvas_scene`
+    /// (with `source_id`: that scene / attachment).
+    pub source_kind: Option<String>,
+    pub source_id: Option<Id>,
     pub since: Option<String>,
     pub until: Option<String>,
     pub include_archived: bool,
@@ -453,6 +457,14 @@ impl ArtifactFilter {
         if let Some(k) = &self.author_kind {
             sql.push_str(" AND a.created_by_kind = ?");
             args.push(Arg::S(k.clone()));
+        }
+        if let Some(k) = &self.source_kind {
+            sql.push_str(" AND a.source_kind = ?");
+            args.push(Arg::S(k.clone()));
+        }
+        if let Some(i) = &self.source_id {
+            sql.push_str(" AND a.source_id = ?");
+            args.push(Arg::S(i.clone()));
         }
         if let Some(t) = &self.since {
             sql.push_str(" AND a.updated_at >= ?");
@@ -1162,6 +1174,19 @@ impl Store {
         .await
         .map_err(dberr("design.version.list"))?;
         rows.iter().map(row_version).collect()
+    }
+
+    /// How many versions [`Self::list_versions`] pages over (same filter).
+    pub async fn count_versions(&self, artifact_id: &str, kind: Option<&str>) -> Result<i64> {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM design_versions WHERE artifact_id = ? AND (? IS NULL OR kind = ?)",
+        )
+        .bind(artifact_id)
+        .bind(kind)
+        .bind(kind)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("design.version.count"))
     }
 
     /// Insert a version on a SIDE branch (`variant/<run>/<k>`) WITHOUT moving

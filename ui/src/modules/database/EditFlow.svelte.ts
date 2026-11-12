@@ -845,7 +845,7 @@ export class EditFlow {
   resetForResult(): void {
     this.selected = new Set();
     this.lastClickedIdx = null;
-    this.pending = new Map();
+    this.pending = new Map(); this.editing = null; // an open editor's index means another row now (pending-carry parks it first)
   }
 
   readonly allInViewSelected: boolean = $derived(
@@ -1064,9 +1064,9 @@ export class EditFlow {
   // `text` is serialized once on open (never per render).
   rawDoc: { rowIdx: number; text: string } | null = $state.raw(null);
   /** Menu label: Mongo rows ARE documents; any other engine's row is a JSON view. */
-  get rawDocLabel(): string {
-    return this.engine === 'mongodb' ? 'View full document' : 'View raw JSON';
-  }
+  get rawDocLabel(): string { return this.engine === 'mongodb' ? 'View full document' : 'View raw JSON'; }
+  /** The result's connection `timezone` parameter: the zone date-time columns are shown in (temporal-zone.ts). */
+  get sessionTz(): unknown { return database.connections.find((c) => c.id === this.connectionId)?.params?.timezone; }
 
   openRawDoc(rowIdx: number): void {
     if (!this.result || rowIdx < 0 || !this.liveRows[rowIdx]) return;

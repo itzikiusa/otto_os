@@ -31,11 +31,14 @@ carry into another conversation.
 
 ## Layout & Workflows
 
-0. **Top bar:** sidebar toggle, a `project / thread` breadcrumb, and on the
-   right a layout menu (single · split · grid), three panel toggles —
-   **Changes**, the focused thread's **Terminal** drawer, the **right panel** —
-   and the thread's ⋯ menu (rename, pin, search, system notes, peer relay,
-   room, settle, archive). Single view has no separate pane header.
+0. **Top bar:** four controls — sidebar toggle, a `project / thread`
+   breadcrumb (with the **Related threads** chip while the thread has any),
+   the **right panel**, and ⋯. The ⋯ holds the thread's actions (rename, pin,
+   search, system notes, Related threads…, Continue on phone, settle,
+   archive), then New thread, Project card, Terminal drawer and the layout
+   (single · split · grid). Back / Forward are ⌘⇧← / ⌘⇧→. Single view has no
+   separate pane header. See
+   [Threads layout](./threads-structured-runtime.md#threads-layout).
 1. **Sidebar (`ThreadSidebar`):**
    - One search row with **filter by project** (several at once; a "Showing …
      · Clear" line appears while a filter is on), **Add project** (a folder that
@@ -61,7 +64,7 @@ carry into another conversation.
      **Changes +N −M** (opens the Changes tab).
 3. **Multi-Session Split & Grid Canvas (`ThreadCanvas` / `ThreadPane`):**
    - Switch between **single**, **Split** (2-up side-by-side), and **Grid**
-     (2×2 up to 4 live threads) from the top-bar layout menu or `⌘K`.
+     (2×2 up to 4 live threads) from the top-bar ⋯ or `⌘K`.
    - Each pane renders rich folded turns (`ConversationView`: GFM Markdown,
      syntax-highlighted code blocks, inline workspace images via
      `GET /api/v1/fs/raw` with zoomable lightbox, expandable `Thinking` prose,
@@ -91,20 +94,22 @@ carry into another conversation.
      branch and uncommitted files. **Open as thread** clears the tag and opens
      it beside the main thread; **Dismiss** archives it. In Agents, `/btw` is
      passed to the CLI unchanged.
-   - **Connections:** Workspace DB/SSH connections, live `db_mcp_activity`
-     stream whenever an agent executes `otto_db_query`, and **Open
-     side-by-side** to launch Database Explorer in Otto's split pane.
-   - **Peers:** Direct session-to-session message relay (`POST /sessions/{id}/message`
-     with `from_session_id`), multi-session broadcast, live cross-session peer
-     timeline, and **Start Room** (`Session Rooms`).
+   - **Connections** (offered once the thread has database activity):
+     Workspace DB/SSH connections, live `db_mcp_activity` stream whenever an
+     agent executes `otto_db_query`, and **Open side-by-side** to launch
+     Database Explorer in Otto's split pane.
+   - Session-to-session messages, broadcasts and **Start a room** live in the
+     header's **Related threads** popover (`POST /sessions/{id}/message` with
+     `from_session_id` for a terminal thread).
 
 ## Recoverable runtime drafts
 
 The composer saves unsent text, attachments, selected review/diff context,
 model, reasoning effort, access mode and the **Next message starts fresh**
 choice to the daemon's SQLite state, scoped to your user, workspace and
-thread. It does not store them in browser local storage. **Restoring…**,
-**Saving…** and **Saved** show the current state; recovery never sends a
+thread. It does not store them in browser local storage. The composer
+says nothing while saving works and shows **Draft not saved · Retry** when it
+fails; recovery never sends a
 message automatically. You can type while a draft loads, but send waits for
 recovery. A late load preserves edits made in the meantime.
 

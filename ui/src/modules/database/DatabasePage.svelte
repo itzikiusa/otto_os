@@ -37,6 +37,9 @@
   import { sshTabs } from './ssh-tabs.svelte';
   import ImportDialog from './ImportDialog.svelte';
   import ExportDialog from './ExportDialog.svelte';
+  import ProcessList from './ProcessList.svelte';
+  import HistoryAll from './HistoryAll.svelte';
+  import { processEngine } from './process-list';
   import { stmtPreview } from '../../lib/database/sql-util';
   import { databaseAccessChild } from '../../lib/access-options';
   import { database, engineGlyph, type DbMainTab, type DbSideTab } from '../../lib/stores/database.svelte';
@@ -147,7 +150,7 @@
 
   // ── Saved / History sidebar (search + inline rename) ──────────────────────
   let savedSearch = $state('');
-  let historySearch = $state('');
+  let historySearch = $state(''); let historyAll = $state(false); // History tab: this connection / all (HistoryAll.svelte)
   let renamingId = $state<string | null>(null);
   let renameDraft = $state('');
   // Lower-cased search text per row, memoized on the row's text — not
@@ -223,10 +226,10 @@
     return sections.find((s) => s.id === c.section_id)?.name ?? '';
   }
   $effect(()=>resourceAccess.subscribe(change=>{
-    if(change.type==='reset' && change.identity){connFormOpen=false;connImportOpen=false;editingConn=null;accessFor=null;sftpFor=null;changesOpen=false;}
+    if(change.type==='reset' && change.identity){connFormOpen=false;connImportOpen=false;editingConn=null;accessFor=null;sftpFor=null;processesFor=null;changesOpen=false;}
   }));
   let changesOpen = $state(false);
-  let accessFor = $state<Connection | null>(null);
+  let accessFor = $state<Connection | null>(null); let processesFor = $state<Connection | null>(null);
   const connectionAccess = (c: Connection, operation: string, capability: 'view'|'edit'|'admin'='edit') => resourceAccess.can('connection',c.id,operation,'connections',capability);
   $effect(() => { for (const c of [...database.connections,...database.otherConnections]) void resourceAccess.load('connection',c.id); });
   // The "Open a connection" pane offers the most recently opened ones as a
@@ -251,13 +254,10 @@
       ...(c.kind === 'ssh' && connectionAccess(c,'sftp_read','view')
         ? [{ label: 'Browse files (SFTP)', icon: 'folder', action: () => (sftpFor = c) }]
         : []),
-      ...(isDb && database.isWarming(c.id)
-        ? [{ label: 'Stop connecting', icon: 'stop', action: () => database.stopConnecting(c.id) }]
-        : []),
-      ...(isDb && database.connStatus.get(c.id)?.phase === 'idle' && database.selectedConnId !== c.id
-        ? [{ label: 'Connect in background', icon: 'refresh', action: () => void database.warm(c.id) }]
-        : []),
+      ...(isDb && database.isWarming(c.id) ? [{ label: 'Stop connecting', icon: 'stop', action: () => database.stopConnecting(c.id) }] : []),
+      ...(isDb && database.connStatus.get(c.id)?.phase === 'idle' && database.selectedConnId !== c.id ? [{ label: 'Connect in background', icon: 'refresh', action: () => void database.warm(c.id) }] : []),
       ...(isDb ? popoutItems(`database/${c.id}`, c.name) : []),
+      ...(isDb && processEngine(c.kind) ? [{ label: 'Processes…', icon: 'gauge', action: () => (processesFor = c) }] : []),
       { separator: true },
       ...(connectionAccess(c,'configure','admin') ? [{ label: 'Edit', icon: 'edit', action: () => editConnection(c) }, { label: 'Delete…', icon: 'trash', danger: true, action: () => void deleteConnection(c) }] : []),
       ...(auth.isRoot && connectionAccess(c,'configure','admin') ? [{ label: 'Duplicate without password', icon: 'copy', action: () => void duplicateConnection(c) }] : []),
@@ -1638,16 +1638,11 @@
   {:else if database.sideTab === 'history'}
     <div class="list-search">
       <Icon name="search" size={12} />
-      <input dir="ltr"
-        class="list-search-input"
-        placeholder="Filter history…"
-        bind:value={historySearch}
-        aria-label="Filter query history"
-      />
-      {#if historySearch}
-        <button class="icon-btn" onclick={() => (historySearch = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={12} /></button>
-      {/if}
+      <input dir="ltr" class="list-search-input" placeholder="Filter history…" bind:value={historySearch} aria-label="Filter query history" />
+      {#if historySearch}<button class="icon-btn" onclick={() => (historySearch = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={12} /></button>{/if}
+      <select class="hist-scope" bind:value={historyAll} aria-label="Whose history" title="This connection’s history, or every connection’s"><option value={false}>This connection</option><option value={true}>All connections</option></select>
     </div>
+    {#if historyAll}<HistoryAll search={historySearch} />{:else}
     <LoadState what="query history" variant="compact" loading={database.historyLoading} error={database.historyError} empty={database.history.length === 0} onretry={() => database.loadHistory()} />
     {#if database.history.length === 0 && (database.historyLoading || database.historyError)}
       <!-- Loading and failed loads are rendered above, never as an empty list. -->
@@ -1669,7 +1664,7 @@
           {database.historyLoadingMore ? 'Loading more history…' : 'Load more'}
         </button>
       {/if}
-    {/if}
+    {/if}{/if}
   {:else}
     {@const sc = database.connections.find((c) => c.id === database.selectedConnId)}
     {#if sc}
@@ -1686,7 +1681,7 @@
 
 {#if changesOpen && database.selectedConnId}<Modal title="Database changes" width={1040} onclose={() => changesOpen=false}><DatabaseChanges connectionId={database.selectedConnId} node={database.activeDb} /></Modal>{/if}
 
-{#if accessFor}<Modal title={`Access · ${accessFor.name}`} width={820} onclose={() => accessFor=null}><ResourceAccess kind="connection" resourceId={accessFor.id} /></Modal>{/if}
+{#if accessFor}<Modal title={`Access · ${accessFor.name}`} width={820} onclose={() => accessFor=null}><ResourceAccess kind="connection" resourceId={accessFor.id} /></Modal>{/if}{#if processesFor}<ProcessList conn={processesFor} onclose={() => (processesFor = null)} />{/if}
 
 {#if connFormOpen}
   <ConnectionForm existing={editingConn} kinds={ALL_KINDS} onclose={() => (connFormOpen = false)} onsaved={onConnSaved}
@@ -1864,6 +1859,10 @@
     border-radius: var(--radius-s);
     padding: 4px 6px;
     font-size: var(--fs-s);
+  }
+  .hist-scope {
+    max-width: 45%;
+    font-size: var(--fs-xs);
   }
   .list-search-input:focus {
     outline: none;

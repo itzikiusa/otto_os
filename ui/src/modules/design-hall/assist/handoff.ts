@@ -16,6 +16,8 @@ export interface GenerateInput {
   format: string;
   title: string;
   projectId?: string | null;
+  /** The Product story the draft implements (Product ▸ story ▸ Ask Otto). */
+  storyId?: string | null;
   brief: string;
   /** 1 = one generate turn; 2–4 = a variants run. */
   variants: number;
@@ -36,6 +38,7 @@ export async function generateFromBrief(input: GenerateInput): Promise<GenerateR
     format: input.format,
     title: input.title,
     projectId: input.projectId ?? null,
+    storyId: input.storyId ?? null,
     brief: input.brief,
   });
   try {

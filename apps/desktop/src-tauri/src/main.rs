@@ -18,6 +18,7 @@ mod panes;
 mod panes_policy;
 mod panic_guard;
 mod popout;
+mod quit;
 mod room_trust;
 mod rooms;
 mod shortcuts;
@@ -89,6 +90,7 @@ fn main() {
                     }
                     "quit" => {
                         lifecycle::durable("exit: menu quit");
+                        quit::arm("menu quit");
                         windows::mark_quitting();
                         windows::snapshot_all(app);
                         app.exit(0);
@@ -180,6 +182,7 @@ fn main() {
             browser::browser_close,
             browser::browser_close_all,
             browser::browser_devtools,
+            browser::browser_clear_data,
             windows::windows_registry,
             snip::snip_get_shortcut,
             snip::snip_set_shortcut,
@@ -213,6 +216,8 @@ fn main() {
             }
 
             build_menu(app)?;
+            // SIGTERM (deploy.sh) now asks this app to quit, under a deadline.
+            quit::register(app.handle());
 
             // Heartbeat: bounds when a silent death (SIGKILL, memory
             // pressure) happened.
@@ -268,6 +273,9 @@ fn run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                     None => "all windows closed".to_string(),
                 }
             ));
+            // Nothing prevents an exit: bound it (a plain non-last window
+            // close never reaches here).
+            quit::arm("exit request");
             windows::mark_quitting();
             windows::snapshot_all(app);
         }
@@ -310,7 +318,12 @@ fn run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
             }
             _ => {}
         },
-        tauri::RunEvent::Exit => lifecycle::clean_exit("exit (clean)"),
+        // Also AppKit's `terminate:` (AppleScript quit), which skips
+        // ExitRequested: bound whatever teardown follows.
+        tauri::RunEvent::Exit => {
+            quit::arm("exit");
+            lifecycle::clean_exit("exit (clean)");
+        }
         _ => {}
     }
 }

@@ -405,3 +405,45 @@ fn governed_self_call_targets_are_never_person_only_routes() {
         "every PERSON_ONLY_TOOLS entry must resolve to its person-only route"
     );
 }
+
+/// A personal agent's owner-only FIELDS are person-only per call (the
+/// handlers' `person_only_change`; the governed path's
+/// `sets_owner_only_agent_field`), never per route: the same routes keep a
+/// rename, a pause or a cadence change open to an agent's own credential, so
+/// they must not be classed Admin/Secret. The slack-as-me lend stays the one
+/// route-level person-only personal-agent route.
+#[test]
+fn personal_agent_owner_only_fields_are_gated_per_call_not_per_route() {
+    use axum::http::Method;
+    use otto_server::policy::{route_class, RouteClass};
+    for (m, p) in [
+        (Method::PATCH, "/api/v1/personal-agents/{id}"),
+        (Method::POST, "/api/v1/personal-agents/{id}/schedules"),
+        (
+            Method::PATCH,
+            "/api/v1/personal-agents/schedules/{schedule_id}",
+        ),
+        (Method::PUT, "/api/v1/personal-agents/{id}/autonomy"),
+    ] {
+        assert!(
+            !matches!(
+                route_class(&m, p),
+                Some(RouteClass::Admin | RouteClass::Secret)
+            ),
+            "{m} {p} must stay open to an agent's harmless edits"
+        );
+    }
+    assert!(matches!(
+        route_class(&Method::PUT, "/api/v1/personal-agents/{id}/slack-as-me"),
+        Some(RouteClass::Admin | RouteClass::Secret)
+    ));
+    for bare in [
+        "update_personal_agent",
+        "add_personal_agent_schedule",
+        "update_personal_agent_schedule",
+        "set_personal_agent_autonomy",
+    ] {
+        assert!(otto_mcp::outward::tool_is_dangerous(bare), "{bare}");
+        assert!(!otto_mcp::outward::tool_is_person_only(bare), "{bare}");
+    }
+}

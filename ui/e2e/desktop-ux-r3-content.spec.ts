@@ -1,6 +1,9 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedVaultDir } from './seed';
 import { openPage, expectNoHorizontalOverflow, expectFullyInViewport, snipAnnotatedPng } from './helpers';
+// The Canvas tests cover the unmounted Canvas page (skipped, CANVAS_PAGE_RETIRED); the
+// Product template test drives the classic arena (story Design tab ⋯ → Open the classic arena).
+import { CANVAS_PAGE_RETIRED, openClassicArena } from './storyDesigns';
 test.use({ viewport:{width:1280,height:900}, serviceWorkers:'block' });
 let workspaceId='', vaultId=0;
 test.beforeAll(async()=>{const {ctx,base}=await apiCtx();workspaceId=await seedWorkspace(ctx,base);vaultId=(await seedVaultDir(ctx,base,workspaceId)).vaultId;await ctx.dispose();});
@@ -12,6 +15,7 @@ async function selectScene(page:Page,title:string){await page.locator('.scene-li
 const sceneUrl = (id: string) => (u: URL) => u.pathname.endsWith(`/canvas/scenes/${id}`);
 
 test('Canvas preserves a failed pending draft across scene switches',async({page})=>{
+ test.skip(true,CANVAS_PAGE_RETIRED);
  const [a,b]=await scenes();await openPage(page,'canvas');await selectScene(page,a.title);
  await page.getByTitle('Edit the Mermaid source',{exact:true}).click();
  let fail=true;const writes:string[]=[];
@@ -48,7 +52,7 @@ for(const [theme,scheme,width,rtl] of [['native','light',1440,false],['native','
   const {ctx,base}=await apiCtx();const r=await ctx.post(`${base}/api/v1/design/artifacts`,{data:{workspace_id:workspaceId,title:'Synthetic loaded review card',format:'html',studio:'frames',content:'<html><body style="font:16px system-ui;padding:24px"><h1>Launch checklist</h1><p>Review the draft before publishing.</p><button>Preview draft</button></body></html>'}});expect(r.ok()).toBeTruthy();const id=(await r.json()).artifact.id;
   await page.goto(`/#/design/a/${id}`);await expect(page.getByTestId('design-source-toggle')).toBeVisible();
   if(width<640) await page.getByRole('group',{name:'Device frame'}).getByRole('button',{name:'iPhone',exact:true}).click();
-  await page.getByTestId('design-source-toggle').click();await page.locator('.cm-content').first().fill('<h1>Updated on this screen</h1><p>Draft remains editable at every width.</p>');await page.getByTestId('design-save').click();await expect(page.getByTestId('design-version-chip')).toHaveCount(2);await page.getByTestId('design-source-toggle').click();
+  await page.getByTestId('design-source-toggle').click();await page.locator('.cm-content').first().fill('<h1>Updated on this screen</h1><p>Draft remains editable at every width.</p>');await expect(page.getByTestId('design-save-state')).toHaveAttribute('data-state','saved');await expect(page.getByTitle('Current version: v2')).toBeAttached();await page.getByTestId('design-source-toggle').click();
   await expectNoHorizontalOverflow(page);await page.screenshot({path:`/tmp/otto-ux-r3-content-design-${theme}-${scheme}.png`});
   const png=await page.evaluate(()=>{const c=document.createElement('canvas');c.width=640;c.height=480;const x=c.getContext('2d')!;x.fillStyle='#eeeeee';x.fillRect(0,0,640,480);x.fillStyle='#222222';x.font='24px sans-serif';x.fillText('Synthetic screenshot for annotation',35,70);return c.toDataURL().split(',')[1];});
   const snip=await ctx.post(`${base}/api/v1/snips`,{data:{data_b64:png,filename:'synthetic-review.png'}});expect(snip.ok()).toBeTruthy();const sid=(await snip.json()).id;await ctx.dispose();
@@ -77,6 +81,7 @@ for(const [theme,scheme,width,rtl] of [['native','light',1440,false],['native','
  });
 }
 test('Canvas queues in-flight saves and keeps both scene drafts',async({page})=>{
+ test.skip(true,CANVAS_PAGE_RETIRED);
  const [a,b]=await scenes();await openPage(page,'canvas');await selectScene(page,a.title);await page.getByTitle('Edit the Mermaid source',{exact:true}).click();
  let release!:()=>void,started!:()=>void;const held=new Promise<void>(r=>release=r),requested=new Promise<void>(r=>started=r);let calls=0;
  await page.context().route(sceneUrl(a.id),async route=>{if(route.request().method()!=='PUT')return route.continue();calls++;if(calls===1){started();await held;}return route.continue();});
@@ -89,7 +94,7 @@ test('Canvas queues in-flight saves and keeps both scene drafts',async({page})=>
 });
 test('Product dashboard template has readable labels and pin annotations',async({page})=>{
  const {ctx,base}=await apiCtx();const response=await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/product/drafts`,{data:{title:`R3 template story ${workspaceId}`} });expect(response.ok()).toBeTruthy();await ctx.dispose();
- await openPage(page,'product');await page.locator('.story-row',{hasText:`R3 template story ${workspaceId}`}).click();await page.getByRole('tab',{name:'Story',exact:true}).click();await page.locator('.sub-tab-strip .st',{hasText:'Design'}).click();
+ await openPage(page,'product');await page.locator('.story-row',{hasText:`R3 template story ${workspaceId}`}).click();await page.getByRole('tab',{name:'Story',exact:true}).click();await page.locator('.sub-tab-strip .st',{hasText:'Design'}).click();await openClassicArena(page);
  const initialPanes=page.getByRole('tablist',{name:'Design panes'});if(await initialPanes.isVisible())await initialPanes.getByRole('tab',{name:'Assets',exact:true}).click();
  await page.getByTitle('New artifact (blank or from a template)').click();await page.getByRole('menuitem',{name:'Template: Dashboard',exact:true}).click();
  const frame=page.frameLocator('iframe.mockup-frame');await expect(frame.locator('.kpi').first()).toBeVisible();
@@ -101,6 +106,7 @@ test('Product dashboard template has readable labels and pin annotations',async(
  const overlay=page.locator('.overlay.annotate');await overlay.click({position:{x:120,y:90}});await page.locator('.editor textarea').fill('Please align this card');await page.locator('.editor').getByRole('button',{name:'Add',exact:true}).click();await expect(page.locator('.editor')).toHaveCount(0);
 });
 test('Canvas Excalidraw preserves failed hand edits across scene switching',async({page})=>{
+ test.skip(true,CANVAS_PAGE_RETIRED);
  const {ctx,base}=await apiCtx();const response=await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/canvas/scenes`,{data:{title:`R3 editable Excalidraw ${workspaceId}`,doc:{type:'otto-canvas',version:1,format:'excalidraw',source:JSON.stringify({type:'excalidraw',elements:[]})}}});expect(response.ok()).toBeTruthy();const id=(await response.json()).id;await ctx.dispose();const [,b]=await scenes();
  await openPage(page,'canvas');await page.locator('.scene-list .row',{hasText:`R3 editable Excalidraw ${workspaceId}`}).getByRole('button').first().click();const drawing=page.locator('.excalidraw canvas').first();await expect(drawing).toBeVisible({timeout:30000});
  let writes=0;await page.context().route(sceneUrl(id),route=>{if(route.request().method()!=='PUT')return route.continue();writes++;return route.fulfill({status:503,json:{code:'upstream',message:'Drawing save unavailable'}});});

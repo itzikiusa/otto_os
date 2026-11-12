@@ -318,7 +318,7 @@
           </div>
           <div class="step-hint">
             Drop-in expertise your agents can use — code review and usage insights. Install now or
-            later from <button class="link" onclick={() => router.go('settings/skills')}>Settings → Skills</button>.
+            later from <button class="link" onclick={() => router.go('skills-eval/bundled')}>Skills Lab → Bundled</button>.
           </div>
           <LoadState variant="compact" what="recommended skills" loading={skillsLoading} error={skillsError} empty={recommendedSkills.length === 0} onretry={loadSkills}>
           <div class="skill-rows">

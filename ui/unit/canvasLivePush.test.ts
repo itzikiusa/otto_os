@@ -405,7 +405,7 @@ test('a save queued during Ask Otto still pins when it lands after finish, and t
   await turn;
 });
 
-test('CanvasPanel lazily imports canvas store inside openInCanvas, sets pendingOpenId before routing, and toasts on failure', async () => {
+test('CanvasPanel lazily imports the Design Hall nav inside openInCanvas, opens the scene\'s Hall mirror, and toasts on failure', async () => {
   const { readFileSync } = await import('node:fs');
   const { compile } = await import('svelte/compiler');
   const panelUrl = new URL('../src/modules/panels/CanvasPanel.svelte', import.meta.url);
@@ -423,9 +423,11 @@ test('CanvasPanel lazily imports canvas store inside openInCanvas, sets pendingO
   const fnStart = panelSource.indexOf('async function openInCanvas');
   assert.notEqual(fnStart, -1, 'openInCanvas is async');
   const fnSlice = panelSource.slice(fnStart, fnStart + 320);
-  const importIdx = fnSlice.indexOf("await import('../../lib/stores/canvas.svelte')");
-  const pendingIdx = fnSlice.indexOf('canvas.pendingOpenId = sceneId');
-  const routeIdx = fnSlice.indexOf("router.go('canvas')");
-  const toastIdx = fnSlice.indexOf("toastError('Couldn’t open Canvas', e)");
-  assert.ok(importIdx > 0 && pendingIdx > importIdx && routeIdx > pendingIdx && toastIdx > routeIdx);
+  const importIdx = fnSlice.indexOf("await import('../design-hall/nav')");
+  const openIdx = fnSlice.indexOf('openSceneInHall(sceneId)');
+  const toastIdx = fnSlice.indexOf("toastError('Couldn’t open Design Hall', e)");
+  assert.ok(importIdx > 0 && openIdx > importIdx && toastIdx > openIdx);
+  // Canvas folded into Design Hall: the old page hand-off is gone from the panel.
+  assert.doesNotMatch(panelSource, /router\.go\('canvas'\)|pendingOpenId/);
+  assert.doesNotMatch(panelSource, /^\s*import\s+[^;]*from\s+['"]\.\.\/design-hall\/nav['"]/m);
 });

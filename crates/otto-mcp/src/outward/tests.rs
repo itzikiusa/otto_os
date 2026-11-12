@@ -848,27 +848,27 @@ const AWS_READS: &[&str] = &[
     "aws_list_accounts",
     "aws_s3_list_buckets",
     "aws_s3_list_objects",
-    "aws_s3_preview",
     "aws_sqs_list_queues",
     "aws_ec2_list_instances",
     "aws_athena_list_tables",
     "aws_athena_get_query",
     "aws_eks_list_clusters",
     "aws_logs_list_groups",
-    "aws_logs_filter",
-    "aws_logs_insights",
     "aws_logs_get_insights",
 ];
 const K8S_READS: &[&str] = &[
     "k8s_list_clusters",
     "k8s_get_resources",
     "k8s_describe",
-    "k8s_logs",
     "k8s_top",
     "k8s_health",
     "k8s_pod_actions_list",
 ];
+/// Data-heavy console reads: defined, but off until an operator enables them.
+const CONSOLE_CONTENT_READS: &[&str] = &["aws_s3_preview", "aws_logs_filter", "k8s_logs"];
 const CONSOLE_WRITES: &[&str] = &[
+    // Billed per GB scanned, like an Athena query.
+    "aws_logs_insights",
     "aws_athena_query",
     "aws_sqs_send",
     "aws_sqs_peek",
@@ -880,7 +880,12 @@ const CONSOLE_WRITES: &[&str] = &[
 fn aws_k8s_tools_present_and_classified() {
     let names = spec_names();
     let specs = otto_tool_specs();
-    for n in AWS_READS.iter().chain(K8S_READS).chain(CONSOLE_WRITES) {
+    for n in AWS_READS
+        .iter()
+        .chain(K8S_READS)
+        .chain(CONSOLE_CONTENT_READS)
+        .chain(CONSOLE_WRITES)
+    {
         assert!(
             names.contains(&format!("otto.{n}")),
             "missing spec otto.{n}"
@@ -898,6 +903,11 @@ fn aws_k8s_tools_present_and_classified() {
     }
     for r in AWS_READS.iter().chain(K8S_READS) {
         assert!(DEFAULT_ENABLED.contains(r), "{r} must be default-enabled");
+        assert!(!DANGEROUS.contains(r), "{r} must not be DANGEROUS");
+    }
+    for r in CONSOLE_CONTENT_READS {
+        assert!(!DEFAULT_ENABLED.contains(r), "{r} must be off by default");
+        assert!(OPT_IN_READS.contains(r), "{r} must be an opt-in read");
         assert!(!DANGEROUS.contains(r), "{r} must not be DANGEROUS");
     }
     for w in CONSOLE_WRITES {
@@ -1167,6 +1177,139 @@ fn dangerous_detail_surfaces_console_targets() {
         d.contains("SELECT * FROM t") && d.contains("db") && d.contains("a1"),
         "{d}"
     );
+    // The dangerous params are in the summary line itself.
+    let d = dangerous_detail(
+        "otto.k8s_action",
+        &json!({"cluster_id":"c1","action":"scale","kind":"deployments","namespace":"shop","name":"web","params":{"replicas":0}}),
+    );
+    assert!(d.contains("replicas=0 (STOPS EVERY POD)"), "{d}");
+    let d = dangerous_detail(
+        "otto.k8s_action",
+        &json!({"cluster_id":"c1","action":"argocd_sync","kind":"applications","namespace":"argocd","name":"shop","params":{"prune":true,"revision":"v1.2"}}),
+    );
+    assert!(d.contains("PRUNE") && d.contains("revision=v1.2"), "{d}");
+    let d = dangerous_detail(
+        "otto.k8s_action",
+        &json!({"cluster_id":"c1","action":"delete_pod","kind":"pods","namespace":"shop","name":"web-1","params":{"grace":"0"}}),
+    );
+    assert!(d.contains("grace=0 + FORCE"), "{d}");
+    let d = dangerous_detail(
+        "otto.k8s_action",
+        &json!({"cluster_id":"c1","action":"rollout_undo","kind":"deployments","namespace":"shop","name":"web","params":{"to_revision":3}}),
+    );
+    assert!(d.contains("to_revision=3"), "{d}");
+    let d = dangerous_detail(
+        "otto.k8s_pod_http",
+        &json!({"cluster_id":"c1","namespace":"shop","port":8081,"method":"POST","path":"/x","pod":"p","body":"12345"}),
+    );
+    assert!(d.contains("5-byte body"), "{d}");
+    let d = dangerous_detail(
+        "otto.aws_sqs_send",
+        &json!({"account_id":"a1","url":"https://sqs/q","body":"abc"}),
+    );
+    assert!(d.contains("3-byte body"), "{d}");
+}
+
+/// A cluster write carrying a typed confirm is a person's decision: the
+/// governed path forces the approval and replays only the approved call as
+/// that person (the route refuses an agent credential's confirm, S6-304).
+#[test]
+fn a_confirm_bearing_cluster_write_is_person_only() {
+    let confirmed = json!({"params": {"confirm_name": "web"}});
+    assert!(call_is_person_only("k8s_action", &confirmed));
+    assert!(!call_is_person_only("k8s_action", &json!({"params": {}})));
+    assert!(!call_is_person_only(
+        "k8s_action",
+        &json!({"params": {"confirm_name": " "}})
+    ));
+    assert!(call_is_person_only(
+        "k8s_pod_http",
+        &json!({"confirm_name": "api"})
+    ));
+    assert!(!call_is_person_only("k8s_pod_http", &json!({})));
+    assert!(!call_is_person_only("aws_sqs_send", &confirmed));
+    // The reviewed person-only tools stay person-only whatever the args.
+    assert!(call_is_person_only("approve_improvement_edit", &json!({})));
+    assert!(person_only_reason("k8s_action").contains("typed confirmation"));
+}
+
+/// An agent-admin call that sets a personal agent's owner-only field is a
+/// person's decision (the handler refuses it from an agent credential): the
+/// approved call replays as the person. A rename / pause / cadence change on
+/// the same tools stays the caller's own call.
+#[test]
+fn owner_only_personal_agent_fields_are_person_only_per_call() {
+    for (bare, args) in [
+        (
+            "update_personal_agent",
+            json!({"agent_id": "a1", "soul_md": "new"}),
+        ),
+        (
+            "update_personal_agent",
+            json!({"agent_id": "a1", "soul_md": ""}),
+        ),
+        (
+            "update_personal_agent",
+            json!({"agent_id": "a1", "delivery": {"type": "slack"}}),
+        ),
+        (
+            "update_personal_agent",
+            json!({"agent_id": "a1", "browser": false}),
+        ),
+        (
+            "add_personal_agent_schedule",
+            json!({"agent_id": "a1", "directive": "x"}),
+        ),
+        (
+            "update_personal_agent_schedule",
+            json!({"schedule_id": "s1", "permission": "directed"}),
+        ),
+        (
+            "set_personal_agent_autonomy",
+            json!({"agent_id": "a1", "rules": []}),
+        ),
+        (
+            "set_personal_agent_autonomy",
+            json!({"agent_id": "a1", "goals": [{"text": "g"}]}),
+        ),
+    ] {
+        assert!(call_is_person_only(bare, &args), "{bare} {args}");
+        assert!(person_only_reason(bare).contains("owner's"), "{bare}");
+    }
+    for (bare, args) in [
+        (
+            "update_personal_agent",
+            json!({"agent_id": "a1", "name": "Scout", "enabled": false}),
+        ),
+        (
+            "update_personal_agent",
+            json!({"agent_id": "a1", "soul_md": null}),
+        ),
+        (
+            "update_personal_agent_schedule",
+            json!({"schedule_id": "s1", "enabled": false}),
+        ),
+        (
+            "add_personal_agent_schedule",
+            json!({"agent_id": "a1", "schedule": {"cadence": "daily"}}),
+        ),
+        (
+            "set_personal_agent_autonomy",
+            json!({"agent_id": "a1", "proactive": {"enabled": true}}),
+        ),
+        (
+            "run_personal_agent",
+            json!({"agent_id": "a1", "soul_md": "x"}),
+        ),
+    ] {
+        assert!(!call_is_person_only(bare, &args), "{bare} {args}");
+    }
+    // Not route-level person-only: the reviewed list stays as it is.
+    for bare in ["update_personal_agent", "add_personal_agent_schedule"] {
+        assert!(!tool_is_person_only(bare), "{bare}");
+    }
+    assert!(person_only_reason("approve_improvement_edit").contains("improvement edit"));
+    assert!(person_only_reason("set_personal_agent_slack_as_me").contains("Slack identity"));
 }
 
 #[test]

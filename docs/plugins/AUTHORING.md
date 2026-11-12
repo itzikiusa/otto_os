@@ -31,7 +31,8 @@ it with RBAC. Plugins can be written in **any language**.
   "description": "…",
   "exec": ["node", "server.js"],   // run from the plugin dir; bind $OTTO_PLUGIN_PORT
   "ui": "ui",                       // iframe assets dir (index.html). Omit for backend-only.
-  "health": "/health"               // health path on your server (default /health)
+  "health": "/health",              // health path on your server (default /health)
+  "agent_tools": false              // optional; see "Agent runs" below (default false)
 }
 ```
 
@@ -65,7 +66,15 @@ Otto spawns your `exec` from the plugin dir with these env vars:
 
 Otto reverse-proxies `GET/POST/… /api/v1/plugins/<slug>/<rest>` → your server's
 `/<rest>`. Implement at least `GET /health` (Otto health-checks it on spawn). The
-caller's identity is forwarded as `X-Otto-User` / `X-Otto-User-Name`. Proxied
+caller's identity is forwarded as `X-Otto-User` / `X-Otto-User-Name`.
+
+**Authenticate the proxy.** Every proxied request carries
+`X-Otto-Plugin-Token: $OTTO_PLUGIN_TOKEN`. Any other local process can reach your
+loopback port, so answer **401** to every request without that exact header
+(compare in constant time; refuse everything when the env var is empty) — except
+`/health`, which Otto probes without it. Both reference plugins do this
+(`pluginTokenOk` in `team-performance/server.js`, `routes::authorized` in
+`dora-metrics`). Proxied
 response bodies are buffered up to 64 MiB; a declared or streamed body exceeding
 that bound returns 502. The normal upstream status/content type and request
 deadline are preserved. This API response limit does not apply to Otto's separate
@@ -81,9 +90,25 @@ Call back with `Authorization: Bearer $OTTO_PLUGIN_TOKEN`:
 | `GET  $OTTO_HOST_API/repos` | `[{id,name,path,remote_url}]` (run git yourself on `path`) |
 | `GET  $OTTO_HOST_API/jira/accounts` | `[{id,label,base_url,email}]` |
 | `GET  $OTTO_HOST_API/jira/credentials?account=<id>` | `{base_url,email,token}` (call Jira yourself) |
-| `POST $OTTO_HOST_API/agents/run` | `{prompt,cwd?,model?}` → `{text}` (runs claude) |
+| `POST $OTTO_HOST_API/agents/run` | `{prompt,provider?,model?,cwd?}` → `{text}` (one agent turn; `provider` is `claude` or `codex`) |
 
 Store your own state under `$OTTO_PLUGIN_DATA_DIR` (files / sqlite — your choice).
+
+### Agent runs
+
+A plugin's prompt usually carries text it collected elsewhere (Jira issues, commit
+messages…), which anyone who can write a ticket controls. So by default
+`agents/run` is **text in, text out**: Claude runs with **no tools and no MCP**,
+Seatbelt-confined, in a throwaway scratch directory (codex: `--sandbox read-only`
+in the same kind of scratch dir); `cwd` is ignored. Fence third-party text in the
+prompt as data anyway.
+
+A plugin that really needs the agent to read or edit files sets
+`"agent_tools": true` in its manifest. Then the turn has full tools, and `cwd`
+(default: `$OTTO_PLUGIN_DATA_DIR`) must be inside that data dir or a repo
+registered in Otto — any other path, and the daemon's own working directory,
+answers 400. Otto writes an audit row (`plugin.agent_run`: provider, tools, cwd,
+prompt size) for every run either way.
 
 ## 5. The UI (iframe)
 
@@ -125,7 +150,9 @@ which Otto authorizes (RBAC) and proxies to your sidecar.
 Plugins are **trusted, user-installed local processes** with a scoped token to the
 host API (repo paths, Jira creds, agent runs). Install is an admin action; plugins
 are **disabled by default**; disable/remove kills the process; everything is
-loopback-only. Only install plugins you trust.
+loopback-only. Only install plugins you trust. The data a plugin feeds an agent is
+NOT trusted: agent runs are tool-less unless the manifest opts in (above), and the
+sidecar only answers Otto's proxy (`X-Otto-Plugin-Token`).
 
 ## 8. Verify
 

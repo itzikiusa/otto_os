@@ -236,6 +236,7 @@
   import { openExternal } from '../external';
   import { terminalLinksForRow, resolveTerminalFile, oscTerminalLink, type TerminalLink } from './terminalLinks';
   import { keyContext, registerFindOwner } from '../keys';
+  import { parkFind, takeFind } from './termFindMemo';
   import { copyText, copyWithToast } from '../clipboard';
   import { snipApi } from '../snip';
   import { toasts } from '../toast.svelte';
@@ -1672,8 +1673,9 @@
         : '',
   );
 
-  /** Drop the find bar's state (and the buffer highlights). */
-  function resetFind(): void {
+  /** Drop the find bar's state and highlights; `parkFor` keeps its open/query for that session. */
+  function resetFind(parkFor: string | null = null): void {
+    parkFind(parkFor, { open: findOpen, query: findQuery });
     findOpen = false;
     if (keyContext.openFind === openFind && document.activeElement === findInput) keyContext.openFind = null;
     cancelLocalFind();
@@ -1685,10 +1687,8 @@
     serverMatches = [];
     serverMatchIdx = -1;
     serverSearchPending = false;
-    if (serverSearchTimer !== null) {
-      clearTimeout(serverSearchTimer);
-      serverSearchTimer = null;
-    }
+    if (serverSearchTimer !== null) clearTimeout(serverSearchTimer);
+    serverSearchTimer = null;
   }
 
   function closeFind(): void {
@@ -2329,6 +2329,9 @@
   /** After adopting: take size authority like an attach would and sync the
    *  PTY to THIS host's box once it has laid out. No snapshot request. */
   function afterAdopt(): void {
+    const memo = takeFind(connectedSid); // the find bar parked with this engine
+    if (memo) [findOpen, findQuery] = [memo.open, memo.query];
+    if (memo?.open) { scheduleLocalFind(); scheduleServerSearch(memo.query); }
     if (claimOnAttach && !readOnly) sendJson({ type: 'claim' });
     requestAnimationFrame(() => {
       if (!term || !connected) return;
@@ -2362,8 +2365,8 @@
    *  replays into the old one's buffer, and switching back is instant. */
   function switchEngine(sid: string): void {
     const hadFocus = !!term?.textarea && document.activeElement === term.textarea;
-    // The find bar's hits (and its ring-buffer list) belong to the old session.
-    resetFind();
+    // The find bar's hits (and its ring-buffer list) belong to the old session: park them with it.
+    resetFind(connectedSid);
     unbindTerm();
     tuiCleanup.cancel();
     if (tuiRefreshRaf !== null) {
@@ -2640,17 +2643,13 @@
       gpuIo?.disconnect();
       if (hudTimer !== null) clearInterval(hudTimer);
       releaseLoop?.();
-      if (localFindTimer !== null) {
-        clearTimeout(localFindTimer);
-        localFindTimer = null;
-      }
       termDidInit = false;
       unregisterSelectAll();
       container.removeEventListener('paste', onPaste, true);
       container.removeEventListener('copy', onCopy, true);
       // Search decorations live on the engine: a parked one must not come
-      // back highlighted under a closed find bar.
-      resetFind();
+      // back highlighted (the bar's open/query park with it; this also cancels the local find).
+      resetFind(parkable && canPark() ? connectedSid : null);
       unbindTerm();
       onTermBlur();
       if (parkable && canPark()) {

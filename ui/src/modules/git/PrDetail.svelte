@@ -65,6 +65,10 @@
   import PrTimelineView from './PrTimelineView.svelte';
   import PrSideColumn from './PrSideColumn.svelte';
   import PrAvatar from './PrAvatar.svelte';
+  import PrHeadPill from './PrHeadPill.svelte';
+  import { headMoved, headMovedLabel, newCommitCount } from './pr-head-follow';
+  import { pickLabel, pickTarget, rememberReviewedHead, reviewedHead, sinceReviewItems, sinceReviewPick } from './pr-since-review';
+  import { withComment } from './pr-comments';
 
   interface Props {
     repoId: string;
@@ -238,7 +242,8 @@
   const POLL_MS = 2 * 60_000;
   /** A fresher copy of the PR than the one on screen (head or activity moved). */
   let pending = $state.raw<PrDetail | null>(null);
-  const pendingNewCommits = $derived(!!pending && !!pr && (pending.head_sha ?? '') !== (pr.head_sha ?? ''));
+  /** Said once the files followed a push (pr-head-follow.ts). */
+  let headNote = $state<string | null>(null);
   $effect(() => {
     const rid = repoId;
     const num = number;
@@ -249,26 +254,29 @@
       if (disposed || rid !== repoId || num !== number || !pr) return;
       prDetailCache.set(prKey(rid, num), next);
       onloaded?.(next);
-      const moved = (next.head_sha ?? '') !== (pr.head_sha ?? '')
-        || next.updated_at !== pr.updated_at
-        || next.state !== pr.state
-        || next.comments.length !== pr.comments.length;
+      // A push: the files and diff follow the new head (the reader is told).
+      if (headMoved(pr.head_sha, next.head_sha)) return void followHead(rid, num);
+      const moved = next.updated_at !== pr.updated_at || next.state !== pr.state || next.comments.length !== pr.comments.length;
       pending = moved ? next : null;
     }, { ms: POLL_MS });
     return () => poller.stop();
   });
-  function applyPending(): void {
+  function applyPending(): Promise<void> {
     pending = null;
+    headNote = null;
     invalidatePr(repoId, number);
     commits = null;
-    void load(repoId, number);
-    void loadCommits(repoId, number);
+    void load(repoId, number); // a moved head re-reads the diff (load)
+    return loadCommits(repoId, number);
+  }
+  async function followHead(rid: string, num: number): Promise<void> {
+    const before = commits;
+    await applyPending();
+    if (!disposed && rid === repoId && num === number) headNote = headMovedLabel(newCommitCount(before, commits));
   }
   function refreshAll(): void {
-    invalidatePr(repoId, number);
-    checksTried = false;
-    checks = null;
-    applyPending();
+    checksTried = false; checks = null;
+    void applyPending(); // drops the cached detail + commits too
     toasts.info('Refreshing', `PR #${number}`);
   }
 
@@ -355,25 +363,12 @@
     }
     invalidatePr(rid, num);
     const posted = await api.post<PrComment>(`/repos/${rid}/prs/${num}/comments`, req);
+    rememberReviewedHead(rid, num, diffHead); // "Changes since your review" starts here
     if (disposed || rid !== repoId || num !== number) return;
     if (pr && typeof posted?.id === 'string' && posted.id !== '') {
       pr = { ...pr, comments: withComment(pr.comments, { ...posted, replies: posted.replies ?? [] }, inReplyTo) };
     }
     void load(rid, num, true);
-  }
-
-  function withComment(comments: PrComment[], c: PrComment, parent?: string): PrComment[] {
-    if (parent) {
-      const i = comments.findIndex(
-        (h) => h.id === parent || h.thread_id === parent || (h.replies ?? []).some((r) => r.id === parent),
-      );
-      if (i >= 0) {
-        const next = comments.slice();
-        next[i] = { ...comments[i], replies: [...(comments[i].replies ?? []), c] };
-        return next;
-      }
-    }
-    return [...comments, c];
   }
 
   async function resolveThread(threadId: string, resolved: boolean): Promise<void> {
@@ -440,6 +435,7 @@
     try {
       invalidatePr(repoId, number);
       await api.post(`/repos/${repoId}/prs/${number}/${kind}`);
+      if (approve) rememberReviewedHead(repoId, number, diffHead);
       if (disposed) return;
       toasts.success(`PR ${approve ? 'approved' : 'declined'}`, `#${number}`);
       if (pr) patchNow(approve ? withMyReview(pr, 'approved', isMe, myName) : { ...pr, state: 'declined' });
@@ -466,6 +462,7 @@
     try {
       invalidatePr(repoId, number);
       await api.post(`/repos/${repoId}/prs/${number}/request-changes`, { body: requestChangesBody.trim() || null });
+      rememberReviewedHead(repoId, number, diffHead);
       if (disposed) return;
       toasts.success('Changes requested', `PR #${number}`);
       showRequestChanges = false;
@@ -544,7 +541,9 @@
   let commitError = $state<string | null>(null);
   let commitLoading = $state(false);
   const selectedCommit = $derived(commitSha ? (commits ?? []).find((c) => c.sha === commitSha) ?? null : null);
-  const commitLoader = $derived(commitSha ? repoDiffFileLoader(repoId, `commit:${commitSha}`) : undefined);
+  const commitLoader = $derived(commitSha ? repoDiffFileLoader(repoId, pickTarget(commitSha)) : undefined);
+  /** "Changes since your review" (pr-since-review.ts), when you reviewed at an older head. */
+  const sincePick = $derived(pr ? sinceReviewPick(reviewedHead(repoId, number), pr.head_sha) : null);
 
   async function pickCommit(sha: string | null): Promise<void> {
     commitSha = sha;
@@ -552,7 +551,7 @@
     commitError = null;
     if (!sha) return;
     commitLoading = true;
-    const url = `/repos/${repoId}/diff?target=${encodeURIComponent(`commit:${sha}`)}&summary=true`;
+    const url = `/repos/${repoId}/diff?target=${encodeURIComponent(pickTarget(sha))}&summary=true`;
     try {
       let d: DiffResp;
       try {
@@ -574,6 +573,7 @@
   function commitMenu(e: MouseEvent): void {
     const items: MenuItem[] = [
       { label: 'All commits', checked: commitSha === null, pinned: true, action: () => void pickCommit(null) },
+      ...sinceReviewItems(sincePick, commitSha, (sel) => void pickCommit(sel)),
       { separator: true, pinned: true },
       ...(commits ?? []).map((c) => ({
         label: c.subject,
@@ -592,9 +592,12 @@
 {#snippet commitPicker()}
   <button class="btn small ghost prd-commit-pick" aria-haspopup="menu" onclick={commitMenu}
     title={selectedCommit ? `${selectedCommit.short_sha} · ${selectedCommit.subject}` : 'Show the changes of one commit'}>
-    <span class="prd-commit-label">{selectedCommit ? selectedCommit.subject : 'All commits'}</span>
+    <span class="prd-commit-label">{pickLabel(commitSha, selectedCommit)}</span>
     <Icon name="chevronDown" size={12} />
   </button>
+  {#if sincePick && commitSha !== sincePick}
+    <button class="btn small ghost" data-testid="pr-since-review" onclick={() => sincePick && void pickCommit(sincePick)} title="Show only what changed after your review">Since your review</button>
+  {/if}
 {/snippet}
 
 <div class="prd" data-pr={number} data-diff-head={diffHead || null}>
@@ -616,11 +619,7 @@
         </span>
         {#if pr.mergeable === false}<span class="prd-state st-declined"><Icon name="warning" size={12} /> Conflicts</span>{/if}
         <span class="grow"></span>
-        {#if pending}
-          <button class="btn small prd-pending" onclick={applyPending} title="Load the latest version of this pull request">
-            <Icon name="refresh" size={12} /> {pendingNewCommits ? 'New commits' : 'Updated'} · Refresh
-          </button>
-        {/if}
+        <PrHeadPill pending={!!pending} {headNote} onapply={() => void applyPending()} ondismiss={() => (headNote = null)} />
         <div class="prd-actions">
           {#if pr.state === 'open'}
             <PrReviewButtons review={mine} {busy} onapprove={() => void action('approve')} onrequestchanges={openRequestChanges}
@@ -716,7 +715,7 @@
             onreply={(parentId, body) => postComment(body, undefined, undefined, parentId)} />
         </div>
 
-        <PrSideColumn {pr} {checks} {commits} {providerName} />
+        <PrSideColumn {pr} {checks} {commits} {providerName} {repoId} where={prWhere()} onreviewerschanged={() => { invalidatePr(repoId, number); void load(repoId, number, true); }} />
       </div>
 
       {#if activeTab === 'timeline'}
@@ -849,7 +848,6 @@
   .st-draft { color: var(--text-dim); background: var(--surface-2); }
   .prd-actions { display: inline-flex; align-items: center; gap: 6px; flex: none; margin-inline-start: auto; }
   .icon-only { padding-inline: 6px; }
-  .prd-pending { color: var(--info); border-color: color-mix(in srgb, var(--info) 40%, var(--border)); }
   .prd-title {
     margin: 2px 0 0;
     font-size: var(--fs-xl);

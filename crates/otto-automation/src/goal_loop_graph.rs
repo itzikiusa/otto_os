@@ -142,7 +142,13 @@ pub fn reconcile(
                     eval.criteria
                         .iter()
                         .find(|c| c.id == *id)
-                        .cloned()
+                        // The ledger is in every role prompt: keep the
+                        // headline; the iteration record keeps the output.
+                        .map(|c| EvalCriterion {
+                            evidence: crate::goal_loop_policy::evidence_headline(&c.evidence)
+                                .to_string(),
+                            ..c.clone()
+                        })
                         .unwrap_or(EvalCriterion {
                             id: id.clone(),
                             met: false,
@@ -352,6 +358,25 @@ mod tests {
         reconcile(&g, &mut l, &eval(), None);
         assert_eq!(next_node(&g, &l).unwrap().id, "c");
         assert_eq!(l.graph_nodes[0].status, "passed");
+    }
+
+    #[test]
+    fn task_ledger_keeps_the_evidence_headline_not_the_verify_output() {
+        let (cfg, _) = fixture();
+        let g = cfg.graph.unwrap();
+        let mut l = GoalLoopLedger::default();
+        initialize(&g, &mut l);
+        l.graph_nodes[0].iteration = 1;
+        let mut e = eval();
+        e.criteria[0].evidence =
+            crate::goal_loop_policy::with_output("verify command exited 0", "test result: ok");
+        reconcile(&g, &mut l, &e, Some("a"));
+        assert_eq!(l.graph_nodes[0].status, "passed");
+        assert_eq!(
+            l.graph_nodes[0].criteria[0].evidence,
+            "verify command exited 0"
+        );
+        assert!(!l.graph_nodes[0].evidence.contains("test result"));
     }
 
     #[test]

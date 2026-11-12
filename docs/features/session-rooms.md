@@ -158,7 +158,9 @@ No unattended desktop access, file transfer or clipboard synchronization is adde
 - **Sharing stops after a connection loss:** this is deliberate. Rejoin media
   and request the relevant permission again after reconnecting.
 - **Room closed after host disconnect:** membership has a thirty-second grace
-  period; expiry ends the room while leaving the session alive.
+  period; expiry ends the room while leaving the session alive. A member whose
+  socket falls behind the room's 128-notice queue is NOT disconnected: it gets a
+  fresh room snapshot and carries on (only the room going away closes it).
 
 The authoritative wire protocol is [Session rooms](../contracts/rooms.md).
 Ordinary terminal input also follows the room authority rules documented in

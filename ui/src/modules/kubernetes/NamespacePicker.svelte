@@ -14,11 +14,15 @@
     namespaces: K8sNamespace[];
     /** Non-empty when the namespace list failed to load — typing still works. */
     error?: string;
+    /** The daemon could list only the namespaces known to work (RBAC). */
+    partial?: boolean;
     disabled?: boolean;
     allowAll?: boolean;
     onchange: (ns: string) => void;
   }
-  let { value, namespaces, error = '', disabled = false, allowAll = true, onchange }: Props = $props();
+  let { value, namespaces, error = '', partial = false, disabled = false, allowAll = true, onchange }: Props = $props();
+  /** Either way the list is not the cluster's full set. */
+  const limited = $derived(!!error || partial);
 
   const ALL = '';
   let open = $state(false);
@@ -163,10 +167,11 @@
     {#if allowAll}<option value="">All namespaces</option>{/if}
     {#each namespaces as n (n.name)}<option value={n.name}>{n.name}</option>{/each}
     {#if value && !namespaces.some((n) => n.name === value)}<option value={value}>{value}</option>{/if}
+    {#if limited}<option disabled value="__partial">Only namespaces you’ve used are listed</option>{/if}
   </select>
 {:else}
-  <div class="ns" class:has-error={!!error} data-testid="k8s-ns-picker">
-    {#if error}
+  <div class="ns" class:has-error={limited} data-testid="k8s-ns-picker">
+    {#if limited}
       <span class="ns-warn" title="Namespaces couldn’t be listed — type one to use it"><Icon name="warning" size={13} /></span>
     {:else}
       <Icon name="layers" size={13} />
@@ -204,7 +209,7 @@
       aria-label="Namespaces"
       style="top:{pos.top}px;left:{pos.left}px;width:{pos.width}px;max-height:{pos.maxH}px"
     >
-      {#if error}<div class="ns-err">Couldn’t list namespaces (RBAC) — showing ones you’ve used; type any other to use it.</div>{/if}
+      {#if limited}<div class="ns-err" data-testid="k8s-ns-partial">Couldn’t list every namespace (RBAC) — showing ones you’ve used; type any other to use it.</div>{/if}
       {#each options as o, i (o.value + ':' + o.label)}
         <div
           id="k8s-ns-opt-{i}"

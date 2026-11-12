@@ -57,6 +57,18 @@ impl Me {
     pub(crate) fn owns(&self, user_keys: &[String]) -> bool {
         user_keys.iter().any(|k| self.keys.contains(k))
     }
+
+    /// The (lowercased) value of this account's `kind` id — what a forge's
+    /// own list filter takes (Bitbucket `reviewers.uuid`, GitLab
+    /// `reviewer_id`). `None` when the identity carries no such id.
+    pub(crate) fn value(&self, kind: &str) -> Option<&str> {
+        let prefix = format!("{kind}:");
+        // A set has no order: the smallest wins, so the answer is stable.
+        self.keys
+            .iter()
+            .filter_map(|k| k.strip_prefix(prefix.as_str()))
+            .min()
+    }
 }
 
 /// [`Me::owns`] with no identity at hand ⇒ false.
@@ -198,6 +210,14 @@ mod tests {
         assert!(me.owns(&["x".into(), num_key(7)]));
         assert!(!me.owns(&[key("uuid", "{u2}")]));
         assert!(!is_me(None, &[num_key(7)]));
+    }
+
+    #[test]
+    fn value_reads_one_kind_of_id() {
+        let me = Me::from_keys(vec![key("uuid", "{AB-1}"), num_key(7)]).unwrap();
+        assert_eq!(me.value("uuid"), Some("{ab-1}"));
+        assert_eq!(me.value("id"), Some("7"));
+        assert_eq!(me.value("login"), None);
     }
 
     #[test]

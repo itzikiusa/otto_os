@@ -1,6 +1,11 @@
 import { test, expect } from '@playwright/test';
 import { openPage } from './helpers';
 import { apiCtx, seedWorkspace } from './seed';
+import { CANVAS_PAGE_RETIRED } from './storyDesigns';
+
+// The Canvas page folded into Design Hall; this file covers the unmounted
+// CanvasPage editor (see e2e/storyDesigns.ts).
+test.skip(() => true, CANVAS_PAGE_RETIRED);
 
 test.use({ serviceWorkers: 'block' });
 

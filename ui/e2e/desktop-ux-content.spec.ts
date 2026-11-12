@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { expectFullyInViewport, expectNoHorizontalOverflow, openPage } from './helpers';
+import { CANVAS_PAGE_RETIRED } from './storyDesigns';
 
 // Route fixtures must observe the actual requests in WebKit as well as Chromium.
 test.use({ serviceWorkers: 'block' });
@@ -38,6 +39,7 @@ test('Product phone empty state exposes the import action immediately', async ({
 
 for (const scheme of ['light', 'dark'] as const) {
   test(`Canvas phone assistant fits and closes in ${scheme}`, async ({ page }) => {
+    test.skip(true, CANVAS_PAGE_RETIRED);
     await page.setViewportSize({ width: 375, height: 812 });
     await page.addInitScript((s) => localStorage.setItem('otto_scheme', s), scheme);
     await openPage(page, 'canvas');

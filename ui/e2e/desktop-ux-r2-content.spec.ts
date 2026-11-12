@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedVaultDir } from './seed';
 import { expectNoHorizontalOverflow, expectFullyInViewport, openPage } from './helpers';
+import { CANVAS_PAGE_RETIRED } from './storyDesigns';
 
 test.use({ viewport: {width:1280,height:800}, serviceWorkers: 'block' });
 
@@ -56,15 +57,19 @@ test('Design Hall tab groups support arrows and Home End', async ({page}) => {
   await expect(lobby.getByRole('tab').last()).toHaveAttribute('aria-selected','true');
   await page.goto(`/#/design/a/${artifactId}`);
   const details = page.getByRole('tablist',{name:'Details panel'});
+  // Otto · Versions · Links: Otto is first and open by default.
   await details.getByRole('tab').first().focus(); await page.keyboard.press('ArrowRight');
-  await expect(page.getByTestId('design-tab-links')).toBeFocused();
-  await expect(page.getByTestId('design-tab-links')).toHaveAttribute('aria-selected','true');
+  await expect(page.getByTestId('design-tab-versions')).toBeFocused();
+  await expect(page.getByTestId('design-tab-versions')).toHaveAttribute('aria-selected','true');
   await page.getByTestId('design-source-toggle').click();
   await page.locator('.cm-content').first().fill('<h1>Updated keyboard draft</h1>');
-  await page.getByTestId('design-save').click();
-  await expect(page.getByTestId('design-version-chip')).toHaveCount(2);
-  await page.getByTestId('design-version-chip').first().click();
-  await page.getByTestId('design-compare').click();
+  // Autosave makes v2; ↑/↓ move through the version rows.
+  await expect(page.getByTestId('design-version-row')).toHaveCount(2);
+  const rows = page.getByTestId('design-version-row').locator('button.row-main');
+  await rows.first().focus(); await page.keyboard.press('ArrowDown');
+  await expect(rows.nth(1)).toBeFocused();
+  await page.keyboard.press('Enter');
+  await page.getByTestId('design-version-compare').click();
   const compare = page.getByRole('tablist',{name:'Compare mode'});
   await compare.getByRole('tab').first().focus(); await page.keyboard.press('End');
   await expect(compare.getByRole('tab').last()).toBeFocused();
@@ -72,7 +77,7 @@ test('Design Hall tab groups support arrows and Home End', async ({page}) => {
   await expect(page.getByRole('dialog',{name:'Compare versions'})).toHaveCSS('opacity','1');
   await page.screenshot({path:'/tmp/otto-ux-r2-content-design-compare.png'});
   await page.keyboard.press('Escape');
-  await expect(page.getByTestId('design-compare')).toBeFocused();
+  await expect(page.getByTestId('design-version-compare')).toBeFocused();
 });
 
 test('Vault failed note opens preserve current content with persistent Retry and ignore stale failures', async ({page}) => {
@@ -107,6 +112,7 @@ test('Vault failed note opens preserve current content with persistent Retry and
 });
 
 test('Canvas phone no-workspace state opens workspace creation directly',async({page})=>{
+  test.skip(true,CANVAS_PAGE_RETIRED);
   await page.setViewportSize({width:375,height:812});
   await page.context().route('**/api/v1/workspaces',route=>route.fulfill({json:[]}));
   await page.addInitScript(()=>localStorage.removeItem('otto_workspace'));
@@ -123,6 +129,7 @@ test('Canvas phone no-workspace state opens workspace creation directly',async({
 
 
 test('Canvas late scene responses cannot replace the latest selection', async ({page}) => {
+  test.skip(true, CANVAS_PAGE_RETIRED);
   const {ctx,base}=await apiCtx();
   const scenes: {id:string; title:string}[]=[];
   for (const title of [`Delayed canvas Alpha ${workspaceId}`,`Latest canvas Beta ${workspaceId}`]) {
@@ -148,7 +155,6 @@ test('Design keeps edits typed while a save is in flight dirty',async({page})=>{
   await page.goto(`/#/design/a/${artifactId}`);
   await page.getByTestId('design-source-toggle').click();
   const editor=page.locator('.cm-content').first();
-  await editor.fill('<h1>Submitted snapshot</h1>');
   let release!:()=>void,started!:()=>void;
   const held=new Promise<void>(resolve=>{release=resolve;});
   const requested=new Promise<void>(resolve=>{started=resolve;});
@@ -156,12 +162,17 @@ test('Design keeps edits typed while a save is in flight dirty',async({page})=>{
     if(route.request().method()!=='PUT')return route.continue();
     const response=await route.fetch();started();await held;await route.fulfill({response});
   });
-  await page.getByTestId('design-save').click(); await requested;
+  // The autosave of the first edit is held in flight while more is typed.
+  await editor.fill('<h1>Submitted snapshot</h1>');
+  await requested;
+  const second=page.waitForRequest(r=>r.method()==='PUT'&&r.url().endsWith(`/design/artifacts/${artifactId}/content`)&&(r.postData()??'').includes('Newer unsaved typing'));
   await editor.fill('<h1>Newer unsaved typing</h1>');
-  release();
-  await expect(page.getByTestId('design-save')).toBeEnabled();
   await expect(page.getByTestId('design-dirty')).toBeVisible();
+  release();
+  // The edits typed meanwhile stay in the editor and are saved next, not dropped.
+  await second;
   await expect(editor).toContainText('Newer unsaved typing');
+  await expect(page.getByTestId('design-save-state')).toHaveAttribute('data-state','saved');
 });
 
 test('Vault retains edits typed during a delayed note open when saving fails',async({page})=>{

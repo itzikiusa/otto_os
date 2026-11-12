@@ -86,6 +86,18 @@ pub fn allowlisted(edit: &ProposedEdit, skill_allowlist: &[String]) -> bool {
     }
 }
 
+/// The autonomy a run applies its edits under. An untrusted run (one whose
+/// input nobody reviewed before it started, e.g. third-party Jira/Confluence
+/// comments read by the story watcher) never applies anything unattended:
+/// every edit queues for a person, whatever the workspace allows.
+pub fn run_autonomy(configured: Autonomy, untrusted: bool) -> Autonomy {
+    if untrusted {
+        Autonomy::Propose
+    } else {
+        configured
+    }
+}
+
 /// Final disposition for an edit.
 pub fn decide(edit: &ProposedEdit, skill_allowlist: &[String], autonomy: Autonomy) -> Disposition {
     if !allowlisted(edit, skill_allowlist) {
@@ -179,6 +191,24 @@ mod tests {
             ImprovementRisk::Low,
         );
         assert_eq!(decide(&e, &list, Autonomy::Propose), Disposition::Queue);
+    }
+
+    #[test]
+    fn untrusted_runs_propose_whatever_the_workspace_allows() {
+        for configured in [Autonomy::Auto, Autonomy::Tiered, Autonomy::Propose] {
+            assert_eq!(run_autonomy(configured, true), Autonomy::Propose);
+            assert_eq!(run_autonomy(configured, false), configured);
+        }
+        let list = vec!["support-triage-router".to_string()];
+        let e = edit(
+            ImprovementTarget::Skill,
+            "support-triage-router",
+            ImprovementRisk::Low,
+        );
+        assert_eq!(
+            decide(&e, &list, run_autonomy(Autonomy::Auto, true)),
+            Disposition::Queue
+        );
     }
 
     // ---- deterministic memory gate ----

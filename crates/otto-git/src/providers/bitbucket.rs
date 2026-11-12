@@ -19,6 +19,7 @@ use super::client::Http;
 use super::identity::{self, Me};
 
 pub(crate) mod checks;
+pub(crate) mod reviewers;
 use super::{map_state, ts, varr, vbool, vstr, vstr_opt, vu64, RemoteRef, RemoteRepoSummary};
 use checks::merge_checks;
 
@@ -790,6 +791,25 @@ impl super::GitProvider for Bitbucket {
             // Bitbucket's cursor: present iff another page exists.
             has_more: v.get("next").and_then(Value::as_str).is_some(),
         })
+    }
+
+    async fn list_review_requested(
+        &self,
+        r: &RemoteRef,
+        page: u32,
+        per_page: u32,
+    ) -> Result<super::PrPage> {
+        self.review_requested_page(r, page, per_page).await
+    }
+
+    async fn set_reviewers(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()> {
+        self.edit_reviewers(r, number, add, remove).await
     }
 
     async fn get_pr(&self, r: &RemoteRef, number: u64) -> Result<PrDetail> {

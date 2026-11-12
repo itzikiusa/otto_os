@@ -302,12 +302,23 @@ schedule advances to `now + cadence_minutes`.
 
 ### 6.4 Live evolve (in-loop)
 
-With `live_evolve` on (or a session carrying `meta.evolve == true`), the
-`LiveEvolver` watches that workspace's live **agent** sessions on the event bus.
-When a watched session goes **Idle**, it arms a **30 s debounce**; if the session
-stays idle (the interaction concluded) and there is **new evidence** since the
-last successful evolve, it runs a single-session evolve pass focused narrowly on the
-skill(s) that one session used. It re-arms when the session next goes Working.
+Only while self-improvement is **`enabled`** for the workspace, and then with
+`live_evolve` on (or a session carrying `meta.evolve == true`), the
+`LiveEvolver` watches that workspace's live **foreground agent** sessions on the
+event bus. `enabled: false` stops it outright, whatever `live_evolve` or a
+session's `meta.evolve` says. Engine-owned background sessions are never
+watched: anything whose `meta.source` is in `BACKGROUND_SESSION_SOURCES`
+(channel tickets, workflow steps, reviewers, scheduled tasks, …) or is gated
+as unattended (`personal_agent`). Nobody interacts with those, and before
+2026-11-12 they kept starting analysis turns after self-improvement was
+switched off. When a watched session goes **Idle**, it arms a **30 s
+debounce**; if the session stays idle (the interaction concluded) it first
+peeks for **new evidence** since the last successful evolve (a read that
+releases its claim without moving the cursor). Nothing new: no run row is
+written and no turn starts. Otherwise it runs a single-session evolve pass
+focused narrowly on the skill(s) that one session used. The analysis turn
+waits for the daemon's admission gate like any unattended background agent
+(label `self_improvement`; agent-sessions.md, "Machine resources"). It re-arms when the session next goes Working.
 Live evolve uses **only the first configured provider** (not the full fan-out) to
 stay cheap per turn, and **does not touch the cron schedule**. It reuses the same
 gate, version log, and approval flow as a scheduled run.
@@ -508,7 +519,7 @@ For the team-deployment view (who can see/configure/run this via the
 | No scheduled runs fire | Workspace not `enabled`, workspace archived, or daemon scheduler not running. Check **Next run** in the UI; it scans every 60 s. |
 | **Run now** / **Evolve** returns `409` | A run is already in progress for that workspace; wait for it to finish. |
 | **Evolve now** disabled / rejected | No focused live session — open and focus one. Archived/exited sessions are rejected. |
-| Live evolve never fires | `live_evolve` off and the session lacks `meta.evolve == true`, the session isn't a live agent session, or there is no new evidence since the last successful pass. |
+| Live evolve never fires | Self-improvement is not `enabled`; `live_evolve` off and the session lacks `meta.evolve == true`; the session isn't a live foreground agent session (background sources are never watched); or there is no new evidence since the last successful pass (no run row is written then). |
 | No channel pings | `channels.notify_self_improvement` is off (default), or the workspace's integration has no default chat / bot token, or the run produced 0 applied + 0 queued. See §7. |
 | Settings pane not refreshing live | It relies on the `improvement_updated` WS event with a 30 s poll fallback; check the WS connection. |
 

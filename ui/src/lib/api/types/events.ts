@@ -406,6 +406,16 @@ export type OttoEvent =
       failed: number;
     }
   | {
+      /** A legacy design source (Canvas scene / story attachment) changed on a
+       *  path with no `canvas_updated` / `mockup_updated`; the daemon's Design
+       *  Hall live sync re-mirrors it, and the graph change then arrives as
+       *  `design_artifact_updated`. A refetch cue at most (LIVE_ONLY). */
+      type: 'design_source_changed';
+      workspace_id: Id;
+      kind: 'canvas_scene' | 'product_attachment';
+      id: Id;
+    }
+  | {
       /** The DB Assistant agent session became live (turn start) — the embedded
        *  DB Assistant panel (beside the query editor) attaches its live shell for
        *  the matching `assist_id`. The session is hidden from the Agents list

@@ -58,10 +58,6 @@ import type {
   RefineTurnResp,
   DiscoveryChat,
   DiscoveryChatDetail,
-  CreateDiscoveryChatReq,
-  DiscoveryChatTurn,
-  DiscoveryAction,
-  ApplyResult,
   SaveAttachmentContentReq,
   BlenderStatus,
   BlenderJob,
@@ -1104,51 +1100,17 @@ class ProductStore {
     return api.post<RefinementThread>(`/product/refinement-threads/${tid}/archive`, {});
   }
 
-  // ── Discovery chats ────────────────────────────────────────────────────────
-  // Conversational agent that works from an EMPTY/Untitled draft to help with
-  // early discovery & research, proposing Apply-able action cards. Story-scoped
-  // mirror of the refinement-thread methods above.
+  // ── Discovery chats (read-only history) ───────────────────────────────────
+  // The live conversation is the story's Chat (refinement threads above);
+  // older discovery chats are listed and read there, never written to.
 
   async listDiscoveryChats(): Promise<DiscoveryChat[]> {
     const id = this.storyId();
     return api.get<DiscoveryChat[]>(`/product/stories/${id}/discovery-chats`);
   }
 
-  async createDiscoveryChat(req: CreateDiscoveryChatReq = {}): Promise<DiscoveryChat> {
-    const id = this.storyId();
-    return api.post<DiscoveryChat>(`/product/stories/${id}/discovery-chats`, req);
-  }
-
   async getDiscoveryChat(cid: string): Promise<DiscoveryChatDetail> {
     return api.get<DiscoveryChatDetail>(`/product/discovery-chats/${cid}`);
-  }
-
-  async sendDiscoveryMessage(
-    cid: string,
-    body: string,
-    provider?: string,
-    model?: string,
-    turnId?: string,
-  ): Promise<DiscoveryChatTurn> {
-    return api.post<DiscoveryChatTurn>(`/product/discovery-chats/${cid}/messages`, {
-      body,
-      provider: provider || undefined,
-      model: model || undefined,
-      turn_id: turnId || undefined,
-    });
-  }
-
-  async stopDiscoveryTurn(cid: string, turnId: string): Promise<ProductStopTurnResp> {
-    const req: ProductStopTurnReq = { turn_id: turnId };
-    return api.post<ProductStopTurnResp>(`/product/discovery-chats/${cid}/stop`, req);
-  }
-
-  async archiveDiscoveryChat(cid: string): Promise<DiscoveryChat> {
-    return api.post<DiscoveryChat>(`/product/discovery-chats/${cid}/archive`, {});
-  }
-
-  async applyDiscoveryAction(cid: string, action: DiscoveryAction): Promise<ApplyResult> {
-    return api.post<ApplyResult>(`/product/discovery-chats/${cid}/apply`, { action });
   }
 
   // ── Mockup Annotations ─────────────────────────────────────────────────────

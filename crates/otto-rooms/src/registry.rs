@@ -28,6 +28,38 @@ pub enum Notice {
         event: RoomEvent,
     },
 }
+impl Notice {
+    /// One `notices.recv()` result as a member socket must handle it. A lagged
+    /// receiver (it fell 128 notices behind) resyncs from a fresh snapshot,
+    /// exactly like `State`: dropping it disconnected the member, and a
+    /// dropped host withdrew every share and everyone's audio. Only a closed
+    /// channel (the room is gone) ends the loop: `None`.
+    pub fn received(r: std::result::Result<Notice, broadcast::error::RecvError>) -> Option<Notice> {
+        match r {
+            Ok(notice) => Some(notice),
+            Err(broadcast::error::RecvError::Lagged(_)) => Some(Notice::State),
+            Err(broadcast::error::RecvError::Closed) => None,
+        }
+    }
+}
+/// Keep what happened since `since` (a room's creation): items stamped at or
+/// after it, and unstamped items that follow a kept one. Room viewers must
+/// not read the session's conversation from before the room existed. Returns
+/// whether anything was dropped.
+pub fn retain_since<T>(
+    items: &mut Vec<T>,
+    since: DateTime<Utc>,
+    stamp: impl Fn(&T) -> Option<&str>,
+) -> bool {
+    let (before, mut keep) = (items.len(), false);
+    items.retain(|item| {
+        if let Some(ts) = stamp(item) {
+            keep = DateTime::parse_from_rfc3339(ts).is_ok_and(|t| t.with_timezone(&Utc) >= since);
+        }
+        keep
+    });
+    items.len() != before
+}
 /// The rooms relay's throttle message (the shared bucket takes it per call).
 pub const RATE_LIMITED: &str = "Too many events; retry shortly";
 pub struct Member {
@@ -293,6 +325,20 @@ impl RoomRegistry {
         let room = room.lock().await;
         room.admitted(&member)?;
         Ok(room.session.clone())
+    }
+    /// [`Self::member_session`] plus when the room was created (wall clock):
+    /// a member reads the conversation of the room's own lifetime only.
+    pub async fn member_session_since(
+        &self,
+        id: &str,
+        token: &str,
+    ) -> Result<(String, DateTime<Utc>)> {
+        let member = self.authenticate(id, token).await?;
+        let room = self.get(id).await?;
+        let room = room.lock().await;
+        room.admitted(&member)?;
+        let age = chrono::Duration::from_std(room.created.elapsed()).unwrap_or_default();
+        Ok((room.session.clone(), Utc::now() - age))
     }
     /// `(room id, session, member)` for the member who drives the terminal
     /// under grant `epoch` — the room-capability HTTP writes. `room_input`

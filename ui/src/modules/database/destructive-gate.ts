@@ -2,9 +2,9 @@
 //  - a run that opens a transaction and leaves it open (MySQL / PostgreSQL):
 //    its session is closed when the run ends, so the transaction is rolled
 //    back — asked on every connection (`tx-shape.ts`);
-//  - destructive SQL on connections the daemon does not guard. Guarded (Prod /
-//    read-only) connections are left to their existing typed confirmation —
-//    asking twice would teach people to click through both
+//  - destructive SQL on connections the daemon does not guard. Guarded ones are
+//    left to the daemon — Prod's typed confirmation (asking twice would teach
+//    people to click through both), Read-only's outright refusal —
 //    (`destructive-sql.ts`; the per-device preference in `runSafety`).
 import { confirmer } from '../../lib/confirm.svelte';
 import { database } from '../../lib/stores/database.svelte';

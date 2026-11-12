@@ -327,6 +327,92 @@ mod handoff_tests {
         );
     }
 
+    /// Unattended loops: every block announces the Blocked status (the bell
+    /// notice hangs off that event), and a loop the restart sweep paused
+    /// emits Paused plus a persisted notice that opens it.
+    #[tokio::test]
+    async fn goal_loop_block_and_restart_pause_are_announced() {
+        use otto_core::domain::GoalLoopStatus;
+        use otto_core::event::Event;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = mem_pool().await;
+        seed_workspace(&pool, "gl-ws").await;
+        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('u','u','x','U',0,?)")
+            .bind(chrono::Utc::now().to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let repo = ctx.goal_loops_repo();
+        let new_loop = || otto_state::NewGoalLoop {
+            workspace_id: "gl-ws".into(),
+            name: "L".into(),
+            repo_path: tmp.path().to_string_lossy().into_owned(),
+            definition: serde_json::from_value(json!({"title": "t", "acceptance_criteria": []}))
+                .unwrap(),
+            limits: Default::default(),
+            config: Default::default(),
+            created_by: "u".into(),
+        };
+        let blocked = repo.create(new_loop()).await.unwrap();
+        repo.mark_running(&blocked.id, chrono::Utc::now())
+            .await
+            .unwrap();
+        let mut events = ctx.events().subscribe();
+        otto_automation::goal_loop::block(&ctx, &blocked.id, "Completion review has findings")
+            .await
+            .unwrap();
+        let mut saw_blocked = false;
+        while let Ok(ev) = events.try_recv() {
+            if let Event::GoalLoopUpdated {
+                loop_id, status, ..
+            } = ev
+            {
+                saw_blocked |= loop_id == blocked.id && status == "blocked";
+            }
+        }
+        assert!(saw_blocked, "a block must announce itself");
+        assert_eq!(
+            repo.get(&blocked.id).await.unwrap().status,
+            GoalLoopStatus::Blocked
+        );
+
+        let running = repo.create(new_loop()).await.unwrap();
+        repo.mark_running(&running.id, chrono::Utc::now())
+            .await
+            .unwrap();
+        let swept = repo
+            .fail_running(otto_automation::goal_loop::RESTART_PAUSE_NOTE)
+            .await
+            .unwrap();
+        assert_eq!(swept.len(), 2, "the running loop and the blocked one");
+        let mut events = ctx.events().subscribe();
+        otto_automation::goal_loop::announce_restart_pause(&ctx, &swept).await;
+        let (mut paused, mut notices) = (Vec::new(), Vec::new());
+        while let Ok(ev) = events.try_recv() {
+            match ev {
+                Event::GoalLoopUpdated {
+                    loop_id, status, ..
+                } if status == "paused" => paused.push(loop_id),
+                Event::Notification { notice, .. } => notices.push(notice),
+                _ => {}
+            }
+        }
+        assert_eq!(paused, vec![running.id.clone()], "blocked stays blocked");
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].title.contains("paused by a restart"));
+        assert_eq!(
+            notices[0].source_key.as_deref(),
+            Some(format!("automation:goal_loop_restart:{}", running.id).as_str())
+        );
+        let after = repo.get(&running.id).await.unwrap();
+        assert_eq!(after.status, GoalLoopStatus::Paused);
+        assert_eq!(
+            after.error.as_deref(),
+            Some(otto_automation::goal_loop::RESTART_PAUSE_NOTE)
+        );
+    }
+
     /// S3-303: a daemon restart while a workflow-kind scheduled run waits on
     /// its workflow must not record a false "interrupted" failure — boot
     /// re-attaches the waiter (without blocking), and the run settles with the

@@ -533,3 +533,67 @@ async fn audio_join_without_a_host_member_is_refused() {
     assert!(refused.is_err(), "{refused:?}");
     assert!(!room.members[&guest.member_id].view.audio_joined);
 }
+/// A member socket that falls behind the 128-notice channel resyncs from a
+/// snapshot instead of being disconnected (a lagging host used to withdraw
+/// every share and everyone's audio); only a closed channel ends it.
+#[tokio::test]
+async fn a_lagged_notice_receiver_resyncs_and_only_close_ends_it() {
+    let (tx, mut rx) = tokio::sync::broadcast::channel::<Notice>(2);
+    for _ in 0..5 {
+        tx.send(Notice::Event {
+            to: None,
+            event: RoomEvent::Heartbeat,
+        })
+        .ok();
+    }
+    let lagged = rx.recv().await;
+    assert!(matches!(
+        lagged,
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+    ));
+    assert!(matches!(Notice::received(lagged), Some(Notice::State)));
+    // The receiver keeps working after the resync.
+    assert!(matches!(
+        Notice::received(rx.recv().await),
+        Some(Notice::Event { .. })
+    ));
+    drop(tx);
+    while rx.try_recv().is_ok() {}
+    assert!(Notice::received(rx.recv().await).is_none());
+}
+/// Room viewers read only the conversation of the room's own lifetime: turns
+/// stamped before the room was created are dropped, an unstamped turn follows
+/// the decision of the stamped turn before it.
+#[test]
+fn only_turns_from_the_rooms_lifetime_are_kept() {
+    let since = chrono::DateTime::parse_from_rfc3339("2026-11-12T10:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let mut turns = vec![
+        ("old", Some("2026-11-12T09:59:59Z")),
+        ("old-unstamped", None),
+        ("new", Some("2026-11-12T12:00:00+02:00")),
+        ("new-unstamped", None),
+        ("bad-stamp", Some("yesterday")),
+    ];
+    assert!(retain_since(&mut turns, since, |t| t.1));
+    let kept: Vec<&str> = turns.iter().map(|t| t.0).collect();
+    assert_eq!(kept, ["new", "new-unstamped"]);
+    let mut fresh = vec![("a", Some("2026-11-12T10:00:00Z"))];
+    assert!(!retain_since(&mut fresh, since, |t| t.1), "nothing dropped");
+}
+#[tokio::test]
+async fn a_member_learns_when_the_room_began() {
+    let reg = RoomRegistry::new();
+    let before = chrono::Utc::now() - chrono::Duration::seconds(1);
+    let host = reg
+        .create("s", "owner", "Host", "Secret session", "shell")
+        .await
+        .unwrap();
+    let (session, since) = reg
+        .member_session_since(&host.room_id, &host.token)
+        .await
+        .unwrap();
+    assert_eq!(session, "s");
+    assert!(since >= before && since <= chrono::Utc::now());
+}

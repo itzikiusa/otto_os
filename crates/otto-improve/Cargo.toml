@@ -7,6 +7,9 @@ license.workspace = true
 [dependencies]
 hex = { workspace = true }
 otto-core = { workspace = true }
+# Library skill writes go through `otto_context::Library` (the editor's lock +
+# hash check) and refresh the Otto-owned provider copies (`user_skills`).
+otto-context = { workspace = true }
 otto-state = { workspace = true }
 otto-transcript = { workspace = true }
 otto-sessions = { workspace = true }

@@ -18,13 +18,13 @@ use otto_core::api::{
     GlobalSoulReq, GlobalSoulResp, LibraryContext, LibrarySkill, LibrarySoul,
     MaterializeProviderResult, MaterializeResp, Problem, ProviderSkillContent, ProviderSkillInfo,
     SkillFileContentResp, SkillFileEntry, UpdateWorkspaceContextReq, UpsertLibraryEntryReq,
-    WorkspaceContextConfig, WriteSkillFileReq,
+    WorkspaceContextConfig,
 };
 use otto_core::auth::{AuthUser, RoleChecker};
 use otto_core::domain::WorkspaceRole;
 use otto_core::{Error, Id};
 use otto_state::WorkspacesRepo;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::library::Library;
 use crate::{config, materialize};
@@ -189,6 +189,7 @@ async fn put_skill<C: ContextCtx>(
         library
             .put_skill(&name, &req.body)
             .map_err(|e| Error::Invalid(format!("put skill: {e}")))?;
+        refresh_provider_copies(&library, &name);
         library
             .get_skill(&name)
             .ok_or_else(|| Error::Internal("skill not found after put".into()))
@@ -203,8 +204,11 @@ async fn delete_skill<C: ContextCtx>(
     Path(name): Path<String>,
 ) -> ApiResult<StatusCode> {
     require_root(&user)?;
-    s.library()
-        .delete_skill(&name)
+    // The tree is moved into `<library>/skills-backup/`, not destroyed.
+    let library = s.library().clone();
+    let target = name.clone();
+    off_runtime(move || library.delete_skill(&target))
+        .await?
         .map_err(|e| Error::Invalid(format!("delete skill: {e}")))?;
     // Also remove the user-level provider copies Otto owns (per-dir manifest);
     // a user-authored skill of the same name is left untouched. Best-effort: the
@@ -263,45 +267,113 @@ async fn list_skill_files<C: ContextCtx>(
     Ok(Json(s.library().list_skill_files(&name)))
 }
 
+/// `GET /library/skills/{name}/file` — the file plus `hash`, the SHA-256 of
+/// its bytes on disk, which the editor sends back as `if_hash` on save.
+#[derive(Serialize)]
+struct SkillFileWithHash {
+    #[serde(flatten)]
+    file: SkillFileContentResp,
+    hash: String,
+}
+
 async fn get_skill_file<C: ContextCtx>(
     State(s): State<C>,
     Extension(_user): Extension<AuthUser>,
     Path(name): Path<String>,
     Query(q): Query<FileQuery>,
-) -> ApiResult<Json<SkillFileContentResp>> {
+) -> ApiResult<Json<SkillFileWithHash>> {
     let (content, binary) = s
         .library()
         .read_skill_file(&name, &q.path)
         .ok_or_else(|| Error::NotFound(format!("file '{}' in skill '{name}'", q.path)))?;
-    Ok(Json(SkillFileContentResp {
-        path: q.path,
-        content,
-        binary,
+    let hash = s
+        .library()
+        .skill_file_hash(&name, &q.path)
+        .unwrap_or_default();
+    Ok(Json(SkillFileWithHash {
+        file: SkillFileContentResp {
+            path: q.path,
+            content,
+            binary,
+        },
+        hash,
     }))
+}
+
+/// `PUT /library/skills/{name}/file` body (`otto_core::api::WriteSkillFileReq`
+/// plus the conflict check).
+#[derive(Deserialize)]
+struct WriteSkillFileBody {
+    path: String,
+    content: String,
+    #[serde(default)]
+    create_only: bool,
+    /// SHA-256 of the file as the writer read it. When set and the file on
+    /// disk no longer matches, nothing is written and the reply is 409 with
+    /// `current_hash` (`null` when the file is gone).
+    #[serde(default)]
+    if_hash: Option<String>,
+}
+
+/// After a Library edit, re-copy the skill into the provider skill folders
+/// whose manifest says Otto owns that copy (`~/.claude/skills`, …), so the
+/// CLIs run what the person just saved. Best effort: the Library write already
+/// succeeded, so a provider-dir hiccup only warns.
+fn refresh_provider_copies(lib: &Library, name: &str) {
+    let Some(src) = lib.skill_dir(name).filter(|d| d.is_dir()) else {
+        return;
+    };
+    if let Err(e) = crate::user_skills::refresh_owned(name, &src) {
+        tracing::warn!(skill = %name, error = %e, "refresh user-level skill copies failed");
+    }
 }
 
 async fn put_skill_file<C: ContextCtx>(
     State(s): State<C>,
     Extension(user): Extension<AuthUser>,
     Path(name): Path<String>,
-    Json(req): Json<WriteSkillFileReq>,
-) -> ApiResult<Json<Vec<SkillFileEntry>>> {
+    Json(req): Json<WriteSkillFileBody>,
+) -> ApiResult<Response> {
     require_root(&user)?;
     if s.library().get_skill(&name).is_none() {
         return Err(Error::NotFound(format!("skill '{name}'")).into());
     }
     let lib = s.library().clone();
-    let files = off_runtime(move || {
-        let written = if req.create_only {
-            lib.create_skill_file(&name, &req.path, &req.content)
-        } else {
-            lib.write_skill_file(&name, &req.path, &req.content)
+    let written = off_runtime(move || {
+        let written = match (req.create_only, req.if_hash.as_deref()) {
+            (true, _) => lib.create_skill_file(&name, &req.path, &req.content),
+            (false, None) => lib.write_skill_file(&name, &req.path, &req.content),
+            (false, Some(base)) => {
+                match lib
+                    .write_skill_file_if(&name, &req.path, &req.content, base)
+                    .map_err(|e| map_io("write skill file", e))?
+                {
+                    Ok(()) => Ok(()),
+                    Err(stale) => return Ok::<_, Error>(Err(stale)),
+                }
+            }
         };
         written.map_err(|e| map_io("write skill file", e))?;
-        Ok::<_, Error>(lib.list_skill_files(&name))
+        refresh_provider_copies(&lib, &name);
+        Ok(Ok(lib.list_skill_files(&name)))
     })
     .await??;
-    Ok(Json(files))
+    match written {
+        Ok(files) => Ok(Json(files).into_response()),
+        Err(stale) => Ok(stale_file_response(stale.current)),
+    }
+}
+
+/// 409 for a save based on an older read: the Problem shape plus the hash the
+/// file has now, so the editor can offer "Reload theirs / Keep mine".
+fn stale_file_response(current: Option<String>) -> Response {
+    let err = Error::Conflict("the file changed since it was opened".into());
+    let body = serde_json::json!({
+        "code": err.code(),
+        "message": err.to_string(),
+        "current_hash": current,
+    });
+    (StatusCode::CONFLICT, Json(body)).into_response()
 }
 
 async fn delete_skill_file<C: ContextCtx>(
@@ -311,9 +383,14 @@ async fn delete_skill_file<C: ContextCtx>(
     Query(q): Query<FileQuery>,
 ) -> ApiResult<StatusCode> {
     require_root(&user)?;
-    s.library()
-        .delete_skill_file(&name, &q.path)
-        .map_err(|e| map_io("delete skill file", e))?;
+    let lib = s.library().clone();
+    off_runtime(move || {
+        lib.delete_skill_file(&name, &q.path)
+            .map_err(|e| map_io("delete skill file", e))?;
+        refresh_provider_copies(&lib, &name);
+        Ok::<_, Error>(())
+    })
+    .await??;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -354,6 +431,7 @@ async fn import_skill<C: ContextCtx>(
         let name = library
             .import_zip(&body, q.name.as_deref())
             .map_err(|e| map_io("import skill", e))?;
+        refresh_provider_copies(&library, &name);
         library
             .get_skill(&name)
             .ok_or_else(|| Error::Internal("skill not found after import".into()))

@@ -317,7 +317,7 @@
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
-  <SectionIntro>The single source of truth materialized into each workspace’s CLIs. Edits here reach agents at the <strong>next session spawn</strong>, not running sessions. This is the raw file view: install or update bundled skills in <button type="button" class="intro-link" onclick={() => router.go('settings/skills')}>Settings → Skills</button>, and edit, test or evaluate one in <button type="button" class="intro-link" onclick={() => router.go('skills-eval')}>Skills Lab</button> — all three read and write this same library.</SectionIntro>
+  <SectionIntro>The single source of truth materialized into each workspace’s CLIs. Edits here reach agents at the <strong>next session spawn</strong>, not running sessions. This is the raw file view: install or update bundled skills in <button type="button" class="intro-link" onclick={() => router.go('skills-eval/bundled')}>Skills Lab → Bundled</button>, and edit, test or evaluate one in <button type="button" class="intro-link" onclick={() => router.go('skills-eval')}>Skills Lab</button> — all three read and write this same library.</SectionIntro>
 
   <!-- Tabs (a real tablist: ←/→, Home/End) -->
   <div class="segmented lib-tabs" role="tablist" aria-label="Library">

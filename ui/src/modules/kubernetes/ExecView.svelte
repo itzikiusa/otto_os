@@ -74,6 +74,8 @@
         ns,
         pod,
         container: container || null,
+        // The daemon requires the pod name on prod (confirmed above).
+        confirm_name: isProd ? pod : null,
       });
       if (!alive) {
         void api.del(`/sessions/${s.id}`).catch(() => {});

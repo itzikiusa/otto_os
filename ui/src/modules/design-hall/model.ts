@@ -23,39 +23,28 @@ import { plural } from '../../lib/plural.ts';
 
 // ── Studios ─────────────────────────────────────────────────────────────────
 
-/**
- * How a studio is served in Phase 0:
- * - `classic`: its own studio is on the roadmap; today's editor opens instead.
- * - `ready`: works end to end in Design Hall today.
- * - `planned`: no editor yet — the tile explains when it lands.
- */
-export type StudioPhase = 'classic' | 'ready' | 'planned';
-
 export interface StudioInfo {
   id: DesignStudio;
   name: string;
-  /** One line under the name on the tile. */
+  /** One line under the name (studio page subtitle, pickers). */
   blurb: string;
   /** Icon name (typed at the component edge with `asIcon`). */
   icon: string;
-  phase: StudioPhase;
-  /** What opens today / when it lands — shown on the studio page. */
+  /** What the studio edits and how — shown on the studio page and the New sheet. */
   note: string;
-  /** Roadmap label for classic/planned studios ("v2", "Phase 1"). */
-  roadmap: string | null;
   /** Formats a new artifact of this studio can start as, first = default. */
   formats: string[];
 }
 
+/** The studios a design can live in. `spatial` stays a valid wire value
+ *  (DesignStudio) but is not offered: it never had an editor. */
 export const STUDIOS: readonly StudioInfo[] = [
   {
     id: 'frames',
     name: 'Frames',
     blurb: 'UI screens, flows and prototypes',
     icon: 'frame',
-    phase: 'classic',
-    note: 'The Frames canvas (auto-layout, components, prototype links) is planned for v2. Today a frame is an HTML screen you edit as source with a live device preview.',
-    roadmap: 'v2',
+    note: 'A frame is an HTML screen you edit as source, with a live device preview.',
     formats: ['html'],
   },
   {
@@ -63,9 +52,7 @@ export const STUDIOS: readonly StudioInfo[] = [
     name: 'Graphics',
     blurb: 'Templates for social, decks and print',
     icon: 'image',
-    phase: 'classic',
-    note: 'Graphics Studio (templates, brand in one click, magic resize) is planned for v2. Today a graphic is an HTML board or an SVG, or an image you import.',
-    roadmap: 'v2',
+    note: 'A graphic is an HTML board or an SVG you edit as source, or an image you import.',
     formats: ['html', 'svg'],
   },
   {
@@ -73,9 +60,7 @@ export const STUDIOS: readonly StudioInfo[] = [
     name: 'Site Studio',
     blurb: 'Websites from sections, published anywhere',
     icon: 'layout',
-    phase: 'ready',
     note: 'Site Studio: start from a template, edit sections on a live canvas at desktop, tablet and mobile widths, and export a static site themed by your brand kit.',
-    roadmap: null,
     formats: ['otto-site'],
   },
   {
@@ -83,19 +68,15 @@ export const STUDIOS: readonly StudioInfo[] = [
     name: '3D Studio',
     blurb: 'Models, scenes and text-to-3D',
     icon: 'box',
-    phase: 'ready',
     note: '3D Studio 1.5: physical material presets, brand colors, environments, states, named views and a turntable. ✨ Generate runs an Otto agent turn (blockout, text or image → 3D, refine in Blender); export GLB, USDZ or PNG and optimize for the web.',
-    roadmap: null,
     formats: ['scene3d'],
   },
   {
     id: 'whiteboard',
     name: 'Whiteboard',
-    blurb: 'Excalidraw, Mermaid and D2 (today’s Canvas)',
+    blurb: 'Excalidraw boards, Mermaid and D2 diagrams',
     icon: 'edit',
-    phase: 'classic',
-    note: 'Whiteboard is today’s Canvas. Diagrams made here are versioned in Design Hall; Canvas boards keep opening in Canvas and are mirrored into the library.',
-    roadmap: null,
+    note: 'Diagrams and boards made here are versioned in Design Hall. Boards drawn in Canvas are mirrored into the library automatically.',
     formats: ['mermaid', 'd2', 'excalidraw'],
   },
   {
@@ -103,20 +84,8 @@ export const STUDIOS: readonly StudioInfo[] = [
     name: 'Brand Kit',
     blurb: 'Colors, type and logos every studio uses',
     icon: 'palette',
-    phase: 'ready',
     note: 'A brand kit is a versioned token document every studio reads by name. Edit it with live contrast and see which designs a change reaches before you save.',
-    roadmap: null,
     formats: ['otto-brand'],
-  },
-  {
-    id: 'spatial',
-    name: 'Spatial Hall',
-    blurb: 'Walk your work as an exhibition',
-    icon: 'gallery',
-    phase: 'planned',
-    note: 'Spatial Hall is a showcase view of your projects. The 3D gallery is planned for v3; a preview of the room layout is available from the lobby.',
-    roadmap: 'v3',
-    formats: [],
   },
 ];
 
@@ -719,40 +688,48 @@ export function signalSummary(s: DesignSignal): string {
 
 export type DesignRoute =
   | { view: 'lobby' }
-  | { view: 'spatial' }
-  | { view: 'artifact'; id: string }
+  | { view: 'artifact'; id: string; query?: string }
   | { view: 'project'; id: string }
   | { view: 'studio'; id: DesignStudio }
   | { view: 'story'; id: string }
   | { view: 'brand' }
   | { view: 'learned'; tab: LearnedTab };
 
-/** The "What Otto learned" tabs; `#/design/learned` opens on Pending. */
+/** "Team design rules": Proposed (`pending`) and Active (`rules`) are its two
+ *  tabs; Memory, Signals and Settings open from its ⋯ menu. */
 export type LearnedTab = 'pending' | 'rules' | 'memory' | 'signals' | 'settings';
 const LEARNED_TABS: LearnedTab[] = ['pending', 'rules', 'memory', 'signals', 'settings'];
+/** The tab names the page shows, accepted in a URL too. */
+const LEARNED_ALIASES: Record<string, LearnedTab> = { proposed: 'pending', active: 'rules' };
 
-/** `router.parts` (with parts[0] === 'design') → the Design Hall view. */
+/** `router.parts` (with parts[0] === 'design') → the Design Hall view. The
+ *  retired Spatial view (`#/design/spatial`, `#/design/studio/spatial`) lands
+ *  on the lobby. A `?…` query (`#/design/a/<id>?from=story/<sid>` — the router
+ *  splits it on its `/`s too) is cut off the path and handed back on an
+ *  artifact route as `query` (`from=story/<sid>`). */
 export function parseDesignRoute(parts: string[]): DesignRoute {
-  const [, a, b] = parts;
+  const q = parts.findIndex((p) => p.includes('?'));
+  const path = q < 0 ? parts : [...parts.slice(0, q), parts[q].slice(0, parts[q].indexOf('?'))];
+  const query = q < 0 ? '' : [parts[q].slice(parts[q].indexOf('?') + 1), ...parts.slice(q + 1)].join('/');
+  const [, a, b] = path;
   switch (a) {
-    case 'spatial':
-      return { view: 'spatial' };
     case 'a':
-      return b ? { view: 'artifact', id: b } : { view: 'lobby' };
+      return b ? { view: 'artifact', id: b, ...(query ? { query } : {}) } : { view: 'lobby' };
     case 'p':
       return b ? { view: 'project', id: b } : { view: 'lobby' };
     case 'story':
       return b ? { view: 'story', id: b } : { view: 'lobby' };
     case 'studio': {
       if (b === 'brand') return { view: 'brand' };
-      if (b === 'spatial') return { view: 'spatial' };
       const s = STUDIOS.find((x) => x.id === b);
       return s ? { view: 'studio', id: s.id } : { view: 'lobby' };
     }
     case 'brand':
       return { view: 'brand' };
-    case 'learned':
-      return { view: 'learned', tab: LEARNED_TABS.includes(b as LearnedTab) ? (b as LearnedTab) : 'pending' };
+    case 'learned': {
+      const t = LEARNED_ALIASES[b] ?? b;
+      return { view: 'learned', tab: LEARNED_TABS.includes(t as LearnedTab) ? (t as LearnedTab) : 'pending' };
+    }
     default:
       return { view: 'lobby' };
   }

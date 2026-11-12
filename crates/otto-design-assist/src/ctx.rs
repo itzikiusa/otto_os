@@ -16,7 +16,6 @@ use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use otto_core::api::Problem;
 use otto_core::auth::AuthUser;
 use otto_core::domain::{User, Workspace, WorkspaceRole};
 use otto_core::event::Event;
@@ -107,10 +106,51 @@ impl IntoResponse for ApiError {
         if status == StatusCode::INTERNAL_SERVER_ERROR {
             tracing::error!("internal error: {}", self.0);
         }
-        let body = Problem {
-            code: self.0.code().to_string(),
-            message: self.0.to_string(),
-        };
-        (status, Json(body)).into_response()
+        // The usual `{code, message}`; a write refused on a mirrored design
+        // answers the stable `mirrored` code (`otto_design::mirror`).
+        (status, Json(otto_design::mirror::problem(&self.0))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A turn / variants run / accept on a mirrored design answers 409 with
+    /// the stable `mirrored` code the UI keys its "Edit here" prompt on.
+    #[tokio::test]
+    async fn a_mirrored_refusal_answers_409_mirrored() {
+        let a: otto_design::DesignArtifact = serde_json::from_value(serde_json::json!({
+            "id": "A", "project_id": null, "workspace_id": "w1", "studio": "frames",
+            "format": "html", "mime": "text/html", "title": "Mockup", "status": "draft",
+            "head_version_id": "v1", "head_seq": 1, "approved_version_id": null, "tags": [],
+            "thumb_blob": null, "meta": {}, "source_kind": "product_attachment",
+            "source_id": "att1", "created_by": "u1", "created_by_kind": "system",
+            "created_session_id": null, "created_at": "2026-11-12T00:00:00Z",
+            "updated_at": "2026-11-12T00:00:00Z"
+        }))
+        .expect("artifact fixture");
+        let err = otto_design::mirror::ensure_editable(&a).expect_err("mirrored");
+        let resp = ApiError(err).into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let p: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(p["code"], otto_design::mirror::MIRRORED_CODE);
+        assert!(
+            p["message"]
+                .as_str()
+                .unwrap()
+                .contains("a story attachment"),
+            "{p}"
+        );
+        // Other errors keep their code.
+        let resp = ApiError(Error::Conflict("busy".into())).into_response();
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let p: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(p["code"], "conflict");
     }
 }

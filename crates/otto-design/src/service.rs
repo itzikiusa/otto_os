@@ -334,6 +334,12 @@ impl DesignService {
         }
     }
 
+    /// A receiver on the host's event bus (`None` without one) — the live
+    /// legacy-source sync listens here (`crate::sync`).
+    pub fn subscribe(&self) -> Option<broadcast::Receiver<Event>> {
+        self.events.as_ref().map(broadcast::Sender::subscribe)
+    }
+
     /// The editable working copy (`<data>/design/<id>/work/<file>`) — text and
     /// JSON formats only; binaries are never edited in place.
     pub fn work_file(&self, a: &DesignArtifact) -> Option<PathBuf> {
@@ -1340,13 +1346,21 @@ impl DesignService {
                     "approve a version first (POST …/approve)".into(),
                 ));
             }
+            // Shipping names WHAT shipped: the approved version.
+            if s == "shipped" && prev_status != "shipped" && a.approved_version_id.is_none() {
+                return Err(Error::Conflict(
+                    "approve a version before marking the design shipped (POST …/approve)".into(),
+                ));
+            }
             a.status = s;
         }
         if let Some(tags) = req.tags {
             a.tags = clean_tags(tags);
         }
         if let Some(m) = req.meta {
+            let before = a.meta.clone();
             merge_meta(&mut a.meta, m)?;
+            crate::mirror::keep_adoption(&before, &mut a.meta);
             a.meta = bound_json(a.meta.clone(), MAX_META_BYTES, "meta")?;
         }
         // GC fence for a new thumbnail blob, held until the row references it.

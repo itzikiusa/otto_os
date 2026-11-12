@@ -26,6 +26,7 @@ import { SvelteMap } from 'svelte/reactivity';
 import { auth } from '../lib/stores/auth.svelte';
 import { routeAllowed } from '../lib/sidebar';
 import { knownRoute } from '../lib/routeKeys';
+import { LIGHT_HOME, lightMode, lightRouteAllowed } from '../lib/lightMode.svelte';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type PageComponent = Component<any>;
@@ -58,7 +59,9 @@ const LOADERS: Record<string, Loader> = {
   loops: () => import('../modules/loops/LoopsPage.svelte'),
   product: () => import('../modules/product/ProductPage.svelte'),
   design: () => import('../modules/design-hall/DesignHallPage.svelte'),
-  canvas: () => import('../modules/canvas/CanvasPage.svelte'),
+  // Canvas folded into Design Hall: `#/canvas` forwards to a scene's Hall
+  // mirror or the Whiteboard studio (CanvasPage.svelte is kept, unmounted).
+  canvas: () => import('../modules/canvas/CanvasRedirect.svelte'),
   browser: () => import('../modules/browser/BrowserView.svelte'),
   mcp: () => import('../modules/mcp/McpPage.svelte'),
   brokers: () => import('../modules/brokers/BrokersPage.svelte'),
@@ -116,7 +119,12 @@ const NOT_SHELL = new Set(['s', 'bar', 'tray', 'room', 'room-host']);
 export function pageKeyOf(parts: readonly string[]): string | null {
   const m = parts[0] ?? '';
   if (NOT_SHELL.has(m)) return null;
-  if (m === '' || (m === 'plugin' && !parts[1])) return 'agents';
+  // The phone's light version (lib/lightMode.svelte.ts) lands on Threads and
+  // gates every module it hides — so a hidden page's chunk never loads, not
+  // even from a deep link, a hover or a prefetch plan.
+  const light = lightMode.active;
+  if (m === '' || (m === 'plugin' && !parts[1])) return light ? LIGHT_HOME : 'agents';
+  if (light && knownRoute(m) && !lightRouteAllowed(m)) return ROUTE_GATE;
   const key = m === 'connections' ? 'database' : m;
   // A known non-page route (`projects` redirects) keeps the old Agents fallback.
   if (!(key in LOADERS) || key === ROUTE_GATE) return knownRoute(m) ? 'agents' : ROUTE_GATE;

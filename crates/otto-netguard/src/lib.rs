@@ -18,6 +18,11 @@
 //! the same vetting to the addresses hyper actually dials; transports that dial
 //! themselves (gRPC, WebSocket) connect to the addresses [`resolve_checked`]
 //! returned instead of re-resolving the name.
+//!
+//! Allow-local mode (the API client's per-workspace opt-in): [`Guard`],
+//! [`allow_local_client_builder`] and friends let private/LAN/loopback targets
+//! through but keep cloud-metadata addresses and the daemon's own listener
+//! blocked always.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 
@@ -400,6 +405,289 @@ pub fn guarded_client_builder() -> reqwest::ClientBuilder {
         .redirect(guarded_redirect_policy())
 }
 
+// ---------------------------------------------------------------------------
+// Allow-local mode: the API client's per-workspace "Private addresses: allowed"
+// opt-in. Loopback / RFC1918 / ULA / CGNAT targets are reachable (a dev server
+// on localhost is the #1 thing an API client is pointed at), but two kinds of
+// target stay refused whatever the setting says:
+//   * cloud-metadata / link-local addresses — the credentials an instance
+//     role hands out are one GET away, and no dev server lives there;
+//   * Otto's own daemon listener — an agent driving the API client must not be
+//     able to call the daemon's API with the client's cookies/headers.
+// ---------------------------------------------------------------------------
+
+/// The daemon's default port (`ottod`'s `DEFAULT_PORT`).
+pub const DEFAULT_DAEMON_PORT: u16 = 7700;
+
+fn extra_daemon_ports() -> &'static std::sync::Mutex<Vec<u16>> {
+    static PORTS: std::sync::OnceLock<std::sync::Mutex<Vec<u16>>> = std::sync::OnceLock::new();
+    PORTS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// Record another port this daemon listens on (the opt-in network listener
+/// may use its own port), so allow-local fetches refuse it too.
+pub fn register_daemon_port(port: u16) {
+    let mut ports = extra_daemon_ports()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if !ports.contains(&port) {
+        ports.push(port);
+    }
+}
+
+/// True when `port` is one the daemon listens on: the default 7700 (the
+/// installed daemon, even when this process runs on another port),
+/// `$OTTO_PORT`, or one passed to [`register_daemon_port`].
+pub fn is_daemon_port(port: u16) -> bool {
+    port == DEFAULT_DAEMON_PORT
+        || std::env::var("OTTO_PORT")
+            .ok()
+            .and_then(|p| p.trim().parse::<u16>().ok())
+            == Some(port)
+        || extra_daemon_ports()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&port)
+}
+
+fn is_metadata_v4(v4: Ipv4Addr) -> bool {
+    // Link-local 169.254.0.0/16: AWS/GCP/Azure/OCI 169.254.169.254, ECS task
+    // credentials 169.254.170.2, AWS DNS/NTP 169.254.169.253/.123.
+    v4.is_link_local()
+        // Alibaba Cloud metadata.
+        || v4 == Ipv4Addr::new(100, 100, 100, 200)
+        // Oracle Cloud classic metadata.
+        || v4 == Ipv4Addr::new(192, 0, 0, 192)
+}
+
+/// True for a cloud-metadata (or link-local) address, in any IPv6 form that
+/// embeds one (see [`is_blocked_ip`]). Blocked even in allow-local mode.
+pub fn is_metadata_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_metadata_v4(v4),
+        IpAddr::V6(v6) => {
+            embedded_v4(v6).is_some_and(is_metadata_v4)
+                // Link-local fe80::/10.
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                // AWS IMDS over IPv6.
+                || v6 == Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254)
+        }
+    }
+}
+
+/// The allow-local classifier for a dial of `ip:port`: a metadata address
+/// ([`is_metadata_ip`]), or a non-public address on a daemon port
+/// ([`is_daemon_port`] — loopback, the unspecified address and the LAN
+/// addresses the network listener answers on alike).
+pub fn is_blocked_ip_allow_local(ip: IpAddr, port: u16) -> bool {
+    is_metadata_ip(ip) || (is_daemon_port(port) && is_blocked_ip(ip))
+}
+
+/// Why an allow-local target is refused, `None` when it may be dialled. The
+/// text says "always blocked" (the API client keys its hint on it: allowing
+/// private addresses would not help) and keeps "SSRF guard".
+fn allow_local_refusal(url: &reqwest::Url) -> Option<String> {
+    if !scheme_allowed(url.scheme()) {
+        return Some(format!("blocked url scheme: {}", url.scheme()));
+    }
+    let Some(host) = bare_host(url).filter(|h| !h.is_empty()) else {
+        return Some("url has no host".to_string());
+    };
+    let port = url.port_or_known_default().unwrap_or(80);
+    let ip = host.parse::<IpAddr>().ok();
+    if is_daemon_port(port) && ip.is_none_or(is_blocked_ip) {
+        // A HOSTNAME on the daemon's port is refused outright: the connect-time
+        // resolver never sees the port, so a rebinding answer of 127.0.0.1
+        // could not be caught there.
+        return Some(format!(
+            "blocked address {host}:{port}: port {port} is Otto's own daemon, always blocked \
+             (SSRF guard)"
+        ));
+    }
+    match ip {
+        Some(ip) if is_metadata_ip(ip) => Some(format!(
+            "blocked address {ip}: cloud-metadata and link-local addresses are always blocked \
+             (SSRF guard)"
+        )),
+        _ => None,
+    }
+}
+
+/// DNS-free allow-local check of a URL (the [`check_url_literal`] of
+/// allow-local mode): scheme allowed, has a host, not a metadata literal, and
+/// not the daemon's port on a non-public host.
+pub fn check_url_literal_allow_local(url: &reqwest::Url) -> bool {
+    allow_local_refusal(url).is_none()
+}
+
+/// The pre-send check of a request sent through [`allow_local_client_builder`]:
+/// [`check_url_literal_allow_local`] with the reason, and no DNS. Resolution
+/// adds nothing here — the client's [`AllowLocalResolver`] vets the addresses
+/// it actually dials (a pre-send lookup would be re-done at connect time
+/// anyway), and a hostname on the daemon's port is refused without one. What
+/// the resolver never sees, an IP-literal host, is vetted here.
+pub fn precheck_url_allow_local(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
+    allow_local_refusal(&parsed).map_or(Ok(()), Err)
+}
+
+/// Resolve + vet a target URL once under the allow-local rules and return
+/// `(bare host, vetted addresses)` — the allow-local [`resolve_checked`].
+pub async fn resolve_checked_allow_local(url: &str) -> Result<(String, Vec<SocketAddr>), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
+    if let Some(reason) = allow_local_refusal(&parsed) {
+        return Err(reason);
+    }
+    let (host, port) = host_port(url)?;
+    let addrs: Vec<SocketAddr> = match host.parse::<IpAddr>() {
+        Ok(ip) => vec![SocketAddr::new(ip, port)],
+        Err(_) => tokio::net::lookup_host((host.as_str(), port))
+            .await
+            .map_err(|e| format!("dns resolution failed for {host}: {e}"))?
+            .collect(),
+    };
+    if addrs.is_empty() {
+        return Err(format!("host {host} did not resolve"));
+    }
+    if let Some(bad) = addrs
+        .iter()
+        .find(|a| is_blocked_ip_allow_local(a.ip(), a.port()))
+    {
+        return Err(format!(
+            "blocked address {} for host {host}: cloud-metadata addresses and Otto's own daemon \
+             are always blocked (SSRF guard)",
+            bad.ip()
+        ));
+    }
+    Ok((host, addrs))
+}
+
+/// Pre-flight allow-local check of a target URL (see
+/// [`resolve_checked_allow_local`]); pair it with
+/// [`allow_local_client_builder`].
+pub async fn check_url_allow_local(url: &str) -> Result<(), String> {
+    resolve_checked_allow_local(url).await.map(|_| ())
+}
+
+/// The allow-local [`GuardedResolver`]: refuses a name when ANY address is a
+/// metadata address, so a rebinding answer can't swap one in at connect time.
+/// (The daemon-port rule needs the port, which a resolver never sees — the
+/// URL-level checks refuse every hostname on a daemon port instead.)
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AllowLocalResolver;
+
+impl reqwest::dns::Resolve for AllowLocalResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                    format!("dns resolution failed for {host}: {e}").into()
+                })?
+                .collect();
+            if let Some(bad) = addrs.iter().find(|a| is_metadata_ip(a.ip())) {
+                let msg = format!(
+                    "blocked address {} for host {host}: cloud-metadata addresses are always \
+                     blocked (SSRF guard)",
+                    bad.ip()
+                );
+                return Err::<reqwest::dns::Addrs, Box<dyn std::error::Error + Send + Sync>>(
+                    msg.into(),
+                );
+            }
+            let iter: reqwest::dns::Addrs = Box::new(addrs.into_iter());
+            Ok::<reqwest::dns::Addrs, Box<dyn std::error::Error + Send + Sync>>(iter)
+        })
+    }
+}
+
+/// Redirect policy of an allow-local client: caps hops at [`MAX_REDIRECTS`]
+/// and refuses a hop [`check_url_literal_allow_local`] refuses.
+pub fn allow_local_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= MAX_REDIRECTS {
+            return attempt.error("too many redirects");
+        }
+        if check_url_literal_allow_local(attempt.url()) {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
+    })
+}
+
+/// The allow-local [`guarded_client_builder`]: [`AllowLocalResolver`] plus
+/// [`allow_local_redirect_policy`]. Callers run [`precheck_url_allow_local`]
+/// first (it vets IP literals and the daemon port; no DNS).
+pub fn allow_local_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .dns_resolver(std::sync::Arc::new(AllowLocalResolver))
+        .redirect(allow_local_redirect_policy())
+}
+
+/// Which outbound rules a fetch runs under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Guard {
+    /// No local vetting: the fetch rides a tunnel whose FAR end resolves and
+    /// dials (the local rules would only false-block bastion-only hosts).
+    Tunnelled,
+    /// The full guard: public addresses only (the default).
+    Strict,
+    /// Private / LAN / loopback allowed; metadata and the daemon's own
+    /// listener still refused.
+    AllowLocal,
+}
+
+impl Guard {
+    /// The guard of a fetch that is (or is not) `tunnelled`, in a workspace
+    /// that has (or has not) opted in to private addresses.
+    pub fn for_fetch(tunnelled: bool, allow_local: bool) -> Self {
+        match (tunnelled, allow_local) {
+            (true, _) => Guard::Tunnelled,
+            (false, false) => Guard::Strict,
+            (false, true) => Guard::AllowLocal,
+        }
+    }
+
+    /// The DNS-free per-hop check of this guard (redirect targets).
+    pub fn hop_allowed(self, url: &reqwest::Url) -> bool {
+        match self {
+            Guard::Tunnelled => true,
+            Guard::Strict => check_url_literal(url),
+            Guard::AllowLocal => check_url_literal_allow_local(url),
+        }
+    }
+}
+
+/// [`resolve_checked`], or [`resolve_checked_allow_local`] in a workspace that
+/// allows private addresses — one call for the callers that dial themselves.
+pub async fn resolve_checked_for(
+    url: &str,
+    allow_local: bool,
+) -> Result<(String, Vec<SocketAddr>), String> {
+    if allow_local {
+        resolve_checked_allow_local(url).await
+    } else {
+        resolve_checked(url).await
+    }
+}
+
+/// [`check_url`], or [`check_url_allow_local`] when private addresses are allowed.
+pub async fn check_url_for(url: &str, allow_local: bool) -> Result<(), String> {
+    resolve_checked_for(url, allow_local).await.map(|_| ())
+}
+
+/// [`is_blocked_ip`], or [`is_blocked_ip_allow_local`] for a dial of `ip:port`
+/// when private addresses are allowed (metadata and the daemon stay blocked).
+pub fn is_blocked_ip_for(ip: IpAddr, port: u16, allow_local: bool) -> bool {
+    if allow_local {
+        is_blocked_ip_allow_local(ip, port)
+    } else {
+        is_blocked_ip(ip)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -574,6 +862,157 @@ mod tests {
         ] {
             assert!(!local(u), "{u} is not an explicit local target");
         }
+    }
+
+    #[test]
+    fn metadata_addresses_are_classified_in_every_form() {
+        for ip in [
+            "169.254.169.254",
+            "169.254.170.2",
+            "169.254.0.1",
+            "100.100.100.200",
+            "192.0.0.192",
+            "::ffff:169.254.169.254",
+            "64:ff9b::a9fe:a9fe",
+            "2002:a9fe:a9fe::1",
+            "fe80::1",
+            "fd00:ec2::254",
+        ] {
+            assert!(is_metadata_ip(ip.parse().unwrap()), "{ip} is metadata");
+        }
+        for ip in [
+            "127.0.0.1",
+            "10.0.0.5",
+            "192.168.1.1",
+            "100.64.0.1",
+            "fd00::1",
+        ] {
+            assert!(!is_metadata_ip(ip.parse().unwrap()), "{ip} is not metadata");
+        }
+    }
+
+    #[test]
+    fn allow_local_keeps_metadata_and_the_daemon_port_blocked() {
+        let lit = |u: &str| check_url_literal_allow_local(&reqwest::Url::parse(u).unwrap());
+        // Private / LAN / loopback dev targets are reachable.
+        for u in [
+            "http://127.0.0.1:3000/",
+            "http://localhost:8080/",
+            "http://[::1]:9000/",
+            "http://10.0.0.5/",
+            "https://192.168.1.20:8443/",
+            "http://100.101.102.103/",
+            "http://internal.corp/",
+            "https://8.8.8.8:7700/", // a PUBLIC literal on 7700 is not the daemon
+        ] {
+            assert!(lit(u), "{u} is allowed with private addresses on");
+        }
+        // Metadata, any form, and the daemon's own listener stay refused.
+        for u in [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::ffff:169.254.169.254]/",
+            "http://[fd00:ec2::254]/",
+            "http://100.100.100.200/",
+            "http://127.0.0.1:7700/sessions",
+            "http://localhost:7700/",
+            "http://[::1]:7700/",
+            "http://0.0.0.0:7700/",
+            "http://192.168.1.20:7700/",
+            "http://rebind.example:7700/", // a hostname on the daemon port
+            "file:///etc/passwd",
+        ] {
+            assert!(!lit(u), "{u} stays blocked with private addresses on");
+        }
+        assert!(is_blocked_ip_allow_local(
+            "127.0.0.1".parse().unwrap(),
+            7700
+        ));
+        assert!(!is_blocked_ip_allow_local(
+            "127.0.0.1".parse().unwrap(),
+            7701
+        ));
+        assert!(is_blocked_ip_allow_local(
+            "169.254.169.254".parse().unwrap(),
+            80
+        ));
+    }
+
+    #[test]
+    fn registered_daemon_ports_are_refused_too() {
+        let lit = |u: &str| check_url_literal_allow_local(&reqwest::Url::parse(u).unwrap());
+        assert!(lit("http://127.0.0.1:47123/"));
+        register_daemon_port(47123);
+        assert!(is_daemon_port(47123));
+        assert!(!lit("http://127.0.0.1:47123/"));
+    }
+
+    #[tokio::test]
+    async fn allow_local_preflight_says_why_and_lets_dev_servers_through() {
+        let err = check_url_allow_local("http://169.254.169.254/")
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("always blocked") && err.contains("SSRF guard"),
+            "{err}"
+        );
+        let err = check_url_allow_local("http://127.0.0.1:7700/sessions")
+            .await
+            .unwrap_err();
+        assert!(err.contains("daemon"), "{err}");
+        assert!(check_url_allow_local("http://127.0.0.1:3000/")
+            .await
+            .is_ok());
+        let (_, addrs) = resolve_checked_allow_local("http://10.1.2.3:8080/x")
+            .await
+            .unwrap();
+        assert_eq!(addrs, vec!["10.1.2.3:8080".parse::<SocketAddr>().unwrap()]);
+    }
+
+    #[tokio::test]
+    async fn the_for_helpers_pick_the_workspace_rule() {
+        let lo: IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(is_blocked_ip_for(lo, 3000, false));
+        assert!(!is_blocked_ip_for(lo, 3000, true));
+        assert!(is_blocked_ip_for(lo, DEFAULT_DAEMON_PORT, true));
+        assert!(is_blocked_ip_for(
+            "169.254.169.254".parse().unwrap(),
+            80,
+            true
+        ));
+        assert!(check_url_for("http://127.0.0.1:3000/", false)
+            .await
+            .is_err());
+        assert!(check_url_for("http://127.0.0.1:3000/", true).await.is_ok());
+        let err = check_url_for("http://169.254.169.254/", true)
+            .await
+            .expect_err("metadata");
+        assert!(err.contains("always blocked"), "{err}");
+    }
+
+    #[test]
+    fn allow_local_precheck_needs_no_dns() {
+        // An unresolvable name passes: the connect-time resolver vets it.
+        assert!(precheck_url_allow_local("https://dup.example.invalid/x").is_ok());
+        assert!(precheck_url_allow_local("http://127.0.0.1:3000/").is_ok());
+        // Literals and the daemon port are refused here, with the reason.
+        let err = precheck_url_allow_local("http://169.254.169.254/").unwrap_err();
+        assert!(err.contains("always blocked"), "{err}");
+        let err = precheck_url_allow_local("http://dup.example.invalid:7700/").unwrap_err();
+        assert!(err.contains("daemon"), "{err}");
+        assert!(precheck_url_allow_local("file:///etc/passwd").is_err());
+        assert!(precheck_url_allow_local("not a url").is_err());
+    }
+
+    #[test]
+    fn guard_modes_pick_the_matching_hop_check() {
+        let url = |u: &str| reqwest::Url::parse(u).unwrap();
+        assert_eq!(Guard::for_fetch(true, false), Guard::Tunnelled);
+        assert_eq!(Guard::for_fetch(false, false), Guard::Strict);
+        assert_eq!(Guard::for_fetch(false, true), Guard::AllowLocal);
+        assert!(Guard::Tunnelled.hop_allowed(&url("http://10.0.0.1/")));
+        assert!(!Guard::Strict.hop_allowed(&url("http://10.0.0.1/")));
+        assert!(Guard::AllowLocal.hop_allowed(&url("http://10.0.0.1/")));
+        assert!(!Guard::AllowLocal.hop_allowed(&url("http://169.254.169.254/")));
     }
 
     #[test]

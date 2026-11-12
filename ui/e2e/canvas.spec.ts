@@ -2,6 +2,7 @@ import { test, expect, type Page, type APIRequestContext } from '@playwright/tes
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { apiCtx, seedWorkspace } from './seed';
+import { CANVAS_PAGE_RETIRED } from './storyDesigns';
 
 // ── E2E: Canvas Studio — TWO modes, file-backed ────────────────────────────────
 //
@@ -27,6 +28,42 @@ test.beforeEach(async ({ page }) => {
     localStorage.setItem('otto_workspace', wsId as string);
     localStorage.setItem('otto_rail_expanded', '0');
   }, workspaceId);
+});
+
+// The Canvas page folded into Design Hall (`#/canvas` forwards there; the
+// CanvasPage editor is kept, unmounted). Tests that drive that editor are
+// skipped with CANVAS_PAGE_RETIRED; the API tests ("product link: …") and the
+// forwarding tests ("#/canvas forwards …") still run.
+// eslint-disable-next-line no-empty-pattern
+test.beforeEach(async ({}, testInfo) => {
+  test.skip(!/^(product link:|#\/canvas forwards)/.test(testInfo.title), CANVAS_PAGE_RETIRED);
+});
+
+test('#/canvas forwards to the Whiteboard studio in Design Hall', async ({ page }) => {
+  await page.goto('/#/canvas');
+  await expect(page).toHaveURL(/#\/design\/studio\/whiteboard$/, { timeout: 20_000 });
+  await expect(page.locator('.canvas-page')).toHaveCount(0);
+});
+
+test('#/canvas forwards a scene to its Design Hall mirror, read-only until Edit here', async ({ page }) => {
+  test.setTimeout(60_000);
+  const { ctx, base } = await apiCtx();
+  const sceneId = await seedScene(ctx, base, `Forwarded board ${Date.now()}`, 'mermaid', 'flowchart LR\n A[Forward] --> B[Hall]');
+  // The live sync mirrors a new scene ~1.5 s after its create event.
+  let mirrorId = '';
+  await expect
+    .poll(async () => {
+      const r = await ctx.get(`${base}/api/v1/design/artifacts?source_kind=canvas_scene&source_id=${sceneId}`);
+      const rows = r.ok() ? ((await r.json()) as { id: string }[]) : [];
+      mirrorId = rows[0]?.id ?? '';
+      return mirrorId;
+    }, { timeout: 20_000 })
+    .not.toBe('');
+  await ctx.dispose();
+  await page.goto(`/#/canvas/${sceneId}`);
+  await expect(page).toHaveURL(new RegExp(`#/design/a/${mirrorId}`), { timeout: 20_000 });
+  await expect(page.getByTestId('design-mirror-banner')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('design-adopt')).toBeVisible();
 });
 
 // -- on-disk file helpers (the isolated daemon's data dir from daemon.json) --------

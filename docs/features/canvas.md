@@ -1,5 +1,17 @@
 # Canvas
 
+> **The Canvas page folded into Design Hall (2026-11).** Every scene is mirrored
+> into Design Hall live and opens there as a Whiteboard design: `#/canvas`
+> forwards to the Whiteboard studio, `#/canvas/<scene id>` (what a ⌘K hit
+> opens) forwards to that board's mirror, and the session Canvas panel's
+> **Open in Design Hall** and a story chat's diagram card open the mirror
+> directly (`openSceneInHall`). A mirror is read-only until someone presses
+> **Edit here**, which takes the board over in the Hall. The old Canvas page
+> (`CanvasPage.svelte` and its parts) is unmounted, not deleted; pointing the
+> `canvas` loader in `ui/src/shell/pages.svelte.ts` back at it restores it. The
+> scene API, the MCP tools and the session Canvas tab below are unchanged. See
+> [design-hall.md §4.1](./design-hall.md).
+
 A file-backed visual canvas built into Otto: describe a diagram in plain English
 and an **agent draws it for you** by editing a per-scene source file, while the
 board re-renders live as the file changes. Each scene is one of three modes —
@@ -42,7 +54,7 @@ session** — attached to that session's right-panel **Canvas** tab so the agent
 | **Edit by hand too** | Excalidraw shapes are directly editable; Mermaid and D2 each have a **Code** panel to edit their source — all three autosave to the same file the agent edits. |
 | **D2-only extras** | A **Sketch** toggle (hand-drawn render style, persisted on the doc as `sketch`) and **PNG / SVG / copy-source** export buttons in the zoombar (Mermaid has the same three). |
 | **Storage** | One row per scene in SQLite (`canvas_scenes.doc_json`); the source file lives under the daemon's data dir (`<data>/canvas/<scene_id>/`). |
-| **Scope** | Scenes are created in a workspace; the Canvas page lists **all of your scenes across every workspace** (Canvas is a workspace-independent tool). Optionally linked to a product story, or referenced by an agent session (§7a). |
+| **Scope** | Scenes are created in a workspace; the Canvas page lists **every scene in every workspace you can view** — yours and your teammates' (Canvas is a workspace-independent tool). Optionally linked to a product story, or referenced by an agent session (§7a). |
 | **Where it lives** | The **Canvas** top-level nav module, and (as a reference) any agent session's right-panel **Canvas** tab. RBAC feature key `canvas` (View to read, Edit to mutate / Ask AI). |
 | **Daemon** | `ottod` on `127.0.0.1:7700`; routes under `/api/v1`. |
 
@@ -210,11 +222,25 @@ the file instead).
 
 Every scene keeps its last **30** versions (`canvas_scene_versions`, migration
 0152). A version is the document as it was **just before** a change: before each
-Ask AI commit, before a restore, and at most once per 10 minutes across manual
-saves. Identical consecutive snapshots are skipped. **Restore previous version…**
+Ask AI commit and every `canvas_update_scene` MCP write (origin `agent`), before
+a restore, and at most once per 10 minutes across manual saves. Identical
+consecutive snapshots are skipped. **Restore previous version…**
 in the Assistant panel lists them and restores the chosen one
 (`POST …/versions/{vid}/restore`); the current doc is snapshotted first, so a
 restore is itself undoable.
+
+### Concurrent edits (409)
+
+Every save sends the `updated_at` the editor last saw as `expect_updated_at`
+(`PUT /canvas/scenes/{id}`); so does the `canvas_update_scene` MCP tool, with the
+stamp it just read. When the scene changed in between (an agent's MCP write,
+another tab, device or person) the server answers **409** and writes nothing.
+The editor then keeps your unsaved board and shows a banner: **Reload theirs**
+drops your draft and loads the stored board; **Keep mine as a copy** first saves
+your board as a new scene "<title> (my copy)" and opens it (if that fails, the
+banner and your draft stay). An Ask AI turn's own `canvas_updated` pushes make
+the editor forget its stamp, so the turn's guard (above) still decides between
+your edits and the agent's, and the next save re-stamps.
 
 `AssistResult` = `{ excalidraw?, mermaid?, d2?, format, nodes[], edges[], note }`.
 `note` is the agent's one-line description (or an error explanation when nothing
@@ -414,7 +440,7 @@ workspace from the scene row.
 | # | Method & path | Auth | Purpose |
 |---|---|---|---|
 | 102 | `GET /api/v1/workspaces/{ws}/canvas/scenes` | ws viewer | list a workspace's scenes (summaries) |
-| — | `GET /api/v1/canvas/scenes` | Canvas View | list **all of the caller's** scenes across workspaces (what the page uses) |
+| — | `GET /api/v1/canvas/scenes` | Canvas View | list the scenes of **every workspace the caller can view** (what the page uses) |
 | 103 | `POST /api/v1/workspaces/{ws}/canvas/scenes` | ws editor | create a scene (`{title, doc?, story_id?, provider?, section?}`) → 201 |
 | 104 | `GET /api/v1/canvas/scenes/{id}` | ws viewer | full scene incl. `doc_json`, `session_id`, `provider`, `section` |
 | 105 | `PUT /api/v1/canvas/scenes/{id}` | ws editor | partial update (`{title?, doc?, thumbnail?, provider?, section?, story_id?}`; omitted fields unchanged) |

@@ -2,6 +2,7 @@
 // ResultsGrid). No Svelte, no DOM — unit-tested in unit/dbGridFormat.test.ts.
 
 // Self-contained on purpose (node:test imports it directly, without a bundler).
+export { columnZone, type ColumnZone } from './temporal-zone.ts';
 
 /** Structured (object/array) and not a one-key Extended-JSON scalar sentinel
  *  (`{"$oid": …}`, `{"$date": …}` …) — the classification `isComplex` makes in
@@ -73,6 +74,29 @@ export function moveColumn(order: number[], from: number, to: number): number[] 
   const [c] = next.splice(from, 1);
   next.splice(to, 0, c);
   return next;
+}
+
+// ── Hidden columns (header menu → Hide column; per query tab, not persisted) ──
+
+/** `hidden` plus `name`, or null when that would hide the last visible column
+ *  (a grid with no header left has nothing to right-click to show them again). */
+export function hideColumn(hidden: readonly string[], name: string, all: readonly string[]): string[] | null {
+  if (hidden.includes(name) || !all.includes(name)) return null;
+  const next = [...hidden, name];
+  return all.some((n) => !next.includes(n)) ? next : null;
+}
+
+/** A display order (original column indexes) without the hidden columns. */
+export function visibleOrder(order: number[], columns: readonly { name: string }[], hidden: readonly string[]): number[] {
+  return hidden.length ? order.filter((i) => !hidden.includes(columns[i]?.name ?? '')) : order;
+}
+
+/** A drag among the VISIBLE columns produced `moved`; keep the hidden ones
+ *  (in their previous relative order) after it, so showing them again doesn't
+ *  reset the order the user arranged. */
+export function withHidden(moved: number[], full: number[]): number[] {
+  const seen = new Set(moved);
+  return [...moved, ...full.filter((i) => !seen.has(i))];
 }
 
 /** Case-insensitive "contains" match for the header filter row; `NULL` /

@@ -1,10 +1,11 @@
 <script lang="ts">
-  // MockupsTab — kept as a thin alias of the Design Arena so the `mockups` tab id
-  // (deep links, E2E) keeps resolving; the tab's LABEL is "Design" (design §6).
-  // Above the arena: the Design Hall graph of this story (designs that implement
-  // it + what they use, "Open in Design Hall"). The arena itself is unchanged.
-  import DesignArena from './design/DesignArena.svelte';
-  import DesignGraphStrip from '../design-hall/DesignGraphStrip.svelte';
+  // MockupsTab — the story's Design tab (the `mockups` tab id is kept so deep
+  // links and E2E keep resolving; the tab's LABEL is "Design"). Design Hall is
+  // the one home for designs, so the tab is the story's designs from the Hall
+  // (StoryDesigns); the old DesignArena opens only from its ⋯ ("Open the
+  // classic arena"). Undo: render `<DesignArena />` here again.
+  import StoryDesigns from './StoryDesigns.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import { product } from '../../lib/stores/product.svelte';
 
   const story = $derived(product.detail?.story ?? null);
@@ -13,7 +14,9 @@
 
 {#if story}
   {#key story.id}
-    <DesignGraphStrip storyId={story.id} storyKey={story.source_key} storyTitle={story.title} {isEpic} />
+    <StoryDesigns {story} {isEpic} />
   {/key}
+{:else}
+  <!-- The story's detail is still loading (the page shows its own load error). -->
+  <Skeleton rows={2} height={180} />
 {/if}
-<DesignArena />

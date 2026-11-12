@@ -10,7 +10,7 @@ import type { BroadcastResp, TrailEvent } from '../../lib/api/types';
 import { threadsChrome } from './threadsChrome.svelte';
 
 export type ThreadsLayoutMode = 'single' | 'split' | 'grid';
-export type ThreadsInspectorTab = 'files' | 'changes' | 'pr' | 'side' | 'connections' | 'peers' | 'browser';
+export type ThreadsInspectorTab = 'files' | 'changes' | 'pr' | 'side' | 'connections' | 'browser';
 
 export interface OpenFileTab {
   path: string;
@@ -139,8 +139,6 @@ class ThreadsStore {
   stageCwd = $state<string | null>(null);
   /** Pane ids whose terminal drawer is open (driven by the top bar + pane menu). */
   terminalOpen = $state<Record<string, boolean>>({});
-  /** Pane id whose inline peer-relay bar is open. */
-  peerBarFor = $state<string | null>(null);
   /** A `/btw` question waiting for the side-chat panel to start it. */
   sideAsk = $state<{ mainId: string; question: string } | null>(null);
   /** Bumped to ask a pane to open its conversation search. */
@@ -148,7 +146,6 @@ class ThreadsStore {
 
   peerEvents = $state<PeerTimelineItem[]>([]);
   mcpActivities = $state<McpDbActivity[]>([]);
-  peerRelayTarget = $state<string>('broadcast');
 
   private liveRefs = 0;
   private stopLive: (() => void) | null = null;
@@ -173,8 +170,7 @@ class ThreadsStore {
       p.inspectorTab === 'changes' ||
       p.inspectorTab === 'side' ||
       p.inspectorTab === 'pr' ||
-      p.inspectorTab === 'connections' ||
-      p.inspectorTab === 'peers'
+      p.inspectorTab === 'connections'
     ) {
       this.inspectorTab = p.inspectorTab;
     }
@@ -498,10 +494,6 @@ class ThreadsStore {
     this.terminalOpen = { ...this.terminalOpen, [id]: !this.terminalOpen[id] };
   }
 
-  togglePeerBar(id: string): void {
-    this.peerBarFor = this.peerBarFor === id ? null : id;
-  }
-
   /** Open the right panel's side chat for `mainId`, optionally asking `question`. */
   openSideChat(mainId: string, question = ''): void {
     if (question.trim()) this.sideAsk = { mainId, question: question.trim() };
@@ -609,14 +601,6 @@ class ThreadsStore {
     this.inspectorTab = tab;
     this.setInspectorOpen(true);
     threadsChrome.addSurface(tab);
-    this.save();
-  }
-
-  openPeerComposerTo(targetSessionId: string): void {
-    this.peerRelayTarget = targetSessionId;
-    this.inspectorTab = 'peers';
-    this.setInspectorOpen(true);
-    threadsChrome.addSurface('peers');
     this.save();
   }
 

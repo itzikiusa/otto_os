@@ -78,7 +78,9 @@ async fn daemon(state: Arc<Daemon>) -> String {
                         {"id": "git", "name": "Git & PRs", "groups": ["git", "code_review"]}]})
                 });
                 axum::Json(json!({
-                    "enabled": ["otto.create_pr", "otto.open_pr_draft", "otto.run_workflow"],
+                    // `otto.k8s_logs`: an opt-in content read is listed only
+                    // while its control-plane twin is on.
+                    "enabled": ["otto.create_pr", "otto.open_pr_draft", "otto.run_workflow", "otto.k8s_logs"],
                     "outward_enabled": true,
                     "ui_granted": false,
                     "profile": profile,

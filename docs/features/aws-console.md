@@ -163,7 +163,9 @@ region; the toolbar region switcher (S3 aside, every service view has one —
 SQS and Athena included) just sets that parameter and remembers the last pick
 per account + service. EC2, EKS and RDS add **All enabled regions**
 (`?region=all`): the daemon lists the account's enabled regions
-(`ec2 describe-regions`, cached 1 h) and queries them six at a time; rows get
+(`ec2 describe-regions`, cached 1 h; if that call fails the view falls back
+to the account region, uncached, and the inline note says the region list could
+not be read) and queries them six at a time; rows get
 a Region column, and regions that failed are listed in an inline note above
 the table while the rest still render. The whole all-regions answer is cached
 for 20 s (concurrent identical requests share one fan-out; an EC2 start / stop
@@ -232,8 +234,10 @@ queries per account, and exports CSV. The EKS cluster sheet links to its
 control-plane group (`/aws/eks/<name>/cluster`) and the RDS drawer to
 `/aws/rds/instance/<id>/…`. Everything is read-only (`aws:View`, the
 account's `metrics` operation); Insights is billed per GB scanned and the
-range is capped at 31 days. Agents get `aws_logs_list_groups`,
-`aws_logs_filter`, `aws_logs_insights` and `aws_logs_get_insights`.
+range is capped at 31 days. Agents get `aws_logs_list_groups` and
+`aws_logs_get_insights` by default; `aws_logs_filter` (log content) is off
+until an operator enables it, and `aws_logs_insights` (billed per GB) is
+approval-gated. `aws_s3_preview` (object content) is off by default too.
 
 ### 3.2 SQS
 
@@ -446,7 +450,9 @@ writes an `audit_log` row: `aws.sqs.send`, `aws.sqs.delete_message`,
 - **Argument validation** (bucket / key / queue URL / ARN / instance id /
   cluster name / query id shapes) happens before any subprocess spawns; every
   call is a `Command` with an argv array — no shell.
-- **Typed confirmations** for purge, stop, reboot are enforced server-side.
+- **Typed confirmations** for purge, stop, reboot and a prod S3 delete are
+  enforced server-side, and only a person can give one: a confirm sent with an
+  agent session's credential is refused (403).
 - **Never `sudo`.** The installer only touches `$HOME` and `<data_dir>`.
 
 ---

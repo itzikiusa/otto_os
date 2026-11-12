@@ -439,6 +439,9 @@ pub async fn evaluate_with(
     args: &Value,
     preloaded: Option<&otto_core::domain::Session>,
 ) -> (AgentGate, Option<CallingAgent>) {
+    let filled =
+        otto_assistant::personal_agent_routines::with_stored_deliver(ctx, bare, None, args).await;
+    let args = filled.as_ref().unwrap_or(args);
     let Some(sid) = bound_session(auth) else {
         return (decide(false, &[], bare, args), None);
     };

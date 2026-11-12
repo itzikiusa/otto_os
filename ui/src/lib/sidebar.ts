@@ -146,16 +146,40 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   { id: 'usage', icon: 'chart', label: 'Usage', group: 'insight', feature: 'usage', keywords: 'cost tokens clickhouse metrics cpu ram billing analytics' },
 ];
 
+/** Narrows which modules every navigation surface offers — the phone's light
+ *  version (lib/lightMode.svelte.ts) installs it. Callers read it inside their
+ *  own deriveds, so a reactive scope re-renders them. null = every module. */
+let moduleScope: ((id: string) => boolean) | null = null;
+
+/** Install (or clear) the module scope; see {@link inModuleScope}. */
+export function setModuleScope(fn: ((id: string) => boolean) | null): void {
+  moduleScope = fn;
+}
+
+/** Whether a module id (or an {@link EXTRA_GOTO} id) is inside the scope. */
+export function inModuleScope(id: string): boolean {
+  return !moduleScope || moduleScope(id);
+}
+
 /**
  * The modules the current user may see: built-ins filtered by the RBAC `can`
  * predicate (ungated ones always pass), with the already-permitted runtime
- * plugins appended (in the Plugins section). Order here is the registry/plugin
- * order — call {@link resolveOrder} to apply the user's saved arrangement.
+ * plugins appended (in the Plugins section), all inside the module scope
+ * (`unscoped` skips it: the sidebar's known-module bookkeeping must see every
+ * module, or switching the light version off would re-surface hidden ones).
+ * Order here is the registry/plugin order — call {@link resolveOrder} to
+ * apply the user's saved arrangement.
  */
 export function availableModules(
   can: (feature: Feature) => boolean,
   plugins: SidebarPluginEntry[],
+  opts: { unscoped?: boolean } = {},
 ): SidebarModule[] {
+  const all = allowedModules(can, plugins);
+  return opts.unscoped ? all : all.filter((m) => inModuleScope(m.id));
+}
+
+function allowedModules(can: (feature: Feature) => boolean, plugins: SidebarPluginEntry[]): SidebarModule[] {
   const builtins = SIDEBAR_MODULES.filter((m) =>
     m.featureAny ? m.featureAny.some(can) : m.feature == null || can(m.feature),
   ).map(
@@ -180,8 +204,8 @@ export function availableModules(
  */
 export function routeAllowed(route: string, can: (feature: Feature) => boolean): boolean {
   const id = route.split(/[/?]/)[0];
-  if (id === 'design') return can('design');
-  if (id === 'canvas') return can('canvas');
+  // `#/canvas` only forwards into Design Hall now, so the Hall's grant gates it.
+  if (id === 'design' || id === 'canvas') return can('design');
   if (id === 'personal-agents') return can('scheduled_tasks');
   const m = SIDEBAR_MODULES.find((x) => x.id === id);
   if (!m) return true;
@@ -681,7 +705,7 @@ export function goToEntries(mods: SidebarModule[]): GoToEntry[] {
     viaModule: true,
   }));
   const taken = new Set(mods.map((m) => m.id));
-  const extras = EXTRA_GOTO.filter((e) => !taken.has(e.id)).map((e): GoToEntry => ({
+  const extras = EXTRA_GOTO.filter((e) => !taken.has(e.id) && inModuleScope(e.id)).map((e): GoToEntry => ({
     id: `core.go-${e.id}`,
     title: `Go to ${e.label}`,
     detail: e.detail,

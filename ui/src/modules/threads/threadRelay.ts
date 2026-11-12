@@ -1,4 +1,4 @@
-// Session-to-session relay (the Peers tab, a pane's peer bar). A runtime
+// Session-to-session relay (Related threads › Message…, relatedMessage.ts). A runtime
 // thread takes the message through its own prompt route
 // (POST /runtime-sessions/{id}/prompt, queued while a turn runs) and shows it
 // as "From <thread>"; a terminal thread through /sessions/{id}/message. A

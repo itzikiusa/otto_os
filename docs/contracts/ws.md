@@ -671,7 +671,9 @@ Notices & notifications:
   `error` notice; further failures stay silent until a clean run ends the streak (the
   streak set is in-memory, so after a daemon restart the next failure refreshes the same
   row). A goal loop that becomes `exhausted`/`blocked`/`failed`/`succeeded` posts one per
-  episode (`goal_loop`; a running loop resets it), and a workflow run parked at a
+  episode (`goal_loop`; a running loop resets it; every block emits `goal_loop_updated`
+  `blocked`), a loop a daemon restart paused posts one `error` notice per restart
+  (`goal_loop_restart`), and a workflow run parked at a
   human-approval step posts a `warn` notice once per gate
   (`automation:workflow_approval:<run>:<node>`). Notices are scoped to the
   task/agent/workflow/loop creator (`user_id`) and carry an `open_route` action
@@ -1352,7 +1354,7 @@ story's design artifact.
 
 Workspace-scoped Design Hall graph events, emitted by `crates/otto-design`
 (`service.rs`) for every change to the artifact graph (`/design/*` REST, the
-startup/admin legacy import). They supersede `mockup_updated` /
+live legacy-source sync and its startup/admin catch-up pass). They supersede `mockup_updated` /
 `canvas_updated` for graph-aware clients; both legacy events keep firing for
 their own routes.
 
@@ -1363,7 +1365,8 @@ their own routes.
 ```
 
 - `design_artifact_updated` — one per committed version (`created`, `content`:
-  PUT content, named commit, import `sync`) with `version_id` set, and one per
+  PUT content, named commit, live / catch-up `sync` of a mirrored Canvas scene
+  or story attachment) with `version_id` set, and one per
   metadata change (`meta`, `approved`, `archived`, `deleted`) with
   `version_id: null` except `approved` (the approved version). `thumbnail`
   (`version_id: null`, `content: null`): a new rendered thumbnail was stored
@@ -1386,7 +1389,8 @@ their own routes.
   `target_deleted`: the target was hard-deleted (the link is now `broken`).
 - `design_learning_update` — a design signal was captured (`POST
   /design/signals`, or automatically: `edit_after_draft`, `status_change`,
-  `shipped`, `agent_draft`, `variant_accepted` / `variant_rejected`), or —
+  `shipped`, `agent_draft`, `variant_accepted` / `variant_rejected`, `adopted`
+  — `POST /design/artifacts/{id}/adopt`), or —
   `kind: "rule_proposed"`, `signal_id`/`artifact_id` null — a learning pass
   queued new team rules for approval (`GET /design/learned`).
 - Scope: `Workspace` (members with viewer+ on `workspace_id`), like the canvas /
@@ -1397,6 +1401,29 @@ their own routes.
   UI routes all three into `designBus` (`ui/src/lib/events.svelte.ts`), a short
   sequenced log each open Design Hall view reads once; a WS reconnect bumps its
   `resyncTick` so open views reload.
+
+### `design_source_changed`
+
+Workspace-scoped cue that a legacy design SOURCE — a Canvas scene or a Product
+story attachment — was created, saved or deleted by a path that emits neither
+`canvas_updated` nor `mockup_updated` (a person's Canvas save / create /
+delete in `crates/otto-canvas/src/http.rs`; attachment upload / patch /
+delete in `crates/otto-product/src/media.rs`).
+
+```json
+{ "type": "design_source_changed", "workspace_id": "<Id>", "kind": "canvas_scene|product_attachment", "id": "<scene or attachment Id>" }
+```
+
+- Consumer: `otto_design::sync::run_live` (the Design Hall live sync) re-mirrors
+  that one source ~1.5 s after its last `canvas_updated` / `mockup_updated` /
+  `design_source_changed` (per-source trailing debounce, so an agent's
+  per-poll writes merge into one sync). What changed in the graph then arrives
+  as the usual `design_artifact_updated` (`created`, `content` for a `sync`
+  head, `archived` when the source row is gone) — UI views need not handle
+  this event; it is a refetch cue at most.
+- Scope: `Workspace` (members with viewer+ on `workspace_id`).
+- UI routing: none (listed in `LIVE_ONLY_EVENTS`, `ui/src/lib/events/routes/index.ts`).
+- TypeScript type: `{ type: 'design_source_changed'; workspace_id: Id; kind: 'canvas_scene' | 'product_attachment'; id: Id }`.
 
 ### `design_assist_updated` / `design_variants_ready`
 

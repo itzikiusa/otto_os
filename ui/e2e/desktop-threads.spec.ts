@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
-import { expectNoHorizontalOverflow } from './helpers';
+import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Threads experimental workspace (#/threads & #/threads/<sessionId>):
@@ -376,30 +376,42 @@ test('multi-session split canvas, pins, file viewer, and peer-to-peer message re
   await fileTabs.getByRole('button', { name: 'README.md' }).first().click();
   await expect(fileTabs.getByRole('heading', { name: 'Threads Workspace' })).toBeVisible();
 
-  // Connections inspector tab exposes one-click side-by-side DB Explorer launch.
+  // Connections joins the + menu only once the thread has touched a
+  // database (MCP DB activity); this seeded thread hasn't. The Terminal is no
+  // longer a surface (it is ⋯ › Terminal drawer), and Peers moved into the
+  // header's Related threads popover.
   const inspector = page.getByTestId('threads-inspector');
   await inspector.getByTestId('threads-surface-add').click();
-  await page.getByRole('menuitem', { name: /Connections/ }).click();
-  await expect(page.getByTestId('connections-open-beside')).toBeVisible();
+  const surfaces = page.locator('.ctx-menu');
+  await expect(surfaces.getByRole('menuitem', { name: /^Files/ })).toBeVisible();
+  for (const gone of [/Connections/, /Peers/, /Terminal/]) await expect(surfaces.getByRole('menuitem', { name: gone })).toHaveCount(0);
+  await page.keyboard.press('Escape');
 
-  // Peers inspector tab relays a direct session-to-session message from Alpha → Beta.
+  // Related threads (⋯ › Related threads…) relays a direct message Alpha → Beta.
   await canvas.getByTestId(`thread-pane-${sessionA}`).click();
-  await inspector.getByTestId('threads-surface-add').click();
-  await page.getByRole('menuitem', { name: /Peers/ }).click();
-  await page.getByTestId('peers-target-select').selectOption(sessionB);
+  await page.getByTestId('threads-thread-menu').click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Related threads…' }).click();
+  const related = page.getByTestId('threads-related-popover');
+  await expect(related).toBeVisible();
+  await expectFullyInViewport(page, related, 'related threads popover');
+  await related.getByTestId('related-message-any').click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Beta Worker' }).click();
   const relayMsg = 'Sync schema check from Alpha';
-  await page.getByTestId('peers-message-input').fill(relayMsg);
+  const sheet = page.getByRole('dialog').filter({ hasText: 'Send a message from' });
+  await sheet.getByRole('textbox').fill(relayMsg);
 
   const sentPromise = page.waitForResponse(
     (r) =>
       r.url().includes(`/api/v1/sessions/${sessionB}/message`) &&
       r.request().method() === 'POST',
   );
-  await page.getByTestId('peers-send-btn').click();
+  await sheet.getByRole('button', { name: 'Send', exact: true }).click();
   const sentResp = await sentPromise;
   expect(sentResp.ok()).toBeTruthy();
 
-  await expect(page.getByTestId('peers-timeline')).toContainText(relayMsg);
+  await expect(related.getByTestId('related-recent')).toContainText(relayMsg);
+  await page.getByTestId('threads-related-chip').click();
+  await expect(related).toHaveCount(0);
 
   // Narrow viewport drawer layout stays free of horizontal overflow.
   await page.setViewportSize({ width: 720, height: 800 });
@@ -430,12 +442,8 @@ test('phone handoff opens the same live agent in Threads and returns to Terminal
   expect(during.provider_session_id).toBe(before.provider_session_id);
   expect(during.live).toBe(true);
   expect(during.meta).toMatchObject({ ...stableMeta, surface: 'threads' });
-  const actions = page.getByTestId('threads-thread-menu');
-  if (await actions.isVisible()) await actions.click();
-  else {
-    await page.getByRole('button', { name: 'More actions', exact: true }).click();
-    await page.getByRole('menuitem', { name: 'Thread actions', exact: true }).click();
-  }
+  // The toolbar keeps its ⋯ at every width (four controls, nothing overflows).
+  await page.getByTestId('threads-thread-menu').click();
   await page.getByRole('menuitem', { name: 'Open in Terminal', exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`#/agents/${agentOnlySession}$`));
   await expect(page.locator('.term-host')).toBeVisible();

@@ -88,9 +88,80 @@ pub fn uninstall(name: &str) -> io::Result<()> {
     uninstall_from_dirs(&provider_skill_dirs(), name)
 }
 
+/// Re-copy skill `name` from its Library tree `src` into every provider dir
+/// whose manifest says Otto owns that copy, after the Library copy was edited
+/// (Skills Lab save, new/deleted file, import). Unlike [`install`] this never
+/// creates a copy where there is none and never touches a copy Otto does not
+/// own, so a skill the person only keeps in Otto stays out of the CLIs.
+/// Returns the provider dirs that were refreshed.
+pub fn refresh_owned(name: &str, src: &Path) -> io::Result<Vec<PathBuf>> {
+    refresh_owned_in_dirs(&provider_skill_dirs(), name, src)
+}
+
 // ---------------------------------------------------------------------------
 // Core (dir-explicit, so the home/CODEX_HOME resolution stays out of tests)
 // ---------------------------------------------------------------------------
+
+/// [`refresh_owned`] over explicit provider roots. Each owned copy is replaced
+/// whole: the new tree is copied into a hidden sibling first and swapped in
+/// with renames, so a failed copy leaves the previous tree in place.
+pub fn refresh_owned_in_dirs(dirs: &[PathBuf], name: &str, src: &Path) -> io::Result<Vec<PathBuf>> {
+    let name = otto_core::paths::safe_component(name)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe skill name"))?;
+    let _edit = manifest_edit_guard();
+    let mut refreshed = Vec::new();
+    for dir in dirs {
+        if !merge::read_manifest_checked(dir)?.iter().any(|n| n == name) {
+            continue; // not Otto's copy (or no copy) — never written
+        }
+        let dest = dir.join(name);
+        match fs::symlink_metadata(&dest) {
+            // A copy the person removed stays removed; a symlink is theirs.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => continue,
+            Ok(_) => {}
+        }
+        swap_in_copy(src, &dest)?;
+        refreshed.push(dir.clone());
+    }
+    Ok(refreshed)
+}
+
+/// Replace the directory `dest` with a fresh copy of `src`: copy into a hidden
+/// sibling, move the old tree aside, rename the copy in, then drop the old one.
+/// Any failure before the swap leaves `dest` untouched.
+fn swap_in_copy(src: &Path, dest: &Path) -> io::Result<()> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let parent = dest
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no parent dir"))?;
+    let leaf = dest
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no dir name"))?
+        .to_string_lossy();
+    let tag = format!(
+        "{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let fresh = parent.join(format!(".{leaf}.otto-new-{tag}"));
+    let old = parent.join(format!(".{leaf}.otto-old-{tag}"));
+    if let Err(e) = copy_tree(src, &fresh) {
+        let _ = fs::remove_dir_all(&fresh);
+        return Err(e);
+    }
+    fs::rename(dest, &old).inspect_err(|_| {
+        let _ = fs::remove_dir_all(&fresh);
+    })?;
+    if let Err(e) = fs::rename(&fresh, dest) {
+        let _ = fs::rename(&old, dest);
+        let _ = fs::remove_dir_all(&fresh);
+        return Err(e);
+    }
+    let _ = fs::remove_dir_all(&old);
+    Ok(())
+}
 
 /// Serializes every manifest read-modify-write (install / uninstall) in this
 /// process, so two concurrent requests on one skills dir can't lose an
@@ -346,6 +417,80 @@ mod tests {
         assert!(skipped.contains(&mine));
         assert!(fresh.join("grill/references/notes.md").is_file());
         assert!(!skipped.contains(&fresh));
+    }
+
+    /// A Library edit reaches the copies Otto installed, and only those: a
+    /// user-owned copy, a symlink and a dir with no copy are left as they are.
+    #[test]
+    fn refresh_updates_owned_copies_and_never_unowned_ones() {
+        let tmp = TempDir::new().unwrap();
+        let src = src_skill(tmp.path());
+        let owned = tmp.path().join("claude");
+        let mine = tmp.path().join("codex");
+        let empty = tmp.path().join("gemini");
+        install_into_dirs(std::slice::from_ref(&owned), "grill", &src).unwrap();
+        fs::create_dir_all(mine.join("grill")).unwrap();
+        fs::write(mine.join("grill/SKILL.md"), "my own grill\n").unwrap();
+        fs::create_dir_all(&empty).unwrap();
+
+        // The person edits the Library copy (and adds a file).
+        fs::write(src.join("SKILL.md"), "---\nversion: 2\n---\n# edited\n").unwrap();
+        fs::write(src.join("references/new.md"), "added\n").unwrap();
+        let refreshed =
+            refresh_owned_in_dirs(&[owned.clone(), mine.clone(), empty.clone()], "grill", &src)
+                .unwrap();
+
+        assert_eq!(refreshed, vec![owned.clone()]);
+        assert_eq!(
+            fs::read_to_string(owned.join("grill/SKILL.md")).unwrap(),
+            "---\nversion: 2\n---\n# edited\n"
+        );
+        assert!(owned.join("grill/references/new.md").is_file());
+        assert_eq!(
+            fs::read_to_string(mine.join("grill/SKILL.md")).unwrap(),
+            "my own grill\n"
+        );
+        assert!(!empty.join("grill").exists(), "no copy is ever created");
+        // No hidden swap dirs are left behind.
+        let leftovers: Vec<_> = fs::read_dir(&owned)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                // The swap's hidden siblings, not the `.otto-managed.json` manifest.
+                let n = e.file_name().to_string_lossy().into_owned();
+                n.contains(".otto-new-") || n.contains(".otto-old-")
+            })
+            .collect();
+        assert!(leftovers.is_empty());
+    }
+
+    /// An owned copy the person deleted by hand is not brought back.
+    #[test]
+    fn refresh_does_not_resurrect_a_removed_owned_copy() {
+        let tmp = TempDir::new().unwrap();
+        let src = src_skill(tmp.path());
+        let d = tmp.path().join("claude");
+        install_into_dirs(std::slice::from_ref(&d), "grill", &src).unwrap();
+        fs::remove_dir_all(d.join("grill")).unwrap();
+        assert!(
+            refresh_owned_in_dirs(std::slice::from_ref(&d), "grill", &src)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!d.join("grill").exists());
+    }
+
+    /// A copy that fails midway keeps the previous provider tree whole.
+    #[test]
+    fn failed_refresh_keeps_the_previous_copy() {
+        let tmp = TempDir::new().unwrap();
+        let src = src_skill(tmp.path());
+        let d = tmp.path().join("claude");
+        install_into_dirs(std::slice::from_ref(&d), "grill", &src).unwrap();
+        let missing = tmp.path().join("no-such-source");
+        assert!(refresh_owned_in_dirs(std::slice::from_ref(&d), "grill", &missing).is_err());
+        assert!(d.join("grill/SKILL.md").is_file());
+        assert!(d.join("grill/references/notes.md").is_file());
     }
 
     #[test]

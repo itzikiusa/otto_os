@@ -20,9 +20,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use otto_core::agent_runtime::{
-    CreateRuntimeSessionBody, OpenPeerReq, PeerInfo, PeerMessageReq, PeerReply, QueuedDeliverReq,
-    RuntimePromptReq, RuntimePromptResp, RuntimeReplay, RuntimeRequestRespondReq, RuntimeSession,
-    UpdateRuntimeSessionReq,
+    CouncilResp, CreateCouncilReq, CreateRuntimeSessionBody, OpenPeerReq, PeerInfo, PeerMessageReq,
+    PeerReply, QueuedDeliverReq, RuntimePromptReq, RuntimePromptResp, RuntimeReplay,
+    RuntimeRequestRespondReq, RuntimeSession, SynthesizeCouncilReq, UpdateRuntimeSessionReq,
 };
 use otto_core::api::Problem;
 use otto_core::auth::{AuthContext, AuthUser};
@@ -71,6 +71,15 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
         .route(
             "/workspaces/{id}/runtime-sessions",
             get(list::<S>).post(create::<S>),
+        )
+        // One prompt to 2–4 agents; inline images ride in the body.
+        .route(
+            "/workspaces/{id}/runtime-sessions/council",
+            post(create_council::<S>).layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
+        )
+        .route(
+            "/runtime-sessions/{id}/council/synthesize",
+            post(synthesize_council::<S>),
         )
         .route(
             "/runtime-sessions/{id}",
@@ -295,6 +304,42 @@ async fn create<S: RuntimeCtx>(
     let req = body.into_req()?;
     let s = ctx.agent_runtime().create(&user.id, &ws, req).await?;
     Ok((StatusCode::CREATED, Json(s)))
+}
+
+/// POST /workspaces/{id}/runtime-sessions/council — 2–4 seats, created all
+/// or none, each sent the prompt (editor+, a person).
+async fn create_council<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path(ws): Path<Id>,
+    Json(req): Json<CreateCouncilReq>,
+) -> ApiResult<(StatusCode, Json<CouncilResp>)> {
+    require_human(&ctx, &auth)?;
+    ctx.roles().check(&user, &ws, WorkspaceRole::Editor).await?;
+    let seats = ctx
+        .agent_runtime()
+        .create_council(&user.id, &ws, req)
+        .await?;
+    Ok((StatusCode::CREATED, Json(CouncilResp { seats })))
+}
+
+/// POST /runtime-sessions/{id}/council/synthesize — open the council's judge
+/// (`{id}` = any of its threads); 409 while a seat still works.
+async fn synthesize_council<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Id>,
+    Json(req): Json<SynthesizeCouncilReq>,
+) -> ApiResult<(StatusCode, Json<RuntimeSession>)> {
+    require_human(&ctx, &auth)?;
+    let s = authorized(&ctx, &user, &id).await?;
+    ctx.roles()
+        .check(&user, &s.workspace_id, WorkspaceRole::Editor)
+        .await?;
+    let judge = ctx.agent_runtime().synthesize_council(&id, req).await?;
+    Ok((StatusCode::CREATED, Json(judge)))
 }
 
 async fn get_one<S: RuntimeCtx>(

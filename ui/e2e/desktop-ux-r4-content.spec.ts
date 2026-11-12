@@ -1,6 +1,9 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedVaultDir } from './seed';
 import { openPage, expectNoHorizontalOverflow, snipAnnotatedPng } from './helpers';
+// Canvas-page tests cover the unmounted Canvas editor (skipped, CANVAS_PAGE_RETIRED);
+// the Product autosave test drives the classic arena (Design tab ⋯ → Open the classic arena).
+import { CANVAS_PAGE_RETIRED, openClassicArena } from './storyDesigns';
 
 test.use({ serviceWorkers: 'block', viewport: { width: 1280, height: 900 } });
 let workspaceId = '', vaultId = 0;
@@ -33,6 +36,7 @@ for (const [theme, scheme, width, rtl] of [
   ['warm', 'light', 834, true], ['warm', 'dark', 375, false], ['pro-dark', 'dark', 1440, true],
 ] as const) {
   test(`D2 real renderer and source recovery ${theme} ${scheme}`, async ({ page }, testInfo) => {
+    test.skip(true, CANVAS_PAGE_RETIRED);
     test.setTimeout(90_000);
     await page.setViewportSize({ width, height: 900 });
     await page.addInitScript(({ theme, scheme, rtl }) => {
@@ -92,8 +96,9 @@ for (const [theme, scheme, width, rtl] of [
     }
     await page.getByTestId('design-source-toggle').click();
     await page.locator('.cm-content').fill('<h1>R4 saved responsive draft</h1>');
-    await page.getByTestId('design-save').click();
-    await expect(page.getByTestId('design-version-chip')).toHaveCount(2);
+    // Autosave stores it as v2 (the header names the current version).
+    await expect(page.getByTestId('design-save-state')).toHaveAttribute('data-state', 'saved');
+    await expect(page.getByTitle('Current version: v2')).toBeAttached();
     await page.getByTestId('design-source-toggle').click();
     // Version creation can finish before the debounced iframe preview settles.
     await expect(page.frameLocator('iframe[title="R4 synthetic release checklist"]')
@@ -167,6 +172,7 @@ test('Product rejected autosave retains both artifacts through switching and res
   await page.locator('.story-row', { hasText: title }).click();
   await page.getByRole('tab', { name: 'Story', exact: true }).click();
   await page.locator('.sub-tab-strip .st', { hasText: 'Design' }).click();
+  await openClassicArena(page);
   const select = async (name: string) => {
     const panes = page.getByRole('tablist', { name: 'Design panes' });
     if (await panes.isVisible()) await panes.getByRole('tab', { name: 'Assets', exact: true }).click();
@@ -229,6 +235,7 @@ test('Vault long phone tree leaves useful space for reading and editing', async 
 });
 
 test('Canvas same-scene reopen keeps the newer draft when an older save resolves', async ({ page }) => {
+  test.skip(true, CANVAS_PAGE_RETIRED);
   const { ctx, base } = await apiCtx(); const scenes: { id: string; title: string }[] = [];
   for (const name of ['Alpha', 'Beta']) {
     const r = await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/canvas/scenes`, { data: {
@@ -324,6 +331,7 @@ test('D2 timed-out transport is disposed and the next queued render recovers', a
 });
 
 test('tablet Canvas gives the editor full width and toggles scenes without losing its draft', async ({ page }, info) => {
+  test.skip(true, CANVAS_PAGE_RETIRED);
   await page.setViewportSize({ width: 834, height: 1112 });
   await page.addInitScript(() => {
     localStorage.setItem('otto_theme', 'warm'); localStorage.setItem('otto_direction', 'rtl');

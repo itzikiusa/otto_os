@@ -33,15 +33,15 @@ for (const brand of [false, true]) {
     // Wait for the real websocket event to refresh the component while its
     // confirmation remains open. The request below must still approve v1.
     if (brand) await expect(page.getByTestId('brand-approve')).toContainText('v2');
-    else await expect(page.getByTestId('design-version-chip').filter({ hasText: 'v2' })).toBeVisible();
+    else await expect(page.getByTitle('Current version: v2')).toBeVisible();
     const sent = page.waitForRequest((r) => r.url().endsWith(`/design/artifacts/${id}/approve`) && r.method() === 'POST');
     await dialog.getByRole('button', { name: brand ? 'Accept v1' : 'Approve v1', exact: true }).click();
     expect((await sent).postDataJSON()).toEqual({ version_id: first.version.id });
     await expect(dialog).toHaveCount(0);
     await expectNoHorizontalOverflow(page);
     if (!brand) {
-      await expect(page.getByTestId('design-status')).toContainText('Draft');
-      await expect(page.getByTestId('design-status')).not.toContainText('Approved');
+      // v1 is approved and v2 came after it: the pill says so instead of "Draft".
+      await expect(page.getByTestId('design-status')).toContainText('Approved v1 · edited');
     }
     if (brand) {
       await expect(page.getByTestId('brand-editor')).toContainText('still use v1');

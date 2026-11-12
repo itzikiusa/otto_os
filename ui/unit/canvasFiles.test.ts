@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { FILE_REF_PREFIX, filesForSave, refSha, sha256Hex } from '../src/modules/canvas/canvasFileRefs.ts';
+import { FILE_REF_PREFIX, filesForSave, markUnloaded, refSha, sha256Hex } from '../src/modules/canvas/canvasFileRefs.ts';
 import { DEFAULT_FILE_CACHE_BYTES, FileCache } from '../src/modules/canvas/canvasFileCache.ts';
 
 const img = `data:image/png;base64,${'A'.repeat(3 * 1024 * 1024)}`;
@@ -41,6 +41,26 @@ test('an unresolved ref passes through and is not re-learned as inline', () => {
   const out = filesForSave({ f2: ref }, new Map());
   assert.equal(out.files.f2.dataURL, ref.dataURL);
   assert.equal(out.inline.length, 0);
+});
+
+test('an image whose file failed to load keeps its ref through the next edit', () => {
+  // The load learned f3's sha, the fetch failed, Excalidraw holds no file for it.
+  const known = new Map<string, string>([['f3', sha]]);
+  const ref = { id: 'f3', mimeType: 'image/png', created: 1, dataURL: FILE_REF_PREFIX + sha };
+  markUnloaded(known, 'f3', ref);
+  const elements = [{ id: 'img', type: 'image', fileId: 'f3' }, { id: 'r', type: 'rectangle' }];
+  const out = filesForSave({}, known, elements);
+  assert.deepEqual(out.files.f3, ref, 'the stored entry (mimeType included) is saved back');
+  assert.equal(out.inline.length, 0);
+  // Without the failure note the known sha still keeps a bare ref.
+  const bare = filesForSave({}, new Map([['f4', sha]]), [{ type: 'image', fileId: 'f4' }]);
+  assert.equal(bare.files.f4.dataURL, FILE_REF_PREFIX + sha);
+  // A deleted image, or one whose file nobody knows, adds nothing.
+  assert.deepEqual(filesForSave({}, known, [{ type: 'image', fileId: 'f3', isDeleted: true }]).files, {});
+  assert.deepEqual(filesForSave({}, new Map(), [{ type: 'image', fileId: 'f9' }]).files, {});
+  // A loaded file wins over the note (no duplicate, no downgrade).
+  const loaded = { id: 'f3', mimeType: 'image/png', dataURL: img };
+  assert.equal(filesForSave({ f3: loaded }, known, elements).files.f3.dataURL, FILE_REF_PREFIX + sha);
 });
 
 // A fetcher that serves `size`-char data URLs and counts calls per sha.

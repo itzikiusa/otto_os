@@ -1,52 +1,44 @@
 <script lang="ts">
-  import { announceShown } from '../../lib/announce.svelte';
-  import { toastError } from '../../lib/toastError';
-  import { onTabKey } from './tabKeys';
-  // Design Hall lobby (Grid view): the prompt hero, all seven studios, the
-  // Continue strip, projects, the Linked-to-Product epic tree, and a rail with
-  // what Otto captured for learning + agent activity. Dashboard-style: every
-  // region owns its loading / empty / error state; the library snapshot is
-  // shared (library.svelte.ts) and refreshed by live design events.
+  // Design Hall lobby: one prompt line (studio ▾ · brief · ⋯ · Generate — the
+  // page's one primary action), then "All designs" — a server-paged grid you
+  // group by Recent · Story · Project and filter by studio, status, Mine and
+  // Archived (the one place archived designs can be found and restored) —
+  // and a rail with only what needs a person: Needs review and Agent
+  // activity. A workspace with no designs yet gets a calm start: a heading,
+  // the prompt and "Import a file". Brand Kit and Team design rules live in
+  // the header ⋯; the studios are the prompt's picker and the Studio chip.
   import { untrack } from 'svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
-  import Icon, { asIcon } from '../../lib/components/Icon.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
-  import StatusDot from '../../lib/components/StatusDot.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import ProductModeTabs from '../../lib/components/ProductModeTabs.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { router } from '../../lib/router.svelte';
-  import { ws } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
-  import { rel } from '../../lib/stores/now.svelte';
-  import { toasts } from '../../lib/toast.svelte';
-  import { designBus, events } from '../../lib/events.svelte';
-  import { sessionState } from '../../lib/status';
+  import { designBus } from '../../lib/events.svelte';
   import { search as searchApi } from '../../lib/api/design';
   import { isAbortError } from '../../lib/api/client';
-  import type { DesignSearchHit, DesignStudio } from '../../lib/api/types';
-  import ArtifactCard from './ArtifactCard.svelte';
-  import ProjectCard from './ProjectCard.svelte';
-  import LinkedToProduct from './LinkedToProduct.svelte';
-  import LearnedCard from './LearnedCard.svelte';
-  import StudioBadge from './StudioBadge.svelte';
-  import SpatialView from './SpatialView.svelte';
-  import ProductModeTabs from '../../lib/components/ProductModeTabs.svelte';
-  import { STUDIOS, filterProjects, studioInfo, titleFromPrompt, type ProjectFilter } from './model';
-  import { createDesign } from './create';
-  import { generateFromBrief, referenceOf, suggestReferences } from './assist/handoff';
-  import { library, LIBRARY_LIMIT } from './library.svelte';
+  import type { DesignSearchHit } from '../../lib/api/types';
   import { loadErrorText } from '../../lib/loadError';
-  import LoadState from '../../lib/components/LoadState.svelte';
+  import ArtifactCard from './ArtifactCard.svelte';
+  import DesignGrid from './DesignGrid.svelte';
+  import GridFilterBar from './GridFilterBar.svelte';
+  import LobbyPrompt from './LobbyPrompt.svelte';
+  import LobbyRail from './LobbyRail.svelte';
+  import { library } from './library.svelte';
+  import { NO_FILTERS, type GridFilters, type GroupBy } from './designGrid';
 
   interface Props {
-    view: 'grid' | 'spatial';
     onnew: (e: MouseEvent) => void;
     onimport: () => void;
     onnewproject: () => void;
   }
-  let { view, onnew, onimport, onnewproject }: Props = $props();
+  let { onnew, onimport, onnewproject }: Props = $props();
+  const canEdit = $derived(auth.can('design', 'edit'));
 
-  // ── Library + live refresh ────────────────────────────────────────────────
+  // ── Library (rail, project + story names) + live refresh ─────────────────
   $effect(() => {
     void designBus.resyncTick;
     untrack(() => void library.load());
@@ -61,139 +53,31 @@
     });
   });
 
-  const live = $derived(library.hits.filter((h) => h.artifact.status !== 'archived'));
-  const recent = $derived(
-    [...live].sort((a, b) => b.artifact.updated_at.localeCompare(a.artifact.updated_at)).slice(0, 8),
-  );
-  const refCount = (id: string) => library.hitOf(id)?.reference_count ?? 0;
+  // ── All designs ──────────────────────────────────────────────────────────
+  let filters = $state<GridFilters>({ ...NO_FILTERS });
+  let groupBy = $state<GroupBy>('recent');
+  const projects = $derived(library.projects.filter((p) => !p.archived));
+  /** First run: nothing in the library, and no filter asked for archived ones. */
+  const firstRun = $derived(library.loaded && !library.error && library.hits.length === 0 && !filters.archived);
 
-  // ── Projects ──────────────────────────────────────────────────────────────
-  let pfilter = $state<ProjectFilter>('all');
-  const allProjects = $derived(library.projects.filter((p) => !p.archived));
-  const projects = $derived(filterProjects(library.projects, library.artifacts, pfilter, auth.me?.id));
-  const PFILTERS: { id: ProjectFilter; label: string }[] = [
-    { id: 'all', label: 'All' },
-    { id: 'mine', label: 'Mine' },
-    { id: 'epic', label: 'By epic' },
-    { id: 'shipped', label: 'Shipped' },
-  ];
-  function epicLabel(id: string | null): string | null {
-    if (!id) return null;
-    const s = library.stories[id];
-    return s ? `${s.source_key} · ${s.title}` : 'Linked epic';
+  function showReview(): void {
+    filters = { ...NO_FILTERS, status: 'review' };
+    groupBy = 'recent';
+    document.getElementById('dh-all-h')?.scrollIntoView({ block: 'start' });
   }
 
-  // ── Agent activity: designs agents drafted, with their live session ──────
-  const agentWork = $derived(
-    live
-      .filter((h) => h.artifact.created_by_kind === 'agent')
-      .sort((a, b) => b.artifact.updated_at.localeCompare(a.artifact.updated_at))
-      .slice(0, 4)
-      .map((h) => ({
-        a: h.artifact,
-        session: h.artifact.created_session_id
-          ? (ws.getSession(h.artifact.created_session_id) ?? null)
-          : null,
-      })),
-  );
-
-  // ── Prompt hero: Generate = create the draft + hand the brief to Otto (one
-  // generate turn, or a variants run), then open it on the Otto tab. "Draft
-  // only" keeps the brief on an empty draft without an agent. ─────────────
-  let prompt = $state('');
-  let heroStudio = $state<DesignStudio>('frames');
-  let heroProject = $state('');
-  let creating = $state(false);
-  const heroStudios = STUDIOS.filter((s) => s.formats.length > 0);
-  const TRY = ['Launch page with a product hero', 'Social tile in portrait', 'Checkout flow diagram', 'Product shot on a plinth'];
-  const TRY_STUDIO: DesignStudio[] = ['frames', 'graphics', 'whiteboard', '3d'];
-  let variants = $state(1);
-  let useRefs = $state(true);
-  /** The team's best matches for the brief — offered to Otto first as [R1..R3]. */
-  let refHits = $state<DesignSearchHit[]>([]);
-  let refCtl: AbortController | null = null;
-  let refTimer: ReturnType<typeof setTimeout> | null = null;
-  $effect(() => {
-    const p = prompt.trim();
-    const on = useRefs;
-    const wsId = ws.currentId;
-    if (refTimer) clearTimeout(refTimer);
-    if (!on || p.length < 4 || !wsId) {
-      refCtl?.abort();
-      refHits = [];
-      return;
-    }
-    refTimer = setTimeout(() => void loadRefs(p, wsId), 450);
-  });
-  async function loadRefs(p: string, wsId: string): Promise<void> {
-    refCtl?.abort();
-    const mine = new AbortController();
-    refCtl = mine;
-    try {
-      const hits = await suggestReferences(p, wsId, mine.signal);
-      if (refCtl === mine) refHits = hits;
-    } catch {
-      /* no preview; Otto still searches the library itself */
-    }
-  }
-
-  async function generate(): Promise<void> {
-    const wsId = ws.currentId;
-    if (!wsId) {
-      toasts.warn('Pick a workspace first', 'New designs are filed under a workspace.');
-      return;
-    }
-    creating = true;
-    try {
-      const r = await generateFromBrief({
-        workspaceId: wsId,
-        studio: heroStudio,
-        format: studioInfo(heroStudio).formats[0],
-        title: titleFromPrompt(prompt),
-        projectId: heroProject || null,
-        brief: prompt,
-        variants,
-        references: useRefs ? refHits.map(referenceOf) : [],
-      });
-      prompt = '';
-      if (r.assistError) toasts.warn('Draft created, but Otto couldn’t start', r.assistError);
-      router.go(`design/a/${encodeURIComponent(r.artifactId)}/otto`);
-    } catch (e) {
-      toastError('Couldn’t create the draft', e);
-    } finally {
-      creating = false;
-    }
-  }
-
-  async function createFromPrompt(): Promise<void> {
-    const wsId = ws.currentId;
-    if (!wsId) {
-      toasts.warn('Pick a workspace first', 'New designs are filed under a workspace.');
-      return;
-    }
-    creating = true;
-    try {
-      const id = await createDesign({
-        workspaceId: wsId,
-        studio: heroStudio,
-        format: studioInfo(heroStudio).formats[0],
-        title: titleFromPrompt(prompt),
-        projectId: heroProject || null,
-        brief: prompt,
-      });
-      prompt = '';
-      router.go(`design/a/${encodeURIComponent(id)}`);
-    } catch (e) {
-      toastError('Couldn’t create the draft', e);
-    } finally {
-      creating = false;
-    }
-  }
-
-  function openStudio(id: DesignStudio): void {
-    if (id === 'brand') router.go('design/brand');
-    else if (id === 'spatial') router.go('design/spatial');
-    else router.go(`design/studio/${id}`);
+  function moreMenu(e: MouseEvent): void {
+    ctxMenu.show(e, [
+      { label: 'Brand Kit', icon: 'palette', action: () => router.go('design/brand') },
+      { label: 'Team design rules', icon: 'bulb', action: () => router.go('design/learned') },
+      { separator: true },
+      {
+        label: 'Archived designs',
+        checked: filters.archived,
+        title: 'Show only archived designs, to find or restore one',
+        action: () => (filters = { ...filters, archived: !filters.archived, status: '' }),
+      },
+    ]);
   }
 
   // ── Global search (header field) ─────────────────────────────────────────
@@ -207,16 +91,18 @@
 
   $effect(() => {
     const term = q.trim();
-    if (debounce) clearTimeout(debounce);
-    if (!term) {
-      ctl?.abort();
-      results = [];
-      searching = false;
-      searchError = null;
-      return;
-    }
-    searching = true;
-    debounce = setTimeout(() => void runSearch(term), 220);
+    untrack(() => {
+      if (debounce) clearTimeout(debounce);
+      if (!term) {
+        ctl?.abort();
+        results = [];
+        searching = false;
+        searchError = null;
+        return;
+      }
+      searching = true;
+      debounce = setTimeout(() => void runSearch(term), 220);
+    });
   });
 
   async function runSearch(term: string): Promise<void> {
@@ -241,10 +127,6 @@
       q = '';
     }
   }
-
-  function goView(v: 'grid' | 'spatial'): void {
-    router.go(v === 'grid' ? 'design' : 'design/spatial');
-  }
 </script>
 
 <!-- The search field rides in the header on desktop/tablet; a phone row has
@@ -265,268 +147,89 @@
 
 <PageHeader title="Product" subtitle="Stories, specs and design studios" class="dh-header">
   {#snippet tabs()}
-    <div class="dh-tabs">
-      <ProductModeTabs active="design" />
-      <div class="segmented" role="tablist" aria-label="Lobby view">
-        <button role="tab" aria-selected={view === 'grid'} tabindex={view === 'grid' ? 0 : -1} onkeydown={onTabKey} class:active={view === 'grid'} onclick={() => goView('grid')}>
-          <Icon name="grid" size={12} /> Grid
-        </button>
-        <button role="tab" aria-selected={view === 'spatial'} tabindex={view === 'spatial' ? 0 : -1} onkeydown={onTabKey} class:active={view === 'spatial'} onclick={() => goView('spatial')}
-          data-testid="design-spatial-tab">
-          <Icon name="gallery" size={12} /> Spatial <span class="beta">Beta</span>
-        </button>
-      </div>
-    </div>
+    <ProductModeTabs active="design" />
   {/snippet}
   {#snippet actions()}
     {#if !viewport.isPhone}{@render searchField()}{/if}
-    <button class="btn small" data-overflow="-1" data-icon="download" onclick={onimport}>
+    <button class="btn small" data-overflow="-1" data-icon="download" onclick={onimport} disabled={!canEdit}>
       <Icon name="download" size={12} /> Import
     </button>
-    <button class="btn small" class:primary={searchActive || view === 'spatial'} onclick={onnew} aria-haspopup="menu" data-testid="design-new" data-keep>
+    <button class="btn small" class:primary={searchActive} onclick={onnew} aria-haspopup="menu" data-testid="design-new" data-keep>
       <Icon name="plus" size={12} /> New <Icon name="chevronDown" size={12} />
+    </button>
+    <button class="icon-btn" onclick={moreMenu} aria-haspopup="menu" aria-label="More Design Hall pages" title="Brand Kit, team design rules, archived designs"
+      data-testid="design-more" data-keep>
+      <Icon name="more" size={14} />
     </button>
   {/snippet}
 </PageHeader>
 
-{#if view === 'spatial'}
-  <SpatialView />
-{:else}
 <PageBody>
-  <div class="lobby-wrap">
+  <div class="lobby-wrap" data-testid="design-lobby">
   {#if viewport.isPhone}<div class="phone-search">{@render searchField()}</div>{/if}
-  <div class="lobby" data-testid="design-lobby">
-    <div class="main">
-      {#if searchActive}
-        <section aria-labelledby="dh-results-h">
-          <div class="sec-head">
-            <h2 id="dh-results-h">Results</h2>
-            <span class="dim">{searching ? 'Searching…' : `${results.length} for “${q.trim()}” · shipped first`}</span>
-            <span class="grow"></span>
-            <button class="btn small ghost" onclick={() => (q = '')}>Clear search</button>
-          </div>
-          {#if searchError}
-            <div class="inline-err" use:announceShown={{ text: 'Couldn’t search. Check the connection and try again.', assertive: true }}>
-              <Icon name="warning" size={14} />
-              <span title={searchError}>Couldn’t search. Check the connection and try again.</span>
-              <button class="btn small" onclick={() => void runSearch(q.trim())}>Retry</button>
-            </div>
-          {:else if !searching && results.length === 0}
-            <p class="dim">No designs match “{q.trim()}”. Search looks at titles, tags, text inside designs, linked stories and project names.</p>
-          {:else}
-            <div class="cards">
-              {#each results as h (h.artifact.id)}
-                <ArtifactCard artifact={h.artifact} stories={library.storyKeys(h.artifact.id)} referenceCount={h.reference_count} />
-              {/each}
-            </div>
-          {/if}
-        </section>
+  {#if searchActive}
+    <section aria-labelledby="dh-results-h">
+      <div class="sec-head">
+        <h2 id="dh-results-h">Results</h2>
+        <span class="dim">{searching ? 'Searching…' : `${results.length} for “${q.trim()}” · shipped first`}</span>
+        <span class="grow"></span>
+        <button class="btn small ghost" onclick={() => (q = '')}>Clear search</button>
+      </div>
+      {#if searchError}
+        <div class="inline-err" use:announceShown={{ text: 'Couldn’t search. Check the connection and try again.', assertive: true }}>
+          <Icon name="warning" size={14} />
+          <span title={searchError}>Couldn’t search. Check the connection and try again.</span>
+          <button class="btn small" onclick={() => void runSearch(q.trim())}>Retry</button>
+        </div>
+      {:else if !searching && results.length === 0}
+        <p class="dim">No designs match “{q.trim()}”. Search looks at titles, tags, text inside designs, linked stories and project names.</p>
       {:else}
-        <!-- Prompt hero -->
-        <section class="hero card" aria-labelledby="dh-hero-h">
+        <div class="cards">
+          {#each results as h (h.artifact.id)}
+            <ArtifactCard artifact={h.artifact} stories={library.storyKeys(h.artifact.id)} referenceCount={h.reference_count} />
+          {/each}
+        </div>
+      {/if}
+    </section>
+  {:else if firstRun}
+    <section class="first" aria-labelledby="dh-first-h" data-testid="design-first-run">
+      <h2 id="dh-first-h">What do you want to make?</h2>
+      <LobbyPrompt {canEdit} />
+      <div class="first-import">
+        <button class="btn small ghost" onclick={onimport} disabled={!canEdit} data-testid="design-first-import">
+          <Icon name="download" size={12} /> Import a file
+        </button>
+      </div>
+    </section>
+  {:else}
+    <div class="lobby">
+      <div class="main">
+        <section class="hero" aria-labelledby="dh-hero-h">
           <h2 id="dh-hero-h">What do you want to make?</h2>
-          <p class="dim">Otto drafts it in the studio you pick, from your team’s past designs. Every result is a version you can compare, keep or undo.</p>
-          <div class="composer">
-            <textarea dir="auto"
-              class="input"
-              rows="2"
-              placeholder="Describe it… e.g. “a launch page for the loyalty programme with a 3D card hero”"
-              aria-label="Describe the design"
-              bind:value={prompt}
-              onkeydown={(e) => {
-                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && prompt.trim() && !creating) {
-                  e.preventDefault();
-                  void generate();
-                }
-              }}
-              data-testid="design-prompt"
-            ></textarea>
-            <div class="composer-bar">
-              <label class="sel">
-                <span>Studio</span>
-                <select class="input" bind:value={heroStudio} aria-label="Studio for the draft">
-                  {#each heroStudios as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
-                </select>
-              </label>
-              <label class="sel">
-                <span>Project</span>
-                <select class="input" bind:value={heroProject} aria-label="Project for the draft">
-                  <option value="">None</option>
-                  {#each allProjects as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
-                </select>
-              </label>
-              <label class="sel">
-                <span>Variants</span>
-                <select class="input" bind:value={variants} aria-label="How many directions Otto drafts" data-testid="design-prompt-variants">
-                  {#each [1, 2, 3, 4] as n (n)}<option value={n}>{n}</option>{/each}
-                </select>
-              </label>
-              <button class="pill-toggle" class:on={useRefs} aria-pressed={useRefs} onclick={() => (useRefs = !useRefs)}
-                title="Offer your team’s closest past designs to Otto first, as references it can cite" data-testid="design-prompt-refs">
-                {#if useRefs}<Icon name="check" size={12} />{/if} Use references
-              </button>
-              <span class="grow"></span>
-              <span class="go">
-              <button class="btn ghost" disabled={!prompt.trim() || creating} onclick={createFromPrompt} data-testid="design-prompt-create"
-                title="Save the brief on an empty draft, without asking Otto">
-                Draft only
-              </button>
-              <button class="btn primary" disabled={!prompt.trim() || creating} onclick={generate} data-testid="design-prompt-generate"
-                title="Create the draft and ask Otto to design it (⌘Enter)">
-                <Icon name="sparkle" size={13} /> {creating ? 'Starting…' : 'Generate'}
-              </button>
-              </span>
-            </div>
-            {#if useRefs && refHits.length}
-              <div class="refs" aria-label="References Otto gets first" data-testid="design-prompt-ref-chips">
-                <span class="dim">References</span>
-                {#each refHits as h, i (h.artifact.id)}
-                  <a class="chip" href={`#/design/a/${encodeURIComponent(h.artifact.id)}`} title={`${h.artifact.title} (${h.artifact.status}) — offered as R${i + 1}`}>
-                    R{i + 1} · {h.artifact.title}
-                  </a>
-                {/each}
-              </div>
-            {/if}
-          </div>
-          <div class="try">
-            <span class="dim">Try</span>
-            {#each TRY as t, i (t)}
-              <button class="chip as-btn" onclick={() => { prompt = t; heroStudio = TRY_STUDIO[i]; }}>{t}</button>
-            {/each}
-          </div>
-          <p class="phase"><Icon name="info" size={12} /> Nothing is applied for you: Otto’s drafts are versions, and variants wait until you pick one.</p>
+          <LobbyPrompt {canEdit} />
         </section>
 
-        <!-- Studios -->
-        <section aria-labelledby="dh-studios-h">
+        <section aria-labelledby="dh-all-h" data-testid="design-all">
           <div class="sec-head">
-            <h2 id="dh-studios-h">Studios</h2>
-            <span class="dim">7 studios · one shared library</span>
+            <h2 id="dh-all-h">{filters.archived ? 'Archived designs' : 'All designs'}</h2>
           </div>
-          <div class="studios" data-testid="design-studios">
-            {#each STUDIOS as s (s.id)}
-              <button class="studio" onclick={() => openStudio(s.id)} data-testid={`design-studio-${s.id}`}>
-                <StudioBadge studio={s.id} size={28} />
-                <span class="s-name">{s.name}</span>
-                <span class="s-blurb">{s.blurb}</span>
-                {#if s.phase === 'planned'}
-                  <span class="s-tag" title={`Planned for ${s.roadmap}`}>{s.roadmap}</span>
-                {/if}
-              </button>
-            {/each}
-          </div>
-        </section>
-
-        <!-- Continue -->
-        <section aria-labelledby="dh-continue-h">
-          <div class="sec-head">
-            <h2 id="dh-continue-h">Continue</h2>
-            <span class="dim">Recently edited</span>
-          </div>
-          {#if library.loading && !library.loaded}
-            <Skeleton rows={1} height={220} />
-          {:else if library.error && !library.loaded}
-            <LoadState variant="compact" what="the design library" error={library.error} empty onretry={() => void library.load()} />
-          {:else if recent.length === 0}
-            <p class="dim">Nothing here yet. Designs you and your agents make — and the ones already in Product and Canvas — show up here.</p>
-          {:else}
-            <div class="strip" data-testid="design-continue">
-              {#each recent as h (h.artifact.id)}
-                <ArtifactCard artifact={h.artifact} stories={library.storyKeys(h.artifact.id)} referenceCount={refCount(h.artifact.id)} live />
+          <GridFilterBar bind:filters bind:groupBy />
+          {#if groupBy === 'project'}
+            <div class="projects" role="group" aria-label="Projects">
+              {#each projects as p (p.id)}
+                <a class="pchip" href={`#/design/p/${encodeURIComponent(p.id)}`}><Icon name="folder" size={12} /> {p.name}</a>
               {/each}
+              <button class="pchip" onclick={onnewproject} disabled={!canEdit}><Icon name="plus" size={12} /> New project…</button>
             </div>
           {/if}
+          <DesignGrid {filters} {groupBy} page={60} follow onclearfilters={() => (filters = { ...NO_FILTERS })} />
         </section>
-
-        <!-- Projects -->
-        <section aria-labelledby="dh-projects-h">
-          <div class="sec-head">
-            <h2 id="dh-projects-h">Projects</h2>
-            <span class="dim">{projects.length} of {allProjects.length}</span>
-            <span class="grow"></span>
-            {#if allProjects.length}
-              <div class="segmented" role="group" aria-label="Filter projects">
-                {#each PFILTERS as f (f.id)}
-                  <button aria-pressed={pfilter === f.id} class:active={pfilter === f.id} onclick={() => (pfilter = f.id)}>{f.label}</button>
-                {/each}
-              </div>
-            {/if}
-          </div>
-          {#if library.loading && !library.loaded}
-            <Skeleton rows={2} height={120} />
-          {:else if allProjects.length === 0}
-            <div class="none">
-              <p class="dim">No projects yet. A project groups the designs for one launch or epic.</p>
-              <button class="btn small" onclick={onnewproject}><Icon name="plus" size={12} /> New project…</button>
-            </div>
-          {:else if projects.length === 0}
-            <p class="dim">No projects match this filter. <button class="linkbtn" onclick={() => (pfilter = 'all')}>Show all</button></p>
-          {:else}
-            {#if library.truncated}
-              <p class="dim" data-testid="lobby-truncated">Counts and filters cover the newest {LIBRARY_LIMIT} designs; older ones are still in search.</p>
-            {/if}
-            <div class="projects">
-              {#each projects as p, i (p.id)}
-                <ProjectCard project={p} artifacts={library.artifacts} epicLabel={epicLabel(p.epic_story_id)} live={i < 6} />
-              {/each}
-            </div>
-          {/if}
-        </section>
-
-        <!-- Linked to Product -->
-        <section aria-labelledby="dh-linked-h">
-          <div class="sec-head">
-            <h2 id="dh-linked-h">Linked to Product</h2>
-            <span class="dim">Epics and the designs that serve them</span>
-          </div>
-          {#if library.loading && !library.loaded}
-            <Skeleton rows={3} height={32} />
-          {:else}
-            <LinkedToProduct />
-          {/if}
-        </section>
-      {/if}
+      </div>
+      <LobbyRail onshowreview={showReview} />
     </div>
-
-    <aside class="rail" aria-label="Learning and activity">
-      <LearnedCard />
-      {#if agentWork.length}
-        <section class="card activity" aria-labelledby="dh-activity-h">
-          <header>
-            <span class="ico"><Icon name="user" size={14} /></span>
-            <h2 id="dh-activity-h">Agent activity</h2>
-          </header>
-          <ul>
-            {#each agentWork as w (w.a.id)}
-              <li>
-                <div class="act-line">
-                  {#if w.session}<StatusDot
-                      state={sessionState(w.session, ws.statusMap[w.session.id], ws.needsYou[w.session.id] === true, { stale: events.state !== 'connected' })}
-                    />{/if}
-                  <span><span class="who">{w.session?.title ?? w.a.created_session_title ?? 'An agent'}</span> drafted
-                    <a href={`#/design/a/${encodeURIComponent(w.a.id)}`}>{w.a.title}</a></span>
-                </div>
-                <div class="act-meta">
-                  <span title={new Date(w.a.updated_at).toLocaleString()}>{rel(w.a.updated_at)}</span>
-                  {#if w.session}
-                    <button class="linkbtn" onclick={() => ws.navigateToSession(w.session!.id)}>Open session</button>
-                  {/if}
-                </div>
-              </li>
-            {/each}
-          </ul>
-        </section>
-      {/if}
-      <nav class="card quick" aria-label="Design Hall pages">
-        <!-- "What Otto learned" is the card above; no second link to it. -->
-        <a href="#/design/brand"><Icon name="palette" size={14} /> Brand Kit</a>
-        <a href="#/canvas"><Icon name={asIcon('shapes')} size={14} /> Open Canvas boards</a>
-      </nav>
-    </aside>
-  </div>
+  {/if}
   </div>
 </PageBody>
-{/if}
 
 <style>
   /* The rail stacks under the main column when the PAGE BODY is narrow (a
@@ -536,7 +239,7 @@
   }
   .lobby {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 300px;
+    grid-template-columns: minmax(0, 1fr) 280px;
     gap: 24px;
     align-items: start;
   }
@@ -548,7 +251,7 @@
   .main {
     display: flex;
     flex-direction: column;
-    gap: 28px;
+    gap: 24px;
     min-width: 0;
   }
   .sec-head {
@@ -569,25 +272,61 @@
   .grow {
     flex: 1;
   }
-  .beta {
-    font-size: var(--fs-xs);
+  .hero h2,
+  .first h2 {
+    margin: 0 0 10px;
+    font-size: var(--fs-l);
     font-weight: 600;
-    color: var(--info);
-    background: var(--info-soft);
-    border-radius: 999px;
-    padding: 0 6px;
-    margin-inline-start: 2px;
+    letter-spacing: -0.01em;
   }
-  .dh-tabs {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    flex-shrink: 0;
+  .first {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+    max-width: 720px;
+    margin: 8vh auto 0;
   }
-  .segmented > button {
+  .first h2 {
+    margin: 0;
+    font-size: var(--fs-xl);
+    text-align: center;
+  }
+  .first-import {
+    display: flex;
+    justify-content: center;
+  }
+  .projects {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-block-end: 14px;
+  }
+  .pchip {
     display: inline-flex;
     align-items: center;
     gap: 4px;
+    max-width: 260px;
+    padding: 2px 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--text-dim);
+    font: inherit;
+    font-size: var(--fs-s);
+    text-decoration: none;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .pchip:hover:not(:disabled) {
+    color: var(--text);
+    border-color: var(--border-strong);
+  }
+  .pchip:disabled {
+    opacity: var(--disabled-opacity);
+    cursor: default;
   }
   .search {
     display: inline-flex;
@@ -623,202 +362,10 @@
     font-size: var(--fs-s);
     outline: none;
   }
-  /* Hero */
-  .hero {
-    padding: 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-  .hero h2 {
-    margin: 0;
-    font-size: var(--fs-xl);
-    font-weight: 600;
-    letter-spacing: -0.01em;
-  }
-  .hero > p {
-    margin: 0;
-    font-size: var(--fs-s);
-  }
-  .composer {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface-2);
-    padding: 10px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-  .composer textarea {
-    height: auto;
-    min-height: 52px;
-    resize: vertical;
-    border: 0;
-    background: transparent;
-    padding: 4px 2px;
-    box-shadow: none;
-    font-size: var(--fs-m);
-  }
-  .composer textarea:focus {
-    box-shadow: none;
-  }
-  .composer:focus-within {
-    border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px var(--accent-soft-strong);
-  }
-  .composer-bar {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-  .sel {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
-  .sel select {
-    height: 24px;
-    padding-block: 0;
-    width: auto;
-    max-width: 200px;
-    background: var(--surface);
-  }
-  .try {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 6px;
-    font-size: var(--fs-s);
-  }
-  .go {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    margin-inline-start: auto;
-  }
-  .refs {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 6px;
-    font-size: var(--fs-s);
-  }
-  .refs .chip {
-    max-width: 240px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    text-decoration: none;
-  }
-  .refs .chip:hover {
-    color: var(--text);
-    border-color: var(--border-strong);
-  }
-  .phase {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin: 0;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  /* Studios */
-  /* All seven studios in one row when the column allows it (they are one
-     product); narrower columns wrap to an even grid. */
-  .main {
-    container-type: inline-size;
-  }
-  .studios {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
-    gap: 8px;
-  }
-  @container (min-width: 800px) {
-    .studios {
-      grid-template-columns: repeat(7, minmax(0, 1fr));
-    }
-  }
-  .studio {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 4px;
-    min-height: 118px;
-    padding: 12px 10px 10px;
-    text-align: start;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    color: var(--text);
-    font: inherit;
-    cursor: pointer;
-    transition: border-color var(--dur-fast) ease-out;
-  }
-  .studio:hover {
-    border-color: var(--border-strong);
-  }
-  .s-name {
-    margin-block-start: 6px;
-    font-weight: 600;
-  }
-  .s-blurb {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    line-height: 1.4;
-  }
-  .s-tag {
-    position: absolute;
-    inset-block-start: 10px;
-    inset-inline-end: 8px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 0 6px;
-  }
-  /* Continue */
-  .strip {
-    display: grid;
-    grid-auto-flow: column;
-    grid-auto-columns: minmax(250px, 1fr);
-    gap: 12px;
-    overflow-x: auto;
-    padding-block-end: 4px;
-    scroll-snap-type: x proximity;
-  }
-  .strip > :global(*) {
-    scroll-snap-align: start;
-  }
   .cards {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr));
     gap: 12px;
-  }
-  /* Projects */
-  .projects {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-    gap: 12px;
-  }
-  @media (max-width: 640px) {
-    .projects {
-      grid-template-columns: 1fr;
-    }
-    .search {
-      width: 44vw;
-    }
-  }
-  .none {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex-wrap: wrap;
-  }
-  .none p {
-    margin: 0;
   }
   .dim {
     color: var(--text-dim);
@@ -826,18 +373,6 @@
   p.dim {
     margin: 0;
     font-size: var(--fs-s);
-  }
-  .linkbtn {
-    border: 0;
-    background: none;
-    padding: 0;
-    color: var(--accent-text);
-    font: inherit;
-    font-size: var(--fs-s);
-    cursor: pointer;
-  }
-  .linkbtn:hover {
-    text-decoration: underline;
   }
   .inline-err {
     display: flex;
@@ -849,23 +384,9 @@
   .inline-err > :global(svg) {
     color: var(--danger);
   }
-  /* Rail */
-  .rail { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
-  .activity { padding: 14px; display: flex; flex-direction: column; gap: 8px; }
-  .activity header { display: flex; align-items: center; gap: 8px; }
-  .activity h2 { margin: 0; font-size: var(--fs-m); font-weight: 600; }
-  .ico { width: 24px; height: 24px; display: grid; place-items: center; border-radius: var(--radius-s); background: var(--surface-2); color: var(--text-dim); }
-  .activity ul { list-style: none; margin: 0; padding: 0; }
-  .activity li { padding: 8px 0; border-block-start: 1px solid var(--border); font-size: var(--fs-s); }
-  .act-line { display: flex; align-items: baseline; gap: 6px; }
-  .act-line a { color: var(--text); font-weight: 500; }
-  .who { font-weight: 600; }
-  .act-meta { display: flex; justify-content: space-between; font-size: var(--fs-xs); color: var(--text-dim); margin-block-start: 2px; }
-  .quick { padding: 6px; display: flex; flex-direction: column; }
-  .quick a { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: var(--radius-s); color: var(--text); text-decoration: none; font-size: var(--fs-s); }
-  .quick a:hover { background: var(--hover); }
-  .quick a :global(svg) { color: var(--text-dim); }
   @media (pointer: coarse), (max-width: 640px) {
-    .search, .sel select { min-block-size: var(--hit-min); }
+    .search {
+      min-block-size: var(--hit-min);
+    }
   }
 </style>

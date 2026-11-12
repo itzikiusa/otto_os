@@ -251,6 +251,46 @@ pub(crate) fn pr_diff_ttl(rev: &str) -> Duration {
     }
 }
 
+/// [`pr_diff_ttl`] for a diff just fetched at `rev`, given the head the forge
+/// reports NOW (`forge_head`; `None` = the forge can't say cheaply —
+/// Bitbucket). `rev` is the CLIENT's word: a client whose PR copy is older
+/// than a push would otherwise pin the forge's new diff under the OLD head
+/// for half an hour. So the long lifetime needs the forge to agree; a
+/// mismatch keeps the short one.
+pub(crate) fn pr_diff_ttl_checked(rev: &str, forge_head: Option<&str>) -> Duration {
+    match forge_head {
+        Some(head) if !rev.trim().is_empty() && !same_commit(rev, head) => PR_DIFF_TTL,
+        _ => pr_diff_ttl(rev),
+    }
+}
+
+/// Same commit, one side possibly abbreviated (7-char floor).
+fn same_commit(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim().to_ascii_lowercase(), b.trim().to_ascii_lowercase());
+    a.len() >= 7 && b.len() >= 7 && (a.starts_with(&b) || b.starts_with(&a))
+}
+
+/// The memo lifetime for PR `number`'s diff fetched at `rev`: asks the forge
+/// for the PR's head (an ETag-cached read on GitHub / GitLab) only when the
+/// read is pinned. A failed lookup keeps the short lifetime.
+pub(crate) async fn pr_diff_ttl_for(
+    provider: &dyn crate::providers::GitProvider,
+    remote: &crate::providers::RemoteRef,
+    number: u64,
+    rev: &str,
+) -> Duration {
+    if rev.trim().is_empty() {
+        return PR_DIFF_TTL;
+    }
+    match provider.pr_diff_target(remote, number).await {
+        Ok(Some(
+            crate::local::DiffTarget::Range(_, head) | crate::local::DiffTarget::MergeBase(_, head),
+        )) => pr_diff_ttl_checked(rev, Some(head.as_str())),
+        Ok(_) => pr_diff_ttl_checked(rev, None),
+        Err(_) => PR_DIFF_TTL,
+    }
+}
+
 fn pr_diffs_raw() -> &'static Mutex<ByteLru<Arc<DiffResp>>> {
     static C: OnceLock<Mutex<ByteLru<Arc<DiffResp>>>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(ByteLru::new(96 << 20, 64 << 20, 32, Some(PR_DIFF_TTL))))
@@ -444,6 +484,27 @@ mod tests {
         // And the byte cap still evicts it.
         c.put("big".into(), 4, 100);
         assert_eq!(c.get("pinned"), None);
+    }
+
+    #[test]
+    fn a_pinned_diff_needs_the_forge_to_agree_on_the_head() {
+        assert_eq!(
+            pr_diff_ttl_checked("abc1234def", Some("abc1234def")),
+            PR_DIFF_PINNED_TTL
+        );
+        // Bitbucket abbreviates: still the same commit.
+        assert_eq!(
+            pr_diff_ttl_checked("abc1234def5678", Some("abc1234def56")),
+            PR_DIFF_PINNED_TTL
+        );
+        // The client's copy is older than a push: short-lived.
+        assert_eq!(
+            pr_diff_ttl_checked("abc1234def", Some("fff9999aaa")),
+            PR_DIFF_TTL
+        );
+        // The forge can't say: the client's word stands.
+        assert_eq!(pr_diff_ttl_checked("abc1234def", None), PR_DIFF_PINNED_TTL);
+        assert_eq!(pr_diff_ttl_checked("", Some("abc1234def")), PR_DIFF_TTL);
     }
 
     #[test]

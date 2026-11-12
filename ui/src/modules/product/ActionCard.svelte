@@ -1,33 +1,31 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
-  // ActionCard — renders ONE agent-proposed DiscoveryAction as a trustworthy
-  // card with an explicit Apply button. Nothing is applied until the PO clicks;
-  // every apply is reversible (sticky "✓ … · Undo" row) and toasted.
+  // ActionCard — renders ONE agent-proposed card from the story Chat with an
+  // explicit Apply button. Nothing is applied until the PO clicks; every apply
+  // is toasted and, where it created rows, reversible (sticky "✓ … · Undo").
   //
-  //   apply_draft   → diff-preview against the current draft, "Replace draft"
-  //                   (danger, confirm when non-empty); Undo re-applies the
-  //                   captured prior body via product.updateDraft.
   //   add_questions → per-item checkbox (default all on), "Add N questions";
   //                   Undo deletes the created question ids.
   //   add_notes     → per-item checkbox (default all on), "Add note(s)";
   //                   Undo deletes the created note ids.
-  //   create_canvas → lazy Mermaid thumbnail (if any), "Open in Canvas";
-  //                   navigates on canvas_id, then toasts.
+  //   create_canvas → lazy Mermaid thumbnail (if any), "Open in Design Hall";
+  //                   opens the new board's Hall mirror, then toasts.
+  //
+  // A proposed story body is never a card: the Chat saves it as a suggested
+  // version and the message links to Rewrite (see RefineChat).
   import Icon from '../../lib/components/Icon.svelte';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import { confirmer } from '../../lib/confirm.svelte';
-  import { viewport } from '../../lib/stores/viewport.svelte';
-  import { router } from '../../lib/router.svelte';
   import { api } from '../../lib/api/client';
-  import DiffView from '../../lib/components/DiffView.svelte';
   import { renderMermaid } from '../../lib/render/mermaid';
   import { ui } from '../../lib/stores/ui.svelte';
-  import { canvas } from '../../lib/stores/canvas.svelte';
-  import type { DiscoveryAction, UpdateDraftReq } from './types';
+  import { openSceneInHall } from '../design-hall/nav'; // ui-guards: allow — Canvas boards open in Design Hall
+  import { applyChatAction } from './chatActions';
+  import type { DiscoveryAction } from './types';
 
-  let { cid, action }: { cid: string; action: DiscoveryAction } = $props();
+  /** `tid`: the Chat conversation (refinement thread) the card came from. */
+  let { tid, action }: { tid: string; action: DiscoveryAction } = $props();
 
   // ── Shared apply state ──────────────────────────────────────────────────────
   let applying = $state(false);
@@ -36,69 +34,8 @@
   let appliedLabel = $state('');
   let undoing = $state(false);
   // Captured so Undo can reverse the change.
-  let priorDraftBody = $state<string | null>(null); // apply_draft snapshot
   let createdQuestionIds = $state<string[]>([]); // add_questions
   let createdNoteIds = $state<string[]>([]); // add_notes
-
-  // ── apply_draft: diff preview + danger confirm ─────────────────────────────
-  let showDiff = $state(false);
-  const currentDraftBody = $derived(product.detail?.source?.body_md ?? '');
-  const currentDraftTitle = $derived(product.detail?.story?.title ?? '');
-  // Force line mode on phone/tablet (split/word are too dense for narrow screens).
-  const diffMode = $derived<'line' | 'word'>(
-    viewport.isPhone || viewport.isTablet ? 'line' : 'word',
-  );
-
-  async function applyDraft(): Promise<void> {
-    if (applying || action.type !== 'apply_draft') return;
-    // Claim the card BEFORE the confirmation: a double-click used to queue two
-    // applies (S18-15).
-    applying = true;
-    const current = currentDraftBody;
-    if (current.trim()) {
-      const ok = await confirmer.ask(
-        'Replace the current draft? This overwrites your text.',
-        { confirmLabel: 'Replace', danger: true },
-      );
-      if (!ok) {
-        applying = false;
-        return;
-      }
-    }
-    // Snapshot the user's text once so Undo restores THEIR original, never
-    // the agent's text from an earlier apply.
-    if (priorDraftBody === null) priorDraftBody = current;
-    try {
-      await product.applyDiscoveryAction(cid, action);
-      await product.loadDetail();
-      applied = true;
-      appliedLabel = 'Draft replaced';
-      toasts.success('Draft replaced');
-    } catch (e) {
-      toastError('Couldn’t replace draft', e);
-    } finally {
-      applying = false;
-    }
-  }
-
-  async function undoDraft(): Promise<void> {
-    if (undoing || priorDraftBody === null) return;
-    undoing = true;
-    try {
-      const req: UpdateDraftReq = {
-        title: product.detail?.story?.title ?? currentDraftTitle,
-        body_md: priorDraftBody,
-      };
-      await product.updateDraft(req);
-      applied = false;
-      priorDraftBody = null; // restored — a later apply snapshots afresh
-      toasts.success('Draft restored');
-    } catch (e) {
-      toastError('Couldn’t undo', e);
-    } finally {
-      undoing = false;
-    }
-  }
 
   // ── add_questions / add_notes: per-item checkboxes ─────────────────────────
   // Track *unchecked* indices instead of a per-item boolean array: that way the
@@ -130,7 +67,7 @@
     if (picked.length === 0) return;
     applying = true;
     try {
-      const result = await product.applyDiscoveryAction(cid, {
+      const result = await applyChatAction(tid, {
         type: 'add_questions',
         questions: picked,
       });
@@ -152,7 +89,7 @@
     if (picked.length === 0) return;
     applying = true;
     try {
-      const result = await product.applyDiscoveryAction(cid, {
+      const result = await applyChatAction(tid, {
         type: 'add_notes',
         notes: picked,
       });
@@ -227,15 +164,13 @@
     if (applying || action.type !== 'create_canvas') return;
     applying = true;
     try {
-      const result = await product.applyDiscoveryAction(cid, action);
+      const result = await applyChatAction(tid, action);
       applied = true;
       appliedLabel = 'Canvas created';
       if (result.canvas_id) {
-        // Deep-link: ask the Canvas module to auto-open this scene on mount, then
-        // navigate there.
-        canvas.pendingOpenId = result.canvas_id;
-        router.go('canvas');
-        toasts.success('Opened in Canvas');
+        // A board lives in Design Hall now: open its mirror there.
+        void openSceneInHall(result.canvas_id);
+        toasts.success('Opened in Design Hall');
       } else {
         toasts.success('Canvas created');
       }
@@ -247,16 +182,7 @@
   }
 
   function undoApplicable(): boolean {
-    return (
-      priorDraftBody !== null ||
-      createdQuestionIds.length > 0 ||
-      createdNoteIds.length > 0
-    );
-  }
-
-  function onUndo(): void {
-    if (action.type === 'apply_draft') void undoDraft();
-    else void undoCreated();
+    return createdQuestionIds.length > 0 || createdNoteIds.length > 0;
   }
 </script>
 
@@ -265,41 +191,14 @@
   <div class="action-card applied-row">
     <span class="applied-text"><Icon name="check" size={12} /> {appliedLabel}</span>
     {#if undoApplicable()}
-      <button class="btn small" onclick={onUndo} disabled={undoing}>
+      <button class="btn small" onclick={() => void undoCreated()} disabled={undoing}>
         {undoing ? 'Undoing…' : 'Undo'}
       </button>
     {/if}
   </div>
 {:else}
   <div class="action-card">
-    {#if action.type === 'apply_draft'}
-      <div class="card-head">
-        <span class="card-kind">Draft</span>
-        <span class="card-title">{action.title}</span>
-      </div>
-      <div class="card-body">
-        <button
-          class="toggle-link"
-          onclick={() => (showDiff = !showDiff)}
-          aria-expanded={showDiff}
-        >
-          {showDiff ? 'Hide changes' : 'Preview changes'}
-        </button>
-        <div class="diff-wrap" class:peek={!showDiff}>
-          <DiffView
-            before={currentDraftBody}
-            after={action.body_md}
-            mode={diffMode}
-            contextLines={showDiff ? 3 : undefined}
-          />
-        </div>
-      </div>
-      <div class="card-actions">
-        <button class="btn small danger" onclick={applyDraft} disabled={applying}>
-          {applying ? 'Replacing…' : 'Replace draft'}
-        </button>
-      </div>
-    {:else if action.type === 'add_questions'}
+    {#if action.type === 'add_questions'}
       <div class="card-head">
         <span class="card-kind">Questions</span>
         <span class="card-title">{action.questions.length} proposed</span>
@@ -393,7 +292,7 @@
       {/if}
       <div class="card-actions">
         <button class="btn small primary" onclick={applyCanvas} disabled={applying}>
-          {applying ? 'Opening…' : 'Open in Canvas'}
+          {applying ? 'Opening…' : 'Open in Design Hall'}
         </button>
       </div>
     {/if}
@@ -444,32 +343,6 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-  }
-
-  /* ── Diff preview (apply_draft) ─────────────────────────────────────────── */
-  .toggle-link {
-    align-self: flex-start;
-    padding: 0;
-    border: none;
-    background: transparent;
-    color: var(--accent-text);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .toggle-link:hover {
-    text-decoration: underline;
-  }
-  .diff-wrap {
-    min-width: 0;
-  }
-  /* Collapsed 3-line peek of the diff. */
-  .diff-wrap.peek {
-    max-height: 4.4em;
-    overflow: hidden;
-    position: relative;
-    -webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent);
-    mask-image: linear-gradient(to bottom, #000 55%, transparent); /* ui-guards: allow — mask alpha, not a color */
   }
 
   /* ── Item lists (questions / notes) ─────────────────────────────────────── */

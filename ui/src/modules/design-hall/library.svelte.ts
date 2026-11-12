@@ -59,9 +59,10 @@ class DesignLibrary {
   // Replaced wholesale on every load, never mutated → raw (no deep proxy over
   // up to 500 hits), with id-keyed indexes for the per-card lookups.
   hits: DesignSearchHit[] = $state.raw([]);
-  /** The lobby reads at most LIBRARY_LIMIT designs (newest first): project
-   *  counts, mosaics and the Mine/Shipped filters only see those. True when
-   *  the cap was hit, so the lobby can say so (S18-12). */
+  /** The library reads at most LIBRARY_LIMIT designs (newest first); the
+   *  grids page their own cards from the server, so only lookups and the
+   *  lobby rail's counts see this cap. True when it was hit, so the rail's
+   *  "Needs review" count reads "N+" (S18-12). */
   truncated = $state(false);
   projects: DesignProject[] = $state.raw([]);
   #hitById = $derived(new Map(this.hits.map((h) => [h.artifact.id, h])));

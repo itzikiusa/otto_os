@@ -315,7 +315,7 @@ export interface RuntimeSession {
    *  (`personal_agent`, `read_only`, `source`, `run_id`, …); absent on a plain
    *  thread. A client sets only an embedded thread's `source` / `origin`, via
    *  the create body (`CreateRuntimeSessionReq.source` / `.origin`). */
-  meta?: (Record<string, unknown> & { source?: string; origin?: EmbeddedOrigin }) | null;
+  meta?: (Record<string, unknown> & { source?: string; origin?: EmbeddedOrigin; council?: CouncilMeta }) | null;
   /** Background work still pending (live; absent = none). */
   background_tasks?: BackgroundTask[];
 }
@@ -328,6 +328,44 @@ export interface OpenPeerReq {
   /** Omitted = the provider's default model. */
   model?: string;
   /** Opening-turn effort; omitted = the model's default. */
+  effort?: string;
+}
+
+/** `meta.council` of a council thread: seat 1–4 (`0` = the synthesis). */
+export interface CouncilMeta {
+  id: Id;
+  seat: number;
+  role: 'seat' | 'synthesis';
+  /** The effort the seat's (or the judge's) turn asked for. */
+  effort?: string;
+}
+
+/** One seat of a council; the same provider may sit more than once. */
+export interface CouncilSeatReq {
+  provider: RuntimeProvider;
+  model?: string;
+  effort?: string;
+}
+
+/** Body of `POST /workspaces/{id}/runtime-sessions/council` (2–4 seats, all or none). */
+export interface CreateCouncilReq {
+  prompt: string;
+  title?: string;
+  /** Every seat's folder; omitted = the workspace root. */
+  cwd?: string;
+  seats: CouncilSeatReq[];
+  images?: PromptImage[];
+}
+
+/** Response of the council create: seat 1 (the group's root) first. */
+export interface CouncilResp {
+  seats: RuntimeSession[];
+}
+
+/** Body of `POST /runtime-sessions/{id}/council/synthesize` — the judge. 409 while a seat works. */
+export interface SynthesizeCouncilReq {
+  provider: RuntimeProvider;
+  model?: string;
   effort?: string;
 }
 

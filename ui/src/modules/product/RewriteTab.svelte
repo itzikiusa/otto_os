@@ -15,6 +15,8 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { confirmOutward } from '../../lib/confirmOutward';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import { publishConflictMessage } from './publishConflict';
   import type { ProductStoryVersion } from './types';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
@@ -248,13 +250,25 @@
       return;
     }
     publishing = true;
+    let conflict: string | null = null;
     try {
       await product.publishVersion(v.id);
       toasts.success('Published', 'Suggested version published back to source.');
     } catch (e) {
-      toastError('Couldn’t publish the rewrite', e);
+      conflict = publishConflictMessage(e);
+      if (!conflict) toastError('Couldn’t publish the rewrite', e);
     } finally {
       publishing = false;
+    }
+    // Edited in Jira/Confluence since the last sync: offer the refresh that
+    // makes the new text the base, instead of a raw error.
+    if (conflict && (await confirmer.ask(conflict, { title: 'Changed since the last sync', confirmLabel: 'Refresh', danger: false })) && owned()) {
+      try {
+        await product.refresh();
+        if (owned()) await initialLoad();
+      } catch (e) {
+        toastError('Couldn’t refresh the story', e);
+      }
     }
   }
 

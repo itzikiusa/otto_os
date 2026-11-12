@@ -22,6 +22,9 @@ pub struct SchemaRegistry {
     /// schema id → PARSED Avro schema (parsing per consumed message was the
     /// hot cost of an Avro peek).
     parsed: DashMap<i32, std::sync::Arc<apache_avro::Schema>>,
+    /// schema id → registry `schemaType` for ids that are NOT Avro (`JSON`,
+    /// `PROTOBUF`). Such payloads are shown raw with a notice, not decoded.
+    non_avro: DashMap<i32, String>,
     /// schema id → (retry-after instant, error) for ids whose lookup FAILED.
     /// Keys that merely look Confluent-framed (first byte 0x00) would otherwise
     /// cost a registry round trip (often through the SSH tunnel) on every 3 s
@@ -91,6 +94,7 @@ impl SchemaRegistry {
             via_tunnel,
             cache: DashMap::new(),
             parsed: DashMap::new(),
+            non_avro: DashMap::new(),
             negative: std::sync::Mutex::new(std::collections::HashMap::new()),
             subjects_cache: std::sync::Mutex::new(None),
         })
@@ -194,6 +198,9 @@ impl SchemaRegistry {
         #[derive(serde::Deserialize)]
         struct SchemaResp {
             schema: String,
+            /// Absent for Avro (the registry's default type).
+            #[serde(rename = "schemaType")]
+            schema_type: Option<String>,
         }
         let body: SchemaResp = match resp.json().await {
             Ok(b) => b,
@@ -203,6 +210,9 @@ impl SchemaRegistry {
                 return Err(e);
             }
         };
+        if let Some(t) = body.schema_type.filter(|t| !t.eq_ignore_ascii_case("AVRO")) {
+            self.non_avro.insert(id, t);
+        }
         self.cache.insert(id, body.schema.clone());
         Ok(body.schema)
     }
@@ -235,6 +245,11 @@ impl SchemaRegistry {
             return Err(e);
         }
         let doc = self.schema_by_id(id).await?;
+        // A JSON Schema / Protobuf id is a known type we don't decode, not a
+        // broken schema: no negative entry (the document is cached anyway).
+        if let Some(t) = self.non_avro_type(id) {
+            return Err(Error::Invalid(format!("schema {id} is {t}, not Avro")));
+        }
         let schema = match apache_avro::Schema::parse_str(&doc) {
             Ok(s) => s,
             Err(e) => {
@@ -246,6 +261,11 @@ impl SchemaRegistry {
         let schema = std::sync::Arc::new(schema);
         self.parsed.insert(id, schema.clone());
         Ok(schema)
+    }
+
+    /// The registry `schemaType` of an already-fetched id that is not Avro.
+    pub fn non_avro_type(&self, id: i32) -> Option<String> {
+        self.non_avro.get(&id).map(|t| t.clone())
     }
 
     /// List subjects with their latest registered version. Reused for
@@ -482,6 +502,11 @@ mod tests {
                     h.fetch_add(1, Ordering::SeqCst);
                     let (status, body) = if req.starts_with("GET /schemas/ids/1 ") {
                         ("200 OK", r#"{"schema":"\"string\""}"#.to_string())
+                    } else if req.starts_with("GET /schemas/ids/2 ") {
+                        (
+                            "200 OK",
+                            r#"{"schemaType":"JSON","schema":"{\"type\":\"object\"}"}"#.to_string(),
+                        )
                     } else if req.starts_with("GET /subjects/history/versions ") {
                         (
                             "200 OK",
@@ -510,6 +535,7 @@ mod tests {
             via_tunnel: true,
             cache: DashMap::new(),
             parsed: DashMap::new(),
+            non_avro: DashMap::new(),
             negative: std::sync::Mutex::new(std::collections::HashMap::new()),
             subjects_cache: std::sync::Mutex::new(None),
         }
@@ -586,6 +612,24 @@ mod tests {
             3,
             "warm batch makes no request"
         );
+    }
+
+    /// A JSON Schema id is a known non-Avro type (shown raw with a notice),
+    /// not a failure: no negative entry, and no second request.
+    #[tokio::test]
+    async fn json_schema_ids_are_typed_not_failed() {
+        let (base, hits) = mock_registry().await;
+        let reg = registry(&base);
+        let err = reg
+            .parsed_schema_by_id(2)
+            .await
+            .expect_err("JSON Schema is not decoded as Avro");
+        assert!(err.to_string().contains("not Avro"), "{err}");
+        assert_eq!(reg.non_avro_type(2).as_deref(), Some("JSON"));
+        assert_eq!(reg.non_avro_type(1), None);
+        assert!(reg.negative_hit(2).is_none());
+        assert!(reg.parsed_schemas_by_ids([2]).await.is_empty());
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
     /// The ids of one batch are looked up concurrently, not one RTT each.

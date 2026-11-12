@@ -27,6 +27,6 @@ mod tests;
 pub use actions::Effect;
 pub use ctx::{Authority, RoomAudit, RoomsCtx};
 pub use registry::{
-    Member, Notice, Room, RoomRegistry, SharedRoom, GRACE, INVITE_TTL, PENDING_TTL, RATE_LIMITED,
-    ROOM_TTL,
+    retain_since, Member, Notice, Room, RoomRegistry, SharedRoom, GRACE, INVITE_TTL, PENDING_TTL,
+    RATE_LIMITED, ROOM_TTL,
 };

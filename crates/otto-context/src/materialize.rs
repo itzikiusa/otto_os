@@ -39,6 +39,21 @@ const CONTEXT_FILE: &str = "CONTEXT.md";
 /// The claude activity-hooks settings file, loaded out-of-tree via `--settings`.
 const SETTINGS_FILE: &str = "settings.json";
 
+/// The opencode config the bundle carries: its `instructions` names the
+/// bundle's context file, and `OPENCODE_CONFIG` points opencode at it (merged
+/// between the user's global and project configs, `instructions` arrays
+/// concatenated — the user's own rules stay).
+const OPENCODE_CONFIG_FILE: &str = "opencode.json";
+
+/// Whether Otto can hand `provider`'s CLI a context file for one launch
+/// without touching the working tree. `gemini` (only a system-prompt
+/// REPLACEMENT via `GEMINI_SYSTEM_MD`, or `GEMINI.md` in the tree) and `pi`
+/// (`AGENTS.md` in the tree) have no such mechanism, so a caller whose
+/// session must carry a persona refuses them instead of running without it.
+pub fn delivers_context(provider: &str) -> bool {
+    matches!(provider, "claude" | "codex" | "agy" | "grok" | "opencode")
+}
+
 /// A session-local Codex home whose `skills/` is owned by Otto. Other entries
 /// are symlinked to the user's real Codex home so auth, config, plugins, and
 /// rollout/session persistence keep their normal behavior.
@@ -139,6 +154,20 @@ pub fn default_context_root() -> PathBuf {
     }
 }
 
+/// The file in every bundle that names the real working directory it serves
+/// (the folder name's `encode_cwd` cannot be reversed). Rewritten on every
+/// provision and resume, so its mtime is the bundle's last use. ottod's bundle
+/// sweep (`context_sweep`) removes a bundle only when this cwd is gone from
+/// disk and the bundle has sat unused for the grace window.
+pub const BUNDLE_CWD_MARKER: &str = ".otto-cwd";
+
+/// Best-effort: a bundle without a marker is only ever kept longer.
+fn write_cwd_marker(dir: &Path, cwd: &str) {
+    if let Err(e) = fs::write(dir.join(BUNDLE_CWD_MARKER), cwd) {
+        tracing::debug!(path = %dir.display(), error = %e, "write bundle cwd marker failed");
+    }
+}
+
 /// The out-of-tree bundle dir for `(provider, cwd)` under `ctx_root`:
 /// `<ctx_root>/<provider>/<encode_cwd(cwd)>` (Claude's per-project encoding).
 /// Deterministic, so the launch injection can be reconstructed on resume
@@ -151,8 +180,8 @@ fn bundle_dir(ctx_root: &Path, provider: &str, cwd: &str) -> PathBuf {
 /// under `ctx_root` and return both the result and the [`SpawnInjection`] the
 /// CLI needs to load that bundle. Nothing is written into `cwd`.
 ///
-/// Providers other than `claude`/`codex`/`agy`/`grok` (shell/…) are skipped: empty
-/// result + empty injection.
+/// Providers [`delivers_context`] rejects (shell, gemini, pi, …) are skipped:
+/// empty result + empty injection.
 pub fn provision(
     library: &Library,
     cfg: &WorkspaceContextConfig,
@@ -174,6 +203,9 @@ pub fn provision_with_home(
     let plan = plan(library, cfg, cwd, provider, ctx_root);
     let bundle = plan.bundle.clone();
     let result = execute(plan);
+    if let (Some(dir), false) = (&bundle, result.skipped) {
+        write_cwd_marker(dir, cwd);
+    }
     // Compute the injection AFTER writing — codex reads the materialized context
     // file back to pass it inline.
     let injection = match (&bundle, result.skipped) {
@@ -198,6 +230,7 @@ pub fn resume_injection_with_home(
 ) -> SpawnInjection {
     let dir = bundle_dir(ctx_root, provider, cwd);
     if dir.is_dir() {
+        write_cwd_marker(&dir, cwd);
         injection_for_home(provider, &dir, provider_home)
     } else {
         SpawnInjection::default()
@@ -215,6 +248,9 @@ pub fn resume_injection_with_home(
 ///   Codex home; context stays inline via `developer_instructions`.
 /// - **grok** — `--rules=<bundle>/CONTEXT.md` appends Otto's context to this
 ///   launch only. Grok currently has no per-launch native skill-root flag.
+/// - **opencode** — `OPENCODE_CONFIG=<bundle>/opencode.json`, whose
+///   `instructions` lists the bundle's `CONTEXT.md` (env only: an argv flag
+///   opencode did not know would fail the launch).
 fn injection_for_home(provider: &str, dir: &Path, provider_home: Option<&Path>) -> SpawnInjection {
     let d = dir.to_string_lossy().into_owned();
     let ctx = dir.join(context_file_name(provider));
@@ -270,7 +306,30 @@ fn injection_for_home(provider: &str, dir: &Path, provider_home: Option<&Path>) 
             args: vec![format!("--rules={}", ctx.display())],
             env: Vec::new(),
         },
+        "opencode" if ctx.is_file() => opencode_injection(dir, &ctx),
         _ => SpawnInjection::default(),
+    }
+}
+
+/// Write the bundle's `opencode.json` (rewritten every time, so a resume
+/// heals a deleted one) and point `OPENCODE_CONFIG` at it. A failed write
+/// injects nothing rather than a config path that does not exist.
+fn opencode_injection(dir: &Path, ctx: &Path) -> SpawnInjection {
+    let config = dir.join(OPENCODE_CONFIG_FILE);
+    let body = json!({
+        "$schema": "https://opencode.ai/config.json",
+        "instructions": [ctx.to_string_lossy()],
+    });
+    if let Err(e) = fs::write(&config, body.to_string()) {
+        tracing::warn!(path = %config.display(), error = %e, "write opencode config failed");
+        return SpawnInjection::default();
+    }
+    SpawnInjection {
+        args: Vec::new(),
+        env: vec![(
+            "OPENCODE_CONFIG".to_string(),
+            config.to_string_lossy().into_owned(),
+        )],
     }
 }
 
@@ -351,7 +410,7 @@ fn plan(
     ctx_root: &Path,
 ) -> ProviderPlan {
     match provider {
-        "claude" | "codex" | "agy" | "grok" => plan_provider(library, cfg, cwd, provider, ctx_root),
+        p if delivers_context(p) => plan_provider(library, cfg, cwd, provider, ctx_root),
         other => ProviderPlan {
             provider: other.to_string(),
             skipped: true,
@@ -604,6 +663,8 @@ fn build_skill_artifacts(
 ///   carrying a skills index) + a session-local shadow CODEX_HOME whose
 ///   `skills/` root is native-discoverable.
 /// - **grok** — `CONTEXT.md` (passed via `--rules`) + indexed `skills/` files.
+/// - **opencode** — `CONTEXT.md` (listed in the bundle's `opencode.json`
+///   `instructions`, loaded via `OPENCODE_CONFIG`) + indexed `skills/` files.
 fn plan_provider(
     library: &Library,
     cfg: &WorkspaceContextConfig,
@@ -617,8 +678,9 @@ fn plan_provider(
     let skills_dir = bundle.join(skills_subdir(provider));
     let skill_artifacts = build_skill_artifacts(library, &skills, &skills_dir);
 
-    // Codex and Grok receive a compact index; Claude/Agy auto-load their skills.
-    let index = if matches!(provider, "codex" | "grok") {
+    // Codex, Grok and opencode receive a compact index; Claude/Agy auto-load
+    // their skills.
+    let index = if matches!(provider, "codex" | "grok" | "opencode") {
         SkillIndex::Indexed {
             skills_dir: &skills_dir,
         }
@@ -1178,6 +1240,30 @@ mod tests {
         }
     }
 
+    /// Every bundle names the real cwd it serves (ottod's bundle sweep reads
+    /// it), and a resume rewrites it so its mtime tracks the last use.
+    #[test]
+    fn every_bundle_carries_its_cwd_marker() {
+        let (_l, cwd, root, lib) = setup();
+        let cwd_path = cwd.path().to_string_lossy().into_owned();
+        let cfg = WorkspaceContextConfig {
+            extra_context_md: "# Workspace rules".into(),
+            ..Default::default()
+        };
+        for provider in ["claude", "codex", "agy"] {
+            provision(&lib, &cfg, &cwd_path, provider, root.path());
+            let marker = bundle_of(&root, provider, &cwd_path).join(BUNDLE_CWD_MARKER);
+            assert_eq!(fs::read_to_string(&marker).unwrap(), cwd_path, "{provider}");
+            fs::remove_file(&marker).unwrap();
+            resume_injection(root.path(), &cwd_path, provider);
+            assert_eq!(fs::read_to_string(&marker).unwrap(), cwd_path, "{provider}");
+            assert_clean_cwd(cwd.path());
+        }
+        // A skipped provider has no bundle, so no marker either.
+        provision(&lib, &cfg, &cwd_path, "shell", root.path());
+        assert!(!bundle_of(&root, "shell", &cwd_path).exists());
+    }
+
     #[test]
     fn claude_injection_appends_context_and_settings() {
         let (_l, cwd, root, lib) = setup();
@@ -1500,6 +1586,54 @@ mod tests {
             foreign.join("SKILL.md").exists(),
             "unmanaged skill survives reconcile"
         );
+    }
+
+    #[test]
+    fn opencode_loads_the_bundle_context_through_its_config_env() {
+        let (_l, cwd, root, lib) = setup();
+        let cwd_path = cwd.path().to_string_lossy().into_owned();
+        let cfg = WorkspaceContextConfig {
+            extra_context_md: "# You are Ada — a personal agent".into(),
+            ..Default::default()
+        };
+        let (res, inj) = provision(&lib, &cfg, &cwd_path, "opencode", root.path());
+        assert!(!res.skipped);
+        assert_clean_cwd(cwd.path());
+        let bundle = bundle_of(&root, "opencode", &cwd_path);
+        let ctx = bundle.join(CONTEXT_FILE);
+        assert!(fs::read_to_string(&ctx).unwrap().contains("You are Ada"));
+        assert!(res.files_written.iter().any(|f| f.ends_with("CONTEXT.md")));
+        assert!(inj.args.is_empty(), "no argv flags: {:?}", inj.args);
+        let (key, path) = inj.env.first().expect("OPENCODE_CONFIG");
+        assert_eq!(key, "OPENCODE_CONFIG");
+        let config: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(config["instructions"], json!([ctx.to_string_lossy()]));
+        // A resume recomputes the same injection from the persisted bundle.
+        let again = resume_injection(root.path(), &cwd_path, "opencode");
+        assert_eq!(again.env, inj.env);
+    }
+
+    #[test]
+    fn providers_without_a_per_launch_context_mechanism_are_named() {
+        for p in ["claude", "codex", "agy", "grok", "opencode"] {
+            assert!(delivers_context(p), "{p}");
+        }
+        for p in ["gemini", "pi", "shell", "my-cli", ""] {
+            assert!(!delivers_context(p), "{p}");
+        }
+        let (_l, cwd, root, lib) = setup();
+        let cwd_path = cwd.path().to_string_lossy().into_owned();
+        for p in ["gemini", "pi"] {
+            let (res, inj) = provision(
+                &lib,
+                &WorkspaceContextConfig::default(),
+                &cwd_path,
+                p,
+                root.path(),
+            );
+            assert!(res.skipped, "{p}");
+            assert!(inj.args.is_empty() && inj.env.is_empty(), "{p}");
+        }
     }
 
     #[test]

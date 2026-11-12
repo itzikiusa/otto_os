@@ -71,6 +71,8 @@
   import { exactIntTie } from './sort-keys';
   import SortChip from './SortChip.svelte';
   import { serverSortSql } from './server-sort';
+  import { carryPending, parkOpenEditors, restorePending } from './pending-carry';
+  import { hiddenCols } from './hidden-cols.svelte';
   import { binaryFilterOff } from '../../lib/database/binary-cells';
   import {
     colScanFor as cachedColScan,
@@ -329,7 +331,7 @@
       sortCol,
       sortDir,
       colFilters: colFiltersInput,
-      pending: flow.parkDraft(), // a half-typed cell edit survives the switch
+      pending: parkOpenEditors(flow), // a half-typed cell / viewer edit survives the switch
     };
   }
   // Park the shown tab's state when the grid goes away (view switch, page
@@ -338,7 +340,8 @@
     if (prevTabKey) stashGridState(prevTabKey, untrack(currentGridState));
   });
   $effect(() => {
-    // Rows always re-seed (edits re-query, not patch in place).
+    // Rows always re-seed (edits re-query, not patch in place); a new result of the SAME tab + shape carries its drafts by key (pending-carry.ts).
+    const carry = (tabKey ?? null) === prevTabKey && colKey === prevColKey && resultProp !== shownResult ? untrack(() => carryPending(flow, liveRows)) : null;
     liveRows = result ? (mini ? result.rows.slice(0, MINI_MAX) : result.rows) : [];
     // A different query tab: park the outgoing tab's sort/search/filters and
     // un-applied edits, and bring back the incoming tab's (when its result is
@@ -355,8 +358,7 @@
         sortCol = saved.sortCol;
         sortDir = saved.sortDir;
         setColFilters(saved.colFilters);
-        detailIdx = null;
-        expansion = newExpansionState();
+        detailIdx = null; expansion = newExpansionState();
         prevColKey = colKey;
         flow.resetForResult();
         if (saved.result === resultProp && saved.pending.size > 0) flow.pending = saved.pending;
@@ -376,17 +378,13 @@
       sortCol = null;
       sortDir = null;
       setColFilters({});
-      detailIdx = null;
-      // A different result shape invalidates every per-path toggle.
-      expansion = newExpansionState();
+      detailIdx = null; expansion = newExpansionState(); // a different shape invalidates every per-path toggle
       prevColKey = colKey;
     }
-    // Clear the selection whenever the upstream result changes (incl. the
-    // re-query after a delete runs). Pending cell drafts are keyed by liveRows
-    // index, so a result change invalidates them too — cleared together.
+    // A new result clears the selection and the (index-keyed) drafts; the carried ones come back on their rows.
     flow.resetForResult();
-    compare = null;
-    shownResult = resultProp;
+    if (carry && untrack(() => restorePending(flow, carry, liveRows)) > 0) toasts.info('Some un-applied changes were dropped', 'Their rows are no longer in the result.');
+    compare = null; shownResult = resultProp;
   });
 
   // Tell the store how many un-applied edits the active tab holds (a tab
@@ -1060,6 +1058,8 @@
       { separator: true },
       ...(hosted ? [{ label: `Filter by ${col}…`, icon: 'search', action: () => database.addColumnFilter(col) }] : []),
       { label: 'Copy column name', icon: 'file', action: () => copyWithToast(col) },
+      ...(hosted && tabKey ? [{ label: 'Hide column', icon: 'eyeOff' as const, disabled: hiddenCols.of(tabKey, colKey).length >= (result?.columns.length ?? 0) - 1, action: () => hiddenCols.hide(tabKey, colKey, col, (result?.columns ?? []).map((c) => c.name)) }] : []),
+      ...(hosted && hiddenCols.of(tabKey, colKey).length ? [{ label: `Show all columns (${hiddenCols.of(tabKey, colKey).length} hidden)`, icon: 'eye' as const, action: () => hiddenCols.showAll(tabKey, colKey) }] : []),
     ]);
   }
 
@@ -1681,7 +1681,7 @@
           {searchLc}
           {sortCol}
           {sortDir}
-          resetToken={colKey}
+          resetToken={colKey} hidden={hosted ? hiddenCols.of(tabKey, colKey) : []}
           filterRow={filterRow && !mini}
           colFilters={colFiltersInput}
           oncolfilter={setColFilter}

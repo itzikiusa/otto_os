@@ -11,20 +11,31 @@
   }
   let { errors }: Props = $props();
   let open = $state(false);
+  // A `truncated` row WAS listed, only partly (the page cap): a different
+  // message from a region that failed outright.
+  const failed = $derived(errors.filter((e) => !e.truncated));
+  const partial = $derived(errors.filter((e) => e.truncated));
   // Spoken at the state edge through the shell's always-mounted announcer: a
   // live region inserted together with its text is not read (WebKit/VoiceOver).
-  const count = $derived(errors.length);
+  const count = $derived(failed.length);
   $effect(() => { if (count) announce(`${plural(count, 'region')} couldn’t be listed — the rows below come from the others.`); });
+  $effect(() => { if (partial.length) announce(`The list is incomplete in ${plural(partial.length, 'region')}.`); });
 </script>
 
-{#if errors.length}
+{#each partial as p (p.region)}
+  <div class="rerr" data-testid="aws-list-truncated">
+    <Icon name="warning" size={13} />
+    <span>List incomplete in <span class="mono">{p.region}</span> — {p.message}.</span>
+  </div>
+{/each}
+{#if failed.length}
   <div class="rerr">
     <Icon name="warning" size={13} />
-    <span>{plural(errors.length, 'region')} couldn’t be listed — the rows below come from the others.</span>
+    <span>{plural(failed.length, 'region')} couldn’t be listed — the rows below come from the others.</span>
     <button class="link" onclick={() => (open = !open)} aria-expanded={open}>{open ? 'Hide' : 'Details'}</button>
     {#if open}
       <ul>
-        {#each errors as e (e.region)}
+        {#each failed as e (e.region)}
           <li><span class="mono">{e.region}</span> — {e.message}</li>
         {/each}
       </ul>

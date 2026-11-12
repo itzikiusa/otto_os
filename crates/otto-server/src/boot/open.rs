@@ -23,7 +23,12 @@ pub async fn open_state(cfg: &BootConfig, boot: &mut BootPhases) -> Result<DbPoo
         .recover_interrupted()
         .await
         .map_err(|e| format!("recover interrupted database changes: {e}"))?;
-    boot_maintenance(&pool).await;
+    // A stop already requested skips the optional stats/VACUUM pass (the
+    // next start runs it) instead of holding the stop for it. The offline
+    // compaction above is not skipped: it also rolls back an unconfirmed swap.
+    if !crate::shutdown::is_shutting_down() {
+        boot_maintenance(&pool).await;
+    }
     boot.mark("maintenance");
     fail_orphaned_improvement_runs(&pool).await;
     Ok(pool)

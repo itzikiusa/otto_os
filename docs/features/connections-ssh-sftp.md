@@ -449,9 +449,13 @@ symlink_target? }`.
 
 ### Workspace MCP servers (`.mcp.json` entries)
 
-Per-workspace, user-configured MCP servers. *Enabled* servers are merged into the
-workspace's `.mcp.json` (alongside Otto's own managed entries) when an agent
-session spawns there. Never auto-enabled: `enabled` defaults `false`, and a server
+Per-workspace, user-configured MCP servers that run **natively** (the agent CLI
+launches them; Otto governs nothing). They are managed on the MCP Control Plane's
+Servers page beside the governed ones — see
+[Native and governed servers](./mcp-control-plane.md#311-native-and-governed-servers);
+the old Settings ▸ MCP servers page redirects there. *Enabled* native servers are
+merged into the workspace's `.mcp.json` (alongside Otto's own managed entries)
+when an agent session spawns there. Never auto-enabled: `enabled` defaults `false`, and a server
 is only written once you flip it on **and** a session then spawns in the workspace.
 `GET/POST /workspaces/{id}/mcp-servers`, `PATCH/DELETE /mcp-servers/{id}`
 (`McpServer{name, command, args, env, secret_env_keys, enabled, …}`). `env`

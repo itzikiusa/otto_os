@@ -384,26 +384,13 @@ async fn serve_websocket(
         // SSRF guard, DNS-rebinding safe: resolve + vet the host ONCE and dial
         // exactly the vetted address (tungstenite's own connect would resolve
         // the name again, after `prepare_stream`'s pre-flight check). The
-        // workspace allow-local opt-in skips the vetting, as for HTTP.
+        // workspace allow-local opt-in lets private addresses through, as for
+        // HTTP — never cloud metadata or the daemon's own port.
         let target = prepared.url().clone();
-        let port = target.port_or_known_default().unwrap_or(80);
-        let addrs: Vec<std::net::SocketAddr> =
-            if otto_apiclient::engine::workspace_allows_local(ctx, wid).await {
-                let host = target
-                    .host_str()
-                    .unwrap_or("")
-                    .trim_start_matches('[')
-                    .trim_end_matches(']')
-                    .to_string();
-                let resolved: Vec<std::net::SocketAddr> =
-                    tokio::net::lookup_host((host.as_str(), port))
-                        .await
-                        .map_err(|e| format!("dns resolution failed for {host}: {e}"))?
-                        .collect();
-                resolved
-            } else {
-                otto_netguard::resolve_checked(target.as_str()).await?.1
-            };
+        let allow_local = otto_apiclient::engine::workspace_allows_local(ctx, wid).await;
+        let addrs = otto_netguard::resolve_checked_for(target.as_str(), allow_local)
+            .await?
+            .1;
         let socket = tokio::net::TcpStream::connect(addrs.as_slice())
             .await
             .map_err(|_| "WebSocket connection failed; check the server URL".to_string())?;

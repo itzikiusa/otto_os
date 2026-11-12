@@ -647,6 +647,50 @@ refreshes quietly. On GitHub the PR detail's comment lists, reviews, review-thre
 state and CI are fetched in parallel (Bitbucket fetches the PR and its comments
 in parallel too).
 
+### Reading a PR that keeps moving
+
+- **The files follow a push.** While a PR is open its detail is re-read every
+  couple of minutes. When the head moved (someone pushed), the file list, the
+  Files panel and the diff are re-read at the new head right away — before,
+  they stayed on the old head until **Refresh**, while the PR list's stats and
+  every file opened afterwards were already read at the new one. The header
+  pill says what happened ("2 new commits · files updated"; a force-push
+  counts every rewritten commit as new) and dismisses on click. Activity that
+  doesn't move the head (comments, state, title) still only raises
+  **Updated · Refresh** — nothing is swapped under you. A comment you were
+  typing on a file the push changed keeps its text (the diff says to
+  re-anchor it).
+- **Changes since your review.** When you approve, request changes or comment
+  through Otto, the head you were reading is remembered for that PR (in this
+  browser). Once the author pushes past it, the Code tab shows **Since your
+  review** (also first in the commit picker): the diff from that head to the
+  current one, computed in your local clone (`range:<reviewed>..<head>`,
+  fetched once when a commit is missing). After a force-push it works as long
+  as the old head is still in your clone. **All commits** goes back.
+- **Review requested from you** (PR list → Filters) lists only the open PRs
+  that ask *your forge account* for a review — the forge's own filter, by
+  stable user id (Bitbucket `reviewers.uuid`, GitLab `reviewer_id`; GitHub
+  keeps the rows whose `requested_reviewers` name you, which GitHub empties
+  once you have reviewed). It pages like the normal list and is remembered
+  per repo; **Clear filters** turns it off.
+- **Edit reviewers** (the pencil beside *Reviewers* in the Summary's details
+  column, open PRs only): untick people with **Remove**, add people (typeahead
+  from the forge's collaborators; free text when that lookup fails), then
+  **Save** asks first, naming who is added — the forge notifies them — and who
+  is removed. GitHub requests / un-requests by login; Bitbucket and GitLab
+  rewrite the PR's whole reviewer list and refuse a name they can't resolve
+  before anything is written. GitLab's details column lists approvers only,
+  so a pending GitLab reviewer can be added but not removed from Otto.
+- **Check out after a force-push.** "Check out" fetches and switches, never
+  pulls. When your local branch and the PR's both have commits the other
+  lacks (the PR branch was rewritten since an earlier checkout, or you
+  committed on it), the toast says so and offers **Update…**: after a confirm
+  it moves your checked-out branch to the PR's version, keeping your old tip
+  on a backup branch `otto-backup/<branch>-<sha>` (and in the reflog) and your
+  uncommitted changes in place. If the move would overwrite an uncommitted
+  change, or the branch changed since you confirmed, nothing happens and you
+  are told why. It is never done without asking.
+
 ### Ask the agent about a pull request
 
 Each open PR has one agent thread you can talk to without leaving the PR. On a
@@ -776,6 +820,7 @@ distinction from the **"Draft message with agent"** button, which drafts the
 | `POST /repos/{id}/checkout` | ws editor | `CheckoutReq` (`create`) |
 | `POST /repos/{id}/cherry-pick` · `/revert` | ws editor | `{sha}`; a conflicting pick/revert is a normal 200 — status carries `op_in_progress` + conflicted paths, resolved/aborted via the merge lifecycle routes |
 | `POST /repos/{id}/branch` · `/branch/rename` · `/branch/delete` | ws editor | Create / rename / delete branch |
+| `POST /repos/{id}/branch/update-to-upstream` | ws editor | `{branch, ahead}` → `{status, backup}` — move the checked-out branch to its upstream after a force-push, old tip kept on `otto-backup/…` |
 | `POST /repos/{id}/tag` · `/tag/push` · `/tag/delete` | ws editor | Create / push / delete tags |
 | `POST /repos/{id}/stash` | ws editor | `{op: save\|pop\|apply\|drop, sha?}` — `save` runs `git stash push -u` (untracked included) and 400s with "nothing to stash" on a clean tree; mutating ops retry briefly on a concurrent `index.lock` |
 | `POST /repos/{id}/merge` · `/merge/preview` · `/merge/abort` · `/merge/commit` | ws editor/viewer | Local merge + conflict lifecycle |
@@ -792,7 +837,8 @@ distinction from the **"Draft message with agent"** button, which drafts the
 
 | Method & path | Auth | Notes |
 |---|---|---|
-| `GET /repos/{id}/prs?state=open\|merged\|declined\|all&page=&per_page=` | ws viewer | `PrListResp {items, has_more, page, per_page}` (`per_page` 1..=100, default 50) |
+| `GET /repos/{id}/prs?state=open\|merged\|declined\|all&page=&per_page=[&review=me]` | ws viewer | `PrListResp {items, has_more, page, per_page}` (`per_page` 1..=100, default 50); `review=me` = open PRs asking your forge account for a review |
+| `PUT /repos/{id}/prs/{number}/reviewers` | ws editor | `{add?, remove?}` reviewer names → 204 (outward; the UI confirms who first) |
 | `POST /repos/{id}/prs` | ws editor | `CreatePrReq` → `PrSummary` |
 | `GET /repos/{id}/prs/{number}/checks` | ws viewer | `PrChecksResp` — the aggregate plus one row per check-run / pipeline job / commit status |
 | `GET /repos/{id}/prs/{number}/readiness` | ws viewer | `PrReadiness` — CI, approvals, mergeability, open blocker findings, and the local checkout's unpushed-commit count / branch freshness |
@@ -830,7 +876,9 @@ in **[code-review.md](./code-review.md)**.
 - List/read/comment/approve/request-changes/merge (with a confirmation modal:
   per-check CI, approvals, mergeability, open blockers, unpushed commits;
   optional delete-source-branch)/decline PRs across all three forges, with CI
-  status and mergeability shown.
+  status and mergeability shown; add or remove reviewers on an open PR; filter
+  the list to the PRs that ask you for a review; and re-review only what
+  changed since your review.
 - Push/pull over HTTPS using a Keychain-stored token, or over SSH via your agent.
 - Work in big repos without the UI stalling: the PR list and PR detail repaint
   instantly from a per-repo cache and revalidate in the background (fresh for
@@ -846,8 +894,8 @@ in **[code-review.md](./code-review.md)**.
   hosts have no PR client — the PR tab says so explicitly ("PRs aren't available
   for `<host>`") instead of failing silently; **Bitbucket Server / Data Center
   is not supported.**
-- Edit reviewers on an **existing** PR from Otto (create-time only), request
-  team/group reviewers, or get CODEOWNERS-derived suggestions.
+- Request team/group reviewers, get CODEOWNERS-derived suggestions, or remove
+  a pending GitLab reviewer (GitLab's reviewer list shows approvers only).
 - Push to a **protected branch** directly. In this repo `main` is PR-protected —
   **default to opening a PR over `main`**, not pushing to it.
 - Use another user's bound git credential. A repo binds exactly one account, and

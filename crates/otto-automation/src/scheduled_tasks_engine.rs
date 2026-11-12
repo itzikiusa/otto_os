@@ -911,7 +911,7 @@ async fn execute_agent(
             }
             let report = ctx
                 .orchestrator()
-                .run_agent(&prompt, &cwd, model, RUN_NO_PROGRESS)
+                .run_agent_background("scheduled_task", &prompt, &cwd, model, RUN_NO_PROGRESS)
                 .await?;
             let summary = extract_summary(&report);
             return Ok(ExecOutcome {

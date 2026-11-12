@@ -28,6 +28,10 @@ use crate::AwsCtx;
 use otto_connections::Spawner;
 use otto_state::{AwsAccountPatch, AwsAccountRow, AwsAccountsRepo, NewAwsAccount};
 
+/// The AWS CLI value that reads a parameter from the child's stdin (the CLI
+/// loads any `file://` parameter); see [`AwsService::run_json_stdin`].
+pub const STDIN_PARAM: &str = "file:///dev/stdin";
+
 /// Permission-probe cache TTL (§1).
 pub const PERMISSIONS_TTL: Duration = Duration::from_secs(10 * 60);
 /// Assume-role temp creds are requested with the default 1 h lifetime; we
@@ -1082,6 +1086,23 @@ impl AwsService {
             self.repo.touch_used(&account.id).await;
         }
         out
+    }
+
+    /// [`Self::run_json`] with `stdin` piped to the child: a caller's free
+    /// text (an SQS message body, Athena SQL) is passed as [`STDIN_PARAM`]
+    /// instead of argv, so it never shows up in `ps` / process accounting and
+    /// is not bounded by the argv size limit.
+    pub async fn run_json_stdin(
+        &self,
+        account: &AwsAccountRow,
+        region: Option<&str>,
+        args: &[&str],
+        stdin: &[u8],
+    ) -> Result<serde_json::Value> {
+        let out = self
+            .run_with(account, region, args, DEFAULT_TIMEOUT, Some(stdin))
+            .await?;
+        cli::parse_stdout(&out.stdout)
     }
 
     /// [`Self::run`] + JSON parse.

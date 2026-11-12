@@ -5,7 +5,10 @@
 import { api } from '../../lib/api/client';
 import { git } from '../../lib/stores/git.svelte';
 import { toasts } from '../../lib/toast.svelte';
-import { checkoutToast, checkoutVerdict } from './pr-checkout';
+import { confirmer } from '../../lib/confirm.svelte';
+import { toastError } from '../../lib/toastError';
+import type { RepoStatusResp } from '../../lib/api/types';
+import { checkoutToast, checkoutVerdict, updateConfirm } from './pr-checkout';
 
 /** Throws on a failed fetch / checkout (the caller toasts it). `quiet()` true
  *  = the view went away: the work still lands, only the toast is skipped. */
@@ -14,6 +17,22 @@ export async function checkoutPrBranch(repoId: string, branch: string, quiet: ()
   const v = checkoutVerdict(await git.checkout(repoId, { branch, auto_stash: true }));
   if (quiet()) return;
   const t = checkoutToast(branch, v);
+  if (v.kind === 'diverged') {
+    const update = async (): Promise<void> => {
+      const c = updateConfirm(branch, v);
+      if (!(await confirmer.ask(c.message, { title: c.title, confirmLabel: c.confirmLabel, danger: false }))) return;
+      try {
+        const r = await api.post<{ status: RepoStatusResp; backup: string }>(`/repos/${repoId}/branch/update-to-upstream`, { branch, ahead: v.ahead });
+        git.setStatus(repoId, r.status);
+        git.bumpRefs(repoId);
+        toasts.success(`Updated ${branch} to the pull request`, `Your earlier commits are on ${r.backup}.`);
+      } catch (e) {
+        toastError(`Couldn’t update ${branch}`, e);
+      }
+    };
+    toasts.push(t.level, t.title, t.body, 15000, { action: { label: 'Update…', run: update } });
+    return;
+  }
   if (v.kind !== 'behind') {
     toasts.push(t.level, t.title, t.body);
     return;
