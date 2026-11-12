@@ -15,7 +15,13 @@ conversation), #34505 (jobs that left the CLI's process group are stopped),
 #34771 (Codex MCP startup failures as notices), #34782 (a failed ACP config
 write is retried), #33604 (a resumed ACP message keeps its text), #34867
 (an ACP choice and its `__other` field are one question) and the open
-#31370 (Claude's context meter uses the window Claude enforces). Its
+#31370 (Claude's context meter uses the window Claude enforces). Threads
+inside a thread (`src/runtime/children.rs` and Otto's Threads UI) follow
+`apps/web/src/components/chat/V2LifecycleRow.tsx` (`SubagentTimelineLink`,
+`SubagentNotificationLink`), `ThreadLineageWorkflowRow.tsx`,
+`composerModelMentions.ts` (#31207, model mentions) and the delegated-task
+completion wake (`apps/server/src/orchestration-v2/ProviderContinuationService.ts`,
+`packages/contracts/src/orchestratorMcp.ts`). Its
 licence:
 
 MIT License

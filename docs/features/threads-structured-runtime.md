@@ -973,6 +973,104 @@ a person, so it is not a background source and takes no admission slot.
 follow-up rounds sent to every seat; scored rubrics; merging the chosen
 seat's work back; an `otto.council` MCP tool; cost in dollars.
 
+### Threads inside a thread
+
+T3 Code shows a thread that belongs to another one in three places, the
+same for every provider, and Otto now does too.
+
+**What a person sees in T3 Code** (read from its source:
+`apps/web/src/components/chat/V2LifecycleRow.tsx`, `ProviderSubagentBar.tsx`,
+`ThreadLineageWorkflowRow.tsx`, `ThreadRelationshipsControl.tsx`,
+`packages/client-runtime/src/state/subagentRuntime.ts`,
+`packages/contracts/src/orchestratorMcp.ts` `delegate_task`,
+`docs/user/composer.md`, `docs/user/thread-sidebar.md`):
+
+- *Inside the parent's timeline*: a delegated child is one compact row
+  (`SubagentTimelineLink`) — the provider's avatar with a status ring, its
+  title, one line of progress while it runs and of its result once settled,
+  the status word, elapsed time and a chevron; the whole row opens the
+  child, a hover card adds model, effort and the full result. When the child
+  ends, a notification row says "Finished" / "Failed" / "Stopped" with the
+  time. Agents a workflow runs group under one header ("2/3 agents",
+  phases, "Stop entire workflow"). Inside the child, the composer gives way
+  to a bar: provider, model, effort, live status, "Runs on its own", **Open
+  parent**.
+- *On the side*: the header's **Related threads** / **Agents** control lists
+  the parent and its subagents with status icons; the sidebar keeps one row
+  per thread and folds working threads into a "Working" section.
+- *Starting one*: the agent calls `delegate_task` (provider, model, effort);
+  its completion wakes the parent ("Completion wakes this thread, so end your
+  turn"). A person types `@opus` / `@gpt` in the composer to name a model
+  for the agent; Shift-click several models in a new thread's picker sends
+  one prompt to each.
+
+**Otto's version.** One visual language for every child — a thread a person
+asked from the composer, one the agent opened with `otto.thread_open`, a
+council's seats — on Claude, Codex and the ACP providers (Gemini, Grok,
+opencode, pi) alike:
+
+- **Start one** — in a runtime thread's composer, **Ask another agent**
+  (the people icon beside Attach) opens the agent menu; each model picked
+  becomes a chip above the text ("Ask Codex · GPT-5"), and picking 2–4 is
+  **Ask several**. Typing `@` and part of a provider or model name (`@cod`,
+  `@opus`) offers the same agents (↑ ↓, ↵ / Tab picks, Esc closes). With
+  chips set, Send asks them instead of this thread's agent:
+  `POST /runtime-sessions/{id}/children` opens one new thread per agent,
+  all or none, linked to this one, in its folder. The chip row says what
+  they may do: this thread's access ("asks before it edits", "can edit
+  files", "full access", or "read-only"); the composer's access chip narrows
+  it, never widens it (a wider pick is refused in words). A full group (8
+  open threads beside the root) is refused above the composer with how many
+  still fit.
+- **Inside the thread** — where they were asked, the parent shows a live
+  card per child (`RuntimeChildCard.svelte`): provider icon, title, model ·
+  effort, Starting / Working / Needs you / Done / Failed / Stopped, elapsed
+  time, its latest step while it works and its answer's first line once it
+  ends, with **Stop**, **Open beside** and **Open**; clicking the row opens
+  its last answer inline, read-only. Several asked together sit under one
+  header ("3 agents · 2 working · Stop all"). An agent's `thread_open` call
+  becomes the same card once it returned (a stretch holding one never folds
+  into "Worked for …"); a provider's own subagent keeps its card, drawn with
+  the same row. Cards follow each child's own session events (its projection
+  stays live while the card is on screen) — no polling.
+- **On the side** — the sidebar nests threads under the thread they belong
+  to (indented, provider icon, status dot); the parent row reads "· 3", its
+  dot speaks for the family (one needs you → needs you, one works →
+  working), and its chevron folds them. A child whose parent is closed,
+  archived or filtered out still shows, marked **detached**. A council's
+  seats nest the same way under its "Council · N" row. History and search
+  are unchanged.
+- **Hearing back** — each child turn's end writes one line in the parent:
+  "Codex finished: <first line> · Open". When the parent's **agent** opened
+  the child and the turn answered what it asked (its opening prompt or an
+  `otto.thread_message`), the answer is also queued for that agent (T3's
+  wake-on-completion): `[Reply from thread "…" (codex, id …): its turn
+  finished …]` + the answer (cut at 16,000 characters). It waits in the
+  parent's queue — the queue bar shows it, with Send now / Remove — and goes
+  out at the parent's next idle moment; one entry per child (a newer answer
+  replaces an older one), never twice for one turn. A dormant parent is not
+  respawned for it (Revive sends it), a closed one gets nothing, and a
+  delivered reply never wakes a grandparent. The parent's turn runs under
+  the parent's own access mode, so every approval it would need is asked as
+  usual. A person's ask never wakes the parent's agent.
+- **Both at once** — **Open beside** (card, sidebar row) puts the child in
+  the split next to its parent (1-up → 2-up → grid). On a phone the child
+  opens in place and the header shows **‹ <parent title>** to go back.
+
+| Word | Where | What |
+|---|---|---|
+| **Ask another agent** | a thread's composer (people icon, or `@`) | one new linked thread on the chosen provider / model / effort |
+| **Ask several** | the new-thread stage (a council), or 2–4 chips in a thread's composer | the same message to each, side by side |
+| `otto.thread_open` | the agent itself | a linked thread whose answers come back to the agent |
+
+Meta and markers: a child carries `meta.child_of {id, by: "person" |
+"agent"}` (the opener; `parent_id` stays the group's root). The parent's
+notices end in `[otto-thread:<id>[,<id>…]:started|finished|failed|stopped]`
+(`threadNoticeOf` in `runtime/childThreads.ts`). Code:
+`crates/otto-agent-protocol/src/runtime/children.rs`;
+`ui/src/modules/threads/runtime/{childThreads.ts,askAgents.ts,askTargets.svelte.ts,childNav.ts,RuntimeAskAgent.svelte,RuntimeChildCard.svelte,RuntimeChildGroup.svelte,RuntimeChildNotice.svelte,ThreadParentChip.svelte}`,
+`ui/src/modules/threads/threadFamilies.ts`.
+
 ### Threads layout
 
 After T3 Code's header and work log, so the conversation stays the loudest

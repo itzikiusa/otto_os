@@ -64,12 +64,20 @@ test('the phone light version shows Remaining on its Usage tab', async ({ page }
   await expectNoHorizontalOverflow(page);
 });
 
-test('a checked Claude login and its switch fit a phone', async ({ page }) => {
+test('a checked Claude login, its two weekly windows and its switch fit a phone', async ({ page }) => {
   await routeLimits(page, claudeLimits('ok'));
   await openPage(page, 'usage');
   test.skip(!(await phone(page)), 'phone layouts only');
   const row = remaining(page).getByTestId('limits-row-claude:account:acc-max');
-  await expect(row.getByTestId('limits-window-five_hour')).toContainText('% left · resets in');
+  await row.scrollIntoViewIfNeeded();
+  for (const id of ['seven_day', 'seven_day_fable']) {
+    const win = row.getByTestId(`limits-window-${id}`);
+    await expect(win).toContainText('% left · resets in');
+    const box = await win.getByRole('meter').boundingBox();
+    expect(box, `${id} bar`).not.toBeNull();
+    expect(box!.width, `${id} bar keeps a usable width`).toBeGreaterThan(40);
+  }
+  await expect(row.getByTestId('limits-window-seven_day_fable')).toContainText('not in effect now');
   const sw = row.getByRole('switch', { name: 'Check Max with Anthropic' });
   await expect(sw).toHaveAttribute('aria-checked', 'true');
   await expect(row.getByRole('button', { name: 'Check now' })).toBeVisible();

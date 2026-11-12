@@ -99,7 +99,7 @@ test('Archived finds an archived design and Unarchive moves it back to Draft', a
 test('Group by Story heads a section that links to the story page', async ({ page }) => {
   await openLobby(page);
   await page.getByTestId('design-group-story').click();
-  await expect(page.getByTestId('design-group-story')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByTestId('design-group-story')).toHaveAttribute('aria-checked', 'true');
   const head = page.locator(`a[href="#/design/story/${storyId}"]`);
   await expect(head).toBeVisible({ timeout: 15_000 });
   await head.click();

@@ -15,6 +15,7 @@
 //! run on a per-session persister task fed in that order.
 
 mod auto_close;
+mod children;
 mod council;
 mod descendants;
 mod fresh;
@@ -115,6 +116,9 @@ struct QueuedRecord {
     id: Id,
     created_at: chrono::DateTime<Utc>,
     req: RuntimePromptReq,
+    /// A child thread's answer waiting for this (parent) thread's agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wake: Option<children::WakeKey>,
 }
 
 impl QueuedRecord {
@@ -662,7 +666,15 @@ impl AgentRuntime {
     /// daemon-only `req.cwd` / `req.meta` give the thread its own folder and
     /// meta (a delegated personal agent); a read-only opener's thread is
     /// read-only too, whatever `req.meta` says.
-    pub async fn open_peer(&self, caller: &Id, req: OpenPeerReq) -> Result<RuntimeSession> {
+    pub async fn open_peer(&self, caller: &Id, mut req: OpenPeerReq) -> Result<RuntimeSession> {
+        // A plain `otto.thread_open`: its answers come back to this agent
+        // (children.rs). A daemon caller's own meta reports back its own way.
+        if req.meta.is_none() {
+            req.meta = Some(children::child_meta(
+                caller,
+                otto_core::agent_runtime::ChildOpener::Agent,
+            ));
+        }
         self.open_linked(caller, req, true).await
     }
 
@@ -786,8 +798,19 @@ impl AgentRuntime {
         let deadline = Instant::now() + wait;
         let live = self.live(id).await?;
         loop {
-            if !is_busy(&live.lock()) || Instant::now() >= deadline {
+            if Instant::now() >= deadline {
                 break;
+            }
+            if !is_busy(&live.lock()) {
+                // A background task that just ended is followed, a moment
+                // later, by the agent's own continuation turn. Only a thread
+                // that STAYS idle is done; without this a waiter could be
+                // handed the answer from before the background work.
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                if !is_busy(&live.lock()) {
+                    break;
+                }
+                continue;
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
@@ -1270,6 +1293,7 @@ impl AgentRuntime {
                     delivery: None,
                     ..req.clone()
                 },
+                wake: None,
             };
             let qid = rec.id.clone();
             if front {
@@ -2426,6 +2450,7 @@ fn finish_turn(
             reason,
         },
     );
+    children::on_turn_end(inner, st, &active.id, status);
     if active.stalled {
         let mins = inner.config.stall_after.as_secs().div_ceil(60);
         let mut n = item(

@@ -150,7 +150,9 @@ test('Processes lists read-only and Kill asks first, naming the query', async ({
     };
   });
   await openConn(page);
-  await page.locator('.conn-list .conn-name', { hasText: CONN }).first().click({ button: 'right' });
+  // Opening a connection folds the connection list away; its open tab in the
+  // strip carries the same connection menu (right-click).
+  await page.locator('.conn-tab', { has: page.locator('.conn-tab-main', { hasText: CONN }) }).first().click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Processes…' }).click();
 
   const panel = page.getByRole('dialog', { name: `Processes · ${CONN}` });

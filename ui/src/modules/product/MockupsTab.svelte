@@ -4,7 +4,11 @@
   // the one home for designs, so the tab is the story's designs from the Hall
   // (StoryDesigns); the old DesignArena opens only from its ⋯ ("Open the
   // classic arena"). Undo: render `<DesignArena />` here again.
-  import StoryDesigns from './StoryDesigns.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  // On demand: the story's designs pull in Design Hall's grid and New sheet,
+  // and a story opens on Overview.
+  const StoryDesigns = lazyComponent(() => import('./StoryDesigns.svelte'));
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { product } from '../../lib/stores/product.svelte';
 
@@ -14,7 +18,7 @@
 
 {#if story}
   {#key story.id}
-    <StoryDesigns {story} {isEpic} />
+    <LazyMount lazy={StoryDesigns} what="the story’s designs" variant="panel" props={{ story, isEpic }} />
   {/key}
 {:else}
   <!-- The story's detail is still loading (the page shows its own load error). -->

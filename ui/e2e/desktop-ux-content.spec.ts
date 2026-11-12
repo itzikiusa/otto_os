@@ -71,7 +71,9 @@ test('Browser URL field preserves left-to-right editing in RTL', async ({ page }
 for (const [module, endpoint, emptyTitle] of [
   ['product', '**/product/stories', 'No stories yet'],
   ['vault', '**/vault/vaults', 'The docs home'],
-  ['canvas', '**/api/v1/canvas/scenes', 'Start a new canvas'],
+  // `#/canvas` forwards to Design Hall's Whiteboard studio (the Canvas page
+  // folded into the Hall): this covers that studio grid's failed load.
+  ['canvas', '**/api/v1/design/search**', 'No designs here yet'],
 ]) {
   test(`${module} phone list failure offers a reachable Retry and recovers`, async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 812 });

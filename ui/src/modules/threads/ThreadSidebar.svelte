@@ -15,6 +15,7 @@
   import ThreadSidebarRow from './ThreadSidebarRow.svelte';
   import ThreadOriginGroups from './ThreadOriginGroups.svelte';
   import { originGroups, threadOrigin } from './threadOrigins';
+  import { inboxOrder } from './threadFamilies';
   import {
     delegatedParentId,
     isThreadSession,
@@ -130,32 +131,10 @@
       .filter((s): s is Session => !!s && matchesFilters(s));
   });
 
-  // Inbox order inside each project: needs-you first, then working, then most
-  // recent — delegated workers nested directly under their lead thread.
-  function inboxOrder(list: Session[]): { session: Session; child: boolean }[] {
-    const score = (s: Session): number => {
-      if (ws.needsYou[s.id]) return 0;
-      const st = ws.statusMap[s.id] ?? s.status;
-      return st === 'working' || st === 'running' ? 1 : 2;
-    };
-    const sorted = [...list].sort((a, b) => score(a) - score(b) || b.last_active_at.localeCompare(a.last_active_at));
-    const present = new Set(sorted.map((s) => s.id));
-    const childrenOf = new Map<string, Session[]>();
-    const roots: Session[] = [];
-    for (const s of sorted) {
-      const parentId = delegatedParentId(s);
-      if (parentId && parentId !== s.id && present.has(parentId)) {
-        childrenOf.set(parentId, [...(childrenOf.get(parentId) ?? []), s]);
-      } else roots.push(s);
-    }
-    const out: { session: Session; child: boolean }[] = [];
-    const visit = (s: Session, child: boolean): void => {
-      out.push({ session: s, child });
-      for (const kid of childrenOf.get(s.id) ?? []) visit(kid, true);
-    };
-    for (const r of roots) visit(r, false);
-    return out;
-  }
+  // Inbox order inside each project (threadFamilies.ts): needs-you first, then
+  // working, then most recent — a thread's children nested under it, foldable.
+  let foldedFamilies = $state<Record<string, boolean>>({});
+  const score = (s: Session): number => (ws.needsYou[s.id] ? 0 : ['working', 'running'].includes(ws.statusMap[s.id] ?? s.status) ? 1 : 2);
 
   // Projects → their unsettled threads. Projects added from "Add project"
   // show even before their first thread.
@@ -185,7 +164,7 @@
     };
     return [...groups.values()]
       .sort((a, b) => pinRank(a.key) - pinRank(b.key))
-      .map((g) => ({ ...g, ordered: inboxOrder(g.items) }));
+      .map((g) => ({ ...g, ordered: inboxOrder(g.items, score, delegatedParentId, (id) => foldedFamilies[id] === true) }));
   });
 
   // History combines settled threads + archived daemon threads.
@@ -500,6 +479,7 @@
                     session={item.session}
                     variant="active"
                     child={item.child}
+                    family={{ kids: item.kids, detached: item.detached, folded: foldedFamilies[item.session.id] === true, ontoggle: () => (foldedFamilies = { ...foldedFamilies, [item.session.id]: !foldedFamilies[item.session.id] }) }}
                     onrowclick={handleRowClick}
                     onreopen={(sess, beside) => void reopenArchived(sess, beside)}
                     onmenu={showThreadMenu}

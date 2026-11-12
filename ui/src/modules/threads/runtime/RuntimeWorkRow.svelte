@@ -16,6 +16,8 @@
   import { lastLine, patchToDiff } from '../../agents/conversation/format'; // ui-guards: allow — shared chat helpers
   import RuntimeApprovalRow from './RuntimeApprovalRow.svelte';
   import RuntimeRunNotice from './RuntimeRunNotice.svelte';
+  import RuntimeChildNotice from './RuntimeChildNotice.svelte';
+  import { threadNoticeOf } from './childThreads';
   import LazyMount from '../../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   const RuntimeToolImages = lazyComponent(() => import('./RuntimeToolImages.svelte'));
@@ -40,6 +42,8 @@
   }
   let { item, output = '', pending, note = null, onrespond, agentId = null, cwd = null }: Props = $props();
   const runNotice = $derived(item.type === 'system_notice' ? runNoticeOf(item.message) : null);
+  /** Threads opened from this one: their live cards / "finished" line. */
+  const childNotice = $derived(item.type === 'system_notice' ? threadNoticeOf(item.message) : null);
 
   let open = $state(false);
   let outEl = $state<HTMLPreElement | null>(null);
@@ -116,6 +120,8 @@
 
 {#if runNotice}
   <RuntimeRunNotice notice={runNotice} {agentId} />
+{:else if childNotice}
+  <RuntimeChildNotice notice={childNotice} />
 {:else}
 <div class="rw" class:failed class:stopped={stopped && !note} data-item-type={item.type} data-testid="runtime-item-{item.id}">
   {#if hasDetail}

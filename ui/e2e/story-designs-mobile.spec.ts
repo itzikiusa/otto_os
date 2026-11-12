@@ -41,10 +41,14 @@ async function openDesignTab(page: Page, scheme: 'light' | 'dark'): Promise<void
   // `#/product/<id>` opens the story from the route (phone: its content panel).
   await page.goto(`/#/product/${storyId}`);
   await expect(page.locator('.product-page')).toBeVisible({ timeout: 30_000 });
-  const cls = (await page.locator('.product-page').getAttribute('class')) ?? '';
-  if (cls.includes('m-list-open') && !cls.includes('m-content-open')) {
-    await page.locator('.story-row', { hasText: STORY }).first().click();
-  }
+  // The routed open flips the phone accordion to the content panel once the
+  // story list and detail load; read that state only after it settles (an
+  // immediate class read raced it and clicked a row the list hadn't drawn).
+  const opened = await page
+    .locator('.product-page.m-content-open')
+    .waitFor({ timeout: 15_000 })
+    .then(() => true, () => false);
+  if (!opened) await page.locator('.story-row', { hasText: STORY }).first().click();
   const group = page.locator('.product-header-row2 .tab-strip:not(.sub-tab-strip) .st', { hasText: 'Story' }).first();
   await group.scrollIntoViewIfNeeded();
   await group.click();
@@ -66,14 +70,15 @@ for (const scheme of ['light', 'dark'] as const) {
     await expect(ask.getByRole('textbox')).toBeVisible();
     await expect(ask.getByRole('button', { name: /Ask Otto/ })).toBeVisible();
     await expectNoHorizontalOverflow(page);
-    await page.screenshot({ path: info.outputPath(`story-designs-phone-${scheme}.png`), fullPage: true });
+    await page.screenshot({ path: info.outputPath(`story-designs-phone-${scheme}.png`) });
   });
 }
 
 test('phone: a card opens the Hall artifact with ?from=story', async ({ page }) => {
   await openDesignTab(page, 'light');
   const card = page.getByTestId('design-artifact-card').filter({ hasText: `Phone card ${SUFFIX}` });
-  await card.locator('a').first().click();
+  // The card itself is the link (`a.acard`).
+  await card.click();
   await expect(page).toHaveURL(new RegExp(`#/design/a/[^/?]+\\?from=story/${storyId}$`), { timeout: 15_000 });
   await expectNoHorizontalOverflow(page);
 });

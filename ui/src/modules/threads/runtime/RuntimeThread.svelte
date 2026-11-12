@@ -71,6 +71,8 @@
   import { runtimeThreads } from './runtimeThreads.svelte';
   import { personalAgentOf } from '../../../lib/personalAgentBadges';
   import { runtimeViews } from './runtimeView.svelte';
+  import RuntimeAskAgent from './RuntimeAskAgent.svelte';
+  import { askFromComposer, askTargets } from './askTargets.svelte';
 
   interface Props {
     sessionId: string;
@@ -248,6 +250,8 @@
       draft.text = '';
       return;
     }
+    // Agents picked as chips ("Ask another agent", `@codex`) get it instead, in new linked threads.
+    if (askTargets.for(ownerId).length) return void askFromComposer(ownerId, draft, assembleComposerMessage(t, draft.context), draft.pickedMode);
     const submitted = snapshotDraft(draft);
     // A closed thread reopens first; while a turn runs it waits in the queue.
     if (needsRevive && !submitted.fresh_context) void reopen().then((ok) => (ok ? send(t, undefined, submitted) : undefined));
@@ -303,8 +307,9 @@
     }
   }
 
+  let askEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
   function onKeydown(e: KeyboardEvent): void {
-    if (e.isComposing) return;
+    if (e.isComposing || askEl?.onKey(e)) return;
     if (suggestions.length > 0) {
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
@@ -455,6 +460,7 @@
         <StageSlashPopup id={popId} items={suggestions} active={cmdIdx} onaccept={acceptCmd} onhover={(i) => (cmdIdx = i)} />
       {/if}
       <RuntimeContextChips context={draft.context} onremove={(id) => { draft.context = draft.context.filter(c => c.id !== id); }} onfocus={() => composerEl?.focus()} />
+      {#if !agentChat}<RuntimeAskAgent bind:this={askEl} part="chips" {sessionId} {provider} access={accessMode} readOnly={!!session?.meta?.read_only} text={draft.text} onreplace={(t) => { draft.text = t; composerEl?.focus(); }} />{/if}
       <textarea
         bind:this={composerEl}
         bind:value={draft.text}
@@ -507,6 +513,7 @@
           }}
         />
         {/if}
+        {#if !agentChat}<RuntimeAskAgent part="button" {sessionId} {provider} access={accessMode} disabled={closed || !session} />{/if}
         <span class="rt-grow">
           <!-- A personal agent's model and access are its settings (Settings ›
                About); a per-turn picker here disagreed with them. -->

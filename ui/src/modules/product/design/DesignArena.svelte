@@ -291,13 +291,13 @@
     lastChildIds = ids;
     void untrack(() => loadChildren(ids ? children : []));
   });
+  // `keepStory`: the classic arena closed ON the story's Design tab — flush only, the story stays selected.
+  let { keepStory = false }: { keepStory?: boolean } = $props();
   onDestroy(() => {
     mockupAssist.close();
     const id = selectedId;
-    // Flush the pending edit first, THEN release every cached blob URL + base.
-    void (id ? product.flushAttachmentContent(id).catch(() => null) : Promise.resolve()).finally(() =>
-      product.teardown(),
-    );
+    // Flush the pending edit first, THEN release every cached blob URL + base (leaving the story).
+    void (id ? product.flushAttachmentContent(id).catch(() => null) : Promise.resolve()).finally(() => keepStory || product.teardown());
   });
 
   let listReloadTimer: ReturnType<typeof setTimeout> | null = null;

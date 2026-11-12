@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { phoneDevice } from '../../lib/stores/phoneDevice.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -31,6 +32,7 @@
   import { threadsChrome } from './threadsChrome.svelte';
   import ThreadSidebar from './ThreadSidebar.svelte';
   import { buildThreadMenu } from './threadMenu';
+  import ThreadParentChip from './runtime/ThreadParentChip.svelte';
   import RelatedThreadsChip from './RelatedThreadsChip.svelte';
   import { relatedPopover } from './relatedPopover.svelte';
   import { councilOf } from './runtime/council';
@@ -78,6 +80,9 @@
 
   // Subscribe to live cross-session messages + MCP DB activity while mounted.
   onMount(() => threads.mountLive());
+  // The header's phone button used to learn this at mount; with the handoff
+  // only in ⋯ now, a paired phone must know before the first menu opens.
+  onMount(() => void phoneDevice.ensure());
   // Structured runtime threads: their rows, and live events for open ones.
   onMount(() => runtimeThreads.mount());
   $effect(() => {
@@ -378,7 +383,7 @@
         <span class="th-crumb-sep" aria-hidden="true">/</span>
         {#if focusedState}<StatusDot state={focusedState} />{/if}
         <span class="th-crumb-title ellipsis" dir="auto">{crumbTitle}</span>
-        {#if focused}<RelatedThreadsChip threadId={focused.id} onstartroom={(sid) => (roomSessionId = sid)} />{/if}
+        {#if focused}<RelatedThreadsChip threadId={focused.id} onstartroom={(sid) => (roomSessionId = sid)} /><ThreadParentChip threadId={focused.id} />{/if}
         {#if focused && councilLeft}
           {@const id = focused.id}
           <button type="button" class="th-council-back" title="Back to the council’s columns" data-testid="threads-back-to-council" onclick={() => council.showCouncil(id)}>

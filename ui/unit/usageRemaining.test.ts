@@ -97,6 +97,14 @@ test('age, tone, plan, provider and credits labels', () => {
   assert.equal(creditsText(null), '');
 });
 
+test('an inactive window says so after its numbers', () => {
+  assert.equal(
+    windowText(win({ name: 'Weekly · Fable', left_percent: 77, active: false }), false, iso(NOW), NOW),
+    '77% left · resets in 2 h 5 min · not in effect now',
+  );
+  assert.equal(windowText(win({ active: true }), false, iso(NOW), NOW), '87% left · resets in 2 h 5 min');
+});
+
 test('Claude check: due only when on, idle and older than the daemon cache', () => {
   const base = { enabled: true, checking: false, checked_at: null as string | null, error: null as string | null };
   assert.equal(checkDue(base, NOW), true, 'never checked');

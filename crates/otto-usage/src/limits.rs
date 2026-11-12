@@ -120,6 +120,11 @@ pub struct WindowLimit {
     pub resets_at: Option<DateTime<Utc>>,
     /// `resets_at` passed after the snapshot was taken.
     pub reset_since_snapshot: bool,
+    /// `false` for a limit the provider lists but does not enforce now
+    /// (Claude `limits[].is_active`); the page shows it dimmed.
+    pub active: bool,
+    /// The provider's own level (`normal`, …) when it sent one.
+    pub severity: Option<String>,
 }
 
 /// Every login `user_id` may see, with its newest limits. Root also sees the
@@ -362,6 +367,8 @@ fn codex_windows(s: &LimitSnapshot, bucket: Option<&str>, now: DateTime<Utc>) ->
                 left_percent: used.map(|u| (100.0 - u).clamp(0.0, 100.0)),
                 resets_at: w.resets_at,
                 reset_since_snapshot: reset,
+                active: true,
+                severity: None,
             }
         })
         .collect()

@@ -8,6 +8,10 @@ import { openPage, expectNoHorizontalOverflow, expectContentHasHeight } from './
 // and one tap goes back to the full app. A phone on its side keeps the tablet
 // layout with the same five modules.
 
+// Every chunk must reach the network listener: a service worker answering
+// from its cache would hide a hidden page's chunk from `page.on('request')`.
+test.use({ serviceWorkers: 'block' });
+
 const LIGHT = ['threads', 'connections', 'git', 'api', 'usage'];
 /** Page chunks of modules the light version hides (dev: source path; build: hashed name). */
 const HIDDEN_CHUNK = /\/(AgentsPage|HomePage|VaultPage|WorkflowsPage|KubernetesPage|AwsPage|McpPage|ProductPage|InsightsPage|LoopsPage)[.-]/;
@@ -75,6 +79,7 @@ test('full app by default; one tap to the light version and one tap back', async
 });
 
 test('a hidden module is a calm page, its code never loads, and "Open the full app" shows it', async ({ page }) => {
+  test.setTimeout(90_000);
   const hidden: string[] = [];
   await bootLight(page, 'kubernetes', hidden);
   test.skip(!(await phoneSized(page)), 'phone-sized screens only');
@@ -85,15 +90,17 @@ test('a hidden module is a calm page, its code never loads, and "Open the full a
   await expectNoHorizontalOverflow(page);
   expect(hidden, 'no hidden page chunk is requested').toEqual([]);
 
-  // Full app: the same route now loads the real page (its chunk arrives).
+  // Full app: the same route now shows the real page.
   await page.getByRole('button', { name: 'Open the full app' }).click();
   await expect(notice).toHaveCount(0);
-  await expect.poll(() => hidden.some((u) => u.includes('KubernetesPage')), { timeout: 20_000 }).toBe(true);
+  await expect(page.getByTestId('k8s-page')).toBeVisible({ timeout: 20_000 });
   expect(await page.evaluate(() => location.hash)).toBe('#/kubernetes');
   expect(await page.evaluate(() => localStorage.getItem('otto_phone_light'))).toBe('0');
 });
 
 test('the five pages open, fit the width and never pull in a hidden page', async ({ page }) => {
+  // Five cold page loads: on its side (the tablet layout) it ran past the default 45 s.
+  test.setTimeout(120_000);
   const hidden: string[] = [];
   await bootLight(page, '', hidden);
   test.skip(!(await phoneSized(page)), 'phone-sized screens only');
@@ -128,15 +135,24 @@ test('⌘K "Go to" lists only the five modules', async ({ page }) => {
   await sheet(page).getByRole('button', { name: 'Commands', exact: true }).click();
   const palette = page.getByRole('dialog', { name: 'Command palette' });
   const search = palette.getByLabel('Search commands');
-  const options = palette.getByRole('option');
-  // A module's Go-to, not a "Go to <x> settings" section of the same name.
-  const goTo = (label: string) => options.filter({ hasText: new RegExp(`Go to ${label}(?![\\w ]*settings)`) });
+  // A command whose title is exactly the module's Go-to: not the palette's
+  // `Ask Otto: "Go to …"` row, a search hit, or a "Go to <x> settings" section.
+  const goTo = (label: string) =>
+    palette.locator('.pal-item-title').filter({ hasText: new RegExp(`^Go to ${label}$`) });
   for (const label of ['Threads', 'Connections', 'Git', 'API', 'Usage']) {
     await search.fill(`Go to ${label}`);
     await expect(goTo(label).first()).toBeVisible();
   }
-  for (const label of ['Agents', 'Home', 'Kubernetes', 'Vault', 'Workflows']) {
+  for (const label of ['Agents', 'Home', 'Kubernetes', 'Vault', 'Workflows', 'Help']) {
     await search.fill(`Go to ${label}`);
+    // The palette has re-ranked for this query once the Ask Otto row echoes it.
+    await expect(palette.getByRole('option', { name: `Ask Otto: "Go to ${label}"` })).toBeVisible();
     await expect(goTo(label)).toHaveCount(0);
+  }
+  // Settings sections that moved into a hidden module are not offered either.
+  for (const moved of ['Bundled skills (Skills Lab)', 'Evaluator defaults', 'MCP servers (Control Plane)']) {
+    await search.fill(`Go to ${moved}`);
+    await expect(palette.getByRole('option', { name: `Ask Otto: "Go to ${moved}"` })).toBeVisible();
+    await expect(palette.locator('.pal-item-title').filter({ hasText: `Go to ${moved}` }).filter({ hasNotText: 'Ask Otto' })).toHaveCount(0);
   }
 });

@@ -59,7 +59,7 @@ test('Ask several sends one prompt to two agents, all or none', async ({ page })
   await picker.getByTestId('model-picker-provider-codex').click();
   await picker.getByRole('button', { name: 'Default model' }).click();
   await page.keyboard.press('Escape');
-  await expect(stage.getByTestId('picker-agent')).toContainText(/Claude, Codex/);
+  await expect(stage.getByTestId('picker-agent')).toContainText(/Claude( Code)?, Codex/);
   const send = stage.getByTestId('new-thread-send-btn');
   await stage.getByTestId('new-thread-input').fill('Which cache should we use?');
   await expect(send).toHaveText(/Ask 2/);

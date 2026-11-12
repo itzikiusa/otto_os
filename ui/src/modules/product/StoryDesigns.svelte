@@ -45,6 +45,8 @@
   let { story, isEpic }: Props = $props();
 
   const canView = $derived(auth.can('design', 'view'));
+  /** How copy names the story: its key, else (a local draft has none) its title. */
+  const storyName = $derived(story.source_key || `“${story.title}”`);
   const canEdit = $derived(auth.can('design', 'edit'));
 
   /** The old arena, on demand (⋯ → Open the classic arena). */
@@ -178,7 +180,7 @@
       <Icon name="chevronLeft" size={12} /> Back to designs
     </button>
   </div>
-  <DesignArena />
+  <DesignArena keepStory />
 {:else if !canView}
   <EmptyState
     icon="lock"
@@ -197,7 +199,7 @@
       </h2>
       <div class="sd-actions">
         <button class="btn primary" onclick={openNew} disabled={!canEdit}
-          title={canEdit ? `A new design that implements ${story.source_key}` : 'You can view designs but not create them'}
+          title={canEdit ? `A new design that implements ${storyName}` : 'You can view designs but not create them'}
           data-testid="story-designs-new">
           <Icon name="plus" size={12} /> New design
         </button>
@@ -215,7 +217,7 @@
         <Icon name="chevronDown" size={12} />
       </button>
       <input dir="auto" class="input sd-brief" bind:value={brief} disabled={!canEdit || asking}
-        placeholder={canEdit ? `Ask Otto to design something for ${story.source_key}…` : 'You can view designs but not create them'}
+        placeholder={canEdit ? `Ask Otto to design something for ${storyName}…` : 'You can view designs but not create them'}
         aria-label="Ask Otto for a design for this story" />
       <button class="btn" type="submit" disabled={!ready}>
         <Icon name="sparkle" size={12} /> {asking ? 'Starting…' : 'Ask Otto'}
@@ -230,7 +232,7 @@
           <EmptyState
             icon="palette"
             title="No designs for this story yet"
-            body={`Start one with New design, or describe it to Otto above. Designs made in Design Hall that implement ${story.source_key}${isEpic ? ' or its stories' : ''} show here too.`}
+            body={`Start one with New design, or describe it to Otto above. Designs made in Design Hall that implement ${storyName}${isEpic ? ' or its stories' : ''} show here too.`}
           />
         {/snippet}
       </DesignGrid>

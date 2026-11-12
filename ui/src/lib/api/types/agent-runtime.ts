@@ -362,6 +362,34 @@ export interface CouncilResp {
   seats: RuntimeSession[];
 }
 
+/** `meta.child_of` of a thread opened from another one (Threads inside a
+ *  thread): the opener, and whether a person or its agent opened it. */
+export interface ChildOf {
+  id: Id;
+  by: 'person' | 'agent';
+}
+
+/** One agent of `POST /runtime-sessions/{id}/children`. */
+export interface AskChildTarget {
+  provider: RuntimeProvider;
+  model?: string;
+  effort?: string;
+}
+
+/** Body of `POST /runtime-sessions/{id}/children` ("Ask another agent"; 1–4
+ *  targets, all or none). Access: omitted = the parent's; wider is a 400. */
+export interface AskChildReq {
+  prompt: string;
+  targets: AskChildTarget[];
+  title?: string;
+  access_mode?: RuntimeAccessMode;
+  images?: PromptImage[];
+}
+
+export interface AskChildResp {
+  children: RuntimeSession[];
+}
+
 /** Body of `POST /runtime-sessions/{id}/council/synthesize` — the judge. 409 while a seat works. */
 export interface SynthesizeCouncilReq {
   provider: RuntimeProvider;

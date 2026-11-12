@@ -13,6 +13,8 @@ import { noteRuntimeWaiting } from '../../../lib/stores/runtimeAttention.svelte'
 import { uiControl } from '../../../lib/stores/uiControl.svelte';
 import type {
   ApprovalDecision,
+  AskChildReq,
+  AskChildResp,
   PeerInfo,
   QuestionAnswer,
   PromptDelivery,
@@ -254,6 +256,14 @@ class RuntimeThreads {
     this.byId[created.id] = created;
     if (req.prompt) await this.prompt(created.id, { text: req.prompt, ...(req.effort ? { effort: req.effort } : {}) });
     return created;
+  }
+
+  /** "Ask another agent" (or several): new threads linked to `parentId`,
+   *  each sent `req.prompt`; all or none. Their rows land before this resolves. */
+  async askChildren(parentId: string, req: AskChildReq): Promise<RuntimeSession[]> {
+    const { children } = await api.post<AskChildResp>(`/runtime-sessions/${parentId}/children`, req);
+    for (const c of children) this.byId[c.id] = c;
+    return children;
   }
 
   async prompt(id: string, req: RuntimePromptReq): Promise<RuntimePromptResp> {

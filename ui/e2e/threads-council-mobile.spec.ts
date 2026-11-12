@@ -15,6 +15,8 @@ test.beforeEach(async ({ page }, ti) => {
 });
 
 test('a council shows one seat at a time behind a segmented control', async ({ page }, info) => {
+  // A phone on its side gets the tablet layout: the seats sit side by side there.
+  test.skip(info.project.name.includes('landscape'), 'portrait phone layout only');
   await page.goto('/');
   await page.waitForFunction(() => typeof (window as unknown as { __mockRuntime?: { seed?: unknown } }).__mockRuntime?.seed === 'function');
   await page.evaluate(() => {

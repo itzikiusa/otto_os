@@ -12,7 +12,8 @@
     name: string;
     /** "gpt-5 · high", "Explore", … */
     sub?: string | null;
-    tone: 'live' | 'done' | 'failed' | 'off';
+    /** `ask`: it waits on a person (an approval or a question). */
+    tone: 'live' | 'done' | 'failed' | 'off' | 'ask';
     status: string;
     elapsed?: string | null;
     result?: string | null;
@@ -22,9 +23,13 @@
     /** Given: an Open button (⇧-click handled by the host). */
     onopen?: (e: MouseEvent) => void;
     openLabel?: string;
+    /** Given: an "Open beside" icon button (a child thread). */
+    onbeside?: () => void;
+    /** Given: a Stop icon button while it works. */
+    onstop?: () => void;
     testid?: string;
   }
-  let { provider = null, name, sub = null, tone, status, elapsed = null, result = null, expanded = false, ontoggle, onopen, openLabel = 'Open', testid }: Props = $props();
+  let { provider = null, name, sub = null, tone, status, elapsed = null, result = null, expanded = false, ontoggle, onopen, openLabel = 'Open', onbeside, onstop, testid }: Props = $props();
 </script>
 
 {#snippet inner()}
@@ -32,7 +37,7 @@
   <span class="ar-name ellipsis" dir="auto">{name}</span>
   {#if sub}<span class="ar-sub ellipsis">{sub}</span>{/if}
   <span class="ar-state">
-    {#if tone === 'live'}<span class="spinner" aria-hidden="true"></span>{:else if tone === 'done'}<Icon name="check" size={12} />{:else if tone === 'failed'}<Icon name="x" size={12} />{/if}
+    {#if tone === 'live'}<span class="spinner" aria-hidden="true"></span>{:else if tone === 'done'}<Icon name="check" size={12} />{:else if tone === 'failed'}<Icon name="x" size={12} />{:else if tone === 'ask'}<Icon name="warning" size={12} />{/if}
     {status}{#if elapsed} · {elapsed}{/if}
   </span>
   {#if result}<span class="ar-result ellipsis" dir="auto" title={result}>{result}</span>{/if}
@@ -46,6 +51,12 @@
     </button>
   {:else}
     <div class="ar-main">{@render inner()}</div>
+  {/if}
+  {#if onstop}
+    <button type="button" class="icon-btn" aria-label="Stop {name}" title="Stop" data-testid="runtime-item-stop" onclick={onstop}><Icon name="stop" size={12} /></button>
+  {/if}
+  {#if onbeside}
+    <button type="button" class="icon-btn" aria-label="Open {name} beside" title="Open beside (Split)" data-testid="runtime-item-beside" onclick={onbeside}><Icon name="split" size={12} /></button>
   {/if}
   {#if onopen}
     <button type="button" class="btn small ghost ar-open" title="{openLabel} (⇧-click: beside)" data-testid="runtime-item-open" onclick={onopen}>{openLabel}</button>
@@ -113,6 +124,9 @@
   }
   .ar[data-tone='failed'] .ar-state {
     color: var(--danger);
+  }
+  .ar[data-tone='ask'] .ar-state {
+    color: var(--warning);
   }
   .ar-state .spinner {
     --spinner-size: 10px;

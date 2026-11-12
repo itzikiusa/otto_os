@@ -22,6 +22,10 @@ export interface WindowLimit {
   resets_at: string | null;
   /** `resets_at` passed after the snapshot was taken. */
   reset_since_snapshot: boolean;
+  /** false: listed by the provider but not enforced right now (shown dimmed). Absent on older daemons. */
+  active?: boolean;
+  /** The provider's own level (`normal`, …) when it sent one. */
+  severity?: string | null;
 }
 
 export interface AccountLimits {

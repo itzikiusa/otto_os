@@ -106,7 +106,7 @@ test('Edit reviewers asks first, naming who is added and who is removed', async 
 
   const sheet = page.getByRole('dialog', { name: 'Reviewers of #51' });
   await expect(sheet.getByTestId('pr-reviewers-save')).toBeDisabled();
-  await sheet.getByRole('textbox', { name: 'Add a reviewer' }).fill('carl');
+  await sheet.getByRole('combobox', { name: 'Add a reviewer' }).fill('carl');
   await sheet.getByRole('button', { name: 'Add', exact: true }).click();
   await sheet.getByRole('button', { name: 'Remove maya' }).click();
   await sheet.getByTestId('pr-reviewers-save').click();

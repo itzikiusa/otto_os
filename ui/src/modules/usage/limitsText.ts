@@ -64,6 +64,12 @@ export function windowText(w: WindowLimit, stale: boolean, takenAt: string | nul
   if (windowReset(w, now) || w.left_percent === null) {
     return 'Reset since the last reading — no newer numbers yet';
   }
+  const line = percentLine(w, stale, takenAt, now);
+  return w.active === false ? `${line} · not in effect now` : line;
+}
+
+function percentLine(w: WindowLimit, stale: boolean, takenAt: string | null, now: number): string {
+  if (w.left_percent === null) return '';
   const left = `${Math.round(w.left_percent)}% left`;
   const reset = resetText(w, now);
   if (stale) {

@@ -152,8 +152,52 @@ const councilRoutes: MockRoute[] = [
   },
 ];
 
+/** A notice in `sid`'s timeline, delivered live like the daemon's. */
+function notice(sid: string, message: string): void {
+  const it = item(sid, { type: 'system_notice', message });
+  appLive.dispatch({ type: 'agent_runtime_event', event: { session_id: sid, sequence: seqs.get(sid) ?? 0, ts: now(), type: 'turn_item.updated', turn_item: it } });
+}
+
+// Threads inside a thread (docs/features/threads-structured-runtime.md
+// "Threads inside a thread"). e2e: `__mockRuntime.childDone(childId, line)`
+// writes the "finished" notice into the thread the child was asked from.
+const childRoutes: MockRoute[] = [
+  {
+    method: 'POST', re: /^\/runtime-sessions\/([^/]+)\/children$/,
+    handle: (m, b) => {
+      const l = log() as any;
+      (l.asks ??= []).push({ id: m[1], ...b });
+      const me = find(m[1]);
+      if (!me) return { status: 404, json: { code: 'not_found', message: 'thread' } };
+      const targets: any[] = b?.targets ?? [];
+      if (targets.length < 1 || targets.length > 4) return { status: 400, json: { code: 'invalid', message: `invalid: ask 1 to 4 agents at once, not ${targets.length}` } };
+      const root = me.parent_id ?? me.id;
+      const open = threads.filter((t) => t.status !== 'closed' && (t.id === root || t.parent_id === root)).length;
+      if (open + targets.length > 9) return { status: 409, json: { code: 'conflict', message: `conflict: this thread already has ${open - 1} open threads beside it (at most 8); there is room for ${Math.max(0, 9 - open)} more — close one before asking another agent` } };
+      const kids = targets.map((x) => addThread(me.workspace_id, {
+        provider: x.provider, model: x.model ?? null, title: String(b?.prompt ?? 'Question').split('\n')[0].slice(0, 60), cwd: me.cwd,
+        parent_id: root, access_mode: b?.access_mode ?? me.access_mode, meta: { child_of: { id: me.id, by: 'person' } },
+      }, String(b?.prompt ?? ''), `Mock ${x.provider}: here is my answer.`));
+      notice(me.id, `You asked ${targets.map((x) => x.provider).join(', ')}: ${String(b?.prompt ?? '').split('\n')[0]} [otto-thread:${kids.map((k) => k.id).join(',')}:started]`);
+      return { status: 201, json: { children: kids } };
+    },
+  },
+];
+
+Object.assign(log(), {
+  /** Child `sid`'s turn ended: the thread it was asked from hears it. */
+  childDone: (sid: string, line: string): void => {
+    const kid = find(sid);
+    const of = (kid?.meta?.child_of as { id?: string } | undefined)?.id;
+    if (kid && of) notice(of, `${kid.provider} finished: ${line} [otto-thread:${sid}:finished]`);
+  },
+});
+
 export const runtimeMockRoutes: MockRoute[] = [
   ...councilRoutes,
+  ...childRoutes,
+  // The new-thread stage checks its folder before it sends (lib/folderCheck).
+  { method: 'GET', re: /^\/fs\/stat$/, handle: (_m, _b, q) => ({ json: { path: q.get('path') ?? '', is_dir: true } }) },
   {
     method: 'GET', re: /^\/workspaces\/([^/]+)\/runtime-sessions$/,
     handle: (m, _b, q) => {

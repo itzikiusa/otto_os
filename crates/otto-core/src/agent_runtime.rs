@@ -948,6 +948,73 @@ pub struct PeerReply {
     pub text: String,
 }
 
+// ---- threads inside a thread: a person asks another agent ------------------
+
+/// The [`RuntimeSession::meta`] key of a thread opened FROM another one
+/// ([`ChildOf`]): who opened it, so its finished turns reach that thread.
+pub const CHILD_META_KEY: &str = "child_of";
+/// Agents one "Ask several" sends the same message to.
+pub const ASK_CHILD_MAX_TARGETS: usize = 4;
+
+/// Who opened a child thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildOpener {
+    /// A person, from the thread's composer ("Ask another agent").
+    Person,
+    /// The thread's own agent (`otto.thread_open`): the child's answers to
+    /// it are delivered back to that agent.
+    Agent,
+}
+
+/// `meta.child_of`: the thread this one was opened from (not the group's
+/// root — that is `parent_id`). Server-owned like the rest of meta.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildOf {
+    pub id: Id,
+    pub by: ChildOpener,
+}
+
+impl RuntimeSession {
+    /// The thread this one was opened from, if any.
+    pub fn child_of(&self) -> Option<ChildOf> {
+        let v = self.meta.as_ref()?.get(CHILD_META_KEY)?;
+        serde_json::from_value(v.clone()).ok()
+    }
+}
+
+/// One agent of `POST /runtime-sessions/{id}/children`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AskChildTarget {
+    pub provider: RuntimeProvider,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+/// `POST /runtime-sessions/{id}/children` — a person sends `prompt` to 1–4
+/// NEW threads linked to `{id}` (its folder; its access mode or a narrower
+/// one), created all or none.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AskChildReq {
+    pub prompt: String,
+    pub targets: Vec<AskChildTarget>,
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Omitted = the parent's. Wider than the parent's is refused (400).
+    #[serde(default)]
+    pub access_mode: Option<RuntimeAccessMode>,
+    #[serde(default)]
+    pub images: Vec<PromptImage>,
+}
+
+/// The children `POST /runtime-sessions/{id}/children` opened, in target order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AskChildResp {
+    pub children: Vec<RuntimeSession>,
+}
+
 // ---- council: one prompt, several agents, then a synthesis ------------------
 
 /// Seats one council holds (a person compares 2–4 answers side by side).

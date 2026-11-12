@@ -128,7 +128,8 @@ test('cards open the Hall artifact with ?from=story; a story attachment appears 
   await expect(mirror).toBeVisible({ timeout: 20_000 });
   await expect(mirror.getByTestId('design-card-mirror')).toContainText('From a story');
 
-  await mirror.locator('a').first().click();
+  // The card itself is the link (`a.acard`).
+  await mirror.click();
   await expect(page).toHaveURL(new RegExp(`\\?from=story/${storyId}$`), { timeout: 15_000 });
   await expect(page.getByTestId('design-mirror-banner')).toBeVisible({ timeout: 20_000 });
   await expect(page.getByTestId('design-adopt')).toBeVisible();
@@ -175,6 +176,11 @@ test('an epic lists its children’s designs, grouped by story', async ({ page }
 
 for (const scheme of ['light', 'dark'] as const) {
   test(`story Design tab renders in ${scheme}`, async ({ page }, info) => {
+    // Seed its own card: tests run fully parallel (a fresh worker re-seeds the
+    // story), so no other test's design can be relied on here.
+    const { ctx, base } = await apiCtx();
+    await hallDesign(ctx, base, `Render ${scheme} ${SUFFIX}`, storyId);
+    await ctx.dispose();
     await page.addInitScript((s) => localStorage.setItem('otto_scheme', s), scheme);
     await openStory(page, STORY);
     await openDesignTab(page);

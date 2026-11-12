@@ -25,7 +25,7 @@ import { auth } from '../lib/stores/auth.svelte';
 import { toasts } from '../lib/toast.svelte';
 import { toastError } from '../lib/toastError';
 import { startSnip } from '../lib/snip';
-import { lightMode } from '../lib/lightMode.svelte';
+import { lightMode, lightRouteAllowed } from '../lib/lightMode.svelte';
 
 /** What the sources need from the app root (its local state and helpers). */
 export interface PaletteDeps {
@@ -171,8 +171,9 @@ export function installPaletteSources(deps: PaletteDeps): () => void {
           keywords: `settings preferences ${s.id.replace(/-/g, ' ')} ${s.keywords ?? ''}`,
           run: () => router.go(`settings/${s.id}`),
         })).concat(
-          // Sections that moved out of Settings keep a ⌘K entry at their new home.
-          movedSections(auth).map((s) => ({
+          // Sections that moved out of Settings keep a ⌘K entry at their new home
+          // (not in the phone's light version when that home is a module it hides).
+          movedSections(auth).filter((s) => !lightMode.active || lightRouteAllowed((s.movedTo ?? 'skills-eval').split('/')[0])).map((s) => ({
             id: `settings.${s.id}`,
             title: `Go to ${s.movedLabel ?? s.label}`,
             group: 'Settings',

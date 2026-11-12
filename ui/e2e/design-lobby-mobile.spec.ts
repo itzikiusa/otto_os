@@ -10,8 +10,11 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 // menu stays inside the viewport, and Archived → Unarchive works by touch.
 
 const V1 = '/api/v1';
-const stamp = `${Date.now().toString(36)}${process.pid.toString(36)}`;
-const ARCHIVED = `Phone archived ${stamp}`;
+// Set per seed (beforeAll runs once per project in a worker): the designs
+// list is not scoped to the seeded workspace, so a name shared by two seeds
+// showed two "Phone archived" cards.
+let stamp = '';
+let ARCHIVED = '';
 let wsId = '';
 
 async function frame(ctx: APIRequestContext, base: string, title: string): Promise<string> {
@@ -23,6 +26,8 @@ async function frame(ctx: APIRequestContext, base: string, title: string): Promi
 }
 
 test.beforeAll(async () => {
+  stamp = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+  ARCHIVED = `Phone archived ${stamp}`;
   const { ctx, base } = await apiCtx();
   wsId = await seedWorkspace(ctx, base);
   for (let i = 0; i < 3; i++) await frame(ctx, base, `Phone frame ${i} ${stamp}`);

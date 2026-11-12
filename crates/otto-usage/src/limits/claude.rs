@@ -37,6 +37,11 @@ pub(crate) struct ClaudeWindow {
     pub observed_at: DateTime<Utc>,
     /// Display order.
     pub rank: u8,
+    /// `false` for a limit the server lists but does not enforce right now
+    /// (`limits[].is_active`); shown dimmed.
+    pub active: bool,
+    /// The server's own level (`normal`, …) when it sent one.
+    pub severity: Option<String>,
 }
 
 /// Everything known about one Claude login.
@@ -155,6 +160,8 @@ pub(crate) fn parse_rate_limit_info(
             resets_at,
             observed_at,
             rank,
+            active: true,
+            severity: None,
         },
     ))
 }
@@ -172,12 +179,7 @@ fn fixed_window(kind: &str) -> Option<(String, Option<u64>, u8)> {
 }
 
 fn scoped_id(display_name: &str) -> String {
-    let slug: String = display_name
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
-    format!("seven_day_{slug}")
+    format!("seven_day_{}", slug(display_name))
 }
 
 /// What a `get_usage` answer says.
@@ -224,6 +226,8 @@ pub(crate) fn parse_get_usage(resp: &Value, observed_at: DateTime<Utc>) -> Optio
                 resets_at: iso(w.get("resets_at")),
                 observed_at,
                 rank,
+                active: true,
+                severity: None,
             },
         );
     }
@@ -250,8 +254,26 @@ pub(crate) fn parse_get_usage(resp: &Value, observed_at: DateTime<Utc>) -> Optio
                 resets_at: iso(m.get("resets_at")),
                 observed_at,
                 rank: 4,
+                active: true,
+                severity: None,
             },
         );
+    }
+    // Newer CLIs list every limit in `limits[]`; an entry replaces the
+    // same window read from the older keys above (`weekly_all` IS `seven_day`).
+    for l in rl
+        .get("limits")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some((id, window, model)) = limit_entry(l, observed_at) else {
+            continue;
+        };
+        if let Some(m) = model {
+            scoped_name.get_or_insert(m);
+        }
+        windows.insert(id, window);
     }
     Some(UsageAnswer::Windows {
         plan: resp
@@ -261,6 +283,92 @@ pub(crate) fn parse_get_usage(resp: &Value, observed_at: DateTime<Utc>) -> Optio
         windows,
         scoped_name,
     })
+}
+
+/// One `rate_limits.limits[]` entry (Claude CLI 2.1.322):
+/// `{kind: "weekly_all"|"weekly_scoped"|…, group: "weekly"|…, percent 0–100,
+/// severity, resets_at, scope: null | {model: {id, display_name}, surface},
+/// is_active}` → `(window id, window, scoped model name)`. An unknown kind or
+/// group is shown by its group and scope rather than dropped.
+fn limit_entry(
+    l: &Value,
+    observed_at: DateTime<Utc>,
+) -> Option<(String, ClaudeWindow, Option<String>)> {
+    let used = l.get("percent").and_then(Value::as_f64)?;
+    if !used.is_finite() {
+        return None;
+    }
+    let kind = l.get("kind").and_then(Value::as_str).unwrap_or("");
+    let group = l.get("group").and_then(Value::as_str).unwrap_or(kind);
+    let (base, minutes, base_id, rank) = match group {
+        "weekly" | "seven_day" => ("Weekly".to_string(), Some(WEEK), "seven_day".to_string(), 1),
+        "session" | "five_hour" => ("5-hour".to_string(), Some(300), "five_hour".to_string(), 0),
+        "daily" => ("Daily".to_string(), Some(24 * 60), "daily".to_string(), 5),
+        "monthly" => ("Monthly".to_string(), None, "monthly".to_string(), 6),
+        "" => ("Limit".to_string(), None, "limit".to_string(), 7),
+        other => (capitalise(other), None, format!("limit_{}", slug(other)), 7),
+    };
+    let scope = l.get("scope").filter(|v| v.is_object());
+    let model = scope
+        .and_then(|s| s.pointer("/model/display_name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
+    let surface = scope.and_then(|s| match s.get("surface") {
+        Some(Value::String(v)) => Some(v.as_str()),
+        Some(v) => v.get("display_name").and_then(Value::as_str),
+        None => None,
+    });
+    let scoped = model.or(surface);
+    let (id, name, rank) = match scoped {
+        Some(label) if base_id == "seven_day" && model.is_some() => {
+            (scoped_id(label), format!("{base} · {label}"), 4)
+        }
+        Some(label) => (
+            format!("{base_id}_{}", slug(label)),
+            format!("{base} · {label}"),
+            rank + 1,
+        ),
+        None if kind.ends_with("_all") || kind.is_empty() || kind == group => (base_id, base, rank),
+        None => (
+            format!("{base_id}_{}", slug(kind)),
+            format!("{base} · {}", kind.replace('_', " ")),
+            rank + 1,
+        ),
+    };
+    Some((
+        id,
+        ClaudeWindow {
+            name,
+            minutes,
+            used_percent: used.clamp(0.0, 100.0),
+            resets_at: iso(l.get("resets_at")),
+            observed_at,
+            rank,
+            active: l.get("is_active").and_then(Value::as_bool).unwrap_or(true),
+            severity: l
+                .get("severity")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        },
+        model.map(str::to_string),
+    ))
+}
+
+fn slug(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+fn capitalise(s: &str) -> String {
+    let s = s.replace('_', " ");
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => s,
+    }
 }
 
 fn iso(v: Option<&Value>) -> Option<DateTime<Utc>> {
@@ -292,6 +400,8 @@ pub(crate) fn served(
                 left_percent: used.map(|u| (100.0 - u).clamp(0.0, 100.0)),
                 resets_at: w.resets_at,
                 reset_since_snapshot: reset,
+                active: w.active,
+                severity: w.severity.clone(),
             }
         })
         .collect();
@@ -422,6 +532,84 @@ mod tests {
         assert_eq!(parse_get_usage(&json!({}), now), None);
     }
 
+    /// The real `get_usage` answer of Claude CLI 2.1.322 on a Max plan
+    /// (`fixtures/claude-get-usage-max.json`): `five_hour` and the code-named
+    /// keys are null, `seven_day` is 61 %, and the newer `limits[]` list holds
+    /// `weekly_all` (the same window) plus an inactive `weekly_scoped` Fable.
+    #[test]
+    fn the_real_cli_answer_yields_weekly_and_fable_and_no_five_hour() {
+        let resp: Value =
+            serde_json::from_str(include_str!("../../fixtures/claude-get-usage-max.json")).unwrap();
+        let now = at("2026-11-12T16:16:50Z");
+        let Some(UsageAnswer::Windows {
+            plan,
+            windows,
+            scoped_name,
+        }) = parse_get_usage(&resp, now)
+        else {
+            panic!("expected windows");
+        };
+        assert_eq!(plan.as_deref(), Some("max"));
+        assert_eq!(scoped_name.as_deref(), Some("Fable"));
+        let ids: Vec<_> = windows.keys().cloned().collect();
+        assert_eq!(
+            ids,
+            ["seven_day", "seven_day_fable"],
+            "one weekly, not two; no 5-hour"
+        );
+        let weekly = &windows["seven_day"];
+        assert_eq!(weekly.name, "Weekly");
+        assert_eq!(weekly.used_percent, 61.0);
+        assert_eq!(
+            weekly.resets_at,
+            Some(at("2026-11-16T15:59:59.663811+00:00")),
+            "microseconds and a +00:00 offset parse"
+        );
+        assert!(weekly.active);
+        assert_eq!(weekly.severity.as_deref(), Some("normal"));
+        let fable = &windows["seven_day_fable"];
+        assert_eq!(fable.name, "Weekly · Fable");
+        assert_eq!(fable.used_percent, 23.0);
+        assert!(!fable.active, "listed but not in effect: shown dimmed");
+
+        let e = ClaudeEntry {
+            windows,
+            ..Default::default()
+        };
+        let (status, _, served) = served(&e, now).unwrap();
+        assert_eq!(status, LimitStatus::Ok);
+        assert_eq!(served.len(), 2);
+        assert_eq!(served[0].name, "Weekly");
+        assert_eq!(served[0].used_percent, Some(61.0));
+        assert_eq!(served[0].left_percent, Some(39.0));
+        assert_eq!(served[1].name, "Weekly · Fable");
+        assert!(!served[1].active);
+    }
+
+    #[test]
+    fn unknown_limit_kinds_are_shown_by_group_and_scope() {
+        let now = at("2026-11-12T10:00:00Z");
+        let resp = json!({"subscription_type":"pro","rate_limits_available":true,"rate_limits":{
+        "limits":[
+            {"kind":"burst_surface","group":"burst","percent":5,"severity":"warning","resets_at":null,"scope":{"model":null,"surface":"chat"},"is_active":true},
+            {"kind":"session_all","group":"session","percent":12.5,"resets_at":"2026-11-12T13:00:00Z","scope":null},
+            {"kind":"weekly_all","group":"weekly","percent":null}
+        ]}});
+        let Some(UsageAnswer::Windows { windows, .. }) = parse_get_usage(&resp, now) else {
+            panic!("expected windows");
+        };
+        let burst = &windows["limit_burst_chat"];
+        assert_eq!(burst.name, "Burst · chat");
+        assert_eq!(burst.severity.as_deref(), Some("warning"));
+        let five = &windows["five_hour"];
+        assert_eq!((five.name.as_str(), five.used_percent), ("5-hour", 12.5));
+        assert!(five.active, "is_active absent: in effect");
+        assert!(
+            !windows.contains_key("seven_day"),
+            "a null percent is not a window"
+        );
+    }
+
     #[test]
     fn a_passed_reset_withdraws_the_percent() {
         let t = at("2026-11-12T10:00:00Z");
@@ -435,6 +623,8 @@ mod tests {
                 resets_at: Some(t + chrono::Duration::minutes(5)),
                 observed_at: t,
                 rank: 0,
+                active: true,
+                severity: None,
             },
         );
         let (_, _, w) = served(&e, t + chrono::Duration::minutes(10)).unwrap();

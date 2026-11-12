@@ -51,10 +51,26 @@ for (const [theme, scheme, width, rtl] of [['native','light',1440,false],['nativ
 
 test('Design Hall tab groups support arrows and Home End', async ({page}) => {
   await openPage(page,'design');
-  const lobby = page.getByRole('tablist',{name:'Lobby view'});
-  await lobby.getByRole('tab').first().focus(); await page.keyboard.press('End');
-  await expect(lobby.getByRole('tab').last()).toBeFocused();
-  await expect(lobby.getByRole('tab').last()).toHaveAttribute('aria-selected','true');
+  // The lobby's "Group by" (Recent · Story · Project) is one radiogroup: one
+  // tab stop, ←/→ and Home/End move the choice.
+  const groupBy = page.getByRole('radiogroup',{name:'Group by'});
+  await groupBy.getByRole('radio').first().focus(); await page.keyboard.press('End');
+  await expect(groupBy.getByRole('radio').last()).toBeFocused();
+  await expect(groupBy.getByRole('radio').last()).toHaveAttribute('aria-checked','true');
+  await page.keyboard.press('Home');
+  await expect(groupBy.getByRole('radio').first()).toBeFocused();
+  await page.keyboard.press('ArrowRight');
+  await expect(groupBy.getByRole('radio').nth(1)).toHaveAttribute('aria-checked','true');
+  await expect(groupBy.getByRole('radio').first()).toHaveAttribute('tabindex','-1');
+  // Team design rules: Proposed · Active.
+  await page.goto('/#/design/learned');
+  const rules = page.getByRole('tablist',{name:'Team design rules'});
+  await rules.getByRole('tab').first().focus(); await page.keyboard.press('End');
+  await expect(rules.getByRole('tab').last()).toBeFocused();
+  await expect(rules.getByRole('tab').last()).toHaveAttribute('aria-selected','true');
+  await page.keyboard.press('Home');
+  await expect(rules.getByRole('tab').first()).toBeFocused();
+  await expect(rules.getByRole('tab').first()).toHaveAttribute('aria-selected','true');
   await page.goto(`/#/design/a/${artifactId}`);
   const details = page.getByRole('tablist',{name:'Details panel'});
   // Otto · Versions · Links: Otto is first and open by default.

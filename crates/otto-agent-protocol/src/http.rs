@@ -20,9 +20,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use otto_core::agent_runtime::{
-    CouncilResp, CreateCouncilReq, CreateRuntimeSessionBody, OpenPeerReq, PeerInfo, PeerMessageReq,
-    PeerReply, QueuedDeliverReq, RuntimePromptReq, RuntimePromptResp, RuntimeReplay,
-    RuntimeRequestRespondReq, RuntimeSession, SynthesizeCouncilReq, UpdateRuntimeSessionReq,
+    AskChildReq, AskChildResp, CouncilResp, CreateCouncilReq, CreateRuntimeSessionBody,
+    OpenPeerReq, PeerInfo, PeerMessageReq, PeerReply, QueuedDeliverReq, RuntimePromptReq,
+    RuntimePromptResp, RuntimeReplay, RuntimeRequestRespondReq, RuntimeSession,
+    SynthesizeCouncilReq, UpdateRuntimeSessionReq,
 };
 use otto_core::api::Problem;
 use otto_core::auth::{AuthContext, AuthUser};
@@ -128,6 +129,29 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
             "/runtime-sessions/{id}/peers/{peer}/close",
             post(close_peer::<S>),
         )
+        // "Ask another agent" from a thread's composer; images ride in the body.
+        .route(
+            "/runtime-sessions/{id}/children",
+            post(ask_children::<S>).layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
+        )
+}
+
+/// POST /runtime-sessions/{id}/children — a PERSON sends one message to 1–4
+/// new threads linked to `{id}` (editor+, the thread's owner or an admin).
+async fn ask_children<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Id>,
+    Json(req): Json<AskChildReq>,
+) -> ApiResult<(StatusCode, Json<AskChildResp>)> {
+    require_human(&ctx, &auth)?;
+    let s = authorized(&ctx, &user, &id).await?;
+    ctx.roles()
+        .check(&user, &s.workspace_id, WorkspaceRole::Editor)
+        .await?;
+    let children = ctx.agent_runtime().ask_children(&id, req).await?;
+    Ok((StatusCode::CREATED, Json(AskChildResp { children })))
 }
 
 /// A linked-thread call AS thread `id`: its owner (a person) or that

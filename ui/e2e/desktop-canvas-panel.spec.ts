@@ -83,8 +83,11 @@ test('Canvas panel: attach a scene, preview it, open it in Design Hall, detach',
   await expect(page).toHaveURL(/#\/design\/a\//, { timeout: 20_000 });
   await expect(page.getByTestId('design-mirror-banner')).toBeVisible({ timeout: 20_000 });
 
-  // Back to the session — the panel (and its ref) is still there.
-  await page.goBack();
+  // Back to the session — the panel (and its ref) is still there. The app's
+  // own Back (the desktop app has no browser back button): the Hall artifact
+  // view holds an unsaved-edits leave-guard, which a native history traversal
+  // is routed through differently.
+  await page.getByTestId('rail-back').click();
   await expect(page.locator('.term-host').first()).toBeVisible({ timeout: 20_000 });
   const rowAfterBack = page.locator('.canvas-panel .ref-row', { hasText: SCENE_TITLE });
   await expect(rowAfterBack).toBeVisible({ timeout: 15_000 });

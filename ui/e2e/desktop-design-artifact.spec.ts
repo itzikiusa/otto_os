@@ -57,9 +57,14 @@ test.beforeEach(async ({ page }) => {
   await page.addInitScript((id) => localStorage.setItem('otto_workspace', id as string), wsId);
 });
 
+// The first test in a run lands on a cold dev server, which compiles the whole
+// artifact view graph (studios, three.js, the editors) on that first load —
+// well over 30 s on a busy machine. Give every test room for it.
+test.describe.configure({ timeout: 150_000 });
+
 async function openDesign(page: Page, id: string): Promise<void> {
   await page.goto(`/#/design/a/${id}`);
-  await expect(page.getByTestId('design-more')).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId('design-more')).toBeVisible({ timeout: 90_000 });
 }
 
 test('a Canvas mirror shows one banner; Edit here adopts it and editing autosaves in place', async ({ page }) => {

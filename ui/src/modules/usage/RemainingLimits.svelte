@@ -117,7 +117,7 @@
                   {@const reset = windowReset(w, now)}
                   {@const text = windowText(w, stale, a.taken_at, now)}
                   {@const left = reset ? null : w.left_percent}
-                  <div class="win" class:stale class:reset data-testid="limits-window-{w.id}">
+                  <div class="win" class:stale class:reset class:inactive={w.active === false} data-testid="limits-window-{w.id}">
                     <span class="win-name">{w.name}</span>
                     <div
                       class="bar {barTone(left)}"
@@ -265,6 +265,13 @@
   /* An old reading is visibly not live: the fill fades. */
   .win.stale .bar .used {
     opacity: 0.45;
+  }
+  /* Listed by the provider but not enforced now (Claude `is_active: false`). */
+  .win.inactive .bar .used {
+    opacity: 0.45;
+  }
+  .win.inactive .win-name {
+    color: var(--text-dim);
   }
   .win.reset .bar {
     background: var(--surface-3);

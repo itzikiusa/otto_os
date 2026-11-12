@@ -3,8 +3,31 @@ import assert from 'node:assert/strict';
 import { snapshotDraft, acknowledgeComposer } from '../src/lib/stores/runtimeDraftPersistence.ts';
 import { componentFunctions } from './componentFunctions.ts';
 
-const sendHelpers = { snapshotDraft, acknowledgeComposer, assembleComposerMessage: (text: string) => text };
+// No agents picked as chips: submit sends to the thread's own agent.
+const sendHelpers = { snapshotDraft, acknowledgeComposer, assembleComposerMessage: (text: string) => text, askTargets: { for: () => [] }, askFromComposer: async () => {} };
 const component = new URL('../src/modules/threads/runtime/RuntimeThread.svelte', import.meta.url);
+
+test('with agents picked as chips, submit asks them and never prompts this thread', async () => {
+  const asked: unknown[][] = [];
+  const prompts: string[] = [];
+  const draft = { flushSave: () => {}, freshContext: false, context: [], text: 'why is CI red?', images: [], model: null, effort: null, pickedMode: null, sending: false, reopening: false, recovered: true, awaitSeq: null, startError: null };
+  const state = componentFunctions(component, ['submit', 'send', 'reopen'], {
+    ...sendHelpers,
+    askTargets: { for: () => [{ provider: 'codex' }] },
+    askFromComposer: async (...args: unknown[]) => { asked.push(args); },
+    sessionId: 'A', ownerId: 'A', draft, needsRevive: false, running: false,
+    parseInteractiveSlashInput: () => null,
+    runtimeThreads: { prompt: async (id: string) => { prompts.push(id); return { sequence: 1 }; } },
+    runtimeDrafts: { owns: () => true },
+    toastError: () => {}, ApiError: class extends Error {},
+  });
+  state.submit();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(prompts, []);
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0][0], 'A');
+  assert.equal(asked[0][2], 'why is CI red?');
+});
 
 test('reopening A then switching to B sends the waiting prompt only to A', async () => {
   let finish!: () => void;

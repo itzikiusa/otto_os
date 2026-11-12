@@ -12,6 +12,7 @@
   import { threads } from '../threadsStore.svelte';
   import { elapsedBetween, type ThreadCall } from './agentRows';
   import RuntimeAgentRow from './RuntimeAgentRow.svelte';
+  import RuntimeChildCard from './RuntimeChildCard.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
 
   let { item, call }: { item: TurnItem; call: ThreadCall } = $props();
@@ -36,6 +37,10 @@
   }
 </script>
 
+{#if call.verb === 'Opened' && call.targetId && !running}
+  <!-- The thread it opened, live: the same card as a child a person asked. -->
+  <RuntimeChildCard id={call.targetId} hint={{ provider: call.provider, title: call.title, model: call.model, effort: call.effort }} />
+{:else}
 <RuntimeAgentRow
   {provider}
   {name}
@@ -48,3 +53,4 @@
   openLabel="Open thread"
   testid="runtime-thread-call-{item.id}"
 />
+{/if}

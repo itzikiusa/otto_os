@@ -6,6 +6,7 @@
 // the thread's folder, the call's duration, a failed command as "exit 1".
 // Pure (unit/runtimeWorkLog.test.ts).
 import type { ProviderTurn, TurnItem } from '../../../lib/api/types';
+import { threadCall } from './agentRows';
 import { workLabel, type WorkEntry } from './timeline';
 
 const LIVE: ReadonlySet<string> = new Set(['running', 'pending', 'waiting']);
@@ -93,8 +94,9 @@ export function workedFor(entries: readonly WorkEntry[]): string {
   return Number.isFinite(d) && d >= 1000 ? `Worked for ${formatDuration(d)}` : 'Worked';
 }
 
-/** What folds: tool calls and thinking. A notice, a subagent, a task list,
- *  an approval or an error is news, so a stretch holding one stays open. */
+/** What folds: tool calls and thinking. A notice, a subagent, a thread the
+ *  agent opened (its live card), a task list, an approval or an error is
+ *  news, so a stretch holding one stays open. */
 const FOLDABLE: ReadonlySet<TurnItem['type']> = new Set(['command_execution', 'file_change', 'web_search', 'dynamic_tool', 'reasoning']);
 
 /** A finished stretch folds when it holds more than one step, only tool
@@ -106,7 +108,7 @@ export function shouldFold(
 ): boolean {
   return (
     entries.length > 1 &&
-    entries.every((e) => FOLDABLE.has(e.item.type)) &&
+    entries.every((e) => FOLDABLE.has(e.item.type) && threadCall(e.item)?.verb !== 'Opened') &&
     stretchDone(entries, turns) &&
     !needsEyes(entries, pendingRequestIds)
   );

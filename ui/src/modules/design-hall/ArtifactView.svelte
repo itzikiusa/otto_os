@@ -811,7 +811,7 @@
         <span class="badges">
           {#if !viewport.isPhone}<StudioBadge studio={artifact.studio} />{/if}
           <StatusPill status={pill.status} suffix={pill.suffix} onclick={statusMenu} />
-          {#if head && !viewport.isPhone}<span class="ver" title={`Current version: v${head.seq}`}>v{head.seq}</span>{/if}
+          {#if head}<!-- every width: where a phone sees its autosave land --><span class="ver" title={`Current version: v${head.seq}`}>v{head.seq}</span>{/if}
         </span>
       {/if}
     {/snippet}

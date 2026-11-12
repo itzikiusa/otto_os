@@ -150,8 +150,10 @@ export function claudeLimits(state: 'off' | 'on' | 'ok' | 'stale' | 'failed', no
         taken_at: numbers ? iso(at) : null,
         windows: numbers
           ? [
-              { id: 'five_hour', name: '5-hour', window_minutes: 300, used_percent: 23.5, left_percent: 76.5, resets_at: iso(now + 3 * HOUR), reset_since_snapshot: false },
-              { id: 'seven_day', name: 'Weekly', window_minutes: 10080, used_percent: 41, left_percent: 59, resets_at: iso(now + 60 * HOUR), reset_since_snapshot: false },
+              // The shape the real CLI 2.1.322 answered on a Max plan: no
+              // 5-hour window, the weekly one, and an inactive Fable bucket.
+              { id: 'seven_day', name: 'Weekly', window_minutes: 10080, used_percent: 61, left_percent: 39, resets_at: iso(now + 60 * HOUR), reset_since_snapshot: false, active: true, severity: 'normal' },
+              { id: 'seven_day_fable', name: 'Weekly · Fable', window_minutes: 10080, used_percent: 23, left_percent: 77, resets_at: iso(now + 60 * HOUR), reset_since_snapshot: false, active: false, severity: 'normal' },
             ]
           : [],
         credits: null,

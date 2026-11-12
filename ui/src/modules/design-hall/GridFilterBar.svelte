@@ -4,6 +4,7 @@
   // button whose state is in its text or aria-pressed, never colour alone.
   import Icon from '../../lib/components/Icon.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { radioKey } from '../../lib/radioKey';
   import type { DesignStatus } from '../../lib/api/types';
   import { STUDIOS, statusLabel, studioInfo } from './model';
   import { NO_FILTERS, activeFilterCount, type GridFilters, type GroupBy } from './designGrid';
@@ -40,10 +41,11 @@
 <div class="bar" data-testid="design-grid-filters">
   <div class="grp">
     <span class="lbl" aria-hidden="true">Group by</span>
-    <div class="segmented" role="group" aria-label="Group by">
+    <!-- One choice of three: a radiogroup with one tab stop (arrows, Home, End). -->
+    <div class="segmented" role="radiogroup" aria-label="Group by">
       {#each GROUPS as g (g.id)}
-        <button aria-pressed={groupBy === g.id} class:active={groupBy === g.id} onclick={() => (groupBy = g.id)}
-          data-testid={`design-group-${g.id}`}>{g.label}</button>
+        <button role="radio" aria-checked={groupBy === g.id} tabindex={groupBy === g.id ? 0 : -1} class:active={groupBy === g.id}
+          onclick={() => (groupBy = g.id)} onkeydown={radioKey} data-testid={`design-group-${g.id}`}>{g.label}</button>
       {/each}
     </div>
   </div>

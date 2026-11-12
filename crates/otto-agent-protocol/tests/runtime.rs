@@ -1482,6 +1482,30 @@ async fn linked_threads_open_message_and_read_within_their_group() {
         "same group from either side"
     );
 
+    // The worker's answer to what the lead asked comes back to the lead's
+    // agent as its next turn ("Completion wakes this thread"), and the lead's
+    // timeline notes it.
+    host.wait(|e| {
+        e.session_id == lead.id
+            && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+                if matches!(&turn_item.kind, TurnItemKind::UserMessage { text, .. }
+                    if text.starts_with("[Reply from thread \"worker\"")))
+    })
+    .await;
+    let woke = rt.latest_reply(&lead.id, WAIT).await.unwrap();
+    assert!(woke.text.contains("you are my worker"), "{}", woke.text);
+    let marker = format!("[otto-thread:{}:finished]", worker.id);
+    host.wait(|e| {
+        e.session_id == lead.id
+            && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+                if matches!(&turn_item.kind, TurnItemKind::SystemNotice { message } if message.ends_with(&marker)))
+    })
+    .await;
+    assert_eq!(
+        worker.meta.as_ref().unwrap()["child_of"],
+        serde_json::json!({"id": lead.id, "by": "agent"})
+    );
+
     // The worker answers the lead.
     rt.message_peer(&worker.id, &lead.id, "done").await.unwrap();
     let back = rt.peer_reply(&worker.id, &lead.id, WAIT).await.unwrap();
@@ -1512,6 +1536,114 @@ async fn linked_threads_open_message_and_read_within_their_group() {
         closed.status,
         otto_core::agent_runtime::RuntimeSessionStatus::Closed
     );
+}
+
+/// A person asks other agents from a thread: the children are linked to it,
+/// get the message as typed (no "Opened by" frame), the parent's timeline
+/// names them and notes each finished turn — and the parent's AGENT is not
+/// woken (a person asked, a person reads).
+#[tokio::test]
+async fn a_person_asks_other_agents_from_a_thread() {
+    use otto_core::agent_runtime::{AskChildReq, AskChildTarget};
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let lead = create(&rt, cwd).await;
+    let target = |p| AskChildTarget {
+        provider: p,
+        model: None,
+        effort: None,
+    };
+
+    // Never more access than the parent's.
+    let wider = rt
+        .ask_children(
+            &lead.id,
+            AskChildReq {
+                prompt: "check it".into(),
+                targets: vec![target(RuntimeProvider::Gemini)],
+                access_mode: Some(RuntimeAccessMode::FullAccess),
+                ..AskChildReq::default()
+            },
+        )
+        .await
+        .expect_err("wider than the parent");
+    assert!(matches!(wider, Error::Invalid(_)), "{wider:?}");
+
+    let kids = rt
+        .ask_children(
+            &lead.id,
+            AskChildReq {
+                prompt: "Why does CI fail?".into(),
+                targets: vec![
+                    target(RuntimeProvider::Gemini),
+                    target(RuntimeProvider::Opencode),
+                ],
+                ..AskChildReq::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(kids.len(), 2);
+    for k in &kids {
+        assert_eq!(k.parent_id.as_ref(), Some(&lead.id));
+        assert_eq!(k.cwd, lead.cwd);
+        assert_eq!(k.access_mode, lead.access_mode);
+        assert_eq!(
+            k.meta.as_ref().unwrap()["child_of"],
+            serde_json::json!({"id": lead.id, "by": "person"})
+        );
+        let reply = rt.latest_reply(&k.id, WAIT).await.unwrap();
+        assert!(reply.text.contains("Why does CI fail?"), "{}", reply.text);
+        assert!(!reply.text.contains("Opened by"), "{}", reply.text);
+    }
+    let started = format!("[otto-thread:{},{}:started]", kids[0].id, kids[1].id);
+    for k in &kids {
+        let done = format!("[otto-thread:{}:finished]", k.id);
+        host.wait(|e| {
+            e.session_id == lead.id
+                && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+                    if matches!(&turn_item.kind, TurnItemKind::SystemNotice { message } if message.ends_with(&done)))
+        })
+        .await;
+    }
+    assert!(
+        notices(&host).iter().any(|n| n.ends_with(&started)),
+        "{:?}",
+        notices(&host)
+    );
+    // No wake for the lead's agent.
+    assert!(user_texts(&host)
+        .iter()
+        .all(|t| !t.starts_with("[Reply from thread")));
+
+    // Nothing to ask, or too many at once, is refused before anything starts.
+    let none = rt
+        .ask_children(
+            &lead.id,
+            AskChildReq {
+                prompt: " ".into(),
+                targets: vec![target(RuntimeProvider::Gemini)],
+                ..AskChildReq::default()
+            },
+        )
+        .await
+        .expect_err("empty");
+    assert!(matches!(none, Error::Invalid(_)), "{none:?}");
+    let five = rt
+        .ask_children(
+            &lead.id,
+            AskChildReq {
+                prompt: "x".into(),
+                targets: (0..5).map(|_| target(RuntimeProvider::Gemini)).collect(),
+                ..AskChildReq::default()
+            },
+        )
+        .await
+        .expect_err("five");
+    assert!(matches!(five, Error::Invalid(_)), "{five:?}");
 }
 
 // ---- Claude (otto-fake-claude): background work, own turns, queue, reopen ----

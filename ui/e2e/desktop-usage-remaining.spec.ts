@@ -121,7 +121,10 @@ test.describe('usage remaining limits (desktop)', () => {
     await sw.click();
     await page.getByRole('dialog').getByRole('button', { name: 'Turn on' }).click();
     // PUT the switch, then one check; the row shows the CLI's numbers.
-    await expect(row.getByTestId('limits-window-five_hour')).toContainText('77% left · resets in');
+    await expect(row.getByTestId('limits-window-seven_day')).toContainText('39% left · resets in 2 d');
+    await expect(row.getByTestId('limits-window-seven_day_fable')).toContainText('77% left · resets in 2 d');
+    await expect(row.getByTestId('limits-window-seven_day_fable')).toContainText('not in effect now');
+    await expect(row.getByTestId('limits-window-five_hour')).toHaveCount(0);
     expect(calls.filter((c) => !c.startsWith('GET'))).toEqual([
       'PUT /api/v1/usage/limits/claude-check',
       'POST /api/v1/usage/limits/claude-check/run',
@@ -149,7 +152,7 @@ test.describe('usage remaining limits (desktop)', () => {
     await page.reload();
     const stale = remaining(page).getByTestId('limits-row-claude:account:acc-max');
     await expect(stale.getByTestId('limits-stale')).toBeVisible();
-    await expect(stale.getByTestId('limits-window-five_hour')).toContainText('77% left 2 h ago');
+    await expect(stale.getByTestId('limits-window-seven_day')).toContainText('39% left 2 h ago');
   });
 
   test('no logins at all is a calm empty state, not an error', async ({ page }) => {

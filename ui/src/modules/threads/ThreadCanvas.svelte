@@ -5,7 +5,11 @@
   import { paneResizer, RESIZE_TITLE } from '../../lib/paneResizer';
   import { ws } from '../../lib/stores/workspace.svelte';
   import ThreadPane from './ThreadPane.svelte';
-  import CouncilView from './runtime/CouncilView.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  // On demand: the council view embeds the whole runtime thread per seat, and
+  // most thread pages never show one.
+  const CouncilView = lazyComponent(() => import('./runtime/CouncilView.svelte'));
   import { council } from './runtime/councilStore.svelte';
   import { isThreadSession } from './threadsHelpers';
   import { threads } from './threadsStore.svelte';
@@ -54,7 +58,7 @@
      "Continue here" on that thread. -->
 {#snippet pane(id: string, focused: boolean, multiPane: boolean)}
   {#if council.showsCouncil(id)}
-    <CouncilView sessionId={id} />
+    <LazyMount lazy={CouncilView} what="the council" variant="panel" props={{ sessionId: id }} />
   {:else}
     <ThreadPane paneId={id} {focused} {multiPane} {onstartroom} />
   {/if}
