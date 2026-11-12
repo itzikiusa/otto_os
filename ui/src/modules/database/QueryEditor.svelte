@@ -580,7 +580,7 @@
       names.map((n) => [n, renderVar(tab.vars[n] ?? defaultVarSpec(), splitMode)]),
     );
     const finalSql = names.length > 0 ? substituteVars(base, rendered, splitMode) : base;
-    void confirmDestructiveRun(finalSql).then((ok) => ok && database.runQuery(finalSql, undefined, { transient: true })); // unguarded DELETE-without-WHERE / DROP / … ask first
+    void confirmDestructiveRun(finalSql).then((ok) => { if (ok) void database.runQuery(finalSql, undefined, { transient: true }); }); // unguarded DELETE-without-WHERE / DROP / … ask first
   }
 
   const canQuery = $derived(!!database.selectedConnId && ['db_query','db_data','db_schema'].some(op=>resourceAccess.can('connection',database.selectedConnId!,op,'database','edit',databaseAccessChild(database.activeDb))));

@@ -5,13 +5,14 @@ import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import * as dialect from '../src/lib/database/sql-dialect.ts';
 import { binaryCellBytes, bytesToHex, bytesToHexCompact } from '../src/lib/database/binary-cells.ts';
+import { plural } from '../src/lib/plural.ts';
 
 // MySQL BINARY / VARBINARY / BLOB and Postgres BYTEA cells arrive as base64
 // TEXT. Every statement the grid builds from them must write / compare the
 // BYTES — quoted, the base64 text was stored instead (Duplicate row, Copy as
 // INSERT) and a BINARY(16) key matched nothing (`WHERE id = '<base64>'`).
 function sqlModule(): Record<string, any> {
-  const ctx = { exports: {} as Record<string, any>, require: () => ({ isComplex: () => false, cellStr: String, compactJson: JSON.stringify, ...dialect }) };
+  const ctx = { exports: {} as Record<string, any>, require: () => ({ isComplex: () => false, cellStr: String, compactJson: JSON.stringify, plural, ...dialect }) };
   runInNewContext(ts.transpileModule(readFileSync(new URL('../src/modules/database/edit-sql.ts', import.meta.url), 'utf8'),
     { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, ctx);
   return ctx.exports;

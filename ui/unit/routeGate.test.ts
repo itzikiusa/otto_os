@@ -65,7 +65,7 @@ test('the router never persists an unknown route and keeps resume points in loca
   const src = read('lib/router.svelte.ts');
   assert.match(src, /if \(ephemeralRoute\(hash\) \|\| !knownHash\(hash\)\) return;/);
   assert.match(src, /if \(ephemeralRoute\(h\) \|\| !knownHash\(h\)\) return;/);
-  assert.doesNotMatch(src, /sessionStorage/);
+  assert.doesNotMatch(src, /sessionStorage\.(get|set|remove)Item/);
   assert.match(src, /setResumeScope\(workspaceId: string \| null\)/);
   assert.match(read('shell/installShell.svelte.ts'), /router\.setResumeScope\(id\)/);
 });

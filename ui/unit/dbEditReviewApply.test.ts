@@ -176,10 +176,11 @@ test('Mongo counts modified documents, so 0 there is not read as "no row matched
 
 test('affectedCheck ignores the BEGIN / COMMIT wrapper and non-row statements', () => {
   const res = { ...counted('BEGIN', 0), more_results: [counted('UPDATE t SET v = 1 WHERE id = 1', 0), counted('COMMIT', 0)] };
-  assert.deepEqual(reviewBatch.affectedCheck('mysql', res, true, ''), { unmatched: [0], multi: [] });
+  const plain = (v: unknown) => JSON.parse(JSON.stringify(v)); // the module runs in its own vm realm
+  assert.deepEqual(plain(reviewBatch.affectedCheck('mysql', res, true, '')), { unmatched: [0], multi: [] });
   assert.equal(reviewBatch.affectedCheck('postgres', counted('INSERT INTO t VALUES (1)', 0), false, 'INSERT INTO t VALUES (1)'), null);
   assert.equal(reviewBatch.affectedCheck('mysql', { columns: [], rows: [] }, false, 'UPDATE t SET v = 1'), null, 'no count, no claim');
-  assert.deepEqual(reviewBatch.affectedCheck('postgres', { columns: [], rows: [], rows_affected: 0 }, false, 'DELETE FROM t WHERE id IN (1)'), { unmatched: [0], multi: [] });
+  assert.deepEqual(plain(reviewBatch.affectedCheck('postgres', { columns: [], rows: [], rows_affected: 0 }, false, 'DELETE FROM t WHERE id IN (1)')), { unmatched: [0], multi: [] });
 });
 
 test('reviewBatchSql wraps only multi-statement MySQL / Postgres reviews that manage no transaction', () => {

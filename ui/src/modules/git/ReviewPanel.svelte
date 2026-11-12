@@ -625,7 +625,7 @@
 
   /** "Post all" skips dismissed / already-posted comments and unverified
    *  claims unless included; the confirm shows every body in full. */
-  const postPlan = $derived(postAllPlan((review?.comments ?? []).filter(isPostable), triageIx));
+  const postPlan = $derived.by(() => postAllPlan((review?.comments ?? []).filter(isPostable), triageIx));
   let postConfirm: { plan: PostAllPlan; done: (send: ReviewComment[] | null) => void } | null = $state(null);
   const FORGE: Record<string, string> = { github: 'GitHub', gitlab: 'GitLab', bitbucket: 'Bitbucket' };
   const forgeName = $derived(FORGE[git.repos.find((r) => r.id === repoId)?.provider ?? ''] ?? '');

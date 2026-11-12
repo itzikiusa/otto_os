@@ -58,6 +58,9 @@ for (const staleFails of [false, true]) {
     const c = componentFunctions(new URL('../src/modules/git/ReviewPanel.svelte', import.meta.url), ['loadFindingsAndReadiness'], {
       reviewGeneration: 1, readinessRequest: 0, disposed: false, review: { id: 'A' },
       mergeReadiness: null, readinessError: null, findings: [], findingsLoading: false, mergeReadinessLoading: false,
+      // Each load reads the triage and the readiness: the first load's two
+      // reads stay pending, the second load's resolve.
+      triage: null, fetchTriage: () => { calls++; return calls <= 2 ? old.promise : Promise.resolve(null); },
       api: { get: () => { calls++; return calls <= 2 ? old.promise : Promise.resolve({ fresh: true }); } },
       loadErrorText: (e: Error) => e.message,
     });
@@ -73,6 +76,7 @@ test('readiness load failure is visible and a retry clears it', async () => {
   const c = componentFunctions(new URL('../src/modules/git/ReviewPanel.svelte', import.meta.url), ['loadFindingsAndReadiness'], {
     reviewGeneration: 1, readinessRequest: 0, disposed: false, review: { id: 'A' },
     mergeReadiness: null, readinessError: null, findings: [], findingsLoading: false, mergeReadinessLoading: false,
+    triage: null, fetchTriage: async () => null,
     api: { get: async () => { if (fail) throw new Error('Service unavailable'); return {}; } },
     loadErrorText: (e: Error) => e.message,
   });

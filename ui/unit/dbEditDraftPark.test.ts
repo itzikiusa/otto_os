@@ -11,7 +11,7 @@ function flow() {
     '../../lib/toast.svelte': { toasts: { info() {}, success() {}, error() {} } },
     './review-batch': {},
     '../../lib/stores/database.svelte': { database: {} },
-    './results-format': { cellStr: (v: unknown) => String(v) },
+    './results-format': { cellStr: (v: unknown) => String(v), SET_NULL: '\u0000otto:set-null', SET_EMPTY: '\u0000otto:set-empty' },
     './edit-types': { adapterFor: () => ({}) },
     './edit-sql': { scopeDatabase: (n: string | null) => n }, './edit-mongo': {}, '../../lib/jsonTree/expansion-plan': {},
     './insert-flow.svelte': { InsertFlow: class { target = null; form = null; } },
