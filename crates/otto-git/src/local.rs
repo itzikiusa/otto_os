@@ -3,19 +3,19 @@
 //! plumbing output with `crate::parse`.
 
 use crate::transport::TransportCredential;
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-
 use otto_core::api::{
     BranchInfo, CommitInfo, ConflictFile, DiffResp, LocalMergeStrategy, MergeConflictStatus,
     MergePreview, MergeResult, RefBranch, RefTag, RefsResp, RepoStatusResp, StashInfo,
     SubmoduleInfo, WorktreeInfo,
 };
 use otto_core::{Error, Result};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 mod errors;
+mod identity;
 pub(crate) use errors::{is_missing_remote_ref, push_err, unborn_or_err, upstream_err};
 pub use errors::{PUSH_LEASE_REFUSED, PUSH_REJECTED};
 

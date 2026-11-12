@@ -4,6 +4,19 @@ use otto_core::domain::{SessionKind, Workspace};
 use otto_core::new_id;
 
 #[test]
+fn a_big_paste_gets_longer_to_drain_but_never_unbounded() {
+    assert_eq!(input_write_timeout(1), INPUT_WRITE_TIMEOUT);
+    assert_eq!(
+        input_write_timeout(100 * 1024),
+        Duration::from_secs(15 + 25)
+    );
+    assert_eq!(
+        input_write_timeout(10 * 1024 * 1024),
+        Duration::from_secs(120)
+    );
+}
+
+#[test]
 fn resume_refuses_a_missing_folder_but_not_scratch_or_otto_dirs() {
     let dir = tempfile::tempdir().unwrap();
     let gone = dir.path().join("moved-away");

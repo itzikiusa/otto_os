@@ -837,13 +837,6 @@ const STATUS_TICK: Duration = Duration::from_secs(2);
 /// rows dropped meanwhile are gone; history regrows from there).
 const UNVIEWED_HISTORY_AFTER: Duration = Duration::from_secs(10 * 60);
 
-/// How long [`SessionManager::input`] waits for its bytes to drain into the
-/// PTY before reporting "not accepting input". The write itself runs on the
-/// PTY's own writer thread (never a tokio worker) and stays queued in order,
-/// so a timeout loses nothing — a 60 KB prompt paste into a TUI that is still
-/// booting drains once it starts reading.
-const INPUT_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
-
 /// How long a LIVE resumable session must be idle (no output) AND unattached
 /// (no WS viewer) before its PTY is suspended to free RAM. The conversation
 /// stays resumable, so reopening it auto-resumes via `--resume`.
@@ -3960,7 +3953,7 @@ impl SessionManager {
         // reading its tty used to park one worker per keystroke/paste until
         // the pool was exhausted and the whole daemon froze.
         handle
-            .write_async_authorized(data, INPUT_WRITE_TIMEOUT, authorization)
+            .write_async_authorized(data, input_write_timeout(data.len()), authorization)
             .await
     }
 
@@ -6258,6 +6251,9 @@ fn missing_cwd_refusal_in(session: &Session, otto_data: &std::path::Path) -> Opt
 
 #[path = "manager/cli_flags.rs"]
 mod cli_flags;
+#[path = "manager/input_timeout.rs"]
+mod input_timeout;
+use input_timeout::{input_write_timeout, INPUT_WRITE_TIMEOUT};
 #[path = "manager/mcp_sync.rs"]
 mod mcp_sync;
 #[path = "manager/otto_tools_env.rs"]
