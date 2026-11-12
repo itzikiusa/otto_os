@@ -221,7 +221,7 @@
     {#if offlineLong}
       <div class="boot-sub">Otto can’t reach the daemon on 127.0.0.1:7700.</div>
       <div class="boot-hint">
-        Check the daemon log at <span class="mono">~/Library/Logs/Otto/ottod.log</span>, then retry. Otto keeps trying in the background.
+        Check the daemon log at <span class="mono">~/Library/Logs/Otto/ottod.log.YYYY-MM-DD</span>, then retry. Otto keeps trying in the background.
       </div>
     {:else}
       <div class="boot-sub">

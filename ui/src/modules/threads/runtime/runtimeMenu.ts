@@ -1,5 +1,6 @@
 // The ⋯ menu of a runtime-backed thread (sidebar row, top bar, pane header).
-// PTY-only actions (archive, rooms, hand-over) don't apply; a closed thread
+// PTY-only actions (archive, rooms, hand-over) don't apply; Settle moves a
+// live thread to History without stopping its agent; a closed thread
 // lives in History, can still be renamed, and can be reopened. Delete asks
 // first unless Settings › "Closing a session tab" is "Always delete" (the
 // same rule as a terminal session's Delete).
@@ -27,6 +28,9 @@ export function runtimeThreadMenu(id: string): MenuItem[] {
     ...uiControlItem(id),
     ...phoneHandoff.menuItem(`threads/${id}`, 'this thread'),
     { separator: true },
+    // Tidy the list without stopping the agent (closing does both).
+    ...(runtimeThreads.get(id)?.status !== 'closed'
+      ? [{ label: threads.isSettled(id) ? 'Move back to Active' : 'Settle to History', icon: 'check', action: () => threads.toggleSettle(id) }] : []),
     ...(['closed', 'dormant'].includes(runtimeThreads.get(id)?.status ?? '')
       ? [{ label: 'Revive thread', icon: 'refresh', action: () => void reopenThread(id) }] : []),
     ...(runtimeThreads.get(id)?.status !== 'closed'

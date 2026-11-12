@@ -6,6 +6,7 @@
   import { sectionLabel } from './sections';
   import { guardUnsaved } from '../../lib/leaveGuard';
   import SectionIntro from './SectionIntro.svelte';
+  import WorkspaceScope from './WorkspaceScope.svelte';
   import SettingToggle from './SettingToggle.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Context & Soul settings page: per-workspace context provisioning. Pick which
@@ -249,7 +250,8 @@
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
-  <SectionIntro><strong>{ws.current?.name ?? 'Your workspace'}</strong> is the shared project for its sessions. Goals, instructions, memory and references apply across agent providers when sessions start or restart. Running conversations keep their current context.</SectionIntro>
+  <WorkspaceScope />
+  <SectionIntro>A workspace is the shared project for its sessions. Goals, instructions, memory and references apply across agent providers when sessions start or restart. Running conversations keep their current context.</SectionIntro>
 
   {#if !wsId}
     <!-- No workspace selected -->

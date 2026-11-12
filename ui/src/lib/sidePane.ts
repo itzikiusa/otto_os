@@ -227,13 +227,13 @@ export type MenuTarget = 'main' | 'side' | 'close-pane';
 
 /**
  * A native menu item (the Rust shell emits it to the WINDOW) while the side
- * pane has focus: Select All acts on the pane's document; Close Tab and the
+ * pane has focus: Select All, Undo and Redo act on the pane's document; Close Tab and the
  * session items act on the pane's session tabs while it shows Agents, and
  * Close Tab closes the pane otherwise. Everything else is the window's.
  */
 export function sideMenuTarget(id: string, sideFocused: boolean, paneModuleKey: string | null): MenuTarget {
   if (!sideFocused || !paneModuleKey) return 'main';
-  if (id === 'select-all') return 'side';
+  if (id === 'select-all' || id === 'undo' || id === 'redo') return 'side';
   if (id === 'close-tab') return paneModuleKey === 'agents' ? 'side' : 'close-pane';
   if (id === 'session-restart' || id === 'session-kill') return paneModuleKey === 'agents' ? 'side' : 'main';
   return 'main';

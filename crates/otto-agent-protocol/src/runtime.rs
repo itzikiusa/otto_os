@@ -48,6 +48,8 @@ use crate::ring::{EventRing, RingLimits};
 /// T3 Code `THREAD_RESUME_MAX_REPLAY_EVENTS` / `…_ENCODED_BYTES`.
 pub const MAX_REPLAY_EVENTS: usize = 128;
 pub const MAX_REPLAY_BYTES: usize = 1_048_576;
+/// Open linked threads one group may hold besides its root (`open_peer`).
+pub const MAX_LINKED_OPEN: usize = 8;
 
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
@@ -643,6 +645,14 @@ impl AgentRuntime {
         let c = self.get(caller).await?;
         if c.status == RuntimeSessionStatus::Closed {
             return Err(Error::Conflict("the session is closed".into()));
+        }
+        // One confused agent must not fan out without bound: `group` lists
+        // the OPEN threads of this linked group, the root included.
+        if self.group(&c).await?.len() > MAX_LINKED_OPEN {
+            return Err(Error::Conflict(format!(
+                "this thread group already has {MAX_LINKED_OPEN} open linked threads — close \
+                 one (otto_thread_close) before opening another"
+            )));
         }
         let root = c.parent_id.clone().unwrap_or_else(|| c.id.clone());
         let mut meta = req.meta;

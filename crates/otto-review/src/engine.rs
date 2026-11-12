@@ -793,14 +793,99 @@ pub fn parse_draft_comments(review_id: &Id, summary_text: &str) -> Vec<DraftComm
 /// (`summarizer::valid_result`) and [`parse_draft_comments`] go through it, so
 /// the two can never disagree about what a valid result is. The verifier's
 /// `{"lens_score"}` element is part of the format and is never a comment.
+///
+/// Element by element, like the reviewers' reader: one element with a `null`
+/// severity, a `"12"` line or no `body` used to reject the WHOLE file, so the
+/// handoff check never accepted it and the verifier ran to its hard deadline.
+/// Coercible fields are coerced, an element with no string body is dropped,
+/// and any JSON array is a valid result — unless it had elements and NONE of
+/// them is a comment (the agent misread the format; waiting is still right).
 pub fn draft_comments_from_json(json: &str) -> Result<Vec<DraftComment>, serde_json::Error> {
-    let items: Vec<serde_json::Value> = serde_json::from_str(json)?;
-    serde_json::from_value(serde_json::Value::Array(
-        items
-            .into_iter()
-            .filter(|v| v.get(crate::session::LENS_SCORE_KEY).is_none())
-            .collect(),
-    ))
+    use serde::de::Error as _;
+    let items: Vec<Value> = serde_json::from_str(json)?;
+    let mut dropped = 0usize;
+    let comments: Vec<DraftComment> = items
+        .into_iter()
+        .filter(|v| v.get(crate::session::LENS_SCORE_KEY).is_none())
+        .filter_map(|v| {
+            let c = coerce_draft_value(v).and_then(|v| serde_json::from_value(v).ok());
+            dropped += usize::from(c.is_none());
+            c
+        })
+        .collect();
+    if comments.is_empty() && dropped > 0 {
+        return Err(serde_json::Error::custom(
+            "no element of the array is a comment with a string body",
+        ));
+    }
+    Ok(comments)
+}
+
+/// Normalize one summarizer element into what [`DraftComment`] reads: lines
+/// from a number or a numeric string (`"42-45"` also yields `line_end`), a
+/// scalar severity as text (`null` ⇒ the default), text fields dropped when
+/// not text, `source_ids` reduced to its strings. `None` ⇒ not an object.
+fn coerce_draft_value(v: Value) -> Option<Value> {
+    let Value::Object(mut map) = v else {
+        return None;
+    };
+    let num = |s: &str| -> Option<u32> {
+        let t = s.trim().trim_start_matches(['L', 'l', '#']);
+        let digits: String = t.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().ok()
+    };
+    let range_end = match map.get("line") {
+        Some(Value::String(s)) => s.split_once(['-', '–', ':']).and_then(|(_, e)| num(e)),
+        _ => None,
+    };
+    for key in ["line", "line_end"] {
+        if let Some(raw) = map.remove(key) {
+            let n = match &raw {
+                Value::Number(n) => n.as_u64().and_then(|n| u32::try_from(n).ok()),
+                Value::String(s) => num(s),
+                _ => None,
+            };
+            if let Some(n) = n {
+                map.insert(key.into(), Value::from(n));
+            }
+        }
+    }
+    if let Some(end) = range_end {
+        map.entry("line_end").or_insert(Value::from(end));
+    }
+    for key in [
+        "severity",
+        "path",
+        "body",
+        "category",
+        "title",
+        "evidence",
+        "reasoning",
+        "suggested_fix",
+        "disposition",
+    ] {
+        match map.get(key) {
+            Some(Value::String(_)) | None => {}
+            Some(Value::Number(_) | Value::Bool(_)) => {
+                let s = map[key].to_string();
+                map.insert(key.into(), Value::String(s));
+            }
+            Some(_) => {
+                map.remove(key);
+            }
+        }
+    }
+    match map.remove("source_ids") {
+        Some(Value::Array(ids)) => {
+            let ids: Vec<Value> = ids.into_iter().filter(Value::is_string).collect();
+            map.insert("source_ids".into(), Value::Array(ids));
+        }
+        Some(Value::String(id)) => {
+            map.insert("source_ids".into(), Value::Array(vec![Value::String(id)]));
+        }
+        _ => {}
+    }
+    Some(Value::Object(map))
 }
 
 /// Whether every reviewer row finished cleanly and the real summarizer ran —

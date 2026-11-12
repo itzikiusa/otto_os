@@ -59,9 +59,11 @@
   color: var(--accent-text);
 }
 
-/* The PR file list reads as a tight list, not spaced cards. */
+/* The PR file list reads as a tight list, not spaced cards. A jump to a file
+   lands its header below the pinned toolbar (DiffPrToolbar sets the height). */
 .diff-root.pr .drow-file {
   padding-top: 6px;
+  scroll-margin-top: var(--pr-toolbar-h, 0px);
 }
 .diff-root.pr .drow-file.first {
   padding-top: 0;

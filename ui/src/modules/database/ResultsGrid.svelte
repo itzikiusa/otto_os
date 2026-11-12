@@ -68,6 +68,7 @@
   import { ALT_BATCH, cellStr, copyWithToast, isComplex } from './results-format';
   import { newExpansionState } from '../../lib/jsonTree/expansion-plan';
   import { cellMatchesFilter } from './grid-format';
+  import { exactIntTie } from './sort-keys';
   import {
     colScanFor as cachedColScan,
     dropColScans,
@@ -325,7 +326,7 @@
       sortCol,
       sortDir,
       colFilters: colFiltersInput,
-      pending: flow.pending,
+      pending: flow.parkDraft(), // a half-typed cell edit survives the switch
     };
   }
   // Park the shown tab's state when the grid goes away (view switch, page
@@ -731,9 +732,7 @@
   function numericVal(v: unknown): number | null {
     if (typeof v === 'number') return Number.isFinite(v) ? v : null;
     if (typeof v === 'bigint') return Number(v);
-    if (typeof v === 'string' && v.trim() !== '' && /^-?\d+(\.\d+)?$/.test(v.trim())) {
-      return Number(v);
-    }
+    if (typeof v === 'string' && v.trim() !== '' && /^-?\d+(\.\d+)?$/.test(v.trim())) return Number(v);
     return null;
   }
   /** NULL/undefined/objects are "empty" → always last regardless of direction. */
@@ -785,7 +784,8 @@
         if (empty[a] && empty[b]) return a - b;
         return empty[a] ? 1 : -1;
       }
-      const cmp = isNum[a] && isNum[b] ? nums[a] - nums[b] : SORT_COLLATOR.compare(strs[a], strs[b]);
+      // Equal doubles may be distinct 64-bit ids (exact digit strings): order those exactly.
+      const cmp = isNum[a] && isNum[b] ? nums[a] - nums[b] || exactIntTie(base[a].row[col], base[b].row[col]) : SORT_COLLATOR.compare(strs[a], strs[b]);
       if (cmp !== 0) return cmp * factor;
       return a - b; // stable tiebreak
     });

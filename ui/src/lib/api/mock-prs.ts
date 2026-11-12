@@ -6,6 +6,29 @@ import type { DiffResp, FileDiff, PrComment, PrSummary } from './types';
 const NOW = Date.now();
 const ago = (mins: number): string => new Date(NOW - mins * 60_000).toISOString();
 
+/** "You" on the forge, as the forge NAMES you — a display name that matches
+ *  none of the mock git accounts' usernames (`dev-otto`, `dev@work.io`), the
+ *  Bitbucket shape. Only the daemon's `is_me` / `is_mine` flags say it's you. */
+export const MOCK_ME = 'Dev Otto';
+/** PRs you authored (author spelled either way). */
+export const mockIsMine = (author: string): boolean => author === MOCK_ME || author === 'dev-otto';
+
+/** Simulated push for e2e: `localStorage.otto_mock_pr_pushed = '<number>'`
+ *  makes that PR's head a newer commit (after its diff was loaded). */
+const PUSHED_SHA = 'c7e57a11';
+function pushed(num: string | number): boolean {
+  try {
+    return localStorage.getItem('otto_mock_pr_pushed') === String(num);
+  } catch {
+    return false;
+  }
+}
+/** A PR summary as the forge reports it now: `is_mine`, and the head moved
+ *  by a simulated push. */
+export function mockPrLive(s: PrSummary): PrSummary {
+  return { ...s, is_mine: mockIsMine(s.author), head_sha: pushed(s.number) ? PUSHED_SHA : (s.head_sha ?? null) };
+}
+
 function fdiff(path: string, body: [('context' | 'add' | 'del'), string][]): FileDiff {
   let o = 1;
   let n = 1;
@@ -173,7 +196,7 @@ export const mockExtraPrs: ExtraPr[] = [
     summary: {
       number: 49,
       title: 'fix(wallet): round bonus balance before conversion',
-      author: 'dev-otto',
+      author: MOCK_ME,
       state: 'open',
       draft: true,
       source_branch: 'fix/bonus-rounding',
@@ -198,7 +221,10 @@ export function mockBigPrDiff(path: string | null): DiffResp {
 
 /** A PR's commits: #51 has six, any other PR two. */
 export function mockPrCommits(num: string): typeof bigPrCommits {
-  return num === '51' ? bigPrCommits : bigPrCommits.slice(0, 2).map((c) => ({ ...c, sha: `x${c.sha.slice(1)}` }));
+  const list = num === '51' ? bigPrCommits : bigPrCommits.slice(0, 2).map((c) => ({ ...c, sha: `x${c.sha.slice(1)}` }));
+  if (!pushed(num)) return list;
+  const sha = `${PUSHED_SHA}${'0'.repeat(32)}`;
+  return [{ sha, short_sha: sha.slice(0, 7), author: 'maya', date: new Date().toISOString(), subject: 'fix: late push after review' }, ...list];
 }
 
 /** `commit:<sha>` of one of #51's commits → the slice of files it touched. */

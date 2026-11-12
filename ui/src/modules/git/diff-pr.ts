@@ -88,3 +88,14 @@ export function buildNavTree(files: readonly FileDiff[]): NavDir {
   };
   return emit(root, '', '');
 }
+
+/** The first file after `current` in `order` (wrapping) that is not viewed —
+ *  "Next unviewed" in the Files panel and the phone's file stepper. */
+export function nextUnviewed(order: readonly string[], viewed: ReadonlySet<string>, current: string | null): string | null {
+  const at = current ? order.indexOf(current) : -1;
+  for (let k = 1; k <= order.length; k++) {
+    const f = order[(at + k) % order.length];
+    if (f !== undefined && !viewed.has(f)) return f;
+  }
+  return null;
+}

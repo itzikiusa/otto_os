@@ -14,6 +14,7 @@
   import { agentThreadBadge } from '../../lib/personalAgentBadges';
   import { harnessLabel, sessionBranch } from './threadsHelpers';
   import { threads } from './threadsStore.svelte';
+  import { runtimeThreads } from './runtime/runtimeThreads.svelte';
 
   interface Props {
     session: Session;
@@ -33,6 +34,8 @@
   const selected = $derived(threads.focusedSessionId === s.id && !threads.newDraftMode);
   const inPane = $derived(threads.paneIds.includes(s.id) && !threads.newDraftMode);
   const history = $derived(variant === 'history');
+  /** Finished a turn while you looked elsewhere (cleared when focused). */
+  const unread = $derived(!selected && !needs && (ws.unread[s.id] === true || runtimeThreads.unread[s.id] === true));
   // The tooltip (branch lookup over every repo's status) is only built while
   // the row is hovered or focused: a git status change no longer re-derives it
   // for every row of the sidebar.
@@ -58,6 +61,7 @@
   class="tr-row reveal-host"
   class:child
   class:needs-you={needs}
+  class:unread
   class:selected
   class:in-pane={inPane && !selected}
   data-testid={testid}
@@ -82,6 +86,7 @@
     {/if}
     <span class="tr-title ellipsis" dir="auto">{s.title}</span>
     {#if badge}<span class="tr-badge tr-badge-{badge.kind} ellipsis" title={badge.title} data-testid="thread-badge-{s.id}">{badge.label}</span>{/if}
+    {#if unread}<span class="tr-unread" role="img" aria-label="Unread" title="New since you last looked" data-testid="thread-unread-{s.id}"></span>{/if}
     <span class="tr-time">{rel(s.last_active_at)}</span>
   </button>
   <div class="tr-actions reveal-on-hover">
@@ -180,6 +185,7 @@
     color: var(--text-dim);
   }
   .tr-row:hover .tr-title,
+  .tr-row.unread .tr-title,
   .tr-row.needs-you .tr-title {
     color: var(--text);
   }
@@ -202,6 +208,13 @@
   }
   .tr-badge-delegated {
     color: var(--success);
+  }
+  .tr-unread {
+    flex-shrink: 0;
+    inline-size: 7px;
+    block-size: 7px;
+    border-radius: 50%;
+    background: var(--accent-solid);
   }
   .tr-time {
     flex-shrink: 0;

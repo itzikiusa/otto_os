@@ -219,13 +219,15 @@ export function activeNavId(parts: string[]): string {
 }
 
 /**
- * Order `available` by the user's saved id order. Any available id NOT present
- * in `savedOrder` (a newly-shipped module, a freshly-installed plugin, or a
- * just-granted feature) keeps its natural order and is appended at the end so
- * nothing silently disappears. Saved ids that are no longer available are
- * ignored. The result is the FULL resolved order (visible + hidden).
+ * Order `available` by the user's saved id order. An available id NOT present
+ * in `savedOrder` (a newly-shipped module, a freshly-installed plugin, a
+ * just-granted feature, or one that was gated off when the order was saved)
+ * is anchored right after its nearest registry predecessor in the same
+ * section, or before its nearest successor when it is the section's first —
+ * never dumped at the bottom of its section. Saved ids that are no longer
+ * available are ignored. The result is the FULL resolved order (visible + hidden).
  */
-export function resolveOrder(available: SidebarModule[], savedOrder: string[]): SidebarModule[] {
+export function resolveOrder(available: SidebarModule[], savedOrder: readonly string[]): SidebarModule[] {
   const byId = new Map(available.map((m) => [m.id, m]));
   const ordered: SidebarModule[] = [];
   for (const id of savedOrder) {
@@ -235,9 +237,50 @@ export function resolveOrder(available: SidebarModule[], savedOrder: string[]): 
       byId.delete(id);
     }
   }
-  // Remaining (not in savedOrder) keep their availability order.
-  for (const m of available) if (byId.has(m.id)) ordered.push(m);
+  // In registry order, so a run of unsaved neighbours keeps its own order.
+  available.forEach((m, i) => {
+    if (byId.delete(m.id)) ordered.splice(anchorSlot(ordered, available, i), 0, m);
+  });
   return ordered;
+}
+
+/** Where `available[i]` goes in `ordered`: after its nearest same-section
+ *  predecessor already placed, else before its nearest placed successor,
+ *  else at the end. */
+function anchorSlot(ordered: SidebarModule[], available: SidebarModule[], i: number): number {
+  const group = available[i].group;
+  for (let p = i - 1; p >= 0; p--) {
+    const at = available[p].group === group ? ordered.indexOf(available[p]) : -1;
+    if (at >= 0) return at + 1;
+  }
+  for (let n = i + 1; n < available.length; n++) {
+    const at = available[n].group === group ? ordered.indexOf(available[n]) : -1;
+    if (at >= 0) return at;
+  }
+  return ordered.length;
+}
+
+/**
+ * The order to SAVE after a reorder: `next` (the ids the user can see now)
+ * with every saved id that isn't among them kept in its slot — right after
+ * the id that preceded it in `saved` — so a module gated off at save time (a
+ * role, a disabled feature, a plugin not loaded yet) doesn't lose its place.
+ * Ids that can never come back (a retired built-in) are dropped.
+ */
+export function mergeSavedOrder(
+  next: readonly string[],
+  saved: readonly string[],
+  registry: readonly SidebarModuleDef[] = SIDEBAR_MODULES,
+): string[] {
+  const out = [...next];
+  const builtin = new Set(registry.map((m) => m.id));
+  let anchor = -1;
+  for (const id of saved) {
+    const at = out.indexOf(id);
+    if (at >= 0) anchor = at;
+    else if (builtin.has(id) || id.startsWith('plugin/')) out.splice(++anchor, 0, id);
+  }
+  return out;
 }
 
 /** The visible subset of a resolved order: everything not in `hidden`. */
@@ -258,6 +301,11 @@ export interface ReconcileSidebarInput {
   groupOrder: readonly string[];
   /** Built-in module ids already seen on this device (`null` on first upgrade). */
   knownModules: readonly string[] | null;
+  /** Built-in ids this user can open right now. Given, a module is surfaced
+   *  and recorded as known only once it is among them (one gated off by a
+   *  role or a disabled feature stays "new" until it is granted); omitted,
+   *  every registry id counts as available. */
+  available?: readonly string[];
   /** Override registry for unit tests; defaults to {@link SIDEBAR_MODULES}. */
   registry?: readonly SidebarModuleDef[];
 }
@@ -272,9 +320,9 @@ export interface ReconcileSidebarResult {
 }
 
 /**
- * Surface newly-shipped built-in modules in an already-customized sidebar once,
- * then record `knownModules` so any later hide / unfavorite / collapse by the
- * user sticks permanently.
+ * Surface newly-shipped (or newly granted) built-in modules in an
+ * already-customized sidebar once, then record `knownModules` so any later
+ * hide / unfavorite / collapse by the user sticks permanently.
  */
 export function reconcileNewSidebarModules(input: ReconcileSidebarInput): ReconcileSidebarResult {
   const registry = input.registry ?? SIDEBAR_MODULES;
@@ -308,6 +356,13 @@ export function reconcileNewSidebarModules(input: ReconcileSidebarInput): Reconc
       }
     }
   }
+
+  // What this device had already seen before this run (the legacy path: what
+  // the saved prefs mention).
+  const seen = new Set(input.knownModules ?? (isCustomized ? builtinIds.filter((id) => !newIds.includes(id)) : []));
+  const avail = input.available ? new Set(input.available) : null;
+  if (avail) newIds = newIds.filter((id) => avail.has(id));
+  const knownModules = avail ? builtinIds.filter((id) => seen.has(id) || avail.has(id)) : builtinIds;
 
   let mutated = false;
   for (const id of newIds) {
@@ -374,15 +429,15 @@ export function reconcileNewSidebarModules(input: ReconcileSidebarInput): Reconc
 
   const knownSame =
     input.knownModules !== null &&
-    input.knownModules.length === builtinIds.length &&
-    input.knownModules.every((id, i) => id === builtinIds[i]);
+    input.knownModules.length === knownModules.length &&
+    input.knownModules.every((id, i) => id === knownModules[i]);
 
   return {
     order,
     hidden,
     favorites,
     collapsedGroups,
-    knownModules: builtinIds,
+    knownModules,
     changed: mutated || !knownSame,
   };
 }
@@ -462,9 +517,8 @@ export function favoriteModules(list: SidebarModule[], favorites: readonly strin
 /**
  * A section's modules as the Navigator draws them outside edit mode. Agents
  * renders its whole session list (plus channel groups and the archive)
- * inline, so any module saved after it in the same section — Rooms, History,
- * Mission Control in Work — sat below every session, out of sight until
- * favorited. It renders last; the saved order (and edit mode) are unchanged.
+ * inline, so any module saved after it in the same section — Threads and
+ * Rooms in Work — sat below every session, out of sight until favorited. It renders last; the saved order (and edit mode) are unchanged.
  * Not applied to Favorites: that section is the user's own explicit order.
  */
 export function agentsLast(mods: SidebarModule[]): SidebarModule[] {
@@ -651,6 +705,7 @@ export function loadReconciledSidebarStorage(
   lsGetStrings: (k: string) => string[],
   lsSet: (k: string, v: string) => void,
   groupOrder: readonly string[],
+  available?: readonly string[],
 ): ReconcileSidebarResult {
   const rawKnown = lsGet(SIDEBAR_LS_KEYS.knownModules);
   let knownModules: string[] | null = null;
@@ -669,6 +724,7 @@ export function loadReconciledSidebarStorage(
     collapsedGroups: lsGetStrings(SIDEBAR_LS_KEYS.collapsedGroups),
     groupOrder,
     knownModules,
+    available,
   });
   if (reconciled.changed) {
     if (reconciled.order.length > 0 || lsGet(SIDEBAR_LS_KEYS.order) !== null) {

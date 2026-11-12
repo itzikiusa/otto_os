@@ -113,9 +113,30 @@ pub(crate) async fn summarize_and_persist(
         cancel_flag: cancel_flag.as_ref(),
         row: summarizer_idx,
     };
+    // A start/delivery failure gets a fresh attempt (fresh handoff dir) within
+    // the same overall budget; the verifier used to get exactly one.
+    let (deadline, states) = (
+        std::time::Instant::now() + summarizer_timeout,
+        &mut agent_states,
+    );
     let summary = otto_agent_run::fanout::summarize(
         &batches_in,
-        |_| turn.run(&mut agent_states),
+        |_| async move {
+            let mut result = turn.run(&mut *states).await;
+            for _ in 1..otto_review::verification::SUMMARIZER_ATTEMPTS {
+                match &result {
+                    Err(e) if otto_review::verification::summarizer_retryable(e) && !flag_tripped() => {
+                        tracing::warn!(review = %review_id, "summarizer did not start ({e}); retrying");
+                        tokio::time::sleep(otto_review::verification::SUMMARIZER_RETRY_BACKOFF).await;
+                        let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+                        mark_summarizer_starting(&mut states[summarizer_idx], summarizer_cfg);
+                        result = SummarizerTurn { timeout, ..turn }.run(&mut *states).await;
+                    }
+                    _ => break,
+                }
+            }
+            result
+        },
         |_| deterministic_comments(review_id, agent_findings),
         |_, _| std::future::ready(()),
     )
@@ -126,36 +147,23 @@ pub(crate) async fn summarize_and_persist(
     }
     let fallback_cause = summary.error;
     if let Some(e) = &fallback_cause {
-        tracing::warn!(review = %review_id, "summarizer failed: {e}; deterministic fallback");
+        tracing::warn!(review = %review_id, "summarizer failed: {e}; reviewer findings kept unverified");
     }
-    let mut parsed = summary.value;
-    let verification_incomplete = fallback_cause.is_some()
-        || !otto_review::engine::verifier_covers_claims(
-            &parsed,
-            &agent_findings.iter().map(Vec::len).collect::<Vec<_>>(),
-        );
-    let mut verification_notes: Vec<_> = parsed
-        .iter()
-        .filter(|c| c.suppressed())
-        .map(|c| {
-            format!(
-                "{}: {} — {}",
-                c.disposition.as_deref().unwrap_or("unverified"),
-                c.body,
-                c.evidence.as_deref().unwrap_or_default()
-            )
-        })
-        .collect();
-    if verification_incomplete {
-        verification_notes.push("Final verifier did not account for every raw claim with a validated evidence-backed disposition. See the original agent findings; review remains incomplete.".into());
-    }
+    // Verified comments plus every claim the verifier did not account for,
+    // stored marked unverified — never dropped (see `otto_review::verification`).
+    let settled =
+        otto_review::verification::settle(summary.value, agent_findings, fallback_cause.as_deref());
     if let Some(mut plan) = ctx.reviews_store.get_review(review_id).await?.scope_plan {
-        plan.verification_notes = verification_notes;
+        plan.verification_notes = settled.notes.clone();
         ctx.reviews_store.set_scope_plan(review_id, &plan).await?;
     }
-    parsed.retain(|c| !c.suppressed());
-
-    let summary_fallback = fallback_cause.is_some();
+    let incomplete = otto_review::verification::incomplete_reason(
+        &settled,
+        fallback_cause.as_deref(),
+        resolve_blocked,
+        &agent_states[..summarizer_idx],
+    );
+    let parsed = settled.comments;
     mark_summarizer_done(
         &mut agent_states[summarizer_idx],
         fallback_cause.as_deref(),
@@ -182,17 +190,9 @@ pub(crate) async fn summarize_and_persist(
     if is_cancelled().await {
         return Ok(());
     }
-    if verification_incomplete || resolve_blocked.is_some() {
-        return Err(Error::Invalid("Final verification is incomplete; raw claims remain in agent results. Retry the verifier or re-run review.".into()));
-    }
-    if !review_run_complete(&agent_states[..summarizer_idx], summary_fallback) {
-        return Err(Error::Invalid(
-            "Review is incomplete: one or more selected reviewers did not finish successfully"
-                .into(),
-        ));
-    }
-
-    Ok(())
+    // Not a verdict (status `error`, the findings stay stored): the message
+    // names the failed step for the review panel and the workflow step.
+    incomplete.map_or(Ok(()), |why| Err(Error::Invalid(why)))
 }
 
 /// THIS attempt's cancel flag (registered on first use). Held for the whole
@@ -476,6 +476,9 @@ impl SummarizerTurn<'_> {
             &summarizer_cfg.model,
         )?;
         attempt.meta["review_id"] = serde_json::json!(review_id);
+        // Queue for a machine slot BEFORE the summarizer's hard budget starts.
+        let admission = ctx.manager.admit_background("review_summarizer").await;
+        admission.stamp(&mut attempt.meta);
         let prompt = attempt.prompt(summarizer_prompt);
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let turn = crate::agent_session::run_session_turn_with(

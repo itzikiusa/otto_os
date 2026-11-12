@@ -17,10 +17,11 @@ use std::time::Duration;
 use otto_core::domain::{SessionKind, SessionStatus};
 use otto_core::event::Event;
 use otto_core::Id;
+use otto_state::improvements::is_run_in_progress;
 use otto_state::{SessionsRepo, WorkspacesRepo};
 use tokio::sync::{broadcast, Mutex, Notify};
 use tokio::task::JoinHandle;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::config::effective_config;
 use crate::engine::ImprovementEngine;
@@ -174,8 +175,15 @@ impl LiveEvolver {
                     }
                     e.in_flight = true;
                 }
-                if let Err(e) = engine.evolve_session(&session_id).await {
-                    warn!(session = %session_id, "live evolve failed: {e}");
+                match engine.evolve_session(&session_id).await {
+                    Ok(_) => {}
+                    // Another run (scheduled, manual, another session) holds
+                    // the workspace: the normal outcome, answered from the
+                    // read pool without touching the write lock.
+                    Err(e) if is_run_in_progress(&e) => {
+                        debug!(session = %session_id, "live evolve skipped: {e}");
+                    }
+                    Err(e) => warn!(session = %session_id, "live evolve failed: {e}"),
                 }
                 let mut map = episodes.lock().await;
                 let Some(e) = map.get_mut(&session_id) else {
@@ -216,6 +224,21 @@ async fn watched(workspaces: &WorkspacesRepo, session: &otto_core::domain::Sessi
 #[cfg(test)]
 mod tests {
     use otto_core::domain::ImprovementTrigger;
+
+    /// The busy answer the live trigger logs quietly is exactly the one
+    /// `create_run` returns; any other conflict still warns.
+    #[test]
+    fn busy_workspace_is_recognised_as_the_quiet_outcome() {
+        use otto_core::Error;
+        use otto_state::improvements::is_run_in_progress;
+        assert!(is_run_in_progress(&Error::Conflict(
+            "an improvement run is already in progress".into()
+        )));
+        assert!(!is_run_in_progress(&Error::Conflict("edit changed".into())));
+        assert!(!is_run_in_progress(&Error::Internal(
+            "an improvement run is already in progress".into()
+        )));
+    }
 
     #[test]
     fn live_trigger_round_trips() {

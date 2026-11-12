@@ -1,8 +1,9 @@
 <script lang="ts">
   import Badge from '../../lib/components/Badge.svelte';
-  // Lag alert configuration UI. Lists configured alerts for a cluster,
-  // showing breach status when the last metrics sweep detected a threshold
-  // crossing. Allows creating and deleting alerts.
+  // Lag alert configuration UI. Lists configured alerts for a cluster with
+  // their breach status — the daemon describes each alerted group when the
+  // list is fetched (there is no background evaluator or notifier yet).
+  // Allows creating and deleting alerts.
 
   import { api } from '../../lib/api/client';
   import { toastError } from '../../lib/toastError';
@@ -22,6 +23,8 @@
   let loading = $state(true);
   /** Failed load — inline with Retry, never "No alerts configured.". */
   let loadError = $state<string | null>(null);
+  /** When the shown lag was read (the list fetch evaluates it). */
+  let evaluatedAt = $state<Date | null>(null);
 
   // New alert form fields.
   let newTopic = $state('');
@@ -48,7 +51,10 @@
     loadError = null;
     api
       .get<LagAlert[]>(`/brokers/clusters/${cluster.id}/lag-alerts`)
-      .then((a) => (alerts = a))
+      .then((a) => {
+        alerts = a;
+        evaluatedAt = new Date();
+      })
       .catch((e) => (loadError = loadErrorText(e)))
       .finally(() => (loading = false));
   }
@@ -92,10 +98,17 @@
 
 <div class="lag-alerts">
   <h5>Lag Alerts</h5>
-  <p class="muted small">
-    Alerts fire when the group’s lag for a topic exceeds the threshold.
-    Breach status is evaluated each time metrics are refreshed and shown here.
-  </p>
+  <div class="intro">
+    <p class="muted small">
+      An alert is breached when the group’s lag on the topic reaches the threshold.
+      Lag is checked when this panel opens or you refresh it — nothing watches it
+      in the background or notifies you yet.
+      {#if evaluatedAt && !loading}Checked {evaluatedAt.toLocaleTimeString()}.{/if}
+    </p>
+    <button class="btn small" onclick={loadAlerts} disabled={loading} title="Check the current lag of every alerted group">
+      {loading ? 'Checking…' : 'Refresh'}
+    </button>
+  </div>
 
   <!-- First load: skeleton; failed load: inline error (or a stale bar over the
        last good list); a reload after add/delete keeps the rows on screen. -->
@@ -117,10 +130,12 @@
               <td>
                 {#if a.breach_lag !== undefined}
                   <Badge tone="bad" label={`Breached (${a.breach_lag.toLocaleString()})`} />
-                {:else if a.enabled}
-                  <Badge tone="ok" label="Active" />
-                {:else}
+                {:else if !a.enabled}
                   <Badge label="Disabled" />
+                {:else if a.current_lag !== undefined}
+                  <Badge tone="ok" label={`OK (lag ${a.current_lag.toLocaleString()})`} />
+                {:else}
+                  <span title="The group has no committed offsets on this topic, or it couldn’t be described in time"><Badge label="Not checked" /></span>
                 {/if}
               </td>
               <td>
@@ -169,6 +184,15 @@
     text-transform: uppercase;
     letter-spacing: .06em;
     color: var(--text-dim);
+  }
+  .intro {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .intro p {
+    flex: 1;
+    margin: 0;
   }
   h5.create-head {
     margin-top: 20px;

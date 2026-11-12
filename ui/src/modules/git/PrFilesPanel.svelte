@@ -11,7 +11,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { plural } from '../../lib/plural';
   import DiffFileTree from './DiffFileTree.svelte';
-  import { buildNavTree, type NavDir } from './diff-pr';
+  import { buildNavTree, nextUnviewed as nextUnviewedOf, type NavDir } from './diff-pr';
   import { prFilesBridge, prFilesKey } from './prFilesBridge.svelte';
 
   interface Props {
@@ -60,15 +60,7 @@
     return out;
   });
   /** The first unviewed file after the current one, in tree order (wrapping). */
-  const nextUnviewed = $derived.by(() => {
-    if (!feed) return null;
-    const at = feed.current ? order.indexOf(feed.current) : -1;
-    for (let k = 1; k <= order.length; k++) {
-      const f = order[(at + k) % order.length];
-      if (f !== undefined && !feed.viewed.has(f)) return f;
-    }
-    return null;
-  });
+  const nextUnviewed = $derived(feed ? nextUnviewedOf(order, feed.viewed, feed.current) : null);
   /** Tick the current file viewed and move on — the one-file-at-a-time loop. */
   function viewedAndNext(): void {
     if (!feed) return;

@@ -2,6 +2,8 @@
 //! readiness and the review-config routes.
 
 use super::*;
+use crate::routes::findings::links;
+use otto_review::triage;
 
 /// Routes under /api/v1 for PR review agents (PR + local).
 pub fn pr_review_routes() -> Router<ServerCtx> {
@@ -20,6 +22,7 @@ pub fn pr_review_routes() -> Router<ServerCtx> {
             post(start_local_review).get(get_local_review),
         )
         .route("/reviews/{review_id}", get(get_review_by_id))
+        .route("/reviews/{review_id}/triage", get(get_review_triage))
         .route("/reviews/{review_id}/handoff", post(handoff_review))
         .route(
             "/reviews/{review_id}/fix-goal",
@@ -71,19 +74,7 @@ pub(crate) async fn list_review_findings(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Vec<otto_core::finding::Finding>>> {
-    // Resolve the review to check workspace access.
-    let review = ctx
-        .reviews_store
-        .get_review(&review_id)
-        .await
-        .map_err(ApiError)?;
-    let repo = ctx
-        .git_store
-        .get_repo(&review.repo_id)
-        .await
-        .map_err(ApiError)?;
-    crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Viewer).await?;
-
+    review_for(&ctx, &user, &review_id, WorkspaceRole::Viewer).await?;
     // Widened to the full workflow `Finding` (superset of the legacy row: all old
     // fields retained + the workflow fields added). See docs/contracts/api.md.
     let findings = ctx
@@ -110,18 +101,7 @@ pub(crate) async fn set_finding_state(
     CurrentUser(user): CurrentUser,
     Json(body): Json<SetFindingStateReq>,
 ) -> ApiResult<Json<otto_state::ReviewFindingRow>> {
-    let review = ctx
-        .reviews_store
-        .get_review(&review_id)
-        .await
-        .map_err(ApiError)?;
-    let repo = ctx
-        .git_store
-        .get_repo(&review.repo_id)
-        .await
-        .map_err(ApiError)?;
-    crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
-
+    review_for(&ctx, &user, &review_id, WorkspaceRole::Editor).await?;
     let new_state = otto_state::FindingState::parse(&body.state).ok_or_else(|| {
         ApiError(Error::Invalid(format!(
             "unknown finding state: {}",
@@ -515,18 +495,51 @@ pub(crate) async fn get_review_by_id(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> crate::error::ApiResult<Json<Review>> {
-    let review = ctx
-        .reviews_store
-        .get_review(&review_id)
-        .await
-        .map_err(crate::error::ApiError)?;
-    let repo = ctx
-        .git_store
-        .get_repo(&review.repo_id)
-        .await
-        .map_err(crate::error::ApiError)?;
-    crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Viewer).await?;
+    let review = review_for(&ctx, &user, &review_id, WorkspaceRole::Viewer).await?;
+    let review = triage::with_verdict(&ctx.findings_store, review).await;
     Ok(Json(review))
+}
+
+/// `GET /reviews/{review_id}/triage` — each comment's tracked finding, whether
+/// another review of the PR already posted it, and the prior findings this
+/// run re-checked (`otto_review::triage`).
+pub(crate) async fn get_review_triage(
+    Path(review_id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<triage::ReviewTriage>> {
+    let review = review_for(&ctx, &user, &review_id, WorkspaceRole::Viewer).await?;
+    let t = triage::triage(&links(&ctx, &user), &review).await;
+    Ok(Json(t.map_err(ApiError)?))
+}
+
+/// Load a review after checking the caller's role in its repo's workspace.
+pub(crate) async fn review_for(
+    ctx: &ServerCtx,
+    user: &User,
+    review_id: &Id,
+    role: WorkspaceRole,
+) -> ApiResult<Review> {
+    let review = ctx.reviews_store.get_review(review_id).await;
+    let review = review.map_err(ApiError)?;
+    require_repo_role(ctx, user, &review.repo_id, role).await?;
+    Ok(review)
+}
+
+/// A review comment with its review and repo, after an Editor check in the
+/// repo's workspace — every comment action starts here.
+pub(crate) async fn comment_for(
+    ctx: &ServerCtx,
+    user: &User,
+    cid: &Id,
+) -> ApiResult<(ReviewComment, Review, otto_core::domain::Repo)> {
+    let comment = ctx.reviews_store.get_comment(cid).await.map_err(ApiError)?;
+    let review = ctx.reviews_store.get_review(&comment.review_id).await;
+    let review = review.map_err(ApiError)?;
+    let repo = ctx.git_store.get_repo(&review.repo_id).await;
+    let repo = repo.map_err(ApiError)?;
+    crate::auth::require_ws_role(ctx, user, &repo.workspace_id, WorkspaceRole::Editor).await?;
+    Ok((comment, review, repo))
 }
 
 pub(crate) async fn get_review(
@@ -550,7 +563,7 @@ pub(crate) async fn get_review(
         .await
         .map_err(crate::error::ApiError)?
         .ok_or_else(|| crate::error::ApiError(Error::NotFound("no review for this PR".into())))?;
-
+    let review = triage::with_verdict(&ctx.findings_store, review).await;
     Ok(Json(review))
 }
 
@@ -584,23 +597,7 @@ pub(crate) async fn approve_comment(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> crate::error::ApiResult<Json<ReviewComment>> {
-    let comment = ctx
-        .reviews_store
-        .get_comment(&cid)
-        .await
-        .map_err(crate::error::ApiError)?;
-    let review = ctx
-        .reviews_store
-        .get_review(&comment.review_id)
-        .await
-        .map_err(crate::error::ApiError)?;
-    let repo = ctx
-        .git_store
-        .get_repo(&review.repo_id)
-        .await
-        .map_err(crate::error::ApiError)?;
-    crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
-
+    let (comment, review, repo) = comment_for(&ctx, &user, &cid).await?;
     // A DECLINED comment is not approvable: a decline that lands while a
     // "Post all" loop is still walking its snapshot must not be posted anyway.
     // Restoring it to draft (`PATCH … {restore_draft:true}`) is the way back.
@@ -616,10 +613,12 @@ pub(crate) async fn approve_comment(
     // - An already-posted comment is never re-posted, and the post is CLAIMED
     //   atomically (posted 0→1) before the forge call, so a double click or a
     //   retried request can't post twice; a failed call releases the claim.
-    let pr_posted = if review.pr_number == LOCAL_REVIEW_PR_NUMBER {
-        comment.posted
+    // `append`: this request is what put the comment on the PR (a local
+    // review: approved it) — a refused post or a re-approve never re-appends.
+    let (pr_posted, append) = if review.pr_number == LOCAL_REVIEW_PR_NUMBER {
+        (comment.posted, comment.state != CommentState::Approved)
     } else if comment.posted {
-        true
+        (true, false)
     } else if !ctx
         .reviews_store
         .claim_comment_post(&cid)
@@ -627,7 +626,7 @@ pub(crate) async fn approve_comment(
         .map_err(crate::error::ApiError)?
     {
         // Another request holds (or completed) the post.
-        true
+        (true, false)
     } else {
         // Re-read under the claim: a decline that raced the check above wins.
         let fresh = ctx.reviews_store.get_comment(&cid).await;
@@ -641,12 +640,12 @@ pub(crate) async fn approve_comment(
         if !posted {
             let _ = ctx.reviews_store.release_comment_post(&cid).await;
         }
-        posted
+        (posted, posted)
     };
-
-    // Append to the review markdown file.
-    if let Err(e) = append_to_review_file(&repo.path, review.pr_number, &comment).await {
-        tracing::warn!(comment = %cid, "failed to append to review file: {e}");
+    if append {
+        if let Err(e) = append_to_review_file(&repo.path, review.pr_number, &comment).await {
+            tracing::warn!(comment = %cid, "failed to append to review file: {e}");
+        }
     }
 
     let updated = ctx
@@ -715,28 +714,24 @@ pub(crate) async fn post_review_comment(
     }
 }
 
+/// `POST /pr-review-comments/{cid}/decline` body (optional): what declining
+/// records on the comment's finding — `false_positive` ("Not a problem", the
+/// default) or `waived` ("Won't fix") — and why.
+#[derive(Deserialize, Default)]
+pub(crate) struct DeclineReq {
+    pub(crate) dismiss: Option<String>,
+    pub(crate) reason: Option<String>,
+}
+
 pub(crate) async fn decline_comment(
     Path(cid): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    body: Option<Json<DeclineReq>>,
 ) -> crate::error::ApiResult<Json<ReviewComment>> {
-    let comment = ctx
-        .reviews_store
-        .get_comment(&cid)
-        .await
-        .map_err(crate::error::ApiError)?;
-    let review = ctx
-        .reviews_store
-        .get_review(&comment.review_id)
-        .await
-        .map_err(crate::error::ApiError)?;
-    let repo = ctx
-        .git_store
-        .get_repo(&review.repo_id)
-        .await
-        .map_err(crate::error::ApiError)?;
-    crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
-
+    let (comment, review, repo) = comment_for(&ctx, &user, &cid).await?;
+    let req = body.map(|b| b.0).unwrap_or_default();
+    let to = triage::dismissal(req.dismiss.as_deref()).map_err(ApiError)?;
     // Keep `posted` as-is: declining a comment that is already on the PR does
     // not un-post it, and resetting the flag let a later approve post it AGAIN.
     let updated = ctx
@@ -745,6 +740,9 @@ pub(crate) async fn decline_comment(
         .await
         .map_err(crate::error::ApiError)?;
     queue_review_learning(&ctx, &repo.workspace_id, &updated);
+    // The comment's finding is dismissed with it (merge readiness, Post all).
+    let reason = req.reason.as_deref();
+    triage::follow_comment(&links(&ctx, &user), &review, &cid, to, reason).await;
     Ok(Json(updated))
 }
 
@@ -774,22 +772,7 @@ pub(crate) async fn edit_review_comment(
     CurrentUser(user): CurrentUser,
     Json(req): Json<EditReviewCommentReq>,
 ) -> crate::error::ApiResult<Json<ReviewComment>> {
-    let comment = ctx
-        .reviews_store
-        .get_comment(&cid)
-        .await
-        .map_err(crate::error::ApiError)?;
-    let review = ctx
-        .reviews_store
-        .get_review(&comment.review_id)
-        .await
-        .map_err(crate::error::ApiError)?;
-    let repo = ctx
-        .git_store
-        .get_repo(&review.repo_id)
-        .await
-        .map_err(crate::error::ApiError)?;
-    crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
+    let (comment, review, _) = comment_for(&ctx, &user, &cid).await?;
     if req.mark_posted {
         if req.body.is_some() || req.restore_draft {
             return Err(crate::error::ApiError(Error::Invalid(
@@ -826,16 +809,22 @@ pub(crate) async fn edit_review_comment(
             "nothing to change — send `body` and/or `restore_draft`".into(),
         )));
     }
-    ctx.reviews_store
+    let edited = ctx
+        .reviews_store
         .edit_unposted_comment(&cid, body, req.restore_draft)
         .await
         .map_err(crate::error::ApiError)?
-        .map(Json)
         .ok_or_else(|| {
             crate::error::ApiError(Error::Conflict(
                 "only an unposted draft can be edited, and only a declined comment restored".into(),
             ))
-        })
+        })?;
+    if req.restore_draft {
+        // Restoring the comment reopens the finding its decline dismissed.
+        let open = otto_core::finding::FindingStatus::Open;
+        triage::follow_comment(&links(&ctx, &user), &review, &cid, open, None).await;
+    }
+    Ok(Json(edited))
 }
 
 // ---------------------------------------------------------------------------
@@ -965,7 +954,7 @@ pub(crate) async fn get_local_review(
         .ok_or_else(|| {
             crate::error::ApiError(Error::NotFound("no local review for this repo".into()))
         })?;
-
+    let review = triage::with_verdict(&ctx.findings_store, review).await;
     Ok(Json(review))
 }
 
@@ -990,7 +979,7 @@ pub(crate) async fn list_reviews(
         .list_for_pr(&repo_id, number as i64)
         .await
         .map_err(crate::error::ApiError)?;
-
+    let reviews = triage::with_verdicts(&ctx.findings_store, reviews).await;
     Ok(Json(reviews))
 }
 
@@ -1012,7 +1001,7 @@ pub(crate) async fn list_local_reviews(
         .list_for_pr(&repo_id, LOCAL_REVIEW_PR_NUMBER as i64)
         .await
         .map_err(crate::error::ApiError)?;
-
+    let reviews = triage::with_verdicts(&ctx.findings_store, reviews).await;
     Ok(Json(reviews))
 }
 

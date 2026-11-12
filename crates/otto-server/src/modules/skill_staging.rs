@@ -16,7 +16,9 @@
 ///
 /// Sources, per skill: the Otto Library, the operator's global Claude skills,
 /// then the compiled-in `otto-skills` tree. Re-copied cleanly so edits and
-/// bundled upgrades propagate. Best-effort: unknown skills are skipped.
+/// bundled upgrades propagate; swapped in whole and only when changed
+/// (`otto_review::skill_bundle`). Best-effort: a skill that cannot be found
+/// or copied is skipped and keeps its last staged copy, if any.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StagedSkillPackages {
     pub(crate) root: String,
@@ -53,38 +55,31 @@ pub(crate) fn stage_skill_packages_at(
                 let d = Path::new(&home).join(".claude/skills").join(name);
                 d.is_dir().then_some(d)
             });
+        // Built complete beside the bundle, then swapped into both views under
+        // one process-wide lock: concurrent reviews share this bundle, and a
+        // running reviewer must never see a half-copied or deleted skill.
         let neutral = neutral_root.join(name);
-        if let Err(e) = remove_staged_package_path(&neutral) {
-            tracing::warn!(skill = %name, "stage_skill_packages: neutral cleanup failed: {e}");
-            continue;
-        }
-        let copied = match src {
-            Some(src) => crate::plugins::copy_dir(&src, &neutral).map(|_| true),
-            None => otto_skills::copy_bundled_into(name, &neutral).map_err(|e| e.to_string()),
-        };
-        match copied {
+        let staged = otto_review::skill_bundle::scratch_in(bundle)
+            .map_err(|e| e.to_string())
+            .and_then(|scratch| {
+                let fresh = scratch.path().join("package");
+                let found = match src {
+                    Some(src) => crate::plugins::copy_dir(&src, &fresh).map(|_| true),
+                    None => otto_skills::copy_bundled_into(name, &fresh).map_err(|e| e.to_string()),
+                }?;
+                let views = [neutral.clone(), claude_root.join(name)];
+                let done = found
+                    .then(|| otto_review::skill_bundle::install(&fresh, scratch.path(), &views))
+                    .transpose()?;
+                Ok(done.is_some())
+            });
+        match staged {
             Ok(true) => {}
-            Ok(false) => {
-                let _ = remove_staged_package_path(&neutral);
-                continue;
-            }
+            Ok(false) => continue,
             Err(e) => {
-                let _ = remove_staged_package_path(&neutral);
-                tracing::warn!(skill = %name, "stage_skill_packages: copy failed: {e}");
+                tracing::warn!(skill = %name, "stage_skill_packages: {e}");
                 continue;
             }
-        }
-        let claude = claude_root.join(name);
-        if let Err(e) = remove_staged_package_path(&claude) {
-            let _ = remove_staged_package_path(&neutral);
-            tracing::warn!(skill = %name, "stage_skill_packages: claude cleanup failed: {e}");
-            continue;
-        }
-        if let Err(e) = crate::plugins::copy_dir(&neutral, &claude) {
-            let _ = remove_staged_package_path(&neutral);
-            let _ = remove_staged_package_path(&claude);
-            tracing::warn!(skill = %name, "stage_skill_packages: claude view failed: {e}");
-            continue;
         }
         let mut package_files = Vec::new();
         collect_staged_package_files(&neutral, &neutral, &mut package_files);
@@ -105,20 +100,6 @@ pub(crate) fn is_safe_skill_package_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-
-#[allow(clippy::disallowed_methods)] // pre-existing sync fs reached from async code without offload (perf2 N3 follow-up)
-pub(crate) fn remove_staged_package_path(
-    path: &std::path::Path,
-) -> std::result::Result<(), String> {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
-            std::fs::remove_dir_all(path).map_err(|e| format!("remove {}: {e}", path.display()))
-        }
-        Ok(_) => std::fs::remove_file(path).map_err(|e| format!("remove {}: {e}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("inspect {}: {e}", path.display())),
-    }
 }
 
 #[allow(clippy::disallowed_methods)] // pre-existing sync fs reached from async code without offload (perf2 N3 follow-up)
@@ -246,6 +227,34 @@ mod staged_skill_package_tests {
             assert!(!staged.files.contains_key("broken-skill"));
             assert!(!bundle.join("skills/broken-skill").exists());
             assert!(!bundle.join(".claude/skills/broken-skill").exists());
+        }
+    }
+
+    /// Two reviews starting together stage the same shared bundle (the
+    /// 2026-11-12 log: "Directory not empty", "No such file"). Both stagings
+    /// succeed and the bundle ends complete.
+    #[test]
+    fn concurrent_stagings_of_one_bundle_both_succeed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let names = vec!["skills-reviewer".to_string()];
+        let runs: Vec<_> = (0..2)
+            .map(|_| {
+                let (bundle, names) = (bundle.clone(), names.clone());
+                let library = otto_context::Library::new(tmp.path().join("library"));
+                std::thread::spawn(move || {
+                    (0..5).all(|_| stage_skill_packages_at(&library, &names, &bundle).is_some())
+                })
+            })
+            .collect();
+        for run in runs {
+            assert!(run.join().unwrap(), "every staging staged the skill");
+        }
+        for root in [bundle.join("skills"), bundle.join(".claude/skills")] {
+            assert!(root.join("skills-reviewer/SKILL.md").is_file());
+            assert!(root
+                .join("skills-reviewer/references/review-rubric.md")
+                .is_file());
         }
     }
 

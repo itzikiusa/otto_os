@@ -90,3 +90,24 @@ test('a late runs response for the old workspace is dropped after clear(new id)'
   await late;
   assert.equal(workflowRuns.list.length, 0);
 });
+
+// Tabs that outlive their session (owner report): a tab never shows an
+// archived session, and a removal closes the tab by id whatever workspace the
+// event names.
+test('an archived by-id row prunes its tab like a missing one', async () => {
+  const { ws } = fixture(async (path) => (path.startsWith('/sessions?ids=') ? [{ ...row('arch'), archived: true }, row('live')] : []));
+  ws.sessions = [row('arch'), row('live')];
+  ws.openTabs = ['arch', 'live'];
+  await ws.refreshSessions();
+  assert.deepEqual([...ws.openTabs], ['live']);
+});
+
+test('session_removed closes the tab whatever workspace the event names', () => {
+  const { ws } = fixture(async () => []);
+  ws.closeTab = (id: string) => { ws.openTabs = ws.openTabs.filter((t: string) => t !== id); };
+  ws.sessions = [row('s')];
+  ws.openTabs = ['s', 'other'];
+  ws.applyEvent({ type: 'session_removed', session_id: 's', workspace_id: 'elsewhere' });
+  assert.deepEqual([...ws.openTabs], ['other']);
+  assert.deepEqual(ws.sessions, []);
+});

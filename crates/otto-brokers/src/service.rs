@@ -6,7 +6,7 @@
 //! producer calls are awaited directly.
 
 use crate::decode::{avro_payload, avro_to_json_with, confluent_frame, decode_payload, to_preview};
-use crate::kafka::{is_internal, KafkaClient, KafkaConnSpec, MAX_CONSUME_BYTES};
+use crate::kafka::{is_internal, KafkaClient, KafkaConnSpec, ValueMatch, MAX_CONSUME_BYTES};
 use crate::metrics::{self, ClusterMetricState};
 use crate::proxy::BrokerTunnel;
 use crate::schema_registry::SchemaRegistry;
@@ -1185,6 +1185,40 @@ impl BrokersService {
             .collect())
     }
 
+    /// The alerts with their CURRENT lag, evaluated now: one `describe_group`
+    /// (committed offsets vs high watermarks — the consumer-groups view's lag)
+    /// per distinct group that has an ENABLED alert, at most
+    /// [`LAG_ALERT_MAX_GROUPS`] groups, all within [`LAG_ALERT_EVAL_TIMEOUT`].
+    /// A group that fails, is denied or runs out of time leaves its alerts
+    /// unevaluated (`current_lag` absent) rather than failing the list. There
+    /// is no background evaluator: alerts are evaluated when they are listed.
+    pub async fn evaluate_lag_alerts(&self, cluster_id: &Id) -> Result<Vec<LagAlert>> {
+        let ops = self
+            .ops
+            .as_ref()
+            .ok_or_else(|| Error::Internal("ops repo not initialised".into()))?;
+        let rows = ops.list_alerts(cluster_id).await?;
+        let groups: std::collections::BTreeSet<String> = rows
+            .iter()
+            .filter(|r| r.enabled)
+            .map(|r| r.group_name.clone())
+            .collect();
+        let mut lags = std::collections::HashMap::new();
+        let eval = async {
+            // Sequential: each describe opens a group consumer on the pooled client.
+            for group in groups.iter().take(LAG_ALERT_MAX_GROUPS) {
+                if let Ok(detail) = self.describe_group(cluster_id, group).await {
+                    lags.extend(group_topic_lags(&detail));
+                }
+            }
+        };
+        let _ = tokio::time::timeout(LAG_ALERT_EVAL_TIMEOUT, eval).await;
+        Ok(rows
+            .into_iter()
+            .map(|r| lag_alert_from_row(r, &lags))
+            .collect())
+    }
+
     pub async fn create_lag_alert(
         &self,
         cluster_id: &Id,
@@ -1243,8 +1277,24 @@ impl BrokersService {
                 .start_offsets
                 .as_ref()
                 .map(|v| v.iter().map(|s| (s.partition, s.offset)).collect());
+            // A value filter runs IN the scan (only matches count toward the
+            // limit), decoding each value the way the response will.
+            let filter = req2
+                .value_filter
+                .as_deref()
+                .filter(|f| !f.is_empty())
+                .map(str::to_lowercase);
+            let reg = registry.clone();
+            let rt = tokio::runtime::Handle::current();
             tokio::task::spawn_blocking(move || {
-                client.consume_raw_from(&t, &req2, starts.as_ref(), Some(MAX_CONSUME_BYTES))
+                let pred = filter.map(|f| value_filter_predicate(f, req2.decode, reg, rt));
+                client.consume_raw_filtered(
+                    &t,
+                    &req2,
+                    starts.as_ref(),
+                    Some(MAX_CONSUME_BYTES),
+                    pred.as_ref().map(|p| p as ValueMatch<'_>),
+                )
             })
             .await
             .map_err(join)??
@@ -1386,6 +1436,37 @@ fn decode_kv(
     Some(decode_payload(Some(bytes), fmt))
 }
 
+/// The scan-loop predicate for a `value_filter` (already lowercased): decode
+/// the raw value exactly as [`decode_batch`] will and match case-insensitively,
+/// so an Avro / JSON / text match anywhere in the scanned range is found. A
+/// registry-framed value resolves its schema on first sight of the id (the
+/// scan runs on a blocking thread, so it blocks on the runtime; ids are cached
+/// per scan, failed ones too via the registry's negative cache).
+fn value_filter_predicate(
+    filter: String,
+    decode: ValueFormat,
+    registry: Option<Arc<SchemaRegistry>>,
+    rt: tokio::runtime::Handle,
+) -> impl Fn(Option<&[u8]>) -> bool {
+    let schemas = std::cell::RefCell::new(std::collections::HashMap::new());
+    let seen = std::cell::RefCell::new(std::collections::HashSet::new());
+    move |bytes: Option<&[u8]>| {
+        let Some(bytes) = bytes else { return false };
+        if let Some(reg) = registry.as_ref() {
+            if matches!(decode, ValueFormat::Auto | ValueFormat::Avro) {
+                if let Some((sid, _)) = confluent_frame(bytes) {
+                    if seen.borrow_mut().insert(sid) {
+                        let got = rt.block_on(reg.parsed_schemas_by_ids([sid]));
+                        schemas.borrow_mut().extend(got);
+                    }
+                }
+            }
+        }
+        decode_kv(Some(bytes), decode, &schemas.borrow())
+            .is_some_and(|v| v.text.to_lowercase().contains(filter.as_str()))
+    }
+}
+
 /// The synchronous decode → value-filter → mask → preview pass over a raw
 /// peek (runs on a blocking thread: pretty-printing 50 × 1.6 MB JSON is
 /// ~0.7 s of CPU).
@@ -1403,6 +1484,11 @@ fn decode_batch(
     // the server — raw payloads never reach the client when this flag is set.
     // Masking runs on the FULL text, before any preview cut.
     let masked = req.mask == Some(true);
+    // A filtered peek reports how far it scanned, and whether the scan cap
+    // (not the end of the range) stopped it.
+    let filtered = req.key_filter.is_some() || value_filter.is_some();
+    let scanned = filtered.then_some(raw.scanned);
+    let scan_capped = filtered && raw.scan_capped;
 
     let mut messages = Vec::with_capacity(raw.messages.len());
     for m in raw.messages {
@@ -1458,6 +1544,8 @@ fn decode_batch(
         partitions: raw.partitions,
         truncated: raw.truncated,
         masked,
+        scanned,
+        scan_capped,
     }
 }
 
@@ -1642,6 +1730,21 @@ fn selector_to_consume_req(sel: &ReplaySelector) -> Result<ConsumeReq> {
     })
 }
 
+/// Upper bound on the groups one alert evaluation describes, and on its time.
+const LAG_ALERT_MAX_GROUPS: usize = 20;
+const LAG_ALERT_EVAL_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// A described group's lag summed per topic, keyed `"{group}:{topic}"` (the
+/// `lag_alert_from_row` convention). Only topics the group has committed on.
+fn group_topic_lags(detail: &GroupDetail) -> std::collections::HashMap<String, i64> {
+    let mut out = std::collections::HashMap::new();
+    for o in &detail.offsets {
+        *out.entry(format!("{}:{}", detail.group_id, o.topic))
+            .or_insert(0) += o.lag.max(0);
+    }
+    out
+}
+
 /// Map a persisted `LagAlertRow` to the API type, enriching with the current
 /// lag for that group+topic if available.
 fn lag_alert_from_row(
@@ -1650,6 +1753,7 @@ fn lag_alert_from_row(
 ) -> LagAlert {
     // Key convention: "{group_name}:{topic}" — matches what the metrics sweep writes.
     let key = format!("{}:{}", r.group_name, r.topic);
+    let current_lag = current_lags.get(&key).copied();
     let breach_lag = current_lags.get(&key).and_then(|&lag| {
         if r.enabled && lag >= r.threshold {
             Some(lag)
@@ -1666,6 +1770,7 @@ fn lag_alert_from_row(
         enabled: r.enabled,
         created_at: r.created_at,
         breach_lag,
+        current_lag,
     }
 }
 
@@ -2333,5 +2438,63 @@ mod reset_guard_tests {
         let msg = f.into_error().to_string();
         assert!(msg.contains("payments[2]"), "{msg}");
         assert!(msg.contains("the others were committed"), "{msg}");
+    }
+}
+
+#[cfg(test)]
+mod lag_alert_eval_tests {
+    use super::*;
+
+    fn offset(topic: &str, partition: i32, lag: i64) -> GroupOffset {
+        GroupOffset {
+            topic: topic.into(),
+            partition,
+            current_offset: 0,
+            high_watermark: lag,
+            lag,
+        }
+    }
+
+    fn row(topic: &str, group: &str, threshold: i64, enabled: bool) -> LagAlertRow {
+        LagAlertRow {
+            id: "a1".into(),
+            cluster_id: "c1".into(),
+            topic: topic.into(),
+            group_name: group.into(),
+            threshold,
+            enabled,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    /// The alert list used to pass an EMPTY lag map, so `breach_lag` could
+    /// never be set. A described group's per-topic lag now reaches the alert.
+    #[test]
+    fn described_group_lag_sets_current_and_breach_lag() {
+        let detail = GroupDetail {
+            group_id: "billing".into(),
+            state: "Stable".into(),
+            protocol_type: "consumer".into(),
+            protocol: "range".into(),
+            members: vec![],
+            offsets: vec![
+                offset("orders", 0, 700),
+                offset("orders", 1, 400),
+                offset("refunds", 0, 3),
+            ],
+            total_lag: 1103,
+        };
+        let lags = group_topic_lags(&detail);
+        assert_eq!(lags.get("billing:orders"), Some(&1100));
+        assert_eq!(lags.get("billing:refunds"), Some(&3));
+
+        let hit = lag_alert_from_row(row("orders", "billing", 1000, true), &lags);
+        assert_eq!((hit.current_lag, hit.breach_lag), (Some(1100), Some(1100)));
+        let under = lag_alert_from_row(row("refunds", "billing", 10, true), &lags);
+        assert_eq!((under.current_lag, under.breach_lag), (Some(3), None));
+        let disabled = lag_alert_from_row(row("orders", "billing", 1000, false), &lags);
+        assert_eq!(disabled.breach_lag, None);
+        let unknown = lag_alert_from_row(row("orders", "other", 1, true), &lags);
+        assert_eq!((unknown.current_lag, unknown.breach_lag), (None, None));
     }
 }

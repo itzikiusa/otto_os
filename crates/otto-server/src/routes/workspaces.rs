@@ -107,12 +107,7 @@ pub async fn create(
     if req.root_path.trim().is_empty() {
         return Err(Error::Invalid("workspace root_path must not be empty".into()).into());
     }
-    // Expand ~ and make sure the directory exists — agent CLIs are spawned
-    // with this as cwd, and a missing dir silently falls back to $HOME.
-    let root_path = otto_core::paths::expand_home_strict(req.root_path.trim())
-        .map_err(Error::Invalid)?
-        .to_string_lossy()
-        .into_owned();
+    let root_path = root_dir(&req.root_path)?.to_string_lossy().into_owned();
     std::fs::create_dir_all(&root_path)
         .map_err(|e| Error::Invalid(format!("cannot create workspace directory: {e}")))?;
     let ws = repo(&ctx)
@@ -139,11 +134,15 @@ pub async fn update(
         }
         WorkspacesRepo::validate_settings_patch(patch)?;
     }
+    let root = req.root_path.as_deref().map(root_dir).transpose()?;
+    if let Some(p) = root.as_ref().filter(|p| !p.is_dir()) {
+        return Err(Error::Invalid(format!("{} does not exist", p.display())).into());
+    }
     let ws = repo(&ctx)
         .update(
             &id,
             req.name.as_deref(),
-            req.root_path.as_deref(),
+            root.as_deref().and_then(|p| p.to_str()),
             req.settings.as_ref(),
             req.archived,
         )
@@ -152,6 +151,11 @@ pub async fn update(
         return Ok(Json(repo(&ctx).patch_settings(&id, patch).await?));
     }
     Ok(Json(ws))
+}
+
+/// `~`-expanded workspace folder: sessions run in it (a missing one falls back to $HOME).
+fn root_dir(p: &str) -> Result<std::path::PathBuf, Error> {
+    otto_core::paths::expand_home_strict(p.trim()).map_err(Error::Invalid)
 }
 
 /// `DELETE /api/v1/workspaces/{id}` — archives (soft delete).

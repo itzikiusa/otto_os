@@ -189,25 +189,7 @@ async fn waive(
     CurrentUser(user): CurrentUser,
     Json(body): Json<ReasonReq>,
 ) -> ApiResult<Json<Finding>> {
-    let cur = load_for_role(&ctx, &user, &id, WorkspaceRole::Editor).await?;
-    let who = actor_label(&user);
-    let f = ctx
-        .findings_store
-        .set_status(&id, FindingStatus::Waived, &who)
-        .await
-        .map_err(ApiError)?;
-    audit(
-        &ctx,
-        &f,
-        "waived",
-        &who,
-        Some(cur.status.as_str()),
-        Some("waived"),
-        serde_json::json!({ "reason": body.reason }),
-    )
-    .await;
-    emit_updated(&ctx, &f);
-    Ok(Json(f))
+    dismiss(&ctx, &user, &id, FindingStatus::Waived, body.reason).await
 }
 
 /// `POST /findings/{id}/false-positive` — not a real issue.
@@ -217,25 +199,42 @@ async fn false_positive(
     CurrentUser(user): CurrentUser,
     Json(body): Json<ReasonReq>,
 ) -> ApiResult<Json<Finding>> {
-    let cur = load_for_role(&ctx, &user, &id, WorkspaceRole::Editor).await?;
-    let who = actor_label(&user);
+    dismiss(&ctx, &user, &id, FindingStatus::FalsePositive, body.reason).await
+}
+
+/// Waive / mark false positive, then decline the still-draft comment that
+/// would post the dismissed issue (`otto_review::triage::follow_finding`).
+async fn dismiss(
+    ctx: &ServerCtx,
+    user: &User,
+    id: &str,
+    to: FindingStatus,
+    reason: Option<String>,
+) -> ApiResult<Json<Finding>> {
+    let cur = load_for_role(ctx, user, id, WorkspaceRole::Editor).await?;
+    let who = actor_label(user);
     let f = ctx
         .findings_store
-        .set_status(&id, FindingStatus::FalsePositive, &who)
+        .set_status(id, to, &who)
         .await
         .map_err(ApiError)?;
-    audit(
-        &ctx,
-        &f,
-        "false_positive",
-        &who,
-        Some(cur.status.as_str()),
-        Some("false_positive"),
-        serde_json::json!({ "reason": body.reason }),
-    )
-    .await;
-    emit_updated(&ctx, &f);
+    let detail = serde_json::json!({ "reason": reason });
+    let from = Some(cur.status.as_str());
+    audit(ctx, &f, to.as_str(), &who, from, Some(to.as_str()), detail).await;
+    emit_updated(ctx, &f);
+    otto_review::triage::follow_finding(&links(ctx, user), &f).await;
     Ok(Json(f))
+}
+
+/// The comment ↔ finding link's stores, bus and actor (`otto_review::triage`).
+pub(crate) fn links<'a>(ctx: &'a ServerCtx, user: &User) -> otto_review::triage::Links<'a> {
+    otto_review::triage::Links {
+        reviews: &ctx.reviews_store,
+        findings: &ctx.findings_store,
+        events: &ctx.finding_events_store,
+        bus: &ctx.events,
+        actor: actor_label(user),
+    }
 }
 
 /// `POST /findings/{id}/require-approval` — flag that a human must sign off
@@ -338,6 +337,8 @@ async fn approve(
     )
     .await;
     emit_updated(&ctx, &f);
+    // A rejection is a false positive: its draft comment must not post.
+    otto_review::triage::follow_finding(&links(&ctx, &user), &f).await;
     Ok(Json(f))
 }
 

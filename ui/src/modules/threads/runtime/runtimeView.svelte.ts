@@ -26,6 +26,9 @@ class RuntimeViews {
   projections = $state<Record<string, RuntimeProjection>>({});
   /** A failed first load of an open thread, by session id. */
   loadError = $state<Record<string, string>>({});
+  /** A failed later resync (after a reconnect or a gap): the projection
+   *  shown may be out of date, by session id. */
+  staleError = $state<Record<string, string>>({});
 
   private views = new Map<string, View>();
   private stopLive: (() => void) | null = null;
@@ -54,6 +57,10 @@ class RuntimeViews {
       this.views.delete(id);
       const { [id]: _drop, ...rest } = this.projections;
       this.projections = rest;
+      if (this.staleError[id]) {
+        const { [id]: _gone, ...stale } = this.staleError;
+        this.staleError = stale;
+      }
       if (this.views.size === 0) {
         this.stopLive?.();
         this.stopLive = null;
@@ -86,15 +93,20 @@ class RuntimeViews {
       this.projections[id] = projection;
       const { [id]: _ok, ...rest } = this.loadError;
       this.loadError = rest;
+      if (this.staleError[id]) {
+        const { [id]: _fresh, ...stale } = this.staleError;
+        this.staleError = stale;
+      }
       view.held = null;
       if (gap) void this.replay(id);
     } catch (e) {
       view.held = null;
       if (!this.projections[id]) this.loadError = { ...this.loadError, [id]: loadErrorText(e) };
+      else this.staleError = { ...this.staleError, [id]: loadErrorText(e) };
     }
   }
 
-  /** Reload a thread whose first load failed. */
+  /** Reload a thread whose first load (or a later resync) failed. */
   retry(id: string): void {
     void this.replay(id);
   }

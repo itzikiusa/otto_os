@@ -1398,17 +1398,22 @@
     "requests": [
       [
         "POST",
-        "/workspaces/ws-test/api-client/requests",
+        "/mcp/otto-tools/invoke",
         {
-          "name": "n",
-          "method": "GET",
-          "url": "http://example.test",
-          "body_mode": "none"
+          "tool": "otto.api_upsert_request",
+          "arguments": {
+            "name": "n",
+            "method": "GET",
+            "url": "http://example.test",
+            "body_mode": "none",
+            "workspace_id": "ws-test"
+          },
+          "wait_seconds": 15
         }
       ]
     ],
     "result": {
-      "err": "saved request has no id"
+      "err": "api_upsert_request failed: {\"ok\":true}"
     }
   },
   "otto_api_run_automation {\"automation_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}": {

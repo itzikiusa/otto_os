@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 use crate::types::CiStatus;
 
 use super::client::Http;
+use super::identity::{self, Me};
 use super::{map_state, ts, varr, vbool, vstr, vstr_opt, RemoteRef, RemoteRepoSummary};
 
 const BASE: &str = "https://api.github.com";
@@ -233,32 +234,151 @@ impl Github {
         Ok(nodes)
     }
 
+    /// Every review thread, 100 per page through `pageInfo.endCursor`: a PR
+    /// past 100 threads lost the resolved state of the rest. Capped at
+    /// [`THREAD_PAGES`] pages (logged) so a runaway cursor cannot hang the read.
     async fn fetch_review_threads_uncached(
         &self,
         r: &RemoteRef,
         number: u64,
     ) -> Result<Vec<Value>> {
-        const Q: &str = "query($owner:String!,$name:String!,$number:Int!){\
+        const Q: &str = "query($owner:String!,$name:String!,$number:Int!,$after:String){\
             repository(owner:$owner,name:$name){pullRequest(number:$number){\
-            reviewThreads(first:100){nodes{id isResolved \
-            comments(first:50){nodes{databaseId}}}}}}}";
-        let v = self
-            .graphql(
-                Q,
-                json!({ "owner": r.owner, "name": r.repo, "number": number }),
+            reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor} \
+            nodes{id isResolved comments(first:50){nodes{databaseId}}}}}}}";
+        const AT: [&str; 4] = ["data", "repository", "pullRequest", "reviewThreads"];
+        let mut all = Vec::new();
+        let mut after: Option<String> = None;
+        for page in 1..=THREAD_PAGES {
+            let v = self
+                .graphql(
+                    Q,
+                    json!({ "owner": r.owner, "name": r.repo, "number": number, "after": after }),
+                )
+                .await?;
+            let threads = AT.iter().try_fold(&v, |cur, k| cur.get(k));
+            let Some(threads) = threads else { break };
+            all.extend(varr(threads, &["nodes"]).iter().cloned());
+            let more = vbool(threads, &["pageInfo", "hasNextPage"]) == Some(true);
+            match vstr_opt(threads, &["pageInfo", "endCursor"]).filter(|_| more) {
+                Some(cursor) if page < THREAD_PAGES => after = Some(cursor),
+                Some(_) => {
+                    tracing::warn!(
+                        pr = number,
+                        "github: more than {} review threads — the rest show without their resolved state",
+                        THREAD_PAGES * 100
+                    );
+                    break;
+                }
+                None => break,
+            }
+        }
+        Ok(all)
+    }
+
+    /// The account this client authenticates as (`GET /user` → `login`,
+    /// `id`), cached per credential. `None` when the lookup fails.
+    pub(crate) async fn me(&self) -> Option<Me> {
+        let key = identity::cache_key("github", &self.base, &self.token);
+        identity::cached(&key, || async {
+            let v = self
+                .http
+                .json(self.req(reqwest::Method::GET, "/user"))
+                .await?;
+            Ok::<_, Error>(Me::from_keys(user_keys(&v)))
+        })
+        .await
+    }
+
+    /// Which list a numeric comment id on PR `number` belongs to: an inline
+    /// REVIEW comment (`/pulls/comments/{id}`) or a general ISSUE comment
+    /// (`/issues/comments/{id}`) — the two have different edit, delete and
+    /// reply endpoints. A comment on another PR is NotFound.
+    async fn comment_kind(&self, r: &RemoteRef, number: u64, id: &str) -> Result<GhComment> {
+        let id: u64 = id
+            .parse()
+            .map_err(|_| Error::Invalid(format!("bad comment id: {id}")))?;
+        let repo = format!("/repos/{}/{}", r.owner, r.repo);
+        let on_pr = |v: &Value, field: &str, tail: &str| {
+            vstr(v, &[field]).ends_with(&format!("/{tail}/{number}"))
+        };
+        match self
+            .http
+            .json(self.req(reqwest::Method::GET, &format!("{repo}/pulls/comments/{id}")))
+            .await
+        {
+            Ok(v) if on_pr(&v, "pull_request_url", "pulls") => return Ok(GhComment::Review(id)),
+            Ok(_) | Err(Error::NotFound(_)) => {}
+            Err(e) => return Err(e),
+        }
+        match self
+            .http
+            .json(self.req(
+                reqwest::Method::GET,
+                &format!("{repo}/issues/comments/{id}"),
+            ))
+            .await
+        {
+            Ok(v) if on_pr(&v, "issue_url", "issues") => Ok(GhComment::Issue(id, v)),
+            Ok(_) | Err(Error::NotFound(_)) => Err(Error::NotFound(format!(
+                "comment {id} is not on PR #{number}"
+            ))),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Dismiss the bound account's CURRENT `state` review (`APPROVED` /
+    /// `CHANGES_REQUESTED`) — GitHub has no "unapprove"; dismissal is the
+    /// withdrawal, and it needs the review id. GitHub only lets accounts with
+    /// enough repository rights dismiss; a refusal says so plainly.
+    async fn dismiss_own_review(&self, r: &RemoteRef, number: u64, state: &str) -> Result<()> {
+        let what = if state == "APPROVED" {
+            "approval"
+        } else {
+            "change request"
+        };
+        let me = self.me().await.ok_or_else(|| {
+            Error::Conflict(format!(
+                "could not tell which GitHub account this is (GET /user failed), so its {what} cannot be found"
+            ))
+        })?;
+        let reviews = self
+            .http
+            .paginate_json(
+                self.req(
+                    reqwest::Method::GET,
+                    &format!("{}/{number}/reviews", Self::prs_path(r)),
+                )
+                .query(&[("per_page", "100")]),
+                self.http.client(),
+                self.auth_header(),
             )
             .await?;
-        Ok(varr(
-            &v,
-            &[
-                "data",
-                "repository",
-                "pullRequest",
-                "reviewThreads",
-                "nodes",
-            ],
-        )
-        .to_vec())
+        let Some(id) = own_review_to_dismiss(&reviews, &me, state) else {
+            return Err(Error::Conflict(format!(
+                "you have no {what} on this PR to withdraw"
+            )));
+        };
+        self.http
+            .ok(self
+                .req(
+                    reqwest::Method::PUT,
+                    &format!("{}/{number}/reviews/{id}/dismissals", Self::prs_path(r)),
+                )
+                .json(&json!({
+                    "message": format!("Withdrew my {what}."),
+                    "event": "DISMISS",
+                })))
+            .await
+            .map_err(|e| match e {
+                Error::Forbidden(m) | Error::Conflict(m) | Error::NotFound(m) => {
+                    Error::Conflict(format!(
+                        "GitHub refused to dismiss your {what} — withdrawing it is not supported \
+                         on GitHub for this account ({m})"
+                    ))
+                }
+                other => other,
+            })
     }
 
     /// Fetch GitHub check-run status for the HEAD commit of `number` and
@@ -525,6 +645,103 @@ pub(crate) fn diff_from_pr_files(rows: &[Value]) -> DiffResp {
     resp
 }
 
+/// How many 100-thread GraphQL pages the review-thread probe reads.
+const THREAD_PAGES: usize = 10;
+
+/// A numeric PR comment id resolved to its list (see [`Github::comment_kind`]).
+enum GhComment {
+    Review(u64),
+    Issue(u64, Value),
+}
+
+/// A GitHub user object's stable ids: `login` (case-insensitive) and the
+/// numeric `id`.
+pub(crate) fn user_keys(u: &Value) -> Vec<String> {
+    vec![
+        identity::key("login", &vstr(u, &["login"])),
+        identity::num_key(super::vu64(u, &["id"])),
+    ]
+}
+
+/// The id of `me`'s review to dismiss for "withdraw my `state`": only when
+/// that account's CURRENT opinion is `state` — its latest APPROVED /
+/// CHANGES_REQUESTED / DISMISSED review (a later comment-only review does not
+/// replace an opinion).
+pub(crate) fn own_review_to_dismiss(reviews: &[Value], me: &Me, state: &str) -> Option<u64> {
+    reviews
+        .iter()
+        .rfind(|rv| {
+            rv.get("user").is_some_and(|u| me.owns(&user_keys(u)))
+                && matches!(
+                    vstr(rv, &["state"]).as_str(),
+                    "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED"
+                )
+        })
+        .filter(|rv| vstr(rv, &["state"]) == state)
+        .map(|rv| super::vu64(rv, &["id"]))
+        .filter(|id| *id > 0)
+}
+
+/// A reply to a GENERAL comment (or a review summary): GitHub threads only
+/// inline review comments, so the reply is a new issue comment that quotes
+/// the first lines of the one it answers.
+pub(crate) fn quote_reply(author: &str, parent: &str, reply: &str) -> String {
+    const LINES: usize = 3;
+    const WIDTH: usize = 200;
+    let lines: Vec<&str> = parent
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let mut out = format!("> @{author} wrote:\n");
+    for l in lines.iter().take(LINES) {
+        let cut: String = l.chars().take(WIDTH).collect();
+        let more = if l.chars().count() > WIDTH { "…" } else { "" };
+        out.push_str(&format!("> {cut}{more}\n"));
+    }
+    if lines.len() > LINES {
+        out.push_str("> …\n");
+    }
+    out.push('\n');
+    out.push_str(reply);
+    out
+}
+
+/// A submitted review's summary body as a general comment (`review-<id>`),
+/// with its verdict in `review_state`. `None` for an empty body or a review
+/// that is still pending (only its author can see it).
+pub(crate) fn review_body_comment(rv: &Value) -> Option<PrComment> {
+    let body = vstr(rv, &["body"]);
+    if body.trim().is_empty() {
+        return None;
+    }
+    let state = match vstr(rv, &["state"]).as_str() {
+        "APPROVED" => "approved",
+        "CHANGES_REQUESTED" => "changes_requested",
+        "COMMENTED" => "commented",
+        "DISMISSED" => "dismissed",
+        _ => return None,
+    };
+    let id = super::vu64(rv, &["id"]);
+    Some(PrComment {
+        id: format!("review-{id}"),
+        author: vstr(rv, &["user", "login"]),
+        body,
+        path: None,
+        line: None,
+        created_at: ts(&vstr(rv, &["submitted_at"])),
+        replies: Vec::new(),
+        resolved: false,
+        thread_id: None,
+        side: None,
+        outdated: false,
+        // A summary is edited on GitHub (the API only edits pending ones' text).
+        can_edit: false,
+        review_state: Some(state.to_string()),
+        in_reply_to: None,
+    })
+}
+
 fn summary_from(v: &Value) -> PrSummary {
     let state = if vstr_opt(v, &["merged_at"]).is_some() {
         PrState::Merged
@@ -554,7 +771,17 @@ fn summary_from(v: &Value) -> PrSummary {
                     .collect()
             })
             .unwrap_or_default(),
+        is_mine: false,
     }
+}
+
+/// [`summary_from`] with `is_mine` set from the author's stable ids.
+fn summary_for(v: &Value, me: Option<&Me>) -> PrSummary {
+    let mut s = summary_from(v);
+    s.is_mine = v
+        .get("user")
+        .is_some_and(|u| identity::is_me(me, &user_keys(u)));
+    s
 }
 
 /// Create-PR request body. `draft` is included only when explicitly requested
@@ -637,7 +864,19 @@ fn comment_from(v: &Value, path: Option<String>, line: Option<u32>) -> PrComment
         thread_id: None, // stamped from GraphQL reviewThreads in get_pr
         side: None,
         outdated: false,
+        can_edit: false,
+        review_state: None,
+        in_reply_to: None,
     }
+}
+
+/// [`comment_from`] with `can_edit` set from the author's stable ids.
+fn comment_for(v: &Value, path: Option<String>, line: Option<u32>, me: Option<&Me>) -> PrComment {
+    let mut c = comment_from(v, path, line);
+    c.can_edit = v
+        .get("user")
+        .is_some_and(|u| identity::is_me(me, &user_keys(u)));
+    c
 }
 
 /// Stamp GraphQL review-thread resolution onto the REST-built threads.
@@ -684,18 +923,23 @@ impl super::GitProvider for Github {
         // ONE request per page — the client pages, not the daemon.
         // Through the ETag cache: a remount / second window within the TTL
         // makes no request, and a revalidation 304 is free of rate-limit cost.
-        let (body, next) = self
-            .http
-            .get_cached_page(self.req(reqwest::Method::GET, &Self::prs_path(r)).query(&[
-                ("state", gh_state.to_string()),
-                ("per_page", per_page.to_string()),
-                ("page", page.to_string()),
-            ]))
-            .await?;
+        let (listed, me) = tokio::join!(
+            self.http
+                .get_cached_page(self.req(reqwest::Method::GET, &Self::prs_path(r)).query(&[
+                    ("state", gh_state.to_string()),
+                    ("per_page", per_page.to_string()),
+                    ("page", page.to_string()),
+                ])),
+            self.me(),
+        );
+        let (body, next) = listed?;
         let has_more = next.is_some();
         let v: Value = serde_json::from_str(&body)
             .map_err(|e| Error::Upstream(format!("github: bad json: {e}")))?;
-        let mut items: Vec<PrSummary> = varr(&v, &[]).iter().map(summary_from).collect();
+        let mut items: Vec<PrSummary> = varr(&v, &[])
+            .iter()
+            .map(|p| summary_for(p, me.as_ref()))
+            .collect();
         // GitHub has no "merged"/"declined" filter — both are `closed`; the
         // split is ours, so this page may be shorter than `per_page`.
         if matches!(state, PrState::Merged | PrState::Declined) {
@@ -732,24 +976,31 @@ impl super::GitProvider for Github {
             };
             Ok::<_, otto_core::Error>((rc, threads))
         };
-        let (issue_comments, review_and_threads, reviews, ci) = tokio::join!(
+        let (issue_comments, review_and_threads, reviews, ci, me) = tokio::join!(
             // General (issue) comments — flat thread.
             list(format!("{}/{number}/comments", Self::issues_path(r))),
             review_and_threads,
-            // Reviews → approvals.
+            // Reviews → approvals, and their summary bodies.
             list(format!("{}/{number}/reviews", Self::prs_path(r))),
             // Best-effort CI status — never fails the PR fetch.
             self.fetch_ci_status_for_sha(r, &head_sha),
+            self.me(),
         );
+        let me = me.as_ref();
         let issue_comments = Value::Array(issue_comments?);
         let (review_comments, threads) = review_and_threads?;
         let review_comments = Value::Array(review_comments);
         let reviews = Value::Array(reviews?);
 
+        // General comments: issue comments plus each submitted review's
+        // summary body ("Request changes: …" is often the comment that
+        // matters most) — inline review comments stay in their threads below.
         let mut comments: Vec<PrComment> = varr(&issue_comments, &[])
             .iter()
-            .map(|c| comment_from(c, None, None))
+            .map(|c| comment_for(c, None, None, me))
+            .chain(varr(&reviews, &[]).iter().filter_map(review_body_comment))
             .collect();
+        comments.sort_by_key(|c| c.created_at);
 
         // Build review-comment threads.
         let mut top: Vec<PrComment> = Vec::new();
@@ -757,7 +1008,7 @@ impl super::GitProvider for Github {
         for c in varr(&review_comments, &[]) {
             let path = vstr_opt(c, &["path"]);
             let (line, side, outdated) = review_anchor(c);
-            let mut pc = comment_from(c, path, line);
+            let mut pc = comment_for(c, path, line, me);
             pc.side = side;
             pc.outdated = outdated;
             match c.get("in_reply_to_id").and_then(Value::as_u64) {
@@ -801,6 +1052,9 @@ impl super::GitProvider for Github {
                 avatar_url: vstr_opt(rv, &["user", "avatar_url"]),
                 reviewed_at: vstr_opt(rv, &["submitted_at"]).map(|s| ts(&s)),
                 name: name.clone(),
+                is_me: rv
+                    .get("user")
+                    .is_some_and(|u| identity::is_me(me, &user_keys(u))),
             };
             match reviewers.iter_mut().find(|r| r.name == name) {
                 Some(existing) => {
@@ -816,13 +1070,29 @@ impl super::GitProvider for Github {
                 None => reviewers.push(entry),
             }
         }
+        // Requested but silent reviewers: `/reviews` only lists people who
+        // already submitted one, so they would not show as pending at all.
+        for u in varr(&pr, &["requested_reviewers"]) {
+            let name = vstr(u, &["login"]);
+            if name.is_empty() || reviewers.iter().any(|r| r.name == name) {
+                continue;
+            }
+            reviewers.push(PrReviewer {
+                name,
+                approved: false,
+                changes_requested: false,
+                avatar_url: vstr_opt(u, &["avatar_url"]),
+                reviewed_at: None,
+                is_me: identity::is_me(me, &user_keys(u)),
+            });
+        }
         let approved_by = reviewers
             .iter()
             .filter(|r| r.approved)
             .map(|r| r.name.clone())
             .collect();
 
-        let mut summary = summary_from(&pr);
+        let mut summary = summary_for(&pr, me);
         summary.ci_status = Some(ci.state.clone());
 
         Ok(PrDetail {
@@ -883,6 +1153,8 @@ impl super::GitProvider for Github {
             )
             .await?;
         let mut summary = summary_from(&v);
+        // Opened with this credential: the author is the caller.
+        summary.is_mine = true;
         // Reviewers: the create endpoint doesn't take them — request them in a
         // best-effort second call. A failure must not fail the (already open)
         // PR; it surfaces as a warning on the response instead.
@@ -929,61 +1201,62 @@ impl super::GitProvider for Github {
     }
 
     async fn comment(&self, r: &RemoteRef, number: u64, c: &NewPrCommentReq) -> Result<PrComment> {
-        // Reply to an inline review comment thread.
-        if let Some(reply_to) = &c.in_reply_to {
-            let id: u64 = reply_to
-                .parse()
-                .map_err(|_| Error::Invalid(format!("bad comment id: {reply_to}")))?;
-            let v = self
-                .http
-                .json(
-                    self.req(
-                        reqwest::Method::POST,
-                        &format!("{}/{number}/comments", Self::prs_path(r)),
-                    )
-                    .json(&json!({ "body": c.body, "in_reply_to": id })),
-                )
-                .await?;
-            let path = vstr_opt(&v, &["path"]);
-            let (line, side, outdated) = review_anchor(&v);
-            let mut pc = comment_from(&v, path, line);
-            pc.side = side;
-            pc.outdated = outdated;
-            return Ok(pc);
-        }
-        // Inline comment: needs the head commit sha — the one the reviewer
-        // saw when the client sends it, else the PR's current head.
-        if let (Some(path), Some(line)) = (&c.path, c.line) {
-            let commit_id = match c.commit_id.as_deref().filter(|s| !s.trim().is_empty()) {
-                Some(sha) => sha.to_string(),
-                None => vstr(&self.pr_raw(r, number).await?, &["head", "sha"]),
-            };
-            let v = self
-                .http
-                .json(
-                    self.req(
-                        reqwest::Method::POST,
-                        &format!("{}/{number}/comments", Self::prs_path(r)),
-                    )
-                    .json(&inline_comment_body(c, path, line, &commit_id)),
-                )
-                .await?;
-            let mut pc = comment_from(&v, Some(path.clone()), Some(line));
-            pc.side = Some(c.side.unwrap_or_default());
-            return Ok(pc);
-        }
-        // General comment → issue comment.
+        Ok(own(self.post_comment(r, number, c).await?))
+    }
+
+    /// `PATCH` the review comment (`/pulls/comments/{id}`) or the issue
+    /// comment (`/issues/comments/{id}`) — whichever list the id is in. A
+    /// review summary (`review-<id>`) is not editable from Otto.
+    async fn edit_comment(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        comment_id: &str,
+        body: &str,
+    ) -> Result<PrComment> {
+        refuse_review_summary(comment_id, "edited")?;
+        let repo = format!("/repos/{}/{}", r.owner, r.repo);
+        let url = match self.comment_kind(r, number, comment_id).await? {
+            GhComment::Review(id) => format!("{repo}/pulls/comments/{id}"),
+            GhComment::Issue(id, _) => format!("{repo}/issues/comments/{id}"),
+        };
         let v = self
             .http
             .json(
-                self.req(
-                    reqwest::Method::POST,
-                    &format!("{}/{number}/comments", Self::issues_path(r)),
-                )
-                .json(&json!({ "body": c.body })),
+                self.req(reqwest::Method::PATCH, &url)
+                    .json(&json!({ "body": body })),
             )
             .await?;
-        Ok(comment_from(&v, None, None))
+        let path = vstr_opt(&v, &["path"]);
+        let (line, side, outdated) = if path.is_some() {
+            review_anchor(&v)
+        } else {
+            (None, None, false)
+        };
+        let mut pc = comment_from(&v, path, line);
+        pc.side = side;
+        pc.outdated = outdated;
+        Ok(own(pc))
+    }
+
+    /// `DELETE` the review or issue comment the id names.
+    async fn delete_comment(&self, r: &RemoteRef, number: u64, comment_id: &str) -> Result<()> {
+        refuse_review_summary(comment_id, "deleted")?;
+        let repo = format!("/repos/{}/{}", r.owner, r.repo);
+        let path = match self.comment_kind(r, number, comment_id).await? {
+            GhComment::Review(id) => format!("{repo}/pulls/comments/{id}"),
+            GhComment::Issue(id, _) => format!("{repo}/issues/comments/{id}"),
+        };
+        self.http.ok(self.req(reqwest::Method::DELETE, &path)).await
+    }
+
+    async fn unapprove(&self, r: &RemoteRef, number: u64) -> Result<()> {
+        self.dismiss_own_review(r, number, "APPROVED").await
+    }
+
+    async fn withdraw_request_changes(&self, r: &RemoteRef, number: u64) -> Result<()> {
+        self.dismiss_own_review(r, number, "CHANGES_REQUESTED")
+            .await
     }
 
     /// GraphQL `resolveReviewThread` / `unresolveReviewThread` — `thread_id`
@@ -1245,6 +1518,129 @@ impl super::GitProvider for Github {
             .map(str::to_string);
         Ok(raw.as_deref().and_then(parse_github_expiry))
     }
+}
+
+impl Github {
+    /// [`super::GitProvider::comment`] without the `can_edit` stamp. A reply to a
+    /// GENERAL comment (or a review summary) cannot thread on GitHub —
+    /// `in_reply_to` takes review-comment ids only, and an issue-comment id
+    /// there is an error — so it is posted as an issue comment quoting the
+    /// comment it answers.
+    async fn post_comment(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        c: &NewPrCommentReq,
+    ) -> Result<PrComment> {
+        if let Some(reply_to) = &c.in_reply_to {
+            let parent = match reply_to.strip_prefix("review-") {
+                Some(review) => {
+                    let review: u64 = review
+                        .parse()
+                        .map_err(|_| Error::Invalid(format!("bad comment id: {reply_to}")))?;
+                    let rv = self
+                        .http
+                        .json(self.req(
+                            reqwest::Method::GET,
+                            &format!("{}/{number}/reviews/{review}", Self::prs_path(r)),
+                        ))
+                        .await?;
+                    Some(rv)
+                }
+                None => match self.comment_kind(r, number, reply_to).await? {
+                    GhComment::Issue(_, v) => Some(v),
+                    GhComment::Review(_) => None,
+                },
+            };
+            if let Some(parent) = parent {
+                let body = quote_reply(
+                    &vstr(&parent, &["user", "login"]),
+                    &vstr(&parent, &["body"]),
+                    &c.body,
+                );
+                let v = self
+                    .http
+                    .json(
+                        self.req(
+                            reqwest::Method::POST,
+                            &format!("{}/{number}/comments", Self::issues_path(r)),
+                        )
+                        .json(&json!({ "body": body })),
+                    )
+                    .await?;
+                return Ok(comment_from(&v, None, None));
+            }
+            // Reply to an inline review comment thread.
+            let id: u64 = reply_to
+                .parse()
+                .map_err(|_| Error::Invalid(format!("bad comment id: {reply_to}")))?;
+            let v = self
+                .http
+                .json(
+                    self.req(
+                        reqwest::Method::POST,
+                        &format!("{}/{number}/comments", Self::prs_path(r)),
+                    )
+                    .json(&json!({ "body": c.body, "in_reply_to": id })),
+                )
+                .await?;
+            let path = vstr_opt(&v, &["path"]);
+            let (line, side, outdated) = review_anchor(&v);
+            let mut pc = comment_from(&v, path, line);
+            pc.side = side;
+            pc.outdated = outdated;
+            return Ok(pc);
+        }
+        // Inline comment: needs the head commit sha — the one the reviewer
+        // saw when the client sends it, else the PR's current head.
+        if let (Some(path), Some(line)) = (&c.path, c.line) {
+            let commit_id = match c.commit_id.as_deref().filter(|s| !s.trim().is_empty()) {
+                Some(sha) => sha.to_string(),
+                None => vstr(&self.pr_raw(r, number).await?, &["head", "sha"]),
+            };
+            let v = self
+                .http
+                .json(
+                    self.req(
+                        reqwest::Method::POST,
+                        &format!("{}/{number}/comments", Self::prs_path(r)),
+                    )
+                    .json(&inline_comment_body(c, path, line, &commit_id)),
+                )
+                .await?;
+            let mut pc = comment_from(&v, Some(path.clone()), Some(line));
+            pc.side = Some(c.side.unwrap_or_default());
+            return Ok(pc);
+        }
+        // General comment → issue comment.
+        let v = self
+            .http
+            .json(
+                self.req(
+                    reqwest::Method::POST,
+                    &format!("{}/{number}/comments", Self::issues_path(r)),
+                )
+                .json(&json!({ "body": c.body })),
+            )
+            .await?;
+        Ok(comment_from(&v, None, None))
+    }
+}
+
+/// A comment this credential just wrote: the caller's own.
+fn own(mut c: PrComment) -> PrComment {
+    c.can_edit = true;
+    c
+}
+
+/// Review summaries (`review-<id>`) are edited/deleted on GitHub itself.
+fn refuse_review_summary(comment_id: &str, verb: &str) -> Result<()> {
+    if comment_id.starts_with("review-") {
+        return Err(Error::Invalid(format!(
+            "a GitHub review summary can't be {verb} from Otto — open the PR on GitHub"
+        )));
+    }
+    Ok(())
 }
 
 /// Warning attached to a create-PR response when the post-create reviewer

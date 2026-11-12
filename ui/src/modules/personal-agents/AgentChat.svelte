@@ -64,7 +64,10 @@
     {#if ThreadView.error}
       <LoadState what="the chat" error={ThreadView.error} onretry={() => ThreadView.retry()} />
     {:else if ThreadView.component}
-      <ThreadView.component sessionId={chat.id} {workspaceId} {agentName} />
+      <!-- The chat is this page's main surface: it takes focus, as its
+           terminal does. No host commands: /diff, /files, /terminal, /new
+           and /btw are Threads' and stay out of the agent's slash popup. -->
+      <ThreadView.component sessionId={chat.id} {workspaceId} {agentName} focusOnMount />
     {:else}
       <LoadState what="the chat" loading />
     {/if}

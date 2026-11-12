@@ -1,8 +1,9 @@
 <script lang="ts">
   // The PR header's review pair, forge-style: Approve and Request changes,
   // each turning into a status ("Approved" / "Changes requested") once that is
-  // your current review. Neither forge API we use can withdraw a review, so a
-  // status is shown, not a toggle; the other button still switches opinion.
+  // your current review; the other button still switches opinion. A review
+  // can be withdrawn on the forges, but this pair has no withdraw control
+  // yet, so a status is shown, not a toggle.
   import Icon from '../../lib/components/Icon.svelte';
   import type { MyReview } from './pr-review-state';
 

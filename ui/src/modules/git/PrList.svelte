@@ -322,7 +322,7 @@
         maxVisible: 40,
         align: 'end',
       });
-    ctxMenu.show(e, filterItems(prefs, { hasHandles: myHandles.size > 0, authors, pickAuthor }, setPrefs));
+    ctxMenu.show(e, filterItems(prefs, { hasHandles: myHandles.size > 0 || prs.some((p) => p.is_mine), authors, pickAuthor }, setPrefs));
   }
 
   // ── Opening + selection ─────────────────────────────────────────────────

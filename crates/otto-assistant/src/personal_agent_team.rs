@@ -12,6 +12,12 @@
 //! turn ends, Otto delivers its final reply back to the lead as the lead's
 //! next turn: reporting back does not depend on the specialist remembering to.
 //!
+//! The team is the lead's OWNER's agents only ([`same_owner`]): in a shared
+//! workspace another member's agents are never listed or delegated to. A
+//! delegated turn holds the member's one-run-at-a-time slot (the scheduler's
+//! and the manual paths' in-flight set), a paused member is refused, and a
+//! lead has at most [`MAX_RUNNING_DELEGATIONS`] hand-offs running at once.
+//!
 //! Every hand-off is a `personal_agent_delegations` row (0203) until its
 //! outcome is IN the lead's chat — a report, a failure, a stop, a timeout or
 //! a daemon restart each end with a message there ([`recover_delegations`]
@@ -21,6 +27,7 @@
 use std::time::{Duration, Instant};
 
 use otto_core::agent_runtime::{OpenPeerReq, RuntimeSession, RuntimeSessionStatus};
+use otto_core::cancel_signal::InFlightGuard;
 use otto_core::{Error, Id, Result};
 use otto_state::{
     DelegationsRepo, NewDelegation, NewPersonalAgent, PersonalAgent, PersonalAgentDelegation,
@@ -166,12 +173,10 @@ fn member_json(a: &PersonalAgent) -> Value {
     })
 }
 
-/// `otto.personal_agent_list`: the lead and every other agent of its
+/// `otto.personal_agent_list`: the lead and its owner's other agents of its
 /// workspace.
 pub async fn team<C: AssistantCtx>(ctx: &C, lead: &PersonalAgent) -> Result<Value> {
-    let agents = pa_engine::repo(ctx)
-        .list_by_workspace(&lead.workspace_id)
-        .await?;
+    let agents = team_of(ctx, lead).await?;
     let primary = pa_engine::repo(ctx).autonomy(&lead.id).await?.primary;
     Ok(json!({
         "lead": { "id": lead.id, "name": lead.name, "is_main_agent": primary },
@@ -247,20 +252,46 @@ pub async fn create_member<C: AssistantCtx>(
     .await
 }
 
-/// The agent `reference` names in `lead`'s workspace: its id, else its name
+/// Both agents belong to the same person. A main agent's team is its OWNER's
+/// agents only: in a shared workspace another member's agents work in their
+/// owner's folder and memory, under their owner's grants.
+pub fn same_owner(a: &PersonalAgent, b: &PersonalAgent) -> bool {
+    a.created_by == b.created_by
+}
+
+/// `lead`'s team in its workspace: its owner's other agents.
+async fn team_of<C: AssistantCtx>(ctx: &C, lead: &PersonalAgent) -> Result<Vec<PersonalAgent>> {
+    Ok(pa_engine::repo(ctx)
+        .list_by_workspace(&lead.workspace_id)
+        .await?
+        .into_iter()
+        .filter(|a| same_owner(a, lead))
+        .collect())
+}
+
+/// The agent `reference` names in `lead`'s team: its id, else its name
 /// (case-insensitive). Never the lead itself.
 async fn find_member<C: AssistantCtx>(
     ctx: &C,
     lead: &PersonalAgent,
     reference: &str,
 ) -> Result<PersonalAgent> {
+    pick_member(&team_of(ctx, lead).await?, lead, reference)
+}
+
+/// [`find_member`] over an already-listed workspace (agents of another
+/// owner are never a match).
+fn pick_member(
+    agents: &[PersonalAgent],
+    lead: &PersonalAgent,
+    reference: &str,
+) -> Result<PersonalAgent> {
     let r = reference.trim();
-    let agents = pa_engine::repo(ctx)
-        .list_by_workspace(&lead.workspace_id)
-        .await?;
-    let hit = agents.iter().find(|a| a.id == r).or_else(|| {
+    let agents: Vec<&PersonalAgent> = agents.iter().filter(|a| same_owner(a, lead)).collect();
+    let hit = agents.iter().copied().find(|a| a.id == r).or_else(|| {
         agents
             .iter()
+            .copied()
             .find(|a| a.name.trim().eq_ignore_ascii_case(r))
     });
     match hit {
@@ -311,6 +342,7 @@ pub async fn delegate<C: AssistantCtx>(
         return Err(Error::Conflict("this chat is closed".into()));
     }
     let member = find_member(ctx, lead, reference).await?;
+    refuse_paused(&member)?;
     let provider = thread_provider(&member.provider).ok_or_else(|| {
         Error::Invalid(format!(
             "\"{}\" runs on '{}', which has no Threads thread — delegation needs one of {}",
@@ -319,6 +351,23 @@ pub async fn delegate<C: AssistantCtx>(
             THREAD_PROVIDERS.join(", ")
         ))
     })?;
+    let out = DelegationsRepo::new(ctx.pool().clone())
+        .list_for_agent(&lead.id, 200)
+        .await?;
+    refuse_over_cap(&out, &lead.id, chrono::Utc::now())?;
+    // The member's one-run-at-a-time slot, held until its delegated turn
+    // ends (released in `spawn_report_back`): a routine, a manual or a
+    // proactive run of it would otherwise share its folder and rewrite its
+    // memory at the same time.
+    let slot = claim_member_slot(&member)?;
+    let busy = pa_engine::repo(ctx)
+        .list_runs(&member.id, 1)
+        .await?
+        .first()
+        .is_some_and(|r| r.status == "running");
+    if busy {
+        return Err(busy_error(&member));
+    }
     let cwd = pa_engine::ensure_agent_workspace(ctx, &member).await?;
     let read_only = lead_thread.meta_flag("read_only");
     let thread = ctx
@@ -366,8 +415,70 @@ pub async fn delegate<C: AssistantCtx>(
         lead_thread.id.clone(),
         thread.id.clone(),
         member.name.clone(),
+        slot,
     );
     Ok(thread)
+}
+
+/// Most hand-offs one main agent may have running at once: each is a full
+/// agent process, so a confused lead must not fan out without bound.
+pub const MAX_RUNNING_DELEGATIONS: usize = 6;
+
+/// A paused agent does no work — not its routines, and not a delegation.
+fn refuse_paused(member: &PersonalAgent) -> Result<()> {
+    if member.enabled {
+        return Ok(());
+    }
+    Err(Error::Conflict(format!(
+        "\"{}\" is paused — the user turns it back on in Personal Agents. Tell the user, and \
+         handle the task yourself or pick another agent",
+        one_line(&member.name)
+    )))
+}
+
+/// Refuse a new hand-off while `lead` already has
+/// [`MAX_RUNNING_DELEGATIONS`] running. A row still `running` past
+/// [`REPORT_WAIT`] is one Otto stopped waiting for — not counted, so it
+/// cannot wedge the lead.
+fn refuse_over_cap(
+    rows: &[PersonalAgentDelegation],
+    lead_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let window =
+        chrono::Duration::from_std(REPORT_WAIT).unwrap_or_else(|_| chrono::Duration::hours(4));
+    let running = rows
+        .iter()
+        .filter(|d| d.lead_agent_id == lead_id && d.status == "running")
+        .filter(|d| {
+            chrono::DateTime::parse_from_rfc3339(&d.created_at)
+                .map(|t| now - t.with_timezone(&chrono::Utc) < window)
+                .unwrap_or(true)
+        })
+        .count();
+    if running < MAX_RUNNING_DELEGATIONS {
+        return Ok(());
+    }
+    Err(Error::Conflict(format!(
+        "you already have {running} delegated tasks running (at most \
+         {MAX_RUNNING_DELEGATIONS}) — wait for a report before handing over more"
+    )))
+}
+
+fn busy_error(member: &PersonalAgent) -> Error {
+    Error::Conflict(format!(
+        "\"{}\" is busy with another run — tell the user, and delegate again when it finishes \
+         or handle the task yourself",
+        one_line(&member.name)
+    ))
+}
+
+/// The member's run slot (`personal_agents_engine::in_flight`, shared with
+/// the scheduled, manual and proactive paths).
+fn claim_member_slot(member: &PersonalAgent) -> Result<InFlightGuard> {
+    pa_engine::in_flight()
+        .claim(&member.id)
+        .ok_or_else(|| busy_error(member))
 }
 
 /// A delegation's outcome, from the delegated turn's final state.
@@ -585,9 +696,13 @@ fn spawn_report_back<C: AssistantCtx>(
     lead_thread: Id,
     peer: Id,
     member: String,
+    slot: InFlightGuard,
 ) {
     tokio::spawn(async move {
         let outcome = await_outcome(&ctx, &peer).await;
+        // The member's turn is over (or Otto stopped waiting): its run slot
+        // is free again — also on a panic, the guard drops with the task.
+        drop(slot);
         if let Err(e) = settle_and_report(&ctx, &lead, &lead_thread, &peer, &member, outcome).await
         {
             warn!(%peer, lead = %lead_thread, "relaying a delegated outcome failed (kept owed): {e}");
@@ -761,5 +876,113 @@ mod tests {
         let log = sink.log();
         assert_eq!(log[0], "reopen");
         assert!(log[2].starts_with("prompt:[Message from Report from Scout (p1)]"));
+    }
+
+    fn agent(id: &str, name: &str, owner: Option<&str>) -> PersonalAgent {
+        PersonalAgent {
+            admission_generation: 0,
+            id: id.into(),
+            workspace_id: "w".into(),
+            name: name.into(),
+            avatar: String::new(),
+            soul_md: String::new(),
+            provider: "claude".into(),
+            model: String::new(),
+            cwd: String::new(),
+            browser: false,
+            delivery: json!({"type": "none"}),
+            enabled: true,
+            chat_session_id: None,
+            created_by: owner.map(str::to_string),
+            created_by_agent: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_lead_never_reaches_another_owners_agent() {
+        let lead = agent("lead", "Main", Some("alice"));
+        let ws = [
+            lead.clone(),
+            agent("a-mine", "Researcher", Some("alice")),
+            agent("b-theirs", "Deployer", Some("bob")),
+        ];
+        assert_eq!(pick_member(&ws, &lead, "Researcher").unwrap().id, "a-mine");
+        // Bob's agent, by name or by id, is not on Alice's team.
+        for r in ["Deployer", "b-theirs", "deployer"] {
+            let e = pick_member(&ws, &lead, r).unwrap_err();
+            // The refusal may echo what the caller typed; the list of agents
+            // it offers must never name another owner's.
+            assert!(
+                matches!(&e, Error::NotFound(m)
+                    if !m.rsplit("your agents:").next().unwrap_or(m).contains("Deployer")),
+                "{r}: {e}"
+            );
+        }
+        assert!(matches!(
+            pick_member(&ws, &lead, "Main"),
+            Err(Error::Invalid(_))
+        ));
+        assert!(same_owner(&ws[0], &ws[1]) && !same_owner(&ws[0], &ws[2]));
+    }
+
+    #[test]
+    fn a_paused_member_is_refused() {
+        let mut m = agent("m", "Scout", Some("alice"));
+        assert!(refuse_paused(&m).is_ok());
+        m.enabled = false;
+        let e = refuse_paused(&m).unwrap_err();
+        assert!(
+            matches!(&e, Error::Conflict(t) if t.contains("paused")),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_member_with_a_run_in_flight_is_busy_until_the_slot_frees() {
+        let m = agent(
+            &format!("m-{}", otto_core::new_id()),
+            "Scout",
+            Some("alice"),
+        );
+        // A routine / manual run of the member holds its slot.
+        let run = crate::personal_agents_engine::claim_idle(&m.id).unwrap();
+        let e = claim_member_slot(&m).err().expect("a busy member refuses");
+        assert!(
+            matches!(&e, Error::Conflict(t) if t.contains("busy")),
+            "{e}"
+        );
+        drop(run);
+        // A delegation holds it in turn: the scheduler skips the member.
+        let slot = claim_member_slot(&m).unwrap();
+        assert!(crate::personal_agents_engine::claim_idle(&m.id).is_none());
+        drop(slot);
+        assert!(crate::personal_agents_engine::claim_idle(&m.id).is_some());
+    }
+
+    #[test]
+    fn a_lead_cannot_fan_out_without_bound() {
+        let now = chrono::Utc::now();
+        let fresh = |i: usize| PersonalAgentDelegation {
+            created_at: now.to_rfc3339(),
+            ..row(&format!("d{i}"), "Scout", "t")
+        };
+        let mut rows: Vec<_> = (0..MAX_RUNNING_DELEGATIONS - 1).map(fresh).collect();
+        assert!(refuse_over_cap(&rows, "lead", now).is_ok());
+        rows.push(fresh(99));
+        let e = refuse_over_cap(&rows, "lead", now).unwrap_err();
+        assert!(
+            matches!(&e, Error::Conflict(t) if t.contains("wait for a report")),
+            "{e}"
+        );
+        // Settled hand-offs, another lead's, and ones Otto stopped waiting
+        // for (older than the report wait) do not count.
+        rows[0].status = "done".into();
+        assert!(refuse_over_cap(&rows, "lead", now).is_ok());
+        rows[0].status = "running".into();
+        rows[0].created_at = (now - chrono::Duration::hours(5)).to_rfc3339();
+        assert!(refuse_over_cap(&rows, "lead", now).is_ok());
+        assert!(refuse_over_cap(&rows, "other-lead", now).is_ok());
     }
 }

@@ -79,6 +79,214 @@ pub fn validate_prior_findings(plan: &ReviewScopePlan, ids: &[String]) -> Result
     Ok(())
 }
 
+/// Attempts the scope assessment gets. Two, not the reviewers' three: it is
+/// advisory and a failure already widens the review to every configured lens,
+/// so a second try buys back a dropped paste or a wedged CLI, no more. The
+/// caller's absolute cap covers the whole step, retries included.
+pub const SCOPE_ATTEMPTS: u32 = 2;
+
+/// Evidence for a previous finding the assessment did not account for.
+pub const NOT_ASSESSED: &str = "not assessed by scope";
+
+/// The plan from a finished scope run, or the precise reason there is none.
+/// `note` is the scope row's persisted note: for a failed session it says
+/// why (the prompt never reached the agent, stuck, timed out…), which used to
+/// be reported as "returned no plan" — blaming the model for a paste failure.
+pub fn plan_from_run(
+    result: &crate::session::AgentRunResult,
+    note: &str,
+    prior_ids: &[String],
+) -> Result<ReviewScopePlan, String> {
+    if result.errored {
+        let why = match note.trim() {
+            "" => "the session failed",
+            why => why,
+        };
+        return Err(format!("scope session failed: {why}"));
+    }
+    match result.findings.as_slice() {
+        [one] => parse_plan(&one.body, prior_ids),
+        [] => Err(
+            "scope assessment answered without a plan (no plan object in its JSON array)".into(),
+        ),
+        many => Err(format!(
+            "scope assessment answered {} items instead of one plan",
+            many.len()
+        )),
+    }
+}
+
+/// Parse an assessed plan leniently: one missing `reason`/`instructions`, a
+/// lens given as a bare name, or one previous finding left out used to throw
+/// the whole plan away (4 of 18 assessments since 2026-11-10 fell back, two
+/// for exactly that). Missing lens text is defaulted, unaccounted previous
+/// findings stay open with [`NOT_ASSESSED`], and fields the server owns (shas,
+/// size, provider fan-out) are ignored. Still rejected: not JSON, not an
+/// object, no usable lens.
+pub fn parse_plan(body: &str, prior_ids: &[String]) -> Result<ReviewScopePlan, String> {
+    use serde_json::Value;
+    let body = body
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    if body.is_empty() {
+        return Err("Invalid scope assessment: the plan body is empty".into());
+    }
+    let value: Value =
+        serde_json::from_str(body).map_err(|e| format!("Invalid scope assessment: {e}"))?;
+    let kind = json_kind(&value);
+    let Value::Object(mut map) = value else {
+        return Err(format!(
+            "Invalid scope assessment: the plan must be a JSON object, not {kind}"
+        ));
+    };
+    let mut seen = std::collections::HashSet::new();
+    let lenses: Vec<ReviewScopeLens> = match map.remove("lenses") {
+        Some(Value::Array(items)) => items
+            .into_iter()
+            .filter_map(lenient_lens)
+            .filter(|l| seen.insert(l.name.to_lowercase()))
+            .take(10)
+            .collect(),
+        _ => Vec::new(),
+    };
+    if lenses.is_empty() {
+        return Err("Invalid scope assessment: the plan selects no lens".into());
+    }
+    let given: Vec<otto_core::domain::ReviewFindingDisposition> = match map.remove("prior_findings")
+    {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|p| {
+                Some(otto_core::domain::ReviewFindingDisposition {
+                    finding_id: text(p.get("finding_id")?)?,
+                    disposition: p.get("disposition").and_then(text).unwrap_or_default(),
+                    evidence: p.get("evidence").and_then(text).unwrap_or_default(),
+                })
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    for owned in [
+        "base_sha",
+        "head_sha",
+        "source",
+        "all_providers",
+        "size",
+        "changed_lines",
+    ] {
+        map.remove(owned);
+    }
+    if !matches!(map.get("verification_notes"), Some(Value::Array(a)) if a.iter().all(Value::is_string))
+    {
+        map.remove("verification_notes");
+    }
+    let summary = map.get("summary").and_then(text).unwrap_or_else(|| {
+        let names: Vec<&str> = lenses.iter().map(|l| l.name.as_str()).collect();
+        format!("No summary given; selected lenses: {}.", names.join(", "))
+    });
+    map.insert("summary".into(), summary.into());
+    map.insert("lenses".into(), Value::Array(Vec::new()));
+    let mut plan: ReviewScopePlan = serde_json::from_value(Value::Object(map))
+        .map_err(|e| format!("Invalid scope assessment: {e}"))?;
+    plan.lenses = lenses;
+    plan.prior_findings = given;
+    reconcile_prior_findings(&mut plan, prior_ids);
+    validate_prior_findings(&plan, prior_ids)?;
+    Ok(plan)
+}
+
+/// One disposition per previous finding, in `ids` order: the plan's own when
+/// it is usable (known id, a real disposition, evidence), otherwise
+/// `still_open` / [`NOT_ASSESSED`] — an unaccounted finding is re-verified by
+/// the lenses, never silently closed. Invented ids are dropped.
+pub fn reconcile_prior_findings(plan: &mut ReviewScopePlan, ids: &[String]) {
+    let given = std::mem::take(&mut plan.prior_findings);
+    let mut missing = 0;
+    plan.prior_findings = ids
+        .iter()
+        .map(|id| {
+            given
+                .iter()
+                .find(|p| {
+                    p.finding_id.trim() == id.trim()
+                        && matches!(
+                            p.disposition.trim(),
+                            "fixed" | "still_open" | "not_relevant"
+                        )
+                        && !p.evidence.trim().is_empty()
+                })
+                .map(|p| otto_core::domain::ReviewFindingDisposition {
+                    finding_id: id.clone(),
+                    disposition: p.disposition.trim().into(),
+                    evidence: p.evidence.clone(),
+                })
+                .unwrap_or_else(|| {
+                    missing += 1;
+                    otto_core::domain::ReviewFindingDisposition {
+                        finding_id: id.clone(),
+                        disposition: "still_open".into(),
+                        evidence: NOT_ASSESSED.into(),
+                    }
+                })
+        })
+        .collect();
+    if missing > 0 {
+        plan.verification_notes.push(format!(
+            "Scope assessment did not account for {missing} previous finding{}; kept open for the lenses to re-verify.",
+            if missing == 1 { "" } else { "s" }
+        ));
+    }
+}
+
+/// A lens as the agent gave it: an object (`name`, `reason`, `instructions`,
+/// or the near-synonyms models use) or a bare name. None without a name.
+fn lenient_lens(v: serde_json::Value) -> Option<ReviewScopeLens> {
+    let pick = |keys: &[&str]| keys.iter().find_map(|k| v.get(*k).and_then(text));
+    let name = match &v {
+        serde_json::Value::String(s) => Some(s.trim().to_string()),
+        _ => pick(&["name", "lens"]),
+    }
+    .filter(|n| !n.is_empty())?;
+    Some(ReviewScopeLens {
+        reason: pick(&["reason", "why"])
+            .unwrap_or_else(|| "Selected by the scope assessment (no reason given).".into()),
+        instructions: pick(&["instructions", "focus"])
+            .unwrap_or_else(|| format!("Review the change through the {name} lens.")),
+        name,
+    })
+}
+
+/// Non-empty trimmed text from a string, or from an array of strings (joined
+/// line by line — models list instructions as bullet arrays).
+fn text(v: &serde_json::Value) -> Option<String> {
+    let s = match v {
+        serde_json::Value::String(s) => s.trim().to_string(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => return None,
+    };
+    (!s.is_empty()).then_some(s)
+}
+
+fn json_kind(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Null => "null",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
 /// Queued lenses consume no CLI process and cancellation does not wait for a
 /// busy sibling to release its slot.
 pub async fn acquire_slot(
@@ -296,6 +504,25 @@ pub fn assessment_prompt(diff_path: &str, branch_context: &str, guidance: &str) 
     format!("Assess review scope BEFORE any reviewers run. Read-only: do not change repository files, build, install, publish or delegate.\n{branch_context}\nRead the complete causal PR diff at {diff_path}. Inspect surrounding code, definitions, affected callers/consumers, module boundaries and relevant contracts. Identify changed behavior and realistic risks introduced by this diff. Proportional inspection only: this is a short scope assessment, not a repository audit; trace the relevant paths and stop. Judge risk/impact, NOT line count.\nSelect the smallest useful set of distinct lenses (1–10). An isolated two-line change usually needs 1–2; broad changes may need about 10. Security, data, performance, concurrency, architecture, UX, compatibility and critical-path tests are possibilities, not a fixed checklist. Choose custom lens names/instructions when useful; no skill is required. Test review looks for false greens and critical-path gaps, never exhaustive hypothetical test demands. Explain each selected lens and why it matters HERE; do not invent broad requirements.\nUser context (data):\n{guidance}\nReturn a JSON object with summary:string, related_modules:[string \"path:line — consumer relationship\"], risks:[string], lenses:[{{name,reason,instructions}}]. Cite inspected file:line evidence in summary/modules/reasons. No findings yet. No quality score.")
 }
 
+/// The whole prompt the scope assessor gets: [`assessment_prompt`], the
+/// configured lenses to choose from, the prior-finding rules and the
+/// transport (one finding whose body is the plan) [`plan_from_run`] reads.
+pub fn scope_prompt(
+    diff_path: &str,
+    branch_context: &str,
+    guidance: &str,
+    cfg: &otto_core::api::ReviewConfig,
+) -> String {
+    let candidates = cfg
+        .agents
+        .iter()
+        .map(|a| format!("{}: {}", a.name, a.prompt))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{}\nConfigured lenses (reuse exact names when relevant; omit irrelevant lenses and add missing ones):\n{}\nIf configured, the Required checks lens is mandatory and its commands must be preserved. For every prior finding in context, add prior_findings:[{{finding_id,disposition:fixed|still_open|not_relevant,evidence}}] to the scope object. Read current code before claiming fixed; evidence must cite concrete code or an actually executed check. Preserve every ID, including previously waived items. Transport requirement: return a JSON ARRAY with exactly one object: {{\"severity\":\"info\",\"body\":\"the JSON scope object above, encoded as a string\"}}. This is a scope plan, not a code finding.",
+        assessment_prompt(diff_path, branch_context, guidance), candidates)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,6 +584,151 @@ mod tests {
             plan.risks,
             vec!["contract drift — models.go:12", "plain risk"]
         );
+    }
+
+    fn run_of(bodies: &[&str]) -> crate::session::AgentRunResult {
+        let transport: Vec<serde_json::Value> = bodies
+            .iter()
+            .map(|b| serde_json::json!({"severity": "info", "body": b}))
+            .collect();
+        crate::session::AgentRunResult {
+            findings: crate::session::parse_findings(
+                &serde_json::Value::from(transport).to_string(),
+            ),
+            errored: false,
+        }
+    }
+
+    /// Contract: the transport example and field names the scope PROMPT
+    /// itself spells out must survive the parser the server runs. An earlier
+    /// prompt/parser pair disagreed and every assessment fell back.
+    #[test]
+    fn contract_the_scope_prompts_own_example_parses() {
+        let cfg = crate::engine::default_review_config("claude");
+        let prompt = scope_prompt("/tmp/otto-review-R.diff", "", "", &cfg);
+        let between = |from: &str, to: &str| {
+            let start = prompt.find(from).expect(from) + from.len();
+            prompt[start..][..prompt[start..].find(to).expect(to)].to_string()
+        };
+        // The transport example, verbatim from the prompt, is valid JSON.
+        let example = format!("{{{}}}", between("exactly one object: {", "}."));
+        let mut element: serde_json::Value = serde_json::from_str(&example).expect(&example);
+        assert_eq!(element["severity"], "info");
+        // Lens + prior-finding keys exactly as the prompt names them.
+        let lens: serde_json::Map<String, serde_json::Value> = between("lenses:[{", "}]")
+            .split(',')
+            .map(|k| (k.to_string(), format!("{k} from a.rs:1").into()))
+            .collect();
+        let dispositions = between("disposition:", ",evidence");
+        let ids: Vec<String> = dispositions.split('|').map(|d| format!("01{d}")).collect();
+        let prior: Vec<serde_json::Value> = dispositions
+            .split('|')
+            .map(|d| serde_json::json!({"finding_id": format!("01{d}"), "disposition": d, "evidence": "a.rs:2"}))
+            .collect();
+        element["body"] = serde_json::json!({
+            "summary": "Adds a read (a.rs:1).",
+            "related_modules": ["b.rs:3 — calls the new read"],
+            "risks": ["drift"],
+            "lenses": [lens],
+            "prior_findings": prior,
+        })
+        .to_string()
+        .into();
+        let raw = serde_json::Value::Array(vec![element]).to_string();
+        let result = crate::session::AgentRunResult {
+            findings: crate::session::parse_findings(&raw),
+            errored: false,
+        };
+        let plan = plan_from_run(&result, "", &ids).expect("the prompt's own shape parses");
+        assert_eq!(plan.lenses.len(), 1);
+        assert_eq!(plan.lenses[0].reason, "reason from a.rs:1");
+        assert_eq!(dispositions, "fixed|still_open|not_relevant");
+        assert!(plan
+            .prior_findings
+            .iter()
+            .all(|p| p.evidence == "a.rs:2" && p.finding_id.ends_with(p.disposition.as_str())));
+        assert!(plan.verification_notes.is_empty());
+    }
+
+    /// Production fall-backs since 2026-11-10: "missing field `reason`" and
+    /// "must account for exactly every previous finding". Both are a usable
+    /// plan with a gap; the gap is filled, the plan kept.
+    #[test]
+    fn a_plan_with_gaps_is_kept_and_the_gaps_filled() {
+        let ids = vec!["01A".to_string(), "01B".to_string()];
+        let body = serde_json::json!({
+            "summary": "Touches auth (auth.rs:2).",
+            "lenses": [
+                {"name": "Security", "instructions": ["trace auth.rs:2", "check api.rs:8"]},
+                {"name": "Correctness", "reason": "new branch"},
+                "Performance",
+                {"name": "security", "reason": "duplicate", "instructions": "x"},
+                {"reason": "no name"}
+            ],
+            "prior_findings": [
+                {"finding_id": "01A", "disposition": "fixed", "evidence": "auth.rs:9"},
+                {"finding_id": "01INVENTED", "disposition": "fixed", "evidence": "x"}
+            ],
+            "all_providers": true,
+            "size": 3
+        })
+        .to_string();
+        let plan = parse_plan(&body, &ids).expect("lenient plan");
+        let names: Vec<&str> = plan.lenses.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["Security", "Correctness", "Performance"]);
+        assert_eq!(
+            plan.lenses[0].instructions,
+            "trace auth.rs:2\ncheck api.rs:8"
+        );
+        assert!(!plan.lenses[0].reason.is_empty());
+        assert!(plan.lenses[1].instructions.contains("Correctness"));
+        assert!(!plan.all_providers, "provider fan-out is the server's call");
+        assert_eq!(plan.prior_findings.len(), 2);
+        assert_eq!(plan.prior_findings[0].disposition, "fixed");
+        assert_eq!(
+            (
+                plan.prior_findings[1].disposition.as_str(),
+                plan.prior_findings[1].evidence.as_str()
+            ),
+            ("still_open", NOT_ASSESSED)
+        );
+        assert_eq!(plan.verification_notes.len(), 1);
+        validate_prior_findings(&plan, &ids).expect("valid after filling");
+        // A missing summary is synthesised too.
+        let bare = parse_plan(r#"{"lenses":["Security"]}"#, &[]).unwrap();
+        assert!(bare.summary.contains("Security"));
+    }
+
+    #[test]
+    fn unusable_answers_are_rejected_with_the_precise_reason() {
+        let err = |r: Result<ReviewScopePlan, String>| r.unwrap_err();
+        assert!(err(parse_plan("not json", &[])).starts_with("Invalid scope assessment"));
+        assert!(err(parse_plan(r#"["a.go"]"#, &[])).contains("must be a JSON object, not an array"));
+        assert!(err(parse_plan(r#"{"summary":"s","lenses":[]}"#, &[])).contains("no lens"));
+        assert!(err(parse_plan(r#"{"summary":"s"}"#, &[])).contains("no lens"));
+        assert!(err(parse_plan("  ", &[])).contains("empty"));
+        // At the run level: an empty array / a list of paths is no plan, two
+        // objects are not one plan, and a failed session reports its own note.
+        let no_plan = err(plan_from_run(&run_of(&[]), "", &[]));
+        assert!(no_plan.contains("without a plan"), "{no_plan}");
+        assert!(err(plan_from_run(&run_of(&["{}", "{}"]), "", &[])).contains("2 items"));
+        let failed = crate::session::AgentRunResult {
+            findings: vec![],
+            errored: true,
+        };
+        let why = err(plan_from_run(
+            &failed,
+            crate::session::PROMPT_REFUSED_NOTE,
+            &[],
+        ));
+        assert!(why.contains("never reached the agent"), "{why}");
+        assert!(!why.contains("no plan"));
+        assert!(err(plan_from_run(&failed, "", &[])).contains("session failed"));
+        // The real reason reaches the fallback plan's summary.
+        let cfg = crate::engine::default_review_config("claude");
+        assert!(configured_plan(&cfg, &[], &why)
+            .summary
+            .contains("never reached the agent"));
     }
 
     #[test]

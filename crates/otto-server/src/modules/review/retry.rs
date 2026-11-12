@@ -567,7 +567,7 @@ pub(crate) async fn retry_summarizer(
             // The original run's cwd/head is gone (a PR worktree is torn down
             // after the run; the head may have moved since), so this attempt
             // cannot prove a finding absent — it only re-summarizes.
-            Some("summarizer retry"),
+            Some(otto_review::verification::SUMMARIZER_RETRY_BLOCKER),
         )
         .await;
         if let Some(wt) = pr_wt {

@@ -1416,3 +1416,65 @@ Provider executable templates containing `{cwd}` or `{sid}` are resolved at
 launch, when those values exist; global readiness shows them as unchecked and
 keeps them selectable. Mission Control ignores stale workspace loads and save
 completions, so switching workspaces preserves the destination's view and form.
+
+## Machine resources
+
+Parallel sessions and engine fan-outs used to assume they owned the machine:
+two code reviews (six reviewer agents each) plus a nightly docs job pushed an
+8-core / 16 GB Mac into 22 GB of swap, and both reviews failed. Three
+mechanisms now keep agent work inside what the machine can take
+(`crates/otto-sessions/src/admission.rs`, `build_budget.rs`,
+`machine_load.rs`, glue in `manager/resources.rs`).
+
+**Admission gate (background agents only).** Before the CLI of an
+unattended background agent is spawned — `meta.source` one of `review`,
+`review_summarizer`, `skilleval`, `skillreview`, `product-analysis`,
+`workflow`, `vault-docs`, `vault-docs-review`, `insights`, `run_with_otto`,
+`goal_loop`, `scheduled_task`, `finding`, `personal_agent` — `create` waits
+until all of these hold:
+
+- fewer than `agent_background_max_live` of those agents are running or
+  starting (a hard ceiling);
+- the 1-minute load average is at most `cores × agent_admission_max_load_per_core`;
+- macOS memory pressure is below *warn*.
+
+Waiters queue first-in first-out; queued agents start at least 5 s apart (the
+load average lags the agents it cannot see yet). Nothing waits forever: a
+load or memory wait gives way after `agent_admission_max_wait_secs`, the
+ceiling after four times that, both with a logged warning. Sessions you start
+yourself, terminals, connections and the interactive assists you are watching
+(canvas / design / db assists, PR and commit drafts, channel replies,
+discovery chats) never wait, and neither do swarm roles (they are started
+together and talk to each other, so holding some back would stall the rest). The first wait in a busy spell raises one
+"Background agents queued" notice (at most every 10 minutes). Only engine
+creates are gated; a resume of a suspended background session is not, but its
+process still counts toward the ceiling once it runs.
+
+**Build budget (every agent session).** At spawn, the agent's environment gets
+parallelism hints its tools — and the CLI's own helper sub-agents, which
+inherit the environment — actually read: `CARGO_BUILD_JOBS`,
+`RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS`, `GOMAXPROCS`,
+`CMAKE_BUILD_PARALLEL_LEVEL`, `-p=N` appended to `GOFLAGS` and `-jN` appended
+to `MAKEFLAGS`. N is the cores shared by the live agent sessions (at least 2,
+at most cores − 1). A variable already set — in the daemon's environment or
+the session's own env — is never replaced, and your shell profile still wins
+inside the agent's shell tool.
+
+**Lower CPU priority (background agents).** A gated background agent runs at
+`nice 10` (its builds and tests inherit it): no cost on an idle machine, but
+under contention your own session and the app stay responsive. macOS
+background QoS was not used — it also throttles disk I/O and pins the work to
+the efficiency cores, which made a review crawl even on an idle machine.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `agent_admission_enabled` | `true` | the admission gate on/off (off releases anything queued) |
+| `agent_background_max_live` | `max(2, cores × 3/4)` (6 on 8 cores) | hard ceiling on running background agents; `0` = no ceiling |
+| `agent_admission_max_load_per_core` | `1.5` | wait while the 1-minute load exceeds cores × this |
+| `agent_admission_max_wait_secs` | `300` | longest load / memory wait (the ceiling waits 4×) |
+| `agent_background_low_priority` | `true` | run background agents at `nice 10` |
+| `agent_build_parallelism` | auto | `0`/absent = auto, a number = fixed workers, `"off"` = set no variable |
+
+The live-session cap (`max_live_agent_sessions`) is still soft: it only
+suspends *quiet* sessions. When every session over it is busy the sweep now
+says so, and if that lasts five minutes it raises one warning notice.

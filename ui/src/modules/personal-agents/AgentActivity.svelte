@@ -43,19 +43,23 @@
   const FULL_EVERY_MS = 60_000;
 
   async function load(): Promise<boolean> {
+    // An answer for the agent shown before a fast switch is dropped, never
+    // merged into this one's feed.
+    const id = agentId;
     try {
       const full = data === null || wantRuns || Date.now() - lastFull > FULL_EVERY_MS;
       wantRuns = false;
       const next = await personalAgentsApi.activity(
-        agentId,
+        id,
         data === null ? {} : { afterSeq: data.seq ?? 0, epoch: data.epoch, runs: full },
       );
+      if (id !== agentId) return false;
       if (full) lastFull = Date.now();
       data = mergeActivity(data, next);
       error = null;
       return true;
     } catch (e) {
-      error = loadErrorText(e);
+      if (id === agentId) error = loadErrorText(e);
       return false;
     }
   }
@@ -66,6 +70,7 @@
     untrack(() => {
       poll?.stop();
       data = null;
+      error = null;
       wantRuns = true;
       poll = liveQuery({
         run: () => load(),

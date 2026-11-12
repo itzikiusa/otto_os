@@ -135,6 +135,8 @@ pub fn is_agent_caller(headers: &HeaderMap, auth: &AuthContext) -> bool {
     source.get("kind").and_then(Value::as_str) == Some("agent")
         || auth.managed_session_id.is_some()
         || auth.mcp_only
+        || auth.mcp_internal
+        || auth.mcp_session_id.is_some()
 }
 
 /// Probe value substituted for every environment secret by [`uses_env_secret`];
@@ -227,6 +229,11 @@ pub async fn unbound_secret_host(
 /// [`unbound_secret_host`] with the environment-secret host set precomputed
 /// (`bound_hosts`, from [`bound_env_secret_hosts`] with the same `bind_vars`)
 /// — `None` reads it when an env secret is actually used.
+///
+/// Without the secret store this can't see the url a person recorded for a
+/// `$secret` marker, so it applies the legacy rule only (see
+/// [`marker_bound_host`]); the engine's own paths call
+/// [`find_unbound_secret`] with the store.
 #[allow(clippy::too_many_arguments)]
 pub async fn unbound_secret_host_with(
     repo: &ApiClientRepo,
@@ -238,10 +245,40 @@ pub async fn unbound_secret_host_with(
     secret_keys: &[String],
     bound_hosts: Option<&BTreeSet<String>>,
 ) -> EngineResult<Option<String>> {
-    let Some(target) = host_of(&substitute(&req.url, vars)) else {
-        return Ok(None);
-    };
-    let refs: Vec<String> = req
+    let found = find_unbound_secret(
+        repo,
+        None,
+        wid,
+        req,
+        vars,
+        bind_vars,
+        env_blob,
+        secret_keys,
+        bound_hosts,
+    )
+    .await?;
+    Ok(found.map(|unbound| unbound.target))
+}
+
+/// A stored secret on its way to a host it is not bound to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnboundSecret {
+    /// The host the send would reach.
+    pub target: String,
+    /// The host the secret may go to; `None` for an environment secret (the
+    /// workspace's saved-request hosts) or a marker with no trusted binding.
+    pub bound: Option<String>,
+}
+
+/// The saved requests (in `wid`) whose `$secret` markers `req.auth` carries,
+/// one per distinct ref. Malformed / foreign refs are skipped —
+/// [`resolve_exec_auth`] rejects those outright.
+pub(crate) async fn marker_owners(
+    repo: &ApiClientRepo,
+    wid: &Id,
+    req: &ExecuteApiReq,
+) -> Vec<ApiRequest> {
+    let refs: BTreeSet<String> = req
         .auth
         .as_object()
         .map(|o| {
@@ -251,6 +288,7 @@ pub async fn unbound_secret_host_with(
                 .collect()
         })
         .unwrap_or_default();
+    let mut owners = Vec::new();
     for r in &refs {
         let Some(rid) = api_secrets::parse_request_ref(r) else {
             continue;
@@ -258,11 +296,62 @@ pub async fn unbound_secret_host_with(
         let Ok(owner) = repo.get_request(&rid.to_string()).await else {
             continue;
         };
-        if &owner.workspace_id != wid {
-            continue;
+        if &owner.workspace_id == wid {
+            owners.push(owner);
         }
-        if host_of(&substitute(&owner.url, bind_vars)).as_deref() != Some(target.as_str()) {
-            return Ok(Some(target));
+    }
+    owners
+}
+
+/// The host a `$secret` marker owned by `owner` may be sent to: the url
+/// recorded in its Keychain `blob` ([`api_secrets::bound_url`] — set by a
+/// person's save or send, never moved by an agent's edit). A legacy blob with
+/// none recorded (or no store at hand, `None`) falls back to the owner's
+/// current url — unless an agent last wrote the request, whose url then
+/// proves nothing about where the secret belongs. `bind_vars` (the
+/// environment's own variables) resolves `{{vars}}` in that url.
+pub fn marker_bound_host(
+    owner: &ApiRequest,
+    blob: Option<&BTreeMap<String, String>>,
+    bind_vars: &serde_json::Map<String, Value>,
+) -> Option<String> {
+    if let Some(url) = blob.and_then(api_secrets::bound_url) {
+        return host_of(&substitute(url, bind_vars));
+    }
+    if is_agent_authored(owner) {
+        return None;
+    }
+    host_of(&substitute(&owner.url, bind_vars))
+}
+
+/// The secret in `req` that would leave its bound host, if any (see the
+/// section comment and [`marker_bound_host`]). `secrets` lets the check read
+/// each marker's recorded binding; `None` applies the legacy rule.
+#[allow(clippy::too_many_arguments)]
+pub async fn find_unbound_secret(
+    repo: &ApiClientRepo,
+    secrets: Option<&Arc<dyn SecretStore>>,
+    wid: &Id,
+    req: &ExecuteApiReq,
+    vars: &serde_json::Map<String, Value>,
+    bind_vars: &serde_json::Map<String, Value>,
+    env_blob: &BTreeMap<String, String>,
+    secret_keys: &[String],
+    bound_hosts: Option<&BTreeSet<String>>,
+) -> EngineResult<Option<UnboundSecret>> {
+    let Some(target) = host_of(&substitute(&req.url, vars)) else {
+        return Ok(None);
+    };
+    for owner in marker_owners(repo, wid, req).await {
+        let blob = match secrets {
+            Some(store) => Some(
+                api_secrets::load_blob_async(store, &api_secrets::request_ref(&owner.id)).await,
+            ),
+            None => None,
+        };
+        let bound = marker_bound_host(&owner, blob.as_ref(), bind_vars);
+        if bound.as_deref() != Some(target.as_str()) {
+            return Ok(Some(UnboundSecret { target, bound }));
         }
     }
     if uses_env_secret(req, vars, env_blob, secret_keys) {
@@ -273,22 +362,92 @@ pub async fn unbound_secret_host_with(
                 .contains(&target),
         };
         if !bound {
-            return Ok(Some(target));
+            return Ok(Some(UnboundSecret {
+                target,
+                bound: None,
+            }));
         }
     }
     Ok(None)
 }
 
+/// What a PERSON's send records as the binding of a marker owned by `owner`
+/// (`Some(url)` only when it changes): a legacy blob the send relied on gets
+/// the owner's url recorded; a send the person confirmed for a new host
+/// (`confirmed_url`, the url they sent) rebinds the secret to it.
+pub fn person_send_binding(
+    owner: &ApiRequest,
+    blob: &BTreeMap<String, String>,
+    target: &str,
+    bind_vars: &serde_json::Map<String, Value>,
+    confirmed_url: Option<&str>,
+) -> Option<String> {
+    if !api_secrets::has_secret_values(blob) {
+        return None;
+    }
+    if marker_bound_host(owner, Some(blob), bind_vars).as_deref() == Some(target) {
+        return api_secrets::bound_url(blob)
+            .is_none()
+            .then(|| owner.url.clone());
+    }
+    confirmed_url.map(str::to_string)
+}
+
+/// Record [`person_send_binding`] for every marker `req` carries, under each
+/// owner's credential lock. Best-effort: a locked or unreadable Keychain
+/// leaves the binding as it was (the send itself was already allowed).
+pub async fn record_person_bindings(
+    repo: &ApiClientRepo,
+    secrets: &Arc<dyn SecretStore>,
+    wid: &Id,
+    req: &ExecuteApiReq,
+    vars: &serde_json::Map<String, Value>,
+    bind_vars: &serde_json::Map<String, Value>,
+    confirmed_url: Option<&str>,
+) {
+    let Some(target) = host_of(&substitute(&req.url, vars)) else {
+        return;
+    };
+    for owner in marker_owners(repo, wid, req).await {
+        let _guard = api_secrets::request_guard(&owner.id).await;
+        let own_ref = api_secrets::request_ref(&owner.id);
+        let Ok(mut blob) = api_secrets::load_blob_checked_async(secrets, &own_ref).await else {
+            continue;
+        };
+        if let Some(url) = person_send_binding(&owner, &blob, &target, bind_vars, confirmed_url) {
+            api_secrets::set_bound_url(&mut blob, &url);
+            let _ = api_secrets::store_blob_async(secrets, &own_ref, &blob).await;
+        }
+    }
+}
+
 /// The 409 for a secret leaving its bound host. `agent` callers are told a
 /// person has to send it; people are told how to confirm.
 pub fn new_host_conflict(host: &str, agent: bool) -> EngineError {
+    unbound_secret_conflict(
+        &UnboundSecret {
+            target: host.to_string(),
+            bound: None,
+        },
+        agent,
+    )
+}
+
+/// [`new_host_conflict`] naming the host the secret is bound to as well. The
+/// target stays the FIRST `host '…'` in the text — the UI reads it from there.
+pub fn unbound_secret_conflict(unbound: &UnboundSecret, agent: bool) -> EngineError {
     let how = if agent {
         "a person must send it from the Otto UI (agent credentials cannot confirm)"
     } else {
         "re-send with confirm_new_host:true"
     };
+    let bound = match &unbound.bound {
+        Some(bound) => format!(" (its bound host is '{bound}')"),
+        None => String::new(),
+    };
     EngineError::Conflict(format!(
-        "needs_confirm=new_host: a stored secret would be sent to host '{host}', which it is not bound to; {how}"
+        "needs_confirm=new_host: a stored secret would be sent to host '{}', which it is not bound to{bound}; {how}",
+        unbound.target
     ))
 }
 

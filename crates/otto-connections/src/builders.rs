@@ -157,7 +157,7 @@ fn user_ssh_config() -> Option<String> {
 
 /// Build the terminal command for a connection. Returns the spec plus
 /// `warn_argv`: true when the secret unavoidably appears in argv
-/// (clickhouse-client only).
+/// (clickhouse-client, and mongosh when its URI carries a password).
 pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(CommandSpec, bool)> {
     let p = &conn.params;
     match conn.kind {
@@ -292,6 +292,18 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
                     "mongodb: param 'conn_string' must not start with '-'".into(),
                 ));
             }
+            // The URI is mongosh's positional argument, so a password in it is
+            // in argv — visible to every local process via `ps` for the whole
+            // session. The Explorer avoids that with a 0600 `--nodb` script that
+            // calls `connect()`, but a terminal's script would have to outlive
+            // the spawn (the PTY starts later, elsewhere) with nothing to delete
+            // it. So a URI carrying a password is flagged like
+            // clickhouse-client's, and the UI warns.
+            let warn_argv = template.contains("{secret}")
+                || matches!(
+                    otto_core::connection_credentials::extract_password(template),
+                    Ok(Some(_))
+                );
             let conn_string = if template.contains("{secret}") {
                 let secret = secret.ok_or_else(|| {
                     Error::Invalid(
@@ -312,7 +324,7 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
                     cwd: None,
                     env: vec![],
                 },
-                false,
+                warn_argv,
             ))
         }
         ConnectionKind::Clickhouse => {
@@ -738,7 +750,22 @@ mod tests {
         let (spec, warn) = build_command(&c, Some("pw")).unwrap();
         assert_eq!(spec.program, "mongosh");
         assert_eq!(spec.args, vec!["mongodb://app:pw@m1:27017/db"]);
-        assert!(!warn);
+        // The substituted password sits in mongosh's argv: flagged.
+        assert!(warn);
+    }
+
+    #[test]
+    fn mongodb_argv_warning_only_when_a_password_is_in_the_uri() {
+        let inline = conn(
+            ConnectionKind::Mongodb,
+            json!({"conn_string":"mongodb://app:pw@m1:27017/db"}),
+        );
+        assert!(build_command(&inline, None).unwrap().1);
+        let no_password = conn(
+            ConnectionKind::Mongodb,
+            json!({"conn_string":"mongodb+srv://m1.example.net/db"}),
+        );
+        assert!(!build_command(&no_password, None).unwrap().1);
     }
 
     /// S6-13: an imported profile's positional values never become options.

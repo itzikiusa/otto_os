@@ -16,7 +16,7 @@
   import ConversationView from '../agents/conversation/ConversationView.svelte'; // ui-guards: allow — experimental threads embeds shared ConversationView
   import { buildThreadMenu } from './threadMenu';
   import ThreadTerminalDrawer from './ThreadTerminalDrawer.svelte';
-  import { harnessLabel, isPlainShellSession, isThreadSession, sessionBranch } from './threadsHelpers';
+  import { harnessLabel, isPlainShellSession, sessionBranch } from './threadsHelpers';
   import { threadRepos } from './threadRepos.svelte';
   import { threads } from './threadsStore.svelte';
   import PhoneHandoffButton from '../../lib/components/PhoneHandoffButton.svelte';
@@ -24,6 +24,8 @@
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { startThreadTerminal } from './runtime/threadTerminalStart';
   import { runtimeThreadMenu } from './runtime/runtimeMenu';
+  import { threadsHostCommands } from './runtime/threadsHost';
+  import { relayTargets, relayToThread } from './threadRelay';
   import { asThreadSession, runtimeThreads } from './runtime/runtimeThreads.svelte';
   // The structured-runtime conversation loads with the first runtime thread.
   const RuntimeThread = lazyComponent(() => import('./runtime/RuntimeThread.svelte'));
@@ -77,9 +79,7 @@
   let peerText = $state('');
   let peerSending = $state(false);
 
-  const peerTargets = $derived(
-    ws.sessions.filter((s) => !s.archived && s.id !== paneId && isThreadSession(s)),
-  );
+  const peerTargets = $derived(relayTargets(paneId));
 
   // The top bar's "Search conversation" asks the focused pane.
   let lastSearchN = 0;
@@ -136,7 +136,7 @@
     if (peerSending || !peerText.trim()) return;
     peerSending = true;
     try {
-      const ok = await threads.sendPeerMessage({
+      const ok = await relayToThread({
         fromSessionId: paneId,
         target: peerTarget,
         text: peerText,
@@ -363,7 +363,7 @@
       </EmptyState>
     {:else if runtime}
       {#key paneId}
-        <LazyMount lazy={RuntimeThread} what="conversation" variant="panel" props={{ sessionId: paneId, focused }} />
+        <LazyMount lazy={RuntimeThread} what="conversation" variant="panel" props={{ sessionId: paneId, focused, hostCommands: threadsHostCommands }} />
       {/key}
     {:else if isPlainShellSession(session)}
       <div class="tp-shell-wrap otto-force-dark">

@@ -249,6 +249,22 @@ export function countStatements(sql: string, mode: SplitMode = 'sql'): number {
   return segments(sql, mode).filter((s) => stripTrailingSemi(sql.slice(s.from, s.to))).length;
 }
 
+/** Each statement that holds code, as written (`text`) and with its strings,
+ *  quoted names and comments blanked to spaces (`code`, same offsets) — what
+ *  a keyword classifier reads, so `'… where …'` or `-- DROP …` never count.
+ *  A comment-only segment runs nothing and is skipped. Not for `line` mode. */
+export function codeStatements(sql: string, mode: SplitMode = 'sql'): { text: string; code: string }[] {
+  if (mode === 'line') return [];
+  const mask = codeMask(sql, mode);
+  const out: { text: string; code: string }[] = [];
+  for (const { from, to } of segments(sql, mode)) {
+    let code = '';
+    for (let i = from; i < to; i++) code += mask[i] ? sql[i] : ' ';
+    if (stripTrailingSemi(code)) out.push({ text: sql.slice(from, to), code });
+  }
+  return out;
+}
+
 /** JS whitespace (the set `String.prototype.trim` and `\s` strip). */
 function isWs(c: number): boolean {
   if (c <= 32) return c === 32 || (c >= 9 && c <= 13);

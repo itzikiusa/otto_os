@@ -25,7 +25,7 @@
   import RuntimeContextChips from './RuntimeContextChips.svelte';
   import { assembleComposerMessage } from './composerContext';
   import { runtimeDrafts } from '../../../lib/stores/runtimeDrafts.svelte';
-  import { tick, untrack } from 'svelte';
+  import { untrack } from 'svelte';
   import { announceShown } from '../../../lib/announce.svelte';
   import { ApiError } from '../../../lib/api/client';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
@@ -39,7 +39,6 @@
   import type { ApprovalDecision, PromptDelivery, RuntimeDraftContent } from '../../../lib/api/types';
   import { INTERACTIVE_SLASH_COMMANDS, isImmediateSlashCommand, parseInteractiveSlashInput, type ComposerSlashCommand } from '../../../lib/slashActions';
   import StageSlashPopup from '../StageSlashPopup.svelte';
-  import { threads } from '../threadsStore.svelte';
   import { now } from '../../../lib/stores/now.svelte';
   import { toastError } from '../../../lib/toastError';
   import LazyMount from '../../../lib/components/LazyMount.svelte';
@@ -48,7 +47,12 @@
   import RuntimeTurnStatus from './RuntimeTurnStatus.svelte';
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
   import { approvalOutcome, errorText, isRunHandoff, isRunning, latestTurn, messageAttribution, pendingApprovals, subagentChildren, timelineRows, turnOutcome, type WorkEntry } from './timeline';
-  import { readAttachments, runViewSlash } from './runtimeComposer';
+  import { mergeQueuedEdit, readAttachments, runViewSlash } from './runtimeComposer';
+  import { availableSlash } from './hostCommands';
+  import type { RuntimeHostCommands } from '../../../lib/runtimeThreadPort';
+  import RuntimeComposerImages from './RuntimeComposerImages.svelte';
+  import RuntimeFollow from './RuntimeFollow.svelte';
+  import RuntimePlan from './RuntimePlan.svelte';
   import RuntimeAccessChip from './RuntimeAccessChip.svelte';
   import RuntimeApprovalRow from './RuntimeApprovalRow.svelte';
   import RuntimeAttachments from './RuntimeAttachments.svelte';
@@ -68,8 +72,12 @@
     onswitch?: (id: string) => void;
     /** A personal agent's chat: "Message <name>…", and its full access reads calm. */
     agentChat?: string;
+    /** The host's view-level slash commands (lib/runtimeThreadPort.ts); unhandled ones are hidden. */
+    hostCommands?: RuntimeHostCommands;
+    /** Denser chrome for a narrow column (another module's embed). */
+    compact?: boolean;
   }
-  let { sessionId, focused, onswitch, agentChat }: Props = $props();
+  let { sessionId, focused, onswitch, agentChat, hostCommands, compact = false }: Props = $props();
   const ownerId = untrack(() => sessionId);
   const draft = untrack(() => runtimeDrafts.for(ownerId));
   /** The personal agent this thread runs as (its run notices open their report). */
@@ -83,6 +91,8 @@
   const session = $derived(runtimeThreads.get(sessionId));
   const p = $derived(runtimeViews.projections[sessionId] ?? null);
   const loadError = $derived(runtimeViews.loadError[sessionId] ?? null);
+  /** A later resync failed: LoadState's quiet "Couldn’t refresh · Retry" bar over the timeline. */
+  const staleError = $derived(runtimeViews.staleError[sessionId] ?? null);
   const rows = $derived(p ? timelineRows(p.items) : []);
   const approvals = $derived(new Map((p ? pendingApprovals(p) : []).map((a) => [a.requestId, a] as const)));
   const requests = $derived(new Map((p?.requests ?? []).map((r) => [r.id, r] as const)));
@@ -113,7 +123,6 @@
 
   let scroller = $state<HTMLDivElement | null>(null);
   let composerEl = $state<HTMLTextAreaElement | null>(null);
-  let atBottom = true;
 
   const running = $derived((p ? isRunning(p) : false) || draft.sending || (draft.awaitSeq !== null && (p?.lastSequence ?? 0) < draft.awaitSeq));
   // An agent chat that answered needs no "Partly done · Send again": the
@@ -215,7 +224,7 @@
     if ((!t && draft.images.length === 0 && draft.context.length === 0) || draft.reopening || draft.sending || draft.recovered === false) return;
     const intent = parseInteractiveSlashInput(t);
     if (intent?.kind === 'send-prompt') t = intent.prompt;
-    else if (intent && runViewSlash(intent, sessionId, session)) {
+    else if (intent && runViewSlash(intent, sessionId, hostCommands)) {
       draft.text = '';
       return;
     }
@@ -225,9 +234,8 @@
     else void send(t, running && !submitted.fresh_context ? 'queue' : undefined, submitted);
   }
 
-  // ── Slash commands: the ones that act on this view ─────────────────────
-  const SLASH_NAMES = new Set(['diff', 'files', 'terminal', 'new', 'clear', 'fork', 'review', 'btw']);
-  const SLASH = INTERACTIVE_SLASH_COMMANDS.filter((c) => SLASH_NAMES.has(c.name));
+  // ── Slash commands: the ones that act on this view (and its host) ──────
+  const SLASH = $derived(availableSlash(INTERACTIVE_SLASH_COMMANDS, hostCommands));
   const popId = $props.id();
   let cmdIdx = $state(0);
   let cmdDismissed = $state(false);
@@ -300,15 +308,6 @@
     }
   }
 
-  // Follow the bottom while the reader is there (T3's scroll anchoring).
-  function onScroll(): void {
-    if (scroller) atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 40;
-  }
-  $effect(() => {
-    void p?.lastSequence;
-    if (!atBottom) return;
-    void tick().then(() => scroller?.scrollTo({ top: scroller.scrollHeight }));
-  });
   // Focus the composer when the pane becomes the focused one (not per event).
   $effect(() => {
     const el = composerEl;
@@ -336,12 +335,12 @@
   {/if}
 {/snippet}
 
-<section class="rt" aria-label="Conversation" data-testid="runtime-thread-{sessionId}">
+<section class="rt" class:compact aria-label="Conversation" data-testid="runtime-thread-{sessionId}">
   <RuntimeLinkedThreads {sessionId} {onswitch} />
   <RuntimeUiControl {sessionId} />
-  <div class="rt-scroll" bind:this={scroller} onscroll={onScroll}>
+  <div class="rt-scroll" bind:this={scroller}>
     <div class="rt-col">
-      <LoadState what="conversation" loading={!p && !loadError} error={p ? null : loadError} empty={!p} onretry={() => runtimeViews.retry(sessionId)}>
+      <LoadState what="conversation" loading={!p && !loadError} error={p ? staleError : loadError} empty={!p} onretry={() => runtimeViews.retry(sessionId)}>
         {#if rows.length === 0}
           <EmptyState
             icon="threads"
@@ -386,18 +385,13 @@
       </LoadState>
     </div>
   </div>
+  <RuntimeFollow {scroller} seq={p?.lastSequence} messageIds={rows.flatMap((r) => (r.kind === 'message' ? [r.item.id] : []))} />
 
   <div class="rt-dock">
     {#if sessionError}
       <p class="rt-banner" dir="auto" use:announceShown={{ text: sessionError, assertive: true }}><Icon name="warning" size={13} />{sessionError}</p>
     {/if}
-    {#if plan}
-      <ol class="rt-plan" aria-label="Plan">
-        {#each plan.steps as s (s.id)}
-          <li class="step-{s.status}" dir="auto"><Icon name={s.status === 'completed' ? 'check' : 'dot'} size={12} />{s.text}</li>
-        {/each}
-      </ol>
-    {/if}
+    {#if plan}<RuntimePlan {plan} />{/if}
     {#if p?.requests.some(request => request.kind === 'question')}
       <LazyMount lazy={RuntimeQuestions} what="the questions" variant="compact" props={{ requests: p.requests, sessionId, agent: agentName, onanswered: () => composerEl?.focus() }} />
     {/if}
@@ -412,7 +406,7 @@
       reopening={draft.reopening}
       onreopen={() => void reopen()}
       onedit={(t) => {
-        draft.text = t;
+        draft.text = mergeQueuedEdit(draft.text, t);
         composerEl?.focus();
       }}
     />
@@ -451,16 +445,7 @@
         onpaste={onPaste}
       ></textarea>
       {#if draft.images.length > 0}
-        <div class="rt-images" data-testid="runtime-images">
-          {#each draft.images as img, i (i)}
-            <span class="rt-image">
-              <Icon name={img.mime.startsWith('image/') ? 'image' : 'file'} size={12} /><span class="ellipsis" dir="auto">{img.name}</span>
-              <button type="button" class="icon-btn" aria-label="Remove {img.name}" title="Remove" onclick={() => (draft.images = draft.images.filter((_, j) => j !== i))}>
-                <Icon name="x" size={12} />
-              </button>
-            </span>
-          {/each}
-        </div>
+        <RuntimeComposerImages images={draft.images} onremove={(i) => (draft.images = draft.images.filter((_, j) => j !== i))} />
       {/if}
       <div class="rt-foot">
         <RuntimeDraftStatus {draft} />
@@ -584,6 +569,17 @@
     margin-inline: auto;
     padding-inline: clamp(12px, 3.2cqi, 48px);
   }
+  /* A narrow column (another module's embed): tighter gutters. */
+  .rt.compact .rt-col,
+  .rt.compact .rt-dock {
+    padding-inline: 8px;
+  }
+  .rt.compact .rt-col {
+    padding-block: 8px 12px;
+  }
+  .rt.compact .rt-dock {
+    padding-block-end: 8px;
+  }
   /* T3's MessagesTimeline rhythm: a turn opens with clear air above the
      user bubble; the answer and its work log sit close beneath it. */
   .rt-col {
@@ -656,31 +652,6 @@
     font-size: var(--fs-s);
     overflow-wrap: anywhere;
   }
-  .rt-plan {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    margin: 0;
-    padding: 6px 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface);
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-    list-style: none;
-  }
-  .rt-plan li {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    overflow-wrap: anywhere;
-  }
-  .rt-plan .step-running {
-    color: var(--text);
-  }
-  .rt-plan .step-completed {
-    color: var(--success);
-  }
   .rt-fresh {
     display: flex;
     align-items: center;
@@ -730,22 +701,6 @@
     gap: 2px;
     flex: 1;
     min-width: 0;
-  }
-  .rt-images {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-  .rt-image {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    max-inline-size: 220px;
-    padding-inline: 8px 2px;
-    border-radius: var(--radius-s);
-    background: var(--surface-2);
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
   }
   .rt-agent {
     display: inline-flex;

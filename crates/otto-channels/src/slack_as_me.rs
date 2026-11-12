@@ -37,6 +37,15 @@ fn is_human(auth: &AuthContext) -> bool {
     bound_session(auth).is_none() && !auth.mcp_only && !auth.is_scoped()
 }
 
+/// The personal agent a session's server-owned meta runs as — read the way
+/// otto-server's `SessionBinding` reads it (any string, so an odd value
+/// narrows to that "agent's" empty grant rather than widening to `All`).
+fn meta_agent(meta: &Value) -> Option<String> {
+    meta.get("personal_agent")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
 /// Which connected Slack teams `auth` may act in as its user.
 pub async fn caller_scope(pool: &DbPool, auth: &AuthContext) -> Result<AsMe> {
     if auth.is_scoped() {
@@ -46,18 +55,17 @@ pub async fn caller_scope(pool: &DbPool, auth: &AuthContext) -> Result<AsMe> {
         return Ok(AsMe::All);
     };
     let agent = match otto_state::SessionsRepo::new(pool.clone()).get(sid).await {
-        Ok(s) => s
-            .meta
-            .get("personal_agent")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        // A Threads thread has no `sessions` row and is never a personal
-        // agent; a session that resolves nowhere gets nothing.
+        Ok(s) => meta_agent(&s.meta),
+        // A Threads thread has no `sessions` row. A personal agent's chat,
+        // run or delegated work IS one, carrying the same server-owned
+        // `meta.personal_agent` (`otto_assistant::personal_agent_threads`);
+        // a plain thread has none. A session that resolves nowhere gets
+        // nothing.
         Err(_) => match otto_state::AgentRuntimeRepo::new(pool.clone())
             .get(sid)
             .await
         {
-            Ok(_) => None,
+            Ok(t) => t.session.meta.as_ref().and_then(meta_agent),
             Err(_) => return Ok(AsMe::Teams(vec![])),
         },
     };
@@ -183,3 +191,7 @@ async fn save_grant<S: ChannelsCtx>(
     repo.save_autonomy(&agent.id, &cfg).await?;
     Ok(Json(view(&s, &user, &agent).await?))
 }
+
+#[cfg(test)]
+#[path = "slack_as_me_tests.rs"]
+mod tests;

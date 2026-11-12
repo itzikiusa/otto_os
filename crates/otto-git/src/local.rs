@@ -3429,19 +3429,18 @@ impl LocalGit {
     /// Callers point this ONLY at dedicated run worktrees, never at a user's
     /// main checkout.
     pub async fn commit_all_if_dirty(&self, message: &str) -> Result<Option<String>> {
-        // Otto's own launcher files (`.mcp.json`, agy's `.agents/mcp_config.json`,
-        // grok's `.grok/config.toml` — secret env included) are never swept in.
-        let launcher: Vec<String> = otto_core::paths::LAUNCHER_ARTIFACTS
+        // Launcher files (`.mcp.json`, `.agents/mcp_config.json`, `.grok/config.toml`
+        // — secret env) and `.env*` are never swept in. Each exclude opens with
+        // a class (`[.]env` = `.env`): an exclude naming an IGNORED path literally
+        // fails `add` ("paths are ignored", exit 1), and the reaper kept the tree.
+        let excludes: Vec<String> = otto_core::paths::LAUNCHER_ARTIFACTS
             .iter()
-            .map(|p| format!(":(exclude){p}"))
+            .chain(&[".env", ".env.*"])
+            .map(|p| format!(":(exclude,glob)[{}]{}", &p[..1], &p[1..]))
             .collect();
         let mut args = vec!["add", "-A", "--", "."];
-        args.extend(launcher.iter().map(String::as_str));
-        args.extend([
-            ":(exclude).env",
-            ":(exclude).env.*",
-            ":(exclude,glob)**/.DS_Store",
-        ]);
+        args.extend(excludes.iter().map(String::as_str));
+        args.push(":(exclude,glob)**/.DS_Store");
         self.run(&args).await?;
         let staged = self.run(&["diff", "--cached", "--name-only"]).await?;
         if staged.trim().is_empty() {
@@ -5305,6 +5304,10 @@ pub const HEAD_REMOTES_CAP: usize = 20;
 #[cfg(test)]
 #[path = "local/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "local/sweep_ignored_tests.rs"]
+mod sweep_ignored_tests;
 
 /// Merged marks, the up-to-date merge guard and the launcher-file sweep.
 /// Kept beside the code (not in `local/tests.rs`) so each fix carries the

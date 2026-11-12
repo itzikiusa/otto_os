@@ -15,13 +15,19 @@ test('edits made during a daemon settings save remain unsaved', async () => {
   assert.ok(save);
   const response = deferred<Record<string, unknown>>();
   let sent: any;
+  let metaReread = false;
+  let postureReread = false;
   const context = createContext({
-    dirty: true, portError: '', listenerDirty: true, sandboxDirty: true, sessionsDirty: true,
+    dirty: true, portError: '', formError: '', listenerDirty: true, sandboxDirty: true, sessionsDirty: true,
     enabled: true, port: 7701, savedListener: { enabled: true, port: 7700 },
     sandboxEnabled: true, sandboxNetwork: 'loopback', sandboxRest: {}, sandboxStored: {}, sandboxExempt: [],
     ...sandboxExemptHelpers, savedSandbox: { enabled: false, network: 'full' },
-    persistEnabled: false, manualGrace: 3600, savedSessions: { persist: true, manualGrace: 86400 },
-    saving: false, allSettings: {}, auth: { meta: {} }, idleSuspend: {}, policyFromSettings: (v: unknown) => v,
+    persistEnabled: false, manualGrace: 3600, archiveDays: 14,
+    savedSessions: { persist: true, manualGrace: 86400, archiveDays: 0 },
+    saving: false, allSettings: {}, auth: { meta: {}, refreshMeta: async () => { metaReread = true; return true; } },
+    daemonStatus: { refreshPosture: () => { postureReread = true; } },
+    canRestartDaemon: false, restartDaemonNow: async () => false,
+    idleSuspend: {}, policyFromSettings: (v: unknown) => v,
     api: { put: async (_: string, body: unknown) => { sent = body; return response.promise; } },
     toasts: { success() {} }, toastError: (_: string, error: unknown) => { throw error; },
   });
@@ -30,8 +36,16 @@ test('edits made during a daemon settings save remain unsaved', async () => {
   context.port = 7702;
   context.sandboxNetwork = 'none';
   context.manualGrace = 7200;
+  context.archiveDays = 30;
   response.resolve(sent);
   await pending;
+  assert.equal(sent.session_auto_archive_days, 14);
+  assert.equal(context.savedSessions.archiveDays, 14);
+  assert.notEqual(context.archiveDays, context.savedSessions.archiveDays);
+  // The status bar must not claim a bound listener on Save: the page
+  // re-reads /meta + the posture instead of writing auth.meta optimistically.
+  assert.equal(context.auth.meta.network_listener, undefined);
+  assert.ok(metaReread && postureReread);
   assert.equal(sent.network_listener.port, 7701);
   assert.equal(context.savedListener.port, 7701);
   assert.equal(context.savedSandbox.network, 'loopback');

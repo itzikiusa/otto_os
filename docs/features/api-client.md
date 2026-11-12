@@ -305,7 +305,23 @@ All auth fields accept `{{var}}` substitution.
 > at most 1,000 log/test entries with 256 KiB of text. These are conservative
 > data budgets, not an absolute JavaScript heap limit. Oversized scripted input
 > is rejected before posting; unscripted requests retain their existing limits.
-> The `pm` API is preserved; DOM/window globals are unavailable in Workers.
+> The `pm` API is preserved; DOM/window globals are unavailable in Workers, and
+> so are the network APIs (`fetch`, `XMLHttpRequest`, `WebSocket`,
+> `EventSource`, `importScripts`, nested Workers, `navigator.sendBeacon`): a
+> script calling one gets an error — requests are sent by the API client, which
+> applies the private-address guard. Daemon-side scripts run in a separate
+> child process with time, CPU and memory limits; if that runner is missing the
+> script is refused, never run inside the daemon.
+> **Daemon-side scripts never see secret values.** A Keychain-backed environment
+> variable reads as its own `{{NAME}}` placeholder (saved-request execute, and
+> automation runs an agent started); the daemon substitutes it when it builds
+> the request, after checking the host it goes to. A script that only passes the
+> placeholder through (`'Bearer ' + pm.environment.get('TOKEN')`) works as
+> before. A script that *computes* with a secret — HMAC signing, base64 of
+> `user:secret` — would send a wrong value, so it fails with *the pre-request
+> script computes with secret 'NAME'…*: put `{{NAME}}` in the request itself
+> (the interactive runner never had secret values either — they are never
+> resolved in the app).
 > Failed/canceled scripts do not publish partial variables, and a failed
 > pre-request script does not send HTTP. Neither runtime is a security sandbox.
 > Scripts
@@ -698,17 +714,21 @@ ApiResponse     { status, status_text, headers[], body, body_base64,
   `100.64.0.0/10` (CGNAT), `0.0.0.0`/`::`, multicast/broadcast, IPv6 ULA
   (`fc00::/7`) and `::1`, IPv4-mapped forms (`::ffff:127.0.0.1`) — **all
   rejected**, including DNS names that resolve to them and any redirect that
-  bounces toward them. *This is deliberate and not configurable from the UI.*
+  bounces toward them — by default. A workspace admin can turn on **Allow
+  private addresses** (request **Settings**, or the button on a blocked
+  response) for local development servers; see the toggle notes under [History responsiveness and replay](#history-responsiveness-and-replay).
 - **Use non-fetchable schemes.** Only `http(s)` / `ws(s)` / `grpc(s)` are
   allowed; `file:`, `data:`, etc. are rejected.
-- **Send a `binary` (single-file) body** — the radio exists but is disabled.
+- **Send a `binary` (single-file) body** — there is no binary body mode (use
+  **Multipart** with one **File** row).
 - **Call client-streaming or bidirectional gRPC** — only unary and
   server-streaming are supported.
-- **Treat scripts as a sandbox** — interactive runs execute in the webview,
-  automation runs in the daemon's `boa` engine (loop-limited, but not a
-  security boundary).
+- **Treat scripts as a sandbox** — interactive runs execute in a dedicated
+  Worker (no network APIs), daemon-side runs in a resource-limited child
+  process running the `boa` engine; neither is a security boundary.
 - **Inspect bodies over 25 MB inline** (not loaded) or see more than the first
-  512 KB of text without **Save**; JSON pretty-print is skipped above 256 KB.
+  512 KB of text without **⋯ → Download response…**; JSON pretty-print is
+  skipped above 256 KB.
 - **See more than the last 500 streamed messages** (older ones are dropped from
   the console).
 - **Read a stored secret back over REST** — Keychain-backed auth members and
@@ -789,9 +809,22 @@ sensitive data your endpoints returned; clear history when appropriate.
   (caller-built URLs), and also on **saved-request execute** (after `vars`
   overrides and the pre-request script) and every step of an **automation run
   an agent started**. The binding is resolved with the environment's own
-  variables, so overriding `{{base_url}}` can't drag it along. A person can
-  confirm a new host; an agent never can (the step / call fails with
-  `needs_confirm=new_host`).
+  variables, so overriding `{{base_url}}` can't drag it along. A `$secret`
+  marker is bound to the url **recorded in its Keychain entry**: set when a
+  person sends (or saves) the request, kept when an agent edits the request's
+  url, so an agent moving a credentialed request to another host can't move the
+  credential with it. A secret saved before bindings were recorded is bound to
+  its request's current url — unless an agent last wrote that request — and
+  gets the url recorded on the first person's send. A person can confirm a new
+  host (which rebinds the secret there); an agent never can (the step / call
+  fails with `needs_confirm=new_host`, naming the target and the bound host).
+- **Redirects never carry a credential to another host.** A request with an
+  API-key header, or one using a Keychain environment variable (which may sit
+  in any header or body), stops at a redirect to a different host (an
+  `http`→`https` upgrade on the same host is still followed): the 3xx comes back
+  as the response, and the Trace says *redirect to another host (…) not
+  followed because this request carries credentials*. `Authorization` and
+  cookies are already dropped on such hops.
 - **Agent ad-hoc responses are scrubbed.** When an agent credential calls
   `POST …/execute`, the returned response is secret-scrubbed like history and
   carries no raw bytes (no inline base64, no `body_id` download).
@@ -827,7 +860,7 @@ with matching `otto.api_*` tools on the governed outward MCP server:
 | `otto_api_get_request` | Read one saved request in the 64 KiB agent shape with auth and sensitive fields masked. |
 | `otto_api_history` | Filter past runs (summary rows from `/history/summaries`: method, url, status, duration, source — no bodies), or fetch one whole entry with its response by history id. |
 | `otto_api_execute` | Execute one saved request; unsafe methods and new hosts use explicit confirm flags. |
-| `otto_api_upsert_request` | Create or update a saved request. |
+| `otto_api_upsert_request` | Create or update a saved request (approval-gated; refuses to move a request that carries stored credentials to another host). |
 | `otto_api_run_automation` | Run a saved automation and return its step report. |
 
 For example, *“call the login request against staging and show me the token
@@ -840,9 +873,11 @@ the **Agent runs** filter, and arrives live through `api_history_appended`.
 Execution is saved-requests-only: agents cannot provide an ad-hoc URL, and
 override values containing `{{` are rejected. Secrets resolve server-side and
 are scrubbed from every result, with names only in `resolved.secrets_used`.
-Confirm flags are agent-side speed bumps inward; the outward `api_execute`,
-`api_upsert_request`, and `api_run_automation` tools are DANGEROUS and
-human-approval-gated. Because a session still holds the owner's API token, the
+Confirm flags are agent-side speed bumps; `api_execute`,
+`api_upsert_request` and `api_run_automation` are DANGEROUS and
+human-approval-gated on both surfaces — the in-session tools
+(`otto_api_execute`, `otto_api_upsert_request`, `otto_api_run_automation`) go
+through the same governed invoke as the outward `otto.api_*` tools. Because a session still holds the owner's API token, the
 daemon applies these protections even when the route is called with raw curl.
 
 When an agent saves a request, its `X-Otto-Session` header stamps
@@ -857,7 +892,10 @@ scripts it did not intend to change.
 
 | Symptom | Likely cause / fix |
 |---|---|
-| `blocked address … (SSRF guard)` | The URL (or a DNS result, or a redirect target) is an internal/loopback/private/link-local/CGNAT address. You can't reach localhost or internal hosts from the workbench — by design. |
+| `blocked address … (SSRF guard)` / *blocked by the private-address guard* | The URL (or a DNS result, or a redirect target) is an internal/loopback/private/link-local/CGNAT address. Blocked by default; a workspace admin can use **Allow private addresses…** for local development servers. A redirect toward one comes back unfollowed with a Trace note. |
+| *DNS lookup failed* / *connection refused* / *TLS certificate problem: …* | Send failures name their cause from the underlying error: the name didn't resolve, nothing listens on that host and port, or the server's certificate was rejected (with the reason — unknown authority, expired, wrong host name). |
+| `needs_confirm=new_host` naming *its bound host* | A stored secret would go to a host other than the one it is bound to (an agent may have edited the request's url). Send it yourself and confirm, or put the url back. |
+| *the pre-request script computes with secret '…'* | Daemon-side scripts see `{{NAME}}` placeholders, not secret values; put `{{NAME}}` in the request itself (signing with a stored secret is not supported). |
 | `blocked url scheme: …` / `url has no host` | Only `http(s)/ws(s)/grpc(s)` with a host are allowed. No `file:`/`data:`. |
 | `request timed out after 60s` | Default timeout. Raise it in **Settings → Request timeout** (ms). |
 | TLS / certificate errors | Turn off **Settings → Verify TLS certificate** for that request to accept self-signed/invalid certs. gRPC has no such toggle; it trusts the macOS trust store (an internal / corporate CA you installed) plus the bundled Mozilla roots, like REST. |

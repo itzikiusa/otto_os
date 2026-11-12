@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
 import { captureRoomInvite, roomInvite, forgetRoom } from '../src/modules/rooms/room-access.ts';
 import { activeNavId, moduleHome } from '../src/lib/sidebar.ts';
+import * as routeKeys from '../src/lib/routeKeys.ts';
 import { dropShareToken, storeShareToken, storedShareToken, type TokenStorage } from '../src/lib/shareTokenStore.ts';
 import { loadPairState, parsePairRoute, resetPairMemory, savePairState, type PairState, type PairStorage } from '../src/lib/phonePair.ts';
 
@@ -69,6 +70,7 @@ function fixture(initialHash = '#/home', shareStore = bindShareStore(fakeSession
       './desktop': { isEmbedded: false },
       './rooms/invites': { captureRoomInvite },
       './sidebar': { activeNavId, moduleHome },
+      './routeKeys': routeKeys,
       './shareTokenStore': shareStore,
       './phonePair': pairStore,
     },
@@ -222,6 +224,7 @@ function loadReloaded(hash: string, tab: TokenStorage) {
       './desktop': { isEmbedded: false },
       './rooms/invites': { captureRoomInvite },
       './sidebar': { activeNavId, moduleHome },
+      './routeKeys': routeKeys,
       './shareTokenStore': bindShareStore(tab),
       './phonePair': bindPairStore(tab),
     },

@@ -7,6 +7,7 @@
 
 pub mod catalog;
 pub mod chat;
+pub mod chat_resolve;
 pub mod checkpoint;
 pub mod context;
 pub mod location;

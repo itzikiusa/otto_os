@@ -379,6 +379,21 @@ impl WorkflowsRepo {
         row.map(|r| row_to_workflow(&r)).transpose()
     }
 
+    /// `(id, name)` of every workflow in ONE workspace, most recently updated
+    /// first — the candidate list a chat trigger matches a typed name against
+    /// when [`Self::find_by_name`]'s exact match misses (a hyphen typed for an
+    /// em dash, doubled spaces, curly quotes). Names only: the full rows carry
+    /// whole graphs, and only the one winner is loaded afterwards.
+    pub async fn list_names(&self, workspace_id: &Id) -> Result<Vec<(Id, String)>> {
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT id, name FROM workflows WHERE workspace_id = ? ORDER BY updated_at DESC",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("workflow names"))
+    }
+
     pub async fn update(
         &self,
         id: &Id,

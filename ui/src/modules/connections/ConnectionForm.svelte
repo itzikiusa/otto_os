@@ -614,7 +614,7 @@
   <div class="field ssh-toggle-row">
     <label class="toggle-label">
       <input type="checkbox" bind:checked={readOnly} />
-      Read-only <span class="dim">(refuse all writes / DDL, even outside prod)</span>
+      Read-only <span class="dim">(writes / DDL need the connection name typed to confirm, even outside prod)</span>
     </label>
   </div>
 
@@ -776,17 +776,17 @@
           <span class="hint">Turn off to accept self-signed / invalid certificates.</span>
         </div>
         <div class="field">
-          <label for="cf-tls-ca">CA certificate path <span class="dim">(optional)</span></label>
-          <PathField bind:value={tlsCaCert} files><input dir="ltr" id="cf-tls-ca" class="input mono" bind:value={tlsCaCert} placeholder="~/certs/ca.pem" spellcheck="false" /></PathField>
+          <label for="cf-tls-ca">CA certificate — file path or pasted PEM <span class="dim">(optional)</span></label>
+          <PathField bind:value={tlsCaCert} files><input dir="ltr" id="cf-tls-ca" class="input mono" bind:value={tlsCaCert} placeholder="~/certs/ca.pem or -----BEGIN CERTIFICATE-----" spellcheck="false" /></PathField>
         </div>
         <div class="field-row">
           <div class="field grow">
-            <label for="cf-tls-cert">Client cert <span class="dim">(optional)</span></label>
-            <PathField bind:value={tlsClientCert} files><input dir="ltr" id="cf-tls-cert" class="input mono" bind:value={tlsClientCert} placeholder="~/certs/client.pem" spellcheck="false" /></PathField>
+            <label for="cf-tls-cert">Client cert — path or PEM <span class="dim">(optional)</span></label>
+            <PathField bind:value={tlsClientCert} files><input dir="ltr" id="cf-tls-cert" class="input mono" bind:value={tlsClientCert} placeholder="~/certs/client.pem or pasted PEM" spellcheck="false" /></PathField>
           </div>
           <div class="field grow">
-            <label for="cf-tls-key">Client key <span class="dim">(optional)</span></label>
-            <PathField bind:value={tlsClientKey} files><input dir="ltr" id="cf-tls-key" class="input mono" bind:value={tlsClientKey} placeholder="~/certs/client-key.pem" spellcheck="false" /></PathField>
+            <label for="cf-tls-key">Client key — path or PEM <span class="dim">(optional)</span></label>
+            <PathField bind:value={tlsClientKey} files><input dir="ltr" id="cf-tls-key" class="input mono" bind:value={tlsClientKey} placeholder="~/certs/client-key.pem or pasted PEM" spellcheck="false" /></PathField>
           </div>
         </div>
         <div class="field">

@@ -93,6 +93,10 @@ test('Settings sections remain reachable and titled at desktop and phone widths'
   for (const width of [1440, 375]) {
     await page.setViewportSize({ width, height: 900 });
     for (const label of labels) {
+      // Phone width is a two-level list: an open section hides the list, so
+      // go back to it before filtering for the next section.
+      const back = page.getByRole('button', { name: 'Back to Settings' });
+      if (width <= 640 && (await back.isVisible())) await back.click();
       await page.getByRole('searchbox', { name: 'Filter settings' }).fill(label);
       await nav.getByRole('button', { name: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`) }).first().click();
       await expect(page.locator('.settings-body h1.ph-title')).toHaveText(label);

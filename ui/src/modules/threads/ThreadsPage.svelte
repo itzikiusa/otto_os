@@ -36,6 +36,7 @@
   import { runtimeThreadMenu } from './runtime/runtimeMenu';
   import { asThreadSession, isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
   import { isThreadSession, projectNameFromCwd } from './threadsHelpers';
+  import { threadOrigin } from './threadOrigins';
   import { personalAgentName } from '../../lib/personalAgentBadges';
   import { threads, type ThreadsLayoutMode } from './threadsStore.svelte';
 
@@ -57,10 +58,19 @@
   $effect(() => threads.setInspectorCompact(compact));
   onMount(() => () => threads.setInspectorCompact(false));
 
-  const liveThreadIds = $derived([
-    ...ws.sessions.filter((s) => !s.archived && isThreadSession(s)).map((s) => s.id),
-    ...runtimeThreads.live().map((s) => s.id),
-  ]);
+  // Newest activity first, so the page opens on the most recent thread (not
+  // an agent's routine run or another module's helper).
+  const liveThreadIds = $derived(
+    [...ws.sessions.filter((s) => !s.archived && isThreadSession(s)), ...runtimeThreads.rows()]
+      .filter((s) => threadOrigin(s) === 'main')
+      .sort((a, b) => b.last_active_at.localeCompare(a.last_active_at))
+      .map((s) => s.id),
+  );
+  // The focused thread is read: clear a runtime thread's unread dot.
+  $effect(() => {
+    const id = threads.focusedSessionId;
+    if (id) untrack(() => runtimeThreads.markRead(id));
+  });
 
   // Subscribe to live cross-session messages + MCP DB activity while mounted.
   onMount(() => threads.mountLive());

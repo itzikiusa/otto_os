@@ -109,15 +109,29 @@ pub async fn workspace_allows_local<C: ApiClientCtx>(ctx: &C, wid: &Id) -> bool 
 /// fails, must fail the send. Falling back would silently route a tunnelled
 /// request DIRECT through an unguarded builder (`guarded` is false whenever a
 /// proxy is set), or drop `follow_redirects=false` / `verify_ssl=false`.
+#[cfg(test)]
 pub(crate) fn build_settings_client(
     wid: &Id,
     req: &ExecuteApiReq,
     proxy: Option<&str>,
     allow_local: bool,
 ) -> Result<Option<reqwest::Client>, String> {
+    build_settings_client_for(wid, req, proxy, allow_local, false)
+}
+
+/// [`build_settings_client`] for a request that may carry a credential
+/// (`credentialed`): its client never follows a redirect to another host
+/// ([`credential_redirect_policy`]), so it is never the shared one.
+pub(crate) fn build_settings_client_for(
+    wid: &Id,
+    req: &ExecuteApiReq,
+    proxy: Option<&str>,
+    allow_local: bool,
+    credentialed: bool,
+) -> Result<Option<reqwest::Client>, String> {
     let no_redirect = req.follow_redirects == Some(false);
     let no_verify = req.verify_ssl == Some(false);
-    if !no_redirect && !no_verify && proxy.is_none() {
+    if !no_redirect && !no_verify && proxy.is_none() && !credentialed {
         return Ok(None);
     }
     // Memoized per settings combination (perf F8): every SSH-tunnelled,
@@ -127,7 +141,7 @@ pub(crate) fn build_settings_client(
     static CLIENTS: OnceLock<StdMutex<HashMap<String, (reqwest::Client, Instant)>>> =
         OnceLock::new();
     let key = format!(
-        "{wid}|{allow_local}|{no_redirect}|{no_verify}|{}",
+        "{wid}|{allow_local}|{no_redirect}|{no_verify}|{credentialed}|{}",
         proxy.unwrap_or("")
     );
     let clients = CLIENTS.get_or_init(|| StdMutex::new(HashMap::new()));
@@ -139,7 +153,14 @@ pub(crate) fn build_settings_client(
             return Ok(Some(client.clone()));
         }
     }
-    let client = build_settings_client_uncached(wid, no_redirect, no_verify, proxy, allow_local)?;
+    let client = build_settings_client_uncached(
+        wid,
+        no_redirect,
+        no_verify,
+        proxy,
+        allow_local,
+        credentialed,
+    )?;
     let mut map = clients.lock().unwrap_or_else(|e| e.into_inner());
     if map.len() >= SETTINGS_CLIENTS_MAX {
         if let Some(oldest) = map
@@ -163,6 +184,7 @@ pub(crate) fn build_settings_client_uncached(
     no_verify: bool,
     proxy: Option<&str>,
     allow_local: bool,
+    credentialed: bool,
 ) -> Result<reqwest::Client, String> {
     // Tunnelled: the target resolves and is dialled at the FAR end — the local
     // guard would only false-block bastion-only hosts (and would refuse the
@@ -179,6 +201,8 @@ pub(crate) fn build_settings_client_uncached(
         .cookie_provider(cookie_jar(wid));
     builder = if no_redirect {
         builder.redirect(reqwest::redirect::Policy::none())
+    } else if credentialed {
+        builder.redirect(credential_redirect_policy(guarded))
     } else if !guarded {
         builder.redirect(reqwest::redirect::Policy::limited(10))
     } else {
@@ -202,4 +226,45 @@ pub(crate) fn build_settings_client_uncached(
             format!("couldn't build the HTTP client for this request's settings ({e})")
         }
     })
+}
+
+/// The redirect policy of a credential-carrying request: hops stay on the
+/// original host ([`same_site_hop`]); a hop anywhere else STOPS, so the 3xx
+/// comes back as the response (the trace says why) instead of carrying an
+/// API-key header or a 307/308 body that reqwest would forward as-is.
+/// `guarded` keeps the SSRF guard's per-hop literal check and hop cap.
+pub(crate) fn credential_redirect_policy(guarded: bool) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() > otto_netguard::MAX_REDIRECTS {
+            return attempt.error("too many redirects");
+        }
+        let same_site = attempt
+            .previous()
+            .first()
+            .is_some_and(|first| same_site_hop(first, attempt.url()));
+        if !same_site || (guarded && !otto_netguard::check_url_literal(attempt.url())) {
+            attempt.stop()
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
+/// Whether a redirect from `from` to `to` stays on the same site: same host
+/// and port, or the same host upgraded from `http` to `https`.
+pub(crate) fn same_site_hop(from: &reqwest::Url, to: &reqwest::Url) -> bool {
+    let same_host = from
+        .host_str()
+        .zip(to.host_str())
+        .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b));
+    if !same_host {
+        return false;
+    }
+    let same_origin =
+        from.scheme() == to.scheme() && from.port_or_known_default() == to.port_or_known_default();
+    let upgrade = from.scheme() == "http"
+        && to.scheme() == "https"
+        && from.port_or_known_default() == Some(80)
+        && to.port_or_known_default() == Some(443);
+    same_origin || upgrade
 }

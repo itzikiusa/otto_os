@@ -62,3 +62,80 @@ test('Code tab: the toolbar is whole, on top, and stays pinned while scrolling',
   await expectOnTop(page, search);
   await expectNoHorizontalOverflow(page);
 });
+
+/** Open PR #51's Code tab (23 files, every one collapsed: > 5 files). */
+async function openCode(page: Page): Promise<void> {
+  await page.goto('/#/git/rep_otto/pr/51');
+  await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
+  await page.getByRole('tab', { name: 'Code', exact: true }).click();
+  await expect(page.locator('.dfile-head').first()).toBeVisible();
+}
+
+test('Code tab: step between files, pick one from the sheet, mark it viewed', async ({ page }) => {
+  test.skip((page.viewportSize()?.width ?? 0) > 1024, 'the file stepper is the ≤1024 px layout (wider shows the Files panel)');
+  await openCode(page);
+  const stepper = page.getByRole('group', { name: 'Files in this pull request' });
+  await expect(stepper).toBeVisible();
+  // Every control is a thumb-sized target, fully on screen.
+  for (const b of await stepper.getByRole('button').all()) {
+    const box = (await b.boundingBox())!;
+    expect(box.height, 'touch target height').toBeGreaterThanOrEqual(44);
+    expect(box.width, 'touch target width').toBeGreaterThanOrEqual(44);
+    await expectFullyInViewport(page, b, 'file stepper control');
+  }
+  const counter = stepper.getByRole('button', { name: /pick a file/ });
+  const fileNo = async (): Promise<number> => Number(/^File (\d+) of 23/.exec((await counter.getAttribute('aria-label')) ?? '')?.[1] ?? -1);
+  await expect.poll(fileNo).toBe(1);
+  // › and ‹ walk the files in diff order, scrolling the diff to each.
+  await stepper.getByRole('button', { name: 'Next file' }).click();
+  await expect.poll(fileNo).toBe(2);
+  await stepper.getByRole('button', { name: 'Next file' }).click();
+  await expect.poll(fileNo).toBe(3);
+  await stepper.getByRole('button', { name: 'Previous file' }).click();
+  await expect.poll(fileNo).toBe(2);
+  await expectNoHorizontalOverflow(page);
+
+  // The counter opens the file tree; a pick closes it and shows that file.
+  await counter.click();
+  const sheet = page.getByRole('dialog', { name: 'Files' });
+  await expect(sheet).toBeVisible();
+  await sheet.getByRole('searchbox', { name: 'Filter files' }).fill('player-details');
+  await sheet.getByRole('button', { name: 'Go to libs/data-models/player-details.ts' }).click();
+  await expect(sheet).toBeHidden();
+  await expect(stepper.locator('.dfs-name')).toHaveText('player-details.ts');
+  await expect(page.locator('[id="dfile-libs/data-models/player-details.ts"] .dfile-head')).toBeInViewport();
+
+  // Viewed by thumb: the stepper's toggle and the file header agree.
+  const viewed = stepper.getByRole('button', { name: 'Mark this file viewed' });
+  await viewed.click();
+  await expect(stepper.getByRole('button', { name: /^Viewed/ })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('checkbox', { name: 'Mark libs/data-models/player-details.ts as viewed' })).toBeChecked();
+  // Next unviewed moves on to another file.
+  await stepper.getByRole('button', { name: 'Next unviewed file' }).click();
+  await expect(stepper.locator('.dfs-name')).not.toHaveText('player-details.ts');
+  await expectNoHorizontalOverflow(page);
+});
+
+test('Code tab: a tap on a line opens its comment composer, clear of the toolbar and the keyboard', async ({ page }, ti) => {
+  test.skip(!ti.project.use.hasTouch, 'touch devices');
+  await openCode(page);
+  // Open the first file and tap one of its added lines (not the gutter).
+  await page.locator('.dfile-head').first().click();
+  const code = page.locator('.diff-body .vrow.dline.add .code').first();
+  await expect(code).toBeVisible();
+  await code.tap();
+  const box = page.getByRole('textbox', { name: 'Line comment' });
+  await expect(box).toBeVisible();
+  await box.tap();
+  await box.fill('Can this come from config?');
+  // Focus centres the composer: whole, on screen, and not under the pinned toolbar.
+  await expect(async () => {
+    await expectFullyInViewport(page, box, 'comment composer');
+    await expectOnTop(page, box);
+    await expectOnTop(page, page.getByRole('button', { name: 'Comment', exact: true }));
+  }).toPass({ timeout: 5_000 });
+  // A second tap on the same line keeps the composer (and the typed text).
+  await code.tap();
+  await expect(box).toHaveValue('Can this come from config?');
+  await expectNoHorizontalOverflow(page);
+});

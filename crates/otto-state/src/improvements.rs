@@ -47,6 +47,34 @@ pub struct NewEdit {
     pub actor: Option<String>,
 }
 
+/// Default retention for FINISHED improvement runs: the window, and how many
+/// of each workspace's newest runs survive it whatever their age.
+pub const RUN_RETENTION_DAYS: i64 = 90;
+pub const RUNS_KEPT_PER_WORKSPACE: i64 = 200;
+/// Floors [`ImprovementsRepo::prune_finished_runs`] applies to its arguments.
+const MIN_RUN_RETENTION_DAYS: i64 = 30;
+const MIN_RUNS_KEPT_PER_WORKSPACE: i64 = 50;
+/// Runs deleted per write transaction, and the pause between two.
+const RUN_PRUNE_BATCH: usize = 200;
+const RUN_PRUNE_PAUSE: std::time::Duration = std::time::Duration::from_millis(25);
+/// Edit states that keep their run: `pending` / `conflict` wait on a person,
+/// and an `applied` edit is the version log a rollback reads.
+const LIVE_EDIT_STATES: &str = "('pending','applied','conflict')";
+
+/// Message of the admission conflict — callers match on it to treat a busy
+/// workspace as the normal outcome it is (see [`is_run_in_progress`]).
+const RUN_IN_PROGRESS: &str = "an improvement run is already in progress";
+
+fn run_in_progress() -> Error {
+    Error::Conflict(RUN_IN_PROGRESS.into())
+}
+
+/// Whether `e` is [`ImprovementsRepo::create_run`]'s "a run is already in
+/// progress" answer (not a failure: the workspace is simply busy).
+pub fn is_run_in_progress(e: &Error) -> bool {
+    matches!(e, Error::Conflict(m) if m == RUN_IN_PROGRESS)
+}
+
 fn row_to_run(r: &sqlx::sqlite::SqliteRow) -> Result<ImprovementRun> {
     Ok(ImprovementRun {
         id: r.get("id"),
@@ -184,7 +212,17 @@ impl ImprovementsRepo {
     // ---- runs ----
 
     /// Serialize every trigger against the same workspace admission boundary.
+    ///
+    /// The usual answer is "busy" (a live evolve fires ~30 s after every idle
+    /// episode of a watched session), so it is answered from the READ pool
+    /// first and never queues for SQLite's write lock: taking `BEGIN
+    /// IMMEDIATE` just to say no held every other writer for 3–10 s. Only a
+    /// workspace that looks idle opens the write transaction, and the check is
+    /// repeated inside it so two admissions still cannot both win.
     pub async fn create_run(&self, ws: &Id, trigger: ImprovementTrigger) -> Result<ImprovementRun> {
+        if self.has_running(ws).await? {
+            return Err(run_in_progress());
+        }
         let mut tx = self
             .pool
             .begin_with("BEGIN IMMEDIATE")
@@ -193,9 +231,7 @@ impl ImprovementsRepo {
         let busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM improvement_runs WHERE workspace_id = ? AND status = 'running')")
             .bind(ws).fetch_one(&mut *tx).await.map_err(dberr("check improvement admission"))?;
         if busy {
-            return Err(Error::Conflict(
-                "an improvement run is already in progress".into(),
-            ));
+            return Err(run_in_progress());
         }
         let id = new_id();
         sqlx::query("INSERT INTO improvement_runs (id, workspace_id, trigger, status, started_at) VALUES (?, ?, ?, 'running', ?)")
@@ -291,6 +327,85 @@ impl ImprovementsRepo {
         .await
         .map_err(dberr("running count"))?;
         Ok(r.get::<i64, _>("n") > 0)
+    }
+
+    /// Retention for FINISHED runs (one row per live evolve, so the table
+    /// only grew). A run goes when it ended more than `older_than_days` ago,
+    /// is outside its workspace's newest `keep_per_workspace`, and has no
+    /// edit in [`LIVE_EDIT_STATES`]; its inert (rejected / rolled-back) edits
+    /// go with it. Candidates are read on the reader pool; each batch is one
+    /// short write transaction that re-checks the rules, paused between
+    /// batches. Arguments are floored. Returns the runs deleted.
+    pub async fn prune_finished_runs(
+        &self,
+        older_than_days: i64,
+        keep_per_workspace: i64,
+    ) -> Result<u64> {
+        let days = older_than_days.max(MIN_RUN_RETENTION_DAYS);
+        let keep = keep_per_workspace.max(MIN_RUNS_KEPT_PER_WORKSPACE);
+        let Some(cutoff) = chrono::Duration::try_days(days)
+            .and_then(|d| Utc::now().checked_sub_signed(d))
+            .map(fmt)
+        else {
+            return Ok(0);
+        };
+        let candidates = format!(
+            "SELECT c.id FROM (SELECT id, status, COALESCE(finished_at, started_at) AS ended, \
+               ROW_NUMBER() OVER (PARTITION BY workspace_id ORDER BY started_at DESC) AS rn \
+               FROM improvement_runs) c \
+             WHERE c.rn > ? AND c.status <> 'running' AND c.ended < ? \
+               AND NOT EXISTS (SELECT 1 FROM improvement_edits e \
+                               WHERE e.run_id = c.id AND e.status IN {LIVE_EDIT_STATES})"
+        );
+        let ids: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(candidates))
+            .bind(keep)
+            .bind(&cutoff)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("improvement run retention"))?;
+        let mut total = 0u64;
+        for (i, chunk) in ids.chunks(RUN_PRUNE_BATCH).enumerate() {
+            if i > 0 {
+                tokio::time::sleep(RUN_PRUNE_PAUSE).await;
+            }
+            let marks = vec!["?"; chunk.len()].join(",");
+            let runs = format!(
+                "DELETE FROM improvement_runs WHERE id IN ({marks}) AND status <> 'running' \
+                 AND NOT EXISTS (SELECT 1 FROM improvement_edits e \
+                     WHERE e.run_id = improvement_runs.id AND e.status IN {LIVE_EDIT_STATES})"
+            );
+            // FK cascade removes the inert edits; this covers a connection
+            // without `foreign_keys` (never an edit whose run survived).
+            let edits = format!(
+                "DELETE FROM improvement_edits WHERE run_id IN ({marks}) \
+                 AND NOT EXISTS (SELECT 1 FROM improvement_runs r WHERE r.id = improvement_edits.run_id)"
+            );
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(dberr("improvement run retention"))?;
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(runs));
+            for id in chunk {
+                q = q.bind(id);
+            }
+            total += q
+                .execute(&mut *tx)
+                .await
+                .map_err(dberr("improvement run retention"))?
+                .rows_affected();
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(edits));
+            for id in chunk {
+                q = q.bind(id);
+            }
+            q.execute(&mut *tx)
+                .await
+                .map_err(dberr("improvement run retention"))?;
+            tx.commit()
+                .await
+                .map_err(dberr("improvement run retention"))?;
+        }
+        Ok(total)
     }
 
     // ---- edits ----
@@ -440,6 +555,102 @@ mod tests {
         .await
         .unwrap();
         assert!(repo.create_run(&ws, ImprovementTrigger::Live).await.is_ok());
+    }
+
+    /// A busy workspace is answered from the reader: with another writer
+    /// holding SQLite's write lock, `create_run` still says "in progress" at
+    /// once instead of queueing behind it.
+    #[tokio::test]
+    async fn busy_admission_never_waits_for_the_write_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = crate::open(&dir.path().join("t.db")).await.unwrap();
+        sqlx::query("INSERT INTO workspaces (id,name,root_path,created_at) VALUES ('busy-ws','w','/tmp','2026-11-12')")
+            .execute(&pool).await.unwrap();
+        let repo = ImprovementsRepo::new(pool.clone());
+        let ws = "busy-ws".to_string();
+        repo.create_run(&ws, ImprovementTrigger::Manual)
+            .await
+            .unwrap();
+        let writer = pool.begin().await.unwrap(); // holds the write lock
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            repo.create_run(&ws, ImprovementTrigger::Live),
+        )
+        .await
+        .expect("a busy workspace must not wait for the write lock");
+        let err = answer.unwrap_err();
+        assert!(is_run_in_progress(&err), "{err:?}");
+        drop(writer);
+        assert!(!is_run_in_progress(&Error::Conflict("other".into())));
+    }
+
+    /// Old finished runs beyond the per-workspace keep go; a running run, a
+    /// run with a pending or applied edit, young runs and the newest N stay.
+    #[tokio::test]
+    async fn finished_run_retention_keeps_live_edits_and_the_newest() {
+        let pool = crate::db::test_pool().await;
+        sqlx::query("INSERT INTO workspaces (id,name,root_path,created_at) VALUES ('rw','w','/tmp','2026-01-01')")
+            .execute(&pool).await.unwrap();
+        let ago = |d: i64| fmt(Utc::now() - chrono::Duration::days(d));
+        let run = |id: String, status: &'static str, days: i64| {
+            let pool = pool.clone();
+            let at = ago(days);
+            async move {
+                let fin = (status != "running").then(|| at.clone());
+                sqlx::query("INSERT INTO improvement_runs (id, workspace_id, trigger, status, started_at, finished_at) VALUES (?, 'rw', 'live', ?, ?, ?)")
+                    .bind(id).bind(status).bind(&at).bind(fin)
+                    .execute(&pool).await.unwrap();
+            }
+        };
+        let edit = |run_id: &'static str, status: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query("INSERT INTO improvement_edits (id, run_id, workspace_id, target, target_ref, target_path, kind, risk, status, after_content, created_at) VALUES (?, ?, 'rw', 'skill', 's', '/s', 'modify', 'low', ?, 'x', '2026-01-01')")
+                    .bind(format!("e-{run_id}")).bind(run_id).bind(status)
+                    .execute(&pool).await.unwrap();
+            }
+        };
+        for i in 0..10 {
+            run(format!("young-{i:02}"), "done", 1).await;
+        }
+        for i in 0..66 {
+            run(format!("old-{i:02}"), "done", 100 + i).await;
+        }
+        run("keep-pending".into(), "done", 400).await;
+        edit("keep-pending", "pending").await;
+        run("keep-applied".into(), "done", 401).await;
+        edit("keep-applied", "applied").await;
+        run("keep-running".into(), "running", 402).await;
+        run("gone-rejected".into(), "skipped", 403).await;
+        edit("gone-rejected", "rejected").await;
+
+        let repo = ImprovementsRepo::new(pool.clone());
+        // Ranked newest first, 50 kept: old-40..old-65 and the four specials
+        // are past the keep; of those the three with a reason stay.
+        assert_eq!(repo.prune_finished_runs(90, 50).await.unwrap(), 27);
+        let left: Vec<String> = sqlx::query_scalar("SELECT id FROM improvement_runs")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left.len(), 80 - 27);
+        for id in [
+            "keep-pending",
+            "keep-applied",
+            "keep-running",
+            "young-00",
+            "old-39",
+        ] {
+            assert!(left.iter().any(|l| l == id), "{id} must survive");
+        }
+        assert!(!left.iter().any(|l| l == "old-40" || l == "gone-rejected"));
+        let edits: Vec<String> =
+            sqlx::query_scalar("SELECT run_id FROM improvement_edits ORDER BY run_id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(edits, ["keep-applied", "keep-pending"]);
+        // Floors: a tiny window or keep cannot widen the deletion.
+        assert_eq!(repo.prune_finished_runs(1, 1).await.unwrap(), 0);
     }
 
     #[tokio::test]

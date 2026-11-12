@@ -13,7 +13,7 @@
   import AttachIssue from '../agents/AttachIssue.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import type { AttachedIssue } from '../../lib/api/types';
-  import { allProviders } from '../../lib/providers';
+  import { allProviders, defaultAgentProvider } from '../../lib/providers';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
 
@@ -34,6 +34,8 @@
 
   // Per-workspace default agent (overrides the global default). '' = inherit.
   const providers = $derived(allProviders());
+  // `PATCH /workspaces/{id}` is admin-only: editors and viewers see the value, read-only.
+  const canAdmin = $derived(ws.myRole === 'admin');
   const wsDefaultAgent = $derived(
     typeof workspace?.settings?.default_provider === 'string'
       ? (workspace.settings.default_provider as string)
@@ -131,15 +133,15 @@
         <div class="info-row">
           <span class="key">Default agent</span>
           <span class="val">
-            <select aria-label="Default agent" class="ws-select" value={wsDefaultAgent} onchange={onDefaultAgentChange}>
-              <option value="">Global default</option>
+            <select aria-label="Default agent" class="ws-select" value={wsDefaultAgent} onchange={onDefaultAgentChange} disabled={!canAdmin} title={canAdmin ? undefined : 'Workspace admins can edit this'}>
+              <option value="">Global default ({defaultAgentProvider()})</option>
               {#each providers as p (p)}
                 <option value={p}>{p}</option>
               {/each}
             </select>
           </span>
         </div>
-        <p class="hint">Agent used for new sessions &amp; channel replies in this workspace. Overrides the global default.</p>
+        <p class="hint">Agent used for new sessions &amp; channel replies in this workspace. Overrides the global default.{#if !canAdmin} Workspace admins can edit this.{/if}</p>
       </section>
     {/if}
 

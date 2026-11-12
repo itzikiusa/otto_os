@@ -14,9 +14,13 @@
 pub mod engine;
 pub mod fallback;
 pub mod fix_goal;
+pub mod handoff;
 pub mod history;
 pub mod prompts;
 pub mod scope;
 pub mod session;
+pub mod skill_bundle;
 pub mod summarizer;
+pub mod triage;
+pub mod verification;
 pub mod worktree;

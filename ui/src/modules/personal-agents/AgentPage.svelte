@@ -118,7 +118,7 @@
     personalAgentsApi
       .autonomy(id)
       .then((a) => { if (id === agentId) autonomy = a; })
-      .catch(() => {});
+      .catch((e) => console.warn('autonomy badges unavailable', e));
   });
 
   // Reset: memories + conversations + schedules + run history (confirmed by
@@ -211,7 +211,7 @@
   $effect(() => paAgentPort.bind({ agentId, reloadAutonomy: () => {
     autonomyReload += 1;
     const id = agentId;
-    personalAgentsApi.autonomy(id).then((a) => { if (id === agentId) autonomy = a; }).catch(() => {});
+    personalAgentsApi.autonomy(id).then((a) => { if (id === agentId) autonomy = a; }).catch((e) => console.warn('autonomy badges unavailable', e));
   }, viewReport: (r) => void viewReport(r) }));
 
   // --- Runs / report viewer -------------------------------------------------
@@ -315,10 +315,12 @@
     ? 'Runs as its owner; only the owner or a workspace admin can change this.'
     : '');
 
+  const PAUSE_TIP = 'While paused, its routines don’t run and other agents can’t hand it work. Chat and Run now still work.';
   function moreMenu(e: MouseEvent): void {
     if (!agent) return;
     ctxMenu.showAt(e.currentTarget as HTMLElement, [
-      { label: agent.enabled ? 'Pause' : 'Resume', icon: agent.enabled ? 'pause' : 'refresh', action: () => void toggleAgent() },
+      // Pausing stops its routines and refuses delegation to it; chat and Run now still work.
+      { label: agent.enabled ? 'Pause routines & delegation' : 'Resume', icon: agent.enabled ? 'pause' : 'refresh', title: agent.enabled ? PAUSE_TIP : 'Let its routines run and other agents hand it work again', action: () => void toggleAgent() },
       { label: 'Reset agent…', icon: 'undo', action: () => void resetAgent() },
       { separator: true },
       { label: 'Delete agent…', icon: 'trash', danger: true, action: () => void removeAgent() },
@@ -350,7 +352,7 @@
 >
   {#snippet badge()}
     {#if agent}
-      {#if !agent.enabled}<span class="chip pa-warn" title="Routines don’t run while paused. Run now and chat still work.">Paused</span>{/if}
+      {#if !agent.enabled}<span class="chip pa-warn" title={PAUSE_TIP}>Paused</span>{/if}
       {#if autonomy?.primary && !viewport.isPhone}<span class="chip pa-accent" title="Your main agent — creates agents, delegates to them, and they report back to it"><Icon name="star" size={12} /> Main agent</span>{/if}
     {/if}
   {/snippet}
@@ -418,7 +420,7 @@
           <AgentAvatar avatar={agent.avatar} name={agent.name} size={40} />
           <div class="who-t">
             <h2 dir="auto">{agent.name}</h2>
-            <span class="muted">{agent.enabled ? 'Active' : 'Paused — its routines don’t run'}{autonomy?.primary ? ' · your main agent' : ''}</span>
+            <span class="muted">{agent.enabled ? 'Active' : 'Paused — no routines or delegated work'}{autonomy?.primary ? ' · your main agent' : ''}</span>
           </div>
           {#if canEditDocuments}<button class="btn small" onclick={() => (editing = 'about')}><Icon name="edit" size={12} /> Name &amp; avatar</button>{/if}
         </div>

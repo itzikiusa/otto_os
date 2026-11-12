@@ -11,8 +11,9 @@
   import { toastError } from '../../lib/toastError';
   import { recallRoom } from '../rooms/room-access'; // ui-guards: allow — shared room credential lookup
   import { openHostedRoom } from '../rooms/room-window'; // ui-guards: allow — shared native/tab room launcher
-  import { delegatedParentId, isThreadSession } from './threadsHelpers';
+  import { delegatedParentId } from './threadsHelpers';
   import { threads } from './threadsStore.svelte';
+  import { anyThread, relayTargets, relayToThread } from './threadRelay';
 
   interface Props {
     workspaceId: string | null;
@@ -26,10 +27,8 @@
   let rooms = $state<RoomSnapshot[]>([]);
   let roomsRetry = $state(0);
 
-  const focusedSession = $derived(focusedSessionId ? (ws.getSession(focusedSessionId) ?? null) : null);
-  const peerCandidates = $derived(
-    ws.sessions.filter((s) => !s.archived && isThreadSession(s) && s.id !== focusedSessionId),
-  );
+  const focusedSession = $derived(anyThread(focusedSessionId));
+  const peerCandidates = $derived(relayTargets(focusedSessionId));
 
   // Sync default target when candidates change.
   $effect(() => {
@@ -79,7 +78,7 @@
     if (sending || !relayText.trim()) return;
     sending = true;
     try {
-      const ok = await threads.sendPeerMessage({
+      const ok = await relayToThread({
         fromSessionId: focusedSessionId,
         target: threads.peerRelayTarget,
         text: relayText,

@@ -3,7 +3,7 @@
 // It monkey-patches window.fetch (for /api/v1/*) and window.WebSocket (for
 // /ws/*) so client.ts stays untouched.
 
-import { mockBigPrDiff, mockCommitDiff, mockExtraPrs, mockPrCommits } from './mock-prs';
+import { MOCK_ME, mockBigPrDiff, mockCommitDiff, mockExtraPrs, mockIsMine, mockPrCommits, mockPrLive } from './mock-prs';
 import { slackMockRoutes } from './mock-slack';
 import type {
   AwsAccount,
@@ -1798,7 +1798,7 @@ const routes: Route[] = [
       // One page, always the last one — the fixture set never overflows.
       return {
         json: {
-          items: list.map((p) => p.summary),
+          items: list.map((p) => ({ ...p.summary, is_mine: mockIsMine(p.summary.author) })),
           has_more: false,
           page: Number(q.get('page') ?? 1),
           per_page: Number(q.get('per_page') ?? 50),
@@ -1839,17 +1839,17 @@ const routes: Route[] = [
       const pr = prs.find((p) => p.repo_id === m[1] && p.summary.number === Number(m[2]));
       if (!pr) return problem(404, 'not_found', 'pr');
       const detail: PrDetail = {
-        ...pr.summary,
+        ...mockPrLive(pr.summary),
         description_md: pr.description_md,
         comments: pr.comments,
         approved_by: pr.approved_by,
-        reviewers: [...pr.approved_by, ...(pr.changes_by ?? [])].map((name) => ({ name, approved: pr.approved_by.includes(name), changes_requested: !pr.approved_by.includes(name), avatar_url: null, reviewed_at: null })),
+        reviewers: [...pr.approved_by, ...(pr.changes_by ?? [])].map((name) => ({ name, approved: pr.approved_by.includes(name), changes_requested: !pr.approved_by.includes(name), avatar_url: null, reviewed_at: null, is_me: name === MOCK_ME })),
         mergeable: pr.mergeable,
       };
       return { json: detail };
     },
   },
-  { method: 'GET', re: /^\/repos\/([^/]+)\/prs\/(\d+)\/diff$/, handle: (m, _b, q) => ({ json: m[2] === '51' ? mockBigPrDiff(q.get('path')) : sampleDiff }) },
+  { method: 'GET', re: /^\/repos\/([^/]+)\/prs\/(\d+)\/diff$/, handle: (m, _b, q) => ({ json: { ...(m[2] === '51' ? mockBigPrDiff(q.get('path')) : sampleDiff), ...(q.get('ignore_whitespace') === 'true' ? { whitespace_ignored: false } : {}) } }) },
   { method: 'GET', re: /^\/repos\/([^/]+)\/prs\/(\d+)\/commits$/, handle: (m) => ({ json: mockPrCommits(m[2]) }) },
   // The Git page is workspace-independent and reads every repo from here; the
   // mock had no handler, so a PR deep-link found no repo to render.
@@ -1961,12 +1961,12 @@ const routes: Route[] = [
     },
   },
   {
-    method: 'POST', // your review ('dev-otto' is the mock git account)
+    method: 'POST', // your review: the forge lists you as MOCK_ME, not the account username
     re: /^\/repos\/([^/]+)\/prs\/(\d+)\/(approve|request-changes)$/,
     handle: (m) => {
       const pr = prs.find((p) => p.repo_id === m[1] && p.summary.number === Number(m[2]));
-      const others = (l: string[] | undefined) => (l ?? []).filter((n) => n !== 'dev-otto');
-      if (pr) [pr.approved_by, pr.changes_by] = m[3] === 'approve' ? [[...others(pr.approved_by), 'dev-otto'], others(pr.changes_by)] : [others(pr.approved_by), [...others(pr.changes_by), 'dev-otto']];
+      const others = (l: string[] | undefined) => (l ?? []).filter((n) => n !== MOCK_ME);
+      if (pr) [pr.approved_by, pr.changes_by] = m[3] === 'approve' ? [[...others(pr.approved_by), MOCK_ME], others(pr.changes_by)] : [others(pr.approved_by), [...others(pr.changes_by), MOCK_ME]];
       return { status: 204 };
     },
   },

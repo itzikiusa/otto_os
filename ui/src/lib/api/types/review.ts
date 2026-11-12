@@ -94,6 +94,40 @@ export interface EditReviewCommentReq {
   mark_posted?: boolean;
 }
 
+/** POST /pr-review-comments/{cid}/decline (optional body): what the decline
+ *  records on the comment's tracked finding — default `false_positive`. */
+export interface DeclineReviewCommentReq {
+  dismiss?: 'false_positive' | 'waived';
+  reason?: string;
+}
+
+/** GET /reviews/{id}/triage — one comment as triage sees it. */
+export interface CommentTriage {
+  comment_id: Id;
+  /** The tracked finding this comment posts, when linked. */
+  finding_id: Id | null;
+  finding_status: FindingStatus | null;
+  /** The final verifier did not check it (body starts `[unverified] `). */
+  unverified: boolean;
+  /** Another review of this PR already posted it (the Otto comment that did). */
+  on_pr: { review_id: Id; comment_id: Id } | null;
+}
+
+/** A finding an earlier run raised that this run re-checked and did not raise again. */
+export interface PriorFinding {
+  finding: Finding;
+  /** 'fixed' | 'still_open' | 'not_relevant' (the scope assessment's word). */
+  disposition: string;
+  evidence: string;
+}
+
+/** GET /reviews/{id}/triage. */
+export interface ReviewTriage {
+  review_id: Id;
+  comments: CommentTriage[];
+  prior: PriorFinding[];
+}
+
 export interface Review {
   scope_plan?: ReviewScopePlan | null;
   id: string;
@@ -104,8 +138,12 @@ export interface Review {
   comments: ReviewComment[];
   agents: ReviewAgentState[];
   created_at: string;
+  /** Computed at read time: 'approved' | 'changes_requested' | 'incomplete';
+   *  null while running, cancelled or failed with nothing usable. */
   verdict?: string | null;
+  /** Unresolved critical/high findings (same set as merge readiness). */
   blocker_count?: number | null;
+  /** One line: open findings by severity, plus "N unverified". */
   summary_md?: string | null;
   /** true when the final comments came from the deterministic summarizer
    *  fallback (configured summarizer unavailable) — derived from the agents' fallback flags. */

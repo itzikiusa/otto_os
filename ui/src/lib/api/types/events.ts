@@ -74,7 +74,9 @@ export type OttoEvent =
       meta: Record<string, unknown>;
     }
   | { type: 'session_renamed'; session_id: Id; workspace_id: Id; title: string }
-  | { type: 'session_removed'; session_id: Id; workspace_id: Id }
+  /** `owner_id` is the removed session's `created_by` (the row is gone, so the
+   *  daemon's event filter reads the owner from the event itself). */
+  | { type: 'session_removed'; session_id: Id; workspace_id: Id; owner_id: Id }
   /** An agent session needs the operator: its turn ended (confirmed idle) or
    *  it raised a prompt / permission request. Sent whatever the notification
    *  settings say — it drives the session list's "needs you" flag. */

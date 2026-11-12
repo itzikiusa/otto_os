@@ -71,6 +71,7 @@ pub(crate) fn ssh_config_from_conn(conn: &Connection) -> Result<SshTunnelConfig,
         port,
         user: user.to_string(),
         identity_file,
+        proxy_jump: None,
     })
 }
 

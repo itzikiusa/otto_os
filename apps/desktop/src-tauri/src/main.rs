@@ -134,6 +134,10 @@ fn main() {
                                     id.to_string(),
                                 );
                             }
+                            // Undo / Redo with no app window focused (the
+                            // floating bar or a tray panel is key): never
+                            // rewind an edit in a window the user isn't in.
+                            None if matches!(id, "undo" | "redo") => {}
                             None => {
                                 if let Some(win) = windows::primary_window(app) {
                                     let _ = app.emit_to(
@@ -390,8 +394,15 @@ fn build_menu(app: &tauri::App) -> tauri::Result<()> {
         "Edit",
         true,
         &[
-            &PredefinedMenuItem::undo(handle, None)?,
-            &PredefinedMenuItem::redo(handle, None)?,
+            // NOT PredefinedMenuItem::undo / ::redo: AppKit sends their key
+            // equivalents to the web view's NATIVE undo list, which never
+            // holds CodeMirror's own edits (it applies pastes and typing
+            // itself) and does not reliably survive focus leaving the window
+            // — so ⌘Z did nothing after a paste or a window switch. The SPA routes
+            // these ids (see ui/src/lib/undoredo.ts): editor history for
+            // CodeMirror, the native command for plain form fields.
+            &MenuItem::with_id(handle, "undo", "Undo", true, Some("Cmd+Z"))?,
+            &MenuItem::with_id(handle, "redo", "Redo", true, Some("Cmd+Shift+Z"))?,
             &PredefinedMenuItem::separator(handle)?,
             &PredefinedMenuItem::cut(handle, None)?,
             &PredefinedMenuItem::copy(handle, None)?,

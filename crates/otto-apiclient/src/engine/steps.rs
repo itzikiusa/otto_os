@@ -141,6 +141,12 @@ pub async fn run_step<C: ApiClientCtx>(
     };
     let mut script_asserts: Vec<Value> = Vec::new();
     let mut scripts_ok = true;
+    // An agent's run: scripts see `{{KEY}}` placeholders for the
+    // environment's secrets, never their values (see `ScriptSecrets`).
+    let script_secrets = |vars: &serde_json::Map<String, Value>| match binding {
+        Some(binding) => ScriptSecrets::new(vars, &binding.env_blob, &binding.secret_keys),
+        None => ScriptSecrets::default(),
+    };
 
     // Pre-request script: may mutate method/url/headers/body and set vars.
     let pre_code = extras
@@ -154,9 +160,14 @@ pub async fn run_step<C: ApiClientCtx>(
             headers: exec.headers.clone(),
             body: exec.body.clone(),
         };
-        let mut svars = string_vars(vars);
-        let out = api_scripts::run_pre_request_isolated(pre_code, &script_req, &svars).await;
-        if let Some(err) = out.error {
+        let secrets = script_secrets(&*vars);
+        let svars = secrets.script_vars(vars);
+        let mut out = api_scripts::run_pre_request_isolated(pre_code, &script_req, &svars).await;
+        let error = match out.error.take() {
+            Some(err) => Some(format!("pre-request script failed: {err}")),
+            None => secrets.check_pre(pre_code, &script_req, &out).err(),
+        };
+        if let Some(error) = error {
             return ApiRunStepResult {
                 request_id,
                 name: request.name,
@@ -164,17 +175,17 @@ pub async fn run_step<C: ApiClientCtx>(
                 duration_ms: 0,
                 ok: false,
                 assertions: Value::Array(Vec::new()),
-                error: Some(format!("pre-request script failed: {err}")),
+                error: Some(error),
             };
         }
+        secrets.restore(&mut out.vars);
         if let Some(mutated) = out.request {
             exec.method = mutated.method;
             exec.url = mutated.url;
             exec.headers = mutated.headers;
             exec.body = mutated.body;
         }
-        svars = out.vars;
-        merge_string_vars(vars, &svars);
+        merge_string_vars(vars, &out.vars);
     }
 
     // GraphQL: combine the query body + stored variables into the standard
@@ -187,8 +198,9 @@ pub async fn run_step<C: ApiClientCtx>(
     // rewritten request, a dataset row or a chained value can retarget the
     // URL). The step fails instead of sending; a person can run it from the UI.
     if let Some(binding) = binding {
-        let unbound = unbound_secret_host_with(
+        let unbound = find_unbound_secret(
             repo,
+            Some(ctx.secrets()),
             wid,
             &exec,
             vars,
@@ -200,7 +212,7 @@ pub async fn run_step<C: ApiClientCtx>(
         .await;
         let error = match unbound {
             Ok(None) => None,
-            Ok(Some(host)) => Some(new_host_conflict(&host, true).to_string()),
+            Ok(Some(unbound)) => Some(unbound_secret_conflict(&unbound, true).to_string()),
             Err(error) => Some(error.to_string()),
         };
         if let Some(error) = error {
@@ -235,6 +247,13 @@ pub async fn run_step<C: ApiClientCtx>(
         };
     }
 
+    // A step carrying an environment secret never follows a redirect off its
+    // host (see `prepare_request_with`).
+    let credentialed = match binding {
+        Some(b) => uses_env_secret(&exec, vars, &b.env_blob, &b.secret_keys),
+        None => false,
+    };
+
     // Resolve `$secret` auth markers (this stored request's own ref only).
     if let Err(msg) = api_secrets::resolve_auth_markers_async(
         ctx.secrets(),
@@ -256,12 +275,13 @@ pub async fn run_step<C: ApiClientCtx>(
 
     // Send via the shared single-request path (same reqwest logic as /execute).
     let allow_local = workspace_allows_local(ctx, wid).await;
-    match build_and_send(
+    match build_and_send_with(
         &jar_scope(wid, actor),
         &exec,
         vars,
         proxy.as_deref(),
         allow_local,
+        credentialed,
     )
     .await
     {
@@ -318,10 +338,12 @@ pub async fn run_step<C: ApiClientCtx>(
                     headers: headers_map,
                     body_text: resp.body.clone(),
                 };
-                let svars = string_vars(vars);
-                let out =
+                let secrets = script_secrets(&*vars);
+                let svars = secrets.script_vars(vars);
+                let mut out =
                     api_scripts::run_post_response_isolated(post_code, &script_resp, &svars).await;
                 if out.error.is_none() {
+                    secrets.restore(&mut out.vars);
                     merge_string_vars(vars, &out.vars);
                 }
                 for t in &out.tests {

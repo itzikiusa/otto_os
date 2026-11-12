@@ -114,22 +114,77 @@ test('Approve / Request changes live in the header and update at once', async ({
   await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
   const head = page.locator('.prd-actions');
   const side = page.getByRole('complementary', { name: 'Pull request details' });
+  const codeTab = page.getByRole('tab', { name: 'Code', exact: true });
 
-  // Request changes: the header button opens the message box on Summary.
+  // Request changes from the Code tab: the composer opens over the diff, and
+  // you stay on Code (it used to jump to Summary).
+  await codeTab.click();
   await head.getByRole('button', { name: 'Request changes' }).click();
-  await page.getByRole('textbox', { name: 'What needs to change' }).fill('Cap the retry loop.');
-  await page.locator('.prd-request-changes').getByRole('button', { name: 'Request changes' }).click();
-  await page.getByRole('dialog').getByRole('button', { name: 'Request changes' }).click();
-  // No refresh needed: the header and the reviewer list change right away.
+  const composer = page.getByRole('dialog', { name: 'Request changes on #51' });
+  await composer.getByRole('textbox', { name: 'What needs to change' }).fill('Cap the retry loop.');
+  await composer.getByRole('button', { name: 'Request changes' }).click();
+  await page.getByRole('dialog').filter({ hasText: 'Request changes on PR #51?' }).getByRole('button', { name: 'Request changes' }).click();
   await expect(head.getByText('Changes requested')).toBeVisible();
-  await expect(side.getByText('Changes requested')).toBeVisible();
+  await expect(codeTab).toHaveAttribute('aria-selected', 'true');
 
-  // Approve flips your opinion.
+  // The forge names you "Dev Otto" — no git account handle matches that (the
+  // Bitbucket shape: username an email, reviewer a display name). After the
+  // quiet reload only the daemon's `is_me` says it's you, and the header must
+  // keep the status instead of flipping back to a button.
+  await page.getByRole('tab', { name: 'Summary', exact: true }).click();
+  await expect(side.getByText('Dev Otto')).toBeVisible();
+  await expect(side.getByText('Changes requested')).toBeVisible();
+  await expect(head.getByText('Changes requested')).toBeVisible();
+
+  // Approve flips your opinion — on the same reviewer row, never a duplicate.
   await head.getByRole('button', { name: 'Approve', exact: true }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Approve PR' }).click();
   await expect(head.getByText('Approved', { exact: true })).toBeVisible();
   await expect(head.getByText('Changes requested')).toHaveCount(0);
   await expect(side.getByText('Changes requested')).toHaveCount(0);
+  await expect(side.getByText('Dev Otto')).toHaveCount(1);
+});
+
+test('is:mine trusts the forge’s own "authored by you", not a name match', async ({ page }) => {
+  await page.goto('/#/git/rep_otto/pr/51');
+  await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
+  // #49's author is "Dev Otto": no account handle matches, `is_mine` does.
+  await page.locator('.pr-search').fill('is:mine');
+  await expect(page.locator('.pr-row')).toHaveCount(2);
+  await expect(page.locator('.pr-row').filter({ hasText: 'round bonus balance' })).toHaveCount(1);
+});
+
+test('Merge after a push you have not read asks first; Reload the diff clears it', async ({ page }) => {
+  await page.goto('/#/git/rep_otto/pr/51');
+  const prd = page.locator('.prd');
+  // The diff you read was loaded at the PR's head.
+  await expect(prd).toHaveAttribute('data-diff-head', /^c1fac680/, { timeout: 15_000 });
+  // Someone pushes while you're still on the page.
+  await page.evaluate(() => localStorage.setItem('otto_mock_pr_pushed', '51'));
+
+  await page.locator('.prd-actions').getByRole('button', { name: 'Merge', exact: true }).click();
+  const modal = page.getByRole('dialog', { name: 'Merge pull request' });
+  const warn = modal.getByTestId('pr-merge-unseen');
+  await expect(warn).toContainText('1 new commit since you opened this diff');
+  const mergeBtn = modal.getByRole('button', { name: 'Merge pull request', exact: true });
+  // The mock's CI is failing too: "Merge anyway" alone does not release Merge.
+  await modal.getByText('Merge anyway').click();
+  await expect(mergeBtn).toBeDisabled();
+  await warn.getByText('Merge including changes I have not reviewed').click();
+  await expect(mergeBtn).toBeEnabled();
+  await warn.getByText('Merge including changes I have not reviewed').click();
+  await expect(mergeBtn).toBeDisabled();
+
+  // Reload the diff: the dialog closes and the diff is re-read at the new head…
+  await warn.getByRole('button', { name: 'Reload the diff' }).click();
+  await expect(modal).toBeHidden();
+  await expect(prd).toHaveAttribute('data-diff-head', /^c7e57a11/);
+  // …so Merge no longer warns: "Merge anyway" (for the failing CI) is enough
+  // once the dialog has read the live head.
+  await page.locator('.prd-actions').getByRole('button', { name: 'Merge', exact: true }).click();
+  await modal.getByText('Merge anyway').click();
+  await expect(mergeBtn).toBeEnabled();
+  await expect(modal.getByTestId('pr-merge-unseen')).toHaveCount(0);
 });
 
 test('PR header never overlaps: repo · #n · state stay whole as the window narrows', async ({ page }) => {

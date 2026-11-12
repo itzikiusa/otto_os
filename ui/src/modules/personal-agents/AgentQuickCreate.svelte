@@ -16,6 +16,7 @@
   import { avatarForPersonality, CHARACTERS } from './characters';
   import { personalityPresets } from './personalities';
   import { personalAgentsApi } from '../../lib/api/personalAgents';
+  import { router } from '../../lib/router.svelte';
 
   interface Props {
     /** No main agent yet: offer (and pre-pick) the main-agent start. */
@@ -115,13 +116,23 @@
           idempotency_key: crypto.randomUUID(),
         });
       }
-      await personalAgentsApi.setPersonality(a.id, { preset: personality }).catch(() => {});
+      // The agent exists either way; a refused personality is said, not dropped.
+      const toneSet = await personalAgentsApi.setPersonality(a.id, { preset: personality }).then(() => true, (e: unknown) => {
+        console.warn('personality not saved', e);
+        return false;
+      });
       await personalAgents.loadAutonomy(a.id);
       // An idea's routine waits in "Add routine" (prefilled), not a toast action.
       const draft = !t && picked && purpose.trim() === picked.purpose ? picked.routine : null;
       const drafted = !!draft;
       if (draft) personalAgents.routineDrafts = { ...personalAgents.routineDrafts, [a.id]: draft };
       toasts.success(`Created ${a.name}`, t?.schedule ? 'Chat with it to set up the rest.' : drafted ? 'Its first routine is ready in Routines.' : 'Add a routine, or just ask it in chat.');
+      if (!toneSet) {
+        const tone = PRESETS.find((p) => p.id === personality)?.label ?? personality;
+        toasts.push('warn', `${a.name} has the default personality`, `“${tone}” couldn’t be saved.`, 8000, {
+          action: { label: 'Set personality', run: () => router.go(`personal-agents/${a.id}/about`) },
+        });
+      }
       oncreated(a);
     } catch (e) {
       error = `Couldn’t create the agent. ${loadErrorText(e)}`;

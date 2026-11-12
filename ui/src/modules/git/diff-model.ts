@@ -57,6 +57,15 @@ export function needsHunks(f: FileDiff): boolean {
   return !!f.hunks_omitted && !f.too_large && !f.is_binary && f.hunks.length === 0;
 }
 
+/** Worth prefetching (diff-prefetch.ts): hunks still to fetch, and not a
+ *  generated file (starts collapsed, nobody reads it) or one over the
+ *  per-file cap (shown as "Large file · Load anyway"). */
+export function prefetchable(f: FileDiff): boolean {
+  if (!needsHunks(f) || isGenerated(f.path)) return false;
+  const s = fileStat(f);
+  return s.add + s.del <= LARGE_FILE_LINES;
+}
+
 // ── Search ────────────────────────────────────────────────────────────────
 // One lowercase blob of a hunk's CHANGED lines, built once per hunk, so a
 // search keystroke is one `includes` per hunk instead of a toLowerCase per line.
@@ -157,6 +166,26 @@ export function lineAnchor(l: DiffLine): { side: 'old' | 'new'; line: number } |
   if (l.old_line !== null) return { side: 'old', line: l.old_line };
   return null;
 }
+/** Anchored comments whose `side:line` is on no line of `f`'s hunks: the
+ *  line is outside the context the forge sent, or a push moved it and the
+ *  forge did not flag the comment outdated. They'd match no row and vanish;
+ *  the file-level block lists them instead ("line not shown"). */
+export function orphanComments(fc: FileComments | undefined, f: FileDiff): PrComment[] {
+  if (!fc || fc.anchored.size === 0) return [];
+  const seen = new Set<string>();
+  for (const h of f.hunks) {
+    for (const l of h.lines) {
+      const a = lineAnchor(l);
+      if (!a) continue;
+      const k = anchorKey(a.side, a.line);
+      if (fc.anchored.has(k)) seen.add(k);
+    }
+  }
+  if (seen.size === fc.anchored.size) return [];
+  const out: PrComment[] = [];
+  for (const [k, cs] of fc.anchored) if (!seen.has(k)) out.push(...cs);
+  return out;
+}
 export function commentsForLine(fc: FileComments | undefined, l: DiffLine): PrComment[] | null {
   if (!fc || fc.anchored.size === 0) return null;
   const a = lineAnchor(l);
@@ -185,7 +214,7 @@ export type Row =
   | (RowBase & { kind: 'large'; lines: number; canLoad: boolean })
   | (RowBase & { kind: 'pending' })
   | (RowBase & { kind: 'error'; message: string })
-  | (RowBase & { kind: 'fcomments'; comments: PrComment[] })
+  | (RowBase & { kind: 'fcomments'; comments: PrComment[]; notShown?: ReadonlySet<PrComment> })
   | (RowBase & { kind: 'hunk'; hi: number; hunk: Hunk; eff: FileDiff })
   | (RowBase & { kind: 'line'; hi: number; li: number; line: DiffLine })
   | (RowBase & { kind: 'split'; hi: number; sr: SplitRow })
@@ -279,8 +308,10 @@ export function buildFileRows(i: FileRowsInput): Row[] {
     }
     if (big || needsHunks(file)) return pendingOrNote();
   }
-  if (i.fc && i.fc.unanchored.length > 0) {
-    rows.push({ kind: 'fcomments', key: `${k}c`, file, comments: i.fc.unanchored });
+  const orphans = orphanComments(i.fc, eff);
+  if (i.fc && i.fc.unanchored.length + orphans.length > 0) {
+    const comments = orphans.length > 0 ? [...i.fc.unanchored, ...orphans] : i.fc.unanchored;
+    rows.push({ kind: 'fcomments', key: `${k}c`, file, comments, notShown: orphans.length > 0 ? new Set(orphans) : undefined });
   }
   for (let hi = 0; hi < eff.hunks.length; hi++) {
     const hunk = eff.hunks[hi];
@@ -353,5 +384,30 @@ export function estimateRow(r: Row, mobile: boolean): number {
       return 1;
     default:
       return 44;
+  }
+}
+
+/** The text ⌘F searches in one row (lib/findProviders.ts): the row model
+ *  covers every file, hunk header and line of the expanded files, while the
+ *  DOM holds only the window. */
+export function findTextOf(r: Row): string {
+  switch (r.kind) {
+    case 'file':
+      return r.file.old_path ? `${r.file.old_path} → ${r.file.path}` : r.file.path;
+    case 'hunk':
+      return r.hunk.header;
+    case 'line':
+      return r.line.content;
+    case 'split':
+      return `${r.sr.left?.content ?? ''}\n${r.sr.right?.content ?? ''}`;
+    case 'note':
+      return r.text;
+    case 'error':
+      return r.message;
+    case 'comment':
+    case 'fcomments':
+      return r.comments.map((c) => c.body).join('\n');
+    default:
+      return '';
   }
 }

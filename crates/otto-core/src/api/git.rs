@@ -502,6 +502,11 @@ pub struct DiffResp {
     /// `-l1000` limit): some renames are reported as a delete + an add.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub renames_incomplete: Option<bool>,
+    /// Set only on a PR diff asked for with `ignore_whitespace=true`: `true`
+    /// when whitespace-only changes were left out, `false` when the forge
+    /// cannot do that (GitHub, GitLab) and this is the normal diff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whitespace_ignored: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -729,6 +734,11 @@ pub struct PrSummary {
     /// so a push re-keys the diff memo instead of serving the old diff.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_sha: Option<String>,
+    /// The PR's author is the forge account the request was made with —
+    /// compared by the forge's stable user id, never a display name. False
+    /// when that identity could not be looked up.
+    #[serde(default)]
+    pub is_mine: bool,
 }
 
 /// One page of `GET /repos/{id}/prs`. `has_more` is the provider's own
@@ -775,6 +785,21 @@ pub struct PrComment {
     /// "outdated" chip rather than pinning it to an unrelated row.
     #[serde(default)]
     pub outdated: bool,
+    /// The comment's author is the forge account the request was made with
+    /// (stable id match), so `PATCH`/`DELETE …/comments/{id}` may act on it.
+    /// Always false for a GitHub review summary (`review_state` set).
+    #[serde(default)]
+    pub can_edit: bool,
+    /// Set when this general comment is a GitHub review's summary body:
+    /// `approved` | `changes_requested` | `commented` | `dismissed`. Its `id`
+    /// is `review-<id>`; a reply to it is posted as a quoting comment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_state: Option<String>,
+    /// Id of the comment this reply answers, when the forge threads replies
+    /// to replies (Bitbucket). A deep chain is flattened under its root, so
+    /// this keeps who answered whom. None on thread heads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_reply_to: Option<String>,
 }
 
 /// Side of a unified diff an inline PR comment anchors to.
@@ -830,6 +855,11 @@ pub struct PrReviewer {
     pub avatar_url: Option<String>,
     #[serde(default)]
     pub reviewed_at: Option<DateTime<Utc>>,
+    /// This reviewer is the forge account the request was made with —
+    /// compared by the forge's stable user id (Bitbucket uuid/account_id,
+    /// GitHub login/id, GitLab id), never a display name.
+    #[serde(default)]
+    pub is_me: bool,
 }
 
 /// One commit on a pull/merge request.
@@ -984,6 +1014,14 @@ pub struct NewPrCommentReq {
     /// (GitHub); ignored by forges that don't need it.
     #[serde(default)]
     pub commit_id: Option<String>,
+}
+
+/// `PATCH /repos/{id}/prs/{number}/comments/{cid}` — replace a comment's
+/// text. `{cid}` is the `PrComment.id` (on GitLab a thread head's id is its
+/// discussion id; the daemon resolves the note).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditPrCommentReq {
+    pub body: String,
 }
 
 /// Body for `POST /repos/{id}/prs/{number}/comments/{cid}/resolve` — `{cid}`

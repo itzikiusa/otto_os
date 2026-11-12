@@ -57,6 +57,33 @@ export function boolLiteral(engine: EngineLike, b: boolean): string {
   return engine === 'postgres' ? (b ? 'TRUE' : 'FALSE') : b ? '1' : '0';
 }
 
+// ── Binary cells ─────────────────────────────────────────────────────────────
+
+/** Column types whose cells the daemon sends as base64 TEXT (MySQL BINARY /
+ *  VARBINARY / *BLOB, Postgres BYTEA) — the same list as the daemon's
+ *  `is_binary_type_name`, which also sets the column's `binary` flag. */
+export function isBinaryType(typeHint: string | null | undefined): boolean {
+  return !!typeHint && /^(?:var)?binary$|^(?:tiny|medium|long)?blob$|^bytea$/i.test(typeHint.trim());
+}
+
+/** Strict standard base64 (what the daemon emits): A–Z a–z 0–9 + /, `=` pad. */
+export function isBase64(s: string): boolean {
+  return s.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(s);
+}
+
+/** A literal that yields the BYTES a base64 cell holds — never the base64
+ *  text itself, which is what quoting it as a string would store / compare.
+ *  Null when the engine has no decoder here or the text isn't base64 (then
+ *  the caller quotes it as typed). Base64 has no quote or backslash, so it
+ *  is safe inside `'…'` verbatim. */
+export function binaryLiteral(engine: EngineLike, b64: string): string | null {
+  if (!isBase64(b64)) return null;
+  if (engine === 'mysql') return `FROM_BASE64('${b64}')`;
+  if (engine === 'postgres') return `decode('${b64}', 'base64')`;
+  if (engine === 'clickhouse') return `base64Decode('${b64}')`;
+  return null;
+}
+
 // ── Table references ─────────────────────────────────────────────────────────
 
 /** Resolve a schema-tree node id like `db:shop/table:orders` (Postgres trees use

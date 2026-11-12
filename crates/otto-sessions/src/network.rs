@@ -277,6 +277,7 @@ fn ssh_config(conn: &Connection) -> Result<SshTunnelConfig> {
         port,
         identity_file: (!string("identity_file").is_empty())
             .then(|| string("identity_file").into()),
+        proxy_jump: None,
     })
 }
 async fn prepare_profile(
@@ -382,6 +383,7 @@ mod tests {
             port: 22,
             user: "user".into(),
             identity_file: None,
+            proxy_jump: None,
         };
         let opener = FakeOpener {
             dropped: Arc::new(AtomicUsize::new(0)),

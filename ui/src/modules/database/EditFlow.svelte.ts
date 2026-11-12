@@ -39,7 +39,7 @@ import { mongoCollectionForEdit } from './edit-mongo';
 import { InsertFlow } from './insert-flow.svelte';
 import { applyPatchAtPath, flattenPaths, valueKind } from '../../lib/jsonTree/expansion-plan';
 import { toastError } from '../../lib/toastError';
-import { batchFailure, completedRows, reviewBatchSql, type BatchFailure } from './review-batch';
+import { affectedCheck, batchFailure, completedRows, reviewBatchSql, unmatchedReport, type BatchFailure } from './review-batch';
 import { plural } from '../../lib/plural';
 
 export type { TypedKind, TypedValue, RowPatch, DiffLine } from './edit-types';
@@ -314,9 +314,10 @@ export class EditFlow {
   pendingValue(rowIdx: number, colIdx: number): string | undefined {
     return this.pending.get(rowIdx)?.cells.get(colIdx);
   }
-  discardPending(): void {
-    this.pending = new Map();
-  }
+  discardPending(): void { this.pending = new Map(); }
+  /** The grid's view state is being parked (tab/view switch, unmount): a
+   *  half-typed, changed cell draft becomes a pending change, not lost. */
+  parkDraft(): Map<number, RowPatch> { const e = this.editing; if (e && this.liveRows[e.rowIdx]) this.commitEdit(); this.editing = null; return this.pending; }
 
   /** Copy-on-write edit of one row's patch; an emptied patch drops the row. */
   private withRow(rowIdx: number, edit: (p: RowPatch) => void): void {
@@ -345,8 +346,8 @@ export class EditFlow {
 
   isEditableCell(colIdx: number): boolean {
     if (!this.editable) return false;
-    const name = this.result?.columns[colIdx]?.name;
-    return !!name && !this.editPkCols.includes(name); // PK column(s) read-only
+    const col = this.result?.columns[colIdx]; // PK column(s) and base64 bytes (no faithful text box) read-only
+    return !!col?.name && !col.binary && !this.editPkCols.includes(col.name);
   }
 
   beginEdit(rowIdx: number, colIdx: number): void {
@@ -362,9 +363,7 @@ export class EditFlow {
       value: draft ?? (v === null || v === undefined ? '' : cellStr(v)),
     };
   }
-  cancelEdit(): void {
-    this.editing = null;
-  }
+  cancelEdit(): void { this.editing = null; }
 
   /** Park the in-progress cell edit as a pending change. A draft that matches
    * the stored value again un-parks the cell. The statement is built later, in
@@ -765,6 +764,15 @@ export class EditFlow {
     this.reviewError = `${failure.message}${where}\n${written}`;
     toasts.error('The write stopped partway', written);
   }
+  /** Row statements that matched NO row (deleted, key changed) — not "Applied":
+   *  keep those drafts and the modal, clear only the rows fully written. */
+  private reportUnmatched(unmatched: readonly number[], ranSql: string): void {
+    const stmtRows = this.reviewStmtRows?.sql === ranSql ? this.reviewStmtRows.rows : null;
+    const { written, message } = unmatchedReport(unmatched, stmtRows);
+    if (written?.size) this.clearCoveredDrafts(written);
+    this.reviewError = message;
+    toasts.warn('Did not match any row', message);
+  }
 
   async runReview(): Promise<void> {
     if (!this.reviewSql || !this.connectionId) return;
@@ -776,44 +784,37 @@ export class EditFlow {
     const tabId = database.tab?.id;
     const connId = database.selectedConnId;
     try {
-      // Scope to the database the result RAN in (Mongo resolves `db.coll.…`
-      // against it; Redis needs its keyspace) — not the selector's current
-      // value, which may have moved since the rows were fetched. `null` is
-      // passed through as "no scope", exactly how the query ran. Routed through
-      // the store so the production / read-only write-gate applies — a guarded
-      // connection prompts for a typed confirmation first.
+      // Scope to the database the result RAN in (not the selector's current
+      // value; `null` = "no scope", as it ran), through the store so the
+      // production / read-only write-gate (typed confirmation) applies.
       const scope = this.scopeNode();
       // MySQL / Postgres: a multi-statement edit runs all-or-nothing.
       const batch = reviewBatchSql(this.engine, sql);
       this.reviewError = null;
       const res = await database.runManagedStatement(batch.sql, scope);
       if ('canceled' in res) {
-        // Nothing ran — keep the modal open. Only a plain dismissal needs the
-        // toast: a mistyped name was already explained by the gate (one toast,
-        // not two), and a stale run (access / connection changed) is silent,
-        // like the direct query paths.
+        // Nothing ran — keep the modal. Only a plain dismissal toasts (the gate
+        // explained a mistyped name; a stale run is silent, like direct runs).
         if (res.canceled === 'declined') toasts.info('Write canceled');
         return;
       }
       // A batch that stopped on an error is still a 200 — not "Applied".
       const failure = batchFailure(res, batch.atomic);
-      if (failure) {
-        this.reportPartialReview(failure, batch.atomic, sql);
-        return;
-      }
+      if (failure) return this.reportPartialReview(failure, batch.atomic, sql);
+      // Nor is an UPDATE / DELETE that matched no row (MySQL / Postgres counts).
+      const miss = affectedCheck(this.engine, res, batch.atomic, sql);
+      if (miss?.unmatched.length) return this.reportUnmatched(miss.unmatched, sql);
       toasts.success('Applied', 'Statement ran successfully');
+      if (miss?.multi.length) toasts.warn('An edit changed more than one row', `${plural(miss.multi.length, 'UPDATE')} matched several rows — the key may not be unique.`);
       // The drafts this review applied are written now: clear them BEFORE the
-      // refresh, which may be skipped (tab switched) or fail — the grid's
-      // per-tab stash would otherwise restore them as "pending" and a second
-      // Review & apply would run the same UPDATE again. Delete / duplicate
+      // refresh, which may be skipped or fail (the per-tab stash would restore
+      // them and a second apply would rerun the UPDATE). Delete / duplicate
       // reviews don't cover the drafts, so they leave them alone.
       this.clearCoveredDrafts();
       this.reviewSql = null;
-      // Refresh what's ON SCREEN: re-run the statement that produced this grid
-      // (`statement` is the tab's ran_statement, not the live editor buffer —
-      // which may have been rewritten since) and stay on the current page.
-      // Switched away while the write ran: skip it — refreshing now would
-      // replace the OTHER tab's result with this tab's statement.
+      // Refresh what's ON SCREEN — the tab's ran_statement, not the live editor
+      // buffer, on the current page. Skipped when the user switched away: it
+      // would replace the OTHER tab's result with this tab's statement.
       if (database.tab?.id !== tabId || database.selectedConnId !== connId) {
         toasts.info('Applied in another tab', 'Re-run that tab to see the change.');
         return;
@@ -973,18 +974,14 @@ export class EditFlow {
     /** Set when the viewed cell belongs to an editable result column — enables
      *  the in-viewer editor (the inline one-line input is useless for JSON). */
     edit: { rowIdx: number; colIdx: number } | null;
+    /** `raw` is a binary column's base64 — CellViewer shows it as hex bytes. */
+    binary?: boolean;
   } | null = $state(null);
   viewerEditing: boolean = $state(false);
   viewerDraft: string = $state('');
   viewerErr: string | null = $state(null);
   readonly viewerText: string = $derived(
-    this.viewer
-      ? this.viewer.formatted
-        ? this.viewer.sql
-          ? formatSql(this.viewer.raw)
-          : this.viewer.raw
-        : this.viewer.raw
-      : '',
+    this.viewer?.formatted && this.viewer.sql ? formatSql(this.viewer.raw) : (this.viewer?.raw ?? ''),
   );
 
   openCell(v: unknown, rowIdx = -1, colIdx = -1): void {
@@ -994,7 +991,9 @@ export class EditFlow {
         : null;
     this.viewerEditing = false;
     this.viewerErr = null;
-    if (typeof v === 'string') {
+    if (typeof v === 'string' && this.result?.columns[colIdx]?.binary) {
+      this.viewer = { raw: v, sql: false, formatted: false, edit: null, binary: true };
+    } else if (typeof v === 'string') {
       this.viewer = { raw: v, sql: looksLikeSql(v), formatted: looksLikeSql(v), edit };
     } else if (v === null || v === undefined) {
       this.viewer = { raw: 'NULL', sql: false, formatted: false, edit };

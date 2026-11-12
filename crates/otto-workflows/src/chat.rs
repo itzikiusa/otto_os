@@ -38,6 +38,10 @@ use otto_core::workflows::{NodeStatus, Workflow, WorkflowRun};
 use otto_state::{TriggersRepo, WorkflowTrigger, WorkflowsRepo};
 use serde_json::{json, Value};
 
+use crate::chat_resolve::{
+    ambiguous_reply, max_parallel_runs, no_such_workflow_reply, resolve_name, slot_outlook,
+    NameMatch, SlotOutlook,
+};
 use crate::WorkflowCtx;
 
 /// Our own acknowledgement replies always start with this. Defensive loop
@@ -48,9 +52,77 @@ use crate::WorkflowCtx;
 /// never be mistaken for a chat-binding trigger.
 const ACK_PREFIX: &str = "🚀 Started workflow";
 
+/// The ack's prefix when every run slot is taken and the run waits its turn —
+/// "Started" would be a lie for the 30–60 minutes it can sit in the queue.
+/// Recognised by the same loop guard.
+const QUEUED_PREFIX: &str = "⏳ Queued workflow";
+
 /// True when `text` is (the start of) our own ack reply.
 fn is_own_ack(text: &str) -> bool {
-    text.starts_with(ACK_PREFIX)
+    text.starts_with(ACK_PREFIX) || text.starts_with(QUEUED_PREFIX)
+}
+
+/// The acknowledgement for an admitted run: whether it started or queued
+/// (`outlook` `None` = the slot lookup failed; reads as started, the wording
+/// from before the queue existed), the `goals` echo of the structured
+/// command, then any `notes` (a reinterpreted field, a fuzzy name match).
+fn ack_reply(
+    name: &str,
+    run_id: &str,
+    outlook: Option<SlotOutlook>,
+    cap: usize,
+    goals: Option<&str>,
+    notes: &[String],
+) -> String {
+    let mut s = match outlook {
+        Some(SlotOutlook::Queued { ahead }) => {
+            let mut s = format!(
+                "{QUEUED_PREFIX} **{name}** (run `{run_id}`) behind {ahead} run{}. It starts when a \
+                 slot frees (at most {cap} run at once).",
+                if ahead == 1 { "" } else { "s" }
+            );
+            if let Some(g) = goals {
+                s.push_str(&format!(" Goals: {g}."));
+            }
+            s
+        }
+        _ => match goals {
+            Some(g) => {
+                format!("{ACK_PREFIX} **{name}** (run `{run_id}`). Working through the steps now — goals: {g}.")
+            }
+            None => {
+                format!("{ACK_PREFIX} **{name}** (run `{run_id}`). Working through the steps now.")
+            }
+        },
+    };
+    for note in notes {
+        s.push('\n');
+        s.push_str(note);
+    }
+    s.push_str(" Reply `status` · `skip` · `abort` · `help` in this thread to control it.");
+    s
+}
+
+/// The ack note when the typed name only matched once normalised (a hyphen
+/// for an em dash, other spacing) — say which workflow actually runs.
+fn matched_name_note(typed: &str, actual: &str) -> Option<String> {
+    let typed = typed.trim();
+    (typed.to_lowercase() != actual.trim().to_lowercase())
+        .then(|| format!("ℹ️ No workflow is named exactly \"{typed}\" — matched **{actual}**."))
+}
+
+/// A reply that refuses an explicit trigger (logged at warn by the caller).
+fn refusal(reply: String) -> WorkflowChatAck {
+    WorkflowChatAck { reply }
+}
+
+/// How a typed workflow name resolved in the receiving workspace.
+enum Resolved {
+    Found(Box<Workflow>),
+    /// No (single) workflow by that name — the reply names the closest.
+    Missing(String),
+    /// The lookup itself failed — the reply says so.
+    Failed(String),
 }
 
 /// A control command a user can send in a running workflow's chat thread.
@@ -181,7 +253,7 @@ Goals:\n\
 /// explanations users actually need to fill it in right (semantics that have
 /// bitten in practice: `Branch:` is the review BASE, not the feature branch).
 const WF_TRIGGER_FIELD_NOTES: &str = "\
-• *Name* — must match a workflow from the list below exactly.\n\
+• *Name* — a workflow from the list below (case, spacing and dash style don't matter).\n\
 • *Working Directory* — absolute path(s) (no `~`); comma-separate SEVERAL repos to \
 review them as one run (cross-repo interactions included).\n\
 • *PR* — which pull request to work on. `PR: 15` for one repo, or `repo-a#15, repo-b#340` \
@@ -639,7 +711,10 @@ pub fn binding_matches(
     if spec.get("chat").and_then(Value::as_str) != Some(chat) {
         return false;
     }
-    if let Some(spec_thread) = spec.get("thread").and_then(Value::as_str) {
+    // A blank `thread` is "any thread": the Triggers form saves the empty
+    // field as `""`, and matching it literally made every binding created
+    // there unmatchable (no inbound message carries an empty thread).
+    if let Some(spec_thread) = spec_thread(spec) {
         if thread != Some(spec_thread) {
             return false;
         }
@@ -680,9 +755,15 @@ fn binding_candidates<'a>(
     // Stable sort: thread-pinned specs sort before unpinned ones; relative
     // order within each group is preserved (matches the old best-match loop,
     // which kept the first pinned/unpinned candidate it saw).
+    matches.sort_by_key(|t| std::cmp::Reverse(spec_thread(&t.spec).is_some()));
     matches
-        .sort_by_key(|t| std::cmp::Reverse(t.spec.get("thread").and_then(Value::as_str).is_some()));
-    matches
+}
+
+/// A binding spec's pinned thread; `None` when absent or blank.
+fn spec_thread(spec: &Value) -> Option<&str> {
+    spec.get("thread")
+        .and_then(Value::as_str)
+        .filter(|t| !t.trim().is_empty())
 }
 
 /// Whether an active run of the bound workflow already owns this message's
@@ -699,30 +780,46 @@ pub struct WorkflowChatTriggerImpl<C: WorkflowCtx> {
 impl<C: WorkflowCtx> WorkflowChatTriggerImpl<C> {
     /// Shared run-start body for all three resolution paths: create the run
     /// row, spawn the workflow engine in the background, and build the ack.
-    /// `detail` overrides the default tail sentence (legacy path reports
-    /// goals; the simplified/binding paths use the default). `channel`/`chat`
+    /// `goals` / `notes` go into the ack (see [`ack_reply`]). `channel`/`chat`
     /// are the inbound message's origin, logged for traceability only (they're
-    /// already threaded into `input` by every call site).
+    /// already threaded into `input` by every call site). Every refusal is
+    /// answered in the thread — an explicit trigger never ends in silence.
     async fn start_named(
         &self,
         wf: Workflow,
         input: Value,
-        detail: Option<String>,
+        goals: Option<&str>,
+        notes: &[String],
         channel: &str,
         chat: &str,
     ) -> Option<WorkflowChatAck> {
         let repo = WorkflowsRepo::new(self.ctx.pool().clone());
-        let ws = self.ctx.workspaces().get(&wf.workspace_id).await.ok()?;
+        let ws = match self.ctx.workspaces().get(&wf.workspace_id).await {
+            Ok(ws) => ws,
+            Err(e) => {
+                tracing::warn!(
+                    "workflow chat: can't start '{}' from {channel}/{chat}: workspace {} lookup failed: {e}",
+                    wf.name,
+                    wf.workspace_id
+                );
+                return Some(refusal(format!(
+                    "⚠️ Can't start **{}**: its workspace (`{}`) could not be loaded: {e}.",
+                    wf.name, wf.workspace_id
+                )));
+            }
+        };
         // S3-302: a chat `Working Directory:` (or repos) outside every
         // registered repo never starts a run — say why in the thread.
         if let Err(reason) = self.ctx.check_run_location(&ws, &input).await {
-            tracing::info!(
-                "workflow chat: refused to start '{}' from {channel}/{chat}: {reason}",
-                wf.name
+            tracing::warn!(
+                "workflow chat: refused to start '{}' (workspace '{}') from {channel}/{chat}: {reason}",
+                wf.name,
+                ws.name
             );
-            return Some(WorkflowChatAck {
-                reply: format!("⚠️ Can't start **{}**: {reason}.", wf.name),
-            });
+            return Some(refusal(format!(
+                "⚠️ Can't start **{}** (workspace *{}*): {reason}.",
+                wf.name, ws.name
+            )));
         }
         tracing::info!(
             "workflow chat: starting workflow '{}' (id {}, ws {}) from {channel}/{chat}",
@@ -730,10 +827,26 @@ impl<C: WorkflowCtx> WorkflowChatTriggerImpl<C> {
             wf.id,
             wf.workspace_id
         );
-        let run = repo
+        // Read BEFORE the insert, so the new run doesn't count itself.
+        let cap = max_parallel_runs();
+        let outlook = self.slot_outlook_now(&repo, cap).await;
+        let run = match repo
             .create_run(&wf.id, &wf.workspace_id, &input, None)
             .await
-            .ok()?;
+        {
+            Ok(run) => run,
+            Err(e) => {
+                tracing::warn!(
+                    "workflow chat: can't start '{}' (workspace '{}') from {channel}/{chat}: create run failed: {e}",
+                    wf.name,
+                    ws.name
+                );
+                return Some(refusal(format!(
+                    "⚠️ Can't start **{}** (workspace *{}*): the run could not be created: {e}.",
+                    wf.name, ws.name
+                )));
+            }
+        };
         self.ctx.spawn_run(
             ws,
             wf.clone(),
@@ -741,14 +854,71 @@ impl<C: WorkflowCtx> WorkflowChatTriggerImpl<C> {
             input.clone(),
             otto_core::workflows::RunScope::default(),
         );
-
-        let tail = detail.unwrap_or_else(|| "Working through the steps now.".to_string());
         Some(WorkflowChatAck {
-            reply: format!(
-                "{ACK_PREFIX} **{}** (run `{}`). {} Reply `status` · `skip` · `abort` · `help` in this thread to control it.",
-                wf.name, run.id, tail
-            ),
+            reply: ack_reply(&wf.name, &run.id, outlook, cap, goals, notes),
         })
+    }
+
+    /// Whether a run admitted now starts or queues, from the persisted run
+    /// states: queued = fresh `pending` rows with no step progress; executing
+    /// = the other live runs, minus those parked on an approval (which hand
+    /// their slot back). A snapshot — the engine's in-memory gate is the
+    /// authority — so `None` on any read error and the ack says "started".
+    async fn slot_outlook_now(&self, repo: &WorkflowsRepo, cap: usize) -> Option<SlotOutlook> {
+        let queued: std::collections::HashSet<String> =
+            repo.queued_run_ids().await.ok()?.into_iter().collect();
+        let mut executing = 0;
+        for id in repo.list_active_run_ids_global().await.ok()? {
+            if queued.contains(&id) {
+                continue;
+            }
+            if let Ok(Some((_, waiting_approval))) = repo.run_status(&id).await {
+                executing += usize::from(!waiting_approval);
+            }
+        }
+        Some(slot_outlook(executing, queued.len(), cap))
+    }
+
+    /// Resolve a typed workflow name in the receiving workspace: the exact
+    /// (case-insensitive) match first, then a normalised match over the
+    /// workspace's names ([`resolve_name`]) — "PR Reviewer - Angular" finds
+    /// "PR Reviewer — Angular".
+    async fn resolve_workflow(
+        &self,
+        repo: &WorkflowsRepo,
+        typed: &str,
+        workspace_id: &str,
+    ) -> Resolved {
+        let ws_id = workspace_id.to_string();
+        let failed = |e: otto_core::Error| {
+            tracing::warn!(
+                "workflow chat: lookup for '{typed}' in workspace {workspace_id} failed: {e}"
+            );
+            Resolved::Failed(format!(
+                "⚠️ Couldn't look up workflow \"{}\" in this workspace: {e}.",
+                typed.trim()
+            ))
+        };
+        match repo.find_by_name(typed, &ws_id).await {
+            Ok(Some(wf)) => return Resolved::Found(Box::new(wf)),
+            Ok(None) => {}
+            Err(e) => return failed(e),
+        }
+        let names = match repo.list_names(&ws_id).await {
+            Ok(names) => names,
+            Err(e) => return failed(e),
+        };
+        match resolve_name(typed, &names) {
+            NameMatch::One(id, _) => match repo.get(&id).await {
+                Ok(wf) => Resolved::Found(Box::new(wf)),
+                Err(e) => failed(e),
+            },
+            NameMatch::Ambiguous(hits) => Resolved::Missing(ambiguous_reply(typed, &hits)),
+            NameMatch::None => {
+                let all: Vec<String> = names.into_iter().map(|(_, n)| n).collect();
+                Resolved::Missing(no_such_workflow_reply(typed, &all))
+            }
+        }
     }
 
     /// Find the active (pending|running) run whose input thread matches this
@@ -831,23 +1001,22 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
             // Resolved in the receiving integration's workspace ONLY — same
             // gate as path (3): a channel never starts another workspace's
             // workflow (S3-03).
-            let wf = match repo
-                .find_by_name(&cmd.name, &workspace_id.to_string())
-                .await
-            {
-                Ok(Some(w)) => w,
-                Ok(None) => {
-                    tracing::info!(
-                        "workflow chat: parsed Action:Workflow but no workflow named '{}' exists — ignoring",
+            // An explicit `Action: Workflow` is never handed on to a chat
+            // session: a name that resolves to nothing gets a reply naming
+            // the closest workflows (it used to fall through silently).
+            let wf = match self.resolve_workflow(&repo, &cmd.name, workspace_id).await {
+                Resolved::Found(w) => *w,
+                Resolved::Missing(reply) => {
+                    tracing::warn!(
+                        "workflow chat: Action:Workflow names no workflow '{}' in workspace {workspace_id}",
                         cmd.name
                     );
-                    return None;
+                    return Some(refusal(reply));
                 }
-                Err(e) => {
-                    tracing::warn!("workflow chat: lookup for '{}' failed: {e}", cmd.name);
-                    return None;
-                }
+                Resolved::Failed(reply) => return Some(refusal(reply)),
             };
+            let mut notes: Vec<String> =
+                matched_name_note(&cmd.name, &wf.name).into_iter().collect();
 
             // The result is reported back via the workspace whose integration
             // received the message (`origin_workspace_id`) — the workflow's
@@ -859,7 +1028,9 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
                 "chat": chat,
                 "thread": thread,
                 "user": user,
-                "name": cmd.name,
+                // The workflow's real name, not what was typed (they differ
+                // after a normalised match) — `status` replies read it.
+                "name": wf.name,
                 "msg": cmd.msg,
                 // Belt-and-braces with the engine's normalize_prompt: also
                 // set `prompt` explicitly from the parsed `Msg:` field.
@@ -886,20 +1057,21 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
             } else {
                 cmd.goals.join("; ")
             };
-            let mut detail = format!("Working through the steps now — goals: {goals_txt}.");
             // Never reinterpret an explicit field in silence.
             if let Some(note) = &cmd.branch_note {
-                detail.push_str(&format!("\n⚠️ {note}"));
+                notes.push(format!("⚠️ {note}"));
             }
             return self
-                .start_named(wf, input, Some(detail), channel, chat)
+                .start_named(wf, input, Some(&goals_txt), &notes, channel, chat)
                 .await;
         }
 
         // (2) Simplified `run <name>: <prompt>` / `workflow <name>: …` command.
         if let Some((name, prompt, explicit)) = parse_run_command(text) {
-            match repo.find_by_name(&name, &workspace_id.to_string()).await {
-                Ok(Some(wf)) => {
+            match self.resolve_workflow(&repo, &name, workspace_id).await {
+                Resolved::Found(wf) => {
+                    let notes: Vec<String> =
+                        matched_name_note(&name, &wf.name).into_iter().collect();
                     let input = json!({
                         "trigger": "chat",
                         "origin_workspace_id": workspace_id,
@@ -911,27 +1083,25 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
                         "msg": prompt,
                         "raw": text,
                     });
-                    return self.start_named(wf, input, None, channel, chat).await;
+                    return self
+                        .start_named(*wf, input, None, &notes, channel, chat)
+                        .await;
                 }
-                Ok(None) if explicit => {
+                Resolved::Missing(reply) | Resolved::Failed(reply) if explicit => {
                     // Explicit `workflow`/`run workflow` keyword names an
-                    // unknown workflow — reply, but don't hijack the message
-                    // into a chat session either.
-                    return Some(WorkflowChatAck {
-                        reply: format!(
-                            "No workflow named **{name}**. Check `Workflows` for the exact name."
-                        ),
-                    });
+                    // unknown workflow (or the lookup failed) — reply, and
+                    // don't hand the message to a chat session either.
+                    tracing::warn!(
+                        "workflow chat: `workflow {name}:` not started in workspace {workspace_id}"
+                    );
+                    return Some(refusal(reply));
                 }
-                Ok(None) => {
+                Resolved::Missing(_) => {
                     // Bare `run <name>: …` with an unknown name — "run" reads
                     // too much like ordinary English to hijack; fall through
                     // to bindings, then to a normal chat session.
                 }
-                Err(e) => {
-                    tracing::warn!("workflow chat: lookup for '{}' failed: {e}", name);
-                    return None;
-                }
+                Resolved::Failed(_) => return None,
             }
         }
 
@@ -961,6 +1131,7 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
         // could leak into workspace A's workflow library and vice versa.
         let candidates = binding_candidates(&triggers, channel, chat, thread, has_mention);
         let mut wf = None;
+        let mut load_error = None;
         for trigger in candidates {
             let candidate = match repo.get(&trigger.workflow_id).await {
                 Ok(w) => w,
@@ -969,11 +1140,17 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
                         "workflow chat: binding trigger {} workflow lookup failed: {e}",
                         trigger.id
                     );
+                    if load_error.is_none() {
+                        load_error = Some(e.to_string());
+                    }
                     continue;
                 }
             };
+            // No reply for this one: when several workspaces' integrations
+            // share a channel, each receives the message, and the owning
+            // workspace starts the run — a reply here would be noise.
             if candidate.workspace_id != workspace_id {
-                tracing::info!(
+                tracing::warn!(
                     "workflow chat: binding trigger {} targets workflow '{}' in workspace {} \
                      — inbound message is from workspace {workspace_id}, skipping",
                     trigger.id,
@@ -985,7 +1162,16 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
             wf = Some(candidate);
             break;
         }
-        let wf = wf?;
+        let Some(wf) = wf else {
+            // A binding matched this channel but its workflow can't be read:
+            // say so rather than quietly turning the message into a chat.
+            return load_error.map(|e| {
+                refusal(format!(
+                    "⚠️ This channel is bound to a workflow that could not be loaded ({e}), so no \
+                     run started. Check the workflow's Triggers in Otto."
+                ))
+            });
+        };
         // A binding matches EVERY message in its channel — including a reply
         // ("also check X") in the thread of the run it already started, which
         // launched a parallel copy (own worktree + agents) that a later
@@ -1022,7 +1208,7 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
             "msg": stripped,
             "raw": text,
         });
-        self.start_named(wf, input, None, channel, chat).await
+        self.start_named(wf, input, None, &[], channel, chat).await
     }
 
     async fn try_control(
@@ -1513,6 +1699,10 @@ mod tests {
         let pinned = json!({"channel":"slack","chat":"C123","thread":"t1"});
         assert!(binding_matches(&pinned, "slack", "C123", Some("t1"), false));
         assert!(!binding_matches(&pinned, "slack", "C123", None, false));
+        // The Triggers form saves a blank thread as "" — that is "any thread".
+        let blank = json!({"channel":"slack","chat":"C123","thread":""});
+        assert!(binding_matches(&blank, "slack", "C123", None, false));
+        assert!(binding_matches(&blank, "slack", "C123", Some("t9"), false));
         let m = json!({"channel":"slack","chat":"C123","mention_only":true});
         assert!(binding_matches(&m, "slack", "C123", None, true));
         assert!(!binding_matches(&m, "slack", "C123", None, false));
@@ -1537,6 +1727,68 @@ mod tests {
             "{ACK_PREFIX} **Some Workflow** (run `xyz`). blah blah"
         )));
         assert!(is_own_ack(&format!("{ACK_PREFIX} anything at all")));
+    }
+
+    #[test]
+    fn queued_ack_is_recognized_by_the_loop_guard() {
+        assert!(is_own_ack(&ack_reply(
+            "Foo",
+            "r1",
+            Some(SlotOutlook::Queued { ahead: 2 }),
+            2,
+            None,
+            &[]
+        )));
+    }
+
+    #[test]
+    fn ack_says_started_only_when_a_slot_is_free() {
+        assert_eq!(
+            ack_reply(
+                "PR Reviewer",
+                "r1",
+                Some(SlotOutlook::StartsNow),
+                2,
+                Some("none"),
+                &[]
+            ),
+            "🚀 Started workflow **PR Reviewer** (run `r1`). Working through the steps now — \
+             goals: none. Reply `status` · `skip` · `abort` · `help` in this thread to control it."
+        );
+        // A failed slot lookup keeps the old wording rather than guessing.
+        assert_eq!(
+            ack_reply("PR Reviewer", "r1", None, 2, None, &[]),
+            "🚀 Started workflow **PR Reviewer** (run `r1`). Working through the steps now. \
+             Reply `status` · `skip` · `abort` · `help` in this thread to control it."
+        );
+    }
+
+    #[test]
+    fn ack_for_a_queued_run_never_claims_it_is_working() {
+        let note = matched_name_note("PR Reviewer - Angular", "PR Reviewer — Angular").unwrap();
+        let reply = ack_reply(
+            "PR Reviewer — Angular",
+            "r9",
+            Some(SlotOutlook::Queued { ahead: 1 }),
+            2,
+            Some("none"),
+            &[note],
+        );
+        assert_eq!(
+            reply,
+            "⏳ Queued workflow **PR Reviewer — Angular** (run `r9`) behind 1 run. It starts when \
+             a slot frees (at most 2 run at once). Goals: none.\n\
+             ℹ️ No workflow is named exactly \"PR Reviewer - Angular\" — matched **PR Reviewer — \
+             Angular**. Reply `status` · `skip` · `abort` · `help` in this thread to control it."
+        );
+        assert!(!reply.contains("Working through"));
+    }
+
+    #[test]
+    fn matched_name_note_only_when_the_names_really_differ() {
+        assert_eq!(matched_name_note("pr reviewer", "PR Reviewer"), None);
+        assert_eq!(matched_name_note(" PR Reviewer ", "PR Reviewer"), None);
+        assert!(matched_name_note("PR Reviewer - Go", "PR Reviewer — Go").is_some());
     }
 
     fn make_trigger(spec: Value) -> WorkflowTrigger {

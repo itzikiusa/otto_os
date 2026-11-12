@@ -44,6 +44,7 @@ mod env;
 mod execute;
 mod history;
 mod multipart;
+mod script_secrets;
 mod send;
 mod steps;
 mod tunnel;
@@ -54,6 +55,7 @@ pub use client::*;
 pub use env::*;
 pub use execute::*;
 pub use history::*;
+pub use script_secrets::*;
 pub use send::*;
 pub use steps::*;
 pub use tunnel::*;
@@ -62,6 +64,8 @@ pub use vars::*;
 use auth::*;
 use multipart::*;
 
+#[cfg(test)]
+mod binding_tests;
 #[cfg(test)]
 mod tests;
 

@@ -41,20 +41,14 @@ pub(super) async fn assess_scope(
     if review_is_cancelled(ctx, review_id).await {
         return Err(Error::Invalid("review cancelled".into()));
     }
-    let candidates = cfg
-        .agents
-        .iter()
-        .map(|a| format!("{}: {}", a.name, a.prompt))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let prompt = format!("{}\nConfigured lenses (reuse exact names when relevant; omit irrelevant lenses and add missing ones):\n{}\nIf configured, the Required checks lens is mandatory and its commands must be preserved. For every prior finding in context, add prior_findings:[{{finding_id,disposition:fixed|still_open|not_relevant,evidence}}] to the scope object. Read current code before claiming fixed; evidence must cite concrete code or an actually executed check. Preserve every ID, including previously waived items. Transport requirement: return a JSON ARRAY with exactly one object: {{\"severity\":\"info\",\"body\":\"the JSON scope object above, encoded as a string\"}}. This is a scope plan, not a code finding.",
-        otto_review::scope::assessment_prompt(diff_path, branch_context, guidance), candidates);
+    let prompt = otto_review::scope::scope_prompt(diff_path, branch_context, guidance, cfg);
     let slots = reviewer_slots();
     let _slot = otto_review::scope::acquire_slot(slots, guard.flag())
         .await
         .map_err(Error::Invalid)?;
     let started = std::time::Instant::now();
-    // Reviewer rule: the grace fails only a QUIET assessor; the hour is a backstop.
+    // Reviewer rule: the grace fails only a QUIET assessor; the hour is a
+    // backstop for the whole step, the second attempt included.
     let grace = otto_review::engine::review_agent_timeout(diff.len(), cfg.timeout_secs);
     let result = tokio::time::timeout(
         SCOPE_ABSOLUTE_CAP,
@@ -71,7 +65,7 @@ pub(super) async fn assess_scope(
             0,
             &prompt,
             grace,
-            Some(1),
+            Some(otto_review::scope::SCOPE_ATTEMPTS),
             Some(guard.flag()),
             None,
             &[],
@@ -90,18 +84,10 @@ pub(super) async fn assess_scope(
     }
     let result =
         result.map_err(|_| Error::Invalid("scope assessment ran past its 1-hour cap".into()))?;
-    if result.errored || result.findings.len() != 1 {
-        return Err(Error::Invalid("scope assessment returned no plan".into()));
-    }
-    let body = result.findings[0]
-        .body
-        .trim()
-        .trim_start_matches("```json")
-        .trim_end_matches("```")
-        .trim();
-    let mut plan: ReviewScopePlan = serde_json::from_str(body)
-        .map_err(|e| Error::Invalid(format!("Invalid scope assessment: {e}")))?;
-    otto_review::scope::validate_prior_findings(&plan, prior_ids).map_err(Error::Invalid)?;
+    // A failed session's row note says why (paste refused, stuck, timed out).
+    let note = states.lock().await.first().map(|s| s.note.clone());
+    let mut plan = otto_review::scope::plan_from_run(&result, &note.unwrap_or_default(), prior_ids)
+        .map_err(Error::Invalid)?;
     if cfg.agents.iter().any(|a| a.name == CHECKS_REVIEWER_NAME)
         && !plan.lenses.iter().any(|l| l.name == CHECKS_REVIEWER_NAME)
     {

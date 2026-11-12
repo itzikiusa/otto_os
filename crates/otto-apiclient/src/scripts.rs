@@ -13,8 +13,9 @@
 //! process (registered with [`set_script_host`]) that is killed after
 //! [`SCRIPT_TIMEOUT`], so a runaway or OOM script costs one child, never the
 //! daemon. At most [`MAX_CONCURRENT_SCRIPTS`] run at once. Without a
-//! registered host (unit tests, other binaries) the script runs in-process on
-//! the blocking pool — never on an async worker.
+//! registered host a script is refused, except in this crate's unit tests or
+//! a process that called [`allow_in_process_scripts`] (other crates' tests,
+//! tools): those run it in-process on the blocking pool, unbounded.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -454,10 +455,39 @@ async fn run_isolated(kind: &str, code: &str, ctx: Value) -> ScriptOutcome {
     };
     match SCRIPT_HOST.get() {
         Some(exe) => run_in_child(exe.as_os_str(), &[CHILD_ARG], &job, SCRIPT_TIMEOUT).await,
-        None => tokio::task::spawn_blocking(move || run(&job.kind, &job.code, &job.ctx))
-            .await
-            .unwrap_or_else(|e| failed(format!("script task failed: {e}"))),
+        None => run_without_host(job, in_process_allowed()).await,
     }
+}
+
+/// No registered host: in-process has no wall-clock, CPU or memory bound, so
+/// only test builds (and a process that opted in) run scripts that way. The
+/// release daemon registers its host at startup; if that failed, it refuses.
+async fn run_without_host(job: ChildJob, allowed: bool) -> ScriptOutcome {
+    if !allowed {
+        return failed(
+            "scripts can't run: the isolated script runner is not available (restart Otto)".into(),
+        );
+    }
+    tokio::task::spawn_blocking(move || run(&job.kind, &job.code, &job.ctx))
+        .await
+        .unwrap_or_else(|e| failed(format!("script task failed: {e}")))
+}
+
+static IN_PROCESS_SCRIPTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Let this process run scripts in-process, without the child runner's
+/// time and memory limits — for tests and tools, never the daemon.
+pub fn allow_in_process_scripts() {
+    IN_PROCESS_SCRIPTS.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Test and debug builds (other crates' tests link this crate without
+/// `cfg(test)`) or an explicit [`allow_in_process_scripts`]; never a release
+/// daemon.
+fn in_process_allowed() -> bool {
+    cfg!(any(test, debug_assertions))
+        || IN_PROCESS_SCRIPTS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// [`run_pre_request`], isolated (out of process when a host is registered,
@@ -611,6 +641,25 @@ mod tests {
                 .await;
         assert!(out.error.is_none(), "{:?}", out.error);
         assert_eq!(out.vars.get("k").unwrap(), "v");
+    }
+
+    /// Without a registered host and without the test/opt-in allowance, a
+    /// script is refused — never run in-process without limits.
+    #[tokio::test]
+    async fn without_a_host_a_release_daemon_refuses_scripts() {
+        let out = run_without_host(job(), false).await;
+        let err = out.error.unwrap();
+        assert!(err.contains("isolated script runner"), "{err}");
+        let ok = run_without_host(
+            ChildJob {
+                kind: "pre".into(),
+                code: "pm.environment.set('k', 'v');".into(),
+                ctx: json!({"vars": {}, "req": req()}),
+            },
+            true,
+        )
+        .await;
+        assert!(ok.error.is_none(), "{:?}", ok.error);
     }
 
     fn req() -> ScriptRequest {

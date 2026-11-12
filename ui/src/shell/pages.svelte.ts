@@ -23,6 +23,9 @@ import { startMeasurement } from '../lib/telemetry';
 import { loadErrorText } from '../lib/loadError';
 import type { Component } from 'svelte';
 import { SvelteMap } from 'svelte/reactivity';
+import { auth } from '../lib/stores/auth.svelte';
+import { routeAllowed } from '../lib/sidebar';
+import { knownRoute } from '../lib/routeKeys';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type PageComponent = Component<any>;
@@ -68,7 +71,12 @@ const LOADERS: Record<string, Loader> = {
   walkthroughs: () => import('../modules/help/Walkthroughs.svelte'),
   plugin: () => import('./PluginRoute.svelte'),
   snip: () => import('../modules/snip/SnipEditor.svelte'),
+  // An unknown or role-locked route (pageKeyOf): "Page not found" / no access.
+  'route-gate': () => import('./RouteGate.svelte'),
 };
+
+/** The page an unknown or locked route shows. */
+export const ROUTE_GATE = 'route-gate';
 
 let rightPanel = $state<PageComponent | null>(null);
 let rightPanelLoad: Promise<void> | null = null;
@@ -100,15 +108,26 @@ export function loadedRightPanel(): PageComponent | null {
 /** Routes the shell never renders as a page (the root App handles them). */
 const NOT_SHELL = new Set(['s', 'bar', 'tray', 'room', 'room-host']);
 
-/** The page a route shows, or null for a route outside the shell. Mirrors the
- *  shell's old `{#if moduleName === …}` chain: `connections` is the Database
- *  page, a plugin route without a slug and any unknown module are Agents. */
+/** The page a route shows, or null for a route outside the shell:
+ *  `connections` is the Database page, the bare route and a plugin route
+ *  without a slug are Agents. An unknown module, or one the signed-in user's
+ *  role / a disabled feature hides (the sidebar's own gate), is the route
+ *  gate — never a silent Agents, never a page that only fails with 403s. */
 export function pageKeyOf(parts: readonly string[]): string | null {
   const m = parts[0] ?? '';
   if (NOT_SHELL.has(m)) return null;
-  if (m === 'connections') return 'database';
-  if (m === 'plugin' && !parts[1]) return 'agents';
-  return m in LOADERS ? m : 'agents';
+  if (m === '' || (m === 'plugin' && !parts[1])) return 'agents';
+  const key = m === 'connections' ? 'database' : m;
+  // A known non-page route (`projects` redirects) keeps the old Agents fallback.
+  if (!(key in LOADERS) || key === ROUTE_GATE) return knownRoute(m) ? 'agents' : ROUTE_GATE;
+  return routeLocked(parts) ? ROUTE_GATE : key;
+}
+
+/** Locked only once the user's access is actually known (no flash of "no
+ *  access" while capabilities load, or after they failed to). */
+function routeLocked(parts: readonly string[]): boolean {
+  if (auth.phase !== 'ready' || !auth.me || auth.capabilitiesError) return false;
+  return !routeAllowed(parts.join('/'), (f) => auth.can(f, 'view'));
 }
 
 /** Resolved pages (reactive: the shell re-renders when one lands). */

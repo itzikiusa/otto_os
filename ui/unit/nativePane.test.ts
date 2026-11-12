@@ -78,4 +78,9 @@ test('native menus honor primary window focus after macOS window cycling leaves 
   assert.equal(sideMenuTarget('select-all', nativeSideFocused(staleSideReport, true), 'connections'), 'main');
   assert.equal(sideMenuTarget('close-tab', nativeSideFocused(true, false), 'connections'), 'close-pane');
   assert.equal(sideMenuTarget('select-all', nativeSideFocused(true, false), 'connections'), 'side');
+  // Undo / Redo are custom menu ids now (the native items never reached the
+  // editor): with the side pane focused they act on its document too.
+  assert.equal(sideMenuTarget('undo', nativeSideFocused(true, false), 'connections'), 'side');
+  assert.equal(sideMenuTarget('redo', nativeSideFocused(true, false), 'connections'), 'side');
+  assert.equal(sideMenuTarget('undo', nativeSideFocused(staleSideReport, true), 'connections'), 'main');
 });

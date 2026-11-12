@@ -13,6 +13,7 @@
   import type { NotificationSettings } from '../../lib/api/types';
   import { router } from '../../lib/router.svelte';
   import SettingToggle from './SettingToggle.svelte';
+  import SectionIntro from './SectionIntro.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
 
   // Load once on mount if the store hasn't fetched yet.
@@ -124,6 +125,7 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('notifications')} subtitle="Alerts and credential-expiry warnings" />
   <PageBody width="readable">
+  <SectionIntro><strong>These settings apply to everyone using this Otto</strong>, not only you{auth.isRoot ? ': a change here changes them for every user' : ''}. Only the root account can change them.</SectionIntro>
 
   <div class="section-title">Alerts</div>
   <div class="card s-card">

@@ -24,6 +24,7 @@
   import type { MenuItem } from '../lib/contextmenu.svelte';
   import { onTabKey } from '../lib/tabKeys';
   import { tick } from 'svelte';
+  import { checkOpenTabs } from './openTabsCheck';
 
   // Share modal: tracks the session id we're sharing; null = closed.
   let shareSessionId = $state<string | null>(null);
@@ -108,6 +109,11 @@
     );
   }
 
+  /** Close several tabs (one confirm), then re-check what is still open. */
+  function closeMany(ids: string[]): void {
+    void ws.requestCloseTabs(ids).then(() => checkOpenTabs(true));
+  }
+
   /** The tab's context menu. "Move left / right" are the pointer-free way to
    *  reorder (also ⌥⇧←/→ on a focused tab); they name the VISUAL direction,
    *  so in RTL "Move left" moves toward the end of the strip. */
@@ -141,21 +147,21 @@
         ? [{
             label: 'Close others',
             icon: 'x',
-            action: () => void ws.requestCloseTabs(ws.openTabs.filter((t) => t !== id)),
+            action: () => closeMany(ws.openTabs.filter((t) => t !== id)),
           }]
         : []),
       ...(tabIdx < ws.openTabs.length - 1
         ? [{
             label: 'Close to the right',
             icon: 'x',
-            action: () => void ws.requestCloseTabs(ws.openTabs.slice(tabIdx + 1)),
+            action: () => closeMany(ws.openTabs.slice(tabIdx + 1)),
           }]
         : []),
       ...(ws.openTabs.length > 1
         ? [{
             label: 'Close all tabs',
             icon: 'x',
-            action: () => void ws.requestCloseTabs([...ws.openTabs]),
+            action: () => closeMany([...ws.openTabs]),
           }]
         : []),
       ...(ws.recentlyClosed.length > 0

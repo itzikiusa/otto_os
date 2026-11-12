@@ -79,8 +79,13 @@ export interface TestConnectionResp {
    *  fix. Independent of `ok`. */
   warn_key_perms?: string | null;
   /** What to change when `ok` is false and the failure is a recognised one
-   *  (auth rejected, host key changed, DNS, refused, timed out, …). */
+   *  (auth rejected, host key changed, DNS, refused, timed out, access denied,
+   *  unknown database, TLS required / unsupported / untrusted, …). */
   hint?: string | null;
+  /** The failed client's full stderr (last 8 KB, secrets and PEM blocks
+   *  redacted). CLI-probe path only (SSH, custom); absent on success and on
+   *  the driver-backed DB path. */
+  detail?: string | null;
 }
 
 /** `POST /connections/unsaved/test` — SSH test-before-save (root only); probes

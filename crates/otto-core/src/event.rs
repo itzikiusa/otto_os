@@ -40,8 +40,15 @@ pub enum Event {
         workspace_id: Id,
         title: String,
     },
-    /// A session was removed.
-    SessionRemoved { session_id: Id, workspace_id: Id },
+    /// A session was removed. `owner_id` is the session's `created_by`: the
+    /// row is already deleted when this is sent, so the `/ws/events` filter
+    /// cannot look the owner up (as with `SessionCreated`, it rides inline).
+    SessionRemoved {
+        session_id: Id,
+        workspace_id: Id,
+        #[serde(default)]
+        owner_id: Id,
+    },
     /// An agent session needs the operator: `reason` is `"turn_end"` (its turn
     /// finished — confirmed idle, monitor.rs) or `"prompt"` (a permission /
     /// question from claude's Notification hook). Sent whatever the
@@ -863,6 +870,7 @@ mod tests {
             Event::SessionRemoved {
                 session_id: "s".into(),
                 workspace_id: "w".into(),
+                owner_id: "u".into(),
             },
             Event::SessionAttention {
                 session_id: "s".into(),
@@ -994,6 +1002,29 @@ mod tests {
         };
         let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert!(v.get("node").is_none());
+    }
+
+    /// `session_removed` keeps the fields the SPA reads and adds the owner
+    /// (the row is gone, so the WS filter needs it inline); an older payload
+    /// without `owner_id` still parses.
+    #[test]
+    fn session_removed_wire_shape_carries_the_owner() {
+        let v = serde_json::to_value(Event::SessionRemoved {
+            session_id: "s1".into(),
+            workspace_id: "w1".into(),
+            owner_id: "u1".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"type": "session_removed", "session_id": "s1",
+                "workspace_id": "w1", "owner_id": "u1"})
+        );
+        let old: Event = serde_json::from_value(
+            serde_json::json!({"type": "session_removed", "session_id": "s1", "workspace_id": "w1"}),
+        )
+        .unwrap();
+        assert!(matches!(old, Event::SessionRemoved { owner_id, .. } if owner_id.is_empty()));
     }
 
     #[test]

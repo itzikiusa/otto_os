@@ -132,6 +132,9 @@ impl SessionManager {
             .extend(cli_flags::read_only_args(&session.provider, &session.meta));
         // A subcommand that must follow the injected top-level flags.
         spec.args.extend(tail_args);
+        // The PTY spawn's build budget (`manager/resources.rs`); priority and
+        // admission stay with the runtime, which spawns the child itself.
+        self.apply_machine_budget(session, spec).await;
         // Last, over the fully-built spec — as `create` does.
         self.apply_sandbox(spec, session).await;
         Ok(protocol_mcp)

@@ -5,6 +5,8 @@
 //! authenticates to the host as themselves, so `shared`/`private` visibility is
 //! enforced per-user on the host.
 
+use std::time::Duration;
+
 use otto_core::{Error, Result};
 use otto_state::memory::ListFilter;
 use serde::de::DeserializeOwned;
@@ -12,6 +14,13 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::types::*;
+
+/// Connecting to the shared host gives up after this long…
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// …and a whole request (connect, send, response body) after this long. With
+/// no cap, an unreachable host hung every memory call — including the recall
+/// step at session start — for as long as the OS kept the socket trying.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct RemoteClient {
     base: String,
@@ -21,10 +30,27 @@ pub struct RemoteClient {
 
 impl RemoteClient {
     pub fn new(base_url: String, token: String) -> Self {
+        Self::with_timeouts(base_url, token, CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+    }
+
+    fn with_timeouts(
+        base_url: String,
+        token: String,
+        connect: Duration,
+        request: Duration,
+    ) -> Self {
+        let http = reqwest::Client::builder()
+            .connect_timeout(connect)
+            .timeout(request)
+            .build()
+            .unwrap_or_else(|e| {
+                tracing::warn!("remote memory: http client without timeouts: {e}");
+                reqwest::Client::new()
+            });
         Self {
             base: base_url.trim_end_matches('/').to_string(),
             token,
-            http: reqwest::Client::new(),
+            http,
         }
     }
 
@@ -39,7 +65,7 @@ impl RemoteClient {
             .bearer_auth(&self.token)
             .send()
             .await
-            .map_err(|e| Error::Upstream(format!("remote memory: {e}")))?;
+            .map_err(send_error)?;
         decode(resp).await
     }
 
@@ -56,7 +82,7 @@ impl RemoteClient {
             .json(body)
             .send()
             .await
-            .map_err(|e| Error::Upstream(format!("remote memory: {e}")))?;
+            .map_err(send_error)?;
         decode(resp).await
     }
 
@@ -96,7 +122,7 @@ impl RemoteClient {
             .query(&q)
             .send()
             .await
-            .map_err(|e| Error::Upstream(format!("remote memory: {e}")))?;
+            .map_err(send_error)?;
         decode(resp).await
     }
 
@@ -116,7 +142,7 @@ impl RemoteClient {
             .bearer_auth(&self.token)
             .send()
             .await
-            .map_err(|e| Error::Upstream(format!("remote memory: {e}")))?;
+            .map_err(send_error)?;
         if resp.status().is_success() {
             Ok(())
         } else {
@@ -153,6 +179,22 @@ impl RemoteClient {
     }
 }
 
+/// A request that never got a response, named for what went wrong so a
+/// caller (and the log) can tell a dead host from a bad answer.
+fn send_error(e: reqwest::Error) -> Error {
+    if e.is_timeout() {
+        Error::Upstream(format!(
+            "remote memory host did not answer in time (connect {}s, request {}s): {e}",
+            CONNECT_TIMEOUT.as_secs(),
+            REQUEST_TIMEOUT.as_secs()
+        ))
+    } else if e.is_connect() {
+        Error::Upstream(format!("remote memory host unreachable: {e}"))
+    } else {
+        Error::Upstream(format!("remote memory: {e}"))
+    }
+}
+
 async fn decode<R: DeserializeOwned>(resp: reqwest::Response) -> Result<R> {
     let status = resp.status();
     if !status.is_success() {
@@ -162,4 +204,46 @@ async fn decode<R: DeserializeOwned>(resp: reqwest::Response) -> Result<R> {
     resp.json::<R>()
         .await
         .map_err(|e| Error::Upstream(format!("remote memory decode: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A host that accepts the connection and never answers fails fast with
+    /// a typed timeout instead of hanging the memory call.
+    #[tokio::test]
+    async fn silent_host_times_out_with_a_clear_error() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _silent = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let client = RemoteClient::with_timeouts(
+            format!("http://{addr}/"),
+            "t".into(),
+            Duration::from_millis(500),
+            Duration::from_millis(300),
+        );
+        let started = std::time::Instant::now();
+        let err = client.get("ws", "m1").await.unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5), "{err}");
+        assert!(matches!(err, Error::Upstream(_)), "{err:?}");
+        assert!(err.to_string().contains("did not answer in time"), "{err}");
+    }
+
+    #[test]
+    fn production_client_carries_both_timeouts() {
+        assert!(CONNECT_TIMEOUT <= Duration::from_secs(5));
+        assert!(REQUEST_TIMEOUT >= CONNECT_TIMEOUT && REQUEST_TIMEOUT <= Duration::from_secs(30));
+        // Builds (with its timeouts) and keeps the base URL normalized.
+        let c = RemoteClient::new("http://host:7700/".into(), "t".into());
+        assert_eq!(
+            c.url("w", "memories"),
+            "http://host:7700/api/v1/workspaces/w/memories"
+        );
+    }
 }

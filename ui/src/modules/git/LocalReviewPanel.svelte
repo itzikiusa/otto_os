@@ -21,6 +21,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import { rel } from '../../lib/stores/now.svelte';
   import ReviewAgents from './ReviewAgents.svelte';
+  import ReviewIncomplete from './ReviewIncomplete.svelte';
   import FindingsBoard from './FindingsBoard.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import { agentProviders } from '../../lib/providers';
@@ -537,9 +538,8 @@
       </button>
     </div>
   {:else if review.status === 'error'}
-    <div class="lrp-error card" role="alert">
-      <Icon name="warning" size={14} />
-      <span class="lrp-error-msg">The review failed. <span class="dim">{review.error ?? 'No reason was reported — check Settings → Logs.'}</span></span>
+    <ReviewIncomplete {review} />
+    <div class="lrp-retry">
       <button class="btn small" disabled={starting} onclick={startReview}>
         {starting ? 'Starting…' : 'Try again'}<!-- ui-guards: allow — re-runs the review (an action), not a failed load -->
       </button>
@@ -816,12 +816,8 @@
     color: var(--danger);
     margin-top: 8px;
   }
-  .lrp-error-msg {
-    flex: 1;
-    min-width: 0;
-    overflow-wrap: anywhere;
-    font-size: var(--fs-s);
-  }
+  .lrp-error-msg { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: var(--fs-s); }
+  .lrp-retry { margin-block-start: 8px; }
 
   /* Findings */
   .lrp-findings-header {

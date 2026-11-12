@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 pub(super) fn connector(tls: &TlsConfig) -> otto_core::Result<tokio_rustls::TlsConnector> {
     let mut roots = RootCertStore::empty();
-    if let Some(ca) = tls.ca_cert.as_deref().filter(|s| !s.is_empty()) {
+    if let Some(ca) = tls.ca_cert.as_deref().filter(|s| !s.trim().is_empty()) {
+        // Inline PEM or a path to a PEM file (crate::tls::resolve_pem).
+        let ca = crate::tls::pem_text("ca_cert", ca)?;
         for cert in CertificateDer::pem_slice_iter(ca.as_bytes()) {
             roots
                 .add(cert.map_err(|e| types::invalid(e.to_string()))?)
@@ -40,14 +42,16 @@ pub(super) fn connector(tls: &TlsConfig) -> otto_core::Result<tokio_rustls::TlsC
                 rustls::crypto::ring::default_provider(),
             )))
     };
-    let cert = tls.client_cert.as_deref().filter(|s| !s.is_empty());
-    let key = tls.client_key.as_deref().filter(|s| !s.is_empty());
+    let cert = tls.client_cert.as_deref().filter(|s| !s.trim().is_empty());
+    let key = tls.client_key.as_deref().filter(|s| !s.trim().is_empty());
     let config = match (cert, key) {
         (Some(cert), Some(key)) => {
-            let certs = CertificateDer::pem_slice_iter(cert.as_bytes())
+            let cert_pem = crate::tls::pem_text("client_cert", cert)?;
+            let key_pem = crate::tls::pem_text("client_key", key)?;
+            let certs = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(|e| types::invalid(e.to_string()))?;
-            let key = PrivateKeyDer::from_pem_slice(key.as_bytes())
+            let key = PrivateKeyDer::from_pem_slice(key_pem.as_bytes())
                 .map_err(|e| types::invalid(e.to_string()))?;
             builder
                 .with_client_auth_cert(certs, key)
@@ -103,5 +107,38 @@ impl rustls::client::danger::ServerCertVerifier for Unverified {
     }
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tls_with_ca(ca: String) -> TlsConfig {
+        TlsConfig {
+            mode: types::TlsMode::Required,
+            ca_cert: Some(ca),
+            ..TlsConfig::default()
+        }
+    }
+
+    #[test]
+    fn ca_given_as_a_file_path_is_loaded() {
+        let ca = rcgen::generate_simple_self_signed(vec!["redis.fixture".into()]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("ca.pem");
+        std::fs::write(&file, ca.cert.pem()).unwrap();
+        assert!(connector(&tls_with_ca(file.to_string_lossy().into_owned())).is_ok());
+        // Inline PEM keeps working exactly as before.
+        assert!(connector(&tls_with_ca(ca.cert.pem())).is_ok());
+    }
+
+    #[test]
+    fn missing_ca_path_fails_naming_the_file() {
+        let err = connector(&tls_with_ca("/nonexistent/otto/redis-ca.pem".into()))
+            .err()
+            .expect("a missing CA file is an error");
+        let msg = err.to_string();
+        assert!(msg.contains("/nonexistent/otto/redis-ca.pem"), "{msg}");
     }
 }

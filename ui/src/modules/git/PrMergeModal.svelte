@@ -8,13 +8,16 @@
   // Blocking reasons disable Merge until "Merge anyway" is ticked.
   import { onDestroy, untrack } from 'svelte';
   import { api, ApiError } from '../../lib/api/client';
-  import type { MergeStrategy, PrChecksResp, PrDetail, PrReadiness } from '../../lib/api/types';
+  import type { MergeStrategy, PrChecksResp, PrCommit, PrDetail, PrReadiness } from '../../lib/api/types';
   import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { openExternal } from '../../lib/external';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { pinnedHead } from './pr-cache';
+  import { unseenHead, type UnseenHead } from './pr-merge-gate';
+  import { mergeStrategies } from './pr-merge-strategy';
+  import PrMergeUnseen from './PrMergeUnseen.svelte';
 
   interface Props {
     repoId: string;
@@ -27,8 +30,16 @@
     onstale?: () => void;
     /** Pre-selected strategy (the PR header's ⋯ "Squash and merge" etc.). */
     initialStrategy?: MergeStrategy;
+    /** The head the PR's diff view was loaded at — what the user actually read
+     *  ('' / omitted = no diff loaded, nothing to compare). */
+    reviewedHead?: string | null;
+    /** Close the dialog and reload the PR + its diff ("Reload the diff"). */
+    onreload?: () => void;
+    /** The repo's forge (`github` | `bitbucket` | `gitlab`): strategy labels
+     *  say what that forge actually does. */
+    provider?: string | null;
   }
-  let { repoId, number, pr, onclose, onmerged, onstale, initialStrategy }: Props = $props();
+  let { repoId, number, pr, onclose, onmerged, onstale, initialStrategy, reviewedHead = null, onreload, provider = null }: Props = $props();
 
   let disposed = false;
   onDestroy(() => { disposed = true; });
@@ -71,6 +82,22 @@
       .finally(() => (headLoading = false));
   });
   const pinSha = $derived(pinnedHead(liveHead, pr.head_sha ?? null));
+
+  // A push after the diff was read (not just during this dialog): Merge waits
+  // for "including changes I have not reviewed". The commit list is read only
+  // then, to say how many commits you haven't seen. `reviewed` is fixed at
+  // open: a 409 makes the parent reload its diff in the background, which
+  // must not count as having read it.
+  const reviewed = untrack(() => reviewedHead);
+  let unseenCommits = $state.raw<PrCommit[] | null>(null);
+  let ackUnseen = $state(false);
+  const unseen: UnseenHead = $derived(headLoading ? { moved: false, count: null } : unseenHead(pinSha, reviewed, unseenCommits));
+  $effect(() => {
+    if (!unseen.moved || unseenCommits) return;
+    const id = repoId;
+    const n = number;
+    void api.get<PrCommit[]>(`/repos/${id}/prs/${n}/commits`).then((c) => { if (!disposed) unseenCommits = c; }).catch(() => {});
+  });
 
   $effect(() => {
     const id = repoId;
@@ -117,7 +144,7 @@
     ].filter((r): r is string => r !== null),
   );
   const loading = $derived(checksLoading || readinessLoading || headLoading);
-  const canMerge = $derived(!merging && !loading && (reasons.length === 0 || mergeAnyway));
+  const canMerge = $derived(!merging && !loading && (reasons.length === 0 || mergeAnyway) && (!unseen.moved || ackUnseen));
 
   const FRESHNESS: Record<string, string> = {
     fresh: 'Up to date with the target branch',
@@ -175,6 +202,8 @@
       // the parent refresh its stale copy. Merge stays a fresh, explicit click.
       if (moved && !disposed) {
         mergeAnyway = false;
+        ackUnseen = false;
+        unseenCommits = null;
         probeTick++;
         onstale?.();
       }
@@ -194,6 +223,10 @@
       {pr.source_branch} <span class="dir-arrow">→</span> {pr.target_branch}
       {#if pinSha}<span title="The merge is pinned to this head commit">· at {pinSha.slice(0, 7)}</span>{/if}
     </div>
+
+    {#if unseen.moved}
+      <PrMergeUnseen {unseen} bind:ack={ackUnseen} disabled={merging} onreload={() => (onreload ?? onclose)()} />
+    {/if}
 
     <!-- readiness rows -->
     <div class="rows">
@@ -288,9 +321,7 @@
       <label class="opt">
         <span class="rlabel">Strategy</span>
         <select class="input" bind:value={strategy} style="width: 140px">
-          <option value="merge">Merge commit</option>
-          <option value="squash">Squash</option>
-          <option value="rebase">Rebase</option>
+          {#each mergeStrategies(provider) as o (o.value)}<option value={o.value} title={o.hint}>{o.label}</option>{/each}
         </select>
       </label>
       <label class="check-opt">

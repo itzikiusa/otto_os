@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 use crate::types::CiStatus;
 
 use super::client::Http;
+use super::identity::{self, Me};
 use super::{map_state, ts, varr, vbool, vstr, vstr_opt, vu64, RemoteRef, RemoteRepoSummary};
 
 const BASE: &str = "https://api.bitbucket.org/2.0";
@@ -45,6 +46,8 @@ pub struct Bitbucket {
     /// API root. Always [`BASE`] in production; overridden only by tests
     /// (`with_base`) so every hop can be pointed at a local stub.
     base: String,
+    /// Diff reads add `ignore_whitespace=true` ([`super::GitProvider::ignoring_whitespace`]).
+    ignore_whitespace: bool,
 }
 
 impl Bitbucket {
@@ -60,6 +63,32 @@ impl Bitbucket {
             username,
             token,
             base: base.trim_end_matches('/').to_string(),
+            ignore_whitespace: false,
+        }
+    }
+
+    /// The account this client authenticates as (`GET /2.0/user`), cached per
+    /// credential. `None` when the lookup fails — nothing is then "you".
+    pub(crate) async fn me(&self) -> Option<Me> {
+        let key = identity::cache_key(
+            "bitbucket",
+            &self.base,
+            &format!("{}:{}", self.username, self.token),
+        );
+        identity::cached(&key, || async {
+            let v = self.send_json(reqwest::Method::GET, "/user", None).await?;
+            Ok::<_, Error>(Me::from_keys(user_keys(&v)))
+        })
+        .await
+    }
+
+    /// `diff`/`diffstat` query suffix for [`Self::ignore_whitespace`]: `sep`
+    /// is `?` or `&`, whichever the path needs.
+    fn ws_param(&self, sep: char) -> String {
+        if self.ignore_whitespace {
+            format!("{sep}ignore_whitespace=true")
+        } else {
+            String::new()
         }
     }
 
@@ -426,7 +455,53 @@ fn summary_from(v: &Value) -> PrSummary {
         labels: vec![],
         reviewer_warnings: Vec::new(),
         head_sha: super::vstr_opt(v, &["source", "commit", "hash"]),
+        is_mine: false,
     }
+}
+
+/// [`summary_from`] with `is_mine` set from the author's stable ids.
+fn summary_for(v: &Value, me: Option<&Me>) -> PrSummary {
+    let mut s = summary_from(v);
+    s.is_mine = v
+        .get("author")
+        .is_some_and(|a| identity::is_me(me, &user_keys(a)));
+    s
+}
+
+/// A Bitbucket user object's stable ids: `uuid` and Atlassian `account_id`
+/// (never `display_name`/`nickname`, which the user can change and which
+/// never equal the email address a git account logs in with).
+pub(crate) fn user_keys(u: &Value) -> Vec<String> {
+    vec![
+        identity::key("uuid", &vstr(u, &["uuid"])),
+        identity::key("account_id", &vstr(u, &["account_id"])),
+    ]
+}
+
+/// The PR's reviewer list. Bitbucket's `participants` also holds everyone who
+/// merely commented (`role: "PARTICIPANT"`); only reviewers are listed, plus
+/// any participant who approved or requested changes — that verdict counts
+/// whatever their role.
+pub(crate) fn reviewers_from(pr: &Value, me: Option<&Me>) -> Vec<PrReviewer> {
+    varr(pr, &["participants"])
+        .iter()
+        .filter(|p| {
+            vstr(p, &["role"]) == "REVIEWER"
+                || vbool(p, &["approved"]).unwrap_or(false)
+                || vstr(p, &["state"]) == "changes_requested"
+        })
+        .map(|p| PrReviewer {
+            name: vstr(p, &["user", "display_name"]),
+            approved: vbool(p, &["approved"]).unwrap_or(false),
+            // `state`: "approved" | "changes_requested" | null.
+            changes_requested: vstr(p, &["state"]) == "changes_requested",
+            avatar_url: vstr_opt(p, &["user", "links", "avatar", "href"]),
+            reviewed_at: vstr_opt(p, &["participated_on"]).map(|s| ts(&s)),
+            is_me: p
+                .get("user")
+                .is_some_and(|u| identity::is_me(me, &user_keys(u))),
+        })
+        .collect()
 }
 
 /// Create-PR request body. `draft` is included only when explicitly requested
@@ -466,6 +541,15 @@ fn member_from(v: &Value) -> Member {
         nickname: vstr(v, &["user", "nickname"]),
         display_name: vstr(v, &["user", "display_name"]),
     }
+}
+
+/// `…/pullrequests/{n}/comments/{cid}` for a numeric comment id (anything
+/// else is refused before it can steer the request elsewhere).
+fn comment_path(r: &RemoteRef, number: u64, comment_id: &str) -> Result<String> {
+    let id: u64 = comment_id
+        .parse()
+        .map_err(|_| Error::Invalid(format!("bad comment id: {comment_id}")))?;
+    Ok(Bitbucket::pr_path(r, &format!("/{number}/comments/{id}")))
 }
 
 /// `inline` object of a Bitbucket comment: `to` anchors a new-side line,
@@ -515,10 +599,109 @@ fn comment_from(v: &Value) -> PrComment {
         created_at: ts(&vstr(v, &["created_on"])),
         replies: Vec::new(),
         resolved,
-        thread_id: None, // stamped on thread heads in get_pr
+        thread_id: None, // stamped on thread roots by `thread_comments`
         side,
         outdated,
+        can_edit: false,
+        review_state: None,
+        in_reply_to: v
+            .get("parent")
+            .and_then(|p| p.get("id"))
+            .and_then(Value::as_u64)
+            .map(|p| p.to_string()),
     }
+}
+
+/// [`comment_from`] with `can_edit` set from the author's stable ids.
+fn comment_for(v: &Value, me: Option<&Me>) -> PrComment {
+    let mut c = comment_from(v);
+    c.can_edit = v
+        .get("user")
+        .is_some_and(|u| identity::is_me(me, &user_keys(u)));
+    c
+}
+
+/// Bitbucket's flat comment list → threads. A reply's `parent` may itself be
+/// a reply, to any depth: every comment joins the thread of the ROOT of its
+/// parent chain, the descendants in chronological order (each keeping its
+/// `in_reply_to`). Only a real root stamps `thread_id` — Bitbucket resolves by
+/// the top-level comment id. A deleted root with live replies is headed by
+/// its earliest live descendant, still resolved through the root's id; a
+/// comment whose parent is not in the list (a page past the cap) heads its
+/// own thread without a `thread_id`, since it is not a real root.
+pub(crate) fn thread_comments(values: &[Value], me: Option<&Me>) -> Vec<PrComment> {
+    use std::collections::HashMap;
+    fn id_of(c: &Value) -> u64 {
+        vu64(c, &["id"])
+    }
+    fn parent_of(c: &Value) -> Option<u64> {
+        c.get("parent")
+            .and_then(|p| p.get("id"))
+            .and_then(Value::as_u64)
+    }
+    fn deleted(c: &Value) -> bool {
+        c.get("deleted").and_then(Value::as_bool).unwrap_or(false)
+    }
+    let by_id: HashMap<u64, &Value> = values
+        .iter()
+        .map(|c| (id_of(c), c))
+        .filter(|(id, _)| *id > 0)
+        .collect();
+    // (root id, real root?) — a missing parent (or a cycle, cut by the hop
+    // bound) makes the topmost comment found an orphan root.
+    let root_of = |c: &Value| -> (u64, bool) {
+        let mut cur = c;
+        for _ in 0..=values.len() {
+            match parent_of(cur) {
+                None => return (id_of(cur), true),
+                Some(p) => match by_id.get(&p) {
+                    Some(&parent) => cur = parent,
+                    None => return (id_of(cur), false),
+                },
+            }
+        }
+        (id_of(cur), false)
+    };
+    let mut order: Vec<u64> = Vec::new();
+    let mut groups: HashMap<u64, (bool, Vec<&Value>)> = HashMap::new();
+    for c in values.iter().filter(|c| id_of(c) > 0) {
+        let (root, real) = root_of(c);
+        groups
+            .entry(root)
+            .or_insert_with(|| {
+                order.push(root);
+                (real, Vec::new())
+            })
+            .1
+            .push(c);
+    }
+    let mut out = Vec::new();
+    for root in order {
+        let Some((real, members)) = groups.remove(&root) else {
+            continue;
+        };
+        let mut live: Vec<&Value> = members.into_iter().filter(|c| !deleted(c)).collect();
+        if live.is_empty() {
+            continue;
+        }
+        live.sort_by_key(|c: &&Value| (ts(&vstr(c, &["created_on"])), id_of(c)));
+        let head_at = live.iter().position(|c| id_of(c) == root).unwrap_or(0);
+        let head_v: &Value = live.remove(head_at);
+        let mut head = comment_for(head_v, me);
+        head.in_reply_to = None;
+        if real {
+            head.thread_id = Some(root.to_string());
+            // A deleted root still carries the thread's resolution.
+            if let Some(r) = by_id.get(&root).copied() {
+                if id_of(r) != id_of(head_v) {
+                    head.resolved = r.get("resolution").is_some_and(|x| !x.is_null());
+                }
+            }
+        }
+        head.replies = live.into_iter().map(|c| comment_for(c, me)).collect();
+        out.push(head);
+    }
+    out
 }
 
 #[async_trait]
@@ -543,9 +726,13 @@ impl super::GitProvider for Bitbucket {
         for s in states {
             path.push_str(&format!("&state={s}"));
         }
-        let v = self.get_json_cached(&path).await?;
+        let (v, me) = tokio::join!(self.get_json_cached(&path), self.me());
+        let v = v?;
         Ok(super::PrPage {
-            items: varr(&v, &["values"]).iter().map(summary_from).collect(),
+            items: varr(&v, &["values"])
+                .iter()
+                .map(|p| summary_for(p, me.as_ref()))
+                .collect(),
             // Bitbucket's cursor: present iff another page exists.
             has_more: v.get("next").and_then(Value::as_str).is_some(),
         })
@@ -560,41 +747,14 @@ impl super::GitProvider for Bitbucket {
             "{}?pagelen=100",
             Self::pr_path(r, &format!("/{number}/comments"))
         );
-        let (pr, comments_v) = tokio::join!(
+        let (pr, comments_v, me) = tokio::join!(
             self.get_json_cached(&pr_path),
             self.paginate_values(&comments_path),
+            self.me(),
         );
         let (pr, comments_v) = (pr?, comments_v?);
-
-        // Thread by parent.id.
-        let mut top: Vec<PrComment> = Vec::new();
-        let mut replies: Vec<(String, PrComment)> = Vec::new();
-        for c in &comments_v {
-            if c.get("deleted").and_then(Value::as_bool).unwrap_or(false) {
-                continue;
-            }
-            let pc = comment_from(c);
-            match c
-                .get("parent")
-                .and_then(|p| p.get("id"))
-                .and_then(Value::as_u64)
-            {
-                Some(parent) => replies.push((parent.to_string(), pc)),
-                None => top.push(pc),
-            }
-        }
-        for (parent, reply) in replies {
-            if let Some(t) = top.iter_mut().find(|t| t.id == parent) {
-                t.replies.push(reply);
-            } else {
-                top.push(reply);
-            }
-        }
-        // Thread heads are the resolve target — Bitbucket resolves by the
-        // top-level comment id.
-        for t in &mut top {
-            t.thread_id = Some(t.id.clone());
-        }
+        let me = me.as_ref();
+        let top = thread_comments(&comments_v, me);
 
         let approved_by: Vec<String> = varr(&pr, &["participants"])
             .iter()
@@ -602,17 +762,7 @@ impl super::GitProvider for Bitbucket {
             .map(|p| vstr(p, &["user", "display_name"]))
             .collect();
 
-        let reviewers: Vec<PrReviewer> = varr(&pr, &["participants"])
-            .iter()
-            .map(|p| PrReviewer {
-                name: vstr(p, &["user", "display_name"]),
-                approved: vbool(p, &["approved"]).unwrap_or(false),
-                // `state`: "approved" | "changes_requested" | null.
-                changes_requested: vstr(p, &["state"]) == "changes_requested",
-                avatar_url: vstr_opt(p, &["user", "links", "avatar", "href"]),
-                reviewed_at: vstr_opt(p, &["participated_on"]).map(|s| ts(&s)),
-            })
-            .collect();
+        let reviewers = reviewers_from(&pr, me);
 
         let description = {
             let d = vstr(&pr, &["description"]);
@@ -625,7 +775,7 @@ impl super::GitProvider for Bitbucket {
 
         // Best-effort CI build-status — never fails the PR fetch.
         let ci = self.fetch_ci_status(r, number).await;
-        let mut summary = summary_from(&pr);
+        let mut summary = summary_for(&pr, me);
         summary.ci_status = Some(ci.state.clone());
 
         Ok(PrDetail {
@@ -644,7 +794,7 @@ impl super::GitProvider for Bitbucket {
         let text = self
             .send_text(
                 reqwest::Method::GET,
-                &Self::pr_path(r, &format!("/{number}/diff")),
+                &Self::pr_path(r, &format!("/{number}/diff{}", self.ws_param('?'))),
             )
             .await?;
         Ok(crate::parse::parse_diff(&text))
@@ -656,7 +806,10 @@ impl super::GitProvider for Bitbucket {
         /// 40 × 500 rows = 20k files; a cursor still open past that is
         /// reported as `truncated` rather than silently passing as whole.
         const MAX_PAGES: usize = 40;
-        let first = Self::pr_path(r, &format!("/{number}/diffstat?pagelen=500"));
+        let first = Self::pr_path(
+            r,
+            &format!("/{number}/diffstat?pagelen=500{}", self.ws_param('&')),
+        );
         // `next` is fetched with the account's credentials: same origin only
         // (the rule `paginate_values` applies).
         let origin = reqwest::Url::parse(&self.url(&first)).ok();
@@ -700,6 +853,7 @@ impl super::GitProvider for Bitbucket {
         if let Some(old) = old_path.filter(|o| !o.is_empty() && *o != path) {
             q.push_str(&format!("&path={}", urlencoding::encode(old)));
         }
+        q.push_str(&self.ws_param('&'));
         let text = self
             .send_text(
                 reqwest::Method::GET,
@@ -744,6 +898,8 @@ impl super::GitProvider for Bitbucket {
             .send_json(reqwest::Method::POST, &Self::pr_path(r, ""), Some(&body))
             .await?;
         let mut summary = summary_from(&v);
+        // Opened with this credential: the author is the caller.
+        summary.is_mine = true;
         summary.reviewer_warnings = warnings;
         Ok(summary)
     }
@@ -789,7 +945,39 @@ impl super::GitProvider for Bitbucket {
                 Some(&body_val),
             )
             .await?;
-        Ok(comment_from(&v))
+        // Just posted with this credential: it is the caller's own.
+        let mut pc = comment_from(&v);
+        pc.can_edit = true;
+        Ok(pc)
+    }
+
+    /// `PUT …/comments/{cid}` with the new `content.raw`.
+    async fn edit_comment(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        comment_id: &str,
+        body: &str,
+    ) -> Result<PrComment> {
+        let path = comment_path(r, number, comment_id)?;
+        let v = self
+            .send_json(
+                reqwest::Method::PUT,
+                &path,
+                Some(&json!({ "content": { "raw": body } })),
+            )
+            .await?;
+        let mut pc = comment_from(&v);
+        pc.can_edit = true;
+        Ok(pc)
+    }
+
+    /// `DELETE …/comments/{cid}`.
+    async fn delete_comment(&self, r: &RemoteRef, number: u64, comment_id: &str) -> Result<()> {
+        let path = comment_path(r, number, comment_id)?;
+        self.send(reqwest::Method::DELETE, &path, None)
+            .await
+            .map(|_| ())
     }
 
     /// `POST .../comments/{id}/resolve` resolves; `DELETE` on the same URL
@@ -821,6 +1009,39 @@ impl super::GitProvider for Bitbucket {
         )
         .await
         .map(|_| ())
+    }
+
+    /// `DELETE …/approve` withdraws the bound account's approval.
+    async fn unapprove(&self, r: &RemoteRef, number: u64) -> Result<()> {
+        self.send(
+            reqwest::Method::DELETE,
+            &Self::pr_path(r, &format!("/{number}/approve")),
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// `DELETE …/request-changes` withdraws the bound account's change request.
+    async fn withdraw_request_changes(&self, r: &RemoteRef, number: u64) -> Result<()> {
+        self.send(
+            reqwest::Method::DELETE,
+            &Self::pr_path(r, &format!("/{number}/request-changes")),
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Bitbucket's `diff`/`diffstat` take `ignore_whitespace=true`.
+    fn ignoring_whitespace(&self) -> Option<std::sync::Arc<dyn super::GitProvider>> {
+        Some(std::sync::Arc::new(Bitbucket {
+            http: self.http.clone(),
+            username: self.username.clone(),
+            token: self.token.clone(),
+            base: self.base.clone(),
+            ignore_whitespace: true,
+        }))
     }
 
     async fn merge(

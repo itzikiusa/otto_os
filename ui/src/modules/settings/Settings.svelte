@@ -23,14 +23,25 @@
     filterSections,
     findSection,
     groupLabel,
+    matchedSetting,
+    scopeDescription,
+    SCOPE_LABEL,
     type SettingsSection,
     type SettingsSectionId,
   } from './sections';
+  import { viewport } from '../../lib/stores/viewport.svelte';
+  import { daemonStatus } from './daemonStatus.svelte';
 
   // As a sheet over another page (Threads' footer ⚙), Settings keeps its own
   // section instead of routing, and ✕ closes the sheet.
   let { sheet = null }: { sheet?: { onclose: () => void } | null } = $props();
   let sheetPage = $state('appearance');
+
+  // Phone (≤640 px): two levels, like iOS Settings — the grouped list (with
+  // the filter) first, then one section with a back control. A deep link
+  // (#/settings/<id>) opens the section directly; bare #/settings is the list.
+  // Wider screens keep the split and open Appearance by default.
+  const phone = $derived(viewport.mode === 'phone');
 
   // Explicit exit: go back to where you were, or home (Agents) if there's no
   // history — so you don't have to click another module to leave Settings.
@@ -43,6 +54,18 @@
     if (sheet) sheetPage = id;
     else router.go(`settings/${id}`);
   }
+  /** Phone: back from a section to the list. */
+  function backToList(): void {
+    if (sheet) sheetPage = '';
+    else router.go('settings');
+  }
+
+  // Root sees a dot on Trust & safety while secrets sit unencrypted (one
+  // cached read shared with the status bar chip; never polled).
+  $effect(() => {
+    daemonStatus.ensureSecrets(auth.me?.id, auth.isRoot);
+  });
+  const warnSecrets = (s: SettingsSection): boolean => s.id === 'trust-safety' && daemonStatus.secretsUnencrypted;
 
   // The section components, keyed by registry id — the only per-section thing
   // that needs Svelte. The Record type makes a new registry entry without a
@@ -81,7 +104,9 @@
     sessions: lazyComponent(() => import('./AdminSessions.svelte')),
   };
 
-  const pageId = $derived(sheet ? sheetPage : router.parts[1] || 'appearance');
+  const routedId = $derived(sheet ? sheetPage : (router.parts[1] ?? ''));
+  const pageId = $derived(routedId || 'appearance');
+  const atList = $derived(phone && !routedId);
   const section = $derived(findSection(pageId));
   // A routed section is openable, known-but-forbidden (a stale link or a role
   // change) or unknown — the last two get an explicit empty state instead of
@@ -208,17 +233,32 @@
 </script>
 
 {#snippet navRow(s: SettingsSection, detail?: string)}
+  {@const match = query.trim() ? matchedSetting(s, query) : null}
+  {@const current = !atList && pageId === s.id}
+  <!-- The scope tag and warning dot are aria-hidden so the row's name stays
+       its label; both are in the title (the row's description). -->
   <button use:rowMenuKeys
     class="settings-nav-item"
-    class:active={pageId === s.id}
-    aria-current={pageId === s.id ? 'page' : undefined}
+    class:active={current}
+    class:has-match={!!match}
+    aria-current={current ? 'page' : undefined}
+    title={warnSecrets(s) ? `${scopeDescription(s)} Secrets are not encrypted.` : scopeDescription(s)}
     onclick={() => open(s)}
     onpointerenter={() => VIEWS[s.id].prefetch()}
     onfocus={() => VIEWS[s.id].prefetch()}
     oncontextmenu={(e) => rowMenu(e, s)}
   >
-    <span class="settings-nav-label">{s.label}</span>
-    {#if detail}<span class="settings-nav-detail">{detail}</span>{/if}
+    <span class="settings-nav-text">
+      <span class="settings-nav-label">{s.label}</span>
+      {#if match}<span class="settings-nav-match">{match}</span>{/if}
+    </span>
+    {#if warnSecrets(s)}<span class="settings-nav-dot" aria-hidden="true" data-testid="settings-nav-secrets-dot"></span>{/if}
+    {#if detail}
+      <span class="settings-nav-detail">{detail}</span>
+    {:else}
+      <span class="settings-nav-scope" aria-hidden="true">{SCOPE_LABEL[s.scope]}</span>
+    {/if}
+    <span class="settings-nav-chevron" aria-hidden="true"><Icon name="chevronRight" size={12} /></span>
   </button>
 {/snippet}
 
@@ -232,7 +272,7 @@
   }}
 />
 
-<div class="settings" class:sheet>
+<div class="settings" class:sheet class:at-list={atList} class:at-section={phone && !atList}>
   <nav class="settings-nav" aria-label="Settings sections">
     <div class="settings-nav-title">
       <span>Settings</span>
@@ -259,11 +299,13 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="settings-nav-list" id="settings-nav-list" bind:this={listEl} onkeydown={onListKey}>
       {#if results}
-        {#each results as s (s.id)}
-          {@render navRow(s, groupLabel(s.group))}
-        {:else}
-          <p class="settings-nav-empty">No sections match “{query.trim()}”</p>
-        {/each}
+        <div class="settings-nav-group">
+          {#each results as s (s.id)}
+            {@render navRow(s, groupLabel(s.group))}
+          {:else}
+            <p class="settings-nav-empty">No sections match “{query.trim()}”</p>
+          {/each}
+        </div>
       {:else}
         {#each groups as g (g.id)}
           <div class="settings-nav-group" role="group" aria-label={g.label}>
@@ -278,6 +320,13 @@
   </nav>
 
   <div class="settings-body">
+    {#if phone}
+      <div class="settings-back">
+        <button class="btn ghost small" onclick={backToList} aria-label="Back to Settings" title="Back to Settings">
+          <Icon name="chevronLeft" size={14} /> Settings
+        </button>
+      </div>
+    {/if}
     {#if View}
       <LazyMount lazy={View} what={`${section?.label ?? 'these'} settings`} />
     {:else if section}
@@ -319,7 +368,7 @@
     min-height: 0;
   }
   .settings-nav {
-    width: 200px;
+    width: 224px;
     flex-shrink: 0;
     border-inline-end: 1px solid var(--separator);
     display: flex;
@@ -414,17 +463,51 @@
     cursor: pointer;
     transition: background var(--dur-fast) ease-out;
   }
-  .settings-nav-label {
+  .settings-nav-text {
     flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .settings-nav-label,
+  .settings-nav-match {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .settings-nav-detail {
+  /* The setting a search found, under its section ("Archive idle sessions"). */
+  .settings-nav-match {
+    font-size: var(--fs-xs);
+    font-weight: 400;
+    color: var(--text-dim);
+  }
+  .settings-nav-item.has-match {
+    height: auto;
+    min-height: 28px;
+    padding-block: 4px;
+  }
+  .settings-nav-detail,
+  .settings-nav-scope {
     flex-shrink: 0;
     font-size: var(--fs-xs);
+    font-weight: 400;
     color: var(--text-dim);
+  }
+  /* Root: Trust & safety while the secret store is unencrypted. */
+  .settings-nav-dot {
+    flex-shrink: 0;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--warning);
+  }
+  .settings-nav-chevron {
+    display: none;
+    color: var(--text-dim);
+  }
+  .settings-back {
+    display: none;
   }
   .settings-nav-empty {
     margin: 0;
@@ -471,44 +554,75 @@
     }
   }
 
+  /* Phone: a two-level list (iOS Settings). Level one is the filter plus
+     the grouped sections as full-width rows; level two is one section with a
+     back control above its own PageHeader (which carries the title). */
   @media (max-width: 640px) {
     .settings {
       flex-direction: column;
     }
+    .settings.at-list .settings-body,
+    .settings.at-section .settings-nav {
+      display: none;
+    }
     .settings-nav {
+      flex: 1;
       width: 100%;
       border-inline-end: none;
-      border-bottom: 1px solid var(--border);
-    }
-    .settings-nav-filter {
-      margin: 8px 8px 0;
-    }
-    /* One horizontally scrolling row of sections (the wrapped grid of ~25
-       buttons took a third of the phone screen). */
-    .settings-nav-list {
-      flex-direction: row;
-      flex-wrap: nowrap;
-      gap: 4px;
-      padding: 8px;
-      overflow-x: auto;
-      scrollbar-width: none;
-    }
-    .settings-nav-list::-webkit-scrollbar {
-      display: none;
-    }
-    .settings-nav-group {
-      display: contents;
-    }
-    .settings-nav-heading,
-    .settings-nav-detail {
-      display: none;
-    }
-    .settings-nav-item {
-      flex: none;
-      white-space: nowrap;
     }
     .settings-nav-title {
       display: none;
+    }
+    .settings-nav-filter {
+      margin: 10px 12px 4px;
+      height: 36px;
+    }
+    .settings-nav-list {
+      padding: 6px 12px 24px;
+      gap: 14px;
+    }
+    .settings-nav-group {
+      gap: 0;
+    }
+    .settings-nav-heading {
+      padding: 0 4px 6px;
+    }
+    /* Each group's rows read as one inset card; filtered results too. */
+    .settings-nav-item,
+    .settings-nav-item.has-match {
+      height: auto;
+      min-height: 44px;
+      padding-block: 6px;
+      padding-inline: 12px 10px;
+      border-radius: 0;
+      background: var(--surface);
+    }
+    .settings-nav-item + .settings-nav-item {
+      border-top: 1px solid var(--separator);
+    }
+    .settings-nav-heading + .settings-nav-item,
+    .settings-nav-group > .settings-nav-item:first-child {
+      border-start-start-radius: var(--radius-m);
+      border-start-end-radius: var(--radius-m);
+    }
+    .settings-nav-item:last-child {
+      border-end-start-radius: var(--radius-m);
+      border-end-end-radius: var(--radius-m);
+    }
+    .settings-nav-item.active {
+      background: var(--surface);
+      font-weight: 400;
+    }
+    .settings-nav-item:hover {
+      background: var(--hover);
+    }
+    .settings-nav-chevron {
+      display: inline-flex;
+    }
+    .settings-back {
+      display: flex;
+      flex-shrink: 0;
+      padding: 6px 8px 0;
     }
   }
 </style>

@@ -13,6 +13,8 @@
   import type { Session } from '../../lib/api/types';
   import { personalAgentName } from '../../lib/personalAgentBadges';
   import ThreadSidebarRow from './ThreadSidebarRow.svelte';
+  import ThreadOriginGroups from './ThreadOriginGroups.svelte';
+  import { originGroups, threadOrigin } from './threadOrigins';
   import {
     delegatedParentId,
     isThreadSession,
@@ -112,7 +114,11 @@
     );
   }
 
-  const filteredLive = $derived(allLiveThreads.filter(matchesFilters));
+  // Agent runs and other modules' helpers fold into their own groups
+  // (threadOrigins.ts), out of the projects and History.
+  const isMain = (s: Session): boolean => threadOrigin(s) === 'main' && matchesFilters(s);
+  const filteredLive = $derived(allLiveThreads.filter(isMain));
+  const sideGroups = $derived(originGroups([...allLiveThreads, ...runtimeThreads.rows(true)].filter(matchesFilters)));
 
   const pinnedThreads = $derived.by(() => {
     const byId = new Map<string, Session>();
@@ -187,7 +193,7 @@
     const archived = [
       ...ws.archivedSessions.filter((s) => isThreadSession(s, allPool)),
       ...runtimeThreads.rows(true),
-    ].filter(matchesFilters);
+    ].filter(isMain);
     const seen = new Set<string>();
     const combined: { session: Session; kind: 'settled' | 'archived' }[] = [];
     for (const s of settled) {
@@ -507,6 +513,8 @@
         {/each}
       </div>
     {/if}
+
+    <ThreadOriginGroups groups={sideGroups} onrowclick={handleRowClick} onreopen={(sess, beside) => void reopenArchived(sess, beside)} onmenu={showThreadMenu} {onselect} />
 
     <section class="th-group" aria-label="History and archived threads">
       <button

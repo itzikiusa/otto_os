@@ -362,9 +362,16 @@ pub fn decide(read_only: bool, rules: &[AgentRule], bare: &str, args: &Value) ->
             "blocked by the agent's rule \"{text}\" (the call mentions `{term}`)"
         ));
     }
-    if let Some(reason) = sensitive_reason(bare, args) {
+    // A routine that posts outside the agent's chat runs unattended from then
+    // on; `sensitive_reason` skips non-mutating tools, so it is asked here.
+    let outward = otto_assistant::personal_agent_routines::outward_delivery_reason(bare, args)
+        .map(|r| format!("outward-facing routine — needs your approval: {r}"));
+    if let Some(reason) = outward.or_else(|| {
+        sensitive_reason(bare, args)
+            .map(|r| format!("sensitive action — always needs your approval: {r}"))
+    }) {
         return AgentGate::ForceApproval {
-            reason: format!("sensitive action — always needs your approval: {reason}"),
+            reason,
             risk: "sensitive",
         };
     }
@@ -736,6 +743,25 @@ mod tests {
             decide(false, &[], "room_post", &json!({"text":"hi"})),
             AgentGate::Pass
         );
+    }
+
+    /// A routine that posts outside the agent's chat asks first; a chat-only
+    /// one (and an edit that leaves the destination alone) never does.
+    #[test]
+    fn a_routine_that_posts_outward_needs_approval() {
+        let slack = json!({"schedule":"daily 09:00","instruction":"brief",
+            "deliver":{"type":"slack","channel":"#team"}});
+        for bare in ["routine_create", "routine_update"] {
+            let gate = decide(false, &[], bare, &slack);
+            assert!(
+                matches!(&gate, AgentGate::ForceApproval { reason, .. } if reason.contains("#team")),
+                "{bare}: {gate:?}"
+            );
+        }
+        let chat = json!({"schedule":"daily 09:00","instruction":"brief"});
+        assert_eq!(decide(false, &[], "routine_create", &chat), AgentGate::Pass);
+        let edit = json!({"routine_id":"r1","instruction":"shorter brief"});
+        assert_eq!(decide(false, &[], "routine_update", &edit), AgentGate::Pass);
     }
 
     #[test]

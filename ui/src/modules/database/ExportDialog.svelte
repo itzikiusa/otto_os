@@ -59,8 +59,10 @@
 
   type ExportFmtOpt = { value: DbExportFormat; label: string };
   const TEXT_FORMATS: ExportFmtOpt[] = [
-    { value: 'csv', label: 'CSV' },
-    { value: 'csv_with_names', label: 'CSV (with header)' },
+    // Header row by default: a header-less CSV opens in a spreadsheet as
+    // anonymous columns. The bare variant stays one pick away.
+    { value: 'csv_with_names', label: 'CSV' },
+    { value: 'csv', label: 'CSV (no header)' },
     { value: 'tsv', label: 'TSV' },
     { value: 'tsv_with_names', label: 'TSV (with header)' },
     { value: 'json', label: 'JSON (array)' },
@@ -94,8 +96,8 @@
   // Guarded storage: a blocked accessor must not break the dialog, and a
   // throwing post-success write must not report a finished export as failed.
   function loadFormat(): DbExportFormat {
-    const v = lsGet(LS_FORMAT) || 'csv';
-    return [...TEXT_FORMATS, ...BINARY_FORMATS].some((f) => f.value === v) ? (v as DbExportFormat) : 'csv';
+    const v = lsGet(LS_FORMAT) || 'csv_with_names';
+    return [...TEXT_FORMATS, ...BINARY_FORMATS].some((f) => f.value === v) ? (v as DbExportFormat) : 'csv_with_names';
   }
   function loadDir(): string {
     return lsGet(LS_DIR) || '~/Downloads';

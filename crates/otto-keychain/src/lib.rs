@@ -61,8 +61,8 @@ pub fn from_env(data_dir: &Path) -> Arc<dyn SecretStore> {
     match mode {
         SecretsMode::Plaintext => {
             tracing::warn!(
-                "secret store: PLAINTEXT file ({}/{PLAINTEXT_FILE}) — use Settings ▸ Security ▸ \
-                 Secure secrets… to encrypt it",
+                "secret store: PLAINTEXT file ({}/{PLAINTEXT_FILE}) — use Settings ▸ Trust & safety ▸ \
+                 Secret storage ▸ Secure secrets… to encrypt it",
                 data_dir.display()
             );
             if strict && !allow_plaintext {

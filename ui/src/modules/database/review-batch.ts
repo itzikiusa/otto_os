@@ -57,6 +57,55 @@ export function batchFailure(res: QueryResult, atomic = false): BatchFailure | n
   };
 }
 
+/** A row edit / delete whose `rows_affected` says whether it hit its row. */
+const ROW_WRITE = /^\s*(update|delete)\b/i;
+
+/** Which row statements of a SUCCESSFUL review matched no row / several rows,
+ *  as indices into the review's own statements (the `BEGIN` / `COMMIT`
+ *  wrapper excluded). A single-row UPDATE whose row was deleted or whose key
+ *  changed is not an error — it reports 0 rows, and "Applied" would be a lie.
+ *  MySQL / Postgres only: their count is MATCHED rows (sqlx sets
+ *  CLIENT_FOUND_ROWS); Mongo's is `modified`, so 0 there can mean "same
+ *  value". Null when there is nothing to warn about (or no counts came back). */
+export function affectedCheck(
+  engine: DbEngine | null,
+  res: QueryResult,
+  atomic: boolean,
+  ranSql: string,
+): { unmatched: number[]; multi: number[] } | null {
+  if (!engine || !TRANSACTIONAL.has(engine)) return null;
+  let entries = [res, ...(res.more_results ?? [])];
+  if (atomic) entries = entries.slice(1, -1);
+  const unmatched: number[] = [];
+  const multi: number[] = [];
+  entries.forEach((r, i) => {
+    // A single statement's result carries no preview: the review text is it.
+    const text = r.statement ?? (atomic || res.more_results?.length ? '' : ranSql);
+    if (!ROW_WRITE.test(text) || typeof r.rows_affected !== 'number') return;
+    if (r.rows_affected === 0) unmatched.push(i);
+    else if (r.rows_affected > 1 && /^\s*update\b/i.test(text)) multi.push(i);
+  });
+  return unmatched.length || multi.length ? { unmatched, multi } : null;
+}
+
+/** What to tell the person when row statements matched nothing, and which
+ *  drafts were written anyway (every statement of the row matched) — null
+ *  when the review was edited and statements no longer map to rows. */
+export function unmatchedReport(
+  unmatched: readonly number[],
+  stmtRows: readonly number[] | null,
+): { written: Set<number> | null; message: string } {
+  const n = unmatched.length;
+  const lead = `${n === 1 ? 'A statement' : `${n} statements`} did not match any row — the row was deleted or its key changed since this result loaded.`;
+  if (!stmtRows) return { written: null, message: `${lead} Nothing else was rolled back; every draft is kept. Re-run the query to see the current rows.` };
+  const missed = new Set(unmatched.map((i) => stmtRows[i]));
+  const written = new Set(stmtRows.filter((row) => !missed.has(row)));
+  return {
+    written,
+    message: `${lead} ${n === 1 ? 'Its draft is' : 'Their drafts are'} kept and still pending${written.size ? '; the other edits were written' : ''}. Re-running the query shows the current rows and discards the kept drafts.`,
+  };
+}
+
 /** The rows whose EVERY statement completed, given the row each statement of
  *  the batch writes (`stmtRows`, in order) and how many completed. A row split
  *  over several statements (a Redis rename) counts only once all of them ran. */

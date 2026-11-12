@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTriggerSpec, defaultTriggerForm, EVENT_KINDS, formFromTrigger } from '../src/modules/workflows/triggerForm.ts';
+import { buildTriggerSpec, chatBindingHow, defaultTriggerForm, EVENT_KINDS, formFromTrigger } from '../src/modules/workflows/triggerForm.ts';
 import { effectiveRetry, updateRetry, clearRetry } from '../src/modules/workflows/retryPolicy.ts';
 
 test('explicit zero survives save while use-default retains agent retry policy', () => {
@@ -40,4 +40,10 @@ test('use default clears legacy nested policies without removing step parameters
   clearRetry(node);
   assert.deepEqual(node.params, { prompt: 'keep' });
   assert.equal(effectiveRetry(node).max_attempts, 2);
+});
+
+test('a chat binding says plainly which messages start it', () => {
+  // The form saves a blank thread as "" — that is any thread, not a pinned one.
+  assert.equal(chatBindingHow({ channel: 'slack', chat: 'C1', thread: '' }), 'Any message in this chat starts a run — no keyword needed.');
+  assert.equal(chatBindingHow({ channel: 'slack', chat: 'C1', thread: '17.1', mention_only: true }), 'Any message in that thread that @mentions the bot starts a run.');
 });

@@ -34,7 +34,7 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
-  import { settingsMenuItems, settingsSummary as querySettingsSummary, setMask } from './query-settings';
+  import { confirmDestructiveRun, settingsMenuItems, settingsSummary as querySettingsSummary, setMask } from './query-settings';
   import { clipHistory } from '../../lib/stores/clipHistory.svelte';
   import { parkedEditCount } from '../../lib/database/grid-tab-state';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -580,7 +580,7 @@
       names.map((n) => [n, renderVar(tab.vars[n] ?? defaultVarSpec(), splitMode)]),
     );
     const finalSql = names.length > 0 ? substituteVars(base, rendered, splitMode) : base;
-    void database.runQuery(finalSql, undefined, { transient: true });
+    void confirmDestructiveRun(finalSql).then((ok) => ok && database.runQuery(finalSql, undefined, { transient: true })); // unguarded DELETE-without-WHERE / DROP / … ask first
   }
 
   const canQuery = $derived(!!database.selectedConnId && ['db_query','db_data','db_schema'].some(op=>resourceAccess.can('connection',database.selectedConnId!,op,'database','edit',databaseAccessChild(database.activeDb))));

@@ -699,11 +699,16 @@ class ThreadsStore {
     target: string;
     text: string;
     workspaceId: string | null;
+    /** Titles the session list can't give (a runtime thread is not in it). */
+    fromTitle?: string;
+    targetTitle?: string;
+    /** Deliver through another route (threadRelay.ts: a runtime target). */
+    via?: (msg: string, fromTitle: string | null) => Promise<unknown>;
   }): Promise<boolean> {
     const msg = opts.text.trim();
     if (!msg) return false;
     const fromSession = opts.fromSessionId ? ws.getSession(opts.fromSessionId) : null;
-    const fromTitle = fromSession?.title ?? 'Operator';
+    const fromTitle = fromSession?.title ?? opts.fromTitle ?? 'Operator';
     try {
       if (opts.target === 'broadcast') {
         const wid = opts.workspaceId ?? ws.currentId;
@@ -730,18 +735,21 @@ class ThreadsStore {
         });
         return true;
       }
-      const targetSession = ws.getSession(opts.target);
-      await api.post(`/sessions/${encodeURIComponent(opts.target)}/message`, {
-        text: fromSession ? `[From ${fromTitle}] ${msg}` : msg,
-        ...(opts.fromSessionId ? { from_session_id: opts.fromSessionId } : {}),
+      const targetTitle = ws.getSession(opts.target)?.title ?? opts.targetTitle;
+      const named = fromSession || opts.fromTitle ? fromTitle : null;
+      if (opts.via) await opts.via(msg, named);
+      else await api.post(`/sessions/${encodeURIComponent(opts.target)}/message`, {
+        text: named ? `[From ${named}] ${msg}` : msg,
+        // Only a terminal session is a sender the route knows.
+        ...(opts.fromSessionId && fromSession ? { from_session_id: opts.fromSessionId } : {}),
       });
-      toasts.success('Sent to thread', `Delivered to ${targetSession?.title ?? 'thread'}`);
+      toasts.success('Sent to thread', `Delivered to ${targetTitle ?? 'thread'}`);
       this.recordLocalPeerEvent({
         kind: 'message',
         fromSessionId: opts.fromSessionId,
         fromTitle,
         toSessionId: opts.target,
-        toTitle: targetSession?.title ?? 'Thread',
+        toTitle: targetTitle ?? 'Thread',
         summary: msg,
       });
       return true;

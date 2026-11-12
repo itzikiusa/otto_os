@@ -483,10 +483,6 @@ fn scope_of(event: &Event) -> Scope<'_> {
             workspace_id,
             ..
         }
-        | Event::SessionRemoved {
-            session_id,
-            workspace_id,
-        }
         | Event::SessionAttention {
             session_id,
             workspace_id,
@@ -496,12 +492,17 @@ fn scope_of(event: &Event) -> Scope<'_> {
             session_id,
             owner: None,
         },
-        // Runtime sessions are not `sessions` rows: the owner rides the event.
+        // No `sessions` row (runtime, or already deleted): the owner rides the event.
         Event::AgentRuntimeEvent {
             workspace_id,
             session_id,
             owner_id,
             ..
+        }
+        | Event::SessionRemoved {
+            workspace_id,
+            session_id,
+            owner_id,
         } => Scope::Session {
             workspace_id,
             session_id,
@@ -711,11 +712,10 @@ async fn allowed(
         return true;
     };
     let owner = match owner {
-        // `SessionCreated` ships the owner; no lookup needed.
+        // The event ships the owner (created / removed / runtime); no lookup.
         Some(owner) => owner.clone(),
-        // Otherwise resolve `created_by` once per session_id and cache it —
-        // `created_by` is immutable, so the high-frequency `TrailAppended`
-        // path stays off the DB after the first event for that session.
+        // Otherwise resolve the immutable `created_by` once per session_id and
+        // cache it, so the hot `TrailAppended` path stays off the DB after that.
         None => match resolve_owner(ctx, session_id, owner_cache).await {
             Some(owner) => owner,
             // Session vanished / lookup failed: fail closed for non-root.
@@ -1082,10 +1082,6 @@ mod tests {
                 workspace_id: "ws1".into(),
                 meta: serde_json::Value::Null,
             },
-            Event::SessionRemoved {
-                session_id: "s1".into(),
-                workspace_id: "ws1".into(),
-            },
             // "Needs you" is as session-private as the status it accompanies.
             Event::SessionAttention {
                 session_id: "s1".into(),
@@ -1144,6 +1140,23 @@ mod tests {
         match scope_of(&created) {
             Scope::Session { owner, .. } => assert_eq!(owner, Some(&"alice".to_string())),
             _ => panic!("expected Scope::Session for SessionCreated"),
+        }
+        // SessionRemoved too: its row is already deleted when it is sent.
+        let removed = Event::SessionRemoved {
+            session_id: "s1".into(),
+            workspace_id: "ws1".into(),
+            owner_id: "alice".into(),
+        };
+        match scope_of(&removed) {
+            Scope::Session {
+                owner,
+                session_id,
+                workspace_id,
+            } => {
+                assert_eq!(owner, Some(&"alice".to_string()));
+                assert_eq!((session_id.as_str(), workspace_id.as_str()), ("s1", "ws1"));
+            }
+            _ => panic!("expected Scope::Session for SessionRemoved"),
         }
         // Structured runtime events: owner-only (+ admin/root), owner inline.
         let runtime = Event::AgentRuntimeEvent {
@@ -1349,6 +1362,7 @@ mod tests {
         c.forget(&Event::SessionRemoved {
             session_id: "s1".into(),
             workspace_id: "w".into(),
+            owner_id: "u".into(),
         });
         assert!(!c.owner.contains_key("s1") && c.owner.contains_key("s2"));
         for i in 0..OWNER_CACHE_CAP {
@@ -1356,6 +1370,46 @@ mod tests {
         }
         c.expire(t0 + AUTH_CACHE_TTL);
         assert!(c.owner.is_empty(), "owner cache is bounded");
+    }
+
+    /// `session_removed` is sent after the row is deleted, so the owner must
+    /// come from the event: a non-root, non-admin OWNER still receives it (their
+    /// other windows close the tab), while a non-owner member still does not.
+    #[tokio::test]
+    async fn removed_session_reaches_its_non_admin_owner_after_the_row_is_gone() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = crate::test_support::mem_pool().await;
+        let ctx = ServerCtx::for_tests(&pool, tmp.path().to_path_buf()).await;
+        let users = otto_state::UsersRepo::new(pool.clone());
+        let root = users.create("root", "x", "Root", true).await.unwrap();
+        let alice = users.create("alice", "x", "Alice", false).await.unwrap();
+        let bob = users.create("bob", "x", "Bob", false).await.unwrap();
+        let path = tmp.path().to_string_lossy().to_string();
+        let ws = ctx.workspaces.create("A", &path, &root.id).await.unwrap();
+        ctx.workspaces
+            .set_member(&ws.id, &alice.id, WorkspaceRole::Editor)
+            .await
+            .unwrap();
+        ctx.workspaces
+            .set_member(&ws.id, &bob.id, WorkspaceRole::Editor)
+            .await
+            .unwrap();
+        // No `sessions` row with this id exists (it was just deleted).
+        let ev = Event::SessionRemoved {
+            session_id: "gone".into(),
+            workspace_id: ws.id.clone(),
+            owner_id: alice.id.clone(),
+        };
+        // A fresh socket's caches per recipient: nothing about "gone" cached.
+        for (u, expect, why) in [
+            (&alice, true, "the owner gets the removal"),
+            (&bob, false, "a non-owner editor still does not"),
+            (&root, true, "root always does"),
+        ] {
+            let mut c = AuthCaches::new(std::time::Instant::now());
+            let got = allowed(&ctx, u, &ev, &mut c.role, &mut c.owner, &mut c.admin).await;
+            assert_eq!(got, expect, "{why}");
+        }
     }
 
     /// A sink that never becomes ready — a dead peer's full send buffer.

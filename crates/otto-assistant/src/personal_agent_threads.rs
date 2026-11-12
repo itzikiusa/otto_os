@@ -141,6 +141,12 @@ async fn run_thread<C: AssistantCtx>(
         cwd: Some(cwd.to_string()),
         title: Some(format!("Agent: {}", agent.name)),
         model: model_of(agent),
+        // The daemon's default mode (Settings), deliberately: a directed run
+        // keeps today's behaviour, and the EFFECTIVE mode is persisted on the
+        // thread row the run points at (`run.session_id`). A read-only run's
+        // confinement never depends on it — `meta.read_only` forces the
+        // Seatbelt profile, strips the CLI's shell tools and makes the daemon
+        // refuse every mutating tool, whatever the mode.
         access_mode: None,
         meta: Some(run_meta(agent, run_id, plan)),
     };
@@ -706,5 +712,55 @@ mod tests {
         assert_eq!(rw["read_only"], false);
         assert_eq!(rw["browser"], true);
         assert_eq!(rw["work"]["origin"], "personal_agent");
+    }
+
+    /// A routine whose permission is `read_only` runs confined in CODE (the
+    /// session meta every confinement layer reads), not only in its prompt;
+    /// a `directed` one is not.
+    #[test]
+    fn a_read_only_routine_runs_confined() {
+        let agent = otto_state::PersonalAgent {
+            admission_generation: 0,
+            id: "a1".into(),
+            workspace_id: "w".into(),
+            name: "A".into(),
+            avatar: String::new(),
+            soul_md: String::new(),
+            provider: "codex".into(),
+            model: String::new(),
+            cwd: String::new(),
+            browser: true,
+            delivery: json!({"type": "none"}),
+            enabled: true,
+            chat_session_id: None,
+            created_by: Some("u".into()),
+            created_by_agent: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let mut s = otto_state::PersonalAgentSchedule {
+            schedule_generation: 0,
+            admission_generation: 0,
+            id: "s1".into(),
+            agent_id: "a1".into(),
+            schedule: json!({"cadence": "daily", "at": "09:00"}),
+            timezone: "UTC".into(),
+            directive: "Morning brief".into(),
+            enabled: true,
+            last_run_at: None,
+            next_run_at: None,
+            armed_at: None,
+            permission: "read_only".into(),
+            delivery: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let ro = run_meta(&agent, "r1", &RunPlan::for_schedule(&s));
+        assert_eq!(ro["read_only"], true);
+        assert_eq!(ro["browser"], false);
+        assert_eq!(ro["trigger"], "schedule");
+        s.permission = "directed".into();
+        let rw = run_meta(&agent, "r2", &RunPlan::for_schedule(&s));
+        assert_eq!(rw["read_only"], false);
     }
 }

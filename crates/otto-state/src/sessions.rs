@@ -12,6 +12,10 @@ const AUTO_ARCHIVE_CANDIDATES_SQL: &str =
     "SELECT id FROM sessions WHERE archived=0 AND kind='agent' AND id>? \
      AND last_active_at<? ORDER BY id LIMIT ?";
 
+/// Most ids bound into one `id IN (…)` statement (SQLite's bind-parameter
+/// limit is far above it; this just keeps each statement small).
+const ID_CHUNK: usize = 500;
+
 #[derive(Clone)]
 pub struct SessionsRepo {
     pool: DbPool,
@@ -462,26 +466,42 @@ impl SessionsRepo {
         Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
     }
 
-    /// Pre-filtered candidates for the provider-title auto-namer: live-ish
-    /// (not exited), unarchived agent sessions on a title-bearing provider with
-    /// a captured provider id and no settled `meta.title_source`. A SUPERSET of
-    /// what `title_eligible` (otto-sessions) accepts — the caller still applies
-    /// it (e.g. the background-source check) — but it keeps the 20 s sweep off
-    /// the whole table (it used to decode every session ever, archived too).
-    pub async fn list_title_candidates(&self) -> Result<Vec<Session>> {
-        let rows = sqlx::query(
-            "SELECT * FROM sessions \
-             WHERE archived = 0 AND status <> 'exited' AND kind = 'agent' \
-               AND provider IN ('claude', 'codex') \
-               AND provider_session_id IS NOT NULL \
-               AND NOT (COALESCE(json_type(meta_json, '$.title_source'), '') = 'text' \
-                        AND json_extract(meta_json, '$.title_source') IN ('user', 'provider')) \
-             ORDER BY created_at DESC",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("title candidates"))?;
-        rows.iter().map(row_to_session).collect()
+    /// Pre-filtered candidates for the provider-title auto-namer among `ids`
+    /// (the sessions live in this daemon), newest first: unarchived, not
+    /// exited agent sessions on a title-bearing provider with a captured
+    /// provider id and no settled `meta.title_source`. A SUPERSET of what
+    /// `title_eligible` (otto-sessions) accepts — the caller still applies it
+    /// (e.g. the background-source check). Keyed by id: the column filter
+    /// alone matched every dormant "reconnectable" row (thousands on a
+    /// long-lived install) and the 20 s sweep decoded all of them.
+    pub async fn list_title_candidates(&self, ids: &[Id]) -> Result<Vec<Session>> {
+        let mut out = Vec::new();
+        for chunk in ids.chunks(ID_CHUNK) {
+            let mut q = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+                "SELECT * FROM sessions \
+                 WHERE archived = 0 AND status <> 'exited' AND kind = 'agent' \
+                   AND provider IN ('claude', 'codex') \
+                   AND provider_session_id IS NOT NULL \
+                   AND NOT (COALESCE(json_type(meta_json, '$.title_source'), '') = 'text' \
+                            AND json_extract(meta_json, '$.title_source') IN ('user', 'provider')) \
+                   AND id IN (",
+            );
+            let mut sep = q.separated(", ");
+            for id in chunk {
+                sep.push_bind(id.clone());
+            }
+            q.push(")");
+            let rows = q
+                .build()
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("title candidates"))?;
+            for r in &rows {
+                out.push(row_to_session(r)?);
+            }
+        }
+        out.sort_by_key(|s| std::cmp::Reverse(s.created_at));
+        Ok(out)
     }
 
     /// **Every** session across **all** workspaces, newest first.
@@ -517,6 +537,60 @@ impl SessionsRepo {
             .fetch_all(&self.pool)
             .await
             .map_err(dberr("auto-archive candidate ids"))
+    }
+
+    /// One page of the background auto-archive sweep: `(id, last_active_at)`
+    /// of unarchived, unpinned BACKGROUND agent sessions (`meta.source` in
+    /// [`otto_core::domain::BACKGROUND_SESSION_SOURCES`] — the complement of
+    /// [`Session::is_foreground_agent`], read off the generated `source`
+    /// column) last active before `cutoff`, oldest first, strictly after the
+    /// `(after_at, after_id)` keyset cursor (`("", "")` = from the start).
+    /// Live/attached checks stay with the caller (in-memory state).
+    pub async fn background_archive_candidates(
+        &self,
+        cutoff: chrono::DateTime<Utc>,
+        after_at: &str,
+        after_id: &str,
+        limit: u32,
+    ) -> Result<Vec<(Id, String)>> {
+        let mut q = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+            "SELECT id, last_active_at FROM sessions \
+             WHERE archived = 0 AND kind = 'agent' AND source IN (",
+        );
+        let mut sep = q.separated(", ");
+        for src in otto_core::domain::BACKGROUND_SESSION_SOURCES {
+            sep.push_bind(src);
+        }
+        // `meta.keep_alive` pins a row (Rust re-checks it under the lock); the
+        // CASE keeps a malformed `meta_json` from failing the whole page.
+        q.push(
+            ") AND CASE WHEN json_valid(meta_json) \
+             THEN json_extract(meta_json, '$.keep_alive') IS NOT 1 ELSE 1 END \
+             AND last_active_at < ",
+        )
+        .push_bind(fmt(cutoff))
+        .push(" AND (last_active_at > ")
+        .push_bind(after_at.to_string())
+        .push(" OR (last_active_at = ")
+        .push_bind(after_at.to_string())
+        .push(" AND id > ")
+        .push_bind(after_id.to_string())
+        .push(")) ORDER BY last_active_at, id LIMIT ")
+        .push_bind(limit.clamp(1, 512) as i64);
+        let rows = q
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("background auto-archive candidates"))?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (
+                    r.get::<String, _>("id"),
+                    r.get::<String, _>("last_active_at"),
+                )
+            })
+            .collect())
     }
 
     pub async fn update_status(&self, id: &Id, status: SessionStatus) -> Result<()> {
@@ -942,9 +1016,14 @@ impl SessionsRepo {
             .collect())
     }
 
+    /// Every row the usage tailer can attribute to: only a provider-session id
+    /// is ever looked up, so rows without one (most of a long install's
+    /// history) are not read at all. Not filtered by status or `archived`
+    /// (see [`UsageAttrRow`]).
     pub async fn list_usage_attribution(&self) -> sqlx::Result<Vec<UsageAttrRow>> {
         let rows = sqlx::query(
-            "SELECT id, workspace_id, provider, cwd, provider_session_id FROM sessions",
+            "SELECT id, workspace_id, provider, cwd, provider_session_id FROM sessions \
+             WHERE provider_session_id IS NOT NULL AND provider_session_id <> ''",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1415,7 +1494,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_usage_attribution_returns_all_sessions_unfiltered() {
+    async fn list_usage_attribution_ignores_status_and_archive_but_needs_a_provider_id() {
         let pool = mem_pool().await;
         let (user, ws) = seed_user_ws(&pool).await;
         let repo = SessionsRepo::new(pool.clone());
@@ -1423,9 +1502,14 @@ mod tests {
         // A live claude session with a provider id.
         let live =
             insert_session_full(&pool, &ws, &user, "claude", "running", Some("psid-1"), 0).await;
-        // An exited+archived codex session with NO provider id — must still be
-        // returned (analysis sessions finish fast but transcripts keep growing).
-        let exited = insert_session_full(&pool, &ws, &user, "codex", "exited", None, 1).await;
+        // An exited+archived codex session WITH a provider id — still returned
+        // (analysis sessions finish fast but transcripts keep growing).
+        let exited =
+            insert_session_full(&pool, &ws, &user, "codex", "exited", Some("psid-2"), 1).await;
+        // No (or an empty) provider id: nothing the tailer could look up, so
+        // the row is not read (it used to be, for every row of the table).
+        let _none = insert_session_full(&pool, &ws, &user, "codex", "exited", None, 0).await;
+        let _empty = insert_session_full(&pool, &ws, &user, "claude", "idle", Some(""), 0).await;
 
         let got = repo.list_usage_attribution().await.unwrap();
         let mut ids: Vec<&str> = got.iter().map(|r| r.id.as_str()).collect();
@@ -1441,7 +1525,7 @@ mod tests {
 
         let exited_row = got.iter().find(|r| r.id == exited).unwrap();
         assert_eq!(exited_row.provider, "codex");
-        assert_eq!(exited_row.provider_session_id, None);
+        assert_eq!(exited_row.provider_session_id.as_deref(), Some("psid-2"));
     }
 
     /// Seed an extra user into an existing pool and return its id.
@@ -2109,17 +2193,61 @@ mod tests {
         repo.merge_meta(&other, &serde_json::json!({"title_source": "first_prompt"}))
             .await
             .unwrap();
+        // A matching row the caller did not ask for (not live in this daemon)
+        // is never read: the sweep passes only its live ids.
+        let dormant = insert_session_full(&pool, &ws, &user, "claude", "idle", Some("p9"), 0).await;
+        let all: Vec<Id> = sqlx::query_scalar("SELECT id FROM sessions WHERE id <> ?")
+            .bind(&dormant)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
         let mut got: Vec<String> = repo
-            .list_title_candidates()
+            .list_title_candidates(&all)
             .await
             .unwrap()
             .into_iter()
             .map(|s| s.id)
             .collect();
         got.sort();
-        let mut want = vec![ok, codex, other];
+        let mut want = vec![ok.clone(), codex, other];
         want.sort();
         assert_eq!(got, want);
+        assert!(repo.list_title_candidates(&[]).await.unwrap().is_empty());
+        let one = repo
+            .list_title_candidates(&[ok.clone(), "missing".into()])
+            .await
+            .unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].id, ok);
+    }
+
+    /// More live ids than one statement binds: every chunk is read, and the
+    /// merged result is newest first.
+    #[tokio::test]
+    async fn title_candidates_span_id_chunks_newest_first() {
+        let pool = mem_pool().await;
+        let (user, ws) = seed_user_ws(&pool).await;
+        let repo = SessionsRepo::new(pool.clone());
+        let first = insert_session_full(&pool, &ws, &user, "claude", "idle", Some("a"), 0).await;
+        let second = insert_session_full(&pool, &ws, &user, "codex", "idle", Some("b"), 0).await;
+        sqlx::query("UPDATE sessions SET created_at = ? WHERE id = ?")
+            .bind("2026-01-01T00:00:00+00:00")
+            .bind(&first)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // `first` lands in the first chunk, `second` in the next one.
+        let mut ids: Vec<Id> = vec![first.clone()];
+        ids.extend((0..ID_CHUNK).map(|i| format!("missing-{i}")));
+        ids.push(second.clone());
+        let got: Vec<Id> = repo
+            .list_title_candidates(&ids)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(got, vec![second, first]);
     }
 
     #[tokio::test]

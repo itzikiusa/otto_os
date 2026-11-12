@@ -32,7 +32,7 @@ function setup(
     buildDuplicate: () => ({ title: 'Review INSERT', sql: 'INSERT INTO t VALUES (1)' }),
   };
   const { EditFlow } = loadSource(new URL('../src/modules/database/EditFlow.svelte.ts', import.meta.url), {
-    '../../lib/toast.svelte': { toasts: { info: (t: string) => toasts.push(`info:${t}`), success: (t: string) => toasts.push(`success:${t}`), error: (t: string) => toasts.push(`error:${t}`) } },
+    '../../lib/toast.svelte': { toasts: { info: (t: string) => toasts.push(`info:${t}`), success: (t: string) => toasts.push(`success:${t}`), warn: (t: string) => toasts.push(`warn:${t}`), error: (t: string) => toasts.push(`error:${t}`) } },
     './review-batch': reviewBatch,
     '../../lib/stores/database.svelte': { database },
     './results-format': {}, './edit-types': { adapterFor: () => adapter },
@@ -128,6 +128,58 @@ test('a review the person edited keeps every draft when it fails partway (no sta
   h.flow.setReviewSql(`${h.flow.reviewSql!.sql}\n// edited`);
   await h.flow.runReview();
   assert.equal(h.flow.pending.size, 2);
+});
+
+// A row that was deleted (or whose key changed) since the result loaded makes
+// its UPDATE match 0 rows — a 200 with no error. That is not "Applied".
+const counted = (statement: string, rows_affected: number) => ({ columns: [], rows: [], rows_affected, statement });
+
+test('a single-row edit that matched no row keeps its draft and the modal, and does not say Applied', async () => {
+  const h = setup(() => ({ columns: [], rows: [], rows_affected: 0 }), { rows: 1, buildUpdate: perRowUpdate });
+  h.flow.reviewPending();
+  await h.flow.runReview();
+  assert.equal(h.flow.pending.size, 1, 'the draft stays pending');
+  assert.ok(h.flow.reviewSql, 'the review modal stays open');
+  assert.match(h.flow.reviewError ?? '', /did not match any row/);
+  assert.equal(h.reruns.length, 0, 'a refresh would discard the kept draft');
+  assert.deepEqual(h.toasts, ['warn:Did not match any row']);
+});
+
+test('in a 3-row batch only the draft whose UPDATE matched nothing is kept', async () => {
+  const h = setup(() => ({
+    ...counted('BEGIN', 0),
+    more_results: [counted('UPDATE … id = 1', 1), counted('UPDATE … id = 2', 0), counted('UPDATE … id = 3', 1), counted('COMMIT', 0)],
+  }), { rows: 3, buildUpdate: perRowUpdate });
+  h.flow.reviewPending();
+  await h.flow.runReview();
+  assert.deepEqual([...h.flow.pending.keys()], [1], 'rows 0 and 2 were written; row 1 matched nothing');
+  assert.match(h.flow.reviewError ?? '', /other edits were written/);
+  assert.deepEqual(h.toasts, ['warn:Did not match any row']);
+});
+
+test('a single-row edit that changed several rows is applied with a warning', async () => {
+  const h = setup(() => ({ columns: [], rows: [], rows_affected: 3 }), { rows: 1, buildUpdate: perRowUpdate });
+  h.flow.reviewPending();
+  await h.flow.runReview();
+  assert.equal(h.flow.pending.size, 0);
+  assert.equal(h.flow.reviewSql, null);
+  assert.deepEqual(h.toasts, ['success:Applied', 'warn:An edit changed more than one row']);
+});
+
+test('Mongo counts modified documents, so 0 there is not read as "no row matched"', async () => {
+  const h = setup(() => ({ columns: [], rows: [], rows_affected: 0 }), { engine: 'mongodb', rows: 1, buildUpdate: perRowUpdate });
+  h.flow.reviewPending();
+  await h.flow.runReview();
+  assert.equal(h.flow.pending.size, 0);
+  assert.deepEqual(h.toasts, ['success:Applied']);
+});
+
+test('affectedCheck ignores the BEGIN / COMMIT wrapper and non-row statements', () => {
+  const res = { ...counted('BEGIN', 0), more_results: [counted('UPDATE t SET v = 1 WHERE id = 1', 0), counted('COMMIT', 0)] };
+  assert.deepEqual(reviewBatch.affectedCheck('mysql', res, true, ''), { unmatched: [0], multi: [] });
+  assert.equal(reviewBatch.affectedCheck('postgres', counted('INSERT INTO t VALUES (1)', 0), false, 'INSERT INTO t VALUES (1)'), null);
+  assert.equal(reviewBatch.affectedCheck('mysql', { columns: [], rows: [] }, false, 'UPDATE t SET v = 1'), null, 'no count, no claim');
+  assert.deepEqual(reviewBatch.affectedCheck('postgres', { columns: [], rows: [], rows_affected: 0 }, false, 'DELETE FROM t WHERE id IN (1)'), { unmatched: [0], multi: [] });
 });
 
 test('reviewBatchSql wraps only multi-statement MySQL / Postgres reviews that manage no transaction', () => {

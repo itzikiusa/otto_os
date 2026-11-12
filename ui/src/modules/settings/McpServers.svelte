@@ -5,6 +5,7 @@
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   import SectionIntro from './SectionIntro.svelte';
+  import WorkspaceScope from './WorkspaceScope.svelte';
   // MCP Servers settings page: per-workspace, user-managed MCP servers that Otto
   // merges into the workspace's `.mcp.json` when an agent session spawns there
   // (alongside Otto's own managed entries, e.g. the browser server). Nothing is
@@ -336,6 +337,7 @@
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
+  <WorkspaceScope />
   <SectionIntro>Enabled servers are merged into this workspace’s <code>.mcp.json</code> when an agent session spawns here, alongside Otto’s own entries (e.g. the browser). Nothing is auto-enabled — a server is only written once you turn it on.</SectionIntro>
 
   <div class="card ungoverned" data-testid="mcp-ungoverned-note">

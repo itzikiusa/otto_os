@@ -1,4 +1,6 @@
-//! An agent's **own scope**, managed from its chat with no approval card:
+//! An agent's **own scope**, managed from its chat with no approval card —
+//! except a routine that posts OUTSIDE the chat (Slack), which the owner
+//! approves first ([`outward_delivery_reason`]):
 //!
 //! * **Routines** (its schedules): "every weekday at 9 Israel time, send me a
 //!   Slack message with …" — create / list / edit / pause / delete. A routine
@@ -102,8 +104,10 @@ pub fn render_self_section() -> &'static str {
     "\n## Your routines, personality and learning\n\
      - Routines are recurring tasks you run on a schedule. When the user asks for one \
      (\"every weekday at 9 Israel time, send me a Slack message with …\"), create it at once \
-     with `otto_routine_create` — no approval needed — and confirm in one line with its \
-     schedule and next run. `otto_routine_list` / `otto_routine_update` (also pause: \
+     with `otto_routine_create` and confirm in one line with its schedule and next run. A \
+     routine that only reports in this chat needs no approval; one that posts to Slack waits \
+     for the user's approval first (Otto asks them) — say so, never claim it is live before \
+     it is. `otto_routine_list` / `otto_routine_update` (also pause: \
      enabled=false) / `otto_routine_delete` manage them. Turn the user's words into the \
      structured schedule yourself; omit the timezone to use the user's own. Always give it a \
      `name` the user would say (2–5 words, e.g. \"Morning PR brief\") and write the \
@@ -375,8 +379,99 @@ async fn plan_delivery<C: AssistantCtx>(
     Ok((Some(json!({"type": "slack", "chat_id": channel})), base))
 }
 
+/// Why an `otto.routine_create` / `otto.routine_update` call (bare tool
+/// name, the caller's arguments) needs the owner's approval: it sets or
+/// changes a destination OUTSIDE the agent's chat (Slack as the Otto bot or
+/// as the user, or any non-chat kind added later), which then posts
+/// unattended on every run. `None` for a chat-only routine and for an
+/// update that leaves the destination alone (no `deliver`) — "remind me
+/// every morning" never waits on a card. The text names where it posts, as
+/// whom, and on what schedule: the approval card shows it.
+///
+/// The governed tool pipeline (otto-server `personal_agent_policy::decide`)
+/// turns `Some` into a forced approval.
+pub fn outward_delivery_reason(bare: &str, args: &Value) -> Option<String> {
+    let verb = match bare {
+        "routine_create" => "sets up a routine that",
+        "routine_update" => "changes a routine so it",
+        _ => return None,
+    };
+    let d = args.get("deliver").filter(|d| !d.is_null())?;
+    let kind = d
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if matches!(kind.as_str(), "" | "chat" | "none") {
+        return None;
+    }
+    let field = |k: &str| {
+        d.get(k)
+            .and_then(Value::as_str)
+            .map(one_line)
+            .filter(|s| !s.is_empty())
+    };
+    let target = field("channel").unwrap_or_else(|| "(no channel given)".into());
+    let whom = match field("as").as_deref() {
+        Some("me") => "AS YOU, in the Slack workspaces you let this agent act in",
+        _ => "as the Otto Slack bot",
+    };
+    let place = if kind == "slack" {
+        format!("posts to Slack {target} {whom}")
+    } else {
+        format!("delivers to a '{kind}' destination ({target})")
+    };
+    let schedule = match args.get("schedule").filter(|s| !s.is_null()) {
+        Some(s) => schedule_words(s),
+        None if bare == "routine_update" => "schedule unchanged".into(),
+        None => "no schedule given".into(),
+    };
+    let tz = args
+        .get("timezone")
+        .and_then(Value::as_str)
+        .map(one_line)
+        .filter(|t| !t.is_empty())
+        .map(|t| format!(" ({t})"))
+        .unwrap_or_default();
+    let agent = args
+        .get("agent")
+        .and_then(Value::as_str)
+        .map(one_line)
+        .filter(|a| !a.is_empty())
+        .map(|a| format!(" for agent \"{a}\""))
+        .unwrap_or_default();
+    Some(format!(
+        "otto.{bare} {verb} {place}, unattended on every run{agent} — {schedule}{tz}"
+    ))
+}
+
+/// A routine schedule spec in a few words for an approval card
+/// (`daily at 09:00`, `cron 0 9 * * 1-5`, `days sun-thu at 09:00`, …).
+fn schedule_words(s: &Value) -> String {
+    let get = |k: &str| match s.get(k) {
+        Some(Value::String(v)) => Some(one_line(v)),
+        Some(Value::Null) | None => None,
+        Some(v) => Some(v.to_string()),
+    };
+    let mut out = get("cadence").unwrap_or_else(|| "schedule".into());
+    for (k, label) in [
+        ("expr", ""),
+        ("days", ""),
+        ("weekday", "weekday "),
+        ("at", "at "),
+        ("every_min", "every min: "),
+        ("run_at", "at "),
+    ] {
+        if let Some(v) = get(k) {
+            out.push_str(&format!(" {label}{v}"));
+        }
+    }
+    out.chars().take(160).collect()
+}
+
 /// The agent a routine call acts on: the caller, or — for the main agent —
-/// one of its workspace's agents (`agent` = id or name).
+/// one of its owner's agents in its workspace (`agent` = id or name).
 pub async fn target<C: AssistantCtx>(
     ctx: &C,
     caller: &PersonalAgent,
@@ -393,10 +488,12 @@ pub async fn target<C: AssistantCtx>(
             "you manage only your own routines — the main agent manages the others'".into(),
         ));
     }
+    // Its OWNER's agents only — never another member's in a shared workspace.
     pa_engine::repo(ctx)
         .list_by_workspace(&caller.workspace_id)
         .await?
         .into_iter()
+        .filter(|a| crate::personal_agent_team::same_owner(a, caller))
         .find(|a| a.id == r || a.name.trim().eq_ignore_ascii_case(r))
         .ok_or_else(|| Error::NotFound(format!("no agent \"{r}\"")))
 }
@@ -824,5 +921,88 @@ mod tests {
         let d = format!("Brief me\n\n{SLACK_AS_ME_MARK} in #general with the slack_post_message tool, as yourself acting for the user. Post it once.]");
         assert_eq!(slack_as_me_channel(&d).as_deref(), Some("#general"));
         assert!(local_timezone().parse::<chrono_tz::Tz>().is_ok());
+    }
+
+    #[test]
+    fn a_chat_only_routine_needs_no_approval() {
+        let sched = json!({"cadence": "daily", "at": "09:00"});
+        for args in [
+            json!({"schedule": sched, "instruction": "Remind me to review PRs"}),
+            json!({"schedule": sched, "instruction": "x", "deliver": {"type": "chat"}}),
+            json!({"schedule": sched, "instruction": "x", "deliver": {}}),
+            json!({"schedule": sched, "instruction": "x", "deliver": null}),
+        ] {
+            assert_eq!(
+                outward_delivery_reason("routine_create", &args),
+                None,
+                "{args}"
+            );
+        }
+        // Other tools are never this gate's business.
+        let slack = json!({"deliver": {"type": "slack", "channel": "#general"}});
+        assert_eq!(outward_delivery_reason("routine_delete", &slack), None);
+        assert_eq!(outward_delivery_reason("routine_list", &slack), None);
+    }
+
+    #[test]
+    fn a_slack_routine_needs_approval_naming_where_whom_and_when() {
+        let args = json!({
+            "schedule": {"cadence": "days", "at": "09:00", "days": "sun-thu"},
+            "timezone": "Asia/Jerusalem",
+            "instruction": "Morning PR brief",
+            "deliver": {"type": "slack", "channel": "#eng-leads"},
+        });
+        let why = outward_delivery_reason("routine_create", &args).expect("approval");
+        for part in [
+            "otto.routine_create",
+            "#eng-leads",
+            "as the Otto Slack bot",
+            "days sun-thu at 09:00",
+            "Asia/Jerusalem",
+            "unattended",
+        ] {
+            assert!(why.contains(part), "{part}: {why}");
+        }
+        // As the user: the card says so loudly.
+        let me = json!({
+            "schedule": {"cadence": "cron", "expr": "0 9 * * 1-5"},
+            "deliver": {"type": "Slack", "channel": "C0123", "as": "me"},
+            "agent": "Researcher",
+        });
+        let why = outward_delivery_reason("routine_create", &me).expect("approval");
+        assert!(why.contains("AS YOU"), "{why}");
+        assert!(
+            why.contains("C0123") && why.contains("cron 0 9 * * 1-5"),
+            "{why}"
+        );
+        assert!(why.contains("for agent \"Researcher\""), "{why}");
+        // Any non-chat destination added later is outward too.
+        let other = json!({"deliver": {"type": "email", "channel": "x@y"}});
+        assert!(outward_delivery_reason("routine_create", &other).is_some());
+    }
+
+    #[test]
+    fn an_update_needs_approval_only_when_it_sets_an_outward_destination() {
+        // Adding (or re-pointing) a Slack delivery asks the owner.
+        let add = json!({"routine_id": "s1", "deliver": {"type": "slack", "channel": "#ops"}});
+        let why = outward_delivery_reason("routine_update", &add).expect("approval");
+        assert!(
+            why.contains("#ops") && why.contains("schedule unchanged"),
+            "{why}"
+        );
+        // An approved routine's instruction / cadence / pause edit does not:
+        // its destination stays what the owner approved.
+        for args in [
+            json!({"routine_id": "s1", "instruction": "Also list stale branches"}),
+            json!({"routine_id": "s1", "schedule": {"cadence": "daily", "at": "10:00"}}),
+            json!({"routine_id": "s1", "enabled": false}),
+            json!({"routine_id": "s1", "deliver": {"type": "chat"}}),
+        ] {
+            assert_eq!(
+                outward_delivery_reason("routine_update", &args),
+                None,
+                "{args}"
+            );
+        }
     }
 }

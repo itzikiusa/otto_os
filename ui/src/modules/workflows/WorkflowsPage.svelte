@@ -26,6 +26,7 @@
   import WorkflowCanvas from './WorkflowCanvas.svelte';
   import RunMonitor from './RunMonitor.svelte';
   import RunApprovals from './RunApprovals.svelte';
+  import NodePalette from './NodePalette.svelte';
   import RunContextSidebar from './RunContextSidebar.svelte';
   import { RunSync } from './runSync.svelte';
   import TriggersPanel from './TriggersPanel.svelte';
@@ -323,7 +324,7 @@
     window.addEventListener('keydown', onKey, true);
     window.addEventListener('pointerdown', onDown, true);
     // Keyboard users land on the first entry of what they just opened.
-    queueMicrotask(() => document.querySelector<HTMLElement>('.wf-pop .pal-item, .wf-pop .run-item')?.focus());
+    queueMicrotask(() => document.querySelector<HTMLElement>('.wf-pop .pal-filter, .wf-pop .run-item')?.focus());
     return () => {
       window.removeEventListener('keydown', onKey, true);
       window.removeEventListener('pointerdown', onDown, true);
@@ -545,6 +546,8 @@
     const submitted = JSON.stringify($state.snapshot(graph));
     savingGraph = true;
     try {
+      // The saved graph is what the next Slack trigger runs: a broken one is shown, not saved.
+      if (!await validateGraph()) { if (current?.id === workflowId) toasts.error('Not saved — resolve the issues above the canvas'); return; }
       const wf = await patchWorkflow(workflowId, { graph: JSON.parse(submitted) as WorkflowGraph });
       applySavedWorkflow(wf);
       // Editing stays available during Save; only the submitted graph is saved.
@@ -935,9 +938,9 @@
         n.y = 30 + row * ROWH;
       }
     });
+    // Layout only: unsaved edits must not go live just because they were tidied.
     graph = { ...graph, nodes: [...nodes] };
     dirty = true;
-    void save();
   }
 
   // Stopping can't be undone (the run halts after its current step and must
@@ -1313,7 +1316,7 @@
            Node/Save join the menu too, so there is never a second,
            auto-generated ⋯ next to ours. The ⋯ collapses first. -->
       {#if !viewport.isPhone}
-        <button class="btn small" data-overflow="1" data-icon="plus" aria-expanded={paletteOpen} aria-haspopup="dialog" onclick={(e) => { anchorPop(e, 230); paletteOpen = !paletteOpen; }}>
+        <button class="btn small" data-overflow="1" data-icon="plus" aria-expanded={paletteOpen} aria-haspopup="dialog" onclick={(e) => { anchorPop(e, 280); paletteOpen = !paletteOpen; }}>
           <Icon name="plus" size={12} /> Node
         </button>
         <button class="btn small" data-overflow="2" data-icon="check" disabled={!dirty || savingGraph} title={dirty ? 'Save the canvas changes' : 'No unsaved changes'} onclick={save}>Save</button>
@@ -1426,17 +1429,7 @@
     {#if current}
       <!-- Popovers for the header's Node / Runs buttons (see anchorPop). -->
       {#if paletteOpen}
-        <div class="palette wf-pop" role="dialog" aria-label="Add a node" style:inset-inline-end="{popRight}px">
-          {#each types as t (t.kind)}
-            <button class="pal-item" onclick={() => addNode(t)}>
-              <span class="pal-ic"><Icon name={asIcon(t.icon, 'box')} size={12} /></span>
-              <span class="pal-body">
-                <span class="pal-name">{t.label}</span>
-                <span class="pal-cat">{t.category}</span>
-              </span>
-            </button>
-          {/each}
-        </div>
+        <NodePalette {types} right={popRight} onpick={addNode} />
       {/if}
       {#if runsOpen}
         <div class="palette runs-pop wf-pop" role="dialog" aria-label="Runs" style:inset-inline-end="{popRight}px">
@@ -1471,7 +1464,7 @@
       <RunApprovals {mon} {graph} {nodeName} />
 
       {#if validationIssues.length}
-        <div class="preflight" use:announceShown={{ text: `Resolve these issues before running: ${validationIssues.map((i) => i.message).join('; ')}`, assertive: true }}><strong>Resolve these issues before running</strong>
+        <div class="preflight" use:announceShown={{ text: `Resolve these issues before saving or running: ${validationIssues.map((i) => i.message).join('; ')}`, assertive: true }}><strong>Resolve these issues before saving or running</strong>
           {#each validationIssues as issue}
             <button class="btn ghost small" onclick={() => { selectedId = issue.node_id; selectedEdgeId = issue.edge_id; }}>{issue.node_id ? nodeName(issue.node_id) : issue.edge_id ? 'Connection' : 'Graph'}: {issue.message}</button>
           {/each}
@@ -2168,45 +2161,6 @@
     border-radius: var(--radius-l);
     box-shadow: var(--glass-shadow);
     padding: 4px;
-  }
-  .pal-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 6px 8px;
-    background: none;
-    border: none;
-    border-radius: var(--radius-s);
-    cursor: pointer;
-    text-align: start;
-    color: var(--text);
-  }
-  .pal-item:hover {
-    background: var(--accent-soft);
-  }
-  .pal-ic {
-    display: grid;
-    place-items: center;
-    width: 24px;
-    height: 24px;
-    border-radius: var(--radius-s);
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    flex-shrink: 0;
-  }
-  .pal-body {
-    display: flex;
-    flex-direction: column;
-  }
-  .pal-name {
-    font-size: var(--fs-s);
-    font-weight: 600;
-  }
-  .pal-cat {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    text-transform: uppercase;
   }
   .canvas-wrap {
     flex: 1;

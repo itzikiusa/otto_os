@@ -186,3 +186,38 @@ export function runPostResponse(code: string, resp: ResponseCtx, vars: Record<st
   };
   return { ...run(code, pm), writes };
 }
+
+/** Network entry points a script must never reach. Interactive scripts run
+ *  in a Worker of the app's own webview, so a call from there would leave
+ *  from the app itself — around the daemon's private-address guard, to
+ *  localhost or the LAN. Requests go through the API client, never a script. */
+export const SCRIPT_BLOCKED_GLOBALS = [
+  'fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'importScripts', 'Worker', 'SharedWorker', 'WebTransport',
+] as const;
+
+/** Replace every {@link SCRIPT_BLOCKED_GLOBALS} entry on `scope` — its own
+ *  property and the one on each prototype up its chain, so
+ *  `Object.getPrototypeOf(self).fetch` is no way around it — and
+ *  `navigator.sendBeacon` with a function that throws. Called once in the
+ *  script Worker before any script runs. */
+export function blockScriptNetwork(scope: object): void {
+  const lock = (target: object, name: string) => {
+    const blocked = function blockedNetworkApi(): never {
+      throw new Error(`${name} is not available in API-client scripts — send requests with the API client`);
+    };
+    try {
+      Object.defineProperty(target, name, { value: blocked, writable: false, configurable: false });
+    } catch {
+      // Already non-configurable (locked earlier): nothing to replace.
+    }
+  };
+  const lockEverywhere = (target: object, name: string) => {
+    lock(target, name);
+    for (let proto = Object.getPrototypeOf(target); proto && proto !== Object.prototype; proto = Object.getPrototypeOf(proto)) {
+      if (Object.prototype.hasOwnProperty.call(proto, name)) lock(proto, name);
+    }
+  };
+  for (const name of SCRIPT_BLOCKED_GLOBALS) lockEverywhere(scope, name);
+  const nav = (scope as { navigator?: unknown }).navigator;
+  if (nav && typeof nav === 'object') lockEverywhere(nav, 'sendBeacon');
+}

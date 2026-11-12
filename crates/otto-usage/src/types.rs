@@ -534,6 +534,16 @@ pub struct UsageStatus {
     /// starts a tailer. The Usage page warns on `retrying` / `stopped`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tailer: Option<TailerStatus>,
+    /// When the engine went down while enabled (RFC 3339), absent while it is
+    /// up, starting, or disabled. An idle-stopped server is not down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outage_since: Option<String>,
+    /// Undelivered rows in the durable ingestion journal as a fraction of its
+    /// cap (0.0–1.0). At 1.0 the tailer stops reading transcripts, and the
+    /// agent CLIs prune old transcripts — a long outage then loses usage.
+    /// Absent until the journal is opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal_fill: Option<f64>,
 }
 
 /// Whether the usage tailer is ingesting (error-handling-3-05).

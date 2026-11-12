@@ -42,7 +42,7 @@ fn strip_userinfo_token(tok: &str) -> String {
 /// so `test()` can surface a detailed, useful error WITHOUT leaking the password:
 /// scrubs `scheme://user:pass@host` userinfo and `--password <x>` / `-p <x>` /
 /// `--password=<x>` argv. Everything else (the actual error text) is preserved.
-fn redact_secrets(s: &str) -> String {
+pub(crate) fn redact_secrets(s: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     let mut redact_next = false;
     for tok in s.split_whitespace() {
@@ -706,9 +706,21 @@ impl ConnectionsService {
     /// Headless test-connect: run the command with a kind-specific probe,
     /// 10s timeout, report ok/latency and the line that explains a failure.
     pub async fn test(&self, conn: &Connection, user_id: &Id) -> Result<TestConnectionResp> {
+        Ok(self.test_detailed(conn, user_id).await?.0)
+    }
+
+    /// [`Self::test`] plus the failed client's full stderr, capped and
+    /// redacted (`failure::redact_detail`) — the HTTP `detail` field.
+    pub async fn test_detailed(
+        &self,
+        conn: &Connection,
+        user_id: &Id,
+    ) -> Result<(TestConnectionResp, Option<String>)> {
         self.authorize(&conn.id, user_id, "configure").await?;
         let secret = self.fetch_secret(conn).await?;
-        probe(conn, secret.as_deref()).await
+        let mut detail = None;
+        let resp = probe_into(conn, secret.as_deref(), &mut detail).await?;
+        Ok((resp, detail))
     }
 
     /// Test-before-save for an SSH profile: probe the form's CURRENT (unsaved)
@@ -722,6 +734,16 @@ impl ConnectionsService {
         kind: ConnectionKind,
         params: serde_json::Value,
     ) -> Result<TestConnectionResp> {
+        Ok(self.test_unsaved_detailed(user_id, kind, params).await?.0)
+    }
+
+    /// [`Self::test_unsaved`] plus the failed client's redacted stderr.
+    pub async fn test_unsaved_detailed(
+        &self,
+        user_id: &Id,
+        kind: ConnectionKind,
+        params: serde_json::Value,
+    ) -> Result<(TestConnectionResp, Option<String>)> {
         let actor = otto_state::UsersRepo::new(self.repo.pool())
             .get(user_id)
             .await?;
@@ -738,7 +760,9 @@ impl ConnectionsService {
         }
         validate_params(kind, &params, false)?;
         let conn = transient_connection(kind, params);
-        probe(&conn, None).await
+        let mut detail = None;
+        let resp = probe_into(&conn, None, &mut detail).await?;
+        Ok((resp, detail))
     }
 
     async fn fetch_secret(&self, conn: &Connection) -> Result<Option<String>> {
@@ -801,7 +825,18 @@ const TIMEOUT_HINT: &str = "the host didn't answer in time. Check the VPN, firew
 /// Run a connection's kind-specific headless probe (no authorization — the
 /// callers check it). `warn_key_perms` stays `None`: the HTTP handlers overlay
 /// it uniformly for every probe path.
+#[cfg(test)]
 pub(crate) async fn probe(conn: &Connection, secret: Option<&str>) -> Result<TestConnectionResp> {
+    probe_into(conn, secret, &mut None).await
+}
+
+/// [`probe`] that also hands back, through `detail`, a failed client's full
+/// stderr — capped and redacted ([`crate::failure::redact_detail`]).
+async fn probe_into(
+    conn: &Connection,
+    secret: Option<&str>,
+    detail: &mut Option<String>,
+) -> Result<TestConnectionResp> {
     let warn_key_perms = None;
     if let Some(message) = missing_target(conn) {
         return Ok(TestConnectionResp {
@@ -884,6 +919,7 @@ pub(crate) async fn probe(conn: &Connection, secret: Option<&str>) -> Result<Tes
                 });
             }
             let stderr = String::from_utf8_lossy(&output.stderr);
+            *detail = crate::failure::redact_detail(&stderr, secret, redact_secrets);
             let (line, hint) = if via_ssh {
                 let d = otto_ssh::diagnose_ssh_stderr(&stderr);
                 (d.line, d.hint.map(str::to_string))
@@ -894,7 +930,8 @@ pub(crate) async fn probe(conn: &Connection, secret: Option<&str>) -> Result<Tes
                     .unwrap_or("")
                     .trim()
                     .to_string();
-                (first, None)
+                let hint = crate::failure::classify_failure(&stderr).map(str::to_string);
+                (first, hint)
             };
             let message = if line.is_empty() {
                 format!("exited with {}", output.status)

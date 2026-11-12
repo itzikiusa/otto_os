@@ -89,6 +89,21 @@ test('groups: mine first, flat without handles', () => {
   assert.deepEqual(groupPrs(rows, new Set(['carol'])).map((x) => x.id), ['all']);
 });
 
+test('is_mine from the daemon wins over the handle match (Bitbucket display names)', () => {
+  // Username is an email, author a display name: no handle matches.
+  const handles = new Set(['itzik@example.com']);
+  const mineRow = pr(1, { author: 'Itzik Cohen', is_mine: true });
+  const theirs = pr(2, { author: 'Ann Lee', is_mine: false });
+  assert.ok(matchesPr(mineRow, parsePrQuery('is:mine'), handles));
+  assert.ok(!matchesPr(theirs, parsePrQuery('is:mine'), handles));
+  // false = not mine OR the daemon couldn't look you up: the handle match still applies.
+  assert.ok(matchesPr(pr(3, { author: 'alice', is_mine: false }), parsePrQuery('is:mine'), new Set(['alice'])));
+  const g = groupPrs([theirs, mineRow], handles);
+  assert.deepEqual(g.map((x) => [x.id, x.items.map((p) => p.number)]), [['mine', [1]], ['others', [2]]]);
+  // Flags alone are enough to group, before the accounts read lands.
+  assert.deepEqual(groupPrs([theirs, mineRow], new Set()).map((x) => x.id), ['mine', 'others']);
+});
+
 test('refresh merge replaces page 1 and keeps later pages', () => {
   const prev = [pr(5), pr(4), pr(3), pr(2), pr(1)];
   // page 1 had 3 rows; #4 was merged away, #6 is new, #3 updated.

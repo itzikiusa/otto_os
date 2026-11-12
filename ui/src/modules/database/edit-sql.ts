@@ -3,7 +3,7 @@
 // literal/identifier helpers are exported on their own because ResultsGrid's
 // FK navigation and the "WHERE pk IN (…)" copy build predicates with them too.
 import type { DbEngine } from '../../lib/api/types';
-import { backslashEscapes, boolLiteral, escapeSqlText, quoteIdent } from '../../lib/database/sql-dialect.ts';
+import { backslashEscapes, binaryLiteral, boolLiteral, escapeSqlText, isBinaryType, quoteIdent } from '../../lib/database/sql-dialect.ts';
 import { cellStr, compactJson, isComplex, SET_EMPTY, SET_NULL } from './results-format';
 import type { DiffLine, EditAdapter, EditCtx, TypedValue } from './edit-types';
 import { plural } from '../../lib/plural';
@@ -42,11 +42,17 @@ function isNumericCell(v: unknown, typeHint: string | null | undefined): boolean
 /** SQL-quote an existing typed value (for WHERE / INSERT values). `typeHint`
  *  is the column's type: an integer column's exact-digits string is emitted
  *  BARE — quoted, MySQL would compare it to the column as a double and match
- *  neighbouring rows. */
+ *  neighbouring rows. A binary column's base64 cell becomes the engine's
+ *  decode of it (`FROM_BASE64('…')`): quoted, the base64 TEXT would be stored
+ *  or compared instead of the bytes (a `BINARY(16)` key then matches nothing). */
 export function valueLiteral(engine: DbEngine | null, v: unknown, typeHint?: string | null): string {
   if (v === null || v === undefined) return 'NULL';
   if (typeof v === 'number' || typeof v === 'bigint') return String(v);
   if (isExactIntegerCell(v, typeHint)) return v;
+  if (typeof v === 'string' && isBinaryType(typeHint)) {
+    const bytes = binaryLiteral(engine, v);
+    if (bytes) return bytes;
+  }
   if (typeof v === 'boolean') return boolLiteral(engine, v);
   if (isComplex(v)) return `'${escapeSqlText(compactJson(v), backslashEscapes(engine))}'`;
   return `'${escapeSqlText(String(v), backslashEscapes(engine))}'`;

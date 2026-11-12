@@ -13,6 +13,7 @@ import { noteRuntimeWaiting } from '../../../lib/stores/runtimeAttention.svelte'
 import { uiControl } from '../../../lib/stores/uiControl.svelte';
 import type {
   ApprovalDecision,
+  PeerInfo,
   QuestionAnswer,
   PromptDelivery,
   ProviderSessionStatus,
@@ -98,6 +99,10 @@ class RuntimeThreads {
   /** Workspaces whose list has loaded once. */
   loaded = $state<Record<string, boolean>>({});
   loadErrors = $state<Record<string, string>>({});
+  /** Threads that finished a turn while nobody was looking (the sidebar's dot). */
+  unread = $state<Record<string, true>>({});
+  /** Threads shown by an embed outside Threads (a turn ending there is seen). */
+  private embedded = new Map<string, number>();
   private liveRefs = 0;
   private stopLive: (() => void) | null = null;
 
@@ -136,6 +141,42 @@ class RuntimeThreads {
     } finally {
       this.loaded = { ...this.loaded, [workspaceId]: true };
     }
+  }
+
+  /** Read one thread's row: an embed needs only its own, never the
+   *  workspace's whole list. */
+  async loadOne(id: string): Promise<RuntimeSession> {
+    const r = await api.get<RuntimeSession>(`/runtime-sessions/${id}`);
+    this.byId[r.id] = r;
+    noteRuntimeWaiting(r.id, r.status === 'awaiting_permission');
+    return r;
+  }
+
+  /** Fetch the rows of `id`'s linked group not held yet (its chips). */
+  async loadLinked(id: string): Promise<void> {
+    const peers = await api.get<PeerInfo[]>(`/runtime-sessions/${id}/peers`);
+    for (const peer of peers) if (!this.byId[peer.id]) this.adopt(peer.id);
+  }
+
+  /** An embed shows `id` while mounted (its finished turns are seen); returns the release. */
+  watch(id: string): () => void {
+    this.embedded.set(id, (this.embedded.get(id) ?? 0) + 1);
+    this.markRead(id);
+    return () => {
+      const n = (this.embedded.get(id) ?? 1) - 1;
+      if (n > 0) this.embedded.set(id, n);
+      else this.embedded.delete(id);
+    };
+  }
+
+  markRead(id: string): void {
+    if (!this.unread[id]) return;
+    const { [id]: _read, ...rest } = this.unread;
+    this.unread = rest;
+  }
+
+  private onScreen(id: string): boolean {
+    return this.embedded.has(id) || (router.module === 'threads' && threads.focusedSessionId === id);
   }
 
   /** Listen while Threads is mounted; returns the unsubscribe. */
@@ -181,6 +222,10 @@ class RuntimeThreads {
 
   private onEvent(ev: RuntimeEvent): void {
     if (!this.byId[ev.session_id]) this.adopt(ev.session_id);
+    // A turn that ended (done or failed) off screen leaves an unread dot.
+    if (ev.type === 'turn.terminal' && (ev.status === 'completed' || ev.status === 'failed') && !this.onScreen(ev.session_id)) {
+      this.unread = { ...this.unread, [ev.session_id]: true };
+    }
     // The row follows status / turn changes only — not every streamed chunk.
     const row = this.byId[ev.session_id];
     if (row && row.status !== 'closed' && (ev.type === 'provider_session.updated' || ev.type === 'provider_turn.updated')) {
@@ -257,6 +302,7 @@ class RuntimeThreads {
   async remove(id: string): Promise<void> {
     await api.del(`/runtime-sessions/${id}`);
     runtimeDrafts.forget(id);
+    this.markRead(id);
     const next = { ...this.byId };
     delete next[id];
     this.byId = next;

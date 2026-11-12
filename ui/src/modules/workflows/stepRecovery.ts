@@ -1,6 +1,8 @@
 // "Stuck?" recovery for a running step whose children all settled but which
 // never moved on: stop the run, then (restart) re-enter it at that step once
-// the engine has stopped. Both confirm first — they stop a live run.
+// the engine has stopped. Both confirm first — they stop a live run. "Stop run"
+// is a plain cancel (the run reads Canceled; there is no mark-step-failed
+// endpoint), so its wording promises exactly that.
 import { api } from '../../lib/api/client';
 import { retryRunNode } from '../../lib/api/workflows';
 import type { WorkflowRun } from '../../lib/api/types';
@@ -18,14 +20,14 @@ export async function recoverStuckStep(
   const ok = await confirmer.ask(
     restart
       ? `Stop this run and re-run “${name}” and every step after it? Steps that already succeeded keep their results.`
-      : `Stop this run and mark “${name}” as failed? Steps after it won’t run.`,
-    { title: restart ? 'Restart stuck step' : 'Mark step failed', confirmLabel: restart ? 'Restart step' : 'Mark failed', danger: !restart },
+      : `Stop this run? It ends as Canceled: “${name}” stops where it is and the steps after it won’t run. You can re-run from this step later.`,
+    { title: restart ? 'Restart stuck step' : 'Stop run', confirmLabel: restart ? 'Restart step' : 'Stop run', danger: !restart },
   );
   if (!ok) return;
   try {
     await api.post(`/workflow-runs/${encodeURIComponent(runId)}/cancel`, {});
     if (!restart) {
-      toasts.info('Run stopped', `${name} marked failed`);
+      toasts.info('Run stopped', `Canceled at ${name}`);
       return;
     }
     // The engine needs a moment to stop the in-flight step ("still stopping"

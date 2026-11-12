@@ -9,6 +9,7 @@ import {
   availableModules,
   favoriteModules,
   insertFavorite,
+  mergeSavedOrder,
   moveAmong,
   reconcileNewSidebarModules,
   reorderAmong,
@@ -184,4 +185,93 @@ test('Personal Agents keeps the scheduled-tasks id but opens on its Agents tab',
   assert.equal(moduleHome('scheduled-tasks'), 'personal-agents');
   assert.equal(moduleHome('git'), 'git');
   assert.equal(navIdForModule('personal-agents'), 'scheduled-tasks');
+});
+
+// ── A module that becomes available later keeps its place (owner report) ──
+
+const only = (keep: (id: string) => boolean) => all().filter((m) => keep(m.id));
+
+test('resolveOrder: an id missing from the saved order lands after its section predecessor, not at the bottom', () => {
+  // Saved while Kubernetes was gated off; Infrastructure reordered by the user.
+  const saved = ids(all()).filter((id) => id !== 'kubernetes');
+  const swapped = saved.map((id) => (id === 'aws' ? 'api' : id === 'api' ? 'aws' : id));
+  const infra = ids(resolveOrder(all(), swapped).filter((m) => m.group === 'infra'));
+  // Registry: connections, aws, kubernetes, api … — Kubernetes follows AWS
+  // wherever the user put AWS.
+  assert.deepEqual(infra, ['connections', 'api', 'aws', 'kubernetes', 'browser', 'mcp']);
+});
+
+test('resolveOrder: the first module of a section anchors before its successor', () => {
+  const reversed = ids(all()).filter((id) => id !== 'connections').reverse();
+  const infra = ids(resolveOrder(all(), reversed).filter((m) => m.group === 'infra'));
+  // Saved reversed: mcp, browser, api, kubernetes, aws — connections goes
+  // before its nearest placed successor (aws).
+  assert.deepEqual(infra, ['mcp', 'browser', 'api', 'kubernetes', 'connections', 'aws']);
+});
+
+test('resolveOrder: a new plugin anchors after the plugin before it; empty saved order = registry order', () => {
+  const plugins = [
+    { id: 'plugin/a', icon: 'zap' as const, label: 'A' },
+    { id: 'plugin/b', icon: 'zap' as const, label: 'B' },
+    { id: 'plugin/c', icon: 'zap' as const, label: 'C' },
+  ];
+  const mods = availableModules(() => true, plugins);
+  const saved = [...ids(all()), 'plugin/c', 'plugin/a'];
+  const got = ids(resolveOrder(mods, saved).filter((m) => m.group === 'plugins'));
+  assert.deepEqual(got, ['plugin/c', 'plugin/a', 'plugin/b']);
+  assert.deepEqual(ids(resolveOrder(all(), [])), ids(all()));
+});
+
+test('mergeSavedOrder: ids not on screen keep their saved slot; retired ids are dropped', () => {
+  const saved = ['home', 'agents', 'threads', 'git', 'kubernetes', 'plugin/x', 'history', 'api'];
+  // Kubernetes + the plugin were gated off while the user moved git to the front.
+  const next = ['git', 'home', 'agents', 'threads', 'api'];
+  assert.deepEqual(mergeSavedOrder(next, saved), ['git', 'kubernetes', 'plugin/x', 'home', 'agents', 'threads', 'api']);
+  // Nothing missing: unchanged.
+  assert.deepEqual(mergeSavedOrder(['b', 'a'], []), ['b', 'a']);
+  // A missing id saved first stays first.
+  assert.deepEqual(mergeSavedOrder(['agents', 'home'], ['kubernetes', 'home', 'agents']), ['kubernetes', 'agents', 'home']);
+});
+
+test('saving while a module is gated off, then granting it, puts it back where it was', () => {
+  const withoutK8s = only((id) => id !== 'kubernetes');
+  // The saved order had Kubernetes right after Connections.
+  const saved = ['connections', 'kubernetes', 'aws', 'api', 'browser', 'mcp'];
+  const before = resolveOrder(withoutK8s, saved);
+  const moved = moveAmong(ids(before), 'mcp', -1)!;
+  const stored = mergeSavedOrder(moved, saved);
+  const infra = ids(resolveOrder(all(), stored).filter((m) => m.group === 'infra'));
+  assert.deepEqual(infra, ['connections', 'kubernetes', 'aws', 'api', 'mcp', 'browser']);
+});
+
+test('reconcileNewSidebarModules: a module is known only once it has been available', () => {
+  const builtins = SIDEBAR_MODULES.map((m) => m.id);
+  const withoutK8s = builtins.filter((id) => id !== 'kubernetes');
+  // Boot before auth (no modules known to be available): nothing surfaced, nothing new marked.
+  const boot = reconcileNewSidebarModules({
+    order: withoutK8s,
+    hidden: [],
+    favorites: [],
+    collapsedGroups: ['infra'],
+    groupOrder: [],
+    knownModules: withoutK8s,
+    available: [],
+  });
+  assert.equal(boot.changed, false);
+  assert.ok(!boot.knownModules.includes('kubernetes'));
+  // Signed in without the Kubernetes grant: still not known.
+  const again = (r: typeof boot, available: string[]) =>
+    reconcileNewSidebarModules({ order: r.order, hidden: r.hidden, favorites: r.favorites, collapsedGroups: r.collapsedGroups, groupOrder: [], knownModules: r.knownModules, available });
+  const gated = again(boot, withoutK8s);
+  assert.ok(!gated.knownModules.includes('kubernetes'));
+  assert.ok(!gated.order.includes('kubernetes'));
+  // Granted later: surfaced like a newly shipped module — placed after AWS, its
+  // section unfolded — and only now recorded as known.
+  const granted = again(gated, builtins);
+  assert.equal(granted.changed, true);
+  assert.equal(granted.order.indexOf('kubernetes'), granted.order.indexOf('aws') + 1);
+  assert.deepEqual(granted.collapsedGroups, []);
+  assert.deepEqual(granted.knownModules, builtins);
+  // Omitting `available` keeps the old "every registry id is available" rule.
+  assert.deepEqual(reconcileNewSidebarModules({ order: [], hidden: [], favorites: [], collapsedGroups: [], groupOrder: [], knownModules: null }).knownModules, builtins);
 });

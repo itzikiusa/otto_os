@@ -30,7 +30,9 @@
   import ConnectionImportDialog from '../connections/ConnectionImportDialog.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent, whenIdle } from '../../lib/lazy-component.svelte';
-  import { PRIMARY_SCROLLBACK } from '../../lib/components/termFlow';
+  import SshPane from './SshPane.svelte';
+  import DbConnErrorBanner from './DbConnErrorBanner.svelte';
+  import { sshTabs } from './ssh-tabs.svelte';
   import ImportDialog from './ImportDialog.svelte';
   import ExportDialog from './ExportDialog.svelte';
   import { stmtPreview } from '../../lib/database/sql-util';
@@ -56,7 +58,6 @@
     ConnectionKind,
     ConnectionSection,
     DbSavedQuery,
-    Session,
   } from '../../lib/api/types';
 
   // Secondary views and the SSH/Kafka/SFTP panes load on first open, not with
@@ -68,7 +69,6 @@
   const StructureLazy = lazyComponent(() => import('./StructureView.svelte'));
   const DiagramLazy = lazyComponent(() => import('./DiagramView.svelte'));
   const DashboardsLazy = lazyComponent(() => import('./Dashboards.svelte'));
-  const TerminalLazy = lazyComponent(() => import('../../lib/components/Terminal.svelte'));
   const ClusterViewerLazy = lazyComponent(() => import('../brokers/ClusterViewer.svelte'));
   const ClusterFormLazy = lazyComponent(() => import('../brokers/ClusterForm.svelte'));
   const SftpLazy = lazyComponent(() => import('../connections/SftpBrowser.svelte'));
@@ -676,14 +676,17 @@
 
   /** Open an ssh/custom profile (or a DB kind's CLI client) as a live terminal
    *  tab in the workbench — the terminal renders in place, seamlessly, like the
-   *  DB kinds. The session is also registered in the Agents list. */
-  async function openTerminal(c: Connection): Promise<void> {
-    // Already open as a workbench tab → just focus it (don't spawn a 2nd session).
-    if (database.sshTabs.some((t) => t.connId === c.id)) {
+   *  DB kinds. `reconnect` (the pane's Reconnect / Restart) always spawns a
+   *  fresh session into the existing tab. */
+  async function openTerminal(c: Connection, reconnect = false): Promise<void> {
+    // Already open and still running → just focus it (don't spawn a 2nd
+    // session). A tab whose session ENDED reconnects instead of focusing it.
+    if (!reconnect && sshTabs.action(c.id) === 'focus') {
       database.focusSsh(c.id);
       if (viewport.isPhone) { connOpen = false; schemaOpen = false; }
       return;
     }
+    if (opening[c.id]) return; // a double-click on Reconnect must not spawn two
     const wsId = ws.currentId;
     if (!wsId) {
       toasts.error(NO_WORKSPACE, 'The database session is attached to a workspace — create or pick one.');
@@ -692,14 +695,8 @@
     opening[c.id] = true;
     announce(`Opening ${c.name}…`);
     try {
-      const session = await api.long.post<Session>(`/connections/${c.id}/open`, {
-        workspace_id: wsId,
-      });
-      // Open it in place as a workbench tab (like the DB kinds). Deliberately NOT
-      // registered via `ws.addSession` — that would navigate to the Agents view
-      // and surface the terminal there. The connection lives only in this hub; the
-      // session is killed when the tab closes (see `closeSshTerminal`).
-      database.addSshTab({ connId: c.id, sessionId: session.id, name: c.name, kind: c.kind });
+      // In place as a workbench tab (like the DB kinds); ssh-tabs.svelte.ts.
+      await sshTabs.open(c, wsId);
       if (viewport.isPhone) { connOpen = false; schemaOpen = false; }
     } catch (e) {
       toastError('Couldn’t open', e);
@@ -708,19 +705,6 @@
     }
   }
 
-  /** Close an SSH/custom terminal tab and kill its underlying session so it
-   *  doesn't linger on the daemon (it isn't tracked in the Agents list). */
-  async function closeSshTerminal(connId: string): Promise<void> {
-    const tab = database.sshTabs.find((t) => t.connId === connId);
-    database.closeSshTab(connId);
-    if (tab) {
-      try {
-        await api.del(`/sessions/${tab.sessionId}`);
-      } catch {
-        // best-effort: the tab is gone from the workbench regardless
-      }
-    }
-  }
   async function deleteConnection(c: Connection): Promise<void> {
     if (
       !(await confirmer.ask(`Delete connection “${c.name}”? Its Keychain secret is removed too.`, {
@@ -929,6 +913,11 @@
       ? (database.sshTabs.find((t) => t.connId === database.activePane!.id) ?? null)
       : null,
   );
+  /** The profile behind an SSH/custom tab (null once it was deleted). */
+  const sshConn = (connId: string): Connection | null =>
+    database.otherConnections.find((c) => c.id === connId) ?? database.connections.find((c) => c.id === connId) ?? null;
+  const editableConn = (c: Connection | null): ((c: Connection) => void) | undefined =>
+    c && connectionAccess(c, 'configure', 'admin') ? editConnection : undefined;
   // Roving tabindex over the connection strip: the selected tab is the one Tab
   // stop; with none selected, the first tab is, so the strip stays reachable.
   const connTabActive = $derived(
@@ -1213,12 +1202,16 @@
         {/each}
         {#each database.sshTabs as s (s.connId)}
           {@const on = database.activePane?.kind === 'ssh' && database.activePane.id === s.connId}
-          <div class="conn-tab" class:active={on} role="presentation">
-            <button class="conn-tab-main" role="tab" aria-selected={on} tabindex={connTabStop(on, `ssh:${s.connId}`)} onclick={() => database.focusSsh(s.connId)} title={s.name}>
+          {@const sc = sshConn(s.connId)}
+          {@const ended = sshTabs.liveness(s.sessionId) === 'exited'}
+          <div class="conn-tab" class:active={on} class:prod={!!sc && isProdConn(sc)} role="presentation" data-testid="ssh-tab">
+            <button class="conn-tab-main" role="tab" aria-selected={on} aria-describedby={ended ? `ssh-st-${s.connId}` : undefined} tabindex={connTabStop(on, `ssh:${s.connId}`)} onclick={() => database.focusSsh(s.connId)} title={s.name}>
               <span class="conn-tab-glyph {s.kind}"><Icon name={engineGlyph(s.kind)} size={12} /></span>
               <span class="conn-tab-name ellipsis">{s.name}</span>
+              {#if sc && envBadge(sc)}<EnvBadge env={sc.environment} readOnly={sc.read_only} />{/if}
             </button>
-            <button class="conn-tab-close" onclick={(e) => { e.stopPropagation(); void closeSshTerminal(s.connId); }} aria-label="Close terminal tab" title="Close terminal tab">
+            {#if ended}<span id="ssh-st-{s.connId}" class="sr-only">Session ended</span><span class="conn-tab-dot" aria-hidden="true" title="Session ended — click the connection or Reconnect to start a new one" data-testid="ssh-tab-ended"></span>{/if}
+            <button class="conn-tab-close" onclick={(e) => { e.stopPropagation(); void sshTabs.close(s.connId); }} aria-label="Close terminal tab" title="Close terminal tab">
               <Icon name="x" size={12} />
             </button>
           </div>
@@ -1233,11 +1226,8 @@
         {/if}
       {:else if database.activePane?.kind === 'ssh'}
         {#if activeSsh}
-          <div class="term-pane">
-            {#key activeSsh.sessionId}
-              <LazyMount lazy={TerminalLazy} what="the terminal" props={{ sessionId: activeSsh.sessionId, scrollback: PRIMARY_SCROLLBACK }} />
-            {/key}
-          </div>
+          {@const sc = sshConn(activeSsh.connId)}
+          <SshPane tab={activeSsh} conn={sc} onreconnect={() => sc && void openTerminal(sc, true)} onedit={editableConn(sc)} />
         {:else}
           <EmptyState icon="terminal" title="Session closed" body="This terminal tab is no longer open." />
         {/if}
@@ -1300,6 +1290,7 @@
            agent panel side-by-side, separated by a draggable, persisted divider. -->
       <div class="main-split" class:assist-open={database.assistOpen}>
         <div class="main-body">
+          <DbConnErrorBanner onedit={editableConn(database.selectedConn)} />
           {#key database.accessRevision}
           <ConnectionComparison enabled={database.mainTab === 'query'}>
           {#if database.mainTab === 'query'}
@@ -2519,19 +2510,6 @@
     padding: 12px 16px 16px;
     display: flex;
     flex-direction: column;
-  }
-  /* SSH/custom terminal pane — fills the workbench body below the tab strip. */
-  .term-pane {
-    flex: 1;
-    min-height: 0;
-    min-width: 0;
-    display: flex;
-    overflow: hidden;
-  }
-  .term-pane :global(> *) {
-    flex: 1;
-    min-height: 0;
-    min-width: 0;
   }
   /* Draggable divider between the view and the assistant pane. */
   .assist-divider {

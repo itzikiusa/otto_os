@@ -23,9 +23,14 @@ export interface PrFilesFeed {
   toggleViewed: (path: string) => void;
 }
 
-/** The feed key of PR `n`: the viewer's `viewedStorageKey`, which already
- *  names one PR (the all-commits and the one-commit viewer share it). */
+/** The feed key of PR `n`, and the all-commits viewer's `viewedStorageKey`. */
 export const prFilesKey = (repoId: string, n: number): string => `otto_pr_viewed:${repoId}#${n}`;
+/** The Viewed-marks key of ONE commit's view of PR `n`: a record of its own,
+ *  so ticking a file there never rewrites the all-commits marks. */
+export const prCommitViewedKey = (repoId: string, n: number, sha: string): string => `${prFilesKey(repoId, n)}@${sha}`;
+/** The feed key a viewer publishes under: its PR's, for a commit view too
+ *  (the Files panel follows whichever view of the PR is in front). */
+export const prFeedKey = (viewedKey: string): string => viewedKey.replace(/@[^@#]*$/, '');
 
 class PrFilesBridge {
   feed = $state.raw<PrFilesFeed | null>(null);
