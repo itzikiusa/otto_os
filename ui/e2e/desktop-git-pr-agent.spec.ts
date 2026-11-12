@@ -45,6 +45,8 @@ test('Explain opens the PR’s thread in place; another PR has its own; maximise
   await expect(panel.getByTestId('embedded-runtime-thread')).toBeVisible({ timeout: 10_000 });
   await expect.poll(() => page.evaluate(() => location.hash)).toBe('#/git');
   await expect(page.locator('.prd-title')).toBeVisible(); // the PR stays beside it
+  // The thread mounts as soon as it is created; the prompt follows it.
+  await expect.poll(async () => (await mockLog(page)).prompts.length).toBe(1);
   const log = await mockLog(page);
   expect(log.creates).toHaveLength(1);
   expect(log.creates[0]).toMatchObject({
@@ -100,6 +102,7 @@ test('Fix asks first, names the folder, and runs with edits allowed', async ({ p
   await menu(page, 'Fix findings with the agent…');
   await page.getByRole('dialog').getByRole('button', { name: 'Start fixing' }).click();
   await expect(page.getByTestId('pr-agent-panel').getByTestId('embedded-runtime-thread')).toBeVisible({ timeout: 10_000 });
+  await expect.poll(async () => (await mockLog(page)).prompts.length).toBe(1);
   const log = await mockLog(page);
   expect(log.creates[0]).toMatchObject({ access_mode: 'auto-accept-edits' });
   expect(log.prompts[0].text).toContain('You may edit files in /Users/dev/otto only');
@@ -136,4 +139,21 @@ test('Explain a file from the Files panel and lines from the diff', async ({ pag
   await pick.click();
   await expect.poll(async () => (await mockLog(page)).prompts.at(-1)?.text ?? '').toMatch(/explain (old )?lines? \d+/);
   expect((await mockLog(page)).creates).toHaveLength(1); // the same thread
+});
+
+test('at 800 px tall the list, the files and the opened thread all fit the column', async ({ page }) => {
+  // Folded on purpose last time: a new ask must still unfold it.
+  await page.addInitScript(() => localStorage.setItem('otto_pr_agent_folded', '1'));
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto('/#/git');
+  await openPr(page, 51);
+  await menu(page, 'Explain this PR');
+  const panel = page.getByTestId('pr-agent-panel');
+  await expect(panel.getByTestId('embedded-runtime-thread')).toBeVisible({ timeout: 10_000 });
+  const box = (await page.locator('.prw-agent').boundingBox())!;
+  expect(box.height).toBeGreaterThanOrEqual(200);
+  expect(box.y + box.height).toBeLessThanOrEqual(800);
+  await expect(page.locator('.prw-list-main')).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Files in pull request #51' })).toBeVisible();
+  expect((await page.locator('.prw-list-main').boundingBox())!.height).toBeGreaterThanOrEqual(140);
 });

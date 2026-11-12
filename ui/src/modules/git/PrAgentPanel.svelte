@@ -24,7 +24,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { prDiffFileLoader } from './diff-load';
   import { prDetailCache, prKey } from './pr-cache';
-  import { prAgentBridge } from './pr-agent-bridge.svelte';
+  import { prAgentBridge, type PrAgentStatus } from './pr-agent-bridge.svelte';
   import { INLINE_CAP, buildAskMessage, repoSlugOf, type PrAgentAsk, type PrAgentSend } from './pr-agent-context';
   import { PR_AGENT_SOURCE, createPrThread, findPrThread, pickRuntimeProvider, prAgentOriginId, prAgentOriginLabel, sendToPrThread } from './pr-agent-thread';
   import { prFilesBridge, prFilesKey } from './prFilesBridge.svelte';
@@ -40,10 +40,13 @@
     ontogglefolded?: () => void;
     onmaximize?: () => void;
     onrestore?: () => void;
+    /** An ask arrived (any entry point): the host brings the panel forward. */
+    onasked?: () => void;
   }
-  let { repoId, number, title, layout, folded = false, ontogglefolded, onmaximize, onrestore }: Props = $props();
+  let { repoId, number, title, layout, folded = false, ontogglefolded, onmaximize, onrestore, onasked }: Props = $props();
   let disposed = false;
   $effect(() => () => { disposed = true; });
+  const hidden = $derived(folded && layout === 'dock');
 
   const ThreadView = lazyComponent(loadRuntimeThreadView);
   const originId = $derived(prAgentOriginId(repoId, number));
@@ -122,6 +125,9 @@
   }
 
   async function run(ask: PrAgentAsk): Promise<void> {
+    // The panel takes the ask itself (it may beat the host's own look at the
+    // bridge): unfold it here, or the answer lands in a folded region.
+    onasked?.();
     if (ask.kind === 'ask') return focusAsk();
     prAgentBridge.reattach(originId);
     const r = repo;
@@ -165,6 +171,20 @@
     const text = draft.trim();
     if (text) void run({ kind: 'question', text });
   }
+
+  // The thread's live state, reported by the embed (`onstatus`): a dot on
+  // the folded header and a hint on the PR's ⋯ entry. The embed stays mounted
+  // (hidden) while folded so it keeps reporting.
+  let live = $state<PrAgentStatus | null>(null);
+  function onstatus(st: PrAgentStatus): void {
+    live = st;
+    prAgentBridge.setStatus(originId, st);
+  }
+  $effect(() => {
+    const key = originId;
+    return () => prAgentBridge.setStatus(key, null);
+  });
+  const dot = $derived(live === 'working' ? 'The agent is working' : live === 'needs-you' ? 'The agent needs you' : '');
 
   function detach(id: string): void {
     prAgentBridge.detach(originId, id);
@@ -217,11 +237,14 @@
       <span class="pra-pr" dir="auto" title={title ? `#${number} ${title}` : `#${number}`}>#{number}{title ? ` ${title}` : ''}</span>
       {#if thread?.status === 'closed'}<span class="pra-tag">History</span>{/if}
       {#if sending}<span class="spinner" aria-hidden="true"></span>{/if}
+      {#if dot && (hidden || layout !== 'dock')}<span class="pra-dot" class:needs={live === 'needs-you'} role="img" aria-label={dot} title={dot}></span>{/if}
     </div>
   {/if}
 
-  {#if !(folded && layout === 'dock')}
-    <div class="pra-body">
+  <!-- Folded: the body stays mounted but hidden when a thread is open, so its
+       embed keeps reporting the agent's state; otherwise it is not rendered. -->
+  {#if !hidden || (thread && !detachedId)}
+    <div class="pra-body" hidden={hidden}>
       {#if sendError}
         <LoadState what="the ask" errorTitle="Couldn’t send it to the agent" error={sendError} variant="compact"
           onretry={() => { const a = lastAsk; if (a) void run(a); else sendError = ''; }} />
@@ -241,7 +264,7 @@
           {#if ThreadView.error}
             <LoadState what="the thread" error={ThreadView.error} onretry={() => ThreadView.retry()} />
           {:else if ThreadView.component}
-            <ThreadView.component sessionId={thread.id} workspaceId={thread.workspace_id} compact
+            <ThreadView.component {onstatus} sessionId={thread.id} workspaceId={thread.workspace_id} compact
               onmaximize={layout === 'dock' ? onmaximize : undefined} ondetach={detach} />
           {:else}
             <LoadState what="the thread" loading empty rows={3} />
@@ -323,6 +346,17 @@
     color: var(--text-dim);
   }
   .pra-tag { flex: none; font-size: var(--fs-xs); color: var(--text-dim); }
+  .pra-body[hidden] { display: none; }
+  .pra-dot {
+    flex: none;
+    inline-size: 8px;
+    block-size: 8px;
+    border-radius: 50%;
+    background: var(--accent-solid);
+    animation: otto-pulse 1.6s ease-in-out infinite;
+  }
+  .pra-dot.needs { background: var(--warning); animation: none; }
+  @media (prefers-reduced-motion: reduce) { .pra-dot { animation: none; } }
   .pra-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
   .pra-thread { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .pra-note { flex: none; margin: 0; padding: 6px 12px; font-size: var(--fs-xs); color: var(--text-dim); }

@@ -68,3 +68,15 @@ test('a Viewed tick in one commit’s view keeps the all-commits marks', async (
   await page.locator('.ctx-menu').getByText('All commits').click();
   await expect(code.getByRole('checkbox', { name: first, exact: true })).toBeChecked();
 });
+
+test('unified / side by side is remembered across a reload', async ({ page }) => {
+  await openCode(page);
+  await page.locator('.prd-code .dfile-head').first().click();
+  await page.locator('.prd-code').getByRole('button', { name: 'Side by side' }).click();
+  await expect(page.locator('.prd-code .diff-body .split-vrow').first()).toBeVisible();
+  await page.reload();
+  await expect(page.locator('.prd-code').getByRole('button', { name: 'Side by side' })).toHaveAttribute('aria-pressed', 'true', { timeout: 15_000 });
+  await page.locator('.prd-code').getByRole('button', { name: 'Unified' }).click();
+  await page.reload();
+  await expect(page.locator('.prd-code').getByRole('button', { name: 'Unified' })).toHaveAttribute('aria-pressed', 'true', { timeout: 15_000 });
+});

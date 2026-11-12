@@ -15,6 +15,9 @@
   import { EMBED_DEFAULTS, openInThreads, type RuntimeThreadViewProps } from '../../../lib/runtimeThreadPort';
   import RuntimeThread from './RuntimeThread.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
+  import { runtimeViews } from './runtimeView.svelte';
+  import { isRunning } from './timeline';
+  import { embedStatus } from './embedStatus';
 
   let {
     sessionId,
@@ -23,6 +26,7 @@
     compact = EMBED_DEFAULTS.compact,
     onmaximize,
     ondetach,
+    onstatus,
     hostCommands,
   }: RuntimeThreadViewProps = $props();
 
@@ -38,6 +42,22 @@
   const detach = (): void => (ondetach ?? openInThreads)(shown);
 
   onMount(() => runtimeThreads.mount());
+  // The host's thread (not a linked one shown in its place), for `onstatus`:
+  // on mount and on every change.
+  const status = $derived.by(() => {
+    const row = runtimeThreads.get(sessionId);
+    const p = runtimeViews.projections[sessionId] ?? null;
+    return embedStatus({
+      status: row?.status,
+      backgroundTasks: p?.session?.background_tasks?.length ?? row?.background_tasks?.length ?? 0,
+      turnRunning: p ? isRunning(p) : false,
+      pendingRequests: p ? p.requests.filter((r) => r.status === 'pending').length : 0,
+    });
+  });
+  $effect(() => {
+    const s = status;
+    untrack(() => onstatus?.(s));
+  });
   $effect(() => {
     const id = shown;
     return untrack(() => runtimeThreads.watch(id));

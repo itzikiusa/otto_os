@@ -4,6 +4,11 @@ import { seedDiagnose } from './connections-diagnose-mocks';
 
 // Phone / tablet: the diagnosis thread opens as a full-height sheet over the
 // Connections page (no side split to squeeze into), and closes back to it.
+
+// The PWA service worker would take WebKit's daemon fetches past page.route
+// (the mocks in connections-diagnose-mocks.ts), so a REAL thread was created
+// and the mocked id never appeared.
+test.use({ serviceWorkers: 'block' });
 test('the diagnosis thread is a full-height sheet on small screens', async ({ page }) => {
   const f = await seedDiagnose(page);
   await openPage(page, 'connections');
@@ -19,7 +24,7 @@ test('the diagnosis thread is a full-height sheet on small screens', async ({ pa
   await expect(aside.locator('[data-testid="runtime-thread-rt-diag-1"]')).toBeVisible({ timeout: 15_000 });
   const vw = page.viewportSize();
   const box = await aside.boundingBox();
-  if (vw && box && vw.width <= 640) {
+  if (vw && box && vw.width <= 1024) {
     expect(Math.round(box.height)).toBeGreaterThanOrEqual(vw.height - 2);
     expect(Math.round(box.width)).toBeGreaterThanOrEqual(vw.width - 2);
   }

@@ -109,10 +109,16 @@ Notes:
   contains the literal token `{secret}`, the stored secret is substituted in
   (`mongodb://app:{secret}@host/db`); a `{secret}` reference with no stored secret
   is a real `400`. Atlas `mongodb+srv://…` URIs are fully supported.
-- **ClickHouse (terminal kind):** `clickhouse-client` has **no** env or stdin
-  password channel, so the password is unavoidably placed in argv. The builder
-  returns `warn_argv = true` and the UI shows a warning; other people on the same
-  machine can see it in the process list. Prefer key/agent paths where possible.
+- **Password on the command line (`warn_argv`).** Two terminal kinds put the
+  password in argv, where other users of the same machine can see it in the
+  process list: **ClickHouse** whenever a password is stored (`clickhouse-client`
+  has **no** env or stdin password channel), and **MongoDB** when its
+  `conn_string` carries a password — inline (`user:pw@`) or as `{secret}` —
+  because `mongosh` takes the whole URI as an argument. The builder returns
+  `warn_argv = true` and the connection form shows a warning: from the Test's
+  `warn_argv` when the probe reported one, otherwise from the same rule applied
+  to the form's values. The Database Explorer's native drivers are not affected.
+  Prefer key/agent paths where possible.
 - **Custom:** the `command_template` is rendered by substituting every other
   `params` key as `{key}`, plus `{secret}` from the Keychain, then split with
   shell-words quoting. Example: `psql -h {host} -U {user} {db}` with
@@ -123,7 +129,8 @@ Notes:
 
 - **Password / secret** → stored in the macOS Keychain (`secret`, write-only).
   Injected per kind via env (`MYSQL_PWD`, `REDISCLI_AUTH`), URI substitution
-  (Mongo), or argv (ClickHouse only). On *PATCH*, omit `secret` to keep the
+  (Mongo), or argv (ClickHouse, and MongoDB when its URI carries the password —
+  see `warn_argv` above). On *PATCH*, omit `secret` to keep the
   existing one; provide it to replace.
 - **SSH key / agent** → set `identity_file` (a path to a private key on disk; a
   "Browse…" picker is in the form) or rely on your ssh-agent and `~/.ssh/config`.
@@ -176,7 +183,10 @@ the sessions docs.
 ### Test connection
 
 `POST /connections/{id}/test` runs a **headless** probe (10s timeout) and returns
-`TestConnectionResp { ok, latency_ms, message, warn_argv, warn_key_perms?, hint? }`:
+`TestConnectionResp { ok, latency_ms, message, warn_argv, warn_key_perms?, hint?, detail? }`
+— `detail` is the failed client's full stderr (last 8 KB, secrets and PEM blocks
+redacted), on the CLI-probe path only (SSH, Custom; absent on success and on the
+driver-backed DB path):
 
 | Kind | Probe |
 |---|---|
@@ -406,7 +416,7 @@ grant is what decides access.
 | `PATCH /connections/{id}/pin` | ws editor (global: `Connections:Edit`) | `{pinned}` → `Connection` |
 | `DELETE /connections/{id}` | ws editor (global: `Connections:Admin`) | — → 204 (deletes Keychain secret) |
 | `POST /connections/{id}/open` | ws editor | `{title?, workspace_id?}` → `Session` |
-| `POST /connections/{id}/test` | ws editor | — → `TestConnectionResp{ok, latency_ms, message, warn_argv}` |
+| `POST /connections/{id}/test` | ws editor | — → `TestConnectionResp{ok, latency_ms, message, warn_argv, warn_key_perms?, hint?, detail?}` |
 
 When `connections.owner_private` (a daemon setting) is **on**, non-root users see
 and may mutate only connections they created.
@@ -471,8 +481,9 @@ removes its env file from every cwd.
 - ✅ SFTP browse/read/transfer with a warm multiplexed connection and a hard
   control-char guard.
 - ✅ `prod` / `read_only` write-gating (DB Explorer) with PATCH-safe semantics.
-- ⚠️ **ClickHouse terminal password is in argv** (`warn_argv`) — `clickhouse-client`
-  exposes no env/stdin password channel.
+- ⚠️ **Some terminal passwords are in argv** (`warn_argv`) — ClickHouse
+  (`clickhouse-client` exposes no env/stdin password channel) and MongoDB whose
+  URI carries a password (`mongosh` takes the URI as an argument). The form warns.
 - ⚠️ SFTP transfers touch the **daemon host's** disk (your Mac), not the browser
   client's — intended, since the daemon is local, but worth knowing for remote/PWA
   access.
@@ -492,8 +503,9 @@ removes its env file from every cwd.
   `secret_ref` (`conn-<id>`); the secret itself lives in the macOS Keychain and is
   fetched only at open/test time. It is never serialized back to the client.
 - **Terminal credential channels.** MySQL/Redis use environment variables; SSH
-  uses keys/agent. MongoDB URI substitution and ClickHouse terminal passwords can
-  appear in argv (`warn_argv`). Native DB tests avoid the CLI argv channel.
+  uses keys/agent. ClickHouse terminal passwords, and MongoDB URIs that carry a
+  password (inline or via `{secret}`), appear in argv (`warn_argv`; the form
+  warns). Native DB tests avoid the CLI argv channel.
 - **Test-connect error redaction** scrubs userinfo and `--password`/`-p` argv
   before surfacing stderr.
 - **SFTP control-char guard** rejects newline/CR/etc. in any path to block
@@ -563,6 +575,60 @@ stops copying before publication.
 | **SFTP download "saved" but file is empty / wrong place** | Remember `get`/`put` hit the **daemon host's** disk; `~` expands to the daemon user's home. If the local path is an existing dir, the remote basename is used. |
 | **"opening a global connection requires 'workspace_id'"** | A global connection has no workspace, but the session it opens needs one — pass `workspace_id` in the open body. |
 | **403 "global connections need the Connections 'edit' grant"** | The caller isn't root and holds less than `Connections:Edit`. Grant it in **Settings → Users → Feature grants** (`Database:Edit` for the DB Explorer's query path). |
+
+### Diagnose with an agent
+
+When a connection does not connect, **Diagnose with an agent…** asks an agent to
+find out why, without leaving the Connections page. The action appears in three
+places: under an SSH tab whose session ended (beside the Test result and
+Reconnect), in the red "Couldn’t connect" banner over a database tab, and in the
+connection form's panel after a failed **Test** (saved profiles only; the form
+closes so the thread is visible).
+
+Nothing runs before you agree. The dialog says:
+
+> An agent will run read-only checks ON THIS MAC to find out why *name* (*kind*,
+> *host*) does not connect: name resolution, reachability of *host:port*, the SSH
+> client’s verbose output, your SSH config for this host, the known-hosts entry,
+> loaded keys and key-file permissions. It will not log in to the remote host,
+> change any file, or see your password or private key. It asks you before
+> anything else.
+
+**Show the checks** lists the exact commands. For an SSH profile (or a database
+behind an SSH tunnel, against the tunnel host):
+
+- `dscacheutil -q host -a name <host>` and `dig +short <host>` — name resolution
+- `nc -vz -w 5 <host> <port>` — is the port reachable
+- `ssh -G -p <port> [-J <jump>] [-i <identity file>] <user>@<host>` — the
+  effective SSH config
+- `ssh -vvv -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=yes
+  -o PreferredAuthentications=none … exit` — the handshake, host key and offered
+  auth methods; only the `none` method is tried, so it never logs in, and
+  known_hosts is never written
+- `ssh-keygen -F <host>` (or `[<host>]:<port>`) — the known-hosts entry
+- `ssh-add -l` — keys loaded in the agent
+- `ls -l <identity file>` — the key file's permissions, never its contents
+- reading `~/.ssh/config`
+
+A database connected directly gets only the name-resolution and `nc` checks
+against its host and port.
+
+The thread runs in **approval-required** mode, so every command waits for your
+OK in the thread's inline approval. The opening prompt carries the connection's
+kind, environment, read-only flag, host, port, user, jump host, identity-file
+path, tunnel and TLS mode, plus the Test result (message, hint, `detail`), and
+never a password, the stored secret, a connection string, or pasted key or
+certificate contents. The agent is told never to read private keys, run anything
+on the remote host, edit `~/.ssh/*` or remove a known-hosts entry. If a host key
+has *changed*, it says that this can mean an attack and stops. It ends with the
+cause, the evidence and the exact fix, and you apply the fix yourself.
+
+The thread opens beside the workbench (a full-height sheet on phones and
+tablets) with **Test again** and **Edit connection** once the agent finishes.
+**Close** keeps it: **Diagnose** on the same connection shows it again, and it
+stays in Threads under the **Connections** group (Detach opens it there). The
+daemon closes such a thread after 12 idle hours
+(`embedded_thread_auto_close_hours`); the next diagnosis reopens it.
 
 ---
 

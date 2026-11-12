@@ -143,6 +143,19 @@
     margin-block-end: 8px;
     font-size: var(--fs-m);
   }
+  /* Landscape phone: inline in the toolbar's single row (DiffPrToolbar). */
+  @media (max-width: 1024px) and (max-height: 500px) {
+    .dfs {
+      flex: 0 0 auto;
+    }
+    .dfs-count {
+      flex: none;
+    }
+    .dfs-name,
+    .dfs-viewed span {
+      display: none;
+    }
+  }
   .dfs-note {
     margin: 0;
     padding: 8px 4px;

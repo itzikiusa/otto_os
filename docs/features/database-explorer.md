@@ -1183,6 +1183,60 @@ every selected row in a new tab — **not** run) and **WHERE pk IN (…)** (copi
 primary-key predicate to the clipboard; composite keys become an OR of per-row
 ANDs). Both reuse the same identifier/literal escaping as inline edits.
 
+### Safety
+
+Guards that stop a run or an edit from doing something other than what it
+looks like. Production / read-only connections keep their typed confirmation
+(§13) on top of these.
+
+- **Destructive statements ask first, on every connection.** Before **Run** /
+  **Run all** sends `DELETE` or `UPDATE` without a `WHERE`, `DROP …`,
+  `TRUNCATE …` or `ALTER TABLE … DROP …` (MySQL, PostgreSQL, ClickHouse), a
+  confirm names the connection and lists the statements (first line each; the
+  first five, then a count). **Cancel** sends nothing. Strings and comments
+  never trigger it, and any `WHERE` counts — `WHERE 1=1` included. A connection
+  marked Prod or read-only skips this prompt because its typed confirmation
+  applies instead. Turn it off per device in the editor's **Query settings**
+  gear → *Confirm destructive statements* (turning it off asks once).
+  Classifier: `destructive-sql.ts`; gate: `destructive-gate.ts`.
+- **Binary cells are bytes, not text.** MySQL `BINARY` / `VARBINARY` / `*BLOB`
+  / `GEOMETRY` and Postgres `BYTEA` cells arrive as base64 and the column is
+  marked `binary: true`. They cannot be edited inline, from the cell viewer or
+  with Set NULL / Set empty (a text box over base64 would store the base64
+  text). The cell viewer shows the bytes as hex with their length and offers
+  **Copy as hex** / **Copy as base64**. Statements Otto generates from such a
+  cell write the bytes: MySQL `FROM_BASE64('…')`, Postgres
+  `decode('…', 'base64')` — in Duplicate row, Copy as INSERT and the key
+  predicate of an UPDATE / DELETE, so a `BINARY(16)` primary key matches its
+  row. Filter / Exclude / Query by value on a binary cell are disabled (the
+  database would compare the base64 text).
+- **"Applied" means a row matched.** After **Review & apply**, every UPDATE /
+  DELETE (Mongo `updateOne` / `deleteMany` …) that reports **0** matched rows
+  — the row was deleted or its key changed since the result loaded — keeps its
+  draft pending and leaves the review open with *did not match any row*;
+  drafts whose statements did match are cleared. An UPDATE that changed more
+  than one row is applied with a warning (the key may not be unique). MySQL
+  counts matched rows (not only changed ones); Mongo reports `matched_count`.
+- **A transaction cannot span runs.** Each run executes on its own pooled
+  session, and a session that ran `BEGIN` / `START TRANSACTION` / `COMMIT` …
+  is closed when the run ends — the server rolls back anything still open. So
+  `START TRANSACTION` → (next run) `UPDATE …` → (next run) `ROLLBACK` commits
+  the update and the ROLLBACK undoes nothing. Put the whole transaction in one
+  **Run all** (⇧⌘↵: `BEGIN; …; COMMIT;` runs on one session), or edit rows and
+  use **Review & apply** (multi-row reviews already run as one transaction).
+  Otto warns before a run that opens a transaction without closing it, and
+  shows a notice above the results after a run of only transaction control or
+  one that left a transaction open (MySQL, PostgreSQL; `tx-shape.ts`).
+- **Sorting a capped result sorts the loaded rows.** The header sort orders
+  the rows in the browser. When the result is capped or paged, the footer chip
+  says *sorted N loaded rows*; when the statement is one plain `SELECT` (the
+  same ones *Query by value* can rewrite) and is still what the editor holds,
+  **Sort on server** re-runs it with `ORDER BY <column> ASC|DESC` replacing any
+  existing ORDER BY. 64-bit ids beyond 2^53 sort by their exact digits.
+- **CSV export has a header by default.** *Export all rows…* defaults to
+  **CSV** with a header row; *CSV (no header)* is the other choice. The last
+  format used is remembered on the device.
+
 ---
 
 ## 6. Visual query builder

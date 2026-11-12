@@ -112,6 +112,16 @@ verifies the stored findings again without re-running the reviewers. A failed
 reviewer is retried on its own card. A partial diff or checkout needs a fresh
 review. The verifier itself gets two start attempts before the run is settled.
 
+A summarizer re-run of the same review (**Retry summarizer**, **Retry step**, or
+a restart resume) replaces the review's undecided drafts, `[unverified]` ones
+included; drafts you already approved, declined or posted stay. When the re-run's
+verifier ran and accounted for the claims, the tracked findings that only the
+earlier attempt's `[unverified]` drafts had created, and that this attempt did not
+raise again, are closed (their `state` becomes `declined`). A finding linked to a
+comment you decided on, or one a later review raised, is left alone. The triage
+`status` is not changed, so such a finding still counts toward merge readiness
+and the review verdict until someone triages it.
+
 Unverified findings are never posted by a workflow as verified: an incomplete
 review fails its `review_run` step before any downstream posting step runs.
 
@@ -130,9 +140,11 @@ when all of these hold:
 
 - the scope assessment said `fixed` with evidence (a disposition filled in as
   `not assessed by scope`, or by a fallback plan, never counts);
-- the final verifier re-checked that claim and dismissed it with evidence
-  (`not_relevant`), and did not keep it, merge it into a kept fix or leave it
-  unverified;
+- the final verifier re-checked that claim and answered it as fixed. Its prompt
+  gives one answer per case: fixed in the current code → `not_relevant` with
+  evidence citing the code that fixes it; still present → `verified` with the
+  current file:line (it stays a comment); cannot tell → `unverified`. Any item
+  keeping the claim (`verified`, `duplicate` or `unverified`) vetoes the close;
 - the managed verifier ran (not the deterministic fallback), the diff was not
   partial, and a PR's source was checked out;
 - this run did not raise the same finding again.

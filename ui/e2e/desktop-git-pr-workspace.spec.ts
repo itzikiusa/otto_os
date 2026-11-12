@@ -320,8 +320,17 @@ test('merge checks and open tasks show in the side column and as merge reasons',
   await expect(checks).toContainText('At least 2 approvals');
   await expect(checks).toContainText('1 of 2 approvals');
   await expect(checks).toContainText('1 task open');
-  // Desktop: the compact header line is for phones only.
-  await expect(page.getByTestId('pr-merge-checks-line')).toBeHidden();
+  // The compact header line stands in for the side column only where that
+  // column has dropped below the conversation (a pane under 860px).
+  const line = page.getByTestId('pr-merge-checks-line');
+  const paneWidth = (): Promise<number> => page.locator('.prd-head').evaluate((el) => el.clientWidth - 32);
+  await page.setViewportSize({ width: 2200, height: 950 });
+  await expect.poll(paneWidth).toBeGreaterThan(860);
+  await expect(line).toBeHidden();
+  await page.setViewportSize({ width: 1300, height: 950 });
+  await expect.poll(paneWidth).toBeLessThan(860);
+  await expect(line).toHaveText('1 of 3 checks passed · 1 task open');
+  await page.setViewportSize({ width: 1600, height: 950 });
 
   await page.locator('.prd-actions').getByRole('button', { name: 'Merge', exact: true }).click();
   const reasons = page.getByRole('dialog', { name: 'Merge pull request' }).locator('.reasons');

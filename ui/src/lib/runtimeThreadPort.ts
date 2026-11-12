@@ -21,6 +21,10 @@
 //   - `ondetach(id)`: the host moves the thread out (a window, a tab). The
 //     detach button renders when given; a compact embed without one offers
 //     "Open in Threads" instead (`openInThreads`).
+//   - `onstatus(status)`: called on mount with the thread's state and on every
+//     change — 'idle' | 'working' | 'needs-you' (an approval or question is
+//     waiting) | 'closed' — so a folded host header can show a dot without
+//     reading the Threads stores.
 //   - `hostCommands`: the view-level slash commands the host can carry out.
 //     A command with no handler is hidden from the slash popup, and typing it
 //     sends it to the agent like any other `/command` (never a silent no-op).
@@ -43,6 +47,9 @@ export interface RuntimeHostCommands {
   sideChat?: (sessionId: string, question: string) => void;
 }
 
+/** An embedded thread's state as its host sees it (`onstatus`). */
+export type RuntimeEmbedStatus = 'idle' | 'working' | 'needs-you' | 'closed';
+
 export type RuntimeThreadViewProps = {
   sessionId: string;
   workspaceId: string;
@@ -51,6 +58,7 @@ export type RuntimeThreadViewProps = {
   compact?: boolean;
   onmaximize?: () => void;
   ondetach?: (sessionId: string) => void;
+  onstatus?: (status: RuntimeEmbedStatus) => void;
   hostCommands?: RuntimeHostCommands;
 };
 /** The props an embed falls back to when the host leaves them out. */

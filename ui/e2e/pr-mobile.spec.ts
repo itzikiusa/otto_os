@@ -61,7 +61,28 @@ test('Code tab: the toolbar is whole, on top, and stays pinned while scrolling',
   await expectFullyInViewport(page, tb, "diff toolbar");
   await expectOnTop(page, search);
   await expectNoHorizontalOverflow(page);
+  // A landscape phone (~380 px tall): the pinned toolbar is one row, and the
+  // code keeps the rest of the pane.
+  const vp = page.viewportSize()!;
+  if (vp.height < 500) {
+    const t = (await tb.boundingBox())!;
+    expect(t.height, 'pinned toolbar height in landscape').toBeLessThanOrEqual(vp.height * 0.3);
+    expect((await diffScrollerBottom(tb)) - (t.y + t.height), 'px of code visible under the pinned toolbar').toBeGreaterThanOrEqual(96);
+  }
 });
+
+/** Bottom edge (viewport px) of whatever scrolls the diff: its nearest
+ *  scrolling ancestor, clipped to the viewport. */
+async function diffScrollerBottom(inside: Locator): Promise<number> {
+  return inside.evaluate((el) => {
+    for (let p = el.parentElement; p; p = p.parentElement) {
+      if (p.scrollHeight > p.clientHeight + 1 && /auto|scroll/.test(getComputedStyle(p).overflowY)) {
+        return Math.min(p.getBoundingClientRect().bottom, window.innerHeight);
+      }
+    }
+    return window.innerHeight;
+  });
+}
 
 /** Open PR #51's Code tab (23 files, every one collapsed: > 5 files). */
 async function openCode(page: Page): Promise<void> {
@@ -76,6 +97,9 @@ test('Code tab: step between files, pick one from the sheet, mark it viewed', as
   await openCode(page);
   const stepper = page.getByRole('group', { name: 'Files in this pull request' });
   await expect(stepper).toBeVisible();
+  // In landscape the PR header fills the short screen and the Code tab's
+  // content starts below it — scroll to the toolbar (it then stays pinned).
+  await stepper.scrollIntoViewIfNeeded();
   // Every control is a thumb-sized target, fully on screen.
   for (const b of await stepper.getByRole('button').all()) {
     const box = (await b.boundingBox())!;
@@ -128,11 +152,21 @@ test('Code tab: a tap on a line opens its comment composer, clear of the toolbar
   await expect(box).toBeVisible();
   await box.tap();
   await box.fill('Can this come from config?');
-  // Focus centres the composer: whole, on screen, and not under the pinned toolbar.
+  // Focus brings the whole composer (Comment button too) into the code area:
+  // below the pinned toolbar and above the bottom of the diff's scroller.
+  // (Geometry, not elementFromPoint: the mock build's own "Mock mode" notice
+  // toast can float over any point of a 380 px-tall screen.)
+  const tb = page.locator('.prd-code .diff-toolbar.pr-toolbar');
+  const send = page.getByRole('button', { name: 'Comment', exact: true });
   await expect(async () => {
+    const t = (await tb.boundingBox())!;
+    const bottom = await diffScrollerBottom(tb);
+    for (const el of [box, send]) {
+      const b = (await el.boundingBox())!;
+      expect(b.y, 'composer below the pinned toolbar').toBeGreaterThanOrEqual(t.y + t.height - 1);
+      expect(b.y + b.height, 'composer above the bottom of the code area').toBeLessThanOrEqual(bottom + 1);
+    }
     await expectFullyInViewport(page, box, 'comment composer');
-    await expectOnTop(page, box);
-    await expectOnTop(page, page.getByRole('button', { name: 'Comment', exact: true }));
   }).toPass({ timeout: 5_000 });
   // A second tap on the same line keeps the composer (and the typed text).
   await code.tap();

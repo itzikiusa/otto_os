@@ -128,3 +128,14 @@ test('password on the command line: clickhouse with a password, mongodb with one
   assert.match(w.argvWarning('mongodb'), /mongosh/);
   assert.equal(w.argvWarning(null), null);
 });
+
+test('a Test that reports warn_argv decides the warning, true or false; otherwise the local rule', () => {
+  // The daemon says no (e.g. the password moved out of the URI): no warning, whatever the rule guesses.
+  assert.equal(w.argvWarningFor('mongodb', false, 'mongodb://app:{secret}@h/db', true), null);
+  // The daemon says yes for a kind the rule does not know (a custom template with {secret}).
+  assert.match(w.argvWarningFor('custom', true, '', true), /command line/);
+  assert.match(w.argvWarningFor('clickhouse', true, '', false), /clickhouse-client/);
+  // No verdict (the driver-backed DB test): the local rule.
+  assert.match(w.argvWarningFor('clickhouse', undefined, '', true), /clickhouse-client/);
+  assert.equal(w.argvWarningFor('clickhouse', undefined, '', false), null);
+});

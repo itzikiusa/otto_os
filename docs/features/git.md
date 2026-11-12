@@ -647,6 +647,51 @@ refreshes quietly. On GitHub the PR detail's comment lists, reviews, review-thre
 state and CI are fetched in parallel (Bitbucket fetches the PR and its comments
 in parallel too).
 
+### Ask the agent about a pull request
+
+Each open PR has one agent thread you can talk to without leaving the PR. On a
+desktop it lives in the PR workspace's left column, under the PR list and the
+**Files** panel, in a region titled **Agent** (folded until first used,
+resizable, its height remembered). Its thread bar can **maximise** it over the
+whole workspace (**Back to the PR** returns) or **detach** it into Threads,
+leaving an **Open here again** placeholder. At 1024 px and narrower the column
+does not exist: the thread opens in a full-height sheet instead.
+
+Ways to ask (each opens the panel, never a new page):
+
+- **PR ⋯ menu:** **Ask a question** (opens the ask box), **Explain this PR**,
+  **Fix findings with the agent…**.
+- **Files panel:** right-click a file for **Explain this file**, or ⌘/Ctrl-click
+  several files and use **Explain the N selected files** (also the ✦ button in
+  the panel header, which explains the current file when nothing is picked).
+- **Code tab:** select some diff rows and click the **Explain lines …** button
+  that appears beside the selection.
+- **The panel itself:** before a thread exists it offers three suggested asks
+  and a free-text box; after that, the thread's own composer.
+
+Every message carries the context the agent needs without the UI: the repo and
+its clone path, the PR number, title, branches and head commit, and for file or
+line asks the paths, the line range and the diff text (capped: 6,000 characters
+of picked lines, 4,000 per file and 12,000 in all, at most 8 files inlined; the
+message names anything it cut, and the agent reads the rest from the clone).
+
+- **Explain / Ask** run read-only (`approval-required`, the most restrictive
+  access mode: the agent reads files and asks before anything else).
+- **Fix** asks first, naming the branch and the folder it will change, then runs
+  with edits allowed (`auto-accept-edits`) in your clone of the repository.
+- The agent **never commits, pushes or posts to the PR** on its own: anything
+  outward stays with you.
+
+There is **one thread per PR**: reopening the PR finds it again
+(`GET /workspaces/{id}/runtime-sessions?source=pr-agent&origin_id=<repo>#<n>`),
+and nothing is created until you ask something. The daemon closes an idle PR
+thread after **12 hours** (setting `embedded_thread_auto_close_hours`, `0` =
+never); a closed thread shows as history, and sending a message reopens it. In
+**Threads** these threads are kept out of the main list, in the folded
+**Pull requests** group (threads the agent opens from one join it too). While the
+Agent region is folded, a dot on its header (and the ⋯ menu's **Ask a
+question** hint) shows when the agent is working or needs you.
+
 ### Merge strategies
 
 `POST /repos/{id}/prs/{number}/merge` takes `MergePrReq.strategy` —

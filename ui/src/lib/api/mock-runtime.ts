@@ -3,15 +3,26 @@
 // for a page to find, start, prompt and embed a thread — the PR workspace's
 // agent thread above all. No agent runs: a prompt is answered at once with a
 // canned reply, and the conversation is served as a replay snapshot. The
-// last create / prompt bodies are kept on `window.__mockRuntime` for e2e.
+// last create / prompt bodies are kept on `window.__mockRuntime` for e2e,
+// with test hooks that seed rows and play live events (`seed`, `say`,
+// `finish`, `queue`) for the Threads specs (e2e/*threads-groups*.spec.ts).
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import type { RuntimeSession, RuntimeSnapshot, TurnItem } from './types';
+import { appLive } from '../live';
+import type { QueuedPrompt, RuntimeSession, RuntimeSnapshot, TurnItem } from './types';
 
 type Out = { status?: number; json?: unknown } | undefined;
 type MockRoute = { method: string; re: RegExp; handle: (m: RegExpMatchArray, body: any, q: URLSearchParams) => Out };
 
 const threads: RuntimeSession[] = [];
 const items = new Map<string, TurnItem[]>();
+const queued = new Map<string, QueuedPrompt[]>();
+/** Per thread: the last event sequence (items, queue changes). */
+const seqs = new Map<string, number>();
+const bump = (sid: string): number => {
+  const next = (seqs.get(sid) ?? 0) + 1;
+  seqs.set(sid, next);
+  return next;
+};
 let n = 0;
 const now = (): string => new Date().toISOString();
 
@@ -24,6 +35,7 @@ function item(sid: string, kind: Record<string, unknown>): TurnItem {
   const list = items.get(sid) ?? [];
   const it = { ...kind, id: `itm_${sid}_${list.length}`, turn_id: `trn_${sid}`, ordinal: list.length, status: 'completed', title: null, started_at: now(), completed_at: now(), updated_at: now() } as unknown as TurnItem;
   items.set(sid, [...list, it]);
+  bump(sid);
   return it;
 }
 
@@ -36,8 +48,40 @@ function snapshot(sid: string): RuntimeSnapshot {
     turn_items: items.get(sid) ?? [],
     runtime_requests: [],
     plans: [],
+    queued_prompts: queued.get(sid) ?? [],
   };
 }
+
+/** Deliver a runtime event the way the daemon's socket does. */
+function emit(sid: string, body: Record<string, unknown>): void {
+  appLive.dispatch({ type: 'agent_runtime_event', event: { session_id: sid, sequence: bump(sid), ts: now(), ...body } });
+}
+
+// e2e hooks (mock mode only — this module never loads otherwise).
+Object.assign(log(), {
+  /** Add a thread row as the daemon would list it (meta and all). */
+  seed: (row: Partial<RuntimeSession> & { id: string; title: string }): string => {
+    threads.push({
+      workspace_id: 'wsp_otto', provider: 'claude', cwd: '/Users/dev/otto', status: 'idle', access_mode: 'approval-required',
+      created_by: 'usr_root', created_at: now(), last_active_at: now(), last_sequence: 0, meta: null, ...row,
+    } as RuntimeSession);
+    return row.id;
+  },
+  /** The agent says `texts` live (one streamed-in message each). */
+  say: (sid: string, texts: string[]): void => {
+    for (const text of texts) {
+      const it = item(sid, { type: 'assistant_message', message_id: `msg_${sid}_${Math.random()}`, text, streaming: false });
+      appLive.dispatch({ type: 'agent_runtime_event', event: { session_id: sid, sequence: seqs.get(sid) ?? 0, ts: now(), type: 'turn_item.updated', turn_item: it } });
+    }
+  },
+  /** A turn of `sid` ended (done). */
+  finish: (sid: string): void => emit(sid, { type: 'turn.terminal', turn_id: `trn_${sid}`, status: 'completed' }),
+  /** A message waits in `sid`'s queue. */
+  queue: (sid: string, text: string): void => {
+    queued.set(sid, [...(queued.get(sid) ?? []), { id: `qp_${sid}_${Date.now()}`, text, attachments: 0, created_at: now() }]);
+    emit(sid, { type: 'queue.updated', queued_prompts: queued.get(sid) });
+  },
+});
 
 const find = (id: string): RuntimeSession | undefined => threads.find((t) => t.id === id);
 
@@ -72,7 +116,15 @@ export const runtimeMockRoutes: MockRoute[] = [
   { method: 'GET', re: /^\/runtime-sessions\/([^/]+)\/peers$/, handle: (m) => { const t = find(m[1]); return { json: t ? [{ id: t.id, provider: t.provider, title: t.title, status: t.status, is_self: true }] : [] }; } },
   {
     method: 'GET', re: /^\/runtime-sessions\/([^/]+)\/events$/,
-    handle: (m) => ({ json: { kind: 'snapshot', snapshot_sequence: (items.get(m[1]) ?? []).length, snapshot: snapshot(m[1]) } }),
+    handle: (m) => ({ json: { kind: 'snapshot', snapshot_sequence: seqs.get(m[1]) ?? 0, snapshot: snapshot(m[1]) } }),
+  },
+  {
+    method: 'DELETE', re: /^\/runtime-sessions\/([^/]+)\/queue\/([^/]+)$/,
+    handle: (m) => {
+      queued.set(m[1], (queued.get(m[1]) ?? []).filter((q) => q.id !== m[2]));
+      emit(m[1], { type: 'queue.updated', queued_prompts: queued.get(m[1]) });
+      return { status: 204 };
+    },
   },
   { method: 'GET', re: /^\/runtime-sessions\/([^/]+)\/draft$/, handle: () => ({ json: { revision: 0, draft: null } }) },
   { method: 'PUT', re: /^\/runtime-sessions\/([^/]+)\/draft$/, handle: (_m, b) => ({ json: { revision: (b?.revision ?? 0) + 1, draft: b?.draft ?? null } }) },
@@ -96,7 +148,7 @@ export const runtimeMockRoutes: MockRoute[] = [
       t.last_active_at = now();
       item(t.id, { type: 'user_message', text: String(b?.text ?? '') });
       item(t.id, { type: 'assistant_message', message_id: `msg_${t.id}`, text: 'Mock agent: here is what this pull request changes.', streaming: false });
-      return { status: 202, json: { turn_id: `trn_${t.id}`, sequence: (items.get(t.id) ?? []).length } };
+      return { status: 202, json: { turn_id: `trn_${t.id}`, sequence: seqs.get(t.id) ?? 0 } };
     },
   },
 ];

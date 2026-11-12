@@ -26,7 +26,7 @@
   import { lineWords, markWords, type WordRange } from './diff-words';
   import { fileNavDelta, lineTapRow, revealComposer, stageErrorToast } from './diff-dom';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
-  import { PREF_HIDE_TESTS, PREF_TREE, PREF_WRAP, buildNavTree, fileStatus, readPref, writePref } from './diff-pr';
+  import { PREF_HIDE_TESTS, PREF_SPLIT, PREF_TREE, PREF_WRAP, buildNavTree, fileStatus, readPref, writePref } from './diff-pr';
   const DiffPrToolbarLazy = lazyComponent(() => import('./DiffPrToolbar.svelte'));
   const DiffNavLazy = lazyComponent(() => import('./DiffNav.svelte'));
   import './diff-pr.css';
@@ -150,8 +150,8 @@
   /** The files this view shows: everything, minus test files when hidden (PR mode). */
   const visibleFiles = $derived(prMode && hideTests ? diff.files.filter((f) => !isTestPath(f.path)) : diff.files);
   const hiddenTests = $derived(diff.files.length - visibleFiles.length);
-
-  let mode = $state<'unified' | 'split'>('unified');
+  let mode = $state<'unified' | 'split'>(readPref(PREF_SPLIT, false) ? 'split' : 'unified');
+  $effect(() => writePref(PREF_SPLIT, mode === 'split')); // remembered per device, like wrap and whitespace
   let hlReady = $state(false);
   const hl = new DeferredHighlighter();
   // Minified/generated lines: the DOM only ever gets the first LINE_CUT chars

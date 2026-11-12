@@ -98,9 +98,12 @@ test('Settings sections remain reachable and titled at desktop and phone widths'
       const back = page.getByRole('button', { name: 'Back to Settings' });
       const search = page.getByRole('searchbox', { name: 'Filter settings' });
       if (width <= 640) {
-        // The layout switches after the resize: wait for whichever level shows.
-        await expect(back.or(search).first()).toBeVisible();
-        if (await back.isVisible()) await back.click();
+        // The layout switches a moment after the resize, and the desktop
+        // filter box is still on screen until it does: wait for the phone
+        // layout itself, then leave an open section.
+        await expect(page.locator('.settings.at-section, .settings.at-list')).toBeVisible();
+        if (await page.locator('.settings.at-section').count()) await back.click();
+        await expect(page.locator('.settings.at-list')).toBeVisible();
       }
       await search.fill(label);
       await nav.getByRole('button', { name: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`) }).first().click();

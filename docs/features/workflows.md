@@ -861,10 +861,21 @@ thread, user, prompt, msg, raw}` — `prompt`/`msg` are the mention-stripped tex
 is refused — e.g. *"previous run of this workflow still active"* for a due
 schedule whose last run is still going. The Triggers panel shows it under each
 trigger: *Last fired 2h ago · started*, *Never fired*, or *Last attempt
-rejected: <reason>*. A Slack sender who is not on the integration's
-`allowed_users` list is dropped by the channel bridge BEFORE it reaches the
-workflow trigger, so that case does not show here yet — check the allowlist
-when a binding reads *Never fired* although people post in its channel.
+rejected: <reason>*.
+
+A sender who is not on the integration's `allowed_users` list is dropped by
+the channel bridge before any routing, and gets **no reply** (answering would
+let anyone probe the bot). The bridge still hands the message to the workflow
+side, which only matches it: the chat binding it would have fired (the
+receiving workspace's first match, as for a real start) and/or the chat
+bindings on that chat of a workflow it names explicitly (`Action: Workflow`,
+`run <name>:` / `workflow <name>:`). Those rows read *Last attempt rejected:
+sender U0123ABC is not on the integration's allowed users*; the daemon logs it
+at warn with the user id and channel; and the first such rejection of a
+trigger each day (UTC) raises a System notice in the bell — *Workflow trigger
+blocked: <workflow>* — that opens the workflow. A message that is no workflow
+trigger, or names a workflow that has no binding on that chat, stamps
+nothing (an explicit one is still logged at warn).
 
 **Queue in the app.** The Running list shows a queued run's place —
 *2nd in line*, with *"Queued · 2nd in line, behind PR Reviewer"* on hover —
@@ -1583,6 +1594,7 @@ are **append-only** — never edit or renumber an existing one.
 |---|---|
 | A `product_*` / `review_run` node errors "missing story_id / repo_id" | These are **wired** now (§4) and need their target: a `story_id` (product) or `repo_id` (review/PR) in the node params or the run input. Provide it (the Run dialog / `Action: Workflow` message / template input). |
 | A `review_run` node "passes" too easily / never passes | `score = 100 − 20×must-fix − 5×should-fix (optional findings deduct 0 by default)` (optionally blended with a goals score), `passed` needs `score ≥ threshold` **and** complete reviewer coverage, a nonempty diff, and no open must-fix findings. Tune `threshold` (default 80) or check the finding counts in the node output. |
+| A Slack/Telegram workflow trigger does nothing — no reply, no run | Almost always the integration's `allowed_users` list: the sender is not on it, and the bridge drops the message silently before any parsing (by design; it never answers strangers). The binding's Triggers row reads *Last attempt rejected: sender … is not on the integration's allowed users* and the bell shows *Workflow trigger blocked*; add the sender's id in Settings → Channels (the rejected sender is listed there with an **Allow** action). A trigger with no binding on that chat leaves only a warn log line. |
 | A scheduled run never starts | The schedule scheduler **is** spawned at boot now (§5). Check the trigger is **enabled**, the cadence/`timezone` is right, and `last_run` shows it isn't mid-window; for cron, validate the `expr`. |
 | Step log: `⚠ handoff file missing — accepted the agent's final reply after 90s idle` | The agent ended its turn but never wrote the step's `.md` handoff (§3), so the engine accepted its final reply after the 90 s grace (a nudge was sent at +10 s). The step's "work product" is the chat reply, not a file — tighten the step prompt to write the handoff, or accept the reply. |
 | Step log: `⚠ handoff written but 3 tasks still pending — waiting (up to 15m)` | The agent wrote its handoff **while** sub-agents / background tasks it launched were still running — against the step protocol (§3). The engine waits up to 15 min for them rather than cutting them off. Fix the prompt so the handoff is written last. |

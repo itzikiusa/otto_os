@@ -35,15 +35,19 @@ export function lineTapRow(e: Event): Element | null {
   return t.closest('.vrow.dline');
 }
 
-/** Touch: the soft keyboard can cover the composer — centre it. Mouse: only
- *  bring the whole box (buttons too) into view, at once; a smooth re-centre
- *  on each focus slid Comment away under the pointer. */
+/** Bring the whole composer (buttons too) into view, clear of the pinned PR
+ *  toolbar: its `scroll-margin-top` is the toolbar's height (diff-pr.css).
+ *  Touch used to CENTRE the textarea — which ignored the toolbar, and on a
+ *  landscape phone (~120 px of code under it) put the box under the toolbar;
+ *  the soft keyboard is handled by the browser itself, which scrolls a
+ *  focused field above it. Mouse: at once — a smooth scroll on each focus
+ *  slid Comment away under the pointer. */
 export function revealComposer(e: FocusEvent): void {
   const el = e.currentTarget as HTMLElement | null;
   if (!el) return;
   const touch = matchMedia('(pointer: coarse)').matches;
-  const box = touch ? el : (el.closest('.composer') ?? el);
-  requestAnimationFrame(() => box.scrollIntoView(touch ? { block: 'center', behavior: scrollBehavior() } : { block: 'nearest' }));
+  const box = el.closest('.composer') ?? el;
+  requestAnimationFrame(() => box.scrollIntoView({ block: 'nearest', behavior: touch ? scrollBehavior() : 'auto' }));
 }
 
 /** The toast for a failed stage / unstage / discard of a hunk or lines. */

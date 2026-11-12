@@ -890,6 +890,7 @@ bound by the shell at boot) and renders it with these props:
 | `compact` | `false` | Denser gutters for a narrow column (≥ 280 px, usable at 390 px), plus a slim title bar with **Open in Threads**. |
 | `onmaximize()` | — | The host grows the embed. The maximise button renders only when given. |
 | `ondetach(id)` | — | The host moves the thread out (a window, a tab). The detach button renders only when given; without it a compact embed (or a linked thread shown in place) offers **Open in Threads** (`openInThreads`). |
+| `onstatus(status)` | — | Called on mount with the host's thread state and on every change: `'idle'`, `'working'` (a turn, a starting session or background work), `'needs-you'` (an approval or question waits; outranks working) or `'closed'`. Lets a folded host header show a dot without reading the Threads stores. |
 | `hostCommands` | — | The view-level slash commands the host carries out (`RuntimeHostCommands`). |
 
 `hostCommands` handlers (all optional): `openDiff(id)` for `/diff`,

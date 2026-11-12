@@ -2,6 +2,9 @@ import { test, expect } from '@playwright/test';
 import { openPage } from './helpers';
 import { seedDiagnose } from './connections-diagnose-mocks';
 
+// The routes in connections-diagnose-mocks.ts must see every daemon fetch.
+test.use({ serviceWorkers: 'block' });
+
 // "Diagnose with an agent": an ended SSH tab's failed Test → Diagnose → the
 // consent dialog → an approval-required thread embedded beside the terminal,
 // without leaving the page.

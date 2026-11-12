@@ -335,9 +335,9 @@ export class EditFlow {
     this.pending = next;
   }
 
-  /** Park a pending value directly (the context menu's Set NULL / Set empty
-   *  string) — same review flow as a typed draft, just skipping the input. */
+  /** Park a value directly (context menu Set NULL / Set empty) — review-gated like a typed draft. */
   parkValue(rowIdx: number, colIdx: number, value: string): void {
+    if (!this.isEditableCell(colIdx)) return; // PK / binary / read-only: every draft entry re-checks here
     this.withRow(rowIdx, (p) => {
       this.dropOverlapping(p, this.columnPath(colIdx) ?? '');
       p.cells.set(colIdx, value);
@@ -369,7 +369,7 @@ export class EditFlow {
    * the stored value again un-parks the cell. The statement is built later, in
    * `reviewPending` — every parked column of a row in ONE UPDATE / updateOne. */
   commitEdit(): void {
-    if (!this.editing || !this.result || !this.editTable || this.editPkCols.length === 0) {
+    if (!this.editing || !this.result || !this.editTable || this.editPkCols.length === 0 || !this.isEditableCell(this.editing.colIdx)) {
       this.editing = null;
       return;
     }

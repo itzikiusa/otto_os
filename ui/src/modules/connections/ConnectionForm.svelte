@@ -2,7 +2,7 @@
   import { announce } from '../../lib/announce.svelte';
   import PemField from './PemField.svelte';
   import TunnelFields from './TunnelFields.svelte';
-  import { argvExposure, argvWarning } from './connection-warnings';
+  import { argvWarningFor } from './connection-warnings';
   import { toastError } from '../../lib/toastError';
   // New/Edit connection sheet — unified form with optional SSH tunnel toggle.
   // Field layout: name / kind / host / port / user / database / password /
@@ -410,7 +410,7 @@
   let testResult = $state<{ ok: boolean; detail: string; hint?: string; warn?: string; stderr?: string; argv?: boolean } | null>(null);
   let testPanel = $state<HTMLElement | null>(null);
   // Password on the client's command line: the last Test's `warn_argv` (the daemon's verdict), else the same rule locally.
-  const argvWarn = $derived(testResult?.argv ? argvWarning(kind === 'mongodb' ? 'mongodb' : 'clickhouse') : argvWarning(argvExposure(kind, fConnString, secret !== '' || !!existing?.secret_ref)));
+  const argvWarn = $derived.by(() => argvWarningFor(kind, testResult?.argv, fConnString, secret !== '' || !!existing?.secret_ref));
 
   /** The settings the shown result was measured against — editing any field
    *  afterwards clears it, so a green "Connected" never vouches for values
@@ -440,7 +440,7 @@
             ? `Connected${res.latency_ms != null ? ` (${res.latency_ms}ms)` : ''}`
             : res.message,
           hint: res.hint ?? undefined,
-          warn: res.warn_key_perms ?? undefined, stderr: res.detail ?? undefined, argv: res.warn_argv === true,
+          warn: res.warn_key_perms ?? undefined, stderr: res.detail ?? undefined, argv: typeof res.warn_argv === 'boolean' ? res.warn_argv : undefined,
         };
       } else {
         const body: Record<string, unknown> = {
@@ -452,14 +452,14 @@
         // authority; it never returns the credential to this form.
         if (existing) body.connection_id = existing.id;
         if (auth.isRoot && secret !== '') body.secret = secret;
-        const res = await api.post<{ ok: boolean; latency_ms?: number; message: string; server_version?: string }>(
+        const res = await api.post<{ ok: boolean; latency_ms?: number; message: string; server_version?: string; warn_argv?: boolean }>(
           '/connections/unsaved/db/test',
           body,
         );
         const bits = [res.server_version, res.latency_ms != null ? `${res.latency_ms}ms` : null]
           .filter(Boolean)
           .join(' · ');
-        testResult = { ok: res.ok, detail: bits ? `${res.message} (${bits})` : res.message };
+        testResult = { ok: res.ok, detail: bits ? `${res.message} (${bits})` : res.message, argv: res.warn_argv };
       }
     } catch (e) {
       testResult = { ok: false, detail: e instanceof Error ? e.message : String(e) };

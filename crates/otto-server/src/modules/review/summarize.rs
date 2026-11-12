@@ -175,7 +175,7 @@ pub(crate) async fn summarize_and_persist(
         resolve_blocked,
         &otto_review::restart::with_failure_reasons(&agent_states[..summarizer_idx]),
     );
-    let parsed = settled.comments;
+    let (parsed, verified) = (settled.comments, cause.is_none() && !settled.incomplete);
     mark_summarizer_done(
         &mut agent_states[summarizer_idx],
         fallback_cause.as_deref(),
@@ -185,7 +185,7 @@ pub(crate) async fn summarize_and_persist(
         .set_agent_at(review_id, summarizer_idx, &agent_states[summarizer_idx])
         .await?;
 
-    let Some(_seen) = persist_comments(
+    let Some(seen) = persist_comments(
         ctx,
         review_id,
         repo_path,
@@ -203,6 +203,12 @@ pub(crate) async fn summarize_and_persist(
         return Ok(());
     }
     otto_review::resolution::resolve_confirmed(&ctx.findings_store, review_id, &fixed).await;
+    let stores = (
+        &ctx.reviews_store,
+        &ctx.findings_store,
+        &ctx.finding_events_store,
+    );
+    otto_review::resolution::close_superseded_unverified(stores, review_id, &seen, verified).await;
     // Not a verdict (status `error`, the findings stay stored): the message
     // names the failed step for the review panel and the workflow step.
     incomplete.map_or(Ok(()), |why| Err(Error::Invalid(why)))
@@ -243,7 +249,8 @@ async fn persist_comments(
     //    (the board + Proof Pack read these). The summarized comment is the
     //    PR-posting artifact; the Finding is the canonical workflow record. A
     //    finding absent from this run is NOT resolved (`otto_review::resolution`
-    //    says why); seen fingerprints only disambiguate same-line findings.
+    //    says why); seen fingerprints disambiguate same-line findings and tell
+    //    a re-run which earlier unverified findings it superseded.
     tracing::info!(review = %review_id, "storing {} draft comments", parsed.len());
     let mut seen_fingerprints: Vec<String> = Vec::new();
     // Comments the user already decided on (or that are on the PR) — a re-run

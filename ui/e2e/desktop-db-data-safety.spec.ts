@@ -121,31 +121,41 @@ test('a lone BEGIN warns before running and leaves the own-session notice', asyn
 
 test('a binary cell is read-only and its viewer shows hex bytes', async ({ page }) => {
   await mockDbRoutes(page, connId);
-  // 16-byte key and a 4-byte blob, base64 on the wire like the MySQL driver sends.
+  // A 16-byte value, base64 on the wire with `binary: true`, like the MySQL driver sends a BLOB.
   const key = Buffer.from('0123456789abcdef0123456789abcdef', 'hex').toString('base64');
   await overrideQuery(page, /FROM\s+orders/i, () => ({
     columns: [
       { name: 'id', type_hint: 'BIGINT' },
+      { name: 'status', type_hint: 'VARCHAR' },
       { name: 'notes', type_hint: 'BLOB', binary: true },
     ],
-    rows: [[1, key]],
+    rows: [[1, 'paid', key]],
     stats: { duration_ms: 2, row_count: 1 },
     truncated: false,
   }));
   await openConn(page);
-  await draft(page, 'SELECT id, notes FROM orders');
+  await draft(page, 'SELECT id, status, notes FROM orders');
   await clickRun(page);
-  const cell = page.locator('.query-editor .grid td[data-c="1"]').first();
-  await expect(cell).toContainText(key.slice(0, 8));
+  const grid = page.locator('.query-editor .grid');
+  const binCell = grid.locator('td[data-c="2"]').first();
+  await expect(binCell).toContainText(key.slice(0, 8));
+  // The result is editable (primary key resolved): its row-select checkbox shows.
+  await expect(grid.locator('tbody input.sel-box')).toHaveCount(1);
 
-  // Double-click would start an inline edit on an editable text cell; a binary
-  // cell never gets a text box.
-  await cell.dblclick();
-  await expect(page.locator('.query-editor .grid td input, .query-editor .grid td textarea')).toHaveCount(0);
+  // The inline editor is a `td.editing` with an `input.cell-input`. A text
+  // column of this editable result opens one on double-click…
+  const inlineEditor = grid.locator('td.editing input.cell-input');
+  await grid.locator('td[data-c="1"]').first().dblclick();
+  await expect(inlineEditor).toHaveCount(1);
+  await page.keyboard.press('Escape');
+  await expect(inlineEditor).toHaveCount(0);
+  // …the binary column never does (a text box over base64 would write the text).
+  await binCell.dblclick();
+  await expect(grid.locator('td.editing')).toHaveCount(0);
 
   const viewer = page.getByRole('dialog', { name: 'Cell value' });
   if (!(await viewer.isVisible())) {
-    await cell.click({ button: 'right' });
+    await binCell.click({ button: 'right' });
     await page.getByRole('menuitem', { name: 'Expand value', exact: true }).click();
   }
   await expect(viewer).toBeVisible();

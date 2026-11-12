@@ -207,8 +207,10 @@
   .retest.ok {
     color: var(--success);
   }
-  /* Phone: a full-height sheet over the page. */
-  @media (max-width: 640px) {
+  /* Phones (portrait AND landscape, e.g. 932×430) and tablets: a full-height
+     sheet over the page. Below ~1025 px a side split leaves neither the
+     workbench nor a compact thread (≥ 280 px) usable width next to the list. */
+  @media (max-width: 1024px) {
     .diag,
     .diag.max {
       position: fixed;

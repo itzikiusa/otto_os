@@ -147,7 +147,7 @@
   <div class="pt-icons" role="group" aria-label="Diff view options">
     {#if canTree}
       <button
-        class="icon-btn pt-tog"
+        class="icon-btn pt-tog pt-tree"
         aria-pressed={treeOpen}
         aria-label={treeOpen ? 'Hide file tree' : 'Show file tree'}
         title={treeOpen ? 'Hide file tree' : 'Show file tree'}
@@ -326,6 +326,32 @@
     }
     .pt-link {
       min-height: 36px;
+    }
+  }
+  /* A phone in landscape (~380 px tall, most of it app and PR chrome): ONE
+     pinned row, so the code keeps the height. The stepper sits inline (its
+     counter keeps "12 / 54"; the file name shows in the file header), and
+     the counts row gives way — the PR header carries files and +/−, the
+     stepper the position, the picker the Viewed marks. */
+  @media (max-width: 1024px) and (max-height: 500px) {
+    .pr-toolbar {
+      gap: 4px;
+      min-height: 0;
+    }
+    /* …and the tree toggle: there the tree is the stepper's file picker. */
+    .pt-stats,
+    .pr-toolbar :global(.pt-tree) {
+      display: none;
+    }
+    .pt-search-wrap {
+      flex: 1 1 0;
+      min-width: 64px;
+    }
+    .toolbar-search {
+      height: 36px;
+    }
+    .pt-icons {
+      gap: 0;
     }
   }
 </style>

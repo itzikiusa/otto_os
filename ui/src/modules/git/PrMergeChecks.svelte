@@ -2,7 +2,8 @@
   // The forge's merge checks and open tasks (`PrDetail.merge_checks`,
   // `task_count`). Full: the Summary side column's list, pass/fail icon plus
   // the forge's detail text. Compact: one "2 of 3 checks passed · 1 task open"
-  // line for the PR header on phones, where the side column sits far below.
+  // line for the PR header wherever the side column has dropped below the
+  // conversation (a phone, or a desktop pane narrowed by the PR list).
   import type { PrDetail } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import { mergeCheckSummary, openTasksLine } from './pr-merge-checks';
@@ -20,9 +21,11 @@
 
 {#if compact}
   {#if summary || tasks}
-    <div class="mc-line" class:bad={failing} data-testid="pr-merge-checks-line">
-      <Icon name={failing ? 'warning' : 'check'} size={12} />
-      <span>{[summary, tasks].filter(Boolean).join(' · ')}</span>
+    <div class="mc-wrap">
+      <div class="mc-line" class:bad={failing} data-testid="pr-merge-checks-line">
+        <Icon name={failing ? 'warning' : 'check'} size={12} />
+        <span>{[summary, tasks].filter(Boolean).join(' · ')}</span>
+      </div>
     </div>
   {/if}
 {:else if summary || tasks}
@@ -66,7 +69,15 @@
     color: var(--success);
   }
   .mc-line.bad { color: var(--danger); }
+  /* Shown whenever the side column (the full list) has dropped below the
+     conversation: a phone, or a desktop pane narrowed by the PR list beside
+     it (PrDetail stacks its Summary under the same 860px; header and body
+     share their side padding). Hidden, the wrapper cancels the header's gap. */
+  .mc-wrap { container-type: inline-size; margin-block-end: -6px; }
+  @container (max-width: 860px) {
+    .mc-line { display: flex; padding-block-end: 6px; }
+  }
   @media (max-width: 1024px) {
-    .mc-line { display: flex; }
+    .mc-line { display: flex; padding-block-end: 6px; }
   }
 </style>

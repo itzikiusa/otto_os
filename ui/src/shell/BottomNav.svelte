@@ -10,6 +10,7 @@
   // adds nothing to the desktop layout.
   import Icon from '../lib/components/Icon.svelte';
   import Drawer from './Drawer.svelte';
+  import MachineChip from './MachineChip.svelte';
   import { router } from '../lib/router.svelte';
   import { navPending } from '../lib/navPending.svelte';
   import { ui } from '../lib/stores/ui.svelte';
@@ -150,6 +151,13 @@
         <Icon name="gear" size={20} />
         <span>Settings</span>
       </button>
+      <!-- The status bar (and its machine chip) is hidden on a phone: the
+           chip lives here as a full-width row; the whole row opens its
+           details. Hidden until the machine status has loaded. -->
+      <div class="sheet-machine" data-testid="more-machine">
+        <span class="sm-label">Machine</span>
+        <MachineChip />
+      </div>
     </div>
 </Drawer>
 
@@ -273,5 +281,37 @@
   .sheet-item span {
     line-height: 1;
     text-align: center;
+  }
+  .sheet-machine {
+    grid-column: 1 / -1;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-height: 44px;
+    padding-inline: 12px;
+    border-radius: var(--radius-m);
+    background: var(--surface);
+    color: var(--text-dim);
+    font-size: var(--fs-s);
+  }
+  .sheet-machine:not(:has(:global(.machine-chip))) {
+    display: none;
+  }
+  /* The chip's button covers the whole row (one tap target), and its status
+     text shows here even at phone width, where the status bar hides it. */
+  .sheet-grid .sheet-machine :global(.machine-chip) {
+    position: static;
+    font-size: var(--fs-s);
+  }
+  .sheet-grid .sheet-machine :global(.machine-chip)::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: var(--radius-m);
+  }
+  .sheet-grid .sheet-machine :global(.mc-text) {
+    display: inline;
   }
 </style>

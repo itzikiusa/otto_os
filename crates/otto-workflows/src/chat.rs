@@ -59,7 +59,7 @@ const ACK_PREFIX: &str = "🚀 Started workflow";
 const QUEUED_PREFIX: &str = "⏳ Queued workflow";
 
 /// True when `text` is (the start of) our own ack reply.
-fn is_own_ack(text: &str) -> bool {
+pub(crate) fn is_own_ack(text: &str) -> bool {
     text.starts_with(ACK_PREFIX) || text.starts_with(QUEUED_PREFIX)
 }
 
@@ -466,7 +466,7 @@ fn split_branch_fields(
 /// matched the workflow actually called `A & B` (the lookup is an exact
 /// `name = ? COLLATE NOCASE`), so `try_start` returned `None` and the message
 /// fell through to a plain chat session with no error anywhere.
-fn strip_slack_tokens(text: &str) -> String {
+pub(crate) fn strip_slack_tokens(text: &str) -> String {
     decode_html_entities(&strip_entity_tokens(text))
 }
 
@@ -742,7 +742,7 @@ pub fn binding_matches(
 /// could leak that channel's content into another workspace's workflow runs.
 /// Net effect: only the LISTING is global — the candidates that can fire are
 /// the receiving workspace's own, the same rule as name-addressed commands.
-fn binding_candidates<'a>(
+pub(crate) fn binding_candidates<'a>(
     triggers: &'a [WorkflowTrigger],
     channel: &str,
     chat: &str,
@@ -1244,6 +1244,19 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
             Some(binding_id.as_str()),
         )
         .await
+    }
+
+    async fn note_rejected_sender(
+        &self,
+        workspace_id: &str,
+        channel: &str,
+        chat: &str,
+        thread: Option<&str>,
+        user: &str,
+        text: &str,
+    ) {
+        crate::chat_rejected::note(&self.ctx, workspace_id, channel, chat, thread, user, text)
+            .await;
     }
 
     async fn try_control(

@@ -110,20 +110,21 @@
       onEnd: () => persist(AGENT_H_KEY, String(agentH)),
     });
   }
-  // An ask from the ⋯ menu, the Files panel or the diff: bring the thread
-  // forward (the panel itself carries the ask out).
+  // An ask (⋯ menu, Files panel, diff, the panel's own box) brings the thread
+  // forward. Desktop: the docked panel is always mounted and may take the
+  // ask before this component sees it, so the panel calls `revealAgent`
+  // itself. Phone: the sheet's panel mounts only once the sheet opens, so
+  // the waiting ask opens it here.
+  function revealAgent(): void {
+    if (agentFolded) setAgentFolded(false);
+    if (listHidden) toggleList();
+    maximized = false;
+  }
   $effect(() => {
     const p = prAgentBridge.pending;
     const n = tabs.active;
-    if (!p || n === null || p.key !== prAgentOriginId(repoId, n)) return;
-    untrack(() => {
-      if (narrow) agentSheet = true;
-      else {
-        if (agentFolded) setAgentFolded(false);
-        if (listHidden) toggleList();
-        maximized = false;
-      }
-    });
+    if (!p || n === null || !narrow || p.key !== prAgentOriginId(repoId, n)) return;
+    untrack(() => (agentSheet = true));
   });
 
   function toggleList(): void {
@@ -227,7 +228,7 @@
             {#key `${repoId}:${tabs.active}`}
               <PrAgentPanel {repoId} number={tabs.active} title={titleOf(tabs.active)} layout={agentMaxOn ? 'max' : 'dock'}
                 folded={agentFolded && !agentMaxOn} ontogglefolded={() => setAgentFolded(!agentFolded)}
-                onmaximize={() => (agentMax = true)} onrestore={() => (agentMax = false)} />
+                onmaximize={() => (agentMax = true)} onrestore={() => (agentMax = false)} onasked={revealAgent} />
             {/key}
           </div>
         {/if}
@@ -346,7 +347,7 @@
   .prw-files-resize:hover, .prw-files-resize:focus-visible { background: var(--accent-line); }
   /* Shrinks before the list does when Files and the agent are both open. */
   .prw-agent { flex: none; min-height: 0; display: flex; flex-direction: column; }
-  .prw-agent.open { flex: 0 1 auto; min-block-size: 120px; max-block-size: 70%; }
+  .prw-agent.open { flex: 0 1 auto; min-block-size: 200px; max-block-size: 70%; }
   /* The agent thread over the whole workspace: list, files and the PR stay
      mounted (drafts, scroll) but out of the way. */
   .prw.agent-max { grid-template-columns: minmax(0, 1fr); }

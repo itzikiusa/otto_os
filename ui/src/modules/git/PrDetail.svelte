@@ -98,6 +98,8 @@
   function selectTab(t: Tab): void {
     activeTab = t;
     try { localStorage.setItem(tabKey(), t); } catch { /* not persisted */ }
+    // A short screen (a phone in landscape) is filled by the PR header: bring the code into view.
+    if (t === 'code' && matchMedia('(max-height: 500px)').matches) requestAnimationFrame(() => document.querySelector('.prd-code:not([hidden])')?.scrollIntoView({ block: 'start' }));
   }
   $effect(() => prFilesBridge.onReveal(prFilesKey(repoId, number), () => selectTab('code'))); // the workspace Files panel
   $effect(() => onPrWhitespaceChange(() => void loadDiff(repoId, number))); // the Code tab's "Hide whitespace"
@@ -515,7 +517,7 @@
     const items: MenuItem[] = [
       { label: 'Refresh', icon: 'refresh', action: refreshAll },
       { separator: true },
-      { label: 'Ask a question', icon: 'comment', hint: 'agent', action: () => openAgent('ask') },
+      { label: 'Ask a question', icon: 'comment', hint: prAgentBridge.hint(repoId, number), action: () => openAgent('ask') },
       { label: 'Explain this PR', icon: 'sparkle', hint: 'agent', action: () => openAgent('explain') },
       { label: 'Fix findings with the agent…', icon: 'zap', hint: 'agent', disabled: !open, action: () => openAgent('fix') },
       { label: 'Tell the author on Slack…', icon: 'send', action: () => pr && openReviewDoneSlack(pr, repoSlug) },
