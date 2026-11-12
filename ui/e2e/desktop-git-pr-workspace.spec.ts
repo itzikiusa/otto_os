@@ -263,7 +263,8 @@ test('your own comment: edit → save, then delete after a confirm', async ({ pa
   // Someone else's comment has no menu.
   await expect(threads.filter({ hasText: 'thresholds' }).getByRole('button', { name: 'Comment actions' })).toHaveCount(0);
 
-  const mine = threads.filter({ hasText: 'Rebased on develop' });
+  // By author, not by body: in edit mode the body is a textarea's VALUE, not text.
+  const mine = threads.filter({ hasText: /Dev Otto/ });
   await mine.getByRole('button', { name: 'Comment actions' }).click();
   await page.locator('.ctx-menu').getByText('Edit', { exact: true }).click();
   const box = mine.getByRole('textbox', { name: 'Edit comment' });

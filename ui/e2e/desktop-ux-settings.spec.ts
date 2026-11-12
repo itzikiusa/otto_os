@@ -96,8 +96,13 @@ test('Settings sections remain reachable and titled at desktop and phone widths'
       // Phone width is a two-level list: an open section hides the list, so
       // go back to it before filtering for the next section.
       const back = page.getByRole('button', { name: 'Back to Settings' });
-      if (width <= 640 && (await back.isVisible())) await back.click();
-      await page.getByRole('searchbox', { name: 'Filter settings' }).fill(label);
+      const search = page.getByRole('searchbox', { name: 'Filter settings' });
+      if (width <= 640) {
+        // The layout switches after the resize: wait for whichever level shows.
+        await expect(back.or(search).first()).toBeVisible();
+        if (await back.isVisible()) await back.click();
+      }
+      await search.fill(label);
       await nav.getByRole('button', { name: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`) }).first().click();
       await expect(page.locator('.settings-body h1.ph-title')).toHaveText(label);
     }

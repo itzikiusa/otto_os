@@ -77,7 +77,7 @@ test('Tidy leaves the change unsaved, and Save refuses a graph with errors', asy
 
   // Save validates: the issue is shown and nothing is written.
   await save.click();
-  await expect(page.getByText('Resolve these issues before saving or running')).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText('Resolve these issues before saving or running').first()).toBeVisible({ timeout: 10_000 });
   await expect(page.locator('.preflight').getByRole('button', { name: /url/i })).toBeVisible();
   await expect(save).toBeEnabled();
   expect(await savedNode(wfId, 'fetch')).toMatchObject({ x: 40, y: 400 });

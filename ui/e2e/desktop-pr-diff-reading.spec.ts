@@ -44,12 +44,12 @@ test('Hide whitespace changes: toggles, persists, and notes a forge that cannot'
   await expect(toggle).toHaveAttribute('aria-pressed', 'false');
   await toggle.click();
   await expect(toggle).toHaveAttribute('aria-pressed', 'true');
-  await expect(page.locator('.pr-toolbar')).toContainText('Whitespace changes can’t be hidden here');
+  await expect(page.locator('.pr-toolbar').filter({ hasText: 'Whitespace changes can’t be hidden here' }).first()).toBeVisible();
   // Persisted like the other view preferences.
   await page.reload();
   await expect(page.getByRole('button', { name: 'Hide whitespace changes' })).toHaveAttribute('aria-pressed', 'true', { timeout: 15_000 });
   await page.getByRole('button', { name: 'Hide whitespace changes' }).click();
-  await expect(page.locator('.pr-toolbar')).not.toContainText('Whitespace changes can’t be hidden here');
+  await expect(page.locator('.pr-toolbar').filter({ hasText: 'Whitespace changes can’t be hidden here' })).toHaveCount(0);
 });
 
 test('a Viewed tick in one commit’s view keeps the all-commits marks', async ({ page }) => {
