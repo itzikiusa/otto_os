@@ -208,8 +208,9 @@ async fn serve(
             _=flow_deadline(credit.as_ref().and_then(CreditGate::stall_deadline)), if credit.as_ref().is_some_and(|c|c.stall_deadline().is_some())=>{
                 if let Some(c)=credit.as_mut(){c.forgive();}
             }
+            // No room lock per output chunk: a revoke/end arrives as a notice
+            // (checked below) and the 1 s tick re-checks membership anyway.
             chunk=output.recv(), if flow.paused_until.is_none() && recovery.pending.is_none()=>{
-                if !valid(&shared,&member,generation).await{break;}
                 match chunk {
                     Ok(chunk)=>{
                         let step=match credit.as_mut(){Some(c)=>c.push(chunk.to_vec(),tokio::time::Instant::now()),None=>CreditStep::Send(chunk)};

@@ -811,11 +811,27 @@ impl VaultEngine {
         let v = self.get_scoped(ws, id).await?;
         let mut out = Vec::new();
         for name in Self::recovery_names_off_runtime(&v.root_path, ".trash/.otto-index").await? {
-            let entry: VaultTrashEntry = serde_json::from_slice(
-                &Self::recovery_read(&v.root_path, &format!(".trash/.otto-index/{name}")).await?,
+            // One unreadable or hand-edited record must not hide the whole
+            // trash (it used to fail the listing): skip it, keep the rest.
+            let entry: VaultTrashEntry = match Self::recovery_read(
+                &v.root_path,
+                &format!(".trash/.otto-index/{name}"),
             )
-            .map_err(|e| Error::Invalid(format!("invalid trash record: {e}")))?;
-            Self::check_rel(&entry.stored_path)?;
+            .await
+            .and_then(|bytes| {
+                serde_json::from_slice(&bytes)
+                    .map_err(|e| Error::Invalid(format!("invalid trash record: {e}")))
+            }) {
+                Ok(entry) => entry,
+                Err(e) => {
+                    tracing::warn!(vault = id, record = %name, error = %e, "vault trash: skipped an unreadable record");
+                    continue;
+                }
+            };
+            if Self::check_rel(&entry.stored_path).is_err() {
+                tracing::warn!(vault = id, record = %name, "vault trash: skipped a record with an invalid path");
+                continue;
+            }
             if Path::new(&v.root_path)
                 .join(".trash")
                 .join(&entry.stored_path)

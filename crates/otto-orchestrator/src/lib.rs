@@ -4,9 +4,11 @@
 //! session in a PTY (no `-p`), types the prompt into it, and reads the
 //! completed reply from claude's session JSONL transcript (see [`claude_pty`]).
 
+pub mod admission;
 pub mod claude_pty;
 pub mod e2e_stub;
 pub mod parse;
+pub mod plugin_agent;
 
 use std::time::Duration;
 
@@ -65,12 +67,15 @@ impl OrchestratorContext {
 /// Plain-English → ActionPlan orchestrator backed by real claude sessions.
 pub struct Orchestrator {
     claude: ClaudePty,
+    /// The host's admission hook for unattended turns ([`admission`]).
+    admission: std::sync::OnceLock<admission::AdmissionHook>,
 }
 
 impl Orchestrator {
     pub fn new(claude_bin: impl Into<String>) -> Self {
         Self {
             claude: ClaudePty::new(claude_bin),
+            admission: std::sync::OnceLock::new(),
         }
     }
 
@@ -131,7 +136,9 @@ impl Orchestrator {
     /// Run a single headless agent turn with the given `prompt` in `cwd` and
     /// return the assistant's full reply text. Used by the PR review workflow
     /// and the swarm planner/recruiter. `no_progress` is the stuck window, not a
-    /// wall-clock cap (see [`ClaudePty::run_prompt`]).
+    /// wall-clock cap (see [`ClaudePty::run_prompt`]). Never waits for the
+    /// machine: an UNATTENDED engine turn calls
+    /// [`Self::run_agent_background`] instead (see [`admission`]).
     pub async fn run_agent(
         &self,
         prompt: &str,

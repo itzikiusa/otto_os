@@ -1,7 +1,6 @@
 <script lang="ts">
   import { announceShown } from '../../lib/announce.svelte';
-  // Browser module page: tab strip + URL bar + reader-mode page. Mirrors the
-  // shape of VaultPage/LoopsPage (a thin view over a $state store).
+  // Browser module page: tab strip + URL bar + reader page (a thin view over a $state store).
 
   import { untrack } from 'svelte';
   import { toastError } from '../../lib/toastError';
@@ -29,6 +28,7 @@
     showCredentials = true;
   }
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import BrowserMenu from './BrowserMenu.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import ReaderView from './ReaderView.svelte';
   import NotesRail from './NotesRail.svelte';
@@ -636,7 +636,7 @@
     <!-- Module page: the page tabs ride inline in the unified header bar. -->
     <PageHeader title="Browser">
       {#snippet actions()}
-        <button class="icon-btn" aria-label="Site credentials" title="Site credentials" onclick={openCredentials}><Icon name="key" size={14} /></button>
+        <BrowserMenu oncredentials={openCredentials} />
       {/snippet}
       {#snippet tabs()}
         <TabStrip onnew={newTab} inbar />

@@ -20,6 +20,13 @@ use crate::build_budget;
 use crate::machine_load::{self, logical_cores, MachineMonitor, Sampler};
 use otto_core::domain::NoticeSeverity;
 
+/// What [`BackgroundAdmissionHook`] resolves to: the [`AdmissionPermit`].
+pub type AdmissionGuard = Box<dyn std::any::Any + Send>;
+/// [`SessionManager::background_admission_hook`]'s type — structurally the
+/// orchestrator's `AdmissionHook` (this crate does not depend on it).
+pub type BackgroundAdmissionHook =
+    Arc<dyn Fn(&str) -> otto_core::auth::BoxFuture<'static, AdmissionGuard> + Send + Sync>;
+
 /// Settings are re-read on every gate check; this bounds the DB reads a
 /// queue of waiters causes (a write through the repo is seen at once).
 const SETTINGS_TTL: Duration = Duration::from_secs(5);
@@ -173,6 +180,51 @@ impl SessionManager {
             return AdmissionPermit::none();
         }
         self.wait_for_admission(source).await
+    }
+
+    /// [`Self::admit_background`] as a `'static` hook for engines that spawn
+    /// their own agent process outside `create` — the orchestrator's headless
+    /// claude turns (`otto_orchestrator::Orchestrator::set_admission_hook`).
+    /// The returned guard is the [`AdmissionPermit`]: it holds the place for
+    /// the whole turn, since no session process registers with the gate.
+    /// Holds the manager weakly; once it is gone, every turn starts at once.
+    pub fn background_admission_hook(self: &Arc<Self>) -> BackgroundAdmissionHook {
+        let manager = Arc::downgrade(self);
+        Arc::new(
+            move |source: &str| -> otto_core::auth::BoxFuture<'static, AdmissionGuard> {
+                let manager = manager.clone();
+                let source = source.to_string();
+                Box::pin(async move {
+                    let Some(manager) = manager.upgrade() else {
+                        return Box::new(AdmissionPermit::none()) as AdmissionGuard;
+                    };
+                    Box::new(manager.admit_background(&source).await) as AdmissionGuard
+                })
+            },
+        )
+    }
+
+    /// [`admission::defer_maintenance`] against the live machine sample and
+    /// the gate's thresholds (re-read each call). Logs the start of each
+    /// deferral episode and a pass forced after the maximum wait.
+    pub async fn defer_maintenance(&self, deferred_since: &mut Option<std::time::Instant>) -> bool {
+        let policy = self.admission_policy().await;
+        let sample = self.admission.monitor().current().await;
+        let busy = admission::machine_busy(&sample, &policy);
+        let was_deferring = deferred_since.is_some();
+        let defer = admission::defer_maintenance(busy, deferred_since, std::time::Instant::now());
+        if defer && !was_deferring {
+            tracing::info!(
+                load1 = ?sample.load1,
+                pressure = ?sample.pressure,
+                "maintenance: machine busy — deferring the pass to a quieter tick"
+            );
+        } else if !defer && busy {
+            tracing::warn!(
+                "maintenance: machine still busy after the maximum wait — running anyway"
+            );
+        }
+        defer
     }
 
     /// `create`'s gate: strips a pre-acquired permit's key from `req.meta`
@@ -562,6 +614,35 @@ mod tests {
         assert!(r.meta.unwrap().get(admission::PERMIT_META_KEY).is_none());
         // Ungated sources get an empty permit straight away.
         assert!(!m.admit_background("canvas_assist").await.is_reserved());
+    }
+
+    /// The orchestrator's headless turns take their place through the hook
+    /// and hold it until the guard drops (no session process registers).
+    #[tokio::test]
+    async fn the_orchestrator_hook_holds_a_place_for_the_whole_turn() {
+        let m = Arc::new(manager(true, 0.5).await);
+        let hook = m.background_admission_hook();
+        let place = hook("self_improvement").await;
+        assert_eq!(m.machine_status().await.background_live, 1);
+        let permit = place
+            .downcast_ref::<AdmissionPermit>()
+            .expect("the guard is the permit");
+        assert!(permit.is_reserved());
+        drop(place);
+        assert_eq!(m.machine_status().await.background_live, 0);
+        // An interactive label never waits and takes no place.
+        let free = hook("canvas_assist").await;
+        assert!(!free
+            .downcast_ref::<AdmissionPermit>()
+            .unwrap()
+            .is_reserved());
+        // The manager gone: turns start at once.
+        drop(m);
+        let after = hook("self_improvement").await;
+        assert!(!after
+            .downcast_ref::<AdmissionPermit>()
+            .unwrap()
+            .is_reserved());
     }
 
     #[tokio::test]

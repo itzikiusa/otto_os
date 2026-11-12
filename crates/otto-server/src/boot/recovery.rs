@@ -206,7 +206,7 @@ where
 pub async fn recover_goal_loops(ctx: &ServerCtx) {
     match ctx
         .goal_loops_repo
-        .fail_running("Interrupted by a daemon restart — Resume to continue with preserved work.")
+        .fail_running(crate::goal_loop::RESTART_PAUSE_NOTE)
         .await
     {
         Ok(loops) => {
@@ -216,9 +216,7 @@ pub async fn recover_goal_loops(ctx: &ServerCtx) {
                     loops.len()
                 );
             }
-            for l in &loops {
-                crate::goal_loop::cleanup_executor_sessions(ctx, &l.workspace_id, &l.id).await;
-            }
+            crate::goal_loop::announce_restart_pause(ctx, &loops).await;
         }
         Err(e) => tracing::warn!("goal-loop recovery: {e}"),
     }

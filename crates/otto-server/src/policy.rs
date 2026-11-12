@@ -587,8 +587,8 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/workspaces/{id}/sessions" {
         return Require(Agents, if get { View } else { Edit });
     }
-    // Structured agent runtime: the handlers add owner-or-admin + person-only writes.
-    if p == "/workspaces/{id}/runtime-sessions" || p.starts_with("/runtime-sessions/") {
+    // Structured agent runtime (+ council): the handlers add owner-or-admin + person-only writes.
+    if p.starts_with("/workspaces/{id}/runtime-sessions") || p.starts_with("/runtime-sessions/") {
         return Require(Agents, if get { View } else { Edit });
     }
     if p == "/sessions" {
@@ -1624,7 +1624,7 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
                 "/k8s/clusters/{id}/actions"
                     | "/k8s/clusters/{id}/exec"
                     | "/k8s/clusters/{id}/pod-http"
-                    | "/k8s/clusters/{id}/resource"
+                    | "/k8s/clusters/{id}/k9s"
             );
         if outward {
             return Some(O);

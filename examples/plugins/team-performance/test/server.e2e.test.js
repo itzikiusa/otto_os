@@ -24,11 +24,14 @@ let agentProviders = [];
 
 // ---- helpers ----------------------------------------------------------------
 
+/** What Otto's proxy adds to every request (the sidecars' OTTO_PLUGIN_TOKEN is 'ptok'). */
+const PLUGIN_AUTH = { 'x-otto-plugin-token': 'ptok' };
+
 function api(method, pathname, body) {
   return new Promise((resolve, reject) => {
     const data = body ? JSON.stringify(body) : null;
     const req = http.request(
-      { method, hostname: '127.0.0.1', port: pluginPort, path: pathname, headers: data ? { 'Content-Type': 'application/json' } : {} },
+      { method, hostname: '127.0.0.1', port: pluginPort, path: pathname, headers: { ...PLUGIN_AUTH, ...(data ? { 'Content-Type': 'application/json' } : {}) } },
       (res) => {
         let buf = '';
         res.on('data', (c) => (buf += c));
@@ -188,6 +191,24 @@ test('all-time view window: empty stored scope has zero bounded capacity window'
     assert.equal(o.capacity.capacity_days, 0);
     assert.equal(o.estimate_accuracy.n, 0);
   } finally { fs.unlinkSync(file); }
+});
+
+test('only a request carrying the plugin token is served (health stays open)', async () => {
+  const raw = (headers) => new Promise((resolve, reject) => {
+    const r = http.request({ method: 'GET', hostname: '127.0.0.1', port: pluginPort, path: '/accounts', headers }, (res) => {
+      res.resume();
+      res.on('end', () => resolve(res.statusCode));
+    });
+    r.on('error', reject);
+    r.end();
+  });
+  assert.equal(await raw({}), 401);
+  assert.equal(await raw({ 'x-otto-plugin-token': 'wrong' }), 401);
+  assert.equal(await raw(PLUGIN_AUTH), 200);
+  const health = await new Promise((resolve, reject) => {
+    http.get({ hostname: '127.0.0.1', port: pluginPort, path: '/health' }, (res) => { res.resume(); resolve(res.statusCode); }).on('error', reject);
+  });
+  assert.equal(health, 200);
 });
 
 test('accounts + projects come from host API and Jira', async () => {
@@ -600,7 +621,7 @@ test('auto-scan cron repeats the last scan params (isolated sidecar, fast tick)'
     new Promise((resolve, reject) => {
       const data = body ? JSON.stringify(body) : null;
       const req = http.request(
-        { method, hostname: '127.0.0.1', port: port2, path: pathname, headers: data ? { 'Content-Type': 'application/json' } : {} },
+        { method, hostname: '127.0.0.1', port: port2, path: pathname, headers: { ...PLUGIN_AUTH, ...(data ? { 'Content-Type': 'application/json' } : {}) } },
         (res) => {
           let buf = '';
           res.on('data', (c) => (buf += c));
@@ -859,7 +880,7 @@ test('PR sync via daemon + deploy/hotfix tags → phases, DORA, canonical guardr
   plugin2.stderr.on('data', (c) => process.stderr.write(`[sidecar-pr] ${c}`));
   const api2 = (method, pathname, body, headers = {}) => new Promise((resolve, reject) => {
     const data = body ? JSON.stringify(body) : null;
-    const req = http.request({ method, hostname: '127.0.0.1', port: port2, path: pathname, headers: { ...(data ? { 'Content-Type': 'application/json' } : {}), ...headers } }, (res) => {
+    const req = http.request({ method, hostname: '127.0.0.1', port: port2, path: pathname, headers: { ...PLUGIN_AUTH, ...(data ? { 'Content-Type': 'application/json' } : {}), ...headers } }, (res) => {
       let buf = ''; res.on('data', (c) => (buf += c)); res.on('end', () => resolve({ status: res.statusCode, json: buf ? JSON.parse(buf) : null }));
     });
     req.on('error', reject); if (data) req.write(data); req.end();

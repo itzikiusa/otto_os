@@ -110,9 +110,9 @@ async fn run(ctx: ServerCtx, shared: SharedRoom, member: String, mut socket: Web
                 let event={let mut room=shared.lock().await;
                     if room.ended{Some(RoomEvent::Ended{reason:"Room ended".into()})}
                     else if room.connected(&member,generation).is_err(){Some(RoomEvent::Ended{reason:"Membership ended or reconnected elsewhere".into()})}
-                    else {match notice {
-                        Ok(Notice::State)=>{if sync_authority(&ctx,&mut room).await.is_err(){break;}room.snapshot(&member).ok().map(|room|RoomEvent::Snapshot{room:Box::new(room)})},
-                        Ok(Notice::Event{to,event})=>{
+                    else {match Notice::received(notice) {
+                        Some(Notice::State)=>{if sync_authority(&ctx,&mut room).await.is_err(){break;}room.snapshot(&member).ok().map(|room|RoomEvent::Snapshot{room:Box::new(room)})},
+                        Some(Notice::Event{to,event})=>{
                             if to.as_deref().is_some_and(|target|target!=member) || room.admitted(&member).is_err(){None}
                             else if let RoomEvent::Annotation{annotation}= &event {
                                 // A revoke/clear can overtake a queued notice;
@@ -120,7 +120,7 @@ async fn run(ctx: ServerCtx, shared: SharedRoom, member: String, mut socket: Web
                                 if room.marks.iter().any(|m|m.id==annotation.id){Some(event)}else{None}
                             }else{Some(event)}
                         },
-                        Err(_)=>break,
+                        None=>break,
                     }}
                 };
                 if let Some(event)=event {let ended=matches!(event,RoomEvent::Ended{..});if send(&mut socket,&event).await.is_err()||ended{break;}}

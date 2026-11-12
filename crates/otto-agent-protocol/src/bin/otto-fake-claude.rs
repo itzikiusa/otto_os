@@ -12,12 +12,17 @@
 //! * `slow <secs>` — "Working…", then waits `<secs>`; a user message arriving
 //!   meanwhile (a steer) is answered in the same turn: "steered: <text>".
 //! * `silent`      — emits nothing until interrupted.
+//! * `escape`      — starts `sleep 600` in a process group of its own (as
+//!   Claude Code does with some jobs), writes its pid to
+//!   `.fake-claude/escaped.pid`, then answers like `echo`.
 //! * anything else — `echo: <text>` as stream events + `assistant`.
 //!
 //! An `interrupt` control request ends the running turn as interrupted.
 //! `--resume <id>` works only for a session this binary started in the same
 //! cwd (`.fake-claude/<id>` exists); otherwise it exits 1 like the CLI
-//! ("No conversation found"). stdin EOF ends the process.
+//! ("No conversation found"). A `.fake-claude/<id>.flaky` marker fails the
+//! next resume once with a passing error (the marker is removed). stdin EOF
+//! ends the process.
 
 use std::io::{BufRead, Write};
 use std::sync::mpsc;
@@ -100,6 +105,10 @@ fn main() {
         Some(id) => {
             if !store.join(&id).exists() {
                 eprintln!("No conversation found with session ID: {id}");
+                std::process::exit(1);
+            }
+            if std::fs::remove_file(store.join(format!("{id}.flaky"))).is_ok() {
+                eprintln!("API Error: Connection error.");
                 std::process::exit(1);
             }
             id
@@ -264,6 +273,22 @@ fn main() {
                     }
                     "silent" => {
                         waiting = Some((None, false));
+                    }
+                    "escape" => {
+                        use std::os::unix::process::CommandExt;
+                        use std::process::{Command, Stdio};
+                        if let Ok(job) = Command::new("sleep")
+                            .arg("600")
+                            .process_group(0)
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .spawn()
+                        {
+                            let _ = std::fs::write(store.join("escaped.pid"), job.id().to_string());
+                        }
+                        text_message(&mid, &format!("echo: {text}"));
+                        result_ok();
                     }
                     _ => {
                         text_message(&mid, &format!("echo: {text}"));

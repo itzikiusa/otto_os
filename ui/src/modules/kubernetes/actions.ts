@@ -24,6 +24,14 @@ function isMutating(def: ActionDef, params: Record<string, unknown>): boolean {
   return true;
 }
 
+/** A plan that stopped partway lists each step's fate after the message, so
+ *  the half-applied state is visible (`patch rollouts/web: done; …`). */
+export function partialDetail(resp: K8sActionResp): string {
+  const steps = resp.steps ?? [];
+  if (!steps.length) return resp.message;
+  return `${resp.message} — ${steps.map((s) => `${s.step}: ${s.status}`).join('; ')}`;
+}
+
 /** Post an action (after its typed confirm when required) and toast the
  *  outcome. Resolves the response, or `null` when cancelled / failed. */
 export async function runAction(
@@ -62,6 +70,8 @@ export async function runAction(
     // naming the action and where it lands.
     const ok = await confirmProd({ env: cl?.environment, where, verb, what, danger: !!def.danger });
     if (!ok) return null;
+    // The daemon requires the typed name for every mutating verb on prod.
+    if (prod) merged.confirm_name = row.name;
   }
   try {
     const resp = await k8sApi.action(clusterId, {
@@ -72,7 +82,7 @@ export async function runAction(
       params: Object.keys(merged).length ? merged : undefined,
     });
     if (resp.ok) toasts.success(`${def.label.replace(/…$/, '')} · ${row.name}`, resp.message || undefined);
-    else toasts.warn(`${def.label.replace(/…$/, '')} · ${row.name}`, resp.message);
+    else toasts.warn(`${def.label.replace(/…$/, '')} · ${row.name}`, partialDetail(resp));
     return resp;
   } catch (e) {
     toastError(`Couldn’t ${verb.charAt(0).toLowerCase()}${verb.slice(1)} ${row.name}`, e);

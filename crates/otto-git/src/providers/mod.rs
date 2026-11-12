@@ -15,6 +15,8 @@ mod wire_tests;
 #[cfg(test)]
 mod wire_tests_review;
 #[cfg(test)]
+mod wire_tests_round2;
+#[cfg(test)]
 mod wire_tests_wave2;
 
 use std::sync::Arc;
@@ -103,6 +105,34 @@ pub trait GitProvider: Send + Sync {
         page: u32,
         per_page: u32,
     ) -> Result<PrPage>;
+    /// One page of OPEN PRs that ask the bound account for a review
+    /// (`GET …/prs?review=me`), matched by the forge's stable user ids
+    /// (`identity::Me`). Default: unsupported.
+    async fn list_review_requested(
+        &self,
+        _r: &RemoteRef,
+        _page: u32,
+        _per_page: u32,
+    ) -> Result<PrPage> {
+        Err(otto_core::Error::Invalid(
+            "listing reviews requested from you is not supported for this provider".into(),
+        ))
+    }
+    /// Request (`add`) and un-request (`remove`) reviewers on PR `number`, by
+    /// the names the collaborator typeahead and `PrReviewer.name` show. A
+    /// name the forge cannot resolve fails the whole call before any write
+    /// where the forge allows (Bitbucket, GitLab). Default: unsupported.
+    async fn set_reviewers(
+        &self,
+        _r: &RemoteRef,
+        _number: u64,
+        _add: &[String],
+        _remove: &[String],
+    ) -> Result<()> {
+        Err(otto_core::Error::Invalid(
+            "changing reviewers is not supported for this provider".into(),
+        ))
+    }
     async fn get_pr(&self, r: &RemoteRef, number: u64) -> Result<PrDetail>;
     /// Fetch a hosted **issue** (not a PR). Default: unsupported — only GitHub
     /// overrides it (the Run with Otto github-issue source). GitLab/Bitbucket

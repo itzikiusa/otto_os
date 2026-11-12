@@ -12,6 +12,8 @@ export interface MockPrRef {
   comments: PrComment[];
   approved_by: string[];
   changes_by?: string[];
+  /** Reviewers asked for a review who haven't answered yet (PUT …/reviewers). */
+  requested?: string[];
 }
 type Find = (repoId: string, num: number) => MockPrRef | undefined;
 
@@ -31,6 +33,21 @@ function locate(list: PrComment[], id: string): { list: PrComment[]; i: number }
 export function prReviewMockRoutes(find: Find): MockRoute[] {
   const pr = (m: RegExpMatchArray) => find(m[1], Number(m[2]));
   return [
+    {
+      method: 'PUT',
+      re: /^\/repos\/([^/]+)\/prs\/(\d+)\/reviewers$/,
+      handle: (m, body) => {
+        const p = pr(m);
+        if (!p) return notFound('pr');
+        const add: string[] = body.add ?? [];
+        const remove: string[] = body.remove ?? [];
+        const keep = (l: string[] | undefined): string[] => (l ?? []).filter((n) => !remove.includes(n));
+        p.approved_by = keep(p.approved_by);
+        p.changes_by = keep(p.changes_by);
+        p.requested = [...keep(p.requested), ...add.filter((n) => !(p.requested ?? []).includes(n) && !p.approved_by.includes(n))];
+        return { status: 204 };
+      },
+    },
     {
       method: 'POST',
       re: /^\/repos\/([^/]+)\/prs\/(\d+)\/(approve|request-changes)$/,

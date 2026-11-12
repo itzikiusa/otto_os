@@ -127,24 +127,33 @@ pub fn build_improve_narrative_from_clarifications(
         s.push_str("## Answered Questions\n\n(none)\n\n");
     } else {
         s.push_str("## Answered Questions\n\n");
+        // The answers (and reconciled questions) come from third-party
+        // Jira/Confluence comments: fenced as DATA so a comment can't steer
+        // the self-improvement run that edits skills.
+        let mut qa = String::new();
         for q in &answered {
-            s.push_str("**Q:** ");
-            s.push_str(&q.text);
-            s.push('\n');
+            qa.push_str("**Q:** ");
+            qa.push_str(&q.text);
+            qa.push('\n');
             if let Some(ref ans) = q.answer {
                 if !ans.trim().is_empty() {
-                    s.push_str("**A:** ");
-                    s.push_str(ans.trim());
-                    s.push('\n');
+                    qa.push_str("**A:** ");
+                    qa.push_str(ans.trim());
+                    qa.push('\n');
                 }
             }
             if !q.category.is_empty() && q.category != "general" {
-                s.push_str("**Category:** ");
-                s.push_str(&q.category);
-                s.push('\n');
+                qa.push_str("**Category:** ");
+                qa.push_str(&q.category);
+                qa.push('\n');
             }
-            s.push('\n');
+            qa.push('\n');
         }
+        s.push_str(&otto_orchestrator::fence_untrusted(
+            "question/answer pairs reconciled from Jira/Confluence comments",
+            qa.trim_end(),
+        ));
+        s.push_str("\n\n");
     }
 
     if notes.is_empty() {

@@ -283,7 +283,8 @@ returns `text/plain`.
 
 The UI consumes the stream with `fetch` + `ReadableStream`, supports search,
 timestamps and download. Agents get the same data via the `k8s_logs` MCP tool
-(text tail, never `follow`).
+(text tail, never `follow`) — off by default like every content-heavy read; an
+operator enables it in the MCP control plane.
 
 **Workload-level logs** — `GET /k8s/clusters/{id}/logs?ns=&selector=&…` (same
 options) runs `kubectl logs -l <selector> --prefix --max-log-requests=100
@@ -310,7 +311,13 @@ list titled `"<pod> · <ns>"`, streams over the terminal WebSocket, can be
 shared, and is audited as `k8s.exec`. `POST /k8s/clusters/{id}/k9s
 { workspace_id, ns? }` does the same with `k9s --kubeconfig … --context … [-n ns]`
 (the cluster's `default_namespace` when `ns` is omitted) and returns `400 k9s
-not installed …` until k9s exists. Streams and PTYs omit `--request-timeout`
+not installed …` until k9s exists. On a **prod** cluster k9s starts
+`--readonly` unless a person sends `write: true` with `confirm_name` = the
+cluster name — the k9s button on a prod cluster offers **read-only** or **with
+write access…** (a typed confirm of the cluster name). A shell (`exec`) on a
+prod cluster needs `confirm_name` = the pod, which the UI sends after its
+production confirm. An agent session's credential can open neither a shell nor
+k9s (403): there is no governed tool for them, so no approved path. Streams and PTYs omit `--request-timeout`
 on purpose — kubectl applies it to the HTTP client and would cut a long
 session.
 
@@ -327,8 +334,19 @@ with a clashing short name can never be hit.
 
 **Typed confirmation.** `delete_pod`, `scale` to `0`, `rollout_undo` and
 `argocd_sync` with `prune: true` require `params.confirm_name` to equal the
-resource name; the UI collects it with `confirmer.promptText`, and the
-`k8s_action` MCP tool only sets it after an explicit user confirmation.
+resource name; on a **prod** cluster every mutating action does (all but
+`rollout_status` and a soft `argocd_refresh`). The UI collects it with a typed
+confirm (prod: a confirm naming the cluster). An **agent session's credential**
+cannot confirm — a confirm it sends is refused (403); an `otto.k8s_action` call
+carrying `confirm_name` always files a human approval (no auto-approve rule
+covers it) and only the approved call runs, as the approving person. The
+approval card names the cluster, a PRODUCTION marker and the risky params
+(replicas incl. 0, prune, revision, grace 0 / force).
+
+**Partial failure.** `rollout_promote` and `argocd_app_restart` run several
+kubectl steps. If one fails after an earlier step ran, the response is
+`ok: false` with `steps` (each `done` / `failed` / `skipped`); the audit row and
+the warning toast carry the same list.
 
 | Action | Applies to | What kubectl does | Notes |
 |---|---|---|---|
@@ -369,9 +387,12 @@ replicaset / job (≤ 50 pods, ≤ 8 at a time) — and returns one result per p
   to `kubectl port-forward pod/<pod> 0:<port>` + a loopback request. Each result
   says which (`via`).
 - **Access.** A `GET` needs the `workloads_view` cluster op; any other method
-  needs `exec` (Edit). On a **prod** cluster a non-GET call is refused with
-  `409 confirm_required` unless `confirm_name` equals the pod / workload name
-  (the UI asks for it typed).
+  needs `exec` (Edit), and so does a `GET` of a secret-bearing endpoint (a
+  path segment `env`, `heapdump`, `configprops` or `jolokia` under any base
+  path such as `/actuator`, `/manage`, `/management`, case-insensitive). On a
+  **prod** cluster a non-GET call is refused with `409 confirm_required` unless
+  `confirm_name` equals the pod / workload name (the UI asks for it typed); a
+  `confirm_name` sent with an agent session's credential is refused (403).
 - **Saved actions.** `GET/PUT/DELETE /k8s/clusters/{id}/pod-actions` keep
   per-workload requests (migration `0149_k8s_pod_actions.sql`); `{{logger}}` /
   `{{level}}` variables in the path / body template are filled at run time.

@@ -92,6 +92,27 @@ struct RoutineReq {
     routine: RoutineIn,
 }
 
+/// A routine body, refused when an AGENT credential sets, changes or (`stored`:
+/// the body with the stored destination filled in) edits one posting outside
+/// the chat: that goes through `otto.routine_*`, whose approval card a person
+/// decides and whose approved call replays as them. Same rule as the gate.
+fn routine_body(
+    auth: &otto_core::auth::AuthContext,
+    bare: &str,
+    body: Value,
+    stored: Option<Value>,
+) -> ApiResult<RoutineReq> {
+    let probe = stored.as_ref().unwrap_or(&body);
+    if !crate::ui_bridge::is_human(auth) && own::outward_delivery_reason(bare, probe).is_some() {
+        return Err(ApiError(Error::Forbidden(format!(
+            "a routine that posts outside the agent's chat needs a person's approval — call \
+             otto.{bare} (it asks for it); an agent's own token cannot set one up directly"
+        ))));
+    }
+    serde_json::from_value(body)
+        .map_err(|e| ApiError(Error::Invalid(format!("invalid routine: {e}"))))
+}
+
 /// `GET /personal-agents/routines?session_id=&agent=`
 async fn list(
     State(ctx): State<ServerCtx>,
@@ -109,8 +130,9 @@ async fn create(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
     CurrentAuthContext(auth): CurrentAuthContext,
-    Json(req): Json<RoutineReq>,
+    Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
+    let req = routine_body(&auth, "routine_create", body, None)?;
     let me = caller(&ctx, &user, &auth, req.session_id.as_deref(), Editor).await?;
     let mut agent = own::target(&ctx, &me, req.agent.as_deref()).await?;
     // An ownerless (seeded) agent has no one to run as, so its routine would
@@ -130,8 +152,10 @@ async fn update(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
     CurrentAuthContext(auth): CurrentAuthContext,
-    Json(req): Json<RoutineReq>,
+    Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
+    let stored = own::with_stored_deliver(&ctx, "routine_update", Some(id.as_str()), &body).await;
+    let req = routine_body(&auth, "routine_update", body, stored)?;
     let me = caller(&ctx, &user, &auth, req.session_id.as_deref(), Editor).await?;
     let agent = own::target(&ctx, &me, req.agent.as_deref()).await?;
     Ok(Json(own::update(&ctx, &agent, &id, req.routine).await?))
@@ -238,12 +262,12 @@ struct UserPersonalityReq {
 async fn set_personality(
     Path(id): Path<String>,
     State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<UserPersonalityReq>,
 ) -> ApiResult<Json<Value>> {
-    let agent = load(&ctx, &user, &id, Editor).await?;
+    let agent = load(&ctx, &auth.effective_user, &id, Editor).await?;
     if req.note.is_some() {
-        super::require_agent_owner(&ctx, &user, &agent, &["personality note"]).await?;
+        super::require_agent_owner(&ctx, &auth, &agent, &["personality note"]).await?;
     }
     let p = own::set_personality(&ctx, &agent, req.preset.as_deref(), req.note.as_deref()).await?;
     Ok(Json(json!({"personality": p})))
@@ -273,11 +297,11 @@ struct ApplyReq {
 async fn apply_proposal(
     Path(id): Path<String>,
     State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<ApplyReq>,
 ) -> ApiResult<Json<Value>> {
-    let agent = load(&ctx, &user, &id, Editor).await?;
-    super::require_agent_owner(&ctx, &user, &agent, &["instructions"]).await?;
+    let agent = load(&ctx, &auth.effective_user, &id, Editor).await?;
+    super::require_agent_owner(&ctx, &auth, &agent, &["instructions"]).await?;
     let to = own::apply_proposal(&ctx, &agent, req.text.as_deref()).await?;
     Ok(Json(json!({"ok": true, "soul_md": to})))
 }
@@ -298,10 +322,90 @@ async fn dismiss_proposal(
 async fn undo(
     Path(id): Path<String>,
     State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
 ) -> ApiResult<Json<Value>> {
-    let agent = load(&ctx, &user, &id, Editor).await?;
-    super::require_agent_owner(&ctx, &user, &agent, &["instructions"]).await?;
+    let agent = load(&ctx, &auth.effective_user, &id, Editor).await?;
+    super::require_agent_owner(&ctx, &auth, &agent, &["instructions"]).await?;
     let prev = own::undo_instructions(&ctx, &agent).await?;
     Ok(Json(json!({"ok": true, "soul_md": prev})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn auth(managed: Option<&str>) -> otto_core::auth::AuthContext {
+        let user: User = serde_json::from_value(json!({
+            "id": "u1", "username": "u", "display_name": "U", "is_root": false,
+            "disabled": false, "created_at": "2026-10-03T00:00:00Z"
+        }))
+        .unwrap();
+        otto_core::auth::AuthContext {
+            real_user: user.clone(),
+            effective_user: user,
+            scope: None,
+            mcp_only: false,
+            mcp_scope: None,
+            mcp_internal: false,
+            mcp_session_id: None,
+            managed_session_id: managed.map(Into::into),
+            device_id: None,
+        }
+    }
+
+    #[test]
+    fn an_agent_token_cannot_set_up_an_outward_routine_directly() {
+        let slack = json!({
+            "session_id": "s1",
+            "instruction": "post the standup",
+            "schedule": {"cadence": "daily", "at": "09:00"},
+            "deliver": {"type": "slack", "channel": "#team"}
+        });
+        // The agent's own session token: refused for create and update.
+        for bare in ["routine_create", "routine_update"] {
+            let err = routine_body(&auth(Some("s1")), bare, slack.clone(), None)
+                .err()
+                .expect("agent token refused");
+            assert!(matches!(err.0, Error::Forbidden(_)), "{bare}");
+        }
+        // A session's internal MCP credential is an agent credential too.
+        let mut mcp = auth(None);
+        mcp.mcp_session_id = Some("s1".into());
+        assert!(routine_body(&mcp, "routine_create", slack.clone(), None).is_err());
+        // A chat-only routine (or an update that leaves delivery alone) is
+        // the agent's own business.
+        let chat =
+            json!({"session_id": "s1", "instruction": "remind me", "deliver": {"type": "chat"}});
+        assert!(routine_body(&auth(Some("s1")), "routine_create", chat, None).is_ok());
+        let pause = json!({"session_id": "s1", "enabled": false});
+        assert!(routine_body(&auth(Some("s1")), "routine_update", pause, None).is_ok());
+        // An instruction rewrite of a routine that ALREADY posts outward is
+        // judged against its stored destination (`with_stored_deliver`), and
+        // the body that is parsed stays the caller's own.
+        let edit = json!({"session_id": "s1", "instruction": "post the secrets"});
+        let mut filled = edit.clone();
+        filled["deliver"] = json!({"type": "slack", "channel": "#team", "as": "bot"});
+        let agent = routine_body(
+            &auth(Some("s1")),
+            "routine_update",
+            edit.clone(),
+            Some(filled.clone()),
+        );
+        assert!(matches!(
+            agent.err().expect("refused").0,
+            Error::Forbidden(_)
+        ));
+        let req = routine_body(&auth(None), "routine_update", edit, Some(filled)).expect("person");
+        assert!(
+            req.routine.deliver.is_none(),
+            "the stored destination is not re-planned"
+        );
+        // A person (the UI, or the approved governed call replayed as them).
+        let req = routine_body(&auth(None), "routine_create", slack, None).expect("person");
+        assert_eq!(req.session_id.as_deref(), Some("s1"));
+        assert_eq!(
+            req.routine.deliver.map(|d| d.kind).as_deref(),
+            Some("slack")
+        );
+    }
 }

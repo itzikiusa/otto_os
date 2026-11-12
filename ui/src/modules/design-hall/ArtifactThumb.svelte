@@ -100,9 +100,9 @@
 
   // Live previews are full documents (style, layout, paint — at 1280 px — per
   // card). They render only while the card is on (or near) screen, and at
-  // most LIVE_CAP at once across every view (r3-03-03: the Lobby mounted up to
-  // 32, SpatialView 4 × every project). A card past the cap shows its
-  // placeholder until a slot frees.
+  // most LIVE_CAP at once across every view (r3-03-03: the Lobby once
+  // mounted up to 32). A card past the cap shows its placeholder until a slot
+  // frees.
   const LIVE_CAP = 12;
   class LiveSlots {
     used = $state(0);

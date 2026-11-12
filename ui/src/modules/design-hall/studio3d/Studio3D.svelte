@@ -3,25 +3,24 @@
   import { rowMenu } from '../../../lib/rowMenu';
   // 3D Studio 1.5 — the Design Hall layout for a `scene3d` artifact (mockup S4):
   //
-  //   ┌ HIERARCHY ─────┬ toolbar: ✨ Generate ▾ · Turntable · Play · Export ▾ ───┬ Inspector · Links · References ┐
+  //   ┌ HIERARCHY ─────┬ toolbar: ✨ Generate ▾ · Turntable · Play · Export ▾ ───┬ Inspector · Otto · Versions · Links ┐
   //   │ tree (+ add)   │ VIEWPORT (three.js)             view cube ⌝          │ transform · material presets  │
   //   │ Environment    │   "Showing v8 draft by Otto · not approved"          │ brand swatches · sliders      │
   //   │ Views          │ ⌞ States [Idle | Hover | Flipped]   12 objects · … ⌟  │ notes · Used in               │
   //   └────────────────┴──────────────────────────────────────────────────────┴───────────────────────────────┘
-  //
-  // It edits the SAME working copy the artifact view owns (`source` →
-  // `onchange(source)`): the view keeps versions, saving, conflicts and the
-  // header. Everything here is a pure `ops.ts` edit of the scene3d v2 doc, an
-  // agent turn through the unified design assist route (Blockout / Text→3D /
-  // Image→3D / Refine in Blender — each lands as a reviewable `agent` version),
-  // or a local export. Cloud 3D providers are opt-in and disabled without a
-  // Keychain key; nothing is sent anywhere without an explicit click.
+  // It edits the SAME working copy the artifact view owns (`source` → `onchange`):
+  // the view keeps versions, saving, conflicts and the header. Everything here is
+  // a pure `ops.ts` edit of the scene3d v2 doc, an agent turn through the design
+  // assist route (Blockout / Text→3D / Image→3D / Refine in Blender — each lands
+  // as a reviewable `agent` version), or a local export. Cloud 3D providers are
+  // opt-in; nothing is sent anywhere without an explicit click.
   import Tabs, { type TabItem } from '../../../lib/components/Tabs.svelte';
   import { toastError } from '../../../lib/toastError';
   import { copyWithToast } from '../../../lib/clipboard';
   import { untrack, type Snippet } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import Modal from '../../../lib/components/Modal.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
   import { toasts } from '../../../lib/toast.svelte';
@@ -30,6 +29,9 @@
   import { downloadText } from '../../../lib/components/exporters';
   import * as dapi from '../../../lib/api/design';
   import { listTurns, startAssist as startTurn } from '../assist/api';
+  import { designAssistBus } from '../../../lib/events.svelte';
+  import { loadErrorText as errText } from '../../../lib/loadError';
+  import { blenderSourceOf, downloadBlenderScript } from '../exportMenu';
   import type { DesignArtifact, DesignAssistTurn, DesignVersion } from '../../../lib/api/types';
   import {
     ENV_PRESETS,
@@ -80,17 +82,17 @@
     linkCount: number;
     seqOf: (versionId: string) => number | null;
     onchange: (source: string) => void;
-    /** The view's Otto / Links / References panels (it owns their data); Otto
-     *  gets the selected object so a turn can focus on it. */
+    /** The view's Otto / Versions / Links panels (it owns their data; Links
+     *  holds Find references); Otto gets the selected object to focus a turn. */
     otto: Snippet<[AssistSelection | null]>;
     links: Snippet;
-    references: Snippet;
+    versions: Snippet;
     /** Open on the Otto tab (the lobby's Generate hand-off, `#/design/a/<id>/otto`). */
     openOtto?: boolean;
     /** The view's toolbar notices (imported / read-only / newer version). */
     notices?: Snippet;
   }
-  let { artifact, source, readonly, dirty, head, usedIn, linkCount, seqOf, onchange, otto, links, references, notices, openOtto = false }: Props = $props();
+  let { artifact, source, readonly, dirty, head, usedIn, linkCount, seqOf, onchange, otto, links, versions, notices, openOtto = false }: Props = $props();
 
   // ── Document ──────────────────────────────────────────────────────────────
   const parsed = $derived(source ? parseScene(source) : null);
@@ -103,12 +105,12 @@
   let showSource = $state(false);
   let showSceneTools = $state(false);
   let turntable = $state(false);
-  type RightTab = 'inspector' | 'otto' | 'links' | 'references';
+  type RightTab = 'inspector' | 'otto' | 'versions' | 'links';
   const rightTabs = $derived<TabItem<RightTab>[]>([
     { id: 'inspector', label: 'Inspector', testid: 's3d-tab-inspector' },
     { id: 'otto', label: 'Otto', testid: 'design-tab-otto' },
+    { id: 'versions', label: 'Versions', testid: 'design-tab-versions' },
     { id: 'links', label: 'Links', count: linkCount, testid: 'design-tab-links' },
-    { id: 'references', label: 'References', testid: 'design-tab-references' },
   ]);
   let rightTab = $state<RightTab>(untrack(() => (openOtto ? 'otto' : 'inspector')));
   $effect(() => {
@@ -161,39 +163,42 @@
   });
 
   // ── Agent turns (Blockout / Text→3D / Image→3D / Refine in Blender) ───────
-  let agent = $state<{ turnId: string; label: string } | null>(null);
-  let pollTimer: ReturnType<typeof setTimeout> | null = null;
-  // Set on unmount: a poll in flight must not re-arm a timer (or toast) from a dead view.
+  let agent = $state<{ turnId: string; label: string; fails: number; error: string | null } | null>(null);
+  // Set on unmount: a read in flight must not toast from a dead view.
   let destroyed = false;
   function track(turn: DesignAssistTurn, label: string): void {
-    agent = { turnId: turn.turn_id, label };
+    agent = { turnId: turn.turn_id, label, fails: 0, error: null };
     toasts.info('Otto is working on it', `${label}. The result lands as a new agent version you can review.`);
-    schedulePoll();
   }
-  function schedulePoll(): void {
-    if (destroyed) return;
-    if (pollTimer) clearTimeout(pollTimer);
-    pollTimer = setTimeout(() => void poll(), 3000);
-  }
+  // Pushed, not polled: the Otto panel's `designAssistBus` says when the turn
+  // ends (or the socket reconnects); the outcome is then read once.
+  let assistSeen = designAssistBus.seq;
+  $effect(() => {
+    const now = designAssistBus.seq;
+    void designAssistBus.resyncTick;
+    untrack(() => {
+      const evs = designAssistBus.since(assistSeen);
+      assistSeen = now;
+      if (agent && (evs.length === 0 || evs.some((ev) => ev.type === 'design_assist_updated' && ev.turn_id === agent!.turnId))) void poll();
+    });
+  });
   async function poll(): Promise<void> {
     const a = agent;
     if (!a) return;
     try {
       const turns = await listTurns(artifact.id);
-      if (destroyed) return;
+      if (destroyed || agent?.turnId !== a.turnId) return;
       const out = turnOutcome(turns.find((x) => x.turn_id === a.turnId));
-      if (agent?.turnId !== a.turnId) return;
-      if (out.kind === 'wait') return schedulePoll();
+      if (out.kind === 'wait') return void (agent = { ...a, fails: 0, error: null });
       agent = null;
       toasts[out.kind](out.title, out.body);
-    } catch {
-      if (destroyed) return;
-      if (agent?.turnId === a.turnId) schedulePoll();
+    } catch (e) {
+      // A failed read is retried on the next event; after two in a row say so inline.
+      if (!destroyed && agent?.turnId === a.turnId) agent = { ...a, fails: a.fails + 1, error: a.fails + 1 >= 2 ? errText(e) : null };
     }
   }
   $effect(() => () => {
     destroyed = true;
-    if (pollTimer) clearTimeout(pollTimer);
     models.release();
   });
   /** This editor’s hold on its model blobs (released on unmount, above). */
@@ -299,7 +304,7 @@
       { label: 'Scene JSON', icon: 'file', disabled: !source, action: () => source && downloadText(source, `${glbFileName(artifact.title).replace(/\.glb$/, '')}.scene3d.json`, 'application/json') },
       { separator: true },
       { label: 'Optimize for web (meshopt)…', icon: 'zap', action: () => void optimize() },
-      { label: 'Blender script — Product arena only', icon: 'file', disabled: true },
+      ...(blenderSourceOf(artifact) ? [{ label: 'Blender script (.py)', icon: 'file', action: () => void downloadBlenderScript(artifact) }] : []),
     ];
     ctxMenu.show(e, items);
   }
@@ -378,7 +383,9 @@
     const anchor = document.querySelector<HTMLElement>('[data-testid="s3d-left"]');
     const rect = anchor?.getBoundingClientRect();
     // Opened from the Hierarchy's Add menu (already closed): anchor near the panel.
-    const at = { clientX: (rect?.left ?? 200) + 40, clientY: (rect?.top ?? 120) + 40, preventDefault() {}, stopPropagation() {} };
+    // Logical: 40 px in from the panel's inline-start edge (its right edge in RTL).
+    const rtl = !!anchor && getComputedStyle(anchor).direction === 'rtl';
+    const at = { clientX: rect ? (rtl ? rect.right - 40 : rect.left + 40) : 240, clientY: (rect?.top ?? 120) + 40, preventDefault() {}, stopPropagation() {} };
     ctxMenu.show(at as unknown as MouseEvent, items, { filter: models.length > 8, maxVisible: 12 });
   }
   async function uploadModel(e: Event): Promise<void> {
@@ -627,6 +634,7 @@
         <span class="grow"></span>
         {#if agent}
           <span class="agent" use:announceShown={`Otto · ${agent.label}…`} data-testid="s3d-agent"><span class="pulse" aria-hidden="true"></span> Otto · {agent.label}…</span>
+          {#if agent.error}<LoadState what="Otto’s progress" errorTitle="Can’t read Otto’s progress" variant="compact" error={agent.error} empty onretry={() => void poll()} />{/if}
         {:else if agentDraft && head}
           <span class="draft-banner" data-testid="s3d-draft" use:announceShown={`Showing v${head.seq} draft by Otto, not approved`}>
             <Icon name="sparkle" size={12} /> Showing <strong>v{head.seq} draft</strong> by Otto · not approved
@@ -687,10 +695,10 @@
           {/if}
         {:else if rightTab === 'otto'}
           {@render otto(assistSelection)}
-        {:else if rightTab === 'links'}
-          {@render links()}
+        {:else if rightTab === 'versions'}
+          {@render versions()}
         {:else}
-          {@render references()}
+          {@render links()}
         {/if}
       </div>
     </aside>
@@ -893,16 +901,8 @@
     border-color: var(--accent-line);
     color: var(--accent-text);
   }
-  .grow {
-    flex: 1;
-  }
-  .agent {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--fs-s);
-    color: var(--accent-text);
-  }
+  .grow { flex: 1; }
+  .agent { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-s); color: var(--accent-text); }
   .pulse {
     width: 8px;
     height: 8px;
@@ -911,9 +911,7 @@
     animation: otto-pulse 1.4s ease-in-out infinite;
   }
   @media (prefers-reduced-motion: reduce) {
-    .pulse {
-      animation: none;
-    }
+    .pulse { animation: none; }
   }
   .stage {
     position: relative;

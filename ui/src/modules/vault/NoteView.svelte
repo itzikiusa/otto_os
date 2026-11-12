@@ -52,6 +52,8 @@
   import RefineDrawer from './RefineDrawer.svelte';
   import StructuredNote from './StructuredNote.svelte';
   import LinkPreview from './LinkPreview.svelte';
+  import AttachmentBar from './AttachmentBar.svelte';
+  import { fileTarget } from './attachmentUpload';
   import { linkPreview } from './previewStore.svelte';
   import { structuredModel } from './structuredNote';
   import { vault, vaultConflictKind } from './vault.svelte';
@@ -337,6 +339,15 @@
     }
   });
 
+  // -- editor: paste / drop files → vault attachment + embed at the cursor --------
+  let editor = $state<ReturnType<typeof CodeEditor> | null>(null);
+  let attach = $state<ReturnType<typeof AttachmentBar> | null>(null);
+  function insertAttachment(text: string, forNote: string | null): boolean {
+    if (!vault.editing || !editor || vault.notePath !== forNote) return false;
+    editor.insertText(text);
+    return true;
+  }
+
   // -- editor: [[wikilink]] + #tag completion -----------------------------------
   async function vaultCompletions(cx: CompletionContext): Promise<CompletionResult | null> {
     const wiki = cx.matchBefore(/\[\[([^\]\n]*)$/);
@@ -458,8 +469,10 @@
     {/if}
 
     {#if vault.editing}
-      <div class="editor-wrap">
+      <AttachmentBar bind:this={attach} note={vault.notePath} insert={insertAttachment} />
+      <div class="editor-wrap" use:fileTarget={(files, source) => attach?.add(files, source)}>
         <CodeEditor
+          bind:this={editor}
           path={vault.notePath ?? 'note.md'}
           content={vault.draft}
           root=""

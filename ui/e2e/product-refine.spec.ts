@@ -2,10 +2,10 @@ import { test, expect, type Page, type BrowserContext } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { seedProductStory } from './seed-product';
 
-// ── E2E: talk-to-agent story refinement (the Refine tab) ───────────────────────
+// ── E2E: talk-to-agent story refinement (the story Chat tab) ───────────────────
 //
-// Opens a seeded story's Overview, switches to the Refine tab, creates a new
-// refinement thread, sends a chat message, and asserts the request round-trip +
+// Opens a seeded story's Overview, switches to the Chat tab (the merged Chat +
+// Refine tab, on refinement threads), starts a new chat, sends a chat message, and asserts the request round-trip +
 // persistence — never specific agent wording (the agent reply is
 // non-deterministic on the throwaway daemon).
 //
@@ -80,16 +80,16 @@ async function openStoryOverview(page: Page): Promise<void> {
   await expect(page.locator('.overview')).toBeVisible({ timeout: 20_000 });
 }
 
-async function openRefineTab(page: Page): Promise<void> {
-  // Refine lives under the "Discover" workflow group: pick the group first, then
-  // the Refine sub-tab. The tab strips are horizontally scrollable; Playwright
-  // auto-scrolls the tab into view before clicking. The accessible name is the
-  // tab label.
+async function openChatTab(page: Page): Promise<void> {
+  // The story Chat (formerly the separate Chat and Refine tabs) lives under the
+  // "Discover" workflow group: pick the group first, then the Chat sub-tab.
+  // The tab strips are horizontally scrollable; Playwright auto-scrolls the tab
+  // into view before clicking. The accessible name is the tab label.
   await page.getByRole('tab', { name: 'Discover', exact: true }).click();
-  const refineTab = page.getByRole('tab', { name: 'Refine' });
-  await expect(refineTab).toBeVisible({ timeout: 15_000 });
-  await refineTab.click();
-  await expect(page.locator('.refine-tab')).toBeVisible({ timeout: 15_000 });
+  const chatTab = page.getByRole('tab', { name: 'Chat', exact: true });
+  await expect(chatTab).toBeVisible({ timeout: 15_000 });
+  await chatTab.click();
+  await expect(page.locator('.chat-tab')).toBeVisible({ timeout: 15_000 });
 }
 
 test('refine: new thread → send → optimistic PO bubble + thinking → settles → persists', async ({
@@ -117,16 +117,16 @@ test('refine: new thread → send → optimistic PO bubble + thinking → settle
   });
 
   await openStoryOverview(page);
-  await openRefineTab(page);
+  await openChatTab(page);
 
-  // ── 1. Create a new thread → it appears and is auto-selected (chat renders) ──
-  const newThreadBtn = page.getByRole('button', { name: /New thread/ });
-  await expect(newThreadBtn).toBeVisible({ timeout: 15_000 });
-  await newThreadBtn.click();
+  // ── 1. Start a new chat → it appears and is auto-selected (chat renders) ────
+  const newChatBtn = page.locator('.list-pane').getByRole('button', { name: /New chat/ });
+  await expect(newChatBtn).toBeVisible({ timeout: 15_000 });
+  await newChatBtn.click();
 
-  // A thread row appears in the list AND becomes the active (selected) one.
-  await expect(page.locator('.thread-item').first()).toBeVisible({ timeout: 20_000 });
-  await expect(page.locator('.thread-item.active')).toBeVisible({ timeout: 20_000 });
+  // A chat row appears in the list AND becomes the active (selected) one.
+  await expect(page.locator('.chat-item').first()).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('.chat-item.active')).toBeVisible({ timeout: 20_000 });
   // Selecting a thread renders the chat pane.
   await expect(page.locator('.refine-chat')).toBeVisible({ timeout: 15_000 });
 
@@ -158,18 +158,18 @@ test('refine: new thread → send → optimistic PO bubble + thinking → settle
   // Drop the delay so the reload's GETs aren't slowed.
   await context.unroute(MESSAGES_ROUTE);
 
-  // ── 4. Reload → reopen Refine → reselect the thread → user message persisted ─
+  // ── 4. Reload → reopen Chat → reselect the chat → user message persisted ────
   // The backend persisted the user message BEFORE the agent call, so it survives
   // the round-trip regardless of how the turn itself resolved. This is the
   // durable proof that the thread + its messages live server-side.
   await page.reload();
   await expect(page.locator('.product-page')).toBeVisible({ timeout: 30_000 });
   await openStoryOverview(page);
-  await openRefineTab(page);
+  await openChatTab(page);
 
-  const persistedThread = page.locator('.thread-item').first();
+  const persistedThread = page.locator('.chat-item').first();
   await expect(persistedThread).toBeVisible({ timeout: 20_000 });
-  await persistedThread.locator('.thread-btn').click();
+  await persistedThread.locator('.chat-btn').click();
   await expect(page.locator('.refine-chat')).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.bubble-user', { hasText: PO_MESSAGE })).toBeVisible({
     timeout: 20_000,

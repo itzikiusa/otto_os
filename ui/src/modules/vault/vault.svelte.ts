@@ -1376,7 +1376,7 @@ function sameVaultStatus(a: VaultStatus | null, b: VaultStatus): boolean {
   return !!a && a.id === b.id && (a.generation ?? null) === (b.generation ?? null) &&
     a.scan_state === b.scan_state && a.last_scan_at === b.last_scan_at && a.notes === b.notes &&
     a.links === b.links && a.unresolved === b.unresolved && a.tags === b.tags &&
-    a.attachments === b.attachments;
+    a.attachments === b.attachments && JSON.stringify(a.search_index ?? null) === JSON.stringify(b.search_index ?? null);
 }
 
 /** The note's link targets (`[[wiki]]`, `![[embed]]`, `](md link)`), in

@@ -22,6 +22,7 @@ use super::identity::{self, Me};
 use super::{map_state, ts, varr, vbool, vstr, vstr_opt, vu64, RemoteRef, RemoteRepoSummary};
 
 pub(crate) mod reactions;
+pub(crate) mod reviewers;
 
 /// Percent-encode characters that must be escaped in GitLab query/path values.
 fn percent_encode_query(s: &str) -> String {
@@ -538,6 +539,25 @@ impl super::GitProvider for Gitlab {
                 .collect(),
             has_more,
         })
+    }
+
+    async fn list_review_requested(
+        &self,
+        r: &RemoteRef,
+        page: u32,
+        per_page: u32,
+    ) -> Result<super::PrPage> {
+        self.review_requested_page(r, page, per_page).await
+    }
+
+    async fn set_reviewers(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()> {
+        self.edit_reviewers(r, number, add, remove).await
     }
 
     async fn get_pr(&self, r: &RemoteRef, number: u64) -> Result<PrDetail> {

@@ -110,6 +110,9 @@ export interface SkillFileContentResp {
   path: string;
   content: string;
   binary: boolean;
+  /** SHA-256 (hex) of the file's bytes on disk. Library files only
+   *  (`GET /library/skills/{name}/file`); provider files omit it. */
+  hash?: string;
 }
 
 export interface WriteSkillFileReq {
@@ -117,6 +120,9 @@ export interface WriteSkillFileReq {
   content: string;
   /** "New file": 409 instead of overwriting an existing `path`. */
   create_only?: boolean;
+  /** SHA-256 (hex) of the file as the editor read it. A mismatch on disk
+   *  writes nothing and answers 409 `{code:'conflict', current_hash}`. */
+  if_hash?: string;
 }
 
 export interface CreateLibrarySkillReq {
@@ -185,7 +191,7 @@ export interface BundledSkillView {
   version: number;
   description: string;
   installed_version: number | null;
-  /** "not_installed" | "up_to_date" | "update_available" | "ahead". */
+  /** "not_installed" | "up_to_date" | "update_available" | "ahead" | "modified". */
   state: string;
   update_available: boolean;
 }
@@ -287,14 +293,17 @@ export interface UpsertLibraryEntryReq {
   body: string;
 }
 
-// --- Bundled skills library (Settings → Skills) ----------------------------
+// --- Bundled skills library (Skills Lab → Skills → Bundled) -----------------
 
-/** Install state of a bundled skill vs. the installed library copy. */
+/** Install state of a bundled skill vs. the installed library copy.
+ *  `modified`: the installed tree is no longer what Otto installed (edited
+ *  without a version bump) — Install all skips it; Update asks and backs up. */
 export type BundledSkillState =
   | 'not_installed'
   | 'up_to_date'
   | 'update_available'
-  | 'ahead';
+  | 'ahead'
+  | 'modified';
 
 /** A skill shipped with Otto, with its state relative to the installed copy. */
 export interface BundledSkill {
@@ -334,6 +343,9 @@ export interface InstallAllBundledResp {
    * skipped skill are still reconciled.
    */
   skipped: string[];
+  /** Installed copies edited since Otto installed them (tree hash changed):
+   *  left untouched unless `force`. Absent from older daemons. */
+  modified?: string[];
   /** A Library install or a provider-mirror reconcile failed; the rest of the batch still ran. */
   failed: { name: string; error: string }[];
   /** `<provider skills dir>/<name>` paths left untouched: a user-owned skill of that name already lives there. */

@@ -200,3 +200,43 @@ pub async fn can_configure(pool: &DbPool, user: &User, id: &Id) -> Result<bool> 
             .await?
             >= Capability::Admin)
 }
+
+/// A typed confirmation (EC2 stop/reboot `confirm_id`, SQS purge
+/// `confirm_name`, a prod S3 delete's `confirm`) is a body field the client
+/// asserts, so an agent session's own credential cannot give a person's
+/// confirmation (S6-304 — the rule Athena's prod DDL guard applies). Called
+/// once the confirm is known to be required and correct: only a person's
+/// request, or a governed tool call a person approved (it replays as that
+/// person), gets past it.
+pub fn refuse_agent_confirm(what: &str) -> Result<()> {
+    if otto_core::auth::request_is_agent() {
+        return Err(Error::Forbidden(format!(
+            "an agent session's credential cannot confirm {what} — a person signed in to Otto \
+             must run it"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod agent_confirm_tests {
+    use otto_core::auth::{with_request_credential, RequestCredential};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn only_a_person_confirms() {
+        let agent = RequestCredential {
+            agent: true,
+            root_withheld: false,
+        };
+        let refused = with_request_credential(agent, async { refuse_agent_confirm("x") }).await;
+        assert!(matches!(refused, Err(Error::Forbidden(_))), "{refused:?}");
+        let person = RequestCredential::default();
+        assert!(
+            with_request_credential(person, async { refuse_agent_confirm("x") })
+                .await
+                .is_ok()
+        );
+    }
+}

@@ -15,7 +15,6 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use otto_core::api::Problem;
 use otto_core::auth::AuthUser;
-use otto_core::domain::Environment;
 use otto_core::domain::{Capability, Feature, Session};
 use otto_core::{Error, Id};
 use otto_state::{AuditRepo, GrantsRepo, NewAuditEntry};
@@ -261,6 +260,25 @@ async fn audit<S: AwsCtx>(
     {
         tracing::warn!(action, "aws audit insert failed: {e}");
     }
+}
+
+/// Audit a write's OUTCOME — success and failure / refusal alike, as the k8s
+/// console does: a refused (e.g. an agent's confirm) or failed mutation
+/// attempt is as interesting as a successful one. `detail` gains `ok` and,
+/// on failure, `error`.
+async fn audit_outcome<S: AwsCtx, T>(
+    ctx: &S,
+    user: &Id,
+    action: &str,
+    target: String,
+    mut detail: serde_json::Value,
+    result: &otto_core::Result<T>,
+) {
+    detail["ok"] = serde_json::json!(result.is_ok());
+    if let Err(e) = result {
+        detail["error"] = serde_json::json!(e.to_string());
+    }
+    audit(ctx, user, action, target, detail).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -767,22 +785,20 @@ async fn s3_delete<S: AwsCtx>(
     crate::access::check(&ctx.pool(), &user, &id, "s3_delete", Some(&bucket)).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
-    if a.environment == Environment::Prod && q.confirm.as_deref() != Some(q.key.as_str()) {
-        return Err(Error::Invalid(format!(
-            "'{}' is a production account — type the object key to confirm the delete",
-            a.name
-        ))
-        .into());
-    }
-    s3::delete_object(&svc, &a, &bucket, &q.key, q.region.as_deref()).await?;
-    audit(
+    let result = match s3::check_delete_confirm(a.environment, &a.name, &q) {
+        Ok(()) => s3::delete_object(&svc, &a, &bucket, &q.key, q.region.as_deref()).await,
+        Err(e) => Err(e),
+    };
+    audit_outcome(
         &ctx,
         &user.id,
         "aws.s3.delete",
         format!("s3://{bucket}/{}", q.key),
         serde_json::json!({ "account_id": id }),
+        &result,
     )
     .await;
+    result?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -914,16 +930,18 @@ async fn sqs_send<S: AwsCtx>(
     crate::access::check(&ctx.pool(), &user, &id, "sqs_send", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
-    let resp = sqs::send(&svc, &a, &req, rq.region.as_deref()).await?;
-    audit(
+    let result = sqs::send(&svc, &a, &req, rq.region.as_deref()).await;
+    let message_id = result.as_ref().ok().map(|r| r.message_id.clone());
+    audit_outcome(
         &ctx,
         &user.id,
         "aws.sqs.send",
         req.url.clone(),
-        serde_json::json!({ "account_id": id, "message_id": resp.message_id, "bytes": req.body.len() }),
+        serde_json::json!({ "account_id": id, "message_id": message_id, "bytes": req.body.len() }),
+        &result,
     )
     .await;
-    Ok(Json(resp))
+    Ok(Json(result?))
 }
 
 /// POST /aws/accounts/{id}/sqs/queues/delete-message — AwsSqs:Edit → 204
@@ -937,15 +955,17 @@ async fn sqs_delete_message<S: AwsCtx>(
     crate::access::check(&ctx.pool(), &user, &id, "sqs_delete", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
-    sqs::delete_message(&svc, &a, &req, rq.region.as_deref()).await?;
-    audit(
+    let result = sqs::delete_message(&svc, &a, &req, rq.region.as_deref()).await;
+    audit_outcome(
         &ctx,
         &user.id,
         "aws.sqs.delete_message",
         req.url.clone(),
         serde_json::json!({ "account_id": id }),
+        &result,
     )
     .await;
+    result?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -960,15 +980,17 @@ async fn sqs_purge<S: AwsCtx>(
     crate::access::check(&ctx.pool(), &user, &id, "sqs_purge", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
-    sqs::purge(&svc, &a, &req, rq.region.as_deref()).await?;
-    audit(
+    let result = sqs::purge(&svc, &a, &req, rq.region.as_deref()).await;
+    audit_outcome(
         &ctx,
         &user.id,
         "aws.sqs.purge",
         req.url.clone(),
         serde_json::json!({ "account_id": id }),
+        &result,
     )
     .await;
+    result?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -983,16 +1005,18 @@ async fn sqs_redrive<S: AwsCtx>(
     crate::access::check(&ctx.pool(), &user, &id, "sqs_redrive", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
-    let resp = sqs::redrive(&svc, &a, &req, rq.region.as_deref()).await?;
-    audit(
+    let result = sqs::redrive(&svc, &a, &req, rq.region.as_deref()).await;
+    let task_handle = result.as_ref().ok().map(|r| r.task_handle.clone());
+    audit_outcome(
         &ctx,
         &user.id,
         "aws.sqs.redrive",
         req.source_arn.clone(),
-        serde_json::json!({ "account_id": id, "destination_arn": req.destination_arn, "task_handle": resp.task_handle }),
+        serde_json::json!({ "account_id": id, "destination_arn": req.destination_arn, "task_handle": task_handle }),
+        &result,
     )
     .await;
-    Ok(Json(resp))
+    Ok(Json(result?))
 }
 
 // ---------------------------------------------------------------------------
@@ -1012,15 +1036,23 @@ async fn ec2_instances<S: AwsCtx>(
     if regions::is_all(q.region.as_deref()) {
         let key = regions::all_key(&id, "ec2", &q);
         let v = regions::cached_all(key, || async {
-            let list = regions::enabled_regions(&svc, &a).await?;
-            let (ok, region_errors) = regions::fan_out(list, |region| {
+            let (list, note) = regions::enabled_regions(&svc, &a).await?;
+            let (ok, mut region_errors) = regions::fan_out(list, |region| {
                 let (svc, a, mut q) = (svc.clone(), a.clone(), q.clone());
                 q.region = Some(region);
-                async move { ec2::list_instances(&svc, &a, &q).await.map(|r| r.instances) }
+                async move { ec2::list_instances(&svc, &a, &q).await }
             })
             .await?;
+            region_errors.extend(note);
+            // A region whose list hit the page cap is partial, not complete.
+            region_errors.extend(
+                ok.iter()
+                    .filter(|(_, r)| r.truncated)
+                    .map(|(region, _)| RegionError::truncated(region, ec2::TRUNCATED_WHAT)),
+            );
+            let ok = ok.into_iter().map(|(region, r)| (region, r.instances));
             serde_json::to_value(AllRegions {
-                instances: tag(ok),
+                instances: tag(ok.collect()),
                 region_errors,
             })
             .map_err(Error::from)
@@ -1028,9 +1060,16 @@ async fn ec2_instances<S: AwsCtx>(
         .await?;
         return Ok(Json(v));
     }
-    Ok(Json(
-        serde_json::to_value(ec2::list_instances(&svc, &a, &q).await?).map_err(Error::from)?,
-    ))
+    let r = ec2::list_instances(&svc, &a, &q).await?;
+    let mut v = serde_json::to_value(&r).map_err(Error::from)?;
+    if r.truncated {
+        // The list views show `region_errors` inline: the same note here.
+        let region = q.region.as_deref().filter(|r| !r.is_empty());
+        let region = region.unwrap_or(&a.region);
+        v["region_errors"] =
+            serde_json::json!([RegionError::truncated(region, ec2::TRUNCATED_WHAT)]);
+    }
+    Ok(Json(v))
 }
 
 /// `?region=all` response for EC2 / RDS (`instances`) — rows carry `region`.
@@ -1076,18 +1115,26 @@ async fn ec2_power<S: AwsCtx>(
     let svc = AwsService::from_ctx(ctx);
     let a = svc.get_row(id).await?;
     let confirm = body.and_then(|Json(b)| b.confirm_id);
-    let resp = ec2::power(&svc, &a, instance_id, action, confirm.as_deref(), region).await?;
+    let result = ec2::power(&svc, &a, instance_id, action, confirm.as_deref(), region).await;
     // The next all-regions refresh must show the new state, not a cached one.
     regions::invalidate(id);
-    audit(
+    let (previous, current) = match &result {
+        Ok(r) => (
+            Some(r.previous_state.clone()),
+            Some(r.current_state.clone()),
+        ),
+        Err(_) => (None, None),
+    };
+    audit_outcome(
         ctx,
         user,
         &format!("aws.ec2.{}", action.as_str()),
         instance_id.to_string(),
-        serde_json::json!({ "account_id": id, "region": region, "previous_state": resp.previous_state, "current_state": resp.current_state }),
+        serde_json::json!({ "account_id": id, "region": region, "previous_state": previous, "current_state": current }),
+        &result,
     )
     .await;
-    Ok(Json(resp))
+    Ok(Json(result?))
 }
 
 /// POST /aws/accounts/{id}/ec2/instances/{instance_id}/start?region= — AwsEc2:Edit
@@ -1283,8 +1330,8 @@ async fn eks_clusters<S: AwsCtx>(
     if regions::is_all(q.region.as_deref()) {
         let key = regions::all_key(&id, "eks", &q);
         let v = regions::cached_all(key, || async {
-            let list = regions::enabled_regions(&svc, &a).await?;
-            let (ok, region_errors) = regions::fan_out(list, |region| {
+            let (list, note) = regions::enabled_regions(&svc, &a).await?;
+            let (ok, mut region_errors) = regions::fan_out(list, |region| {
                 let (svc, a) = (svc.clone(), a.clone());
                 async move {
                     eks::list_clusters(&svc, &a, Some(&region))
@@ -1293,6 +1340,7 @@ async fn eks_clusters<S: AwsCtx>(
                 }
             })
             .await?;
+            region_errors.extend(note);
             serde_json::to_value(AllRegionsClusters {
                 clusters: tag(ok),
                 region_errors,
@@ -1381,13 +1429,14 @@ async fn rds_instances<S: AwsCtx>(
     if regions::is_all(q.region.as_deref()) {
         let key = regions::all_key(&id, "rds", &q);
         let v = regions::cached_all(key, || async {
-            let list = regions::enabled_regions(&svc, &a).await?;
-            let (ok, region_errors) = regions::fan_out(list, |region| {
+            let (list, note) = regions::enabled_regions(&svc, &a).await?;
+            let (ok, mut region_errors) = regions::fan_out(list, |region| {
                 let (svc, a, mut q) = (svc.clone(), a.clone(), q.clone());
                 q.region = Some(region);
                 async move { rds::list_instances(&svc, &a, &q).await.map(|r| r.instances) }
             })
             .await?;
+            region_errors.extend(note);
             serde_json::to_value(AllRegions {
                 instances: tag(ok),
                 region_errors,

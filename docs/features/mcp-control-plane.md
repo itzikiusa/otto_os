@@ -48,7 +48,7 @@ the token kind, and the routes.
 | **Gateway** | `ottod mcp-tools` surfaces governed downstream tools (namespaced `mcp__<server>__<tool>`) and proxies them through the same pipeline. |
 | **Persistence** | SQLite (migration **0077**): augmented `mcp_servers` + `mcp_tools`, `mcp_allowlist`, `mcp_policies`, `mcp_call_log`, `mcp_approvals`. |
 | **RBAC** | `Feature::Mcp` (`mcp`): reads = **View**, mutations/invoke = **Edit**, posture (policy writes/import, outward config, approvals) = **Admin**; stdio registration = **Admin** in-handler. |
-| **UI** | Three sections replace eight tabs: **Otto server** is the default (`#/mcp`), **External servers** (`#/mcp/servers`) holds the registry/tools/rules, and **Activity** (`#/mcp/activity`) holds approvals, audit, and per-tool stats. Detailed controls use progressive disclosure. |
+| **UI** | Three sections replace eight tabs: **Otto server** is the default (`#/mcp`), **External servers** (`#/mcp/servers`) holds every MCP server — native and governed (§3.1.1) — with tools/rules, and **Activity** (`#/mcp/activity`) holds approvals, audit, and per-tool stats. Detailed controls use progressive disclosure. |
 | **Defaults** | Outward server **off**; dangerous-tool approval **on**; health sweep every **300 s**. |
 
 ---
@@ -99,10 +99,10 @@ server home and Activity remain available without a selected workspace; session
 attachment controls appear once a workspace is selected. Servers are registered
 **per workspace**.
 
-> This is distinct from the **legacy** per-workspace `.mcp.json` config CRUD
-> (`/mcp-servers`, migration 0036), which is unchanged and stays Exempt from
-> `Feature::Mcp` — Otto was never in the call path there. The control plane lives
-> under the separate `/mcp/*` and `/workspaces/{wid}/mcp/*` prefixes.
+> The per-workspace `.mcp.json` config routes (`/mcp-servers`, migration 0036)
+> manage the same `mcp_servers` rows as **native** servers (§3.1.1) and stay
+> Exempt from `Feature::Mcp` — Otto is not in the call path of a native server.
+> Their old page, Settings ▸ MCP servers, now redirects to `#/mcp/servers`.
 
 ---
 
@@ -155,6 +155,60 @@ to 250 ms for one before opening a throwaway session, so parallel calls to one
 `npx` server rarely pay a fresh spawn. Governed calls
 also record health as they go: a transport failure marks the server unhealthy,
 any answer marks it healthy (written only when the status changes).
+
+### 3.1.1 Native and governed servers
+
+`#/mcp/servers` is the one place every MCP server of the workspace is managed.
+Each row says how it **runs**:
+
+| Runs | Who launches it | Tool names in the agent | Governance |
+|---|---|---|---|
+| **Native** | the agent CLI, from each session's `.mcp.json` (codex `-c`, agy/grok/pi launchers alike) | the server's own (`get_issue`) | none: the row carries a **Not governed** badge — no policy, approval or audit applies |
+| **Governed** | Otto's gateway (stdio child of the daemon, or remote http) | `mcp__<server>__<tool>` | allowlist, per-tool switches, policy, approval, dry-run, audit (§4) |
+
+There is one table, `mcp_servers`, and its `managed` column **is** the mode
+(`true` governed, `false` native), so a server is never both. A native server is
+also never under an Enforced access policy: it is written into a file every
+session in the workspace reads, so per-person rules can't follow it
+(`McpRegistryRepo::list_native_enabled` is the set written to `.mcp.json`:
+enabled + unmanaged + stdio + not Enforced; the gateway and the invoke gate skip
+an unmanaged Legacy server).
+
+- **Add server** asks **Runs**: *Governed* registers through
+  `POST /workspaces/{wid}/mcp/servers` as before; *Native* (stdio only) goes
+  through `POST /workspaces/{wid}/mcp-servers`, the route Settings used. Both are
+  owner-only.
+- A native row offers **Edit** (name, command, arguments, env, secret env — a
+  bare `KEY=` keeps the stored Keychain value — and Enabled), the **Enabled**
+  switch (written to `.mcp.json` for new sessions) and **Remove**, all through
+  `/mcp-servers`, so disabling, renaming or removing still sweeps the launcher
+  env files that hold its resolved secrets. Otto never connects to a native
+  server, so it has no health, tools or Discover.
+- **⋯ → Run through Otto's gateway…** / **Run natively…** switches the mode
+  (owner only; `PATCH /mcp/servers/{id}` `{runs: "governed" | "native"}`). The
+  confirm says exactly what changes: governed tools reach the agent through
+  Otto's gateway under different names (`mcp__<server>__<tool>`), so skills and
+  prompts that name the native tools must be updated (and the reverse).
+  - *To governed*: the row becomes managed, stops being written into
+    `.mcp.json` at the next spawn, and Otto runs discovery. Per-person access
+    rules kept from before are enforced again.
+  - *To native* (stdio only): the access policy turns Legacy — its rules are kept,
+    not enforced, and come back when you switch back — and the row becomes
+    unmanaged, so the next spawn writes it into `.mcp.json`.
+  - Secrets never move: both modes read the same Keychain blob (`mcp-{id}`)
+    through the row's `secret_ref`; no value is copied into SQLite or a log.
+  - Sessions already running keep what they started with until they restart.
+- The per-workspace `otto` server switch (Settings' "Connections MCP") is
+  **Attach to sessions** on the Otto server page (§3.2); there is one copy.
+
+**Upgrading.** Every row used to be `managed`, so a stdio server without an
+Enforced access policy (one added under Settings before access policies) ran
+both ways: written into `.mcp.json` and surfaced through the gateway. A
+migration marks those rows unmanaged — they keep running natively and leave the
+gateway. Servers with an Enforced policy (every server added since) were never
+written to `.mcp.json` and stay governed. Rolling back is safe: the previous
+build reads the same rows and already treats an unmanaged Legacy server as
+direct-only.
 
 ### 3.2 Enable the outward Otto MCP server
 
@@ -339,8 +393,8 @@ Coverage by category (✅ = read tools, ⚠ = mutating tools, approval-gated):
 | **Self-Improvement** | ✅ get_config / list_runs / get_run / list_edits | ⚠ run, approve_edit, reject_edit, rollback_edit |
 | **Scheduled Tasks** | ✅ list (every workspace) / get / list_runs | ⚠ create / update / set_enabled / run / delete |
 | **Personal Agents** | ✅ list_agent_rooms / room_read / room_post (never approval-gated — persisted + user-visible) | — |
-| **AWS** | ✅ aws_list_accounts / aws_s3_list_buckets / aws_s3_list_objects / aws_s3_preview / aws_sqs_list_queues / aws_ec2_list_instances / aws_athena_list_tables / aws_athena_get_query / aws_eks_list_clusters / aws_logs_list_groups / aws_logs_filter / aws_logs_insights (billed per GB scanned) / aws_logs_get_insights | ⚠ aws_athena_query (starts a billed Athena scan; poll `aws_athena_get_query`), aws_sqs_send (produces one message), aws_sqs_peek³ — no S3 write, no EC2 start/stop |
-| **Kubernetes** | ✅ k8s_list_clusters / k8s_get_resources / k8s_describe / k8s_logs (text tail, never `follow`) / k8s_top | ⚠ k8s_action (restart / scale / delete_pod / rollout_* / Argo Rollouts promote-abort-retry / argocd_sync-refresh-terminate_op-app_restart / cronjob_*; destructive ones need `params.confirm_name == name`) |
+| **AWS** | ✅ aws_list_accounts / aws_s3_list_buckets / aws_s3_list_objects / aws_sqs_list_queues / aws_ec2_list_instances / aws_athena_list_tables / aws_athena_get_query / aws_eks_list_clusters / aws_logs_list_groups / aws_logs_get_insights — opt-in (off by default, content): aws_s3_preview / aws_logs_filter | ⚠ aws_athena_query (starts a billed Athena scan; poll `aws_athena_get_query`), aws_logs_insights (billed per GB scanned; poll `aws_logs_get_insights`), aws_sqs_send (produces one message), aws_sqs_peek³ — no S3 write, no EC2 start/stop |
+| **Kubernetes** | ✅ k8s_list_clusters / k8s_get_resources / k8s_describe / k8s_top — opt-in (off by default, content): k8s_logs (text tail, never `follow`) | ⚠ k8s_action (restart / scale / delete_pod / rollout_* / Argo Rollouts promote-abort-retry / argocd_sync-refresh-terminate_op-app_restart / cronjob_*; destructive ones — every mutating one on a prod cluster — need `params.confirm_name == name`, and such a call is always a person's approval: it runs as the approving person) |
 | **Code & Context / Agents / Approvals** | ✅ list_workspaces / list_goal_loops / *search_codebase*¹ / get_context_packet / get_proof_pack / ask_human_approval | ⚠ run_goal_loop |
 
 ¹ Off by default (opt-in): non-mutating tools that stream large/sensitive *content*
@@ -567,11 +621,16 @@ this order; the **first** decisive stage wins:
    (atomically) and must match `(server, tool, workspace, args_hash)`, be unexpired,
    and have been decided by **someone other than the requester**. A `dry_run` request
    skips approval *creation* (a preview executes nothing).
-7. **Dry-run** — if requested (or policy `require_dry_run`): **pure simulation** — it
+7. **Dry-run** — if requested, or under a policy `require_dry_run` when no
+   preview of the same call exists yet: **pure simulation** — it
    validates args, resolves the target, and returns
    `{ executed:false, mode:"preview", would_call:{server,tool,arguments} }`. It
    **never** calls the downstream tool (the gate in step 6 precedes it and is never
-   bypassed).
+   bypassed). Under `require_dry_run` the first call IS the preview and requests or
+   spends no approval; the identical repeat (same caller, server, tool and
+   canonical args hash, within 120 minutes) runs — through the approval gate if
+   one applies — and uses the preview up, so the next call previews again. The
+   previews live in daemon memory: after a restart the call previews again.
 8. **Execute** via the outbound client; measure latency + response bytes; **cap every
    result array to 500 rows** and `redact_json` the content.
 9. **Audit + stats** — exactly **one** `mcp_call_log` row per terminal path (denied /
@@ -668,7 +727,8 @@ Enabled, Approval, Override risk**, plus a progressively disclosed **dry-run/inv
 tester** (run a tool with JSON args, toggle **Dry run**, see the governed decision).
 
 - **Risk label** (`read` / `write` / `dangerous`) — from MCP `toolAnnotations` when
-  present (`destructiveHint=true`→`dangerous`; `readOnlyHint=true`→`read`), refined by
+  present (`destructiveHint=true`→`dangerous`; `readOnlyHint=true`→`read` only when
+  no write keyword contradicts it — the hint is the server's claim), refined by
   name/description **keywords** (`delete|drop|remove|exec|deploy|payment|…`→dangerous;
   `create|update|write|send|publish|merge|…`→write). **No signal → `write` (fail
   closed).**
@@ -681,6 +741,14 @@ tester** (run a tool with JSON args, toggle **Dry run**, see the governed decisi
   always pure local simulation.
 - A human can **pin** labels (`risk_overridden`); rediscovery never lowers a pinned
   label.
+- **Review baseline** (`mcp_tools.reviewed_hash`). A server's first catalog is
+  what the person adding it reviews: those tools start enabled. A tool that appears
+  on a later discovery starts **disabled** and badged **New — not reviewed**;
+  enabling it (or **Acknowledge**) reviews it. When a rediscovered tool's
+  description, input schema or annotations differ from the reviewed ones it is
+  badged **Changed since reviewed** and every call needs approval until a person
+  clicks **Acknowledge** (`PATCH /mcp/tools/{id}` `{acknowledge: true}`). Tools
+  from before review tracking are baselined on their next discovery.
 
 ---
 
@@ -699,7 +767,14 @@ matching enabled rules, `deny` beats `require_approval` beats `require_dry_run` 
 The matcher grammar (all fields optional, **AND**-combined; empty match = matches
 everything): `server_id`, `server_name`, `tool` (exact), `tool_glob` (simple `*`),
 `risk_label`, `min_injection_risk` (`>=`), `mutating` (bool), `direction`,
-`caller_kind`, `workspace_id`.
+`caller_kind`, `workspace_id`. Create, update and import refuse (400) any other key
+and any wrong value — a typo'd key used to be ignored, making the rule match every
+call.
+
+**Import** validates every rule first, then applies in one transaction: with
+`replace`, only the scopes the document names (each rule's `workspace_id`, or the
+global rules) are cleared; other workspaces keep their rules, and a failure leaves
+the old ruleset untouched.
 
 All policy **mutations** (create/update/delete/import) require **MCP Admin**; export
 and evaluate are read-only (View).
@@ -798,7 +873,12 @@ and the **cloud consoles** — AWS: `aws_list_accounts`, `aws_s3_list_buckets`/
 tail, 256 KiB cap keeping the newest lines, never `follow`), `k8s_top` — plus the
 Edit-gated writers `aws_athena_query`, `aws_sqs_send`, `aws_sqs_peek`,
 `k8s_action`, `k8s_pod_http` (the irreversible ones approval-gated through the
-governed invoke — see above).
+governed invoke — see above). The content reads `aws_s3_preview`,
+`aws_logs_filter` and `k8s_logs` follow the control plane's switch here too
+(refused until an operator enables `otto.<tool>`), and `aws_logs_insights`
+(billed per GB) and `aws_athena_query` (billed per byte) run through the governed
+invoke like the writers. The opt-in reads are also left out of this surface's
+`tools/list` while their control-plane twin is off.
 
 **Cross-workspace, by name.** The native list tools (`otto_list_workflows`,
 `otto_list_connections`, `otto_list_broker_clusters`, `otto_list_swarms`,
@@ -899,12 +979,10 @@ Otto's own agents, not just the UI tester and the outward tools. (In the shipped
 code the gateway tools are surfaced **additively**; there is no separate
 `mcp_gateway_enabled` toggle — a drift from the design doc, which proposed one.)
 
-**Known limitation — raw session injection.** Governed servers with `enabled=true`
-are also injected directly into session `.mcp.json` files. An agent can therefore
-reach that raw server entry without using the namespaced gateway tool and its
-governance pipeline. Keep a server disabled unless that direct session access is
-acceptable; the Activity audit covers calls routed through Otto, not calls made over
-the injected raw entry.
+**Native servers are not governed.** A governed server is never written into a
+session's `.mcp.json`; only a **native** one is (§3.1.1), and the gateway never
+surfaces a native one. Calls an agent makes to a native server never reach Otto:
+the Activity audit covers governed calls only.
 
 ---
 
@@ -961,7 +1039,7 @@ the workspace role.
 | `GET /workspaces/{wid}/mcp/servers` | List a workspace's servers (`McpServerDetail[]`) | View |
 | `POST /workspaces/{wid}/mcp/servers` | Register a server | Edit (stdio → **Admin**) |
 | `GET /mcp/servers/{id}` | Server + its tools | View |
-| `PATCH /mcp/servers/{id}` | Update server config | Edit (stdio command → Admin) |
+| `PATCH /mcp/servers/{id}` | Update server config; `runs: "native" \| "governed"` switches the run mode (§3.1.1) | Edit (stdio command → Admin; `runs` → owner) |
 | `DELETE /mcp/servers/{id}` | Delete a server (+ keychain secret) | Edit |
 | `POST /mcp/servers/{id}/health` | Probe health now | Edit |
 | `POST /mcp/servers/{id}/discover` | Re-discover the tool catalog | Edit |
@@ -1056,9 +1134,9 @@ migration 0146 and no longer read; auto-approve lives in the
   governed downstream tools additively (a drift from the design doc).
 - **No dedicated MCP WS event** — the gateway uses a generic `notice` nudge; the rest
   is poll/refresh.
-- **Enabled governed servers are also injected raw into sessions** — callers can use
-  those direct entries outside the gateway pipeline; disable the server unless that
-  access is intended.
+- **Native servers are outside governance by design** (§3.1.1) — switch one to
+  governed to put its calls under policy, approval and audit. A switch applies to
+  sessions started afterwards; running sessions keep what they started with.
 - **`stdio` registration runs arbitrary local commands** as the daemon — gated to
   MCP Admin, logged, and UI-warned, but inherently powerful.
 

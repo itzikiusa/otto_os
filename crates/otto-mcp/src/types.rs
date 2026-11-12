@@ -61,6 +61,8 @@ pub struct UpdateServerReq {
     pub injection_risk: Option<String>,
     pub default_tool_access: Option<String>,
     pub enabled: Option<bool>,
+    /// Native ⇄ governed (`"native"` | `"governed"`): owner only.
+    pub runs: Option<crate::RunMode>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -69,6 +71,10 @@ pub struct PatchToolReq {
     pub require_approval: Option<bool>,
     pub risk_label: Option<String>,
     pub injection_risk: Option<String>,
+    /// `true`: a person reviewed the tool's current description / schema —
+    /// it becomes the baseline (clears `unreviewed` / `changed_since_review`).
+    #[serde(default)]
+    pub acknowledge: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]

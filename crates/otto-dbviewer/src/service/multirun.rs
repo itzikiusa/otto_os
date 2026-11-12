@@ -380,7 +380,13 @@ impl DbViewerService {
         if !spec.read_only {
             for (ti, t) in targets.iter().enumerate() {
                 let writes = runs.iter().any(|r| r.target == ti && r.is_write);
-                if writes && t.guarded && self.is_enforced(&t.connection_id).await? {
+                if writes && t.read_only {
+                    warnings.push(format!(
+                        "{}: read-only connection — its writes are refused, and no \
+                         confirmation lifts that (turn off Read-only in its settings)",
+                        t.label
+                    ));
+                } else if writes && t.guarded && self.is_enforced(&t.connection_id).await? {
                     warnings.push(format!(
                         "{}: access-enforced {} connection — its writes will be refused \
                          (production / read-only changes need an approved reviewed change)",
@@ -584,6 +590,10 @@ impl DbViewerService {
                  classified as writes/DDL",
                 plan.write_count
             )));
+        }
+        // Before any confirmation: a Read-only target has none to give.
+        if let Some(refused) = super::read_only_guard::multirun_refusal(&plan) {
+            return Err(refused);
         }
         if plan.needs_confirm && req.confirm_write && !super::person_confirmed(true) {
             return Err(Error::Forbidden(super::AGENT_CONFIRM_REFUSED.into()));

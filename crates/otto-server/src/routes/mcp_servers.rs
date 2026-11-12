@@ -1,6 +1,6 @@
-//! Workspace MCP-server config CRUD. Users manage the MCP servers that get
-//! merged into a workspace's `.mcp.json` when an agent session spawns there
-//! (alongside Otto's own managed browser entry — see `otto-sessions::mcp`).
+//! Workspace MCP-server config CRUD for NATIVE servers (written into `.mcp.json`
+//! at spawn; the MCP Control Plane lists them with the governed ones, and its
+//! PATCH `runs` switches the mode — `otto_mcp::RunMode`).
 //!
 //! Nothing here is auto-enabled: `enabled` defaults to `false` on create, and a
 //! server is only written to `.mcp.json` once the user flips it on and a session
@@ -25,6 +25,7 @@ use otto_core::domain::{McpServer, WorkspaceRole};
 use otto_core::hooks::McpServerSpec;
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id};
+use otto_mcp::McpService;
 use otto_sessions::mcp::McpServerSource;
 use otto_state::{McpServersRepo, NewMcpServer};
 use serde_json::{json, Value};
@@ -61,13 +62,6 @@ async fn resource_check(
     Ok(())
 }
 
-/// Keychain ref for a server's secret blob — the Control Plane's convention
-/// (`otto_mcp::McpService::secret_ref`), duplicated here to avoid a crate
-/// dependency for one format string. The blob is `{"env":{…},"headers":{…}}`.
-fn secret_ref(id: &str) -> String {
-    format!("mcp-{id}")
-}
-
 /// A stored secret blob from a Keychain lookup. ONLY a missing entry
 /// (`Ok(None)`) means "no secrets" (`{}`); a failed read (a locked or denied
 /// Keychain) or a blob that doesn't parse is an `Err` (PC-6). Folding those to
@@ -87,13 +81,13 @@ fn parse_secret_blob(lookup: otto_core::Result<Option<String>>, id: &str) -> Res
 /// Read a server's secret blob (see [`parse_secret_blob`]).
 #[allow(clippy::disallowed_methods)] // sync McpProvider path: enabled_servers is blocking by contract (already blocks on a bridge thread)
 fn load_secret_blob(secrets: &dyn SecretStore, id: &str) -> Result<Value, String> {
-    parse_secret_blob(secrets.get(&secret_ref(id)), id)
+    parse_secret_blob(secrets.get(&McpService::secret_ref(id)), id)
 }
 
 /// [`load_secret_blob`] off the runtime thread, for the routes.
 async fn read_secret_blob(secrets: &Arc<dyn SecretStore>, id: &str) -> Result<Value, String> {
     parse_secret_blob(
-        otto_core::secrets::get_async(secrets, &secret_ref(id)).await,
+        otto_core::secrets::get_async(secrets, &McpService::secret_ref(id)).await,
         id,
     )
 }
@@ -173,7 +167,7 @@ async fn write_secret_env(
         .and_then(Value::as_object)
         .is_none_or(|h| h.is_empty());
     let keys: Vec<String> = secret_env.keys().cloned().collect();
-    let sref = secret_ref(id);
+    let sref = McpService::secret_ref(id);
     if secret_env.is_empty() && headers_empty {
         otto_core::secrets::delete_async(secrets, &sref).await?;
         Ok(repo.set_secret_meta(&id.to_string(), None, &keys).await?)
@@ -271,6 +265,10 @@ pub async fn create(
             .iter()
             .map(|s| s.to_string())
             .collect();
+    let actor = otto_core::access::AccessActor {
+        real_user_id: user.id.clone(),
+        effective_user_id: None,
+    };
     otto_state::ResourceAccessRepo::new(ctx.pool.clone())
         .initialize_owner_policy(
             otto_core::access::ResourceKind::McpServer,
@@ -278,12 +276,12 @@ pub async fn create(
             &user.id,
             &operations,
             &[],
-            &otto_core::access::AccessActor {
-                real_user_id: user.id.clone(),
-                effective_user_id: None,
-            },
+            &actor,
         )
         .await?;
+    // Added here = runs natively (the owner rule is kept for a later switch).
+    let native = otto_mcp::RunMode::Native;
+    ctx.mcp.set_run_mode(&server.id, native, &actor).await?;
     Ok(Json(server))
 }
 
@@ -398,7 +396,7 @@ pub async fn delete(
     repo.delete(&id).await?;
     // Best-effort: drop the server's Keychain blob with it, and the launcher
     // env files that carry its resolved values.
-    let _ = otto_core::secrets::delete_async(&ctx.secrets, &secret_ref(&id)).await;
+    let _ = otto_core::secrets::delete_async(&ctx.secrets, &McpService::secret_ref(&id)).await;
     sweep_env_files(existing.name).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -431,7 +429,7 @@ impl DbMcpServerProvider {
 
 impl McpServerSource for DbMcpServerProvider {
     fn enabled_servers(&self, workspace_id: &str) -> Result<Vec<McpServerSpec>, String> {
-        let repo = McpServersRepo::new(self.pool.clone());
+        let repo = otto_state::McpRegistryRepo::new(self.pool.clone());
         let ws = workspace_id.to_string();
         // Bridge the async repo onto the calling thread without holding the
         // runtime: spawn the query and block this thread on its result. (The
@@ -443,7 +441,7 @@ impl McpServerSource for DbMcpServerProvider {
                     .enable_all()
                     .build()
                     .map_err(|e| format!("build runtime: {e}"))?;
-                rt.block_on(repo.list_enabled(&ws))
+                rt.block_on(repo.list_native_enabled(&ws))
                     .map_err(|e| format!("list enabled mcp servers: {e}"))
             })
             .join()
@@ -521,9 +519,21 @@ mod tests {
     }
 
     async fn mk_repo() -> (otto_state::DbPool, McpServersRepo, Id, Id) {
-        let opts = sqlx::sqlite::SqliteConnectOptions::new()
-            .in_memory(true)
-            .foreign_keys(true);
+        mk_repo_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .in_memory(true)
+                .foreign_keys(true),
+        )
+        .await
+    }
+
+    /// A test that queries through [`DbMcpServerProvider`] and then again
+    /// needs a FILE database: the provider runs on its own short-lived
+    /// runtime, and the pooled connection it used is dropped with it, so an
+    /// in-memory database (one per connection) would come back empty.
+    async fn mk_repo_with(
+        opts: sqlx::sqlite::SqliteConnectOptions,
+    ) -> (otto_state::DbPool, McpServersRepo, Id, Id) {
         let pool = otto_state::DbPool::from(
             sqlx::sqlite::SqlitePoolOptions::new()
                 .max_connections(1)
@@ -590,10 +600,13 @@ mod tests {
         assert_eq!(s.secret_env_keys, vec!["API_TOKEN".to_string()]);
         assert_eq!(
             s.secret_ref.as_deref(),
-            Some(secret_ref(&server.id).as_str())
+            Some(McpService::secret_ref(&server.id).as_str())
         );
         assert_eq!(s.env.get("REGION").map(String::as_str), Some("eu"));
-        let blob = store.get(&secret_ref(&server.id)).unwrap().unwrap();
+        let blob = store
+            .get(&McpService::secret_ref(&server.id))
+            .unwrap()
+            .unwrap();
         assert!(blob.contains("tk-9"));
 
         // Empty value = keep-sentinel: the stored value survives a re-save.
@@ -608,7 +621,7 @@ mod tests {
         .unwrap();
         assert_eq!(s.secret_env_keys, vec!["API_TOKEN".to_string()]);
         assert!(store
-            .get(&secret_ref(&server.id))
+            .get(&McpService::secret_ref(&server.id))
             .unwrap()
             .unwrap()
             .contains("tk-9"));
@@ -620,7 +633,10 @@ mod tests {
             .unwrap();
         assert!(s.secret_env_keys.is_empty());
         assert!(s.secret_ref.is_none());
-        assert!(store.get(&secret_ref(&server.id)).unwrap().is_none());
+        assert!(store
+            .get(&McpService::secret_ref(&server.id))
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -729,7 +745,7 @@ mod tests {
             .unwrap();
         repo.set_secret_meta(
             &server.id,
-            Some(&secret_ref(&server.id)),
+            Some(&McpService::secret_ref(&server.id)),
             &["TOKEN".to_string()],
         )
         .await
@@ -754,6 +770,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(repo.list_enabled(&ws).await.unwrap().len(), 1);
+        // …and runs natively (only native servers reach the provider).
+        otto_state::McpRegistryRepo::new(pool.clone())
+            .set_managed(&server.id, false)
+            .await
+            .unwrap();
         let denied: Arc<dyn SecretStore> = Arc::new(DeniedStore);
         // The route's read refuses (→ 503, before any write)…
         assert!(read_secret_blob(&denied, &server.id).await.is_err());
@@ -764,6 +785,60 @@ mod tests {
             .await
             .unwrap();
         assert!(res.is_err(), "launched without its token: {res:?}");
+    }
+
+    /// `.mcp.json` takes a server only while it runs natively: the same
+    /// Legacy row is written as native and left out once governed, so one
+    /// server never reaches an agent both ways.
+    #[tokio::test]
+    async fn provider_writes_only_native_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        let (pool, repo, ws, user) = mk_repo_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(dir.path().join("state.db"))
+                .create_if_missing(true)
+                .foreign_keys(true),
+        )
+        .await;
+        let server = repo
+            .create(NewMcpServer {
+                workspace_id: ws.clone(),
+                name: "linear".into(),
+                command: "npx".into(),
+                args: vec![],
+                env: BTreeMap::new(),
+                enabled: true,
+                created_by: user,
+            })
+            .await
+            .unwrap();
+        // Legacy access (no policy row), as a server from before access rules.
+        sqlx::query("DELETE FROM resource_access_policies WHERE resource_id = ?")
+            .bind(&server.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let store: Arc<dyn SecretStore> =
+            Arc::new(MemStore(std::sync::Mutex::new(BTreeMap::new())));
+        let registry = otto_state::McpRegistryRepo::new(pool.clone());
+        let names = |provider: DbMcpServerProvider, ws: Id| async move {
+            tokio::task::spawn_blocking(move || provider.enabled_servers(&ws))
+                .await
+                .unwrap()
+                .unwrap()
+                .into_iter()
+                .map(|s| s.name)
+                .collect::<Vec<_>>()
+        };
+        // Governed (managed): not written.
+        let p = DbMcpServerProvider::new(pool.clone(), store.clone());
+        assert!(names(p, ws.clone()).await.is_empty());
+        registry.set_managed(&server.id, false).await.unwrap();
+        let p = DbMcpServerProvider::new(pool.clone(), store.clone());
+        assert_eq!(names(p, ws.clone()).await, ["linear"]);
+        registry.set_managed(&server.id, true).await.unwrap();
+        let p = DbMcpServerProvider::new(pool, store);
+        assert!(names(p, ws).await.is_empty());
     }
 
     #[test]

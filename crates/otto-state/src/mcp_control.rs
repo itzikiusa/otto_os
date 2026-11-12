@@ -97,8 +97,25 @@ pub struct McpTool {
     pub enabled: bool,
     pub require_approval: bool,
     pub risk_overridden: bool,
+    /// A tool new to an already-reviewed server: it was discovered disabled
+    /// and no person has enabled or acknowledged it yet.
+    #[serde(default)]
+    pub unreviewed: bool,
+    /// The description / input schema / annotations changed since a person
+    /// last reviewed the tool: every call needs approval until acknowledged.
+    #[serde(default)]
+    pub changed_since_review: bool,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// The review fingerprint of a tool's advertised contract: its description,
+/// input schema and annotations, as stored (`*_json` columns).
+pub fn tool_content_hash(description: Option<&str>, schema_json: &str, annot_json: &str) -> String {
+    otto_core::text::content_sha256(&format!(
+        "{}\u{0}{schema_json}\u{0}{annot_json}",
+        description.unwrap_or("")
+    ))
 }
 
 /// A tool as freshly discovered from a server (pre-persistence).
@@ -432,6 +449,41 @@ impl McpRegistryRepo {
         Ok(rows.iter().map(row_to_detail).collect())
     }
 
+    /// How a server runs: `managed = true` is GOVERNED (Otto's gateway runs it
+    /// under policy, approval and audit), `false` is NATIVE (the agent CLI
+    /// launches it from `.mcp.json`). One column, one statement: a server is
+    /// never both.
+    pub async fn set_managed(&self, id: &Id, managed: bool) -> Result<McpServerDetail> {
+        sqlx::query("UPDATE mcp_servers SET managed = ?, updated_at = ? WHERE id = ?")
+            .bind(i64::from(managed))
+            .bind(fmt(Utc::now()))
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set mcp server run mode"))?;
+        self.get(id).await
+    }
+
+    /// A workspace's enabled NATIVE servers: the set written into each
+    /// session's `.mcp.json`. Native = unmanaged stdio, and never a server
+    /// under an Enforced access policy: its per-user rules can't follow raw
+    /// credentials into a file every session in the workspace reads.
+    pub async fn list_native_enabled(&self, ws: &Id) -> Result<Vec<McpServerDetail>> {
+        let rows = sqlx::query(
+            "SELECT * FROM mcp_servers WHERE workspace_id = ? AND enabled = 1 AND managed = 0
+               AND transport = 'stdio'
+               AND NOT EXISTS (SELECT 1 FROM resource_access_policies p
+                 WHERE p.resource_kind = 'mcp_server' AND p.resource_id = mcp_servers.id
+                   AND p.mode = 'enforced')
+             ORDER BY name",
+        )
+        .bind(ws)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("mcp servers"))?;
+        Ok(rows.iter().map(row_to_detail).collect())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn update(
         &self,
@@ -550,14 +602,23 @@ impl McpRegistryRepo {
 // ===========================================================================
 
 fn row_to_tool(r: &sqlx::sqlite::SqliteRow) -> Result<McpTool> {
+    let description: Option<String> = r.get("description");
+    let schema: String = r.get("input_schema_json");
+    let annot: String = r.get("annotations_json");
+    let reviewed: Option<String> = r.get("reviewed_hash");
+    let current = tool_content_hash(description.as_deref(), &schema, &annot);
     Ok(McpTool {
+        unreviewed: reviewed.as_deref() == Some(""),
+        changed_since_review: reviewed
+            .as_deref()
+            .is_some_and(|h| !h.is_empty() && h != current),
         id: r.get("id"),
         server_id: r.get("server_id"),
         name: r.get("name"),
         title: r.get("title"),
-        description: r.get("description"),
-        input_schema: json(&r.get::<String, _>("input_schema_json"))?,
-        annotations: json(&r.get::<String, _>("annotations_json"))?,
+        description,
+        input_schema: json(&schema)?,
+        annotations: json(&annot)?,
         risk_label: r.get("risk_label"),
         injection_risk: r.get("injection_risk"),
         mutating: r.get::<i64, _>("mutating") != 0,
@@ -585,20 +646,46 @@ impl McpToolsRepo {
     /// have schema/description refreshed, but a human-pinned (`risk_overridden`)
     /// tool keeps its risk/injection labels. Tools no longer advertised are left
     /// in place (so their per-tool permission survives a transient discovery).
+    ///
+    /// Review (`reviewed_hash`, see its migration): a server's FIRST discovery
+    /// is what the person adding it reviews, so those tools start enabled with
+    /// their content as the baseline. A tool that appears LATER on a server
+    /// that already has tools starts disabled and unreviewed. A rediscovered
+    /// tool keeps its baseline, so a changed description/schema shows as
+    /// `changed_since_review`; a row from before review tracking is baselined
+    /// on the content Otto had stored for it.
     pub async fn upsert_discovered(&self, server_id: &Id, tools: &[DiscoveredTool]) -> Result<()> {
         let now = fmt(Utc::now());
+        let first_discovery: bool =
+            sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM mcp_tools WHERE server_id = ?)")
+                .bind(server_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(dberr("lookup mcp tools"))?;
         for t in tools {
-            let existing: Option<String> =
-                sqlx::query_scalar("SELECT id FROM mcp_tools WHERE server_id = ? AND name = ?")
-                    .bind(server_id)
-                    .bind(&t.name)
-                    .fetch_optional(&self.pool)
-                    .await
-                    .map_err(dberr("lookup mcp tool"))?;
+            let existing = sqlx::query(
+                "SELECT id, description, input_schema_json, annotations_json, reviewed_hash \
+                 FROM mcp_tools WHERE server_id = ? AND name = ?",
+            )
+            .bind(server_id)
+            .bind(&t.name)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("lookup mcp tool"))?;
             let schema = serde_json::to_string(&t.input_schema).unwrap_or_else(|_| "{}".into());
             let annot = serde_json::to_string(&t.annotations).unwrap_or_else(|_| "{}".into());
             match existing {
-                Some(id) => {
+                Some(row) => {
+                    let id: String = row.get("id");
+                    let reviewed: String = row
+                        .get::<Option<String>, _>("reviewed_hash")
+                        .unwrap_or_else(|| {
+                            tool_content_hash(
+                                row.get::<Option<String>, _>("description").as_deref(),
+                                &row.get::<String, _>("input_schema_json"),
+                                &row.get::<String, _>("annotations_json"),
+                            )
+                        });
                     // The pin guard lives IN the UPDATE: an admin `patch` landing
                     // between a separate read and this write would otherwise have
                     // its label overwritten while the row stays `risk_overridden`.
@@ -606,29 +693,66 @@ impl McpToolsRepo {
                         "UPDATE mcp_tools SET title=?, description=?, input_schema_json=?, annotations_json=?, \
                          risk_label = CASE WHEN risk_overridden = 1 THEN risk_label ELSE ? END, \
                          injection_risk = CASE WHEN risk_overridden = 1 THEN injection_risk ELSE ? END, \
-                         mutating=?, supports_dry_run=?, updated_at=? WHERE id=?",
+                         mutating=?, supports_dry_run=?, reviewed_hash = COALESCE(reviewed_hash, ?), \
+                         updated_at=? WHERE id=?",
                     )
                     .bind(&t.title).bind(&t.description).bind(&schema).bind(&annot)
                     .bind(&t.risk_label).bind(&t.injection_risk).bind(t.mutating as i64)
-                    .bind(t.supports_dry_run as i64).bind(&now).bind(&id)
+                    .bind(t.supports_dry_run as i64).bind(&reviewed).bind(&now).bind(&id)
                     .execute(&self.pool).await.map_err(dberr("update mcp tool"))?;
                 }
                 None => {
+                    let (enabled, reviewed) = if first_discovery {
+                        (
+                            true,
+                            tool_content_hash(t.description.as_deref(), &schema, &annot),
+                        )
+                    } else {
+                        (false, String::new())
+                    };
                     sqlx::query(
-                        "INSERT INTO mcp_tools (id, server_id, name, title, description, input_schema_json, annotations_json, risk_label, injection_risk, mutating, supports_dry_run, enabled, require_approval, risk_overridden, created_at, updated_at)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 0, ?, ?)",
+                        "INSERT INTO mcp_tools (id, server_id, name, title, description, input_schema_json, annotations_json, risk_label, injection_risk, mutating, supports_dry_run, enabled, require_approval, risk_overridden, reviewed_hash, created_at, updated_at)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
                     )
                     .bind(new_id()).bind(server_id).bind(&t.name).bind(&t.title).bind(&t.description)
                     .bind(&schema).bind(&annot).bind(&t.risk_label).bind(&t.injection_risk)
                     .bind(t.mutating as i64).bind(t.supports_dry_run as i64)
+                    .bind(enabled as i64)
                     // Dangerous tools default to require_approval on first discovery.
                     .bind((t.risk_label == "dangerous") as i64)
+                    .bind(&reviewed)
                     .bind(&now).bind(&now)
                     .execute(&self.pool).await.map_err(dberr("insert mcp tool"))?;
                 }
             }
         }
         Ok(())
+    }
+
+    /// A person reviewed the tool's current description / schema: make it the
+    /// baseline (clears `unreviewed` and `changed_since_review`).
+    pub async fn acknowledge(&self, id: &Id) -> Result<McpTool> {
+        // Hash the STORED text, exactly as discovery hashes it.
+        let row = sqlx::query(
+            "SELECT description, input_schema_json, annotations_json FROM mcp_tools WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("mcp tool"))?;
+        let hash = tool_content_hash(
+            row.get::<Option<String>, _>("description").as_deref(),
+            &row.get::<String, _>("input_schema_json"),
+            &row.get::<String, _>("annotations_json"),
+        );
+        sqlx::query("UPDATE mcp_tools SET reviewed_hash = ?, updated_at = ? WHERE id = ?")
+            .bind(hash)
+            .bind(fmt(Utc::now()))
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("acknowledge mcp tool"))?;
+        self.get(id).await
     }
 
     pub async fn list_for_server(&self, server_id: &Id) -> Result<Vec<McpTool>> {
@@ -692,7 +816,12 @@ impl McpToolsRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("patch mcp tool"))?;
-        self.get(id).await
+        let t = self.get(id).await?;
+        // Switching on a tool that appeared after review IS its review.
+        if enabled == Some(true) && t.unreviewed {
+            return self.acknowledge(id).await;
+        }
+        Ok(t)
     }
 }
 
@@ -913,6 +1042,42 @@ impl McpPolicyRepo {
         .await
         .map_err(dberr("update policy"))?;
         self.get(id).await
+    }
+
+    /// Import a ruleset in ONE transaction: when `replace`, first delete the
+    /// rules of exactly the scopes the import targets (each policy's
+    /// `workspace_id`; `None` = the global rules), then insert every policy.
+    /// Any failure rolls the whole import back — the old ruleset stays.
+    /// Workspaces the import does not mention keep their rules.
+    pub async fn import(&self, policies: &[NewPolicy], replace: bool) -> Result<usize> {
+        let now = fmt(Utc::now());
+        let mut tx = self.pool.begin().await.map_err(dberr("policy import tx"))?;
+        if replace {
+            let mut scopes: Vec<Option<&Id>> =
+                policies.iter().map(|p| p.workspace_id.as_ref()).collect();
+            scopes.sort();
+            scopes.dedup();
+            for scope in scopes {
+                sqlx::query("DELETE FROM mcp_policies WHERE workspace_id IS ?")
+                    .bind(scope)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(dberr("clear policies"))?;
+            }
+        }
+        for n in policies {
+            let m = serde_json::to_string(&n.match_json).unwrap_or_else(|_| "{}".into());
+            sqlx::query(
+                "INSERT INTO mcp_policies (id, workspace_id, name, enabled, priority, match_json, effect, reason, created_by, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(new_id()).bind(&n.workspace_id).bind(&n.name).bind(n.enabled as i64)
+            .bind(n.priority).bind(&m).bind(&n.effect).bind(&n.reason).bind(&n.created_by)
+            .bind(&now).bind(&now)
+            .execute(&mut *tx).await.map_err(dberr("import policy"))?;
+        }
+        tx.commit().await.map_err(dberr("commit policy import"))?;
+        Ok(policies.len())
     }
 
     pub async fn delete(&self, id: &Id) -> Result<()> {
@@ -1613,6 +1778,78 @@ mod tests {
         .unwrap()
     }
 
+    fn policy(ws: Option<&Id>, name: &str, by: &Id) -> NewPolicy {
+        NewPolicy {
+            workspace_id: ws.cloned(),
+            name: name.into(),
+            enabled: true,
+            priority: 100,
+            match_json: serde_json::json!({}),
+            effect: "deny".into(),
+            reason: None,
+            created_by: by.clone(),
+        }
+    }
+
+    /// A replace-import clears only the scopes it targets, and a failing row
+    /// rolls the whole import back (it used to delete every rule first, one
+    /// by one, then stop at the first bad row with the ruleset gone).
+    #[tokio::test]
+    async fn policy_import_replaces_only_its_scopes_atomically() {
+        let pool = mem_pool().await;
+        let (ws1, user) = seed(&pool).await;
+        let ws2 = new_id();
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'w2', '/tmp', ?)",
+        )
+        .bind(&ws2)
+        .bind(fmt(Utc::now()))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let repo = McpPolicyRepo::new(pool.clone());
+        for p in [
+            policy(None, "global", &user),
+            policy(Some(&ws1), "ws1-old", &user),
+            policy(Some(&ws2), "ws2-old", &user),
+        ] {
+            repo.create(p).await.unwrap();
+        }
+        let names = |rows: Vec<McpPolicy>| {
+            let mut n: Vec<String> = rows.into_iter().map(|p| p.name).collect();
+            n.sort();
+            n
+        };
+
+        let n = repo
+            .import(&[policy(Some(&ws1), "ws1-new", &user)], true)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(
+            names(repo.list(None).await.unwrap()),
+            ["global", "ws1-new", "ws2-old"]
+        );
+
+        // The second row's creator does not exist (FK): nothing changes.
+        let ghost: Id = "no-such-user".into();
+        let bad = [
+            policy(Some(&ws2), "ws2-new", &user),
+            policy(Some(&ws2), "ws2-broken", &ghost),
+        ];
+        assert!(repo.import(&bad, true).await.is_err());
+        assert_eq!(
+            names(repo.list(None).await.unwrap()),
+            ["global", "ws1-new", "ws2-old"]
+        );
+
+        // A merge import (replace=false) deletes nothing.
+        repo.import(&[policy(None, "global-2", &user)], false)
+            .await
+            .unwrap();
+        assert_eq!(repo.list(None).await.unwrap().len(), 4);
+    }
+
     fn discovered(name: &str, risk: &str, description: &str) -> DiscoveredTool {
         DiscoveredTool {
             name: name.into(),
@@ -1675,6 +1912,90 @@ mod tests {
         assert_eq!(free.risk_label, "write");
         assert!(!free.risk_overridden);
         assert_eq!(free.description.as_deref(), Some("v2"));
+    }
+
+    /// Discovery review: a server's first catalog is the reviewed baseline; a
+    /// tool appearing later starts disabled until a person enables it; a
+    /// changed description/schema is flagged until acknowledged.
+    #[tokio::test]
+    async fn discovery_holds_new_and_changed_tools_for_review() {
+        let pool = mem_pool().await;
+        let (ws, user) = seed(&pool).await;
+        let s = mk_server(&pool, &ws, &user).await;
+        let repo = McpToolsRepo::new(pool.clone());
+        repo.upsert_discovered(&s.id, &[discovered("a", "read", "v1")])
+            .await
+            .unwrap();
+        let a = repo.get_by_name(&s.id, "a").await.unwrap();
+        assert!(a.enabled && !a.unreviewed && !a.changed_since_review);
+
+        // A tool new to the already-reviewed server, and a changed one.
+        repo.upsert_discovered(
+            &s.id,
+            &[
+                discovered("a", "read", "v2 now also deletes"),
+                discovered("b", "read", "new"),
+            ],
+        )
+        .await
+        .unwrap();
+        let b = repo.get_by_name(&s.id, "b").await.unwrap();
+        assert!(
+            !b.enabled,
+            "a tool new to a reviewed server starts disabled"
+        );
+        assert!(b.unreviewed && !b.changed_since_review);
+        let a = repo.get_by_name(&s.id, "a").await.unwrap();
+        assert!(a.changed_since_review, "changed description is flagged");
+        assert!(a.enabled);
+
+        // Rediscovering the same changed text keeps the flag (baseline kept).
+        repo.upsert_discovered(&s.id, &[discovered("a", "read", "v2 now also deletes")])
+            .await
+            .unwrap();
+        assert!(
+            repo.get_by_name(&s.id, "a")
+                .await
+                .unwrap()
+                .changed_since_review
+        );
+
+        let a = repo.acknowledge(&a.id).await.unwrap();
+        assert!(!a.changed_since_review && !a.unreviewed);
+        // Enabling the new tool is its review.
+        let b = repo
+            .patch(&b.id, Some(true), None, None, None)
+            .await
+            .unwrap();
+        assert!(b.enabled && !b.unreviewed && !b.changed_since_review);
+    }
+
+    /// A row from before review tracking (NULL) is baselined on the content
+    /// it had, so a change arriving with that discovery is still flagged.
+    #[tokio::test]
+    async fn legacy_tools_are_baselined_on_their_stored_content() {
+        let pool = mem_pool().await;
+        let (ws, user) = seed(&pool).await;
+        let s = mk_server(&pool, &ws, &user).await;
+        let repo = McpToolsRepo::new(pool.clone());
+        repo.upsert_discovered(&s.id, &[discovered("a", "read", "v1")])
+            .await
+            .unwrap();
+        sqlx::query("UPDATE mcp_tools SET reviewed_hash = NULL")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let a = repo.get_by_name(&s.id, "a").await.unwrap();
+        assert!(!a.changed_since_review && !a.unreviewed);
+        repo.upsert_discovered(&s.id, &[discovered("a", "read", "v2")])
+            .await
+            .unwrap();
+        assert!(
+            repo.get_by_name(&s.id, "a")
+                .await
+                .unwrap()
+                .changed_since_review
+        );
     }
 
     /// Omitted PATCH fields keep their value, and only a label change pins.
@@ -1765,6 +2086,73 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(legacy.name, "test");
+    }
+
+    /// Native = unmanaged + Legacy access + stdio + enabled; every other
+    /// combination stays out of `.mcp.json`, and one flag flips it.
+    #[tokio::test]
+    async fn native_list_is_unmanaged_legacy_stdio_only() {
+        let pool = mem_pool().await;
+        let (ws, user) = seed(&pool).await;
+        let repo = McpRegistryRepo::new(pool.clone());
+        let s = mk_server(&pool, &ws, &user).await;
+        // Governed (the default): never native.
+        assert!(repo.list_native_enabled(&ws).await.unwrap().is_empty());
+        let s = repo.set_managed(&s.id, false).await.unwrap();
+        assert!(!s.managed);
+        // Unmanaged but access-Enforced (the insert trigger): still not written.
+        assert!(repo.list_native_enabled(&ws).await.unwrap().is_empty());
+        sqlx::query("DELETE FROM resource_access_policies WHERE resource_id = ?")
+            .bind(&s.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let native = repo.list_native_enabled(&ws).await.unwrap();
+        assert_eq!(
+            native.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+            [s.id.as_str()]
+        );
+        // Disabled → out; governed again → out.
+        repo.update(
+            &s.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(false),
+        )
+        .await
+        .unwrap();
+        assert!(repo.list_native_enabled(&ws).await.unwrap().is_empty());
+        repo.update(
+            &s.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
+        assert!(repo.set_managed(&s.id, true).await.unwrap().managed);
+        assert!(repo.list_native_enabled(&ws).await.unwrap().is_empty());
+        // An http row is never native, whatever its flag says.
+        sqlx::query("UPDATE mcp_servers SET managed = 0, transport = 'http' WHERE id = ?")
+            .bind(&s.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(repo.list_native_enabled(&ws).await.unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -30,7 +30,13 @@ pub struct Ec2Instance {
 #[derive(Debug, Clone, Serialize)]
 pub struct InstancesResp {
     pub instances: Vec<Ec2Instance>,
+    /// The in-process lister stopped at its page cap: `instances` is partial.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
+
+/// Pages the in-process `DescribeInstances` lister reads (×1000 rows).
+pub const TRUNCATED_WHAT: &str = "20,000 instances";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct InstanceDetail {
@@ -230,7 +236,11 @@ pub async fn list_instances(
     if let Some(text) = q.q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         instances.retain(|i| matches_query(i, text));
     }
-    Ok(InstancesResp { instances })
+    let truncated = v.get("Truncated").and_then(Value::as_bool) == Some(true);
+    Ok(InstancesResp {
+        instances,
+        truncated,
+    })
 }
 
 pub async fn describe_instance(
@@ -261,6 +271,21 @@ pub async fn describe_instance(
     Ok(InstanceDetail { instance, raw })
 }
 
+/// Stop / reboot need `confirm_id == id`, given by a person (an agent
+/// credential's confirm is refused, see [`crate::access::refuse_agent_confirm`]).
+/// Start needs neither.
+pub fn check_power_confirm(id: &str, action: PowerAction, confirm_id: Option<&str>) -> Result<()> {
+    if !matches!(action, PowerAction::Stop | PowerAction::Reboot) {
+        return Ok(());
+    }
+    if confirm_id != Some(id) {
+        return Err(Error::Invalid(format!(
+            "confirm_id must equal the instance id '{id}'"
+        )));
+    }
+    crate::access::refuse_agent_confirm(&format!("{} of instance {id}", action.as_str()))
+}
+
 pub async fn power(
     svc: &AwsService,
     a: &AwsAccountRow,
@@ -270,11 +295,7 @@ pub async fn power(
     region: Option<&str>,
 ) -> Result<StateChangeResp> {
     validate_instance_id(id)?;
-    if matches!(action, PowerAction::Stop | PowerAction::Reboot) && confirm_id != Some(id) {
-        return Err(Error::Invalid(format!(
-            "confirm_id must equal the instance id '{id}'"
-        )));
-    }
+    check_power_confirm(id, action, confirm_id)?;
     match action {
         PowerAction::Start => {
             let v = svc
@@ -381,5 +402,38 @@ mod tests {
         assert!(validate_instance_id("i-12345678").is_ok());
         assert!(validate_instance_id("vol-123").is_err());
         assert!(validate_instance_id("i-zzzz").is_err());
+    }
+
+    /// S6-304: an agent credential's correct confirm is refused for stop /
+    /// reboot; a person's is accepted; start needs no confirm.
+    #[tokio::test]
+    async fn an_agent_credential_cannot_confirm_a_power_change() {
+        use otto_core::auth::{with_request_credential, RequestCredential};
+        let agent = RequestCredential {
+            agent: true,
+            root_withheld: false,
+        };
+        let person = RequestCredential::default();
+        let id = "i-12345678";
+        for action in [PowerAction::Stop, PowerAction::Reboot] {
+            let refused =
+                with_request_credential(agent, async { check_power_confirm(id, action, Some(id)) })
+                    .await;
+            assert!(matches!(refused, Err(Error::Forbidden(_))), "{refused:?}");
+            let ok = with_request_credential(person, async {
+                check_power_confirm(id, action, Some(id))
+            })
+            .await;
+            assert!(ok.is_ok(), "{ok:?}");
+            let missing =
+                with_request_credential(person, async { check_power_confirm(id, action, None) })
+                    .await;
+            assert!(matches!(missing, Err(Error::Invalid(_))));
+        }
+        assert!(with_request_credential(agent, async {
+            check_power_confirm(id, PowerAction::Start, None)
+        })
+        .await
+        .is_ok());
     }
 }

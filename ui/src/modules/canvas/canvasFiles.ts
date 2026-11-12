@@ -15,7 +15,7 @@
 
 import { authedText } from '../../lib/api/client';
 import { FileCache } from './canvasFileCache';
-import { refSha, type ExFile } from './canvasFileRefs';
+import { markUnloaded, refSha, type ExFile } from './canvasFileRefs';
 
 export { FILE_REF_PREFIX, refSha, filesForSave, sha256Hex } from './canvasFileRefs';
 
@@ -37,7 +37,8 @@ export function releaseFiles(owner: unknown): void {
  * Resolve a scene's `files` map for Excalidraw: ref entries get their data URL
  * fetched (and `known` learns id → sha); inline entries pass through. Files
  * whose fetch fails are left out (Excalidraw shows its placeholder) rather
- * than failing the whole load. `owner` = the board (released on unmount via
+ * than failing the whole load, and remembered (`markUnloaded`) so the next
+ * save still carries their ref instead of dropping the image. `owner` = the board (released on unmount via
  * `releaseFiles`); `skip` = ids the editor already holds.
  */
 export async function resolveFiles(
@@ -53,12 +54,13 @@ export async function resolveFiles(
     return !skip.has(id);
   });
   const out = await Promise.all(
-    entries.map(async ([, f]) => {
+    entries.map(async ([id, f]) => {
       const sha = refSha(f.dataURL);
       if (!sha) return f;
       try {
         return { ...f, dataURL: await fetchFile(sha, owner) };
       } catch {
+        markUnloaded(known, id, f);
         return null;
       }
     }),

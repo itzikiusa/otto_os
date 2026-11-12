@@ -130,6 +130,8 @@ struct Segment {
     kind: SegmentKind,
     item_id: String,
     message_id: String,
+    /// The agent named it (`messageId`): later chunks of that id append.
+    named: bool,
     text: String,
 }
 
@@ -198,6 +200,9 @@ pub struct AcpDriver {
     /// The model to apply through `flavor.model_config_id` once ready.
     model: Option<String>,
     config_req: Option<u64>,
+    /// The model write failed for a reason other than a refusal: written
+    /// again before the next prompt (T3 Code #34782).
+    config_retry: bool,
     next_id: u64,
     phase: Phase,
     init_id: u64,
@@ -219,6 +224,10 @@ pub struct AcpDriver {
     turn_id: Option<String>,
     segment: Option<Segment>,
     segments: u32,
+    /// This turn's closed named segments by `messageId`: a message that
+    /// resumes after a thought (or another message) keeps its text and its
+    /// place (T3 Code #33604).
+    closed_named: HashMap<String, Segment>,
     tools: HashMap<String, Tool>,
     pending: HashMap<String, Pending>,
     questions: HashMap<String, (Value, Vec<otto_core::agent_runtime::RuntimeQuestion>)>,
@@ -247,6 +256,7 @@ impl AcpDriver {
             mcp_servers: Vec::new(),
             model: None,
             config_req: None,
+            config_retry: false,
             next_id: 0,
             phase: Phase::Initializing,
             init_id: 0,
@@ -265,6 +275,7 @@ impl AcpDriver {
             turn_id: None,
             segment: None,
             segments: 0,
+            closed_named: HashMap::new(),
             tools: HashMap::new(),
             pending: HashMap::new(),
             questions: HashMap::new(),
@@ -413,7 +424,26 @@ impl AcpDriver {
         step.write(line);
     }
 
+    /// The model as a session config option (`flavor.model_config_id`).
+    fn write_model_config(&mut self, step: &mut DriverStep) {
+        if let (Some(config_id), Some(model), Some(sid)) = (
+            self.flavor.model_config_id,
+            self.model.clone(),
+            self.session_id.clone(),
+        ) {
+            let (id, line) = self.request(
+                M_SET_CONFIG_OPTION,
+                json!({"sessionId": sid, "configId": config_id, "value": model}),
+            );
+            self.config_req = Some(id);
+            step.write(line);
+        }
+    }
+
     fn send_prompt(&mut self, step: &mut DriverStep, turn_id: String, req: &RuntimePromptReq) {
+        if std::mem::take(&mut self.config_retry) {
+            self.write_model_config(step);
+        }
         let sid = self.session_id.clone().unwrap_or_default();
         let mut blocks: Vec<ContentBlock> = req
             .images
@@ -445,6 +475,7 @@ impl AcpDriver {
         self.prompt_id = Some(id);
         self.turn_id = Some(turn_id);
         self.segments = 0;
+        self.closed_named.clear();
         step.write(line);
     }
 
@@ -493,6 +524,9 @@ impl AcpDriver {
     fn close_segment(&mut self, step: &mut DriverStep) {
         if let Some(seg) = self.segment.take() {
             step.push(DriverEvent::TurnItem(self.segment_item(&seg, false)));
+            if seg.named {
+                self.closed_named.insert(seg.message_id.clone(), seg);
+            }
         }
     }
 
@@ -509,13 +543,23 @@ impl AcpDriver {
             .is_some_and(|s| s.kind == kind && mid.as_ref().is_none_or(|m| *m == s.message_id));
         if !reuse {
             self.close_segment(step);
-            self.segments += 1;
-            let item_id = format!("{}:seg{}", self.turn(), self.segments);
-            self.segment = Some(Segment {
-                kind,
-                message_id: mid.unwrap_or_else(|| item_id.clone()),
-                item_id,
-                text: String::new(),
+            let resumed = mid
+                .as_ref()
+                .and_then(|m| self.closed_named.remove(m))
+                .filter(|seg| seg.kind == kind);
+            self.segment = Some(match resumed {
+                Some(seg) => seg,
+                None => {
+                    self.segments += 1;
+                    let item_id = format!("{}:seg{}", self.turn(), self.segments);
+                    Segment {
+                        kind,
+                        named: mid.is_some(),
+                        message_id: mid.unwrap_or_else(|| item_id.clone()),
+                        item_id,
+                        text: String::new(),
+                    }
+                }
             });
         }
         let seg = self.segment.as_mut().expect("set above");
@@ -861,18 +905,7 @@ impl AcpDriver {
                 native_thread_id: self.session_id.clone(),
                 model: None,
             });
-            if let (Some(config_id), Some(model), Some(sid)) = (
-                self.flavor.model_config_id,
-                self.model.clone(),
-                self.session_id.clone(),
-            ) {
-                let (id, line) = self.request(
-                    M_SET_CONFIG_OPTION,
-                    json!({"sessionId": sid, "configId": config_id, "value": model}),
-                );
-                self.config_req = Some(id);
-                step.write(line);
-            }
+            self.write_model_config(step);
             // A prompt queued before `initialize` answered goes as is; the
             // agent refuses images it cannot take.
             if let Some((turn, req)) = self.queued.take() {
@@ -881,6 +914,9 @@ impl AcpDriver {
         } else if Some(id) == self.config_req {
             self.config_req = None;
             if let Some(e) = error {
+                // -32602: the agent refused the value; anything else (an
+                // internal error, a dropped request) was not applied.
+                self.config_retry = e.get("code").and_then(Value::as_i64) != Some(-32602);
                 step.push(DriverEvent::Error(rpc_failure("provider_error", &e)));
             }
         } else if Some(id) == self.mode_req {
@@ -1119,14 +1155,23 @@ impl StructuredDriver for AcpDriver {
             .ok_or_else(|| DriverError("no such pending question".into()))?;
         otto_core::agent_runtime::validate_question_answers(questions, answers)
             .map_err(DriverError)?;
+        use otto_core::agent_runtime::{QuestionAnswer, QuestionKind};
         let content: serde_json::Map<String, Value> = answers
             .iter()
             .map(|a| {
-                let value = match a {
-                    otto_core::agent_runtime::QuestionAnswer::Multi { values, .. } => json!(values),
-                    _ => json!(a.values()[0]),
-                };
-                (a.question_id().to_string(), value)
+                let id = a.question_id();
+                let single = questions
+                    .iter()
+                    .any(|q| q.id == id && q.kind == QuestionKind::Single);
+                match a {
+                    QuestionAnswer::Multi { values, .. } => (id.to_string(), json!(values)),
+                    // Typed text for a single choice is its folded
+                    // `<id>__other` field's answer (`questions::acp_form`).
+                    QuestionAnswer::Text { text, .. } if single => {
+                        (crate::questions::other_field(id), json!(text))
+                    }
+                    _ => (id.to_string(), json!(a.values()[0])),
+                }
             })
             .collect();
         let mut step = DriverStep::default();
@@ -1244,6 +1289,7 @@ impl StructuredDriver for AcpDriver {
         self.questions.clear();
         self.tools.clear();
         self.segment = None;
+        self.closed_named.clear();
         DriverStep::default()
     }
 }
@@ -1497,6 +1543,40 @@ mod tests {
         assert_eq!(sent(&r, 0)["result"]["outcome"]["optionId"], "a1");
     }
 
+    /// T3 Code PR #34526 ("only approved execute requests may open client
+    /// terminals") does not apply: Otto advertises no `terminal` capability
+    /// and refuses every `terminal/*` call, unapproved or approved alike, so
+    /// an agent can never make the client run a command.
+    #[test]
+    fn terminal_requests_are_refused_whether_or_not_the_execute_was_approved() {
+        let mut d = AcpDriver::gemini("gemini");
+        let init = d.start(&ctx(None));
+        assert_eq!(
+            sent(&init, 0)["params"]["clientCapabilities"]["terminal"],
+            false
+        );
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#);
+        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+        let create = r#"{"jsonrpc":"2.0","id":"t9","method":"terminal/create","params":{"sessionId":"s1","command":"rm","args":["-rf","/w"]}}"#;
+        // Before any approval: refused, nothing reaches the runtime.
+        let s = d.on_line(create);
+        assert_eq!(sent(&s, 0)["error"]["code"], -32601);
+        assert!(s.events.is_empty(), "{s:?}");
+        // After a person approved an execute request: still refused.
+        d.on_line(r#"{"jsonrpc":"2.0","id":"p7","method":"session/request_permission","params":{"sessionId":"s1","toolCall":{"toolCallId":"c1","kind":"execute","title":"rm"},"options":[{"optionId":"a1","name":"Allow","kind":"allow_once"},{"optionId":"r1","name":"Deny","kind":"reject_once"}]}}"#);
+        d.respond("acp-p7", ApprovalDecision::Accept).unwrap();
+        let s = d.on_line(create);
+        assert_eq!(sent(&s, 0)["error"]["code"], -32601);
+        assert!(s.events.is_empty(), "{s:?}");
+        for m in ["terminal/output", "terminal/kill", "terminal/release"] {
+            let s = d.on_line(&format!(
+                r#"{{"jsonrpc":"2.0","id":"x","method":"{m}","params":{{"sessionId":"s1","terminalId":"t"}}}}"#
+            ));
+            assert_eq!(sent(&s, 0)["error"]["code"], -32601, "{m}");
+        }
+    }
+
     #[test]
     fn a_multi_file_edit_renders_one_patch() {
         let patch = multi_file_patch(&[
@@ -1654,6 +1734,54 @@ mod tests {
             -32602
         );
     }
+    /// T3 Code #34867: an optional choice with an `<id>__other` text field
+    /// is one question; typed text answers the companion, a pick the choice.
+    #[test]
+    fn a_choice_with_an_other_field_is_one_question_answered_either_way() {
+        use otto_core::agent_runtime::QuestionAnswer;
+        let mut d = AcpDriver::gemini("gemini");
+        d.session_id = Some("s1".into());
+        let form = |id: u64| {
+            json!({"jsonrpc":"2.0","id":id,"method":"elicitation/create","params":{"sessionId":"s1","mode":"form","message":"Pick a database","requestedSchema":{"type":"object","properties":{
+                "q0":{"type":"string","description":"Which database?","enum":["Postgres","MySQL"]},
+                "q0__other":{"type":"string"}
+            }}}})
+            .to_string()
+        };
+        let s = d.on_line(&form(1));
+        let DriverEvent::Question { id, questions, .. } = &s.events[0] else {
+            panic!("question event missing")
+        };
+        assert_eq!(questions.len(), 1, "{questions:?}");
+        assert!(questions[0].allow_free_text);
+        let typed = d
+            .respond_question(
+                id,
+                &[QuestionAnswer::Text {
+                    question_id: "q0".into(),
+                    text: "SQLite".into(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            sent(&typed, 0)["result"]["content"],
+            json!({"q0__other":"SQLite"})
+        );
+        let s = d.on_line(&form(2));
+        let DriverEvent::Question { id, .. } = &s.events[0] else {
+            panic!("question event missing")
+        };
+        let picked = d
+            .respond_question(
+                id,
+                &[QuestionAnswer::Single {
+                    question_id: "q0".into(),
+                    value: "MySQL".into(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(sent(&picked, 0)["result"]["content"], json!({"q0":"MySQL"}));
+    }
     #[test]
     fn required_unconstrained_acp_fields_keep_empty_values() {
         use otto_core::agent_runtime::QuestionAnswer;
@@ -1682,5 +1810,92 @@ mod tests {
             sent(&response, 0)["result"]["content"],
             json!({"tags":[],"name":""})
         );
+    }
+
+    /// T3 Code #34782: a model write lost to anything but a refusal is
+    /// written again before the next prompt; a refused value is not.
+    #[test]
+    fn a_model_config_write_that_failed_is_retried_before_the_next_prompt() {
+        let mut d = AcpDriver::opencode();
+        let c = LaunchContext {
+            model: Some("anthropic/claude-sonnet".into()),
+            ..ctx(None)
+        };
+        d.start(&c);
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"ses_1"}}"#);
+        let set_id = sent(&s, 0)["id"].clone();
+        let lost =
+            json!({"jsonrpc":"2.0","id":set_id,"error":{"code":-32603,"message":"internal error"}});
+        let s = d.on_line(&lost.to_string());
+        assert!(matches!(&s.events[0], DriverEvent::Error(_)));
+        let s = d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+        let again = sent(&s, 0);
+        assert_eq!(again["method"], "session/set_config_option");
+        assert_eq!(again["params"]["configId"], "model");
+        assert_eq!(again["params"]["value"], "anthropic/claude-sonnet");
+        let prompt = sent(&s, 1);
+        assert_eq!(prompt["method"], "session/prompt");
+        // A refusal (-32602) is final: the next prompt goes alone.
+        let refused = json!({"jsonrpc":"2.0","id":again["id"],"error":{"code":-32602,"message":"unknown model"}});
+        d.on_line(&refused.to_string());
+        let done = json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"end_turn"}});
+        d.on_line(&done.to_string());
+        let s = d.prompt("t2", &RuntimePromptReq::of("again")).unwrap();
+        assert_eq!(s.writes.len(), 1);
+        assert_eq!(sent(&s, 0)["method"], "session/prompt");
+    }
+
+    /// T3 Code #33604: a named message that resumes after a thought keeps
+    /// the text streamed before it, as one item in its first place.
+    #[test]
+    fn a_resumed_message_keeps_its_streamed_text() {
+        let mut d = AcpDriver::gemini("gemini");
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#);
+        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+        let update = |kind: &str, text: &str, mid: Option<&str>| {
+            let mut u = json!({"sessionUpdate":kind,"content":{"type":"text","text":text}});
+            if let Some(m) = mid {
+                u["messageId"] = json!(m);
+            }
+            json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":u}})
+                .to_string()
+        };
+        let last_item = |s: &DriverStep| {
+            s.events
+                .iter()
+                .rev()
+                .find_map(|e| match e {
+                    DriverEvent::TurnItem(i) => Some(i.clone()),
+                    _ => None,
+                })
+                .expect("an item")
+        };
+        let first = last_item(&d.on_line(&update("agent_message_chunk", "First. ", Some("a"))));
+        d.on_line(&update("agent_thought_chunk", "Thinking", None));
+        let s = d.on_line(&update("agent_message_chunk", "Second.", Some("a")));
+        let resumed = last_item(&s);
+        assert_eq!(resumed.id, first.id, "one item, in its first place");
+        assert!(
+            matches!(&resumed.kind, TurnItemKind::AssistantMessage { text, message_id, .. }
+                if text == "First. Second." && message_id == "a"),
+            "{:?}",
+            resumed.kind
+        );
+        // Interleaved named messages a, b, a: each keeps its own text.
+        let b = last_item(&d.on_line(&update("agent_message_chunk", "B", Some("b"))));
+        assert_ne!(b.id, first.id);
+        let a = last_item(&d.on_line(&update("agent_message_chunk", " Third.", Some("a"))));
+        assert_eq!(a.id, first.id);
+        assert!(
+            matches!(&a.kind, TurnItemKind::AssistantMessage { text, .. } if text == "First. Second. Third.")
+        );
+        // Anonymous (ACP v1) chunks still split at a thought.
+        let x = last_item(&d.on_line(&update("agent_message_chunk", "x", None)));
+        d.on_line(&update("agent_thought_chunk", "hm", None));
+        let y = last_item(&d.on_line(&update("agent_message_chunk", "y", None)));
+        assert_ne!(x.id, y.id);
     }
 }

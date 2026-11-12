@@ -18,7 +18,9 @@
 //! Legacy design data is mirrored, never moved: `import` creates graph rows for
 //! `product_attachments` (design/mockup + images/models) and `canvas_scenes`
 //! idempotently (keyed on `source_kind`/`source_id`), links them to their
-//! stories (`implements`) and re-syncs a new version when the source changed.
+//! stories (`implements`) and re-syncs a new version when the source changed —
+//! live (`sync`, debounced per source off the event bus) plus a catch-up pass
+//! at boot. Mirrors are read-only until adopted (`mirror`).
 //!
 //! Routing (server nests this under `/api/v1`): every route is flat
 //! `/design/…`; the workspace comes from the request body or the row. Reads
@@ -42,10 +44,12 @@ pub mod graph;
 pub mod http;
 pub mod import;
 pub mod learn;
+pub mod mirror;
 pub mod retention;
 pub mod service;
 pub mod site;
 pub mod store;
+pub mod sync;
 pub mod types;
 pub mod uri;
 pub mod variants;

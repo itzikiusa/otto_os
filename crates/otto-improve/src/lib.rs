@@ -11,6 +11,7 @@ pub mod digest;
 pub mod engine;
 mod evidence;
 pub mod http;
+mod library_write;
 pub mod live;
 pub mod pathsafe;
 pub mod producer;

@@ -16,6 +16,7 @@
   import type { BrokerCluster, GroupDetail, GroupOffset, GroupSummary } from '../../lib/api/types';
   import type { DryRunResp } from './types';
   import ResetWarning, { resetWarning } from './ResetWarning.svelte';
+  import GroupLagBadge from './GroupLagBadge.svelte'; import { nextLagPoll } from './brokerFigures';
 
   interface Props {
     cluster: BrokerCluster;
@@ -24,15 +25,13 @@
 
   const guarded = $derived(cluster.read_only || cluster.environment === 'prod');
 
-  // Raw: a cluster can hold thousands of groups; the list is replaced
-  // wholesale per load, never mutated in place.
+  // Raw: thousands of groups; the list is replaced wholesale per load, never mutated in place.
   let groups = $state.raw<GroupSummary[]>([]);
   let loading = $state(true);
   /** Failed loads — inline with Retry, never "No consumer groups." / a blank detail. */
   let loadError = $state<string | null>(null);
   let detailError = $state<string | null>(null);
-  // True when the broker's ACLs deny consumer-group access (probed once, cached
-  // server-side). We show a clear banner instead of erroring, and skip re-probes.
+  // Broker ACLs deny group access (probed once, cached server-side): a banner, no re-probes.
   let accessDenied = $state(false);
   let accessMsg = $state('');
   let selected = $state<string | null>(null);
@@ -53,8 +52,7 @@
   let dryRunResult = $state<DryRunResp | null>(null);
   const blockedBy = $derived(resetWarning(dryRunResult, selected)); // the preview's refusal warning
 
-  // Resizable group list (PaneDivider): the width survives reloads. On phones /
-  // a narrow container the list stacks full-width and the divider is hidden.
+  // Resizable list (PaneDivider, width persisted); phones / narrow panes stack it full-width.
   let listW = $state(loadPaneWidth('brokers.groupsListW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
 
   $effect(() => {
@@ -72,7 +70,7 @@
     loadGroups();
   });
 
-  function loadGroups(): void {
+  function loadGroups(poll = 0): void {
     const request = ++listRequest;
     const clusterId = cluster.id;
     const current = () => request === listRequest && cluster.id === clusterId;
@@ -87,6 +85,8 @@
         loadError = null;
         // List/detail opens on an item, never on an empty "pick one" pane.
         if (!selected && g.length > 0) open(g[0].group_id);
+        const wait = nextLagPoll(g, poll); // list lag still computing server-side
+        if (wait != null) setTimeout(() => { if (current()) loadGroups(poll + 1); }, wait);
       })
       .catch((e) => {
         if (!current()) return;
@@ -149,8 +149,7 @@
     return offsets;
   });
 
-  // Max lag across all partitions — used to scale the per-row bars. (A loop,
-  // not `Math.max(...spread)`: a 12k-partition group would blow the arg limit.)
+  // Max lag scales the per-row bars (a loop: `Math.max(...)` on 12k partitions blows the arg limit).
   const maxLag = $derived(sortedOffsets.reduce((m, o) => (o.lag > m ? o.lag : m), 1));
 
   // Window the group list and the offsets table (SC-22): 1k groups / 12k
@@ -331,7 +330,7 @@
     {:else}
       <!-- First load: skeleton; failed load: inline error (or a stale bar over
            the last good list); a refresh keeps the rows on screen. -->
-      <LoadState what="consumer groups" variant="compact" {loading} error={loadError} empty={groups.length === 0} onretry={loadGroups}>
+      <LoadState what="consumer groups" variant="compact" {loading} error={loadError} empty={groups.length === 0} onretry={() => loadGroups()}>
         {#snippet emptyView()}<p class="muted pad">No consumer groups on this cluster.</p>{/snippet}
       {#if groupsWin.top}<div class="tw-spacer" aria-hidden="true" style="height:{groupsWin.top}px"></div>{/if}
       {#each groups.slice(groupsWin.start, groupsWin.end) as g (g.group_id)}
@@ -340,6 +339,7 @@
           <span class="badges">
             <span class="state {stateClass(g.state)}">{g.state}</span>
             <span class="muted">{plural(g.members, 'member')}</span>
+            <GroupLagBadge group={g} />
           </span>
         </button>
       {/each}

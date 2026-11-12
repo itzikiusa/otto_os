@@ -461,6 +461,43 @@ The dashboard surfaces this as the **CostForecastChip** next to the headline cos
 
 ---
 
+### 6.2 Remaining plan limits (the "Remaining" section)
+
+The top of the Usage overview shows, per provider login, how much of each
+subscription window is **left** and when it resets — one row per login, one bar
+per window, plan and credits when the CLI reports them. It works without
+ClickHouse: the numbers come from files the CLIs already write, read on demand
+(`GET /usage/limits`, `crates/otto-usage/src/limits.rs`; parser
+`crates/otto-transcript/src/limits.rs`). Nothing is stored and no history is kept.
+
+| Login | Source | What Otto shows |
+|---|---|---|
+| Codex (default `~/.codex` / `$CODEX_HOME`, and each Codex subscription profile) | The `rate_limits` object on the newest `token_count` line of the newest rollouts (`primary` / `secondary` windows with `used_percent`, `window_minutes`, `resets_at`; `credits`; `plan_type`). Both rollout layouts; older `resets_in_seconds` and RFC 3339 `resets_at` are read too. | Each window: `% left · resets in 3 d 4 h`, plan, credits. Model-specific buckets (`limit_id` other than `codex`) appear as extra windows named after the bucket. |
+| Codex with an API key | `rate_limits: null` | `Unknown` — "This login reports no plan limits". |
+| Claude Code (default, every `~/.claude-*`, each Claude profile) | Claude Code writes no plan limits to disk. Otto keeps the newest reading per window in memory, keyed by the login's config dir, from (1) `rate_limit_event` frames a structured (stream-json) Claude session prints, and (2) only when the owner turns on **Check with Anthropic** for that login, the login's own `claude` CLI answering the `get_usage` control request. | `5-hour`, `Weekly`, `Weekly · Opus/Sonnet/<model>` windows (newer CLIs list them in `rate_limits.limits[]`; a limit listed but not in effect, `is_active: false`, is shown dimmed with "not in effect now"; a null window is left out), plan; `Unknown` with the reason when nothing was seen or a check failed. |
+| Antigravity | None local. | `Unknown`, with the reason. |
+
+Root also sees the machine's default CLI homes; everyone sees their own
+subscription profiles (Settings ▸ Providers). **Freshness:** a reading older
+than 30 min is marked **Stale** and every percent on it carries its age ("8% left
+5 h ago"); a window whose reset time passed after the reading shows no percent
+at all ("Reset since the last reading"). The page re-reads once a minute while
+visible; the daemon caches each Codex root's answer for 15 s.
+
+**Check with Anthropic (Claude, opt-in per login, off by default).** The switch
+on a Claude row asks first, naming what runs and where it goes. When on, Otto
+runs that login's own `claude` CLI (its `CLAUDE_CONFIG_DIR`, no tools, no
+settings or hooks, no MCP servers, no transcript, no prompt) and sends it the
+Agent SDK's `initialize` and `get_usage` control requests over stream-json; the
+CLI asks Anthropic with its own sign-in — **Otto never reads the login**. One
+exchange has a 10 s hard timeout (the CLI is killed), answers are cached for
+5 minutes, and only one check per login runs at a time. The page runs a check
+when it opens if the last one is older than that, and **Check now** runs one on
+demand. A failed check shows as `Unknown` with the reason, never as 0 %. The
+switch is stored in the `settings` table (`usage_limits_claude_check`). The
+`get_usage` request is marked experimental in the Agent SDK, so a CLI update
+can change its answer; Otto then reports "answered in a shape Otto doesn’t know".
+
 ## 7. System metrics
 
 `crates/otto-usage/src/metrics.rs` samples host + process telemetry via `sysinfo`;
@@ -571,6 +608,9 @@ contract: `docs/contracts/api.md` (§ "Usage tracking & system metrics") and
 | `GET /usage/summary` | `days?` (def 30), `otto_only?` (def true) | `UsageSummary` (totals + providers + daily + sessions + by_kind). |
 | `GET /usage/by-kind` | `days?`, `otto_only?` | `FeatureUsage[]` (per-feature rollup). |
 | `GET /usage/metrics` | `minutes?` (def 60) | `MetricPoint[]` (system metrics series). |
+| `GET /usage/limits` | — | `LimitsResp` (remaining plan allowance per provider login; Usage:View, non-root sees only their own subscription profiles). See §6.2. |
+| `PUT /usage/limits/claude-check` | `{key, enabled}` | `LimitsResp` (the opt-in switch for one Claude login; off by default). |
+| `POST /usage/limits/claude-check/run` | `{key}` | `LimitsResp` (runs that login's own `claude` CLI `get_usage`; 400 while off). |
 | `GET /usage/attribution` | `by?` (def `origin`), `days?` | `AttributionRow[]` (cost/tokens/sessions per work-graph dimension). |
 | `POST /usage/forecast` | `ForecastReq {feature, provider, est_tokens?}` | `ForecastResp {projected_cost_usd, basis}`. |
 | `PUT /usage/config` | partial `{enabled?, retention_days?, metrics_interval_secs?, clickhouse_path?}` | `UsageStatus` (applied live). |

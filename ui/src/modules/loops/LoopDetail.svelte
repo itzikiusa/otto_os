@@ -18,13 +18,14 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { humanVerification } from './verification';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
-  import { loopStatus } from './loopStatus';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { formatSeconds } from '../../lib/metric-format';
   import Modal from '../../lib/components/Modal.svelte';
   import type { GoalLoop } from '../../lib/api/types';
-  import { budgetCap, extendDefaults, hasBudgetLeft } from './budget';
+  import { budgetCap, extendBlocker, extendDefaults, hasBudgetLeft } from './budget';
+  import { loopStatusOf, pausedByRestart } from './loopSafety';
+  import LoopSafetyNotes from './LoopSafetyNotes.svelte';
   import { tick } from 'svelte';
 
   /** ⌘K verbs registered by the detail page (or bound via optional actions prop). */
@@ -160,12 +161,10 @@
     const loopId = id;
     const iters = Math.floor(Number(extIters));
     const mins = Math.floor(Number(extMinutes));
-    if (!(iters > 0) || !(mins > 0)) {
-      extError = 'Iterations and runtime must be positive whole numbers.';
-      return;
-    }
-    if (iters <= loop.iterations_started || mins * 60 <= elapsedSecs(loop)) {
-      extError = `Raise both above what is already used (${loop.iterations_started} iterations, ${formatSeconds(Math.round(elapsedSecs(loop)))}).`;
+    // Name the limit still without room (the engine refuses it the same way).
+    const blocker = extendBlocker(loop, elapsedSecs(loop), iters, mins);
+    if (blocker) {
+      extError = blocker;
       return;
     }
     extError = '';
@@ -193,6 +192,12 @@
   const answeredQuestions = $derived((loop?.ledger?.questions ?? []).filter((q) => !!q.answer));
   const canVerify = $derived(!!loop && ['paused', 'blocked', 'exhausted'].includes(loop.status));
   const canResume = $derived(!!loop && (loop.status === 'paused' || loop.status === 'blocked' || loop.status === 'exhausted'));
+  /** The restart banner's Resume: the header verb's rules (no budget → Extend). */
+  function resumeNow(): void {
+    if (!loop || acting || unanswered) return;
+    if (!budgetLeft) return openExtend();
+    void act(() => loops.resume(id), 'Couldn’t resume the goal loop');
+  }
 
   $effect(() => {
     const loopId = id;
@@ -241,7 +246,7 @@
     </button>
   {/snippet}
   {#snippet badge()}
-    {#if loop}<StatusBadge status={loopStatus(loop.status)} />{/if}
+    {#if loop}<StatusBadge status={loopStatusOf(loop)} />{/if}
   {/snippet}
   {#snippet actions()}
     {#if loop}
@@ -310,9 +315,10 @@
         <div><dt>Work type</dt><dd>{loop.config.mode === 'research' ? 'Research' : 'Build'}</dd></div>
         {#if loop.branch}<div class="wide"><dt>Branch</dt><dd class="mono" title={loop.branch}>{loop.branch}</dd></div>{/if}
       </dl>
+      <LoopSafetyNotes {loop} elapsedSecs={elapsedSecs(loop)} busy={acting} blocked={unanswered} onresume={resumeNow} />
 
       {#if loop.summary}<p class="summary">{loop.summary}</p>{/if}
-      {#if loop.error}<p class="errline" use:announceShown={{ text: loop.error, assertive: true }}><Icon name="warning" size={13} /> <span>{loop.error}</span></p>{/if}
+      {#if loop.error && !pausedByRestart(loop)}<p class="errline" use:announceShown={{ text: loop.error, assertive: true }}><Icon name="warning" size={13} /> <span>{loop.error}</span></p>{/if}
       {#if loop.ledger?.next_action}<p class="summary"><strong>Next:</strong> {loop.ledger.next_action}</p>{/if}
       {#if loop.worktree_path}
         <p class="retained">Retained work <code title={loop.worktree_path}>{loop.worktree_path}</code></p>

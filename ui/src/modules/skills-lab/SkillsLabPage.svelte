@@ -14,6 +14,7 @@
   import SkillsBrowser from './SkillsBrowser.svelte';
   import SkillReviewPanel from './SkillReviewPanel.svelte';
   import SkillsEvalPage from '../skills-eval/SkillsEvalPage.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -74,6 +75,20 @@
   function openRun(id: string): void {
     runTarget = id;
     go('evaluator');
+  }
+
+  // The page ⋯: Import on Skills, and — Skills Lab being the one home for
+  // skills — what used to be Settings → Skills (Install all bundled skills)
+  // and Settings → Skills evaluator (the defaults sheet, owned by
+  // SkillsEvalPage), behind the same settings-admin gate as those sections.
+  const admin = $derived(auth.can('settings', 'admin'));
+  function pageMore(e: MouseEvent): void {
+    ctxMenu.show(e, tab === 'evaluator'
+      ? [{ label: 'Evaluator defaults…', icon: 'gear', action: () => evalPage?.openDefaults() }]
+      : [
+          { label: 'Import a skill (.zip)…', icon: 'download', action: () => browser?.openImport() },
+          ...(admin ? [{ label: 'Install all bundled skills…', icon: 'box', action: () => void browser?.installAllBundled() }] : []),
+        ]);
   }
 
   const wsId = $derived(ws.currentId ?? '');
@@ -149,19 +164,10 @@
       </div>
     {/snippet}
     {#snippet actions()}
-      {#if auth.can('settings', 'admin')}
-        <!-- Where this page's defaults live: the evaluator's agents/iterations
-             (evaluator tab) or the installed library (skills tab). -->
-        <button class="icon-btn" data-overflow="-1" data-icon="gear"
-          data-label={tab === 'evaluator' ? 'Evaluator defaults' : 'Skill library settings'}
-          onclick={() => router.go(tab === 'evaluator' ? 'settings/skill-eval' : 'settings/skills')}
-          aria-label={tab === 'evaluator' ? 'Evaluator defaults' : 'Skill library settings'}
-          title={tab === 'evaluator' ? 'Evaluator defaults (Settings → Skills evaluator)' : 'Installed skills (Settings → Skills)'}><Icon name="gear" size={14} /></button>
+      {#if tab === 'skills' || (tab === 'evaluator' && admin)}
+        <button class="icon-btn" data-keep onclick={pageMore} aria-haspopup="menu" aria-label="More Skills Lab actions" title={tab === 'evaluator' ? 'More: evaluator defaults' : 'More: import a skill, install all bundled skills'} data-testid="lab-more"><Icon name="more" size={14} /></button>
       {/if}
       {#if tab === 'skills'}
-        <button class="btn small" data-overflow="-1" data-icon="download" data-label="Import a skill (.zip)…" onclick={() => browser?.openImport()} title="Import a skill package (.zip)">
-          <Icon name="download" size={12} /> Import…
-        </button>
         {#if canCreate}
           <button class="btn small primary" onclick={() => browser?.openNew()} data-testid="new-skill"><Icon name="plus" size={12} /> New skill</button>
         {/if}

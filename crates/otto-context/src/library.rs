@@ -105,6 +105,93 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// A conditional skill-file write lost: the file is no longer the version the
+/// writer read. `current` is its hash now (`None` = the file is gone).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleSkillFile {
+    pub current: Option<String>,
+}
+
+/// Serializes the editor's check-then-write so the `if_hash` test and the
+/// write are one step for every in-process writer that goes through Library.
+static SKILL_WRITES: Mutex<()> = Mutex::new(());
+
+fn skill_write_guard() -> std::sync::MutexGuard<'static, ()> {
+    SKILL_WRITES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Backups kept per skill in `<library>/skills-backup/`; older ones are pruned
+/// after each new backup (bundled updates and deletes share the folder).
+pub const SKILL_BACKUPS_KEPT: usize = 3;
+
+/// Atomically reserve a unique, empty `<root>/skills-backup/<name>-<secs>-<id>`
+/// dir; two backups in one second must not merge their safety copies. Legacy
+/// `<name>-<secs>` directories remain valid.
+pub fn reserve_skill_backup(root: &Path, name: &str) -> io::Result<PathBuf> {
+    let secs = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let parent = root.join("skills-backup");
+    fs::create_dir_all(&parent)?;
+    loop {
+        let dest = parent.join(format!("{name}-{secs}-{}", otto_core::new_id()));
+        match fs::create_dir(&dest) {
+            Ok(()) => return Ok(dest),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Keep only the newest `keep` `skills-backup/<name>-<secs>` dirs for `name`
+/// (best effort: a failed removal is left for the next backup).
+pub fn prune_skill_backups(root: &Path, name: &str, keep: usize) {
+    let Ok(rd) = fs::read_dir(root.join("skills-backup")) else {
+        return;
+    };
+    let prefix = format!("{name}-");
+    let mut dirs: Vec<((u64, String), PathBuf)> = rd
+        .flatten()
+        .filter_map(|e| {
+            let file = e.file_name();
+            let suffix = file.to_str()?.strip_prefix(&prefix)?;
+            let (timestamp, unique) = suffix.split_once('-').unwrap_or((suffix, ""));
+            // Exactly `<secs>` (legacy) or `<secs>-<ULID>`: anything else is
+            // another skill whose name merely starts with this one ("vault"
+            // vs "vault-2-<secs>-<id>"), whose backups must never be pruned.
+            let ulid = unique.len() == 26 && unique.chars().all(|c| c.is_ascii_alphanumeric());
+            if !(unique.is_empty() || ulid) || !timestamp.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            let secs = timestamp.parse::<u64>().ok()?;
+            e.file_type()
+                .ok()?
+                .is_dir()
+                .then(|| ((secs, unique.to_string()), e.path()))
+        })
+        .collect();
+    dirs.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, d) in dirs.into_iter().skip(keep) {
+        let _ = fs::remove_dir_all(d);
+    }
+}
+
+/// Recursively copy a directory tree (files keep their mode via `fs::copy`).
+fn copy_dir(src: &Path, dest: &Path) -> io::Result<()> {
+    fs::create_dir_all(dest)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dest.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &to)?;
+        } else {
+            fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
+}
+
 /// Handle to the on-disk library rooted at `root`.
 #[derive(Clone)]
 pub struct Library {
@@ -363,20 +450,60 @@ impl Library {
         Ok(())
     }
 
-    pub fn delete_skill(&self, name: &str) -> io::Result<()> {
+    /// Delete a skill from the Library by MOVING its whole tree into
+    /// `<library>/skills-backup/<name>-<secs>-<id>/` (the same folder the
+    /// bundled-skill updates back up into), so a deleted skill can be put back
+    /// by hand. Returns that folder, or `None` when there was no such skill.
+    pub fn delete_skill(&self, name: &str) -> io::Result<Option<PathBuf>> {
         let dir = self
             .skill_dir(name)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe skill name"))?;
-        match fs::remove_dir_all(&dir) {
-            Ok(()) => {
-                if let Ok(mut cache) = self.skill_cache.lock() {
-                    cache.remove(name);
-                }
-                Ok(())
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e),
+        match fs::symlink_metadata(&dir) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+            Ok(_) => {}
         }
+        let dest = reserve_skill_backup(&self.root, name)?;
+        // The reserved dir is empty, so a rename may replace it (same volume).
+        // A failed rename falls back to copy-then-remove; the copy must finish
+        // before the original goes.
+        if fs::rename(&dir, &dest).is_err() {
+            copy_dir(&dir, &dest)?;
+            fs::remove_dir_all(&dir)?;
+        }
+        self.evict(name);
+        prune_skill_backups(&self.root, name, SKILL_BACKUPS_KEPT);
+        Ok(Some(dest))
+    }
+
+    /// SHA-256 (hex) of one file in a library skill exactly as it is on disk,
+    /// or `None` when it does not exist. The Skills Lab editor sends it back as
+    /// `if_hash` so a save never silently overwrites a newer edit.
+    pub fn skill_file_hash(&self, name: &str, rel: &str) -> Option<String> {
+        let target = confined(&self.skill_dir(name)?, rel)?;
+        fs::read(target)
+            .ok()
+            .map(|b| otto_core::text::bytes_sha256(&b))
+    }
+
+    /// [`Self::write_skill_file`], but only when the file on disk still hashes
+    /// to `if_hash` (what the writer read). A mismatch writes nothing and
+    /// returns `Ok(Err(StaleSkillFile))` carrying the current hash. The check
+    /// and the write hold one lock, so two in-process editors can't both win.
+    pub fn write_skill_file_if(
+        &self,
+        name: &str,
+        rel: &str,
+        content: &str,
+        if_hash: &str,
+    ) -> io::Result<Result<(), StaleSkillFile>> {
+        let _write = skill_write_guard();
+        let current = self.skill_file_hash(name, rel);
+        if current.as_deref() != Some(if_hash) {
+            return Ok(Err(StaleSkillFile { current }));
+        }
+        self.write_skill_file_unlocked(name, rel, content)?;
+        Ok(Ok(()))
     }
 
     // -- skill files (multi-file editor) -------------------------------------
@@ -420,7 +547,37 @@ impl Library {
     /// Create or overwrite one file inside an existing library skill. Rejects
     /// unsafe paths and content over the size cap. Creates intermediate dirs and
     /// evicts the skill cache (in case `SKILL.md` changed).
+    /// Remove one file of a library skill, but only while it still hashes to
+    /// `if_hash` (same lock and contract as [`Self::write_skill_file_if`]).
+    /// Unlike [`Self::delete_skill_file`] it may remove `SKILL.md`: the
+    /// self-improvement engine applies (and rolls back) whole-file removals.
+    pub fn remove_skill_file_if(
+        &self,
+        name: &str,
+        rel: &str,
+        if_hash: &str,
+    ) -> io::Result<Result<(), StaleSkillFile>> {
+        let _write = skill_write_guard();
+        let current = self.skill_file_hash(name, rel);
+        if current.as_deref() != Some(if_hash) {
+            return Ok(Err(StaleSkillFile { current }));
+        }
+        let root = self
+            .skill_dir(name)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe skill name"))?;
+        let target = confined(&root, rel)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe path"))?;
+        fs::remove_file(target)?;
+        self.evict(name);
+        Ok(Ok(()))
+    }
+
     pub fn write_skill_file(&self, name: &str, rel: &str, content: &str) -> io::Result<()> {
+        let _write = skill_write_guard();
+        self.write_skill_file_unlocked(name, rel, content)
+    }
+
+    fn write_skill_file_unlocked(&self, name: &str, rel: &str, content: &str) -> io::Result<()> {
         let root = self
             .skill_dir(name)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe skill name"))?;
@@ -446,6 +603,7 @@ impl Library {
     /// create are one `create_new` open, never a check-then-write race.
     pub fn create_skill_file(&self, name: &str, rel: &str, content: &str) -> io::Result<()> {
         use std::io::Write as _;
+        let _write = skill_write_guard();
         let root = self
             .skill_dir(name)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe skill name"))?;
@@ -983,6 +1141,108 @@ mod tests {
         assert!(lib
             .read_skill_file("editable", "../../etc/passwd")
             .is_none());
+    }
+
+    /// Deleting a skill moves the whole tree into `skills-backup/`, never
+    /// destroys it; deleting a missing skill reports no backup.
+    #[test]
+    fn delete_skill_moves_the_tree_into_the_backup_folder() {
+        let (d, lib) = lib();
+        lib.create_skill("gone", "review", "Soon deleted", None)
+            .unwrap();
+        lib.write_skill_file("gone", "references/notes.md", "keep me")
+            .unwrap();
+        let backup = lib.delete_skill("gone").unwrap().expect("backed up");
+        assert!(backup.starts_with(d.path().join("skills-backup")));
+        assert!(backup
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("gone-"));
+        assert_eq!(
+            std::fs::read_to_string(backup.join("references/notes.md")).unwrap(),
+            "keep me"
+        );
+        assert!(backup.join("SKILL.md").is_file());
+        assert!(lib.get_skill("gone").is_none());
+        assert!(!d.path().join("skills/gone").exists());
+        assert_eq!(lib.delete_skill("gone").unwrap(), None);
+    }
+
+    /// Pruning "vault" backups never touches those of "vault-2" (modern
+    /// `<name>-<secs>-<ULID>` or legacy `<name>-<secs>` names).
+    #[test]
+    fn prune_matches_the_exact_skill_name_only() {
+        let (d, _lib) = lib();
+        let b = d.path().join("skills-backup");
+        let ulid = |n: u32| format!("01JC{n:022}");
+        let mut vault2 = Vec::new();
+        for secs in [1, 2, 3, 4] {
+            let modern = format!("vault-2-{secs}-{}", ulid(secs));
+            fs::create_dir_all(b.join(&modern)).unwrap();
+            vault2.push(modern);
+        }
+        fs::create_dir_all(b.join("vault-2-5")).unwrap();
+        vault2.push("vault-2-5".to_string());
+        for secs in [10, 11, 12, 13] {
+            fs::create_dir_all(b.join(format!("vault-{secs}-{}", ulid(secs)))).unwrap();
+        }
+        prune_skill_backups(d.path(), "vault", 2);
+        let left: Vec<String> = fs::read_dir(&b)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        for name in &vault2 {
+            assert!(left.contains(name), "{name} pruned as a vault backup");
+        }
+        assert_eq!(left.iter().filter(|n| n.starts_with("vault-1")).count(), 2);
+        assert!(left.contains(&format!("vault-13-{}", ulid(13))));
+        assert!(left.contains(&format!("vault-12-{}", ulid(12))));
+        // And pruning "vault-2" keeps its own newest two only.
+        prune_skill_backups(d.path(), "vault-2", 2);
+        let left2 = fs::read_dir(&b).unwrap().flatten().count();
+        assert_eq!(left2, 4);
+    }
+
+    /// `if_hash` guards the editor: a save based on an older read is refused
+    /// with the current hash and leaves the newer text alone.
+    #[test]
+    fn conditional_write_refuses_a_stale_hash() {
+        let (_d, lib) = lib();
+        lib.create_skill("guarded", "review", "d", None).unwrap();
+        let read_hash = lib.skill_file_hash("guarded", "SKILL.md").unwrap();
+        assert_eq!(
+            read_hash,
+            otto_core::text::content_sha256(&lib.read_skill_file("guarded", "SKILL.md").unwrap().0)
+        );
+        // The improve engine (or a review fix) writes in between.
+        lib.write_skill_file("guarded", "SKILL.md", "theirs")
+            .unwrap();
+        let theirs = lib.skill_file_hash("guarded", "SKILL.md").unwrap();
+        let stale = lib
+            .write_skill_file_if("guarded", "SKILL.md", "mine", &read_hash)
+            .unwrap()
+            .expect_err("stale base");
+        assert_eq!(stale.current.as_deref(), Some(theirs.as_str()));
+        assert_eq!(
+            lib.read_skill_file("guarded", "SKILL.md").unwrap().0,
+            "theirs"
+        );
+        // "Keep mine" re-sends with their hash and wins.
+        lib.write_skill_file_if("guarded", "SKILL.md", "mine", &theirs)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            lib.read_skill_file("guarded", "SKILL.md").unwrap().0,
+            "mine"
+        );
+        // A file that vanished is stale too (current = None).
+        let gone = lib
+            .write_skill_file_if("guarded", "references/x.md", "y", &theirs)
+            .unwrap()
+            .expect_err("missing file");
+        assert_eq!(gone.current, None);
     }
 
     #[test]

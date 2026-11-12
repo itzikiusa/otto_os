@@ -29,7 +29,7 @@ operator reference for the feature.
 | Capture recurring wisdom | **Learnings** — a global patterns/avoids knowledge base, auto-suggested by agents |
 | Stay in sync with the source | **Watcher** — periodic poll that reconciles new comments into answered questions |
 | Feed a coding agent the full picture | **Inject** — a consolidated context bundle dropped into a new agent session |
-| Design what it looks like — 2D and 3D | **Design** — one arena for HTML screens (device frames), Excalidraw boards, Mermaid diagrams and `scene3d` 3D scenes (viewport + hierarchy + inspector), each agent-assisted, file-backed and autosaved; GLB / Blender-script export, optional Blender render |
+| Design what it looks like — 2D and 3D | **Design** — the story's designs from Design Hall (the one home for designs): New design, Ask Otto, cards that open in the Hall and lead back; the older arena (pinned review notes, Blender render) stays behind ⋯ for now |
 | Keep a swarm's output under one roof | **Epic tree** — a story can be an *epic* with children in *folders*; swarm agents publish INTO their project's epic instead of piling up top-level drafts |
 
 ---
@@ -51,14 +51,15 @@ the session manager + improvement engine), and a Svelte UI module.
 | · PTY mechanics | `crates/otto-server/src/product_host.rs` (`impl ProductRunHost for ServerCtx`) | `ProductRunHost` for `ServerCtx`: spawn a provider as a real session, inject the prompt (codex settle + repaste), watch to a result with bounded recovery |
 | Watcher | `crates/otto-product/src/watcher.rs` | The background poll/reconcile supervisor |
 | Swarm bridge | `crates/otto-product/src/swarm.rs` | `story_to_swarm` (Plan → Swarm), discovery runs |
-| Discovery chat / refinement | `crates/otto-product/src/chat.rs`, `refine.rs` | Conversational story agents — generic over the `ProductStudioHost` trait (`host.rs`), implemented for `ServerCtx` in `crates/otto-server/src/product_host.rs` |
+| Story Chat | `crates/otto-product/src/refine.rs` (the engine), `chat_actions.rs` (cards), `chat_draft.rs` (body → suggestion), `chat.rs` (earlier chats, read-only; the shared context bundle) | The conversational story agent — generic over the `ProductStudioHost` trait (`host.rs`), implemented for `ServerCtx` in `crates/otto-server/src/product_host.rs` |
 | Memory route | `crates/otto-server/src/routes/product_memory.rs` | `POST …/memory/ingest` |
 | Issue trackers | `crates/otto-issues/` | The Jira/Confluence clients (`JiraClient`, `ConfluenceClient`) Product proxies through |
 | Design formats | `crates/otto-product/src/design_format.rs`, `design_scene3d.rs`, `crates/otto-server/src/design_blender.rs` | The single `DesignFormat` enum (html · mermaid · excalidraw · scene3d), the `scene3d` validator + deterministic Blender-script generator, Blender detection / render jobs |
 | Media | `crates/otto-product/src/media.rs`, `crates/otto-server/src/mockup_assist.rs` | Attachment upload / content PUT (mime allow-list, sniffing, size caps), the in-place file-backed assist agent |
 | UI | `ui/src/modules/product/` | `ProductPage.svelte` + per-tab components; `types.ts` mirrors the DTOs |
 | · Jira details | `ui/src/modules/product/` | `JiraIssueSection.svelte` (the Overview tab's Jira Details sidebar + IssueEditor host) over `jiraIssue.svelte.ts` (issue + dev-status load); `caseOrder.svelte.ts` (test-case reorder with a queued save) |
-| · Design Arena | `ui/src/modules/product/design/` | `DesignArena.svelte` (assets / viewport / inspector / assistant shell), `DesignBoard.svelte` (Excalidraw island), `DeviceFrame.svelte`, templates, exporters |
+| · Design tab | `ui/src/modules/product/StoryDesigns.svelte`, `StoryDesignsLine.svelte`, `storyDesigns.ts` | The story's Design Hall designs (grid, New design, Ask Otto) and the Overview's "N designs → Design" line |
+| · Design Arena (classic) | `ui/src/modules/product/design/` | `DesignArena.svelte` (assets / viewport / inspector / assistant shell) — opened only from the Design tab's ⋯ → *Open the classic arena*; `exporters.ts` re-exports `ui/src/lib/design/exporters.ts` |
 | · 3D | `ui/src/lib/design/scene3d/` | `Scene3DViewport.svelte` (lazy three.js), `Hierarchy.svelte`, `Inspector.svelte`, `types.ts` / `validate.ts` / `ops.ts` (pure doc mutations) / `exportGlb.ts` |
 | Skills | `crates/otto-skills/assets/skills/development/otto-{mockup,design-2d,design-3d}/` | What the assistant / swarm agents know about the four formats and their authoring rules |
 | Contracts (authoritative) | `docs/contracts/product.md`, `api.md` (§ Product), `ws.md` (Product events) | The source-of-truth API spec |
@@ -102,11 +103,11 @@ The Product page is a two-pane layout: a left sidebar with the **story list**
 (plus import controls and a tag filter) and a main area with a **Stories /
 Learnings** toggle. With a story selected, the main area shows a tab strip:
 
-> **Overview · Analysis · Questions · Notes · Rewrite · Test Cases · Plan · Design · History · Inject**
+> **Overview · Chat · Analysis · Questions · Notes · Rewrite · Test Cases · Plan · Design · History · Inject**
 
 (For a draft, Overview becomes an editor; for a Jira-backed story, Overview adds
 a live Jira metadata panel. The tab id `mockups` is kept as a deep-link alias for
-**Design**; a `tree_kind:"doc"` child hides the analysis/plan tabs.) The story
+**Design**, and the old tab ids `refine` and `discovery` land on **Chat**; a `tree_kind:"doc"` child hides the analysis/plan tabs.) The story
 list itself is a **tree** — epics with folders and children — see
 [§4.13](#413-epic-tree--epics-folders-and-swarm-publishing).
 
@@ -237,7 +238,12 @@ the story to `stage: "refined"` and emitting `product_changed`
 **Publishing a version** — `POST /product/versions/{vid}/publish` pushes a
 version's body to the live source: Jira via `update_description`, Confluence via a
 versioned `update_page`. It records a `published` version and a `published` event,
-returning `{url, ref}`.
+returning `{url, ref}`. Both refuse with **409** when someone edited the source
+since Otto last synced it — Confluence by page version, Jira by comparing the live
+description with the one recorded at import / refresh / the last publish (a Jira
+publish records what Jira holds right after the write as the next base). The
+Rewrite tab shows that refusal as a "Changed since the last sync" dialog whose
+**Refresh** re-pulls the story so you can review and publish again.
 
 ### 4.5 Test Cases — generate, approve/edit, and publish to Confluence
 
@@ -329,6 +335,10 @@ then **Publish as Jira Story** or **Publish as Confluence RFC**.
   `source_kind: "draft"`, `stage: "draft"`, and a blank `kind: "draft"` version.
 - Edit: `PATCH /product/stories/{sid}/draft` (`UpdateDraftReq { title, body_md }`)
   — edits the draft version in place (no new version).
+- A story body the **Chat** agent proposes (`chat_draft.rs`) is ALWAYS saved as
+  a new `suggested` version — on a draft and on an imported Jira/Confluence story
+  alike. Your draft, its history and the title are never touched; review and
+  publish the suggestion from Rewrite. An empty body is refused.
 - Transcripts: `GET/POST /product/stories/{sid}/transcripts`,
   `DELETE /product/transcripts/{trid}`. Transcripts feed the agent context (they
   do **not** appear in the inject bundle).
@@ -341,6 +351,41 @@ then **Publish as Jira Story** or **Publish as Confluence RFC**.
   issue and rebinds the draft to it (`source_kind → "jira"`). (For a
   Confluence-backed RFC this instead spawns a *new* linked Jira story and
   cross-links the two.)
+
+### 4.7a Chat — one conversation with the story agent
+
+**UI** — **Discover → Chat** (this one tab replaced the separate Chat and Refine
+tabs). The left list holds the story's chats (**New chat**, newest first, Archive
+on hover) and, when the story has any, a collapsed **Earlier chats** section. The
+right pane is one conversation: starter chips that prefill the composer, the
+transcript, the agent's cards inline, and a composer with a compact **Agent**
+picker (any configured provider, per message).
+
+- **Proposed text never replaces yours.** When the agent rewrites the story, the
+  turn saves a `suggested` version and the reply shows **Suggestion vN · Review in
+  Rewrite**; Rewrite diffs it against the story and publishes it.
+- **Cards** — *Questions*, *Notes* (per-item checkboxes, Undo deletes what was
+  created) and *Canvas* (a diagram linked to the story, opened in Canvas). Nothing
+  is applied until you click.
+- **Earlier chats** — the old Discovery Chat conversations, read-only, with a
+  one-line note of what each reply proposed and **Continue in a new chat**.
+  Nothing was migrated or deleted.
+
+**Behind it** (`refine.rs`, `chat_actions.rs`, `chat_draft.rs`, `chat.rs`):
+
+- `POST /product/stories/{sid}/refinement-threads` starts a chat;
+  `POST /product/refinement-threads/{tid}/messages` runs one turn as a managed
+  session (`source: product_refine`). The prompt carries a bounded context bundle
+  (best body, mockups/attachments with text inlined, open questions, notes —
+  `chat::assemble_context`, 24k chars) and the last 40 messages. The agent answers
+  `{reply, updated_story_md?, summary?, actions?}`; a body becomes a `suggested`
+  version (+ `product_changed`), the cards ride on the reply
+  (`meta_json.actions`).
+- `POST /product/refinement-threads/{tid}/apply` applies one card
+  (`chat_actions::apply_story_action`). The diagram goes through ONE function,
+  `chat_actions::create_design_from_action`, so it can move to Design Hall.
+- Earlier chats: `GET /product/stories/{sid}/discovery-chats` and
+  `GET /product/discovery-chats/{cid}`; sending to one returns **409**.
 
 ### 4.8 Learnings — a global recurring-patterns knowledge base
 
@@ -439,8 +484,12 @@ stories about every **60 seconds**; a story is polled when its cadence elapses
    comments onto open questions — marking questions **answered** with the extracted
    answer, adding **new questions**, and proposing a recommended next step
    (recorded as a `reconciled` event),
-4. triggers a `story-clarifying-questions` + `po-story-overview` skill
-   self-improvement pass, and
+4. when this batch answered questions, triggers a `story-clarifying-questions` +
+   `po-story-overview` self-improvement pass over THOSE questions only. The
+   answers are third-party comment text, so the narrative fences them as
+   untrusted data and the run is **untrusted**
+   (`run_for_untrusted_narrative`): every edit it proposes queues for a person,
+   whatever the workspace's autonomy, and
 5. emits a `Notice` ("Story {key}: N new comment(s)") surfaced in the
    notification center.
 
@@ -475,8 +524,8 @@ ever rewriting the Jira row**: the UI treats a row as an epic when
   epic**, **Detach from epic**. Toolbar **New ▾** → *Draft* / *Epic*; inside an
   epic **Add child ▾** → *Story* / *Doc*. (Drag-and-drop is a follow-up.)
 - An epic's **Overview** adds a *Children* board (folder → cards) with rolled-up
-  counts, and its **Design** tab shows every child's design artifacts
-  (filterable by child) — the epic is the single place to review a feature.
+  counts, and its **Design** tab shows every child's designs, grouped by story
+  — the epic is the single place to review a feature.
 - The tag filter still applies (to the flattened list).
 - **Deleting an epic re-parents its children to top level** — it never cascades
   into them. Deleting any story now also removes its attachments and annotation
@@ -502,11 +551,59 @@ project's story → the resolved epic) and accepts `--format
 html|mermaid|excalidraw|scene3d`. Both helpers now **fail loudly** (`curl -f`,
 HTTP status printed, non-zero exit) instead of silently 204-ing.
 
-### 4.14 Design Arena — screens, boards, diagrams and 3D scenes
+### 4.14 The Design tab — the story's designs, from Design Hall
 
-The **Design** tab (formerly *Mockups*) is one arena for every visual artifact on
-a story. Desktop layout; on mobile it collapses to a segmented top bar with a
-single pane, like the Database Explorer:
+Design Hall is the one home for designs ([design-hall.md §4.1](./design-hall.md#41-one-home-the-story-design-tab-and-canvas-fold-into-the-hall)).
+The story's **Design** tab (tab id `mockups`, kept for deep links) is the Hall's
+design grid scoped to the story — an epic includes its children's designs and
+groups them by story — with:
+
+- **New design** (the page's one primary action): the Hall's New design sheet,
+  "Implements story" preset to this story. The draft opens in the Hall.
+- **Ask Otto**: pick a studio, describe the design; Otto creates a draft that
+  implements the story (so its brief carries the story and acceptance
+  criteria), runs one generate turn and opens it on its Otto tab.
+- The filter row (group by Recent · Story · Project; studio, status, Mine,
+  Archived) and paging ("Load more").
+- **⋯** → *Open in Design Hall* (`#/design/story/<id>`) and *Open the classic
+  arena* (below).
+
+Cards open `#/design/a/<id>?from=story/<storyId>`; the artifact view leads
+back to the story. The **Overview** shows one line, "N designs → Design",
+where *Linked canvases* used to be.
+
+**Agent mockups arrive by themselves.** The arena's Create with AI turn (and
+the `otto-mockup` helper) still writes a story attachment and broadcasts
+`mockup_updated`; Design Hall's live sync mirrors it about 1.5 s later as an
+artifact that `implements` the story, and the grid reloads on the mirror's
+create event — the card shows within seconds, badged **From a story**,
+read-only until someone presses **Edit here** in the Hall. Canvas boards linked
+to the story arrive the same way, badged **From Canvas**.
+
+**Where each old control lives now.**
+
+| Was | Now |
+|---|---|
+| Overview → Linked canvases → open / New canvas | The Design tab's cards / **New design** → Whiteboard studio |
+| Linked canvases → Link an existing canvas | Open the board's design in the Hall → **Edit here** → Links → Add → A story |
+| Arena: New ▾ (screen, board, diagram, 3D, template), Import | **New design** (studio, format, template); Design Hall → Import |
+| Arena: Create with AI / Refine | **Ask Otto**, then the design's Otto tab |
+| Arena: Export ▾ (PNG, SVG, source, GLB) | The artifact view's Export ▾; 3D Studio Export ▾ |
+| Arena: pinned annotations, Render in Blender, Blender script | ⋯ → **Open the classic arena** (temporary) |
+| Graph strip → Open in Design Hall | ⋯ → **Open in Design Hall** |
+
+**Temporary: the classic arena.** ⋯ → *Open the classic arena* mounts the arena
+described below for this story, because pinned review annotations and the
+Blender bridge exist only there; "Back to designs" returns to the grid. The
+entry is always shown (knowing whether a story has pinned notes would cost one
+request per attachment) and goes away once Design Hall has both. A person
+without the `design` grant gets the arena from the tab's empty state instead.
+
+#### The classic arena — screens, boards, diagrams and 3D scenes
+
+The arena is one editor for every visual attachment on a story. Desktop
+layout; on mobile it collapses to a segmented top bar with a single pane, like
+the Database Explorer:
 
 ```
 ┌──────────────┬─────────────────────────────────────────────┬────────────────┐
@@ -620,7 +717,7 @@ agent edits `scene.json`.
 
 ### Stopping a conversational turn
 
-Discovery and refinement expose an exact-turn Stop API for clients that supply
+The story Chat (and the earlier discovery chats) expose an exact-turn Stop API for clients that supply
 a fresh `turn_id` on each Send. Stop waits for that turn's session cleanup and
 does not stop another conversation or a later turn. The accepted user message
 is retained; clients reload the transcript rather than re-send it. A turn that
@@ -709,6 +806,8 @@ validator in `crates/otto-server/src/design_scene3d.rs`.
 | `POST /workspaces/{id}/product/stories/{sid}/inject-session` | `Session` | spawn an agent preloaded with the bundle |
 | `POST /product/testcase-runs/{rid}/approve` | `ProductTestcaseRun` | + skill self-improvement |
 | `POST /product/analyses/{aid}/agents/{agent_id}/retry` · `/stop` | **202** | per-lens control |
+| `POST /product/refinement-threads/{tid}/messages` | `{user_message, agent_message, story_updated, version_no?, actions}` | one Chat turn; a body → `suggested` version |
+| `POST /product/refinement-threads/{tid}/apply` | `ApplyResult` | apply one Chat card |
 | `POST /workspaces/{ws}/product/stories/{sid}/memory/ingest` | `{ingested}` | extract artifacts into `otto-memory` |
 
 ### WebSocket events (`/ws/events`)
@@ -752,10 +851,10 @@ validator in `crates/otto-server/src/design_scene3d.rs`.
 - Have a **watcher** fold new comments into answered questions automatically.
 - Organise stories as **epics with folders**, and have swarm agents publish into
   their project's epic instead of creating top-level drafts.
-- Design in one arena: HTML **screens** in device frames, Excalidraw **boards**,
-  Mermaid **diagrams** and **3D scenes** (viewport, hierarchy, inspector, gizmo,
-  Play view), each agent-assisted, autosaved, exportable (PNG / SVG / source /
-  GLB / Blender script) and, with a local Blender, rendered headlessly.
+- Keep a story's designs in Design Hall from its **Design** tab (New design,
+  Ask Otto, agent mockups mirrored in within seconds), and still open the
+  classic arena — HTML **screens**, Excalidraw **boards**, Mermaid **diagrams**
+  and **3D scenes**, pinned annotations, Blender render — from its ⋯.
 
 **You cannot (today):**
 
@@ -857,6 +956,8 @@ validator in `crates/otto-server/src/design_scene3d.rs`.
   (§ Product / § Issue trackers), `docs/contracts/ws.md` (Product events).
 - `docs/design/product-design-arena.md` — the reviewed design for the Design
   Arena + epic tree (data model, `scene3d` schema, Blender bridge, delivery plan).
-- [`./canvas.md`](./canvas.md) — the separate Canvas module (Excalidraw / D2 /
-  Mermaid scenes not bound to a story); [`./mcp-control-plane.md`](./mcp-control-plane.md) — where the
-  Blender MCP template lives.
+- [`./design-hall.md`](./design-hall.md) — the one home for designs (§4.1: the
+  story Design tab, mirrors, "Edit here"); [`./canvas.md`](./canvas.md) — Canvas
+  scenes, which now open as Design Hall whiteboards;
+  [`./mcp-control-plane.md`](./mcp-control-plane.md) — where the Blender MCP
+  template lives.

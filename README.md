@@ -177,7 +177,10 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 - **Canvas** — think visually. Each canvas scene is **file-backed** in
   **Excalidraw** (`canvas.json`), **Mermaid** (`canvas.mermaid`), or **D2**
   (`canvas.d2`). An agent edits the underlying file while you converse, so
-  diagrams evolve live alongside your session.
+  diagrams evolve live alongside your session. The Canvas page has folded into
+  **Design Hall**: boards open there as Whiteboard designs, read-only until you
+  press **Edit here** to take one over (the old page is unmounted, not deleted).
+  See [`docs/features/canvas.md`](./docs/features/canvas.md).
 - **Channels** — bridge a Slack or Telegram thread to an agent session: messages
   (and file attachments) are relayed in, the agent's reply (and any file) is
   relayed back. One agent per ticket, auto-archived when idle.

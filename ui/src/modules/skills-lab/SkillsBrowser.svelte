@@ -21,6 +21,8 @@
   import { registry } from '../../lib/commands.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { recallSelection, rememberSelection } from '../../lib/lastSelection';
+  import { router } from '../../lib/router.svelte';
+  import { installAllBundled as runInstallAll } from './bundledActions';
   import Icon from '../../lib/components/Icon.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -158,6 +160,18 @@
   let query = $state('');
   let category = $state<string | null>(null);
   let source = $state<SourceFilter>('all');
+  // `#/skills-eval/bundled` (and the old `#/settings/skills`) opens on the
+  // bundled catalogue: the Bundled filter, with its install state summary.
+  $effect(() => {
+    if (router.parts[0] === 'skills-eval' && router.parts[1] === 'bundled') untrack(() => (source = 'bundled'));
+  });
+  const bundledInstalled = $derived(bundled.filter((b) => b.state !== 'not_installed').length);
+  const bundledUpdates = $derived(bundled.filter((b) => b.state === 'update_available').length);
+  /** Page ⋯ → Install all bundled skills (the category filter narrows it). */
+  export async function installAllBundled(): Promise<void> {
+    const cat = category && bundled.some((b) => b.category === category) ? category : null;
+    if (await runInstallAll(cat)) await loadAll();
+  }
   let driftedOnly = $state(false);
   const cats = $derived(categoryCounts(groups));
   // The four biggest categories as chips; the rest in a (clamped) ctxMenu so
@@ -402,6 +416,9 @@
             {/if}
           </div>
         </div>
+        {#if source === 'bundled' && bundled.length > 0}
+          <p class="bundled-sum dim" data-testid="bundled-summary">{bundledInstalled} of {bundled.length} bundled skills installed{bundledUpdates ? ` · ${bundledUpdates} with an update` : ''}</p>
+        {/if}
         {#if partialError}
           <div class="partial">
             <Icon name="warning" size={12} />
@@ -731,6 +748,12 @@
   }
   .no-match {
     padding: 16px 10px;
+  }
+  .bundled-sum {
+    margin: 0;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: var(--fs-xs);
   }
   .no-match p {
     margin: 0 0 6px;

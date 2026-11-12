@@ -155,6 +155,7 @@ class K8sStore {
     this.hasMetrics = false;
     this.namespaces = [];
     this.namespacesError = '';
+    this.namespacesPartial = false;
     this.selected = null;
     this.k9sSessionId = null;
     this.namespace = '';
@@ -202,6 +203,9 @@ class K8sStore {
   namespace = $state('');
   namespaces: K8sNamespace[] = $state([]);
   namespacesError = $state('');
+  /** The daemon could not list namespaces cluster-wide: `namespaces` is only
+   *  the known ones (RBAC-limited user). */
+  namespacesPartial = $state(false);
   filter = $state('');
   selected: K8sSelection | null = $state(null);
   drawerTab: K8sDrawerTab = $state('overview');
@@ -355,6 +359,7 @@ class K8sStore {
     this.rowsError = '';
     this.namespaces = [];
     this.namespacesError = '';
+    this.namespacesPartial = false;
     this.k9sSessionId = null;
     if (!id) {
       this.filter = '';
@@ -527,12 +532,14 @@ class K8sStore {
       if (this.clusterId !== id || revision!==this.accessRevision) return;
       this.namespaces = this.mergeKnown(id, r.namespaces);
       this.namespacesError = '';
+      this.namespacesPartial = r.partial === true;
     } catch (e) {
       if (this.clusterId !== id || revision!==this.accessRevision) return;
       // RBAC-limited user: fall back to the namespaces we know work here so
       // the picker still has real entries to switch between.
       this.namespaces = this.mergeKnown(id, []);
       this.namespacesError = providerErrorText(e);
+      this.namespacesPartial = false;
     }
   }
 
@@ -563,7 +570,11 @@ class K8sStore {
       const c = this.clusters.find((x) => x.id === id);
       const persisted = c?.known_namespaces ?? [];
       if (!persisted.includes(ns)) {
-        void this.updateCluster(id, { known_namespaces: [...persisted, ns] }).catch(() => {});
+        // Non-fatal (the localStorage copy above still lists it), but never
+        // silent: a refused / failed save is why another device lacks it.
+        void this.updateCluster(id, { known_namespaces: [...persisted, ns] }).catch((e) =>
+          console.warn(`k8s: namespace “${ns}” not saved on the cluster row`, e),
+        );
       }
     }
   }

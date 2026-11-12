@@ -382,6 +382,65 @@ async fn guarded_writes_are_refused_up_front_without_confirmation() {
 }
 
 #[tokio::test]
+async fn a_read_only_target_refuses_the_whole_multi_run_even_when_confirmed() {
+    let mut fx = fixture().await;
+    let stub = Stub::new(Engine::Mysql);
+    fx.svc.registry.set_for_test(Engine::Mysql, stub.clone());
+    let dev = fx
+        .conn("dev", ConnectionKind::Mysql, Environment::Dev)
+        .await;
+    let ro = fx.conn("ro", ConnectionKind::Mysql, Environment::Dev).await;
+    sqlx::query("UPDATE connections SET read_only = 1 WHERE id = ?")
+        .bind(&ro)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let s = spec(
+        "UPDATE t SET a = 1",
+        vec![target(&dev, None), target(&ro, None)],
+        vec![],
+    );
+    let plan = fx.svc.multi_run_plan(&fx.user, &s).await.unwrap();
+    assert!(
+        plan.warnings
+            .iter()
+            .any(|w| w.contains("ro: read-only connection")),
+        "{:?}",
+        plan.warnings
+    );
+    let mut confirmed = start(s.clone());
+    confirmed.confirm_write = true;
+    confirmed.plan_hash = Some(plan.plan_hash.clone());
+    let err = otto_core::auth::with_request_credential(
+        otto_core::auth::RequestCredential::default(),
+        fx.svc.multi_run_start(&fx.user, &confirmed),
+    )
+    .await
+    .expect_err("a person's confirmation does not lift Read-only");
+    assert!(matches!(err, Error::Forbidden(_)), "{err:?}");
+    assert!(
+        err.to_string().contains(READ_ONLY_CONNECTION_PREFIX),
+        "{err}"
+    );
+    assert!(
+        stub.ran().is_empty(),
+        "nothing runs, not even the dev target"
+    );
+
+    // A read on the same targets is unaffected.
+    let read = spec(
+        "SELECT 1",
+        vec![target(&dev, None), target(&ro, None)],
+        vec![],
+    );
+    let plan = fx.svc.multi_run_plan(&fx.user, &read).await.unwrap();
+    assert!(!plan
+        .warnings
+        .iter()
+        .any(|w| w.contains("read-only connection")));
+}
+
+#[tokio::test]
 async fn clickhouse_ddl_gets_on_cluster_and_dml_does_not() {
     let mut fx = fixture().await;
     let stub = Stub::new(Engine::Clickhouse);

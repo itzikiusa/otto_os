@@ -4,7 +4,6 @@ import { componentFunctions } from './componentFunctions.ts';
 import { deferred } from './sourceHarness.ts';
 
 for (const [file, idKey, load, get, send, stop] of [
-  ['DiscoveryChat', 'cid', 'loadChat', 'getDiscoveryChat', 'sendDiscoveryMessage', 'stopDiscoveryTurn'],
   ['RefineChat', 'tid', 'loadThread', 'getRefinementThread', 'sendRefinementMessage', 'stopRefinementTurn'],
 ]) {
   function fixture() {

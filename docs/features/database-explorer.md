@@ -25,7 +25,13 @@ The Database Explorer is its own top-level page in Otto. Its left sidebar is a
 **connection picker** (grouped into draggable sections) plus a **schema tree**
 and a **Schema / Saved / History** switch — **Saved** queries can be renamed,
 updated in place ("Save as new" forks), and searched; **History** has a search
-box and a **Load more** pager. The main area is a tab strip —
+box and a **Load more** pager, and a **This connection / All connections**
+switch: *All connections* asks each database connection (the 20 most recently
+opened, 50 rows each) for its history and merges it newest first, every row
+labelled with its connection, with a connection filter; a connection the user
+cannot read is skipped and counted. Opening a row switches to its connection
+and opens the statement in a new tab — it never runs (`HistoryAll.svelte`,
+`history-all.ts`). The main area is a tab strip —
 **Query · Builder · Structure · Diagram · Dashboards** — over the active view.
 The workbench **restores itself on reload** (open connection tabs, the selected
 connection, each connection's active view, its open query tabs — pinned ones
@@ -772,8 +778,8 @@ stdout comes back as the result grid (one line per row); a non-zero exit
 surfaces the tail of both streams as the error.
 
 - A script **always classifies as a write** — arbitrary JS can't be proven
-  read-only — so the production / read-only typed-confirmation gate applies
-  before anything runs, and the MCP read-only surface refuses scripts outright.
+  read-only — so the production typed-confirmation gate applies (a Read-only
+  connection refuses it) before anything runs, and the MCP read-only surface refuses scripts outright.
 - Needs the `mongosh` CLI on the daemon's PATH (`brew install mongosh`) — the
   same binary Otto's Mongo **terminal sessions** spawn. The moment the editor
   detects a script it shows a **notice bar** ("mongosh script detected — Run
@@ -836,6 +842,28 @@ to `POST …/db/cancel`, and the service issues:
 
 Cancelling an unknown / already-finished query, or one that belongs to a
 different connection, is always a benign `204` — never an error.
+
+### Processes (what is running on the server)
+
+Connection right-click → **Processes…** (MySQL and ClickHouse) opens a small
+panel listing what runs on the server now — id, user, time, state and the
+statement — with **Refresh** (`ProcessList.svelte`, `process-list.ts`).
+
+- **Listing is read-only.** It sends `SHOW FULL PROCESSLIST` (MySQL) or
+  `SELECT … FROM system.processes` (ClickHouse) through `…/db/query` with
+  `read_only: true`, so the server classifies it as a read and runs it in the
+  engine's native read-only mode. These exact listings, sent read-only, are
+  **not recorded in query history** (`service/process_list.rs`); the same
+  text typed into the editor is.
+- **Kill asks first and stops the query, not the connection.** **Kill** opens a
+  confirm that names the connection, the user and the statement, and shows the
+  exact SQL — `KILL QUERY <id>` (MySQL) or `KILL QUERY WHERE query_id = '…'
+  ASYNC` (ClickHouse). It is a write: a **production** connection then takes
+  its typed confirmation, and on a **Read-only** connection Kill is not offered
+  (the server would refuse it anyway).
+- **MongoDB** (`$currentOp`) and PostgreSQL are not covered yet: Mongo needs a
+  driver op the native path does not have, and Postgres' `pg_cancel_backend()`
+  is a `SELECT` the write guard would classify as a read.
 
 ---
 
@@ -1103,7 +1131,12 @@ a multi-statement batch) and opens the "Review SQL" modal — the statement only
 runs when you press **Run** there. **Discard** drops the drafts; re-editing a
 parked cell back to its stored value un-parks it. After a successful run the
 grid **re-runs the active query** so values reflect the database (no optimistic
-patching — and any drafts left over are invalidated by the refresh).
+patching). Drafts are keyed by row position, so a new result of the same tab
+and columns (a re-run, the refresh after a partial apply, a page there and
+back) **carries them by primary key**: each draft follows its row to its new
+position, an open cell editor (inline or in the cell viewer) is parked first,
+and only drafts whose row is no longer in the result are dropped, with a
+notice (`pending-carry.ts`). A result of another shape still starts clean.
 
 A multi-row review on **MySQL / PostgreSQL** runs as one transaction: the
 batch is sent as `BEGIN; …; COMMIT;`, the driver stops at the first failing
@@ -1146,8 +1179,8 @@ The review modal is titled for the operation ("Review UPDATE", "Review DELETE",
 "Review INSERT (duplicate row)", "Review updateOne", "Review ALTER … UPDATE
 (mutation)", …), shows a **diff table** of every change (path · before → after)
 above the editable statement, and warns it will run against the connection. On
-a **production / read-only** connection a **typed confirmation** is required
-first (see §13).
+a **production** connection a **typed confirmation** is required first; a
+**Read-only** connection refuses the write outright (see §13).
 
 ### Copy & export from the grid
 
@@ -1186,8 +1219,8 @@ ANDs). Both reuse the same identifier/literal escaping as inline edits.
 ### Safety
 
 Guards that stop a run or an edit from doing something other than what it
-looks like. Production / read-only connections keep their typed confirmation
-(§13) on top of these.
+looks like. Production connections keep their typed confirmation and Read-only
+connections refuse every write (§13) on top of these.
 
 - **Destructive statements ask first, on every connection.** Before **Run** /
   **Run all** sends `DELETE` or `UPDATE` without a `WHERE`, `DROP …`,
@@ -1195,8 +1228,8 @@ looks like. Production / read-only connections keep their typed confirmation
   confirm names the connection and lists the statements (first line each; the
   first five, then a count). **Cancel** sends nothing. Strings and comments
   never trigger it, and any `WHERE` counts — `WHERE 1=1` included. A connection
-  marked Prod or read-only skips this prompt because its typed confirmation
-  applies instead. Turn it off per device in the editor's **Query settings**
+  marked Prod skips this prompt because its typed confirmation applies
+  instead; a Read-only one refuses the statement on the server. Turn it off per device in the editor's **Query settings**
   gear → *Confirm destructive statements* (turning it off asks once).
   Classifier: `destructive-sql.ts`; gate: `destructive-gate.ts`.
 - **Binary cells are bytes, not text.** MySQL `BINARY` / `VARBINARY` / `*BLOB`
@@ -1233,6 +1266,19 @@ looks like. Production / read-only connections keep their typed confirmation
   same ones *Query by value* can rewrite) and is still what the editor holds,
   **Sort on server** re-runs it with `ORDER BY <column> ASC|DESC` replacing any
   existing ORDER BY. 64-bit ids beyond 2^53 sort by their exact digits.
+- **Date-time columns say which zone they are shown in.** Otto never converts
+  a value; the header's type line adds the zone and its tooltip says why
+  (`temporal-zone.ts`): MySQL `TIMESTAMP` and ClickHouse `DateTime` /
+  `DateTime64` are shown in the session zone — the connection's **Time zone**
+  parameter, **UTC** by default — or, for ClickHouse, the zone named in the
+  column type (`DateTime('Europe/Berlin')`); Postgres `TIMESTAMPTZ` is UTC with
+  its offset; MySQL `DATETIME` and Postgres `TIMESTAMP` are marked **no zone**
+  (wall-clock values, shown as stored).
+- **Hide columns per tab.** Header right-click → **Hide column** removes it
+  from the grid; **Show all columns (N hidden)** in any header's menu brings
+  them back. Kept per query tab and result shape, not saved (a reload shows
+  every column). The last visible column cannot be hidden. Copy / export still
+  include every column.
 - **CSV export has a header by default.** *Export all rows…* defaults to
   **CSV** with a header row; *CSV (no header)* is the other choice. The last
   format used is remembered on the device.
@@ -1721,17 +1767,31 @@ parses (and which read fine as plain text in history rows and MCP results):
   Mongo `conn_string` `{secret}` substitution happens at resolve time.
 - **Loopback by default.** The daemon listens on `127.0.0.1` and runs on the
   user's machine, so `export-to-path` writes the **daemon host's** real local disk.
-- **Production / read-only write guard.** A connection is *guarded* when its
+- **Read-only means read-only.** A connection marked **Read-only** refuses
+  every statement classified as a write/DDL with a `403` tagged
+  `read_only_connection:` — **whatever the request carries**: no typed
+  confirmation, `confirm_write`, multi-run confirm or import confirm lifts it
+  (it used to take the same typed confirmation as production, which made it a
+  speed bump). The only way to write is to turn Read-only off in the
+  connection's settings. It is checked before any confirmation, in the one
+  write-guard every run, edit, import and multi-run goes through
+  (`service/read_only_guard.rs`); a multi-run with any write on a Read-only
+  target is refused as a whole before anything runs, and its preview says so.
+  Redis `KEYS` is a read, so on a Read-only connection it keeps its
+  blocking-command confirmation. An approved reviewed change (Database →
+  Changes) is the access-governance path and is not a confirmation.
+- **Production write guard.** A connection is *guarded* when its
   environment is **Prod** **or** it is explicitly **read-only** (`is_write_guarded`).
   A guarded connection **refuses any statement classified as a write/DDL** unless
-  the request carries `confirm_write`. Classification is **conservative — unknown
+  the request carries `confirm_write` (Prod only — see the Read-only rule above). Classification is **conservative — unknown
   is treated as a write** (so a novel/unparseable statement errs toward refusing):
   SQL is a read only if every statement starts with `SELECT/SHOW/DESC/DESCRIBE/
   EXPLAIN/WITH/USE` (`SET` counts as a write); Redis is a read only if every line
   is in a vetted read-command set (`CONFIG`/`CLIENT`/`EVAL` are writes); Mongo is a
   read only for recognizable `find`/`aggregate`/`count`/`distinct` shapes without
-  `$out`/`$merge`. A rejected write returns a `409` tagged `write_blocked:` so the
-  UI prompts for a **typed confirmation** (type the connection name). Confirmed
+  `$out`/`$merge`. A rejected write on a production connection returns a `409` tagged
+  `write_blocked:` so the UI prompts for a **typed confirmation** (type the
+  connection name). Confirmed
   writes on a guarded connection are **audited** (`db.write_confirmed`). The UI also
   shows danger styling — a red rail / **PROD** badge for production, an amber rail /
   **RO** badge for read-only — and a **Production** / **Read-only** chip in the
@@ -1747,7 +1807,8 @@ parses (and which read fine as plain text in history rows and MCP results):
   [MCP control plane guide](./mcp-control-plane.md).
 - **Multi-target runs ("Run on…") keep the guard per target.** Every run goes
   through the same `…/db/query` path (write-guard, access enforcement, history,
-  audit). A multi-run with any write to a production / read-only target is
+  audit). A multi-run with any write to a Read-only target is refused as a
+  whole (`read_only_connection:`); one with a write to a production target is
   refused **as a whole** unless the request carries `confirm_write` — set by
   the UI only after a typed confirmation listing every such target and its
   final statement — and `plan_hash` pins the run to the reviewed preview.

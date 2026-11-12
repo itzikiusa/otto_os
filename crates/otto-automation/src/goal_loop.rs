@@ -33,6 +33,8 @@ use crate::AutomationCtx;
 
 mod completion;
 mod graph_run;
+mod restart;
+pub use restart::{announce_restart_pause, RESTART_PAUSE_NOTE};
 
 // --- Registry --------------------------------------------------------------
 
@@ -139,9 +141,31 @@ pub fn new_registry() -> GoalLoopRegistry {
 const EXECUTOR_WAITING_IDLE: Duration = Duration::from_secs(45);
 const EXECUTOR_STUCK_IDLE: Duration = Duration::from_secs(180);
 const EXECUTOR_RETRY_BACKOFF: Duration = Duration::from_secs(3);
-/// Absolute controller-lifetime backstop, regardless of config.
-const HARD_CAP: Duration = Duration::from_secs(4 * 60 * 60);
+/// Otto's own limit on one run of a loop (start or Resume until it settles):
+/// at most this much active time, whatever `limits.max_runtime_secs` says.
+/// It bounds an unattended run that a large runtime limit would otherwise
+/// leave going all night. Not configurable; the Loops UI shows it next to the
+/// runtime limit (`ui/src/modules/loops/loopSafety.ts` mirrors the value).
+pub const MAX_RUN_ACTIVE_SECS: u64 = 4 * 60 * 60;
+const HARD_CAP: Duration = Duration::from_secs(MAX_RUN_ACTIVE_SECS);
+/// The Exhausted summary when [`HARD_CAP`], not the loop's own runtime limit,
+/// ended the run. Keeps "time cap" so the UI's budget hint still matches.
+const RUN_CAP_REASON: &str = "time cap reached: Otto stops a run after 4 hours of active time";
 const CLEANUP_GRACE: Duration = Duration::from_secs(10);
+
+/// Why a run that is about to start would end on time: Otto's per-run cap
+/// when that is smaller than what the loop's own runtime limit leaves.
+fn time_cap_reason(loop_: &GoalLoop) -> &'static str {
+    let own = loop_
+        .limits
+        .max_runtime_secs
+        .saturating_sub(loop_.elapsed_secs_at(Utc::now()));
+    if own > MAX_RUN_ACTIVE_SECS {
+        RUN_CAP_REASON
+    } else {
+        "time cap reached"
+    }
+}
 
 /// A zero budget must not start work. The check is the same one
 /// [`within_budget`] uses once a future exists.
@@ -153,6 +177,48 @@ fn may_start_work(remaining: Duration) -> bool {
 /// is still startable and still has runtime. Terminal status means stop won.
 fn admit_start(status: GoalLoopStatus, remaining: Duration) -> bool {
     !status.is_terminal() && may_start_work(remaining)
+}
+
+/// The post-provisioning check of a start. A resume of an Exhausted loop
+/// (already admitted by [`exhausted_resume_refusal`]) still finds the row
+/// Exhausted here; any other terminal status means a Stop won.
+fn admit_resume(started_from: GoalLoopStatus, now: GoalLoopStatus, remaining: Duration) -> bool {
+    let resuming_exhausted =
+        started_from == GoalLoopStatus::Exhausted && now == GoalLoopStatus::Exhausted;
+    (resuming_exhausted || !now.is_terminal()) && may_start_work(remaining)
+}
+
+/// Why an Exhausted loop cannot be resumed as it stands, naming the limit to
+/// raise; `None` when it can. Room left under both of its own limits is
+/// enough — including a loop Otto's per-run cap stopped, since a resume
+/// opens a new run window. A pending human-only re-evaluation needs no new
+/// iteration (see [`evaluation_only`]), so a spent iteration limit does not
+/// block it. Without this, Resume re-exhausted at once (or, before
+/// `mark_running` accepted Exhausted, silently did nothing).
+fn exhausted_resume_refusal(
+    loop_: &GoalLoop,
+    prior_eval: Option<&GoalLoopEvaluation>,
+) -> Option<String> {
+    if loop_.status != GoalLoopStatus::Exhausted {
+        return None;
+    }
+    let used = loop_.elapsed_secs_at(Utc::now());
+    if used >= loop_.limits.max_runtime_secs {
+        return Some(format!(
+            "Raise the runtime limit to resume: {} min of active time is used and the limit is {} min.",
+            used.div_ceil(60),
+            loop_.limits.max_runtime_secs.div_ceil(60)
+        ));
+    }
+    if loop_.iterations_started >= loop_.limits.max_iterations
+        && !evaluation_only(loop_, prior_eval)
+    {
+        return Some(format!(
+            "Raise the iteration limit to resume: {} of {} iterations are used.",
+            loop_.iterations_started, loop_.limits.max_iterations
+        ));
+    }
+    None
 }
 
 /// Re-read after a durable Running write. False means do not start side effects.
@@ -189,6 +255,19 @@ pub async fn start_loop(ctx: &impl AutomationCtx, loop_id: &Id) -> Result<()> {
     ctx.goal_loops().require_idle(loop_id)?;
     let loop_ = ctx.goal_loops_repo().get(loop_id).await?;
     crate::goal_loop_graph::validate(&loop_.config, &loop_.definition)?;
+    // An Exhausted loop resumes only once a raised limit (or a new run
+    // window) gives it room; otherwise say which limit to raise.
+    if loop_.status == GoalLoopStatus::Exhausted {
+        let prior = ctx
+            .goal_loops_repo()
+            .get_iteration(loop_id, loop_.current_iteration)
+            .await
+            .ok()
+            .and_then(|i| i.evaluation);
+        if let Some(why) = exhausted_resume_refusal(&loop_, prior.as_ref()) {
+            return Err(Error::Conflict(why));
+        }
+    }
     // Zero remaining runtime must not provision a worktree or flip the loop
     // to Running. The controller's within_budget guard runs only after that.
     if !may_start_work(remaining_runtime(&loop_)) {
@@ -199,7 +278,7 @@ pub async fn start_loop(ctx: &impl AutomationCtx, loop_id: &Id) -> Result<()> {
     // await is the same window the schedulers close with launch_after_await:
     // do not mark Running or spawn over a terminal loop.
     let fresh = ctx.goal_loops_repo().get(loop_id).await?;
-    if !admit_start(fresh.status, remaining_runtime(&fresh)) {
+    if !admit_resume(loop_.status, fresh.status, remaining_runtime(&fresh)) {
         return Ok(());
     }
     ctx.goal_loops_repo()
@@ -406,12 +485,12 @@ pub async fn retry_executor(
     .await;
     let ctx2 = ctx.clone();
     tokio::spawn(async move {
-        let budget = ctx2
+        let (budget, cap_reason) = ctx2
             .goal_loops_repo()
             .get(&loop_.id)
             .await
-            .map(|current| remaining_runtime(&current))
-            .unwrap_or(Duration::ZERO);
+            .map(|current| (remaining_runtime(&current), time_cap_reason(&current)))
+            .unwrap_or((Duration::ZERO, "time cap reached"));
         let expired = within_budget(
             run_executor(
                 &ctx2,
@@ -449,29 +528,18 @@ pub async fn retry_executor(
                     &ctx2,
                     &loop_.id,
                     GoalLoopStatus::Exhausted,
-                    Some("time cap reached"),
+                    Some(cap_reason),
                     None,
                 )
                 .await;
             } else {
-                if block(
+                // `block` emits the stored status.
+                let _ = block(
                     &ctx2,
                     &loop_.id,
                     "Executor retry finished. Resume for a fresh evaluation.",
                 )
-                .await
-                .is_ok()
-                {
-                    emit(
-                        &ctx2,
-                        &loop_.workspace_id,
-                        &loop_.id,
-                        GoalLoopStatus::Blocked,
-                        GoalLoopPhase::Done,
-                        iter_idx,
-                        loop_.progress_pct,
-                    );
-                }
+                .await;
             }
         }
         deregister(&ctx2, &loop_.id, &handle);
@@ -482,8 +550,8 @@ pub async fn retry_executor(
 // --- Controller ------------------------------------------------------------
 
 async fn controller(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHandle) {
-    let budget = match ctx.goal_loops_repo().get(&loop_id).await {
-        Ok(loop_) => remaining_runtime(&loop_),
+    let (budget, cap_reason) = match ctx.goal_loops_repo().get(&loop_id).await {
+        Ok(loop_) => (remaining_runtime(&loop_), time_cap_reason(&loop_)),
         Err(_) => {
             deregister(&ctx, &loop_id, &handle);
             return;
@@ -512,7 +580,7 @@ async fn controller(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHandle) {
                 &ctx,
                 &loop_id,
                 GoalLoopStatus::Exhausted,
-                Some("time cap reached"),
+                Some(cap_reason),
                 None,
             )
             .await;
@@ -566,7 +634,7 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
                 &ctx,
                 &loop_id,
                 GoalLoopStatus::Exhausted,
-                Some("controller lifetime cap reached"),
+                Some(RUN_CAP_REASON),
                 None,
             )
             .await;
@@ -910,18 +978,9 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
         clear_evaluation_continuation(&ctx, &loop_id).await;
         if eval.verdict == "blocked" {
             let summary = format!("Blocked — needs input. {}", eval.feedback);
-            // Bank the active window and stop ticking; resume requires user action.
-            if block(&ctx, &loop_id, &summary).await.is_ok() {
-                emit(
-                    &ctx,
-                    &ws,
-                    &loop_id,
-                    GoalLoopStatus::Blocked,
-                    GoalLoopPhase::Done,
-                    idx,
-                    progress,
-                );
-            }
+            // Bank the active window and stop ticking; resume requires user
+            // action. `block` emits the stored status (and so the bell notice).
+            let _ = block(&ctx, &loop_id, &summary).await;
             // Surface a free-form notice so the user knows to intervene.
             let _ = ctx.events().send(Event::Notice {
                 level: "warn".into(),
@@ -1214,9 +1273,14 @@ fn stop_landed_while_registered(was_current: bool, handle: &LoopHandle) -> bool 
 /// Block the loop (awaiting user) without treating it as terminal-finished: the
 /// repo write banks the window (only if still anchored), clears it, sets Blocked. Resume re-spawns a controller.
 /// The write is retried ([`settle_status`]); on a persistent failure the
-/// stored status is emitted (with a Notice) and the error returned, so the
-/// caller emits Blocked only when it was stored.
-async fn block(ctx: &impl AutomationCtx, loop_id: &Id, summary: &str) -> Result<()> {
+/// stored status is emitted (with a Notice) and the error returned.
+///
+/// Every block emits the status actually stored. Open views follow it, and
+/// the notification center posts its "blocked and needs you" bell notice from
+/// this event — a block without one (completion review, cost limit, task
+/// admission) used to leave an unattended loop parked with nobody told.
+#[doc(hidden)] // pub for otto-server's block-event test
+pub async fn block(ctx: &impl AutomationCtx, loop_id: &Id, summary: &str) -> Result<()> {
     let loop_ = ctx.goal_loops_repo().get(loop_id).await.inspect_err(
         |e| tracing::warn!(loop_id = %loop_id, "goal loop: block could not read the loop: {e}"),
     )?;
@@ -1224,18 +1288,22 @@ async fn block(ctx: &impl AutomationCtx, loop_id: &Id, summary: &str) -> Result<
     // Blocked is resumable — KEEP the worktree (and its commits) so Resume
     // continues on top of the loop's work. Live executor sessions are killed.
     cleanup_executor_sessions(ctx, &loop_.workspace_id, loop_id).await;
-    if written.is_err() {
-        let stored = stored_status(ctx, loop_id).await.unwrap_or(loop_.status);
-        emit(
-            ctx,
-            &loop_.workspace_id,
-            loop_id,
-            stored,
+    let (status, phase) = match &written {
+        Ok(()) => (GoalLoopStatus::Blocked, GoalLoopPhase::Done),
+        Err(_) => (
+            stored_status(ctx, loop_id).await.unwrap_or(loop_.status),
             loop_.phase,
-            loop_.current_iteration,
-            loop_.progress_pct,
-        );
-    }
+        ),
+    };
+    emit(
+        ctx,
+        &loop_.workspace_id,
+        loop_id,
+        status,
+        phase,
+        loop_.current_iteration,
+        loop_.progress_pct,
+    );
     written
 }
 
@@ -1488,16 +1556,7 @@ async fn evaluate(
                         &handle.interrupted,
                     )
                     .await;
-                    set_criterion(
-                        &mut eval,
-                        &crit.id,
-                        run.success,
-                        if run.success {
-                            "verify command exited 0"
-                        } else {
-                            "verify command failed"
-                        },
-                    );
+                    set_criterion(&mut eval, &crit.id, run.success, &verify_evidence(&run));
                 }
                 None => set_criterion(&mut eval, &crit.id, false, "verify command is missing"),
             }
@@ -1515,6 +1574,8 @@ async fn evaluate(
         }
     }
 
+    // A met claim must cite evidence before it can count.
+    crate::goal_loop_policy::require_evidence(&mut eval);
     crate::goal_loop_policy::reconcile_human(&loop_.definition, &loop_.ledger, &mut eval);
 
     // Reconcile an over-optimistic verdict against ground truth.
@@ -1526,7 +1587,22 @@ async fn evaluate(
             eval.rationale
         );
     }
+    // And the opposite: the criteria decide completion, so an evaluator that
+    // wants "one more pass" over fully verified work does not keep spending
+    // iterations unattended.
+    crate::goal_loop_policy::complete_when_all_met(&mut eval);
     eval
+}
+
+/// A command criterion's evidence: its exit status, then the tail of what it
+/// printed, so the iteration record shows why it failed (or passed).
+fn verify_evidence(run: &otto_core::domain::CmdRun) -> String {
+    let headline = if run.success {
+        "verify command exited 0".to_string()
+    } else {
+        format!("verify command failed (exit {})", run.exit_code)
+    };
+    crate::goal_loop_policy::with_output(&headline, &run.output)
 }
 
 fn fallback_eval(reason: &str) -> GoalLoopEvaluation {
@@ -2041,6 +2117,124 @@ mod goal_loop_tests {
             old.interrupted.load(Ordering::Relaxed),
             "an executor watching interrupted must see the supersede"
         );
+    }
+
+    #[test]
+    fn the_run_cap_is_named_only_when_it_is_the_binding_limit() {
+        let mut goal = recovery_goal(serde_json::json!({}));
+        goal.limits.max_runtime_secs = 3600;
+        assert_eq!(time_cap_reason(&goal), "time cap reached");
+        goal.limits.max_runtime_secs = MAX_RUN_ACTIVE_SECS + 60;
+        assert_eq!(time_cap_reason(&goal), RUN_CAP_REASON);
+        assert!(RUN_CAP_REASON.contains("time cap"), "the UI matches on it");
+        // Time already used counts against the loop's own limit.
+        goal.elapsed_secs = 120;
+        assert_eq!(time_cap_reason(&goal), "time cap reached");
+        assert_eq!(
+            remaining_runtime(&goal),
+            Duration::from_secs(MAX_RUN_ACTIVE_SECS - 60)
+        );
+        goal.limits.max_runtime_secs = 10 * MAX_RUN_ACTIVE_SECS;
+        assert_eq!(remaining_runtime(&goal), HARD_CAP);
+    }
+
+    #[test]
+    fn exhausted_loop_resumes_only_after_a_limit_leaves_room() {
+        let mut goal = recovery_goal(serde_json::json!({}));
+        goal.status = GoalLoopStatus::Exhausted;
+        // Iteration cap hit (1 of 1): refused, naming the iteration limit.
+        let why = exhausted_resume_refusal(&goal, None).expect("no room");
+        assert!(
+            why.contains("iteration limit") && why.contains("1 of 1"),
+            "{why}"
+        );
+        // Raised: admitted, and the post-provision check lets it through.
+        goal.limits.max_iterations = 2;
+        assert_eq!(exhausted_resume_refusal(&goal, None), None);
+        assert!(admit_resume(
+            GoalLoopStatus::Exhausted,
+            GoalLoopStatus::Exhausted,
+            remaining_runtime(&goal)
+        ));
+        // Runtime used up: refused, naming the runtime limit.
+        goal.elapsed_secs = 3600;
+        let why = exhausted_resume_refusal(&goal, None).expect("no time");
+        assert!(
+            why.contains("runtime limit") && why.contains("60 min"),
+            "{why}"
+        );
+        goal.limits.max_runtime_secs = 7200;
+        assert_eq!(exhausted_resume_refusal(&goal, None), None);
+        // Other states are not this check's business.
+        goal.limits.max_iterations = 1;
+        goal.status = GoalLoopStatus::Paused;
+        assert_eq!(exhausted_resume_refusal(&goal, None), None);
+    }
+
+    #[test]
+    fn a_loop_stopped_by_the_run_cap_resumes_without_a_raise() {
+        let mut goal = recovery_goal(serde_json::json!({}));
+        goal.status = GoalLoopStatus::Exhausted;
+        goal.limits.max_iterations = 10;
+        goal.limits.max_runtime_secs = 3 * MAX_RUN_ACTIVE_SECS;
+        goal.elapsed_secs = MAX_RUN_ACTIVE_SECS;
+        assert_eq!(exhausted_resume_refusal(&goal, None), None);
+        assert_eq!(remaining_runtime(&goal), HARD_CAP, "a fresh 4 h window");
+    }
+
+    #[test]
+    fn exhausted_human_only_continuation_needs_no_new_iteration() {
+        let mut goal = recovery_goal(serde_json::json!({"resume_evaluation_iteration":1}));
+        goal.status = GoalLoopStatus::Exhausted;
+        assert_eq!(exhausted_resume_refusal(&goal, None), None);
+    }
+
+    #[test]
+    fn a_stop_during_provisioning_still_wins_over_an_exhausted_resume() {
+        let room = Duration::from_secs(60);
+        assert!(!admit_resume(
+            GoalLoopStatus::Exhausted,
+            GoalLoopStatus::Stopped,
+            room
+        ));
+        assert!(!admit_resume(
+            GoalLoopStatus::Paused,
+            GoalLoopStatus::Exhausted,
+            room
+        ));
+        assert!(admit_resume(
+            GoalLoopStatus::Paused,
+            GoalLoopStatus::Paused,
+            room
+        ));
+        assert!(!admit_resume(
+            GoalLoopStatus::Exhausted,
+            GoalLoopStatus::Exhausted,
+            Duration::ZERO
+        ));
+    }
+
+    #[test]
+    fn verify_evidence_keeps_exit_status_and_output() {
+        let failed = otto_core::domain::CmdRun {
+            success: false,
+            exit_code: 101,
+            output: "test parse::rejects_blank ... FAILED".into(),
+            duration_ms: 5,
+        };
+        let evidence = verify_evidence(&failed);
+        assert_eq!(
+            crate::goal_loop_policy::evidence_headline(&evidence),
+            "verify command failed (exit 101)"
+        );
+        assert!(evidence.ends_with("rejects_blank ... FAILED"));
+        let passed = otto_core::domain::CmdRun {
+            success: true,
+            exit_code: 0,
+            output: String::new(),
+            duration_ms: 5,
+        };
+        assert_eq!(verify_evidence(&passed), "verify command exited 0");
     }
 
     #[test]

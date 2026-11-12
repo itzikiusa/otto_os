@@ -3,7 +3,7 @@
 Otto ships a curated, **versioned library of first-party "skills"** — multi-file
 instruction packs that teach an agent a method (how to grill a diff, hunt a
 correctness bug, write a usage-insights report). The Skills Library in
-**Settings → Skills** lets you browse that bundled catalog and **install or
+**Skills Lab → Skills → Bundled** lets you browse that bundled catalog and **install or
 update** each skill into your personal Otto library, with **drift detection**
 (bundled-vs-installed `version:`) and a **never-overwrite-without-a-backup**
 guarantee. Once installed, skills are materialized into agent sessions and drive
@@ -31,7 +31,7 @@ relates to your own library entries.
 | | |
 |---|---|
 | **What it is** | A bundled, versioned catalog of first-party skills + a drift-aware install/update tool. |
-| **Where it lives** | **Settings → Skills** (root-only page). |
+| **Where it lives** | **Skills Lab → Skills**, **Bundled** filter (`#/skills-eval/bundled`; the old `#/settings/skills` link forwards there). |
 | **What a skill is** | A multi-file instruction pack (`SKILL.md` + `references/` + optional `assets/`/`scripts/`) that gives an agent a method. |
 | **Bundled vs installed** | The catalog is **embedded in the daemon binary** (read-only); installing copies a skill into your **on-disk Otto library** where it becomes editable + self-improvable. |
 | **Install target on disk** | `<data_dir>/library/skills/<name>/` — on macOS `~/Library/Application Support/Otto/library/skills/<name>/`. |
@@ -71,7 +71,7 @@ tracks whether your copy still matches the bundled one.
 | Installed skill | `<data_dir>/library/skills/<name>/` (flat by name — see §5). |
 | Backup of a replaced skill | `<data_dir>/library/skills-backup/<name>-<unix_secs>/`. |
 | Souls / context (sibling stores) | `<data_dir>/library/souls/<name>.md`, `<data_dir>/library/context/<name>.md`. |
-| Catalog UI | **Settings → Skills** (`ui/src/modules/settings/SkillsLibrary.svelte`). |
+| Catalog UI | **Skills Lab → Skills → Bundled** (`ui/src/modules/skills-lab/SkillsBrowser.svelte`, `SkillDetail.svelte`, actions in `bundledActions.ts`). |
 | Your-own-skills UI | **Settings → Context Library → Skills** (edit/remove arbitrary library skills). |
 | Catalog routes | `GET /library/bundled`, `POST /library/bundled/{name}/install`, `POST /library/bundled/install-all`. |
 | Library CRUD routes | `GET/PUT/DELETE /library/skills[/{name}]` (and souls/context). |
@@ -134,7 +134,7 @@ they power three features:
 
 ## 4. Browsing the bundled catalog
 
-Open **Settings → Skills** (root-only). The page loads `GET /library/bundled`
+Open **Skills Lab → Skills** and pick the **Bundled** filter (or follow the old **Skills Lab → Skills → Bundled** link, which forwards there). The list loads `GET /library/bundled`
 (`contextApi.listBundled()`), which returns every bundled skill plus its drift
 state against your installed copy.
 
@@ -181,7 +181,7 @@ The bundled crate (`crates/otto-skills/assets/skills/`) currently ships:
 > seven **`product`** skills are *not* part of this catalog — they ship in the
 > `otto-product` crate and are **auto-seeded** into your library on daemon start
 > (see §6), so they show up in your Context Library and drive Product analysis
-> without ever appearing on the **Settings → Skills** catalog page.
+> without ever appearing on the **Skills Lab → Skills → Bundled** catalog page.
 
 ---
 
@@ -297,7 +297,7 @@ so your edits are never clobbered on routine restart:
 - **`otto-swarm`** seeds role skills + preset souls.
 
 These appear in your Context Library (editable, self-improvable) but **not** in the
-**Settings → Skills** catalog page — that page only lists the `otto-skills` bundle.
+**Skills Lab → Skills → Bundled** catalog page — that page only lists the `otto-skills` bundle.
 
 ---
 
@@ -337,7 +337,7 @@ installed `review` skill becomes a preset whose focus is *"Apply the `<skill>` s
 agent **with the skill materialized in-session**, so the agent follows the skill's
 full method (e.g. `grill`'s twelve-pass adversarial sweep). The panel also runs a
 **pre-check**: if `review` skills are *missing* or have a *newer bundled version*, it
-nudges you toward **Settings → Skills** to install/update them. (See
+nudges you toward **Skills Lab → Skills → Bundled** to install/update them. (See
 **[code-review.md](./code-review.md)**.)
 
 ### Product analysis (`product` category)
@@ -474,8 +474,8 @@ caller on an install route.
   (`crates/otto-skills/src/http.rs`); a non-root caller gets `403`. The policy layer
   also classifies these (`crates/otto-server/src/policy.rs`): `GET /library/bundled`
   is a **View**-level read, the install/install-all POSTs are **Edit**-level, and the
-  rest of `/library/*` is library-admin. The **Settings → Skills** page is gated to
-  root in the UI as well.
+  rest of `/library/*` is library-admin. The page ⋯ **Install all bundled skills…** entry keeps the old Settings → Skills gate
+  (settings admin) in the UI as well.
 - **Never overwrite without a safety copy.** The backend *always* keeps the backup
   (`backup=true` default); the UI obtains explicit consent for the destructive
   "ahead" replace. This is the "do not damage user work" guarantee in code.
@@ -498,9 +498,9 @@ caller on an install route.
 | Install/Update button → **403 / "installing skills requires root"** | You are not a root user. Catalog mutations are root-only; sign in as root. |
 | Skill stuck at **"Edited (ahead)"** and won't auto-update | By design — your copy was hand-edited or refined by self-improvement. Click **Update → "Back up & replace"** to sync to the bundle (your copy is backed up first), or leave it to keep your edits. |
 | Update **lost my hand-edits** | Expected — Update overwrites. Restore from `<data_dir>/library/skills-backup/<name>-<unix_secs>/`. |
-| A `review` skill **doesn't appear as a lens** in the Review tab | It isn't *installed* (only installed `review`-category skills become lenses), or its `category` isn't `review`. Install it from **Settings → Skills**; the Review tab pre-check flags missing/outdated ones. |
-| Review lens "out of date" pre-check banner | A `review` skill has a newer bundled version. Go to **Settings → Skills** and Update it. |
-| `product` skills aren't on the **Settings → Skills** page | Correct — they're auto-seeded by `otto-product`, not part of this catalog. Find/edit them under **Settings → Context Library → Skills**. |
+| A `review` skill **doesn't appear as a lens** in the Review tab | It isn't *installed* (only installed `review`-category skills become lenses), or its `category` isn't `review`. Install it from **Skills Lab → Skills → Bundled**; the Review tab pre-check flags missing/outdated ones. |
+| Review lens "out of date" pre-check banner | A `review` skill has a newer bundled version. Go to **Skills Lab → Skills → Bundled** and Update it. |
+| `product` skills aren't on the **Skills Lab → Skills → Bundled** page | Correct — they're auto-seeded by `otto-product`, not part of this catalog. Find/edit them under **Settings → Context Library → Skills**. |
 | Edited a skill's `version:` but state didn't change | The catalog re-reads on reload; refresh the page. An unparseable `version:` is treated as `1`. |
 | A skill's `scripts/*.sh` isn't executable | The executable bit is set on install on Unix only; reinstall the skill, or `chmod +x` it manually. |
 | `skills-backup/` is growing large | Backups are never auto-pruned. Delete old `skills-backup/<name>-<ts>/` dirs you no longer need. |
@@ -518,3 +518,44 @@ caller on an install route.
 - **[Product](./product.md)** — how `product`-category skills drive story analysis.
 - **[Self-improvement](./self-improvement.md)** — how your *installed* skill copies
   are refined from real sessions (and why that flips skills to "Edited (ahead)").
+
+
+---
+
+## Skills Lab is the one home (2026-11)
+
+Settings → Skills and Settings → Skills evaluator were merged into **Skills Lab**:
+
+| Was | Now |
+|-----|-----|
+| Settings → Skills catalogue (state chips, filter, X of Y installed) | Skills Lab → Skills, **Bundled** filter chip; the list pane shows "N of M bundled skills installed · K with an update" |
+| Install / Update / "Replace…" per skill | The skill's detail: **Install to library** / **Update library copy** in the header; **Replace with bundled…** in its ⋯ for an edited (`ahead` / `modified`) copy. One state-aware question (`bundledText.ts` `replaceQuestion`); an edited copy is a danger confirm and is always backed up |
+| Remove… | The skill's ⋯ → **Delete from library…** (danger confirm that names `skills-backup/`) |
+| Install all (per category) | Page ⋯ → **Install all bundled skills…**; a selected category chip narrows it to that category. Edited copies are skipped and named in a toast |
+| Settings → Skills evaluator | Skills Lab → Evaluator → page ⋯ → **Evaluator defaults…** (a sheet); `#/settings/skill-eval` opens it |
+
+Behaviour that came with the move:
+
+- **"Modified" is decided by content.** Each bundled install records a hash of the
+  tree it wrote (`<library>/.bundled-installs/<name>.sha256`). A tree that no longer
+  matches is `modified` even without a `version:` bump: Install all leaves it alone,
+  a single Update asks and always backs it up. Copies installed before this record
+  existed fall back to the version comparison.
+- **Atomic replace.** An install writes the new tree into a hidden sibling and
+  renames it into place; a failure midway leaves the previous copy whole.
+- **Edits reach the CLIs.** A Skills Lab save, new/deleted file, `PUT
+  /library/skills/{name}` or import re-copies the skill into each provider skills
+  folder whose `.otto-managed.json` says Otto owns it. A copy Otto does not own, a
+  symlink, or a copy the person removed is never written.
+- **Self-improvement edits too.** An applied, approved or rolled-back improvement
+  to a Library skill file is written through the same Library write (lock + hash
+  check) and refreshes the Otto-owned provider copies
+  (`crates/otto-improve/src/library_write.rs`); workspace skills and memory files
+  keep the engine's own atomic write.
+- **No silent overwrites.** The editor sends `if_hash` (SHA-256 of the text it
+  loaded); if the self-improvement engine, a review fix or another window wrote
+  first, the save is refused (409) and the editor shows **Reload theirs / Keep
+  mine** with the draft still in place.
+- **Delete is recoverable.** Deleting a library skill moves its folder into
+  `<library>/skills-backup/<name>-<secs>-<id>/` (the newest three per skill are
+  kept) instead of removing it.

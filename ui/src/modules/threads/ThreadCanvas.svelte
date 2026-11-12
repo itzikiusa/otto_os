@@ -5,6 +5,12 @@
   import { paneResizer, RESIZE_TITLE } from '../../lib/paneResizer';
   import { ws } from '../../lib/stores/workspace.svelte';
   import ThreadPane from './ThreadPane.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  // On demand: the council view embeds the whole runtime thread per seat, and
+  // most thread pages never show one.
+  const CouncilView = lazyComponent(() => import('./runtime/CouncilView.svelte'));
+  import { council } from './runtime/councilStore.svelte';
   import { isThreadSession } from './threadsHelpers';
   import { threads } from './threadsStore.svelte';
 
@@ -48,6 +54,16 @@
   }
 </script>
 
+<!-- A council (`meta.council`) shows as its columns unless the person chose
+     "Continue here" on that thread. -->
+{#snippet pane(id: string, focused: boolean, multiPane: boolean)}
+  {#if council.showsCouncil(id)}
+    <LazyMount lazy={CouncilView} what="the council" variant="panel" props={{ sessionId: id }} />
+  {:else}
+    <ThreadPane paneId={id} {focused} {multiPane} {onstartroom} />
+  {/if}
+{/snippet}
+
 <div
   class="tc-canvas"
   class:single={effectiveMode === 'single'}
@@ -59,22 +75,12 @@
 >
   {#if effectiveMode === 'single' && panes[0]}
     <div class="tc-single-slot">
-      <ThreadPane
-        paneId={panes[0]}
-        focused={true}
-        multiPane={false}
-        {onstartroom}
-      />
+      {@render pane(panes[0], true, false)}
     </div>
   {:else if effectiveMode === 'split'}
     <div class="tc-split-slot" style:flex="0 0 calc({splitRatio}% - 5px)">
       {#if panes[0]}
-        <ThreadPane
-          paneId={panes[0]}
-          focused={threads.focusedSessionId === panes[0]}
-          multiPane={panes.length > 1}
-          {onstartroom}
-        />
+        {@render pane(panes[0], threads.focusedSessionId === panes[0], panes.length > 1)}
       {/if}
     </div>
 
@@ -100,12 +106,7 @@
 
     <div class="tc-split-slot tc-split-end">
       {#if panes[1]}
-        <ThreadPane
-          paneId={panes[1]}
-          focused={threads.focusedSessionId === panes[1]}
-          multiPane={true}
-          {onstartroom}
-        />
+        {@render pane(panes[1], threads.focusedSessionId === panes[1], true)}
       {:else}
         <div class="tc-empty-slot" data-testid="threads-split-picker">
           <div class="tc-slot-card">
@@ -144,12 +145,7 @@
   {:else}
     {#each panes as id (id)}
       <div class="tc-grid-cell">
-        <ThreadPane
-          paneId={id}
-          focused={threads.focusedSessionId === id}
-          multiPane={panes.length > 1}
-          {onstartroom}
-        />
+        {@render pane(id, threads.focusedSessionId === id, panes.length > 1)}
       </div>
     {/each}
     {#if panes.length < 4}

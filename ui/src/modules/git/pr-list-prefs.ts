@@ -14,6 +14,9 @@ export interface PrListPrefs {
   ci: CiFilter | null;
   author: string | null;
   mine: boolean;
+  /** Only open PRs that ask you for a review — a SERVER filter
+   *  (`review=me`, the forge's own stable-id match), so it pages correctly. */
+  review: boolean;
   folded: string[];
 }
 
@@ -24,11 +27,12 @@ export const DEFAULT_PREFS: PrListPrefs = {
   ci: null,
   author: null,
   mine: false,
+  review: false,
   folded: [],
 };
 
 /** The filter fields "Clear filters" resets (sort/state/folds stay). */
-export const CLEARED_FILTERS: Partial<PrListPrefs> = { draft: 'any', ci: null, author: null, mine: false };
+export const CLEARED_FILTERS: Partial<PrListPrefs> = { draft: 'any', ci: null, author: null, mine: false, review: false };
 
 const prefsKey = (id: string) => `otto_prlist_prefs_${id}`;
 
@@ -50,7 +54,20 @@ export function writePrefs(id: string, p: PrListPrefs): void {
 }
 
 export const activeFilters = (p: PrListPrefs): number =>
-  (p.draft !== 'any' ? 1 : 0) + (p.ci ? 1 : 0) + (p.author ? 1 : 0) + (p.mine ? 1 : 0);
+  (p.draft !== 'any' ? 1 : 0) + (p.ci ? 1 : 0) + (p.author ? 1 : 0) + (p.mine ? 1 : 0) + (p.review ? 1 : 0);
+
+/** The list's server query: a state, or `<state>~review` for "review
+ *  requested from you" (its own cache key — those rows are another list). */
+export const listToken = (state: PrState, review: boolean): string => (review ? `${state}~review` : state);
+
+/** `GET /repos/{id}/prs` for a {@link listToken}. The review filter lists
+ *  open PRs only, whatever the state chip says. */
+export function prListUrl(repoId: string, token: string, page: number, perPage: number): string {
+  const [state, review] = token.split('~');
+  return review
+    ? `/repos/${repoId}/prs?state=open&review=me&page=${page}&per_page=${perPage}`
+    : `/repos/${repoId}/prs?state=${state}&page=${page}&per_page=${perPage}`;
+}
 
 export function sortItems(p: PrListPrefs, anyStats: boolean, set: (x: Partial<PrListPrefs>) => void): MenuItem[] {
   const order: PrSort[] = ['updated', 'newest', 'oldest', 'changed', 'number', 'title'];
@@ -72,6 +89,7 @@ export function filterItems(
   });
   const items: MenuItem[] = [];
   if (opts.hasHandles) items.push({ label: 'Authored by you', icon: 'user', checked: p.mine, action: () => set({ mine: !p.mine }) });
+  items.push({ label: 'Review requested from you', icon: 'eye', hint: 'open', checked: p.review, action: () => set({ review: !p.review }) });
   items.push({
     label: p.author ? `Author: ${p.author}` : 'Author…',
     icon: 'people',

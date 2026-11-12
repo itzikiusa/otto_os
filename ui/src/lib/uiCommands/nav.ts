@@ -61,8 +61,11 @@ function openableModules(): Set<string> {
     set.add('database');
     set.add('brokers');
   }
-  if (auth.can('design', 'view')) set.add('design');
-  if (auth.can('canvas', 'view')) set.add('canvas');
+  // `canvas` only forwards into Design Hall (boards live there now).
+  if (auth.can('design', 'view')) {
+    set.add('design');
+    set.add('canvas');
+  }
   if (set.has('scheduled-tasks')) set.add('personal-agents');
   set.add('settings');
   return set;

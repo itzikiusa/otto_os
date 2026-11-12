@@ -384,6 +384,18 @@ pub enum Event {
         version_ids: Vec<Id>,
         failed: usize,
     },
+    /// Design Hall live sync: a legacy design source — a Canvas scene or a
+    /// Product story attachment — was created, saved or deleted by a path that
+    /// emits no `CanvasUpdated` / `MockupUpdated` (a person's Canvas save, an
+    /// attachment upload or delete). `otto_design::sync` re-mirrors that one
+    /// source into the graph (debounced); clients may treat it as a refetch cue.
+    DesignSourceChanged {
+        workspace_id: Id,
+        /// `canvas_scene` | `product_attachment`.
+        kind: String,
+        /// The scene / attachment id.
+        id: Id,
+    },
     /// A mockup agent session just became live (at the START of a turn). Lets the
     /// Mockups Assistant panel attach the agent's shell/Terminal immediately,
     /// instead of only after the turn finishes.
@@ -765,6 +777,7 @@ impl Event {
             Event::DesignLearningUpdate { .. } => "design_learning_update",
             Event::DesignAssistUpdated { .. } => "design_assist_updated",
             Event::DesignVariantsReady { .. } => "design_variants_ready",
+            Event::DesignSourceChanged { .. } => "design_source_changed",
             Event::MockupSessionStarted { .. } => "mockup_session_started",
             Event::DbAssistSessionStarted { .. } => "db_assist_session_started",
             Event::DbAssistUpdated { .. } => "db_assist_updated",
@@ -911,6 +924,11 @@ mod tests {
             },
             Event::NotificationsChanged {
                 user_id: "u".into(),
+            },
+            Event::DesignSourceChanged {
+                workspace_id: "w".into(),
+                kind: "canvas_scene".into(),
+                id: "sc1".into(),
             },
             Event::WorkbenchDocChanged {
                 workspace_id: "w".into(),

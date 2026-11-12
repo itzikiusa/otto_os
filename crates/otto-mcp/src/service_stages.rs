@@ -28,6 +28,45 @@ pub(super) struct ServerStages<'a> {
     pub args_hash: String,
     /// Set once a single-use approval was consumed for this call.
     pub approval_id_used: Option<String>,
+    /// Set once a policy-required preview of these args licensed this call.
+    pub preview_used: bool,
+}
+
+/// The identity of a previewed call: the same caller, server, tool and
+/// exact arguments (canonical hash) — what a later real call must match.
+fn preview_key(s: &ServerStages<'_>) -> String {
+    format!(
+        "{}|{}|{}|{}|{}",
+        s.ctx.workspace_id.as_deref().unwrap_or(""),
+        s.ctx.caller_user_id.as_deref().unwrap_or(""),
+        s.server.id,
+        s.tool_name,
+        s.args_hash
+    )
+}
+
+impl McpService {
+    /// Remember a preview returned for `key` (dropping expired ones).
+    pub(super) fn record_preview(&self, key: String) {
+        let ttl = std::time::Duration::from_secs(APPROVAL_TTL_MINS as u64 * 60);
+        if let Ok(mut m) = self.previews.lock() {
+            m.retain(|_, at| at.elapsed() < ttl);
+            m.insert(key, std::time::Instant::now());
+        }
+    }
+
+    /// Whether an unexpired preview exists for `key`; `consume` uses it up.
+    pub(super) fn take_preview(&self, key: &str, consume: bool) -> bool {
+        let ttl = std::time::Duration::from_secs(APPROVAL_TTL_MINS as u64 * 60);
+        let Ok(mut m) = self.previews.lock() else {
+            return false;
+        };
+        let live = m.get(key).is_some_and(|at| at.elapsed() < ttl);
+        if consume || !live {
+            m.remove(key);
+        }
+        live
+    }
 }
 
 #[async_trait]
@@ -147,7 +186,7 @@ impl Stages for ServerStages<'_> {
                         risk_label: Some(risk_label.to_string()),
                         requested_by: ctx.caller_user_id.clone(),
                         requested_by_kind: Some(ctx.caller_kind.clone()),
-                        requested_by_session_id: None,
+                        requested_by_session_id: ctx.caller_session_id.clone(),
                         expires_at: Some(expires),
                     })
                     .await?;
@@ -193,7 +232,16 @@ impl Stages for ServerStages<'_> {
                 self.approval_id_used.as_deref(),
             )
             .await?;
+        self.svc.record_preview(preview_key(self));
         Ok(InvokeOutcome::DryRun { preview })
+    }
+
+    async fn has_prior_dry_run(&mut self) -> bool {
+        self.svc.take_preview(&preview_key(self), false)
+    }
+
+    async fn consume_prior_dry_run(&mut self) {
+        self.preview_used = self.svc.take_preview(&preview_key(self), true);
     }
 
     // 6. Fail-closed audit: insert the row BEFORE running so an audit failure
@@ -222,7 +270,7 @@ impl Stages for ServerStages<'_> {
                 bytes: None,
                 rows: None,
                 approval_id: self.approval_id_used.clone(),
-                caller_session_id: None,
+                caller_session_id: ctx.caller_session_id.clone(),
             })
             .await // ← propagates: no audit row ⇒ no execution (fail-closed)
     }

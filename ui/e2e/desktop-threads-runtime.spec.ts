@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +7,12 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 import type { Locator } from '@playwright/test';
 
 /** Relative luminance (0 dark … 1 light) of an element's computed background. */
+/** The project card lives in the toolbar's ⋯ (threadsPageMenu.ts). */
+async function toggleProjectCard(page: Page): Promise<void> {
+  await page.getByTestId('threads-thread-menu').click();
+  await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Project card' }).click();
+}
+
 async function bgLuminance(el: Locator): Promise<number> {
   return el.evaluate((node) => {
     const [r, g, b] = (getComputedStyle(node).backgroundColor.match(/[\d.]+/g) ?? ['0', '0', '0']).map(Number);
@@ -415,7 +421,7 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   await expect(page.getByRole('dialog')).toHaveCount(0);
 
   // The project card opens from the toolbar and covers no message.
-  await page.getByTestId('threads-toggle-card').click();
+  await toggleProjectCard(page);
   const card = page.getByTestId('threads-project-card');
   await expectFullyInViewport(page, card, 'project card');
   const cardBox = (await card.boundingBox())!;
@@ -433,7 +439,7 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   await page.reload();
   await expect.poll(() => page.evaluate(() => document.documentElement.dir)).toBe('rtl');
   await expect(bubble).toBeVisible({ timeout: 30_000 });
-  await page.getByTestId('threads-toggle-card').click();
+  await toggleProjectCard(page);
   await expectFullyInViewport(page, card, 'project card (RTL)');
   const rtlCard = (await card.boundingBox())!;
   const rtlBubble = (await bubble.boundingBox())!;
@@ -445,7 +451,7 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   await page.evaluate(() => localStorage.removeItem('otto_direction'));
   await page.reload();
   await expect(bubble).toBeVisible({ timeout: 30_000 });
-  await page.getByTestId('threads-toggle-card').click();
+  await toggleProjectCard(page);
   await expect(card).toBeVisible();
   // The user's window: a ~810 px centre column can't spare the card's width,
   // so the card docks above the timeline instead of covering it (LTR + RTL).
@@ -455,7 +461,7 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
       await page.evaluate(() => localStorage.setItem('otto_direction', 'rtl'));
       await page.reload();
       await expect(bubble).toBeVisible({ timeout: 30_000 });
-      await page.getByTestId('threads-toggle-card').click();
+      await toggleProjectCard(page);
     }
     const centre = (await page.locator('.th-center-col').boundingBox())!;
     expect(centre.width, 'centre column width').toBeGreaterThanOrEqual(800);
@@ -473,12 +479,12 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.reload();
   await expect(bubble).toBeVisible({ timeout: 30_000 });
-  await page.getByTestId('threads-toggle-card').click();
+  await toggleProjectCard(page);
   await expect(card).toBeVisible();
   // Outside click closes it (and Esc after reopening).
   await thread.locator('.rt-col').click({ position: { x: 10, y: 10 } });
   await expect(card).toHaveCount(0);
-  await page.getByTestId('threads-toggle-card').click();
+  await toggleProjectCard(page);
   await expect(card).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(card).toHaveCount(0);
@@ -552,7 +558,8 @@ test('composer drafts recover after reload and page reopen without sending; fail
   await page.goto('/#/threads');
   await page.getByTestId('threads-sidebar').getByText('Recover my unsent draft', { exact: true }).click();
   const thread = page.getByTestId(`runtime-thread-${id}`);
-  await expect(thread.getByText('Saved', { exact: true })).toBeVisible();
+  // The save state shows only on failure; its data-state says the draft finished loading.
+  await expect(thread.getByTestId('runtime-draft-status')).toHaveAttribute('data-state', 'saved');
   await thread.getByTestId('runtime-composer').fill('Unsent browser recovery text');
   await thread.locator('input[type=file]').setInputFiles({ name: 'recover.png', mimeType: 'image/png', buffer: Buffer.from(png, 'base64') });
   await expect.poll(async () => {

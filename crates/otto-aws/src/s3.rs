@@ -153,6 +153,25 @@ pub struct DeleteQuery {
     pub confirm: Option<String>,
 }
 
+/// A delete on a production account needs `confirm == key`, given by a
+/// person (an agent credential's confirm is refused, see
+/// [`crate::access::refuse_agent_confirm`]). Other accounts need neither.
+pub fn check_delete_confirm(
+    env: otto_core::domain::Environment,
+    account: &str,
+    q: &DeleteQuery,
+) -> Result<()> {
+    if env != otto_core::domain::Environment::Prod {
+        return Ok(());
+    }
+    if q.confirm.as_deref() != Some(q.key.as_str()) {
+        return Err(Error::Invalid(format!(
+            "'{account}' is a production account — type the object key to confirm the delete"
+        )));
+    }
+    crate::access::refuse_agent_confirm("deleting an object on a production account")
+}
+
 // ---------------------------------------------------------------------------
 // Normalizers (pure)
 // ---------------------------------------------------------------------------
@@ -1084,6 +1103,40 @@ pub async fn presign(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S6-304: on prod an agent credential's correct delete confirm is
+    /// refused; a person's is accepted.
+    #[tokio::test]
+    async fn an_agent_credential_cannot_confirm_a_prod_delete() {
+        use otto_core::auth::{with_request_credential, RequestCredential};
+        use otto_core::domain::Environment;
+        let q = DeleteQuery {
+            key: "a/b.txt".into(),
+            region: None,
+            confirm: Some("a/b.txt".into()),
+        };
+        let agent = RequestCredential {
+            agent: true,
+            root_withheld: false,
+        };
+        let refused = with_request_credential(agent, async {
+            check_delete_confirm(Environment::Prod, "acct", &q)
+        })
+        .await;
+        assert!(matches!(refused, Err(Error::Forbidden(_))), "{refused:?}");
+        let person = RequestCredential::default();
+        let ok = with_request_credential(person, async {
+            check_delete_confirm(Environment::Prod, "acct", &q)
+        })
+        .await;
+        assert!(ok.is_ok(), "{ok:?}");
+        // Off prod no confirm is asked for, so there is none to refuse.
+        let dev = with_request_credential(agent, async {
+            check_delete_confirm(Environment::Dev, "acct", &q)
+        })
+        .await;
+        assert!(dev.is_ok());
+    }
 
     #[tokio::test]
     async fn download_stream_stops_at_the_cap() {

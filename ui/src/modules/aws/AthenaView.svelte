@@ -2,6 +2,7 @@
   import { announce } from '../../lib/announce.svelte';
   import { rowMenu } from '../../lib/rowMenu';
   import { toastError } from '../../lib/toastError';
+  import { lsGet, lsSet } from '../../lib/storage';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // Athena: three-pane like the DB Explorer — catalog tree (databases → tables
   // → columns) feeding `CodeEditor` sql completion, an editor with workgroup /
@@ -52,6 +53,8 @@
   let openDbs = $state<Record<string, boolean>>({});
   let openTables = $state<Record<string, boolean>>({});
   let tablesLoading = $state<Record<string, boolean>>({});
+  /** A database whose table list failed: shown inline under it, with Retry. */
+  let tablesError = $state<Record<string, string>>({});
 
   // Editor state — the SQL text is remembered per account. The view is
   // remounted per account (AwsPage {#key}s on account+service), so reading the
@@ -62,21 +65,9 @@
   const WG_KEY = `otto_aws_athena_wg_${acctId}`;
   const DB_KEY = `otto_aws_athena_db_${acctId}`;
   // Storage can throw (private window, blocked site data): the editor then
-  // just starts empty and nothing is remembered.
-  function readKey(key: string): string {
-    try {
-      return localStorage.getItem(key) ?? '';
-    } catch {
-      return '';
-    }
-  }
-  function writeKey(key: string, value: string): void {
-    try {
-      localStorage.setItem(key, value);
-    } catch {
-      /* not persisted — the session keeps working */
-    }
-  }
+  // just starts empty and nothing is remembered (lib/storage guards it).
+  const readKey = (key: string): string => lsGet(key) ?? '';
+  const writeKey = lsSet;
   let sql = $state(readKey(SQL_KEY));
   let workgroup = $state(readKey(WG_KEY));
   let database = $state(readKey(DB_KEY));
@@ -127,15 +118,16 @@
     }
   }
 
-  async function toggleDb(db: string): Promise<void> {
-    const open = !openDbs[db];
+  /** `reload`: (re)load an expanded database's tables without folding it. */
+  async function toggleDb(db: string, reload = false): Promise<void> {
+    const open = reload || !openDbs[db];
     openDbs = { ...openDbs, [db]: open };
     if (open && !catalog?.tables[db] && !tablesLoading[db]) {
       tablesLoading = { ...tablesLoading, [db]: true };
       try {
         await aws.loadAthenaTables(account.id, db, rq);
       } catch (e) {
-        toastError(`Couldn’t list tables in ${db}`, e);
+        tablesError = { ...tablesError, [db]: awsLoadText(e) };
       } finally {
         tablesLoading = { ...tablesLoading, [db]: false };
       }
@@ -467,8 +459,10 @@
               {#if open}
                 {#if tablesLoading[db]}
                   <div class="sub dim">loading…</div>
+                {:else if !catalog?.tables[db] && tablesError[db]}
+                  <LoadState what="the tables in {db}" error={awsErrorText(tablesError[db])} empty variant="compact" onretry={() => void toggleDb(db, true)} />
                 {:else if !catalog?.tables[db]}
-                  <div class="sub"><button class="link" onclick={() => void toggleDb(db)}>load tables</button></div>
+                  <div class="sub"><button class="link" onclick={() => void toggleDb(db, true)}>load tables</button></div>
                 {:else}
                   <ul class="tables">
                     {#each treeTables(db) as t (t.name)}

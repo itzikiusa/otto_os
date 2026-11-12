@@ -65,7 +65,7 @@ one blocks on input, and retry a single validation.
 | Start form | `StartEvalForm.svelte` (the "New evaluation" form) |
 | One run's report | `RunDetail.svelte` (header + per-iteration breakdown, polls while running) |
 | Side-by-side compare | `CompareView.svelte` |
-| Defaults / config | **Settings → Skill Eval** (`ui/src/modules/settings/SkillEvalSettings.svelte`) |
+| Defaults / config | **Skills Lab → Evaluator → ⋯ → Evaluator defaults** (`ui/src/modules/skills-eval/EvalDefaultsSheet.svelte`; the old `#/settings/skill-eval` link opens it) |
 | REST client | `ui/src/lib/api/skillsEval.ts` |
 | Backend engine | `crates/otto-server/src/skill_eval.rs` |
 | Persistence | `crates/otto-state/src/skill_evals.rs`; tables `skill_evals`, `skill_eval_iterations` |
@@ -108,7 +108,7 @@ on shippable code.
 ## 3. Starting an evaluation — every form field
 
 Click **New** in the left rail (or the empty-state button) to open the start
-form. It prefills from the saved defaults (**Settings → Skill Eval**, §8) and from
+form. It prefills from the saved defaults (**Evaluator defaults** (Skills Lab → Evaluator → ⋯), §8) and from
 the skills it can discover in the current workspace.
 
 The lede on the form states the contract plainly: *"A coding agent uses the skill
@@ -336,9 +336,9 @@ skill/provider scored highest where it matters.
 
 ---
 
-## 8. Configuration (Settings → Skill Eval)
+## 8. Configuration (Evaluator defaults)
 
-**Settings → Skill Eval** edits the **defaults** the start form prefills. It is
+**Evaluator defaults** (Skills Lab → Evaluator → ⋯) edits the **defaults** the start form prefills. It is
 **root-only** to read and write (`GET`/`PUT /settings/skill-eval`); the stored
 blob is `SkillEvalConfig`:
 
@@ -483,7 +483,7 @@ status/score. (The timed poll remains a fallback if the socket is down.)
 | `NotFound` for a `provider`/`path` skill | The `SKILL.md` isn't at `~/.{provider}/skills/<name>/SKILL.md`, or the path/archive has no `SKILL.md`/`.md`. Check the location/contents. |
 | Code diff shows "(worktree no longer available)" | The worktree was already removed (e.g. after **Delete**). The diff is only viewable while the worktree exists. |
 | Promote fails: invalid name | Library names must be `[A-Za-z0-9_-]+`. Rename and retry. |
-| Promote returns `403` | Promotion (and **Settings → Skill Eval**) is **root-only**. |
+| Promote returns `403` | Promotion (and **Evaluator defaults** (Skills Lab → Evaluator → ⋯)) is **root-only**. |
 | Run never finishes / very slow | Large task or many validations × providers × passes; watch timeouts (40/15/10 min). Reduce passes or providers, or split the task. |
 | The improver never ran | Expected when `Iterations = 1`, on the last iteration, or after a perfect-scoring round (it short-circuits). |
 

@@ -34,6 +34,7 @@
   import AttributionDrilldown from './AttributionDrilldown.svelte';
   import CostForecastChip from './CostForecastChip.svelte';
   import UsageHealthBanner from './UsageHealthBanner.svelte';
+  import RemainingLimits from './RemainingLimits.svelte';
   import ModelBreakdown from './ModelBreakdown.svelte';
   let reportLoad = $state(0);
 
@@ -505,8 +506,8 @@
         {/await}
       {/key}
     {:else}
-    <!-- What the numbers cover: who, how far back, how fresh. In the page body,
-         not the header, so the header keeps to tabs + Refresh / Export / settings. -->
+    {#if canView && view === 'overview'}<RemainingLimits />{/if}
+    <!-- What the numbers cover: who, how far back, how fresh (body, not header). -->
     {#if usage.status?.available}
       <div class="usage-bar" role="toolbar" aria-label="Usage scope">
         {#if admin}
@@ -548,8 +549,7 @@
     <!-- Ingestion health: tailer retrying/stopped, database down, journal filling. -->
     <UsageHealthBanner status={usage.status} />
 
-    <!-- Live budget banner (driven by the BudgetExceeded WS event).
-         Dismissible; clears automatically on a "recovered" event. -->
+    <!-- Live budget banner (BudgetExceeded WS event); dismissible, clears on "recovered". -->
     {#if budgetAlert}
       <div class="budget-banner" class:recovered={budgetAlert.direction === 'recovered'} use:announceShown={budgetAlert.direction === 'recovered' ? `Back under budget: ${budgetAlert.provider || 'workspace'}` : { text: `Over budget: ${budgetAlert.provider || 'workspace'} spent ${formatUsd(budgetAlert.spendUsd)} of its ${formatUsd(budgetAlert.capUsd)} cap.`, assertive: true }}>
         <Icon name={budgetAlert.direction === 'recovered' ? 'check' : 'warning'} size={14} />

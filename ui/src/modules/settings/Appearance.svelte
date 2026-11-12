@@ -4,6 +4,7 @@
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   import SettingToggle from './SettingToggle.svelte';
+  import AppearanceLightMode from './AppearanceLightMode.svelte';
   // Theme (native / pro-dark / warm), scheme (auto / light / dark), accent.
   import {
     ui,
@@ -109,7 +110,6 @@
     const photo = ui.ambientPhoto ? ui.ambientPhoto[ui.resolvedScheme] : null;
     return ambientImage(mode, accentNow, ui.resolvedScheme, photo);
   }
-
   let photoBusy = $state(false);
   async function pickPhoto(e: Event & { currentTarget: HTMLInputElement }): Promise<void> {
     const input = e.currentTarget;
@@ -164,8 +164,7 @@
         aria-pressed={ui.scheme === s.id}
         disabled={ui.theme === 'pro-dark'}
         title={ui.theme === 'pro-dark' ? 'Pro Dark is always dark' : undefined}
-        onclick={() => ui.setScheme(s.id)}>{s.label}</button
-      >
+        onclick={() => ui.setScheme(s.id)}>{s.label}</button>
     {/each}
   </div>
   <p class="hint-line">
@@ -181,6 +180,7 @@
     {/each}
   </div>
   <p class="hint-line">Right-to-left mirrors the layout for RTL languages (Hebrew, Arabic).</p>
+  <AppearanceLightMode />
 
   <div class="section-title">Accent color</div>
   <div class="row">

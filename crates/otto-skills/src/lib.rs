@@ -5,7 +5,7 @@
 //!
 //! Unlike `otto-product` (which auto-seeds its lenses into the Library on daemon
 //! start), these skills are **never auto-installed**. They are surfaced in
-//! **Settings → Skills** and installed/updated into the Library only on explicit
+//! **Skills Lab → Skills → Bundled** and installed/updated into the Library only on explicit
 //! user action, with drift (bundled-vs-installed `version:`) shown so the user
 //! decides whether to keep their copy or sync the new one. This module is the
 //! read-only catalogue + the install primitive; consent/backup is the caller's job.
@@ -47,6 +47,10 @@ pub enum InstallState {
     UpdateAvailable { installed: u32, bundled: u32 },
     /// Installed at a version >= the bundle (user-edited / ahead). Never auto-touch.
     Ahead { installed: u32, bundled: u32 },
+    /// The installed tree is not the one Otto installed (its recorded hash no
+    /// longer matches): the person edited it without bumping `version:`.
+    /// Install-all leaves it alone; a single update asks and always backs up.
+    Modified { installed: u32, bundled: u32 },
 }
 
 /// Read a single scalar `key:` from the first frontmatter block of a SKILL.md body.
@@ -200,16 +204,114 @@ fn collect_bundled(dir: &Dir<'_>, base: &Path, out: &mut Vec<String>) {
 }
 
 /// Compute the [`InstallState`] of bundled skill `name` against the Library.
+///
+/// "Edited or not" is decided by content, not by the version number alone: the
+/// install records a hash of the tree it wrote (see [`install_into`]), and a
+/// tree that no longer hashes to it is [`InstallState::Modified`]. A tree equal
+/// to the current bundle is up to date whatever its `version:` says. Copies
+/// installed before the record existed fall back to the version comparison.
 pub fn install_state(library: &Library, name: &str) -> Option<InstallState> {
     let bundled = bundled_version(name)?;
-    Some(match installed_version(library, name) {
-        None => InstallState::NotInstalled,
-        Some(installed) if installed == bundled => InstallState::UpToDate,
-        Some(installed) if installed < bundled => {
-            InstallState::UpdateAvailable { installed, bundled }
+    let installed = installed_version(library, name);
+    let Some(installed) = installed else {
+        return Some(InstallState::NotInstalled);
+    };
+    let dir = library.root.join("skills").join(safe_component(name)?);
+    let on_disk = tree_hash(&dir).ok();
+    if on_disk.is_some() && on_disk == bundled_tree_hash(name) {
+        return Some(InstallState::UpToDate);
+    }
+    if let (Some(recorded), Some(now)) = (recorded_hash(library, name), on_disk) {
+        if recorded != now {
+            return Some(InstallState::Modified { installed, bundled });
         }
-        Some(installed) => InstallState::Ahead { installed, bundled },
+    }
+    Some(if installed == bundled {
+        InstallState::UpToDate
+    } else if installed < bundled {
+        InstallState::UpdateAvailable { installed, bundled }
+    } else {
+        InstallState::Ahead { installed, bundled }
     })
+}
+
+/// Where the hash of each bundled install is recorded: outside `skills/` so it
+/// is never listed as a skill file, copied to a provider dir or hashed itself.
+fn record_path(library: &Library, name: &str) -> Option<std::path::PathBuf> {
+    Some(
+        library
+            .root
+            .join(".bundled-installs")
+            .join(format!("{}.sha256", safe_component(name)?)),
+    )
+}
+
+fn recorded_hash(library: &Library, name: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(record_path(library, name)?).ok()?;
+    Some(raw.trim().to_string()).filter(|h| !h.is_empty())
+}
+
+fn record_hash(library: &Library, name: &str, hash: &str) -> io::Result<()> {
+    let path = record_path(library, name)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe skill name"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    otto_context::library::write_atomic(&path, hash.as_bytes())
+}
+
+/// A content hash of a skill tree: every regular file's skill-relative path and
+/// bytes, in path order. Hidden entries (editor temp files, `.DS_Store`) are
+/// skipped so they never read as an edit.
+pub fn tree_hash(dir: &Path) -> io::Result<String> {
+    let mut files = Vec::new();
+    collect_disk(dir, dir, &mut files)?;
+    files.sort();
+    let mut manifest = String::new();
+    for rel in files {
+        let bytes = std::fs::read(dir.join(&rel))?;
+        manifest.push_str(&format!(
+            "{rel}\0{}\n",
+            otto_core::text::bytes_sha256(&bytes)
+        ));
+    }
+    Ok(otto_core::text::content_sha256(&manifest))
+}
+
+fn collect_disk(base: &Path, dir: &Path, out: &mut Vec<String>) -> io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let ty = entry.file_type()?;
+        let path = entry.path();
+        if ty.is_dir() {
+            collect_disk(base, &path, out)?;
+        } else if ty.is_file() {
+            if let Ok(rel) = path.strip_prefix(base) {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// [`tree_hash`] of the embedded tree for `name`, computed the same way.
+fn bundled_tree_hash(name: &str) -> Option<String> {
+    let (dir, _cat) = bundled_dir(name)?;
+    let mut manifest = String::new();
+    for rel in bundled_files(name) {
+        if rel.split('/').any(|seg| seg.starts_with('.')) {
+            continue;
+        }
+        let bytes = dir.get_file(dir.path().join(&rel))?.contents();
+        manifest.push_str(&format!(
+            "{rel}\0{}\n",
+            otto_core::text::bytes_sha256(bytes)
+        ));
+    }
+    Some(otto_core::text::content_sha256(&manifest))
 }
 
 /// Install (or overwrite) bundled skill `name` into the Library at
@@ -219,8 +321,8 @@ pub fn install_state(library: &Library, name: &str) -> Option<InstallState> {
 /// This OVERWRITES any existing installed copy — the Settings layer is responsible
 /// for getting user consent and offering a backup first (never override silently).
 pub fn install_into(library: &Library, name: &str) -> io::Result<bool> {
-    // A name with separators/`..` would aim the `remove_dir_all` below outside
-    // the Library — reject before any path is built (same `false` as unknown).
+    // A name with separators/`..` would aim the replace below outside the
+    // Library — reject before any path is built (same `false` as unknown).
     let Some(name) = safe_component(name) else {
         return Ok(false);
     };
@@ -228,11 +330,58 @@ pub fn install_into(library: &Library, name: &str) -> io::Result<bool> {
         return Ok(false);
     };
     let dest = library.root.join("skills").join(name);
-    if dest.exists() {
-        std::fs::remove_dir_all(&dest)?;
-    }
-    seed_dir(skill_dir, &dest)?;
+    replace_tree(&dest, |tmp| seed_dir(skill_dir, tmp))?;
+    // Record what Otto wrote, so a later edit reads as "modified" even when
+    // the person did not bump `version:`.
+    record_hash(library, name, &tree_hash(&dest)?)?;
     Ok(true)
+}
+
+/// Replace the directory `dest` with the tree `fill` writes, without ever
+/// leaving half a skill: `fill` writes into a hidden sibling, the old tree is
+/// moved aside, the new one renamed in, and only then is the old one dropped.
+/// A `fill` error (disk full, permissions) leaves `dest` exactly as it was.
+fn replace_tree(dest: &Path, fill: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let parent = dest
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no parent dir"))?;
+    std::fs::create_dir_all(parent)?;
+    let leaf = dest
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no dir name"))?
+        .to_string_lossy();
+    let tag = format!(
+        "{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let fresh = parent.join(format!(".{leaf}.otto-install-{tag}"));
+    let old = parent.join(format!(".{leaf}.otto-old-{tag}"));
+    if let Err(e) = fill(&fresh) {
+        let _ = std::fs::remove_dir_all(&fresh);
+        return Err(e);
+    }
+    let had_old = match std::fs::rename(dest, &old) {
+        Ok(()) => true,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&fresh);
+            return Err(e);
+        }
+    };
+    if let Err(e) = std::fs::rename(&fresh, dest) {
+        if had_old {
+            let _ = std::fs::rename(&old, dest);
+        }
+        let _ = std::fs::remove_dir_all(&fresh);
+        return Err(e);
+    }
+    if had_old {
+        let _ = std::fs::remove_dir_all(&old);
+    }
+    Ok(())
 }
 
 /// Materialize one compiled-in skill's complete file tree at `dest`.
@@ -516,6 +665,78 @@ mod tests {
 
         assert_eq!(install_state(&lib, "grill"), Some(InstallState::UpToDate));
         assert!(!install_into(&lib, "not-a-skill").unwrap());
+    }
+
+    /// An edit that keeps `version:` is still "modified" (the recorded tree
+    /// hash no longer matches), and putting the bundled text back clears it.
+    #[test]
+    fn edit_without_version_bump_reads_as_modified() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::new(dir.path());
+        assert!(install_into(&lib, "grill").unwrap());
+        assert_eq!(install_state(&lib, "grill"), Some(InstallState::UpToDate));
+        let md = dir.path().join("skills/grill/SKILL.md");
+        let original = std::fs::read_to_string(&md).unwrap();
+        std::fs::write(&md, format!("{original}\nMy own house rule.\n")).unwrap();
+        let v = bundled_version("grill").unwrap();
+        assert_eq!(
+            install_state(&lib, "grill"),
+            Some(InstallState::Modified {
+                installed: v,
+                bundled: v
+            })
+        );
+        // A new file counts too; editor temp files (hidden) do not.
+        std::fs::write(&md, &original).unwrap();
+        assert_eq!(install_state(&lib, "grill"), Some(InstallState::UpToDate));
+        std::fs::write(dir.path().join("skills/grill/.SKILL.md.otto-tmp-1"), "x").unwrap();
+        assert_eq!(install_state(&lib, "grill"), Some(InstallState::UpToDate));
+        std::fs::write(dir.path().join("skills/grill/extra.md"), "x").unwrap();
+        assert!(matches!(
+            install_state(&lib, "grill"),
+            Some(InstallState::Modified { .. })
+        ));
+    }
+
+    /// A replace that fails midway leaves the previous tree whole, with no
+    /// hidden temp dirs left behind; a successful one swaps the tree.
+    #[test]
+    fn replace_tree_is_atomic_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("skills/grill");
+        std::fs::create_dir_all(dest.join("references")).unwrap();
+        std::fs::write(dest.join("SKILL.md"), "previous").unwrap();
+        std::fs::write(dest.join("references/r.md"), "ref").unwrap();
+
+        let err = replace_tree(&dest, |tmp| {
+            std::fs::create_dir_all(tmp)?;
+            std::fs::write(tmp.join("SKILL.md"), "half")?;
+            Err(io::Error::other("disk full"))
+        })
+        .unwrap_err();
+        assert_eq!(err.to_string(), "disk full");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("SKILL.md")).unwrap(),
+            "previous"
+        );
+        assert!(dest.join("references/r.md").is_file());
+        let names: Vec<String> = std::fs::read_dir(dir.path().join("skills"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["grill".to_string()]);
+
+        replace_tree(&dest, |tmp| {
+            std::fs::create_dir_all(tmp)?;
+            std::fs::write(tmp.join("SKILL.md"), "next")
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.join("SKILL.md")).unwrap(),
+            "next"
+        );
+        assert!(!dest.join("references").exists(), "old tree dropped");
     }
 
     #[test]

@@ -1488,6 +1488,9 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
             // serve natively (what the operator ticked under MCP → Otto server),
             // UI-control tools only once this session holds the UI grant.
             let filter = enabled.as_ref().and_then(|i| i.filter.clone());
+            // The opt-in console content reads are listed only while their
+            // control-plane twin is on (the call is refused otherwise).
+            let enabled_names = enabled.as_ref().map(|i| i.names.clone());
             let governed = match enabled {
                 Some(info) => {
                     ctx.advertised_ui
@@ -1506,6 +1509,12 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
                     }));
                 }
                 scope_listing_for_source(arr, ctx.source.as_deref());
+                arr.retain(|t| {
+                    listed_with_opt_in(
+                        t["name"].as_str().unwrap_or_default(),
+                        enabled_names.as_deref(),
+                    )
+                });
                 if let Some(f) = &filter {
                     f.retain_listed(arr);
                 }

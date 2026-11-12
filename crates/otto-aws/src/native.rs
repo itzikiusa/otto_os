@@ -526,7 +526,9 @@ pub async fn describe_instances(t: &Target, state: Option<&str>, ids: &[&str]) -
             break;
         }
     }
-    Ok(json!({ "Reservations": reservations }))
+    // Still a token after MAX_PAGES: the list is partial — say so instead of
+    // presenting the first 20 pages as the whole account.
+    Ok(json!({ "Reservations": reservations, "Truncated": token.is_some() }))
 }
 
 fn form_enc(s: &str) -> String {

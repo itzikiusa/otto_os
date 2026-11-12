@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { questionAnswerError, pendingQuestions } from '../src/modules/threads/runtime/questions.ts';
+import { questionAnswerError, pendingQuestions, offersOther, otherAnswer } from '../src/modules/threads/runtime/questions.ts';
 const question = { id: 'native-key', header: 'Strategy', prompt: 'Which strategy?', kind: 'single' as const, required: true, allow_free_text: false, options: [{ value: 'safe_v1', label: 'Safe' }] };
 test('answers preserve native values and reject labels, wrong kinds and missing required fields', () => {
   assert.equal(questionAnswerError([question], [{ question_id: 'native-key', type: 'single', value: 'safe_v1' }]), null);
@@ -60,4 +60,16 @@ test('an untouched ACP form sends explicit empty native fields', async () => {
   state.initializeEmptyAnswers();
   await state.send({ preventDefault() {} });
   assert.deepEqual(JSON.parse(JSON.stringify(sent)), [{ question_id: 'tags', type: 'multi', values: [] }, { question_id: 'name', type: 'text', text: '' }]);
+});
+
+test('a single choice folded with its "other" field offers Other and answers as text', () => {
+  const q = { ...question, allow_free_text: true };
+  assert.equal(offersOther(q), true);
+  assert.equal(offersOther(question), false);
+  assert.equal(offersOther({ ...q, kind: 'text' as const, options: [] }), false, 'a text question is its own box');
+  const answer = otherAnswer(q.id, 'Something else');
+  assert.deepEqual(answer, { type: 'text', question_id: 'native-key', text: 'Something else' });
+  assert.equal(questionAnswerError([q], [answer]), null);
+  // Without allow_free_text the same text answer is refused.
+  assert.match(questionAnswerError([question], [answer])!, /offered/);
 });

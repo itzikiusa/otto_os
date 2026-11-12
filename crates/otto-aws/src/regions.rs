@@ -1,6 +1,7 @@
 //! "All enabled regions" fan-out for the regional list views (EC2 / EKS /
 //! RDS). `?region=all` resolves the account's enabled regions once
-//! (`ec2 describe-regions`, cached per account for an hour — the default
+//! (`ec2 describe-regions`, cached per account for an hour unless it fell
+//! back to the home region — the default
 //! answer already omits opt-in regions the account has not enabled), then runs
 //! the per-region call with at most [`FANOUT_CONCURRENCY`] CLI children at a
 //! time. A region that fails never fails the whole list: it comes back in
@@ -37,6 +38,21 @@ pub const ALL_REGIONS_TTL: Duration = Duration::from_secs(20);
 pub struct RegionError {
     pub region: String,
     pub message: String,
+    /// The region WAS listed, but only partly (EC2's in-process lister stops
+    /// after 20 pages): the rows shown are not all of them.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+impl RegionError {
+    /// The note for a region whose list stopped at the page cap.
+    pub fn truncated(region: &str, what: &str) -> Self {
+        Self {
+            region: region.to_string(),
+            message: format!("only the first {what} are shown — filter by state or name"),
+            truncated: true,
+        }
+    }
 }
 
 pub fn is_all(region: Option<&str>) -> bool {
@@ -69,37 +85,65 @@ pub fn parse_regions(v: &serde_json::Value) -> Vec<String> {
 }
 
 /// The account's enabled regions (cached 1 h). Falls back to the account's own
-/// region when `describe-regions` is denied, so "All regions" degrades to the
-/// default view instead of an error page.
-pub async fn enabled_regions(svc: &AwsService, a: &AwsAccountRow) -> Result<Vec<String>> {
+/// region when `describe-regions` fails (e.g. no `ec2:DescribeRegions`), so
+/// "All regions" degrades to the default view instead of an error page — but
+/// says so: the fallback comes back as a [`RegionError`] for the list to show
+/// ("some regions could not be read"), and is never cached, so a fixed policy
+/// or a transient error is picked up on the next refresh.
+pub async fn enabled_regions(
+    svc: &AwsService,
+    a: &AwsAccountRow,
+) -> Result<(Vec<String>, Option<RegionError>)> {
     {
         let map = cache().lock().unwrap_or_else(|p| p.into_inner());
         if let Some((at, list)) = map.get(&a.id) {
             if at.elapsed() < REGIONS_TTL {
-                return Ok(list.clone());
+                return Ok((list.clone(), None));
             }
         }
     }
-    let list = match svc.run_json(a, None, &["ec2", "describe-regions"]).await {
-        Ok(v) => parse_regions(&v),
-        // Credentials are a hard stop (the UI shows "Sign in"); anything else
-        // (e.g. no ec2:DescribeRegions) degrades to the home region.
+    let result = svc.run_json(a, None, &["ec2", "describe-regions"]).await;
+    let (list, note) = resolve_regions(result, &a.region)?;
+    if note.is_none() {
+        cache()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(a.id.clone(), (Instant::now(), list.clone()));
+    }
+    Ok((list, note))
+}
+
+/// Pure half of [`enabled_regions`]: the region list for a `describe-regions`
+/// outcome, plus the note to show when it fell back to `home`. Credentials are
+/// a hard stop (the UI shows "Sign in").
+fn resolve_regions(
+    result: Result<serde_json::Value>,
+    home: &str,
+) -> Result<(Vec<String>, Option<RegionError>)> {
+    let why = match result {
+        Ok(v) => {
+            let list = parse_regions(&v);
+            if !list.is_empty() {
+                return Ok((list, None));
+            }
+            "describe-regions returned no regions".to_string()
+        }
         Err(Error::Invalid(m)) if m.starts_with("login required") => return Err(Error::Invalid(m)),
         Err(e) => {
             tracing::debug!("describe-regions failed, using the account region: {e}");
-            Vec::new()
+            message_of(&e)
         }
     };
-    let list = if list.is_empty() {
-        vec![a.region.clone()]
-    } else {
-        list
-    };
-    cache()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(a.id.clone(), (Instant::now(), list.clone()));
-    Ok(list)
+    Ok((
+        vec![home.to_string()],
+        Some(RegionError {
+            region: "other regions".into(),
+            message: format!(
+                "couldn't list the account's enabled regions ({why}) — showing {home} only"
+            ),
+            truncated: false,
+        }),
+    ))
 }
 
 /// Human message for a per-region failure (`Error`'s Display carries a code
@@ -149,7 +193,11 @@ where
                 if message.starts_with("login required") && login.is_none() {
                     login = Some(e);
                 }
-                errs.push(RegionError { region, message });
+                errs.push(RegionError {
+                    region,
+                    message,
+                    truncated: false,
+                });
             }
         }
     }
@@ -225,6 +273,11 @@ pub fn invalidate(account: &Id) {
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .retain(|k, _| !k.starts_with(&prefix));
+    // An account edit (credentials, home region) can change the region list.
+    cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(account);
 }
 
 #[cfg(test)]
@@ -269,7 +322,8 @@ mod tests {
             errs,
             vec![RegionError {
                 region: "r-3".into(),
-                message: "not authorized in r-3".into()
+                message: "not authorized in r-3".into(),
+                truncated: false,
             }]
         );
         assert!(peak.load(Ordering::SeqCst) <= FANOUT_CONCURRENCY);
@@ -346,6 +400,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ok, 1);
+    }
+
+    #[test]
+    fn a_region_list_fallback_is_reported_not_silent() {
+        let ok = serde_json::json!({"Regions":[{"RegionName":"eu-west-1"}]});
+        let (list, note) = resolve_regions(Ok(ok), "us-east-1").unwrap();
+        assert_eq!((list, note), (vec!["eu-west-1".to_string()], None));
+        let denied = Err(Error::Forbidden(
+            "not authorized: ec2:DescribeRegions".into(),
+        ));
+        let (list, note) = resolve_regions(denied, "us-east-1").unwrap();
+        assert_eq!(list, vec!["us-east-1"]);
+        let note = note.expect("the fallback is surfaced");
+        assert!(
+            note.message.contains("DescribeRegions") && note.message.contains("us-east-1"),
+            "{}",
+            note.message
+        );
+        let login = Err(Error::Invalid("login required: sso expired".into()));
+        assert!(resolve_regions(login, "us-east-1").is_err());
+    }
+
+    #[test]
+    fn a_truncated_region_says_so_and_a_failed_one_does_not() {
+        let t =
+            serde_json::to_value(RegionError::truncated("eu-west-1", "20,000 instances")).unwrap();
+        assert_eq!(t["truncated"], true);
+        assert!(t["message"].as_str().unwrap().contains("20,000 instances"));
+        let f = RegionError {
+            region: "r".into(),
+            message: "denied".into(),
+            truncated: false,
+        };
+        assert!(serde_json::to_value(f).unwrap().get("truncated").is_none());
+    }
+
+    #[test]
+    fn invalidate_clears_the_region_list_too() {
+        let id = "acct-region-invalidate".to_string();
+        cache()
+            .lock()
+            .unwrap()
+            .insert(id.clone(), (Instant::now(), vec!["eu-west-1".into()]));
+        invalidate(&id);
+        assert!(!cache().lock().unwrap().contains_key(&id));
     }
 
     #[tokio::test]

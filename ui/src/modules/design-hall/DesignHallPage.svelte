@@ -3,10 +3,10 @@
   // and owns the creation affordances every view shares: the "New ▾" menu
   // (global, viewport-clamped ctxMenu), the New design sheet, file import and
   // New project. Routes:
-  //   #/design                lobby (grid)        #/design/spatial     lobby (spatial, beta)
-  //   #/design/a/<id>         one artifact        #/design/p/<id>      a project
-  //   #/design/studio/<id>    a studio            #/design/story/<id>  designs for a story
-  //   #/design/brand          Brand Kit           #/design/learned[/rules|/memory]
+  //   #/design                lobby               #/design/a/<id>      one artifact
+  //   #/design/p/<id>         a project           #/design/studio/<id> a studio
+  //   #/design/story/<id>     designs for a story #/design/brand       Brand Kit
+  //   #/design/learned[/<tab>] Team design rules (`#/design/spatial` → lobby)
   import { onDestroy } from 'svelte';
   import { router } from '../../lib/router.svelte';
   import { toastError } from '../../lib/toastError';
@@ -60,24 +60,22 @@
     router.go(`design/a/${encodeURIComponent(id)}`);
   }
 
-  /** Header "New ▾": one row per studio (planned ones visible but disabled). */
+  /** Header "New ▾": one row per studio (the sheet then offers the studio's
+   *  formats — Whiteboard: Mermaid, D2 or Excalidraw), import, new project. */
   function newMenu(e: MouseEvent): void {
-    const s = (id: DesignStudio, label: string, format?: string): MenuItem => ({
+    const s = (id: DesignStudio, label: string): MenuItem => ({
       label,
       icon: studioInfo(id).icon,
       disabled: !canEdit,
-      action: () => openNew({ studio: id, format }),
+      action: () => openNew({ studio: id }),
     });
     ctxMenu.show(e, [
-      s('frames', 'Frame screen (HTML)'),
+      s('frames', 'Frame screen'),
       s('graphics', 'Graphic'),
-      s('3d', '3D scene'),
-      s('whiteboard', 'Whiteboard diagram (Mermaid)', 'mermaid'),
-      s('whiteboard', 'Whiteboard diagram (D2)', 'd2'),
-      s('whiteboard', 'Whiteboard board (Excalidraw)', 'excalidraw'),
       s('site', 'Site'),
+      s('3d', '3D scene'),
+      s('whiteboard', 'Whiteboard diagram or board'),
       s('brand', 'Brand kit'),
-      { label: 'Exhibition (planned for v3)', icon: 'gallery', disabled: true },
       { separator: true },
       { label: 'Import file…', icon: 'download', disabled: !canEdit, action: pickFile },
       { label: 'New project…', icon: 'folder', disabled: !canEdit, action: () => void newProject() },
@@ -150,7 +148,7 @@
       { id: 'design.new-project', title: 'New design project…', group: 'Design Hall', keywords: 'create project epic', run: () => void newProject() },
       { id: 'design.import', title: 'Import design file…', group: 'Design Hall', keywords: 'upload png svg glb html excalidraw', run: pickFile },
       { id: 'design.brand', title: 'Go to Brand Kit', group: 'Design Hall', keywords: 'tokens colors palette typography', run: () => router.go('design/brand') },
-      { id: 'design.learned', title: 'Go to what Otto learned', group: 'Design Hall', keywords: 'signals rules memory learning', run: () => router.go('design/learned') },
+      { id: 'design.learned', title: 'Go to team design rules', group: 'Design Hall', keywords: 'what otto learned signals rules memory learning', run: () => router.go('design/learned') },
     ]);
   });
 </script>
@@ -166,8 +164,8 @@
       actionLabel={auth.can('product', 'view') ? 'Open Stories' : undefined}
       onaction={auth.can('product', 'view') ? () => router.go('product') : undefined}
     />
-  {:else if route.view === 'lobby' || route.view === 'spatial'}
-    <Lobby view={route.view === 'spatial' ? 'spatial' : 'grid'} onnew={newMenu} onimport={pickFile} onnewproject={() => void newProject()} />
+  {:else if route.view === 'lobby'}
+    <Lobby onnew={newMenu} onimport={pickFile} onnewproject={() => void newProject()} />
   {:else if route.view === 'artifact'}
     {#key route.id}
       <ArtifactView id={route.id} />

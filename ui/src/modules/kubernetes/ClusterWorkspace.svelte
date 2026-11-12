@@ -37,6 +37,7 @@
   import InstallPanel from './InstallPanel.svelte';
   import type { ActionDef } from './actions';
   import { actionsFor, runAction } from './actions';
+  import { chooseK9sMode, type K9sMode } from './k9sLaunch';
   import { formatAge, kindDef, visibleKinds } from './k8s-util';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import K8sViewSwitch from './K8sViewSwitch.svelte';
@@ -265,9 +266,8 @@
     }
     ctxMenu.show(e, items);
   }
-
   // --- k9s -------------------------------------------------------------------------
-  async function openK9s(): Promise<void> {
+  async function openK9s(mode: K9sMode = {}): Promise<void> {
     if (!canK9s || k9sOpening) return;
     if (!k8s.status?.k9s.installed) {
       if (isAdmin) k9sInstallOpen = true;
@@ -281,7 +281,7 @@
     }
     k9sOpening = true;
     try {
-      const s = await k8sApi.k9s(cluster.id, { workspace_id: wsId, ns: k8s.namespace || null });
+      const s = await k8sApi.k9s(cluster.id, { workspace_id: wsId, ns: k8s.namespace || null, ...mode });
       k8s.k9sSessionId = s.id;
     } catch (e) {
       toastError('Couldn’t start k9s', e);
@@ -430,7 +430,7 @@
   {#snippet actions()}
     <button class="icon-btn" onclick={() => void k8s.loadResources()} title="Refresh (r)" aria-label="Refresh" data-icon="refresh" data-label="Refresh"><Icon name="refresh" size={14} /></button>
     {#if canK9s}
-      <button class="btn small" onclick={() => void openK9s()} disabled={k9sOpening} title="Open k9s in a terminal" data-testid="k8s-k9s-btn" data-icon="terminal" data-label="Open k9s">
+      <button class="btn small" onclick={(e) => chooseK9sMode(e, cluster, (m) => void openK9s(m))} disabled={k9sOpening} title="Open k9s in a terminal (read-only on production)" data-testid="k8s-k9s-btn" data-icon="terminal" data-label="Open k9s">
         <Icon name="terminal" size={12} /> k9s
       </button>
     {/if}
@@ -481,7 +481,7 @@
       <div class="center">
         <!-- Table toolbar: scope + filter + freshness belong to the table, not the page header. -->
         <div class="tbl-bar" role="toolbar" aria-label="Resource table">
-          <span class="ns-keep"><NamespacePicker allowAll={can(readOperation(kind), '')} bind:this={nsPicker} value={k8s.namespace} namespaces={k8s.namespaces} error={k8s.namespacesError} disabled={clusterScoped} onchange={(ns) => k8s.setNamespace(ns)} /></span>
+          <span class="ns-keep"><NamespacePicker allowAll={can(readOperation(kind), '')} bind:this={nsPicker} value={k8s.namespace} namespaces={k8s.namespaces} error={k8s.namespacesError} partial={k8s.namespacesPartial} disabled={clusterScoped} onchange={(ns) => k8s.setNamespace(ns)} /></span>
           {#if !viewport.isPhone}
             {@render filterBox()}
           {/if}

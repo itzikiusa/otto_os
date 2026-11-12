@@ -232,13 +232,16 @@ fn owner_only_changes(agent: &PersonalAgent, req: &UpdateAgentReq) -> Vec<&'stat
 /// B's instructions as A and send the result to B (S3-05). The owner, a
 /// workspace Admin or root may (`roles.check` passes root). An agent with no
 /// owner (a seeded preset) is adopted by the first Editor who changes one of
-/// these fields — it then runs as them, never as somebody else.
+/// these fields — it then runs as them, never as somebody else. An agent's
+/// own credential acts AS its owner, so it is refused outright.
 async fn require_agent_owner(
     ctx: &ServerCtx,
-    user: &User,
+    auth: &otto_core::auth::AuthContext,
     agent: &PersonalAgent,
     changed: &[&str],
 ) -> Result<(), ApiError> {
+    personal_agents_engine::person_only_change(crate::ui_bridge::is_human(auth), changed)?;
+    let user = &auth.effective_user;
     let ownership = agent_ownership(agent, &user.id);
     if changed.is_empty() || ownership == AgentOwnership::Owner {
         return Ok(());
@@ -324,6 +327,7 @@ async fn update(
     Path(id): Path<String>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<UpdateAgentReq>,
 ) -> ApiResult<Json<PersonalAgent>> {
     let repo = agents(&ctx);
@@ -331,7 +335,7 @@ async fn update(
     require_ws_role(&ctx, &user, &agent.workspace_id, WorkspaceRole::Editor).await?;
     // Name, avatar and enable/pause stay open to Editors; what runs and where
     // the report goes is the owner's (S3-05).
-    require_agent_owner(&ctx, &user, &agent, &owner_only_changes(&agent, &req)).await?;
+    require_agent_owner(&ctx, &auth, &agent, &owner_only_changes(&agent, &req)).await?;
     if let Some(p) = req.provider.as_deref() {
         check_provider(p)?;
     }
@@ -444,6 +448,7 @@ async fn create_schedule(
     Path(id): Path<String>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<otto_assistant::personal_agent_admin::ScheduleIn>,
 ) -> ApiResult<Json<PersonalAgentSchedule>> {
     let repo = agents(&ctx);
@@ -459,7 +464,7 @@ async fn create_schedule(
     if req.permission.as_deref().is_some_and(|p| p != "directed") {
         changed.push("schedule permission");
     }
-    require_agent_owner(&ctx, &user, &agent, &changed).await?;
+    require_agent_owner(&ctx, &auth, &agent, &changed).await?;
     let made = otto_assistant::personal_agent_admin::add_schedule::<ServerCtx>(&repo, &id, req)
         .await
         .map_err(ApiError)?;
@@ -479,6 +484,7 @@ async fn update_schedule(
     Path(schedule_id): Path<String>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<UpdateScheduleReq>,
 ) -> ApiResult<Json<PersonalAgentSchedule>> {
     let repo = agents(&ctx);
@@ -487,22 +493,15 @@ async fn update_schedule(
     require_ws_role(&ctx, &user, &agent.workspace_id, WorkspaceRole::Editor).await?;
     // Cadence, timezone and enabled stay open; directive and permission are
     // the owner's (S3-05).
+    let differs = |new: Option<&str>, old: &str| new.is_some_and(|n| n != old);
     let mut changed = Vec::new();
-    if req
-        .directive
-        .as_deref()
-        .is_some_and(|d| d != schedule.directive)
-    {
+    if differs(req.directive.as_deref(), &schedule.directive) {
         changed.push("schedule directive");
     }
-    if req
-        .permission
-        .as_deref()
-        .is_some_and(|p| p != schedule.permission)
-    {
+    if differs(req.permission.as_deref(), &schedule.permission) {
         changed.push("schedule permission");
     }
-    require_agent_owner(&ctx, &user, &agent, &changed).await?;
+    require_agent_owner(&ctx, &auth, &agent, &changed).await?;
     if let Some(s) = &req.schedule {
         cadence::validate(s).map_err(ApiError)?;
     }
@@ -700,12 +699,12 @@ async fn read_memory(
 async fn save_memory(
     Path(id): Path<String>,
     State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<SaveDocumentReq>,
 ) -> ApiResult<Json<crate::personal_agent_documents::AgentDocument>> {
-    let agent = document_agent(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let agent = document_agent(&ctx, &auth.effective_user, &id, WorkspaceRole::Editor).await?;
     // Memory is injected into every run, which runs as the owner.
-    require_agent_owner(&ctx, &user, &agent, &["memory"]).await?;
+    require_agent_owner(&ctx, &auth, &agent, &["memory"]).await?;
     let root = personal_agents_engine::agent_directory(&ctx, &agent).map_err(ApiError)?;
     crate::personal_agent_documents::save_memory(&root, &req.version, &req.content)
         .await
@@ -731,12 +730,12 @@ async fn read_context(
 async fn save_context(
     Path(id): Path<String>,
     State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<SaveDocumentReq>,
 ) -> ApiResult<Json<crate::personal_agent_documents::AgentDocument>> {
-    let agent = document_agent(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let agent = document_agent(&ctx, &auth.effective_user, &id, WorkspaceRole::Editor).await?;
     // The context is injected into every run, which runs as the owner.
-    require_agent_owner(&ctx, &user, &agent, &["context"]).await?;
+    require_agent_owner(&ctx, &auth, &agent, &["context"]).await?;
     let version = agents(&ctx)
         .save_context(&id, &req.version, &req.content)
         .await

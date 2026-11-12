@@ -153,6 +153,7 @@ fn ctx(ws: &str, dry_run: bool) -> InvokeCtx {
         caller_user_id: Some("u".into()),
         caller_kind: "ui".into(),
         direction: "outbound".into(),
+        caller_session_id: None,
     }
 }
 

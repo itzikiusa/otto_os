@@ -1,10 +1,9 @@
 <script lang="ts">
-  // Site Studio — the editor ArtifactStage mounts for `otto-site` documents.
-  //
-  //   toolbar: breakpoint (1280 / 834 / 390) · zoom · motion · undo/redo   Preview · Publish ▾
-  //   ┌ Pages · Layers · Blocks ┬ canvas (real DOM in a device frame) ┬ Design inspector ┐
-  //   (≤ 1100 px wide the inspector stacks under the left panel; ≤ 700 px it all stacks)
-  //
+  // Site Studio — the artifact view mounts it for `otto-site` documents and it
+  // owns the layout (ArtifactStage mounts the compact page for Compare):
+  //   toolbar: breakpoint · zoom · motion · undo/redo · notices   Preview · Publish ▾
+  //   ┌ Pages · Layers · Blocks ┬ canvas (real DOM in a device frame) ┬ Design · Otto · Versions · Links ┐
+  //   (≤ 900 px the right column stacks under the left panel; ≤ 700 px one panel at a time)
   // The studio owns the parsed document, an undo stack and the selection; every
   // change is serialized and handed UP through `onchange` — the artifact view
   // saves it with `PUT …/content` + `base_version` (409 → the person chooses),
@@ -12,7 +11,7 @@
   // `siteSelection` for the Otto co-design panel. Brand tokens come from the
   // project's brand kit (else the document's `brand` reference, else a
   // `uses_tokens` link); 3D embeds and library images are resolved lazily.
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy, untrack, type Snippet } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
@@ -47,8 +46,11 @@
     /** The owning editor's unsaved-edits flag (publish sheet warning). */
     dirty?: boolean;
     onchange?: (source: string) => void;
+    /** The view's toolbar notices, and its details panel given this inspector as a "Design" tab. */
+    notices?: Snippet;
+    details?: Snippet<[Snippet | undefined]>;
   }
-  let { artifact, source, dirty = undefined, readonly = false, compact = false, onchange }: Props = $props();
+  let { artifact, source, dirty = undefined, readonly = false, compact = false, onchange, notices, details }: Props = $props();
 
   // The page stylesheet is injected once into the document (every rule is
   // scoped under .os-*, so it can't touch the app).
@@ -520,10 +522,7 @@
   function publishMenu(e: MouseEvent): void {
     const items: MenuItem[] = [
       { label: 'Export static site (.zip): HTML + CSS', icon: 'download', disabled: !artifact.head_version_id, action: () => (publishMode = 'zip') },
-      { label: 'Export as Svelte project — v2', icon: 'download', disabled: true },
       { label: 'Publish preview (local)', icon: 'globe', disabled: !artifact.head_version_id, action: () => (publishMode = 'local') },
-      { separator: true },
-      { label: 'Publish as claude.ai artifact — coming soon', icon: 'share', disabled: true },
     ];
     ctxMenu.show(e, items);
   }
@@ -606,6 +605,7 @@
           <Icon name="warning" size={12} /> {findings.filter((f) => f.level === 'error').length} to fix
         </button>
       {/if}
+      {#if notices}{@render notices()}{/if}
       <span class="grow"></span>
       <button class="btn small" onclick={() => (previewOpen = true)} disabled={!doc || !doc.pages.length} data-testid="site-preview"><Icon name="play" size={12} /> Preview</button>
       <button class="btn small" onclick={publishMenu} disabled={!doc || !doc.pages.length} aria-haspopup="menu" data-testid="site-publish">
@@ -618,7 +618,7 @@
         <Icon name="warning" size={16} />
         <div>
           <strong>This isn’t a valid Site Studio document.</strong>
-          <p class="dim">Open <em>Source</em> to fix it, or restore an earlier version.</p>
+          <p class="dim">Restore an earlier version from Versions, or ask Otto to fix it.</p>
           <ul>
             {#each issues.slice(0, 8) as i (i.path + i.message)}<li><span class="mono">{i.path || '(root)'}</span> — {i.message}</li>{/each}
           </ul>
@@ -678,11 +678,11 @@
             ondrop={(p, i) => insert(p, i)}
           />
         </section>
-        <aside class="insp" aria-label="Design">
+        {#snippet inspector()}
           <div class="insp-head"><span class="insp-title">Design</span>{#if sectionId || blockId}<button class="linkbtn" onclick={() => select(null, null)}>Page settings</button>{/if}</div>
           <div class="insp-body">
             <Inspector
-              {doc}
+              doc={doc!}
               pageId={page.id}
               {theme}
               {brand}
@@ -706,7 +706,9 @@
               onbrandcorrection={(payload) => design.captureSignal({ artifact_id: artifact.id, kind: 'brand_correction', payload })}
             />
           </div>
-        </aside>
+        {/snippet}
+        {#if details}<div class="insp with-details">{@render details(inspector)}</div>
+        {:else}<aside class="insp" aria-label="Design">{@render inspector()}</aside>{/if}
       </div>
     {/if}
   </div>
@@ -759,18 +761,14 @@
     background: var(--accent-soft);
     color: var(--accent-text);
   }
-  .bar .chip {
-    cursor: pointer;
-  }
+  .bar .chip { cursor: pointer; }
   .sep {
     width: 1px;
     height: 18px;
     margin: 0 4px;
     background: var(--border);
   }
-  .grow {
-    flex: 1;
-  }
+  .grow { flex: 1; }
   .work {
     flex: 1;
     min-height: 0;
@@ -809,11 +807,7 @@
     font-size: var(--fs-m);
     font-weight: 600;
   }
-  .insp-body {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-  }
+  .insp-body { flex: 1; min-height: 0; overflow-y: auto; }
   .linkbtn {
     border: 0;
     background: none;
@@ -853,8 +847,11 @@
     color: var(--text-dim);
     font-size: var(--fs-s);
   }
-  /* Medium: the inspector stacks under the left panel so the canvas keeps its width. */
-  @container site-studio (max-width: 1099px) {
+  .work:has(.with-details) { grid-template-columns: 248px minmax(0, 1fr) 340px; }
+  .insp.with-details > :global(.right) { flex: 1; min-height: 0; border-inline-start: 0; }
+  /* Medium: the right column stacks under the left panel so the canvas keeps its width. */
+  @container site-studio (max-width: 899px) {
+    .work:has(.with-details) { grid-template-columns: 272px minmax(0, 1fr); }
     .work {
       grid-template-columns: 272px minmax(0, 1fr);
       grid-template-rows: minmax(0, 0.9fr) minmax(0, 1.1fr);

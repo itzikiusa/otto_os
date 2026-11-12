@@ -486,13 +486,16 @@ impl GoalLoopsRepo {
     /// isn't shown as finished. The controller takes over from here.
     ///
     /// A terminal row is left alone. `false` means a stop or a finish landed
-    /// first, and the caller must not spawn a controller over it.
+    /// first, and the caller must not spawn a controller over it. Exhausted
+    /// is the one resumable "finished" state: `goal_loop::start_loop` admits
+    /// it only after a raised limit (or a fresh run window) leaves room, and
+    /// refuses it with the limit to raise otherwise.
     pub async fn mark_running(&self, id: &Id, run_started_at: DateTime<Utc>) -> Result<bool> {
         let now = self.touch();
         let res = sqlx::query(
             "UPDATE goal_loops SET status = 'running', run_started_at = ?, finished_at = NULL,
              error = NULL, updated_at = ? WHERE id = ?
-             AND status IN ('draft', 'running', 'paused', 'blocked')",
+             AND status IN ('draft', 'running', 'paused', 'blocked', 'exhausted')",
         )
         .bind(fmt(run_started_at))
         .bind(&now)
@@ -736,8 +739,12 @@ impl GoalLoopsRepo {
                 .await
                 .map_err(dberr("begin goal-loop boot sweep"))?;
             sqlx::query(
-                "UPDATE goal_loops SET status = CASE WHEN status = 'blocked' THEN 'blocked' ELSE 'paused' END, error = ?, phase = 'done',
-                 elapsed_secs = elapsed_secs + ?, run_started_at = NULL, finished_at = ?, updated_at = ? WHERE id = ?",
+                // A Blocked loop had no controller to lose: keep its own error
+                // and block time instead of re-stamping them every boot.
+                "UPDATE goal_loops SET status = CASE WHEN status = 'blocked' THEN 'blocked' ELSE 'paused' END,
+                 error = CASE WHEN status = 'blocked' THEN error ELSE ? END, phase = 'done',
+                 elapsed_secs = elapsed_secs + ?, run_started_at = NULL,
+                 finished_at = CASE WHEN status = 'blocked' THEN finished_at ELSE ? END, updated_at = ? WHERE id = ?",
             )
             .bind(error)
             .bind(elapsed as i64)
@@ -1116,5 +1123,53 @@ mod tests {
             "banked once: {}",
             b.elapsed_secs
         );
+    }
+
+    /// Extend & resume: an Exhausted row can be marked Running again (the
+    /// engine admits it only after its limits leave room); a stopped or
+    /// succeeded one still cannot.
+    #[tokio::test]
+    async fn mark_running_resumes_exhausted_but_not_finished_loops() {
+        let pool = mem_pool().await;
+        let repo = GoalLoopsRepo::new(pool.clone());
+        let l = repo.create(new_loop()).await.unwrap();
+        repo.mark_running(&l.id, Utc::now()).await.unwrap();
+        repo.finalize(
+            &l.id,
+            GoalLoopStatus::Exhausted,
+            Some("time cap reached"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(repo.mark_running(&l.id, Utc::now()).await.unwrap());
+        let after = repo.get(&l.id).await.unwrap();
+        assert_eq!(after.status, GoalLoopStatus::Running);
+        assert_eq!(after.finished_at, None);
+        assert!(after.run_started_at.is_some());
+        for terminal in [GoalLoopStatus::Stopped, GoalLoopStatus::Succeeded] {
+            repo.finalize(&l.id, terminal, None, None).await.unwrap();
+            assert!(!repo.mark_running(&l.id, Utc::now()).await.unwrap());
+            assert_eq!(repo.get(&l.id).await.unwrap().status, terminal);
+        }
+    }
+
+    /// A Blocked loop had no controller to lose: a restart keeps its own
+    /// error and block time instead of re-stamping them every boot.
+    #[tokio::test]
+    async fn restart_sweep_keeps_a_blocked_loops_error_and_finish_time() {
+        let pool = mem_pool().await;
+        let repo = GoalLoopsRepo::new(pool.clone());
+        let l = repo.create(new_loop()).await.unwrap();
+        repo.mark_running(&l.id, Utc::now()).await.unwrap();
+        repo.finalize(&l.id, GoalLoopStatus::Blocked, Some("q"), Some("own error"))
+            .await
+            .unwrap();
+        let before = repo.get(&l.id).await.unwrap();
+        assert_eq!(repo.fail_running("restart").await.unwrap().len(), 1);
+        let after = repo.get(&l.id).await.unwrap();
+        assert_eq!(after.status, GoalLoopStatus::Blocked);
+        assert_eq!(after.error.as_deref(), Some("own error"));
+        assert_eq!(after.finished_at, before.finished_at);
     }
 }

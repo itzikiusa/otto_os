@@ -144,6 +144,8 @@ test('search hits map to module routes', () => {
   assert.equal(hitRoute({ kind: 'repo', id: 'abc' }), 'git/abc');
   assert.equal(hitRoute({ kind: 'story', id: 'x' }), 'product');
   assert.equal(hitRoute({ kind: 'weird', id: 'x' }), 'home');
+  // A board opens itself: `#/canvas/<id>` forwards to its Design Hall mirror.
+  assert.equal(hitRoute({ kind: 'canvas', id: 'sc 1' }), 'canvas/sc%201');
 });
 
 // ─── keys ──────────────────────────────────────────────────────────────────

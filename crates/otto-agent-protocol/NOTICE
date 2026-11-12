@@ -5,7 +5,24 @@ event model and entities, the ACP session lifecycle and update mapping, the
 Claude Agent SDK transport and decision mapping (ClaudeAdapterV2), the Codex
 app-server lifecycle, item and approval mapping (CodexAdapterV2), the Grok
 ACP launch flavour, the 50 ms streaming coalescing, the replay/snapshot
-limits and the restart reconciliation. Its licence:
+limits and the restart reconciliation. Later fixes ported from T3 Code
+(main at 3ffd38ef7, behaviour only): #34597 (a cut-off reply reads
+interrupted), #34183 (an interrupted Claude tool call is stopped, not
+failed), #34912 (Stop on a turn that is still starting), #34564 (a model
+picked with a steer switches the running turn), #34822 (a resumed Claude
+waits for its MCP servers), #34762 (a passing resume refusal keeps the
+conversation), #34505 (jobs that left the CLI's process group are stopped),
+#34771 (Codex MCP startup failures as notices), #34782 (a failed ACP config
+write is retried), #33604 (a resumed ACP message keeps its text), #34867
+(an ACP choice and its `__other` field are one question) and the open
+#31370 (Claude's context meter uses the window Claude enforces). Threads
+inside a thread (`src/runtime/children.rs` and Otto's Threads UI) follow
+`apps/web/src/components/chat/V2LifecycleRow.tsx` (`SubagentTimelineLink`,
+`SubagentNotificationLink`), `ThreadLineageWorkflowRow.tsx`,
+`composerModelMentions.ts` (#31207, model mentions) and the delegated-task
+completion wake (`apps/server/src/orchestration-v2/ProviderContinuationService.ts`,
+`packages/contracts/src/orchestratorMcp.ts`). Its
+licence:
 
 MIT License
 

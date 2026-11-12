@@ -1,8 +1,10 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
-  // The governed MCP server registry: each row shows transport, a health pill,
-  // tool count, injection-risk badge, and an enabled toggle, with Discover /
-  // Health check / Delete actions. "Add server" opens the create form.
+  // Every MCP server of the workspace, in one list. Each row says how it RUNS
+  // (runMode.ts): governed rows show transport, health, tools, injection risk
+  // and Discover / Health / Delete; native rows (the agent CLI launches them
+  // from `.mcp.json`) carry a "Not governed" badge and Edit / Remove, through
+  // the `/mcp-servers` routes Settings used. ⋯ switches a server's mode.
   import ResourceAccess from '../../lib/components/ResourceAccess.svelte';
   import { toastError } from '../../lib/toastError';
   import Modal from '../../lib/components/Modal.svelte';
@@ -10,7 +12,9 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import { mcpCpApi } from '../../lib/api/mcp';
+  import { mcpApi, mcpCpApi } from '../../lib/api/mcp';
+  import NativeServerForm from './NativeServerForm.svelte';
+  import { NOT_GOVERNED_NOTE, RUNS_LABEL, serverRuns, switchBlocked, switchConfirm, type McpRunMode } from './runMode';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
@@ -46,6 +50,7 @@
     }
   });
   let formOpen = $state(false);
+  let editing = $state<McpServerDetail | null>(null);
   let rulesOpen = $state(false);
   let expandedId = $state<string | null>(null);
   /** Per-server in-flight action so the right buttons spin without blocking others. */
@@ -93,6 +98,13 @@
   async function toggleEnabled(s: McpServerDetail): Promise<void> {
     setBusy(s.id, 'toggle');
     try {
+      // Native: the `/mcp-servers` route, which also sweeps the launcher env
+      // files holding a disabled server's resolved secrets.
+      if (serverRuns(s) === 'native') {
+        await mcpApi.update(s.id, { enabled: !s.enabled });
+        onPatch({ ...s, enabled: !s.enabled });
+        return;
+      }
       const updated = await mcpCpApi.cpUpdate(s.id, { enabled: !s.enabled });
       onPatch(updated);
     } catch (e) {
@@ -103,7 +115,11 @@
   }
 
   async function remove(s: McpServerDetail): Promise<void> {
-    const ok = await confirmer.ask(`Delete MCP server "${s.name}"? Its discovered tools and allowlist entries are deleted too.`, {
+    const native = serverRuns(s) === 'native';
+    const what = native
+      ? `Remove MCP server “${s.name}”? It stops being written to this workspace’s .mcp.json for new sessions${s.secret_env_keys.length ? ', and its secret values are removed from the Keychain' : ''}.`
+      : `Delete MCP server "${s.name}"? Its discovered tools and allowlist entries are deleted too.`;
+    const ok = await confirmer.ask(what, {
       title: 'Delete server',
       confirmLabel: 'Delete',
       danger: true,
@@ -111,11 +127,30 @@
     if (!ok) return;
     setBusy(s.id, 'delete');
     try {
-      await mcpCpApi.cpDelete(s.id);
+      await (native ? mcpApi.remove(s.id) : mcpCpApi.cpDelete(s.id));
       toasts.success('Server deleted', s.name);
       await onReload();
     } catch (e) {
       toastError('Couldn’t delete the server', e);
+    } finally {
+      setBusy(s.id, null);
+    }
+  }
+
+  /** Native ⇄ governed, behind a confirm that says exactly what changes. */
+  async function switchMode(s: McpServerDetail, to: McpRunMode): Promise<void> {
+    const c = switchConfirm(s.name, to);
+    if (!(await confirmer.ask(c.message, { title: c.title, confirmLabel: c.confirmLabel }))) return;
+    setBusy(s.id, 'runs');
+    try {
+      const updated = await mcpCpApi.cpUpdate(s.id, { runs: to });
+      onPatch(updated);
+      toasts.success(to === 'governed' ? `${s.name} is now governed` : `${s.name} now runs natively`, 'Applies to agent sessions started from now on.');
+      // A governed server's tools come from discovery; best effort, the row's
+      // Discover button retries.
+      if (to === 'governed') await mcpCpApi.cpDiscover(s.id).then(() => onReload(), () => undefined);
+    } catch (e) {
+      toastError('Couldn’t change how the server runs', e);
     } finally {
       setBusy(s.id, null);
     }
@@ -127,10 +162,21 @@
 
   function rowMenu(e: MouseEvent, s: McpServerDetail): void {
     const configure = can(s.id, 'configure');
-    const items: MenuItem[] = [
-      { label: busy[s.id] === 'health' ? 'Checking health…' : 'Check health', icon: 'radar', disabled: !configure, action: () => void health(s) },
-      { label: expandedId === s.id ? 'Hide tools' : 'View tools', icon: 'eye', action: () => toggleExpanded(s.id) },
-    ];
+    const to: McpRunMode = serverRuns(s) === 'native' ? 'governed' : 'native';
+    const blocked = !auth.isRoot ? 'Only the owner can change how a server runs' : switchBlocked(s, to);
+    const items: MenuItem[] = serverRuns(s) === 'native'
+      ? [{ label: 'Edit…', icon: 'edit', disabled: !configure, action: () => (editing = s) }]
+      : [
+          { label: busy[s.id] === 'health' ? 'Checking health…' : 'Check health', icon: 'radar', disabled: !configure, action: () => void health(s) },
+          { label: expandedId === s.id ? 'Hide tools' : 'View tools', icon: 'eye', action: () => toggleExpanded(s.id) },
+        ];
+    items.push({
+      label: to === 'governed' ? 'Run through Otto’s gateway…' : 'Run natively…',
+      icon: 'server',
+      disabled: !configure || blocked != null,
+      title: blocked ?? undefined,
+      action: () => void switchMode(s, to),
+    });
     if (auth.isRoot || can(s.id, 'manage_access')) items.push({ label: 'Manage access…', icon: 'key', action: () => (accessId = s.id) });
     items.push({ separator: true }, { label: 'Delete…', icon: 'trash', danger: true, disabled: !configure, action: () => void remove(s) });
     ctxMenu.show(e, items);
@@ -168,7 +214,7 @@
     <EmptyState
       icon="server"
       title="No external servers yet"
-      body="Register an external MCP server to govern its tools with policies, approvals and audit. Otto’s own server lives on the Otto server tab."
+      body="Add an MCP server for this workspace’s agents: governed through Otto’s gateway (policies, approvals, audit) or native (the agent CLI launches it). Otto’s own server lives on the Otto server tab."
       actionLabel={auth.isRoot ? 'Add server' : undefined}
       actionIcon="plus"
       onaction={auth.isRoot ? () => (formOpen = true) : undefined}
@@ -186,7 +232,15 @@
       </div>
       {#each servers as s (s.id)}
         {@const endpoint = s.transport === 'stdio' ? `${s.command} ${s.args.join(' ')}`.trim() : (s.url ?? '')}
-        <div class="srow">
+        {@const native = serverRuns(s) === 'native'}
+        <div class="srow" data-testid="mcp-server-row" data-runs={serverRuns(s)}>
+          <div class="name-cell">
+          {#if native}
+            <button class="name" onclick={() => (editing = s)} disabled={!can(s.id, 'configure')} title={can(s.id, 'configure') ? `Edit ${s.name}` : NO_CONFIGURE}>
+              <span class="nm">{s.name}</span>
+              <span class="endpoint mono" title={endpoint}>{endpoint}</span>
+            </button>
+          {:else}
           <button
             class="name"
             onclick={() => toggleExpanded(s.id)}
@@ -198,26 +252,46 @@
             {#if s.description}<span class="desc" title={s.description}>{s.description}</span>{/if}
             <span class="endpoint mono" title={endpoint}>{endpoint}</span>
           </button>
+          {/if}
+            <span class="runs" data-testid="mcp-server-runs-badge">
+              <span class="runs-mode">Runs: {RUNS_LABEL[serverRuns(s)]}</span>
+              {#if native}
+                <span class="ungoverned" title={NOT_GOVERNED_NOTE}>Not governed</span>
+                <span class="runs-note">{NOT_GOVERNED_NOTE}</span>
+              {/if}
+            </span>
+          </div>
           <span class="cell" data-label="Transport"><span class="transport">{s.transport}</span></span>
+          {#if native}
+            <!-- Otto never connects to a native server: nothing to probe or list. -->
+            <span class="cell dim" data-label="Health" title="The agent CLI runs it; Otto doesn’t connect to it">—</span>
+            <span class="cell num dim" data-label="Tools">—</span>
+            <span class="cell dim" data-label="Injection">—</span>
+          {:else}
           <span class="cell" data-label="Health">
             <McpPill kind="health" value={s.health_status} small />
             {#if s.health_latency_ms != null && s.health_status === 'healthy'}<span class="lat">{s.health_latency_ms}ms</span>{/if}
           </span>
           <span class="cell num" data-label="Tools">{s.tools_count}</span>
           <span class="cell" data-label="Injection"><McpPill kind="injection" value={s.injection_risk} small /></span>
+          {/if}
           <span class="cell" data-label="Enabled">
             <Switch
               checked={s.enabled}
               disabled={busy[s.id] === 'toggle' || !can(s.id, 'configure')}
               onchange={() => void toggleEnabled(s)}
               label={`Enable ${s.name}`}
-              title={!can(s.id, 'configure') ? NO_CONFIGURE : s.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}
+              title={!can(s.id, 'configure') ? NO_CONFIGURE : native ? (s.enabled ? 'Written to .mcp.json for new sessions — click to stop' : 'Not written to .mcp.json — click to enable') : s.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}
             />
           </span>
           <span class="cell actions">
+            {#if native}
+              <button class="btn small" disabled={!!busy[s.id] || !can(s.id,'configure')} title={can(s.id,'configure') ? `Edit ${s.name}` : NO_CONFIGURE} onclick={() => (editing = s)}>Edit</button>
+            {:else}
             <button class="btn small" disabled={!!busy[s.id] || !can(s.id,'configure')} title={can(s.id,'configure') ? 'Fetch the tool list from this server' : NO_CONFIGURE} onclick={() => void discover(s)}>
               {busy[s.id] === 'discover' ? 'Discovering…' : 'Discover'}
             </button>
+            {/if}
             <button
               class="icon-btn"
               aria-label={`More actions for ${s.name}`}
@@ -228,7 +302,7 @@
               <Icon name="more" size={14} />
             </button>
           </span>
-          {#if expandedId === s.id}
+          {#if expandedId === s.id && !native}
             <div class="row-body" data-testid="mcp-server-tools">
               <ToolsTab {wsId} {servers} selectedServerId={s.id} onSelect={() => {}} embedded ondiscovered={() => void onReload()} />
             </div>
@@ -240,6 +314,10 @@
 </div>
 
 {#if accessId}<Modal title="MCP server access" width={820} onclose={() => accessId=null}><ResourceAccess kind="mcp_server" resourceId={accessId} /></Modal>{/if}
+
+{#if editing}
+  <NativeServerForm server={editing} onclose={() => (editing = null)} onsaved={() => void onReload()} />
+{/if}
 
 {#if formOpen}
   <ServerForm {wsId} onclose={() => (formOpen = false)} onsaved={() => void onReload()} />
@@ -315,6 +393,37 @@
     padding: 0;
     min-width: 0;
     width: 100%;
+  }
+  .name-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+  .name:disabled {
+    cursor: default;
+  }
+  .runs {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
+  .ungoverned {
+    padding: 1px 6px;
+    border-radius: var(--radius-s);
+    background: var(--warning-soft);
+    color: var(--text);
+    font-weight: 600;
+  }
+  .runs-note {
+    flex-basis: 100%;
+    min-width: 0;
+  }
+  .dim {
+    color: var(--text-dim);
   }
   .name .nm {
     font-weight: 600;

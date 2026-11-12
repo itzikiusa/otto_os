@@ -16,6 +16,9 @@ otto-server.workspace = true
 # The control-plane catalog (`otto_mcp::outward`) the native tool listing is
 # generated from, and the shared gateway budget (architecture-1-05, integrations-4-01).
 otto-mcp.workspace = true
+# Registers the daemon's own ports with the outbound guard (allow-local mode
+# still refuses them).
+otto-netguard.workspace = true
 rust-embed = { workspace = true, optional = true, features = ["deterministic-timestamps"] }
 tokio.workspace = true
 axum.workspace = true

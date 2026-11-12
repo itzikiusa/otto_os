@@ -8,6 +8,7 @@ import type {
   BundledSkillContent,
   BundledSkillView,
   CreateLibrarySkillReq,
+  InstallBundledResp,
   LibrarySkill,
   Problem,
   ProviderSkillContent,
@@ -39,10 +40,9 @@ export const skillLabApi = {
   listBundled: () => api.get<BundledSkillView[]>('/library/bundled'),
   getBundled: (name: string) =>
     api.get<BundledSkillContent>(`/library/bundled/${encodeURIComponent(name)}`),
+  /** Install or update one bundled skill (always backs up an existing copy). */
   install: (name: string) =>
-    api.post<{ name: string; installed: boolean; backed_up: boolean; backup_path: string | null }>(
-      `/library/bundled/${encodeURIComponent(name)}/install`,
-    ),
+    api.post<InstallBundledResp>(`/library/bundled/${encodeURIComponent(name)}/install`),
 
   // --- provider-global skills (~/.claude, $CODEX_HOME, ~/.gemini for agy), read-only -------
   listProvider: () => api.get<ProviderSkillInfo[]>('/library/provider-skills'),

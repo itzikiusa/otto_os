@@ -144,6 +144,10 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
             post(otto_product::refine::stop_turn::<ServerCtx>),
         )
         .route(
+            "/product/refinement-threads/{tid}/apply",
+            post(otto_product::refine::apply_action::<ServerCtx>),
+        )
+        .route(
             "/product/refinement-threads/{tid}/archive",
             post(otto_product::refine::archive_thread::<ServerCtx>),
         )

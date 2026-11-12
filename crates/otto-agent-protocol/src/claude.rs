@@ -65,7 +65,7 @@ mod tasks;
 use otto_core::agent_runtime::{
     ApprovalDecision, ApprovalOption, BackgroundTask, PlanStep, PlanStepStatus, ProviderFailure,
     RequestKind, RuntimeAccessMode, RuntimePromptReq, RuntimeProvider, RuntimeRequestStatus,
-    TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
+    ThreadTokenUsage, TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
@@ -73,6 +73,9 @@ use crate::driver::{
     item, tool_error, DriverError, DriverEvent, DriverStep, LaunchContext, LaunchSpec,
     StructuredDriver,
 };
+
+/// Claude Code's switch for connecting MCP servers before the first request.
+const MCP_NONBLOCKING: &str = "MCP_CONNECTION_NONBLOCKING";
 
 /// `permissionModeForClaudeRuntimePolicy` (`ClaudeAdapterV2.ts:2573-2620`).
 fn permission_mode(mode: RuntimeAccessMode) -> &'static str {
@@ -115,6 +118,7 @@ enum BlockKind {
     Thinking,
 }
 
+#[derive(Clone)]
 struct Block {
     kind: BlockKind,
     item_id: String,
@@ -153,6 +157,12 @@ pub struct ClaudeDriver {
     /// Messages whose text arrived as stream events (their final `assistant`
     /// frame then carries nothing new for text / thinking).
     streamed: Vec<String>,
+    /// The root reply shown last, while nothing has followed it (a tool
+    /// call, a new message): an `aborted_streaming` result cut it off.
+    last_reply: Option<Block>,
+    /// The last root message's `usage` and the model that wrote it: the
+    /// context it filled (a turn's `result.usage` sums every request).
+    last_usage: Option<(Option<String>, Value)>,
     tools: HashMap<String, Tool>,
     pending: HashMap<String, Pending>,
     /// The model / effort this process runs (switched live, as the SDK's
@@ -197,6 +207,8 @@ impl ClaudeDriver {
             blocks: HashMap::new(),
             message_id: None,
             streamed: Vec::new(),
+            last_reply: None,
+            last_usage: None,
             tools: HashMap::new(),
             pending: HashMap::new(),
             model: None,
@@ -260,6 +272,27 @@ impl ClaudeDriver {
         );
     }
 
+    /// `set_model` / `apply_flag_settings` for a model / effort `req` picks
+    /// that this process does not run yet (the SDK's `setModel` /
+    /// `applyFlagSettings`).
+    fn switch_selection(&mut self, step: &mut DriverStep, req: &RuntimePromptReq) {
+        if req.model.is_some() && req.model != self.model {
+            self.model = req.model.clone();
+            let (id, line) =
+                self.control_request(json!({"subtype": "set_model", "model": req.model}));
+            self.switches.push(id);
+            step.write(line);
+        }
+        if req.effort.is_some() && req.effort != self.effort {
+            self.effort = req.effort.clone();
+            let settings = json!({"effortLevel": req.effort});
+            let (id, line) = self
+                .control_request(json!({"subtype": "apply_flag_settings", "settings": settings}));
+            self.switches.push(id);
+            step.write(line);
+        }
+    }
+
     fn block_item(&self, b: &Block, streaming: bool) -> TurnItem {
         let status = if streaming {
             TurnItemStatus::Running
@@ -284,10 +317,42 @@ impl ClaudeDriver {
         let mut open: Vec<(u64, Block)> = self.blocks.drain().collect();
         open.sort_by_key(|(i, _)| *i);
         for (_, b) in open {
-            if !b.text.is_empty() {
-                step.push(DriverEvent::TurnItem(self.block_item(&b, false)));
-            }
+            self.emit_closed(step, b);
         }
+    }
+
+    /// A finished block; a reply's text is remembered as the last reply.
+    fn emit_closed(&mut self, step: &mut DriverStep, b: Block) {
+        if b.text.is_empty() {
+            return;
+        }
+        step.push(DriverEvent::TurnItem(self.block_item(&b, false)));
+        if b.kind == BlockKind::Text {
+            self.last_reply = Some(b);
+        }
+    }
+
+    /// A stopped turn's cut-off output reads as interrupted, not finished
+    /// (T3 Code #34597): the blocks still streaming and, when the stream
+    /// itself was aborted, the reply shown last.
+    fn cut_off_blocks(&mut self, step: &mut DriverStep, aborted_streaming: bool) {
+        let mut open: Vec<(u64, Block)> = self.blocks.drain().collect();
+        open.sort_by_key(|(i, _)| *i);
+        let last = self.last_reply.take();
+        let mut cut_reply = false;
+        for (_, b) in open.into_iter().filter(|(_, b)| !b.text.is_empty()) {
+            cut_reply |= b.kind == BlockKind::Text;
+            step.push(DriverEvent::TurnItem(self.interrupted_item(&b)));
+        }
+        if let Some(b) = last.filter(|_| aborted_streaming && !cut_reply) {
+            step.push(DriverEvent::TurnItem(self.interrupted_item(&b)));
+        }
+    }
+
+    fn interrupted_item(&self, b: &Block) -> TurnItem {
+        let mut it = self.block_item(b, false);
+        it.status = TurnItemStatus::Interrupted;
+        it
     }
 
     fn on_stream_event(&mut self, step: &mut DriverStep, ev: &Value) {
@@ -295,6 +360,7 @@ impl ClaudeDriver {
         match ev.get("type").and_then(Value::as_str).unwrap_or_default() {
             "message_start" => {
                 self.close_blocks(step);
+                self.last_reply = None; // a new message followed it
                 self.message_id = ev
                     .pointer("/message/id")
                     .and_then(Value::as_str)
@@ -344,9 +410,7 @@ impl ClaudeDriver {
             }
             "content_block_stop" => {
                 if let Some(b) = self.blocks.remove(&index) {
-                    if !b.text.is_empty() {
-                        step.push(DriverEvent::TurnItem(self.block_item(&b, false)));
-                    }
+                    self.emit_closed(step, b);
                 }
             }
             _ => {}
@@ -426,6 +490,10 @@ impl ClaudeDriver {
             .unwrap_or_default()
             .to_string();
         let streamed = self.streamed.contains(&mid);
+        if let Some(u) = msg.pointer("/message/usage").filter(|u| u.is_object()) {
+            let model = msg.pointer("/message/model").and_then(Value::as_str);
+            self.last_usage = Some((model.map(str::to_string), u.clone()));
+        }
         let content = msg
             .pointer("/message/content")
             .and_then(Value::as_array)
@@ -449,7 +517,7 @@ impl ClaudeDriver {
                         message_id: mid.clone(),
                         text: text.to_string(),
                     };
-                    step.push(DriverEvent::TurnItem(self.block_item(&b, false)));
+                    self.emit_closed(step, b);
                 }
                 Some("tool_use") => {
                     let id = block
@@ -463,6 +531,7 @@ impl ClaudeDriver {
                         .unwrap_or("tool")
                         .to_string();
                     let input = block.get("input").cloned().unwrap_or(Value::Null);
+                    self.last_reply = None; // the reply was whole: a tool call followed it
                     if tasks::is_agent_tool(&name) {
                         self.start_agent(step, &id, &name, &input);
                         continue;
@@ -505,17 +574,20 @@ impl ClaudeDriver {
             let result = crate::tool_images::extract(block.get("content"));
             let text = result.text;
             let is_error = block.get("is_error").and_then(Value::as_bool) == Some(true);
-            if self.on_root_tool_result(step, &id, &text, is_error) {
+            let stopped = non_execution_status(msg, &id);
+            if self.on_root_tool_result(step, &id, &text, is_error, stopped) {
                 continue;
             }
             let Some(mut t) = self.tools.remove(&id) else {
                 continue;
             };
-            if is_error {
-                t.status = TurnItemStatus::Failed;
-                t.error = tool_error(&text);
-            } else {
-                t.status = TurnItemStatus::Completed;
+            match stopped {
+                Some(status) => t.status = status,
+                None if is_error => {
+                    t.status = TurnItemStatus::Failed;
+                    t.error = tool_error(&text);
+                }
+                None => t.status = TurnItemStatus::Completed,
             }
             t.output = Some(text);
             t.images = result.images;
@@ -677,9 +749,23 @@ impl ClaudeDriver {
     }
 
     fn on_result(&mut self, step: &mut DriverStep, msg: &Value) {
-        self.close_blocks(step);
+        let (status, failure, reason) = terminal_from_result(msg);
+        if matches!(
+            status,
+            TurnTerminalStatus::Interrupted | TurnTerminalStatus::Cancelled
+        ) {
+            let aborted_streaming =
+                msg.get("terminal_reason").and_then(Value::as_str) == Some("aborted_streaming");
+            self.cut_off_blocks(step, aborted_streaming);
+        } else {
+            self.close_blocks(step);
+        }
+        self.last_reply = None;
         self.tools.clear();
         self.end_turn_tasks(step);
+        if let Some(usage) = self.context_usage(msg) {
+            step.push(DriverEvent::ContextUsage(usage));
+        }
         if let Some(u) = msg.get("usage") {
             let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
             let cached = n("cache_read_input_tokens");
@@ -693,7 +779,6 @@ impl ClaudeDriver {
                     .filter(|t| *t > 0),
             }));
         }
-        let (status, failure, reason) = terminal_from_result(msg);
         step.push(DriverEvent::Terminal {
             status,
             failure,
@@ -701,6 +786,33 @@ impl ClaudeDriver {
         });
         self.turn_id = None;
         self.streamed.clear();
+    }
+
+    /// The context the last message filled, against the window this Claude
+    /// process enforces: `result.modelUsage[model].contextWindow` (settings
+    /// like `CLAUDE_CODE_DISABLE_1M_CONTEXT` shrink it below the model's
+    /// catalogue window — T3 Code #31370). Another model's entry (a side
+    /// task on a smaller model) never stands in for it.
+    fn context_usage(&mut self, msg: &Value) -> Option<ThreadTokenUsage> {
+        let (model, u) = self.last_usage.take()?;
+        let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+        let cached = n("cache_read_input_tokens");
+        let input = n("input_tokens") + cached + n("cache_creation_input_tokens");
+        let output = n("output_tokens");
+        let max_tokens = model.and_then(|m| {
+            msg.get("modelUsage")?
+                .get(m.as_str())?
+                .get("contextWindow")?
+                .as_u64()
+                .filter(|w| *w > 0)
+        });
+        Some(ThreadTokenUsage {
+            used_tokens: input + output,
+            max_tokens,
+            input_tokens: Some(input),
+            cached_input_tokens: Some(cached),
+            output_tokens: Some(output),
+        })
     }
 
     /// Root output with no prompt of ours running: the CLI started a turn
@@ -712,6 +824,7 @@ impl ClaudeDriver {
         let id = otto_core::new_id();
         self.turn_id = Some(id.clone());
         self.streamed.clear();
+        self.last_reply = None;
         step.push(DriverEvent::TurnStarted { turn_id: id });
     }
 
@@ -755,6 +868,24 @@ impl ClaudeDriver {
             native_thread_id: self.session_id.clone(),
             model: None,
         });
+    }
+}
+
+/// Claude Code's own word on a tool call that never ran to its end
+/// (`tool_result_meta[].non_execution_kind`): one a new message or Stop cut
+/// short is stopped, not failed (T3 Code #34183); a withdrawn one cancelled.
+fn non_execution_status(msg: &Value, tool_use_id: &str) -> Option<TurnItemStatus> {
+    let kind = msg
+        .get("tool_result_meta")?
+        .as_array()?
+        .iter()
+        .find(|m| m.get("id").and_then(Value::as_str) == Some(tool_use_id))?
+        .get("non_execution_kind")?
+        .as_str()?;
+    match kind {
+        "interrupted" => Some(TurnItemStatus::Interrupted),
+        "cancelled" => Some(TurnItemStatus::Cancelled),
+        _ => None,
     }
 }
 
@@ -841,15 +972,27 @@ impl StructuredDriver for ClaudeDriver {
         if let Some(m) = &ctx.model {
             args.extend(["--model".into(), m.clone()]);
         }
+        let mut env: Vec<(String, String)> =
+            vec![("CLAUDE_CODE_ENTRYPOINT".into(), "sdk-ts".into())];
         match &ctx.resume {
-            Some(id) => args.extend(["--resume".into(), id.clone()]),
+            Some(id) => {
+                args.extend(["--resume".into(), id.clone()]);
+                // Claude Code connects MCP servers in the background; on a
+                // resume the first request then finds the transcript's MCP
+                // tools missing and tells the agent they all disconnected.
+                // Wait for them (capped by its MCP_CONNECT_TIMEOUT_MS) unless
+                // the daemon's environment already decides (T3 Code #34822).
+                if std::env::var_os(MCP_NONBLOCKING).is_none() {
+                    env.push((MCP_NONBLOCKING.into(), "0".into()));
+                }
+            }
             None => args.extend(["--session-id".into(), self.fresh_session_id.clone()]),
         }
         LaunchSpec {
             program: self.program.clone(),
             args,
             tail_args: Vec::new(),
-            env: vec![("CLAUDE_CODE_ENTRYPOINT".into(), "sdk-ts".into())],
+            env,
         }
     }
 
@@ -877,21 +1020,7 @@ impl StructuredDriver for ClaudeDriver {
         // The CLI reads stdin in order: switches and the prompt may follow
         // `initialize` before its answer (as the SDK streams them).
         let mut step = DriverStep::default();
-        if req.model.is_some() && req.model != self.model {
-            self.model = req.model.clone();
-            let (id, line) =
-                self.control_request(json!({"subtype": "set_model", "model": req.model}));
-            self.switches.push(id);
-            step.write(line);
-        }
-        if req.effort.is_some() && req.effort != self.effort {
-            self.effort = req.effort.clone();
-            let settings = json!({"effortLevel": req.effort});
-            let (id, line) = self
-                .control_request(json!({"subtype": "apply_flag_settings", "settings": settings}));
-            self.switches.push(id);
-            step.write(line);
-        }
+        self.switch_selection(&mut step, req);
         if let Some(mode) = req.access_mode.filter(|m| *m != self.access) {
             self.access = mode;
             let (id, line) = self.control_request(
@@ -906,11 +1035,14 @@ impl StructuredDriver for ClaudeDriver {
 
     /// The CLI reads stdin in order and hands a user message that arrives
     /// mid-turn to the model at its next step (the SDK's streaming input).
+    /// A model / effort picked with it switches first, so the rest of the
+    /// running turn uses it (T3 Code #34564).
     fn steer(&mut self, req: &RuntimePromptReq) -> Result<DriverStep, DriverError> {
         if self.turn_id.is_none() {
             return Err(DriverError("no turn is running".into()));
         }
         let mut step = DriverStep::default();
+        self.switch_selection(&mut step, req);
         self.send_user(&mut step, req);
         Ok(step)
     }
@@ -1100,6 +1232,8 @@ impl StructuredDriver for ClaudeDriver {
         self.pending.clear();
         self.tools.clear();
         self.blocks.clear();
+        self.last_reply = None;
+        self.last_usage = None;
         self.clear_tasks();
         self.turn_id = None;
         DriverStep::default()
@@ -1779,6 +1913,24 @@ mod tests {
         assert_eq!(w["type"], "user");
         assert_eq!(w["message"]["content"][0]["text"], "also check b");
         assert!(s.events.is_empty());
+        // T3 Code #34564: a model picked with the steer switches the running
+        // turn first (stdin order); the same model again sends nothing.
+        let req = RuntimePromptReq {
+            model: Some("opus".into()),
+            ..RuntimePromptReq::of("use opus")
+        };
+        let s = d.steer(&req).unwrap();
+        let w: Vec<Value> = s
+            .writes
+            .iter()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(
+            w[0]["request"],
+            json!({"subtype":"set_model","model":"opus"})
+        );
+        assert_eq!(w[1]["message"]["content"][0]["text"], "use opus");
+        assert_eq!(d.steer(&req).unwrap().writes.len(), 1);
     }
     #[test]
     fn ask_user_question_is_not_a_permission_and_returns_updated_input() {
@@ -1836,5 +1988,195 @@ mod tests {
             .respond_question("claude-first", std::slice::from_ref(&answer))
             .is_err());
         assert!(d.respond_question("claude-second", &[answer]).is_ok());
+    }
+
+    /// T3 Code #34597: output a stopped turn cut off is interrupted, not a
+    /// finished answer — the block still streaming, and on an
+    /// `aborted_streaming` result the reply shown last.
+    #[test]
+    fn a_reply_cut_off_by_a_stop_reads_as_interrupted() {
+        let mut d = ClaudeDriver::new();
+        ready(&mut d);
+        d.prompt("t1", &RuntimePromptReq::of("essay")).unwrap();
+        feed(
+            &mut d,
+            json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"m1"}},"parent_tool_use_id":null}),
+        );
+        feed(
+            &mut d,
+            json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"parent_tool_use_id":null}),
+        );
+        feed(
+            &mut d,
+            json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"The audit covers the `integ"}},"parent_tool_use_id":null}),
+        );
+        // The partial assistant frame, then the abort (no content_block_stop).
+        feed(
+            &mut d,
+            json!({"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"The audit covers the `integ"}]},"parent_tool_use_id":null}),
+        );
+        let s = feed(
+            &mut d,
+            json!({"type":"result","subtype":"success","is_error":false,"terminal_reason":"aborted_streaming","result":"The audit covers the `integ"}),
+        );
+        let reply = &items(&s)[0];
+        assert_eq!(reply.id, "t1:m1:0");
+        assert_eq!(reply.status, TurnItemStatus::Interrupted);
+        assert!(!reply.is_streaming());
+        assert!(matches!(
+            s.events.last(),
+            Some(DriverEvent::Terminal {
+                status: TurnTerminalStatus::Interrupted,
+                ..
+            })
+        ));
+
+        // A reply whose block closed before the abort is re-marked.
+        d.prompt("t2", &RuntimePromptReq::of("again")).unwrap();
+        feed(
+            &mut d,
+            json!({"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"Half a"}]},"parent_tool_use_id":null}),
+        );
+        let s = feed(
+            &mut d,
+            json!({"type":"result","subtype":"success","is_error":false,"terminal_reason":"aborted_streaming"}),
+        );
+        assert!(items(&s)
+            .iter()
+            .any(|i| i.id == "t2:m2:a0" && i.status == TurnItemStatus::Interrupted));
+
+        // Stopped during a tool: the reply before the call was whole.
+        d.prompt("t3", &RuntimePromptReq::of("run")).unwrap();
+        feed(
+            &mut d,
+            json!({"type":"assistant","message":{"id":"m3","content":[{"type":"text","text":"Running it."}]},"parent_tool_use_id":null}),
+        );
+        feed(
+            &mut d,
+            json!({"type":"assistant","message":{"id":"m3","content":[{"type":"tool_use","id":"tu3","name":"Bash","input":{"command":"sleep 9"}}]},"parent_tool_use_id":null}),
+        );
+        let s = feed(
+            &mut d,
+            json!({"type":"result","subtype":"success","is_error":false,"terminal_reason":"aborted_streaming"}),
+        );
+        assert!(
+            !items(&s)
+                .iter()
+                .any(|i| i.status == TurnItemStatus::Interrupted),
+            "{:?}",
+            items(&s)
+        );
+
+        // A completed turn closes its open blocks as completed, as before.
+        d.prompt("t4", &RuntimePromptReq::of("hi")).unwrap();
+        feed(
+            &mut d,
+            json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"parent_tool_use_id":null}),
+        );
+        feed(
+            &mut d,
+            json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}},"parent_tool_use_id":null}),
+        );
+        let s = feed(
+            &mut d,
+            json!({"type":"result","subtype":"success","is_error":false}),
+        );
+        assert_eq!(items(&s)[0].status, TurnItemStatus::Completed);
+    }
+
+    /// T3 Code #34183: a call a new message (or Stop) cut short is stopped,
+    /// not failed; Claude Code says so in `tool_result_meta`.
+    #[test]
+    fn a_tool_call_interrupted_by_a_message_is_stopped_not_failed() {
+        let mut d = ClaudeDriver::new();
+        ready(&mut d);
+        d.prompt("t1", &RuntimePromptReq::of("wait")).unwrap();
+        feed(
+            &mut d,
+            json!({"type":"assistant","message":{"id":"m1","content":[
+                {"type":"tool_use","id":"tu1","name":"mcp__otto__wait","input":{}},
+                {"type":"tool_use","id":"tu2","name":"Bash","input":{"command":"false"}},
+                {"type":"tool_use","id":"tu3","name":"Read","input":{"file_path":"/w/a"}}
+            ]},"parent_tool_use_id":null}),
+        );
+        let s = feed(
+            &mut d,
+            json!({"type":"user","message":{"content":[
+                {"type":"tool_result","tool_use_id":"tu1","content":"Error: The tool call was interrupted before a result was received","is_error":true},
+                {"type":"tool_result","tool_use_id":"tu2","content":"exit 1","is_error":true},
+                {"type":"tool_result","tool_use_id":"tu3","content":"cancelled","is_error":true}
+            ]},"tool_result_meta":[{"id":"tu1","non_execution_kind":"interrupted"},{"id":"tu2","non_execution_kind":null},{"id":"tu3","non_execution_kind":"cancelled"}],"parent_tool_use_id":null}),
+        );
+        let it = items(&s);
+        assert_eq!(it[0].status, TurnItemStatus::Interrupted);
+        assert!(it[0].error.is_none(), "not an error: {:?}", it[0].error);
+        assert_eq!(it[1].status, TurnItemStatus::Failed);
+        assert!(it[1].error.is_some());
+        assert_eq!(it[2].status, TurnItemStatus::Cancelled);
+    }
+
+    /// T3 Code #34822: a resumed Claude waits for its MCP servers before the
+    /// first request; a fresh thread starts as fast as before.
+    #[test]
+    fn a_resumed_session_waits_for_its_mcp_servers() {
+        let d = ClaudeDriver::new();
+        let has = |spec: &LaunchSpec| {
+            spec.env
+                .iter()
+                .any(|(k, v)| k == MCP_NONBLOCKING && v == "0")
+        };
+        assert!(!has(&d.launch(&ctx(None))));
+        // The daemon's own environment, when set, decides instead.
+        assert_eq!(
+            has(&d.launch(&ctx(Some("abc")))),
+            std::env::var_os(MCP_NONBLOCKING).is_none()
+        );
+    }
+
+    /// T3 Code #31370: the context meter's window is the one Claude Code
+    /// reports for the model that ran (`result.modelUsage`), and its fill is
+    /// the last message's context, not the turn's summed usage.
+    #[test]
+    fn the_context_meter_uses_the_window_claude_enforces() {
+        let mut d = ClaudeDriver::new();
+        ready(&mut d);
+        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+        for (id, input) in [("m1", 1000), ("m2", 1500)] {
+            feed(
+                &mut d,
+                json!({"type":"assistant","message":{"id":id,"model":"claude-opus-5-5","content":[{"type":"text","text":"x"}],
+                    "usage":{"input_tokens":input,"cache_read_input_tokens":180000,"cache_creation_input_tokens":0,"output_tokens":40}},"parent_tool_use_id":null}),
+            );
+        }
+        let s = feed(
+            &mut d,
+            json!({"type":"result","subtype":"success","is_error":false,
+            "usage":{"input_tokens":2500,"cache_read_input_tokens":360000,"output_tokens":80},
+            "modelUsage":{
+                "claude-opus-5-5":{"inputTokens":2500,"contextWindow":200000},
+                "claude-haiku-5-5":{"inputTokens":90,"contextWindow":1000000}
+            }}),
+        );
+        let ctx = s
+            .events
+            .iter()
+            .find_map(|e| match e {
+                DriverEvent::ContextUsage(u) => Some(u.clone()),
+                _ => None,
+            })
+            .expect("context usage");
+        assert_eq!(ctx.max_tokens, Some(200_000), "the enforced window");
+        assert_eq!(ctx.used_tokens, 1500 + 180_000 + 40, "the last message");
+        assert_eq!(ctx.cached_input_tokens, Some(180_000));
+        // No message usage this turn: no reading, rather than a stale one.
+        d.prompt("t2", &RuntimePromptReq::of("go")).unwrap();
+        let s = feed(
+            &mut d,
+            json!({"type":"result","subtype":"success","is_error":false,"modelUsage":{}}),
+        );
+        assert!(!s
+            .events
+            .iter()
+            .any(|e| matches!(e, DriverEvent::ContextUsage(_))));
     }
 }

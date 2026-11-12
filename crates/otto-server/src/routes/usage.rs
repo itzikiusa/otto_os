@@ -397,6 +397,53 @@ pub async fn metrics(
     Ok(Json(ctx.usage.metrics(minutes).await.map_err(ApiError)?))
 }
 
+/// The read-only usage routes (`protected_routes` is at its size limit).
+pub fn read_routes() -> axum::Router<ServerCtx> {
+    use axum::routing::{get, post, put};
+    axum::Router::new()
+        .route("/usage/status", get(status))
+        .route("/usage/summary", get(summary))
+        .route("/usage/by-kind", get(by_kind))
+        .route("/usage/report", get(report))
+        .route("/usage/metrics", get(metrics))
+        .route("/usage/limits", get(limits))
+        .route("/usage/limits/claude-check", put(limits_claude_check))
+        .route("/usage/limits/claude-check/run", post(limits_claude_run))
+}
+
+/// `GET /usage/limits` — plan allowance left per provider login (`otto_usage::limits`).
+pub async fn limits(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<otto_usage::limits::LimitsResp>> {
+    let l = otto_usage::limits::remaining_limits(&ctx.pool, &user.id, user.is_root, &ctx.data_dir);
+    Ok(Json(l.await.map_err(ApiError)?))
+}
+
+type Limits = ApiResult<Json<otto_usage::limits::LimitsResp>>;
+
+/// `PUT /usage/limits/claude-check` — the opt-in "Check with Anthropic" switch.
+pub async fn limits_claude_check(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(u): CurrentUser,
+    Json(req): Json<otto_usage::limits::ClaudeCheckReq>,
+) -> Limits {
+    let l = otto_usage::limits::set_claude_check(&ctx.pool, &u.id, u.is_root, &ctx.data_dir, &req);
+    Ok(Json(l.await.map_err(ApiError)?))
+}
+
+/// `POST /usage/limits/claude-check/run` — run the opted-in check now (the login's own CLI).
+pub async fn limits_claude_run(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(u): CurrentUser,
+    Json(req): Json<otto_usage::limits::ClaudeRunReq>,
+) -> Limits {
+    let (pool, dir) = (&ctx.pool, &ctx.data_dir);
+    let cli = ctx.manager.provider_program("claude");
+    let l = otto_usage::limits::run_claude_check(pool, &u.id, u.is_root, dir, &req.key, cli);
+    Ok(Json(l.await.map_err(ApiError)?))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct UsageConfigReq {
     pub enabled: Option<bool>,

@@ -22,6 +22,17 @@ fn main() {
             Some((p, q)) => (p.to_string(), q.to_string()),
             None => (raw.clone(), String::new()),
         };
+        let token = req
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("x-otto-plugin-token"))
+            .map(|h| h.value.as_str().to_string());
+        // Only Otto's proxy may call in (it adds this plugin's own token).
+        let expected = std::env::var("OTTO_PLUGIN_TOKEN").unwrap_or_default();
+        if !dora_metrics::routes::authorized(&path, token.as_deref(), &expected) {
+            let _ = req.respond(Response::from_string("unauthorized").with_status_code(401));
+            continue;
+        }
         let mut body = String::new();
         if matches!(req.method(), Method::Post | Method::Put) {
             let _ = req.as_reader().read_to_string(&mut body);

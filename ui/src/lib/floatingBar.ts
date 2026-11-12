@@ -251,7 +251,8 @@ export function hitRoute(hit: { kind: string; id: string }): string {
     case 'memory':
       return 'vault';
     case 'canvas':
-      return 'canvas';
+      // `#/canvas/<scene>` forwards to the board's Design Hall mirror.
+      return `canvas/${encodeURIComponent(hit.id)}`;
     default:
       return 'home';
   }

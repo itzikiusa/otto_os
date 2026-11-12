@@ -53,9 +53,9 @@ pub(crate) fn sweep_idle_jars(map: &mut JarMap, now: Instant) {
 
 /// Shared outbound HTTP client per (workspace, allow_local). Follows
 /// redirects, generous body timeout enforced per-request via `.timeout()`.
-/// `allow_local` (the workspace's explicit opt-in) swaps the SSRF-guarded
-/// resolver + redirect policy for a plain bounded client — the pre-flight
-/// check is skipped by the caller under the same flag.
+/// `allow_local` (the workspace's explicit opt-in) swaps the strict SSRF guard
+/// for the allow-local one (`otto_netguard::allow_local_client_builder`) — the
+/// caller's pre-flight check switches under the same flag.
 /// Idle entries are dropped after [`TUNNEL_IDLE_TTL`] (S6-310), which also
 /// releases their hold on the scope's cookie jar.
 pub(crate) fn http_client(wid: &Id, allow_local: bool) -> reqwest::Client {
@@ -68,7 +68,9 @@ pub(crate) fn http_client(wid: &Id, allow_local: bool) -> reqwest::Client {
         .entry(format!("{wid}|{allow_local}"))
         .or_insert_with(|| {
             let builder = if allow_local {
-                reqwest::Client::builder().redirect(reqwest::redirect::Policy::limited(10))
+                // Private targets allowed; metadata + the daemon's own
+                // listener still refused, at connect time and per hop.
+                otto_netguard::allow_local_client_builder()
             } else {
                 // SSRF guard: the guarded resolver re-vets every address at
                 // CONNECT time (a DNS-rebinding answer can't swap in 127.0.0.1
@@ -107,8 +109,8 @@ pub async fn workspace_allows_local<C: ApiClientCtx>(ctx: &C, wid: &Id) -> bool 
 ///
 /// Errors instead of degrading: a proxy URL reqwest rejects, or a builder that
 /// fails, must fail the send. Falling back would silently route a tunnelled
-/// request DIRECT through an unguarded builder (`guarded` is false whenever a
-/// proxy is set), or drop `follow_redirects=false` / `verify_ssl=false`.
+/// request DIRECT through an unguarded builder (the guard is `Tunnelled`
+/// whenever a proxy is set), or drop `follow_redirects=false` / `verify_ssl=false`.
 #[cfg(test)]
 pub(crate) fn build_settings_client(
     wid: &Id,
@@ -189,12 +191,13 @@ pub(crate) fn build_settings_client_uncached(
     // Tunnelled: the target resolves and is dialled at the FAR end — the local
     // guard would only false-block bastion-only hosts (and would refuse the
     // local SOCKS endpoint itself). allow_local: the workspace explicitly opted
-    // in to private targets. Everything else keeps the connect-time guard.
-    let guarded = proxy.is_none() && !allow_local;
-    let base = if guarded {
-        otto_netguard::guarded_client_builder()
-    } else {
-        reqwest::Client::builder()
+    // in to private targets — metadata and the daemon's own listener stay
+    // refused. Everything else keeps the full connect-time guard.
+    let guarded = otto_netguard::Guard::for_fetch(proxy.is_some(), allow_local);
+    let base = match guarded {
+        otto_netguard::Guard::Strict => otto_netguard::guarded_client_builder(),
+        otto_netguard::Guard::AllowLocal => otto_netguard::allow_local_client_builder(),
+        otto_netguard::Guard::Tunnelled => reqwest::Client::builder(),
     };
     let mut builder = base
         .user_agent("Otto-ApiClient/1.0")
@@ -203,11 +206,13 @@ pub(crate) fn build_settings_client_uncached(
         builder.redirect(reqwest::redirect::Policy::none())
     } else if credentialed {
         builder.redirect(credential_redirect_policy(guarded))
-    } else if !guarded {
-        builder.redirect(reqwest::redirect::Policy::limited(10))
     } else {
-        // Redirects still follow the SSRF-guarded policy.
-        builder.redirect(otto_netguard::guarded_redirect_policy())
+        // Redirects follow the guard's own policy (bounded, re-checked hops).
+        builder.redirect(match guarded {
+            otto_netguard::Guard::Strict => otto_netguard::guarded_redirect_policy(),
+            otto_netguard::Guard::AllowLocal => otto_netguard::allow_local_redirect_policy(),
+            otto_netguard::Guard::Tunnelled => reqwest::redirect::Policy::limited(10),
+        })
     };
     if no_verify {
         builder = builder.danger_accept_invalid_certs(true);
@@ -232,8 +237,10 @@ pub(crate) fn build_settings_client_uncached(
 /// original host ([`same_site_hop`]); a hop anywhere else STOPS, so the 3xx
 /// comes back as the response (the trace says why) instead of carrying an
 /// API-key header or a 307/308 body that reqwest would forward as-is.
-/// `guarded` keeps the SSRF guard's per-hop literal check and hop cap.
-pub(crate) fn credential_redirect_policy(guarded: bool) -> reqwest::redirect::Policy {
+/// `guarded` keeps that guard's per-hop literal check alongside the hop cap.
+pub(crate) fn credential_redirect_policy(
+    guarded: otto_netguard::Guard,
+) -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() > otto_netguard::MAX_REDIRECTS {
             return attempt.error("too many redirects");
@@ -242,7 +249,7 @@ pub(crate) fn credential_redirect_policy(guarded: bool) -> reqwest::redirect::Po
             .previous()
             .first()
             .is_some_and(|first| same_site_hop(first, attempt.url()));
-        if !same_site || (guarded && !otto_netguard::check_url_literal(attempt.url())) {
+        if !same_site || !guarded.hop_allowed(attempt.url()) {
             attempt.stop()
         } else {
             attempt.follow()

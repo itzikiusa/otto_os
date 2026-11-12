@@ -194,8 +194,8 @@ export interface RunQueryReq {
   max_rows?: number | null;
   /** Node context to scope execution — the active database / Redis keyspace. */
   node?: string | null;
-  /** Explicit acknowledgement of a write/DDL on a guarded (production /
-   *  read-only) connection; set only after the typed confirmation. */
+  /** Explicit acknowledgement of a write/DDL on a production connection; set
+   *  only after the typed confirmation. A Read-only connection ignores it. */
   confirm_write?: boolean;
   /** Client-supplied id so `…/db/cancel` can issue engine-native cancellation. */
   query_id?: string | null;
@@ -389,7 +389,7 @@ export interface ImportReq {
   table: string;
   /** Rows per INSERT; clamped 1..=5000 server-side (default 500). */
   batch_size?: number;
-  /** Typed-confirmation acknowledgement for a guarded (Prod/read-only) connection. */
+  /** Typed-confirmation acknowledgement for a Prod connection (Read-only refuses regardless). */
   confirm_write?: boolean;
 }
 

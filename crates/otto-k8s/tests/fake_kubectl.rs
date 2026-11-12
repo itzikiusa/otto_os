@@ -391,7 +391,33 @@ impl K8sCtx for TestCtx {
     }
 }
 
+/// A request made with a PERSON's credential (what the server's feature
+/// guard publishes for a signed-in person). Outside any credential scope the
+/// crate fails closed and treats the caller as an agent (S6-304).
 async fn call(
+    ctx: &TestCtx,
+    user: &User,
+    method: &str,
+    uri: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value, String) {
+    let person = otto_core::auth::RequestCredential::default();
+    call_as(person, ctx, user, method, uri, body).await
+}
+
+/// [`call`] with an explicit request credential (an agent session's: `agent`).
+async fn call_as(
+    cred: otto_core::auth::RequestCredential,
+    ctx: &TestCtx,
+    user: &User,
+    method: &str,
+    uri: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value, String) {
+    otto_core::auth::with_request_credential(cred, call_inner(ctx, user, method, uri, body)).await
+}
+
+async fn call_inner(
     ctx: &TestCtx,
     user: &User,
     method: &str,
@@ -1168,6 +1194,58 @@ async fn exec_spawns_a_k8s_session_with_the_contract_argv() {
     } else {
         assert_eq!(st, StatusCode::BAD_REQUEST, "{t}");
         assert!(t.contains("k9s not installed"), "{t}");
+    }
+}
+
+/// S6-304: an agent session's credential opens neither a shell nor k9s, and
+/// the refusal is audited like an opened session.
+#[tokio::test]
+async fn an_agent_credential_cannot_open_a_shell_or_k9s_and_it_is_audited() {
+    let (ctx, user) = TestCtx::new().await;
+    let c = create_cluster(&ctx, &user).await;
+    let id = c["id"].as_str().unwrap();
+    let agent = otto_core::auth::RequestCredential {
+        agent: true,
+        root_withheld: false,
+    };
+    let (st, _, t) = call_as(
+        agent,
+        &ctx,
+        &user,
+        "POST",
+        &format!("/k8s/clusters/{id}/exec"),
+        Some(serde_json::json!({"workspace_id": "ws1", "ns": "shop", "pod": "web-1"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{t}");
+    let (st, _, t) = call_as(
+        agent,
+        &ctx,
+        &user,
+        "POST",
+        &format!("/k8s/clusters/{id}/k9s"),
+        Some(serde_json::json!({"workspace_id": "ws1"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{t}");
+    assert!(
+        ctx.recorder.last.lock().unwrap().is_none(),
+        "nothing spawned"
+    );
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT action, detail FROM audit_log WHERE action IN ('k8s.exec', 'k8s.k9s') ORDER BY ts, id",
+    )
+    .fetch_all(&ctx.pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    for (action, detail) in rows {
+        let d: serde_json::Value = serde_json::from_str(&detail).unwrap();
+        assert_eq!(d["ok"], false, "{action}");
+        assert!(
+            d["error"].as_str().unwrap().contains("agent session"),
+            "{action}: {d}"
+        );
     }
 }
 

@@ -9,7 +9,7 @@ Open **Goal Loops → New goal loop**. Start from one of the seven suggested tem
 Each criterion specifies how it is verified:
 
 - **Command:** Otto runs the command and uses its exit status as ground truth.
-- **Agent assessment:** the evaluator must provide evidence. Existing `manual` criteria retain this meaning.
+- **Agent assessment:** the evaluator must cite evidence. A criterion it marks met with blank evidence counts as not met, and the iteration says so. Existing `manual` criteria retain this meaning.
 - **Human verification:** the model cannot mark it accepted. Once work is ready, the loop blocks; record what you personally verified and Resume.
 
 Set iteration, active-time, phase-time and executor-attempt limits. Select executor and planner/evaluator/digester providers/models. Optional source/spec/plan links and skill names are included in agent context. Skill availability is checked by the executing agent, not guaranteed by preflight.
@@ -18,7 +18,7 @@ Set iteration, active-time, phase-time and executor-attempt limits. Select execu
 
 ## Monitor and decisions
 
-The detail view shows status, phase, criterion progress, elapsed budget, retained work path, next action and iteration history. **Agents and roles** lists executor, planner, evaluator, digester and completion-reviewer sessions with provider and state. Open a session inline to inspect its work. Sessions remain identifiable after their live PTYs are released.
+The detail view shows status, phase, criterion progress, elapsed budget, Otto's 4-hour run cap, retained work path, next action and iteration history. Each iteration's **Evaluation** lists every criterion with the evidence behind its verdict; a command criterion shows its exit status and, under **Command output**, the last 8 KB of what the command printed. The evaluator's feedback and its reasoning (**Why**) follow. **Agents and roles** lists executor, planner, evaluator, digester and completion-reviewer sessions with provider and state. Open a session inline to inspect its work. Sessions remain identifiable after their live PTYs are released.
 
 The ledger persists questions, answers, verifier identity/evidence, next action and review results alongside the narrative context digest. A blocked question must receive a recorded answer before Resume. Answers do not automatically restart the loop.
 
@@ -31,16 +31,25 @@ that ran out is marked "cap reached"); a plain Resume would re-exhaust at once.
 When no budget is left the primary action is **Extend & resume…**: a dialog
 prefilled with the current caps + 50% (always above what is already used)
 saves the new limits (`PATCH /goal-loops/{id} {limits}`) and resumes. While
-budget remains, **Extend budget…** sits next to Resume.
+budget remains, **Extend budget…** sits next to Resume. An exhausted loop
+resumes once its limits leave room; otherwise Resume answers 409 naming the
+limit to raise ("Raise the iteration limit to resume: 5 of 5 iterations are
+used."), and the dialog names it before sending. A loop stopped by Otto's
+4-hour run cap has room already: plain Resume starts a new run window. A pending
+human-only re-evaluation needs no extra iteration.
 
-Pause banks active time. Stop releases execution resources and retains the worktree. Success, failure and exhaustion also retain tracked and untracked work. Restart pauses active loops and preserves blocked decisions, so you can Resume explicitly. Deleting loop history does not delete the working directory or branch; the detail view shows the retained path before deletion.
+Pause banks active time. Stop releases execution resources and retains the worktree. Success, failure and exhaustion also retain tracked and untracked work. A daemon restart pauses running loops and preserves blocked decisions, so you can Resume explicitly. Such a loop shows **Paused by restart** (not plain Paused) with a banner and a Resume button, and the notification center gets one notice per loop that opens it. Deleting loop history does not delete the working directory or branch; the detail view shows the retained path before deletion.
 
-Build proof includes the actual working contents: committed differences from the launch base, staged changes, unstaged changes and untracked files. Verification command output and evaluator evidence are attached to a proof pack. Research reports are attached as evidence. `OTTO_PROOF_REQUIRE_GOAL_LOOP=1` requires passing machine proof on every completion attempt, including the last permitted iteration. Exhausting the budget never relaxes this requirement.
+Evidence lives on each iteration's evaluation (`GoalLoopIteration.evaluation.criteria[].evidence`): the evaluator's citation, the person's record for a human criterion, or for a command criterion its exit status followed by the tail of its output. Goal loops do not produce proof packs and do not capture a diff of the work; inspect the retained directory or branch for that. A research report is checked by its `test -s findings.md` command criterion, which proves the file exists and is not empty, not that its claims are right.
+
+**When a loop completes.** The acceptance criteria decide. When every criterion is met with evidence (command criteria only count as met when their command exits 0, human criteria only with a person's record), the iteration completes even if the evaluator asked to continue; its request is kept in the iteration's rationale. An evaluator `blocked` verdict is left alone, because it asks a person for something. The optional completion review still runs before success. Every block (a question, repeated failure, completion-review finding, cost setting, task-admission error) emits `goal_loop_updated` with `blocked`, which raises the "is blocked and needs you" notice.
 
 ## Limits and troubleshooting
 
 - Executors run sequentially in one working directory.
-- Iteration limits gate new work; active-time limits are checked at iteration boundaries, with per-role phase deadlines and a controller backstop.
+- Iteration limits gate new work; active-time limits are checked at iteration boundaries, with per-role phase deadlines.
+- **Run cap: 4 hours.** One run (a Start or Resume until the loop settles) stops after at most 4 hours of active time, whatever `max_runtime_secs` says, and the loop ends Exhausted with the summary "time cap reached: Otto stops a run after 4 hours of active time". Resume starts a new run while the loop's own limits leave room. The cap is not configurable. The detail view and the launch form show it, and say so when the loop's own runtime limit is longer.
+- Token and cost totals per loop are not tracked: iteration `tokens_input`, `tokens_output` and `cost_usd` stay 0. Use **Usage** for provider totals.
 - Per-loop monetary accounting is not wired. Non-null `max_cost_usd` is rejected; older loops with this setting block until it is removed. Workspace usage-budget checks still gate Define/Launch/Resume.
 - If a loop is exhausted, raise iteration/runtime limits through PATCH before Resume. If human acceptance is the only remaining work, it does not require another execution iteration.
 - If a provider fails or times out, inspect its retained session and iteration evidence. Missing/noncompliant structured outputs fail the role rather than silently satisfying criteria.
@@ -50,7 +59,7 @@ Build proof includes the actual working contents: committed differences from the
 
 See [API contract](../contracts/api.md#goal-loops) and [WS contract](../contracts/ws.md) for HTTP requests and `goal_loop_updated`. List/detail require workspace Viewer; definition, mutation, verification and answers require Editor. Identity is derived from authentication, not an agent-supplied verifier field.
 
-The controller is `crates/otto-automation/src/goal_loop.rs`; managed roles are in `goal_loop_roles.rs`; pure verification decisions are in `goal_loop_policy.rs`; working-directory/evidence helpers are in `goal_loop_workspace.rs`. State lives in `GoalLoopsRepo`, with the ledger added by migration `0133_goal_loop_ledger.sql`. UI lives in `ui/src/modules/loops/`.
+The controller is `crates/otto-automation/src/goal_loop.rs`; managed roles are in `goal_loop_roles.rs`; pure verification decisions (evidence rule, completion rule, verify-output tail) are in `goal_loop_policy.rs`; worktree provisioning is in `goal_loop_workspace.rs`; restart notices are in `goal_loop/restart.rs`. State lives in `GoalLoopsRepo`, with the ledger added by migration `0133_goal_loop_ledger.sql`. UI lives in `ui/src/modules/loops/`.
 
 ## Walkthrough: build, inspect, and finish
 
@@ -60,7 +69,7 @@ The controller is `crates/otto-automation/src/goal_loop.rs`; managed roles are i
 4. Choose bounded limits and executor roles. Executors share one directory and run sequentially. Different providers/models can fill each role. Optional links and named skills guide the work; they do not grant access to unavailable sources or install skills.
 5. Create and start. Expand each iteration to inspect its plan, executor summaries, evaluations, digest and sessions. The provider/model on the definer controls drafting; executor and role choices control the subsequent loop.
 6. When the loop requests a decision, read the question and record an answer. When automated work is ready but a human criterion is pending, inspect the retained files or running product and record specific evidence. Resume is a separate action.
-7. Review the final proof and retained files. Integrating, committing, pushing or publishing the result remains a separate operation. You can use the displayed directory in your editor or Git tools.
+7. Review the final evaluation evidence and retained files. Integrating, committing, pushing or publishing the result remains a separate operation. You can use the displayed directory in your editor or Git tools.
 
 ## Goal loop or engineering graph
 
@@ -72,7 +81,7 @@ Switching modes preserves the current goal and criteria. Disabling an edited gra
 
 ## Research workflow
 
-Choose Research to investigate a question without requiring a repository. Add useful source links and request citations in the goal. Otto creates a dedicated directory and requires a nonempty `findings.md`; the report becomes a proof artifact. Add separate acceptance criteria for source quality, confidence, unresolved questions or a human decision. A nonempty report alone does not establish that its claims are correct.
+Choose Research to investigate a question without requiring a repository. Add useful source links and request citations in the goal. Otto creates a dedicated directory and requires a nonempty `findings.md` through the `otto-research-report` command criterion. Add separate acceptance criteria for source quality, confidence, unresolved questions or a human decision. A nonempty report alone does not establish that its claims are correct.
 
 Build/Research mode is fixed when the loop is created, because it determines the working-directory and report-verification requirements. Create another loop to change mode. Research does not automatically crawl private links or enable credentials; agent tools retain their existing access rules.
 
@@ -82,9 +91,9 @@ Build/Research mode is fixed when the loop is created, because it determines the
 | --- | --- |
 | Draft | Definition/configuration exists; Start begins execution. |
 | Running | A controller or explicit executor retry owns the work. Pause or Stop can interrupt it. |
-| Paused | Active time is banked. Once in-flight work has stopped, inspect, verify, raise limits or Resume. |
+| Paused | Active time is banked. Once in-flight work has stopped, inspect, verify, raise limits or Resume. **Paused by restart** means a daemon restart, not a person, paused it. |
 | Blocked | A decision, repeated failure, human criterion or completion-review finding needs attention. Read the explanation before Resume. |
-| Exhausted | A hard limit was reached. Raise the applicable limit, or finish a pending human-only verification continuation. |
+| Exhausted | A hard limit was reached: the iteration limit, the runtime limit, or Otto's 4-hour run cap. Raise the applicable limit, or finish a pending human-only verification continuation. |
 | Succeeded | All acceptance criteria and configured completion gates passed. Files remain available. |
 | Failed / Stopped | Execution ended; inspect the error or retained output. These are terminal history states. |
 
@@ -94,7 +103,7 @@ A blocked sequential loop can retry one executor from its **current** iteration 
 
 ## Limits and evidence details
 
-The iteration counter measures iterations started, including interrupted iterations. Pause does not refund elapsed time. Raising limits does not erase previous work or progress. Each managed role has an absolute deadline including session startup and publication. Verification commands have a timeout and are stopped with their process group on cancellation or timeout. Captured output retains up to 512 KiB from each of stdout and stderr, marks omitted bytes, and keeps draining both pipes so verbose commands can finish. Executor recovery remains bounded by attempts and its per-attempt waiting rules.
+The iteration counter measures iterations started, including interrupted iterations. Pause does not refund elapsed time. Raising limits does not erase previous work or progress. Each managed role has an absolute deadline including session startup and publication. Verification commands have a timeout and are stopped with their process group on cancellation or timeout. Captured output retains up to 512 KiB from each of stdout and stderr, marks omitted bytes, and keeps draining both pipes so verbose commands can finish. The iteration record keeps the last 8 KB of it with the criterion's evidence. The repeated-failure check compares only the exit-status line, so changing timings in the output do not hide a repeated failure. Executor recovery remains bounded by attempts and its per-attempt waiting rules.
 
 The narrative digest is auxiliary context; the retained working directory is the source of truth. The ledger preserves questions/answers, identity and evidence for human checks, the latest next action, repeated-failure state and completion-review results. It is not a complete task/file dependency tracker. The failure threshold is currently two matching unsuccessful evaluations and is not configurable.
 
@@ -135,9 +144,10 @@ All paths below are under `/api/v1`. The authoritative request/response fields a
 | Human verification is rejected | Wait for work to stop, use a person’s credential, provide nonempty evidence, and verify a criterion whose kind is Human. |
 | Resume asks for an answer | Record every pending decision question first; answers persist and do not auto-resume. |
 | Retry is unavailable | Retry is limited to an executor in the current iteration of a blocked loop, with a retained prompt. Role sessions are inspectable but are not executor retry slots. |
-| Completion blocks on proof | Inspect command evidence and report artifacts. Required machine proof is not waived on the last iteration. |
+| A criterion shows "Marked met without evidence" | The evaluator claimed it without citing a check. Make the criterion's verification concrete (or a command) and Resume. |
+| Loop keeps iterating after everything passed | It should not: all criteria met with evidence completes the loop. If it continues, a criterion is unmet or lacks evidence; read the iteration's Evaluation. |
 | Completion blocks on review | Read the review findings and use them to decide the next action. Unavailable or malformed review output also blocks. |
-| Loop paused after daemon restart | This is intentional recovery. Inspect retained work and Resume explicitly. |
+| Loop paused after daemon restart | Intentional recovery: the loop shows **Paused by restart** and a notice is posted. Inspect retained work and Resume explicitly. |
 | A skill or source is missing | Make it available through the provider's normal configuration or revise the goal. There is no automatic skill installation or source-access escalation. |
 
 Seven suggested templates and editable task graphs are available; see [Suggested loops and engineering graphs](./goal-loop-templates.md). General template export/import and pre-launch skill-availability resolution are not implemented. Templates do not install skills or guarantee access to source systems.
@@ -156,7 +166,7 @@ The form edits Name, acceptance criteria, role configuration and budgets. Each c
 | Max minutes | `limits.max_runtime_secs`, converted from minutes | 30 |
 | Per-phase minutes | `limits.per_phase_timeout_secs`, converted from minutes | 10 |
 | Executor recovery attempts | `limits.max_attempts_per_executor` | 3 |
-| Controller lifetime backstop | Internal constant | 4 hours |
+| Run cap (one Start/Resume) | Not configurable (`MAX_RUN_ACTIVE_SECS`) | 4 hours of active time |
 | Allow local commits | `config.allow_commits` | Off |
 | Completion review | `config.require_review` | Off |
 | Monetary limit | `limits.max_cost_usd` | Unset; setting it is rejected |
@@ -167,7 +177,7 @@ Detail has a progress bar, the Plan → Execute → Evaluate → Digest stepper,
 
 ## Controller and directory reference
 
-`start_loop` provisions the directory, marks Running, registers its exclusive control handle and starts the controller. Each cycle checks limits; creates an iteration; plans; executes sequentially; evaluates command/agent/human criteria; digests; and decides whether to continue, block or assemble proof. A failed planner supplies fallback instructions so executors can work toward the criteria directly. A malformed evaluator result never satisfies omitted criteria. Progress is recomputed from the actual accepted criterion count.
+`start_loop` provisions the directory, marks Running, registers its exclusive control handle and starts the controller. Each cycle checks limits; creates an iteration; plans; executes sequentially; evaluates command/agent/human criteria; digests; and decides whether to continue, block or complete. A failed planner supplies fallback instructions so executors can work toward the criteria directly. A malformed evaluator result never satisfies omitted criteria. Progress is recomputed from the actual accepted criterion count.
 
 For build goals the directory is `<data>/goal-loops/<id>/work`, on `goal-loop/<id>`. Fresh launch captures HEAD as `base_commit`. Resume reuses a registered worktree unchanged. If someone has removed the directory but the branch survives, Otto can reattach the branch without resetting it; already deleted uncommitted files cannot be reconstructed from that branch. An unrecorded occupied path fails rather than being overwritten. Research uses the dedicated directory without provisioning a Git worktree.
 
@@ -176,8 +186,9 @@ For build goals the directory is `<data>/goal-loops/<id>/work`, on `goal-loop/<i
 | Controller, lifecycle and recovery | `crates/otto-automation/src/goal_loop.rs` |
 | Managed provider role turns | `crates/otto-automation/src/goal_loop_roles.rs` |
 | Command cancellation and process cleanup | `crates/otto-automation/src/goal_loop_commands.rs` |
-| Human verification/progress decisions | `crates/otto-automation/src/goal_loop_policy.rs` |
-| Worktree provisioning and working-content capture | `crates/otto-automation/src/goal_loop_workspace.rs` |
+| Evidence, completion, human verification and progress decisions | `crates/otto-automation/src/goal_loop_policy.rs` |
+| Worktree provisioning | `crates/otto-automation/src/goal_loop_workspace.rs` |
+| Restart-pause notice | `crates/otto-automation/src/goal_loop/restart.rs` |
 | Tolerant JSON extraction | `crates/otto-automation/src/goal_loop_parse.rs` |
 | HTTP handlers | `crates/otto-server/src/routes/goal_loops.rs` |
 | Domain types/default role prompts | `crates/otto-core/src/domain.rs` |
@@ -235,8 +246,8 @@ task, the evaluator rechecks previously passed prerequisite criteria against
 current work. After execution it evaluates the goal again; regressed prerequisites
 invalidate their descendants. An optimistic assessment cannot pass a task that
 never ran, a failed executor, missing evidence or a still-pending dependency.
-Completion requires all tasks and authoritative criteria to pass, plus the existing
-proof and independent-review gates when configured. If final review finds a
+Completion requires all tasks and authoritative criteria to pass, plus the
+independent-review gate when configured. If final review finds a
 problem, the final task reopens for repair on Resume.
 
 The persisted `ledger.graph_nodes` records task ID, state, iteration and criterion

@@ -22,7 +22,7 @@
   import type { EditFlow } from './EditFlow.svelte';
   import { CELL_MAX, cellDisplay, cellStr, clip, copyWithToast, isComplex, previewJson } from './results-format';
   import { registerFindProvider } from '../../lib/findProviders';
-  import { columnKind, moveColumn, rowNumberWidthCh, type ColumnKind } from './grid-format';
+  import { columnKind, columnZone, moveColumn, rowNumberWidthCh, visibleOrder, withHidden, type ColumnKind } from './grid-format';
   import { buildCell, widthStyle } from './grid-cells';
 
   interface Props {
@@ -51,6 +51,7 @@
     oncellmenu: (e: MouseEvent, ci: number, v: unknown, rowIdx: number) => void;
     onheadermenu: (e: MouseEvent, ci: number) => void;
     oncyclesort: (ci: number) => void;
+    hidden?: string[]; // column names hidden in this tab (header menu → Hide column; hidden-cols.svelte.ts)
   }
   let {
     result,
@@ -72,6 +73,7 @@
     oncellmenu,
     onheadermenu,
     oncyclesort,
+    hidden = [],
   }: Props = $props();
 
   // ── Windowed virtualization (main grid only) ─────────────────────────────────
@@ -156,7 +158,7 @@
   // edits, menus, filters) keeps speaking original indices.
   let order = $state<number[]>([]);
   const cols = $derived(
-    order.length === result.columns.length ? order : result.columns.map((_c, i) => i),
+    visibleOrder(order.length === result.columns.length ? order : result.columns.map((_c, i) => i), result.columns, hidden),
   );
   let dragFrom = $state<number | null>(null);
   let dropAt = $state<number | null>(null);
@@ -172,7 +174,7 @@
   }
   function onHeadDrop(e: DragEvent, pos: number): void {
     e.preventDefault();
-    if (dragFrom !== null) order = moveColumn(cols, dragFrom, pos);
+    if (dragFrom !== null) order = withHidden(moveColumn(cols, dragFrom, pos), order.length === result.columns.length ? order : result.columns.map((_c, i) => i));
     dragFrom = null;
     dropAt = null;
   }
@@ -181,14 +183,10 @@
     dropAt = null;
   }
 
-  // Per-column layout kind (numbers right-aligned, JSON link-styled…).
+  // Per-column layout kind (numbers right-aligned, JSON link-styled…); the zone a date-time column is shown in (temporal-zone.ts).
+  const zoneOf = (c: { type_hint?: string | null }) => columnZone(flow.engine, c.type_hint, flow.sessionTz);
   const kinds = $derived.by<ColumnKind[]>(() =>
-    result.columns.map((c, i) =>
-      columnKind(
-        c.type_hint,
-        liveRows.slice(0, 50).map((r) => r[i]),
-      ),
-    ),
+    result.columns.map((c, i) => columnKind(c.type_hint, liveRows.slice(0, 50).map((r) => r[i]))),
   );
 
   // Row-number column width: a function of the ROW COUNT only (see header note).
@@ -735,7 +733,7 @@
     // Typing in the filter row must not move the cell cursor.
     if ((e.target as HTMLElement | null)?.closest('.filter-row')) return;
     const nRows = viewRows.length;
-    const nCols = result.columns.length;
+    const nCols = cols.length; // display positions (hidden columns are not in `cols`)
     if (nRows === 0 || nCols === 0) return;
     const cur = focusCell ?? { r: 0, c: 0 };
     const page = Math.max(1, Math.floor((viewportH - HEAD_H) / ROW_H) - 1);
@@ -807,8 +805,8 @@
     class:hv={hvirt}
     role={mini ? undefined : 'grid'}
     aria-rowcount={mini ? undefined : liveRows.length + 1}
-    aria-colcount={mini ? undefined : result.columns.length + 1}
-    style="--last:{result.columns.length}; --row-h:{ROW_H}px; --rn-w:calc({rnCh}ch + 30px)"
+    aria-colcount={mini ? undefined : cols.length + 1}
+    style="--last:{cols.length}; --row-h:{ROW_H}px; --rn-w:calc({rnCh}ch + 30px)"
   >
     {#if hvirt}
       <!-- Column window on: the widths live here (fixed layout), so the header
@@ -842,7 +840,7 @@
           {@const c = result.columns[ci]}
           {@const isPk = flow.editable && flow.editPkCols.includes(c.name)}
           <th use:rowMenu
-            title={mini ? (c.type_hint ?? undefined) : `${c.name}${c.type_hint ? ` · ${c.type_hint}` : ''} — click to sort, drag to reorder, right-click for more`}
+            title={mini ? (c.type_hint ?? undefined) : `${c.name}${c.type_hint ? ` · ${c.type_hint}` : ''}${zoneOf(c) ? `. ${zoneOf(c)?.note}` : ''} — click to sort, drag to reorder, right-click for more`}
             class:pk={isPk}
             class:sortable={!mini}
             class:sorted={sortCol === ci}
@@ -878,7 +876,7 @@
                       >{sortCol === ci ? (sortDir === 'asc' ? '▲' : '▼') : '↕'}</span
                     >
                   </span>
-                  <span class="th-type">{c.type_hint ?? ' '}</span>
+                  <span class="th-type">{c.type_hint ?? ' '}{#if zoneOf(c)}<span class="th-zone" data-testid="db-col-zone"> · {zoneOf(c)?.label}</span>{/if}</span>
                 </span>
               </button>
               <!-- Pointer-only refinement: columns size to their content by default (double-click restores that). -->
@@ -929,7 +927,7 @@
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_click_events_have_key_events -->
     <tbody onclick={onBodyClick} ondblclick={onBodyDblClick} oncontextmenu={onBodyContextMenu}>
       {#if padTop > 0}
-        <tr class="spacer" aria-hidden="true"><td colspan={result.columns.length + 1} style="height:{padTop}px"></td></tr>
+        <tr class="spacer" aria-hidden="true"><td colspan={cols.length + 1} style="height:{padTop}px"></td></tr>
       {/if}
       {#each windowRows as { row, idx } (idx)}
         <!-- Data cells are appended by `rowCells` (plain DOM, see grid-cells.ts);
@@ -973,7 +971,7 @@
         </tr>
       {/each}
       {#if padBottom > 0}
-        <tr class="spacer" aria-hidden="true"><td colspan={result.columns.length + 1} style="height:{padBottom}px"></td></tr>
+        <tr class="spacer" aria-hidden="true"><td colspan={cols.length + 1} style="height:{padBottom}px"></td></tr>
       {/if}
     </tbody>
   </table>

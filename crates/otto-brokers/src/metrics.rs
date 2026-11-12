@@ -145,13 +145,24 @@ impl ClusterMetricState {
     pub fn needs_sweep(&self) -> bool {
         match self.cached_watermark {
             None => true,
-            Some((ts, _)) => chrono::Utc::now().timestamp_millis() - ts >= self.sweep_ttl_ms(),
+            Some((ts, _)) => chrono::Utc::now().timestamp_millis() - ts >= self.next_sweep_ms(),
         }
     }
 
     /// Adaptive TTL: `max(WATERMARK_TTL_MS, SWEEP_TTL_FACTOR × last sweep)`.
     pub fn sweep_ttl_ms(&self) -> i64 {
         WATERMARK_TTL_MS.max(self.last_sweep_ms.saturating_mul(SWEEP_TTL_FACTOR))
+    }
+
+    /// While only the baseline sample exists there is no rate to show, so the
+    /// second sweep comes after the base TTL, not `3 ×` a slow first sweep
+    /// (the Overview read "measuring" for up to a minute on a tunnelled cluster).
+    fn next_sweep_ms(&self) -> i64 {
+        if self.throughput.is_empty() {
+            WATERMARK_TTL_MS
+        } else {
+            self.sweep_ttl_ms()
+        }
     }
 
     /// Store a freshly-fetched watermark total and return it.
@@ -201,17 +212,25 @@ impl ClusterMetricState {
     }
 }
 
+/// msg/s between two `(ts_ms, total)` samples; `None` without a usable
+/// previous sample (none yet, or not older than `cur`). Clamped at 0: totals
+/// shrink only when a topic is deleted, which is not negative throughput.
+pub fn throughput_rate(prev: Option<(i64, i64)>, cur: (i64, i64)) -> Option<f64> {
+    let (prev_ts, prev_total) = prev?;
+    if cur.0 <= prev_ts {
+        return None;
+    }
+    let dt = (cur.0 - prev_ts) as f64 / 1000.0;
+    Some(((cur.1 - prev_total) as f64 / dt).max(0.0))
+}
+
 impl ClusterMetricState {
-    /// Record the current cluster-wide message total and return msg/s.
-    fn record_throughput(&mut self, now_ms: i64, total: i64) -> f64 {
-        let rate = match self.last_total {
-            Some((prev_ts, prev_total)) if now_ms > prev_ts => {
-                let dt = (now_ms - prev_ts) as f64 / 1000.0;
-                ((total - prev_total) as f64 / dt).max(0.0)
-            }
-            _ => 0.0,
-        };
-        self.last_total = Some((now_ms, total));
+    /// Record the current cluster-wide message total and return msg/s. The
+    /// first sample is only a baseline: no rate (`None`, shown as "measuring"),
+    /// and no sparkline point — it used to read as a hard `0/s`.
+    fn record_throughput(&mut self, now_ms: i64, total: i64) -> Option<f64> {
+        let prev = self.last_total.replace((now_ms, total));
+        let rate = throughput_rate(prev, (now_ms, total))?;
         self.throughput.push_back(ThroughputPoint {
             ts_ms: now_ms,
             total_messages: total,
@@ -220,7 +239,7 @@ impl ClusterMetricState {
         while self.throughput.len() > MAX_POINTS {
             self.throughput.pop_front();
         }
-        rate
+        Some(rate)
     }
 
     /// Assemble the metrics response from the CACHED sweep total. A throughput
@@ -232,16 +251,14 @@ impl ClusterMetricState {
         let now_ms = now.timestamp_millis();
         let (total_messages, rate) = match self.cached_watermark {
             Some((ts, total)) if self.last_total.map(|(t, _)| t) != Some(ts) => {
-                (total, self.record_throughput(ts, total))
+                (Some(total), self.record_throughput(ts, total))
             }
             Some((_, total)) => (
-                total,
-                self.throughput
-                    .back()
-                    .map(|p| p.messages_per_sec)
-                    .unwrap_or(0.0),
+                Some(total),
+                self.throughput.back().map(|p| p.messages_per_sec),
             ),
-            None => (0, 0.0),
+            // No sweep has landed yet: unknown, never a measured 0.
+            None => (None, None),
         };
         self.assemble(now, now_ms, total_messages, rate, prometheus)
     }
@@ -251,15 +268,15 @@ impl ClusterMetricState {
         let now = Utc::now();
         let now_ms = now.timestamp_millis();
         let rate = self.record_throughput(now_ms, total_messages);
-        self.assemble(now, now_ms, total_messages, rate, prometheus)
+        self.assemble(now, now_ms, Some(total_messages), rate, prometheus)
     }
 
     fn assemble(
         &mut self,
         now: chrono::DateTime<Utc>,
         now_ms: i64,
-        total_messages: i64,
-        rate: f64,
+        total_messages: Option<i64>,
+        rate: Option<f64>,
         prometheus: Option<&str>,
     ) -> ClusterMetrics {
         let (brokers, prometheus_available) = match prometheus {
@@ -505,23 +522,46 @@ mod tests {
         st.store_sweep(1_000, Duration::from_secs(20));
         assert_eq!(st.sweep_ttl_ms(), 60_000);
         assert!(!st.needs_sweep());
-        // First cached build records one point; re-serving the same sweep
-        // doesn't append a flat point.
+        // The first sweep is only a baseline: total known, rate unknown, no
+        // sparkline point — and the second sweep is due after the BASE TTL.
         let m = st.build_cached(None);
-        assert_eq!(m.total_messages, 1_000);
-        assert_eq!(m.throughput.len(), 1);
+        assert_eq!(m.total_messages, Some(1_000));
+        assert_eq!(m.messages_per_sec, None);
+        assert!(m.throughput.is_empty());
+        assert_eq!(st.next_sweep_ms(), WATERMARK_TTL_MS);
+        // A second sweep 1 s later yields a rate and one point; re-serving the
+        // same sweep doesn't append a flat point.
+        st.cached_watermark = Some((st.last_total.unwrap().0 + 1000, 1_050));
         let m = st.build_cached(None);
         assert_eq!(m.throughput.len(), 1);
+        assert!((m.messages_per_sec.unwrap() - 50.0).abs() < 0.01);
+        let m = st.build_cached(None);
+        assert_eq!(m.throughput.len(), 1);
+        assert!((m.messages_per_sec.unwrap() - 50.0).abs() < 0.01);
+        assert_eq!(st.next_sweep_ms(), 60_000);
     }
 
     #[test]
-    fn throughput_rate() {
+    fn no_sweep_yet_is_unknown_not_zero() {
+        let mut st = ClusterMetricState::default();
+        let m = st.build_cached(None);
+        assert_eq!((m.total_messages, m.messages_per_sec), (None, None));
+        assert!(m.throughput.is_empty());
+        assert_eq!(throughput_rate(None, (1_000, 5)), None);
+        assert_eq!(throughput_rate(Some((1_000, 5)), (1_000, 9)), None);
+        assert_eq!(throughput_rate(Some((0, 10)), (2_000, 4)), Some(0.0));
+        assert_eq!(throughput_rate(Some((0, 0)), (2_000, 100)), Some(50.0));
+    }
+
+    #[test]
+    fn throughput_rate_after_two_builds() {
         let mut st = ClusterMetricState::default();
         let _ = st.build(0, None);
         // Force a 1s gap.
         st.last_total = Some((st.last_total.unwrap().0 - 1000, 0));
         let m = st.build(100, None);
         assert!(!m.prometheus_available);
-        assert!(m.messages_per_sec > 99.0 && m.messages_per_sec < 101.0);
+        let rate = m.messages_per_sec.unwrap();
+        assert!(rate > 99.0 && rate < 101.0);
     }
 }

@@ -143,3 +143,13 @@ test('parseFrontmatter without frontmatter returns the whole text', () => {
   assert.deepEqual(parseFrontmatter(''), { meta: [], body: '' });
   assert.deepEqual(metaList(undefined), []);
 });
+
+test('a library copy edited without a version bump drifts from bundled', () => {
+  const g = groupSkills(
+    [{ name: 'grill', description: 'Grill a diff', body: '# mine', category: 'review' }],
+    [{ name: 'grill', category: 'review', version: 2, description: 'Grill a diff', installed_version: 2, state: 'modified' }],
+    [],
+  )[0];
+  assert.deepEqual(g.driftedSources, ['bundled']);
+  assert.match(g.drift[0], /edited since it was installed from bundled v2/);
+});

@@ -11,10 +11,14 @@
 //! A supervisor's handle is returned as `impl Send + 'static` and parked in
 //! [`Background`]: the boot sequence only has to keep it alive, so it never
 //! names the handle type (one less path to fix when a subsystem moves).
+//!
+//! The timer loops run under `otto_core::supervise::spawn`: a panic is logged
+//! and the loop restarted with backoff instead of ending for the daemon's life.
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use otto_core::supervise;
 use otto_improve::{LiveEvolver, Scheduler};
 use otto_state::{ImprovementsRepo, SessionsRepo, SettingsRepo};
 
@@ -167,7 +171,7 @@ fn spawn_brokers_reaper(ctx: &ServerCtx) {
     let brokers = Arc::clone(&ctx.brokers);
     let interval = Duration::from_secs(5 * 60); // every 5 min
     let idle = Duration::from_secs(30 * 60); // 30 min idle
-    tokio::spawn(async move {
+    supervise::spawn("brokers-reaper", brokers, move |brokers| async move {
         loop {
             tokio::time::sleep(interval).await;
             let n = brokers.reap_idle(idle);
@@ -181,7 +185,7 @@ fn spawn_brokers_reaper(ctx: &ServerCtx) {
 fn spawn_db_explorer_reaper(ctx: &ServerCtx) {
     let db = Arc::clone(&ctx.db_explorer);
     let interval = Duration::from_secs(5 * 60); // every 5 min
-    tokio::spawn(async move {
+    supervise::spawn("db-reaper", db, move |db| async move {
         loop {
             tokio::time::sleep(interval).await;
             let n = db.reap_idle().await;
@@ -206,7 +210,7 @@ fn spawn_channel_session_archiver(ctx: &ServerCtx) {
     let manager = Arc::clone(&ctx.manager);
     let interval = Duration::from_secs(10 * 60); // every 10 min
     let max_idle = Duration::from_secs(60 * 60); // 1h idle
-    tokio::spawn(async move {
+    supervise::spawn("channel-archiver", manager, move |manager| async move {
         loop {
             tokio::time::sleep(interval).await;
             let n = manager.reap_idle_channel_sessions(max_idle).await;
@@ -224,7 +228,7 @@ fn spawn_archived_channel_session_purge(ctx: &ServerCtx) {
     let manager = Arc::clone(&ctx.manager);
     let interval = Duration::from_secs(24 * 60 * 60); // daily
     let max_age = Duration::from_secs(30 * 24 * 60 * 60); // 30 days
-    tokio::spawn(async move {
+    supervise::spawn("channel-purge", manager, move |manager| async move {
         loop {
             let n = manager.purge_old_archived_channel_sessions(max_age).await;
             if n > 0 {
@@ -243,7 +247,7 @@ fn spawn_orphan_session_files_sweep(ctx: &ServerCtx) {
     let manager = Arc::clone(&ctx.manager);
     let interval = Duration::from_secs(24 * 60 * 60); // daily
     let grace = Duration::from_secs(60 * 60);
-    tokio::spawn(async move {
+    supervise::spawn("orphan-files-sweep", manager, move |manager| async move {
         loop {
             let n = manager.sweep_orphan_session_files(grace).await;
             if n > 0 {
@@ -261,7 +265,7 @@ fn spawn_orphan_session_files_sweep(ctx: &ServerCtx) {
 fn spawn_idle_session_suspender(ctx: &ServerCtx) {
     let manager = Arc::clone(&ctx.manager);
     let interval = Duration::from_secs(60);
-    tokio::spawn(async move {
+    supervise::spawn("idle-suspender", manager, move |manager| async move {
         loop {
             tokio::time::sleep(interval).await;
             let n = manager.suspend_idle_unattached().await;
@@ -281,7 +285,7 @@ fn spawn_idle_session_suspender(ctx: &ServerCtx) {
 fn spawn_nested_agent_capture(ctx: &ServerCtx) {
     let manager = Arc::clone(&ctx.manager);
     let interval = Duration::from_secs(30);
-    tokio::spawn(async move {
+    supervise::spawn("nested-agent-capture", manager, move |manager| async move {
         loop {
             tokio::time::sleep(interval).await;
             let n = manager.capture_nested_agents().await;
@@ -298,7 +302,7 @@ fn spawn_nested_agent_capture(ctx: &ServerCtx) {
 fn spawn_stale_session_archiver(ctx: &ServerCtx) {
     let manager = Arc::clone(&ctx.manager);
     let interval = Duration::from_secs(60 * 60);
-    tokio::spawn(async move {
+    supervise::spawn("stale-archiver", manager, move |manager| async move {
         loop {
             tokio::time::sleep(interval).await;
             let n = manager.auto_archive_stale().await;
@@ -317,7 +321,7 @@ fn spawn_stale_session_archiver(ctx: &ServerCtx) {
 fn spawn_provider_title_namer(ctx: &ServerCtx) {
     let manager = Arc::clone(&ctx.manager);
     let interval = Duration::from_secs(20);
-    tokio::spawn(async move {
+    supervise::spawn("title-namer", manager, move |manager| async move {
         loop {
             tokio::time::sleep(interval).await;
             // Nothing live → no transcript is growing; skip the SQL
@@ -341,7 +345,7 @@ fn spawn_provider_title_namer(ctx: &ServerCtx) {
 fn spawn_dead_session_pruner(ctx: &ServerCtx) {
     let manager = Arc::clone(&ctx.manager);
     let interval = Duration::from_secs(6 * 60 * 60); // every 6h
-    tokio::spawn(async move {
+    supervise::spawn("dead-pruner", manager, move |manager| async move {
         loop {
             let n = manager.prune_dead_sessions().await;
             if n > 0 {
@@ -358,7 +362,7 @@ fn spawn_activity_trail_pruner(ctx: &ServerCtx) {
     let manager = Arc::clone(&ctx.manager);
     const KEEP_PER_SESSION: i64 = 1_000;
     let interval = Duration::from_secs(60 * 60); // hourly
-    tokio::spawn(async move {
+    supervise::spawn("trail-pruner", manager, move |manager| async move {
         // First pass checks every session; later passes only the sessions
         // that received trail rows since the previous pass started (with
         // a margin for clock skew between writers), which is all that can
@@ -385,17 +389,20 @@ fn spawn_activity_trail_pruner(ctx: &ServerCtx) {
 /// younger than its window). See docs/features/backup-restore.md. The same
 /// hourly pass purges expired credentials and runs SQLite housekeeping.
 fn spawn_data_retention(ctx: &ServerCtx) {
-    let pool = ctx.pool.clone();
-    let auth_cache = ctx.auth_cache.clone();
     let interval = Duration::from_secs(60 * 60); // hourly
-    let manager = Arc::clone(&ctx.manager);
-    tokio::spawn(async move {
+    supervise::spawn("retention", ctx.clone(), move |ctx| async move {
+        let (pool, manager) = (ctx.pool.clone(), Arc::clone(&ctx.manager));
         let settings = SettingsRepo::new(pool.clone());
-        let auth = otto_rbac::AuthRepo::with_cache(pool.clone(), auth_cache);
+        let auth = otto_rbac::AuthRepo::with_cache(pool.clone(), ctx.auth_cache.clone());
         let maint_pool = pool.clone();
         let repo = otto_state::RetentionRepo::new(pool);
-        let mut compaction_logged = false;
+        let (mut compaction_logged, mut deferred) = (false, None);
         loop {
+            // Over the admission load / memory threshold: retry soon instead.
+            if manager.defer_maintenance(&mut deferred).await {
+                tokio::time::sleep(otto_sessions::admission::MAINTENANCE_RETRY).await;
+                continue;
+            }
             let raw = settings
                 .get(otto_state::retention::SETTING_KEY)
                 .await
@@ -491,11 +498,10 @@ fn spawn_data_retention(ctx: &ServerCtx) {
 /// `WorkflowsRepo::prune_runs`). Each pruned run's
 /// `workflow-context/<run_id>/` dir is removed, confined to that root.
 fn spawn_workflow_run_retention(ctx: &ServerCtx) {
-    let pool = ctx.pool.clone();
-    let ctx_root = ctx.data_dir.join("workflow-context");
     let interval = Duration::from_secs(24 * 60 * 60);
-    tokio::spawn(async move {
-        let repo = otto_state::WorkflowsRepo::new(pool);
+    supervise::spawn("run-retention", ctx.clone(), move |ctx| async move {
+        let ctx_root = ctx.data_dir.join("workflow-context");
+        let repo = otto_state::WorkflowsRepo::new(ctx.pool.clone());
         loop {
             match repo
                 .prune_runs(
@@ -775,9 +781,8 @@ fn start_usage_tracking(ctx: &ServerCtx) {
 /// those used in the last 6 h are checked (see `McpService::health_sweep`),
 /// so an idle daemon spawns no MCP processes.
 fn spawn_mcp_health_sweep(ctx: &ServerCtx) {
-    let mcp = Arc::clone(&ctx.mcp);
-    let settings = SettingsRepo::new(ctx.pool.clone());
-    tokio::spawn(async move {
+    supervise::spawn("mcp-health", ctx.clone(), |ctx| async move {
+        let (mcp, settings) = (Arc::clone(&ctx.mcp), SettingsRepo::new(ctx.pool.clone()));
         loop {
             let secs = settings
                 .get("mcp_health_interval_secs")

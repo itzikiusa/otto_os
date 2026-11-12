@@ -839,7 +839,7 @@
             <h5>Key <span class="muted">({selected.key.format})</span></h5>
             <pre class="payload key">{selected.key.text || '∅'}</pre>
           {/if}
-          <h5>Value</h5>
+          <h5>Value</h5>{#if selected.value?.notice}<p class="muted small schema-notice">{selected.value.notice}</p>{/if}
           {#if selected.value?.truncated}
             <p class="muted small">
               {#if fullLoading}Loading the full value… (showing the first 2 KiB){:else if fullErr}{fullErr} Showing the first 2 KiB.

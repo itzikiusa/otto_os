@@ -14,7 +14,7 @@ use otto_core::domain::WorkspaceRole;
 use otto_core::Error;
 use otto_state::{AgentAutonomy, AgentRule, PersonalAgentsRepo, ProactiveConfig, StandingGoal};
 
-use crate::auth::{require_ws_role, CurrentUser};
+use crate::auth::{require_ws_role, CurrentAuthContext, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::personal_agent_memory;
 use crate::personal_agents_engine;
@@ -198,10 +198,10 @@ fn owner_only_autonomy_changes(old: &AgentAutonomy, new: &AgentAutonomy) -> Vec<
 async fn save_autonomy(
     Path(id): Path<String>,
     State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<SaveAutonomyReq>,
 ) -> ApiResult<Json<AgentAutonomy>> {
-    let agent = load(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let agent = load(&ctx, &auth.effective_user, &id, WorkspaceRole::Editor).await?;
     let repo = agents(&ctx);
     let current = repo.autonomy(&id).await.map_err(ApiError)?;
     let becomes_primary = req.primary == Some(true) && !current.primary;
@@ -211,7 +211,7 @@ async fn save_autonomy(
     // (PC-3, access-control-4-02); toggles, budget and `primary` stay Editor.
     super::require_agent_owner(
         &ctx,
-        &user,
+        &auth,
         &agent,
         &owner_only_autonomy_changes(&current, &next),
     )
@@ -411,12 +411,12 @@ struct EditMemoryReq {
 async fn edit_memory(
     Path(id): Path<String>,
     State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<EditMemoryReq>,
 ) -> ApiResult<Json<Value>> {
-    let agent = load(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let agent = load(&ctx, &auth.effective_user, &id, WorkspaceRole::Editor).await?;
     // The same `memory/notes.md` that `PUT …/memory` guards (PC-3).
-    super::require_agent_owner(&ctx, &user, &agent, &["memory"]).await?;
+    super::require_agent_owner(&ctx, &auth, &agent, &["memory"]).await?;
     let root = personal_agents_engine::agent_directory(&ctx, &agent).map_err(ApiError)?;
     let doc = crate::personal_agent_documents::read_memory(&root)
         .await

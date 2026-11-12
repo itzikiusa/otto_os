@@ -567,11 +567,14 @@ pub async fn start_insights(
         "--end-time",
         &end,
         "--query-string",
-        &req.query,
+        crate::accounts::STDIN_PARAM,
         "--limit",
         &limit,
     ]);
-    let v = svc.run_json(a, region, &args).await?;
+    // The query goes through stdin, never argv (`ps` shows argv).
+    let v = svc
+        .run_json_stdin(a, region, &args, req.query.as_bytes())
+        .await?;
     let query_id = s(&v, "queryId")
         .ok_or_else(|| Error::Upstream("logs start-query returned no queryId".into()))?;
     Ok(InsightsStartedResp { query_id })

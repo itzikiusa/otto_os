@@ -108,17 +108,15 @@ async fn scan_kick_during_walk_is_drained_without_another_event() {
 #[tokio::test]
 async fn restart_backfills_missing_fts_without_changing_files() {
     let (e, _dir, id) = fixture().await;
-    // Simulate rows committed by a prior fallback-only process.
-    sqlx::query("DELETE FROM vault_fts")
-        .execute(e.store.pool())
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM vault_fts_ids")
-        .execute(e.store.pool())
-        .await
-        .unwrap();
+    // Simulate rows committed by a prior fallback-only process (or a v1
+    // index retired by the upgrade): the index lost every row.
+    e.store.fts_clear_vault(id).await.unwrap();
     let restarted = Arc::new(VaultEngine::new(e.store.pool().clone()));
     restarted.scan(id).await.unwrap();
+    // The background backfill (kicked after scans/reads) fills it from the
+    // files; run it inline so the assertion is deterministic.
+    let report = restarted.run_search_backfill(id).await.unwrap();
+    assert_eq!(report.filled, 1);
     let hits = restarted
         .search(
             "ws",

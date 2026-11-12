@@ -1,7 +1,7 @@
 //! Design Hall glue (the graph itself lives in `otto-design`): the per-request
-//! service handle, the host-owned deep format validation, and the startup
-//! import that mirrors legacy Product-arena attachments + Canvas scenes into
-//! the graph (idempotent; legacy rows/routes untouched).
+//! service handle, the host-owned deep format validation, and the boot hook
+//! that keeps legacy Product-arena attachments + Canvas scenes mirrored into
+//! the graph (catch-up pass, then live; legacy rows/routes untouched).
 
 use otto_core::{Error, Result};
 
@@ -34,9 +34,9 @@ pub fn validate_content(format: &str, bytes: &[u8]) -> Result<()> {
     }
 }
 
-/// Boot hook: build the FTS index and run the idempotent legacy import in the
-/// background (never blocks or fails startup; the outcome is logged), and
-/// start the daily retention pass (opt-in: off unless `OTTO_DESIGN_AUTO_PRUNE=1`).
+/// Boot hook: FTS index, the catch-up legacy import, then the live per-source
+/// sync off the event bus, all in the background (never blocks startup), and
+/// the daily retention pass (opt-in: off unless `OTTO_DESIGN_AUTO_PRUNE=1`).
 pub fn spawn_startup_import(ctx: &ServerCtx) {
     let svc = service(ctx);
     tokio::spawn(otto_design::import::startup(svc));

@@ -14,6 +14,7 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -208,6 +209,14 @@
     <button class="btn small" onclick={() => void canvas.retryDoc(id).catch(() => {})}>Retry save</button>
   </div>
 {/each}
+{#if canvas.conflict}
+  {@const conflictTitle = canvas.scenes.find(scene => scene.id === canvas.conflict?.id)?.title ?? 'This scene'}
+  <div class="save-error" data-testid="canvas-conflict" use:announceShown={{ text: `${conflictTitle} changed elsewhere; choose which board to keep`, assertive: true }}>
+    <span>{conflictTitle} was changed elsewhere (an agent, another tab or person) after you opened it. Your unsaved board is kept until you choose.</span>
+    <button class="btn small" onclick={() => void canvas.reloadTheirs().catch((e) => toastError('Couldn’t reload the scene', e))}>Reload theirs</button>
+    <button class="btn small" onclick={() => void canvas.keepMineAsCopy().catch((e) => toastError('Couldn’t save your copy', e))}>Keep mine as a copy</button>
+  </div>
+{/if}
 <PageBody fill padded={false}>
 {#if !ws.currentId}
   <div class="canvas-page empty-ws" bind:this={workspaceEmpty}>

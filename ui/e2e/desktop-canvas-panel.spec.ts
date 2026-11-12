@@ -5,7 +5,7 @@ import { apiCtx, seedWorkspace, seedShellSession } from './seed';
 //
 // Every `agent`-kind session gets a right-panel "Canvas" tab (CanvasPanel.svelte,
 // GET/POST/DELETE /sessions/{id}/canvas-refs) listing scenes referenced by that
-// session — an expandable inline SVG preview, "Open in Canvas", "Detach", and an
+// session — an expandable inline SVG preview, "Open in Design Hall", "Detach", and an
 // "Attach scene…" picker. Desktop-only (the ≥1025px 3-pane shell mounts
 // `RightPanel`; mobile/tablet host it in a drawer instead) — self-skips on the
 // mobile/tablet projects like `desktop-shell.spec.ts:18`.
@@ -46,7 +46,7 @@ test.beforeEach(async ({ page }, info) => {
   }, workspaceId);
 });
 
-test('Canvas panel: attach a scene, preview it, open in Canvas, detach', async ({ page }) => {
+test('Canvas panel: attach a scene, preview it, open it in Design Hall, detach', async ({ page }) => {
   test.setTimeout(90_000);
   await page.goto(`/#/agents/${sessionId}`);
   await expect(page.locator('.term-host').first()).toBeVisible({ timeout: 30_000 });
@@ -77,17 +77,17 @@ test('Canvas panel: attach a scene, preview it, open in Canvas, detach', async (
   await row.locator('.ref-title').click();
   await expect(row.locator('.ref-preview svg').first()).toBeVisible({ timeout: 20_000 });
 
-  // "Open in Canvas" navigates to the Canvas module with the scene open.
-  await row.getByRole('button', { name: 'Open in Canvas' }).click();
-  await expect(page).toHaveURL(/#\/canvas/);
-  await expect(page.locator('.canvas-page')).toBeVisible({ timeout: 20_000 });
-  await expect(page.locator('.scene-list .row.active', { hasText: SCENE_TITLE })).toBeVisible({
-    timeout: 15_000,
-  });
-  await expect(page.locator('.board svg').first()).toBeVisible({ timeout: 20_000 });
+  // "Open in Design Hall" opens the scene's Hall mirror (the Canvas page folded
+  // into Design Hall): read-only there until someone presses Edit here.
+  await row.getByRole('button', { name: 'Open in Design Hall' }).click();
+  await expect(page).toHaveURL(/#\/design\/a\//, { timeout: 20_000 });
+  await expect(page.getByTestId('design-mirror-banner')).toBeVisible({ timeout: 20_000 });
 
-  // Back to the session — the panel (and its ref) is still there.
-  await page.goBack();
+  // Back to the session — the panel (and its ref) is still there. The app's
+  // own Back (the desktop app has no browser back button): the Hall artifact
+  // view holds an unsaved-edits leave-guard, which a native history traversal
+  // is routed through differently.
+  await page.getByTestId('rail-back').click();
   await expect(page.locator('.term-host').first()).toBeVisible({ timeout: 20_000 });
   const rowAfterBack = page.locator('.canvas-panel .ref-row', { hasText: SCENE_TITLE });
   await expect(rowAfterBack).toBeVisible({ timeout: 15_000 });

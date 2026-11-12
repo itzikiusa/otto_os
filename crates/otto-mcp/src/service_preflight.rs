@@ -7,9 +7,9 @@ impl McpService {
         original: &McpServerDetail,
         tool_name: &str,
         ctx: &InvokeCtx,
-        approved: bool,
+        (approved, previewed): (bool, bool),
     ) -> std::result::Result<(), String> {
-        self.check_before_send(original, tool_name, ctx, approved)
+        self.check_before_send(original, tool_name, ctx, approved, previewed)
             .await
             .map_err(|error| redact_text(&error.to_string()).value)
     }
@@ -20,6 +20,7 @@ impl McpService {
         tool_name: &str,
         ctx: &InvokeCtx,
         approved: bool,
+        previewed: bool,
     ) -> Result<()> {
         let deny = |reason: &str| Error::Conflict(reason.into());
         let server = self.registry().get(&original.id).await?;
@@ -70,12 +71,15 @@ impl McpService {
         );
         match &effect {
             Effect::Deny(reason) => return Err(deny(&format!("policy denied: {reason}"))),
-            Effect::RequireDryRun(_) => {
+            // A call licensed by a matching preview may run; a dry-run
+            // requirement that appeared after admission still stops it.
+            Effect::RequireDryRun(_) if !previewed => {
                 return Err(deny("policy now requires a dry run; retry for a preview"));
             }
             _ => {}
         }
         let approval_required = tool.require_approval
+            || tool.changed_since_review
             || matches!(effect, Effect::RequireApproval(_))
             || (tool.risk_label == "dangerous" && self.require_approval_dangerous().await);
         if approval_required && !approved {

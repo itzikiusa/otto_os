@@ -359,11 +359,13 @@ async fn namespaces<S: K8sCtx>(
     // Cluster-scope listing is often forbidden (Rancher project users); the
     // persisted `known_namespaces` fill in, and are appended even when the
     // list succeeds but is partial.
-    let mut listed = match resources::namespaces(&k).await {
-        Ok(l) => l,
+    // `partial`: the cluster-scope list was refused, so the answer is only the
+    // known namespaces — the picker must say so, not pass it off as complete.
+    let (mut listed, partial) = match resources::namespaces(&k).await {
+        Ok(l) => (l, false),
         Err(e) if !c.known_namespaces.is_empty() => {
             tracing::debug!("k8s namespaces: list failed ({e}); using known namespaces");
-            Vec::new()
+            (Vec::new(), true)
         }
         Err(e) => return Err(e.into()),
     };
@@ -401,7 +403,7 @@ async fn namespaces<S: K8sCtx>(
         .zip(visible)
         .filter_map(|(row, ok)| ok.then_some(row))
         .collect();
-    Ok(Json(json!({ "namespaces": ns })))
+    Ok(Json(json!({ "namespaces": ns, "partial": partial })))
 }
 
 async fn nodes<S: K8sCtx>(
@@ -650,20 +652,27 @@ async fn exec<S: K8sCtx>(
 ) -> ApiResult<(StatusCode, Json<otto_core::domain::Session>)> {
     let svc = Clusters::new(&ctx);
     let c = svc.get(&id).await?;
-    let session = sessions::exec(&ctx, &user, &c, &req).await?;
+    let result = sessions::exec(&ctx, &user, &c, &req).await;
     list_cache::touch_throttled(svc.repo(), &c.id).await;
+    // Refusals too (an agent credential, a missing prod confirm, RBAC): an
+    // attempted shell into a pod is as interesting as an opened one.
+    let (ok, err) = match &result {
+        Ok(_) => (true, None),
+        Err(e) => (false, Some(e.to_string())),
+    };
     audit(
         &ctx,
         &user,
         "k8s.exec",
         &c.id,
         json!({
-            "cluster": c.name, "context": c.context_name, "ns": req.ns, "pod": req.pod,
-            "container": req.container, "command": req.command, "session_id": session.id,
+            "cluster": c.name, "context": c.context_name, "environment": c.environment,
+            "ns": req.ns, "pod": req.pod, "container": req.container, "command": req.command,
+            "session_id": result.as_ref().ok().map(|s| &s.id), "ok": ok, "error": err,
         }),
     )
     .await;
-    Ok((StatusCode::CREATED, Json(session)))
+    Ok((StatusCode::CREATED, Json(result?)))
 }
 
 async fn k9s<S: K8sCtx>(
@@ -674,17 +683,26 @@ async fn k9s<S: K8sCtx>(
 ) -> ApiResult<(StatusCode, Json<otto_core::domain::Session>)> {
     let svc = Clusters::new(&ctx);
     let c = svc.get(&id).await?;
-    let session = sessions::k9s(&ctx, &user, &c, &req).await?;
+    let result = sessions::k9s(&ctx, &user, &c, &req).await;
     list_cache::touch_throttled(svc.repo(), &c.id).await;
+    // Refusals too, like exec.
+    let (ok, err) = match &result {
+        Ok(_) => (true, None),
+        Err(e) => (false, Some(e.to_string())),
+    };
     audit(
         &ctx,
         &user,
         "k8s.k9s",
         &c.id,
-        json!({ "cluster": c.name, "context": c.context_name, "ns": req.ns, "session_id": session.id }),
+        json!({
+            "cluster": c.name, "context": c.context_name, "environment": c.environment,
+            "ns": req.ns, "write": req.write, "session_id": result.as_ref().ok().map(|s| &s.id),
+            "ok": ok, "error": err,
+        }),
     )
     .await;
-    Ok((StatusCode::CREATED, Json(session)))
+    Ok((StatusCode::CREATED, Json(result?)))
 }
 
 async fn run_action<S: K8sCtx>(
@@ -700,14 +718,20 @@ async fn run_action<S: K8sCtx>(
     let svc = Clusters::new(&ctx);
     let c = svc.get(&id).await?;
     let k = clusters::kubectl_for(&ctx, &c).await?;
-    let result = actions::execute_authorized(&k, &req, &ctx.pool(), &user, &id).await;
+    let result =
+        actions::execute_authorized(&k, &req, &ctx.pool(), &user, &id, c.environment).await;
     list_cache::touch_throttled(svc.repo(), &c.id).await;
     // Audit both outcomes: a denied/failed mutation attempt is as interesting
     // as a successful one. Params are logged verbatim (they carry no secrets:
-    // replicas / revision / confirm_name / flags).
-    let (ok, err) = match &result {
-        Ok(r) => (r.ok, None),
-        Err(e) => (false, Some(e.to_string())),
+    // replicas / revision / confirm_name / flags). A plan that stopped
+    // partway records which steps were applied.
+    let (ok, err, steps) = match &result {
+        Ok(r) => (
+            r.ok,
+            (!r.steps.is_empty()).then(|| r.message.clone()),
+            r.steps.clone(),
+        ),
+        Err(e) => (false, Some(e.to_string()), Vec::new()),
     };
     // The next list must show the action's effect, not a cached answer.
     list_cache::forget_cluster(c.id.as_str());
@@ -719,7 +743,7 @@ async fn run_action<S: K8sCtx>(
         json!({
             "cluster": c.name, "context": c.context_name, "environment": c.environment,
             "kind": req.kind, "ns": req.ns, "name": req.name, "params": req.params,
-            "ok": ok, "error": err,
+            "ok": ok, "error": err, "steps": steps,
         }),
     )
     .await;
@@ -731,10 +755,12 @@ async fn run_action<S: K8sCtx>(
 // ---------------------------------------------------------------------------
 
 /// RBAC operation for a pod HTTP call: a GET reads (`workloads_view`); any
-/// mutating method can change the app's runtime state, so it needs the same
-/// Edit-level grant as running a command in the pod (`exec`).
-fn pod_http_operation(mutating: bool) -> &'static str {
-    if mutating {
+/// mutating method can change the app's runtime state, and a GET of a
+/// secret-bearing endpoint (`/actuator/env`, `heapdump`, … — see
+/// [`crate::pod_http::is_sensitive_path`]) reads what `exec` could, so both
+/// need the same Edit-level grant as running a command in the pod (`exec`).
+fn pod_http_operation(mutating: bool, sensitive: bool) -> &'static str {
+    if mutating || sensitive {
         "exec"
     } else {
         "workloads_view"
@@ -754,7 +780,7 @@ async fn pod_http<S: K8sCtx>(
         &ctx.pool(),
         &user,
         &id,
-        pod_http_operation(mutating),
+        pod_http_operation(mutating, pod_http::is_sensitive_path(&v.path)),
         Some(&v.namespace),
     )
     .await?;
@@ -787,6 +813,13 @@ async fn pod_http<S: K8sCtx>(
             ),
         };
         return Ok((StatusCode::CONFLICT, Json(problem)).into_response());
+    }
+    if let Err(e) = pod_http::refuse_agent_confirm(req.confirm_name.as_deref()) {
+        let mut detail = base_detail;
+        detail["ok"] = json!(false);
+        detail["error"] = json!(e.to_string());
+        audit(&ctx, &user, "k8s.pod_http", &c.id, detail).await;
+        return Err(e.into());
     }
     let k = clusters::kubectl_for(&ctx, &c).await?;
     let result = pod_http::run(&k, c.id.as_str(), &v).await;
@@ -994,7 +1027,9 @@ mod pod_http_route_tests {
 
     #[test]
     fn get_reads_and_mutations_need_exec() {
-        assert_eq!(pod_http_operation(false), "workloads_view");
-        assert_eq!(pod_http_operation(true), "exec");
+        assert_eq!(pod_http_operation(false, false), "workloads_view");
+        assert_eq!(pod_http_operation(true, false), "exec");
+        // A GET of /actuator/env reads secrets: exec, not workloads_view.
+        assert_eq!(pod_http_operation(false, true), "exec");
     }
 }

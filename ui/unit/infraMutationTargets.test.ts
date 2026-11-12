@@ -96,6 +96,7 @@ test('SQS deletion stays bound to the approved queue and preserves a newly selec
   c.selected = { name: 'B', url: 'queue-B' }; c.rq = 'us-east-1';
   c.messages = [{ message_id: 'message-A', body: 'different queue' }];
   approval.resolve(true); await deleting;
-  assert.deepEqual(writes, [['account-A', 'queue-A', 'receipt-A', 'eu-west-1']]);
+  // The approved queue's name rides along as the prod confirm.
+  assert.deepEqual(writes, [['account-A', 'queue-A', 'receipt-A', 'eu-west-1', 'A']]);
   assert.equal(c.messages.length, 1);
 });

@@ -104,8 +104,11 @@ test('a thread deep link from another workspace opens the thread at phone width'
   await expect.poll(() => page.evaluate(() => localStorage.getItem('otto_workspace'))).toBe(otherWs);
   await expect(page).toHaveURL(new RegExp(`#/threads/${threadId}$`));
   await expectNoHorizontalOverflow(page);
-  // A paired phone never offers "Continue on phone" (it is the phone).
-  await expect(page.getByTestId('threads-continue-phone')).toHaveCount(0);
+  // A paired phone never offers "Continue on phone" (it is the phone): the
+  // handoff lives in the toolbar ⋯ only, and not there either.
+  await page.getByTestId('threads-thread-menu').click();
+  await expect(page.locator('.ctx-menu').getByRole('menuitem', { name: /Continue on phone/ })).toHaveCount(0);
+  await page.keyboard.press('Escape');
 
   // Sidebar + inspector are drawers over the stage, fully on screen.
   await page.getByTestId('threads-toggle-sidebar').click();
@@ -157,13 +160,9 @@ test('Continue on phone (desktop credential) offers the thread QR when Phone acc
   await mock(page, '**/api/v1/phone/devices', () => [{ id: 'd', name: 'iPhone', user_agent: null, created_at: '', last_seen_at: '', last_ip: null, idle_expires_at: '', expires_at: '', current: false }]);
   await page.goto(`/#/threads/${threadId}`);
   await expect(page.getByTestId(`runtime-thread-${threadId}`)).toBeVisible({ timeout: 30_000 });
-  const btn = page.getByTestId('threads-continue-phone');
-  // At phone width the header may overflow it into ⋯ — either path opens the sheet.
-  if (await btn.isVisible()) await btn.click();
-  else {
-    await page.getByRole('button', { name: 'More actions' }).click();
-    await page.getByRole('menuitem', { name: /Continue on phone/ }).click();
-  }
+  // The handoff is a ⋯ item (the toolbar keeps sidebar, title, right panel, ⋯).
+  await page.getByTestId('threads-thread-menu').click();
+  await page.getByRole('menuitem', { name: /Continue on phone/ }).click();
   const sheet = page.getByRole('dialog', { name: 'Continue on phone' });
   await expectFullyInViewport(page, sheet, 'Continue on phone sheet');
   await expect(sheet).toContainText(`http://mac.tail0b7b6b.ts.net/#/threads/${threadId}`);

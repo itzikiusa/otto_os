@@ -33,6 +33,7 @@
   import SkillEditor from './SkillEditor.svelte';
   import SkillActivity from './SkillActivity.svelte';
   import { metaList, parseFrontmatter, sourceLabel, type SkillGroup, type VariantSource } from './skillGroups';
+  import { deleteQuestion, installedNote, noteUserOwned, replaceQuestion } from './bundledActions';
 
   interface Props {
     group: SkillGroup;
@@ -83,9 +84,9 @@
   }
 
   const variant = $derived(group.variants.find((v) => v.source === source) ?? group.variants[0]);
-  const isLibrary = $derived(variant.source === 'library');
   const isBundled = $derived(variant.source === 'bundled');
   const hasLibrary = $derived(group.variants.some((v) => v.source === 'library'));
+  const bundled = $derived(group.variants.find((v) => v.source === 'bundled'));
 
   // ---- Load the selected copy’s SKILL.md + file list ----------------------
   let body = $state<string>('');
@@ -206,15 +207,17 @@
     const name = group.name;
     const owner = selectionKey;
     const generation = loadGeneration;
-    const b = group.variants.find((v) => v.source === 'bundled');
     const updating = hasLibrary;
-    if (updating && !(await confirmer.ask(`Replace the library copy of ${group.name} with bundled v${b?.bundledVersion}? Your current copy is backed up first.`, { title: 'Replace from bundled', confirmLabel: 'Replace', danger: false }))) return;
+    // The one state-aware install / update / replace question.
+    const ask = updating ? replaceQuestion(name, bundled?.bundledState, bundled?.bundledVersion) : null;
+    if (ask && !(await confirmer.ask(...ask))) return;
     if (disposed || owner !== selectionKey || generation !== loadGeneration) return;
     busy = true;
     try {
-      await skillLabApi.install(name);
+      const r = await skillLabApi.install(name);
       if (disposed || owner !== selectionKey || generation !== loadGeneration) return;
-      toasts.success(updating ? 'Library copy updated' : 'Installed to library', updating ? 'The previous copy was backed up.' : 'You can edit it now.');
+      toasts.success(updating ? 'Library copy updated' : 'Installed to library', installedNote(r, updating));
+      noteUserOwned(r.user_owned);
       onchanged({ name, source: 'library' });
     } catch (e) {
       toastError(`Couldn’t install ${group.name}`, e);
@@ -244,7 +247,7 @@
     const name = group.name;
     const owner = selectionKey;
     const generation = loadGeneration;
-    if (!(await confirmer.ask(`Delete “${group.name}” from the Otto library? Its files are removed; copies in ${group.variants.filter((v) => v.source !== 'library').map((v) => sourceLabel(v.source)).join(', ') || 'other places'} are not touched.`, { title: 'Delete skill' }))) return;
+    if (!(await confirmer.ask(...deleteQuestion(group.name)))) return;
     try {
       if (disposed || owner !== selectionKey || generation !== loadGeneration) return;
       await skillLabApi.remove(name);
@@ -259,7 +262,8 @@
     const items: MenuItem[] = [
       { label: 'Evaluate', icon: 'target', action: onevaluate },
       ...(!hasLibrary && !isBundled ? [{ label: 'Copy to library', icon: 'copy' as const, action: () => void copyToLibrary() }] : []),
-      ...(isLibrary ? [{ separator: true }, { label: 'Delete from library…', icon: 'trash' as const, danger: true, action: () => void remove() }] : []),
+      ...(hasLibrary && ['ahead', 'modified'].includes(bundled?.bundledState ?? '') ? [{ label: 'Replace with bundled…', icon: 'download' as const, action: () => void install() }] : []),
+      ...(hasLibrary ? [{ separator: true }, { label: 'Delete from library…', icon: 'trash' as const, danger: true, action: () => void remove() }] : []),
     ];
     ctxMenu.show(e, items);
   }

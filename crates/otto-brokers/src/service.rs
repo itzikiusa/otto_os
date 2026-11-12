@@ -5,7 +5,11 @@
 //! sampler state. Blocking librdkafka calls run on `spawn_blocking`; admin /
 //! producer calls are awaited directly.
 
-use crate::decode::{avro_payload, avro_to_json_with, confluent_frame, decode_payload, to_preview};
+use crate::decode::{
+    avro_payload, avro_to_json_with, confluent_frame, decode_payload, to_preview,
+    undecoded_schema_payload,
+};
+use crate::group_lag_cache::{GroupLagCache, LAG_WAIT};
 use crate::kafka::{is_internal, KafkaClient, KafkaConnSpec, ValueMatch, MAX_CONSUME_BYTES};
 use crate::metrics::{self, ClusterMetricState};
 use crate::proxy::BrokerTunnel;
@@ -96,6 +100,8 @@ pub struct BrokersService {
     /// repeated auth errors); cleared on cluster edit/delete so a re-grant or
     /// credential change re-probes.
     group_denied: DashMap<Id, ()>,
+    /// Per-group total lag for the Groups list (bounded job + short TTL).
+    group_lags: Arc<GroupLagCache>,
     audit: Option<BrokerAuditRepo>,
     /// Broker operator workflow tables (lag alerts + replay evidence). Optional
     /// so the crate can be constructed without a state pool in unit tests.
@@ -139,6 +145,7 @@ impl BrokersService {
             sweep_locks: DashMap::new(),
             policy_cache: DashMap::new(),
             group_denied: DashMap::new(),
+            group_lags: Arc::default(),
             audit,
             ops: None,
         }
@@ -380,6 +387,7 @@ impl BrokersService {
         self.samplers.remove(id);
         // Re-probe group access after a credential/config change.
         self.group_denied.remove(id);
+        self.group_lags.forget_cluster(id);
     }
 
     // ---- connection pool --------------------------------------------------
@@ -839,10 +847,22 @@ impl BrokersService {
             return Err(Error::Forbidden(crate::kafka::GROUP_ACL_DENIED.to_string()));
         }
         let (client, _) = self.client_for(id).await?;
-        let res = tokio::task::spawn_blocking(move || client.list_groups())
+        let lister = client.clone();
+        let res = tokio::task::spawn_blocking(move || lister.list_groups())
             .await
             .map_err(join)?;
-        self.note_group_result(id, res)
+        let mut groups = self.note_group_result(id, res)?;
+        let (meta, lags) = (client.clone(), client);
+        self.group_lags
+            .fill(
+                id,
+                &mut groups,
+                move || meta.lag_partitions(),
+                move |g, parts| lags.group_total_lag(g, parts),
+                LAG_WAIT,
+            )
+            .await;
+        Ok(groups)
     }
 
     pub async fn describe_group(&self, id: &Id, group: &str) -> Result<GroupDetail> {
@@ -1304,8 +1324,7 @@ impl BrokersService {
         // try Avro; values when Auto/Avro is requested) — a handful of ids.
         // Lookups run concurrently; failed ids are negatively cached, so a
         // topic whose keys only look framed costs no round trip per tail tick.
-        let mut schemas: std::collections::HashMap<i32, Arc<apache_avro::Schema>> =
-            std::collections::HashMap::new();
+        let mut schemas = BatchSchemas::default();
         if let Some(reg) = &registry {
             let value_avro = matches!(req.decode, ValueFormat::Auto | ValueFormat::Avro);
             let mut ids = std::collections::BTreeSet::new();
@@ -1319,7 +1338,8 @@ impl BrokersService {
                     }
                 }
             }
-            schemas = reg.parsed_schemas_by_ids(ids).await;
+            schemas.avro = reg.parsed_schemas_by_ids(ids.iter().copied()).await;
+            schemas.note_non_avro(reg, ids);
         }
 
         let req = req.clone();
@@ -1416,20 +1436,44 @@ where
 
 // ---- helpers --------------------------------------------------------------
 
+/// Registry schemas resolved for one batch: parsed Avro, plus the ids whose
+/// registry type is JSON Schema / Protobuf (shown raw with a notice).
+#[derive(Default)]
+struct BatchSchemas {
+    avro: std::collections::HashMap<i32, Arc<apache_avro::Schema>>,
+    non_avro: std::collections::HashMap<i32, String>,
+}
+
+impl BatchSchemas {
+    /// Record the known non-Avro type of each id that did not resolve as Avro.
+    fn note_non_avro(&mut self, reg: &SchemaRegistry, ids: impl IntoIterator<Item = i32>) {
+        for id in ids {
+            if !self.avro.contains_key(&id) {
+                if let Some(t) = reg.non_avro_type(id) {
+                    self.non_avro.insert(id, t);
+                }
+            }
+        }
+    }
+}
+
 /// Decode a key/value, using the pre-resolved registry schema for
 /// Confluent-framed Avro when `Auto`/`Avro` is requested.
 fn decode_kv(
     bytes: Option<&[u8]>,
     fmt: ValueFormat,
-    schemas: &std::collections::HashMap<i32, Arc<apache_avro::Schema>>,
+    schemas: &BatchSchemas,
 ) -> Option<DecodedPayload> {
     let bytes = bytes?;
     if matches!(fmt, ValueFormat::Auto | ValueFormat::Avro) {
         if let Some((schema_id, body)) = confluent_frame(bytes) {
-            if let Some(schema) = schemas.get(&schema_id) {
+            if let Some(schema) = schemas.avro.get(&schema_id) {
                 if let Ok(v) = avro_to_json_with(schema, body) {
                     return Some(avro_payload(&v, schema_id, bytes));
                 }
+            }
+            if let Some(kind) = schemas.non_avro.get(&schema_id) {
+                return Some(undecoded_schema_payload(kind, schema_id, body, bytes));
             }
         }
     }
@@ -1448,7 +1492,7 @@ fn value_filter_predicate(
     registry: Option<Arc<SchemaRegistry>>,
     rt: tokio::runtime::Handle,
 ) -> impl Fn(Option<&[u8]>) -> bool {
-    let schemas = std::cell::RefCell::new(std::collections::HashMap::new());
+    let schemas = std::cell::RefCell::new(BatchSchemas::default());
     let seen = std::cell::RefCell::new(std::collections::HashSet::new());
     move |bytes: Option<&[u8]>| {
         let Some(bytes) = bytes else { return false };
@@ -1457,7 +1501,9 @@ fn value_filter_predicate(
                 if let Some((sid, _)) = confluent_frame(bytes) {
                     if seen.borrow_mut().insert(sid) {
                         let got = rt.block_on(reg.parsed_schemas_by_ids([sid]));
-                        schemas.borrow_mut().extend(got);
+                        let mut s = schemas.borrow_mut();
+                        s.avro.extend(got);
+                        s.note_non_avro(reg, [sid]);
                     }
                 }
             }
@@ -1473,7 +1519,7 @@ fn value_filter_predicate(
 fn decode_batch(
     raw: crate::kafka::RawConsume,
     req: &ConsumeReq,
-    schemas: &std::collections::HashMap<i32, Arc<apache_avro::Schema>>,
+    schemas: &BatchSchemas,
     preview: bool,
 ) -> ConsumeResp {
     // key_filter is applied server-side in consume_raw (raw bytes, pre-decode)

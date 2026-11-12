@@ -1,4 +1,4 @@
-//! Axum router for **Settings → Skills**: the bundled-skill catalogue plus the
+//! Axum router for **Skills Lab → Bundled**: the bundled-skill catalogue plus the
 //! manual, drift-aware install/update primitives. All paths are relative to the
 //! `/api/v1` mount point.
 //!
@@ -9,7 +9,6 @@
 //! consent; the backend always keeps the safety copy.
 
 use std::path::Path as FsPath;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -17,6 +16,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use otto_context::http::ContextCtx;
+use otto_context::library::{
+    prune_skill_backups as prune_backups, reserve_skill_backup as backup_dir, SKILL_BACKUPS_KEPT,
+};
 use otto_context::{user_skills, Library};
 use otto_core::api::{BundledSkillContent, Problem, SkillFileEntry};
 use otto_core::auth::AuthUser;
@@ -87,7 +89,9 @@ pub struct BundledView {
     pub description: String,
     /// The installed version, or `None` when not installed.
     pub installed_version: Option<u32>,
-    /// `"not_installed" | "up_to_date" | "update_available" | "ahead"`.
+    /// `"not_installed" | "up_to_date" | "update_available" | "ahead" |
+    /// "modified"` — `modified`: the installed tree is no longer what Otto
+    /// installed (edited without a version bump); updating it asks first.
     pub state: String,
     /// `true` iff the bundle is strictly newer than the installed copy
     /// (`bundled > installed`) — i.e. the `update_available` state. Lets the
@@ -118,6 +122,10 @@ pub struct InstallAllResult {
     /// untouched in the Library, no backup made. Current Library copies still
     /// reconcile their provider mirrors so failed copies can be retried.
     pub skipped: Vec<String>,
+    /// Installed copies the person edited since Otto installed them (their
+    /// tree hash no longer matches): left untouched unless `force`.
+    #[serde(default)]
+    pub modified: Vec<String>,
     /// Skills whose install failed; the rest of the batch still ran.
     pub failed: Vec<InstallFailure>,
     /// `<provider skills dir>/<name>` entries left untouched because a
@@ -152,10 +160,6 @@ struct InstallAllQuery {
     force: bool,
 }
 
-/// Backups kept per skill in `<library>/skills-backup/`; older ones are pruned
-/// after each new backup.
-const BACKUPS_KEPT: usize = 3;
-
 fn default_true() -> bool {
     true
 }
@@ -181,14 +185,17 @@ pub fn router<C: ContextCtx>() -> Router<C> {
 // ---------------------------------------------------------------------------
 
 /// Map an [`InstallState`] to its wire `state` string + installed version.
-fn state_view(st: Option<InstallState>) -> (String, Option<u32>) {
+fn state_view(st: Option<InstallState>, on_disk: Option<u32>) -> (String, Option<u32>) {
     match st {
         None | Some(InstallState::NotInstalled) => ("not_installed".to_string(), None),
-        Some(InstallState::UpToDate) => ("up_to_date".to_string(), None),
+        // The bundle carries no installed version for this state: read it off
+        // the installed SKILL.md so a badge can say "Installed v3".
+        Some(InstallState::UpToDate) => ("up_to_date".to_string(), on_disk),
         Some(InstallState::UpdateAvailable { installed, .. }) => {
             ("update_available".to_string(), Some(installed))
         }
         Some(InstallState::Ahead { installed, .. }) => ("ahead".to_string(), Some(installed)),
+        Some(InstallState::Modified { installed, .. }) => ("modified".to_string(), Some(installed)),
     }
 }
 
@@ -196,12 +203,25 @@ async fn list_bundled_skills<C: ContextCtx>(
     State(s): State<C>,
     Extension(_user): Extension<AuthUser>,
 ) -> ApiResult<Json<Vec<BundledView>>> {
-    let library = s.library();
-    let views = list_bundled()
+    // `install_state` hashes each installed tree: blocking fs work.
+    let library = s.library().clone();
+    let views = tokio::task::spawn_blocking(move || bundled_views(&library))
+        .await
+        .map_err(|e| Error::Internal(format!("list task: {e}")))?;
+    Ok(Json(views))
+}
+
+fn bundled_views(library: &Library) -> Vec<BundledView> {
+    list_bundled()
         .into_iter()
         .map(|b| {
             let st = install_state(library, &b.name);
-            let (state, installed_version) = state_view(st);
+            let on_disk = if matches!(st, Some(InstallState::UpToDate)) {
+                crate::installed_version(library, &b.name)
+            } else {
+                None
+            };
+            let (state, installed_version) = state_view(st, on_disk);
             let update_available = matches!(st, Some(InstallState::UpdateAvailable { .. }));
             BundledView {
                 name: b.name,
@@ -213,8 +233,7 @@ async fn list_bundled_skills<C: ContextCtx>(
                 update_available,
             }
         })
-        .collect();
-    Ok(Json(views))
+        .collect()
 }
 
 /// Full content of one bundled skill (body + file list) so the Skills Lab can
@@ -316,6 +335,7 @@ fn install_many_into_dirs(
         installed: Vec::new(),
         backed_up: Vec::new(),
         skipped: Vec::new(),
+        modified: Vec::new(),
         failed: Vec::new(),
         user_owned: Vec::new(),
     };
@@ -347,6 +367,11 @@ fn install_many_into_dirs(
             }
             Some(InstallState::Ahead { .. }) if !force => {
                 out.skipped.push(b.name);
+                continue;
+            }
+            // The person's edits: never overwritten by a bulk install.
+            Some(InstallState::Modified { .. }) if !force => {
+                out.modified.push(b.name);
                 continue;
             }
             _ => {}
@@ -401,6 +426,12 @@ fn install_one_into_dirs(
     };
     let installed_dir = library.root.join("skills").join(name);
     let mut backup_path: Option<String> = None;
+    // An edited copy is always backed up, whatever the caller asked.
+    let backup = backup
+        || matches!(
+            install_state(library, name),
+            Some(InstallState::Modified { .. })
+        );
 
     if backup && installed_dir.exists() {
         let dest = backup_dir(&library.root, name)
@@ -412,7 +443,7 @@ fn install_one_into_dirs(
         copy_tree(&installed_dir, &dest)
             .map_err(|e| Error::Internal(format!("back up skill '{name}': {e}")))?;
         backup_path = Some(dest.to_string_lossy().into_owned());
-        prune_backups(&library.root, name, BACKUPS_KEPT);
+        prune_backups(&library.root, name, SKILL_BACKUPS_KEPT);
     }
 
     let installed = install_into(library, name)
@@ -440,51 +471,6 @@ fn install_one_into_dirs(
         backup_path,
         user_owned,
     })
-}
-
-/// Atomically reserve a unique backup; two installs in one second must not
-/// merge their safety copies. Legacy `<name>-<secs>` directories remain valid.
-fn backup_dir(root: &FsPath, name: &str) -> std::io::Result<std::path::PathBuf> {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let parent = root.join("skills-backup");
-    std::fs::create_dir_all(&parent)?;
-    loop {
-        let dest = parent.join(format!("{name}-{secs}-{}", otto_core::new_id()));
-        match std::fs::create_dir(&dest) {
-            Ok(()) => return Ok(dest),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        }
-    }
-}
-
-/// Keep only the newest `keep` `skills-backup/<name>-<secs>` dirs for `name`
-/// (best effort: a failed removal is left for the next backup).
-fn prune_backups(root: &FsPath, name: &str, keep: usize) {
-    let Ok(rd) = std::fs::read_dir(root.join("skills-backup")) else {
-        return;
-    };
-    let prefix = format!("{name}-");
-    let mut dirs: Vec<((u64, String), std::path::PathBuf)> = rd
-        .flatten()
-        .filter_map(|e| {
-            let file = e.file_name();
-            let suffix = file.to_str()?.strip_prefix(&prefix)?;
-            let (timestamp, unique) = suffix.split_once('-').unwrap_or((suffix, ""));
-            let secs = timestamp.parse::<u64>().ok()?;
-            e.file_type()
-                .ok()?
-                .is_dir()
-                .then(|| ((secs, unique.to_string()), e.path()))
-        })
-        .collect();
-    dirs.sort_by(|a, b| b.0.cmp(&a.0));
-    for (_, d) in dirs.into_iter().skip(keep) {
-        let _ = std::fs::remove_dir_all(d);
-    }
 }
 
 /// Recursively copy a directory tree from `src` to `dest`.
@@ -636,6 +622,60 @@ mod tests {
             std::fs::read_to_string(provider.join(&skill.name).join("SKILL.md")).unwrap(),
             "user copy"
         );
+    }
+
+    /// Install-all never overwrites a copy the person edited without bumping
+    /// its version, and says so; a single update of it always backs it up.
+    #[test]
+    fn install_all_skips_modified_and_single_update_backs_it_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::new(dir.path().join("library"));
+        let skill = list_bundled().into_iter().next().unwrap();
+        let provider = dir.path().join("provider");
+        assert!(install_into(&lib, &skill.name).unwrap());
+        let md = lib.root.join("skills").join(&skill.name).join("SKILL.md");
+        let edited = format!("{}\nlocal rule\n", std::fs::read_to_string(&md).unwrap());
+        std::fs::write(&md, &edited).unwrap();
+
+        let all = install_many_into_dirs(
+            &lib,
+            Some(&skill.category),
+            false,
+            false,
+            std::slice::from_ref(&provider),
+        );
+        assert!(all.modified.contains(&skill.name), "{all:?}");
+        assert!(!all.installed.contains(&skill.name));
+        assert_eq!(std::fs::read_to_string(&md).unwrap(), edited);
+
+        // backup=false is overridden for an edited copy.
+        let one = install_one_into_dirs(&lib, &skill.name, false, std::slice::from_ref(&provider))
+            .map_err(|ApiErr(e)| e)
+            .unwrap();
+        assert!(one.backed_up);
+        let backup = std::path::PathBuf::from(one.backup_path.unwrap());
+        assert_eq!(
+            std::fs::read_to_string(backup.join("SKILL.md")).unwrap(),
+            edited
+        );
+        assert_eq!(
+            install_state(&lib, &skill.name),
+            Some(InstallState::UpToDate)
+        );
+    }
+
+    #[test]
+    fn up_to_date_view_reports_the_installed_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::new(dir.path());
+        let skill = list_bundled().into_iter().next().unwrap();
+        assert!(install_into(&lib, &skill.name).unwrap());
+        let view = bundled_views(&lib)
+            .into_iter()
+            .find(|v| v.name == skill.name)
+            .unwrap();
+        assert_eq!(view.state, "up_to_date");
+        assert_eq!(view.installed_version, Some(skill.version));
     }
 
     #[test]

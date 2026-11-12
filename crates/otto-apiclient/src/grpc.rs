@@ -698,48 +698,47 @@ message ErrorResponse { int32 error_code = 1; string error_message = 2; }
 
 /// Build the tonic endpoint for `url` (TLS for `https`/`grpcs`).
 ///
-/// SSRF guard: unless the workspace opted in to local/private targets, the host
-/// is resolved + vetted ONCE and the channel dials exactly that vetted address
-/// (pinned) — handing tonic the hostname would resolve it again at connect
-/// time, re-opening DNS rebinding. The original authority is kept as the
+/// SSRF guard (strict, or the allow-local rules when the workspace opted in to
+/// private targets): the host is resolved + vetted ONCE and the channel dials
+/// exactly that vetted address (pinned) — handing tonic the hostname would
+/// resolve it again at connect time, re-opening DNS rebinding. The original authority is kept as the
 /// request origin (`:authority`) and as the TLS server name, so virtual hosts
 /// and certificate verification behave exactly as for the hostname.
 async fn grpc_endpoint(url: &str, allow_local: bool) -> Result<Endpoint, Error> {
     let uri = http::Uri::from_str(url).map_err(|e| invalid(format!("bad url: {e}")))?;
     let is_tls = matches!(uri.scheme_str(), Some("https") | Some("grpcs"));
-    let mut endpoint = if allow_local {
-        Channel::builder(uri.clone())
+    // allow_local (the workspace opt-in): private targets pass, metadata and
+    // the daemon's own listener do not — and the dial is pinned the same way.
+    let resolved = if allow_local {
+        otto_netguard::resolve_checked_allow_local(url).await
     } else {
-        let (host, addrs) = otto_netguard::resolve_checked(url).await.map_err(invalid)?;
-        let mut addr = addrs
-            .iter()
-            .find(|a| a.is_ipv4())
-            .or_else(|| addrs.first())
-            .copied()
-            .ok_or_else(|| invalid(format!("host {host} did not resolve")))?;
-        if uri.port_u16().is_none() {
-            // `grpc`/`grpcs` have no registered default port in the URL parser.
-            addr.set_port(if is_tls { 443 } else { 80 });
-        }
-        // tonic only layers TLS on an `https` connect URI, so normalise the
-        // scheme (`grpc`/`grpcs` included) for both the dial and the origin.
-        let scheme = if is_tls { "https" } else { "http" };
-        let authority = uri
-            .authority()
-            .map(|a| a.as_str().to_string())
-            .ok_or_else(|| invalid("url has no host"))?;
-        let pinned = http::Uri::from_str(&format!("{scheme}://{addr}"))
-            .map_err(|e| invalid(format!("bad url: {e}")))?;
-        let origin = http::Uri::from_str(&format!("{scheme}://{authority}"))
-            .map_err(|e| invalid(format!("bad url: {e}")))?;
-        let mut endpoint = Channel::builder(pinned).origin(origin);
-        if is_tls {
-            endpoint = with_client_tls(endpoint, Some(host.as_str()))?;
-        }
-        return Ok(endpoint);
+        otto_netguard::resolve_checked(url).await
     };
+    let (host, addrs) = resolved.map_err(invalid)?;
+    let mut addr = addrs
+        .iter()
+        .find(|a| a.is_ipv4())
+        .or_else(|| addrs.first())
+        .copied()
+        .ok_or_else(|| invalid(format!("host {host} did not resolve")))?;
+    if uri.port_u16().is_none() {
+        // `grpc`/`grpcs` have no registered default port in the URL parser.
+        addr.set_port(if is_tls { 443 } else { 80 });
+    }
+    // tonic only layers TLS on an `https` connect URI, so normalise the
+    // scheme (`grpc`/`grpcs` included) for both the dial and the origin.
+    let scheme = if is_tls { "https" } else { "http" };
+    let authority = uri
+        .authority()
+        .map(|a| a.as_str().to_string())
+        .ok_or_else(|| invalid("url has no host"))?;
+    let pinned = http::Uri::from_str(&format!("{scheme}://{addr}"))
+        .map_err(|e| invalid(format!("bad url: {e}")))?;
+    let origin = http::Uri::from_str(&format!("{scheme}://{authority}"))
+        .map_err(|e| invalid(format!("bad url: {e}")))?;
+    let mut endpoint = Channel::builder(pinned).origin(origin);
     if is_tls {
-        endpoint = with_client_tls(endpoint, None)?;
+        endpoint = with_client_tls(endpoint, Some(host.as_str()))?;
     }
     Ok(endpoint)
 }
@@ -1255,8 +1254,13 @@ mod tests {
             .await
             .is_err());
         assert!(grpc_endpoint("http://[::1]:50051", false).await.is_err());
-        // allow_local: the workspace opt-in lets a local dev server through.
+        // allow_local: the workspace opt-in lets a local dev server through,
+        // but never cloud metadata or the daemon's own listener.
         assert!(grpc_endpoint("grpc://127.0.0.1:50051", true).await.is_ok());
+        assert!(grpc_endpoint("grpc://169.254.169.254:80", true)
+            .await
+            .is_err());
+        assert!(grpc_endpoint("http://127.0.0.1:7700", true).await.is_err());
         // A public literal is dialled at the vetted address, scheme normalised.
         let ep = grpc_endpoint("grpc://8.8.8.8:50051", false).await.unwrap();
         assert_eq!(ep.uri().scheme_str(), Some("http"));

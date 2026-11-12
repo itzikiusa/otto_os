@@ -16,6 +16,8 @@ mod changes;
 mod completion;
 mod metadata;
 mod multirun;
+mod process_list;
+mod read_only_guard;
 mod validation;
 
 use std::collections::HashMap;
@@ -103,6 +105,11 @@ pub const WRITE_BLOCKED_PREFIX: &str = "write_blocked: ";
 /// read-only MCP query endpoint refuses writes outright, regardless of the
 /// connection's write-guard, so an agent-supplied statement can never mutate data.
 pub const MCP_READ_ONLY_PREFIX: &str = "mcp_read_only: ";
+
+/// Stable marker prefixed to the refusal of a write on a connection marked
+/// Read-only (403). Unlike [`WRITE_BLOCKED_PREFIX`] there is no confirm path:
+/// only turning the setting off allows a write (see `read_only_guard`).
+pub const READ_ONLY_CONNECTION_PREFIX: &str = "read_only_connection: ";
 
 /// Stable marker prefixed to the rejection of a [`QueryRequest::read_only`]
 /// request (a UI run an agent asked for) whose statement is a write/DDL.
@@ -1989,15 +1996,15 @@ impl DbViewerService {
     /// and passes the `is_write` check below; only raw writes carrying
     /// `explain:true` are blocked.
     async fn guard_write(&self, conn_id: &Id, req: &QueryRequest) -> Result<()> {
-        if person_confirmed(req.confirm_write) {
-            return Ok(());
-        }
+        // Always load the row: a confirmed write still meets the Read-only refusal.
         let conn = self.connections.get(conn_id).await?;
         Self::guard_write_conn(&conn, req)
     }
 
-    /// [`Self::guard_write`] against an already-loaded connection row.
+    /// [`Self::guard_write`] against an already-loaded connection row. A
+    /// Read-only connection refuses a write FIRST, so no confirmation lifts it.
     fn guard_write_conn(conn: &Connection, req: &QueryRequest) -> Result<()> {
+        read_only_guard::refuse_write(conn, &req.statement)?;
         if person_confirmed(req.confirm_write) {
             return Ok(());
         }
@@ -2353,7 +2360,10 @@ impl DbViewerService {
         req: &QueryRequest,
         read_only: bool,
     ) -> Result<QueryResult> {
-        self.run_with(conn_id, user_id, req, read_only, true).await
+        // The UI's `req.read_only`, not `read_only`: an agent's MCP listing stays recorded.
+        let record = process_list::records_history(req.read_only, &req.statement);
+        self.run_with(conn_id, user_id, req, read_only, record)
+            .await
     }
 
     /// [`Self::run_inner`] with history recording optional — `record: false` is
@@ -3325,7 +3335,7 @@ impl DbViewerService {
                 // Best-effort summary row. A batch the write guard refused
                 // never ran, so (like a guarded single statement) it isn't
                 // recorded.
-                let refused = matches!(&failure, Some(e) if e.to_string().contains(WRITE_BLOCKED_PREFIX.trim_end()));
+                let refused = matches!(&failure, Some(e) if [WRITE_BLOCKED_PREFIX, READ_ONLY_CONNECTION_PREFIX].iter().any(|p| e.to_string().contains(p.trim_end())));
                 if counts.batches > 0 || (failure.is_some() && !refused) {
                     let _ = self
                         .repo

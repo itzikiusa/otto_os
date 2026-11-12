@@ -418,7 +418,7 @@
       <div class="lbl">Budget</div>
       <div class="budget">
         <label>Max iterations <input class="input in num" type="number" min="1" bind:value={maxIterations} /></label>
-        <label>Max minutes <input class="input in num" type="number" min="1" bind:value={maxMinutes} /></label>
+        <label>Max minutes <input class="input in num" type="number" min="1" bind:value={maxMinutes} aria-describedby="goal-run-cap" /></label>
         <label>Per-phase minutes <input class="input in num" type="number" min="1" bind:value={perPhaseMinutes} /></label>
         <label>Executors <input class="input in num" type="number" min="1" max="6" bind:value={executorCount} /></label>
       </div>
@@ -440,6 +440,7 @@
       <p class="muted small">
         Executors run sequentially in an isolated {mode === 'research' ? 'research directory' : 'git worktree'}. Working files remain available after the loop finishes.
       </p>
+      <p class="muted small" id="goal-run-cap">Otto stops any single run after 4 h of active time{maxMinutes > 240 ? ', even when this budget allows more' : ''}.</p>
       {#if draft.suggested_config.graph}
         <p class="muted small">{draft.suggested_config.graph.nodes.length} tasks need at least that many iterations. Leave extra iterations for repairs.</p>
         {#if maxIterations < draft.suggested_config.graph.nodes.length}<p class="form-error" use:announceShown={{ text: 'Increase the iteration budget to cover every graph task.', assertive: true }}>Increase the iteration budget to cover every graph task.</p>{/if}

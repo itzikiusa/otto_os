@@ -18,6 +18,7 @@ use tokio::sync::broadcast;
 use crate::classify::{decide, Disposition};
 use crate::config::{effective_config, next_run, write_config};
 use crate::digest::SessionDigest;
+use crate::library_write;
 use crate::pathsafe::resolve_target;
 use crate::producer::ProposalProducer;
 use crate::prompt::{build_prompt, load_skill_instructions};
@@ -641,7 +642,21 @@ impl ImprovementEngine {
                 // file into place atomically. On a conflict (someone changed the
                 // file since we snapshotted it) we do NOT clobber — the edit is
                 // queued for manual review instead.
-                match safe_auto_apply(&path, edit, current.as_deref()).await? {
+                // A Library skill goes through the Library (the editor's lock
+                // and hash check) and refreshes the Otto-owned CLI copies.
+                let outcome = match library_write::skill_target(&self.library_root, &path) {
+                    Some(t) => {
+                        canonicalize_within(&path, allowed_root_for(&path))?;
+                        let after = (edit.kind != ImprovementEditKind::Remove)
+                            .then(|| edit.patch.after.clone());
+                        match library_write::apply(t, current.clone(), after).await? {
+                            true => ApplyOutcome::Applied,
+                            false => ApplyOutcome::Conflict,
+                        }
+                    }
+                    None => safe_auto_apply(&path, edit, current.as_deref()).await?,
+                };
+                match outcome {
                     ApplyOutcome::Applied => ImprovementEditStatus::Applied,
                     ApplyOutcome::Conflict => ImprovementEditStatus::Pending,
                 }
@@ -707,7 +722,20 @@ impl ImprovementEngine {
         if let Some(parent) = std::path::Path::new(&edit.target_path).parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
-        let written = if edit.kind == ImprovementEditKind::Remove {
+        let library_skill =
+            library_write::skill_target(&self.library_root, Path::new(&edit.target_path));
+        let written = if let Some(t) = library_skill {
+            let after =
+                (edit.kind != ImprovementEditKind::Remove).then(|| edit.after_content.clone());
+            match library_write::apply(t, current.clone(), after).await {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(Error::Conflict(format!(
+                    "{} changed while the edit was applied",
+                    edit.target_path
+                ))),
+                Err(e) => Err(e),
+            }
+        } else if edit.kind == ImprovementEditKind::Remove {
             remove_edit_target(Path::new(&edit.target_path)).await
         } else {
             // Backup + temp + rename, like auto-apply: an in-place write
@@ -829,6 +857,13 @@ impl ImprovementEngine {
         };
         if current.as_deref() != expected {
             return Ok(false);
+        }
+        // A Library skill: restore through the Library (lock + hash check)
+        // and refresh the Otto-owned CLI copies.
+        if let Some(t) =
+            library_write::skill_target(&self.library_root, Path::new(&edit.target_path))
+        {
+            return library_write::apply(t, current, edit.before_content.clone()).await;
         }
         match &edit.before_content {
             Some(before) if edit.kind == ImprovementEditKind::Remove => {
@@ -962,9 +997,45 @@ impl ImprovementEngine {
         target_skills: &[String],
         trigger: ImprovementTrigger,
     ) -> Result<Id> {
+        self.narrative_run(ws_id, title, narrative, target_skills, trigger, false)
+            .await
+    }
+
+    /// [`Self::run_for_narrative`] for a narrative nobody reviewed before the
+    /// run started (the story watcher: third-party Jira/Confluence comments,
+    /// unattended). Every edit it proposes QUEUES for a person, whatever the
+    /// workspace's autonomy — see [`crate::classify::run_autonomy`].
+    pub async fn run_for_untrusted_narrative(
+        &self,
+        ws_id: &Id,
+        title: &str,
+        narrative: &str,
+        target_skills: &[String],
+        trigger: ImprovementTrigger,
+    ) -> Result<Id> {
+        self.narrative_run(ws_id, title, narrative, target_skills, trigger, true)
+            .await
+    }
+
+    async fn narrative_run(
+        &self,
+        ws_id: &Id,
+        title: &str,
+        narrative: &str,
+        target_skills: &[String],
+        trigger: ImprovementTrigger,
+        untrusted: bool,
+    ) -> Result<Id> {
         let run = self.improvements.create_run(ws_id, trigger).await?;
         let res = self
-            .run_for_narrative_body(run.id.clone(), ws_id, title, narrative, target_skills)
+            .run_for_narrative_body(
+                run.id.clone(),
+                ws_id,
+                title,
+                narrative,
+                target_skills,
+                untrusted,
+            )
             .await;
         self.settle_unfinished(ws_id, &run.id, res).await
     }
@@ -976,6 +1047,7 @@ impl ImprovementEngine {
         title: &str,
         narrative: &str,
         target_skills: &[String],
+        untrusted: bool,
     ) -> Result<Id> {
         let _ = self.events.send(Event::ImprovementRunStarted {
             workspace_id: ws_id.clone(),
@@ -1069,7 +1141,7 @@ impl ImprovementEngine {
                 &id,
                 &proposal,
                 &cfg.skill_allowlist,
-                cfg.autonomy,
+                crate::classify::run_autonomy(cfg.autonomy, untrusted),
             )
             .await;
 
@@ -2459,6 +2531,38 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(),
             "NEW SKILL BODY\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn untrusted_narrative_queues_even_an_allowlisted_low_risk_edit() {
+        // The setup that auto-applies above, but run as the story watcher
+        // runs it: third-party comments never apply an edit unattended.
+        let (engine, ws_id, dir) = skill_edit_engine("good-skill", &["good-skill"]).await;
+        let skill_dir = dir.path().join("library").join("skills").join("good-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "OLD\n").unwrap();
+
+        let run_id = engine
+            .run_for_untrusted_narrative(
+                &ws_id,
+                "story-comments",
+                "Refine good-skill's routing rules.",
+                &["good-skill".to_string()],
+                ImprovementTrigger::Scheduled,
+            )
+            .await
+            .unwrap();
+        let edits = engine
+            .improvements
+            .list_edits_by_run(&run_id)
+            .await
+            .unwrap();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].status, ImprovementEditStatus::Pending);
+        assert_eq!(
+            std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(),
+            "OLD\n"
         );
     }
 

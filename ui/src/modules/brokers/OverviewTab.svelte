@@ -9,6 +9,7 @@
   import { pollWhileVisible } from '../../lib/poll';
   import { quietCadence } from '../../lib/pollBackoff';
   import type { ClusterMetrics, ClusterOverview, Id } from '../../lib/api/types';
+  import { rateText, totalText } from './brokerFigures';
 
   interface Props {
     clusterId: Id;
@@ -17,6 +18,8 @@
 
   let overview = $state<ClusterOverview | null>(null);
   let metrics = $state<ClusterMetrics | null>(null);
+  /** Last metrics poll failed (the figure reads "—", not "measuring…"). */
+  let metricsError = $state<string | null>(null);
   let loading = $state(true);
   /** Failed overview load — inline with Retry (it used to toast and leave a blank pane). */
   let error = $state<string | null>(null);
@@ -39,6 +42,7 @@
     error = null;
     overview = null;
     metrics = null;
+    metricsError = null;
     let alive = true;
 
     void api
@@ -67,8 +71,13 @@
           .then((m) => {
             if (!alive) return;
             metrics = m;
+            metricsError = null;
             cadence.sample(lastTotal !== m.total_messages);
             lastTotal = m.total_messages;
+          })
+          .catch((e) => {
+            if (alive) metricsError = loadErrorText(e);
+            throw e; // the poller backs off on failure
           }),
       {
         get ms() {
@@ -129,8 +138,11 @@
       </div>
       <div class="card">
         <span class="k">Throughput</span>
-        <span class="v">{Math.round(metrics?.messages_per_sec ?? 0)}<small>/s</small></span>
-        <span class="sub">{fmtNum(metrics?.total_messages ?? 0)} total</span>
+        <!-- The first sweep is only a baseline: "measuring…" until a rate exists, never a fake 0. -->
+        <span class="v" title={metricsError ?? (metrics?.messages_per_sec == null ? 'Measuring — the rate needs two samples a few seconds apart' : '')}>
+          {rateText(metrics?.messages_per_sec, metricsError != null)}{#if metrics?.messages_per_sec != null}<small>/s</small>{/if}
+        </span>
+        <span class="sub">{totalText(metrics?.total_messages)} total</span>
       </div>
       {#if overview.under_replicated_partitions != null}
         <div class="card" class:warn-card={overview.under_replicated_partitions > 0}>

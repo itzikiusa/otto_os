@@ -322,7 +322,10 @@ drives the throughput chart and broker CPU/RAM:
 - **Throughput** is derived from the **high-watermark delta** between calls (a
   cluster-wide watermark sweep, fanned across 16 worker threads). The sweep is
   expensive over a tunnel, so a fresh value is cached for ~8 s and reused
-  between polls.
+  between polls. The first sweep is only a baseline: until a second sweep
+  lands (due ~8 s later) `messages_per_sec` is `null` and the Overview shows
+  **measuring…** — never a measured-looking `0/s`. `total_messages` is `null`
+  until the first sweep. A failed metrics call shows "—".
 - **Broker CPU/RAM** comes from the optional Prometheus `metrics_url`
   (`prometheus_available` is `false` when none is set). It understands Redpanda
   (`redpanda_*`), JVM (`jvm_memory_bytes_*`), and `process_*` metric names.
@@ -382,7 +385,12 @@ disturbs your real consumers**.
   Schema Registry is configured (the magic byte + 4-byte schema id are
   recognized, the schema fetched by id and cached). Each decoded payload also
   carries `raw_base64`, so the UI can re-render a message as hex/base64 on
-  demand.
+  demand. A framed payload whose registry schema is **JSON Schema** or
+  **Protobuf** is not decoded: the body after the 5-byte frame is shown as-is
+  with `schema_id` and a one-line `notice` ("only Avro is decoded").
+- **Order** — a multi-partition peek returns one timeline: a merge by
+  timestamp (ties by partition, then offset) that keeps each partition's own
+  offset order.
 - **`mask`** — when `true`, every key, value, and header value is run through
   `otto_core::redact` **server-side** before the response leaves the daemon (raw
   PII never reaches the client); the response is flagged `masked: true` and the
@@ -411,7 +419,12 @@ writes an audit row (see §10).
 ## 7. Consumer groups & lag
 
 - `GET /brokers/clusters/{id}/groups` → `GroupSummary[]` (group id, state,
-  protocol type, member count).
+  protocol type, member count, `total_lag`, `lag_pending`). List lag is
+  computed by one background job per cluster, 4 groups at a time, cached
+  30 s; the list waits at most 3 s for it. Groups not done yet come back
+  `lag_pending: true` (the UI re-fetches with a bounded backoff and shows
+  "lag …"); `total_lag: null` (shown "—") means no committed offsets,
+  unreadable offsets, or not a consumer group — never a guessed 0.
 - `GET /brokers/clusters/{id}/groups/{group}` → `GroupDetail`: members (with
   client id, host, and assigned topic-partitions), per-partition offsets
   (`current_offset`, `high_watermark`, `lag`), and `total_lag`. The UI sorts by
@@ -468,8 +481,11 @@ the broker-ops tables (migration `0055`).
   (name, value, source, `is_default`, `is_sensitive`, `is_read_only`).
 - `PUT …/topics/{topic}/configs` with an `AlterConfigsReq`
   (`{ configs: [{name, value}], confirm? }`, Editor; guarded clusters require
-  `confirm`). The change **merges over the existing dynamic overrides** and
-  returns the refreshed config list. Alters write an audit row.
+  `confirm`). Only the edited keys change: the client's AlterConfigs is a
+  full replace, so the request carries every current dynamic override plus
+  the edits, and it is **refused (nothing changed)** when the current
+  overrides can't be read in full — a failed describe, or a sensitive
+  override whose value the broker withholds. Returns the refreshed config list. Alters write an audit row.
 
 Some clusters/principals can't read configs (e.g. MSK without
 `DESCRIBE_CONFIGS`); in that case the cleanup-policy enrichment on the topics

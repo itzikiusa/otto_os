@@ -5,6 +5,7 @@
 //! client pool) → `http` (`api_router::<S: BrokersCtx>()`).
 
 pub mod decode;
+mod group_lag_cache;
 pub mod http;
 pub mod kafka;
 pub mod metrics;

@@ -14,18 +14,16 @@
   import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
   import { toastError } from '../../lib/toastError';
   import ConversationView from '../agents/conversation/ConversationView.svelte'; // ui-guards: allow — experimental threads embeds shared ConversationView
-  import { buildThreadMenu } from './threadMenu';
+  import { buildThreadMenu, relatedThreadsItem } from './threadMenu';
   import ThreadTerminalDrawer from './ThreadTerminalDrawer.svelte';
   import { harnessLabel, isPlainShellSession, sessionBranch } from './threadsHelpers';
   import { threadRepos } from './threadRepos.svelte';
   import { threads } from './threadsStore.svelte';
-  import PhoneHandoffButton from '../../lib/components/PhoneHandoffButton.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { startThreadTerminal } from './runtime/threadTerminalStart';
   import { runtimeThreadMenu } from './runtime/runtimeMenu';
   import { threadsHostCommands } from './runtime/threadsHost';
-  import { relayTargets, relayToThread } from './threadRelay';
   import { asThreadSession, runtimeThreads } from './runtime/runtimeThreads.svelte';
   // The structured-runtime conversation loads with the first runtime thread.
   const RuntimeThread = lazyComponent(() => import('./runtime/RuntimeThread.svelte'));
@@ -34,9 +32,10 @@
     paneId: string;
     focused: boolean;
     multiPane: boolean;
-    onstartroom: (sessionId: string) => void;
+    /** Kept for callers: rooms now start from the header's Related threads popover. */
+    onstartroom?: (sessionId: string) => void;
   }
-  let { paneId, focused, multiPane, onstartroom }: Props = $props();
+  let { paneId, focused, multiPane }: Props = $props();
 
   const runtime = $derived(runtimeThreads.get(paneId));
   const session = $derived(ws.getSession(paneId) ?? (runtime ? asThreadSession(runtime) : null));
@@ -58,8 +57,8 @@
   let convRef = $state<ReturnType<typeof ConversationView> | null>(null);
   let renaming = $state(false);
   let draftTitle = $state('');
-  // Terminal drawer + peer bar live in the store so the page's top bar can
-  // drive the focused pane (single view has no pane header of its own).
+  // The terminal drawer lives in the store so the page's top bar can drive
+  // the focused pane (single view has no pane header of its own).
   const showTerminal = $derived(threads.isTerminalOpen(paneId));
   // A runtime thread has no terminal of its own: its drawer is a plain shell in
   // the thread's folder (`meta.terminal_of`, out of the thread lists like the
@@ -73,14 +72,7 @@
     startThreadTerminal(runtime)
       .catch((e: unknown) => { shellFailed[id] = true; toastError('Couldn’t open a terminal', e); });
   });
-  const showPeerBar = $derived(threads.peerBarFor === paneId);
   const toggleTerminal = (): void => threads.toggleTerminal(paneId);
-  let peerTarget = $state('broadcast');
-  let peerText = $state('');
-  let peerSending = $state(false);
-
-  const peerTargets = $derived(relayTargets(paneId));
-
   // The top bar's "Search conversation" asks the focused pane.
   let lastSearchN = 0;
   $effect(() => {
@@ -88,18 +80,6 @@
     if (req && req.id === paneId && req.n !== lastSearchN) {
       lastSearchN = req.n;
       convRef?.triggerSearch();
-    }
-  });
-
-  $effect(() => {
-    if (showPeerBar && peerTargets.length > 0 && peerTarget === 'broadcast') {
-      peerTarget = peerTargets[0].id;
-    }
-  });
-
-  $effect(() => {
-    if (showPeerBar && peerTarget !== 'broadcast' && !peerTargets.some((t) => t.id === peerTarget)) {
-      peerTarget = peerTargets[0]?.id ?? 'broadcast';
     }
   });
 
@@ -129,25 +109,6 @@
     } else if (e.key === 'Escape') {
       e.preventDefault();
       renaming = false;
-    }
-  }
-
-  async function submitInlinePeer(): Promise<void> {
-    if (peerSending || !peerText.trim()) return;
-    peerSending = true;
-    try {
-      const ok = await relayToThread({
-        fromSessionId: paneId,
-        target: peerTarget,
-        text: peerText,
-        workspaceId: session?.workspace_id ?? ws.currentId,
-      });
-      if (ok) {
-        peerText = '';
-        if (threads.peerBarFor === paneId) threads.peerBarFor = null;
-      }
-    } finally {
-      peerSending = false;
     }
   }
 
@@ -205,8 +166,9 @@
   }
 
   function openPaneMenu(e: MouseEvent): void {
-    if (runtime) ctxMenu.show(e, runtimeThreadMenu(paneId));
-    else if (session) ctxMenu.show(e, buildThreadMenu(session, { onstartroom }));
+    // Related threads (message, rooms) sits in every pane's ⋯ (threadMenu.ts).
+    if (runtime) ctxMenu.show(e, [...runtimeThreadMenu(paneId), { separator: true }, relatedThreadsItem(paneId)]);
+    else if (session) ctxMenu.show(e, buildThreadMenu(session));
   }
   function paneFocus(node: HTMLElement): { destroy(): void } {
     const mark = (): void => {
@@ -274,7 +236,6 @@
             <Icon name="terminal" size={13} />
           </button>
         {/if}
-        <PhoneHandoffButton route={`threads/${paneId}`} what="this thread" name={session?.title} testid="pane-continue-phone-{paneId}" />
         <button
           type="button"
           class="icon-btn"
@@ -297,56 +258,6 @@
         </button>
       </div>
     </header>
-  {/if}
-
-  {#if showPeerBar}
-    <div class="tp-peer-bar" data-testid="pane-peer-bar-{paneId}">
-      <span class="tp-peer-label">To:</span>
-      <select
-        class="input tp-peer-select"
-        aria-label="Target thread for peer message"
-        bind:value={peerTarget}
-      >
-        {#each peerTargets as t (t.id)}
-          <option value={t.id}>{t.title}</option>
-        {/each}
-        <option value="broadcast">Broadcast to all active threads</option>
-      </select>
-      <input
-        type="text"
-        dir="auto"
-        class="input tp-peer-input"
-        aria-label="Message to send to peer thread"
-        placeholder="Relay message from this thread…"
-        bind:value={peerText}
-        use:focusOnMount
-        onkeydown={(e) => {
-          if (e.key === 'Enter' && !e.isComposing) {
-            e.preventDefault();
-            void submitInlinePeer();
-          } else if (e.key === 'Escape') {
-            threads.peerBarFor = null;
-          }
-        }}
-      />
-      <button
-        type="button"
-        class="btn small primary"
-        disabled={peerSending || !peerText.trim()}
-        onclick={() => void submitInlinePeer()}
-      >
-        Send
-      </button>
-      <button
-        type="button"
-        class="icon-btn"
-        aria-label="Close peer relay bar"
-        title="Close"
-        onclick={() => (threads.peerBarFor = null)}
-      >
-        <Icon name="x" size={12} />
-      </button>
-    </div>
   {/if}
 
   <div class="tp-body">
@@ -471,32 +382,6 @@
   .tp-actions :global(.icon-btn.active) {
     background: var(--accent-soft);
     color: var(--accent-text);
-  }
-  .tp-peer-bar {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 10px;
-    background: var(--surface-2);
-    border-block-end: 1px solid var(--border);
-    flex-shrink: 0;
-  }
-  .tp-peer-label {
-    font-size: var(--fs-xs);
-    font-weight: 500;
-    color: var(--text-dim);
-    flex-shrink: 0;
-  }
-  .tp-peer-select {
-    max-width: 180px;
-    font-size: var(--fs-xs);
-    padding-block: 4px;
-  }
-  .tp-peer-input {
-    flex: 1;
-    min-width: 0;
-    font-size: var(--fs-s);
-    padding-block: 4px;
   }
   .tp-body {
     flex: 1;

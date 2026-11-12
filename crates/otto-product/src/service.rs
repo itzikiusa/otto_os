@@ -631,7 +631,8 @@ impl ProductService {
 
     /// Publish a suggested version to the issue tracker.
     ///
-    /// - Jira: updates the issue description with the version body.
+    /// - Jira: refuses with a Conflict when the description changed in Jira
+    ///   since the last sync, else updates it with the version body.
     /// - Confluence: fetches the current page version, then updates the page body.
     ///
     /// On success, records a `published` version and a `publish` event, and
@@ -660,13 +661,34 @@ impl ProductService {
         let token = self.account_token(&account).await?;
 
         // 2. Push to the issue tracker.
-        let mut published_raw: Option<String> = None;
-        match story.source_kind.as_str() {
+        let published_raw: Option<String> = match story.source_kind.as_str() {
             "jira" => {
                 let client = Tracker::for_account(&account, &token);
+                // Same optimistic concurrency as Confluence below, keyed on
+                // the description itself (see `publish_guard`).
+                if let Some(base) = self.synced_jira_description(&story.id).await? {
+                    let live = client.get_issue(&story.source_key).await?;
+                    if let Some(conflict) =
+                        crate::publish_guard::jira_publish_conflict(&base, &live.description)
+                    {
+                        return Err(conflict);
+                    }
+                }
                 client
                     .update_description(&story.source_key, &version.body_md)
                     .await?;
+                // What Jira now holds (its ADF round-trip of our Markdown) is
+                // the NEXT publish's base. A failed re-read leaves no base.
+                match client.get_issue(&story.source_key).await {
+                    Ok(after) => serde_json::to_string(&serde_json::json!({
+                        "description": after.description
+                    }))
+                    .ok(),
+                    Err(e) => {
+                        tracing::warn!(story = %story.id, "publish: re-reading the Jira issue failed: {e}");
+                        None
+                    }
+                }
             }
             "confluence" => {
                 let client = ConfluenceClient::for_account(&account, &token)?;
@@ -703,17 +725,17 @@ impl ProductService {
                     .await?;
                 // Remember the version this publish produced, so the NEXT
                 // publish's conflict check has the right base.
-                published_raw = serde_json::to_string(&serde_json::json!({
+                serde_json::to_string(&serde_json::json!({
                     "version": updated.version
                 }))
-                .ok();
+                .ok()
             }
             other => {
                 return Err(Error::Invalid(format!(
                     "publish_version: unsupported source_kind: {other}"
                 )));
             }
-        }
+        };
 
         // 3. Record a 'published' version row.
         self.repo
@@ -3755,6 +3777,236 @@ mod tests {
         svc.authorize_story_account(&draft.story.id, &as_user(&stranger, false))
             .await
             .expect("accountless story passes");
+    }
+
+    // -----------------------------------------------------------------------
+    // Jira publish conflict guard (publish_guard) + chat "Replace draft"
+    // -----------------------------------------------------------------------
+
+    /// A Jira story imported with `synced_description` as its base, a
+    /// suggested version, and a mock Jira whose live description is the
+    /// canned one ("As a user I want to reset my password.").
+    async fn jira_publish_fixture(
+        synced_description: &str,
+        server: &MockServer,
+    ) -> (Arc<ProductService>, ProductRepo, Id, Id, Id) {
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/PROJ-1"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(canned_jira_issue_json("PROJ-1")),
+            )
+            .mount(server)
+            .await;
+        let pool = mem_pool().await;
+        let user_id = seed_user(&pool).await;
+        let ws_id = seed_workspace(&pool).await;
+        let account = seed_issue_account(&pool, &user_id, &server.uri()).await;
+        let repo = ProductRepo::new(pool.clone());
+        let secrets: Arc<dyn SecretStore> = Arc::new(FixedSecret("t".into()));
+        let svc = Arc::new(ProductService::new(
+            repo.clone(),
+            IssuesRepo::new(pool.clone()),
+            secrets,
+        ));
+        let req = ImportStoryReq {
+            source_kind: "jira".into(),
+            account_id: account.id.clone(),
+            source_key: "PROJ-1".into(),
+            cwd: None,
+            watch_enabled: None,
+        };
+        let src = FetchedSource {
+            title: "Reset password".into(),
+            url: format!("{}/browse/PROJ-1", server.uri()),
+            body_md: synced_description.into(),
+            raw_json: Some(serde_json::json!({ "description": synced_description }).to_string()),
+            issue_type: Some("Story".into()),
+        };
+        let detail = svc
+            .record_import(&ws_id, &req, &user_id, src)
+            .await
+            .unwrap();
+        let suggested = repo
+            .add_version(NewVersion {
+                story_id: detail.story.id.clone(),
+                kind: "suggested".into(),
+                title: "Reset password".into(),
+                body_md: "Rewritten body".into(),
+                raw_json: None,
+                change_notes: None,
+                created_by: user_id.clone(),
+            })
+            .await
+            .unwrap();
+        (svc, repo, detail.story.id, suggested.id, user_id)
+    }
+
+    #[tokio::test]
+    async fn jira_publish_refuses_when_the_description_changed_in_jira() {
+        let server = MockServer::start().await;
+        // Nothing may be written to Jira.
+        Mock::given(method("PUT"))
+            .and(path("/rest/api/3/issue/PROJ-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let (svc, repo, sid, vid, user) =
+            jira_publish_fixture("The body Otto synced before a Jira edit.", &server).await;
+
+        let err = svc.publish_version(&vid, &user).await.unwrap_err();
+        match err {
+            Error::Conflict(m) => assert!(m.contains("changed in Jira"), "{m}"),
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+        let published = repo
+            .latest_version_of_kind(&sid, "published")
+            .await
+            .unwrap();
+        assert!(published.is_none(), "a refused publish records nothing");
+    }
+
+    #[tokio::test]
+    async fn jira_publish_proceeds_and_records_the_next_base_when_unchanged() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/rest/api/3/issue/PROJ-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (svc, repo, sid, vid, user) =
+            jira_publish_fixture("As a user I want to reset my password.", &server).await;
+
+        svc.publish_version(&vid, &user).await.expect("publish");
+        let published = repo
+            .latest_version_of_kind(&sid, "published")
+            .await
+            .unwrap()
+            .expect("published row");
+        // The mock still serves the canned body: that is what Jira held after
+        // the write, so it is the next publish's base.
+        assert_eq!(
+            crate::publish_guard::raw_jira_description(published.raw_json.as_deref()).as_deref(),
+            Some("As a user I want to reset my password.")
+        );
+        assert_eq!(
+            svc.synced_jira_description(&sid).await.unwrap().as_deref(),
+            Some("As a user I want to reset my password.")
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_draft_refuses_an_empty_body() {
+        let pool = mem_pool().await;
+        let user_id = seed_user(&pool).await;
+        let ws_id = seed_workspace(&pool).await;
+        let repo = ProductRepo::new(pool.clone());
+        let secrets: Arc<dyn SecretStore> = Arc::new(FixedSecret("unused".into()));
+        let svc = ProductService::new(repo.clone(), IssuesRepo::new(pool.clone()), secrets);
+        let draft = svc.create_draft(&ws_id, &user_id, Some("D")).await.unwrap();
+        svc.update_draft_body(&draft.story.id, "D", "My own text", &user_id)
+            .await
+            .unwrap();
+
+        let err = svc
+            .propose_story_body(&draft.story.id, Some("D"), "  \n", None, &user_id)
+            .await
+            .expect_err("empty body refused");
+        assert!(matches!(err, Error::Invalid(_)), "got {err:?}");
+        let detail = svc.story_detail(&draft.story.id).await.unwrap();
+        assert_eq!(detail.source.unwrap().body_md, "My own text");
+    }
+
+    #[tokio::test]
+    async fn chat_proposal_on_a_local_draft_is_a_suggestion_and_leaves_the_draft_alone() {
+        let pool = mem_pool().await;
+        let user_id = seed_user(&pool).await;
+        let ws_id = seed_workspace(&pool).await;
+        let repo = ProductRepo::new(pool.clone());
+        let secrets: Arc<dyn SecretStore> = Arc::new(FixedSecret("unused".into()));
+        let svc = ProductService::new(repo.clone(), IssuesRepo::new(pool.clone()), secrets);
+        let draft = svc.create_draft(&ws_id, &user_id, Some("D")).await.unwrap();
+        let sid = draft.story.id.clone();
+        svc.update_draft_body(&sid, "D", "My own text", &user_id)
+            .await
+            .unwrap();
+
+        let version = svc
+            .propose_story_body(&sid, Some("Agent title"), "Agent body", None, &user_id)
+            .await
+            .unwrap();
+        assert_eq!(version.kind, "suggested");
+        assert_eq!(version.body_md, "Agent body");
+
+        // The person's draft, its single revision and the title are untouched;
+        // the suggestion waits in Rewrite.
+        let detail = svc.story_detail(&sid).await.unwrap();
+        assert_eq!(detail.story.title, "D");
+        let shown = detail.source.unwrap();
+        assert_eq!(shown.kind, "draft");
+        assert_eq!(shown.body_md, "My own text");
+        let drafts = repo
+            .list_versions(&sid)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|v| v.kind == "draft")
+            .count();
+        assert_eq!(drafts, 1);
+        let best = svc.best_content_version(&sid).await.unwrap().unwrap();
+        assert_eq!(best.id, version.id, "the suggestion is the best body");
+    }
+
+    #[tokio::test]
+    async fn chat_draft_on_an_imported_story_writes_a_visible_suggestion() {
+        let pool = mem_pool().await;
+        let user_id = seed_user(&pool).await;
+        let ws_id = seed_workspace(&pool).await;
+        let repo = ProductRepo::new(pool.clone());
+        let secrets: Arc<dyn SecretStore> = Arc::new(FixedSecret("unused".into()));
+        let svc = ProductService::new(repo.clone(), IssuesRepo::new(pool.clone()), secrets);
+        let req = ImportStoryReq {
+            source_kind: "jira".into(),
+            account_id: new_id(),
+            source_key: "TEST-7".into(),
+            cwd: None,
+            watch_enabled: None,
+        };
+        let src = FetchedSource {
+            title: "Tracker title".into(),
+            url: "https://jira.example.com/browse/TEST-7".into(),
+            body_md: "Jira body".into(),
+            raw_json: None,
+            issue_type: None,
+        };
+        let detail = svc
+            .record_import(&ws_id, &req, &user_id, src)
+            .await
+            .unwrap();
+        let sid = detail.story.id.clone();
+
+        let version = svc
+            .propose_story_body(&sid, Some("Agent title"), "Agent body", None, &user_id)
+            .await
+            .unwrap();
+        assert_eq!(version.kind, "suggested");
+
+        let suggested = repo
+            .latest_version_of_kind(&sid, "suggested")
+            .await
+            .unwrap()
+            .expect("a suggested version the Rewrite tab shows");
+        assert_eq!(suggested.body_md, "Agent body");
+        assert!(repo
+            .latest_version_of_kind(&sid, "draft")
+            .await
+            .unwrap()
+            .is_none());
+        // The imported source and the tracker title are untouched.
+        let after = svc.story_detail(&sid).await.unwrap();
+        assert_eq!(after.story.title, "Tracker title");
+        assert_eq!(after.source.unwrap().body_md, "Jira body");
     }
 }
 

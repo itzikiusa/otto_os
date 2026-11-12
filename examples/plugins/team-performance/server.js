@@ -2687,12 +2687,23 @@ function readBodyLegacy(req) {
 const GOAL_METRICS = new Set(A.GOAL_METRICS);
 const SCOPE_METRICS = new Set(A.SCOPE_METRICS);
 
+/** Constant-time check of the `x-otto-plugin-token` Otto's proxy sends. */
+function pluginTokenOk(got) {
+  if (!TOKEN || typeof got !== 'string') return false;
+  const a = Buffer.from(got);
+  const b = Buffer.from(TOKEN);
+  return a.length === b.length && require('crypto').timingSafeEqual(a, b);
+}
+
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://localhost');
   const q = u.searchParams;
   try {
-    if (q.get('account') && !/^[A-Za-z0-9_-]{1,64}$/.test(q.get('account'))) return send(res, 400, { error: 'bad account id' });
     if (u.pathname === '/health') return send(res, 200, { ok: true });
+    // Only Otto's proxy may call in: it adds this plugin's own token. Any
+    // other local process gets 401 (fail closed when no token was given).
+    if (!pluginTokenOk(req.headers['x-otto-plugin-token'])) return send(res, 401, { error: 'missing or invalid x-otto-plugin-token' });
+    if (q.get('account') && !/^[A-Za-z0-9_-]{1,64}$/.test(q.get('account'))) return send(res, 400, { error: 'bad account id' });
 
     if (u.pathname === '/accounts' && req.method === 'GET') {
       return send(res, 200, await hostGet('/jira/accounts'));

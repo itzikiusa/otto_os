@@ -323,7 +323,7 @@ async fn poll_story(
         let mut attempt: u32 = 0;
         loop {
             match orchestrator
-                .run_agent_untrusted(&prompt, None, RECONCILE_TIMEOUT)
+                .run_agent_untrusted_background("product", &prompt, None, RECONCILE_TIMEOUT)
                 .await
             {
                 Ok(out) => break Ok(out),
@@ -410,37 +410,41 @@ async fn poll_story(
         )
         .await?;
 
-    // Step 7: run self-improvement narrative.
-    let all_questions = product_repo
-        .list_questions(&story_id)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!("story watcher: list_questions({story_id}) failed: {e}");
-            Vec::new()
-        });
-    let notes = product_repo
-        .list_notes(&story_id)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!("story watcher: list_notes({story_id}) failed: {e}");
-            Vec::new()
-        });
-    let narrative = build_improve_narrative_from_clarifications(&story, &all_questions, &notes);
-    let target_skills = vec![
-        "story-clarifying-questions".to_string(),
-        "po-story-overview".to_string(),
-    ];
-    if let Err(e) = improve
-        .run_for_narrative(
-            &story.workspace_id,
-            "story-comments",
-            &narrative,
-            &target_skills,
-            ImprovementTrigger::Scheduled,
-        )
-        .await
-    {
-        warn!("story watcher: run_for_narrative {story_id}: {e}");
+    // Step 7: self-improvement from the questions THIS batch answered —
+    // never the story's whole history again on every new comment, and
+    // nothing at all when no question was answered. The answers are
+    // third-party text read unattended, so the run is untrusted: its edits
+    // always queue for a person (`run_for_untrusted_narrative`), and the
+    // narrative fences them as data.
+    if !answers.is_empty() {
+        let all_questions = product_repo
+            .list_questions(&story_id)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("story watcher: list_questions({story_id}) failed: {e}");
+                Vec::new()
+            });
+        let newly_answered = newly_answered_questions(all_questions, &answers);
+        if !newly_answered.is_empty() {
+            let narrative =
+                build_improve_narrative_from_clarifications(&story, &newly_answered, &[]);
+            let target_skills = vec![
+                "story-clarifying-questions".to_string(),
+                "po-story-overview".to_string(),
+            ];
+            if let Err(e) = improve
+                .run_for_untrusted_narrative(
+                    &story.workspace_id,
+                    "story-comments",
+                    &narrative,
+                    &target_skills,
+                    ImprovementTrigger::Scheduled,
+                )
+                .await
+            {
+                warn!("story watcher: run_for_untrusted_narrative {story_id}: {e}");
+            }
+        }
     }
 
     // Step 8: emit a Notice event for the UI.
@@ -458,6 +462,17 @@ async fn poll_story(
     });
 
     Ok(())
+}
+
+/// The questions this reconcile batch just answered (by id), with the
+/// answer it recorded — the only ones the watcher's improvement run reads.
+fn newly_answered_questions(
+    all: Vec<otto_state::ProductQuestion>,
+    answers: &[(Id, String)],
+) -> Vec<otto_state::ProductQuestion> {
+    all.into_iter()
+        .filter(|q| q.status == "answered" && answers.iter().any(|(id, _)| *id == q.id))
+        .collect()
 }
 
 #[derive(serde::Deserialize)]
@@ -644,11 +659,40 @@ mod tests {
     fn watcher_reconcile_uses_the_untrusted_runner() {
         let src = include_str!("watcher.rs");
         let code = &src[..src.find("#[cfg(test)]").unwrap()];
-        assert!(code.contains(".run_agent_untrusted("));
+        assert!(code.contains(".run_agent_untrusted"));
         assert!(
             !code.contains(".run_agent(&"),
             "no full-tool run_agent in the watcher"
         );
+    }
+
+    /// Third-party comments must never auto-apply a skill edit: the watcher
+    /// runs self-improvement only through the untrusted entry point.
+    #[test]
+    fn watcher_improvement_run_is_untrusted() {
+        let src = include_str!("watcher.rs");
+        let code = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(code.contains(".run_for_untrusted_narrative("));
+        assert!(!code.contains(".run_for_narrative("));
+    }
+
+    #[test]
+    fn improvement_reads_only_the_questions_this_batch_answered() {
+        let mut old = make_question("q-old", "Answered last week");
+        old.status = "answered".into();
+        old.answer = Some("old".into());
+        let mut fresh = make_question("q-new", "Answered now");
+        fresh.status = "answered".into();
+        fresh.answer = Some("new".into());
+        let open = make_question("q-open", "Still open");
+        let answers = vec![("q-new".to_string(), "new".to_string())];
+
+        let picked = newly_answered_questions(vec![old, fresh, open], &answers);
+        assert_eq!(
+            picked.iter().map(|q| q.id.as_str()).collect::<Vec<_>>(),
+            ["q-new"]
+        );
+        assert!(newly_answered_questions(vec![], &answers).is_empty());
     }
 
     #[test]

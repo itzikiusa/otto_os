@@ -5,6 +5,7 @@
 //! No embeddings anywhere — recall is FTS5 + the link graph + agent-authored
 //! OKF docs.
 
+mod attachments;
 pub mod engine;
 pub mod http;
 mod index;
@@ -14,6 +15,7 @@ mod prepare;
 mod recovery;
 pub mod resolve;
 pub mod scan;
+mod search_index;
 pub mod store;
 pub mod types;
 mod watch;

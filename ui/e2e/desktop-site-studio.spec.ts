@@ -92,8 +92,8 @@ test('a blank site starts from a template and saves as a new version', async ({ 
   const canvas = page.getByTestId('site-page');
   await expect(canvas).toContainText('Every purchase moves you up.');
   await expect(page.getByTestId('design-dirty')).toBeVisible();
-  await page.getByTestId('design-save').click();
-  await expect(page.getByTestId('design-version-chip')).toHaveCount(2);
+  // Autosave stores it as v2.
+  await expect(page.getByTitle('Current version: v2')).toBeVisible();
   await expect(page.getByTestId('design-dirty')).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
 });
@@ -134,10 +134,10 @@ test('edit a section from the inspector and in place; toolbars stay on screen', 
   const menu = page.locator('.ctx-menu');
   await page.waitForTimeout(100);
   await expectFullyInViewport(page, menu, 'publish menu');
-  await expect(menu.getByRole('menuitem', { name: /claude\.ai artifact/ })).toBeDisabled();
+  // No placeholder rows: only the exports that work.
+  await expect(menu.getByRole('menuitem', { name: /claude\.ai artifact|Svelte project/ })).toHaveCount(0);
   await page.keyboard.press('Escape');
 
-  await page.getByTestId('design-save').click();
   await expect(page.getByTestId('design-dirty')).toHaveCount(0);
 });
 

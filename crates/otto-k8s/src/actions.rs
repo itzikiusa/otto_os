@@ -13,6 +13,7 @@
 //! confirmation and the MCP tool only sets it after an explicit user yes.
 
 use chrono::{DateTime, SecondsFormat, Utc};
+use otto_core::domain::Environment;
 use otto_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -37,6 +38,70 @@ pub struct K8sActionResp {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
+    /// Set only when a multi-step plan stopped partway: every step in order,
+    /// with which ran (`ok`), which failed and which never started — the
+    /// cluster is in a half-applied state the caller must see.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<K8sActionStep>,
+}
+
+/// One kubectl step of a multi-step action (`rollout_promote`,
+/// `argocd_app_restart`) as reported after a partial failure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct K8sActionStep {
+    /// `patch rollouts/web (status)`, `rollout restart deployments/api` …
+    pub step: String,
+    /// `done` | `failed` | `skipped`.
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// A short, secret-free label for a planned step: the verb and target (the
+/// leading non-flag args), plus `(status)` for a status-subresource patch.
+pub fn step_label(step: &[String]) -> String {
+    let mut label = step
+        .iter()
+        .take_while(|a| !a.starts_with('-'))
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if step.iter().any(|a| a == "--subresource=status") {
+        label.push_str(" (status)");
+    }
+    label
+}
+
+/// The response for a plan that failed at step `failed` (0-based) after at
+/// least one step already ran — partial, so `Ok` with `ok: false` and every
+/// step's fate instead of an error that hides what was applied.
+fn partial_failure(plan: &Plan, failed: usize, err: &Error, done_output: String) -> K8sActionResp {
+    let total = plan.steps.len();
+    let steps = plan
+        .steps
+        .iter()
+        .enumerate()
+        .map(|(i, s)| K8sActionStep {
+            step: step_label(s),
+            status: match i.cmp(&failed) {
+                std::cmp::Ordering::Less => "done",
+                std::cmp::Ordering::Equal => "failed",
+                std::cmp::Ordering::Greater => "skipped",
+            },
+            error: (i == failed).then(|| err.to_string()),
+        })
+        .collect();
+    K8sActionResp {
+        ok: false,
+        message: format!(
+            "{} — FAILED at step {} of {total} after {failed} step(s) were applied: {err}",
+            plan.message,
+            failed + 1
+        ),
+        output: (!done_output.is_empty()).then_some(done_output),
+        steps,
+    }
 }
 
 /// A planned action: kubectl argv lists (after the base flags) run in order.
@@ -93,6 +158,32 @@ fn require_confirm(req: &K8sActionReq, what: &str) -> Result<()> {
             req.name
         )))
     }
+}
+
+/// Every verb but a status read and a soft Argo CD refresh (a re-read of
+/// git, the UI's own rule) changes the cluster.
+fn is_mutating(req: &K8sActionReq) -> bool {
+    match req.action.trim() {
+        "rollout_status" => false,
+        "argocd_refresh" => p_bool(req, "hard"),
+        _ => true,
+    }
+}
+
+/// The typed-confirmation rules that depend on WHERE and WHO ([`plan`] keeps
+/// the per-verb destructive confirms, which hold on every cluster):
+/// - on a PROD cluster every mutating verb needs `params.confirm_name == name`
+///   (restart, scale, Argo sync / app restart, cronjob trigger, … — the UI
+///   already sends it there);
+/// - a confirm is a body field the client asserts, so an agent session's own
+///   credential never gives it (S6-304, the rule Athena's prod DDL guard
+///   applies): only a person's request, or a governed tool call a person
+///   approved (it replays as that person), may carry one.
+pub fn check_confirm(req: &K8sActionReq, env: Environment) -> Result<()> {
+    if env == Environment::Prod && is_mutating(req) {
+        require_confirm(req, "this is a production cluster")?;
+    }
+    crate::pod_http::refuse_agent_confirm(p_str(req, "confirm_name"))
 }
 
 fn target(kind: Kind, name: &str) -> String {
@@ -511,14 +602,19 @@ pub async fn execute(k: &Kubectl, req: &K8sActionReq) -> Result<K8sActionResp> {
 }
 
 /// Authenticated entry point for HTTP and MCP callers. Rechecks each planned
-/// command so revocation stops a multi-step rollout before its next mutation.
+/// command so revocation stops a multi-step rollout before its next mutation,
+/// and applies the prod / agent confirm rules ([`check_confirm`]) once the
+/// caller is known to hold the action's grant.
 pub async fn execute_authorized(
     k: &Kubectl,
     req: &K8sActionReq,
     pool: &otto_state::DbPool,
     user: &otto_core::domain::User,
     cluster_id: &otto_core::Id,
+    env: Environment,
 ) -> Result<K8sActionResp> {
+    authorize_action(req, pool, user, cluster_id).await?;
+    check_confirm(req, env)?;
     execute_inner(k, req, Some((pool, user, cluster_id))).await
 }
 
@@ -557,9 +653,6 @@ async fn execute_inner(
     req: &K8sActionReq,
     authorization: Option<Authorization<'_>>,
 ) -> Result<K8sActionResp> {
-    if let Some((pool, user, cluster_id)) = authorization {
-        authorize_action(req, pool, user, cluster_id).await?;
-    }
     let now = Utc::now();
     let app = if needs_application(req.action.trim()) {
         Some(resources::get_one(k, Kind::Applications, Some(&req.ns), req.name.trim()).await?)
@@ -573,38 +666,18 @@ async fn execute_inner(
             application: app.as_ref(),
         },
     )?;
-    let mut outputs = Vec::new();
+    let mut outputs: Vec<String> = Vec::new();
     let mut ok = true;
-    for step in &plan.steps {
-        if let Some((pool, user, cluster_id)) = authorization {
-            authorize_action(req, pool, user, cluster_id).await?;
-        }
-        if plan.tolerate_nonzero {
-            // Tolerant of a non-zero exit (not complete yet), but NOT of auth
-            // failures: a stale EKS token is re-authed once, and Unauthorized /
-            // Forbidden surface as errors instead of "not complete".
-            let out = k
-                .run_tolerant(step.iter().cloned(), crate::cli::DEFAULT_TIMEOUT)
-                .await?;
-            if out.status != 0 {
-                ok = false;
+    for (i, step) in plan.steps.iter().enumerate() {
+        if let Err(e) = run_step(k, req, &plan, step, authorization, &mut outputs, &mut ok).await {
+            if i == 0 {
+                // Nothing was applied: a plain error.
+                return Err(e);
             }
-            let mut text = out.stdout;
-            if !out.stderr.trim().is_empty() {
-                text.push_str(&crate::cli::redact(out.stderr.trim()));
-            }
-            outputs.push(text);
-        } else {
-            let out = k.run(step.iter().cloned()).await?;
-            outputs.push(out.stdout);
+            return Ok(partial_failure(&plan, i, &e, join_outputs(outputs)));
         }
     }
-    let output = outputs
-        .into_iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let output = join_outputs(outputs);
     Ok(K8sActionResp {
         ok,
         message: if ok {
@@ -613,7 +686,53 @@ async fn execute_inner(
             format!("{} — not complete", plan.message)
         },
         output: (!output.is_empty()).then_some(output),
+        steps: Vec::new(),
     })
+}
+
+fn join_outputs(outputs: Vec<String>) -> String {
+    outputs
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// One planned step: re-authorize (a revoked grant stops the plan before its
+/// next mutation), then run it.
+async fn run_step(
+    k: &Kubectl,
+    req: &K8sActionReq,
+    plan: &Plan,
+    step: &[String],
+    authorization: Option<Authorization<'_>>,
+    outputs: &mut Vec<String>,
+    ok: &mut bool,
+) -> Result<()> {
+    if let Some((pool, user, cluster_id)) = authorization {
+        authorize_action(req, pool, user, cluster_id).await?;
+    }
+    if plan.tolerate_nonzero {
+        // Tolerant of a non-zero exit (not complete yet), but NOT of auth
+        // failures: a stale EKS token is re-authed once, and Unauthorized /
+        // Forbidden surface as errors instead of "not complete".
+        let out = k
+            .run_tolerant(step.iter().cloned(), crate::cli::DEFAULT_TIMEOUT)
+            .await?;
+        if out.status != 0 {
+            *ok = false;
+        }
+        let mut text = out.stdout;
+        if !out.stderr.trim().is_empty() {
+            text.push_str(&crate::cli::redact(out.stderr.trim()));
+        }
+        outputs.push(text);
+    } else {
+        let out = k.run(step.iter().cloned()).await?;
+        outputs.push(out.stdout);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1191,5 +1310,91 @@ mod tests {
             ..req("restart", "deployments", "web", json!({}))
         };
         assert!(plan(&r, now(), &PlanInputs::default()).is_ok());
+    }
+
+    const AGENT: otto_core::auth::RequestCredential = otto_core::auth::RequestCredential {
+        agent: true,
+        root_withheld: false,
+    };
+
+    async fn as_cred(
+        cred: otto_core::auth::RequestCredential,
+        r: &K8sActionReq,
+        env: Environment,
+    ) -> Result<()> {
+        otto_core::auth::with_request_credential(cred, async { check_confirm(r, env) }).await
+    }
+
+    /// S6-304: an agent credential's correct confirm is refused; a person's
+    /// is accepted — on every cluster, for every destructive verb.
+    #[tokio::test]
+    async fn an_agent_credential_cannot_confirm_an_action() {
+        let person = otto_core::auth::RequestCredential::default();
+        let r = req(
+            "delete_pod",
+            "pods",
+            "web-1",
+            json!({"confirm_name": "web-1"}),
+        );
+        for env in [Environment::Dev, Environment::Prod] {
+            let refused = as_cred(AGENT, &r, env).await;
+            assert!(matches!(refused, Err(Error::Forbidden(_))), "{refused:?}");
+            assert!(as_cred(person, &r, env).await.is_ok());
+        }
+        // An unconfirmed non-destructive verb off prod is still the agent's.
+        let restart = req("restart", "deployments", "web", json!({}));
+        assert!(as_cred(AGENT, &restart, Environment::Dev).await.is_ok());
+    }
+
+    /// On PROD every mutating verb needs the typed name server-side.
+    #[tokio::test]
+    async fn prod_requires_confirm_for_every_mutating_action() {
+        let person = otto_core::auth::RequestCredential::default();
+        for (action, kind) in [
+            ("restart", "deployments"),
+            ("scale", "deployments"),
+            ("argocd_sync", "applications"),
+            ("argocd_app_restart", "applications"),
+            ("cronjob_trigger", "cronjobs"),
+            ("cronjob_suspend", "cronjobs"),
+            ("rollout_promote", "rollouts"),
+        ] {
+            let bare = req(action, kind, "web", json!({"replicas": 3}));
+            let e = as_cred(person, &bare, Environment::Prod).await;
+            assert!(matches!(e, Err(Error::Invalid(_))), "{action}: {e:?}");
+            assert!(as_cred(person, &bare, Environment::Staging).await.is_ok());
+            let typed = req(
+                action,
+                kind,
+                "web",
+                json!({"replicas": 3, "confirm_name": "web"}),
+            );
+            assert!(as_cred(person, &typed, Environment::Prod).await.is_ok());
+        }
+        // A status read changes nothing: no confirm.
+        let status = req("rollout_status", "deployments", "web", json!({}));
+        assert!(as_cred(person, &status, Environment::Prod).await.is_ok());
+    }
+
+    #[test]
+    fn a_partial_failure_reports_every_steps_fate() {
+        let r = req("rollout_promote", "rollouts", "web", json!({"full": true}));
+        let p = plan(&r, now(), &PlanInputs::default()).unwrap();
+        assert_eq!(p.steps.len(), 3);
+        let resp = partial_failure(&p, 1, &Error::Upstream("forbidden".into()), "a".into());
+        assert!(!resp.ok);
+        assert!(resp.message.contains("step 2 of 3"), "{}", resp.message);
+        let fates: Vec<_> = resp.steps.iter().map(|s| s.status).collect();
+        assert_eq!(fates, vec!["done", "failed", "skipped"]);
+        assert_eq!(
+            resp.steps[0].step,
+            "patch rollouts.argoproj.io/web (status)"
+        );
+        assert!(resp.steps[1]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("forbidden"));
+        assert_eq!(resp.output.as_deref(), Some("a"));
     }
 }

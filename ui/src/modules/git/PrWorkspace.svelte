@@ -91,6 +91,10 @@
   let agentFolded = $state((() => { try { return localStorage.getItem(AGENT_FOLDED_KEY) !== '0'; } catch { return true; } })());
   let agentMax = $state(false);
   let agentSheet = $state(false);
+  // Phone: the sheet's opener carries the thread's state while the sheet is
+  // closed (a hidden status-only panel keeps the embed reporting it).
+  const agentLive = $derived(tabs.active === null ? null : (prAgentBridge.status[prAgentOriginId(repoId, tabs.active)] ?? null));
+  const agentLabel = $derived(agentLive === 'working' ? 'Agent thread: the agent is working' : agentLive === 'needs-you' ? 'Agent thread: the agent needs you' : 'Agent thread');
   const narrow = $derived(viewport.isMobile);
   const agentMaxOn = $derived(agentMax && tabs.active !== null && !narrow);
   function setAgentH(h: number): void {
@@ -271,6 +275,13 @@
         {/each}
       </nav>
       <button class="prw-icon" aria-label="Find a pull request" title="Find a pull request" onclick={focusSearch}><Icon name="plus" size={13} /></button>
+      {#if narrow && tabs.active !== null}
+        <button class="prw-icon prw-agent-open" aria-label={agentLabel} title={agentLabel} onclick={() => (agentSheet = true)}
+          data-testid="pr-agent-open" data-status={agentLive ?? 'idle'}>
+          <Icon name="sparkle" size={13} />
+          {#if agentLive === 'working' || agentLive === 'needs-you'}<span class="prw-agent-dot" class:needs={agentLive === 'needs-you'} aria-hidden="true"></span>{/if}
+        </button>
+      {/if}
       <span class="grow"></span>
       {#if tabs.active !== null}
         <button class="prw-icon prw-desk" aria-pressed={maximized} aria-label={maximized ? 'Restore the list' : 'Maximize the pull request'}
@@ -309,6 +320,11 @@
 {#if tabs.active !== null}
   <PrAgentLinePick onexplain={(n, pick) => prAgentBridge.ask(repoId, n, { kind: 'lines', pick })} />
   {#if narrow}
+    {#if !agentSheet}
+      <div hidden>
+        {#key `${repoId}:${tabs.active}`}<PrAgentPanel {repoId} number={tabs.active} title={titleOf(tabs.active)} layout="sheet" statusOnly />{/key}
+      </div>
+    {/if}
     <DockedDrawer open={agentSheet} modal title="Agent · PR #{tabs.active}" onclose={() => (agentSheet = false)} testid="pr-agent-sheet">
       {#key `${repoId}:${tabs.active}`}
         <PrAgentPanel {repoId} number={tabs.active} title={titleOf(tabs.active)} layout="sheet" />
@@ -416,6 +432,19 @@
   .prw-icon { width: 26px; height: 26px; flex: none; }
   .prw-icon:hover { background: var(--hover); color: var(--text); }
   .prw-icon[aria-pressed='true'] { color: var(--text); }
+  .prw-agent-open { position: relative; }
+  .prw-agent-dot {
+    position: absolute;
+    inset-block-start: 4px;
+    inset-inline-end: 4px;
+    inline-size: 7px;
+    block-size: 7px;
+    border-radius: 50%;
+    background: var(--accent-solid);
+    animation: otto-pulse 1.6s ease-in-out infinite;
+  }
+  .prw-agent-dot.needs { background: var(--warning); animation: none; }
+  @media (prefers-reduced-motion: reduce) { .prw-agent-dot { animation: none; } }
   .prw-pane { flex: 1; min-height: 0; min-width: 0; }
   .prw-back { display: none; }
 

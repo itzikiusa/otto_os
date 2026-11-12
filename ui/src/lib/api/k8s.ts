@@ -86,7 +86,7 @@ export const k8sApi = {
 
   // --- reads (View) -----------------------------------------------------------
   namespaces: (id: string, signal?: AbortSignal) =>
-    api.get<{ namespaces: K8sNamespace[] }>(`/k8s/clusters/${enc(id)}/namespaces`, signal),
+    api.get<{ namespaces: K8sNamespace[]; partial?: boolean }>(`/k8s/clusters/${enc(id)}/namespaces`, signal),
   nodes: (id: string, signal?: AbortSignal) =>
     api.get<{ nodes: K8sNode[] }>(`/k8s/clusters/${enc(id)}/nodes`, signal),
   /** `ns` empty ⇒ all namespaces (`-A`). */

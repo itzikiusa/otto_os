@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { expectFullyInViewport, expectNoHorizontalOverflow, openPage } from './helpers';
+import { CANVAS_PAGE_RETIRED } from './storyDesigns';
 
 // Route fixtures must observe the actual requests in WebKit as well as Chromium.
 test.use({ serviceWorkers: 'block' });
@@ -38,6 +39,7 @@ test('Product phone empty state exposes the import action immediately', async ({
 
 for (const scheme of ['light', 'dark'] as const) {
   test(`Canvas phone assistant fits and closes in ${scheme}`, async ({ page }) => {
+    test.skip(true, CANVAS_PAGE_RETIRED);
     await page.setViewportSize({ width: 375, height: 812 });
     await page.addInitScript((s) => localStorage.setItem('otto_scheme', s), scheme);
     await openPage(page, 'canvas');
@@ -69,7 +71,9 @@ test('Browser URL field preserves left-to-right editing in RTL', async ({ page }
 for (const [module, endpoint, emptyTitle] of [
   ['product', '**/product/stories', 'No stories yet'],
   ['vault', '**/vault/vaults', 'The docs home'],
-  ['canvas', '**/api/v1/canvas/scenes', 'Start a new canvas'],
+  // `#/canvas` forwards to Design Hall's Whiteboard studio (the Canvas page
+  // folded into the Hall): this covers that studio grid's failed load.
+  ['canvas', '**/api/v1/design/search**', 'No designs here yet'],
 ]) {
   test(`${module} phone list failure offers a reachable Retry and recovers`, async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 812 });

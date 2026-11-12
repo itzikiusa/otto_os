@@ -1,6 +1,11 @@
 import { test, expect } from '@playwright/test';
 import { openPage } from './helpers';
 import { apiCtx, seedWorkspace } from './seed';
+import { CANVAS_PAGE_RETIRED } from './storyDesigns';
+
+// The Canvas page folded into Design Hall; this file covers the unmounted
+// CanvasPage editor (see e2e/storyDesigns.ts).
+test.skip(() => true, CANVAS_PAGE_RETIRED);
 
 // C1 + C5: a scene save carrying more than axum's 2 MB default (an Excalidraw
 // board with a pasted screenshot) is accepted, every save keeps the pre-save

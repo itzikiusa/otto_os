@@ -2,9 +2,11 @@
   import { announceEdge } from '../../lib/announce.svelte';
   import { onDestroy, tick, untrack } from 'svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  // RefineChat — displays a single refinement thread transcript and handles
-  // sending new messages to the agent.  Props: { tid } (the thread id).
-  // Parent (RefineTab) controls which thread is active.
+  // RefineChat — one story Chat conversation (a refinement thread): the
+  // transcript, the composer with a compact agent picker, the agent's cards
+  // (questions / notes / a diagram, applied one by one) inline, and a link to
+  // Rewrite for each suggested version a turn wrote. Props: { tid }; the
+  // parent (ChatTab) controls which conversation is active.
   import Icon from '../../lib/components/Icon.svelte';
   import { toastError } from '../../lib/toastError';
   import { product } from '../../lib/stores/product.svelte';
@@ -14,14 +16,17 @@
   import AgentByline from '../../lib/components/AgentByline.svelte';
   import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
+  import ActionCard from './ActionCard.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
+  import { chatMessageCards, chatMessageSuggestion } from './chatActions';
   import type { RefinementMessage } from './types';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   let { tid }: { tid: string } = $props();
 
-  // Provider for this turn's agent. Each refinement turn replays the full thread
-  // history in the prompt, so a per-turn provider is self-contained — sourced
-  // from the live registry so custom providers (e.g. grok) work.
+  // Provider for this turn's agent. Each turn replays the thread history in the
+  // prompt, so a per-turn provider is self-contained — sourced from the live
+  // registry so custom providers (e.g. grok) work.
   let provider = $state(defaultAgentProvider());
 
   // ── Local state ────────────────────────────────────────────────────────────
@@ -49,6 +54,14 @@
   const drafts = new Map<string, string>();
   const stopRequestedTurns = new Set<string>();
   const BACKGROUND_NOTICE = 'Stopped waiting — the agent turn may still finish in the background.';
+  // Starter prompts — a chip PREFILLS the composer, it never sends.
+  const STARTERS = [
+    'Help me scope a story for: ',
+    'What questions should I answer before building this?',
+    'What edge cases and failure modes am I missing?',
+    'Draft acceptance criteria from what we’ve discussed',
+    'Rewrite the story so it is ready to publish',
+  ];
   onDestroy(() => { alive = false; ++loadSeq; });
 
   function newTurnId(): string {
@@ -274,15 +287,14 @@
     }
   }
 
-  // ── Helpers ────────────────────────────────────────────────────────────────
-
-  function parseMeta(metaJson: string | null): Record<string, unknown> {
-    if (!metaJson) return {};
-    try {
-      return JSON.parse(metaJson) as Record<string, unknown>;
-    } catch {
-      return {};
-    }
+  function useStarter(text: string): void {
+    inputText = text;
+    composerEl?.focus();
+    // Caret to the end: "Help me scope a story for: " expects more typing.
+    queueMicrotask(() => {
+      const end = composerEl?.value.length ?? 0;
+      composerEl?.setSelectionRange(end, end);
+    });
   }
 
 </script>
@@ -293,15 +305,27 @@
     {#if (loading || loadError) && messages.length === 0}
       <LoadState what="this thread" {loading} error={loadError} empty onretry={() => void loadThread(tid)} />
     {:else if messages.length === 0}
-      <EmptyState icon="comment" title="No messages yet" body="Type a message below to start the conversation with the agent." />
+      <div class="empty-wrap">
+        <EmptyState
+          icon="comment"
+          title="Let’s shape this story"
+          body="Describe the rough idea or ask for a change. Proposed text is saved as a suggestion you review in Rewrite; questions, notes and diagrams come as cards you apply."
+        />
+        <div class="starters" class:scroll-row={viewport.isPhone} class:scroll-thin={viewport.isPhone}>
+          {#each STARTERS as s (s)}
+            <button class="starter-chip" type="button" onclick={() => useStarter(s)} title="Prefill the composer">
+              {s.trim()}
+            </button>
+          {/each}
+        </div>
+      </div>
     {:else}
       {#if loadError}
         <LoadState what="this thread" {loading} error={loadError} onretry={() => void loadThread(tid)} />
       {/if}
       {#each messages as m (m.id)}
-        {@const meta = m.role === 'agent' ? parseMeta(m.meta_json) : {}}
-        {@const storyUpdated = Boolean(meta.story_updated)}
-        {@const versionNo = meta.version_no != null ? Number(meta.version_no) : null}
+        {@const versionNo = m.role === 'agent' ? chatMessageSuggestion(m) : null}
+        {@const cards = m.role === 'agent' ? chatMessageCards(m) : []}
         <div class="bubble-row" class:row-user={m.role === 'user'} class:row-agent={m.role === 'agent'}>
           <div class="bubble" class:bubble-user={m.role === 'user'} class:bubble-agent={m.role === 'agent'}>
             <div class="bubble-header">
@@ -318,14 +342,22 @@
             {:else}
               <div class="bubble-body plain">{m.body}</div>
             {/if}
-            {#if storyUpdated && versionNo !== null}
+            {#if versionNo !== null}
               <button
                 class="story-updated-chip"
-                onclick={() => (product.tab = 'rewrite')}
-                title="Switch to Rewrite tab to review and apply this suggested draft version"
+                type="button"
+                onclick={() => void product.changeTab('rewrite')}
+                title="Open Rewrite to compare this suggestion with the story and publish it"
               >
-                <Icon name="edit" size={12} /> Review draft v{versionNo} in Rewrite
+                <Icon name="edit" size={12} /> Suggestion v{versionNo} · Review in Rewrite
               </button>
+            {/if}
+            {#if cards.length > 0}
+              <div class="action-cards">
+                {#each cards as a, i (i)}
+                  <ActionCard {tid} action={a} />
+                {/each}
+              </div>
             {/if}
           </div>
         </div>
@@ -384,21 +416,21 @@
 
   <!-- ── Input ─────────────────────────────────────────────────────────────── -->
   <div class="input-area">
-    <label class="rc-provider">
-      <span class="dim">Agent</span>
-      <select bind:value={provider} aria-label="Refinement provider" disabled={sending || stopping || loading || Boolean(loadError)}>
-        {#each agentProviders() as p (p)}<option value={p}>{p}</option>{/each}
-      </select>
-    </label>
     <textarea dir="auto" aria-label="Message"
       bind:this={composerEl}
       class="msg-input"
-      placeholder="Type a message… (Enter to send, Shift+Enter for newline)"
+      placeholder="Describe the idea or ask for a change… (Enter to send, Shift+Enter for newline)"
       bind:value={inputText}
       onkeydown={handleKeydown}
       disabled={sending || stopping || loading || Boolean(loadError)}
       rows={3}
     ></textarea>
+    <label class="rc-provider" title="The agent that answers the next message">
+      <span class="dim">Agent</span>
+      <select bind:value={provider} aria-label="Chat agent" disabled={sending || stopping || loading || Boolean(loadError)}>
+        {#each agentProviders() as p (p)}<option value={p}>{p}</option>{/each}
+      </select>
+    </label>
     <button
       class="send-btn"
       onclick={() => void send()}
@@ -534,6 +566,53 @@
     color: var(--text-dim);
   }
 
+  /* ── Empty state: starter chips ─────────────────────────────────────────── */
+  .empty-wrap {
+    margin: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    max-width: 560px;
+    min-width: 0;
+  }
+  .starters {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 6px;
+    padding: 4px 8px 2px;
+  }
+  /* On phone the chips become a single horizontal-scroll row. */
+  .starters.scroll-row {
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    overflow-x: auto;
+    width: 100%;
+  }
+  .starter-chip {
+    flex-shrink: 0;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--text);
+    font-size: var(--fs-xs);
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background var(--dur-fast), border-color var(--dur-fast);
+  }
+  .starter-chip:hover {
+    background: var(--accent-soft);
+    border-color: var(--accent-line);
+  }
+
+  .action-cards {
+    display: flex;
+    flex-direction: column;
+  }
+
   /* Story-updated chip */
   .story-updated-chip {
     display: inline-flex;
@@ -570,7 +649,8 @@
     align-items: center;
     gap: 6px;
     font-size: var(--fs-s);
-    flex-basis: 100%;
+    margin-inline-end: auto;
+    min-width: 0;
   }
   .rc-provider .dim {
     color: var(--text-dim);
@@ -580,7 +660,7 @@
   }
 
   .msg-input {
-    flex: 1;
+    flex: 1 1 100%;
     min-width: 0;
     resize: none;
     padding: 6px 8px;

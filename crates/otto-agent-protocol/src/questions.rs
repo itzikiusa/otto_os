@@ -231,7 +231,37 @@ pub fn acp_form(params: &Value) -> Result<Vec<RuntimeQuestion>, String> {
     }) {
         return Err("invalid required fields".into());
     }
-    unique(questions)
+    unique(fold_other_fields(questions))
+}
+
+/// The free-text companion of an ACP single choice: `<id>__other`.
+pub fn other_field(id: &str) -> String {
+    format!("{id}__other")
+}
+
+/// An optional `<id>__other` text field (OMP's ask dialog) is the free-text
+/// answer of the optional single choice `<id>`: one question, not two
+/// steps, whose typed answer goes back under the companion's id (see
+/// [`other_field`]). A multi-select keeps both, since it can answer with
+/// options and text at once (T3 Code #34867).
+fn fold_other_fields(mut questions: Vec<RuntimeQuestion>) -> Vec<RuntimeQuestion> {
+    let folded: Vec<String> = questions
+        .iter()
+        .filter(|q| q.kind == QuestionKind::Single && !q.required)
+        .map(|q| other_field(&q.id))
+        .filter(|other| {
+            questions
+                .iter()
+                .any(|c| c.id == *other && c.kind == QuestionKind::Text && !c.required)
+        })
+        .collect();
+    questions.retain(|q| !folded.contains(&q.id));
+    for q in &mut questions {
+        if folded.contains(&other_field(&q.id)) {
+            q.allow_free_text = true;
+        }
+    }
+    questions
 }
 
 #[cfg(test)]
@@ -248,6 +278,24 @@ mod tests {
         assert!(acp_form(&form).is_err());
         form["mode"] = json!("url");
         assert!(acp_form(&form).is_err());
+    }
+    #[test]
+    fn an_optional_choice_and_its_other_text_field_are_one_question() {
+        let form = json!({"mode":"form","requestedSchema":{"type":"object","properties":{
+            "q0":{"type":"string","title":"Database","enum":["Postgres","MySQL"]},
+            "q0__other":{"type":"string","title":"Other"},
+            "q1":{"type":"array","items":{"type":"string","enum":["api","web"]}},
+            "q1__other":{"type":"string"},
+            "q2":{"type":"string","enum":["a"]},
+            "q2__other":{"type":"string"}
+        },"required":["q2"]}});
+        let qs = acp_form(&form).unwrap();
+        let ids: Vec<&str> = qs.iter().map(|q| q.id.as_str()).collect();
+        // q0 folds; a multi-select (q1) and a required choice (q2) do not.
+        assert_eq!(ids, ["q0", "q1", "q1__other", "q2", "q2__other"]);
+        assert!(qs[0].allow_free_text);
+        assert_eq!(qs[0].kind, QuestionKind::Single);
+        assert!(!qs[3].allow_free_text);
     }
     #[test]
     fn claude_question_text_is_native_key_and_multi_is_typed() {

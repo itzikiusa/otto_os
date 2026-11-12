@@ -135,24 +135,23 @@ pub const DEFAULT_ENABLED: &[&str] = &[
     // AWS console reads (docs/design/aws-k8s-consoles.md §6) — every one is a
     // GET behind its per-service feature grant
     // (`aws_s3` / `aws_sqs` / `aws_ec2` / `aws_athena` / `aws_eks`: View).
+    // Content reads (an object's bytes, log events) are opt-in like every
+    // other content-heavy read; a Logs Insights scan is billed per GB, so it
+    // is approval-gated (DANGEROUS) like an Athena query.
     "aws_list_accounts",
     "aws_s3_list_buckets",
     "aws_s3_list_objects",
-    "aws_s3_preview",
     "aws_sqs_list_queues",
     "aws_ec2_list_instances",
     "aws_athena_list_tables",
     "aws_athena_get_query",
     "aws_eks_list_clusters",
     "aws_logs_list_groups",
-    "aws_logs_filter",
-    "aws_logs_insights",
     "aws_logs_get_insights",
-    // Kubernetes console reads (`kubernetes`: View).
+    // Kubernetes console reads (`kubernetes`: View); pod logs are opt-in.
     "k8s_list_clusters",
     "k8s_get_resources",
     "k8s_describe",
-    "k8s_logs",
     "k8s_top",
     "k8s_health",
     "k8s_pod_actions_list",
@@ -230,6 +229,8 @@ pub const DANGEROUS: &[&str] = &[
     // human-only: there is deliberately no tool for it.
     "design_assist",
     "design_link",
+    // A Logs Insights scan, billed per GB scanned.
+    "aws_logs_insights",
     // AWS / Kubernetes console writers — a billed Athena scan, a produced SQS
     // message, an SQS peek (a receive bumps each message's receive count and
     // can dead-letter it), and a kubectl rollout/scale/delete/Argo verb against
@@ -287,6 +288,10 @@ pub const NATIVE_SESSION_WRITERS: &[&str] = &[
     "api_execute",
     "api_upsert_request",
     "api_run_automation",
+    // Not irreversible but billed per byte scanned: the bridge used to post
+    // them straight to their routes, so they ride the governed path too.
+    "aws_logs_insights",
+    "aws_athena_query",
 ];
 
 /// Governed tools whose self-call target is a PERSON-ONLY (Admin-class)
@@ -310,6 +315,65 @@ pub const PERSON_ONLY_TOOLS: &[&str] = &[
 /// True iff `bare` is one of the [`PERSON_ONLY_TOOLS`].
 pub fn tool_is_person_only(bare: &str) -> bool {
     PERSON_ONLY_TOOLS.contains(&bare)
+}
+
+/// True iff THIS call is a person's to decide: a [`PERSON_ONLY_TOOLS`] entry,
+/// a cluster write whose arguments carry a typed confirm (`k8s_action`
+/// `params.confirm_name`, `k8s_pod_http` `confirm_name`), or an agent-admin
+/// call that sets an owner-only field ([`sets_owner_only_agent_field`]). The
+/// route refuses those from an agent credential (S6-304; the personal-agent
+/// handlers' `person_only_change`), so the governed path always files a human
+/// approval for an agent caller and replays only the approved call as that
+/// person — exactly as for a person-only tool.
+pub fn call_is_person_only(bare: &str, args: &Value) -> bool {
+    let confirm = match bare {
+        "k8s_action" => args.pointer("/params/confirm_name"),
+        "k8s_pod_http" => args.get("confirm_name"),
+        _ => None,
+    };
+    tool_is_person_only(bare)
+        || sets_owner_only_agent_field(bare, args)
+        || confirm
+            .and_then(Value::as_str)
+            .is_some_and(|c| !c.trim().is_empty())
+}
+
+/// An agent-admin call that sets a personal agent's OWNER-ONLY field: what it
+/// runs and where its report goes (instructions, provider, model, folder,
+/// browser, delivery), a schedule's directive or permission, its standing
+/// goals or rules. Per CALL, not per tool: the same routes stay open to an
+/// agent for a rename, a pause or a cadence change (the route itself is not
+/// person-only, so these tools are not [`PERSON_ONLY_TOOLS`]). Any such key
+/// present counts, even one re-sending the stored value — a superset of
+/// what the handler refuses, never less.
+pub fn sets_owner_only_agent_field(bare: &str, args: &Value) -> bool {
+    let keys: &[&str] = match bare {
+        "update_personal_agent" => &["soul_md", "provider", "model", "cwd", "browser", "delivery"],
+        "add_personal_agent_schedule" | "update_personal_agent_schedule" => {
+            &["directive", "permission"]
+        }
+        "set_personal_agent_autonomy" => &["goals", "rules"],
+        _ => return false,
+    };
+    keys.iter()
+        .any(|k| args.get(*k).is_some_and(|v| !v.is_null()))
+}
+
+/// The approval-card reason for a [`call_is_person_only`] call by an agent.
+pub fn person_only_reason(bare: &str) -> &'static str {
+    if bare.ends_with("_improvement_edit") {
+        "deciding an improvement edit is a person's decision — approve to apply it as yourself"
+    } else if bare == "set_personal_agent_slack_as_me" {
+        "lending your Slack identity to an agent is your decision — approve to apply it as yourself"
+    } else if bare.contains("personal_agent") {
+        "a personal agent's instructions, delivery, schedule permissions, goals and rules are its \
+         owner's — approve to apply this change as yourself"
+    } else if bare.starts_with("routine_") {
+        "a routine that posts outside the agent's chat is your decision — approve to set it up as \
+         yourself"
+    } else {
+        "a typed confirmation is a person's — approve to run this cluster change as yourself"
+    }
 }
 
 /// True iff the bare tool is mutating + approval-gated ([`DANGEROUS`]).
@@ -386,6 +450,10 @@ pub const OPT_IN_READS: &[&str] = &[
     "slack_read_messages",
     "slack_search",
     "slack_my_activity",
+    // Console content: an S3 object's bytes, log events, pod logs.
+    "aws_s3_preview",
+    "aws_logs_filter",
+    "k8s_logs",
     // (search_memory + Vault v2 content reads removed — Vault feature disabled.)
 ];
 
@@ -954,7 +1022,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"group":{"type":"string"},"pattern":{"type":"string"},
                 "streams":{"type":"string"},"start":{"type":"integer"},"end":{"type":"integer"},
                 "token":{"type":"string"},"max":{"type":"integer"},"region":{"type":"string"}}}}),
-        json!({"name":"otto.aws_logs_insights","mutating":false,"category":"AWS",
+        json!({"name":"otto.aws_logs_insights","mutating":true,"category":"AWS",
             "description":"START a Logs Insights `query` over `groups` (≤ 50) between `start` and `end` (epoch ms, ≤ 31 days); returns `{query_id}` — poll otto.aws_logs_get_insights. Read-only, but billed per GB scanned.",
             "inputSchema":{"type":"object","required":["account_id","groups","query","start","end"],"properties":{
                 "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"groups":{"type":"array","items":{"type":"string"}},
@@ -1479,6 +1547,109 @@ pub fn prune_exempt_tools(exempt: &[String], enabled: &[String]) -> Vec<String> 
         .collect()
 }
 
+/// ` with a N-byte body` for a write carrying a `body` (pod HTTP, SQS send).
+fn body_size(args: &Value) -> String {
+    match args.get("body").and_then(Value::as_str) {
+        Some(b) => format!(" with a {}-byte body", b.len()),
+        None => String::new(),
+    }
+}
+
+/// `true` / `"true"` / `"1"` / `"yes"` — the daemon's own reading of a flag.
+fn flag(v: Option<&Value>) -> bool {
+    match v {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(s)) => matches!(s.as_str(), "true" | "1" | "yes"),
+        _ => false,
+    }
+}
+
+/// The `k8s_action` params an approver must see before saying yes: the
+/// replica count (0 stops every pod), prune, a pinned revision, grace 0 (a
+/// forced delete), a hard refresh / full promote.
+fn k8s_risky_params(p: Option<&Value>) -> String {
+    let Some(p) = p.filter(|p| p.is_object()) else {
+        return String::new();
+    };
+    let mut parts = Vec::new();
+    if let Some(r) = p.get("replicas") {
+        parts.push(match i64_lenient(r) {
+            Some(0) => "replicas=0 (STOPS EVERY POD)".to_string(),
+            Some(n) => format!("replicas={n}"),
+            None => format!("replicas={r}"),
+        });
+    }
+    if flag(p.get("prune")) {
+        parts.push("PRUNE (deletes resources)".into());
+    }
+    for k in ["revision", "to_revision"] {
+        if let Some(v) = p.get(k).filter(|v| !v.is_null()) {
+            parts.push(format!(
+                "{k}={}",
+                v.as_str().map_or(v.to_string(), str::to_string)
+            ));
+        }
+    }
+    match p.get("grace").and_then(i64_lenient) {
+        Some(0) => parts.push("grace=0 + FORCE (no graceful shutdown)".into()),
+        Some(g) => parts.push(format!("grace={g}s")),
+        None => {}
+    }
+    if flag(p.get("hard")) {
+        parts.push("hard".into());
+    }
+    if flag(p.get("full")) {
+        parts.push("full promote".into());
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" — {}", parts.join(", "))
+    }
+}
+
+/// [`dangerous_detail`] for a console write, led by the cluster / account
+/// NAME and a PRODUCTION marker resolved from the registry — the args carry
+/// an opaque id the approver cannot judge. Other tools (or an unknown id):
+/// plain [`dangerous_detail`].
+pub async fn detail_with_target(pool: &otto_state::DbPool, tool: &str, args: &Value) -> String {
+    let detail = dangerous_detail(tool, args);
+    let short = tool.strip_prefix("otto.").unwrap_or(tool);
+    let id = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_string);
+    let target = if short.starts_with("k8s_") {
+        match id("cluster_id") {
+            Some(id) => otto_state::K8sClustersRepo::new(pool.clone())
+                .get(&id)
+                .await
+                .ok()
+                .map(|c| ("Cluster", c.name, c.environment)),
+            None => None,
+        }
+    } else if short.starts_with("aws_") {
+        match id("account_id") {
+            Some(id) => otto_state::AwsAccountsRepo::new(pool.clone())
+                .get(&id)
+                .await
+                .ok()
+                .map(|a| ("AWS account", a.name, a.environment)),
+            None => None,
+        }
+    } else {
+        None
+    };
+    match target {
+        Some((what, name, env)) => format!(
+            "{}{what} '{name}': {detail}",
+            if env == otto_core::domain::Environment::Prod {
+                "PRODUCTION · "
+            } else {
+                ""
+            }
+        ),
+        None => detail,
+    }
+}
+
 /// Build the human-facing approval detail. For scheduled-task create/update it
 /// surfaces the prompt + cadence + destination so the approver knows exactly what
 /// recurring autonomous capability they are granting (security review fix).
@@ -1710,9 +1881,10 @@ pub fn dangerous_detail(tool: &str, args: &Value) -> String {
             )
         }
         "aws_sqs_send" => format!(
-            "Send a message to SQS queue '{}' on AWS account '{}'",
+            "Send a message to SQS queue '{}' on AWS account '{}'{}",
             args.get("url").and_then(Value::as_str).unwrap_or("?"),
-            args.get("account_id").and_then(Value::as_str).unwrap_or("?")
+            args.get("account_id").and_then(Value::as_str).unwrap_or("?"),
+            body_size(args)
         ),
         "aws_sqs_peek" => format!(
             "Peek messages on SQS queue '{}' on AWS account '{}' (increments their receive count; can dead-letter)",
@@ -1720,7 +1892,7 @@ pub fn dangerous_detail(tool: &str, args: &Value) -> String {
             args.get("account_id").and_then(Value::as_str).unwrap_or("?")
         ),
         "k8s_pod_http" => format!(
-            "HTTP {} {} on port {} of {} in namespace '{}' of cluster '{}'",
+            "HTTP {} {} on port {} of {} in namespace '{}' of cluster '{}'{}",
             args.get("method").and_then(Value::as_str).unwrap_or("?"),
             args.get("path").and_then(Value::as_str).unwrap_or("?"),
             args.get("port")
@@ -1736,15 +1908,17 @@ pub fn dangerous_detail(tool: &str, args: &Value) -> String {
                 _ => "?".into(),
             },
             args.get("namespace").and_then(Value::as_str).unwrap_or("?"),
-            args.get("cluster_id").and_then(Value::as_str).unwrap_or("?")
+            args.get("cluster_id").and_then(Value::as_str).unwrap_or("?"),
+            body_size(args)
         ),
         "k8s_action" => format!(
-            "Kubernetes action '{}' on {}/{} in namespace '{}' of cluster '{}'",
+            "Kubernetes action '{}' on {}/{} in namespace '{}' of cluster '{}'{}",
             args.get("action").and_then(Value::as_str).unwrap_or("?"),
             args.get("kind").and_then(Value::as_str).unwrap_or("?"),
             args.get("name").and_then(Value::as_str).unwrap_or("?"),
             args.get("namespace").and_then(Value::as_str).unwrap_or("?"),
-            args.get("cluster_id").and_then(Value::as_str).unwrap_or("?")
+            args.get("cluster_id").and_then(Value::as_str).unwrap_or("?"),
+            k8s_risky_params(args.get("params"))
         ),
         "design_assist" => {
             let prompt: String = args

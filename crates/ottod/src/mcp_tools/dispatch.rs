@@ -44,16 +44,16 @@ pub(super) const FEATURE_READ_TOOLS: &[&str] = &[
     "aws_list_accounts",
     "aws_s3_list_buckets",
     "aws_s3_list_objects",
-    "aws_s3_preview",
     "aws_sqs_list_queues",
     "aws_ec2_list_instances",
     "aws_athena_list_tables",
     "aws_athena_get_query",
     "aws_eks_list_clusters",
     "aws_logs_list_groups",
-    "aws_logs_filter",
-    "aws_logs_insights",
     "aws_logs_get_insights",
+    // (`aws_s3_preview` / `aws_logs_filter` / `k8s_logs` are the opt-in
+    // content reads with their own arms, see `OPT_IN_CONSOLE_READS`;
+    // `aws_logs_insights` is billed per GB and runs through the governed path.)
     // Kubernetes console reads (`k8s_logs` is text/plain and has its own arm).
     "k8s_list_clusters",
     "k8s_get_resources",
@@ -62,6 +62,38 @@ pub(super) const FEATURE_READ_TOOLS: &[&str] = &[
     "k8s_health",
     "k8s_pod_actions_list",
 ];
+
+/// The console content reads (an S3 object's bytes, log events, pod logs):
+/// off by default on the Otto MCP server (the outward catalog's opt-in reads),
+/// and this bridge follows the same switch so an operator's "off" also holds
+/// for a session's own tools.
+pub(super) const OPT_IN_CONSOLE_READS: &[&str] = &["aws_s3_preview", "aws_logs_filter", "k8s_logs"];
+
+/// Refuse an [`OPT_IN_CONSOLE_READS`] call unless the operator enabled its
+/// `otto.*` twin in the control plane (an unreadable list refuses too).
+async fn require_enabled_read(ctx: &Ctx, name: &str) -> Result<(), String> {
+    let full = format!("otto.{name}");
+    let info = ctx.enabled_info(false).await;
+    if opt_in_read_enabled(info.as_ref().map(|i| i.names.as_slice()), &full) {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{name}` ({full}) reads content and is off on the Otto MCP server — enable it \
+             under MCP → Otto server in Otto, then call it again"
+        ))
+    }
+}
+
+/// `tools/list`: keep a tool unless it is an [`OPT_IN_CONSOLE_READS`] entry
+/// whose control-plane twin is off (or the enable list could not be read).
+pub(super) fn listed_with_opt_in(name: &str, enabled: Option<&[String]>) -> bool {
+    !OPT_IN_CONSOLE_READS.contains(&name) || opt_in_read_enabled(enabled, &format!("otto.{name}"))
+}
+
+/// Pure half of [`require_enabled_read`].
+pub(super) fn opt_in_read_enabled(enabled: Option<&[String]>, full: &str) -> bool {
+    enabled.is_some_and(|names| names.iter().any(|n| n == full))
+}
 
 /// How a [`ROUTED_TWINS`] call's arguments are bound to the calling session
 /// before `route_for` — the native pre-step, after `resolve_native_refs`.
@@ -797,10 +829,27 @@ pub(super) async fn run_tool(
         // `k8s_logs` is the one text/plain read; the three writers below hit the
         // per-feature Edit-gated console routes as the session owner.
         "k8s_logs" => {
+            require_enabled_read(ctx, "k8s_logs").await?;
             let (text, truncated) = ctx.get_text(&k8s_logs_path(args)?).await?;
             let lines = text.lines().count() as i64;
             let (v, _) = finalize(json!({ "text": text, "truncated": truncated }));
             Ok((v, Some(lines)))
+        }
+        "aws_s3_preview" | "aws_logs_filter" => {
+            require_enabled_read(ctx, name).await?;
+            let call = read_route(name, args, None)?;
+            let raw = ctx.get_json_within(&call.path, call.budget).await?;
+            Ok(finalize(raw))
+        }
+        "aws_logs_insights" => {
+            // Billed per GB scanned: approval + audit like an Athena query.
+            for k in ["account_id", "query"] {
+                arg_str(args, k)?;
+            }
+            Ok(finalize(
+                governed_native_write(ctx, "aws_logs_insights", args, Duration::from_secs(60))
+                    .await?,
+            ))
         }
         "aws_sqs_peek" => {
             // Edit-gated server-side: the receive bumps the receive count.
@@ -811,24 +860,19 @@ pub(super) async fn run_tool(
             Ok(finalize(raw))
         }
         "aws_athena_query" => {
-            let acc = arg_str(args, "account_id")?;
-            let mut body = json!({ "sql": arg_str(args, "sql")? });
-            for k in ["database", "workgroup", "output_location"] {
-                if let Some(v) = arg_optional_string(args, k)?.filter(|s| !s.is_empty()) {
-                    body[k] = json!(v);
-                }
+            // A billed scan: approval + guardrail + audit through the governed
+            // path (it used to post straight to the route with no approval).
+            // Required arguments checked here for a fast, clear error.
+            for k in ["account_id", "sql"] {
+                arg_str(args, k)?;
             }
-            let raw = ctx
-                .post_json(
-                    &format!(
-                        "/aws/accounts/{}/athena/query?{}",
-                        seg(&acc),
-                        opt_query(args, &[("region", "region")]).trim_start_matches('&')
-                    ),
-                    &body,
-                )
-                .await?;
-            Ok(finalize(raw))
+            for k in ["database", "workgroup", "output_location"] {
+                arg_optional_string(args, k)?;
+            }
+            Ok(finalize(
+                governed_native_write(ctx, "aws_athena_query", args, Duration::from_secs(75))
+                    .await?,
+            ))
         }
         "aws_sqs_send" => {
             // Required arguments checked here for a fast, clear error; the
@@ -1321,6 +1365,16 @@ async fn run_data_tool(
     }
 }
 
+/// `PUT /canvas/scenes/{id}` body for the `canvas_update_scene` tool: the
+/// new doc, guarded by the `updated_at` the tool just read, as an agent write.
+fn canvas_update_body(doc: Value, read_updated_at: Option<&Value>) -> Value {
+    let mut body = json!({ "doc": doc, "origin": "agent" });
+    if let Some(stamp) = read_updated_at.and_then(Value::as_str) {
+        body["expect_updated_at"] = json!(stamp);
+    }
+    body
+}
+
 /// The canvas and workbench tools of [`run_tool`].
 async fn run_canvas_tool(
     ctx: &Ctx,
@@ -1444,11 +1498,21 @@ async fn run_canvas_tool(
             // `?summary=true`: the list row comes back, not the whole scene —
             // an echo of a big Excalidraw doc tripped the 1 MiB body cap and
             // reported a failure for a write that had succeeded (SD-22).
+            // `expect_updated_at`: the stamp read above, so a board the person
+            // saved in between answers 409 instead of being overwritten; the
+            // `agent` origin keeps the replaced board as its own version.
             ctx.put_json(
                 &format!("/canvas/scenes/{}?summary=true", seg(&scene_id)),
-                &json!({ "doc": new_doc }),
+                &canvas_update_body(new_doc, existing.get("updated_at")),
             )
-            .await?;
+            .await
+            .map_err(|e| {
+                if e.contains("changed since") {
+                    format!("{e} — re-read it with canvas_get_scene, then retry")
+                } else {
+                    e
+                }
+            })?;
 
             Ok(finalize(json!({ "ok": true, "format": format })))
         }
@@ -1889,5 +1953,58 @@ mod untrusted_and_host_tests {
         // No stored credential → any host.
         let plain = json!({"url": "https://api.test/", "auth": {"type": "none"}});
         assert!(credentialed_host_change(&plain, &json!({"url": "https://other.test/"})).is_none());
+    }
+}
+
+#[cfg(test)]
+mod canvas_tool_tests {
+    use super::*;
+
+    /// The tool writes as an agent and only over the scene it read: a board
+    /// saved in between answers 409 instead of being overwritten.
+    #[test]
+    fn an_update_is_guarded_by_the_stamp_it_read_and_marked_as_an_agent_write() {
+        let stamp = json!("2026-11-12T10:00:00.5Z");
+        let body = canvas_update_body(json!({ "source": "a" }), Some(&stamp));
+        assert_eq!(body["origin"], "agent");
+        assert_eq!(body["expect_updated_at"], stamp);
+        assert_eq!(body["doc"]["source"], "a");
+        let unguarded = canvas_update_body(json!({}), None);
+        assert!(unguarded.get("expect_updated_at").is_none());
+    }
+}
+
+#[cfg(test)]
+mod console_gate_tests {
+    use super::*;
+
+    /// The console content reads follow the control plane's switch (off
+    /// unless enabled; an unreadable list refuses), and Logs Insights is no
+    /// longer a plain read: it runs through the governed path.
+    #[test]
+    fn console_content_reads_follow_the_control_plane() {
+        let on = vec!["otto.k8s_logs".to_string()];
+        assert!(opt_in_read_enabled(Some(on.as_slice()), "otto.k8s_logs"));
+        assert!(!opt_in_read_enabled(
+            Some(on.as_slice()),
+            "otto.aws_s3_preview"
+        ));
+        assert!(!opt_in_read_enabled(None, "otto.k8s_logs"));
+        // The listing follows the same switch; other tools are untouched.
+        assert!(listed_with_opt_in("k8s_logs", Some(on.as_slice())));
+        assert!(!listed_with_opt_in("aws_s3_preview", Some(on.as_slice())));
+        assert!(!listed_with_opt_in("aws_logs_filter", None));
+        assert!(listed_with_opt_in("k8s_top", None));
+        for t in OPT_IN_CONSOLE_READS {
+            assert!(!FEATURE_READ_TOOLS.contains(t), "{t} has its own gated arm");
+        }
+        // The billed scans run through the governed path, never as reads.
+        for t in ["aws_logs_insights", "aws_athena_query"] {
+            assert!(!FEATURE_READ_TOOLS.contains(&t), "{t}");
+            assert!(
+                otto_mcp::outward::NATIVE_SESSION_WRITERS.contains(&t),
+                "{t}"
+            );
+        }
     }
 }

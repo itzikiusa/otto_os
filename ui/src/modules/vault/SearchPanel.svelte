@@ -3,9 +3,21 @@
   // `type:` operators; snippets come highlighted with ‹› markers from bm25.
   import { vault } from './vault.svelte';
   import { escapeHtml } from '../../lib/html';
+  import Icon from '../../lib/components/Icon.svelte';
+  import { announceShown } from '../../lib/announce.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import { searchIndexNotice } from './searchIndex';
 
   let input = $state<HTMLInputElement | undefined>();
+  // While the full-text index rebuilds, results come from the indexed part:
+  // say so, and search again once it completes so the list is whole.
+  const partial = $derived(vault.status?.search_index ?? null);
+  let wasPartial = false;
+  $effect(() => {
+    const now = !!partial;
+    if (wasPartial && !now && vault.searchedQuery && !vault.searching) void vault.runSearch();
+    wasPartial = now;
+  });
 
   $effect(() => {
     if (vault.leftMode === 'search') input?.focus();
@@ -42,6 +54,9 @@
   {:else if vault.searchQuery.trim() && vault.searchHits.length === 0}
     <div class="dim">No notes match “{vault.searchQuery.trim()}”.</div>
   {/if}
+  {#if partial && vault.searchedQuery && !vault.searchError}
+    <div class="partial" use:announceShown={searchIndexNotice(partial)}><Icon name="info" size={12} /> {searchIndexNotice(partial)}</div>
+  {/if}
   {#if !vault.searching && !vault.searchError && vault.searchedQuery && vault.searchQuery.trim() === vault.searchedQuery}
     <div class="hits">
       {#each vault.searchHits as h (h.path)}
@@ -62,6 +77,23 @@
 </div>
 
 <style>
+  .partial {
+    display: flex;
+    gap: 6px;
+    align-items: flex-start;
+    margin-block: 6px;
+    padding: 6px 8px;
+    border-radius: var(--radius-s);
+    background: var(--info-soft);
+    color: var(--text);
+    font-size: var(--fs-xs);
+    line-height: 1.4;
+  }
+  .partial :global(svg) {
+    flex: none;
+    margin-block-start: 2px;
+    color: var(--info);
+  }
   .search {
     display: flex;
     flex-direction: column;

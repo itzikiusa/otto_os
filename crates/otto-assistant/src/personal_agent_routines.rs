@@ -385,8 +385,10 @@ async fn plan_delivery<C: AssistantCtx>(
 /// as the user, or any non-chat kind added later), which then posts
 /// unattended on every run. `None` for a chat-only routine and for an
 /// update that leaves the destination alone (no `deliver`) — "remind me
-/// every morning" never waits on a card. The text names where it posts, as
-/// whom, and on what schedule: the approval card shows it.
+/// every morning" never waits on a card; callers run an update through
+/// [`with_stored_deliver`] first, so editing a routine that ALREADY posts
+/// outward asks too. The text names where it posts, as whom, and on what
+/// schedule: the approval card shows it.
 ///
 /// The governed tool pipeline (otto-server `personal_agent_policy::decide`)
 /// turns `Some` into a forced approval.
@@ -444,6 +446,48 @@ pub fn outward_delivery_reason(bare: &str, args: &Value) -> Option<String> {
     Some(format!(
         "otto.{bare} {verb} {place}, unattended on every run{agent} — {schedule}{tz}"
     ))
+}
+
+/// `args` of an `otto.routine_update` that names no `deliver`, with the
+/// routine's STORED destination filled in — so [`outward_delivery_reason`]
+/// asks before an update rewrites the instruction (or cadence, permission,
+/// resume) of a routine that ALREADY posts outside the chat, unattended.
+/// `None` = judge the call's own args: another tool, an update naming a
+/// `deliver`, a pure pause, a chat-only routine, or a routine that cannot be
+/// read (the update itself then fails). `id` defaults to `args.routine_id`
+/// (the REST route carries it in the path instead).
+pub async fn with_stored_deliver<C: AssistantCtx>(
+    ctx: &C,
+    bare: &str,
+    id: Option<&str>,
+    args: &Value,
+) -> Option<Value> {
+    if bare != "routine_update" || args.get("deliver").is_some_and(|d| !d.is_null()) {
+        return None;
+    }
+    let id = id.or_else(|| args.get("routine_id").and_then(Value::as_str))?;
+    let stored = pa_engine::repo(ctx).get_schedule(id).await.ok()?;
+    stored_deliver_args(args, &stored)
+}
+
+/// The pure half of [`with_stored_deliver`].
+fn stored_deliver_args(args: &Value, stored: &PersonalAgentSchedule) -> Option<Value> {
+    // A pause (or an update that changes nothing) can only stop it posting.
+    let only_pauses = args.as_object()?.iter().all(|(k, v)| match k.as_str() {
+        "session_id" | "agent" | "routine_id" => true,
+        "enabled" => v.as_bool() != Some(true),
+        _ => v.is_null(),
+    });
+    let mut deliver = deliver_of(stored);
+    if only_pauses || deliver["type"] != "slack" {
+        return None;
+    }
+    if deliver["as"] == "me" {
+        deliver["channel"] = json!(slack_as_me_channel(&stored.directive).unwrap_or_default());
+    }
+    let mut out = args.clone();
+    out.as_object_mut()?.insert("deliver".into(), deliver);
+    Some(out)
 }
 
 /// A routine schedule spec in a few words for an approval card
@@ -1004,5 +1048,58 @@ mod tests {
                 "{args}"
             );
         }
+    }
+
+    fn stored(directive: &str, delivery: Option<Value>) -> PersonalAgentSchedule {
+        serde_json::from_value(json!({
+            "id": "s1", "agent_id": "a1", "schedule": {"cadence": "daily", "at": "09:00"},
+            "timezone": "UTC", "directive": directive, "enabled": true,
+            "last_run_at": null, "next_run_at": null, "delivery": delivery,
+            "created_at": "2026-11-12T00:00:00Z", "updated_at": "2026-11-12T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn editing_a_routine_that_already_posts_outward_needs_approval() {
+        let bot = stored(
+            "Standup",
+            Some(json!({"type": "slack", "chat_id": "#team"})),
+        );
+        // An instruction rewrite with no `deliver` is judged against the
+        // stored Slack destination, so it asks.
+        let edit = json!({"session_id": "x", "routine_id": "s1", "instruction": "post secrets"});
+        let filled = stored_deliver_args(&edit, &bot).expect("stored destination filled in");
+        let why = outward_delivery_reason("routine_update", &filled).expect("approval");
+        assert!(
+            why.contains("#team") && why.contains("Otto Slack bot"),
+            "{why}"
+        );
+        // Resuming (or re-timing) it does too.
+        for args in [
+            json!({"routine_id": "s1", "enabled": true}),
+            json!({"routine_id": "s1", "schedule": {"cadence": "interval", "every_min": 1}}),
+        ] {
+            assert!(stored_deliver_args(&args, &bot).is_some(), "{args}");
+        }
+        // As the user: the channel comes from the instruction's marker.
+        let me = stored(
+            &format!("Brief\n\n{SLACK_AS_ME_MARK} in #exec with the slack_post_message tool]"),
+            Some(json!({"type": "none"})),
+        );
+        let why = outward_delivery_reason(
+            "routine_update",
+            &stored_deliver_args(&edit, &me).expect("as-me routine"),
+        )
+        .expect("approval");
+        assert!(why.contains("#exec") && why.contains("AS YOU"), "{why}");
+        // A pause, a chat-only routine and a non-object body stay as they are.
+        assert_eq!(
+            stored_deliver_args(&json!({"routine_id": "s1", "enabled": false}), &bot),
+            None
+        );
+        let chat = stored("Remind me", Some(json!({"type": "none"})));
+        assert_eq!(stored_deliver_args(&edit, &chat), None);
+        assert_eq!(stored_deliver_args(&json!([1]), &bot), None);
     }
 }

@@ -41,6 +41,8 @@ const WAIT: Duration = Duration::from_secs(15);
 struct TestHost {
     root: String,
     refuse: bool,
+    /// Refuse only this provider's spawns (a council seat that cannot start).
+    refuse_provider: Mutex<Option<RuntimeProvider>>,
     prepared: Mutex<Vec<LaunchSpec>>,
     events: Mutex<Vec<Arc<RuntimeEvent>>>,
     notify: tokio::sync::Notify,
@@ -64,11 +66,11 @@ impl RuntimeHost for TestHost {
     async fn prepare_spawn(
         &self,
         _ws: &Workspace,
-        _s: &RuntimeSession,
+        s: &RuntimeSession,
         spec: &mut LaunchSpec,
         _mcp: McpDelivery,
     ) -> Result<Vec<McpServerDef>> {
-        if self.refuse {
+        if self.refuse || *self.refuse_provider.lock().unwrap() == Some(s.provider) {
             return Err(Error::Invalid(
                 "refusing to start an agent session here".into(),
             ));
@@ -89,6 +91,7 @@ impl TestHost {
         Arc::new(Self {
             root: root.into(),
             refuse,
+            refuse_provider: Mutex::default(),
             prepared: Mutex::default(),
             events: Mutex::default(),
             notify: tokio::sync::Notify::new(),
@@ -1479,6 +1482,30 @@ async fn linked_threads_open_message_and_read_within_their_group() {
         "same group from either side"
     );
 
+    // The worker's answer to what the lead asked comes back to the lead's
+    // agent as its next turn ("Completion wakes this thread"), and the lead's
+    // timeline notes it.
+    host.wait(|e| {
+        e.session_id == lead.id
+            && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+                if matches!(&turn_item.kind, TurnItemKind::UserMessage { text, .. }
+                    if text.starts_with("[Reply from thread \"worker\"")))
+    })
+    .await;
+    let woke = rt.latest_reply(&lead.id, WAIT).await.unwrap();
+    assert!(woke.text.contains("you are my worker"), "{}", woke.text);
+    let marker = format!("[otto-thread:{}:finished]", worker.id);
+    host.wait(|e| {
+        e.session_id == lead.id
+            && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+                if matches!(&turn_item.kind, TurnItemKind::SystemNotice { message } if message.ends_with(&marker)))
+    })
+    .await;
+    assert_eq!(
+        worker.meta.as_ref().unwrap()["child_of"],
+        serde_json::json!({"id": lead.id, "by": "agent"})
+    );
+
     // The worker answers the lead.
     rt.message_peer(&worker.id, &lead.id, "done").await.unwrap();
     let back = rt.peer_reply(&worker.id, &lead.id, WAIT).await.unwrap();
@@ -1509,6 +1536,114 @@ async fn linked_threads_open_message_and_read_within_their_group() {
         closed.status,
         otto_core::agent_runtime::RuntimeSessionStatus::Closed
     );
+}
+
+/// A person asks other agents from a thread: the children are linked to it,
+/// get the message as typed (no "Opened by" frame), the parent's timeline
+/// names them and notes each finished turn — and the parent's AGENT is not
+/// woken (a person asked, a person reads).
+#[tokio::test]
+async fn a_person_asks_other_agents_from_a_thread() {
+    use otto_core::agent_runtime::{AskChildReq, AskChildTarget};
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let lead = create(&rt, cwd).await;
+    let target = |p| AskChildTarget {
+        provider: p,
+        model: None,
+        effort: None,
+    };
+
+    // Never more access than the parent's.
+    let wider = rt
+        .ask_children(
+            &lead.id,
+            AskChildReq {
+                prompt: "check it".into(),
+                targets: vec![target(RuntimeProvider::Gemini)],
+                access_mode: Some(RuntimeAccessMode::FullAccess),
+                ..AskChildReq::default()
+            },
+        )
+        .await
+        .expect_err("wider than the parent");
+    assert!(matches!(wider, Error::Invalid(_)), "{wider:?}");
+
+    let kids = rt
+        .ask_children(
+            &lead.id,
+            AskChildReq {
+                prompt: "Why does CI fail?".into(),
+                targets: vec![
+                    target(RuntimeProvider::Gemini),
+                    target(RuntimeProvider::Opencode),
+                ],
+                ..AskChildReq::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(kids.len(), 2);
+    for k in &kids {
+        assert_eq!(k.parent_id.as_ref(), Some(&lead.id));
+        assert_eq!(k.cwd, lead.cwd);
+        assert_eq!(k.access_mode, lead.access_mode);
+        assert_eq!(
+            k.meta.as_ref().unwrap()["child_of"],
+            serde_json::json!({"id": lead.id, "by": "person"})
+        );
+        let reply = rt.latest_reply(&k.id, WAIT).await.unwrap();
+        assert!(reply.text.contains("Why does CI fail?"), "{}", reply.text);
+        assert!(!reply.text.contains("Opened by"), "{}", reply.text);
+    }
+    let started = format!("[otto-thread:{},{}:started]", kids[0].id, kids[1].id);
+    for k in &kids {
+        let done = format!("[otto-thread:{}:finished]", k.id);
+        host.wait(|e| {
+            e.session_id == lead.id
+                && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+                    if matches!(&turn_item.kind, TurnItemKind::SystemNotice { message } if message.ends_with(&done)))
+        })
+        .await;
+    }
+    assert!(
+        notices(&host).iter().any(|n| n.ends_with(&started)),
+        "{:?}",
+        notices(&host)
+    );
+    // No wake for the lead's agent.
+    assert!(user_texts(&host)
+        .iter()
+        .all(|t| !t.starts_with("[Reply from thread")));
+
+    // Nothing to ask, or too many at once, is refused before anything starts.
+    let none = rt
+        .ask_children(
+            &lead.id,
+            AskChildReq {
+                prompt: " ".into(),
+                targets: vec![target(RuntimeProvider::Gemini)],
+                ..AskChildReq::default()
+            },
+        )
+        .await
+        .expect_err("empty");
+    assert!(matches!(none, Error::Invalid(_)), "{none:?}");
+    let five = rt
+        .ask_children(
+            &lead.id,
+            AskChildReq {
+                prompt: "x".into(),
+                targets: (0..5).map(|_| target(RuntimeProvider::Gemini)).collect(),
+                ..AskChildReq::default()
+            },
+        )
+        .await
+        .expect_err("five");
+    assert!(matches!(five, Error::Invalid(_)), "{five:?}");
 }
 
 // ---- Claude (otto-fake-claude): background work, own turns, queue, reopen ----
@@ -1833,6 +1968,120 @@ async fn reopen_resumes_the_thread_or_starts_fresh_with_a_notice() {
     rt.prompt(&s.id, "fresh").await.unwrap();
     host.wait_n(is_terminal, 3).await;
     assert_eq!(last_assistant_text(&host), "echo: fresh");
+}
+
+/// T3 Code #34912: a Stop that lands while a prompt is still starting (its
+/// agent spawning) stops that turn once it runs, instead of finding nothing
+/// to stop and leaving the turn running.
+#[tokio::test]
+async fn a_stop_landing_while_a_prompt_starts_stops_its_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    let is_starting = |e: &RuntimeEvent| {
+        matches!(&e.body, RuntimeEventBody::ProviderSessionUpdated { provider_session }
+            if provider_session.status == ProviderSessionStatus::Starting)
+    };
+    // `silent` never ends on its own: only a Stop ends this turn.
+    let (sent, stopped) = tokio::join!(rt.prompt(&s.id, "silent"), async {
+        host.wait(is_starting).await;
+        rt.interrupt(&s.id).await
+    });
+    let turn_id = sent.unwrap().turn_id;
+    assert!(stopped.unwrap(), "the Stop was taken");
+    let end = host.wait(is_terminal).await;
+    assert_eq!(terminal(&end), Some(TurnTerminalStatus::Interrupted));
+    assert!(
+        matches!(&end.body, RuntimeEventBody::TurnTerminal { turn_id: t, .. } if *t == turn_id)
+    );
+    // The Stop is spent: the next prompt runs normally.
+    rt.prompt(&s.id, "after").await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    assert_eq!(last_assistant_text(&host), "echo: after");
+}
+
+/// T3 Code #34505: a job the Claude CLI started in a process group of its
+/// own outlives the group kill; closing the session stops it too.
+#[tokio::test]
+async fn closing_a_claude_session_stops_jobs_it_moved_out_of_its_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    rt.prompt(&s.id, "escape").await.unwrap();
+    host.wait(is_terminal).await;
+    let pid: i32 = std::fs::read_to_string(dir.path().join(".fake-claude/escaped.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // SAFETY: signal 0 only checks that the pid exists.
+    let alive = || unsafe { libc::kill(pid, 0) } == 0;
+    assert!(alive(), "the job runs");
+    // Let a poll record the tree, then close.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    rt.close(&s.id).await.unwrap();
+    let deadline = std::time::Instant::now() + WAIT;
+    while alive() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the escaped job {pid} still runs"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// T3 Code #34762: a resume refused for a passing reason keeps the
+/// provider's conversation — Otto resumes once more instead of starting a
+/// fresh thread the agent remembers nothing of.
+#[tokio::test]
+async fn a_resume_refused_for_a_passing_reason_keeps_the_conversation() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    rt.prompt(&s.id, "hi").await.unwrap();
+    host.wait(is_terminal).await;
+    let native = rt.get(&s.id).await.unwrap().native_thread_id.unwrap();
+    rt.close(&s.id).await.unwrap();
+    // The next resume fails once with a connection error.
+    std::fs::write(
+        dir.path()
+            .join(".fake-claude")
+            .join(format!("{native}.flaky")),
+        b"",
+    )
+    .unwrap();
+    let before = host.prepared.lock().unwrap().len();
+    let reopened = rt.reopen(&s.id).await.unwrap();
+    assert_ne!(reopened.status, RuntimeSessionStatus::Closed);
+    let prepared = host.prepared.lock().unwrap().clone();
+    assert_eq!(prepared.len(), before + 2, "resumed twice");
+    for p in &prepared[before..] {
+        let r = p.args.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(p.args[r + 1], native);
+    }
+    assert!(
+        !notices(&host)
+            .iter()
+            .any(|n| n.contains("could not be resumed")),
+        "{:?}",
+        notices(&host)
+    );
+    assert_eq!(
+        rt.get(&s.id).await.unwrap().native_thread_id.as_deref(),
+        Some(native.as_str())
+    );
+    rt.prompt(&s.id, "still there").await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    assert_eq!(last_assistant_text(&host), "echo: still there");
 }
 
 #[tokio::test]
@@ -2615,4 +2864,268 @@ async fn embedded_threads_are_found_by_origin_and_auto_close_only_when_idle() {
         rt.close(&s.id).await.unwrap();
     }
     rt.close(&peer.id).await.unwrap();
+}
+
+// ---- council: one prompt to several agents, then a judge ----
+
+fn seat(
+    provider: RuntimeProvider,
+    effort: Option<&str>,
+) -> otto_core::agent_runtime::CouncilSeatReq {
+    otto_core::agent_runtime::CouncilSeatReq {
+        provider,
+        model: None,
+        effort: effort.map(str::to_string),
+    }
+}
+
+fn council_req(
+    prompt: &str,
+    seats: Vec<otto_core::agent_runtime::CouncilSeatReq>,
+) -> otto_core::agent_runtime::CreateCouncilReq {
+    otto_core::agent_runtime::CreateCouncilReq {
+        prompt: prompt.into(),
+        title: None,
+        cwd: None,
+        seats,
+        images: Vec::new(),
+    }
+}
+
+/// A council is one linked group (seat 1 the root), every seat read-only and
+/// approval-required, each sent the prompt (the same provider may sit
+/// twice); the judge is linked to seat 1, reads every answer and gets the
+/// daemon's own prompt without the "Opened by" header.
+#[tokio::test]
+async fn council_seats_form_one_read_only_group_and_the_judge_reads_every_answer() {
+    use otto_core::agent_runtime::{CouncilRole, SynthesizeCouncilReq};
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let seats = rt
+        .create_council(
+            &"u1".into(),
+            &"w1".into(),
+            council_req(
+                "which cache?",
+                vec![
+                    seat(RuntimeProvider::Gemini, None),
+                    seat(RuntimeProvider::Gemini, None),
+                    seat(RuntimeProvider::Codex, Some("low")),
+                ],
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(seats.len(), 3);
+    let root = &seats[0];
+    assert!(root.parent_id.is_none());
+    let council = root.council().unwrap();
+    for (i, s) in seats.iter().enumerate() {
+        let c = s.council().unwrap();
+        assert_eq!(
+            (c.id.as_str(), c.seat, c.role),
+            (council.id.as_str(), i as u32 + 1, CouncilRole::Seat)
+        );
+        assert!(s.meta_flag("read_only"), "seat {} must only read", i + 1);
+        assert_eq!(s.access_mode, RuntimeAccessMode::ApprovalRequired);
+        if i > 0 {
+            assert_eq!(s.parent_id.as_ref(), Some(&root.id));
+        }
+    }
+    assert_eq!(seats[1].title, "which cache? · gemini");
+    for s in &seats[..2] {
+        let r = rt.latest_reply(&s.id, WAIT).await.unwrap();
+        assert!(!r.busy);
+        assert!(r.text.contains("which cache?"), "{}", r.text);
+    }
+    let codex = rt.latest_reply(&seats[2].id, WAIT).await.unwrap();
+    assert!(
+        codex.text.contains(" low 0]"),
+        "the seat's effort rode its turn: {}",
+        codex.text
+    );
+
+    let judge = rt
+        .synthesize_council(
+            &seats[2].id,
+            SynthesizeCouncilReq {
+                provider: RuntimeProvider::Gemini,
+                model: None,
+                effort: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(judge.parent_id.as_ref(), Some(&root.id));
+    let jc = judge.council().unwrap();
+    assert_eq!(
+        (jc.id, jc.seat, jc.role),
+        (council.id.clone(), 0, CouncilRole::Synthesis)
+    );
+    assert!(judge.meta_flag("read_only"));
+    assert_eq!(judge.title, "which cache? · synthesis");
+    let verdict = rt.latest_reply(&judge.id, WAIT).await.unwrap();
+    assert!(
+        !verdict.text.contains("Opened by thread"),
+        "{}",
+        verdict.text
+    );
+    for want in [
+        "## The question",
+        "which cache?",
+        "## Seat 1 — gemini",
+        "## Seat 3 — codex",
+        "disagree",
+    ] {
+        assert!(verdict.text.contains(want), "{want}: {}", verdict.text);
+    }
+
+    // A thread outside any council has nothing to synthesize.
+    let plain = create(&rt, cwd).await;
+    assert!(matches!(
+        rt.synthesize_council(
+            &plain.id,
+            SynthesizeCouncilReq {
+                provider: RuntimeProvider::Gemini,
+                model: None,
+                effort: None,
+            },
+        )
+        .await,
+        Err(Error::Invalid(_))
+    ));
+}
+
+/// 2–4 seats and a prompt, else 400; a seat that cannot start removes the
+/// seats already made (all or none) and the error names it.
+#[tokio::test]
+async fn council_is_created_all_or_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let (u, w): (Id, Id) = ("u1".into(), "w1".into());
+    let g = || seat(RuntimeProvider::Gemini, None);
+    for bad in [
+        council_req("q", vec![g()]),
+        council_req("q", vec![g(), g(), g(), g(), g()]),
+        council_req("   ", vec![g(), g()]),
+    ] {
+        assert!(matches!(
+            rt.create_council(&u, &w, bad).await,
+            Err(Error::Invalid(_))
+        ));
+    }
+    assert!(
+        rt.list(&w, None).await.unwrap().is_empty(),
+        "nothing spawned"
+    );
+
+    *host.refuse_provider.lock().unwrap() = Some(RuntimeProvider::Codex);
+    let err = rt
+        .create_council(
+            &u,
+            &w,
+            council_req("q", vec![g(), g(), seat(RuntimeProvider::Codex, None)]),
+        )
+        .await
+        .expect_err("seat 3 cannot start");
+    assert!(
+        matches!(&err, Error::Invalid(m) if m.starts_with("seat 3 (codex)")),
+        "{err:?}"
+    );
+    assert!(
+        rt.list(&w, None).await.unwrap().is_empty(),
+        "the two seats already made are gone"
+    );
+}
+
+/// The judge waits for every seat (409 while one works) and counts against
+/// the group's open-thread cap like any linked thread.
+#[tokio::test]
+async fn synthesis_waits_for_every_seat_and_respects_the_group_cap() {
+    use otto_core::agent_runtime::{OpenPeerReq, SynthesizeCouncilReq};
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let g = || seat(RuntimeProvider::Gemini, None);
+    let seats = rt
+        .create_council(
+            &"u1".into(),
+            &"w1".into(),
+            council_req("hang", vec![g(), g()]),
+        )
+        .await
+        .unwrap();
+    let judge = || SynthesizeCouncilReq {
+        provider: RuntimeProvider::Gemini,
+        model: None,
+        effort: None,
+    };
+    let busy = rt
+        .synthesize_council(&seats[0].id, judge())
+        .await
+        .expect_err("seats are still in their turn");
+    assert!(
+        matches!(&busy, Error::Conflict(m) if m.contains("is still working")),
+        "{busy:?}"
+    );
+    // Both seats have started answering ("working") before they are stopped,
+    // so each keeps a partial answer for the judge.
+    for s in &seats {
+        host.wait(|e| {
+            e.session_id == s.id
+                && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+                    if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, .. } if text == "working"))
+        })
+        .await;
+    }
+    for s in &seats {
+        assert!(rt.interrupt(&s.id).await.unwrap());
+        assert!(!rt.latest_reply(&s.id, WAIT).await.unwrap().busy);
+    }
+
+    // Fill the group to its cap (seat 1 + 8 linked threads).
+    let mut extra = Vec::new();
+    for i in 0..7 {
+        let p = rt
+            .open_peer(
+                &seats[0].id,
+                OpenPeerReq {
+                    provider: RuntimeProvider::Gemini,
+                    prompt: None,
+                    title: Some(format!("extra {i}")),
+                    model: None,
+                    effort: None,
+                    cwd: None,
+                    meta: None,
+                },
+            )
+            .await
+            .unwrap();
+        extra.push(p);
+    }
+    // The cap is checked before the answers are read.
+    let full = rt
+        .synthesize_council(&seats[1].id, judge())
+        .await
+        .expect_err("the group is full");
+    assert!(
+        matches!(&full, Error::Conflict(m) if m.contains("open linked threads")),
+        "{full:?}"
+    );
+    rt.close(&extra[0].id).await.unwrap();
+    let j = rt.synthesize_council(&seats[1].id, judge()).await.unwrap();
+    let verdict = rt.latest_reply(&j.id, WAIT).await.unwrap();
+    assert!(
+        verdict.text.contains("working"),
+        "the interrupted seats' partial answers: {}",
+        verdict.text
+    );
 }

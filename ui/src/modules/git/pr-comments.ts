@@ -85,3 +85,21 @@ export function reviewChip(state: PrReviewState): { label: string; tone: 'succes
       return { label: 'Dismissed', tone: 'dim' };
   }
 }
+
+/** `comments` with a just-posted `c` added: under the thread whose head,
+ *  thread id or reply is `parent` (a reply), else at the end. The reload
+ *  that follows reconciles (a GitHub reply to a general comment is a new
+ *  top-level comment there). */
+export function withComment(comments: PrComment[], c: PrComment, parent?: string): PrComment[] {
+  if (parent) {
+    const i = comments.findIndex(
+      (h) => h.id === parent || h.thread_id === parent || (h.replies ?? []).some((r) => r.id === parent),
+    );
+    if (i >= 0) {
+      const next = comments.slice();
+      next[i] = { ...comments[i], replies: [...(comments[i].replies ?? []), c] };
+      return next;
+    }
+  }
+  return [...comments, c];
+}

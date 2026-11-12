@@ -948,6 +948,151 @@ pub struct PeerReply {
     pub text: String,
 }
 
+// ---- threads inside a thread: a person asks another agent ------------------
+
+/// The [`RuntimeSession::meta`] key of a thread opened FROM another one
+/// ([`ChildOf`]): who opened it, so its finished turns reach that thread.
+pub const CHILD_META_KEY: &str = "child_of";
+/// Agents one "Ask several" sends the same message to.
+pub const ASK_CHILD_MAX_TARGETS: usize = 4;
+
+/// Who opened a child thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildOpener {
+    /// A person, from the thread's composer ("Ask another agent").
+    Person,
+    /// The thread's own agent (`otto.thread_open`): the child's answers to
+    /// it are delivered back to that agent.
+    Agent,
+}
+
+/// `meta.child_of`: the thread this one was opened from (not the group's
+/// root — that is `parent_id`). Server-owned like the rest of meta.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildOf {
+    pub id: Id,
+    pub by: ChildOpener,
+}
+
+impl RuntimeSession {
+    /// The thread this one was opened from, if any.
+    pub fn child_of(&self) -> Option<ChildOf> {
+        let v = self.meta.as_ref()?.get(CHILD_META_KEY)?;
+        serde_json::from_value(v.clone()).ok()
+    }
+}
+
+/// One agent of `POST /runtime-sessions/{id}/children`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AskChildTarget {
+    pub provider: RuntimeProvider,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+/// `POST /runtime-sessions/{id}/children` — a person sends `prompt` to 1–4
+/// NEW threads linked to `{id}` (its folder; its access mode or a narrower
+/// one), created all or none.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AskChildReq {
+    pub prompt: String,
+    pub targets: Vec<AskChildTarget>,
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Omitted = the parent's. Wider than the parent's is refused (400).
+    #[serde(default)]
+    pub access_mode: Option<RuntimeAccessMode>,
+    #[serde(default)]
+    pub images: Vec<PromptImage>,
+}
+
+/// The children `POST /runtime-sessions/{id}/children` opened, in target order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AskChildResp {
+    pub children: Vec<RuntimeSession>,
+}
+
+// ---- council: one prompt, several agents, then a synthesis ------------------
+
+/// Seats one council holds (a person compares 2–4 answers side by side).
+pub const COUNCIL_MIN_SEATS: usize = 2;
+pub const COUNCIL_MAX_SEATS: usize = 4;
+/// The [`RuntimeSession::meta`] key every council thread carries
+/// ([`CouncilMeta`]).
+pub const COUNCIL_META_KEY: &str = "council";
+
+/// One seat of `POST /workspaces/{id}/runtime-sessions/council`. The same
+/// provider may sit more than once (two efforts, two models).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CouncilSeatReq {
+    pub provider: RuntimeProvider,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Reasoning effort for the seat's first turn; omitted = the model's default.
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+/// `POST /workspaces/{id}/runtime-sessions/council` — one prompt to 2–4 agents.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CreateCouncilReq {
+    pub prompt: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Every seat's folder; omitted = the workspace root.
+    #[serde(default)]
+    pub cwd: Option<String>,
+    pub seats: Vec<CouncilSeatReq>,
+    #[serde(default)]
+    pub images: Vec<PromptImage>,
+}
+
+/// The council's seats, seat 1 first (seat 1 is the group's root thread).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CouncilResp {
+    pub seats: Vec<RuntimeSession>,
+}
+
+/// `POST /runtime-sessions/{id}/council/synthesize` — the judge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SynthesizeCouncilReq {
+    pub provider: RuntimeProvider,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CouncilRole {
+    Seat,
+    Synthesis,
+}
+
+/// `meta.council` of a council thread: which council, which seat (1-based;
+/// `0` for the synthesis) and its role. Server-owned like the rest of meta.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CouncilMeta {
+    pub id: Id,
+    pub seat: u32,
+    pub role: CouncilRole,
+    /// The effort the seat's (or the judge's) turn asked for, shown in its header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+impl RuntimeSession {
+    /// This thread's council membership, if it sits on one.
+    pub fn council(&self) -> Option<CouncilMeta> {
+        let v = self.meta.as_ref()?.get(COUNCIL_META_KEY)?;
+        serde_json::from_value(v.clone()).ok()
+    }
+}
+
 /// T3 Code's `RuntimeMode` (its `auto` mode is not offered): what the agent
 /// may do without asking. Otto's Seatbelt, folder trust and prompt guard
 /// apply in every mode.
@@ -1497,5 +1642,42 @@ mod tests {
         assert_eq!(embedded_auto_close_hours(Some(&json!("5"))), 12);
         assert_eq!(embedded_auto_close_hours(Some(&json!(-1))), 12);
         assert_eq!(embedded_auto_close_hours(Some(&json!(1.5))), 12);
+    }
+
+    #[test]
+    fn council_meta_reads_back_and_a_council_body_parses() {
+        let session = |meta: Value| -> RuntimeSession {
+            serde_json::from_value(json!({
+                "id": "s1", "workspace_id": "w1", "provider": "codex", "title": "t",
+                "cwd": "/w", "status": "idle", "access_mode": "approval-required",
+                "created_by": "u1", "created_at": ts(), "last_active_at": ts(),
+                "last_sequence": 0, "meta": meta,
+            }))
+            .unwrap()
+        };
+        let s = session(json!({"council": {"id": "c1", "seat": 2, "role": "seat"}}));
+        assert_eq!(
+            s.council(),
+            Some(CouncilMeta {
+                id: "c1".into(),
+                seat: 2,
+                role: CouncilRole::Seat,
+                effort: None,
+            })
+        );
+        let j = session(json!({"council": {"id": "c1", "seat": 0, "role": "synthesis"}}));
+        assert_eq!(j.council().map(|c| c.role), Some(CouncilRole::Synthesis));
+        assert_eq!(session(json!({"read_only": true})).council(), None);
+        assert_eq!(session(json!({"council": "nope"})).council(), None);
+
+        let body: CreateCouncilReq = serde_json::from_value(json!({
+            "prompt": "which cache?",
+            "seats": [{"provider": "claude", "model": "opus", "effort": "high"},
+                      {"provider": "claude"}]
+        }))
+        .unwrap();
+        assert_eq!(body.seats.len(), 2);
+        assert_eq!(body.seats[1].model, None);
+        assert!(body.images.is_empty() && body.title.is_none());
     }
 }

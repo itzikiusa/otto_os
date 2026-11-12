@@ -117,7 +117,7 @@ test('a preset and a brand swatch edit the document; Save links the kit', async 
   await expect(page.getByTestId('design-dirty')).toBeVisible();
   // The project's brand kit supplies the swatches.
   await page.getByRole('radio', { name: /Brand violet/ }).click();
-  await page.getByTestId('design-save').click();
+  // Autosave stores the edit.
   await expect(page.getByTestId('design-dirty')).toHaveCount(0);
 
   const doc = await content();
@@ -172,7 +172,7 @@ test('Save view adds a named camera; Optimize for web reports the budget', async
   await dlg.getByRole('textbox').fill('Hero angle');
   await dlg.getByRole('button', { name: 'Save view' }).click();
   await expect(page.getByTestId('s3d-left')).toContainText('Hero angle');
-  await page.getByTestId('design-save').click();
+  // Autosave stores the edit.
   await expect(page.getByTestId('design-dirty')).toHaveCount(0);
   expect((await content()).cameras?.[0]?.id).toBe('hero-angle');
 

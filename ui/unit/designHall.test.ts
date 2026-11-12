@@ -117,9 +117,24 @@ test('links split into Uses / Used in and lineage orders provenance first with c
   assert.equal(policyLabel('pinned', 9), 'pinned v9');
 });
 
+test('an artifact opened from a story keeps a clean id and hands back its query', () => {
+  // The router splits the hash on every `/`, the query's included.
+  const parts = (hash: string) => hash.split('/');
+  assert.deepEqual(parseDesignRoute(parts('design/a/X1?from=story/S1')), { view: 'artifact', id: 'X1', query: 'from=story/S1' });
+  // The Otto tab with the story crumb: the id is clean, and ArtifactView's tab
+  // check (`parts[3]` without its query) sees `otto`.
+  const otto = parts('design/a/X1/otto?from=story/S1');
+  assert.deepEqual(parseDesignRoute(otto), { view: 'artifact', id: 'X1', query: 'from=story/S1' });
+  assert.equal(otto[3]?.split('?')[0], 'otto');
+  // A story page link with a stray query still lands on the story.
+  assert.deepEqual(parseDesignRoute(parts('design/story/S1?x=1')), { view: 'story', id: 'S1' });
+});
+
 test('route parser maps every Design Hall path and falls back to the lobby', () => {
   assert.deepEqual(parseDesignRoute(['design']), { view: 'lobby' });
-  assert.deepEqual(parseDesignRoute(['design', 'spatial']), { view: 'spatial' });
+  // The retired Spatial view lands on the lobby.
+  assert.deepEqual(parseDesignRoute(['design', 'spatial']), { view: 'lobby' });
+  assert.deepEqual(parseDesignRoute(['design', 'studio', 'spatial']), { view: 'lobby' });
   assert.deepEqual(parseDesignRoute(['design', 'a', 'X1']), { view: 'artifact', id: 'X1' });
   assert.deepEqual(parseDesignRoute(['design', 'p', 'P1']), { view: 'project', id: 'P1' });
   assert.deepEqual(parseDesignRoute(['design', 'studio', '3d']), { view: 'studio', id: '3d' });
@@ -129,12 +144,22 @@ test('route parser maps every Design Hall path and falls back to the lobby', () 
   assert.deepEqual(parseDesignRoute(['design', 'learned', 'x']), { view: 'learned', tab: 'pending' });
   assert.deepEqual(parseDesignRoute(['design', 'learned', 'signals']), { view: 'learned', tab: 'signals' });
   assert.deepEqual(parseDesignRoute(['design', 'learned', 'settings']), { view: 'learned', tab: 'settings' });
+  assert.deepEqual(parseDesignRoute(['design', 'learned', 'memory']), { view: 'learned', tab: 'memory' });
+  // The tab names Team design rules shows are accepted in a URL too.
+  assert.deepEqual(parseDesignRoute(['design', 'learned', 'proposed']), { view: 'learned', tab: 'pending' });
+  assert.deepEqual(parseDesignRoute(['design', 'learned', 'active']), { view: 'learned', tab: 'rules' });
   assert.deepEqual(parseDesignRoute(['design', 'a']), { view: 'lobby' });
 });
 
-test('there are exactly seven studios with unique ids and every format renders', () => {
-  assert.equal(STUDIOS.length, 7);
-  assert.equal(new Set(STUDIOS.map((s) => s.id)).size, 7);
+test('there are exactly six studios with unique ids and every format renders', () => {
+  assert.equal(STUDIOS.length, 6);
+  assert.equal(new Set(STUDIOS.map((s) => s.id)).size, 6);
+  // Every offered studio has an editor: no roadmap placeholders shown to users.
+  for (const s of STUDIOS) {
+    assert.ok(s.formats.length > 0, `${s.id} has a format`);
+    assert.doesNotMatch(`${s.blurb} ${s.note}`, /\bv[23]\b|planned|today’s Canvas/i, s.id);
+  }
+  assert.ok(!STUDIOS.some((s) => (s.id as string) === 'spatial'));
   assert.equal(renderKind('otto-canvas'), 'canvas');
   assert.equal(renderKind('glb'), 'model');
   assert.equal(renderKind('webp'), 'image');

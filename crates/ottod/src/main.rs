@@ -9,6 +9,7 @@
 #![recursion_limit = "512"]
 
 mod config;
+mod context_sweep;
 mod housekeeping;
 mod mcp_server;
 mod mcp_tools;
@@ -389,13 +390,35 @@ async fn run(cfg: Config) -> Result<(), String> {
         return Ok(());
     }
     let secrets = otto_keychain::from_env(&cfg.data_dir);
-    let BuiltCtx { ctx, root_user_id } = boot::build_ctx(&boot_cfg, pool, secrets).await?;
+    // build_ctx and recovery are abandoned when a stop lands mid-phase and
+    // they outlast BOOT_PHASE_STOP_GRACE (open_state above never is: its
+    // snapshot / migration must finish). An abandoned build_ctx leaves the
+    // running marker (not a clean stop); abandoned recovery tears down.
+    let Some(built) = unless_stopped(
+        "modules",
+        &shutdown_rx,
+        boot::build_ctx(&boot_cfg, pool, secrets),
+    )
+    .await
+    else {
+        tracing::info!("ottod stopped (boot abandoned)");
+        return Ok(());
+    };
+    let BuiltCtx { ctx, root_user_id } = built?;
     boot.mark("modules");
     // Session restore (respawns, holder adoption) is skipped on a stop:
     // holders keep running and the next start adopts them.
     let mut early_stop = stop_requested("modules");
     if early_stop.is_none() {
-        boot::recover_before_serve(&ctx, &mut boot).await?;
+        let recovered = unless_stopped(
+            "recovery",
+            &shutdown_rx,
+            boot::recover_before_serve(&ctx, &mut boot),
+        )
+        .await;
+        if let Some(result) = recovered {
+            result?;
+        }
         early_stop = stop_requested("recovery");
     }
     if let Some(signal_at) = early_stop {
@@ -413,6 +436,8 @@ async fn run(cfg: Config) -> Result<(), String> {
         return Ok(());
     }
     boot::spawn_post_listen_work(&ctx, post_listen_housekeeping);
+    // Daily: workflow-context folders whose run row is gone (bounded, logged).
+    context_sweep::spawn(ctx.pool.clone(), &cfg.data_dir);
     let mut background = boot::spawn_background(&ctx, root_user_id).await;
     background.keep(start_usage_tailer(&cfg, &ctx));
     // Stop supervisor admission as soon as shutdown begins, including while
@@ -439,6 +464,7 @@ async fn run(cfg: Config) -> Result<(), String> {
 
     // (Bound at the very top of `run` — the single-instance lock.)
     tracing::info!("listening on http://127.0.0.1:{}", cfg.port);
+    otto_netguard::register_daemon_port(cfg.port);
     // A settings-read failure here happens after supervisors and sessions have
     // started. Preserve that error, but take the same cancellation/teardown path
     // as a primary listener failure instead of returning through `?`.
@@ -627,6 +653,7 @@ async fn serve_network_listener(
     };
     tracing::info!("network listener on https://0.0.0.0:{port} (TLS)");
     otto_server::transport::set_network_listener_port(Some(port));
+    otto_netguard::register_daemon_port(port);
     let router = router.clone();
     // axum-server drives shutdown via its own Handle; bridge the watch signal
     // into a graceful_shutdown so the TLS listener drains in step with the
@@ -817,6 +844,44 @@ fn teardown_deadline(
 ) -> std::time::Instant {
     let own = now + TEARDOWN_BUDGET;
     signal_at.map_or(own, |at| own.min(at + STOP_BUDGET))
+}
+
+/// How long a boot phase may keep running after a stop signal before it is
+/// abandoned. launchd SIGKILLs [`STOP_BUDGET`]-plus seconds after SIGTERM
+/// anyway; abandoning here leaves the rest of that budget for the teardown.
+/// Recovery passes are idempotent (the next start redoes them).
+const BOOT_PHASE_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Run one boot phase to completion unless a stop signal lands while it runs
+/// AND it is still running [`BOOT_PHASE_STOP_GRACE`] after that signal —
+/// then it is dropped (`None`). A signal that arrived before the phase
+/// started counts from its own instant.
+async fn unless_stopped<T>(
+    phase: &str,
+    shutdown_rx: &ShutdownRx,
+    work: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    let mut rx = shutdown_rx.clone();
+    tokio::pin!(work);
+    let signal_at = tokio::select! {
+        out = &mut work => return Some(out),
+        at = rx.wait_for(Option::is_some) => match at.map(|at| *at) {
+            Ok(Some(at)) => at,
+            // The signal task is gone: no stop can come, finish the phase.
+            _ => return Some(work.await),
+        },
+    };
+    let deadline = tokio::time::Instant::from_std(signal_at + BOOT_PHASE_STOP_GRACE);
+    match tokio::time::timeout_at(deadline, work).await {
+        Ok(out) => Some(out),
+        Err(_) => {
+            tracing::warn!(
+                "boot phase {phase} still running {}s after the stop signal — abandoned",
+                BOOT_PHASE_STOP_GRACE.as_secs()
+            );
+            None
+        }
+    }
 }
 
 /// One teardown step's timeout: its own `cap`, but never more than what is
@@ -1087,6 +1152,56 @@ impl ShutdownSignals {
 mod shutdown_budget_tests {
     use super::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn a_boot_phase_with_no_stop_runs_to_completion() {
+        let (_tx, rx) = watch::channel(None);
+        assert_eq!(unless_stopped("t", &rx, async { 7 }).await, Some(7));
+    }
+
+    #[tokio::test]
+    async fn a_phase_still_running_past_the_grace_after_a_stop_is_abandoned() {
+        // The signal landed longer ago than the grace: no more waiting.
+        let at = std::time::Instant::now()
+            .checked_sub(BOOT_PHASE_STOP_GRACE + Duration::from_secs(1))
+            .expect("monotonic clock is past the grace");
+        let (_tx, rx) = watch::channel(Some(at));
+        let out = tokio::time::timeout(
+            Duration::from_secs(5),
+            unless_stopped("t", &rx, std::future::pending::<()>()),
+        )
+        .await
+        .expect("abandoned promptly, not after the phase");
+        assert_eq!(out, None);
+    }
+
+    #[tokio::test]
+    async fn a_phase_that_ends_inside_the_grace_after_a_stop_still_completes() {
+        let (tx, rx) = watch::channel(None);
+        let work = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            "done"
+        };
+        let stop = async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = tx.send(Some(std::time::Instant::now()));
+        };
+        let (out, ()) = tokio::join!(unless_stopped("t", &rx, work), stop);
+        assert_eq!(out, Some("done"));
+    }
+
+    #[tokio::test]
+    async fn a_gone_signal_task_never_abandons_a_phase() {
+        let (tx, rx) = watch::channel(None);
+        drop(tx);
+        assert_eq!(unless_stopped("t", &rx, async { 1 }).await, Some(1));
+    }
+
+    #[test]
+    fn the_boot_phase_grace_leaves_the_teardown_budget_inside_exit_timeout() {
+        // A stop abandoned at the grace still has STOP_BUDGET - grace left.
+        assert!(BOOT_PHASE_STOP_GRACE + Duration::from_secs(10) <= STOP_BUDGET);
+    }
 
     #[test]
     fn steps_never_eat_the_clickhouse_reserve() {

@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{Path as AxPath, Query, Request, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, delete, get, post};
 use axum::{Json, Router};
@@ -57,6 +57,9 @@ pub struct PluginManifestFile {
     pub ui: Option<String>,
     #[serde(default)]
     pub health: Option<String>,
+    /// Full tools for `/plugin-host/agents/run` turns (default: tool-less, sandboxed).
+    #[serde(default)]
+    pub agent_tools: bool,
 }
 
 fn default_icon() -> String {
@@ -97,6 +100,8 @@ fn load_manifest(dir: &Path) -> Result<PluginManifestFile, String> {
 /// traffic, `x-otto-user` headers included).
 struct RunningPlugin {
     port: u16,
+    /// Sent as `x-otto-plugin-token` on every proxied request (sidecar auth).
+    token: String,
     /// Which spawn this entry belongs to: the watcher of an older spawn must
     /// never remove a newer one's entry.
     generation: u64,
@@ -244,6 +249,7 @@ impl PluginManager {
             if self
                 .http
                 .get(&url)
+                .header("x-otto-plugin-token", &p.token)
                 .timeout(Duration::from_millis(500))
                 .send()
                 .await
@@ -265,7 +271,7 @@ impl PluginManager {
         }
         // Keep ownership local during readiness: cancellation or failure kills
         // the child and cannot leave a stale published port.
-        self.adopt(&p.slug, port, child);
+        self.adopt(&p.slug, port, &p.token, child);
         self.last_errors.lock().unwrap().remove(&p.slug);
         tracing::info!(plugin = %p.slug, port, "plugins: sidecar started");
         Ok(port)
@@ -277,7 +283,7 @@ impl PluginManager {
     /// forwarding to whatever binds the freed port next; [`Self::stop`]
     /// signals the watcher instead of waiting on the child itself. No
     /// auto-restart: a crashing sidecar stays down until re-enabled.
-    fn adopt(&self, slug: &str, port: u16, mut child: Child) {
+    fn adopt(&self, slug: &str, port: u16, token: &str, mut child: Child) {
         let generation = self
             .generations
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -320,6 +326,7 @@ impl PluginManager {
             slug.to_string(),
             RunningPlugin {
                 port,
+                token: token.to_string(),
                 generation,
                 stop,
                 watcher,
@@ -359,8 +366,14 @@ impl PluginManager {
         }
     }
 
+    #[cfg(test)]
     fn port_of(&self, slug: &str) -> Option<u16> {
-        self.running.lock().unwrap().get(slug).map(|r| r.port)
+        self.route_of(slug).map(|(port, _)| port)
+    }
+
+    fn route_of(&self, slug: &str) -> Option<(u16, String)> {
+        let map = self.running.lock().unwrap();
+        map.get(slug).map(|r| (r.port, r.token.clone()))
     }
 
     fn set_last_error(&self, slug: &str, error: String) {
@@ -470,13 +483,14 @@ async fn list_enabled(State(ctx): State<ServerCtx>) -> ApiResult<Json<Vec<Plugin
 
 /// Reverse-proxy `/api/v1/plugins/{slug}/*` to the sidecar. The auth +
 /// feature-guard already authorized this (slug-keyed). Forwards method, query,
-/// body, content-type, and the caller identity (X-Otto-User).
+/// body, content-type, the caller identity (X-Otto-User) and the plugin's
+/// own token (X-Otto-Plugin-Token: sidecars refuse requests without it).
 async fn proxy(State(ctx): State<ServerCtx>, req: Request) -> Response {
     let path = req.uri().path().to_string();
     let Some((slug, rest)) = split_plugin_path(&path) else {
         return (StatusCode::BAD_REQUEST, "bad plugin path").into_response();
     };
-    let Some(port) = ctx.plugins.port_of(&slug) else {
+    let Some((port, token)) = ctx.plugins.route_of(&slug) else {
         return (StatusCode::BAD_GATEWAY, "plugin not running").into_response();
     };
     let user = req.extensions().get::<AuthUser>().map(|u| u.0.clone());
@@ -486,11 +500,7 @@ async fn proxy(State(ctx): State<ServerCtx>, req: Request) -> Response {
         .query()
         .map(|q| format!("?{q}"))
         .unwrap_or_default();
-    let ctype = req
-        .headers()
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
+    let pass = passed_headers(req.headers(), &["content-type", "accept", "if-none-match"]);
 
     let body = match axum::body::to_bytes(req.into_body(), 16 * 1024 * 1024).await {
         Ok(b) => b,
@@ -502,8 +512,9 @@ async fn proxy(State(ctx): State<ServerCtx>, req: Request) -> Response {
         reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
     // `Bytes` → reqwest body without copying the (≤ 16 MB) buffer again.
     let mut rb = ctx.plugins.http.request(rmethod, &url).body(body);
-    if let Some(ct) = ctype {
-        rb = rb.header("content-type", ct);
+    rb = rb.header("x-otto-plugin-token", token);
+    for (name, value) in pass {
+        rb = rb.header(name, value);
     }
     if let Some(u) = user {
         rb = rb
@@ -545,12 +556,9 @@ async fn forward_with_limit(rb: reqwest::RequestBuilder, limit: usize) -> Respon
         Err(e) => return (StatusCode::BAD_GATEWAY, format!("plugin proxy: {e}")).into_response(),
     };
     let status = resp.status();
-    let ct = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/octet-stream")
-        .to_string();
+    let ct = resp.headers().get(reqwest::header::CONTENT_TYPE).cloned();
+    let ct = ct.unwrap_or(HeaderValue::from_static("application/octet-stream"));
+    let pass = passed_headers(resp.headers(), &RESPONSE_HEADERS);
     if resp
         .content_length()
         .is_some_and(|size| size > limit as u64)
@@ -583,16 +591,37 @@ async fn forward_with_limit(rb: reqwest::RequestBuilder, limit: usize) -> Respon
             }
         }
     }
-    Response::builder()
+    let mut out = Response::builder()
         .status(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY))
-        .header("content-type", ct)
-        .body(Body::from(bytes))
-        .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+        .header("content-type", ct.as_bytes());
+    for (name, value) in pass {
+        out = out.header(name, value);
+    }
+    let out = out.body(Body::from(bytes));
+    out.unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
 }
 
-/// Split `…/plugins/<slug>/<rest>` (with or without the `/api/v1` nest prefix).
+/// Sidecar response headers relayed to the caller (besides content-type);
+/// everything else (cookies, CORS, framing…) stays with the sidecar.
+const RESPONSE_HEADERS: [&str; 5] = [
+    "content-disposition",
+    "cache-control",
+    "etag",
+    "last-modified",
+    "content-encoding",
+];
+
+/// The allowlisted `names` present in `headers`, as (name, raw value) pairs.
+fn passed_headers(headers: &HeaderMap, names: &[&'static str]) -> Vec<(&'static str, Vec<u8>)> {
+    let get = |n: &&'static str| Some((*n, headers.get(*n)?.as_bytes().to_vec()));
+    names.iter().filter_map(get).collect()
+}
+
+/// Split `[/api/v1]/plugins/<slug>/<rest>` — the PREFIX only: a later
+/// `/plugins/` inside `<rest>` belongs to the sidecar's own path.
 fn split_plugin_path(path: &str) -> Option<(String, String)> {
-    let after = path.split("/plugins/").nth(1)?;
+    let after = path.strip_prefix("/api/v1").unwrap_or(path);
+    let after = after.strip_prefix("/plugins/")?;
     let mut it = after.splitn(2, '/');
     let slug = it.next()?.to_string();
     let rest = it.next().unwrap_or("").to_string();
@@ -750,14 +779,8 @@ async fn install(
         })
         .await
         .map_err(ApiError)?;
-    ctx.audit(otto_state::NewAuditEntry {
-        user_id: Some(user.id.clone()),
-        action: "plugin.installed".into(),
-        target: Some(otto_core::Id::from(rec.slug.as_str())),
-        detail: Some(serde_json::json!({ "source": src })),
-        ip: None,
-    })
-    .await;
+    let detail = Some(serde_json::json!({ "source": src }));
+    audit(&ctx, Some(&user), "plugin.installed", &rec.slug, detail).await;
     Ok(Json(rec))
 }
 
@@ -772,6 +795,7 @@ async fn enable(
     crate::auth::require_human(&auth.0)?;
     let _guard = ctx.plugins.lifecycle.lock().await;
     let enabled = ctx.plugins.enable(&slug).await.map_err(ApiError)?;
+    audit(&ctx, Some(&user), "plugin.enabled", &slug, None).await;
     Ok(Json(enabled))
 }
 
@@ -791,6 +815,7 @@ async fn disable(
         .await
         .map_err(ApiError)?;
     ctx.plugins.stop(&slug).await;
+    audit(&ctx, Some(&user), "plugin.disabled", &slug, None).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -806,15 +831,28 @@ async fn remove(
     let _guard = ctx.plugins.lifecycle.lock().await;
     ctx.plugins.stop(&slug).await;
     ctx.plugins.repo().delete(&slug).await.map_err(ApiError)?;
-    ctx.audit(otto_state::NewAuditEntry {
-        user_id: Some(user.id.clone()),
-        action: "plugin.removed".into(),
-        target: Some(otto_core::Id::from(slug.as_str())),
-        detail: None,
-        ip: None,
-    })
-    .await;
+    audit(&ctx, Some(&user), "plugin.removed", &slug, None).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// One plugin audit row (`user` is None for a sidecar's own host-API call).
+async fn audit(
+    ctx: &ServerCtx,
+    user: Option<&otto_core::domain::User>,
+    action: &str,
+    slug: &str,
+    detail: Option<serde_json::Value>,
+) {
+    let (user_id, target) = (user.map(|u| u.id.clone()), Some(slug.to_string()));
+    let (action, ip) = (action.to_string(), None);
+    let entry = otto_state::NewAuditEntry {
+        user_id,
+        action,
+        target,
+        detail,
+        ip,
+    };
+    ctx.audit(entry).await;
 }
 
 // ===========================================================================
@@ -1057,92 +1095,46 @@ async fn host_agents_run(
     headers: HeaderMap,
     Json(req): Json<AgentRunReq>,
 ) -> Response {
-    if let Err(r) = auth_plugin(&ctx, &headers).await {
-        return *r;
-    }
-    let cwd = req.cwd.unwrap_or_else(|| ".".into());
+    let rec = match auth_plugin(&ctx, &headers).await {
+        Ok(rec) => rec,
+        Err(r) => return *r,
+    };
+    // The prompt carries text the plugin collected (Jira, git…): untrusted,
+    // tool-less turn unless the manifest opts into `agent_tools` (then only
+    // in the plugin's data dir or a registered repo). See otto-orchestrator.
+    let tools = load_manifest(Path::new(&rec.source)).is_ok_and(|m| m.agent_tools);
+    let repos = if tools {
+        ctx.git_store.list_all_repos().await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let repos: Vec<String> = repos.into_iter().map(|r| r.path).collect();
+    let data_dir = ctx.plugins.data_dir.join("plugins").join(&rec.slug);
+    let scope = match otto_orchestrator::plugin_agent::plugin_agent_scope(
+        tools,
+        req.cwd.as_deref(),
+        &data_dir,
+        &repos,
+        std::env::current_dir().ok().as_deref(),
+    ) {
+        Ok(scope) => scope,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
     // No workspace context here (plugins are host-scoped), so resolve the default
     // agent through the global `default_provider` setting, else "claude".
     let provider = ctx
         .resolve_provider_or_fallback(None, req.provider.as_deref(), "plugins.host_agents_run")
         .await;
-    let result = match provider.as_str() {
-        "claude" => {
-            ctx.orchestrator
-                .run_agent(
-                    &req.prompt,
-                    &cwd,
-                    req.model.as_deref(),
-                    Duration::from_secs(180),
-                )
-                .await
-        }
-        "codex" => run_codex_exec(&req.prompt, &cwd, req.model.as_deref()).await,
-        other => {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("provider {other:?} has no headless runner (supported: claude, codex)"),
-            )
-                .into_response()
-        }
-    };
-    match result {
+    let cwd = scope.cwd().map(|d| d.to_string_lossy().to_string());
+    let detail = serde_json::json!({ "provider": provider, "agent_tools": tools, "cwd": cwd, "prompt_chars": req.prompt.len() });
+    audit(&ctx, None, "plugin.agent_run", &rec.slug, Some(detail)).await;
+    let run =
+        ctx.orchestrator
+            .run_plugin_agent(&provider, &req.prompt, req.model.as_deref(), &scope);
+    match run.await {
         Ok(text) => Json(AgentRunResp { text }).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => ApiError(e).into_response(),
     }
-}
-
-/// One-shot headless codex run: `codex exec` with a read-only sandbox and
-/// `--output-last-message` so the reply is read from a file instead of parsing
-/// the streamed TUI output. 10-minute hard cap.
-async fn run_codex_exec(prompt: &str, cwd: &str, model: Option<&str>) -> otto_core::Result<String> {
-    let bin = std::env::var("CODEX_BIN")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "codex".to_string());
-    let out_file =
-        std::env::temp_dir().join(format!("otto-plugin-codex-{}.txt", uuid::Uuid::new_v4()));
-    let mut cmd = tokio::process::Command::new(&bin);
-    cmd.arg("exec")
-        .arg("--skip-git-repo-check")
-        .arg("--sandbox")
-        .arg("read-only")
-        .arg("--output-last-message")
-        .arg(&out_file)
-        .current_dir(cwd)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        // The timeout below drops the wait future: without this the timed-out
-        // `codex exec` ran on unsupervised (and kept burning tokens).
-        .kill_on_drop(true);
-    if let Some(m) = model.map(str::trim).filter(|m| !m.is_empty()) {
-        cmd.arg("--model").arg(m);
-    }
-    // `--` closes the option list: the prompt is free text and may start
-    // with a dash.
-    cmd.arg("--").arg(prompt);
-    let child = cmd
-        .spawn()
-        .map_err(|e| otto_core::Error::Upstream(format!("spawn {bin}: {e}")))?;
-    let out = match tokio::time::timeout(Duration::from_secs(600), child.wait_with_output()).await {
-        Ok(r) => r.map_err(|e| otto_core::Error::Upstream(format!("codex exec: {e}")))?,
-        Err(_) => {
-            let _ = std::fs::remove_file(&out_file);
-            return Err(otto_core::Error::Upstream("codex exec timed out".into()));
-        }
-    };
-    let text = std::fs::read_to_string(&out_file).unwrap_or_default();
-    let _ = std::fs::remove_file(&out_file);
-    if !out.status.success() && text.trim().is_empty() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Err(otto_core::Error::Upstream(format!(
-            "codex exec failed ({}): {}",
-            out.status,
-            err.chars().take(300).collect::<String>()
-        )));
-    }
-    Ok(text)
 }
 
 /// Recursively copy a directory (used to install a local plugin into the home,
@@ -1227,7 +1219,7 @@ mod proxy_timeout_tests {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        manager.adopt("fixture", 1, child);
+        manager.adopt("fixture", 1, "t", child);
         let _guard = manager.lifecycle.lock().await;
         let updated = manager
             .replace(record("new", "/missing/new-executable"))
@@ -1294,6 +1286,7 @@ mod proxy_timeout_tests {
             let (stop, _rx) = tokio::sync::oneshot::channel::<()>();
             RunningPlugin {
                 port: 7,
+                token: String::new(),
                 generation,
                 stop,
                 watcher: tokio::spawn(async {}),
@@ -1331,7 +1324,7 @@ mod proxy_timeout_tests {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        manager.adopt("crashy", 41_000, crashing);
+        manager.adopt("crashy", 41_000, "t", crashing);
         assert_eq!(manager.port_of("crashy"), Some(41_000));
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while manager.port_of("crashy").is_some() {
@@ -1357,17 +1350,54 @@ mod proxy_timeout_tests {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        manager.adopt("again", 1, old);
+        manager.adopt("again", 1, "t", old);
         let fresh = Command::new("/bin/sh")
             .args(["-c", "exec sleep 60"])
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        manager.adopt("again", 2, fresh);
+        manager.adopt("again", 2, "t", fresh);
         tokio::time::sleep(Duration::from_millis(600)).await;
         assert_eq!(manager.port_of("again"), Some(2));
         manager.stop("again").await;
         assert!(manager.port_of("again").is_none());
+    }
+
+    /// The proxy authenticates itself to the sidecar with the plugin's token.
+    #[tokio::test]
+    async fn the_proxy_route_carries_the_plugins_token() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = PluginManager::new(
+            PluginsRepo::new(pool),
+            tmp.path().join("plugins"),
+            tmp.path().into(),
+            "http://127.0.0.1:1".into(),
+        );
+        let child = Command::new("/bin/sh")
+            .args(["-c", "exec sleep 60"])
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        manager.adopt("tok", 9, "secret-token", child);
+        assert_eq!(manager.route_of("tok"), Some((9, "secret-token".into())));
+        manager.stop("tok").await;
+        assert_eq!(manager.route_of("tok"), None);
+    }
+
+    #[test]
+    fn manifest_agent_tools_is_opt_in() {
+        let tmp = tempfile::tempdir().unwrap();
+        let write = |extra: &str| {
+            let m = format!(r#"{{"slug":"p","name":"P","exec":["node"]{extra}}}"#);
+            std::fs::write(tmp.path().join("otto-plugin.json"), m).unwrap();
+            load_manifest(tmp.path()).unwrap().agent_tools
+        };
+        assert!(!write(""));
+        assert!(write(r#","agent_tools":true"#));
     }
 
     /// A sidecar that accepts and then never answers (the SI-08 hang).
@@ -1451,6 +1481,52 @@ mod proxy_timeout_tests {
                 peer.await.unwrap();
             }
         }
+    }
+
+    /// Only the leading `[/api/v1]/plugins/<slug>/` is the route: a later
+    /// `/plugins/` belongs to the sidecar's own path.
+    #[test]
+    fn only_the_route_prefix_is_split_off() {
+        let split = |p: &str| split_plugin_path(p);
+        let pair = |a: &str, b: &str| Some((a.to_string(), b.to_string()));
+        assert_eq!(split("/api/v1/plugins/tp/a/b"), pair("tp", "a/b"));
+        assert_eq!(split("/plugins/tp"), pair("tp", ""));
+        assert_eq!(
+            split("/plugins/tp/x/plugins/other/y"),
+            pair("tp", "x/plugins/other/y")
+        );
+        assert_eq!(split("/api/v1/plugins/"), None);
+        assert_eq!(split("/elsewhere/plugins/tp/x"), None);
+    }
+
+    /// Caching/download headers pass both ways; everything else stays put.
+    #[tokio::test]
+    async fn only_allowlisted_headers_are_relayed() {
+        let mut inbound = HeaderMap::new();
+        inbound.insert("if-none-match", HeaderValue::from_static("\"v1\""));
+        inbound.insert("cookie", HeaderValue::from_static("session=x"));
+        let pass = passed_headers(&inbound, &["content-type", "accept", "if-none-match"]);
+        assert_eq!(pass, vec![("if-none-match", b"\"v1\"".to_vec())]);
+
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let h = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            if let Ok((mut s, _)) = l.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf).await;
+                let _ = s
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/csv\r\netag: \"e1\"\r\ncontent-disposition: attachment\r\nset-cookie: a=b\r\ncontent-length: 2\r\n\r\nok")
+                    .await;
+            }
+        });
+        let client = proxy_client(PROXY_CONNECT_TIMEOUT, PROXY_TIMEOUT);
+        let resp = forward(client.get(format!("http://127.0.0.1:{port}/x"))).await;
+        assert_eq!(resp.headers()["content-type"], "text/csv");
+        assert_eq!(resp.headers()["etag"], "\"e1\"");
+        assert_eq!(resp.headers()["content-disposition"], "attachment");
+        assert!(resp.headers().get("set-cookie").is_none());
+        h.abort();
     }
 
     #[tokio::test]

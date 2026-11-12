@@ -340,7 +340,7 @@ fn redirect_hops_stay_on_the_same_site() {
         &url("https://api.test/a"),
         Some("https://evil.example/b"),
         true,
-        false,
+        otto_netguard::Guard::Tunnelled,
     )
     .unwrap();
     assert!(note.contains("evil.example") && note.contains("carries credentials"));
@@ -349,7 +349,7 @@ fn redirect_hops_stay_on_the_same_site() {
         &url("https://api.test/a"),
         Some("/b"),
         true,
-        false
+        otto_netguard::Guard::Tunnelled
     )
     .is_none());
     let guard = unfollowed_redirect_note(
@@ -357,10 +357,24 @@ fn redirect_hops_stay_on_the_same_site() {
         &url("https://api.test/a"),
         Some("http://127.0.0.1/admin"),
         false,
-        true,
+        otto_netguard::Guard::Strict,
     )
     .unwrap();
     assert!(guard.contains("SSRF guard"), "{guard}");
+    // Private addresses allowed: the loopback hop is fine, metadata and the
+    // daemon's own port are not.
+    let allow_local = |to: &str| {
+        unfollowed_redirect_note(
+            reqwest::StatusCode::FOUND,
+            &url("https://api.test/a"),
+            Some(to),
+            false,
+            otto_netguard::Guard::AllowLocal,
+        )
+    };
+    assert!(allow_local("http://127.0.0.1:3000/admin").is_none());
+    assert!(allow_local("http://169.254.169.254/latest/").is_some());
+    assert!(allow_local("http://127.0.0.1:7700/sessions").is_some());
 }
 
 /// Loopback servers on two hosts (127.0.0.1 → localhost): a request with an
@@ -466,6 +480,12 @@ fn send_failures_name_their_cause() {
     let guard = classify_send_failure(&causes).unwrap();
     // The UI's "Allow private addresses…" helper keys on this text.
     assert!(guard.contains("SSRF guard") && guard.contains("private-address guard"));
+    // Metadata / daemon refusals: no "allow private addresses" hint (it is on).
+    let always = classify_send_failure(&[
+        "dns error: blocked address 169.254.169.254 for host m.test: cloud-metadata addresses are always blocked (SSRF guard)".to_string(),
+    ])
+    .unwrap();
+    assert!(always.contains("always blocked") && !always.contains("allow private"));
 
     let msg = |inner: &str| classify_send_failure(&[inner.to_string()]).unwrap();
     assert!(

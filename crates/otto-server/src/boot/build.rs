@@ -76,6 +76,8 @@ pub async fn build_ctx(
         workspaces: workspaces.clone(),
     });
     let orchestrator = orchestrator();
+    // Unattended headless turns (`run_agent_background`) take the session gate.
+    orchestrator.set_admission_hook(manager.background_admission_hook());
     let improve_engine = improve_engine(&pool, &events, &workspaces, &orchestrator, cfg);
     let memory = memory_service(&pool);
     let plugins = plugin_manager(cfg, &pool);

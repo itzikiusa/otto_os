@@ -43,6 +43,44 @@ pub struct VaultStatus {
     /// shows `git rm --cached -r <dir>`. Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tracked_recovery: Vec<String>,
+    /// Present only while the full-text index is incomplete (rebuilding
+    /// after an upgrade or an explicit rebuild): search still answers, from
+    /// the part indexed so far. Omitted when the index is complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_index: Option<SearchIndexStatus>,
+}
+
+/// Progress of an incomplete full-text index.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchIndexStatus {
+    /// `rebuilding` while the background rebuild runs; `pending` when notes
+    /// are missing from the index and the rebuild has not started yet.
+    pub state: String,
+    /// Notes in the full-text index so far.
+    pub indexed: i64,
+    /// Notes in the vault.
+    pub total: i64,
+}
+
+/// `POST …/search` with `with_index: true`: the hits plus, while the index
+/// is incomplete, how much of the vault they were drawn from.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SearchPage {
+    pub hits: Vec<SearchHit>,
+    /// `None` = the index is complete; otherwise the hits may be missing
+    /// notes that are not indexed yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<SearchIndexStatus>,
+}
+
+/// `POST …/attachment` result: the saved file and the embed to insert.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VaultAttachment {
+    /// Vault-relative path of the new file (never an existing one).
+    pub path: String,
+    pub size: i64,
+    /// The embed in the vault's link style, e.g. `![[attachments/x.png]]`.
+    pub embed: String,
 }
 
 /// One entry of a lazy directory listing (folders first, then notes/files).
@@ -173,6 +211,9 @@ pub struct SearchReq {
     pub path_prefix: Option<String>,
     pub okf_type: Option<String>,
     pub limit: usize,
+    /// Answer `{hits, index}` instead of the bare hit array, so a caller can
+    /// tell a partial result (index still rebuilding) from a complete one.
+    pub with_index: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

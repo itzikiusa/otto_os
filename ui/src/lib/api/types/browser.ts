@@ -156,6 +156,9 @@ export interface BrowserAskReq {
   url: string;
   text: string;
   annotation_ids?: Id[];
+  /** A LIVE tab's visible text (desktop webview); the daemon caps it at
+   *  30 000 chars and fences it as untrusted page content. */
+  page_text?: string;
 }
 
 /** `POST /workspaces/{wid}/browser/vault-save` response — the vault-relative

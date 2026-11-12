@@ -56,6 +56,53 @@ fn absolute_command(command: &str) -> Option<String> {
         .map(|p| p.to_string_lossy().into_owned())
 }
 
+/// A personal agent's session (`meta.personal_agent`): otto-assistant's
+/// `ensure_agent_workspace` wrote its bundle (the workspace context plus the
+/// agent's persona, rules and team) just before creating it.
+fn carries_persona(meta: &serde_json::Value) -> bool {
+    meta.get("personal_agent")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|a| !a.is_empty())
+}
+
+/// [`carries_persona`] for a stored session: the terminal spawn paths in
+/// `manager.rs` (create and restart) had the same overwrite.
+pub(super) fn persona(session: &Session) -> bool {
+    carries_persona(&session.meta)
+}
+
+/// [`context_injection`] under a short name for `manager.rs`, which may not grow.
+pub(super) fn inject(
+    hook: &dyn PreSpawnHook,
+    ws: &Workspace,
+    cwd: &str,
+    provider: &str,
+    persona: bool,
+) -> otto_core::hooks::SpawnInjection {
+    context_injection(hook, ws, cwd, provider, persona)
+}
+
+/// The context injection of a structured spawn. A persona session launches
+/// on the bundle already on disk: re-materializing `(provider, cwd)` from the
+/// workspace settings alone would overwrite it and start the agent without
+/// its persona. With no bundle to read back it falls back to the workspace
+/// context, as every other session gets.
+fn context_injection(
+    hook: &dyn PreSpawnHook,
+    ws: &Workspace,
+    cwd: &str,
+    provider: &str,
+    persona: bool,
+) -> otto_core::hooks::SpawnInjection {
+    if persona {
+        let kept = hook.resume_injection(cwd, provider);
+        if !kept.args.is_empty() || !kept.env.is_empty() {
+            return kept;
+        }
+    }
+    hook.before_spawn(ws, cwd, provider)
+}
+
 impl SessionManager {
     /// Prepare `spec` (the runtime driver's launch command) for spawning as
     /// agent session `session` in `ws`. `tail_args` go after the context
@@ -118,10 +165,12 @@ impl SessionManager {
             let ws_owned = ws.clone();
             let cwd = session.cwd.clone();
             let prov = session.provider.clone();
-            let injection =
-                tokio::task::spawn_blocking(move || hook.before_spawn(&ws_owned, &cwd, &prov))
-                    .await
-                    .unwrap_or_default();
+            let persona = carries_persona(&session.meta);
+            let injection = tokio::task::spawn_blocking(move || {
+                context_injection(hook.as_ref(), &ws_owned, &cwd, &prov, persona)
+            })
+            .await
+            .unwrap_or_default();
             spec.args.extend(injection.args);
             spec.env.extend(injection.env);
         }
@@ -236,5 +285,86 @@ impl SessionManager {
     /// `interaction_mode_apply` does for PTY sessions).
     pub async fn runtime_has_process_sandbox(&self, provider: &str) -> bool {
         self.has_process_sandbox(SessionKind::Agent, provider).await
+    }
+}
+
+#[cfg(test)]
+mod persona_tests {
+    use super::*;
+    use otto_core::hooks::SpawnInjection;
+    use serde_json::json;
+
+    /// A bundle on disk (`resume_injection` reads it back) or not; records
+    /// whether the spawn re-materialized from the workspace settings.
+    struct Hook {
+        bundle: bool,
+        rematerialized: std::sync::Mutex<bool>,
+    }
+
+    impl PreSpawnHook for Hook {
+        fn before_spawn(&self, _ws: &Workspace, _cwd: &str, _p: &str) -> SpawnInjection {
+            *self.rematerialized.lock().unwrap() = true;
+            SpawnInjection {
+                args: vec!["--workspace-only".into()],
+                env: Vec::new(),
+            }
+        }
+        fn resume_injection(&self, cwd: &str, _p: &str) -> SpawnInjection {
+            SpawnInjection {
+                args: if self.bundle {
+                    vec![format!("--persona-bundle={cwd}")]
+                } else {
+                    Vec::new()
+                },
+                env: Vec::new(),
+            }
+        }
+    }
+
+    fn ws() -> Workspace {
+        serde_json::from_value(json!({
+            "id": "w1", "name": "W", "root_path": "/tmp", "settings": {},
+            "archived": false, "created_at": "2026-11-12T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    fn hook(bundle: bool) -> Hook {
+        Hook {
+            bundle,
+            rematerialized: std::sync::Mutex::new(false),
+        }
+    }
+
+    #[test]
+    fn a_personal_agent_thread_keeps_the_persona_bundle() {
+        assert!(carries_persona(
+            &json!({"source": "personal_agent", "personal_agent": "a1"})
+        ));
+        let h = hook(true);
+        let inj = context_injection(&h, &ws(), "/agents/a1", "claude", true);
+        assert_eq!(inj.args, vec!["--persona-bundle=/agents/a1".to_string()]);
+        assert!(
+            !*h.rematerialized.lock().unwrap(),
+            "the persona bundle must not be overwritten from the workspace settings"
+        );
+    }
+
+    #[test]
+    fn other_sessions_and_a_missing_bundle_get_the_workspace_context() {
+        for meta in [
+            json!({}),
+            json!({"personal_agent": ""}),
+            json!({"personal_agent": 5}),
+        ] {
+            assert!(!carries_persona(&meta), "{meta}");
+        }
+        let h = hook(true);
+        let inj = context_injection(&h, &ws(), "/repo", "claude", false);
+        assert_eq!(inj.args, vec!["--workspace-only".to_string()]);
+        assert!(*h.rematerialized.lock().unwrap());
+        let h = hook(false);
+        let inj = context_injection(&h, &ws(), "/agents/a1", "codex", true);
+        assert_eq!(inj.args, vec!["--workspace-only".to_string()]);
     }
 }

@@ -18,8 +18,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use otto_core::{Error, Result};
 use rdkafka::admin::{
-    AdminClient, AdminOptions, AlterConfig, ConfigSource, NewTopic, ResourceSpecifier,
-    TopicReplication,
+    AdminClient, AdminOptions, AlterConfig, NewTopic, ResourceSpecifier, TopicReplication,
 };
 use rdkafka::client::{ClientContext, DefaultClientContext};
 use rdkafka::config::ClientConfig;
@@ -30,6 +29,10 @@ use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
+
+mod group_lag;
+mod time_order;
+mod topic_config;
 
 const META_TIMEOUT: Duration = Duration::from_secs(15);
 const WATERMARK_TIMEOUT: Duration = Duration::from_secs(8);
@@ -1338,9 +1341,8 @@ impl KafkaClient {
             incomplete || ((messages.len() as i64) < expected && messages.len() >= want);
         let scan_capped =
             filtered && scanned >= raw_cap && messages.len() < want && done.len() < parts.len();
-        messages.sort_by(|a, b| a.partition.cmp(&b.partition).then(a.offset.cmp(&b.offset)));
         Ok(RawConsume {
-            messages,
+            messages: time_order::merge_by_timestamp(messages),
             partitions: ranges,
             truncated,
             incomplete,
@@ -1362,6 +1364,8 @@ impl KafkaClient {
                 state: g.state().to_string(),
                 protocol_type: g.protocol_type().to_string(),
                 members: g.members().len(),
+                total_lag: None,
+                lag_pending: false,
             })
             .collect();
         out.sort_by(|a, b| a.group_id.cmp(&b.group_id));
@@ -1633,9 +1637,10 @@ impl KafkaClient {
         out
     }
 
-    /// Safe topic config update: merge the requested keys over the existing
-    /// dynamic (non-default) overrides so other overrides aren't reset. (0.39's
-    /// `alter_configs` is a full replace; there is no incremental variant.)
+    /// Safe topic config update: only the edited keys change. 0.39's
+    /// `alter_configs` is a full replace (no incremental variant), so the
+    /// request carries the current overrides too — and is refused when they
+    /// can't be read in full (see [`topic_config::merged_topic_overrides`]).
     pub async fn alter_topic_configs(&self, topic: &str, kvs: &[ConfigKv]) -> Result<()> {
         let opts = AdminOptions::new().request_timeout(Some(Duration::from_secs(15)));
         let spec = ResourceSpecifier::Topic(topic);
@@ -1644,20 +1649,7 @@ impl KafkaClient {
             .describe_configs([&spec], &opts)
             .await
             .map_err(kerr)?;
-
-        let mut merged: HashMap<String, String> = HashMap::new();
-        for cr in current.into_iter().flatten() {
-            for e in &cr.entries {
-                if matches!(e.source, ConfigSource::DynamicTopic) {
-                    if let Some(v) = &e.value {
-                        merged.insert(e.name.clone(), v.clone());
-                    }
-                }
-            }
-        }
-        for kv in kvs {
-            merged.insert(kv.name.clone(), kv.value.clone());
-        }
+        let merged = topic_config::merged_topic_overrides(topic, current, kvs)?;
 
         let mut alter = AlterConfig::new(ResourceSpecifier::Topic(topic));
         for (k, v) in &merged {

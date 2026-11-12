@@ -487,6 +487,20 @@ async fn update_server<S: McpCtx>(
             "only the owner can change MCP credentials or commands".into(),
         )));
     }
+    // Native ⇄ governed: one row, one mode (`service_run_mode.rs`). Owner
+    // only: either way the server's command runs on this Mac.
+    if let Some(mode) = req.runs.filter(|m| *m != crate::RunMode::of(&server)) {
+        if !otto_core::auth::root_authority(&user) {
+            return Err(ApiErr(Error::Forbidden(
+                "only the owner can change how an MCP server runs".into(),
+            )));
+        }
+        let actor = otto_core::access::AccessActor {
+            real_user_id: user.id.clone(),
+            effective_user_id: None,
+        };
+        ctx.mcp().set_run_mode(&id, mode, &actor).await?;
+    }
     // Only the maps this save supplies are checked: a stored key is never a
     // reason to refuse an unrelated edit.
     let supplied_env = req.env.iter().chain(req.secret_env.iter());
@@ -650,7 +664,8 @@ async fn patch_tool<S: McpCtx>(
         WorkspaceRole::Editor,
     )
     .await?;
-    ctx.mcp()
+    let patched = ctx
+        .mcp()
         .tools()
         .patch(
             &tool_id,
@@ -659,6 +674,14 @@ async fn patch_tool<S: McpCtx>(
             req.risk_label.as_deref(),
             req.injection_risk.as_deref(),
         )
+        .await
+        .map_err(ApiErr)?;
+    if req.acknowledge != Some(true) {
+        return Ok(Json(patched));
+    }
+    ctx.mcp()
+        .tools()
+        .acknowledge(&tool_id)
         .await
         .map(Json)
         .map_err(ApiErr)
@@ -686,6 +709,7 @@ async fn invoke_tool<S: McpCtx>(
         caller_user_id: Some(user.id.clone()),
         caller_kind: "ui".into(),
         direction: "outbound".into(),
+        caller_session_id: None,
     };
     let outcome = ctx
         .mcp()
@@ -840,6 +864,7 @@ async fn create_policy<S: McpCtx>(
     Json(req): Json<CreatePolicyReq>,
 ) -> ApiResult<Json<otto_state::McpPolicy>> {
     validate_effect(&req.effect)?;
+    let match_json = checked_match(req.match_json)?;
     ctx.mcp()
         .policies()
         .create(NewPolicy {
@@ -847,7 +872,7 @@ async fn create_policy<S: McpCtx>(
             name: req.name,
             enabled: req.enabled,
             priority: req.priority,
-            match_json: req.match_json,
+            match_json,
             effect: req.effect,
             reason: req.reason,
             created_by: user.id,
@@ -866,6 +891,7 @@ async fn update_policy<S: McpCtx>(
     if let Some(e) = &req.effect {
         validate_effect(e)?;
     }
+    let match_json = req.match_json.map(checked_match).transpose()?;
     ctx.mcp()
         .policies()
         .update(
@@ -873,7 +899,7 @@ async fn update_policy<S: McpCtx>(
             req.name.as_deref(),
             req.enabled,
             req.priority,
-            req.match_json.as_ref(),
+            match_json.as_ref(),
             req.effect.as_deref(),
             req.reason.as_deref(),
         )
@@ -904,34 +930,34 @@ async fn import_policies<S: McpCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<ImportPoliciesReq>,
 ) -> ApiResult<Json<Value>> {
-    for p in &req.policies {
-        validate_effect(&p.effect)?;
-    }
-    if req.replace {
-        // Clear existing rules then re-create. (Admin-gated route.)
-        let existing = ctx.mcp().policies().list(None).await.map_err(ApiErr)?;
-        for p in existing {
-            ctx.mcp().policies().delete(&p.id).await.map_err(ApiErr)?;
+    // Validate EVERY rule before touching the table, then replace (only the
+    // scopes the import names) and insert in one transaction: a bad row used
+    // to stop the import after every existing rule was already deleted.
+    // (Admin-gated route.)
+    let mut rules = Vec::with_capacity(req.policies.len());
+    for (i, p) in req.policies.into_iter().enumerate() {
+        let bad = |msg: String| ApiErr(Error::Invalid(format!("policy #{}: {msg}", i + 1)));
+        if validate_effect(&p.effect).is_err() {
+            return Err(bad(format!("unknown effect {:?}", p.effect)));
         }
+        let match_json = match_value(p.match_json).map_err(bad)?;
+        rules.push(NewPolicy {
+            workspace_id: p.workspace_id,
+            name: p.name,
+            enabled: p.enabled,
+            priority: p.priority,
+            match_json,
+            effect: p.effect,
+            reason: p.reason,
+            created_by: user.id.clone(),
+        });
     }
-    let mut created = 0;
-    for p in req.policies {
-        ctx.mcp()
-            .policies()
-            .create(NewPolicy {
-                workspace_id: p.workspace_id,
-                name: p.name,
-                enabled: p.enabled,
-                priority: p.priority,
-                match_json: p.match_json,
-                effect: p.effect,
-                reason: p.reason,
-                created_by: user.id.clone(),
-            })
-            .await
-            .map_err(ApiErr)?;
-        created += 1;
-    }
+    let created = ctx
+        .mcp()
+        .policies()
+        .import(&rules, req.replace)
+        .await
+        .map_err(ApiErr)?;
     Ok(Json(
         json!({ "imported": created, "replaced": req.replace }),
     ))
@@ -955,6 +981,18 @@ async fn evaluate_policy<S: McpCtx>(
         .await
         .map(Json)
         .map_err(ApiErr)
+}
+
+/// A rule's `match` as stored: absent/`null` means "every call" (`{}`);
+/// anything else must pass [`crate::policy::validate_match`] (400).
+fn checked_match(m: Value) -> Result<Value, ApiErr> {
+    match_value(m).map_err(|e| ApiErr(Error::Invalid(e)))
+}
+
+fn match_value(m: Value) -> Result<Value, String> {
+    let m = if m.is_null() { json!({}) } else { m };
+    crate::policy::validate_match(&m)?;
+    Ok(m)
 }
 
 fn validate_effect(effect: &str) -> Result<(), ApiErr> {
@@ -1194,4 +1232,24 @@ async fn stats<S: McpCtx>(
         }
     }
     Ok(Json(visible))
+}
+
+#[cfg(test)]
+mod policy_input_tests {
+    use super::*;
+
+    /// Create, update and import all store a rule's `match` through this: an
+    /// absent match is "every call", a typo'd key is a 400 (it used to be
+    /// ignored, which made the rule match every call).
+    #[test]
+    fn a_missing_match_means_every_call_and_a_typo_is_refused() {
+        assert_eq!(match_value(Value::Null).unwrap(), json!({}));
+        assert_eq!(
+            match_value(json!({"tool": "delete_repo"})).unwrap(),
+            json!({"tool": "delete_repo"})
+        );
+        assert!(match_value(json!({"tool_nam": "delete_repo"})).is_err());
+        let err = checked_match(json!({"mutating": "yes"})).expect_err("400");
+        assert!(matches!(err.0, Error::Invalid(_)));
+    }
 }

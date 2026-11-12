@@ -648,14 +648,14 @@
     cookiesOpen = true;
     void apiClient.loadCookies();
   }
-  /** Settings → "Allow private addresses". Turning it ON lifts the SSRF guard
-   *  for everyone in the workspace, so it asks first — the same confirm as the
+  /** Settings → "Allow private addresses". Turning it ON relaxes the SSRF guard
+   *  (metadata + the daemon stay blocked) for everyone, so it asks first — the same confirm as the
    *  response pane's "Allow private addresses" button. A failed save puts the
    *  box back and says why (not always "admins only"). */
   async function setAllowLocal(input: HTMLInputElement): Promise<void> {
     const on = input.checked;
     if (on && !(await confirmer.ask(
-      'API requests in this workspace will be able to reach localhost and private-network addresses (10.x, 192.168.x, …). Use this for local development servers. Everyone in the workspace is affected; you can block them again here.',
+      'API requests in this workspace will be able to reach localhost and private-network addresses (10.x, 192.168.x, …). Cloud-metadata addresses (169.254.x) and Otto’s own port (7700) stay blocked. Use this for local development servers. Everyone in the workspace is affected; you can block them again here.',
       { title: 'Allow private addresses?', confirmLabel: 'Allow private addresses', danger: false },
     ))) {
       input.checked = false;
@@ -1162,7 +1162,7 @@
           <label class="set-row toggle">
             <input type="checkbox" checked={apiClient.allowLocal} onchange={(e) => void setAllowLocal(e.currentTarget)} />
             <span class="set-label">Allow private addresses</span>
-            <span class="set-unit">Lets API requests reach localhost and private networks (10.x, 192.168.x…). Off by default; admins only; applies to everyone in this workspace.</span>
+            <span class="set-unit">Lets API requests reach localhost and private networks (10.x, 192.168.x…). Cloud-metadata addresses (169.254.x) and Otto’s own port (7700) stay blocked. Off by default; admins only; applies to everyone in this workspace.</span>
           </label>
         </div>
       </div>

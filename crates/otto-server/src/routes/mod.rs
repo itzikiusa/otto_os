@@ -407,12 +407,8 @@ pub fn protected_routes() -> Router<ServerCtx> {
             "/telemetry/ingest",
             post(telemetry::ingest).layer(axum::extract::DefaultBodyLimit::max(131_072)),
         )
-        .route("/usage/status", get(usage::status))
-        .route("/usage/summary", get(usage::summary))
-        .route("/usage/by-kind", get(usage::by_kind))
-        .route("/usage/report", get(usage::report))
+        .merge(usage::read_routes())
         .route("/usage/ccusage-check", post(usage::ccusage_check))
-        .route("/usage/metrics", get(usage::metrics))
         .route("/usage/config", put(usage::put_config))
         .route("/usage/install", post(usage::install))
         // Usage budgets (opt-in spend caps; enforcement default off).

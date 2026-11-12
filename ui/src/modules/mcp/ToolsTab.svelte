@@ -20,6 +20,7 @@
     McpToolView,
   } from '../../lib/api/types';
   import McpPill from './McpPill.svelte';
+  import ToolReviewBadge from './ToolReviewBadge.svelte';
 
   interface Props {
     wsId: string;
@@ -81,7 +82,7 @@
 
   async function patchTool(
     t: McpToolView,
-    patch: { enabled?: boolean; require_approval?: boolean; risk_label?: McpRiskLabel },
+    patch: { enabled?: boolean; require_approval?: boolean; risk_label?: McpRiskLabel; acknowledge?: boolean },
   ): Promise<void> {
     busyTool = { ...busyTool, [t.id]: true };
     try {
@@ -224,6 +225,7 @@
             <span class="nm">{t.title || t.name}</span>
             <code class="code">{t.name}</code>
             {#if t.description}<span class="desc" title={t.description}>{t.description}</span>{/if}
+            <ToolReviewBadge tool={t} busy={busyTool[t.id]} canConfigure={can('configure', t.name)} onacknowledge={() => void patchTool(t, { acknowledge: true })} />
           </div>
           <span class="cell">
             <McpPill kind="risk" value={t.risk_label} small />

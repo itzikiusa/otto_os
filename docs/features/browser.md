@@ -114,7 +114,7 @@ fetch)" for the full request/response table. Summary:
 | `GET/POST /workspaces/{wid}/browser/credentials` | list (password never included) / create a Site Credential — password goes straight to the Keychain |
 | `PATCH/DELETE /browser/credentials/{id}` | update (optionally rotate the password) / remove a credential (also deletes its Keychain entry) |
 | `POST /browser/credentials/{id}/reveal` | `{confirm:true}` → `{password}` — the only route that ever returns the plaintext password |
-| `POST /workspaces/{wid}/browser/ask` | `{session_id,url,text,annotation_ids?}` → 200 — the ask bar's turn: page + marks + question, see below |
+| `POST /workspaces/{wid}/browser/ask` | `{session_id,url,text,annotation_ids?,page_text?}` → 200 — the ask bar's turn: page + marks + question, see below |
 | `POST /workspaces/{wid}/browser/login` | `{domain}` → `{logged_in,engine}` — governed agent sign-in, see below |
 
 WS events: `browser_tab_updated{tab}`, `browser_annotation_added{annotation}` (see
@@ -194,8 +194,11 @@ edge to resize (persisted).
 The **ask bar** (`AskBar.svelte`) under the terminal is how the agent learns
 what you're looking at. ⏎ submits `POST /workspaces/{wid}/browser/ask` with
 the active tab's URL, the marks on that page (the chip toggles them; on by
-default, newest 20), and your question; the daemon writes one turn into the
-session:
+default, newest 20), and your question — plus, for a LIVE tab in the desktop
+app's webview, the page's visible text (`page_text`, read with `browser_eval`;
+capped at 30 000 chars and fenced as untrusted under `[Browser page text]`,
+since the agent can't fetch a logged-in page itself; the streamed daemon
+renderer sends none yet); the daemon writes one turn into the session:
 
 ```text
 [Browser context] The user is viewing <url> — "<title>" in Otto's Browser and is asking you about it. 2 element(s) marked on this page follow (newest last) — "the element I marked" refers to these. Use browser_page / browser_query on the URL to read the page.
@@ -323,6 +326,22 @@ bar for a live tab on either engine (native: `history.back()` /
 `history.forward()` / `browser_reload` / `window.stop()` in the page; a native
 webview reports no history, so Back and Forward stay enabled and do nothing at
 either end).
+
+**Own data store and "Clear browsing data".** On macOS 14 and later every
+live-tab webview (every tab, every workspace, every window) uses the in-app
+browser's OWN WebKit data store (`data_store_identifier`, fixed id in
+`browser.rs`), apart from the default store Otto's own window keeps its
+sign-in and settings in. **Upgrading to this build signs you out of the sites
+you had opened in Otto's browser once** — their cookies stay behind in the old
+(default) store, which the browser no longer reads. The Browser page's ⋯ menu
+(desktop app) has **Clear browsing data…**: after a confirm it deletes that
+store's cookies, cache and site storage (local storage, IndexedDB, service
+workers) — signing you out of those sites — through `browser_clear_data`.
+Otto's own window and the daemon's Chromium renderer are untouched; WebKit
+clears asynchronously and an open page keeps what it loaded until it reloads.
+Before macOS 14 WebKit has no separate store: tabs keep sharing the default
+store as before, and the command refuses (clearing it would sign Otto itself
+out).
 
 **Manual checklist** (desktop app only — a plain `cargo build`/`npm run
 build` can't exercise the native webview itself):

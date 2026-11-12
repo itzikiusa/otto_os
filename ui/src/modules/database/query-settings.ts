@@ -18,7 +18,7 @@ export { confirmRun } from './destructive-gate';
 export async function toggleConfirmDestructive(): Promise<void> {
   if (!runSafety.confirmDestructive) return runSafety.setConfirmDestructive(true);
   const ok = await confirmer.ask(
-    'DELETE or UPDATE without WHERE, DROP, TRUNCATE and ALTER TABLE … DROP will run on the first ⌘↵ on every connection not marked Prod or read-only (those keep their typed confirmation). This applies on this device only.',
+    'DELETE or UPDATE without WHERE, DROP, TRUNCATE and ALTER TABLE … DROP will run on the first ⌘↵ on every connection not marked Prod or read-only (Prod keeps its typed confirmation; Read-only refuses writes). This applies on this device only.',
     { title: 'Stop confirming destructive statements?', confirmLabel: 'Turn off', cancelLabel: 'Keep confirming', danger: true },
   );
   if (ok) runSafety.setConfirmDestructive(false);
@@ -92,7 +92,7 @@ export function settingsMenuItems(): MenuItem[] {
     {
       label: 'Confirm destructive statements (DELETE/UPDATE without WHERE, DROP, TRUNCATE)',
       checked: runSafety.confirmDestructive,
-      title: 'Safety: ask before DELETE / UPDATE without WHERE, DROP, TRUNCATE or ALTER TABLE … DROP on any connection (this device). Prod and read-only connections always take the typed confirm.',
+      title: 'Safety: ask before DELETE / UPDATE without WHERE, DROP, TRUNCATE or ALTER TABLE … DROP on any connection (this device). Prod connections always take the typed confirm; Read-only ones refuse writes.',
       action: () => void toggleConfirmDestructive(),
     },
   ];

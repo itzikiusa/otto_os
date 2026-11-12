@@ -5,8 +5,13 @@ import { STARTER_KITS } from '../src/modules/design-hall/brand/starters.ts';
 
 test.use({ serviceWorkers: 'block', viewport: { width: 390, height: 844 } });
 
+// The Canvas page folded into Design Hall: a Canvas board opens on a phone as
+// its Hall mirror (whiteboard), read-only with a reachable "Edit here" that
+// takes it over (adopt). Editing the adopted whiteboard is the Hall's artifact
+// view, covered by the Design Hall specs.
 for (const theme of ['light', 'dark']) {
-  test(`phone Canvas remains editable (${theme})`, async ({ page }, testInfo) => {
+  test(`phone Canvas board opens as its Design Hall mirror with a reachable Edit here (${theme})`, async ({ page }, testInfo) => {
+    test.setTimeout(60_000);
     const { ctx, base } = await apiCtx();
     const ws = await seedWorkspace(ctx, base);
     const response = await ctx.post(`${base}/api/v1/workspaces/${ws}/canvas/scenes`, {
@@ -14,32 +19,36 @@ for (const theme of ['light', 'dark']) {
     });
     expect(response.ok()).toBeTruthy();
     const scene = await response.json();
+    let mirrorId = '';
+    await expect
+      .poll(async () => {
+        const r = await ctx.get(`${base}/api/v1/design/artifacts?source_kind=canvas_scene&source_id=${scene.id}`);
+        mirrorId = r.ok() ? (((await r.json()) as { id: string }[])[0]?.id ?? '') : '';
+        return mirrorId;
+      }, { timeout: 20_000 })
+      .not.toBe('');
     await page.addInitScript(({ ws, theme }) => {
       localStorage.setItem('otto_workspace', ws);
       localStorage.setItem('otto_scheme', theme);
     }, { ws, theme });
-    await page.goto('/#/canvas');
-    await page.locator('.scene-list .row', { hasText: `Editable phone diagram ${theme}` }).click();
-    await page.getByRole('button', { name: 'Code', exact: true }).click();
-    const editor = page.locator('.code-pane .cm-content');
-    await expect(editor).toBeVisible();
-    await editor.fill('flowchart LR\n Phone --> Saved');
-    await expect.poll(async () => {
-      const result = await ctx.get(`${base}/api/v1/canvas/scenes/${scene.id}`);
-      return JSON.stringify(await result.json());
-    }).toContain('Phone --> Saved');
-    const zoom = page.getByRole('button', { name: 'Zoom in', exact: true });
-    expect((await zoom.boundingBox())!.height).toBeGreaterThanOrEqual(36);
+    await page.goto(`/#/canvas/${scene.id}`);
+    await expect(page).toHaveURL(new RegExp(`#/design/a/${mirrorId}`), { timeout: 20_000 });
+    const banner = page.getByTestId('design-mirror-banner');
+    await expect(banner).toBeVisible({ timeout: 20_000 });
+    const adopt = page.getByTestId('design-adopt');
+    await expectFullyInViewport(page, adopt, 'phone Edit here');
     await expectNoHorizontalOverflow(page);
-    await page.screenshot({ path: testInfo.outputPath(`canvas-phone-${theme}.png`) });
-    await page.getByRole('button', { name: 'Ask Otto', exact: true }).click();
-    const close = page.getByRole('button', { name: 'Close assistant', exact: true });
-    await expectFullyInViewport(page, close, 'phone assistant Close');
-    const title = await page.locator('.assistant .head .title').boundingBox();
-    const closeBox = await close.boundingBox();
-    expect(Math.abs(closeBox!.y - title!.y)).toBeLessThan(18);
+    await page.screenshot({ path: testInfo.outputPath(`canvas-mirror-phone-${theme}.png`) });
+    await adopt.click();
+    await expect(banner).toHaveCount(0, { timeout: 15_000 });
+    await expect
+      .poll(async () => {
+        const r = await ctx.get(`${base}/api/v1/design/artifacts/${mirrorId}`);
+        const d = (await r.json()) as { artifact?: { meta?: { adopted?: boolean } } };
+        return d.artifact?.meta?.adopted === true;
+      })
+      .toBe(true);
     await expectNoHorizontalOverflow(page);
-    await close.click();
     await ctx.dispose();
   });
 }
@@ -66,7 +75,9 @@ test('phone Site Studio exposes each editing panel without squeezing the page', 
   await page.getByTestId('site-layer').filter({ hasText: 'Hero' }).click();
   await expect(panels.getByRole('button', { name: 'Design', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await panels.getByRole('button', { name: 'Design', exact: true }).click();
-  await expect(page.getByRole('complementary', { name: 'Design', exact: true })).toBeVisible();
+  // Site Studio's right column is the design's details panel, opened on its Design (inspector) tab.
+  await expect(page.getByRole('complementary', { name: 'Design details', exact: true })).toBeVisible();
+  await expect(page.getByTestId('design-tab-design')).toHaveAttribute('aria-selected', 'true');
   await panels.getByRole('button', { name: 'Page', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Page canvas', exact: true })).toBeVisible();
   const actions = page.getByTestId('site-section-toolbar');

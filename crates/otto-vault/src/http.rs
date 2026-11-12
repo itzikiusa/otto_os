@@ -322,15 +322,74 @@ async fn backlinks<C: VaultCtx>(
     ))
 }
 
+/// Header on a bare-array search answer drawn from an incomplete index:
+/// `rebuilding; indexed=N; total=M` (absent when the index is complete).
+const SEARCH_INDEX_HEADER: &str = "x-otto-search-index";
+
 async fn search<C: VaultCtx>(
     State(c): State<C>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(WsVaultPath { ws, id }): Path<WsVaultPath>,
     Json(req): Json<SearchReq>,
-) -> ApiResult<Json<Vec<SearchHit>>> {
+) -> ApiResult<Response> {
     // Read-shaped POST — Viewer (policy.rs gates it View as well).
     require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
-    Ok(Json(c.vault().search(&ws, id, &req).await?))
+    let page = c.vault().search_page(&ws, id, &req).await?;
+    if req.with_index {
+        return Ok(Json(page).into_response());
+    }
+    let mut resp = Json(page.hits).into_response();
+    if let Some(ix) = page.index {
+        if let Ok(v) = header::HeaderValue::from_str(&format!(
+            "{}; indexed={}; total={}",
+            ix.state, ix.indexed, ix.total
+        )) {
+            resp.headers_mut().insert(SEARCH_INDEX_HEADER, v);
+        }
+    }
+    Ok(resp)
+}
+
+#[derive(Deserialize)]
+struct SearchIndexReq {
+    /// `rebuild` | `optimize`.
+    action: String,
+}
+
+async fn search_index<C: VaultCtx>(
+    State(c): State<C>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(WsVaultPath { ws, id }): Path<WsVaultPath>,
+    Json(req): Json<SearchIndexReq>,
+) -> ApiResult<Json<SearchIndexStatus>> {
+    require(&c, &user, &ws, WorkspaceRole::Editor).await?;
+    Ok(Json(
+        c.vault().search_index_action(&ws, id, &req.action).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct AttachmentQ {
+    /// The note being edited (anchors `./` attachment settings).
+    note: Option<String>,
+    /// The original file name; empty for a nameless clipboard image.
+    #[serde(default)]
+    name: String,
+}
+
+async fn attachment<C: VaultCtx>(
+    State(c): State<C>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(WsVaultPath { ws, id }): Path<WsVaultPath>,
+    Query(q): Query<AttachmentQ>,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<VaultAttachment>> {
+    require(&c, &user, &ws, WorkspaceRole::Editor).await?;
+    Ok(Json(
+        c.vault()
+            .save_attachment(&ws, id, q.note.as_deref(), &q.name, &body)
+            .await?,
+    ))
 }
 
 async fn switcher<C: VaultCtx>(
@@ -554,6 +613,16 @@ pub fn router<C: VaultCtx>() -> Router<C> {
         .route(
             "/workspaces/{ws}/vault/vaults/{id}/search",
             post(search::<C>),
+        )
+        .route(
+            "/workspaces/{ws}/vault/vaults/{id}/search-index",
+            post(search_index::<C>),
+        )
+        .route(
+            "/workspaces/{ws}/vault/vaults/{id}/attachment",
+            post(attachment::<C>).layer(DefaultBodyLimit::max(
+                crate::attachments::MAX_ATTACHMENT_BYTES + 64 * 1024,
+            )),
         )
         .route(
             "/workspaces/{ws}/vault/vaults/{id}/switcher",

@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,6 +6,13 @@ import { apiCtx } from './seed';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
 // Uses the real fake-Codex process → driver → persisted runtime → UI path.
+
+/** A finished stretch of several tool calls folds into "Worked for …"
+ *  (RuntimeWorkFold): wait for the turn to end, then open every fold. */
+async function openFinishedWork(page: Page): Promise<void> {
+  await expect(page.getByTestId('runtime-send')).toBeVisible({ timeout: 30_000 });
+  for (const s of await page.locator('[data-testid^="runtime-fold-"]:not([open]) > summary').all()) await s.click();
+}
 let ctx: APIRequestContext;
 let base: string;
 let workspace: string;
@@ -43,7 +50,9 @@ test('tool images retain text, enlarge with keyboard, survive reload and fit pho
   await stage.getByTestId('new-thread-input').fill('tool image');
   await stage.getByTestId('new-thread-send-btn').click();
   const row = page.locator('[data-item-type="dynamic_tool"]').filter({ hasText: 'preview.screenshot' });
-  await expect(row).toBeVisible({ timeout: 30_000 });
+  await expect(row).toHaveCount(1, { timeout: 30_000 });
+  await openFinishedWork(page);
+  await expect(row).toBeVisible();
   await row.locator('.rw-line').click();
   await expect(row).toContainText('Screenshot captured');
   await expect(row).toContainText('"width":1');
@@ -73,7 +82,9 @@ test('tool images retain text, enlarge with keyboard, survive reload and fit pho
   await page.keyboard.press('Escape');
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.reload();
-  await expect(row).toBeVisible({ timeout: 30_000 });
+  await expect(row).toHaveCount(1, { timeout: 30_000 });
+  await openFinishedWork(page);
+  await expect(row).toBeVisible();
   await row.locator('.rw-line').click();
   await expect(previews.locator('img')).toHaveCount(2);
 });

@@ -21,7 +21,7 @@
   import { ciOf, groupPrs, hasClientFilter, isMine, matchesPr, mergeRefreshed, parsePrQuery, sortPrs, SORT_LABEL, type PrGroup } from './pr-query';
   import { PrStatsLoader } from './pr-stats.svelte';
   import PrListRow from './PrListRow.svelte';
-  import { CLEARED_FILTERS, DEFAULT_PREFS, activeFilters, authorItems, filterItems, readPrefs, sortItems, writePrefs, type PrListPrefs } from './pr-list-prefs';
+  import { CLEARED_FILTERS, DEFAULT_PREFS, activeFilters, authorItems, filterItems, listToken, prListUrl, readPrefs, sortItems, writePrefs, type PrListPrefs } from './pr-list-prefs';
   import { SvelteSet } from 'svelte/reactivity';
   import { untrack } from 'svelte';
   import { pollWhileVisible } from '../../lib/poll';
@@ -68,6 +68,8 @@
   });
   const parsed = $derived(parsePrQuery(parsedSource));
   const effState: PrState = $derived(parsed.state ?? prefs.state);
+  /** The server list: the state, or the "review requested from you" one. */
+  const listTok = $derived(listToken(effState, prefs.review));
 
   // ── Data ─────────────────────────────────────────────────────────────────
   const states: PrState[] = ['open', 'merged', 'declined', 'all'];
@@ -100,7 +102,7 @@
 
   $effect(() => {
     const id = repoId;
-    const st = effState;
+    const st = listTok;
     void retryRev;
     const revision = ++loadRevision;
     let active = true;
@@ -131,7 +133,7 @@
     }
     lastRetryRev = retryRev;
     void api
-      .get<PrListResp>(`/repos/${id}/prs?state=${st}&page=1&per_page=${PER_PAGE}`)
+      .get<PrListResp>(prListUrl(id, st, 1, PER_PAGE))
       .then((r) => {
         prListCache.set(key, r);
         if (!active) return;
@@ -166,11 +168,11 @@
       return;
     }
     const revision = loadRevision;
-    const st = effState;
+    const st = listTok;
     refreshing = true;
     try {
       if (manual) prListCache.delete(prListKey(repoId, st, 1));
-      const r = await api.get<PrListResp>(`/repos/${repoId}/prs?state=${st}&page=1&per_page=${PER_PAGE}`);
+      const r = await api.get<PrListResp>(prListUrl(repoId, st, 1, PER_PAGE));
       prListCache.set(prListKey(repoId, st, 1), r);
       if (revision !== loadRevision) return;
       prs = mergeRefreshed(prs, r.items, page1Count);
@@ -218,7 +220,7 @@
     moreError = '';
     try {
       const next = page + 1;
-      const r = await api.get<PrListResp>(`/repos/${repoId}/prs?state=${effState}&page=${next}&per_page=${PER_PAGE}`);
+      const r = await api.get<PrListResp>(prListUrl(repoId, listTok, next, PER_PAGE));
       if (revision !== loadRevision) return;
       const seen = new Set(prs.map((p) => p.number));
       prs = [...prs, ...r.items.filter((p) => !seen.has(p.number))];
@@ -484,6 +486,9 @@
       <Skeleton rows={6} height={40} />
     {:else if error}
       <LoadState what="pull requests" error={`${errorCause} ${error}`} empty onretry={() => retryRev++} />
+    {:else if prs.length === 0 && prefs.review}
+      <EmptyState icon="eye" title="No reviews requested from you" body="No open pull request asks you for a review right now."
+        actionLabel="Show every pull request" actionIcon="pr" onaction={() => setPrefs({ review: false })} />
     {:else if prs.length === 0}
       <EmptyState
         icon="pr"

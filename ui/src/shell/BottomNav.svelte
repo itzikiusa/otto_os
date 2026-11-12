@@ -8,9 +8,18 @@
   //
   // Rendered only on phone (App.svelte gates it behind viewport.isPhone), so it
   // adds nothing to the desktop layout.
+  //
+  // The light version (lib/lightMode.svelte.ts, opt-in from the top of the
+  // More sheet) shows exactly its five modules as tabs, in a fixed order, and
+  // shrinks "More" to a small ⋯ that holds the way back to the full app,
+  // notifications, Commands, Settings, sign out and the machine row.
   import Icon from '../lib/components/Icon.svelte';
   import Drawer from './Drawer.svelte';
   import MachineChip from './MachineChip.svelte';
+  import NotificationBell from './NotificationBell.svelte';
+  import { notifications } from '../lib/stores/notifications.svelte';
+  import { plural } from '../lib/plural';
+  import { LIGHT_MODULES, lightMode } from '../lib/lightMode.svelte';
   import { router } from '../lib/router.svelte';
   import { navPending } from '../lib/navPending.svelte';
   import { ui } from '../lib/stores/ui.svelte';
@@ -33,25 +42,26 @@
       .filter((p) => auth.canPlugin(p.slug, 'view'))
       .map((p) => ({ id: `plugin/${p.slug}`, icon: p.icon, label: p.name })),
   );
+  const light = $derived(lightMode.active);
   // Flattened section by section, so the bar's order matches the sidebar's —
   // Favorites first, so a user's favorites become the phone's primary tabs.
-  const modules = $derived(
-    sidebarSections(
-      visibleOrder(
-        resolveOrder(
-          availableModules((f) => auth.can(f, 'view'), pluginEntries),
-          ui.sidebarOrder,
-        ),
-        ui.sidebarHidden,
-      ),
+  // The light version is a fixed set instead (still role-filtered: the
+  // registry's own gate, inside the light scope), never the saved order.
+  const modules = $derived.by(() => {
+    const available = availableModules((f) => auth.can(f, 'view'), light ? [] : pluginEntries);
+    if (light) return LIGHT_MODULES.flatMap((id) => available.filter((m) => m.id === id));
+    return sidebarSections(
+      visibleOrder(resolveOrder(available, ui.sidebarOrder), ui.sidebarHidden),
       ui.sidebarFavorites,
       ui.sidebarGroupOrder,
-    ).flatMap((s) => s.modules),
-  );
+    ).flatMap((s) => s.modules);
+  });
   // The entry the current route highlights (plugin slug, '' → Agents, …).
   const current = $derived(activeNavId(router.parts));
-  const primary = $derived(modules.slice(0, PRIMARY_COUNT));
-  const overflow = $derived(modules.slice(PRIMARY_COUNT));
+  const primary = $derived(light ? modules : modules.slice(0, PRIMARY_COUNT));
+  const overflow = $derived(light ? [] : modules.slice(PRIMARY_COUNT));
+  // Light: the ⋯ carries the unread notifications (the bell lives in its sheet).
+  const unread = $derived(light ? notifications.unreadRows : 0);
 
   // Badges on spilled modules (a session waiting on you must not hide in More).
   const moreBadge = $derived.by(() => {
@@ -75,10 +85,23 @@
     moreOpen = false;
   }
 
+  /** Switch between the light version and the full app (one tap, either way). */
+  function setLight(on: boolean): void {
+    moreOpen = false;
+    lightMode.set(on);
+  }
+
   // "More" is active when the current module lives in the overflow set (or
   // Settings), so the bar reflects where you are even for spilled modules.
   const moreActive = $derived(
     router.module === 'settings' || overflow.some((m) => m.id === current),
+  );
+  const moreLabel = $derived(
+    moreBadge
+      ? `More, ${moreBadge.count} ${moreBadge.needs ? 'need you' : 'active'}`
+      : unread > 0
+        ? `More, ${plural(unread, 'unread notification')}`
+        : 'More',
   );
 </script>
 
@@ -97,18 +120,37 @@
   {/each}
 
   <!-- Always present: besides the spilled modules it holds Commands (the
-       phone's only palette entry off the Agents page) and Settings. -->
-  <button class="bn-btn" class:active={moreActive} aria-haspopup="dialog" aria-expanded={moreOpen} aria-label={moreBadge ? `More, ${moreBadge.count} ${moreBadge.needs ? 'need you' : 'active'}` : 'More'} title="More" onclick={() => (moreOpen = true)}>
+       phone's only palette entry off the Agents page) and Settings. In the
+       light version it is a small ⋯ beside the five tabs, not a sixth tab. -->
+  <button class="bn-btn" class:bn-compact={light} class:active={moreActive} aria-haspopup="dialog" aria-expanded={moreOpen} aria-label={moreLabel} title="More" onclick={() => (moreOpen = true)}>
     <span class="bn-icon">
       <Icon name="more" size={20} />
-      {#if moreBadge}<span class="bn-badge" class:needs={moreBadge.needs}>{moreBadge.count}</span>{/if}
+      {#if moreBadge}<span class="bn-badge" class:needs={moreBadge.needs}>{moreBadge.count}</span>
+      {:else if unread > 0}<span class="bn-badge needs" aria-hidden="true">{unread > 99 ? '99+' : unread}</span>{/if}
     </span>
-    <span class="bn-label">More</span>
+    {#if !light}<span class="bn-label">More</span>{/if}
   </button>
 </nav>
 
 <Drawer bind:open={moreOpen} side="right" title="More" width="min(86vw, 360px)">
     <div class="sheet-grid">
+      <!-- One tap either way between the full app and the light version
+           (remembered on this device; Settings ▸ Appearance has it too). -->
+      <button class="sheet-row" data-testid="light-toggle" onclick={() => setLight(!light)}>
+        <Icon name={light ? 'maximize' : 'minimize'} size={20} />
+        <span class="sr-text">
+          <span class="sr-title">{light ? 'Full app' : 'Light version'}</span>
+          <span class="sr-hint">{light ? 'Show every module again' : 'Threads, Connections, Git, API and Usage only'}</span>
+        </span>
+      </button>
+      {#if light}
+        <!-- The light version's top bar may be absent (Threads draws its own
+             header), so the bell lives here too. -->
+        <div class="sheet-row sheet-bell" data-testid="more-notifications">
+          <span class="sr-title">Notifications</span>
+          <NotificationBell placement="below" />
+        </div>
+      {/if}
       <button
         class="sheet-item"
         onclick={() => {
@@ -127,18 +169,20 @@
           {#if b}<span class="bn-badge sheet-badge" class:needs={b.tone === 'needs'} aria-hidden="true">{b.count}</span>{/if}
         </button>
       {/each}
-      <button
-        class="sheet-item"
-        class:active={router.module === 'walkthroughs'}
-        aria-current={router.module === 'walkthroughs' ? 'page' : undefined}
-        onclick={() => {
-          router.go('walkthroughs');
-          moreOpen = false;
-        }}
-      >
-        <Icon name="info" size={20} />
-        <span>Help</span>
-      </button>
+      {#if !light}
+        <button
+          class="sheet-item"
+          class:active={router.module === 'walkthroughs'}
+          aria-current={router.module === 'walkthroughs' ? 'page' : undefined}
+          onclick={() => {
+            router.go('walkthroughs');
+            moreOpen = false;
+          }}
+        >
+          <Icon name="info" size={20} />
+          <span>Help</span>
+        </button>
+      {/if}
       <button
         class="sheet-item"
         class:active={router.module === 'settings'}
@@ -151,6 +195,20 @@
         <Icon name="gear" size={20} />
         <span>Settings</span>
       </button>
+      {#if light}
+        <!-- The full app signs out from the Navigator; the light version has
+             no Navigator on its landing page, so the sheet carries it. -->
+        <button
+          class="sheet-item"
+          onclick={() => {
+            moreOpen = false;
+            void auth.logout();
+          }}
+        >
+          <Icon name="logout" size={20} />
+          <span>Sign out</span>
+        </button>
+      {/if}
       <!-- The status bar (and its machine chip) is hidden on a phone: the
            chip lives here as a full-width row; the whole row opens its
            details. Hidden until the machine status has loaded. -->
@@ -212,6 +270,10 @@
   }
   .bn-btn.active .bn-icon {
     background: var(--accent-soft);
+  }
+  /* Light version: "More" is a narrow ⋯ beside the five tabs, not a sixth. */
+  .bn-btn.bn-compact {
+    flex: 0 0 48px;
   }
   .bn-label {
     font-size: var(--fs-xs);
@@ -281,6 +343,39 @@
   .sheet-item span {
     line-height: 1;
     text-align: center;
+  }
+  /* Full-width rows: the light/full switch and (light) the bell. */
+  .sheet-row {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 48px;
+    padding: 8px 12px;
+    border: none;
+    border-radius: var(--radius-m);
+    background: var(--surface);
+    color: var(--text);
+    font-size: var(--fs-s);
+    text-align: start;
+    cursor: pointer;
+  }
+  .sr-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .sr-title {
+    font-weight: 500;
+  }
+  .sr-hint {
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
+  }
+  .sheet-bell {
+    justify-content: space-between;
+    cursor: default;
   }
   .sheet-machine {
     grid-column: 1 / -1;

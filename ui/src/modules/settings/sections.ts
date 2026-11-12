@@ -76,7 +76,8 @@ export const SETTINGS_SECTIONS = [
   { id: 'git-accounts', label: 'Git accounts', group: 'integrations', keywords: 'github gitlab bitbucket token pr push https credentials', scope: 'me', settings: ['GitHub token', 'GitLab token', 'Bitbucket token'] },
   { id: 'jira', label: 'Jira & Linear accounts', group: 'integrations', keywords: 'atlassian confluence linear issues tickets token api key', scope: 'me', settings: ['Email', 'Label', 'Token expiry'] },
   { id: 'channels', label: 'Slack, Telegram & webhooks', group: 'integrations', keywords: 'slack telegram webhook bridge inbound bot', scope: 'workspace', scopeNote: 'Slack act-as-me at the bottom is per user.', settings: ['Bot token', 'App token', 'Default channel ID', 'Default chat ID', 'Allowed users', 'Open to everyone', 'Preferred CLI', 'Reply instructions', 'Webhook key', 'Inbound URL', 'Act as me'] },
-  { id: 'mcp-servers', label: 'MCP servers', group: 'integrations', keywords: 'model context protocol tools workspace', scope: 'workspace', settings: ['Connections MCP', 'Your servers', 'Command', 'Environment'] },
+  // Moved to the MCP Control Plane (one home for native + governed servers).
+  { id: 'mcp-servers', label: 'MCP servers', group: 'integrations', keywords: 'model context protocol tools workspace', scope: 'workspace', settings: ['Connections MCP', 'Your servers', 'Command', 'Environment'], movedTo: 'mcp/servers', movedLabel: 'MCP servers (Control Plane)' },
   { id: 'language-servers', label: 'Language servers', group: 'integrations', keywords: 'lsp completion gopls rust-analyzer typescript install path', scope: 'everyone', settings: ['Install missing servers', 'Install command'] },
   { id: 'phone-access', label: 'Phone access', group: 'integrations', keywords: 'tailscale tailnet phone iphone android mobile pair qr device continue remote serve', scope: 'everyone', scopeNote: 'Paired phones are per user; serving over Tailscale is for this Mac.', settings: ['Tailscale', 'Serving', 'Paired phones', 'Devices in your tailnet'] },
   { id: 'sharing', label: 'Sharing', group: 'integrations', keywords: 'email sender share guest one-time code otp gmail smtp email remote', scope: 'me', scopeNote: 'The public link domain applies to everyone.', settings: ['Gmail sender', 'Gmail address', 'App password', 'Public link domain'] },
@@ -87,8 +88,10 @@ export const SETTINGS_SECTIONS = [
   { id: 'context-soul', label: 'Workspace context', group: 'agents', keywords: 'soul goals instructions memory references project', scope: 'workspace', settings: ['Goal', 'Shared instructions', 'Workspace memory', 'References', 'Project context', 'Decisions', 'Artifacts', 'Soul', 'Materialize now'] },
   { id: 'self-improvement', label: 'Self-improvement', group: 'agents', keywords: 'improve review memory skills edits approval', scope: 'workspace', settings: ['Schedule', 'Run every (minutes)', 'Look back (hours)', 'Autonomy', 'What may change', 'Skill allow-list', 'Pending approvals', 'Recent runs'] },
   { id: 'insights', label: 'Insights', group: 'agents', keywords: 'reports daily weekly monthly schedule html', scope: 'everyone', settings: ['Report agent', 'Schedule', 'Provider'] },
-  { id: 'skills', label: 'Skills', group: 'agents', keywords: 'bundled skill library install claude codex agy', gate: ADMIN, scope: 'everyone', settings: ['Install bundled skills', 'Install all'] },
-  { id: 'skill-eval', label: 'Skills evaluator', group: 'agents', keywords: 'skill eval validate improve iterations lab', gate: ADMIN, scope: 'everyone', settings: ['Improver agent', 'Iterations', 'Validation passes', 'Default validations'] },
+  // Moved to Skills Lab (the one home for skills): out of the nav, search and
+  // ⌘K; the route stays so old links forward to `movedTo` (see movedSectionRoute).
+  { id: 'skills', label: 'Skills', group: 'agents', keywords: 'bundled skill library install claude codex agy', gate: ADMIN, scope: 'everyone', settings: ['Install bundled skills', 'Install all'], movedTo: 'skills-eval/bundled', movedLabel: 'Bundled skills (Skills Lab)' },
+  { id: 'skill-eval', label: 'Skills evaluator', group: 'agents', keywords: 'skill eval validate improve iterations lab', gate: ADMIN, scope: 'everyone', settings: ['Improver agent', 'Iterations', 'Validation passes', 'Default validations'], movedTo: 'skills-eval/evaluator/defaults', movedLabel: 'Evaluator defaults' },
   { id: 'context-library', label: 'Context library', group: 'agents', keywords: 'skills souls snippets library materialize', gate: ADMIN, scope: 'everyone', settings: ['Global default soul', 'Skills', 'Souls', 'Snippets'] },
   // ── System ──
   { id: 'daemon', label: 'Daemon', group: 'system', keywords: 'ottod server port listener network sandbox isolation sessions restart persist suspend idle timeout machine resources cpu cores memory ram swap load busy queue queued parallel parallelism priority nice build workers jobs disk space', gate: 'root', scope: 'everyone', settings: ['Network listener', 'Port', 'Process sandbox', 'Run unconfined', 'Keep sessions running', 'Suspend idle sessions', 'Archive idle sessions', 'Auto-archive', 'Machine resources', 'Queue background agents', 'Background agents running at once', 'Lower priority', 'Build workers per agent session', 'Archive background agent sessions', 'Low disk warning', 'Log folder', 'Restart daemon'] },
@@ -114,6 +117,10 @@ export const SETTINGS_SECTIONS = [
   scopeNote?: string;
   /** The page's visible setting labels, so search finds "idle timeout". */
   settings: readonly string[];
+  /** The section moved out of Settings: its route forwards here. */
+  movedTo?: string;
+  /** Its ⌘K name at the new home ("Go to <movedLabel>"). */
+  movedLabel?: string;
 }[];
 
 export type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]['id'];
@@ -127,6 +134,8 @@ export interface SettingsSection {
   scope: SettingsScope;
   scopeNote?: string;
   settings: readonly string[];
+  movedTo?: string;
+  movedLabel?: string;
 }
 
 const SECTIONS: readonly SettingsSection[] = SETTINGS_SECTIONS;
@@ -153,9 +162,21 @@ export function canOpenSection(section: SettingsSection, access: SettingsAccess)
   return access.can(g.feature, g.level);
 }
 
-/** The sections `access` may open, in nav order. */
+/** The sections `access` may open, in nav order. Moved sections are not
+ *  listed (nav, search, ⌘K); their routes forward via {@link movedSectionRoute}. */
 export function availableSections(access: SettingsAccess): SettingsSection[] {
-  return SECTIONS.filter((s) => canOpenSection(s, access));
+  return SECTIONS.filter((s) => !s.movedTo && canOpenSection(s, access));
+}
+
+/** The moved sections `access` could open before the move — ⌘K keeps a
+ *  "Go to <movedLabel>" command for each, landing at `movedTo`. */
+export function movedSections(access: SettingsAccess): SettingsSection[] {
+  return SECTIONS.filter((s) => !!s.movedTo && canOpenSection(s, access));
+}
+
+/** Where an old `#/settings/<id>` link goes now, or null for a live section. */
+export function movedSectionRoute(id: string): string | null {
+  return findSection(id)?.movedTo ?? null;
 }
 
 /** The section's scope as one line: "Workspace — Applies to the current…". */

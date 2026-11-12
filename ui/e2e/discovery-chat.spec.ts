@@ -2,15 +2,17 @@ import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { seedProductStory } from './seed-product';
 
-// ── E2E: Discovery Chat ────────────────────────────────────────────────────────
+// ── E2E: the story Chat (merged Chat + Refine) ────────────────────────────────
 //
 // Opens a seeded story's Chat tab, starts a chat, sends a message via a starter
-// prompt, and asserts the (stubbed) agent reply renders with action cards — then
-// applies the "add questions" card and confirms the applied state.
+// prompt, and asserts the (stubbed) agent reply renders with its question card
+// and a "Review in Rewrite" link for the suggested body — then applies the
+// questions card and confirms the applied state.
 //
-// The throwaway daemon runs with OTTO_E2E=1, so the discovery-chat turn returns
-// the deterministic stub (prose + an `actions` JSON block with apply_draft +
-// add_questions) instead of spawning a real CLI. Deterministic + network-free.
+// The throwaway daemon runs with OTTO_E2E=1, so the turn (its prompt carries the
+// `OTTO_TASK: discovery_chat` sentinel) returns the deterministic stub (prose +
+// an `actions` block with apply_draft + add_questions) instead of spawning a
+// real CLI: the apply_draft becomes a suggested version, the questions a card.
 
 test.use({ viewport: { width: 1360, height: 900 }, actionTimeout: 12_000 });
 
@@ -56,7 +58,7 @@ test('discovery-chat: new chat → starter prompt → agent reply with action ca
   await openChatTab(page);
 
   // Start a chat.
-  await page.getByRole('button', { name: 'New chat' }).click();
+  await page.locator('.list-pane').getByRole('button', { name: 'New chat' }).click();
 
   // Empty state offers starter chips that prefill (not auto-send) the composer.
   const chip = page.locator('.starter-chip').first();
@@ -71,11 +73,12 @@ test('discovery-chat: new chat → starter prompt → agent reply with action ca
   // The agent bubble appears…
   await expect(page.locator('.bubble-agent').last()).toBeVisible({ timeout: 20_000 });
 
-  // …carrying action cards (apply_draft + add_questions from the stub).
-  const cards = page.locator('.action-card');
-  await expect.poll(() => cards.count(), { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
+  // …with the stub's body saved as a suggestion (a link to Rewrite, never a
+  // "Replace draft" card) and its questions as a card.
+  await expect(page.locator('.story-updated-chip')).toContainText('Review in Rewrite', { timeout: 15_000 });
+  await expect(page.getByRole('button', { name: /Replace draft/ })).toHaveCount(0);
 
-  // Apply the "Questions" card (no confirm dialog, unlike apply_draft).
+  // Apply the "Questions" card.
   const questionsCard = page.locator('.action-card', { hasText: 'Questions' }).first();
   await expect(questionsCard).toBeVisible();
   await questionsCard.getByRole('button', { name: /Add \d+ question/ }).click();
@@ -90,7 +93,7 @@ test.describe('discovery-chat on a phone', () => {
   test('discovery-chat: starter chips render on a phone', async ({ page }) => {
     test.setTimeout(60_000);
     await openChatTab(page);
-    await page.getByRole('button', { name: 'New chat' }).click();
+    await page.locator('.list-pane').getByRole('button', { name: 'New chat' }).click();
     // Chips are present (as a horizontal scroll row on a phone).
     await expect(page.locator('.starter-chip').first()).toBeVisible({ timeout: 15_000 });
   });

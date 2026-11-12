@@ -210,12 +210,14 @@ impl ClaudeDriver {
     }
 
     /// A root tool result. `true` when it was a subagent's (handled here).
+    /// `stopped`: the CLI says the call never ran to its end.
     pub(super) fn on_root_tool_result(
         &mut self,
         step: &mut DriverStep,
         id: &str,
         text: &str,
         is_error: bool,
+        stopped: Option<TurnItemStatus>,
     ) -> bool {
         // Older CLIs: the launch result is the only sign of background work.
         let launched = id_after(text, "Command running in background with ID:")
@@ -240,13 +242,15 @@ impl ClaudeDriver {
         if !is_error && (a.background || async_launch) {
             a.background = true; // runs on; its task notification settles it
         } else {
-            a.status = if is_error {
+            a.status = stopped.unwrap_or(if is_error {
                 TurnItemStatus::Failed
             } else {
                 TurnItemStatus::Completed
-            };
+            });
             a.output = Some(text.to_string()).filter(|t| !t.trim().is_empty());
-            a.error = is_error.then(|| tool_error(text)).flatten();
+            a.error = (a.status == TurnItemStatus::Failed)
+                .then(|| tool_error(text))
+                .flatten();
         }
         self.emit_agent(step, id);
         if !self.agents.get(id).is_some_and(|a| a.status.is_open()) {
@@ -598,7 +602,9 @@ impl ClaudeDriver {
                     let result = crate::tool_images::extract(block.get("content"));
                     let text = result.text;
                     t.tool.images = result.images;
-                    if block.get("is_error").and_then(Value::as_bool) == Some(true) {
+                    if let Some(status) = super::non_execution_status(msg, &id) {
+                        t.tool.status = status;
+                    } else if block.get("is_error").and_then(Value::as_bool) == Some(true) {
                         t.tool.status = TurnItemStatus::Failed;
                         t.tool.error = tool_error(&text);
                     } else {

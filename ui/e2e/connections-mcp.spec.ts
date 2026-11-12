@@ -268,10 +268,12 @@ test('Connections MCP: real otto MCP server queries a live DB read-only', async 
   }
   expect(selStatus, 'a SELECT must not be refused as a write').not.toBe(403);
 
-  // ---- (5) the settings UI shows the toggle --------------------------------
+  // ---- (5) the UI shows the toggle -----------------------------------------
+  // Settings ▸ MCP servers moved to the MCP Control Plane: the old link lands
+  // on its Servers page, and the per-workspace `otto` toggle is "Attach to
+  // sessions" on the Otto server page (one copy).
   await page.goto('/#/settings/mcp-servers');
-  const card = page.locator('[data-testid="connections-mcp"]');
-  await expect(card).toBeVisible({ timeout: 30_000 });
-  await expect(card.getByText('Connections MCP')).toBeVisible();
-  await expect(card.locator('input[type="checkbox"]')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => location.hash), { timeout: 30_000 }).toBe('#/mcp/servers');
+  await page.goto('/#/mcp');
+  await expect(page.locator('input[data-testid="mcp-session-attach"]')).toBeVisible({ timeout: 30_000 });
 });

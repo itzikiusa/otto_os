@@ -90,6 +90,24 @@ pub fn agent_ownership(agent: &PersonalAgent, user_id: &str) -> AgentOwnership {
     }
 }
 
+/// Owner-only agent fields (instructions, delivery, permissions, rules,
+/// memory, context) need a PERSON. An agent session's own token — and its
+/// internal MCP credential — authorizes AS its owner, so it passes the owner
+/// check and could otherwise rewrite its own instructions or widen its own
+/// permissions unattended. `is_person` is the host's credential classifier
+/// (otto-server `ui_bridge::is_human`); `changed` lists the fields the call
+/// really changes (empty = nothing owner-only, allowed).
+pub fn person_only_change(is_person: bool, changed: &[&str]) -> Result<()> {
+    if is_person || changed.is_empty() {
+        return Ok(());
+    }
+    Err(Error::Forbidden(format!(
+        "an agent cannot change its own {} — propose new instructions \
+         (otto.instructions_propose) or ask its owner to change it on the Personal Agents page",
+        changed.join(", ")
+    )))
+}
+
 /// Process-wide cap on concurrent personal-agent runs (bounds unattended-agent
 /// CPU/LLM cost). Override with `OTTO_PERSONAL_MAX_CONCURRENT`.
 fn run_semaphore() -> &'static Arc<Semaphore> {
@@ -404,6 +422,7 @@ pub async fn ensure_agent_workspace<C: AssistantCtx>(
     ctx: &C,
     agent: &PersonalAgent,
 ) -> Result<String> {
+    let provider = persona_provider(&agent.provider)?.to_string();
     let dir = agent_directory(ctx, agent)?;
     crate::personal_agent_documents::seed_memory(&dir, &seed_notes(&agent.name)).await?;
     let cwd = dir.to_string_lossy().to_string();
@@ -435,19 +454,23 @@ pub async fn ensure_agent_workspace<C: AssistantCtx>(
             }
         }
     }
-    let cfg = otto_core::api::WorkspaceContextConfig {
-        extra_context_md: identity,
-        include_memory: false,
-        ..Default::default()
-    };
+    // On top of the workspace's own context (skills, soul, shared notes): a
+    // structured (Threads) spawn launches on THIS bundle instead of
+    // re-materializing the workspace's alone over it (otto-sessions
+    // `runtime_spawn::context_injection`), so the bundle carries both. Best
+    // effort like the spawn hook: no workspace row = the persona alone.
+    let settings = ctx.workspaces().get(&agent.workspace_id).await;
+    let settings = settings.map(|w| w.settings).unwrap_or_default();
+    let mut cfg = otto_context::config::from_settings(&settings);
+    if !cfg.extra_context_md.trim().is_empty() {
+        cfg.extra_context_md.push_str("\n\n");
+    }
+    cfg.extra_context_md.push_str(&identity);
+    cfg.include_memory = false;
     // Skill-tree copies + CLAUDE.md/AGENTS.md writes are a burst of blocking
     // file IO, paid on every run and new chat: off the runtime worker, like
     // the swarm's `provision_agent` (perf §15 N9).
-    let (library, cwd2, provider) = (
-        ctx.context_library().clone(),
-        cwd.clone(),
-        agent.provider.clone(),
-    );
+    let (library, cwd2) = (ctx.context_library().clone(), cwd.clone());
     let provisioned = tokio::task::spawn_blocking(move || {
         let ctx_root = otto_context::materialize::default_context_root();
         otto_context::materialize::provision(&library, &cfg, &cwd2, &provider, &ctx_root)
@@ -469,6 +492,23 @@ pub async fn ensure_agent_workspace<C: AssistantCtx>(
             one_line(&agent.name)
         ))),
     }
+}
+
+/// The provider a persona is provisioned for (empty = Claude, the default),
+/// refused when its CLI cannot be handed a context file for one launch
+/// (`otto_context::materialize::delivers_context`: gemini, pi, a custom CLI):
+/// the agent would otherwise run with none of its instructions, rules or team.
+pub fn persona_provider(provider: &str) -> Result<&str> {
+    let p = match provider.trim() {
+        "" => "claude",
+        p => p,
+    };
+    if otto_context::materialize::delivers_context(p) {
+        return Ok(p);
+    }
+    Err(Error::Invalid(format!(
+        "{p} can't load a persona for one launch — pick Claude, Codex, agy, Grok or opencode"
+    )))
 }
 
 /// Did provisioning land the persona's instructions file? A provider Otto
@@ -1360,7 +1400,7 @@ async fn execute_agent<C: AssistantCtx>(
             }
             let report = ctx
                 .orchestrator()
-                .run_agent(&prompt, &cwd, model, RUN_NO_PROGRESS)
+                .run_agent_background("personal_agent", &prompt, &cwd, model, RUN_NO_PROGRESS)
                 .await?;
             let summary = C::extract_summary(&report);
             return Ok(ExecOutcome {
@@ -1823,7 +1863,10 @@ mod tests {
 
 #[cfg(test)]
 mod cwd_tests {
-    use super::{agent_ownership, validate_agent_cwd, AgentOwnership};
+    use super::{
+        agent_ownership, person_only_change, persona_provider, validate_agent_cwd, AgentOwnership,
+        Error,
+    };
 
     #[test]
     fn ownership_distinguishes_owner_ownerless_and_other() {
@@ -1852,6 +1895,38 @@ mod cwd_tests {
         agent.created_by = Some("u1".into());
         assert_eq!(agent_ownership(&agent, "u1"), AgentOwnership::Owner);
         assert_eq!(agent_ownership(&agent, "u2"), AgentOwnership::Other);
+    }
+
+    #[test]
+    fn a_persona_needs_a_provider_that_loads_one_per_launch() {
+        assert_eq!(persona_provider("").unwrap(), "claude");
+        assert_eq!(persona_provider("  ").unwrap(), "claude");
+        for p in ["claude", "codex", "agy", "grok", "opencode"] {
+            assert_eq!(persona_provider(p).unwrap(), p);
+        }
+        for p in ["gemini", "pi", "my-cli"] {
+            match persona_provider(p) {
+                Err(Error::Invalid(m)) => {
+                    assert!(m.starts_with(p) && m.contains("pick Claude"), "{m}")
+                }
+                other => panic!("{p}: expected Invalid, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn owner_only_fields_need_a_person_credential() {
+        // An agent credential changing an owner-only field is refused, and
+        // the refusal names the fields.
+        let err = person_only_change(false, &["instructions", "delivery"])
+            .expect_err("agent credential refused");
+        match err {
+            Error::Forbidden(m) => assert!(m.contains("instructions, delivery"), "{m}"),
+            other => panic!("expected Forbidden, got {other:?}"),
+        }
+        // A person may; an agent may change what is not owner-only.
+        assert!(person_only_change(true, &["instructions"]).is_ok());
+        assert!(person_only_change(false, &[]).is_ok());
     }
 
     #[test]

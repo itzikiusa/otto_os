@@ -106,9 +106,11 @@ can open: admin-only panes are hidden rather than shown disabled.
 - Slack, Telegram and inbound webhook integrations for the current workspace.
   Tokens and webhook keys are stored in the Keychain.
 
-**MCP Servers** — see [MCP Control Plane](#/walkthroughs/mcp)
-- Per-workspace MCP servers that are merged into the workspace's `.mcp.json`
-  when an agent session starts. Adding a server needs root.
+**MCP Servers** — moved to [MCP Control Plane](#/walkthroughs/mcp)
+- Every MCP server now lives on the MCP Control Plane's Servers page, native
+  (written into `.mcp.json` for the agent CLI, not governed) or governed
+  (through Otto's gateway). The old Settings link opens it there; the
+  Connections MCP switch is "Attach to sessions" on its Otto server page.
 
 **Language Servers**
 - Shows which language servers (Go, Python, TypeScript, JavaScript, Rust, JSON,

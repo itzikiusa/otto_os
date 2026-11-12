@@ -81,7 +81,10 @@ count that was interrupted after the first delta, then `close`.
 3. **Stream.** The CLI emits `stream_event`s. Text and thinking deltas grow
    one item per content block. The full `assistant` frame adds the
    `tool_use` blocks (text that was already streamed is not re-emitted), and
-   the `user` frame's `tool_result` settles the tool.
+   the `user` frame's `tool_result` settles the tool. A call the CLI marks
+   `tool_result_meta[].non_execution_kind: "interrupted"` (a new message or
+   Stop cut it short) settles `interrupted`, shown as stopped, not failed;
+   `"cancelled"` settles `cancelled` (T3 Code #34183).
 4. **Permission round-trip.** The CLI sends
    `control_request {subtype:"can_use_tool", tool_name, input,
    permission_suggestions, tool_use_id}`, which becomes a pending runtime
@@ -102,7 +105,9 @@ count that was interrupted after the first delta, then `close`.
    question) closes the request `cancelled`.
 5. **Interrupt.** Every open question is answered `cancel`, then
    `control_request {subtype:"interrupt"}` is sent (T3 Code:
-   `queryRuntime.interrupt()`, `:1298-1300`).
+   `queryRuntime.interrupt()`, `:1298-1300`). A Stop that lands while a
+   prompt is still starting (its agent spawning or resuming) is kept and
+   stops that turn as soon as it runs (T3 Code #34912).
 6. **Turn end.** The `result` message, mapped by `terminalStatusFromResult`
    (`:3708-3738`):
 
@@ -114,7 +119,16 @@ count that was interrupted after the first delta, then `close`.
    | anything else | failed |
 
    Usage: input is `input` + cache read + cache creation, and output is
-   `output` tokens.
+   `output` tokens. A turn that ends interrupted or cancelled settles the
+   text still streaming as `interrupted`, not completed; on an
+   `aborted_streaming` result the reply shown last is re-marked too
+   (T3 Code #34597).
+
+   Context meter: the last root message's `usage` (input + cache + output,
+   not the turn's sum) against `result.modelUsage[<that message's
+   model>].contextWindow`, the window this Claude process enforces
+   (settings such as `CLAUDE_CODE_DISABLE_1M_CONTEXT` shrink it). Another
+   model's entry never stands in (T3 Code #31370, open upstream).
 7. **Tool → item.** `CLAUDE_KNOWN_TOOL_CLASSIFICATIONS` (`:2819-2860`):
 
    | Claude tool | Item type |
@@ -158,7 +172,19 @@ count that was interrupted after the first delta, then `close`.
 9. **Steering.** A message with `delivery: "steer"` is written to the CLI's
    stdin while the turn runs; the CLI hands it to the model at its next step
    (the SDK's streaming input). It is a `user_message` of the running turn.
+   A model or effort picked with it switches first (`set_model` /
+   `apply_flag_settings`), so the rest of the turn uses it (T3 Code #34564);
+   the session's stored model follows on the next prompt.
    The other drivers do not steer; such a message is queued instead.
+10. **Resume.** A resumed CLI (`--resume`) gets
+   `MCP_CONNECTION_NONBLOCKING=0` unless the daemon's environment sets it:
+   Claude Code then connects its MCP servers before the first request
+   instead of telling the agent they all disconnected (T3 Code #34822).
+11. **Escaped jobs.** Claude Code starts some jobs in a process group of
+   their own, which the group kill misses. While the session is busy its
+   process tree is recorded once a second (`ps`); when the process is
+   gone, each recorded job still running (same pid and start time) is
+   killed (`runtime/descendants.rs`, T3 Code #34505).
 
 ### Codex (`codex app-server`; `codex.rs`)
 
@@ -193,11 +219,16 @@ The framing is newline-delimited JSON-RPC **without** a `"jsonrpc"` member:
    | `item/commandExecution/outputDelta` | `command_output.delta` |
    | `turn/plan/updated` | The plan |
    | `thread/tokenUsage/updated` | Usage (`last` → turn, `total` + `modelContextWindow` → context) |
+   | `mcpServer/startupStatus/updated` `failed` | A `system_notice` "MCP server <name> failed to start" with Codex's error, once, in the running turn or the next one (T3 Code #34771) |
    | `error` with `willRetry:false` | Kept as the failure |
    | `turn/completed` | `completed`, `interrupted` or `failed` (`mapCodexTurnStatus`, `:359-372`) |
 
    Item status follows `codexItemStatus` (`:392-414`): `inProgress` →
    running, `declined` → cancelled.
+
+   Effort rides `turn/start`, so changing it never resumes the loaded thread
+   (T3 Code #32915), and Otto never sends a reasoning `summary`, so Codex
+   uses the user's own `model_reasoning_summary` (T3 Code #35089).
 6. **Approvals** (`:5277-5640`).
 
    | Codex request | Kind | Answer |
@@ -242,6 +273,11 @@ plus `adapter.ts`.
    env-var methods are never sent. A second failure is reported, and the
    person signs in with the CLI.
 4. **Prompt.** `session/prompt`; the response carries `stopReason`.
+   `agent_message_chunk`s with the same `messageId` append to one message,
+   also when a thought or another message came in between: it keeps its
+   streamed text and its place (T3 Code #33604). An opencode model written
+   as a config option that failed for any reason but a refusal (`-32602`)
+   is written again before the next prompt (T3 Code #34782).
 
    | `stopReason` | Turn status |
    |---|---|
@@ -523,7 +559,7 @@ remain under **Previous questions**.
 |---|---|
 | Claude `AskUserQuestion` | Text, single choice and multi-select, with free-text alternatives. The original question text keys `updatedInput.answers`; multi-select values use Claude's comma-separated format. |
 | Codex `item/tool/requestUserInput` | Text and single choice, with free-text alternatives. Native question IDs map to `{answers: [...]}` arrays. |
-| ACP `elicitation/create` | Session-scoped `mode: "form"` with flat text, string enum/titled single choices, and arrays of string choices. Replies preserve schema property names and values. This is the upstream draft extension; not every ACP provider emits it. |
+| ACP `elicitation/create` | Session-scoped `mode: "form"` with flat text, string enum/titled single choices, and arrays of string choices. Replies preserve schema property names and values. An optional single choice `<id>` with an optional `<id>__other` text field (OMP's ask dialog) is one question with a free-text alternative; typed text is returned as `<id>__other` (T3 Code #34867). This is the upstream draft extension; not every ACP provider emits it. |
 
 `POST /runtime-sessions/{id}/requests/{request_id}` accepts `{answers: [...]}`
 with tagged `single`, `multi` or `text` entries, or `{question_action:
@@ -649,7 +685,10 @@ and still remembered the image.
   never a stall (`RuntimeConfig::stall_after` / `stall_tool_after`).
 - **Revive and delete.** `POST /runtime-sessions/{id}/reopen` clears
   `closed` (in order with the close's own write) and respawns a closed or dormant agent with
-  its resume key, without sending a prompt. An already-live process is preserved. If the process exits before it is ready (the provider lost
+  its resume key, without sending a prompt. An already-live process is preserved. If the process exits before it is ready, the runtime resumes
+  once more unless the exit says the conversation is gone ("No
+  conversation found"): a passing failure keeps the provider's conversation
+  (T3 Code #34762). If that fails too (the provider lost
   the conversation), the runtime starts a fresh provider thread, keeps the
   timeline, and adds a notice that the agent does not remember it; the old
   key is kept until the fresh one is up. Concurrent reopens and prompts share
@@ -823,11 +862,17 @@ secret question forms are refused instead of being collected into history.
 | `ui/src/modules/threads/runtime/runtimeThreads.svelte.ts` | session rows (live status) and actions |
 | `ui/src/modules/threads/runtime/runtimeView.svelte.ts` | an open thread's projection: live events, replay after a gap / reconnect (loads with the view) |
 | `ui/src/modules/threads/runtime/Runtime{Thread,WorkRow,ApprovalRow}.svelte` | timeline, work-log rows, inline approvals, composer with Stop (sending to a closed thread reopens it) |
-| `ui/src/modules/threads/runtime/Runtime{SubagentCard,QueueBar,TurnStatus}.svelte` | the subagent card; background work, the queue (Steer / Send now / Edit / Remove) and Closed · Reopen; the turn's status line (working, own turn, stopped, stalled, partly done) |
+| `ui/src/modules/threads/runtime/{RuntimeWorkFold.svelte,RuntimeWorkGroup.svelte,workLog.ts}` | the quiet work log: a finished stretch folds into "Worked for …", a running group names its live call "+N more", labels without `cd <dir> &&` and with paths relative to the thread's folder, durations, "exit N" |
+| `ui/src/modules/threads/runtime/{RuntimeBannerStack.svelte,banners.ts}` | everything above the composer in one priority order (error > question / approval > plan > queue > notices), at most two in full |
+| `ui/src/modules/threads/runtime/Runtime{SubagentCard,AgentRow,ThreadCallRow}.svelte`, `agentRows.ts` | one compact row for another agent: a subagent, or the agent's `thread_open` / `thread_message` call |
+| `ui/src/modules/threads/runtime/Runtime{QueueBar,TurnStatus}.svelte` | background work, the queue (Steer / Send now / Edit / Remove) and Closed · Reopen; the turn's status line (working, own turn, stopped, stalled, partly done) |
+| `ui/src/modules/threads/{RelatedThreadsChip,RelatedThreadsList,ThreadPopover}.svelte`, `relatedThreads.ts`, `relatedCollect.ts`, `relatedMessage.ts` | the header's one Related threads control (linked threads, workers, side chat, rooms; open, open beside, message, start a room) |
+| `ui/src/modules/threads/threadsPageMenu.ts` | the toolbar ⋯: the thread's actions, then New thread, Related threads…, Project card, Terminal drawer and the layout |
 | `ui/src/lib/stores/runtimeDraftPersistence.ts`, `runtimeDraftRecovery.svelte.ts`, `runtimeDrafts.svelte.ts` | draft snapshot acknowledgement, serialized persistence and recovery |
 | `ui/src/modules/threads/runtime/Runtime{Questions,QuestionCard,ToolImages,ContextChips,DraftStatus}.svelte` | typed questions, image enlargement, context preview/removal and save status |
 | `ui/src/modules/threads/runtime/composerContext.ts` | attributed review conversations and file/hunk/line excerpts assembled on send |
 | `ui/src/modules/threads/runtime/runtimeMenu.ts` | the thread menu: Reopen, Close, Delete (confirmed unless "Closing a session tab" is Always delete) |
+| `crates/otto-agent-protocol/src/runtime/council.rs`, `ui/src/modules/threads/runtime/{council.ts,councilStore.svelte.ts,Council*.svelte}` | Council: seats created all or none, the judge's prompt; the stage multi-select, columns, sidebar row |
 | `ui/e2e/desktop-threads-runtime.spec.ts` | E2E against `otto-fake-codex` and `otto-fake-claude` (global-setup's shims exec them for `app-server` / `--input-format stream-json`) |
 
 ## 9. Gaps and next steps
@@ -866,7 +911,206 @@ secret question forms are refused instead of being collected into history.
   `_list` / `_message` / `_read`): a thread's agent opens other threads
   (`parent_id` = the group's root), messages them and reads their replies —
   an orchestrator driving codex / gemini / grok workers. The Threads sidebar
-  nests the group; the thread header shows the group as switchable chips.
+  nests the group; the toolbar's **Related threads** chip lists it (see
+  [Threads layout](#threads-layout)); an embed shows a small "N linked" chip
+  of its own.
+
+### Council: one prompt, several agents
+
+T3 Code lets you pick several models in the new-thread picker; one send then
+starts one thread per model with the same prompt
+(`apps/web/src/components/chat/useMultipleModelSend.ts`, `chatViewSend.ts`
+`startFanoutThread`). Otto's **Council** does the same and keeps the answers
+together, then adds the step T3 Code leaves to you: a judge.
+
+**Starting one.** In the new-thread stage, **Ask several** (beside the agent
+chip) turns the agent menu into a multi-select: every model picked becomes a
+seat, and picking it again takes it out. A ⌘- or ⇧-click on a model starts
+the selection with the current pick. With 2–4 seats the chip reads e.g.
+"Opus, Sol, +1" and the send button "Ask 3"; one seat sends nothing and
+asks for another. The same provider may sit twice (another model or
+effort). One model is today's single thread, unchanged.
+
+**What the daemon makes** (`POST /workspaces/{id}/runtime-sessions/council`,
+`crates/otto-agent-protocol/src/runtime/council.rs`):
+
+- one linked group: seat 1 is the root, seats 2–4 are linked to it, every
+  seat carries `meta.council {id, seat, role: "seat", effort?}`;
+- every seat is **read-only** (`meta.read_only`: the read-only Seatbelt
+  profile and tool list) and approval-required, so parallel agents in one
+  folder never clash on files;
+- all seats or none: a seat that cannot start removes the ones already
+  made, and the error names it ("seat 2 (codex): …"); the stage keeps the
+  picks so a retry is one click;
+- the prompt goes to every seat at once. No new WebSocket events: each seat
+  streams on its own session channel.
+
+**The view.** A thread with `meta.council` opens as columns
+(`ui/src/modules/threads/runtime/CouncilView.svelte`): 2–4 compact embeds,
+each headed by the provider, model, effort, status, elapsed time and tokens
+(tokens, not cost — most people run on subscriptions), with **Continue
+here** to take that seat on as a normal thread (the sidebar's council row
+brings the columns back). A seat whose turn failed says so and offers **Ask
+again**. On a phone the columns become a segmented control, one seat at a
+time. The sidebar shows the council as one row, "Council · 3" with the
+seats' provider icons, that unfolds into the seats and the synthesis.
+
+**Synthesis.** The footer's one primary action is **Synthesize with
+<judge>** (the judge defaults to seat 1's provider; any runtime provider can
+judge). It is disabled, with the reason, while a seat or an earlier
+synthesis still works. `POST /runtime-sessions/{id}/council/synthesize`
+opens a thread linked to seat 1 (`role: "synthesis"`, read-only) whose
+prompt the daemon builds: the question, each seat's last answer, and the
+task — where they agree, where they disagree and who is right, a pick or a
+merge, open questions. It is sent without the "Opened by …" header (the
+daemon wrote it, not an agent). The answer is the last, full-width column.
+
+**Limits.** 4 seats + 1 synthesis = 5 threads, inside the group cap
+(`MAX_LINKED_OPEN`, 8 besides the root). A council is started and watched by
+a person, so it is not a background source and takes no admission slot.
+
+**Left for later, on purpose:** a worktree per seat so seats can edit;
+follow-up rounds sent to every seat; scored rubrics; merging the chosen
+seat's work back; an `otto.council` MCP tool; cost in dollars.
+
+### Threads inside a thread
+
+T3 Code shows a thread that belongs to another one in three places, the
+same for every provider, and Otto now does too.
+
+**What a person sees in T3 Code** (read from its source:
+`apps/web/src/components/chat/V2LifecycleRow.tsx`, `ProviderSubagentBar.tsx`,
+`ThreadLineageWorkflowRow.tsx`, `ThreadRelationshipsControl.tsx`,
+`packages/client-runtime/src/state/subagentRuntime.ts`,
+`packages/contracts/src/orchestratorMcp.ts` `delegate_task`,
+`docs/user/composer.md`, `docs/user/thread-sidebar.md`):
+
+- *Inside the parent's timeline*: a delegated child is one compact row
+  (`SubagentTimelineLink`) — the provider's avatar with a status ring, its
+  title, one line of progress while it runs and of its result once settled,
+  the status word, elapsed time and a chevron; the whole row opens the
+  child, a hover card adds model, effort and the full result. When the child
+  ends, a notification row says "Finished" / "Failed" / "Stopped" with the
+  time. Agents a workflow runs group under one header ("2/3 agents",
+  phases, "Stop entire workflow"). Inside the child, the composer gives way
+  to a bar: provider, model, effort, live status, "Runs on its own", **Open
+  parent**.
+- *On the side*: the header's **Related threads** / **Agents** control lists
+  the parent and its subagents with status icons; the sidebar keeps one row
+  per thread and folds working threads into a "Working" section.
+- *Starting one*: the agent calls `delegate_task` (provider, model, effort);
+  its completion wakes the parent ("Completion wakes this thread, so end your
+  turn"). A person types `@opus` / `@gpt` in the composer to name a model
+  for the agent; Shift-click several models in a new thread's picker sends
+  one prompt to each.
+
+**Otto's version.** One visual language for every child — a thread a person
+asked from the composer, one the agent opened with `otto.thread_open`, a
+council's seats — on Claude, Codex and the ACP providers (Gemini, Grok,
+opencode, pi) alike:
+
+- **Start one** — in a runtime thread's composer, **Ask another agent**
+  (the people icon beside Attach) opens the agent menu; each model picked
+  becomes a chip above the text ("Ask Codex · GPT-5"), and picking 2–4 is
+  **Ask several**. Typing `@` and part of a provider or model name (`@cod`,
+  `@opus`) offers the same agents (↑ ↓, ↵ / Tab picks, Esc closes). With
+  chips set, Send asks them instead of this thread's agent:
+  `POST /runtime-sessions/{id}/children` opens one new thread per agent,
+  all or none, linked to this one, in its folder. The chip row says what
+  they may do: this thread's access ("asks before it edits", "can edit
+  files", "full access", or "read-only"); the composer's access chip narrows
+  it, never widens it (a wider pick is refused in words). A full group (8
+  open threads beside the root) is refused above the composer with how many
+  still fit.
+- **Inside the thread** — where they were asked, the parent shows a live
+  card per child (`RuntimeChildCard.svelte`): provider icon, title, model ·
+  effort, Starting / Working / Needs you / Done / Failed / Stopped, elapsed
+  time, its latest step while it works and its answer's first line once it
+  ends, with **Stop**, **Open beside** and **Open**; clicking the row opens
+  its last answer inline, read-only. Several asked together sit under one
+  header ("3 agents · 2 working · Stop all"). An agent's `thread_open` call
+  becomes the same card once it returned (a stretch holding one never folds
+  into "Worked for …"); a provider's own subagent keeps its card, drawn with
+  the same row. Cards follow each child's own session events (its projection
+  stays live while the card is on screen) — no polling.
+- **On the side** — the sidebar nests threads under the thread they belong
+  to (indented, provider icon, status dot); the parent row reads "· 3", its
+  dot speaks for the family (one needs you → needs you, one works →
+  working), and its chevron folds them. A child whose parent is closed,
+  archived or filtered out still shows, marked **detached**. A council's
+  seats nest the same way under its "Council · N" row. History and search
+  are unchanged.
+- **Hearing back** — each child turn's end writes one line in the parent:
+  "Codex finished: <first line> · Open". When the parent's **agent** opened
+  the child and the turn answered what it asked (its opening prompt or an
+  `otto.thread_message`), the answer is also queued for that agent (T3's
+  wake-on-completion): `[Reply from thread "…" (codex, id …): its turn
+  finished …]` + the answer (cut at 16,000 characters). It waits in the
+  parent's queue — the queue bar shows it, with Send now / Remove — and goes
+  out at the parent's next idle moment; one entry per child (a newer answer
+  replaces an older one), never twice for one turn. A dormant parent is not
+  respawned for it (Revive sends it), a closed one gets nothing, and a
+  delivered reply never wakes a grandparent. The parent's turn runs under
+  the parent's own access mode, so every approval it would need is asked as
+  usual. A person's ask never wakes the parent's agent.
+- **Both at once** — **Open beside** (card, sidebar row) puts the child in
+  the split next to its parent (1-up → 2-up → grid). On a phone the child
+  opens in place and the header shows **‹ <parent title>** to go back.
+
+| Word | Where | What |
+|---|---|---|
+| **Ask another agent** | a thread's composer (people icon, or `@`) | one new linked thread on the chosen provider / model / effort |
+| **Ask several** | the new-thread stage (a council), or 2–4 chips in a thread's composer | the same message to each, side by side |
+| `otto.thread_open` | the agent itself | a linked thread whose answers come back to the agent |
+
+Meta and markers: a child carries `meta.child_of {id, by: "person" |
+"agent"}` (the opener; `parent_id` stays the group's root). The parent's
+notices end in `[otto-thread:<id>[,<id>…]:started|finished|failed|stopped]`
+(`threadNoticeOf` in `runtime/childThreads.ts`). Code:
+`crates/otto-agent-protocol/src/runtime/children.rs`;
+`ui/src/modules/threads/runtime/{childThreads.ts,askAgents.ts,askTargets.svelte.ts,childNav.ts,RuntimeAskAgent.svelte,RuntimeChildCard.svelte,RuntimeChildGroup.svelte,RuntimeChildNotice.svelte,ThreadParentChip.svelte}`,
+`ui/src/modules/threads/threadFamilies.ts`.
+
+### Threads layout
+
+After T3 Code's header and work log, so the conversation stays the loudest
+thing on screen:
+
+- **Toolbar: four controls** — sidebar, the breadcrumb (project / thread),
+  right panel, ⋯. The ⋯ holds the thread's own actions, then **New thread**
+  (also the sidebar's New button and ⌘K "New thread"), **Related threads…**,
+  **Project card**, **Terminal drawer** (also `/terminal` and ⌘K) and the
+  layout (Single / Split / Grid, also in ⌘K). Back and Forward are the
+  shell's own (⌘⇧← / ⌘⇧→, ⌘K "Go back" / "Go forward"). Continue on phone is
+  a ⋯ item, in the toolbar and in a split pane's header alike.
+- **Related threads**: one chip beside the title, shown only while the thread
+  has related threads (linked by `otto.thread_open`, a delegated thread's
+  parent and workers, its side chat). Its popover lists them with their
+  status, the thread's session rooms and its recent cross-thread messages;
+  each row opens, opens beside or messages; **Message a thread…** reaches any
+  thread (or all of them) and **Start a room…** starts a session room. It
+  replaced the Peers tab, the pane's "To:" relay bar and the ⋯ items "Send
+  message to peer…" / "Session room…". A sidebar row's "Send message from
+  active thread…" opens the same message sheet directly.
+- **Right panel**: Browser, Files, Diff, Pull request and Side chat; the
+  terminal is the drawer (no Terminal surface); **Connections** joins the +
+  menu once the thread has database activity (or its tab is open).
+- **Work log**: a finished stretch of tool calls and thinking folds into one
+  "Worked for 2m 14s · 6 steps" line that opens to every call. A stretch that
+  is still running, or holds a failure, an approval (pending or decided), a
+  notice, a subagent or a task list never folds. Thinking reads inline (three
+  lines, then More). A running group reads "npm test +2 more". Rows drop a
+  leading `cd <dir> &&` / `cd <dir>;`, show paths relative to the thread's
+  folder and each call's duration, and a failed command reads "exit 1".
+- **Other agents**: a subagent and the agent's `thread_open` /
+  `thread_message` calls share one compact row — provider, name, model ·
+  effort, status, elapsed time, a one-line result and Open (⇧-click: beside).
+- **Above the composer**: one stack in one order — error, then a question
+  or a UI-control request, then the plan, the queue (or Revive), then the
+  fresh-context notice. Errors, questions and approvals always show; the rest
+  fill up to two and fold into "N more: …".
+- **Composer**: the draft's save state shows only when saving failed (with
+  Retry). One model chip; effort is picked inside its popover.
 
 ### Revive and responsive width
 

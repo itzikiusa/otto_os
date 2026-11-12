@@ -15,6 +15,9 @@
   import { harnessLabel, sessionBranch } from './threadsHelpers';
   import { threads } from './threadsStore.svelte';
   import { runtimeThreads } from './runtime/runtimeThreads.svelte';
+  import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
+  import { councilMembers, councilOf } from './runtime/council';
+  import { council } from './runtime/councilStore.svelte';
 
   interface Props {
     session: Session;
@@ -24,9 +27,11 @@
     onreopen: (s: Session, beside: boolean) => void;
     onmenu: (e: MouseEvent, s: Session) => void;
     onselect?: () => void;
+    /** Threads nested under this one (threadFamilies.ts): fold, count, aggregate status; or detached from its parent. */
+    family?: { kids: string[]; detached: boolean; folded: boolean; ontoggle: () => void };
   }
 
-  let { session: s, variant, child = false, onrowclick, onreopen, onmenu, onselect }: Props = $props();
+  let { session: s, variant, child = false, onrowclick, onreopen, onmenu, onselect, family }: Props = $props();
 
   const needs = $derived(ws.needsYou[s.id] === true);
   const st = $derived(sessionState(s, ws.statusMap[s.id] ?? s.status, needs, { stale: events.state !== 'connected' }));
@@ -52,20 +57,90 @@
    *  routine / Manual run / Proactive / Delegated by … */
   const badge = $derived(agentThreadBadge(s.meta as Record<string, unknown> | undefined));
 
+  // A council (one prompt, several agents) is ONE row — "Council · 3" with
+  // its seats' provider icons — on seat 1; it unfolds into the seats (and
+  // the synthesis), which otherwise hide under it.
+  const cmeta = $derived(councilOf(runtimeThreads.get(s.id)));
+  const members = $derived(cmeta ? councilMembers(Object.values(runtimeThreads.byId), s.id) : null);
+  const head = $derived(variant === 'active' && cmeta?.role === 'seat' && !runtimeThreads.get(s.id)?.parent_id);
+  const unfolded = $derived(!!cmeta && council.expanded[cmeta.id] === true);
+  const folded = $derived(!!cmeta && child && !head && !unfolded && !selected);
+  const councilState = $derived.by(() => {
+    const ids = members ? [...members.seats, ...(members.synthesis ? [members.synthesis] : [])].map((m) => m.id) : [s.id];
+    const working = ids.some((id) => runtimeThreads.get(id)?.status === 'working' || runtimeThreads.get(id)?.status === 'starting');
+    return sessionState(s, working ? 'working' : 'idle', ids.some((id) => ws.needsYou[id] === true), { stale: events.state !== 'connected' });
+  });
+
+  const kids = $derived(family && !cmeta ? family.kids : []);
+  /** A parent's dot speaks for its children too: one needs you → needs you; one works → working. */
+  const famState = $derived.by(() => {
+    if (kids.length === 0) return st;
+    const anyNeeds = needs || kids.some((id) => ws.needsYou[id] === true);
+    const working = kids.some((id) => ['working', 'starting'].includes(runtimeThreads.get(id)?.status ?? ws.statusMap[id] ?? ''));
+    return anyNeeds || working ? sessionState(s, working ? 'working' : (ws.statusMap[s.id] ?? s.status), anyNeeds, { stale: events.state !== 'connected' }) : st;
+  });
+
   const testid = $derived(
     variant === 'pinned' ? `thread-pinned-${s.id}` : variant === 'history' ? `thread-history-${s.id}` : `thread-row-${s.id}`,
   );
 </script>
 
+{#if head && cmeta && members}
+  <div class="tr-row tr-council" class:selected={selected && council.showsCouncil(s.id)} data-testid="thread-council-{cmeta.id}">
+    <button
+      type="button"
+      class="icon-btn tr-fold"
+      aria-expanded={unfolded}
+      aria-label="{unfolded ? 'Fold' : 'Show'} the council’s threads"
+      title={unfolded ? 'Fold the seats' : 'Show the seats'}
+      data-testid="thread-council-fold-{cmeta.id}"
+      onclick={() => council.toggleExpanded(cmeta.id)}
+    >
+      <Icon name={unfolded ? 'chevronDown' : 'chevronRight'} size={12} />
+    </button>
+    <button
+      type="button"
+      class="tr-main"
+      title="Council · {members.seats.length}: {s.title}"
+      aria-current={selected ? 'true' : undefined}
+      onclick={() => {
+        council.showCouncil(s.id);
+        onselect?.();
+      }}
+      oncontextmenu={(e) => onmenu(e, s)}
+    >
+      <StatusDot state={councilState} />
+      <span class="tr-stack" aria-hidden="true">
+        {#each members.seats.slice(0, 4) as m (m.id)}
+          {#if hasProviderIcon(m.provider)}<ProviderIcon provider={m.provider} size={12} />{/if}
+        {/each}
+      </span>
+      <span class="tr-title ellipsis" dir="auto">{s.title.replace(/ · [^·]*$/, '')}</span>
+      <span class="tr-badge">Council · {members.seats.length}</span>
+      <span class="tr-time">{rel(s.last_active_at)}</span>
+    </button>
+  </div>
+  {#if unfolded}{@render row(true)}{/if}
+{:else if !folded}
+  {@render row(child)}
+{/if}
+
+{#snippet row(nested: boolean)}
 <div
   class="tr-row reveal-host"
-  class:child
+  class:child={nested}
+  class:tr-family={kids.length > 0}
   class:needs-you={needs}
   class:unread
   class:selected
   class:in-pane={inPane && !selected}
   data-testid={testid}
 >
+  {#if kids.length > 0 && family}
+    <button type="button" class="icon-btn tr-fold" aria-expanded={!family.folded} aria-label="{family.folded ? 'Show' : 'Fold'} the threads opened from {s.title}" title={family.folded ? 'Show its threads' : 'Fold its threads'} data-testid="thread-family-fold-{s.id}" onclick={family.ontoggle}>
+      <Icon name={family.folded ? 'chevronRight' : 'chevronDown'} size={12} />
+    </button>
+  {/if}
   <button
     type="button"
     class="tr-main"
@@ -82,9 +157,12 @@
     {#if history}
       <Icon name="archive" size={12} />
     {:else}
-      <StatusDot state={st} />
+      <StatusDot state={famState} />
     {/if}
+    {#if nested && hasProviderIcon(s.provider)}<ProviderIcon provider={s.provider} size={12} />{/if}
     <span class="tr-title ellipsis" dir="auto">{s.title}</span>
+    {#if kids.length > 0}<span class="tr-kids" title="{kids.length} threads opened from this one" data-testid="thread-family-count-{s.id}">· {kids.length}</span>{/if}
+    {#if family?.detached}<span class="tr-badge" title="Opened from a thread that is closed or archived" data-testid="thread-detached-{s.id}">detached</span>{/if}
     {#if badge}<span class="tr-badge tr-badge-{badge.kind} ellipsis" title={badge.title} data-testid="thread-badge-{s.id}">{badge.label}</span>{/if}
     {#if unread}<span class="tr-unread" role="img" aria-label="Unread" title="New since you last looked" data-testid="thread-unread-{s.id}"></span>{/if}
     <span class="tr-time">{rel(s.last_active_at)}</span>
@@ -131,6 +209,7 @@
     </button>
   </div>
 </div>
+{/snippet}
 
 <style>
   .tr-row {
@@ -253,8 +332,37 @@
       padding-inline-end: 80px;
     }
   }
+  .tr-council .tr-main {
+    padding-inline-start: 0;
+  }
+  .tr-fold {
+    flex: none;
+  }
+  .tr-stack {
+    display: inline-flex;
+    flex: none;
+  }
+  .tr-stack > :global(*:not(:first-child)) {
+    margin-inline-start: -4px;
+  }
+  /* The council row has no hover actions: keep its time, no reserved end. */
+  .tr-row.tr-council .tr-main {
+    padding-inline-end: 8px;
+  }
+  .tr-row.tr-council .tr-time {
+    display: inline;
+  }
   .tr-pin-on {
     color: var(--warning);
+  }
+  .tr-kids {
+    flex: none;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .tr-family .tr-main {
+    padding-inline-start: 0;
   }
   .tr-pin-on :global(svg path) {
     fill: currentColor;

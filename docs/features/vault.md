@@ -48,7 +48,9 @@ contract is `docs/contracts/api.md` → *Vault v3 — the docs home*.
 | · scanning | `crates/otto-vault/src/scan.rs`, `engine.rs` | Incremental (size+mtime) walk; freshness kicks |
 | · OKF | `crates/otto-vault/src/okf.rs` | E1–E3 / W1–W5 conformance + `index.md` generation |
 | · HTTP | `crates/otto-vault/src/http.rs` | The `/workspaces/{ws}/vault/*` router |
-| Persistence | `crates/otto-state/migrations/0105_vault_docs.sql` | `vaults`, `vault_notes`, `vault_links`, `vault_tags`, `vault_files` (+ runtime FTS5 `vault_fts`); the same migration **dropped** the v2 vector/backends/code tables |
+| Persistence | `crates/otto-state/migrations/0105_vault_docs.sql` | `vaults`, `vault_notes`, `vault_links`, `vault_tags`, `vault_files` (+ the runtime full-text index `vault_fts2` / `vault_fts2_docs`, see §4.4); the same migration **dropped** the v2 vector/backends/code tables |
+| · full-text index | `crates/otto-vault/src/search_index.rs` | Contentless FTS5 index, query-time snippets, background backfill/rebuild, merge pass |
+| · attachments | `crates/otto-vault/src/attachments.rs` | Paste/drop saves: folder + link-style conventions, safe unique names, content sniffing |
 | MCP (session) | `crates/ottod/src/mcp_tools.rs` | `otto_vault_list/dir/read/search/backlinks/tags/graph/okf_validate` + `write/write_file/rename/delete`; reviewer sessions receive the read-only subset |
 | MCP (outward) | `crates/otto-mcp/src/outward/` | `otto.vault_*` — reads default-enabled, writes approval-gated |
 | Global search | `crates/otto-server/src/routes/search.rs` | ⌘F fans out to `vault_fts` (`kind: "vault_note"`) |
@@ -199,6 +201,22 @@ chosen mode is remembered per vault.
   alias inserts `[[File|alias]]`.
 - **`#` tag completion** from the vault's existing tags (with counts).
 
+- **Paste or drop a file** (a screenshot, an image, a PDF…) into the editor —
+  desktop app or phone browser. Otto saves it as a **new** file in the vault's
+  attachment folder and inserts the embed at the cursor. The folder and link
+  style follow the vault: an Obsidian vault's `.obsidian/app.json`
+  (`attachmentFolderPath`: root, beside the note, a subfolder beside the note,
+  or a fixed folder; `useMarkdownLinks`), else `attachments/` with
+  `![[attachments/…]]`. A clipboard image is named `Pasted image
+  <yyyyMMddHHmmss>.png`; an existing file is never overwritten (`name 1.png`
+  instead). Images are recognised by their bytes, not the extension; PDFs and
+  a short list of plain types (txt, csv, json, yaml, log, zip, audio/video,
+  docx/xlsx/pptx) are accepted; anything else (HTML, SVG, scripts) is refused
+  with a message. The cap is **20 MB**, checked before upload. A failed save
+  stays above the editor with **Retry** (same bytes) and Dismiss; if you
+  switched notes before it finished, the link is not inserted elsewhere — a
+  toast names the saved file and its embed.
+
 **Reading view** renders GFM through an **allowlist sanitizer** (no scripts,
 iframes, or event handlers survive), with the Obsidian constructs below. A note
 over **64 KB** is parsed and highlighted in a module worker
@@ -321,6 +339,30 @@ type:Decision retention     # OKF type filter
 Filters run inside the SQL query, before the result limit: `foo tag:x` finds
 every tagged match (also nested `x/…` tags), however low it ranks overall, and a
 search never reads the whole notes or tags table.
+
+**The index stores no copy of your notes.** The full-text index (`vault_fts2`,
+in Otto's state database next to the other vault tables) is a *contentless*
+FTS5 table: tokens and per-note token counts only. Snippets are computed when
+you search, from the note files of the page of results being returned, with
+FTS5's own snippet function — so they read exactly as before. The previous
+layout (`vault_fts`) stored every note body a second time (~78 MB at 10k
+notes).
+
+**Rebuilding.** The index is derived, so it is never migrated in place. On the
+first start after this upgrade the old table is dropped and the index is
+rebuilt from the notes in the background — 100 notes per transaction, yielding
+between batches, logged with counts, and resumable (a restart continues with
+the notes still missing). Search keeps answering meanwhile from the indexed
+part, and says so: the header shows **Search index N%**, the Search pane says
+"Results may be incomplete" with the counts, the API marks the answer
+(`with_index` / the `x-otto-search-index` header) and `GET …/status` carries
+`search_index`. When it completes, a toast confirms it and an open search
+re-runs. **⋯ → Rebuild search index** does the same on demand (notes are not
+touched). After a large backfill a bounded FTS5 merge pass compacts the index.
+Freed pages go to the state database's free list; Otto's hourly incremental
+vacuum returns them to disk (the vault code never VACUUMs the shared database).
+A rollback to an older build is safe: it recreates its own table and
+re-indexes every note.
 
 **Tags** mode lists every tag with its count (frontmatter + inline, nested
 `a/b` tags included); clicking a tag jumps to a `tag:` search. Notes **>4 MiB**
@@ -750,6 +792,8 @@ PDF annotation, community plugins.
 | Clicking an unresolved link asks to create a note | That's the feature — Obsidian-style click-to-create for ghost links. |
 | **"Diagram error: Refused to evaluate a string as JavaScript…"** on a D2 diagram | The packaged app's CSP blocked D2's engine — it needs `'wasm-unsafe-eval'` (WASM) and `'unsafe-eval'` (its worker's ELK layout loader uses `new Function`). Both are in `apps/desktop/src-tauri/tauri.conf.json`'s `script-src` **deliberately**: script SOURCES stay `'self'`-only and rendered markdown is sanitized, so don't remove them without replacing the D2 engine. Mermaid never needed either. |
 | A diagram shows "Diagram error: Parse error …" with the source | The agent wrote invalid mermaid (unquoted special chars in labels is the usual cause). The source stays visible by design; the prepared-prompt templates instruct agents to verify fences before finishing. |
+| Search pane says "Results may be incomplete" / header shows **Search index N%** | The full-text index is rebuilding (first start after an upgrade, or ⋯ → Rebuild search index). Search answers from the part indexed so far; it re-runs when the rebuild completes. Daemon log lines start `vault search index:` with counts. |
+| "Couldn't attach …" above the editor | The save failed (shown with the reason) — **Retry** re-sends the same bytes. Over 20 MB, an image name with non-image bytes, or an unsupported type (HTML, SVG, scripts…) is refused with a message and no Retry. |
 | Big note isn't found by body search | Notes >4 MiB skip body parsing. Search by filename; body tags, aliases and outgoing links resume after shrinking the file. |
 | `index.md` missing from switcher/graph | Reserved OKF files are excluded by default; the graph has a **Reserved files** toggle. |
 | Graph shows a **truncated** chip | The full-mode server edge budget (default 2M, degree-prioritized) was hit; use the filters/local mode or raise `?edge_budget=`. |

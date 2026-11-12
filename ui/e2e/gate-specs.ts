@@ -29,9 +29,9 @@ export const DESKTOP_GATE_SPECS = [
   'desktop-backup-archive.spec.ts',
   'desktop-browser-overlay-selector.spec.ts',
   'desktop-canvas-panel.spec.ts',
-  'desktop-canvas-versions.spec.ts',
   'desktop-channels-rooms-health.spec.ts',
   'desktop-connections-hub.spec.ts',
+  'desktop-design-artifact.spec.ts',
   'desktop-personal-autonomy.spec.ts',
   'desktop-personal-documents.spec.ts',
   'desktop-platform-settings-recovery.spec.ts',
@@ -48,6 +48,8 @@ export const DESKTOP_GATE_SPECS = [
   'desktop-shell-reopen.spec.ts',
   'desktop-skills-lab.spec.ts',
   'desktop-threads.spec.ts',
+  'desktop-threads-clean.spec.ts',
+  'desktop-threads-council.spec.ts',
   'desktop-tiled-maximize.spec.ts',
   'desktop-token-cleanup.spec.ts',
   'desktop-transcript-cache-live.spec.ts',
@@ -55,7 +57,7 @@ export const DESKTOP_GATE_SPECS = [
 ] as const;
 
 /** Mobile specs run at iPhone portrait (WebKit). */
-export const MOBILE_GATE_SPECS = ['theme.spec.ts', 'vault-mobile.spec.ts'] as const;
+export const MOBILE_GATE_SPECS = ['design-lobby-mobile.spec.ts', 'theme.spec.ts', 'vault-mobile.spec.ts'] as const;
 
 /** The projects the gate runs a spec on (desktop list / mobile list). */
 export const DESKTOP_GATE_PROJECT = 'desktop-browser';
@@ -69,7 +71,11 @@ export const MOBILE_GATE_PROJECT = 'iphone-portrait';
  * --project=iphone-portrait` when promoting a spec; lower it only when a spec
  * leaves the gate.
  */
-export const GATE_MIN_EXPECTED = 121;
+// 2026-11-12 round 2: 121 − 1 (desktop-canvas-versions left: the Canvas page
+// it drove is retired, so it only skips) + 5 desktop-design-artifact (the
+// Hall's versions/restore replace it) + 5 desktop-threads-clean + 2
+// desktop-threads-council (both mock mode) + 2 design-lobby-mobile = 134.
+export const GATE_MIN_EXPECTED = 134;
 
 /** Exact-file matcher for a Playwright project's `testMatch`. */
 export function gateMatcher(files: readonly string[]): RegExp {

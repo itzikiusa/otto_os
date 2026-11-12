@@ -22,6 +22,7 @@ import type {
   DesignSignal,
   DesignSignalKind,
   DesignSignalReq,
+  DesignSourceKind,
   DesignStatus,
   DesignStudio,
   DesignVersion,
@@ -43,6 +44,10 @@ export interface DesignListFilter {
   story_id?: Id;
   include_children?: boolean;
   author_kind?: 'user' | 'agent' | 'system';
+  /** The mirror of one Canvas scene / story attachment (with `source_id`;
+   *  add `include_archived` to also find an archived mirror). */
+  source_kind?: DesignSourceKind;
+  source_id?: Id;
   since?: string;
   until?: string;
   include_archived?: boolean;
@@ -120,6 +125,12 @@ export function restoreVersion(id: Id, version: string, body: DesignRestoreReq =
 /** Named commit (`kind: named`). */
 export function commitVersion(id: Id, body: DesignCommitReq) {
   return api.post<DesignSaveResult>(`/design/artifacts/${enc(id)}/versions`, body);
+}
+
+/** "Edit here": take over a mirrored artifact (sets `meta.adopted`; writes stop
+ *  answering 409 `mirrored`). Idempotent; 400 when it mirrors nothing. */
+export function adoptArtifact(id: Id) {
+  return api.post<DesignArtifact>(`/design/artifacts/${enc(id)}/adopt`, {});
 }
 
 /** Human-only: moves `approved_version_id` (default: head) and sets status `approved`. */

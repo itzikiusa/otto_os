@@ -9,6 +9,7 @@
 
 <script lang="ts">
   import { onTabKey } from './tabKeys';
+  import LoadState from '../../lib/components/LoadState.svelte';
   // Compare two versions — of this artifact, or this artifact against a
   // reference from the library. Side by side renders both with the same stage
   // the editor uses; Changes is a text diff of the sources (JSON pretty-printed
@@ -30,11 +31,15 @@
     /** The artifact open in the view — only its versions can be restored. */
     currentId: string;
     headId: string | null;
+    /** The open design's approved version (its left side can be approved here). */
+    approvedId?: string | null;
+    canApprove?: boolean;
     meId: string | null | undefined;
     onclose: () => void;
     onrestore: (versionId: string, seq: number) => void;
+    onapprove?: (versionId: string) => void;
   }
-  let { left: initialLeft, right: initialRight, currentId, headId, meId, onclose, onrestore }: Props = $props();
+  let { left: initialLeft, right: initialRight, currentId, headId, approvedId = null, canApprove = false, meId, onclose, onrestore, onapprove }: Props = $props();
 
   let left = $state<CompareSide>(untrack(() => initialLeft));
   let right = $state<CompareSide>(untrack(() => initialRight));
@@ -61,12 +66,17 @@
   }
   let loadedL = $state<Loaded | null>(null);
   let loadedR = $state<Loaded | null>(null);
+  /** Bumped by Retry: a side that failed loads again. */
+  let retry = $state(0);
 
-  function loader(side: () => CompareSide, set: (l: Loaded) => void, get: () => Loaded | null) {
+  function loader(side: () => CompareSide, set: (l: Loaded | null) => void, get: () => Loaded | null) {
     return () => {
       const s = side();
       const key = `${s.artifact.id}:${s.versionId}`;
-      if (untrack(get)?.key === key) return;
+      void retry;
+      const had = untrack(get);
+      if (had?.key === key && !had.error) return;
+      if (had?.error) set(null);
       const asText = isTextFormat(s.artifact.format);
       let canceled = false;
       void fetchContent(s.artifact.id, { version: s.versionId, asText }).then(
@@ -115,6 +125,8 @@
   }
 
   const canRestore = $derived(left.artifact.id === currentId && left.versionId !== headId && seqOf(left) != null);
+  const canApproveLeft = $derived(canApprove && !!onapprove && left.artifact.id === currentId && left.versionId !== approvedId && seqOf(left) != null);
+  const loadFailed = $derived(loadedL?.error ?? loadedR?.error ?? null);
   const paneH = $derived(Math.max(260, Math.round(innerH * 0.58)));
 </script>
 
@@ -147,7 +159,7 @@
             {#if !p.l}
               <Skeleton rows={6} height={16} label="this version" />
             {:else if p.l.error}
-              <p class="msg err"><Icon name="warning" size={14} /> Couldn’t load this version. {p.l.error}</p>
+              <div class="msg"><LoadState what="this version" variant="compact" error={p.l.error} empty onretry={() => retry++} /></div>
             {:else}
               {#key p.l.key}
                 <ArtifactStage artifact={p.s.artifact} source={p.l.text} blobUrl={p.l.blobUrl} readonly compact />
@@ -158,7 +170,9 @@
       </div>
     {:else}
       <div class="diff" style:height={`${paneH}px`}>
-        {#if loadedL && loadedR && !loadedL.error && !loadedR.error}
+        {#if loadFailed}
+          <div class="msg" data-testid="design-compare-error"><LoadState what="a version to compare" variant="compact" error={loadFailed} empty onretry={() => retry++} /></div>
+        {:else if loadedL && loadedR}
           <DiffView before={pretty(left.artifact.format, loadedL.text)} after={pretty(right.artifact.format, loadedR.text)} mode="split" contextLines={4} />
         {:else}
           <Skeleton rows={8} height={16} label="the versions" />
@@ -167,6 +181,11 @@
     {/if}
   </div>
   {#snippet footer()}
+    {#if canApproveLeft}
+      <button class="btn" onclick={() => onapprove?.(left.versionId)} data-testid="design-compare-approve">
+        <Icon name="check" size={13} /> Approve v{seqOf(left)}
+      </button>
+    {/if}
     {#if canRestore}
       <button class="btn" onclick={() => onrestore(left.versionId, seqOf(left)!)} data-testid="design-restore">
         <Icon name="refresh" size={13} /> Restore v{seqOf(left)}
@@ -228,11 +247,6 @@
     margin: 16px;
     font-size: var(--fs-s);
     color: var(--text-dim);
-  }
-  .msg.err {
-    color: var(--danger);
-    display: flex;
-    gap: 6px;
   }
   @media (max-width: 640px) {
     .pickers,

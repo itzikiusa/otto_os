@@ -14,7 +14,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import LoopDetail from './LoopDetail.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
-  import { loopStatus } from './loopStatus';
+  import { loopStatusOf } from './loopSafety';
   import Icon from '../../lib/components/Icon.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { untrack } from 'svelte';
@@ -195,7 +195,7 @@
             <button class="loop-card" onclick={() => open(l.id)}>
               <div class="card-top">
                 <span class="name" title={l.name}>{l.name}</span>
-                <StatusBadge status={loopStatus(l.status)} />
+                <StatusBadge status={loopStatusOf(l)} />
               </div>
               {#if l.definition?.summary}<span class="goal" title={l.definition.summary}>{l.definition.summary}</span>{/if}
               <div class="bar" aria-hidden="true"><span class="bar-fill status-{l.status}" style:width={`${l.progress_pct}%`}></span></div>

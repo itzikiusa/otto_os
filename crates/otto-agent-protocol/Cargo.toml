@@ -12,6 +12,8 @@ otto-state = { workspace = true }
 # `SessionManager::prepare_runtime_spawn`; `CommandSpec` is its spec type.
 otto-sessions = { workspace = true }
 otto-pty = { workspace = true }
+# Claude's plan limits (`rate_limit_event` frames) recorded passively per login.
+otto-usage = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }

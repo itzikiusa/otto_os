@@ -11,6 +11,8 @@ import { toastError } from '../../lib/toastError';
 import { delegatedParentId, isPlainShellSession } from './threadsHelpers';
 import { threads } from './threadsStore.svelte';
 import { phoneHandoff } from '../../lib/stores/phoneHandoff.svelte';
+import { relatedPopover } from './relatedPopover.svelte';
+import { RELATED_LABEL } from './threadsPageMenu';
 
 export async function promptRenameThread(s: Session): Promise<void> {
   const next = await confirmer.promptText('Enter a title for this thread.', {
@@ -46,7 +48,14 @@ export function legacyReviveItem(s: Session): MenuItem[] {
     ? [{ label: 'Revive thread', icon: 'refresh', action: () => void reviveLegacyThread(s) }] : [];
 }
 
-export function buildThreadMenu(s: Session, opts: { onstartroom: (id: string) => void }): MenuItem[] {
+/** ⋯ › Related threads…: linked threads, workers, side chat and rooms, with
+ *  Message and Start a room (the old "Send message to peer…" and "Session
+ *  room…" items) — the header chip's popover. */
+export function relatedThreadsItem(id: string): MenuItem {
+  return { label: RELATED_LABEL, icon: 'people', action: () => relatedPopover.open(id) };
+}
+
+export function buildThreadMenu(s: Session): MenuItem[] {
   const id = s.id;
   const parentId = delegatedParentId(s);
   const shell = isPlainShellSession(s);
@@ -71,8 +80,7 @@ export function buildThreadMenu(s: Session, opts: { onstartroom: (id: string) =>
         ]
       : []),
     ...(!shell ? [{ label: 'Side chat…', icon: 'comment', hint: '/btw', action: () => threads.openSideChat(id) }] : []),
-    { label: 'Send message to peer…', icon: 'send', action: () => threads.togglePeerBar(id) },
-    { label: 'Session room…', icon: 'people', action: () => opts.onstartroom(id) },
+    relatedThreadsItem(id),
     ...phoneHandoff.menuItem(`threads/${id}`, 'this thread'),
     ...(parentId
       ? [{ label: 'Open with parent in Split', icon: 'split', action: () => threads.openPairInSplit(parentId, id) }]

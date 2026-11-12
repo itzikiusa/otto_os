@@ -2,17 +2,17 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { plural } from '../../lib/plural';
   import { loadErrorText } from '../../lib/loadError';
-  // What Otto learned from your team (`#/design/learned[/pending|rules|memory|
-  // signals|settings][/<edit id>]`). Learning v1 is suggest-only: a
-  // deterministic extractor turns repeated design signals (≥ 3 across ≥ 2
-  // designs) into PENDING edits of the workspace skill `design-team-style`;
-  // a person approves, rejects or rolls back each through otto-improve's edit
-  // flow (every decision asks first). Tabs:
-  //   Pending   proposals + the patterns still forming (candidates)
-  //   Rules     the approved rules (roll back) + the decision history
-  //   Memory    design memories (`otto-memory` collection `design`)
-  //   Signals   the raw log the rules come from
-  //   Settings  the workspace setting `design_learning` (off / suggest only)
+  // Team design rules (`#/design/learned[/pending|rules|memory|signals|
+  // settings][/<edit id>]`; `proposed` / `active` are aliases). Learning v1 is
+  // suggest-only: a deterministic extractor turns repeated design signals
+  // (≥ 3 across ≥ 2 designs) into PENDING edits of the workspace skill
+  // `design-team-style`; a person approves, rejects or rolls back each through
+  // otto-improve's edit flow (every decision asks first). Two tabs:
+  //   Proposed (`pending`) proposals + the patterns still forming
+  //   Active   (`rules`)   the approved rules (roll back) + decision history
+  // and three pages from the ⋯ menu: Memory (`otto-memory` collection
+  // `design`), Signals (the raw log the rules come from) and Settings (the
+  // workspace setting `design_learning`, off / suggest only, + export).
   // The evidence pane shows the signals behind the selected rule.
   import { untrack } from 'svelte';
   import { toastError } from '../../lib/toastError';
@@ -61,12 +61,11 @@
   let { tab }: Props = $props();
 
   const TABS: { id: LearnedTab; label: string }[] = [
-    { id: 'pending', label: 'Pending' },
-    { id: 'rules', label: 'Rules' },
-    { id: 'memory', label: 'Memory' },
-    { id: 'signals', label: 'Signals' },
-    { id: 'settings', label: 'Settings' },
+    { id: 'pending', label: 'Proposed' },
+    { id: 'rules', label: 'Active' },
   ];
+  const PAGES: Partial<Record<LearnedTab, string>> = { memory: 'Design memory', signals: 'Signals', settings: 'Learning settings' }; // the ⋯ pages
+  const sub = $derived(PAGES[tab] ?? null);
 
   const wsId = $derived(ws.currentId);
   const canEdit = $derived(auth.can('design', 'edit'));
@@ -280,10 +279,14 @@
       savingMode = false;
     }
   }
-  function modeMenu(e: MouseEvent): void {
+  function moreMenu(e: MouseEvent): void {
+    const off = learned?.mode === 'off', locked = !learned || savingMode;
     ctxMenu.show(e, [
-      { label: 'Suggest only', checked: learned?.mode !== 'off', action: () => void setMode('suggest') },
-      { label: 'Off', checked: learned?.mode === 'off', action: () => void setMode('off') },
+      ...(Object.entries(PAGES) as [LearnedTab, string][]).map(([id, label]) => ({ label, icon: id === 'signals' ? 'chart' : id === 'memory' ? 'book' : 'gear', action: () => go(id) })),
+      { separator: true },
+      { label: 'Learning: suggest only', checked: !off, disabled: locked, action: () => void setMode('suggest') },
+      { label: 'Learning: off', checked: off, disabled: locked, action: () => void setMode('off') },
+      { separator: true }, { label: 'Export rules (.md)', icon: 'download', disabled: !learned, action: exportRules },
     ]);
   }
 
@@ -300,8 +303,6 @@
   const count = (t: LearnedTab): number | null => {
     if (t === 'pending') return learned?.pending.length ?? null;
     if (t === 'rules') return learned?.active.length ?? null;
-    if (t === 'memory') return memories?.length ?? null;
-    if (t === 'signals') return signals.length;
     return null;
   };
 
@@ -321,13 +322,13 @@
   const withEvidence = $derived((tab === 'pending' || tab === 'rules') && !!selection);
 </script>
 
-<PageHeader title="What Otto learned"
-  crumbs={viewport.isPhone ? [] : [{ label: 'Design Hall', onclick: () => router.go('design') }]}>
+<PageHeader title={sub ?? 'Team design rules'}
+  crumbs={viewport.isPhone ? [] : [{ label: 'Design Hall', onclick: () => router.go('design') }, ...(sub ? [{ label: 'Team design rules', onclick: () => go('pending') }] : [])]}>
   {#snippet leading()}
-    {#if viewport.isPhone}<button class="icon-btn" onclick={() => router.go('design')} aria-label="Back to Design Hall" title="Back to Design Hall"><Icon name="chevronLeft" size={16} /></button>{/if}
+    {#if viewport.isPhone}<button class="icon-btn" onclick={() => (sub ? go('pending') : router.go('design'))} aria-label={sub ? 'Back to team design rules' : 'Back to Design Hall'} title={sub ? 'Back to team design rules' : 'Back to Design Hall'}><Icon name="chevronLeft" size={16} /></button>{/if}
   {/snippet}
   {#snippet tabs()}
-    <div class="segmented" role="tablist" aria-label="Learning">
+    {#if !sub}<div class="segmented" role="tablist" aria-label="Team design rules">
       {#each TABS as t (t.id)}
         {@const n = count(t.id)}
         <button role="tab" aria-selected={tab === t.id} class:active={tab === t.id} tabindex={tab === t.id ? 0 : -1}
@@ -335,14 +336,10 @@
           {t.label}{#if n != null}<span class="n" class:hot={t.id === 'pending' && n > 0}>{n}</span>{/if}
         </button>
       {/each}
-    </div>
+    </div>{/if}
   {/snippet}
   {#snippet actions()}
-    <button class="btn small" onclick={modeMenu} aria-haspopup="menu" disabled={!learned || savingMode} data-testid="design-learning-mode"
-      title="Workspace learning mode">
-      Learning: {learned?.mode === 'off' ? 'Off' : 'Suggest only'} <Icon name="chevronDown" size={12} />
-    </button>
-    <button class="btn small" onclick={() => void lookNow()} disabled={!wsId || !canEdit || extracting || learned?.mode === 'off'}
+    {#if !sub}<button class="btn small" onclick={() => void lookNow()} disabled={!wsId || !canEdit || extracting || learned?.mode === 'off'}
       data-testid="design-learned-extract"
       title={learned?.mode === 'off'
         ? 'Learning is off — switch it to Suggest only to look for rules'
@@ -350,7 +347,9 @@
           ? 'You need edit access to this workspace to look for rules'
           : 'Look at recent signals and propose any rule that is ready'}>
       <Icon name="bulb" size={12} /> {extracting ? 'Looking…' : 'Look for rules now'}
-    </button>
+    </button>{/if}
+    <button class="icon-btn" onclick={moreMenu} aria-haspopup="menu" aria-label="More — signals, memory, settings" title="Signals, design memory, learning settings"
+      data-testid="design-learned-more" data-keep><Icon name="more" size={14} /></button>
   {/snippet}
 </PageHeader>
 
@@ -444,14 +443,14 @@
           <button class="btn small" onclick={exportRules}><Icon name="download" size={12} /> Export rules (.md)</button>
         </div>
         <div class="set">
-          <div><strong>Auto-apply</strong><p class="dim">Not available: every rule needs a person’s approval, and each one can be rolled back under Rules.</p></div>
+          <div><strong>Auto-apply</strong><p class="dim">Not available: every rule needs a person’s approval, and each one can be rolled back under Active.</p></div>
         </div>
       </div>
     {/if}
   {:else if phase === 'loading'}
     <Skeleton rows={4} height={72} />
   {:else if phase === 'error' || !learned}
-    <LoadState what="what Otto learned" error={error || 'No data came back.'} empty onretry={() => void load()} />
+    <LoadState what="team design rules" error={error || 'No data came back.'} empty onretry={() => void load()} />
   {:else}
     <div class="split" class:with-evidence={withEvidence}>
       <div class="list">
@@ -505,8 +504,8 @@
         {:else}
           {#if learned.active.length === 0}
             <EmptyState icon="book" title="No team rules yet"
-              body="Rules you accept under Pending show here, with the evidence behind them. Otto follows them in every design turn and says so."
-              actionLabel={count('pending') ? 'Review pending rules' : undefined}
+              body="Rules you accept under Proposed show here, with the evidence behind them. Otto follows them in every design turn and says so."
+              actionLabel={count('pending') ? 'Review proposed rules' : undefined}
               onaction={() => go('pending')} />
           {:else}
             <div class="rules card">

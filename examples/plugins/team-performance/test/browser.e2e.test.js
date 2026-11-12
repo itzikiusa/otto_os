@@ -77,7 +77,7 @@ let dataDir, repoDir;
 function req(port, method, pathname, body) {
   return new Promise((resolve, reject) => {
     const data = body ? JSON.stringify(body) : null;
-    const r = http.request({ method, hostname: '127.0.0.1', port, path: pathname, headers: data ? { 'Content-Type': 'application/json' } : {} }, (res) => {
+    const r = http.request({ method, hostname: '127.0.0.1', port, path: pathname, headers: { 'x-otto-plugin-token': 'ptok', ...(data ? { 'Content-Type': 'application/json' } : {}) } }, (res) => {
       let buf = '';
       res.on('data', (c) => (buf += c));
       res.on('end', () => {
@@ -126,7 +126,7 @@ const listen = (srv) => new Promise((r) => srv.listen(0, '127.0.0.1', () => r(sr
 
 /** Forward a request to 127.0.0.1:port (used for the Jira overlay and the /api proxy). */
 function forward(req0, res0, port, pathname) {
-  const r = http.request({ method: req0.method, hostname: '127.0.0.1', port, path: pathname, headers: { ...req0.headers, host: `127.0.0.1:${port}` } }, (res) => {
+  const r = http.request({ method: req0.method, hostname: '127.0.0.1', port, path: pathname, headers: { ...req0.headers, host: `127.0.0.1:${port}`, 'x-otto-plugin-token': 'ptok' } }, (res) => {
     res0.writeHead(res.statusCode, res.headers);
     res.pipe(res0);
   });

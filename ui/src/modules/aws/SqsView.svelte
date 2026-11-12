@@ -204,7 +204,7 @@
     });
     if (!ok) return;
     try {
-      await awsApi.sqsDeleteMessage(accountId, queue.url, m.receipt_handle, region || undefined);
+      await awsApi.sqsDeleteMessage(accountId, queue.url, m.receipt_handle, region || undefined, queue.name);
       if (selected?.url === queue.url && account.id === accountId && rq === region)
         messages = messages.filter((x) => x.message_id !== m.message_id);
       toasts.success('Message deleted');
@@ -314,7 +314,7 @@
     if (!ok) return;
     redriving = true;
     try {
-      const r = await awsApi.sqsRedrive(account.id, { source_arn: src, destination_arn: redriveDest.trim() || undefined }, rq || undefined);
+      const r = await awsApi.sqsRedrive(account.id, { source_arn: src, destination_arn: redriveDest.trim() || undefined, confirm_name: src.split(':').pop() }, rq || undefined);
       toasts.success('Redrive started', r.task_handle);
     } catch (e) {
       toastError('Couldn’t redrive', e);

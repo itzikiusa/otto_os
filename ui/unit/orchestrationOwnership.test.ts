@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { loadErrorText } from '../src/lib/loadError.ts';
+import { extendBlocker } from '../src/modules/loops/budget.ts';
 import { deferred, loadSource } from './sourceHarness.ts';
 
 function methods(file: string, names: string[]) {
@@ -88,7 +89,7 @@ test('extended budget survives Resume failure and retry skips repeat PATCH', asy
     ${methods('modules/loops/LoopDetail.svelte', ['extendAndResume'])}
     return {extendAndResume, read(){return {extError,extendOpen,acting}}};`, {
     loops: { updateLimits: async () => { updates++; }, resume: async () => { if (++resumes === 1) throw Error('offline'); } },
-    elapsedSecs: () => 1, formatSeconds: String, errText: String,
+    elapsedSecs: () => 1, formatSeconds: String, errText: String, extendBlocker,
     loadErrorText,
     toasts: toast,
   });

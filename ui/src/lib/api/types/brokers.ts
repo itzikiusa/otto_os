@@ -214,6 +214,9 @@ export interface DecodedPayload {
   raw_base64?: string;
   /** Set on a `preview: true` peek when `text` was cut to 2 KiB. */
   truncated?: boolean;
+  /** One-line notice when the payload is shown undecoded (e.g. a JSON Schema /
+   * Protobuf registry schema — only Avro is decoded). */
+  notice?: string;
 }
 
 export interface MessageHeader {
@@ -272,6 +275,11 @@ export interface GroupSummary {
   state: string;
   protocol_type: string;
   members: number;
+  /** Total lag; `null` = unknown (no committed offsets, unreadable offsets,
+   * not a consumer group, or still computing) — never a guessed 0. */
+  total_lag: number | null;
+  /** Still computing in the background; re-fetch the list shortly. */
+  lag_pending: boolean;
 }
 
 export interface TopicPartition {
@@ -341,8 +349,10 @@ export interface BrokerResourceMetrics {
 
 export interface ClusterMetrics {
   throughput: ThroughputPoint[];
-  messages_per_sec: number;
-  total_messages: number;
+  /** `null` until two watermark sweeps exist ("measuring"), never a fake 0. */
+  messages_per_sec: number | null;
+  /** `null` until the first sweep lands. */
+  total_messages: number | null;
   brokers: BrokerResourceMetrics[];
   prometheus_available: boolean;
   sampled_at: string;

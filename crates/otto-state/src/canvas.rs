@@ -113,6 +113,13 @@ pub struct SceneUpdate {
     pub expect_updated_at: Option<DateTime<Utc>>,
 }
 
+/// Parse a client's `expect_updated_at` (the `updated_at` it last read). A
+/// malformed stamp is `Invalid` (400), never ignored: ignoring it would turn
+/// a guarded save back into last-write-wins.
+pub fn scene_stamp(raw: &str) -> Result<DateTime<Utc>> {
+    ts(raw).map_err(|_| Error::Invalid(format!("bad expect_updated_at '{raw}'")))
+}
+
 // ---------------------------------------------------------------------------
 // Row conversion
 // ---------------------------------------------------------------------------
@@ -298,6 +305,39 @@ impl CanvasRepo {
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("list canvas scenes for user"))?;
+        rows.iter().map(row_to_summary).collect()
+    }
+
+    /// Every workspace that holds at least one scene. The global Canvas list
+    /// keeps those the caller can view and lists them with
+    /// [`Self::list_for_workspaces`] (a shared board is not only its creator's).
+    pub async fn scene_workspaces(&self) -> Result<Vec<Id>> {
+        sqlx::query_scalar("SELECT DISTINCT workspace_id FROM canvas_scenes")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("canvas scene workspaces"))
+    }
+
+    /// The scenes of every workspace in `ws`, newest first.
+    pub async fn list_for_workspaces(&self, ws: &[Id]) -> Result<Vec<CanvasSceneSummary>> {
+        if ws.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "SELECT id, workspace_id, story_id, title, thumbnail, section,
+                    format, created_at, updated_at
+             FROM canvas_scenes WHERE workspace_id IN ({}) ORDER BY updated_at DESC",
+            vec!["?"; ws.len()].join(",")
+        );
+        // Only `?` placeholders are interpolated; every value is bound.
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
+        for w in ws {
+            q = q.bind(w);
+        }
+        let rows = q
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("list canvas scenes for workspaces"))?;
         rows.iter().map(row_to_summary).collect()
     }
 
@@ -1125,6 +1165,46 @@ mod tests {
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
         pool.into()
+    }
+
+    /// The global list is per workspace, not per creator: a teammate's board
+    /// in a workspace the caller can view is listed; another workspace's is not.
+    #[tokio::test]
+    async fn scenes_list_by_workspace_not_by_creator() {
+        let repo = CanvasRepo::new(mem_pool().await);
+        for (ws, by, title) in [
+            ("w1", "u1", "mine"),
+            ("w1", "u2", "teammate"),
+            ("w2", "u3", "other"),
+        ] {
+            repo.create(NewScene {
+                workspace_id: ws.into(),
+                story_id: None,
+                title: title.into(),
+                doc_json: "{}".into(),
+                provider: "claude".into(),
+                section: None,
+                created_by: by.into(),
+            })
+            .await
+            .unwrap();
+        }
+        let mut ws = repo.scene_workspaces().await.unwrap();
+        ws.sort();
+        assert_eq!(ws, ["w1", "w2"]);
+        let titles = |rows: Vec<CanvasSceneSummary>| {
+            let mut t: Vec<String> = rows.into_iter().map(|r| r.title).collect();
+            t.sort();
+            t
+        };
+        let w1 = repo.list_for_workspaces(&["w1".into()]).await.unwrap();
+        assert_eq!(titles(w1), ["mine", "teammate"]);
+        let both = repo
+            .list_for_workspaces(&["w1".into(), "w2".into()])
+            .await
+            .unwrap();
+        assert_eq!(both.len(), 3);
+        assert!(repo.list_for_workspaces(&[]).await.unwrap().is_empty());
     }
 
     #[tokio::test]

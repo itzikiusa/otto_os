@@ -8,8 +8,10 @@
 //!   retry / stop / approve handlers that launch the runners.
 //! - [`run`] — the analysis / rewrite / test-gen / plan-gen runners, driven
 //!   through the host's [`ProductRunHost`] (see [`host`]).
-//! - [`chat`] / [`refine`] / [`media`] — the story-studio handlers
-//!   (discovery chat, refinement threads, attachments + annotations), driven through [`ProductStudioHost`].
+//! - [`refine`] / [`chat`] / [`media`] — the story-studio handlers (the story
+//!   Chat, the read-only earlier discovery chats, attachments + annotations),
+//!   driven through [`ProductStudioHost`]; [`chat_actions`] applies the Chat's
+//!   cards and [`chat_draft`] saves a proposed body as a suggestion.
 //! - [`design_format`] / [`design_scene3d`] — the design artifact formats and
 //!   the `scene3d` validator + Blender-script generator.
 //! - [`watcher`] — the story watcher (Jira/Confluence comment reconcile).
@@ -17,6 +19,8 @@
 mod agent_attempt;
 pub mod analysis;
 pub mod chat;
+pub mod chat_actions;
+pub mod chat_draft;
 pub mod design_format;
 pub mod design_scene3d;
 pub mod extract;
@@ -24,6 +28,7 @@ pub mod host;
 pub mod http;
 pub mod media;
 pub mod memory_facade;
+mod publish_guard;
 pub mod refine;
 pub mod run;
 pub mod service;

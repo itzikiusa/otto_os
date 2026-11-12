@@ -1,5 +1,10 @@
 import {test, expect} from '@playwright/test';
 import {apiCtx, seedWorkspace} from './seed';
+import {CANVAS_PAGE_RETIRED} from './storyDesigns';
+
+// The Canvas page folded into Design Hall; this file covers the unmounted
+// CanvasPage editor (see e2e/storyDesigns.ts).
+test.skip(() => true, CANVAS_PAGE_RETIRED);
 
 test.use({serviceWorkers: 'block', viewport: {width: 1440, height: 1000}});
 for (const format of ['mermaid', 'd2', 'excalidraw'] as const) {

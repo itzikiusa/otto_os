@@ -1,11 +1,11 @@
 <script lang="ts">
   // ListPane — the chrome shared by every "220px list + detail" tab on the
-  // Product page (ChatTab/RefineTab's chat lists, MockupsTab's mockup list):
+  // Product page (ChatTab's chat list, MockupsTab's mockup list):
   // a bordered sidebar-style column with a title + action-buttons header and a
   // scrollable body. The body renders `empty` INSTEAD OF `children` only when
   // `isEmpty` is true and an `empty` snippet was actually passed — callers that
-  // fold loading/error states into their own `children` markup (e.g. RefineTab,
-  // which must keep its discovery-run picker visible even with zero threads)
+  // fold loading/error states into their own `children` markup (e.g. ChatTab,
+  // which keeps its "Earlier chats" section visible even with zero chats)
   // simply omit `isEmpty`/`empty` and keep full control.
   import type { Snippet } from 'svelte';
 

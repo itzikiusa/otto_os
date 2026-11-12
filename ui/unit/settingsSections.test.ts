@@ -7,6 +7,8 @@ import {
   canOpenSection,
   filterSections,
   findSection,
+  movedSectionRoute,
+  movedSections,
   sectionLabel,
   type SettingsAccess,
 } from '../src/modules/settings/sections.ts';
@@ -45,7 +47,8 @@ test('access gates: ungated for members, admin sections for settings admins, roo
   assert.ok(ua.includes('users') && ua.includes('sessions'));
   assert.ok(!ua.includes('access-groups'), 'groups are root-only even for users admins');
 
-  assert.equal(availableSections(root).length, SETTINGS_SECTIONS.length);
+  // Every section except the ones that moved out of Settings (Skills Lab).
+  assert.equal(availableSections(root).length, SETTINGS_SECTIONS.filter((s) => !('movedTo' in s)).length);
   assert.equal(canOpenSection(findSection('access-groups')!, root), true);
 });
 
@@ -101,7 +104,7 @@ test('sections backed by root-only handlers are gated on root, not settings:admi
     assert.ok(!ids.includes(id as never), `${id} shown to a non-root settings admin`);
   }
   // Sections whose handlers accept settings admins stay open to them.
-  assert.ok(ids.includes('skills'));
+  assert.ok(ids.includes('context-library'));
 });
 
 // Sweep 2026-10-11 UI-1: Providers also drives `/providers/models` (Agents)
@@ -141,4 +144,35 @@ test('root-only handlers ↔ root-gated sections (S17-303)', () => {
       assert.match(src, /require_root\(/, `${f} is root-gated`);
     }
   }
+});
+
+// Skills Lab is the one home for skills: the bundled catalogue and the
+// evaluator defaults left Settings, but their routes still land in the Lab.
+test('moved skills sections leave the nav, search and ⌘K but forward old links', () => {
+  const ids = availableSections(root).map((s) => s.id);
+  assert.ok(!ids.includes('skills') && !ids.includes('skill-eval'));
+  assert.ok(!filterSections(availableSections(root), 'bundled skill').some((s) => s.id === 'skills'));
+  assert.equal(movedSectionRoute('skills'), 'skills-eval/bundled');
+  assert.equal(movedSectionRoute('skill-eval'), 'skills-eval/evaluator/defaults');
+  assert.equal(movedSectionRoute('appearance'), null);
+  assert.equal(movedSectionRoute('nope'), null);
+});
+
+test('⌘K keeps one "Go to" entry per moved section, at its new home, behind the old gate', () => {
+  const moved = movedSections(root)
+    .filter((s) => s.id === 'skills' || s.id === 'skill-eval')
+    .map((s) => [`Go to ${s.movedLabel}`, s.movedTo]);
+  assert.deepEqual(moved, [
+    ['Go to Bundled skills (Skills Lab)', 'skills-eval/bundled'],
+    ['Go to Evaluator defaults', 'skills-eval/evaluator/defaults'],
+  ]);
+  // The old settings-admin gate still applies to the moved skills entries.
+  assert.ok(!movedSections(member).some((s) => s.id === 'skills' || s.id === 'skill-eval'));
+  const palette = readFileSync(new URL('../src/shell/paletteSources.svelte.ts', import.meta.url), 'utf8');
+  assert.match(palette, /movedSections\(auth\)/);
+});
+
+test('every moved section names its new home in ⌘K', () => {
+  for (const s of movedSections(root)) assert.ok(s.movedLabel, `${s.id} has no movedLabel`);
+  assert.equal(movedSections(root).find((s) => s.id === 'mcp-servers')?.movedLabel, 'MCP servers (Control Plane)');
 });

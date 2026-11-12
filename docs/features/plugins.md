@@ -208,12 +208,17 @@ must match an **enabled** plugin):
 | `GET  /plugin-host/repos` | `[{id, name, path, remote_url}]` — every Git repo Otto knows about. The plugin runs git itself against `path`. |
 | `GET  /plugin-host/jira/accounts` | `[{id, label, base_url, email}]` — configured Jira accounts (no tokens). |
 | `GET  /plugin-host/jira/credentials?account=<id>` | `{base_url, email, token}` — the Jira **token** for one account, so the plugin can call Jira directly. |
-| `POST /plugin-host/agents/run` | `{prompt, cwd?, model?}` → `{text}` — runs a `claude` agent (180s timeout) and returns its text. |
+| `POST /plugin-host/agents/run` | `{prompt, provider?, model?, cwd?}` → `{text}` — one agent turn (`claude`, or `codex`). By default **text in, text out**: no tools, no MCP, Seatbelt-confined, in a throwaway scratch dir (`cwd` ignored), because the prompt carries third-party text (Jira, git). Full tools only when the manifest sets `"agent_tools": true`; then `cwd` (default `$OTTO_PLUGIN_DATA_DIR`) must be inside the data dir or a registered repo and never the daemon's own directory (else 400). Every run is audited (`plugin.agent_run`). |
 
 **A plugin CAN:** serve its own UI + backend; read the repo list and run git on
 those paths; read Jira accounts and fetch a Jira account's credentials; run a
 one-shot agent prompt; persist its own state under `$OTTO_PLUGIN_DATA_DIR`
 (files, SQLite, whatever it wants); know the calling user via `X-Otto-User`.
+
+**A sidecar must authenticate the proxy.** Every proxied request carries
+`X-Otto-Plugin-Token` (= `OTTO_PLUGIN_TOKEN`). Any local process can reach the
+loopback port, so a sidecar answers 401 without that exact header, except on
+`/health` (Otto's readiness probe sends none). Both bundled plugins do.
 
 **A plugin CANNOT:** reach any other Otto endpoint (the host API is exactly the
 four routes above — there is no generic passthrough); touch the SQLite state DB,
@@ -327,7 +332,7 @@ while). Files: `Cargo.toml`, `src/main.rs`, `otto-plugin.json`, `ui/index.html`.
 | `GET /plugin-host/repos` | `[{id,name,path,remote_url}]` |
 | `GET /plugin-host/jira/accounts` | `[{id,label,base_url,email}]` |
 | `GET /plugin-host/jira/credentials?account=<id>` | `{base_url,email,token}` |
-| `POST /plugin-host/agents/run` | `{prompt,cwd?,model?}` → `{text}` |
+| `POST /plugin-host/agents/run` | `{prompt,provider?,model?,cwd?}` → `{text}` (tool-less unless `agent_tools`) |
 
 ### Grants
 

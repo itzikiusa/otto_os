@@ -37,6 +37,11 @@ const SOURCES: Record<string, string> = {
   skillreview: 'Skill review',
   run_with_otto: 'Run with Otto',
   finding: 'Finding fix',
+  // Headless orchestrator turns (no session row): otto-sessions admission.rs
+  // ORCHESTRATOR_TURN_SOURCES.
+  self_improvement: 'Self-improvement review',
+  product: 'Story watcher',
+  plugin: 'Plugin agent',
 };
 
 /** A queued agent's `meta.source` in words. */
