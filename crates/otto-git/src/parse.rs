@@ -312,6 +312,24 @@ pub fn parse_upstream_tracking(out: &str) -> (u32, u32) {
 }
 
 /// Parse `git branch --format=%(refname:short)%09%(upstream:short)%09%(HEAD)`.
+/// The one branch name in a `for-each-ref --format=%(refname:lstrip=3)
+/// refs/remotes` listing (remote prefix already stripped). A remote's
+/// symbolic `HEAD` is not a branch; the same branch on two remotes counts
+/// once; two different branches ⇒ `None`.
+pub fn sole_remote_branch(out: &str) -> Option<String> {
+    let mut names: Vec<&str> = out
+        .lines()
+        .map(str::trim)
+        .filter(|n| !n.is_empty() && *n != "HEAD")
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    match names.as_slice() {
+        [one] => Some((*one).to_string()),
+        _ => None,
+    }
+}
+
 pub fn parse_branches(out: &str) -> Vec<BranchInfo> {
     out.lines()
         .filter(|l| !l.trim().is_empty() && !l.starts_with('(')) // skip "(HEAD detached …)"
@@ -1426,6 +1444,22 @@ fn parse_hunk_header(rest: &str) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sole_remote_branch_names_only_an_unambiguous_branch() {
+        use super::sole_remote_branch;
+        assert_eq!(
+            sole_remote_branch("feature/GS-1-x\n"),
+            Some("feature/GS-1-x".into())
+        );
+        assert_eq!(
+            sole_remote_branch("HEAD\nfeature/a\nfeature/a\n"),
+            Some("feature/a".into())
+        );
+        assert_eq!(sole_remote_branch("develop\nfeature/a\n"), None);
+        assert_eq!(sole_remote_branch(""), None);
+        assert_eq!(sole_remote_branch("HEAD\n"), None);
+    }
+
     #[test]
     fn status_caps_untracked_rows_only() {
         let mut out = String::from("# branch.head main\0");

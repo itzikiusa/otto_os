@@ -5,6 +5,10 @@
 use std::{future::Future, path::PathBuf, time::Duration};
 use tokio::sync::oneshot;
 
+/// Largest summarizer brief pasted into the terminal as is; longer ones go
+/// through [`Attempt::instructions_path`].
+pub const PASTE_INLINE_MAX: usize = 16 * 1024;
+
 pub struct Attempt {
     dir: tempfile::TempDir,
     pub provider: String,
@@ -44,12 +48,34 @@ impl Attempt {
     pub fn temporary_path(&self) -> PathBuf {
         self.dir.path().join("result.json.tmp")
     }
+    pub fn instructions_path(&self) -> PathBuf {
+        self.dir.path().join("instructions.md")
+    }
+    /// The text typed into the summarizer's terminal. A large brief (every raw
+    /// claim plus the run's context — 100+ KB on a big PR) is written to
+    /// [`Self::instructions_path`] and only a short pointer is pasted: a
+    /// terminal paste that size can outlast the PTY write deadline on a busy
+    /// daemon, and then the summarizer never starts. If the file cannot be
+    /// written the brief is pasted whole, as before.
     pub fn prompt(&self, prompt: &str) -> String {
-        format!("{prompt}\n\nReturn the final draft comments as a JSON array. Each item must include a string body. \
+        let handoff = format!("Return the final draft comments as a JSON array. Each item must include a string body. \
 Write the COMPLETE JSON array to the temporary file {} first, then atomically rename it to {}. \
 Do not write directly to the final file or publish it before all comments are complete. \
 The final file is the completion signal; a chat reply alone does not complete this task.",
-            self.temporary_path().display(), self.result_path().display())
+            self.temporary_path().display(), self.result_path().display());
+        let full = format!("{prompt}\n\n{handoff}");
+        if full.len() <= PASTE_INLINE_MAX
+            || std::fs::write(self.instructions_path(), &full).is_err()
+        {
+            return full;
+        }
+        format!(
+            "Your complete instructions for this task are in the file {} ({} KB). \
+Read the WHOLE file first (in parts if it is long) and follow it exactly. \
+Every raw claim it lists needs its own disposition.\n\n{handoff}",
+            self.instructions_path().display(),
+            full.len().div_ceil(1024)
+        )
     }
 }
 
@@ -134,6 +160,31 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+
+    /// The 2026-11-12 bo_common_ui failure: a ~100 KB brief pasted into the
+    /// terminal never drained, the summarizer never started and the review
+    /// ended in error. A big brief must reach the agent as a file.
+    #[test]
+    fn a_large_brief_is_handed_over_as_a_file_and_a_small_one_inline() {
+        let attempt = Attempt::new("claude", "").unwrap();
+        let small = attempt.prompt("Summarize these 2 claims.");
+        assert!(small.starts_with("Summarize these 2 claims."));
+        assert!(!attempt.instructions_path().exists());
+
+        let brief = format!("BRIEF-START {}", "claim text ".repeat(10_000));
+        let typed = attempt.prompt(&brief);
+        assert!(
+            typed.len() < 2048,
+            "pasted text stays short: {}",
+            typed.len()
+        );
+        let path = attempt.instructions_path();
+        assert!(typed.contains(&path.display().to_string()));
+        assert!(typed.contains(&attempt.result_path().display().to_string()));
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.starts_with("BRIEF-START"));
+        assert!(written.contains(&attempt.result_path().display().to_string()));
+    }
 
     #[tokio::test]
     async fn publishes_pending_sessions_and_cleans_up_for_every_provider() {

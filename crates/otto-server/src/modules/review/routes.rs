@@ -916,16 +916,11 @@ pub(crate) async fn start_local_review(
         // Name the working-tree's current branch (source) and the diff base
         // (dest) for the reviewers. cwd stays the working tree — that IS the code
         // under review for a local review (uncommitted changes vs base).
-        let local_branches = git
-            .current_branch()
-            .await
-            .ok()
-            .filter(|c| !c.is_empty())
-            .map(|source| ReviewBranches {
-                source,
-                dest: body.base.clone(),
-                checked_out: true,
-            });
+        let local_branches = git.branch_identity().await.map(|source| ReviewBranches {
+            source,
+            dest: body.base.clone(),
+            checked_out: true,
+        });
         tokio::spawn(async move {
             // Local/working-tree review: no PR, so pr_number = 0 (the fingerprint
             // accommodates pr 0).

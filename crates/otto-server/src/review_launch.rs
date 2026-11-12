@@ -177,16 +177,11 @@ async fn start_review_for_branch(
         // The worktree already holds the branch's real code; name both sides
         // for the reviewers. A SHA base shows as itself — still meaningful.
         let dest = resolved.branch.clone();
-        let branches = git
-            .current_branch()
-            .await
-            .ok()
-            .filter(|c| !c.is_empty())
-            .map(|source| ReviewBranches {
-                source,
-                dest,
-                checked_out: true,
-            });
+        let branches = git.branch_identity().await.map(|source| ReviewBranches {
+            source,
+            dest,
+            checked_out: true,
+        });
         tokio::spawn(async move {
             run_review(
                 ctx_bg,
