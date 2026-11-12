@@ -60,12 +60,14 @@ pub fn is_inline_pem(value: &str) -> bool {
 }
 
 /// Resolve one `TlsConfig` PEM field (`field` is its name, used in errors):
-/// inline PEM is returned as is, otherwise the value is read as a file path.
+/// inline PEM is returned as is (re-wrapped first when it arrived on one line,
+/// see [`rewrap_pem`]), otherwise the value is read as a file path.
 pub fn resolve_pem(field: &str, value: &str) -> Result<PemSource> {
-    if is_inline_pem(value) {
-        return Ok(PemSource::Inline(value.to_string()));
-    }
     let what = label(field);
+    if is_inline_pem(value) {
+        let pem = rewrap_pem(value).map_err(|why| Error::Invalid(format!("TLS {what}: {why}")))?;
+        return Ok(PemSource::Inline(pem.into_owned()));
+    }
     let shown = value.trim();
     let path = otto_core::paths::expand_home_strict(shown)
         .map_err(|e| Error::Invalid(format!("TLS {what}: {e}")))?;
@@ -78,6 +80,61 @@ pub fn resolve_pem(field: &str, value: &str) -> Result<PemSource> {
     let pem = read_pem_file(&path)
         .map_err(|why| Error::Invalid(format!("TLS {what} file {shown:?}: {why}")))?;
     Ok(PemSource::File { path, pem })
+}
+
+/// Re-wrap inline PEM that lost its line breaks. Browsers strip newlines from
+/// text pasted into a single-line input, so a certificate arrives as
+/// `-----BEGIN CERTIFICATE-----MIIB…-----END CERTIFICATE-----`, which PEM
+/// parsers reject. Every block (a chain holds several) becomes its header line,
+/// the base64 body in 64-character lines and its footer line; text outside the
+/// blocks is dropped. A value that already has line breaks is returned as is.
+/// Anything but base64 (and spaces) between a block's markers is an error.
+fn rewrap_pem(value: &str) -> std::result::Result<std::borrow::Cow<'_, str>, String> {
+    const BEGIN: &str = "-----BEGIN ";
+    if value.contains('\n') {
+        return Ok(std::borrow::Cow::Borrowed(value));
+    }
+    let mut out = String::new();
+    let mut rest = value;
+    while let Some(start) = rest.find(BEGIN) {
+        let after = &rest[start + BEGIN.len()..];
+        let label_end = after
+            .find("-----")
+            .ok_or("a -----BEGIN marker is not closed")?;
+        let label = &after[..label_end];
+        if label.is_empty()
+            || !label
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == ' ')
+        {
+            return Err(format!("{label:?} is not a PEM block label"));
+        }
+        let tail = &after[label_end + "-----".len()..];
+        let footer = format!("-----END {label}-----");
+        let body_end = tail
+            .find(&footer)
+            .ok_or_else(|| format!("the {label} block has no {footer} line"))?;
+        let body: String = tail[..body_end]
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let base64 = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=');
+        if body.is_empty() || !body.bytes().all(base64) {
+            return Err(format!(
+                "the {label} block holds something other than base64 between its markers"
+            ));
+        }
+        out.push_str(&format!("{BEGIN}{label}-----\n"));
+        // All ASCII (checked above), so every 64-byte chunk is a whole str.
+        for line in body.as_bytes().chunks(64) {
+            out.push_str(&String::from_utf8_lossy(line));
+            out.push('\n');
+        }
+        out.push_str(&footer);
+        out.push('\n');
+        rest = &tail[body_end + footer.len()..];
+    }
+    Ok(std::borrow::Cow::Owned(out))
 }
 
 /// The PEM text of a field, whichever way it was given — for clients that take
@@ -217,6 +274,85 @@ mod tests {
             PemSource::Inline(CA.to_string())
         );
         assert_eq!(pem_text("ca_cert", CA).unwrap(), CA);
+    }
+
+    /// A 100-character base64 body: wraps to one 64- and one 36-char line.
+    fn body(c: char) -> String {
+        std::iter::repeat_n(c, 100).collect()
+    }
+
+    fn wrapped(label: &str, c: char) -> String {
+        let b = body(c);
+        format!(
+            "-----BEGIN {label}-----\n{}\n{}\n-----END {label}-----\n",
+            &b[..64],
+            &b[64..]
+        )
+    }
+
+    #[test]
+    fn single_line_pem_is_rewrapped() {
+        let one = format!(
+            "-----BEGIN CERTIFICATE-----{}-----END CERTIFICATE-----",
+            body('A')
+        );
+        assert_eq!(
+            pem_text("ca_cert", &one).unwrap(),
+            wrapped("CERTIFICATE", 'A')
+        );
+        // Some browsers turn the line breaks into spaces instead.
+        let spaced = format!(
+            "-----BEGIN PRIVATE KEY----- {} {} -----END PRIVATE KEY-----",
+            &body('k')[..50],
+            &body('k')[50..]
+        );
+        assert_eq!(
+            pem_text("client_key", &spaced).unwrap(),
+            wrapped("PRIVATE KEY", 'k')
+        );
+    }
+
+    #[test]
+    fn single_line_chain_rewraps_every_block() {
+        let chain = format!(
+            "-----BEGIN CERTIFICATE-----{}-----END CERTIFICATE----- \
+             -----BEGIN CERTIFICATE-----{}-----END CERTIFICATE-----",
+            body('A'),
+            body('B')
+        );
+        assert_eq!(
+            pem_text("ca_cert", &chain).unwrap(),
+            format!(
+                "{}{}",
+                wrapped("CERTIFICATE", 'A'),
+                wrapped("CERTIFICATE", 'B')
+            )
+        );
+    }
+
+    #[test]
+    fn well_formed_pem_is_left_unchanged() {
+        let pem = format!(
+            "{}{}",
+            wrapped("CERTIFICATE", 'A'),
+            wrapped("CERTIFICATE", 'B')
+        );
+        assert_eq!(pem_text("ca_cert", &pem).unwrap(), pem);
+        assert_eq!(pem_text("ca_cert", CA).unwrap(), CA);
+    }
+
+    #[test]
+    fn garbage_between_single_line_markers_is_rejected() {
+        for bad in [
+            "-----BEGIN CERTIFICATE-----not base64!-----END CERTIFICATE-----",
+            "-----BEGIN CERTIFICATE----------END CERTIFICATE-----",
+            "-----BEGIN CERTIFICATE-----QUJD",
+            "-----BEGIN CERTIFICATE-----QUJD-----END PRIVATE KEY-----",
+            "-----BEGIN cert-----QUJD-----END cert-----",
+        ] {
+            let m = msg(resolve_pem("ca_cert", bad).unwrap_err());
+            assert!(m.starts_with("TLS CA certificate: "), "{bad}: {m}");
+        }
     }
 
     #[test]

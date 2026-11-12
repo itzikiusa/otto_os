@@ -85,6 +85,11 @@ impl Recovery {
             .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
     }
 
+    /// [`Self::outage_since`] as a time (the health notices measure it).
+    pub(super) fn outage_started(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        *self.outage_since.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn unit(&self) -> Duration {
         Duration::from_millis(self.unit_ms.load(Ordering::Relaxed))
     }

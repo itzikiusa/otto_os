@@ -236,3 +236,96 @@ test('⋯ menu offers merge strategies, agent sessions and copy actions', async 
   await expect(modal).toBeVisible();
   await expect(modal.locator('select')).toHaveValue('squash');
 });
+
+test('your review status withdraws from its own menu', async ({ page }) => {
+  await page.goto('/#/git/rep_otto/pr/51');
+  await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
+  const head = page.locator('.prd-actions');
+  const side = page.getByRole('complementary', { name: 'Pull request details' });
+  await head.getByRole('button', { name: 'Approve', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Approve PR' }).click();
+  // The status is a button now; its menu withdraws (asks first).
+  await head.getByRole('button', { name: /^Approved/ }).click();
+  await page.locator('.ctx-menu').getByText('Withdraw approval…').click();
+  const dlg = page.getByRole('dialog', { name: 'Withdraw your approval of PR #51?' });
+  await dlg.getByRole('button', { name: 'Withdraw approval' }).click();
+  await expect(head.getByRole('button', { name: 'Approve', exact: true })).toBeVisible();
+  await expect(page.locator('.toast-title').filter({ hasText: 'Approval withdrawn' })).toBeVisible();
+  // The quiet reload agrees: no approval of yours in the reviewer list.
+  await expect(side.locator('.sc-row').filter({ hasText: 'Dev Otto' }).getByText('Approved')).toHaveCount(0);
+  await expect(head.getByText('Approved', { exact: true })).toHaveCount(0);
+});
+
+test('your own comment: edit → save, then delete after a confirm', async ({ page }) => {
+  await page.goto('/#/git/rep_otto/pr/51');
+  await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
+  const threads = page.locator('.prd-comments .prd-thread');
+  // Someone else's comment has no menu.
+  await expect(threads.filter({ hasText: 'thresholds' }).getByRole('button', { name: 'Comment actions' })).toHaveCount(0);
+
+  const mine = threads.filter({ hasText: 'Rebased on develop' });
+  await mine.getByRole('button', { name: 'Comment actions' }).click();
+  await page.locator('.ctx-menu').getByText('Edit', { exact: true }).click();
+  const box = mine.getByRole('textbox', { name: 'Edit comment' });
+  await expect(box).toHaveValue('Rebased on develop — ready for another look.');
+  await box.fill('Rebased on develop — please re-review.');
+  await mine.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(box).toHaveCount(0);
+  await expect(mine).toContainText('please re-review');
+
+  await mine.getByRole('button', { name: 'Comment actions' }).click();
+  await page.locator('.ctx-menu').getByText('Delete…').click();
+  const dlg = page.getByRole('dialog', { name: 'Delete this comment?' });
+  await expect(dlg).toContainText('removed for everyone');
+  await expect(dlg).toContainText('PR #51');
+  await dlg.getByRole('button', { name: 'Delete comment' }).click();
+  await expect(page.locator('.toast-title').filter({ hasText: 'Comment deleted' })).toBeVisible();
+  await expect(threads.filter({ hasText: 'Rebased on develop' })).toHaveCount(0);
+});
+
+test('reactions toggle, review summaries wear their verdict, replies name who they answer', async ({ page }) => {
+  await page.goto('/#/git/rep_otto/pr/51');
+  await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
+  const threads = page.locator('.prd-comments .prd-thread');
+  const thread = threads.filter({ hasText: 'thresholds' });
+
+  // Tap a pill: yours is added; tap again: taken back.
+  await thread.getByRole('button', { name: 'Thumbs up: 2 reactions' }).click();
+  const mine = thread.getByRole('button', { name: 'Thumbs up: 3 reactions, including yours' });
+  await expect(mine).toHaveAttribute('aria-pressed', 'true');
+  await mine.click();
+  await expect(thread.getByRole('button', { name: 'Thumbs up: 2 reactions' })).toHaveAttribute('aria-pressed', 'false');
+  // Add one from the picker.
+  await thread.getByRole('button', { name: 'Add a reaction' }).first().click();
+  await page.locator('.ctx-menu').getByText('Hooray').click();
+  await expect(thread.getByRole('button', { name: 'Hooray: 1 reaction, including yours' })).toBeVisible();
+
+  // A Bitbucket-style reply to a reply says whom it answers.
+  await expect(thread).toContainText('↪ replying to dev-otto');
+
+  // A GitHub review summary: verdict chip, Reply, no edit/delete/reactions.
+  const review = threads.filter({ hasText: 'handles its errors' });
+  await expect(review.locator('.cmt-review')).toHaveText('Approved');
+  await expect(review.getByRole('button', { name: 'Reply', exact: true })).toBeVisible();
+  await expect(review.getByRole('button', { name: 'Comment actions' })).toHaveCount(0);
+  await expect(review.getByRole('button', { name: 'Add a reaction' })).toHaveCount(0);
+});
+
+test('merge checks and open tasks show in the side column and as merge reasons', async ({ page }) => {
+  await page.goto('/#/git/rep_otto/pr/51');
+  await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
+  const checks = page.getByRole('region', { name: 'Merge checks' });
+  await expect(checks).toContainText('1 of 3 checks passed');
+  await expect(checks).toContainText('At least 2 approvals');
+  await expect(checks).toContainText('1 of 2 approvals');
+  await expect(checks).toContainText('1 task open');
+  // Desktop: the compact header line is for phones only.
+  await expect(page.getByTestId('pr-merge-checks-line')).toBeHidden();
+
+  await page.locator('.prd-actions').getByRole('button', { name: 'Merge', exact: true }).click();
+  const reasons = page.getByRole('dialog', { name: 'Merge pull request' }).locator('.reasons');
+  await expect(reasons).toContainText('At least 2 approvals');
+  await expect(reasons).toContainText('1 task open');
+  // The failing build check is the CI row's job, not repeated.
+  await expect(reasons).not.toContainText('All builds passed');
+});

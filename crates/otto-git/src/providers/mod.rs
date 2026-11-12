@@ -14,6 +14,8 @@ pub mod identity;
 mod wire_tests;
 #[cfg(test)]
 mod wire_tests_review;
+#[cfg(test)]
+mod wire_tests_wave2;
 
 use std::sync::Arc;
 
@@ -21,7 +23,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use otto_core::api::{
     Collaborator, CreatePrReq, DiffResp, MergeStrategy, NewPrCommentReq, PrComment, PrCommit,
-    PrDetail, PrState, PrSummary, UpdatePrReq,
+    PrDetail, PrReaction, PrState, PrSummary, ReactionKey, UpdatePrReq,
 };
 use otto_core::domain::{GitAccount, GitProviderKind};
 use otto_core::Result;
@@ -181,6 +183,32 @@ pub trait GitProvider: Send + Sync {
         Err(otto_core::Error::Invalid(
             "deleting comments is not supported for this provider".into(),
         ))
+    }
+    /// Add (`on: true`) or remove the bound account's `key` reaction on
+    /// comment `comment_id` (a `PrComment.id`); answers the comment's
+    /// reactions afterwards. Default: 409 — the forge has no reactions.
+    async fn set_reaction(
+        &self,
+        _r: &RemoteRef,
+        _number: u64,
+        _comment_id: &str,
+        _key: ReactionKey,
+        _on: bool,
+    ) -> Result<Vec<PrReaction>> {
+        Err(otto_core::Error::Conflict(
+            "reactions are not supported for this provider".into(),
+        ))
+    }
+    /// The two commits the forge computes PR `number`'s diff between, as a
+    /// local diff target — for computing a whitespace-ignoring diff in the
+    /// repo's own clone when the forge has no such switch. `Ok(None)` =
+    /// unknown (the default).
+    async fn pr_diff_target(
+        &self,
+        _r: &RemoteRef,
+        _number: u64,
+    ) -> Result<Option<crate::local::DiffTarget>> {
+        Ok(None)
     }
     /// A twin of this client whose diff reads (whole, summary, one file)
     /// leave whitespace-only changes out, computed by the forge. `None` = the

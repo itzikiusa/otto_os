@@ -24,12 +24,8 @@ pub(super) async fn assess_scope(
         ctx.reviews_store.set_scope_plan(review_id, &plan).await?;
         return Ok(plan);
     }
-    let user = otto_state::UsersRepo::new(ctx.pool.clone())
-        .list()
-        .await?
-        .into_iter()
-        .find(|u| u.is_root)
-        .ok_or_else(|| Error::Internal("no root user to assess review scope".into()))?;
+    let user =
+        otto_review::restart::review_user(&otto_state::UsersRepo::new(ctx.pool.clone())).await?;
     let cfg_agent = &cfg.summarizer;
     let row = otto_review::scope::scope_row(&cfg_agent.provider, &cfg_agent.model);
     ctx.reviews_store
@@ -84,10 +80,10 @@ pub(super) async fn assess_scope(
     }
     let result =
         result.map_err(|_| Error::Invalid("scope assessment ran past its 1-hour cap".into()))?;
-    // A failed session's row note says why (paste refused, stuck, timed out).
-    let note = states.lock().await.first().map(|s| s.note.clone());
-    let mut plan = otto_review::scope::plan_from_run(&result, &note.unwrap_or_default(), prior_ids)
-        .map_err(Error::Invalid)?;
+    // A failed session says why (paste refused, stuck, timed out).
+    let why = result.reason.as_deref().unwrap_or_default();
+    let mut plan =
+        otto_review::scope::plan_from_run(&result, why, prior_ids).map_err(Error::Invalid)?;
     if cfg.agents.iter().any(|a| a.name == CHECKS_REVIEWER_NAME)
         && !plan.lenses.iter().any(|l| l.name == CHECKS_REVIEWER_NAME)
     {

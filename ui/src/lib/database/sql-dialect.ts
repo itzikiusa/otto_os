@@ -60,10 +60,13 @@ export function boolLiteral(engine: EngineLike, b: boolean): string {
 // ── Binary cells ─────────────────────────────────────────────────────────────
 
 /** Column types whose cells the daemon sends as base64 TEXT (MySQL BINARY /
- *  VARBINARY / *BLOB, Postgres BYTEA) — the same list as the daemon's
- *  `is_binary_type_name`, which also sets the column's `binary` flag. */
+ *  VARBINARY / *BLOB / GEOMETRY, Postgres BYTEA) — the same list as the
+ *  daemon's `is_binary_type_name`, which also sets the column's `binary` flag.
+ *  GEOMETRY is matched upper-case only, as MySQL reports it: a PostGIS
+ *  `geometry` column is a different encoding. */
 export function isBinaryType(typeHint: string | null | undefined): boolean {
-  return !!typeHint && /^(?:var)?binary$|^(?:tiny|medium|long)?blob$|^bytea$/i.test(typeHint.trim());
+  const t = typeHint?.trim() ?? '';
+  return t === 'GEOMETRY' || /^(?:var)?binary$|^(?:tiny|medium|long)?blob$|^bytea$/i.test(t);
 }
 
 /** Strict standard base64 (what the daemon emits): A–Z a–z 0–9 + /, `=` pad. */

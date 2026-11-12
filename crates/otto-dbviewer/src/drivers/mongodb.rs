@@ -1170,7 +1170,7 @@ impl MongoDriver {
                 })
                 .await?;
                 Ok(write_result(
-                    res.modified_count,
+                    res.matched_count, // MATCHED, like MySQL's count: 0 = no such document
                     format!(
                         "matched {}, modified {}",
                         res.matched_count, res.modified_count
@@ -1188,7 +1188,7 @@ impl MongoDriver {
                 })
                 .await?;
                 Ok(write_result(
-                    res.modified_count,
+                    res.matched_count, // MATCHED, like MySQL's count: 0 = no such document
                     format!(
                         "matched {}, modified {}",
                         res.matched_count, res.modified_count

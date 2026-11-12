@@ -26,6 +26,9 @@
     type ProcessSandbox,
   } from './sandboxExempt';
   import { archiveDaysFrom, archiveDaysError } from './sessionArchive';
+  import MachineResources from './MachineResources.svelte';
+  import { machineStatus } from './machineStatus.svelte';
+  import { machineBody, machineFormErrors, machineFormFrom, sameMachineForm } from './machineSettings';
   import { daemonStatus } from './daemonStatus.svelte';
   import { canRestartDaemon, restartDaemonNow } from './daemonRestart';
   import { copyWithToast } from '../../lib/clipboard';
@@ -75,6 +78,12 @@
       archiveDays !== savedSessions.archiveDays,
   );
   const archiveError = $derived(archiveDaysError(archiveDays));
+  // Machine resources (admission gate, build budget, background priority,
+  // background auto-archive, low-disk warning): one form, the same Save.
+  let machine = $state(machineFormFrom({}));
+  let savedMachine = $state(machineFormFrom({}));
+  const machineDirty = $derived(!sameMachineForm(machine, savedMachine));
+  const machineErrors = $derived(machineFormErrors(machine));
   // The saved listener setting isn't what the running daemon has bound: it
   // is bound once, at start (`/security-posture` knows; this page is root).
   const restartPending = $derived(!!daemonStatus.posture?.network_listener_restart_required);
@@ -88,7 +97,7 @@
     if (secs === 0) return 'Never';
     return secs === DEFAULT_MANUAL_GRACE_SECS ? `${formatGrace(secs)} (default)` : formatGrace(secs);
   }
-  const dirty = $derived(listenerDirty || sandboxDirty || sessionsDirty);
+  const dirty = $derived(listenerDirty || sandboxDirty || sessionsDirty || machineDirty);
   // The inputs' min/max are advisory only; an out-of-range or empty port would
   // be saved as-is (and an empty one silently falls back to the loopback port).
   const portValid = $derived(Number.isInteger(port) && port >= 1024 && port <= 65535);
@@ -96,7 +105,7 @@
   /** Where the installed ottod writes its daily files (ottod config.rs; a dev
    *  daemon with OTTO_DATA_DIR logs elsewhere — Settings ▸ Logs shows that). */
   const LOG_DIR = '~/Library/Logs/Otto/';
-  const formError = $derived(portError || archiveError);
+  const formError = $derived(portError || archiveError || Object.values(machineErrors)[0] || '');
   // Latest full settings object (the PUT response). Saves send ONLY the keys
   // they change: PUT /settings upserts exactly the keys in the body, so
   // spreading this page-load snapshot reverted keys written since (auto-update
@@ -142,6 +151,8 @@
       manualGrace = policyFromSettings(allSettings).manualGraceSecs;
       archiveDays = archiveDaysFrom(allSettings);
       savedSessions = { persist: persistEnabled, manualGrace, archiveDays };
+      machine = machineFormFrom(allSettings);
+      savedMachine = machineFormFrom(allSettings);
       daemonStatus.refreshPosture(true);
     } catch (e) {
       loadError = loadErrorText(e);
@@ -175,6 +186,7 @@
       if (manualGrace !== savedSessions.manualGrace) body.manual_idle_suspend_secs = manualGrace;
       if (archiveDays !== savedSessions.archiveDays) body.session_auto_archive_days = archiveDays;
     }
+    if (machineDirty) Object.assign(body, machineBody(machine, savedMachine));
     const saveListener = listenerDirty;
     const saveSandbox = sandboxDirty;
     const saveSessions = sessionsDirty;
@@ -182,6 +194,8 @@
     const submittedListener = { enabled, port };
     const submittedSandbox = { enabled: sandboxEnabled, network: sandboxNetwork, exempt: [...sandboxExempt] };
     const submittedSessions = { persist: persistEnabled, manualGrace, archiveDays };
+    const saveMachine = machineDirty;
+    const submittedMachine = { ...machine };
     saving = true;
     try {
       allSettings = await api.put<Record<string, unknown>>('/settings', body);
@@ -229,6 +243,11 @@
               : 'Sessions are never archived automatically',
           );
         }
+      }
+      if (saveMachine) {
+        savedMachine = submittedMachine;
+        machineStatus.refresh();
+        notes.push('Machine resource limits apply to the next background agent');
       }
       // A listener change only applies on restart: offer it right here.
       if (saveListener && canRestartDaemon) {
@@ -422,6 +441,9 @@
         from the sidebar’s Archived section. Nothing is deleted.
       </p>
     </div>
+
+    <h2 class="section-title">Machine resources</h2>
+    <MachineResources bind:form={machine} errors={machineErrors} />
 
     <h2 class="section-title">Logs</h2>
     <div class="card pad dm-card logs">

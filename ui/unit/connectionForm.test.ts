@@ -10,7 +10,7 @@ function form(overrides: Record<string, unknown> = {}) {
     existing: null, kind: 'mysql', fHost: 'db', fPort: '', fUser: '', fDb: '', fTimezone: 'UTC', fConnString: '',
     fTemplate: '', fJump: '', fIdentity: '', sshEnabled: false, tlsMode: 'disabled', tlsVerify: true,
     tlsCaCert: '', tlsClientCert: '', tlsClientKey: '', tlsServerName: '', tunnelOpen: false,
-    tunHost: '', tunPort: '', tunUser: '', tunIdentity: '', secret: '', name: '',
+    tunHost: '', tunPort: '', tunUser: '', tunIdentity: '', tunJump: '', secret: '', name: '',
     hasDatabaseField: new Set(['mysql','postgres','redis','mongodb','clickhouse']),
     tzKinds: new Set(['mysql','postgres','clickhouse']), tlsKinds: new Set(['mysql','postgres','redis','mongodb','clickhouse']),
     kindLabels: { ssh: 'SSH', mysql: 'MySQL', postgres: 'PostgreSQL', redis: 'Redis', mongodb: 'MongoDB', clickhouse: 'ClickHouse', custom: 'Custom' },
@@ -90,4 +90,11 @@ test('an unreadable or unknown-scheme URI returns an inline error and toasts not
   assert.deepEqual(toasted, []);
   assert.equal(c.parseDsn('mysql://app@db:3306/x'), null);
   assert.equal(c.parseDsn('   '), null);
+});
+
+test('the tunnel jump host is saved as params.ssh.proxy_jump and cleared when emptied', () => {
+  const c = form({ existing: { kind: 'mysql', params: { host: 'db', ssh: { host: 'bastion', proxy_jump: 'old@hop:22' } } }, tunnelOpen: true, tunHost: 'bastion', tunJump: ' ops@hop1:22,hop2 ' });
+  assert.equal(c.buildParams().ssh.proxy_jump, 'ops@hop1:22,hop2');
+  c.tunJump = '';
+  assert.equal(c.buildParams().ssh.proxy_jump, undefined);
 });

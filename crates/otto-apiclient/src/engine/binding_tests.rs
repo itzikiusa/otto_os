@@ -499,3 +499,58 @@ fn every_agent_credential_kind_counts_as_an_agent() {
     session.mcp_session_id = Some("s1".into());
     assert!(is_agent_caller(&HeaderMap::new(), &session));
 }
+
+/// The approval card names where a saved request goes, not its opaque id.
+#[test]
+fn the_approval_target_names_method_and_host() {
+    let vars = json!({"base": "https://api.example.com/v1"});
+    let vars = vars.as_object().unwrap();
+    assert_eq!(
+        approval_target("post", "{{base}}/orders?x=1", vars),
+        "POST api.example.com"
+    );
+    assert_eq!(
+        approval_target("GET", "https://Other.Example/x", vars),
+        "GET other.example"
+    );
+    // An undefined variable leaves the url to say what it can.
+    assert_eq!(
+        approval_target("GET", "{{missing}}/x", vars),
+        "GET {{missing}}/x"
+    );
+}
+
+/// Authorship follows the credential: a session's own token without the
+/// bridge header is the agent it is, with its session id.
+#[test]
+fn agent_author_follows_the_credential() {
+    let user = User {
+        id: "fixture".into(),
+        username: "fixture".into(),
+        display_name: "Fixture".into(),
+        is_root: false,
+        disabled: false,
+        created_at: chrono::Utc::now(),
+    };
+    let person = AuthContext::automation(&user, "test");
+    assert_eq!(agent_author(&HeaderMap::new(), &person), None);
+    let managed = AuthContext {
+        managed_session_id: Some("s-managed".into()),
+        ..person.clone()
+    };
+    assert_eq!(
+        agent_author(&HeaderMap::new(), &managed),
+        Some(Some("s-managed".to_string()))
+    );
+    let mut bridged = HeaderMap::new();
+    bridged.insert("x-otto-session", "s-header".parse().unwrap());
+    assert_eq!(
+        agent_author(&bridged, &managed),
+        Some(Some("s-header".to_string()))
+    );
+    let outward = AuthContext {
+        mcp_only: true,
+        ..person
+    };
+    assert_eq!(agent_author(&HeaderMap::new(), &outward), Some(None));
+}

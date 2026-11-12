@@ -139,6 +139,23 @@ pub fn is_agent_caller(headers: &HeaderMap, auth: &AuthContext) -> bool {
         || auth.mcp_session_id.is_some()
 }
 
+/// `Some(session)` when the caller is an agent ([`is_agent_caller`]), with the
+/// session it acts for: the bridge's `X-Otto-Session` header, else the
+/// credential's own session binding (`None` for an outward MCP client). `None`
+/// for a person. A save stamps `extras.agent` from this — by CREDENTIAL, so a
+/// raw PATCH with a session's token counts as the agent it is.
+pub fn agent_author(headers: &HeaderMap, auth: &AuthContext) -> Option<Option<Id>> {
+    if !is_agent_caller(headers, auth) {
+        return None;
+    }
+    let (_, session) = caller_source(headers);
+    Some(
+        session
+            .or_else(|| auth.managed_session_id.clone())
+            .or_else(|| auth.mcp_session_id.clone()),
+    )
+}
+
 /// Probe value substituted for every environment secret by [`uses_env_secret`];
 /// control characters keep it from ever colliding with real request text.
 pub(crate) const SECRET_PROBE: &str = "\u{1}otto-secret-probe\u{1}";
@@ -496,6 +513,44 @@ pub fn oauth_token_url_bound(saved: &str, requested: &str) -> bool {
         (Some(a), Some(b)) => a == b,
         _ => false,
     }
+}
+
+/// What an approval card for running saved request `request_id` (in `wid`)
+/// should name: its method and the host it goes to (see
+/// [`approval_target`]), with the variables of `environment_id` — else the
+/// active environment — substituted. Plain variables only: a card never reads
+/// the Keychain. `None` when the request is unknown or in another workspace.
+/// The governed invoke's arguments carry only the request id, so without this
+/// the approver can't see where an agent's `api_execute` goes. (A pre-request
+/// script can still retarget the send; the secret ↔ host binding covers that.)
+pub async fn saved_request_target(
+    repo: &ApiClientRepo,
+    wid: &Id,
+    request_id: &Id,
+    environment_id: Option<&Id>,
+) -> Option<String> {
+    let request = repo.get_request(request_id).await.ok()?;
+    if &request.workspace_id != wid {
+        return None;
+    }
+    let env = match environment_id {
+        Some(eid) => repo.get_environment(eid).await.ok(),
+        None => repo.active_environment(wid).await.ok().flatten(),
+    };
+    let vars = env
+        .filter(|env| &env.workspace_id == wid)
+        .and_then(|env| env.variables.as_object().cloned())
+        .unwrap_or_default();
+    Some(approval_target(&request.method, &request.url, &vars))
+}
+
+/// `"POST api.example.com"`: the method and the host of `url` after `vars`;
+/// the substituted url itself when it has no parseable host (a variable the
+/// environment doesn't define).
+pub fn approval_target(method: &str, url: &str, vars: &serde_json::Map<String, Value>) -> String {
+    let url = substitute(url, vars);
+    let target = host_of(&url).unwrap_or(url);
+    format!("{} {target}", method.to_ascii_uppercase())
 }
 
 /// Audit source derived from the inward bridge's session header, or — for an

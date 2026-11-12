@@ -695,6 +695,7 @@ async fn invalid_graphql_variables_fail_saved_and_automation_replay() {
             Path(wid.clone()),
             State(ctx.clone()),
             CurrentUser(user.clone()),
+            CurrentAuthContext(auth_for(&user)),
             HeaderMap::new(),
             Json(req),
         )
@@ -738,6 +739,120 @@ async fn invalid_graphql_variables_fail_saved_and_automation_replay() {
     }
 }
 
+/// The url recorded in a saved request's Keychain blob (`$bound_url:`).
+async fn bound_url_of(ctx: &ServerCtx, id: &str) -> Option<String> {
+    let blob = api_secrets::load_blob_async(&ctx.secrets, &api_secrets::request_ref(id)).await;
+    api_secrets::bound_url(&blob).map(str::to_string)
+}
+
+/// A person's save records where the request's secret may go; an agent's save
+/// — recognised by its CREDENTIAL, with no session header — is stamped
+/// `extras.agent` and keeps the recorded url, so its later send to the moved
+/// url is refused with the "a person must send it" text.
+#[tokio::test]
+async fn saves_record_the_bound_url_and_stamp_agents_by_credential() {
+    use crate::routes::browser::tests::{mem_pool, root_user, seed_workspace, test_ctx};
+    let tmp = tempfile::TempDir::new().unwrap();
+    let pool = mem_pool().await;
+    let wid: Id = "ws-save-binding".into();
+    seed_workspace(&pool, &wid).await;
+    let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+    let user = root_user();
+    let person = auth_for(&user);
+    let agent = AuthContext {
+        managed_session_id: Some("sess-9".into()),
+        ..auth_for(&user)
+    };
+    let body = |url: &str, auth: Value| -> UpsertApiRequestReq {
+        serde_json::from_value(json!({"name": "r", "method": "GET", "url": url, "auth": auth}))
+            .expect("upsert dto")
+    };
+
+    let Json(created) = create_request(
+        Path(wid.clone()),
+        State(ctx.clone()),
+        CurrentUser(user.clone()),
+        CurrentAuthContext(person.clone()),
+        HeaderMap::new(),
+        Json(body(
+            "https://a.example/x",
+            json!({"type": "bearer", "token": "tk-1"}),
+        )),
+    )
+    .await
+    .unwrap();
+    let marker = created.auth.clone();
+    assert!(api_secrets::marker_ref(&marker["token"]).is_some());
+    assert_eq!(
+        bound_url_of(&ctx, &created.id).await.as_deref(),
+        Some("https://a.example/x")
+    );
+
+    // A person moves the request: the binding moves with their save.
+    let patch = |url: &str, auth: AuthContext| {
+        update_request(
+            Path((wid.clone(), created.id.clone())),
+            State(ctx.clone()),
+            CurrentUser(user.clone()),
+            CurrentAuthContext(auth),
+            HeaderMap::new(),
+            Json(body(url, marker.clone())),
+        )
+    };
+    let Json(moved) = patch("https://b.example/x", person.clone()).await.unwrap();
+    assert!(!is_agent_authored(&moved));
+    assert_eq!(
+        bound_url_of(&ctx, &created.id).await.as_deref(),
+        Some("https://b.example/x")
+    );
+
+    // An agent's raw PATCH with its own session token (no header): stamped,
+    // and the secret stays bound where the person put it.
+    let Json(agent_moved) = patch("https://c.example/x", agent.clone()).await.unwrap();
+    assert_eq!(
+        agent_moved.extras.as_ref().unwrap()["agent"]["session_id"],
+        "sess-9"
+    );
+    assert_eq!(
+        bound_url_of(&ctx, &created.id).await.as_deref(),
+        Some("https://b.example/x")
+    );
+    let refused = run_saved_request(
+        Path((wid.clone(), created.id.clone())),
+        State(ctx.clone()),
+        CurrentUser(user.clone()),
+        CurrentAuthContext(agent.clone()),
+        HeaderMap::new(),
+        Json(serde_json::from_value(json!({"confirm_new_host": true})).unwrap()),
+    )
+    .await
+    .expect_err("an agent can't send the secret to the url it moved it to");
+    let text = refused.0.to_string();
+    assert!(text.contains("'c.example'"), "{text}");
+    assert!(text.contains("its bound host is 'b.example'"), "{text}");
+    assert!(text.contains("a person must send it"), "{text}");
+
+    // An agent that supplies its OWN token decides where that token goes.
+    let Json(own) = create_request(
+        Path(wid.clone()),
+        State(ctx.clone()),
+        CurrentUser(user.clone()),
+        CurrentAuthContext(agent),
+        HeaderMap::new(),
+        Json(body(
+            "https://d.example/x",
+            json!({"type": "bearer", "token": "agent-own"}),
+        )),
+    )
+    .await
+    .unwrap();
+    assert!(is_agent_authored(&own));
+    assert_eq!(
+        bound_url_of(&ctx, &own.id).await.as_deref(),
+        Some("https://d.example/x")
+    );
+}
+
 /// perf N4: every saved-request write (the agent's `api_upsert_request`
 /// goes through these same routes) tells the workspace's clients, so the
 /// UI's 60 s list cache can't serve a stale tree.
@@ -756,6 +871,7 @@ async fn request_writes_emit_api_client_changed() {
         Path(wid.clone()),
         State(ctx.clone()),
         CurrentUser(user.clone()),
+        CurrentAuthContext(auth_for(&user)),
         HeaderMap::new(),
         Json(upsert_req("one", "https://a.example/x")),
     )
@@ -765,6 +881,7 @@ async fn request_writes_emit_api_client_changed() {
         Path((wid.clone(), created.id.clone())),
         State(ctx.clone()),
         CurrentUser(user.clone()),
+        CurrentAuthContext(auth_for(&user)),
         HeaderMap::new(),
         Json(upsert_req("one renamed", "https://a.example/x")),
     )
@@ -819,6 +936,7 @@ async fn execute_with_env_secret_never_reads_full_request_rows() {
             Path(wid.clone()),
             State(ctx.clone()),
             CurrentUser(user.clone()),
+            CurrentAuthContext(auth_for(&user)),
             HeaderMap::new(),
             Json(upsert_req(
                 &format!("r{i}"),

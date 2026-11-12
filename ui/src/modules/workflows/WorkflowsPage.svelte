@@ -25,6 +25,7 @@
   import { effectiveRetry, updateRetry, clearRetry } from './retryPolicy';
   import WorkflowCanvas from './WorkflowCanvas.svelte';
   import RunMonitor from './RunMonitor.svelte';
+  import RunRouteSync from './RunRouteSync.svelte';
   import RunApprovals from './RunApprovals.svelte';
   import NodePalette from './NodePalette.svelte';
   import RunContextSidebar from './RunContextSidebar.svelte';
@@ -189,7 +190,6 @@
   $effect(() => () => {
     destroyed = true;
   });
-
   /** Open a run from the "Running" sidebar list: ensure its workflow is open,
    *  then show the run (which the auto-update effects keep live). */
   async function openRunById(workflowId: string, runId: string): Promise<void> {
@@ -268,7 +268,7 @@
           if (current && router.module === 'workflows') router.replace(`workflows/${current.id}`);
           return;
         }
-        if (routeWorkflowId() === linked) open(wf);
+        if (routeWorkflowId() === linked && current?.id !== linked) open(wf);
       })();
     });
   });
@@ -1273,7 +1273,7 @@
   </div>
 {/snippet}
 
-<div class="wf-root">
+<div class="wf-root"><RunRouteSync currentWorkflowId={current?.id ?? null} openRunId={run?.id ?? null} onopen={openRunById} />
 <PageHeader class="wf-bar" title={current?.name ?? 'Workflows'}>
   {#snippet leading()}
     {#if viewport.isPhone && current}

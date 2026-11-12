@@ -22,6 +22,8 @@ mod output_noise;
 pub mod parse;
 pub mod patch;
 pub mod pr_checks;
+pub mod pr_reactions;
+mod pr_ws;
 pub mod providers;
 pub mod push;
 pub mod recovery;

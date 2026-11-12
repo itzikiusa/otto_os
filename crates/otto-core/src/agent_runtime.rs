@@ -755,6 +755,137 @@ pub struct CreateRuntimeSessionReq {
     pub meta: Option<serde_json::Value>,
 }
 
+/// The `meta.source` of a thread a person opened INSIDE another page (a PR
+/// review's Ask / Explain / Fix, a broken connection's diagnosis) rather than
+/// from Threads. The only sources a client may name (`POST
+/// …/runtime-sessions` `source`); Threads folds them into their own sections
+/// (UI mirror: `EMBEDDED_THREAD_SOURCES` in `ui/src/modules/threads/threadOrigins.ts`)
+/// and the runtime closes them after `embedded_thread_auto_close_hours` idle.
+pub const EMBEDDED_THREAD_SOURCES: [&str; 2] = ["pr-agent", "connection-diagnose"];
+
+/// The `origin.kind` each embedded source must carry.
+fn embedded_origin_kind(source: &str) -> Option<&'static str> {
+    match source {
+        "pr-agent" => Some("pr"),
+        "connection-diagnose" => Some("connection"),
+        _ => None,
+    }
+}
+
+/// Longest `origin.id` / `origin.label`, in characters.
+pub const EMBEDDED_ORIGIN_MAX_CHARS: usize = 200;
+
+/// What an embedded thread is about (`meta.origin`): the PR or connection it
+/// was opened for, so the page finds it again (`GET …/runtime-sessions?
+/// source=&origin_id=`). `kind` / `id` default to empty so a missing one is a
+/// 400 from [`CreateRuntimeSessionBody::into_req`], not a serde 422.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbeddedOrigin {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// `POST /workspaces/{id}/runtime-sessions` body: the create fields plus the
+/// two a client may set on the server-owned meta. Nothing else in the body
+/// reaches `meta` (`CreateRuntimeSessionReq::meta` stays `serde(skip)`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CreateRuntimeSessionBody {
+    #[serde(flatten)]
+    pub req: CreateRuntimeSessionReq,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub origin: Option<EmbeddedOrigin>,
+}
+
+impl CreateRuntimeSessionBody {
+    /// The create request, its meta `{source, origin}` when the body names an
+    /// embedded source. Refuses (400) a source outside
+    /// [`EMBEDDED_THREAD_SOURCES`], an `origin` without a `source`, an origin
+    /// kind that does not match the source, and an empty or over-long id /
+    /// over-long label.
+    pub fn into_req(self) -> crate::Result<CreateRuntimeSessionReq> {
+        let mut req = self.req;
+        req.meta = embedded_meta(self.source.as_deref(), self.origin)?;
+        Ok(req)
+    }
+}
+
+/// The meta an embedded thread is created with (`None` = a plain thread);
+/// see [`CreateRuntimeSessionBody::into_req`].
+pub fn embedded_meta(
+    source: Option<&str>,
+    origin: Option<EmbeddedOrigin>,
+) -> crate::Result<Option<Value>> {
+    let invalid = crate::Error::Invalid;
+    let Some(source) = source else {
+        return match origin {
+            Some(_) => Err(invalid("`origin` needs a `source`".into())),
+            None => Ok(None),
+        };
+    };
+    let Some(kind) = embedded_origin_kind(source) else {
+        return Err(invalid(format!(
+            "unknown thread source '{source}' (expected one of: {})",
+            EMBEDDED_THREAD_SOURCES.join(", ")
+        )));
+    };
+    let mut meta = serde_json::Map::new();
+    meta.insert("source".into(), Value::String(source.into()));
+    if let Some(mut o) = origin {
+        if o.kind != kind {
+            return Err(invalid(format!(
+                "a '{source}' thread's origin kind must be '{kind}', not '{}'",
+                o.kind
+            )));
+        }
+        let id_len = o.id.chars().count();
+        if o.id.trim().is_empty() || id_len > EMBEDDED_ORIGIN_MAX_CHARS {
+            return Err(invalid(format!(
+                "origin id must be 1–{EMBEDDED_ORIGIN_MAX_CHARS} characters"
+            )));
+        }
+        if o.label
+            .as_ref()
+            .is_some_and(|l| l.chars().count() > EMBEDDED_ORIGIN_MAX_CHARS)
+        {
+            return Err(invalid(format!(
+                "origin label must be at most {EMBEDDED_ORIGIN_MAX_CHARS} characters"
+            )));
+        }
+        o.label = o.label.filter(|l| !l.trim().is_empty());
+        meta.insert(
+            "origin".into(),
+            serde_json::to_value(o).map_err(|e| crate::Error::Internal(e.to_string()))?,
+        );
+    }
+    Ok(Some(Value::Object(meta)))
+}
+
+/// Whether a thread's meta names an embedded source ([`EMBEDDED_THREAD_SOURCES`]).
+pub fn is_embedded_thread(meta: Option<&Value>) -> bool {
+    meta.and_then(|m| m.get("source"))
+        .and_then(Value::as_str)
+        .is_some_and(|s| EMBEDDED_THREAD_SOURCES.contains(&s))
+}
+
+/// The daemon setting (`PUT /settings`) after how many idle hours an open
+/// embedded thread is closed (kept in History, reopenable): absent or not a
+/// non-negative integer = the default (12), `0` = never.
+pub const EMBEDDED_THREAD_AUTO_CLOSE_KEY: &str = "embedded_thread_auto_close_hours";
+pub const EMBEDDED_THREAD_AUTO_CLOSE_DEFAULT_HOURS: u64 = 12;
+
+/// The auto-close setting's hours (see [`EMBEDDED_THREAD_AUTO_CLOSE_KEY`]).
+pub fn embedded_auto_close_hours(setting: Option<&Value>) -> u64 {
+    setting
+        .and_then(Value::as_u64)
+        .unwrap_or(EMBEDDED_THREAD_AUTO_CLOSE_DEFAULT_HOURS)
+}
+
 /// `POST /runtime-sessions/{id}/peers` — an agent (or its owner) opens a
 /// linked thread: same workspace, cwd and access mode as `{id}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1253,5 +1384,118 @@ mod tests {
             json!({"question_action":"decline","answers":[]})
         )
         .is_err());
+    }
+
+    /// The create body: only `source` / `origin` reach the server-owned meta,
+    /// validated by one rule (whitelist, kind pairing, lengths, no orphan origin).
+    #[test]
+    fn create_body_takes_only_whitelisted_embedded_meta() {
+        let parse = |v: Value| serde_json::from_value::<CreateRuntimeSessionBody>(v).unwrap();
+        let req = parse(json!({
+            "provider": "claude",
+            "title": "Ask about #12",
+            "source": "pr-agent",
+            "origin": {"kind": "pr", "id": "repo-1#12", "label": "Fix the parser"},
+            "meta": {"read_only": false, "personal_agent": "x"},
+        }))
+        .into_req()
+        .unwrap();
+        assert_eq!(req.provider, Some(RuntimeProvider::Claude));
+        assert_eq!(req.title.as_deref(), Some("Ask about #12"));
+        assert_eq!(
+            req.meta,
+            Some(json!({
+                "source": "pr-agent",
+                "origin": {"kind": "pr", "id": "repo-1#12", "label": "Fix the parser"},
+            }))
+        );
+        // No source: today's plain thread, whatever `meta` the body carries.
+        let plain = parse(json!({"provider": "codex", "meta": {"read_only": true}}))
+            .into_req()
+            .unwrap();
+        assert_eq!(plain.provider, Some(RuntimeProvider::Codex));
+        assert!(plain.meta.is_none());
+        // A source without an origin; a blank label is dropped.
+        let bare = embedded_meta(Some("connection-diagnose"), None).unwrap();
+        assert_eq!(bare, Some(json!({"source": "connection-diagnose"})));
+        let blank = embedded_meta(
+            Some("connection-diagnose"),
+            Some(EmbeddedOrigin {
+                kind: "connection".into(),
+                id: "c1".into(),
+                label: Some("  ".into()),
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            blank.unwrap()["origin"],
+            json!({"kind": "connection", "id": "c1"})
+        );
+        // Exactly the limit, in characters (not bytes), is fine.
+        let long = "é".repeat(EMBEDDED_ORIGIN_MAX_CHARS);
+        assert!(embedded_meta(
+            Some("pr-agent"),
+            Some(EmbeddedOrigin {
+                kind: "pr".into(),
+                id: long.clone(),
+                label: Some(long),
+            }),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn create_body_refuses_bad_embedded_meta_with_400() {
+        let origin = |kind: &str, id: &str, label: Option<&str>| EmbeddedOrigin {
+            kind: kind.into(),
+            id: id.into(),
+            label: label.map(str::to_string),
+        };
+        let over = "x".repeat(EMBEDDED_ORIGIN_MAX_CHARS + 1);
+        let bad = [
+            (Some("personal_agent"), None),
+            (Some("PR-AGENT"), None),
+            (Some(""), None),
+            (None, Some(origin("pr", "1", None))),
+            (Some("pr-agent"), Some(origin("connection", "1", None))),
+            (Some("connection-diagnose"), Some(origin("pr", "1", None))),
+            (Some("pr-agent"), Some(origin("", "1", None))),
+            (Some("pr-agent"), Some(origin("pr", "", None))),
+            (Some("pr-agent"), Some(origin("pr", "   ", None))),
+            (Some("pr-agent"), Some(origin("pr", &over, None))),
+            (Some("pr-agent"), Some(origin("pr", "1", Some(&over)))),
+        ];
+        for (source, o) in bad {
+            let r = embedded_meta(source, o.clone());
+            assert!(
+                matches!(r, Err(crate::Error::Invalid(_))),
+                "{source:?} {o:?} → {r:?}"
+            );
+        }
+        // Through the body too: a missing origin id is a 400, not a 422.
+        let body: CreateRuntimeSessionBody = serde_json::from_value(json!({
+            "provider": "claude", "source": "pr-agent", "origin": {"kind": "pr"}
+        }))
+        .unwrap();
+        assert!(matches!(body.into_req(), Err(crate::Error::Invalid(_))));
+    }
+
+    #[test]
+    fn embedded_thread_helpers() {
+        assert!(is_embedded_thread(Some(&json!({"source": "pr-agent"}))));
+        assert!(is_embedded_thread(Some(
+            &json!({"source": "connection-diagnose"})
+        )));
+        assert!(!is_embedded_thread(Some(
+            &json!({"source": "personal_agent"})
+        )));
+        assert!(!is_embedded_thread(Some(&json!({"source": 7}))));
+        assert!(!is_embedded_thread(None));
+        assert_eq!(embedded_auto_close_hours(None), 12);
+        assert_eq!(embedded_auto_close_hours(Some(&json!(0))), 0);
+        assert_eq!(embedded_auto_close_hours(Some(&json!(48))), 48);
+        assert_eq!(embedded_auto_close_hours(Some(&json!("5"))), 12);
+        assert_eq!(embedded_auto_close_hours(Some(&json!(-1))), 12);
+        assert_eq!(embedded_auto_close_hours(Some(&json!(1.5))), 12);
     }
 }

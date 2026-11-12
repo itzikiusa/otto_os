@@ -340,6 +340,8 @@ struct GateState {
     last_admit: Option<Instant>,
     busy_notice: Option<Instant>,
     cap: CapWatch,
+    /// A low-disk notice is out (cleared by the recovery notice).
+    low_disk_noticed: bool,
 }
 
 /// A spawned agent process the gate counts while it runs.
@@ -566,6 +568,18 @@ impl AdmissionGate {
         false
     }
 
+    /// The data volume was seen `low` (below `machine_low_disk_gb`) or not.
+    /// `Some(true)` when an episode starts (raise the warning), `Some(false)`
+    /// when one that was announced ends (post the recovery), else `None`.
+    pub fn observe_low_disk(&self, low: bool) -> Option<bool> {
+        let mut st = self.state();
+        if st.low_disk_noticed == low {
+            return None;
+        }
+        st.low_disk_noticed = low;
+        Some(low)
+    }
+
     /// The snapshot the status chip / settings page show.
     pub fn status(
         &self,
@@ -604,6 +618,9 @@ impl AdmissionGate {
             busy: policy.enabled && busy_reason.is_some(),
             busy_reason: busy_reason.filter(|_| policy.enabled),
             queued,
+            disk_free_bytes: None,
+            low_disk_gb: crate::machine_load::DEFAULT_LOW_DISK_GB,
+            low_disk: false,
         }
     }
 }
@@ -632,6 +649,22 @@ pub struct MachineStatus {
     pub busy_reason: Option<String>,
     /// Waiting agents, oldest first.
     pub queued: Vec<QueuedAgent>,
+    /// Free bytes on the volume holding Otto's data dir (`null` = unknown).
+    pub disk_free_bytes: Option<u64>,
+    /// The low-disk floor in GiB (`machine_low_disk_gb`; 0 = off).
+    pub low_disk_gb: f64,
+    /// Free space is below the floor. Shown, never acted on.
+    pub low_disk: bool,
+}
+
+impl MachineStatus {
+    /// Add the data volume's free space and the low-disk verdict.
+    pub fn with_disk(mut self, free_bytes: Option<u64>, low_disk_gb: f64) -> Self {
+        self.disk_free_bytes = free_bytes;
+        self.low_disk_gb = low_disk_gb;
+        self.low_disk = crate::machine_load::is_low_disk(free_bytes, low_disk_gb);
+        self
+    }
 }
 
 /// One waiting background agent.
@@ -1157,5 +1190,26 @@ mod tests {
         let off = g.status(&busy, &AdmissionPolicy::disabled(8), t0);
         assert!(!off.busy);
         assert_eq!(off.busy_reason, None);
+        // Disk is unknown until the manager adds it.
+        assert_eq!(off.disk_free_bytes, None);
+        assert!(!off.low_disk);
+        let gib = 1024 * 1024 * 1024;
+        let low = off.with_disk(Some(12 * gib), 30.0);
+        assert!(low.low_disk);
+        let v = serde_json::to_value(&low).unwrap();
+        assert_eq!(v["disk_free_bytes"], 12 * gib);
+        assert_eq!(v["low_disk_gb"], 30.0);
+        assert_eq!(v["low_disk"], json!(true));
+    }
+
+    #[test]
+    fn the_low_disk_notice_fires_once_per_episode_and_clears() {
+        let g = gate();
+        assert_eq!(g.observe_low_disk(false), None, "fine from the start");
+        assert_eq!(g.observe_low_disk(true), Some(true), "episode starts");
+        assert_eq!(g.observe_low_disk(true), None, "only once");
+        assert_eq!(g.observe_low_disk(false), Some(false), "recovered");
+        assert_eq!(g.observe_low_disk(false), None);
+        assert_eq!(g.observe_low_disk(true), Some(true), "a new episode");
     }
 }

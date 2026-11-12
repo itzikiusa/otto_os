@@ -33,6 +33,16 @@ pub struct WorkflowTrigger {
     /// run it missed while off). `None` on rows predating migration 0151.
     #[serde(default)]
     pub armed_at: Option<chrono::DateTime<Utc>>,
+    /// When the trigger last fired or was refused (`None` = never). Stamped
+    /// by [`TriggersRepo::record_outcome`].
+    #[serde(default)]
+    pub last_fired_at: Option<chrono::DateTime<Utc>>,
+    /// What that attempt came to: `"started"` | `"queued"` | `"rejected"`.
+    #[serde(default)]
+    pub last_outcome: Option<String>,
+    /// The short reason of a `"rejected"` attempt.
+    #[serde(default)]
+    pub last_detail: Option<String>,
 }
 
 /// Fields required to create a trigger.
@@ -63,6 +73,11 @@ fn row_to_trigger(r: &sqlx::sqlite::SqliteRow) -> Result<WorkflowTrigger> {
         armed_at: r
             .get::<Option<String>, _>("armed_at")
             .and_then(|s| ts(&s).ok()),
+        last_fired_at: r
+            .get::<Option<String>, _>("last_fired_at")
+            .and_then(|s| ts(&s).ok()),
+        last_outcome: r.get("last_outcome"),
+        last_detail: r.get("last_detail"),
     })
 }
 
@@ -102,7 +117,8 @@ impl TriggersRepo {
     /// List all triggers for a workflow, ordered oldest-first.
     pub async fn list(&self, workflow_id: &Id) -> Result<Vec<WorkflowTrigger>> {
         let rows = sqlx::query(
-            "SELECT id, workflow_id, kind, spec_json, enabled, created_at, armed_at, admission_generation
+            "SELECT id, workflow_id, kind, spec_json, enabled, created_at, armed_at, admission_generation,
+                    last_fired_at, last_outcome, last_detail
              FROM workflow_triggers
              WHERE workflow_id = ?
              ORDER BY created_at",
@@ -119,7 +135,8 @@ impl TriggersRepo {
     /// Used by the scheduler to find `schedule` triggers that are due.
     pub async fn list_enabled_by_kind(&self, kind: &str) -> Result<Vec<WorkflowTrigger>> {
         let rows = sqlx::query(
-            "SELECT id, workflow_id, kind, spec_json, enabled, created_at, armed_at, admission_generation
+            "SELECT id, workflow_id, kind, spec_json, enabled, created_at, armed_at, admission_generation,
+                    last_fired_at, last_outcome, last_detail
              FROM workflow_triggers
              WHERE kind = ? AND enabled = 1
              ORDER BY created_at",
@@ -135,7 +152,8 @@ impl TriggersRepo {
     /// Fetch a single trigger by id.
     pub async fn get(&self, id: &Id) -> Result<WorkflowTrigger> {
         let row = sqlx::query(
-            "SELECT id, workflow_id, kind, spec_json, enabled, created_at, armed_at, admission_generation
+            "SELECT id, workflow_id, kind, spec_json, enabled, created_at, armed_at, admission_generation,
+                    last_fired_at, last_outcome, last_detail
              FROM workflow_triggers WHERE id = ?",
         )
         .bind(id)
@@ -314,6 +332,24 @@ impl TriggersRepo {
             .await
             .map_err(dberr("commit scheduled workflow admission"))?;
         Ok(Some(run))
+    }
+
+    /// Stamp what a trigger's latest attempt came to — one UPDATE per fire
+    /// (`outcome` `"started"` | `"queued"` | `"rejected"`, `detail` the short
+    /// rejection reason). Touches nothing the scheduler or an edit owns.
+    pub async fn record_outcome(&self, id: &Id, outcome: &str, detail: Option<&str>) -> Result<()> {
+        sqlx::query(
+            "UPDATE workflow_triggers SET last_fired_at = ?, last_outcome = ?, last_detail = ?
+             WHERE id = ?",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(outcome)
+        .bind(detail)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("record trigger outcome"))?;
+        Ok(())
     }
 
     /// Fixture-only cursor seeding. Production uses the atomic run claim.
@@ -667,6 +703,66 @@ mod tests {
             .await
             .unwrap();
         assert!(t5.armed_at.unwrap() > old_ts);
+    }
+
+    /// A trigger reads "never fired" until stamped; each stamp replaces the
+    /// last one (a later success clears an old rejection reason), and a
+    /// config edit leaves the stamp alone.
+    #[tokio::test]
+    async fn last_outcome_is_stamped_per_attempt_and_survives_edits() {
+        let pool = mem_pool().await;
+        let workflows = WorkflowsRepo::new(pool.clone());
+        let repo = TriggersRepo::new(pool);
+        let wf = workflows
+            .create(
+                &"ws1".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
+            .await
+            .unwrap();
+        let t = repo
+            .create(NewWorkflowTrigger {
+                workflow_id: wf.id.clone(),
+                kind: "chat".into(),
+                spec: serde_json::json!({"channel": "slack", "chat": "C1"}),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        assert!(t.last_fired_at.is_none() && t.last_outcome.is_none());
+
+        repo.record_outcome(&t.id, "rejected", Some("workspace could not be loaded"))
+            .await
+            .unwrap();
+        let r = repo.get(&t.id).await.unwrap();
+        assert_eq!(r.last_outcome.as_deref(), Some("rejected"));
+        assert_eq!(
+            r.last_detail.as_deref(),
+            Some("workspace could not be loaded")
+        );
+        let fired = r.last_fired_at.expect("stamped");
+
+        repo.record_outcome(&t.id, "queued", None).await.unwrap();
+        let q = repo.list(&wf.id).await.unwrap().remove(0);
+        assert_eq!(q.last_outcome.as_deref(), Some("queued"));
+        assert!(q.last_detail.is_none(), "a later success clears the reason");
+        assert!(q.last_fired_at.unwrap() >= fired);
+
+        let edited = repo
+            .update(
+                &t.id,
+                Some(serde_json::json!({"channel": "slack", "chat": "C2"})),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(edited.last_outcome.as_deref(), Some("queued"));
+        let by_kind = repo.list_enabled_by_kind("chat").await.unwrap();
+        assert_eq!(by_kind[0].last_outcome.as_deref(), Some("queued"));
     }
 
     #[test]

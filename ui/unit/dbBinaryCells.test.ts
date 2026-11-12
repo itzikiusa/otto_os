@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import * as dialect from '../src/lib/database/sql-dialect.ts';
-import { binaryCellBytes, bytesToHex, bytesToHexCompact } from '../src/lib/database/binary-cells.ts';
+import { binaryCellBytes, binaryFilterOff, bytesToHex, bytesToHexCompact } from '../src/lib/database/binary-cells.ts';
 import { plural } from '../src/lib/plural.ts';
 
 // MySQL BINARY / VARBINARY / BLOB and Postgres BYTEA cells arrive as base64
@@ -83,8 +83,8 @@ test('text columns are untouched; non-base64 text in a binary column is quoted a
 });
 
 test('isBinaryType mirrors the daemon list exactly', () => {
-  for (const t of ['BINARY', 'VARBINARY', 'TINYBLOB', 'BLOB', 'MEDIUMBLOB', 'LONGBLOB', 'BYTEA', 'bytea']) assert.equal(dialect.isBinaryType(t), true, t);
-  for (const t of ['VARCHAR', 'TEXT', 'String', 'BYTEA[]', 'JSON', null, undefined]) assert.equal(dialect.isBinaryType(t), false, String(t));
+  for (const t of ['BINARY', 'VARBINARY', 'TINYBLOB', 'BLOB', 'MEDIUMBLOB', 'LONGBLOB', 'GEOMETRY', 'BYTEA', 'bytea']) assert.equal(dialect.isBinaryType(t), true, t);
+  for (const t of ['VARCHAR', 'TEXT', 'String', 'BYTEA[]', 'JSON', 'geometry', 'BIT', null, undefined]) assert.equal(dialect.isBinaryType(t), false, String(t));
   assert.equal(dialect.binaryLiteral('mongodb', KEY), null);
   assert.equal(dialect.binaryLiteral('mysql', 'abc'), null, 'length not a multiple of 4');
 });
@@ -96,4 +96,13 @@ test('the cell viewer renders bytes as hex with their length', () => {
   assert.equal(bytesToHexCompact(bytes), '0123456789abcdef0123456789abcdef');
   assert.equal(bytesToHex(bytes, 8), '01 23 45 67 89 ab cd ef\n01 23 45 67 89 ab cd ef');
   assert.equal(binaryCellBytes('…[truncated 9 chars]'), null);
+});
+
+test('WHERE-building cell actions are disabled for binary cells, with the reason', () => {
+  const off = binaryFilterOff({ binary: true }, KEY);
+  assert.equal(off.disabled, true);
+  assert.match(off.title ?? '', /base64/);
+  assert.deepEqual({ ...binaryFilterOff({ binary: true }, null) }, {}, 'NULL still filters as IS NULL');
+  assert.deepEqual({ ...binaryFilterOff({ name: 'x' } as never, 'abc') }, {});
+  assert.deepEqual({ ...binaryFilterOff(undefined, 'abc') }, {});
 });

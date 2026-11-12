@@ -17,6 +17,8 @@ pub mod fix_goal;
 pub mod handoff;
 pub mod history;
 pub mod prompts;
+pub mod resolution;
+pub mod restart;
 pub mod scope;
 pub mod session;
 pub mod skill_bundle;

@@ -17,7 +17,8 @@ use super::*;
 
 use crate::admission::{self, AdmissionPermit, AdmissionPolicy, Poll};
 use crate::build_budget;
-use crate::machine_load::{logical_cores, MachineMonitor, Sampler};
+use crate::machine_load::{self, logical_cores, MachineMonitor, Sampler};
+use otto_core::domain::NoticeSeverity;
 
 /// Settings are re-read on every gate check; this bounds the DB reads a
 /// queue of waiters causes (a write through the repo is seen at once).
@@ -63,12 +64,101 @@ impl SessionManager {
         )
     }
 
-    /// Machine load and the admission queue, for the UI.
+    /// Machine load, the admission queue and the data volume's free space,
+    /// for the UI (`GET /machine/status`). The read is also what notices low
+    /// disk: the first read below `machine_low_disk_gb` raises one warning in
+    /// the notification centre and the first read above it again its
+    /// recovery (the status bar reads it every few seconds while Otto is open).
     pub async fn machine_status(&self) -> admission::MachineStatus {
         let policy = self.admission_policy().await;
         let sample = self.admission.monitor().current().await;
-        self.admission
+        let home = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        let data_dir = self.sandbox_data_dir(&home);
+        let free = tokio::task::spawn_blocking(move || machine_load::disk_free_bytes(&data_dir))
+            .await
+            .ok()
+            .flatten();
+        let floor = machine_load::low_disk_gb(
+            self.resource_setting(machine_load::LOW_DISK_SETTING)
+                .await
+                .as_ref(),
+        );
+        let status = self
+            .admission
             .status(&sample, &policy, std::time::Instant::now())
+            .with_disk(free, floor);
+        if let (Some(low), Some(bytes)) = (self.admission.observe_low_disk(status.low_disk), free) {
+            self.post_low_disk_notice(low, bytes, floor).await;
+        }
+        status
+    }
+
+    async fn post_low_disk_notice(&self, low: bool, free_bytes: u64, floor_gb: f64) {
+        let gib = free_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        let (severity, title, body) = if low {
+            (
+                NoticeSeverity::Warn,
+                "Low disk space",
+                format!(
+                    "Only {gib:.1} GB is free on the disk Otto runs from (warning below \
+                     {floor_gb:.0} GB). Builds, agent sessions and swap start failing when it \
+                     runs out. Otto deletes nothing on its own; free some space."
+                ),
+            )
+        } else {
+            (
+                NoticeSeverity::Info,
+                "Disk space back to normal",
+                format!("{gib:.1} GB is free again on the disk Otto runs from."),
+            )
+        };
+        self.post_system_notice(
+            "machine:low_disk",
+            severity,
+            title,
+            &body,
+            Some("settings/daemon"),
+        )
+        .await;
+    }
+
+    /// Persist a daemon-health notice in the notification centre (the bell)
+    /// and push it live, de-duped on `key`: the recovery notice of an episode
+    /// reuses the key, so it refreshes the warning's row instead of adding a
+    /// second one. Best-effort — a failed write is logged. Global (every
+    /// signed-in user sees it), like the credential monitor's notices.
+    pub async fn post_system_notice(
+        &self,
+        key: &str,
+        severity: NoticeSeverity,
+        title: &str,
+        body: &str,
+        route: Option<&str>,
+    ) {
+        let repo = otto_state::NotificationsRepo::new(self.repo.pool());
+        let new = otto_state::NewNotice {
+            kind: otto_core::domain::NoticeKind::System,
+            severity,
+            title: title.to_string(),
+            body: body.to_string(),
+            source_key: Some(key.to_string()),
+            action: route.map(|r| otto_core::domain::NoticeAction::OpenRoute {
+                route: r.to_string(),
+                workspace_id: None,
+            }),
+            user_id: None,
+        };
+        match repo.create(new).await {
+            Ok(notice) => {
+                let _ = self.events.send(Event::Notification {
+                    notice,
+                    user_id: None,
+                });
+            }
+            Err(e) => tracing::warn!(key, "system notice: {e}"),
+        }
     }
 
     /// Wait for a place for a background agent of `source` BEFORE starting a
@@ -381,6 +471,44 @@ mod tests {
             archived: false,
             meta,
         }
+    }
+
+    #[tokio::test]
+    async fn status_reports_free_disk_and_low_disk_notices_once_per_episode() {
+        let m = manager(true, 0.5).await;
+        let m = &m;
+        let put = |v: serde_json::Value| async move {
+            m.settings
+                .as_ref()
+                .unwrap()
+                .put(machine_load::LOW_DISK_SETTING, &v)
+                .await
+                .unwrap();
+        };
+        let low_disk_notices = || async move {
+            otto_state::NotificationsRepo::new(m.repo.pool())
+                .list(50, &otto_state::NoticeAccess::All)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|n| n.source_key.as_deref() == Some("machine:low_disk"))
+                .collect::<Vec<_>>()
+        };
+        // No disk is this large: every read is "low".
+        put(serde_json::json!(1e12)).await;
+        let s = m.machine_status().await;
+        assert!(s.disk_free_bytes.is_some_and(|b| b > 0));
+        assert!(s.low_disk);
+        m.machine_status().await;
+        let raised = low_disk_notices().await;
+        assert_eq!(raised.len(), 1, "one notice per episode");
+        assert_eq!(raised[0].severity, NoticeSeverity::Warn);
+        // Warnings off: the episode ends and the same row turns informational.
+        put(serde_json::json!(0)).await;
+        assert!(!m.machine_status().await.low_disk);
+        let cleared = low_disk_notices().await;
+        assert_eq!(cleared.len(), 1, "the recovery refreshes the row");
+        assert_eq!(cleared[0].severity, NoticeSeverity::Info);
     }
 
     #[tokio::test]

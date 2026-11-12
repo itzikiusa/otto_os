@@ -44,6 +44,7 @@
   // overlay.js's header for why).
   import overlaySrc from './overlay.js?raw';
   import { buildFillScript, fillAllowedForUrl, fillResult, fillTargetOk, hostOf, matchDomain } from './autofill';
+  import { liveWebviews, NATIVE_NAV_JS, type LiveNav } from './liveWebviews';
 
   interface Props {
     /** Hosted inside the agent-mode right panel (the "v2" Browser tab): no
@@ -149,11 +150,6 @@
       },
     ]);
   }
-  // Per-tab last-navigated URL, so the driver effect only calls `open` (which
-  // re-navigates) when the URL actually changed — switching tabs just
-  // shows/hides, preserving each tab's scroll/form state.
-  const openedUrl: Record<string, string> = {};
-
   function hostRect(): Rect | null {
     if (!liveHostEl) return null;
     const r = liveHostEl.getBoundingClientRect();
@@ -182,15 +178,18 @@
     if (!active || overlay) return;
     const r = hostRect();
     if (!r) return;
-    if (openedUrl[active.id] !== active.url) {
-      openedUrl[active.id] = active.url;
+    // `liveWebviews` outlives this view, so a re-mount (or a tab switch)
+    // only shows the webview, keeping its scroll / form / app state.
+    if (liveWebviews.action(active.id, active.url) === 'navigate') {
+      liveWebviews.set(active.id, active.url);
       // create-or-navigate + show, then arm the picker overlay on the fresh
       // page (a same-tab URL change reloads the DOM, dropping any overlay a
       // previous injection installed).
       void nativeBrowser.open(active.id, active.url, r).then(() => injectOverlay(active.id));
     } else {
-      void nativeBrowser.bounds(active.id, r);
-      void nativeBrowser.show(active.id);
+      // Places + shows it (re-creates one another host closed): the shell
+      // never re-navigates a webview to the URL it already shows.
+      void nativeBrowser.open(active.id, active.url, r);
     }
   });
 
@@ -428,7 +427,7 @@
     let disposed = false;
     void nativeBrowser
       .onUrlChange((id, url) => {
-        openedUrl[id] = url; // keep the driver effect from re-navigating (loop)
+        liveWebviews.set(id, url); // keep the driver effect from re-navigating (loop)
         browser.trackLiveNav(id, url);
         if (!urlFocused && id === browser.activeId) urlInput = url;
         void injectOverlay(id); // in-page nav reloaded the DOM — re-arm the picker
@@ -467,37 +466,35 @@
     for (const id of knownLiveIds) {
       if (!current.has(id)) {
         void nativeBrowser.close(id);
-        delete openedUrl[id];
+        liveWebviews.forget(id);
       }
     }
     knownLiveIds = current;
-    liveMru = liveMru.filter((id) => current.has(id));
   });
 
   // Cap live native webviews (perf SB-14): every live tab kept a hidden
   // WKWebView — its own WebContent process, JS timers and media — for as long
   // as the tab existed. Keep the MAX_LIVE_WEBVIEWS most recently shown; close
-  // older hidden ones (only those this view opened). Re-activating one re-opens
-  // it at the tab's current URL (`openedUrl` is cleared, so the show effect
-  // calls `open`) — in-page state (scroll, form input) is lost, like Safari's
-  // tab discarding.
+  // older hidden ones. Re-activating one re-opens it at the tab's current URL
+  // — in-page state (scroll, form input) is lost, like Safari's tab discarding.
   const MAX_LIVE_WEBVIEWS = 4;
-  let liveMru: string[] = [];
   $effect(() => {
     if (!nativeBrowserAvailable) return;
     const id = activeLive?.id;
     if (!id) return;
-    untrack(() => {
-      liveMru = [id, ...liveMru.filter((x) => x !== id)];
-      while (liveMru.length > MAX_LIVE_WEBVIEWS) {
-        const old = liveMru.pop();
-        if (old && old !== id && openedUrl[old] !== undefined) {
-          void nativeBrowser.close(old);
-          delete openedUrl[old];
-        }
-      }
-    });
+    untrack(() => liveWebviews.touch(id, MAX_LIVE_WEBVIEWS).forEach((old) => void nativeBrowser.close(old)));
   });
+
+  // Back / Forward / Reload / Stop for whichever engine renders the live tab.
+  function liveNav(nav: LiveNav): void {
+    if (activeRemote) {
+      if (nav !== 'stop') remoteView?.[nav]();
+    } else if (activeLive) {
+      if (nav === 'reload') void nativeBrowser.reload(activeLive.id);
+      else void nativeBrowser.eval(activeLive.id, NATIVE_NAV_JS[nav]);
+    }
+  }
+  const remoteDown = $derived.by(() => !!activeRemote && remoteState?.status !== 'live');
 
   // Hide (not close — this view doesn't own destroying a tab's session state)
   // every live tab's webview when the module unmounts, so navigating away
@@ -648,34 +645,24 @@
   {/if}
 
   <div class="urlbar">
-    {#if activeRemote && browserLive.ready}
-      <button
-        class="icon-btn tool"
-        onclick={() => remoteView?.back()}
-        disabled={remoteState?.status !== 'live' || !remoteState?.session?.can_go_back}
-        aria-label="Back"
-        title="Back"
-      >
+    {#if (activeRemote && browserLive.ready) || activeLive}
+      {@const remote = activeRemote ? remoteState?.session : undefined}
+      <!-- A native webview reports no history, so its Back/Forward stay enabled
+           (a no-op at either end); the remote engine says what it can do. -->
+      <button class="icon-btn tool" onclick={() => liveNav('back')} disabled={remoteDown || (!!activeRemote && !remote?.can_go_back)} aria-label="Back" title="Back">
         <Icon name="chevronLeft" size={14} />
       </button>
-      <button
-        class="icon-btn tool"
-        onclick={() => remoteView?.forward()}
-        disabled={remoteState?.status !== 'live' || !remoteState?.session?.can_go_forward}
-        aria-label="Forward"
-        title="Forward"
-      >
+      <button class="icon-btn tool" onclick={() => liveNav('forward')} disabled={remoteDown || (!!activeRemote && !remote?.can_go_forward)} aria-label="Forward" title="Forward">
         <Icon name="chevronRight" size={14} />
       </button>
-      <button
-        class="icon-btn tool"
-        onclick={() => remoteView?.reload()}
-        disabled={remoteState?.status !== 'live'}
-        aria-label="Reload page"
-        title="Reload page (⌘R)"
-      >
+      <button class="icon-btn tool" onclick={() => liveNav('reload')} disabled={remoteDown} aria-label="Reload page" title="Reload page (⌘R)">
         <Icon name="refresh" size={14} />
       </button>
+      {#if activeLive}
+        <button class="icon-btn tool" onclick={() => liveNav('stop')} aria-label="Stop loading" title="Stop loading">
+          <Icon name="stop" size={14} />
+        </button>
+      {/if}
     {/if}
     <input
       type="text"
@@ -832,6 +819,7 @@
         loading={browser.loadingPage}
         error={browser.pageError}
         onopenurl={focusUrl}
+        onnavigate={(url) => { urlInput = url; void go(); }}
         onretry={() => {
           const url = browser.activeTab?.url;
           if (url) void browser.loadPage(url, { fresh: true });

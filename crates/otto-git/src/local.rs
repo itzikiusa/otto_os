@@ -14,8 +14,10 @@ use std::process::Stdio;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+mod diff_flags;
 mod errors;
 mod identity;
+use diff_flags::note_renames;
 pub(crate) use errors::{is_missing_remote_ref, push_err, unborn_or_err, upstream_err};
 pub use errors::{PUSH_LEASE_REFUSED, PUSH_REJECTED};
 
@@ -360,16 +362,6 @@ pub(crate) fn verb_of<'a>(args: &'a [&'a str]) -> &'a str {
         }
     }
     "command"
-}
-
-/// git's `-l<N>` overflow warning ("exhaustive/inexact rename detection was
-/// skipped due to too many files"): past [`RENAMES`]' limit some renames come
-/// back as a delete + an add. Recorded so the diff can say so
-/// (`DiffResp.renames_incomplete`).
-fn note_renames(stderr: &str, ri: &std::sync::atomic::AtomicBool) {
-    if stderr.contains("rename detection was skipped") {
-        ri.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
 }
 
 /// Per-file cap on one untracked file's patch in a review diff (it is
@@ -758,6 +750,8 @@ pub struct DiffOpts {
     pub summary: bool,
     /// Per-file cap + response budget; `None` = uncapped (internal callers).
     pub caps: Option<crate::parse::DiffCaps>,
+    /// `-w`: leave whitespace-only changes out (patch and summary alike).
+    pub ignore_whitespace: bool,
 }
 
 impl DiffOpts {
@@ -2602,12 +2596,12 @@ impl LocalGit {
     /// (file list + counts from `--raw --numstat`, never the patch) and `caps`
     /// (per-file cap + response budget, applied WHILE parsing).
     pub async fn diff_with(&self, target: &DiffTarget, opts: &DiffOpts) -> Result<DiffResp> {
-        let paths = opts.pathspecs()?;
+        let (paths, w) = (opts.pathspecs()?, opts.ignore_whitespace);
         if opts.summary {
-            return self.diff_summary(target, &paths).await;
+            return self.diff_summary(target, &paths, w).await;
         }
         let ri = std::sync::atomic::AtomicBool::new(false);
-        let out = self.diff_patch_bytes(target, &paths, &ri).await?;
+        let out = self.diff_patch_bytes(target, &paths, &ri, w).await?;
         let captured_bytes = out.len();
         let caps = opts.caps;
         let mut resp = off_runtime(out.len(), move || {
@@ -2775,6 +2769,7 @@ impl LocalGit {
         target: &DiffTarget,
         paths: &[&str],
         ri: &std::sync::atomic::AtomicBool,
+        w: bool,
     ) -> Result<Vec<u8>> {
         let run = |c: GitCmd| async move { self.exec_diff(&c, ri).await };
         // Every call is a [`GitCmd::diff`] — fixed output format, raw UTF-8
@@ -2785,6 +2780,7 @@ impl LocalGit {
         // `parse_diff_bytes` fingerprints exactly what git printed.
         let diff = |sub: &str, extra: &[&str]| -> GitCmd {
             GitCmd::diff(sub)
+                .args(w.then_some("-w"))
                 .args(extra.iter().copied())
                 .maybe_paths(paths)
         };
@@ -2845,7 +2841,7 @@ impl LocalGit {
     /// untracked side of `Working`). git still computes the changes but never
     /// renders or ships a patch: ~40–100 KB for a 100k-line branch instead of
     /// 15–30 MB. Every file comes back `hunks: []`, `hunks_omitted: true`.
-    async fn diff_summary(&self, target: &DiffTarget, paths: &[&str]) -> Result<DiffResp> {
+    async fn diff_summary(&self, target: &DiffTarget, paths: &[&str], w: bool) -> Result<DiffResp> {
         let ri = std::sync::atomic::AtomicBool::new(false);
         let run = |c: GitCmd| {
             let ri = &ri;
@@ -2855,6 +2851,7 @@ impl LocalGit {
         let stat = |sub: &str, extra: &[&str]| -> GitCmd {
             GitCmd::diff(sub)
                 .args(["--raw", "--numstat", "-z", m, l])
+                .args(w.then_some("-w"))
                 .args(extra.iter().copied())
                 .maybe_paths(paths)
         };

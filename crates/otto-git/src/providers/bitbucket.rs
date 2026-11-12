@@ -17,7 +17,10 @@ use crate::types::CiStatus;
 
 use super::client::Http;
 use super::identity::{self, Me};
+
+pub(crate) mod checks;
 use super::{map_state, ts, varr, vbool, vstr, vstr_opt, vu64, RemoteRef, RemoteRepoSummary};
+use checks::merge_checks;
 
 const BASE: &str = "https://api.bitbucket.org/2.0";
 
@@ -68,18 +71,43 @@ impl Bitbucket {
     }
 
     /// The account this client authenticates as (`GET /2.0/user`), cached per
-    /// credential. `None` when the lookup fails — nothing is then "you".
+    /// credential. `None` when the lookup fails — nothing is then "you". That
+    /// call needs the Account: read scope a PR-only token may lack; a refusal
+    /// is remembered for a while and the identity is then learnt from the
+    /// caller's own writes ([`Self::learn_me`]).
     pub(crate) async fn me(&self) -> Option<Me> {
-        let key = identity::cache_key(
-            "bitbucket",
-            &self.base,
-            &format!("{}:{}", self.username, self.token),
-        );
-        identity::cached(&key, || async {
+        identity::cached(&self.identity_key(), || async {
             let v = self.send_json(reqwest::Method::GET, "/user", None).await?;
             Ok::<_, Error>(Me::from_keys(user_keys(&v)))
         })
         .await
+    }
+
+    /// The identity cache key of this credential.
+    pub(crate) fn identity_key(&self) -> String {
+        identity::cache_key(
+            "bitbucket",
+            &self.base,
+            &format!("{}:{}", self.username, self.token),
+        )
+    }
+
+    /// Remember the caller from a user object Bitbucket returned for the
+    /// caller's OWN write: the participant of an approve / request-changes,
+    /// the author of a comment just posted or edited. Needs no scope beyond
+    /// the pull-request one the write itself used.
+    fn learn_me(&self, user: Option<&Value>) {
+        if let Some(u) = user {
+            identity::learn(&self.identity_key(), Me::from_keys(user_keys(u)));
+        }
+    }
+
+    /// [`Self::learn_me`] from a write's response body (a participant
+    /// object); an empty or non-JSON body changes nothing.
+    async fn learn_from_participant(&self, resp: reqwest::Response) {
+        if let Ok(v) = resp.json::<Value>().await {
+            self.learn_me(v.get("user"));
+        }
     }
 
     /// `diff`/`diffstat` query suffix for [`Self::ignore_whitespace`]: `sep`
@@ -526,6 +554,29 @@ fn create_pr_body(req: &CreatePrReq, reviewer_uuids: &[String]) -> Value {
     body
 }
 
+/// Who a `/2.0/user` payload is, for "Test connection": the display name,
+/// the `nickname` when it differs, and the Atlassian account id. The old
+/// `username` field is deprecated (Atlassian removed it from user objects),
+/// so it is only the last fallback.
+pub(crate) fn token_owner(v: &Value) -> String {
+    let display = vstr(v, &["display_name"]);
+    let nick = vstr(v, &["nickname"]);
+    let mut out = match (display.is_empty(), nick.is_empty()) {
+        (false, false) if !display.eq_ignore_ascii_case(&nick) => format!("{display} ({nick})"),
+        (false, _) => display,
+        (true, false) => nick,
+        (true, true) => vstr(v, &["username"]),
+    };
+    if let Some(id) = vstr_opt(v, &["account_id"]) {
+        out = if out.is_empty() {
+            format!("account {id}")
+        } else {
+            format!("{out} · account {id}")
+        };
+    }
+    out
+}
+
 /// One workspace member (from `/2.0/workspaces/{ws}/members`) as the fields
 /// reviewer resolution + the collaborator typeahead need.
 #[derive(Debug, Clone)]
@@ -609,6 +660,9 @@ fn comment_from(v: &Value) -> PrComment {
             .and_then(|p| p.get("id"))
             .and_then(Value::as_u64)
             .map(|p| p.to_string()),
+        // Bitbucket Cloud has no reactions API.
+        reactions: Vec::new(),
+        can_react: false,
     }
 }
 
@@ -747,10 +801,15 @@ impl super::GitProvider for Bitbucket {
             "{}?pagelen=100",
             Self::pr_path(r, &format!("/{number}/comments"))
         );
-        let (pr, comments_v, me) = tokio::join!(
+        // The repo's merge rules (memoised per repo), the PR's tasks and its
+        // build statuses are best-effort reads in the same round trip.
+        let (pr, comments_v, me, ci, rules, tasks) = tokio::join!(
             self.get_json_cached(&pr_path),
             self.paginate_values(&comments_path),
             self.me(),
+            self.fetch_ci_status(r, number),
+            self.merge_rules(r),
+            self.pr_tasks(r, number),
         );
         let (pr, comments_v) = (pr?, comments_v?);
         let me = me.as_ref();
@@ -773,10 +832,19 @@ impl super::GitProvider for Bitbucket {
             }
         };
 
-        // Best-effort CI build-status — never fails the PR fetch.
-        let ci = self.fetch_ci_status(r, number).await;
         let mut summary = summary_for(&pr, me);
         summary.ci_status = Some(ci.state.clone());
+        // Merge checks only mean something while the PR can still merge.
+        let merge_checks = match (&rules, summary.state) {
+            (Some(rules), PrState::Open) => merge_checks(
+                rules,
+                &summary.target_branch,
+                &pr,
+                &ci,
+                tasks.map(|t| t.open),
+            ),
+            _ => Vec::new(),
+        };
 
         Ok(PrDetail {
             summary,
@@ -786,6 +854,9 @@ impl super::GitProvider for Bitbucket {
             reviewers,
             // Bitbucket doesn't expose a mergeable flag on the PR object.
             mergeable: None,
+            reactions_supported: false,
+            merge_checks,
+            task_count: tasks,
         })
     }
 
@@ -945,7 +1016,9 @@ impl super::GitProvider for Bitbucket {
                 Some(&body_val),
             )
             .await?;
-        // Just posted with this credential: it is the caller's own.
+        // Just posted with this credential: it is the caller's own — and
+        // its author names the caller.
+        self.learn_me(v.get("user"));
         let mut pc = comment_from(&v);
         pc.can_edit = true;
         Ok(pc)
@@ -967,6 +1040,7 @@ impl super::GitProvider for Bitbucket {
                 Some(&json!({ "content": { "raw": body } })),
             )
             .await?;
+        self.learn_me(v.get("user"));
         let mut pc = comment_from(&v);
         pc.can_edit = true;
         Ok(pc)
@@ -1001,14 +1075,18 @@ impl super::GitProvider for Bitbucket {
         self.send(method, &path, None).await.map(|_| ())
     }
 
+    /// `POST …/approve` answers the caller's participant object — the
+    /// identity is learnt from it.
     async fn approve(&self, r: &RemoteRef, number: u64) -> Result<()> {
-        self.send(
-            reqwest::Method::POST,
-            &Self::pr_path(r, &format!("/{number}/approve")),
-            None,
-        )
-        .await
-        .map(|_| ())
+        let resp = self
+            .send(
+                reqwest::Method::POST,
+                &Self::pr_path(r, &format!("/{number}/approve")),
+                None,
+            )
+            .await?;
+        self.learn_from_participant(resp).await;
+        Ok(())
     }
 
     /// `DELETE …/approve` withdraws the bound account's approval.
@@ -1120,9 +1198,21 @@ impl super::GitProvider for Bitbucket {
             .await?;
         }
         let path = Self::pr_path(r, &format!("/{number}/request-changes"));
-        self.send(reqwest::Method::POST, &path, None)
-            .await
-            .map(|_| ())
+        let resp = self.send(reqwest::Method::POST, &path, None).await?;
+        self.learn_from_participant(resp).await;
+        Ok(())
+    }
+
+    /// Bitbucket Cloud has no reactions API.
+    async fn set_reaction(
+        &self,
+        _r: &RemoteRef,
+        _number: u64,
+        _comment_id: &str,
+        _key: otto_core::api::ReactionKey,
+        _on: bool,
+    ) -> Result<Vec<otto_core::api::PrReaction>> {
+        Err(Error::Conflict("Bitbucket Cloud has no reactions".into()))
     }
 
     async fn list_pr_commits(&self, r: &RemoteRef, number: u64) -> Result<Vec<PrCommit>> {
@@ -1189,6 +1279,7 @@ impl super::GitProvider for Bitbucket {
 
     /// `GET /2.0/user` with the bound credentials: proves authentication and
     /// echoes app-password scopes from the `x-oauth-scopes` header when present.
+    /// `login` names the owner as Bitbucket shows them ([`token_owner`]).
     async fn verify_token(&self) -> Result<super::TokenCheck> {
         let resp = self.send(reqwest::Method::GET, "/user", None).await?;
         let scopes = super::github::scopes_header(resp.headers());
@@ -1196,15 +1287,11 @@ impl super::GitProvider for Bitbucket {
             .json()
             .await
             .map_err(|e| Error::Upstream(format!("bitbucket decode: {e}")))?;
-        let login = {
-            let u = vstr(&v, &["username"]);
-            if u.is_empty() {
-                vstr(&v, &["display_name"])
-            } else {
-                u
-            }
-        };
-        Ok(super::TokenCheck { login, scopes })
+        identity::learn(&self.identity_key(), Me::from_keys(user_keys(&v)));
+        Ok(super::TokenCheck {
+            login: token_owner(&v),
+            scopes,
+        })
     }
 
     async fn list_repos(

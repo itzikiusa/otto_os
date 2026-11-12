@@ -8,6 +8,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { database } from '../../lib/stores/database.svelte';
   import type { Connection } from '../../lib/api/types';
+  import DiagnoseButton from './DiagnoseButton.svelte';
 
   interface Props {
     /** Absent when the viewer may not edit the selected profile. */
@@ -45,6 +46,9 @@
       variant="compact"
     >
       {#snippet errorActions()}
+        {#if database.selectedConn && status?.phase === 'error'}
+          <DiagnoseButton conn={database.selectedConn} probe={{ message: status.error ?? '', hint }} />
+        {/if}
         {#if onedit && database.selectedConn}
           {@const c = database.selectedConn}
           <button class="btn small" onclick={() => onedit(c)}>

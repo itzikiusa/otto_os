@@ -20,7 +20,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use otto_core::agent_runtime::{
-    CreateRuntimeSessionReq, OpenPeerReq, PeerInfo, PeerMessageReq, PeerReply, QueuedDeliverReq,
+    CreateRuntimeSessionBody, OpenPeerReq, PeerInfo, PeerMessageReq, PeerReply, QueuedDeliverReq,
     RuntimePromptReq, RuntimePromptResp, RuntimeReplay, RuntimeRequestRespondReq, RuntimeSession,
     UpdateRuntimeSessionReq,
 };
@@ -250,27 +250,49 @@ async fn authorized<S: RuntimeCtx>(ctx: &S, user: &User, id: &Id) -> ApiResult<R
     }
 }
 
-/// GET /workspaces/{id}/runtime-sessions — the caller's own (all, for an admin).
+#[derive(Deserialize)]
+struct ListQuery {
+    /// Only threads whose `meta.source` is this (an embedded page's lookup).
+    #[serde(default)]
+    source: Option<String>,
+    /// Only threads whose `meta.origin.id` is this.
+    #[serde(default)]
+    origin_id: Option<String>,
+}
+
+/// GET /workspaces/{id}/runtime-sessions[?source=&origin_id=] — the caller's
+/// own (all, for an admin); the filters narrow that same set, closed
+/// threads included.
 async fn list<S: RuntimeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(ws): Path<Id>,
+    Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<Vec<RuntimeSession>>> {
     ctx.roles().check(&user, &ws, WorkspaceRole::Viewer).await?;
     let owner = (!is_ws_admin(&ctx, &user, &ws).await).then_some(&user.id);
-    Ok(Json(ctx.agent_runtime().list(&ws, owner).await?))
+    let source = q.source.as_deref().filter(|s| !s.is_empty());
+    let origin_id = q.origin_id.as_deref().filter(|s| !s.is_empty());
+    Ok(Json(
+        ctx.agent_runtime()
+            .list_filtered(&ws, owner, source, origin_id)
+            .await?,
+    ))
 }
 
-/// POST /workspaces/{id}/runtime-sessions — create + spawn (editor+).
+/// POST /workspaces/{id}/runtime-sessions — create + spawn (editor+). The
+/// body may name an embedded `source` / `origin` (validated, the only
+/// client input that reaches the server-owned meta).
 async fn create<S: RuntimeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Extension(auth): Extension<AuthContext>,
     Path(ws): Path<Id>,
-    Json(req): Json<CreateRuntimeSessionReq>,
+    Json(body): Json<CreateRuntimeSessionBody>,
 ) -> ApiResult<(StatusCode, Json<RuntimeSession>)> {
     require_human(&ctx, &auth)?;
     ctx.roles().check(&user, &ws, WorkspaceRole::Editor).await?;
+    let req = body.into_req()?;
     let s = ctx.agent_runtime().create(&user.id, &ws, req).await?;
     Ok((StatusCode::CREATED, Json(s)))
 }

@@ -24,6 +24,8 @@ use crate::types::{
     SessionUsage, TokenTotals, UsageConfig, UsageEvent, UsageReport, UsageStatus, UsageSummary,
 };
 
+#[path = "engine/health.rs"]
+mod health;
 #[path = "engine/recovery.rs"]
 mod recovery;
 

@@ -5,8 +5,8 @@
   // quick non-interactive `ssh … exit`, diagnosed server-side) and shows its
   // summary, the hint on what to change, and the raw detail on demand.
   //
-  // `extra` is the slot for further recovery actions (a later "Diagnose with
-  // an agent"); it renders after Reconnect / Edit connection.
+  // `extra` is the slot for further recovery actions ("Diagnose with an
+  // agent…", see SshPane); it renders after Reconnect / Edit connection.
   import type { Snippet } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';

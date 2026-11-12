@@ -3050,6 +3050,15 @@ mod tests {
             // Deliberately listed in the Agents tab (engine-owned via
             // `work.origin`, see personal_agents_engine.rs).
             "personal_agent",
+            // Embedded structured-runtime threads (`EMBEDDED_THREAD_SOURCES`
+            // in agent_runtime.rs): a person opened them inside the PR or
+            // connection page and is watching them there — not an engine's
+            // unattended work, so never admission-gated or hidden as
+            // background. Threads folds them into their own sections and the
+            // runtime closes (never deletes) them after
+            // `embedded_thread_auto_close_hours` idle.
+            "pr-agent",
+            "connection-diagnose",
             // A Connection-kind sign-in terminal, never an agent session.
             "provider-login",
             // Not session meta: canvas/excalidraw document `source`, API

@@ -39,9 +39,10 @@ use otto_state::{TriggersRepo, WorkflowTrigger, WorkflowsRepo};
 use serde_json::{json, Value};
 
 use crate::chat_resolve::{
-    ambiguous_reply, max_parallel_runs, no_such_workflow_reply, resolve_name, slot_outlook,
-    NameMatch, SlotOutlook,
+    ambiguous_reply, no_such_workflow_reply, resolve_name, NameMatch, SlotOutlook,
 };
+use crate::run_queue::{max_parallel_runs, slot_outlook_now};
+use crate::trigger_outcome::{self, TriggerOutcome};
 use crate::WorkflowCtx;
 
 /// Our own acknowledgement replies always start with this. Defensive loop
@@ -784,6 +785,9 @@ impl<C: WorkflowCtx> WorkflowChatTriggerImpl<C> {
     /// are the inbound message's origin, logged for traceability only (they're
     /// already threaded into `input` by every call site). Every refusal is
     /// answered in the thread — an explicit trigger never ends in silence.
+    /// `binding` is the chat-binding trigger that matched (path 3): what the
+    /// attempt came to is stamped on it ([`trigger_outcome`]).
+    #[allow(clippy::too_many_arguments)]
     async fn start_named(
         &self,
         wf: Workflow,
@@ -792,8 +796,32 @@ impl<C: WorkflowCtx> WorkflowChatTriggerImpl<C> {
         notes: &[String],
         channel: &str,
         chat: &str,
+        binding: Option<&str>,
     ) -> Option<WorkflowChatAck> {
         let repo = WorkflowsRepo::new(self.ctx.pool().clone());
+        let (ack, outcome) = self
+            .admit_and_spawn(&repo, wf, input, goals, notes, channel, chat)
+            .await;
+        if let Some(trigger_id) = binding {
+            trigger_outcome::stamp(self.ctx.pool(), trigger_id, &outcome).await;
+        }
+        Some(ack)
+    }
+
+    /// [`Self::start_named`]'s body: the reply, and the outcome to stamp.
+    #[allow(clippy::too_many_arguments)]
+    async fn admit_and_spawn(
+        &self,
+        repo: &WorkflowsRepo,
+        wf: Workflow,
+        input: Value,
+        goals: Option<&str>,
+        notes: &[String],
+        channel: &str,
+        chat: &str,
+    ) -> (WorkflowChatAck, TriggerOutcome) {
+        let rejected =
+            |reason: String, reply: String| (refusal(reply), TriggerOutcome::Rejected(reason));
         let ws = match self.ctx.workspaces().get(&wf.workspace_id).await {
             Ok(ws) => ws,
             Err(e) => {
@@ -802,10 +830,13 @@ impl<C: WorkflowCtx> WorkflowChatTriggerImpl<C> {
                     wf.name,
                     wf.workspace_id
                 );
-                return Some(refusal(format!(
-                    "⚠️ Can't start **{}**: its workspace (`{}`) could not be loaded: {e}.",
-                    wf.name, wf.workspace_id
-                )));
+                return rejected(
+                    format!("workspace could not be loaded: {e}"),
+                    format!(
+                        "⚠️ Can't start **{}**: its workspace (`{}`) could not be loaded: {e}.",
+                        wf.name, wf.workspace_id
+                    ),
+                );
             }
         };
         // S3-302: a chat `Working Directory:` (or repos) outside every
@@ -816,10 +847,11 @@ impl<C: WorkflowCtx> WorkflowChatTriggerImpl<C> {
                 wf.name,
                 ws.name
             );
-            return Some(refusal(format!(
+            let reply = format!(
                 "⚠️ Can't start **{}** (workspace *{}*): {reason}.",
                 wf.name, ws.name
-            )));
+            );
+            return rejected(reason, reply);
         }
         tracing::info!(
             "workflow chat: starting workflow '{}' (id {}, ws {}) from {channel}/{chat}",
@@ -829,7 +861,7 @@ impl<C: WorkflowCtx> WorkflowChatTriggerImpl<C> {
         );
         // Read BEFORE the insert, so the new run doesn't count itself.
         let cap = max_parallel_runs();
-        let outlook = self.slot_outlook_now(&repo, cap).await;
+        let outlook = slot_outlook_now(repo, cap, None).await;
         let run = match repo
             .create_run(&wf.id, &wf.workspace_id, &input, None)
             .await
@@ -841,10 +873,13 @@ impl<C: WorkflowCtx> WorkflowChatTriggerImpl<C> {
                     wf.name,
                     ws.name
                 );
-                return Some(refusal(format!(
-                    "⚠️ Can't start **{}** (workspace *{}*): the run could not be created: {e}.",
-                    wf.name, ws.name
-                )));
+                return rejected(
+                    format!("the run could not be created: {e}"),
+                    format!(
+                        "⚠️ Can't start **{}** (workspace *{}*): the run could not be created: {e}.",
+                        wf.name, ws.name
+                    ),
+                );
             }
         };
         self.ctx.spawn_run(
@@ -854,29 +889,12 @@ impl<C: WorkflowCtx> WorkflowChatTriggerImpl<C> {
             input.clone(),
             otto_core::workflows::RunScope::default(),
         );
-        Some(WorkflowChatAck {
-            reply: ack_reply(&wf.name, &run.id, outlook, cap, goals, notes),
-        })
-    }
-
-    /// Whether a run admitted now starts or queues, from the persisted run
-    /// states: queued = fresh `pending` rows with no step progress; executing
-    /// = the other live runs, minus those parked on an approval (which hand
-    /// their slot back). A snapshot — the engine's in-memory gate is the
-    /// authority — so `None` on any read error and the ack says "started".
-    async fn slot_outlook_now(&self, repo: &WorkflowsRepo, cap: usize) -> Option<SlotOutlook> {
-        let queued: std::collections::HashSet<String> =
-            repo.queued_run_ids().await.ok()?.into_iter().collect();
-        let mut executing = 0;
-        for id in repo.list_active_run_ids_global().await.ok()? {
-            if queued.contains(&id) {
-                continue;
-            }
-            if let Ok(Some((_, waiting_approval))) = repo.run_status(&id).await {
-                executing += usize::from(!waiting_approval);
-            }
-        }
-        Some(slot_outlook(executing, queued.len(), cap))
+        (
+            WorkflowChatAck {
+                reply: ack_reply(&wf.name, &run.id, outlook, cap, goals, notes),
+            },
+            trigger_outcome::admitted(outlook),
+        )
     }
 
     /// Resolve a typed workflow name in the receiving workspace: the exact
@@ -1062,7 +1080,7 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
                 notes.push(format!("⚠️ {note}"));
             }
             return self
-                .start_named(wf, input, Some(&goals_txt), &notes, channel, chat)
+                .start_named(wf, input, Some(&goals_txt), &notes, channel, chat, None)
                 .await;
         }
 
@@ -1084,7 +1102,7 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
                         "raw": text,
                     });
                     return self
-                        .start_named(*wf, input, None, &notes, channel, chat)
+                        .start_named(*wf, input, None, &notes, channel, chat, None)
                         .await;
                 }
                 Resolved::Missing(reply) | Resolved::Failed(reply) if explicit => {
@@ -1132,6 +1150,7 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
         let candidates = binding_candidates(&triggers, channel, chat, thread, has_mention);
         let mut wf = None;
         let mut load_error = None;
+        let mut binding_id = String::new();
         for trigger in candidates {
             let candidate = match repo.get(&trigger.workflow_id).await {
                 Ok(w) => w,
@@ -1141,6 +1160,12 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
                         trigger.id
                     );
                     if load_error.is_none() {
+                        trigger_outcome::stamp_rejected(
+                            self.ctx.pool(),
+                            &trigger.id,
+                            &format!("its workflow could not be loaded: {e}"),
+                        )
+                        .await;
                         load_error = Some(e.to_string());
                     }
                     continue;
@@ -1159,6 +1184,7 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
                 );
                 continue;
             }
+            binding_id = trigger.id.clone();
             wf = Some(candidate);
             break;
         }
@@ -1208,7 +1234,16 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
             "msg": stripped,
             "raw": text,
         });
-        self.start_named(wf, input, None, &[], channel, chat).await
+        self.start_named(
+            wf,
+            input,
+            None,
+            &[],
+            channel,
+            chat,
+            Some(binding_id.as_str()),
+        )
+        .await
     }
 
     async fn try_control(
@@ -1801,6 +1836,9 @@ mod tests {
             admission_generation: 0,
             created_at: chrono::Utc::now(),
             armed_at: None,
+            last_fired_at: None,
+            last_outcome: None,
+            last_detail: None,
         }
     }
 

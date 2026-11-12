@@ -32,6 +32,8 @@
   import { lazyComponent, whenIdle } from '../../lib/lazy-component.svelte';
   import SshPane from './SshPane.svelte';
   import DbConnErrorBanner from './DbConnErrorBanner.svelte';
+  import DiagnoseAside from './DiagnoseAside.svelte';
+  import { connDiagnose } from './diagnose.svelte';
   import { sshTabs } from './ssh-tabs.svelte';
   import ImportDialog from './ImportDialog.svelte';
   import ExportDialog from './ExportDialog.svelte';
@@ -914,10 +916,8 @@
       : null,
   );
   /** The profile behind an SSH/custom tab (null once it was deleted). */
-  const sshConn = (connId: string): Connection | null =>
-    database.otherConnections.find((c) => c.id === connId) ?? database.connections.find((c) => c.id === connId) ?? null;
-  const editableConn = (c: Connection | null): ((c: Connection) => void) | undefined =>
-    c && connectionAccess(c, 'configure', 'admin') ? editConnection : undefined;
+  const sshConn = (id: string): Connection | null => database.otherConnections.find((c) => c.id === id) ?? database.connections.find((c) => c.id === id) ?? null;
+  const editableConn = (c: Connection | null) => (c && connectionAccess(c, 'configure', 'admin') ? editConnection : undefined);
   // Roving tabindex over the connection strip: the selected tab is the one Tab
   // stop; with none selected, the first tab is, so the strip stays reachable.
   const connTabActive = $derived(
@@ -1334,6 +1334,7 @@
       {/if}
     {/if}
   </div>
+  <DiagnoseAside editFor={editableConn} />
 </div>
 </PageBody>
 </div>
@@ -1688,12 +1689,8 @@
 {#if accessFor}<Modal title={`Access · ${accessFor.name}`} width={820} onclose={() => accessFor=null}><ResourceAccess kind="connection" resourceId={accessFor.id} /></Modal>{/if}
 
 {#if connFormOpen}
-  <ConnectionForm
-    existing={editingConn}
-    kinds={ALL_KINDS}
-    onclose={() => (connFormOpen = false)}
-    onsaved={onConnSaved}
-  />
+  <ConnectionForm existing={editingConn} kinds={ALL_KINDS} onclose={() => (connFormOpen = false)} onsaved={onConnSaved}
+    ondiagnose={(p) => { const c = editingConn; connFormOpen = false; if (c) connDiagnose.request(c, p); }} />
 {/if}
 
 {#if clusterFormOpen}

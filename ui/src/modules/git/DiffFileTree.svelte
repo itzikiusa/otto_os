@@ -26,8 +26,13 @@
     showStatus?: boolean;
     onjump: (path: string) => void;
     ontoggleviewed: (path: string) => void;
+    /** Files picked for an action (⌘/Ctrl-click toggles one via `onpick`). */
+    picked?: ReadonlySet<string> | null;
+    onpick?: (path: string) => void;
+    /** A file row's context menu. */
+    onfilemenu?: (e: MouseEvent, path: string) => void;
   }
-  let { tree, matchSet, viewed, commentCounts, current = null, showStatus = false, onjump, ontoggleviewed }: Props = $props();
+  let { tree, matchSet, viewed, commentCounts, current = null, showStatus = false, onjump, ontoggleviewed, picked = null, onpick, onfilemenu }: Props = $props();
 
   let collapsed: Record<string, boolean> = $state({});
   function toggleDir(path: string): void {
@@ -123,6 +128,7 @@
     class="nav-file"
     class:nav-file-viewed={isViewed}
     class:nav-file-current={current === file.path}
+    class:nav-file-picked={!!picked?.has(file.path)}
     style="padding-inline-start: {8 + depth * 12}px"
     title={file.path}
   >
@@ -135,7 +141,9 @@
         aria-label="Mark {file.path} as viewed"
       />
     </span>
-    <button class="nav-file-open" onclick={() => onjump(file.path)} aria-label="Go to {file.path}" aria-current={current === file.path ? 'true' : undefined}>
+    <button class="nav-file-open" aria-label="Go to {file.path}{picked?.has(file.path) ? ' (selected)' : ''}" aria-current={current === file.path ? 'true' : undefined}
+      onclick={(e) => ((e.metaKey || e.ctrlKey) && onpick ? onpick(file.path) : onjump(file.path))}
+      oncontextmenu={onfilemenu ? (e) => onfilemenu(e, file.path) : undefined}>
       {#if st}<span class="nav-st st-{st.kind}" title={st.label} aria-hidden="true">{st.glyph}</span>{/if}
       <span class="nav-file-path"><span class="nav-base">{baseName(file.path)}</span></span>
       {#if cCount > 0}
@@ -251,6 +259,7 @@
   .nav-file.nav-file-viewed {
     opacity: 0.45;
   }
+  .nav-file.nav-file-picked { background: var(--accent-faint); }
   .nav-file.nav-file-current {
     opacity: 1;
     background: var(--accent-soft);

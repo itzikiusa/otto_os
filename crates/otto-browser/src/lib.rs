@@ -19,7 +19,7 @@ pub mod live;
 
 pub use cdp::LightpandaEngine;
 pub use engine::{BrowserEngine, EngineError, MatchedNode, Page, PAGE_BYTE_CAP, PAGE_TIMEOUT_SECS};
-pub use extract::{html_to_markdown, readability};
+pub use extract::{html_to_markdown, page_markdown, readability};
 pub use lightpanda::Lightpanda;
 
 use std::collections::HashMap;
@@ -222,8 +222,8 @@ pub(crate) async fn build_page(
     let url = url.to_string();
     tokio::task::spawn_blocking(move || {
         let title = extract_title(&html);
-        let cleaned = readability(&html);
-        let markdown = html_to_markdown(&cleaned);
+        // Links stay clickable in the reader (resolved against the page).
+        let markdown = page_markdown(&html, &url);
         Page {
             url,
             title,

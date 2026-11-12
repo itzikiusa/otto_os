@@ -13,8 +13,13 @@
 //! secret), not the account row: a token rotated to another person's token
 //! under the same account must not keep the old identity, and every provider
 //! constructor (including the tests' `with_base`) gets a key for free. A failed
-//! lookup is never cached and never fails the PR request — nothing is "you"
-//! for that read and the next one asks again.
+//! lookup never fails the PR request — nothing is "you" for that read. A
+//! network failure is not cached (the next read asks again); a 401/403 is the
+//! token lacking the scope (Bitbucket's `/user` needs Account: read), which
+//! will not change on its own, so it is remembered for [`NEG_TTL`] instead of
+//! costing a failing call on every PR open. Meanwhile the forge's answers to
+//! the caller's own writes (an approval, a posted comment) carry the caller's
+//! user object, and [`learn`] stores it — `is_me` then works without `/user`.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -27,6 +32,9 @@ use sha2::{Digest, Sha256};
 /// How long a resolved identity is trusted. Who owns a token does not change;
 /// the bound only keeps a deleted/renamed forge account from living forever.
 const TTL: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// How long a refused (401/403) identity lookup is not retried.
+const NEG_TTL: Duration = Duration::from_secs(30 * 60);
 
 /// The authenticated forge user as its stable-id keys (`uuid:{…}`,
 /// `account_id:…`, `login:…`, `id:…` — lowercased). Built by each provider
@@ -84,14 +92,32 @@ pub(crate) fn cache_key(provider: &str, base: &str, secret: &str) -> String {
     )
 }
 
-fn cache() -> &'static Mutex<HashMap<String, (Instant, Me)>> {
-    static C: OnceLock<Mutex<HashMap<String, (Instant, Me)>>> = OnceLock::new();
+/// One credential's cached answer: `Some(me)` = known, `None` = the forge
+/// refused the lookup (401/403) — negative, kept for [`NEG_TTL`].
+type Entry = (Instant, Option<Me>);
+
+fn cache() -> &'static Mutex<HashMap<String, Entry>> {
+    static C: OnceLock<Mutex<HashMap<String, Entry>>> = OnceLock::new();
     C.get_or_init(Default::default)
 }
 
+fn fresh((at, me): &Entry) -> bool {
+    at.elapsed() < if me.is_some() { TTL } else { NEG_TTL }
+}
+
+fn store(key: &str, me: Option<Me>) {
+    if !enabled() {
+        return;
+    }
+    let mut guard = cache().lock().unwrap_or_else(|p| p.into_inner());
+    // Bounded by the number of credentials in use; stale rows go.
+    guard.retain(|_, e| fresh(e));
+    guard.insert(key.to_string(), (Instant::now(), me));
+}
+
 /// The identity for `key`, from the cache or — on a miss — `fetch`. A fetch
-/// that fails (or yields no ids) is logged at debug and answers `None`
-/// without being cached.
+/// that fails (or yields no ids) is logged at debug and answers `None`; only
+/// a refusal (`Forbidden` / `Unauthorized`) is remembered, for [`NEG_TTL`].
 pub(crate) async fn cached<F, Fut>(key: &str, fetch: F) -> Option<Me>
 where
     F: FnOnce() -> Fut,
@@ -99,27 +125,39 @@ where
 {
     if enabled() {
         let guard = cache().lock().unwrap_or_else(|p| p.into_inner());
-        if let Some((at, me)) = guard.get(key) {
-            if at.elapsed() < TTL {
-                return Some(me.clone());
-            }
+        if let Some(e) = guard.get(key).filter(|e| fresh(e)) {
+            return e.1.clone();
         }
     }
     match fetch().await {
         Ok(Some(me)) => {
-            if enabled() {
-                let mut guard = cache().lock().unwrap_or_else(|p| p.into_inner());
-                // Bounded by the number of credentials in use; stale rows go.
-                guard.retain(|_, (at, _)| at.elapsed() < TTL);
-                guard.insert(key.to_string(), (Instant::now(), me.clone()));
-            }
+            store(key, Some(me.clone()));
             Some(me)
         }
         Ok(None) => None,
+        Err(e @ (otto_core::Error::Forbidden(_) | otto_core::Error::Unauthorized)) => {
+            tracing::debug!(
+                "forge identity lookup refused (not retried for {} min; nothing marked as you \
+                 until an own action names the account): {e}",
+                NEG_TTL.as_secs() / 60
+            );
+            store(key, None);
+            None
+        }
         Err(e) => {
             tracing::debug!("forge identity lookup failed (nothing marked as you): {e}");
             None
         }
+    }
+}
+
+/// Store the caller's identity read off the forge's answer to one of the
+/// caller's own writes (Bitbucket's approve / request-changes participant,
+/// a just-posted comment's author). Replaces a negative entry; a payload
+/// without ids changes nothing.
+pub(crate) fn learn(key: &str, me: Option<Me>) {
+    if let Some(me) = me {
+        store(key, Some(me));
     }
 }
 
@@ -135,6 +173,13 @@ fn enabled() -> bool {
 pub(crate) fn forget_for_tests(base: &str) {
     let mut guard = cache().lock().unwrap_or_else(|p| p.into_inner());
     guard.retain(|k, _| !k.split('|').nth(1).is_some_and(|b| b.starts_with(base)));
+}
+
+/// Whether `key` holds a fresh negative (refused-lookup) entry.
+#[cfg(test)]
+pub(crate) fn is_negative_for_tests(key: &str) -> bool {
+    let guard = cache().lock().unwrap_or_else(|p| p.into_inner());
+    guard.get(key).is_some_and(|e| e.1.is_none() && fresh(e))
 }
 
 #[cfg(test)]

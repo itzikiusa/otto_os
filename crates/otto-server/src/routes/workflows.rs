@@ -902,6 +902,10 @@ pub fn workspace_run_routes() -> axum::Router<ServerCtx> {
             axum::routing::get(list_active_runs),
         )
         .route(
+            "/workspaces/{wid}/workflow-runs/queue",
+            axum::routing::get(run_queue),
+        )
+        .route(
             "/workspaces/{wid}/workflow-runs",
             axum::routing::get(search_runs),
         )
@@ -988,6 +992,18 @@ pub async fn list_active_runs(
     Ok(Json(
         repo(&ctx).list_active_runs(&wid).await.map_err(ApiError)?,
     ))
+}
+
+/// `GET /workspaces/{wid}/workflow-runs/queue` — the parallel-run cap and the
+/// workspace's queued runs with their place in the daemon-wide line.
+pub async fn run_queue(
+    Path(wid): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<otto_workflows::run_queue::QueueView>> {
+    crate::auth::require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
+    let view = otto_workflows::run_queue::queue_view(&repo(&ctx), &wid).await;
+    Ok(Json(view.map_err(ApiError)?))
 }
 
 // ---------------------------------------------------------------------------
@@ -1675,15 +1691,15 @@ pub async fn webhook_trigger(
     // One run at a time per workflow, checked atomically with the insert —
     // the same admission the schedule/event triggers and scheduled tasks use,
     // so a retrying CI caller can't stack concurrent runs (409 instead).
-    let run = repo(&ctx)
+    let busy = "a run of this workflow is already in progress — retry once it finishes";
+    let admitted = repo(&ctx)
         .admit_run_if_idle(&wf.id, &wf.workspace_id, &input, None)
-        .await
-        .map_err(ApiError)?
-        .ok_or_else(|| {
-            ApiError(Error::Conflict(
-                "a run of this workflow is already in progress — retry once it finishes".into(),
-            ))
-        })?;
+        .await;
+    let Some(run) = admitted.map_err(ApiError)? else {
+        otto_workflows::trigger_outcome::stamp_rejected(&ctx.pool, &trigger.id, busy).await;
+        return Err(ApiError(Error::Conflict(busy.into())));
+    };
+    otto_workflows::trigger_outcome::stamp_admitted(&ctx.pool, &trigger.id, &run.id).await;
 
     workflow_engine::spawn_run(
         ctx.clone(),

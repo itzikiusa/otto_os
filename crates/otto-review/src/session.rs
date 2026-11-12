@@ -455,12 +455,13 @@ fn coerce_finding_value(v: serde_json::Value) -> Option<serde_json::Value> {
     Some(Value::Object(map))
 }
 
-/// Outcome of one review agent run (fed to the summarizer). Why a failed run
-/// failed is the row's persisted `note` (`review_error_note`), which the
-/// caller reads from its `SharedStates` (the scope assessment does).
+/// Outcome of one review agent run (fed to the summarizer).
 pub struct AgentRunResult {
     pub findings: Vec<ReviewFinding>,
     pub errored: bool,
+    /// Why an errored run failed (or was skipped) — the same text persisted
+    /// as the row's `note`; `None` for a run that finished.
+    pub reason: Option<String>,
 }
 
 /// Shared, persisted live state for all agents in a review.
@@ -922,20 +923,24 @@ pub async fn run_agent_session_with_recovery(
         AgentRunResult {
             findings,
             errored: false,
+            reason: None,
         }
     } else if outcome.reason == Some(FailReason::Superseded) {
         let by = {
             let g = states.lock().await;
             lens_covered_by(&g, agent_index).unwrap_or_default()
         };
+        let note = format!("skipped — {} already covered this lens", by);
+        let reason = Some(note.clone());
         persist_agent(states, reviews, review_id, agent_index, move |s| {
             s.status = "skipped".into();
-            s.note = format!("skipped — {} already covered this lens", by);
+            s.note = note;
         })
         .await;
         AgentRunResult {
             findings: Vec::new(),
             errored: true,
+            reason,
         }
     } else {
         let refused = prompt_refused.load(std::sync::atomic::Ordering::Relaxed);
@@ -944,6 +949,7 @@ pub async fn run_agent_session_with_recovery(
         } else {
             review_error_note(outcome.reason)
         };
+        let reason = Some(note.clone());
         persist_agent(states, reviews, review_id, agent_index, move |s| {
             s.status = "error".into();
             s.note = note;
@@ -952,6 +958,7 @@ pub async fn run_agent_session_with_recovery(
         AgentRunResult {
             findings: Vec::new(),
             errored: true,
+            reason,
         }
     }
 }

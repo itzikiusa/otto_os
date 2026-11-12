@@ -596,6 +596,7 @@ mod tests {
                 &serde_json::Value::from(transport).to_string(),
             ),
             errored: false,
+            reason: None,
         }
     }
 
@@ -638,6 +639,7 @@ mod tests {
         let result = crate::session::AgentRunResult {
             findings: crate::session::parse_findings(&raw),
             errored: false,
+            reason: None,
         };
         let plan = plan_from_run(&result, "", &ids).expect("the prompt's own shape parses");
         assert_eq!(plan.lenses.len(), 1);
@@ -715,6 +717,7 @@ mod tests {
         let failed = crate::session::AgentRunResult {
             findings: vec![],
             errored: true,
+            reason: Some(crate::session::PROMPT_REFUSED_NOTE.into()),
         };
         let why = err(plan_from_run(
             &failed,

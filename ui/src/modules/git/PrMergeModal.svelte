@@ -17,6 +17,7 @@
   import { pinnedHead } from './pr-cache';
   import { unseenHead, type UnseenHead } from './pr-merge-gate';
   import { mergeStrategies } from './pr-merge-strategy';
+  import { mergeCheckReasons } from './pr-merge-checks';
   import PrMergeUnseen from './PrMergeUnseen.svelte';
 
   interface Props {
@@ -141,6 +142,8 @@
       mergeable === false ? 'Not mergeable' : null,
       blockers > 0 ? plural(blockers, 'blocker finding') : null,
       checksError || readinessError ? 'Unable to verify CI / readiness' : null,
+      // The forge's own merge checks + open tasks (CI ones are the row above).
+      ...mergeCheckReasons(pr),
     ].filter((r): r is string => r !== null),
   );
   const loading = $derived(checksLoading || readinessLoading || headLoading);

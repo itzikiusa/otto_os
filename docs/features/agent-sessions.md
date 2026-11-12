@@ -1474,7 +1474,58 @@ the efficiency cores, which made a review crawl even on an idle machine.
 | `agent_admission_max_wait_secs` | `300` | longest load / memory wait (the ceiling waits 4×) |
 | `agent_background_low_priority` | `true` | run background agents at `nice 10` |
 | `agent_build_parallelism` | auto | `0`/absent = auto, a number = fixed workers, `"off"` = set no variable |
+| `session_auto_archive_background_days` | `7` | archive engine-owned background sessions (reviews, workflow steps, …) idle this many days, checked hourly, 200 per pass; live, attached and kept-alive sessions are skipped; `0` = never. Archiving deletes nothing: the history stays and the session can be unarchived and resumed |
+| `machine_low_disk_gb` | `30` | free GiB on the data volume below which the chip and the bell warn; `0` = never |
 
 The live-session cap (`max_live_agent_sessions`) is still soft: it only
 suspends *quiet* sessions. When every session over it is busy the sweep now
 says so, and if that lasts five minutes it raises one warning notice.
+
+**Where to see it.** `GET /machine/status` (any signed-in user; see
+`docs/contracts/api.md`, "Machine status") returns the load, memory pressure,
+swap, the background agents running against the ceiling, every queued agent
+(its source, how long it has waited and why) and the free space on the volume
+holding Otto's data dir (one `statfs`, no process). Two places read it, through
+one shared poller that asks every 10 s while the window is visible and stops
+while it is hidden:
+
+- **The status bar's machine chip.** A dim gauge while the Mac is calm;
+  *Machine busy · N queued* in warning colour while a background agent arriving
+  now would wait; *Low disk · N GB free* below `machine_low_disk_gb`. Clicking
+  it opens the details (load per core, memory, swap, agents, free disk and the
+  queue). On a narrow window the chip shows the icon alone; its label carries
+  the words.
+- **Settings ▸ Daemon ▸ Machine resources** (root). A live line — *Now: load
+  3.1 on 8 cores · memory normal · 2 of 6 background agents · nothing queued ·
+  142 GB free* — over the settings in the table above: the queue switch,
+  *Background agents running at once* (blank = automatic, the automatic value
+  shown; 0 = no limit), *Run background agents at lower priority*, *Build
+  workers per agent session* (automatic / a number / off), *Archive finished
+  background agent sessions after N days* and the low-disk floor, with the load
+  threshold and the longest wait under *Advanced*. The page refuses a value the
+  daemon would silently replace with its default (a negative count, a
+  fractional number of seconds, a blank archive day count — which the daemon
+  would read as "off"), and saves only the keys you changed.
+
+**"Queued — machine busy".** The agent is not stuck and nothing failed: Otto
+has not started its CLI yet because the Mac is loaded (load above the
+threshold, memory pressure high) or the background-agent limit is reached.
+Queued agents start first-in first-out, a few seconds apart, as the machine
+frees up, and never wait longer than the longest wait (four times that at the
+limit). Your own sessions never queue.
+
+**Health notices in the bell.** Problems that used to show only on the page
+that owns them now post one `System` notice per episode to the notification
+centre, and the same row turns into an info notice when the problem clears:
+
+| Problem | When | Notice (`source_key`) |
+|---|---|---|
+| Low disk | the first `/machine/status` read below `machine_low_disk_gb` | *Low disk space* → *Disk space back to normal* (`machine:low_disk`) |
+| Slack Socket Mode listener down | disconnected for over 2 minutes (connect failures, dropped socket, rejected token) | *Slack disconnected* naming the workspace and the last error → *Slack reconnected* (`channel:slack:<workspace>:listener`) |
+| Usage database down | `outage_since` older than 5 minutes (checked once a minute) | *Usage is not being recorded* → *Usage recording resumed* (`usage:outage`) |
+| Usage journal filling | `journal_fill` above 50% (clears below 40%) | *Usage journal N% full* → *Usage journal drained* (`usage:journal`) |
+
+The Usage page also shows a banner at the top while the usage database is down
+("Usage has not been recorded since 14:05 … Otto is retrying"), while the
+transcript tailer is retrying or stopped, and while the journal is over half
+full. Nothing is held back or deleted on any of these.

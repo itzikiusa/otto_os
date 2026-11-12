@@ -5,6 +5,7 @@
   import { openExternal } from '../../lib/external';
   import { rel } from '../../lib/stores/now.svelte';
   import PrAvatar from './PrAvatar.svelte';
+  import PrMergeChecks from './PrMergeChecks.svelte';
 
   interface Props {
     pr: PrDetail;
@@ -55,6 +56,7 @@
       {/each}
     </section>
   {/if}
+  <PrMergeChecks {pr} />
   {#if (pr.labels ?? []).length > 0}
     <section>
       <h3 class="h">Labels</h3>

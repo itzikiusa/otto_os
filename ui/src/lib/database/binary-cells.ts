@@ -34,3 +34,18 @@ export function bytesToHexCompact(bytes: Uint8Array): string {
   for (const b of bytes) out += b.toString(16).padStart(2, '0');
   return out;
 }
+
+/** Menu-item overrides for a cell of a binary column: the WHERE-building
+ *  actions (Filter / Exclude chips, Query by value, Add to query) would compare
+ *  the column with its base64 TEXT and match nothing, so they are disabled and
+ *  say why. Other cells get no override. */
+export function binaryFilterOff(
+  column: { binary?: boolean } | undefined,
+  value: unknown,
+): { disabled?: boolean; title?: string } {
+  if (!column?.binary || typeof value !== 'string') return {};
+  return {
+    disabled: true,
+    title: 'Not for binary columns: the value is shown as base64 text, which the database would compare as text and match nothing. Open the value to copy it as hex.',
+  };
+}

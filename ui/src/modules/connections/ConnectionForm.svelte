@@ -1,6 +1,8 @@
 <script lang="ts">
   import { announce } from '../../lib/announce.svelte';
-  import PathField from '../../lib/components/PathField.svelte';
+  import PemField from './PemField.svelte';
+  import TunnelFields from './TunnelFields.svelte';
+  import { argvExposure, argvWarning } from './connection-warnings';
   import { toastError } from '../../lib/toastError';
   // New/Edit connection sheet — unified form with optional SSH tunnel toggle.
   // Field layout: name / kind / host / port / user / database / password /
@@ -22,11 +24,13 @@
     onsaved: (c: Connection) => void;
     /** Restrict the kind selector (e.g. DB-only in the Database module). */
     kinds?: ConnectionKind[];
+    /** "Diagnose with an agent…" on a saved profile's failed Test (the host closes the form and asks consent). */
+    ondiagnose?: (probe: { message: string; hint?: string | null; detail?: string | null }) => void;
   }
   let {
     existing,
     onclose,
-    onsaved,
+ onsaved, ondiagnose,
     kinds = ['ssh', 'mysql', 'postgres', 'redis', 'mongodb', 'clickhouse', 'custom'],
   }: Props = $props();
 
@@ -119,7 +123,8 @@
   let tunUser = $state((existingSsh?.user as string) ?? '');
   // svelte-ignore state_referenced_locally
   let tunIdentity = $state((existingSsh?.identity_file as string) ?? '');
-  let showTunnelFilePicker = $state(false);
+  // svelte-ignore state_referenced_locally
+  let tunJump = $state((existingSsh?.proxy_jump as string) ?? '');
 
   // Section assignment (workspace connections only). `''` = ungrouped.
   // svelte-ignore state_referenced_locally
@@ -240,7 +245,8 @@
     // SSH tunnel (DB engines only). Requires at least a host.
     if (tlsKinds.has(kind) && tunnelOpen && tunHost.trim()) {
       const ssh: Record<string, unknown> = { ...(existing?.params?.ssh as Record<string, unknown> ?? {}), host: tunHost.trim() };
-      for (const key of ['port', 'user', 'identity_file']) delete ssh[key];
+      for (const key of ['port', 'user', 'identity_file', 'proxy_jump']) delete ssh[key];
+      if (tunJump.trim()) ssh['proxy_jump'] = tunJump.trim();
       if (tunPort !== '') ssh['port'] = Number(tunPort);
       if (tunUser)        ssh['user'] = tunUser;
       if (tunIdentity)    ssh['identity_file'] = tunIdentity;
@@ -401,8 +407,10 @@
   let testing = $state(false);
   /** `detail` is the full outcome line; `hint` says what to change on a
    *  recognised failure; `warn` carries the key-permission warning. */
-  let testResult = $state<{ ok: boolean; detail: string; hint?: string; warn?: string } | null>(null);
+  let testResult = $state<{ ok: boolean; detail: string; hint?: string; warn?: string; stderr?: string; argv?: boolean } | null>(null);
   let testPanel = $state<HTMLElement | null>(null);
+  // Password on the client's command line: the last Test's `warn_argv` (the daemon's verdict), else the same rule locally.
+  const argvWarn = $derived(testResult?.argv ? argvWarning(kind === 'mongodb' ? 'mongodb' : 'clickhouse') : argvWarning(argvExposure(kind, fConnString, secret !== '' || !!existing?.secret_ref)));
 
   /** The settings the shown result was measured against — editing any field
    *  afterwards clears it, so a green "Connected" never vouches for values
@@ -432,7 +440,7 @@
             ? `Connected${res.latency_ms != null ? ` (${res.latency_ms}ms)` : ''}`
             : res.message,
           hint: res.hint ?? undefined,
-          warn: res.warn_key_perms ?? undefined,
+          warn: res.warn_key_perms ?? undefined, stderr: res.detail ?? undefined, argv: res.warn_argv === true,
         };
       } else {
         const body: Record<string, unknown> = {
@@ -618,12 +626,7 @@
     </label>
   </div>
 
-  {#if kind === 'clickhouse'}
-    <div class="warn-banner">
-      clickhouse-client only accepts the password via argv — it may be visible in
-      <span class="mono">ps</span> output on the host while connected.
-    </div>
-  {/if}
+  {#if argvWarn}<div class="warn-banner" data-testid="argv-warning">{argvWarn}</div>{/if}
 
   <!-- MongoDB: connection string only -->
   {#if kind === 'mongodb'}
@@ -775,19 +778,10 @@
           </label>
           <span class="hint">Turn off to accept self-signed / invalid certificates.</span>
         </div>
-        <div class="field">
-          <label for="cf-tls-ca">CA certificate — file path or pasted PEM <span class="dim">(optional)</span></label>
-          <PathField bind:value={tlsCaCert} files><input dir="ltr" id="cf-tls-ca" class="input mono" bind:value={tlsCaCert} placeholder="~/certs/ca.pem or -----BEGIN CERTIFICATE-----" spellcheck="false" /></PathField>
-        </div>
+        <div class="field"><PemField id="cf-tls-ca" label="CA certificate — file path or pasted PEM" bind:value={tlsCaCert} placeholder="~/certs/ca.pem or -----BEGIN CERTIFICATE-----" /></div>
         <div class="field-row">
-          <div class="field grow">
-            <label for="cf-tls-cert">Client cert — path or PEM <span class="dim">(optional)</span></label>
-            <PathField bind:value={tlsClientCert} files><input dir="ltr" id="cf-tls-cert" class="input mono" bind:value={tlsClientCert} placeholder="~/certs/client.pem or pasted PEM" spellcheck="false" /></PathField>
-          </div>
-          <div class="field grow">
-            <label for="cf-tls-key">Client key — path or PEM <span class="dim">(optional)</span></label>
-            <PathField bind:value={tlsClientKey} files><input dir="ltr" id="cf-tls-key" class="input mono" bind:value={tlsClientKey} placeholder="~/certs/client-key.pem or pasted PEM" spellcheck="false" /></PathField>
-          </div>
+          <div class="field grow"><PemField id="cf-tls-cert" label="Client cert — path or PEM" bind:value={tlsClientCert} placeholder="~/certs/client.pem or pasted PEM" /></div>
+          <div class="field grow"><PemField id="cf-tls-key" label="Client key — path or PEM" bind:value={tlsClientKey} placeholder="~/certs/client-key.pem or pasted PEM" /></div>
         </div>
         <div class="field">
           <label for="cf-tls-sni">Server name (SNI) <span class="dim">(optional)</span></label>
@@ -805,31 +799,7 @@
     </div>
     {#if tunnelOpen}
       <div class="ssh-section">
-        <div class="field-row">
-          <div class="field grow">
-            <label for="cf-tun-host">Tunnel host</label>
-            <input dir="ltr" id="cf-tun-host" class="input mono" bind:value={tunHost} placeholder="bastion.example.com" spellcheck="false" />
-            {#if !tunHost.trim()}
-              <span class="hint">Required — without a host the tunnel isn’t saved.</span>
-            {/if}
-          </div>
-          <div class="field tun-port">
-            <label for="cf-tun-port">Port <span class="dim">(opt)</span></label>
-            <input id="cf-tun-port" class="input mono" type="number" bind:value={tunPort} placeholder="22" />
-          </div>
-        </div>
-        <div class="field">
-          <label for="cf-tun-user">Tunnel user <span class="dim">(optional)</span></label>
-          <input dir="ltr" id="cf-tun-user" class="input mono" bind:value={tunUser} placeholder="ec2-user" spellcheck="false" />
-        </div>
-        <div class="field">
-          <label for="cf-tun-identity">Identity file <span class="dim">(optional)</span></label>
-          <div class="file-input-row">
-            <input dir="ltr" id="cf-tun-identity" class="input mono grow" bind:value={tunIdentity} placeholder="~/.ssh/id_rsa" spellcheck="false" />
-            <button class="btn browse-btn" onclick={() => (showTunnelFilePicker = true)}>Browse…</button>
-          </div>
-          <span class="hint">Key file must be private (<span class="mono">chmod 600</span>) or ssh ignores it.</span>
-        </div>
+        <TunnelFields bind:host={tunHost} bind:port={tunPort} bind:user={tunUser} bind:jump={tunJump} bind:identity={tunIdentity} />
       </div>
     {/if}
   {/if}
@@ -913,6 +883,7 @@
       {#if !testResult.ok}<p class="test-panel-msg mono">{testResult.detail}</p>{/if}
       {#if testResult.hint}<p class="test-panel-hint"><strong>What to check:</strong> {testResult.hint}</p>{/if}
       {#if testResult.warn}<p class="test-panel-warn">{testResult.warn}</p>{/if}
+      {#if !testResult.ok && existing && ondiagnose && (kind === 'ssh' || tlsKinds.has(kind))}<div><button class="btn small" onclick={() => testResult && ondiagnose?.({ message: testResult.detail, hint: testResult.hint, detail: testResult.stderr })} data-testid="conn-diagnose"><Icon name="assistant" size={12} />Diagnose with an agent…</button></div>{/if}
     </div>
   {/if}
 
@@ -958,17 +929,6 @@
     files={true}
     onpick={(path) => { fIdentity = path; showFilePicker = false; }}
     onclose={() => (showFilePicker = false)}
-  />
-{/if}
-
-<!-- SSH tunnel identity file picker -->
-{#if showTunnelFilePicker}
-  <FolderPicker
-    title="Choose identity file"
-    start={tunIdentity ? tunIdentity.replace(/\/[^/]+$/, '') : ''}
-    files={true}
-    onpick={(path) => { tunIdentity = path; showTunnelFilePicker = false; }}
-    onclose={() => (showTunnelFilePicker = false)}
   />
 {/if}
 
@@ -1079,9 +1039,6 @@
   .browse-btn {
     flex-shrink: 0;
     white-space: nowrap;
-  }
-  .tun-port {
-    flex: 0 0 90px;
   }
   .section-row,
   .section-new {

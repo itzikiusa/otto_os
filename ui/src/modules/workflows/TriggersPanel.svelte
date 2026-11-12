@@ -15,6 +15,7 @@
   import { buildTriggerSpec, chatBindingHow, defaultTriggerForm, formFromTrigger, EVENT_KINDS } from './triggerForm';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { cadenceLabel } from '../../lib/cadence';
+  import TriggerStatus from './TriggerStatus.svelte';
 
   interface Props {
     workflowId: string;
@@ -359,6 +360,7 @@
         <span class="trig-kind">{KIND_LABEL[t.kind] ?? t.kind}</span>
         <span class="trig-spec" title={describeSpec(t)}>{describeSpec(t)}</span>
         {#if t.kind === 'chat'}<span class="trig-how">{chatBindingHow(t.spec)}</span>{/if}
+        <TriggerStatus trigger={t} />
       </div>
       <Switch
         checked={t.enabled}

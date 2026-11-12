@@ -47,8 +47,21 @@ Open **Review scope** to see the selected lenses, their reasons, related modules
 risks and assigned providers. A small change need not launch a broad review. A
 prose-only change under `docs/` can use a deterministic documentation scope; it
 still runs a reviewer and verifier. Changes with prior findings or configured
-required checks use scope assessment instead. The assessment has a two-minute
-execution budget. Failure is shown rather than silently launching every lens.
+required checks use scope assessment instead. A PR over the large-PR threshold
+(5,000 changed lines by default) skips the assessment and runs every configured
+lens on every provider.
+
+The assessment gets two attempts inside a one-hour cap; each attempt fails only
+when the assessor goes quiet for the reviewer idle budget. A usable plan with gaps
+is kept (a missing reason or instruction is defaulted; a prior finding it left
+out stays `still_open` with the evidence `not assessed by scope`). When both
+attempts fail, the review does not stop: every configured lens runs, and
+**Review scope** shows why the assessment was unavailable.
+
+Prompts over 16 KB (reviewer, scope and verifier prompts routinely run 100+ KB)
+are written to a private temp file and the session is typed a short pointer to
+it, so a long paste cannot outlast the terminal write and leave an agent that
+never started.
 
 Enabled providers form a pool. By default lenses are distributed across that
 pool. **Cross-provider check** explicitly runs selected configured lenses on their
@@ -85,13 +98,50 @@ Severity describes impact: `bug` means must fix, `warn` means should fix, and
 `info` means optional. Issues sharing one fix are consolidated. Raw reviewer
 findings remain available, including when final verification fails.
 
+### How a review ends
+
+| Outcome | Review status | What it means |
+|---|---|---|
+| Verified | `done` | The verifier accounted for the reviewers' claims. A claim it did not account for is still stored, as a draft whose body starts `[unverified] `, and still counts; omitting a claim never makes it disappear. **Verification coverage** in the scope notes says "N of M reviewer claims verified; K carried forward unverified". |
+| Incomplete — not a verdict | `error`, message `Review incomplete — not a verdict: …` | The reviewers' findings are stored, but there is no verdict: the verifier did not run or accounted for no claim (every finding is stored unverified), a reviewer did not finish (named with why it failed, e.g. `Security (timed out with no result)`), or the reviewed change was only partly covered (a partial diff, or a PR source that could not be checked out). Never read it as clean or as a score of 0. |
+| Error | `error`, any other message | Nothing usable (the diff could not be written, the checkout failed, …). Re-run the review. |
+
+To finish an incomplete review: when every reviewer finished and only the
+verifier failed, **Retry summarizer** (or, in a workflow, **Retry step**)
+verifies the stored findings again without re-running the reviewers. A failed
+reviewer is retried on its own card. A partial diff or checkout needs a fresh
+review. The verifier itself gets two start attempts before the run is settled.
+
+Unverified findings are never posted by a workflow as verified: an incomplete
+review fails its `review_run` step before any downstream posting step runs.
+
 ### Re-review
 
 Starting a fresh review assesses the latest change and brings forward previous
 tracked findings for the same repository and PR. Local lineage is also scoped to
-the source branch. Every prior finding needs an explicit `fixed`, `still_open` or
-`not_relevant` disposition with evidence. Disappearance from a new output is not
-proof of resolution. These dispositions are visible in **Review scope**.
+the source branch (detached PR checkouts are named by their remote branch; with
+no branch name at all, nothing is brought forward). Every prior finding needs an
+explicit `fixed`, `still_open` or `not_relevant` disposition with evidence, and is
+also handed to the final verifier as a claim of its own. These dispositions are
+visible in **Review scope** and under **Resolved since the last run**.
+
+A prior finding is marked resolved (its tracked `state` becomes `resolved`) only
+when all of these hold:
+
+- the scope assessment said `fixed` with evidence (a disposition filled in as
+  `not assessed by scope`, or by a fallback plan, never counts);
+- the final verifier re-checked that claim and dismissed it with evidence
+  (`not_relevant`), and did not keep it, merge it into a kept fix or leave it
+  unverified;
+- the managed verifier ran (not the deterministic fallback), the diff was not
+  partial, and a PR's source was checked out;
+- this run did not raise the same finding again.
+
+Disappearing from a new run's output resolves nothing: the scope picks different
+lenses per run, the verifier drops pre-existing issues as out of scope, and a
+re-worded finding can come back under a new fingerprint. Resolution only touches
+the engine's `state`; the triage `status` people set (accepted, waived, …), and
+so merge readiness, is never changed by a review.
 
 For workflow runs, use **Re-review** in the run monitor or send `re-review` in the
 original workflow chat thread. This creates a linked run, refreshes PR refs and
@@ -110,7 +160,8 @@ The summarizer also has an openable managed session on its configured provider.
 - **Stop** cancels one active reviewer and leaves other reviewers running.
 - **Retry** reruns that reviewer using its persisted prompt, diff and reviewed
   context. It is not a review of newly pushed commits; start a fresh review for that.
-- **Retry summarizer** repeats final verification over the stored reviewer results.
+- **Retry summarizer** repeats final verification over the stored reviewer results
+  (needs at least one stored finding; otherwise start a new review).
 - **Cancel review** stops the complete run and tears down its sessions. Cancelled
   reviews cannot be retried using their deleted persisted prompts.
 
@@ -125,6 +176,16 @@ The verifier budget is `300 + 3 × input findings` seconds, capped at 30 minutes
 A timeout, provider failure or malformed response can preserve a deterministic
 fallback, but that fallback is not independent verification: the review remains
 incomplete. Cancellation is terminal and does not start a fallback attempt.
+
+**Daemon restart.** A review running when the daemon stops is settled at the next
+start. If every reviewer had finished and stored findings, only the summarizer is
+run again over those findings (as **Retry summarizer** does) and the review shows
+as running; a workflow step waiting on it picks it up. Each such resume is noted in
+the scope's verification notes, and after two a review is failed instead
+(`Interrupted by daemon restarts while summarizing, after 2 automatic resumes`),
+so a crash loop stops. A review whose reviewers had not all finished fails with
+`Interrupted by a daemon restart — re-run to review again.` A cancelled review is
+left cancelled.
 
 ## Act on findings
 
@@ -244,10 +305,14 @@ evidence and distinguish code traces, actual checks and unavailable checks.
 
 | Symptom | Action |
 |---|---|
-| Scope assessment failed | Inspect its error and provider session. Retry after fixing the CLI or unavailable context; no broad fallback fleet was launched. |
+| Scope assessment failed | The review continued with every configured lens; **Review scope** shows why. Inspect the provider session if it keeps failing (two attempts per review). |
 | Reviewer is queued | Other reviews may occupy the shared slots. Queued time does not consume the reviewer execution timeout. |
 | Reviewer is waiting or stuck | Open its session, inspect the cause, or retry that reviewer. |
-| Final verification is incomplete | Inspect raw findings and verification notes, then retry the summarizer or start a fresh review. Zero published comments alone is not a pass. |
+| `Review incomplete — not a verdict: the final verifier …` | The findings are stored unverified. **Retry summarizer** (or **Retry step** in a workflow) verifies them without re-running the reviewers. |
+| `Review incomplete — not a verdict: reviewer(s) did not finish: X (why)` | The other lenses were verified; the score is partial. Retry reviewer X on its card. |
+| `Review incomplete — not a verdict: the reviewed change is not fully covered` | Part of the diff was omitted or the PR source was not checked out. Fix the cause and start a fresh review. |
+| `Interrupted by a daemon restart …` | Reviewers had not finished: re-run the review. After two automatic summarizer resumes: **Retry summarizer**. |
+| A fixed finding still shows open | Only an explicit, verified `fixed` resolves a finding (see Re-review); triage it yourself, or re-review so the scope and verifier assess it. |
 | PR revision or merge-base unavailable | Fetch/repair the relevant source and target refs, then start a new review. Otto does not verify another checkout as if it were the PR. |
 | Local files were omitted | Inspect the explicit omission markers; narrow or commit the change before seeking complete coverage. |
 | Posted comment is missing | Check `posted` and the provider error; verify account access and rate limits. |

@@ -498,6 +498,31 @@ numeric score cannot override a must-fix finding.
 steps are error-skipped. Empty provider/lens configuration inherits the effective
 repository review configuration (custom, named preset or global default).
 
+The output's `outcome` is one of `passed`, `failed`, `incomplete` or `pending`
+(`await:false`). **`incomplete` is not a verdict**: the review stored its
+reviewers' findings but could not verify them (the verifier failed, a reviewer did
+not finish, or the change was only partly covered — see
+[`code-review.md`](code-review.md#how-a-review-ends)). Then `score`, `review_score`
+and `passed` are not a result: `score` is `null` (never 0), `score_text` reads
+`incomplete`, or `partial — N/100` with `partial_score` when the verifier did run
+over the lenses that finished, `reason` starts `review incomplete — not a verdict:`
+and `verification` gives `state` (`verified`/`partial`/`incomplete`/`none`),
+`unverified`, `coverage` and `missing_lenses`. An incomplete review **always**
+errors the step, with or without `require_pass`, so no downstream step posts or
+gates on a non-verdict. `allow_summary_fallback:true` opts in to scoring the
+stored unverified findings when the verifier is the ONLY thing that failed.
+
+**Retry step on an incomplete review.** The step remembers its review. When
+**Retry step** re-enters it with the same diff, head and configuration and every
+reviewer of that review finished (only the verifier failed, its runner vanished,
+or a daemon restart interrupted it), the step re-runs ONLY the summarizer over
+the stored findings, waits for it, and recomputes its output, score and chat
+message — no new checkout, scope assessment or reviewer fleet. A review with a
+failed reviewer, a partial diff, or a changed head starts a new review instead.
+A run resumed after a daemon restart (`on_restart: resume`) adopts the review the
+same way; if every reviewer had finished, boot recovery has already resumed its
+summarizer (at most twice per review) and the step simply waits for it.
+
 #### Execution compatibility
 
 Existing `review_mode` run overrides, `params.mode` and stored `ReviewConfig.mode`
@@ -668,9 +693,30 @@ starts a run whose **input carries every parsed field** (`trigger:"chat"`, `chan
 `chat`, `thread`, `user`, `name`, `msg`, `jira_ticket`, `working_directory`,
 `relevant_info[]`, `goals[]`, `raw`) — so the first node (e.g. a "prepare relevant
 info" agent) can consolidate the ticket / working dir / paths into a brief for the
-rest of the graph — and replies in-thread (*"🚀 Started workflow … (run `…`)"*).
+rest of the graph — and replies in-thread with where the run landed:
 
-`Name:` must match a workflow **exactly** (`name = ? COLLATE NOCASE`). Before
+- a free run slot: *"🚀 Started workflow **X** (run `id`). Working through the
+  steps now — goals: … Reply `status` · `skip` · `abort` · `help` in this thread
+  to control it."*
+- every slot taken (at most `OTTO_WF_MAX_PARALLEL_RUNS`, default 2, runs execute
+  at once): *"⏳ Queued workflow **X** (run `id`) behind N run(s). It starts when
+  a slot frees (at most N run at once). …"* — and when the run gets its slot the
+  same thread hears *"🚀 Started workflow **X** (run `id`) — it was queued for
+  25 min."* before any step reports. A run that started at once gets no second
+  message.
+- a refusal (its workspace can't be loaded, the `Working Directory:` is outside
+  every registered repo, the run row can't be created) replies *"⚠️ Can't start
+  **X** …: <reason>."* — an explicit trigger never ends in silence.
+
+A name that only matched after normalisation adds *"ℹ️ No workflow is named
+exactly "…" — matched **X**."*. The run's page in Otto
+(`#/workflows/<workflow id>/runs/<run id>`, **Copy link** in the run header)
+shows *Started from Slack — <channel>* with the trigger message in a
+disclosure.
+
+`Name:` is matched case-insensitively first (`name = ? COLLATE NOCASE`), then
+after normalising both sides (dash variants — a typed `-` finds an em dash —
+curly quotes, spacing, case). Before
 matching, `strip_slack_tokens` removes Slack's entity tokens (`<@U…>`, `<#C…>`,
 `<!here>`; `<url|label>` keeps the label) and *then* decodes Slack's HTML escapes
 (`&amp;`/`&lt;`/`&gt;`) — in that order, so a `<` the user actually typed
@@ -678,9 +724,13 @@ matching, `strip_slack_tokens` removes Slack's entity tokens (`<@U…>`, `<#C…
 not cosmetic: Slack escapes `&` in message text, so a workflow named
 *"Provider — games fetch & review"* arrived as `… fetch &amp; review`, matched
 nothing, and `try_start` returned `None` — the trigger became a plain chat
-session with **no error reported anywhere**. If a name still doesn't match,
-that silent fall-through is the symptom to look for (the daemon logs
-`parsed Action:Workflow but no workflow named '…' exists — ignoring`).
+session with **no error reported anywhere**. A name that still matches nothing
+now gets a reply naming the closest workflows: *"No workflow named "X". Did
+you mean: A, B, C? Reply `help` for the full list."* (or *"… Reply `help` for
+the list of workflows."* when nothing is close, *"… — this workspace has no
+workflows yet."* when there are none); several workflows that normalise to the
+same name reply *""X" matches more than one workflow: A, B. Type the exact
+name."*
 
 **Worked example — trigger the "Write tests for a story" template from Slack.**
 Instantiate the `write-tests` template (workflow name *"Write tests for a story"*),
@@ -719,8 +769,17 @@ blocks on chat latency:
   short summary of the work product (or `❌ <step> failed — <err>` on failure);
 - for the **fix→review loop**: a `🔁 Iteration N/M` header, the inner sub-steps as
   `› ▶ …` / `› ✅ …` / `› ❌ …`, and a review block
-  `🔍 Review #N done — score X/100 (pass ≥ T) — ✅ passed` / `⚠️ below threshold`
-  followed by a bulleted findings list (or *"Findings: none 🎉"*).
+  `🔍 Review #N done — score X/100 (pass ≥ T) — ✅ passed` / `⚠️ <reason>`
+  followed by the per-lens scores and a bulleted findings list (or *"Findings:
+  none 🎉"*, said only of a review that finished with none). A review that did not
+  complete posts `🔍 Review #N — ⚠️ Review incomplete — not a verdict` instead,
+  with `Why:` (which step failed and why, naming any failed lens with its
+  reason), the verification coverage, how many findings are stored unverified
+  (not posted to the PR), the lenses that did not finish, a `Partial score` when
+  the verifier ran, and how to finish it: **Retry step** re-runs only the
+  summarizer when every reviewer finished (above), the review's own page can
+  retry the summarizer or a failed reviewer, and re-running the workflow starts
+  a full new review.
 
 Structural/plumbing nodes (`log`, `transform`, `delay`, `condition`,
 `manual_trigger`) are intentionally **not** announced, to keep the thread readable;
@@ -779,7 +838,8 @@ Jira ticket PROJ-1421, cover happy path + over-limit + boundary.
 
 An unknown name behaves differently depending on which keyword matched: the
 **explicit** `workflow`/`run workflow` keyword replies *"No workflow named
-**X**…"* without starting a run; the **bare** `run` keyword silently falls
+"X". Did you mean: …?"* (the same suggestions as above) without starting a run;
+the **bare** `run` keyword silently falls
 through to normal chat (bare "run" reads too much like ordinary English to
 hijack a message that wasn't meant for it).
 
@@ -795,14 +855,31 @@ thread-pinned binding wins over an unpinned one when both match); `mention_only`
 match the run input is `{trigger:"chat", origin_workspace_id, channel, chat,
 thread, user, prompt, msg, raw}` — `prompt`/`msg` are the mention-stripped text.
 
+**Does a trigger work?** Every trigger row carries `last_fired_at` /
+`last_outcome` (`started` · `queued` · `rejected`) / `last_detail`, stamped
+(one UPDATE) where a schedule, event, chat-binding or webhook trigger fires or
+is refused — e.g. *"previous run of this workflow still active"* for a due
+schedule whose last run is still going. The Triggers panel shows it under each
+trigger: *Last fired 2h ago · started*, *Never fired*, or *Last attempt
+rejected: <reason>*. A Slack sender who is not on the integration's
+`allowed_users` list is dropped by the channel bridge BEFORE it reaches the
+workflow trigger, so that case does not show here yet — check the allowlist
+when a binding reads *Never fired* although people post in its channel.
+
+**Queue in the app.** The Running list shows a queued run's place —
+*2nd in line*, with *"Queued · 2nd in line, behind PR Reviewer"* on hover —
+and one line, *"Up to 2 at once — other workflow runs wait in line."*, from
+`GET /workspaces/{wid}/workflow-runs/queue`.
+
 **Loop guard.** Slack drops any event carrying a `bot_id` (including the nested
 `message` of a `message_changed` edit) before it reaches the bridge; Telegram's
 `getUpdates` long-poll structurally never returns the bot's own sends — so
 neither adapter needs bot-detection logic to avoid the bot triggering itself.
 The channel-binding path (only, since it has no keyword to require) adds a
 **second, defensive** guard on top: it never treats a message starting with the
-bot's own ack prefix (`"🚀 Started workflow"`) as a binding trigger, so a
-binding can't retrigger itself off its own start-line reply.
+bot's own ack prefixes (`"🚀 Started workflow"`, `"⏳ Queued workflow"`; the
+dequeue announcement reuses the first) as a binding trigger, so a binding can't
+retrigger itself off its own replies.
 
 > **Ordering note.** `implement-feature`/`po-lifecycle`-style templates that need
 > a `repo_id` still don't get one from a bare chat message or binding (chat

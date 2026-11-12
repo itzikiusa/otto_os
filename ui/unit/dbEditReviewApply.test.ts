@@ -166,8 +166,25 @@ test('a single-row edit that changed several rows is applied with a warning', as
   assert.deepEqual(h.toasts, ['success:Applied', 'warn:An edit changed more than one row']);
 });
 
-test('Mongo counts modified documents, so 0 there is not read as "no row matched"', async () => {
-  const h = setup(() => ({ columns: [], rows: [], rows_affected: 0 }), { engine: 'mongodb', rows: 1, buildUpdate: perRowUpdate });
+/** One mongosh `updateOne` per row — what the Mongo adapter builds. */
+const perRowUpdateOne = (rows: { rowIdx: number }[]): Built => ({
+  title: 'Review update',
+  sql: rows.map((r) => `db.t.updateOne({_id: ${r.rowIdx + 1}}, {$set: {v: "x"}})`).join('\n'),
+  diff: [],
+  stmtRows: rows.map((r) => r.rowIdx),
+});
+
+test('Mongo reports MATCHED documents: an updateOne that matched none keeps its draft', async () => {
+  const h = setup(() => ({ columns: [], rows: [], rows_affected: 0 }), { engine: 'mongodb', rows: 1, buildUpdate: perRowUpdateOne });
+  h.flow.reviewPending();
+  await h.flow.runReview();
+  assert.equal(h.flow.pending.size, 1);
+  assert.match(h.flow.reviewError ?? '', /did not match any row/);
+  assert.deepEqual(h.toasts, ['warn:Did not match any row']);
+});
+
+test('a Mongo updateOne that matched its document is Applied', async () => {
+  const h = setup(() => ({ columns: [], rows: [], rows_affected: 1 }), { engine: 'mongodb', rows: 1, buildUpdate: perRowUpdateOne });
   h.flow.reviewPending();
   await h.flow.runReview();
   assert.equal(h.flow.pending.size, 0);

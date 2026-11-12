@@ -160,6 +160,30 @@ export interface PrComment {
   /** The comment this reply answers when the forge nests replies (Bitbucket
    *  chains are flattened under their root). Absent on thread heads. */
   in_reply_to?: string | null;
+  /** Emoji reactions on this comment (GitHub, GitLab). Absent when the forge
+   *  has none (Bitbucket Cloud) or an older daemon. */
+  reactions?: PrReaction[];
+  /** The reaction routes accept this comment: false on Bitbucket and on a
+   *  GitHub review summary (`review-<id>`). Absent from an older daemon. */
+  can_react?: boolean;
+}
+
+/** `PUT|DELETE /repos/{id}/prs/{number}/comments/{cid}/reactions/{key}`. */
+export type ReactionKey = 'thumbs_up' | 'thumbs_down' | 'laugh' | 'hooray' | 'confused' | 'heart' | 'rocket' | 'eyes';
+
+/** One reaction on a comment: how many, and whether one of them is yours. */
+export interface PrReaction {
+  key: ReactionKey;
+  count: number;
+  me: boolean;
+}
+
+/** One forge merge precondition (Bitbucket merge checks, GitHub branch rules). */
+export interface PrMergeCheck {
+  key: string;
+  label: string;
+  passed: boolean;
+  detail?: string | null;
 }
 
 /** Verdict of the GitHub review a summary comment came from. */
@@ -189,6 +213,13 @@ export type PrDetail = PrSummary & {
   approved_by: string[];
   reviewers: PrReviewer[];
   mergeable: boolean | null;
+  /** False when the forge has no reactions API (Bitbucket Cloud). Absent from
+   *  an older daemon, which has no reaction routes: no controls then. */
+  reactions_supported?: boolean;
+  /** The forge's own merge preconditions, when it reports them. */
+  merge_checks?: PrMergeCheck[] | null;
+  /** Bitbucket tasks on the PR. */
+  task_count?: { open: number; resolved: number } | null;
 };
 
 export interface CreatePrReq {

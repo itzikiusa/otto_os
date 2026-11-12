@@ -314,14 +314,15 @@ All auth fields accept `{{var}}` substitution.
 > script is refused, never run inside the daemon.
 > **Daemon-side scripts never see secret values.** A Keychain-backed environment
 > variable reads as its own `{{NAME}}` placeholder (saved-request execute, and
-> automation runs an agent started); the daemon substitutes it when it builds
+> every automation run — yours too); the daemon substitutes it when it builds
 > the request, after checking the host it goes to. A script that only passes the
 > placeholder through (`'Bearer ' + pm.environment.get('TOKEN')`) works as
 > before. A script that *computes* with a secret — HMAC signing, base64 of
 > `user:secret` — would send a wrong value, so it fails with *the pre-request
 > script computes with secret 'NAME'…*: put `{{NAME}}` in the request itself
 > (the interactive runner never had secret values either — they are never
-> resolved in the app).
+> resolved in the app). To sign requests with a key in a script, keep that key
+> in a plain (not Keychain-backed) environment variable.
 > Failed/canceled scripts do not publish partial variables, and a failed
 > pre-request script does not send HTTP. Neither runtime is a security sandbox.
 > Scripts
@@ -805,15 +806,16 @@ sensitive data your endpoints returned; clear history when appropriate.
   token strings.
 - **Secret host binding everywhere an agent can aim.** A stored secret (a
   `$secret` auth marker or a Keychain environment variable) only travels to the
-  host it's bound to — on ad-hoc execute, streams and the OAuth token fetch
-  (caller-built URLs), and also on **saved-request execute** (after `vars`
+  host it's bound to — on ad-hoc execute, streams, gRPC invoke / reflect and
+  the OAuth token fetch (caller-built URLs), and also on **saved-request execute** (after `vars`
   overrides and the pre-request script) and every step of an **automation run
   an agent started**. The binding is resolved with the environment's own
   variables, so overriding `{{base_url}}` can't drag it along. A `$secret`
   marker is bound to the url **recorded in its Keychain entry**: set when a
   person sends (or saves) the request, kept when an agent edits the request's
   url, so an agent moving a credentialed request to another host can't move the
-  credential with it. A secret saved before bindings were recorded is bound to
+  credential with it. A secret an agent typed into its own new request is bound
+  to that request's url (whoever supplies a secret decides where it goes). A secret saved before bindings were recorded is bound to
   its request's current url — unless an agent last wrote that request — and
   gets the url recorded on the first person's send. A person can confirm a new
   host (which rebinds the secret there); an agent never can (the step / call
@@ -880,8 +882,10 @@ human-approval-gated on both surfaces — the in-session tools
 through the same governed invoke as the outward `otto.api_*` tools. Because a session still holds the owner's API token, the
 daemon applies these protections even when the route is called with raw curl.
 
-When an agent saves a request, its `X-Otto-Session` header stamps
-`extras.agent = {session_id, at}`. On `PATCH /requests/{id}`, omitted/null `auth`
+When an agent saves a request, it is stamped `extras.agent = {session_id, at}`.
+The stamp follows the CREDENTIAL, not only the `X-Otto-Session` header: a raw
+`PATCH` with a session's own API token (or an MCP token) counts as that agent,
+and its save never moves where the request's stored secret may go. On `PATCH /requests/{id}`, omitted/null `auth`
 keeps the stored auth row and Keychain blob, and omitted `extras` keeps the
 stored extension data; an agent update therefore does not erase secrets or
 scripts it did not intend to change.

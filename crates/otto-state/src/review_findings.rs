@@ -509,6 +509,35 @@ impl ReviewFindingsRepo {
         Ok(res.rows_affected())
     }
 
+    /// Flip the given findings' DETECTION `state` to `resolved`: prior findings
+    /// a later run explicitly confirmed fixed (the scope assessment said
+    /// `fixed` with evidence and the final verifier agreed). By id, never by
+    /// absence. A finding this run raised again (`review_id = run_id`) is
+    /// left alone, as is one already settled (`resolved` / `declined`); the
+    /// workflow `status` (human triage) is never written. Returns rows changed.
+    pub async fn resolve_confirmed(&self, ids: &[&str], run_id: &str) -> Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let sql = format!(
+            "UPDATE review_findings SET state = 'resolved', last_seen_run = ?, updated_at = ? \
+             WHERE id IN ({}) AND review_id != ? AND state IN ('open', 'fixing', 'regressed')",
+            vec!["?"; ids.len()].join(", ")
+        );
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+            .bind(run_id)
+            .bind(fmt(Utc::now()));
+        for id in ids {
+            q = q.bind(*id);
+        }
+        let res = q
+            .bind(run_id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("resolve confirmed findings"))?;
+        Ok(res.rows_affected())
+    }
+
     /// Fetch a single finding row by its id.
     pub async fn get(&self, id: &Id) -> Result<ReviewFindingRow> {
         let row = sqlx::query("SELECT * FROM review_findings WHERE id = ?")
@@ -1078,6 +1107,44 @@ mod tests {
             "open",
             "branch A's finding is not B's to resolve"
         );
+    }
+
+    /// Explicit resolution: by id only, never a finding the resolving run
+    /// raised again, never a declined one, and the human `status` survives.
+    #[tokio::test]
+    async fn confirmed_resolution_is_by_id_and_keeps_human_triage() {
+        let repo = ReviewFindingsRepo::new(mem_pool().await);
+        let (fixed, _) = repo.upsert(&sample("fp-fixed", "high")).await.unwrap();
+        let (other, _) = repo.upsert(&sample("fp-other", "high")).await.unwrap();
+        let (declined, _) = repo.upsert(&sample("fp-declined", "high")).await.unwrap();
+        repo.set_state(
+            &"rev1".to_string(),
+            "fp-declined",
+            FindingState::Declined,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.set_status(&fixed.id, FindingStatus::Accepted, "alice")
+            .await
+            .unwrap();
+        // Raised again by the resolving run itself: not resolvable.
+        let mut again = sample("fp-again", "high");
+        again.review_id = "rev2";
+        let (reraised, _) = repo.upsert(&again).await.unwrap();
+        let ids = [
+            fixed.id.as_str(),
+            declined.id.as_str(),
+            reraised.id.as_str(),
+        ];
+        assert_eq!(repo.resolve_confirmed(&ids, "rev2").await.unwrap(), 1);
+        let after = repo.get_full(&fixed.id).await.unwrap();
+        assert_eq!(after.state, "resolved");
+        assert_eq!(after.status, FindingStatus::Accepted, "triage untouched");
+        assert_eq!(repo.get_full(&other.id).await.unwrap().state, "open");
+        assert_eq!(repo.get_full(&declined.id).await.unwrap().state, "declined");
+        assert_eq!(repo.get_full(&reraised.id).await.unwrap().state, "open");
+        assert_eq!(repo.resolve_confirmed(&[], "rev2").await.unwrap(), 0);
     }
 
     #[test]

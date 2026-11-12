@@ -265,8 +265,13 @@ second, fabricated instruction line once inside the fence.
   mojibake for you (or an agent) to read.
 - Reader extraction keeps text that *shows* markup (`&lt;div&gt;` in a tutorial
   stays visible as `<div>`), keeps table cells of one row apart (`Name | Age`)
-  and breaks lines at lists, quotes, sections and tables. Links and code-block
-  indentation are not preserved yet.
+  and breaks lines at lists, quotes, sections and tables. Links are kept as
+  markdown links (`[text](<url>)`, at most 200 per page): relative ones are
+  resolved against the page, `javascript:` / `data:` / `file:` / `mailto:` and
+  `#fragment`-only links keep only their text. Clicking a link in the reader
+  navigates that tab through the normal (guarded) navigation — never the app
+  window or a new window, and only to `http(s)`. Code-block indentation is not
+  preserved yet.
 - Tab URLs must be `http(s)` (or `about:blank`) and at most 8 KiB.
 - Reader renders are reused: the daemon caches a rendered page per workspace
   and URL (the `#fragment` is ignored) for 60 s — at most 32 pages / 32 MB —
@@ -308,6 +313,17 @@ same `otto-browser-<id>` label scheme, keyed by their own (non-overlapping) tab
 ids, so the two can be open at once without one's cleanup tearing down the
 other's tabs.
 
+A live tab's webview keeps its page while the Browser view is hidden or
+mounted again (switching the right panel's tabs, leaving and re-entering the
+Browser page): which URL each webview shows is kept per window
+(`ui/src/modules/browser/liveWebviews.ts`), and `browser_open` never
+re-navigates a webview to the URL it already shows — scroll, form input and
+app state survive. **Back / Forward / Reload / Stop** sit before the address
+bar for a live tab on either engine (native: `history.back()` /
+`history.forward()` / `browser_reload` / `window.stop()` in the page; a native
+webview reports no history, so Back and Forward stay enabled and do nothing at
+either end).
+
 **Manual checklist** (desktop app only — a plain `cargo build`/`npm run
 build` can't exercise the native webview itself):
 
@@ -320,6 +336,10 @@ build` can't exercise the native webview itself):
    navigation without a page reload.
 5. Close the tab (✕ in the tab strip) — the child webview is destroyed, not
    just hidden.
+6. Scroll a live page and type into a form, switch the right panel to another
+   tab and back (or leave the Browser page and return) — the page is still
+   there, scrolled and filled in, not reloaded.
+7. Back / Forward / Reload / Stop act on the live page.
 
 ### Element picker overlay (live tabs)
 

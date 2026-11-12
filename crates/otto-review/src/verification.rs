@@ -364,7 +364,7 @@ pub fn incomplete_chat(
     }
     msg.push_str(&crate::prompts::lens_scores_chat(lens_scores));
     msg.push_str(
-        "\nTo finish it: open the review and retry the summarizer (or the failed reviewer), or re-run this workflow.",
+        "\nTo finish it: retry this step (it re-runs only the summarizer when every reviewer finished), or open the review and retry the summarizer or the failed reviewer. Re-running the workflow starts a full new review.",
     );
     msg
 }

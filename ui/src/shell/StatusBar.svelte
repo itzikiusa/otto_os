@@ -1,8 +1,8 @@
 <script lang="ts">
   // Status bar: working agents · needs you · event stream · current branch ·
-  // network listener · clock. While the events socket is down the live counts
-  // are stale: the working dot stops pulsing and the stream says
-  // "Reconnecting…" (patterns.md §1, "Stale is a state").
+  // machine load · network listener · clock. While the events socket is down
+  // the live counts are stale: the working dot stops pulsing and the stream
+  // says "Reconnecting…" (patterns.md §1, "Stale is a state").
   import Icon from '../lib/components/Icon.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
   import { agentRunsWorking } from '../lib/stores/agentRunsWorking.svelte';
@@ -14,6 +14,7 @@
   import { nowMinute } from '../lib/stores/now.svelte';
   import { daemonStatus } from '../modules/settings/daemonStatus.svelte';
   import { listenerIndicator } from '../modules/settings/daemonIndicators';
+  import MachineChip from './MachineChip.svelte';
 
   const live = $derived(events.state === 'connected');
 
@@ -100,6 +101,7 @@
         {#if git.primaryStatus.behind > 0}<span class="dim">↓{git.primaryStatus.behind}</span>{/if}
       </button>
     {/if}
+    <MachineChip />
     {#if daemonStatus.secretsUnencrypted}
       <button
         class="sb-item sb-btn sb-warn"

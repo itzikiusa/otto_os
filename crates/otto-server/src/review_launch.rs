@@ -96,7 +96,7 @@ async fn start_review_for_branch(
                     .and_then(serde_json::Value::as_str)
                 {
                     if let Ok(review) = ctx.reviews_store.get_review(&id.to_string()).await {
-                        if review_adoptable(&review) {
+                        if adopt(ctx, &review, &repo.workspace_id).await {
                             return Ok((
                                 review.id,
                                 resolved,
@@ -204,22 +204,27 @@ async fn start_review_for_branch(
 }
 
 /// Whether a workflow step may ADOPT the review its checkpoint names instead
-/// of launching a new one: a review still running (restart adoption), or a
-/// finished one whose reviewers all completed. A finished review with a
-/// failed or partial reviewer is not adopted — "Retry step" on a review step
-/// that failed `require_pass` for missing coverage re-scored the same
-/// incomplete review on every retry and could never pass.
-fn review_adoptable(review: &otto_core::domain::Review) -> bool {
-    match review.status {
-        ReviewStatus::Running => true,
-        // A summary that fell back to the deterministic merge counts as
-        // incomplete here too: a step that refuses fallbacks would re-adopt
-        // it on every retry and never pass.
-        ReviewStatus::Done => otto_review::engine::review_run_complete(
-            &review.agents,
-            review.summary_fallback.unwrap_or(false),
-        ),
-        _ => false,
+/// of launching a new one (`otto_review::restart::adoption`): as it is (still
+/// running, or finished complete), or once only its summarizer has been
+/// re-run — "Retry step" on a review whose reviewers all finished but whose
+/// verifier failed re-verifies the stored findings instead of re-reviewing.
+async fn adopt(ctx: &ServerCtx, review: &otto_core::domain::Review, workspace_id: &str) -> bool {
+    use otto_review::restart::{adoption, review_user, Adoption};
+    match adoption(review) {
+        Adoption::Adopt => true,
+        Adoption::Launch => false,
+        Adoption::RerunSummarizer => {
+            let users = otto_state::UsersRepo::new(ctx.pool.clone());
+            let rerun = async {
+                review_budget_gate(ctx, workspace_id).await?;
+                rerun_summarizer(ctx, &review.id, review_user(&users).await?).await
+            };
+            // A rerun that cannot start falls back to a new review.
+            rerun
+                .await
+                .inspect_err(|e| tracing::warn!(review = %review.id, "summarizer re-run: {e}"))
+                .is_ok()
+        }
     }
 }
 

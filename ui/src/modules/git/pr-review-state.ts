@@ -41,3 +41,15 @@ export function withMyReview(pr: PrDetail, kind: Exclude<MyReview, null>, isMe: 
   const others = pr.approved_by.filter((n) => n !== me && !isMe(n));
   return { ...pr, reviewers, approved_by: kind === 'approved' ? [...others, me] : others };
 }
+
+/** `pr` with your `kind` review withdrawn: your reviewer row stays (you are
+ *  still a reviewer) but no longer approves / requests changes, and you leave
+ *  `approved_by`. No-op when that isn't your current review. */
+export function withoutMyReview(pr: PrDetail, kind: Exclude<MyReview, null>, isMe: (name: string) => boolean): PrDetail {
+  const hit = myReviewer(pr.reviewers, isMe);
+  const reviewers = hit
+    ? pr.reviewers.map((r) => (r === hit ? { ...r, approved: kind === 'approved' ? false : r.approved, changes_requested: kind === 'changes' ? false : r.changes_requested } : r))
+    : pr.reviewers;
+  const approved_by = kind === 'approved' ? pr.approved_by.filter((n) => n !== hit?.name && !isMe(n)) : pr.approved_by;
+  return { ...pr, reviewers, approved_by };
+}

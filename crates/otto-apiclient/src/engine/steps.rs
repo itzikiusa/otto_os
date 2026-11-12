@@ -2,24 +2,29 @@
 
 use super::*;
 
-/// Secret ↔ host binding inputs for an automation run an AGENT started (see
-/// [`unbound_secret_host`]): the environment's own variables (no dataset rows,
-/// no chained extractions) and its Keychain blob. A person's run carries none —
-/// they chose the automation, its dataset and its targets themselves.
+/// What an automation run knows of its environment's Keychain secrets: the
+/// environment's own variables (no dataset rows, no chained extractions) and
+/// its Keychain blob. Every run's scripts see `{{KEY}}` placeholders, never the
+/// values (see [`ScriptSecrets`]); only a run an AGENT started also keeps each
+/// secret on its bound host (`enforce`, see [`find_unbound_secret`]) — a
+/// person chose the automation, its dataset and its targets themselves.
 pub struct StepSecretBinding {
+    /// The secret ↔ host binding is checked before each step's send.
+    pub enforce: bool,
     pub env_vars: serde_json::Map<String, Value>,
     pub env_blob: BTreeMap<String, String>,
     pub secret_keys: Vec<String>,
     /// [`bound_env_secret_hosts`] for `env_vars`, computed once per run
-    /// rather than once per step (perf F3).
+    /// rather than once per step (perf F3); empty when not `enforce`d.
     pub bound_hosts: BTreeSet<String>,
 }
 
 impl StepSecretBinding {
-    /// The binding `api_automation_runs::start` gives a run: `Some` for an
+    /// The binding `api_automation_runs::start` gives a run: enforced for an
     /// AGENT caller (every stored secret stays on its bound host, see
-    /// [`run_step`]), `None` for a person (their run is theirs to aim). One
-    /// constructor, so the run route and its test share the decision.
+    /// [`run_step`]), not for a person (their run is theirs to aim) — either
+    /// way the scripts see placeholders. Always `Some`; one constructor, so
+    /// the run route and its test share the decision.
     pub async fn for_caller(
         agent: bool,
         api: &ApiClientRepo,
@@ -28,11 +33,13 @@ impl StepSecretBinding {
         environment: Option<&ApiEnvironment>,
         env_blob: &BTreeMap<String, String>,
     ) -> EngineResult<Option<Self>> {
-        if !agent {
-            return Ok(None);
-        }
         Ok(Some(Self {
-            bound_hosts: bound_env_secret_hosts(api, wid, env_vars).await?,
+            enforce: agent,
+            bound_hosts: if agent {
+                bound_env_secret_hosts(api, wid, env_vars).await?
+            } else {
+                BTreeSet::new()
+            },
             env_vars: env_vars.clone(),
             env_blob: env_blob.clone(),
             secret_keys: environment
@@ -141,8 +148,8 @@ pub async fn run_step<C: ApiClientCtx>(
     };
     let mut script_asserts: Vec<Value> = Vec::new();
     let mut scripts_ok = true;
-    // An agent's run: scripts see `{{KEY}}` placeholders for the
-    // environment's secrets, never their values (see `ScriptSecrets`).
+    // Scripts see `{{KEY}}` placeholders for the environment's secrets, never
+    // their values (see `ScriptSecrets`); the send substitutes them.
     let script_secrets = |vars: &serde_json::Map<String, Value>| match binding {
         Some(binding) => ScriptSecrets::new(vars, &binding.env_blob, &binding.secret_keys),
         None => ScriptSecrets::default(),
@@ -197,7 +204,7 @@ pub async fn run_step<C: ApiClientCtx>(
     // Agent-started run: a stored secret must not leave its bound host (a
     // rewritten request, a dataset row or a chained value can retarget the
     // URL). The step fails instead of sending; a person can run it from the UI.
-    if let Some(binding) = binding {
+    if let Some(binding) = binding.filter(|b| b.enforce) {
         let unbound = find_unbound_secret(
             repo,
             Some(ctx.secrets()),
@@ -248,7 +255,8 @@ pub async fn run_step<C: ApiClientCtx>(
     }
 
     // A step carrying an environment secret never follows a redirect off its
-    // host (see `prepare_request_with`).
+    // host (see `prepare_request_with`) — whoever started the run, as on an
+    // interactive send.
     let credentialed = match binding {
         Some(b) => uses_env_secret(&exec, vars, &b.env_blob, &b.secret_keys),
         None => false,

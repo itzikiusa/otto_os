@@ -361,12 +361,8 @@ pub(crate) async fn run_review_core(
 
     // 3. Resolve the root user (review agents run as autonomous sessions on its
     //    behalf, like channel sessions) and the per-agent grace period.
-    let review_user = otto_state::UsersRepo::new(ctx.pool.clone())
-        .list()
-        .await
-        .ok()
-        .and_then(|us| us.into_iter().find(|u| u.is_root))
-        .ok_or_else(|| Error::Internal("no root user to run review agents".into()))?;
+    let review_user =
+        otto_review::restart::review_user(&otto_state::UsersRepo::new(ctx.pool.clone())).await?;
     let timeout = review_agent_timeout(diff_text.len(), cfg.timeout_secs);
     // An orchestrator run carries every lens, so it needs more than one lens'
     // budget — bounded, and still only a budget (`watch_for_result`'s deadline
@@ -541,6 +537,7 @@ pub(crate) async fn run_review_core(
                     otto_review::session::AgentRunResult {
                         findings: vec![],
                         errored: true,
+                        reason: Some("review cancelled while queued".into()),
                     },
                 );
             };

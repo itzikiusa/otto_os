@@ -57,23 +57,29 @@ export function batchFailure(res: QueryResult, atomic = false): BatchFailure | n
   };
 }
 
-/** A row edit / delete whose `rows_affected` says whether it hit its row. */
+/** A row edit / delete whose `rows_affected` says whether it hit its row:
+ *  SQL `UPDATE` / `DELETE`, and the mongosh calls the Mongo adapter emits. */
 const ROW_WRITE = /^\s*(update|delete)\b/i;
+const MONGO_ROW_WRITE = /\.(?:update|replace|delete)(?:One|Many)\s*\(/;
+/** Engines whose `rows_affected` for those statements counts MATCHED rows. */
+const MATCH_COUNTED: ReadonlySet<DbEngine> = new Set(['mysql', 'postgres', 'mongodb']);
 
 /** Which row statements of a SUCCESSFUL review matched no row / several rows,
  *  as indices into the review's own statements (the `BEGIN` / `COMMIT`
  *  wrapper excluded). A single-row UPDATE whose row was deleted or whose key
  *  changed is not an error — it reports 0 rows, and "Applied" would be a lie.
- *  MySQL / Postgres only: their count is MATCHED rows (sqlx sets
- *  CLIENT_FOUND_ROWS); Mongo's is `modified`, so 0 there can mean "same
- *  value". Null when there is nothing to warn about (or no counts came back). */
+ *  MySQL / Postgres / Mongo: their count is MATCHED rows (sqlx sets
+ *  CLIENT_FOUND_ROWS; the Mongo driver reports `matched_count` for updates,
+ *  `deleted_count` for deletes). Null when there is nothing to warn about (or
+ *  no counts came back). */
 export function affectedCheck(
   engine: DbEngine | null,
   res: QueryResult,
   atomic: boolean,
   ranSql: string,
 ): { unmatched: number[]; multi: number[] } | null {
-  if (!engine || !TRANSACTIONAL.has(engine)) return null;
+  if (!engine || !MATCH_COUNTED.has(engine)) return null;
+  const rowWrite = engine === 'mongodb' ? MONGO_ROW_WRITE : ROW_WRITE;
   let entries = [res, ...(res.more_results ?? [])];
   if (atomic) entries = entries.slice(1, -1);
   const unmatched: number[] = [];
@@ -81,7 +87,7 @@ export function affectedCheck(
   entries.forEach((r, i) => {
     // A single statement's result carries no preview: the review text is it.
     const text = r.statement ?? (atomic || res.more_results?.length ? '' : ranSql);
-    if (!ROW_WRITE.test(text) || typeof r.rows_affected !== 'number') return;
+    if (!rowWrite.test(text) || typeof r.rows_affected !== 'number') return;
     if (r.rows_affected === 0) unmatched.push(i);
     else if (r.rows_affected > 1 && /^\s*update\b/i.test(text)) multi.push(i);
   });

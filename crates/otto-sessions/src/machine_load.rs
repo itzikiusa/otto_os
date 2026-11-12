@@ -159,6 +159,64 @@ mod os {
     }
 }
 
+/// Setting (number of GiB, default [`DEFAULT_LOW_DISK_GB`]; `0` = never):
+/// below this much free space on the data volume the status chip turns to
+/// warning and one notice is raised. Nothing is held back on it.
+pub const LOW_DISK_SETTING: &str = "machine_low_disk_gb";
+/// The owner keeps 30 GB free at all times: builds and swap fail hard below.
+pub const DEFAULT_LOW_DISK_GB: f64 = 30.0;
+const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+/// `machine_low_disk_gb`; anything missing, negative or not a number takes
+/// the default (a typo never silences the warning).
+pub fn low_disk_gb(value: Option<&serde_json::Value>) -> f64 {
+    value
+        .and_then(serde_json::Value::as_f64)
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(DEFAULT_LOW_DISK_GB)
+}
+
+/// Free space below the floor (`floor_gb` 0 = off; unknown space never is).
+pub fn is_low_disk(free_bytes: Option<u64>, floor_gb: f64) -> bool {
+    floor_gb > 0.0 && free_bytes.is_some_and(|b| (b as f64) < floor_gb * GIB)
+}
+
+/// Bytes available to this (unprivileged) user on the volume holding
+/// `path` — what `df` reports as "Avail". A `statfs` syscall, no process. A
+/// path not created yet is measured at its nearest existing ancestor (the
+/// same volume); `None` only when nothing on the way can be read.
+pub fn disk_free_bytes(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    path.ancestors().find_map(|p| {
+        let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;
+        disk::free(&c)
+    })
+}
+
+#[cfg(target_os = "macos")]
+mod disk {
+    /// macOS `statfs` (64-bit counts; `statvfs` there truncates to 32 bits).
+    pub fn free(path: &std::ffi::CStr) -> Option<u64> {
+        // SAFETY: all-zero is a valid `statfs` (integers and byte arrays).
+        let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+        // SAFETY: `path` is NUL-terminated; `st` is a valid, writable struct.
+        let rc = unsafe { libc::statfs(path.as_ptr(), &mut st) };
+        (rc == 0).then_some(st.f_bavail.saturating_mul(u64::from(st.f_bsize)))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod disk {
+    #[allow(clippy::unnecessary_cast)]
+    pub fn free(path: &std::ffi::CStr) -> Option<u64> {
+        // SAFETY: all-zero is a valid `statvfs` (plain integers).
+        let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+        // SAFETY: `path` is NUL-terminated; `st` is a valid, writable struct.
+        let rc = unsafe { libc::statvfs(path.as_ptr(), &mut st) };
+        (rc == 0).then_some((st.f_bavail as u64).saturating_mul(st.f_frsize as u64))
+    }
+}
+
 /// A [`Sampler`] behind a [`SAMPLE_TTL`] cache.
 pub struct MachineMonitor {
     sampler: Arc<dyn Sampler>,
@@ -272,6 +330,36 @@ mod tests {
         assert!((s.load_per_core() - 1.5).abs() < 1e-9);
         let unknown = MachineSample { load1: None, ..s };
         assert_eq!(unknown.load_per_core(), 0.0);
+    }
+
+    #[test]
+    fn free_disk_space_is_read_from_the_volume_and_judged_against_the_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        let free = disk_free_bytes(dir.path()).expect("statfs on a temp dir");
+        assert!(free > 0);
+        // Not created yet: measured on the volume it will live on.
+        assert!(disk_free_bytes(&dir.path().join("not/yet")).is_some_and(|b| b > 0));
+        assert_eq!(disk_free_bytes(std::path::Path::new("")), None);
+
+        let gib = 1024 * 1024 * 1024;
+        assert!(is_low_disk(Some(29 * gib), 30.0));
+        assert!(
+            !is_low_disk(Some(30 * gib), 30.0),
+            "exactly at the floor is fine"
+        );
+        assert!(!is_low_disk(Some(gib), 0.0), "0 = no warning");
+        assert!(!is_low_disk(None, 30.0), "unknown space never warns");
+
+        assert_eq!(low_disk_gb(None), DEFAULT_LOW_DISK_GB);
+        assert_eq!(low_disk_gb(Some(&serde_json::json!(50))), 50.0);
+        assert_eq!(low_disk_gb(Some(&serde_json::json!(0))), 0.0);
+        for bad in [
+            serde_json::json!(-1),
+            serde_json::json!("lots"),
+            serde_json::json!(null),
+        ] {
+            assert_eq!(low_disk_gb(Some(&bad)), DEFAULT_LOW_DISK_GB, "{bad}");
+        }
     }
 
     /// The real sampler reads without panicking and reports sane values.

@@ -835,11 +835,20 @@ pub struct Column {
 }
 
 /// Engine type names (sqlx `type_info().name()`) whose cells the drivers send
-/// as base64: exactly the MySQL `CellDecoder::Bytes` set plus Postgres `BYTEA`.
+/// as base64: exactly the MySQL `CellDecoder::Bytes` set and `GEOMETRY`
+/// (internal format, `CellDecoder::Geometry`) plus Postgres `BYTEA`. MySQL
+/// `BIT` is not here: sqlx decodes it as an unsigned integer.
 pub fn is_binary_type_name(type_name: &str) -> bool {
     matches!(
         type_name,
-        "BINARY" | "VARBINARY" | "TINYBLOB" | "BLOB" | "MEDIUMBLOB" | "LONGBLOB" | "BYTEA"
+        "BINARY"
+            | "VARBINARY"
+            | "TINYBLOB"
+            | "BLOB"
+            | "MEDIUMBLOB"
+            | "LONGBLOB"
+            | "GEOMETRY"
+            | "BYTEA"
     )
 }
 
@@ -1786,10 +1795,19 @@ mod tests {
     /// other column omits the field so existing payloads stay byte-identical.
     #[test]
     fn binary_columns_are_marked_on_the_wire() {
-        for name in ["BINARY", "VARBINARY", "BLOB", "LONGBLOB", "BYTEA"] {
+        for name in [
+            "BINARY",
+            "VARBINARY",
+            "BLOB",
+            "LONGBLOB",
+            "GEOMETRY",
+            "BYTEA",
+        ] {
             assert!(Column::typed("c", name).binary, "{name}");
         }
-        for name in ["VARCHAR", "TEXT", "String", "JSON", "BYTEA[]"] {
+        for name in [
+            "VARCHAR", "TEXT", "String", "JSON", "BYTEA[]", "BIT", "geometry",
+        ] {
             assert!(!Column::typed("c", name).binary, "{name}");
         }
         let json = serde_json::to_value(Column::typed("id", "BINARY")).unwrap();

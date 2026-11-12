@@ -10,14 +10,17 @@
   // replayed 4,000 lines on return — losing the selection (what ⌘C copies),
   // the scroll position and the find state.
   //
-  // When the session has ended, SshExitPanel says why and offers Reconnect.
-  import type { Snippet } from 'svelte';
+  // When the session has ended, SshExitPanel says why and offers Reconnect
+  // (the ONE restart control: the Terminal's own "Restart session" overlay
+  // button is not enabled here) and "Diagnose with an agent…".
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { PRIMARY_SCROLLBACK } from '../../lib/components/termFlow';
-  import type { Connection, SessionStatus } from '../../lib/api/types';
+  import type { Connection, SessionStatus, TestConnectionResp } from '../../lib/api/types';
   import type { SshTab } from '../../lib/stores/database/model';
   import SshExitPanel from './SshExitPanel.svelte';
+  import DiagnoseButton from './DiagnoseButton.svelte';
+  import { probeOf } from './diagnose-prompt';
   import { sshTabs } from './ssh-tabs.svelte';
 
   interface Props {
@@ -25,10 +28,8 @@
     conn: Connection | null;
     onreconnect: () => void;
     onedit?: (c: Connection) => void;
-    /** Extra recovery actions in the exit panel (see SshExitPanel `extra`). */
-    exitActions?: Snippet<[{ result: unknown }]>;
   }
-  let { tab, conn, onreconnect, onedit, exitActions }: Props = $props();
+  let { tab, conn, onreconnect, onedit }: Props = $props();
 
   const TerminalLazy = lazyComponent(() => import('../../lib/components/Terminal.svelte'));
 
@@ -44,13 +45,19 @@
     <LazyMount
       lazy={TerminalLazy}
       what="the terminal"
-      props={{ sessionId, scrollback: PRIMARY_SCROLLBACK, keepAlive: true, restartable: true, onrestart: onreconnect, onstatus }}
+      props={{ sessionId, scrollback: PRIMARY_SCROLLBACK, keepAlive: true, onrestart: onreconnect, onstatus }}
     />
   </div>
   {#if exited}
-    <SshExitPanel {conn} name={tab.name} kind={tab.kind} {onreconnect} {onedit} extra={exitActions} />
+    <SshExitPanel {conn} name={tab.name} kind={tab.kind} {onreconnect} {onedit} extra={conn ? diagnose : undefined} />
   {/if}
 </div>
+
+{#snippet diagnose({ result }: { result: TestConnectionResp | null })}
+  {#if conn && conn.kind === 'ssh' && (!result || !result.ok)}
+    <DiagnoseButton {conn} probe={result ? probeOf(result) : null} />
+  {/if}
+{/snippet}
 
 <style>
   .ssh-pane {

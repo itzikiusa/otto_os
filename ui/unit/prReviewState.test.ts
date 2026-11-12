@@ -3,7 +3,7 @@
 // changes lands — so the header and reviewer list change at once.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { myReview, myReviewer, withMyReview } from '../src/modules/git/pr-review-state.ts';
+import { myReview, myReviewer, withMyReview, withoutMyReview } from '../src/modules/git/pr-review-state.ts';
 import type { PrDetail, PrReviewer } from '../src/lib/api/types';
 
 const me = (n: string) => n.toLowerCase() === 'itzik';
@@ -74,4 +74,24 @@ test('the reload after an optimistic approve still reads as approved', () => {
   assert.equal(myReview(optimistic, bbMe), 'approved');
   const reloaded = pr([flagged('Ann Lee', false), flagged('Itzik Cohen', true, true)], ['Itzik Cohen']);
   assert.equal(myReview(reloaded, bbMe), 'approved');
+});
+
+test('withdrawing an approval keeps you as a reviewer, drops the approval', () => {
+  const start = pr([flagged('Ann Lee', false, true), flagged('Itzik Cohen', true, true)], ['Ann Lee', 'Itzik Cohen']);
+  const next = withoutMyReview(start, 'approved', bbMe);
+  assert.equal(myReview(next, bbMe), null);
+  assert.deepEqual(next.approved_by, ['Ann Lee']);
+  assert.deepEqual(next.reviewers.map((r) => [r.name, r.approved]), [['Ann Lee', true], ['Itzik Cohen', false]]);
+});
+
+test('withdrawing a change request clears it; approve → withdraw → approve round-trips', () => {
+  const changes = withMyReview(pr([flagged('Ann Lee', false)]), 'changes', bbMe, 'Itzik');
+  assert.equal(myReview(changes, bbMe), 'changes');
+  const cleared = withoutMyReview(changes, 'changes', bbMe);
+  assert.equal(myReview(cleared, bbMe), null);
+  assert.equal(cleared.reviewers.length, 2);
+  assert.equal(myReview(withMyReview(cleared, 'approved', bbMe, 'Itzik'), bbMe), 'approved');
+  // Withdrawing what isn't yours to withdraw changes nothing.
+  const untouched = withoutMyReview(pr([flagged('Ann Lee', false, true)], ['Ann Lee']), 'approved', bbMe);
+  assert.deepEqual(untouched.approved_by, ['Ann Lee']);
 });

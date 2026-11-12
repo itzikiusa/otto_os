@@ -313,8 +313,9 @@ export interface RuntimeSession {
   ui_control?: { enabled: boolean; granted_at?: string; granted_by?: Id } | null;
   /** Server-owned meta a personal agent's run / chat thread runs under
    *  (`personal_agent`, `read_only`, `source`, `run_id`, …); absent on a plain
-   *  thread. Never sent by a client. */
-  meta?: Record<string, unknown> | null;
+   *  thread. A client sets only an embedded thread's `source` / `origin`, via
+   *  the create body (`CreateRuntimeSessionReq.source` / `.origin`). */
+  meta?: (Record<string, unknown> & { source?: string; origin?: EmbeddedOrigin }) | null;
   /** Background work still pending (live; absent = none). */
   background_tasks?: BackgroundTask[];
 }
@@ -352,6 +353,19 @@ export interface PeerReply {
 /** T3 Code's RuntimeMode names; sticky per session like `model`. */
 export type RuntimeAccessMode = 'approval-required' | 'auto-accept-edits' | 'full-access';
 
+/** `meta.source` of a thread opened inside another page (mirrors Rust
+ *  `EMBEDDED_THREAD_SOURCES`); the only sources a client may name. */
+export type EmbeddedThreadSource = 'pr-agent' | 'connection-diagnose';
+
+/** `meta.origin` of an embedded thread: what it was opened for. `kind` pairs
+ *  with the source (`pr-agent` ↔ `pr`, `connection-diagnose` ↔ `connection`);
+ *  `id` is 1–200 characters, `label` at most 200. */
+export interface EmbeddedOrigin {
+  kind: 'pr' | 'connection';
+  id: string;
+  label?: string;
+}
+
 /** Body of POST /workspaces/{id}/runtime-sessions. */
 export interface CreateRuntimeSessionReq {
   provider: RuntimeProvider;
@@ -360,6 +374,19 @@ export interface CreateRuntimeSessionReq {
   title?: string | null;
   model?: string | null;
   access_mode?: RuntimeAccessMode;
+  /** Makes this an embedded thread (stored as `meta.source`); any other value
+   *  is a 400. Embedded threads close after `embedded_thread_auto_close_hours`
+   *  idle (default 12, 0 = never) and reopen from History. */
+  source?: EmbeddedThreadSource;
+  /** Stored as `meta.origin`; only with `source` (400 otherwise). */
+  origin?: EmbeddedOrigin;
+}
+
+/** Query of GET /workspaces/{id}/runtime-sessions: either narrows the list to
+ *  `meta.source` / `meta.origin.id` (closed threads included, newest first). */
+export interface ListRuntimeSessionsQuery {
+  source?: string;
+  origin_id?: string;
 }
 
 /** Body of POST /runtime-sessions/{id}/prompt. */

@@ -19,6 +19,17 @@ pub async fn health() -> Json<Value> {
     Json(json!({ "ok": true }))
 }
 
+/// `GET /api/v1/machine/status` — load, the background-agent queue and free
+/// disk, for the status-bar chip and Settings ▸ Daemon (any signed-in user).
+pub fn machine_routes() -> axum::Router<ServerCtx> {
+    axum::Router::new().route(
+        "/machine/status",
+        axum::routing::get(|State(ctx): State<ServerCtx>| async move {
+            Json(ctx.manager.machine_status().await)
+        }),
+    )
+}
+
 /// Whether the request carries a bearer that verifies as a full (unscoped,
 /// non-MCP) account credential. A share link — verified or still OTP-pending —
 /// and an MCP token are NOT "signed in" here (S8-308): a leaked share link

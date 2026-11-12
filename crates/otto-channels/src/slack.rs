@@ -660,6 +660,74 @@ async fn sleep_unless_cancelled(ms: u64, cancel: &AtomicBool) {
     }
 }
 
+/// How long the Socket Mode listener may stay disconnected before the
+/// notification centre says so. A routine reconnect (Slack rotates the
+/// socket every few hours) takes seconds; two minutes is an outage.
+const DOWN_NOTICE_AFTER: Duration = Duration::from_secs(120);
+
+/// One disconnected spell of a listener and whether it was announced. Pure:
+/// the caller passes the clock.
+#[derive(Debug, Default)]
+struct DownSpell {
+    since: Option<std::time::Instant>,
+    noticed: bool,
+}
+
+impl DownSpell {
+    /// Not connected at `now`. True exactly once per spell, when it has
+    /// lasted [`DOWN_NOTICE_AFTER`].
+    fn down(&mut self, now: std::time::Instant) -> bool {
+        let since = *self.since.get_or_insert(now);
+        if self.noticed || now.saturating_duration_since(since) < DOWN_NOTICE_AFTER {
+            return false;
+        }
+        self.noticed = true;
+        true
+    }
+
+    /// Connected (`hello`). True when the spell had been announced, so the
+    /// recovery is posted too.
+    fn up(&mut self) -> bool {
+        std::mem::take(self).noticed
+    }
+}
+
+/// Raise (`down` = why) or clear (`None`) the "Slack disconnected" notice
+/// for `integ`'s workspace — one bell row per integration, refreshed in
+/// place by the recovery. Spawned, so the frame loop never waits on the DB.
+fn post_listener_notice(bridge: &Arc<Bridge>, integ: &Integration, down: Option<String>) {
+    use otto_core::domain::NoticeSeverity;
+    let bridge = Arc::clone(bridge);
+    let ws = integ.workspace_id.clone();
+    tokio::spawn(async move {
+        let name = match bridge.workspaces.get(&ws).await {
+            Ok(w) => w.name,
+            Err(_) => ws.clone(),
+        };
+        let (severity, title, body) = match down {
+            Some(why) => (
+                NoticeSeverity::Warn,
+                "Slack disconnected",
+                format!(
+                    "Otto's Slack connection for workspace “{name}” has been down for over 2 \
+                     minutes ({why}). Otto keeps reconnecting; messages to the bot are not \
+                     answered until it is back."
+                ),
+            ),
+            None => (
+                NoticeSeverity::Info,
+                "Slack reconnected",
+                format!("Otto's Slack connection for workspace “{name}” is back."),
+            ),
+        };
+        let key = format!("channel:slack:{ws}:listener");
+        bridge
+            .manager
+            .post_system_notice(&key, severity, title, &body, Some("settings/channels"))
+            .await;
+    });
+}
+
 /// Open and maintain a Slack Socket Mode connection until `cancel` is set.
 /// Each inbound `message` event is forwarded to `bridge`. Every connect /
 /// drop / failure is reported to `health` (Settings → Channels shows it).
@@ -690,11 +758,17 @@ pub async fn run(
 
     let mut backoff_ms: u64 = 3_000;
     const BACKOFF_MAX_MS: u64 = 60_000;
+    // Down since the listener started until the first `hello`.
+    let mut spell = DownSpell::default();
+    let mut problem = String::from("not connected yet");
 
     'outer: loop {
         if cancel.load(Ordering::Relaxed) {
             debug!("slack listener stopping (cancel)");
             return;
+        }
+        if spell.down(std::time::Instant::now()) {
+            post_listener_notice(&bridge, &integ, Some(problem.clone()));
         }
 
         // --- Step 1: request a fresh WSS URL from apps.connections.open ---
@@ -708,6 +782,7 @@ pub async fn run(
                     backoff_ms = BACKOFF_MAX_MS;
                 }
                 health.failed(&detail, permanent);
+                problem = detail;
                 sleep_unless_cancelled(backoff_ms, &cancel).await;
                 backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                 continue 'outer;
@@ -728,7 +803,8 @@ pub async fn run(
             Ok(Err(e)) => {
                 let why = redact_url(&e, &wss_url);
                 error!("slack: websocket connect failed: {why}");
-                health.failed(&format!("Socket Mode connect failed: {why}"), false);
+                problem = format!("Socket Mode connect failed: {why}");
+                health.failed(&problem, false);
                 sleep_unless_cancelled(backoff_ms, &cancel).await;
                 backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                 continue 'outer;
@@ -738,13 +814,11 @@ pub async fn run(
                     "slack: websocket connect timed out after {}s, retrying in {backoff_ms}ms",
                     WS_CONNECT_TIMEOUT.as_secs()
                 );
-                health.failed(
-                    &format!(
-                        "Socket Mode connect timed out after {}s (network down or Slack unreachable)",
-                        WS_CONNECT_TIMEOUT.as_secs()
-                    ),
-                    false,
+                problem = format!(
+                    "Socket Mode connect timed out after {}s (network down or Slack unreachable)",
+                    WS_CONNECT_TIMEOUT.as_secs()
                 );
+                health.failed(&problem, false);
                 sleep_unless_cancelled(backoff_ms, &cancel).await;
                 backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                 continue 'outer;
@@ -853,6 +927,9 @@ pub async fn run(
                     info!("slack: socket mode connected (hello received)");
                     backoff_ms = 3_000;
                     health.connected();
+                    if spell.up() {
+                        post_listener_notice(&bridge, &integ, None);
+                    }
                 }
                 "disconnect" => {
                     // Routine: Slack rotates Socket Mode connections every
@@ -1011,6 +1088,7 @@ pub async fn run(
         } else {
             health.reconnecting(&drop_reason);
         }
+        problem = drop_reason;
         // Pause before reconnecting (exponential backoff, reset on successful hello).
         sleep_unless_cancelled(backoff_ms, &cancel).await;
         backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
@@ -1373,6 +1451,26 @@ async fn download_slack_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_listener_down_two_minutes_is_announced_once_and_its_return_once() {
+        let t0 = std::time::Instant::now();
+        let mut spell = DownSpell::default();
+        assert!(!spell.down(t0), "a reconnect starts the clock");
+        assert!(!spell.down(t0 + Duration::from_secs(60)));
+        assert!(spell.down(t0 + DOWN_NOTICE_AFTER), "two minutes: announce");
+        assert!(!spell.down(t0 + Duration::from_secs(600)), "only once");
+        assert!(spell.up(), "the recovery is announced");
+        assert!(!spell.up());
+        // A quick routine reconnect never reaches the bell.
+        let t1 = t0 + Duration::from_secs(3600);
+        assert!(!spell.down(t1));
+        assert!(!spell.down(t1 + Duration::from_secs(5)));
+        assert!(!spell.up(), "nothing was announced, nothing to clear");
+        // The next spell has its own clock.
+        assert!(!spell.down(t1 + Duration::from_secs(10)));
+        assert!(spell.down(t1 + Duration::from_secs(10) + DOWN_NOTICE_AFTER));
+    }
 
     #[test]
     fn inbound_text_is_decoded_from_slack_wire_format() {

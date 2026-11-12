@@ -11,8 +11,9 @@
 //! "Did you mean …".
 //!
 //! Run slots: the engine executes at most `OTTO_WF_MAX_PARALLEL_RUNS` (default
-//! 2) runs at once and queues the rest FIFO. [`slot_outlook`] turns the live
-//! run counts into what the acknowledgement may honestly promise.
+//! 2, the one reader is `run_queue::max_parallel_runs`) runs at once and
+//! queues the rest FIFO. [`slot_outlook`] turns the live run counts into what
+//! the acknowledgement may honestly promise.
 
 /// Fold a workflow name for comparison: Unicode dashes (‐ ‑ ‒ – — ― −) → `-`,
 /// curly quotes → straight, whitespace runs → one space, no space around a
@@ -135,16 +136,6 @@ pub fn ambiguous_reply(typed: &str, names: &[String]) -> String {
         typed.trim(),
         names.join(", ")
     )
-}
-
-/// The effective daemon-wide run cap — the same knob and default the engine's
-/// run gate reads (`otto-server/src/workflow_engine.rs`, `max_parallel_runs`).
-pub fn max_parallel_runs() -> usize {
-    std::env::var("OTTO_WF_MAX_PARALLEL_RUNS")
-        .ok()
-        .and_then(|s| s.trim().parse::<usize>().ok())
-        .filter(|n| *n >= 1)
-        .unwrap_or(2)
 }
 
 /// What a new run can expect when it is admitted.

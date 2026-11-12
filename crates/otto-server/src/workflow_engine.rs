@@ -46,6 +46,9 @@ pub(crate) use otto_workflows::location::{
     ensure_path_in_workspace, git_main_worktree, looks_like_path, match_repo_path,
 };
 use otto_workflows::retry::{outcome_error, retry_backoff};
+use otto_workflows::run_queue::{
+    max_parallel_runs, resolve_chat_target, result_workspace, run_gate, ChatTarget,
+};
 
 /// Session and review associations share the ordered progress stream. Reviews
 /// are recorded as soon as they exist, even when the step does not await them.
@@ -406,60 +409,6 @@ impl ProgressSink {
     fn enabled(&self) -> bool {
         self.tx.is_some()
     }
-}
-
-/// Where a run reports back to: the chat integration + channel/thread the trigger
-/// arrived on. Resolved once from the run input.
-struct ChatTarget {
-    /// Workspace whose integration reports the run — always the workflow's own
-    /// (see `result_workspace`; chat triggers only start workflows of the
-    /// receiving workspace, S3-03).
-    ws: String,
-    channel: Channel,
-    chat: String,
-    thread: Option<String>,
-}
-
-/// The workspace whose Slack/Telegram integration reports a run: always the
-/// workflow's own. Chat triggers only start workflows of the receiving
-/// workspace (S3-03), so a legitimate `origin_workspace_id` equals it; any
-/// other value is a forged/legacy input and must not borrow another
-/// workspace's bot token (S3-02).
-fn result_workspace(workflow: &Workflow, origin: Option<&str>) -> String {
-    if let Some(o) = origin.filter(|o| *o != workflow.workspace_id) {
-        tracing::warn!(workflow_id = %workflow.id, origin = o,
-              "run input names another workspace as its origin — reporting via the workflow's own");
-    }
-    workflow.workspace_id.clone()
-}
-
-/// Resolve the chat target for live progress + result delivery from the run input.
-/// Honors an explicit `result_chat`(+`result_channel`/`result_thread`) override,
-/// else the incoming-hook origin (`channel`/`chat`/`thread`). Returns `None` for a
-/// manual UI run or a webhook-only trigger (nothing to stream to).
-fn resolve_chat_target(workflow: &Workflow, input: &Value) -> Option<ChatTarget> {
-    let obj = input.as_object()?;
-    let str_at = |k: &str| obj.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
-    let ws = result_workspace(workflow, str_at("origin_workspace_id"));
-    let (channel, chat, thread) = match str_at("result_chat") {
-        Some(c) => (
-            str_at("result_channel").or_else(|| str_at("channel")),
-            Some(c),
-            str_at("result_thread"),
-        ),
-        None => (str_at("channel"), str_at("chat"), str_at("thread")),
-    };
-    let channel = match channel {
-        Some("slack") => Channel::Slack,
-        Some("telegram") => Channel::Telegram,
-        _ => return None,
-    };
-    Some(ChatTarget {
-        ws,
-        channel,
-        chat: chat?.to_string(),
-        thread: thread.map(str::to_string),
-    })
 }
 
 /// Spawn the progress pump: a single task that owns the receiver + resolved
@@ -1223,35 +1172,6 @@ fn find_step_handoff(
     None
 }
 
-/// Default cap on workflow runs EXECUTING at once, daemon-wide. Every run
-/// beyond it queues FIFO in [`spawn_run`] and stays `pending`. A single run
-/// can fan out dozens of agent PTYs (a `review_run` node alone launches the
-/// whole reviewer fleet), so uncapped parallel runs exhausted fds and starved
-/// interactive sessions; 2 keeps one long run from blocking a quick one while
-/// bounding the process/fd blast radius.
-const DEFAULT_MAX_PARALLEL_RUNS: usize = 2;
-
-/// The effective cap: `OTTO_WF_MAX_PARALLEL_RUNS` (≥ 1) when set, else
-/// [`DEFAULT_MAX_PARALLEL_RUNS`]. Read once — the gate's permit count can't
-/// change while runs hold permits.
-fn max_parallel_runs() -> usize {
-    static N: OnceLock<usize> = OnceLock::new();
-    *N.get_or_init(|| {
-        std::env::var("OTTO_WF_MAX_PARALLEL_RUNS")
-            .ok()
-            .and_then(|s| s.trim().parse::<usize>().ok())
-            .filter(|n| *n >= 1)
-            .unwrap_or(DEFAULT_MAX_PARALLEL_RUNS)
-    })
-}
-
-/// Daemon-wide run gate. Tokio's semaphore queues waiters FIFO, so runs start
-/// in the order they were requested.
-fn run_gate() -> &'static tokio::sync::Semaphore {
-    static GATE: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
-    GATE.get_or_init(|| tokio::sync::Semaphore::new(max_parallel_runs()))
-}
-
 tokio::task_local! {
     /// The run-gate permit of the run executing on this task — set by
     /// [`spawn_run`] around [`run_workflow`]. A `human_approval` gate hands it
@@ -1322,6 +1242,9 @@ impl otto_workflows::WorkflowCtx for ServerCtx {
     }
     fn issues_store(&self) -> &otto_state::IssuesRepo {
         &self.issues_store
+    }
+    fn secrets(&self) -> &std::sync::Arc<dyn otto_core::secrets::SecretStore> {
+        &self.secrets
     }
     fn spawn_run(&self, ws: Workspace, wf: Workflow, run_id: Id, input: Value, scope: RunScope) {
         spawn_run(self.clone(), ws, wf, run_id, input, scope, None);
@@ -1445,10 +1368,11 @@ pub fn spawn_run(
                 return;
             }
         }
-        let gate = run_gate();
+        let (gate, mut parked_at) = (run_gate(), None);
         let permit = match gate.try_acquire() {
             Ok(p) => p,
             Err(_) => {
+                parked_at = Some(Instant::now());
                 // Parked. Announce the (still all-pending) run so the sidebar
                 // list picks it up; rev 0 makes clients refetch rather than
                 // trust the event's empty node counts.
@@ -1550,6 +1474,10 @@ pub fn spawn_run(
                 return;
             }
         };
+        // A queued chat run's thread hears "Started" before any step does.
+        let waited = parked_at.map(|t| t.elapsed());
+        otto_workflows::run_queue::announce_dequeued(&ctx, &workflow, &run_id, &input, waited)
+            .await;
         // The permit rides in a task-local so a parked approval gate can hand
         // it back (see RUN_PERMIT); it is released when the run ends.
         RUN_PERMIT

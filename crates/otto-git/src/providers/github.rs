@@ -19,6 +19,8 @@ use super::client::Http;
 use super::identity::{self, Me};
 use super::{map_state, ts, varr, vbool, vstr, vstr_opt, RemoteRef, RemoteRepoSummary};
 
+pub(crate) mod reactions;
+
 const BASE: &str = "https://api.github.com";
 
 /// Percent-encode characters that must be escaped in GitHub search query values.
@@ -739,6 +741,9 @@ pub(crate) fn review_body_comment(rv: &Value) -> Option<PrComment> {
         can_edit: false,
         review_state: Some(state.to_string()),
         in_reply_to: None,
+        // Review reactions have no REST endpoint.
+        reactions: Vec::new(),
+        can_react: false,
     })
 }
 
@@ -867,6 +872,8 @@ fn comment_from(v: &Value, path: Option<String>, line: Option<u32>) -> PrComment
         can_edit: false,
         review_state: None,
         in_reply_to: None,
+        reactions: reactions::from_rollup(v),
+        can_react: true,
     }
 }
 
@@ -1033,6 +1040,9 @@ impl super::GitProvider for Github {
                 }
             }
         }
+        // Which reactions are the caller's: a bounded, best-effort read.
+        self.stamp_my_reactions(r, &mut comments, &mut top, me)
+            .await;
         comments.append(&mut top);
 
         // Reviews are chronological events, not one row per current opinion.
@@ -1102,6 +1112,9 @@ impl super::GitProvider for Github {
             approved_by,
             reviewers,
             mergeable: vbool(&pr, &["mergeable"]),
+            reactions_supported: true,
+            merge_checks: merge_checks_from(&pr),
+            task_count: None,
         })
     }
 
@@ -1248,6 +1261,31 @@ impl super::GitProvider for Github {
             GhComment::Issue(id, _) => format!("{repo}/issues/comments/{id}"),
         };
         self.http.ok(self.req(reqwest::Method::DELETE, &path)).await
+    }
+
+    /// GitHub diffs a PR as `base...head` (from their merge base).
+    async fn pr_diff_target(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+    ) -> Result<Option<crate::local::DiffTarget>> {
+        let pr = self.pr_raw(r, number).await?;
+        let (base, head) = (vstr(&pr, &["base", "sha"]), vstr(&pr, &["head", "sha"]));
+        Ok((!base.is_empty() && !head.is_empty())
+            .then_some(crate::local::DiffTarget::MergeBase(base, head)))
+    }
+
+    /// See [`reactions`]: review and issue comments each have their own
+    /// reaction endpoints; a review summary has none.
+    async fn set_reaction(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        comment_id: &str,
+        key: otto_core::api::ReactionKey,
+        on: bool,
+    ) -> Result<Vec<otto_core::api::PrReaction>> {
+        self.set_reaction_impl(r, number, comment_id, key, on).await
     }
 
     async fn unapprove(&self, r: &RemoteRef, number: u64) -> Result<()> {
@@ -1625,6 +1663,74 @@ impl Github {
             .await?;
         Ok(comment_from(&v, None, None))
     }
+}
+
+/// The PR's `mergeable_state` as merge checks — only what that one field
+/// honestly says (GitHub computes it asynchronously: `unknown` or absent ⇒
+/// nothing). `blocked` folds every unmet branch-protection rule (required
+/// reviews, required checks) into one row, as GitHub's own field does.
+pub(crate) fn merge_checks_from(pr: &Value) -> Vec<otto_core::api::MergeCheck> {
+    use otto_core::api::MergeCheck;
+    if vstr(pr, &["state"]) != "open" || vstr_opt(pr, &["merged_at"]).is_some() {
+        return Vec::new();
+    }
+    let check = |key: &str, label: &str, passed: bool, detail: Option<&str>| MergeCheck {
+        key: key.into(),
+        label: label.into(),
+        passed,
+        detail: detail.map(str::to_string),
+    };
+    let conflicts = |passed: bool| {
+        check(
+            "conflicts",
+            "No conflicts with the base branch",
+            passed,
+            (!passed).then_some("Resolve the conflicts before merging"),
+        )
+    };
+    let rules = |passed: bool| {
+        check(
+            "branch_protection",
+            "Branch protection rules satisfied",
+            passed,
+            (!passed).then_some("Required reviews or required checks are missing"),
+        )
+    };
+    // The conflict row only when GitHub's own `mergeable` says so.
+    let mut out: Vec<MergeCheck> = vbool(pr, &["mergeable"])
+        .map(conflicts)
+        .into_iter()
+        .collect();
+    let conflict_known = !out.is_empty();
+    out.extend(match vstr(pr, &["mergeable_state"]).as_str() {
+        "clean" | "has_hooks" => vec![rules(true)],
+        "unstable" => vec![
+            rules(true),
+            check(
+                "checks",
+                "All checks have passed",
+                false,
+                Some("Some non-required checks are failing or pending"),
+            ),
+        ],
+        "blocked" => vec![rules(false)],
+        "behind" => vec![check(
+            "up_to_date",
+            "Up to date with the base branch",
+            false,
+            Some("The base branch has newer commits that must be merged in"),
+        )],
+        "dirty" if !conflict_known => vec![conflicts(false)],
+        "draft" => vec![check(
+            "draft",
+            "Ready for review",
+            false,
+            Some("A draft pull request cannot be merged"),
+        )],
+        // `unknown` (still computing) or absent: nothing more is known.
+        _ => Vec::new(),
+    });
+    out
 }
 
 /// A comment this credential just wrote: the caller's own.

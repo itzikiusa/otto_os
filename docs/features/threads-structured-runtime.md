@@ -908,3 +908,31 @@ projects and History, in their own folded group ("Pull requests",
 "Connections", "Helpers"). A personal agent's routine runs fold into one
 **Agent runs** group the same way (newest first, 20 at a time); its chat
 stays under the agent's name.
+
+The daemon side of that tag. `meta` is server-owned, so a page names the
+source in the create body instead — `POST /workspaces/{id}/runtime-sessions`
+with `source` (`pr-agent` or `connection-diagnose`) and an optional
+`origin: {kind, id, label?}` (`kind` `pr` for `pr-agent`, `connection` for
+`connection-diagnose`; `id` 1–200 characters, e.g. `<repo>#<number>` or the
+connection id; `label` ≤ 200). The daemon validates them in one place
+(`otto_core::agent_runtime::embedded_meta`: any other source, an `origin`
+without a `source`, a mismatched kind or a bad length is a 400) and stores
+exactly `meta.source` / `meta.origin`; nothing else in the body reaches
+`meta`. The page finds its thread again with
+`GET /workspaces/{id}/runtime-sessions?source=pr-agent&origin_id=<repo>#<n>`
+(URL-encode the id): the caller's own matching threads (all, for an admin),
+newest activity first, closed ones included so the page can offer to reopen
+rather than start over. A thread the agent opens from an embedded one
+(`…/peers`) inherits its `source` / `origin` and stays in the same group.
+
+Embedded threads close themselves. Shortly after boot and then hourly, the
+runtime closes every open thread with an embedded source that has had no
+activity for `embedded_thread_auto_close_hours` (daemon setting, `PUT
+/settings`; default `12`, `0` = never) — the same Close a person clicks: the
+agent stops, the thread stays in History and reopens on demand. It never
+closes one with a turn or background work running, or with an approval or
+question waiting on the person, and closes at most 50 per pass (the rest wait
+for the next hour); each close is logged at info. The sweep lives in
+`crates/otto-agent-protocol/src/runtime/auto_close.rs`; the
+`json_extract(meta, '$.source')` index keeps both the lookup and the sweep
+off a full scan.

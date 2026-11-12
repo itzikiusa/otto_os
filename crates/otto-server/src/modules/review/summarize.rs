@@ -2,8 +2,8 @@
 //! shared summarizer step (`otto_agent_run::fanout::summarize`) — it builds
 //! the managed summarizer turn ([`SummarizerTurn`]) and the deterministic
 //! fallback, then persists the result: the summarizer row, the draft comments
-//! and promoted findings ([`persist_comments`]), the absent-finding
-//! resolution ([`resolve_absent`]) and the proof pack.
+//! and promoted findings ([`persist_comments`]), and the prior findings this
+//! run confirmed fixed (`otto_review::resolution` — never by absence).
 
 use super::*;
 use otto_review::prompts::*;
@@ -74,8 +74,13 @@ pub(crate) async fn summarize_and_persist(
                 .collect()
         })
         .collect();
-    if let Some(plan) = ctx.reviews_store.get_review(review_id).await?.scope_plan {
-        let prior = otto_review::history::prior_claims(&plan, &ctx.findings_store).await?;
+    // Prior findings go in LAST, one claim each (`resolution::confirmed_fixed`).
+    let (plan, prior_batch) = (
+        ctx.reviews_store.get_review(review_id).await?.scope_plan,
+        agent_findings.len(),
+    );
+    if let Some(plan) = &plan {
+        let prior = otto_review::history::prior_claims(plan, &ctx.findings_store).await?;
         if !prior.is_empty() {
             agent_findings.push(prior);
         }
@@ -151,8 +156,15 @@ pub(crate) async fn summarize_and_persist(
     }
     // Verified comments plus every claim the verifier did not account for,
     // stored marked unverified — never dropped (see `otto_review::verification`).
-    let settled =
-        otto_review::verification::settle(summary.value, agent_findings, fallback_cause.as_deref());
+    let (cause, blocked) = (fallback_cause.as_deref(), resolve_blocked);
+    let fixed = otto_review::resolution::confirmed_fixed(
+        plan.as_ref(),
+        prior_batch,
+        &summary.value,
+        cause,
+        blocked,
+    );
+    let settled = otto_review::verification::settle(summary.value, agent_findings, cause);
     if let Some(mut plan) = ctx.reviews_store.get_review(review_id).await?.scope_plan {
         plan.verification_notes = settled.notes.clone();
         ctx.reviews_store.set_scope_plan(review_id, &plan).await?;
@@ -161,7 +173,7 @@ pub(crate) async fn summarize_and_persist(
         &settled,
         fallback_cause.as_deref(),
         resolve_blocked,
-        &agent_states[..summarizer_idx],
+        &otto_review::restart::with_failure_reasons(&agent_states[..summarizer_idx]),
     );
     let parsed = settled.comments;
     mark_summarizer_done(
@@ -173,7 +185,7 @@ pub(crate) async fn summarize_and_persist(
         .set_agent_at(review_id, summarizer_idx, &agent_states[summarizer_idx])
         .await?;
 
-    let Some(_seen_fingerprints) = persist_comments(
+    let Some(_seen) = persist_comments(
         ctx,
         review_id,
         repo_path,
@@ -190,6 +202,7 @@ pub(crate) async fn summarize_and_persist(
     if is_cancelled().await {
         return Ok(());
     }
+    otto_review::resolution::resolve_confirmed(&ctx.findings_store, review_id, &fixed).await;
     // Not a verdict (status `error`, the findings stay stored): the message
     // names the failed step for the review panel and the workflow step.
     incomplete.map_or(Ok(()), |why| Err(Error::Invalid(why)))
@@ -213,8 +226,8 @@ fn attempt_cancel_flag(
 }
 
 /// Persist the summary's draft comments AND promote each into a tracked
-/// workflow Finding. Returns the fingerprints seen (for [`resolve_absent`]),
-/// or `None` when the review was cancelled mid-way.
+/// workflow Finding. Returns the fingerprints seen, or `None` when the review
+/// was cancelled mid-way.
 #[allow(clippy::too_many_arguments)]
 async fn persist_comments(
     ctx: &ServerCtx,
@@ -228,10 +241,9 @@ async fn persist_comments(
 ) -> Result<Option<Vec<String>>> {
     // 6. Persist draft comments AND promote each into a tracked workflow Finding
     //    (the board + Proof Pack read these). The summarized comment is the
-    //    PR-posting artifact; the Finding is the canonical workflow record. We
-    //    also track seen fingerprints to drive the cross-run DETECTION lifecycle
-    //    (absent findings flip `state`→resolved via resolve_absent_scoped below — the
-    //    engine owns the `state` axis; the workflow `status` is untouched).
+    //    PR-posting artifact; the Finding is the canonical workflow record. A
+    //    finding absent from this run is NOT resolved (`otto_review::resolution`
+    //    says why); seen fingerprints only disambiguate same-line findings.
     tracing::info!(review = %review_id, "storing {} draft comments", parsed.len());
     let mut seen_fingerprints: Vec<String> = Vec::new();
     // Comments the user already decided on (or that are on the PR) — a re-run
@@ -285,7 +297,6 @@ async fn persist_comments(
             &mut anchor_files,
         )
         .await;
-        // Track for the cross-run detection lifecycle (resolve_absent_scoped below).
         seen_fingerprints.push(fp);
     }
     Ok(Some(seen_fingerprints))

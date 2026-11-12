@@ -80,6 +80,7 @@ pub async fn create_request(
     Path(wid): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     headers: HeaderMap,
     Json(req): Json<UpsertApiRequestReq>,
 ) -> ApiResult<Json<ApiRequest>> {
@@ -88,8 +89,9 @@ pub async fn create_request(
         return Err(Error::Invalid("request name must not be empty".into()).into());
     }
     let mut extras = validate_extras(req.extras.clone())?;
-    let (source, session_id) = caller_source(&headers);
-    if source["kind"] == "agent" {
+    // Authorship by CREDENTIAL (header or token), not by header alone.
+    let author = agent_author(&headers, &auth);
+    if let Some(session_id) = &author {
         extras = Some(stamp_agent(extras, session_id.as_deref()));
     }
     ensure_collection_in_workspace(&repo(&ctx), req.collection_id.as_deref(), &wid).await?;
@@ -101,10 +103,12 @@ pub async fn create_request(
     // row exists (lazy migration on save; plaintext never touches SQLite).
     let id = otto_core::new_id();
     let own_ref = api_secrets::request_ref(&id);
-    let (auth_row, blob) = api_secrets::split_auth_secrets(
+    let (auth_row, blob) = api_secrets::split_auth_secrets_for_save(
         &normalize_json_object(req.auth.clone()),
         &own_ref,
         &BTreeMap::new(),
+        &req.url,
+        author.is_none(),
     )
     .map_err(|m| ApiError(Error::Invalid(m)))?;
     // A brand-new id has no Keychain item: an empty blob would only issue a
@@ -126,6 +130,7 @@ pub async fn update_request(
     Path((wid, id)): Path<(Id, Id)>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     headers: HeaderMap,
     Json(mut req): Json<UpsertApiRequestReq>,
 ) -> ApiResult<Json<ApiRequest>> {
@@ -145,22 +150,23 @@ pub async fn update_request(
     } else {
         incoming_extras
     };
-    let (source, session_id) = caller_source(&headers);
-    if source["kind"] == "agent" {
+    let author = agent_author(&headers, &auth);
+    if let Some(session_id) = &author {
         extras = Some(stamp_agent(extras, session_id.as_deref()));
     }
 
     // Lazy secret migration: plaintext secret members move to the Keychain;
-    // markers sent back unchanged keep their stored values.
-    let previous_blob =
-        api_secrets::load_blob_checked_async(&ctx.secrets, &api_secrets::request_ref(&id)).await?;
+    // markers sent back unchanged keep their stored values. A person's save
+    // binds them to the saved url; an agent's keeps the recorded one.
+    let own_ref = api_secrets::request_ref(&id);
+    let previous_blob = api_secrets::load_blob_checked_async(&ctx.secrets, &own_ref).await?;
     let auth_row = if let Some(incoming) = merged_auth_for_update(&req.auth) {
-        let own_ref = api_secrets::request_ref(&id);
-        let existing_blob = api_secrets::load_blob_checked_async(&ctx.secrets, &own_ref).await?;
-        let (auth_row, blob) = api_secrets::split_auth_secrets(
+        let (auth_row, blob) = api_secrets::split_auth_secrets_for_save(
             &normalize_json_object(incoming),
             &own_ref,
-            &existing_blob,
+            &previous_blob,
+            &req.url,
+            author.is_none(),
         )
         .map_err(|m| ApiError(Error::Invalid(m)))?;
         api_secrets::store_blob_async(&ctx.secrets, &own_ref, &blob).await?;
@@ -175,12 +181,7 @@ pub async fn update_request(
     let updated = match repo.update_request(&id, new).await {
         Ok(updated) => updated,
         Err(error) => {
-            api_secrets::store_blob_async(
-                &ctx.secrets,
-                &api_secrets::request_ref(&id),
-                &previous_blob,
-            )
-            .await?;
+            api_secrets::store_blob_async(&ctx.secrets, &own_ref, &previous_blob).await?;
             return Err(error.into());
         }
     };

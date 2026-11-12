@@ -3,8 +3,11 @@
 // It monkey-patches window.fetch (for /api/v1/*) and window.WebSocket (for
 // /ws/*) so client.ts stays untouched.
 
-import { MOCK_ME, mockBigPrDiff, mockCommitDiff, mockExtraPrs, mockIsMine, mockPrCommits, mockPrLive } from './mock-prs';
+import { MOCK_ME, mockBigPrDiff, mockCommitDiff, mockExtraPrs, mockIsMine, mockPrCommits, mockPrExtras, mockPrLive } from './mock-prs';
+import { prReviewMockRoutes } from './mock-pr-comments';
 import { slackMockRoutes } from './mock-slack';
+import { machineMockRoutes } from './mock-machine';
+import { runtimeMockRoutes } from './mock-runtime';
 import type {
   AwsAccount,
   AwsPermissions,
@@ -968,6 +971,9 @@ const k8sRoutes: Route[] = [
 const routes: Route[] = [
   ...k8sRoutes,
   ...slackMockRoutes,
+  ...machineMockRoutes,
+  ...runtimeMockRoutes,
+  ...prReviewMockRoutes((rid, num) => prs.find((p) => p.repo_id === rid && p.summary.number === num)),
   { method: 'GET', re: /^\/health$/, handle: () => ({ json: { ok: true } }) },
   { method: 'GET', re: /^\/meta$/, handle: () => ({ json: { ...meta, needs_onboarding: localStorage.getItem('otto_mock_onboarding') === '1' } }) },
   {
@@ -1506,7 +1512,9 @@ const routes: Route[] = [
           ok,
           latency_ms: ok ? 12 + Math.floor(Math.random() * 80) : null,
           message: ok ? 'probe ok' : 'connection refused: mongo.internal:27017',
-          warn_argv: c.kind === 'clickhouse',
+          // The daemon's rule (builders.rs): clickhouse with a stored password,
+          // mongodb whose URI carries one.
+          warn_argv: (c.kind === 'clickhouse' && !!c.secret_ref) || (c.kind === 'mongodb' && /\{secret\}|:\/\/[^/@?]*:[^/@?]+@/.test(String(c.params?.conn_string ?? ''))),
         },
       };
     },
@@ -1839,7 +1847,7 @@ const routes: Route[] = [
       const pr = prs.find((p) => p.repo_id === m[1] && p.summary.number === Number(m[2]));
       if (!pr) return problem(404, 'not_found', 'pr');
       const detail: PrDetail = {
-        ...mockPrLive(pr.summary),
+        ...mockPrLive(pr.summary), ...mockPrExtras(pr.repo_id, pr.summary.number),
         description_md: pr.description_md,
         comments: pr.comments,
         approved_by: pr.approved_by,
@@ -1957,16 +1965,6 @@ const routes: Route[] = [
       const head = pr.comments.find((c) => c.thread_id === m[3]);
       if (!head) return problem(404, 'not_found', 'thread');
       head.resolved = body.resolved === true;
-      return { status: 204 };
-    },
-  },
-  {
-    method: 'POST', // your review: the forge lists you as MOCK_ME, not the account username
-    re: /^\/repos\/([^/]+)\/prs\/(\d+)\/(approve|request-changes)$/,
-    handle: (m) => {
-      const pr = prs.find((p) => p.repo_id === m[1] && p.summary.number === Number(m[2]));
-      const others = (l: string[] | undefined) => (l ?? []).filter((n) => n !== MOCK_ME);
-      if (pr) [pr.approved_by, pr.changes_by] = m[3] === 'approve' ? [[...others(pr.approved_by), MOCK_ME], others(pr.changes_by)] : [others(pr.approved_by), [...others(pr.changes_by), MOCK_ME]];
       return { status: 204 };
     },
   },
