@@ -25,7 +25,9 @@
 //!     source; `catch_unwind` below is belt-and-suspenders for any other wry
 //!     panic so it degrades to a no-op instead of crashing the app.
 
+use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::{Mutex, OnceLock};
 use tauri::webview::{NewWindowFeatures, NewWindowResponse};
 use tauri::{Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl};
 
@@ -53,6 +55,35 @@ fn allowed_tab_url(u: &tauri::Url) -> bool {
     }
 }
 
+/// The URL each tab webview was last sent to (`browser_open` /
+/// `browser_navigate`) or last navigated to by the page (`on_navigation`), by
+/// label. Tracked here because `webview.url()` panics before a first load
+/// commits (see the module docs).
+fn shown_urls() -> std::sync::MutexGuard<'static, HashMap<String, String>> {
+    static SHOWN: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    SHOWN
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Record (`Some`) or forget (`None`) what webview `lbl` shows.
+fn set_shown(lbl: &str, url: Option<&tauri::Url>) {
+    match url {
+        Some(u) => shown_urls().insert(lbl.to_string(), u.to_string()),
+        None => shown_urls().remove(lbl),
+    };
+}
+
+/// Whether `browser_open` must navigate webview `lbl` to `url` — not when it
+/// already shows it (both sides are parsed, so `https://a.example` and
+/// `https://a.example/` are the same page). A re-mounted Browser view
+/// re-opening its tab must not reload the page and lose its scroll, form and
+/// app state; an explicit reload is `browser_reload`.
+fn needs_navigation(lbl: &str, url: &tauri::Url) -> bool {
+    shown_urls().get(lbl).map(String::as_str) != Some(url.as_str())
+}
+
 fn parse_url(url: &str) -> Result<tauri::Url, String> {
     let u: tauri::Url = url.parse().map_err(|e| format!("bad url '{url}': {e}"))?;
     if !allowed_tab_url(&u) {
@@ -64,8 +95,8 @@ fn parse_url(url: &str) -> Result<tauri::Url, String> {
     Ok(u)
 }
 
-/// Open (or re-navigate + reposition + show) the webview for tab `id` at the
-/// given panel rect. Coordinates are logical (CSS) pixels relative to the
+/// Open (or reposition + show, navigating only when it shows another URL —
+/// see [`needs_navigation`]) the webview for tab `id` at the given panel rect. Coordinates are logical (CSS) pixels relative to the
 /// window's top-left, matching `getBoundingClientRect()` in the SPA.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // tauri command: flat invoke args (id + url + rect)
@@ -84,10 +115,14 @@ pub fn browser_open(
     // Existing tab → reposition, navigate, show. Guard against any wry panic so a
     // transient failure degrades to a no-op rather than aborting the whole app.
     if let Some(wv) = app.get_webview(&lbl) {
+        let navigate = needs_navigation(&lbl, &parsed);
         return catch_unwind(AssertUnwindSafe(move || -> Result<(), String> {
             let _ = wv.set_position(LogicalPosition::new(x, y));
             let _ = wv.set_size(LogicalSize::new(width.max(1.0), height.max(1.0)));
-            wv.navigate(parsed).map_err(|e| e.to_string())?;
+            if navigate {
+                wv.navigate(parsed.clone()).map_err(|e| e.to_string())?;
+                set_shown(&lbl, Some(&parsed));
+            }
             let _ = wv.show();
             Ok(())
         }))
@@ -102,6 +137,8 @@ pub fn browser_open(
     let id_nav = id.clone();
     let lbl_nav = win_label.clone();
     let app_new = app.clone();
+    let lbl_seen = lbl.clone();
+    set_shown(&lbl, Some(&parsed));
     let builder = tauri::webview::WebviewBuilder::new(&lbl, WebviewUrl::External(parsed))
         .transparent(false)
         // Track in-page navigation for the address bar (never calls url()).
@@ -110,6 +147,7 @@ pub fn browser_open(
             if !allowed_tab_url(u) {
                 return false;
             }
+            set_shown(&lbl_seen, Some(u));
             let _ = app_nav.emit_to(lbl_nav.as_str(), URL_EVENT, (id_nav.clone(), u.to_string()));
             true
         })
@@ -126,7 +164,10 @@ pub fn browser_open(
             LogicalPosition::new(x, y),
             LogicalSize::new(width.max(1.0), height.max(1.0)),
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            set_shown(&lbl, None);
+            e.to_string()
+        })?;
     Ok(())
 }
 
@@ -190,6 +231,7 @@ async fn await_eval_result(
 pub fn browser_navigate(app: tauri::AppHandle, id: String, url: String) -> Result<(), String> {
     if let Some(wv) = app.get_webview(&label(&id)) {
         let parsed = parse_url(&url)?;
+        set_shown(&label(&id), Some(&parsed));
         return catch_unwind(AssertUnwindSafe(move || {
             wv.navigate(parsed).map_err(|e| e.to_string())
         }))
@@ -243,6 +285,7 @@ pub fn browser_hide_all(app: tauri::AppHandle, window: tauri::Window) {
 
 #[tauri::command]
 pub fn browser_close(app: tauri::AppHandle, id: String) {
+    set_shown(&label(&id), None);
     if let Some(wv) = app.get_webview(&label(&id)) {
         let _ = catch_unwind(AssertUnwindSafe(|| {
             let _ = wv.close();
@@ -298,6 +341,7 @@ pub fn browser_close_all(app: tauri::AppHandle, window: tauri::Window) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         for (lbl, wv) in app.webviews() {
             if lbl.starts_with(PREFIX) && wv.window().label() == window.label() {
+                set_shown(&lbl, None);
                 let _ = wv.close();
             }
         }
@@ -329,6 +373,23 @@ mod tests {
         ] {
             assert!(parse_url(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn open_navigates_only_to_a_url_the_webview_does_not_show() {
+        let lbl = label("test-needs-navigation");
+        let url = |u: &str| parse_url(u).unwrap();
+        assert!(needs_navigation(&lbl, &url("https://a.example")));
+        set_shown(&lbl, Some(&url("https://a.example")));
+        // Normalised: the same page with and without the root slash.
+        assert!(!needs_navigation(&lbl, &url("https://a.example/")));
+        assert!(needs_navigation(&lbl, &url("https://a.example/next")));
+        // The page navigated itself (on_navigation records it).
+        set_shown(&lbl, Some(&url("https://a.example/next")));
+        assert!(!needs_navigation(&lbl, &url("https://a.example/next")));
+        // Closed: the next open creates and loads it again.
+        set_shown(&lbl, None);
+        assert!(needs_navigation(&lbl, &url("https://a.example/next")));
     }
 
     #[tokio::test]

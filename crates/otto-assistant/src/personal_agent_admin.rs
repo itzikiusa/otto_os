@@ -236,8 +236,9 @@ pub async fn refresh_next_run<C: AssistantCtx>(
         .await;
 }
 
-/// Make `agent` the workspace's main agent (one per workspace: every other
-/// agent's flag is cleared).
+/// Make `agent` its owner's main agent in its workspace (one per person per
+/// workspace: the flag is cleared on the owner's other agents there, never
+/// on another member's).
 pub async fn make_primary(repo: &PersonalAgentsRepo, agent: &PersonalAgent) -> Result<()> {
     let mut cfg = repo.autonomy(&agent.id).await?;
     if !cfg.primary {
@@ -245,6 +246,23 @@ pub async fn make_primary(repo: &PersonalAgentsRepo, agent: &PersonalAgent) -> R
         repo.save_autonomy(&agent.id, &cfg).await?;
     }
     clear_other_primaries(repo, agent).await
+}
+
+/// `agent`'s owner's main agent in its workspace, if one is set (the oldest
+/// flagged, as `PersonalAgentsRepo::primary_agent` picks per workspace) — the
+/// lead `agent` reports to.
+pub async fn primary_of(
+    repo: &PersonalAgentsRepo,
+    agent: &PersonalAgent,
+) -> Result<Option<PersonalAgent>> {
+    // `list_by_workspace` is oldest first; the autonomy read is cached.
+    for a in repo.list_by_workspace(&agent.workspace_id).await? {
+        if crate::personal_agent_team::same_owner(&a, agent) && repo.autonomy(&a.id).await?.primary
+        {
+            return Ok(Some(a));
+        }
+    }
+    Ok(None)
 }
 
 /// Setting up a routine means "run this": a paused agent is resumed, or the
@@ -265,10 +283,12 @@ pub async fn resume_for_routine(repo: &PersonalAgentsRepo, agent: &PersonalAgent
     Ok(true)
 }
 
-/// Clear `primary` on every other agent of `agent`'s workspace.
+/// Clear `primary` on every other agent of `agent`'s owner in its
+/// workspace. "Main agent" is per (workspace, owner): one member choosing
+/// theirs must not demote another member's.
 pub async fn clear_other_primaries(repo: &PersonalAgentsRepo, agent: &PersonalAgent) -> Result<()> {
     for other in repo.list_by_workspace(&agent.workspace_id).await? {
-        if other.id == agent.id {
+        if other.id == agent.id || !crate::personal_agent_team::same_owner(&other, agent) {
             continue;
         }
         let mut cfg = repo.autonomy(&other.id).await?;
@@ -740,5 +760,50 @@ mod tests {
         assert!(l.contains("cron `0 7 * * 0-5`"), "{l}");
         assert!(l.contains("Asia/Jerusalem"), "{l}");
         assert!(l.contains("may act"), "{l}");
+    }
+
+    /// "Main agent" is per (workspace, owner): Bob choosing his never
+    /// demotes Alice's, and each agent's lead is its own owner's main agent.
+    #[tokio::test]
+    async fn the_main_agent_is_per_person_in_a_shared_workspace() {
+        let pool = otto_state::db::test_pool().await;
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, created_at) \
+             VALUES ('prim-ws', 'ws', '/tmp/ws', '2026-11-12T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let repo = PersonalAgentsRepo::new(pool.clone());
+        let mk = |name: &str, owner: &str| NewPersonalAgent {
+            created_by: Some(owner.to_string()),
+            ..NewPersonalAgent::defaults("prim-ws".into(), name.into())
+        };
+        let alice_main = repo.create(mk("Alice main", "alice")).await.unwrap();
+        let alice_helper = repo.create(mk("Alice helper", "alice")).await.unwrap();
+        let bob_main = repo.create(mk("Bob main", "bob")).await.unwrap();
+        let bob_helper = repo.create(mk("Bob helper", "bob")).await.unwrap();
+
+        make_primary(&repo, &alice_main).await.unwrap();
+        make_primary(&repo, &bob_main).await.unwrap();
+        assert!(repo.autonomy(&alice_main.id).await.unwrap().primary);
+        assert!(repo.autonomy(&bob_main.id).await.unwrap().primary);
+        assert_eq!(
+            primary_of(&repo, &alice_helper).await.unwrap().unwrap().id,
+            alice_main.id
+        );
+        assert_eq!(
+            primary_of(&repo, &bob_helper).await.unwrap().unwrap().id,
+            bob_main.id
+        );
+
+        // Alice moving her main agent clears only her old one.
+        make_primary(&repo, &alice_helper).await.unwrap();
+        assert!(!repo.autonomy(&alice_main.id).await.unwrap().primary);
+        assert!(repo.autonomy(&bob_main.id).await.unwrap().primary);
+        assert_eq!(
+            primary_of(&repo, &alice_main).await.unwrap().unwrap().id,
+            alice_helper.id
+        );
     }
 }

@@ -29,7 +29,7 @@ use tokio::process::{Child, Command};
 
 pub mod diagnose;
 pub mod sftp;
-pub use diagnose::{diagnose as diagnose_ssh_stderr, SshDiagnosis};
+pub use diagnose::{diagnose as diagnose_ssh_stderr, diagnose_terminal_output, SshDiagnosis};
 pub use sftp::{SftpEntry, SftpParams, SftpSession};
 
 /// SSH tunnel config. Auth uses the system ssh client, so it honours the
@@ -47,6 +47,12 @@ pub struct SshTunnelConfig {
     /// Path to a private key on disk (optional; agent is used otherwise).
     #[serde(default)]
     pub identity_file: Option<String>,
+    /// Optional ProxyJump chain (`ssh -J`): `[user@]host[:port]`, comma-separated
+    /// for several hops, e.g. `ops@outer.example.com,inner-bastion`. The jump
+    /// hops authenticate with the agent / `~/.ssh/config` (`identity_file`
+    /// applies to `host` only). Absent = connect to `host` directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_jump: Option<String>,
 }
 
 fn default_ssh_port() -> u16 {
@@ -70,10 +76,28 @@ pub fn valid_ssh_user(user: &str) -> bool {
         || (!user.starts_with('-') && !user.chars().any(|c| c.is_whitespace() || c.is_control()))
 }
 
+/// A ProxyJump chain `ssh -J` cannot read as an option or split: one or more
+/// comma-separated `[user@]host[:port]` hops, none empty, none starting with
+/// `-`, and no whitespace / control characters anywhere (the same rule the
+/// terminal builder applies to its `jump`).
+pub fn valid_proxy_jump(jump: &str) -> bool {
+    !jump.is_empty()
+        && jump
+            .split(',')
+            .all(|hop| !hop.is_empty() && !hop.starts_with('-'))
+        && !jump.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
 impl SshTunnelConfig {
-    /// Refuse a host / user `ssh` could misread (see [`valid_ssh_host`],
-    /// [`valid_ssh_user`]). Checked before every tunnel is opened and when a
-    /// profile carrying a tunnel is saved.
+    /// The ProxyJump chain, when one is set (blank counts as unset).
+    fn jump(&self) -> Option<&str> {
+        self.proxy_jump.as_deref().filter(|j| !j.trim().is_empty())
+    }
+
+    /// Refuse a host / user / jump chain `ssh` could misread (see
+    /// [`valid_ssh_host`], [`valid_ssh_user`], [`valid_proxy_jump`]). Checked
+    /// before every tunnel is opened and when a profile carrying a tunnel is
+    /// saved.
     pub fn validate(&self) -> Result<()> {
         if !valid_ssh_host(&self.host) {
             return Err(Error::Invalid(format!(
@@ -86,6 +110,14 @@ impl SshTunnelConfig {
                 "ssh tunnel user '{}' is not a valid user name",
                 self.user
             )));
+        }
+        if let Some(jump) = self.jump() {
+            if !valid_proxy_jump(jump) {
+                return Err(Error::Invalid(format!(
+                    "ssh tunnel jump host '{jump}' must be [user@]host[:port] hops separated by commas, \
+                     with no spaces and none starting with '-'"
+                )));
+            }
         }
         Ok(())
     }
@@ -398,6 +430,10 @@ fn base_args(cfg: &SshTunnelConfig) -> Vec<String> {
         args.push("-i".into());
         args.push(identity.to_string());
     }
+    if let Some(jump) = cfg.jump() {
+        args.push("-J".into());
+        args.push(jump.to_string());
+    }
     args
 }
 
@@ -462,7 +498,44 @@ mod tests {
             port: 2222,
             user: "itziklavon".into(),
             identity_file: Some("/home/me/.ssh/id_rsa".into()),
+            proxy_jump: None,
         }
+    }
+
+    #[test]
+    fn proxy_jump_is_passed_as_one_dash_j_value_before_the_destination() {
+        let mut c = cfg();
+        c.proxy_jump = Some("ops@outer.example.com:2200,inner".into());
+        assert!(c.validate().is_ok());
+        for args in [
+            local_forward_args(&c, 1, "db", 3306),
+            socks_forward_args(&c, 1),
+        ] {
+            let j = args.iter().position(|a| a == "-J").unwrap();
+            assert_eq!(args[j + 1], "ops@outer.example.com:2200,inner");
+            assert!(j < args.iter().position(|a| a == "--").unwrap());
+        }
+        // Absent or blank → no -J at all.
+        assert!(!socks_forward_args(&cfg(), 1).iter().any(|a| a == "-J"));
+        c.proxy_jump = Some("  ".into());
+        assert!(c.validate().is_ok());
+        assert!(!socks_forward_args(&c, 1).iter().any(|a| a == "-J"));
+    }
+
+    #[test]
+    fn proxy_jump_cannot_smuggle_an_option() {
+        for jump in ["-oProxyCommand=x", "a,-oFoo", "a b", "a,,b", "a\nb", ","] {
+            let mut c = cfg();
+            c.proxy_jump = Some(jump.into());
+            assert!(c.validate().is_err(), "{jump:?}");
+        }
+        let c: SshTunnelConfig =
+            serde_json::from_str(r#"{"host":"h","proxy_jump":"j1,j2"}"#).unwrap();
+        assert_eq!(c.proxy_jump.as_deref(), Some("j1,j2"));
+        // Unset stays out of the persisted JSON (Kafka stores this struct).
+        assert!(!serde_json::to_string(&cfg())
+            .unwrap()
+            .contains("proxy_jump"));
     }
 
     #[test]

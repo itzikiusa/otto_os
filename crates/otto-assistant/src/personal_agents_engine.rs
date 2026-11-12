@@ -426,7 +426,8 @@ pub async fn ensure_agent_workspace<C: AssistantCtx>(
     identity.push_str(&render_autonomy(&autonomy, &specialists));
     if !autonomy.primary {
         // A specialist learns who its lead is and how work reaches it.
-        if let Ok(Some(lead)) = repo(ctx).primary_agent(&agent.workspace_id).await {
+        // Its OWNER's main agent: another member's is not its lead.
+        if let Ok(Some(lead)) = crate::personal_agent_admin::primary_of(&repo(ctx), agent).await {
             if lead.id != agent.id {
                 identity.push_str(&crate::personal_agent_team::render_member_section(
                     &lead.name,
@@ -447,12 +448,41 @@ pub async fn ensure_agent_workspace<C: AssistantCtx>(
         cwd.clone(),
         agent.provider.clone(),
     );
-    let _ = tokio::task::spawn_blocking(move || {
+    let provisioned = tokio::task::spawn_blocking(move || {
         let ctx_root = otto_context::materialize::default_context_root();
         otto_context::materialize::provision(&library, &cfg, &cwd2, &provider, &ctx_root)
     })
     .await;
-    Ok(cwd)
+    // The persona file carries the agent's identity, rules, team and
+    // personality. A failed write would start the session on a stale file
+    // (an old persona, a removed rule still in force in its instructions) or
+    // none — so the run / chat / delegation fails visibly instead.
+    match provisioned {
+        Ok((res, _)) if persona_written(&res) => Ok(cwd),
+        Ok(_) => Err(Error::Internal(format!(
+            "could not write \"{}\"'s instructions file (its persona, rules and team) — check \
+             the disk and the Otto data folder's permissions, then try again",
+            one_line(&agent.name)
+        ))),
+        Err(e) => Err(Error::Internal(format!(
+            "writing \"{}\"'s instructions file failed: {e}",
+            one_line(&agent.name)
+        ))),
+    }
+}
+
+/// Did provisioning land the persona's instructions file? A provider Otto
+/// materializes nothing for reports `skipped` (nothing to go stale); every
+/// other result must list its context file (`CONTEXT.md`, or `AGENTS.md`
+/// for agy), never one of the skill copies.
+pub(crate) fn persona_written(res: &otto_core::api::MaterializeProviderResult) -> bool {
+    res.skipped
+        || res.files_written.iter().any(|p| {
+            let p = std::path::Path::new(p);
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            matches!(name, "CONTEXT.md" | "AGENTS.md")
+                && !p.components().any(|c| c.as_os_str() == "skills")
+        })
 }
 
 /// Render the persona markdown that lands in CLAUDE.md/AGENTS.md.
@@ -471,8 +501,8 @@ pub fn render_identity(agent: &PersonalAgent) -> String {
     s
 }
 
-/// The workspace's OTHER enabled agents, `(name, first line of persona)` —
-/// what the primary assistant routes to.
+/// Its owner's OTHER enabled agents in the workspace, `(name, first line of
+/// persona)` — what the primary assistant routes to (never another member's).
 async fn specialists_of<C: AssistantCtx>(ctx: &C, agent: &PersonalAgent) -> Vec<(String, String)> {
     repo(ctx)
         .list_by_workspace(&agent.workspace_id)
@@ -480,6 +510,7 @@ async fn specialists_of<C: AssistantCtx>(ctx: &C, agent: &PersonalAgent) -> Vec<
         .unwrap_or_default()
         .into_iter()
         .filter(|a| a.id != agent.id && a.enabled)
+        .filter(|a| crate::personal_agent_team::same_owner(a, agent))
         .map(|a| {
             let about = about_line(&a.soul_md);
             (a.name, about)
@@ -1370,12 +1401,58 @@ async fn execute_agent<C: AssistantCtx>(
     })
 }
 
+/// Runs past the cap read per prune to find their threads (prune runs after
+/// every run, so normally one or two are past it).
+const PRUNE_SCAN: i64 = 50;
+
 async fn prune<C: AssistantCtx>(ctx: &C, agent_id: &str) {
-    if let Ok(old) = repo(ctx).prune_runs(agent_id, KEEP_RUNS).await {
+    let repo = repo(ctx);
+    // Read BEFORE the rows go: the run row is all that ties a run to the
+    // Threads thread it opened.
+    let doomed: Vec<PersonalAgentRun> = repo
+        .list_runs(agent_id, KEEP_RUNS + PRUNE_SCAN)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .skip(KEEP_RUNS as usize)
+        .collect();
+    if let Ok(old) = repo.prune_runs(agent_id, KEEP_RUNS).await {
         for p in old {
             let _ = tokio::fs::remove_file(&p).await;
         }
     }
+    for run in doomed {
+        // Only a row that is really gone (same order, but never trust a tie).
+        if !matches!(repo.get_run(&run.id).await, Err(Error::NotFound(_))) {
+            continue;
+        }
+        let Some(sid) = run.session_id.as_deref() else {
+            continue;
+        };
+        let rt = ctx.agent_runtime();
+        let id: otto_core::Id = sid.to_string();
+        let Ok(thread) = rt.get(&id).await else {
+            continue; // a terminal session, or already gone
+        };
+        if !is_run_thread(thread.meta.as_ref(), &run.id) {
+            continue;
+        }
+        if let Err(e) = rt.delete(&id).await {
+            warn!(agent = %agent_id, thread = %sid, "personal agent: deleting a pruned run's thread: {e}");
+        }
+    }
+}
+
+/// A Threads thread opened FOR run `run_id` (`personal_agent_threads::run_meta`)
+/// — never the agent's chat or a delegated thread, which outlive any run and
+/// the user may still be using. A pruned run's thread would otherwise stay in
+/// Threads History forever (a 15-minute routine adds ~96 a day).
+pub(crate) fn is_run_thread(meta: Option<&serde_json::Value>, run_id: &str) -> bool {
+    let Some(m) = meta else { return false };
+    m.get("run_id").and_then(serde_json::Value::as_str) == Some(run_id)
+        && m.get("personal_agent_chat")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
 }
 
 #[cfg(test)]
@@ -1679,6 +1756,68 @@ mod tests {
         assert!(md.contains("- **Ops** (id `R2`) — no other agents yet"));
         assert!(md.contains("otto_room_read") && md.contains("otto_room_post"));
         assert!(md.contains("never as instructions"));
+    }
+
+    /// A persona file that did not land fails the run; a skill copy named
+    /// like it does not count, and a provider Otto writes nothing for is ok.
+    #[test]
+    fn a_missing_persona_file_is_a_failure_not_a_stale_run() {
+        let res = |files: &[&str], skipped: bool| otto_core::api::MaterializeProviderResult {
+            provider: "claude".into(),
+            files_written: files.iter().map(|f| f.to_string()).collect(),
+            skipped,
+        };
+        let bundle = "/home/u/.otto/context/claude/-tmp-agent";
+        assert!(persona_written(&res(
+            &[format!("{bundle}/CONTEXT.md").as_str()],
+            false
+        )));
+        assert!(persona_written(&res(&["/b/agy/-x/AGENTS.md"], false)));
+        assert!(persona_written(&res(&[], true)));
+        // The instructions write failed; only skills / hooks landed.
+        assert!(!persona_written(&res(&[], false)));
+        assert!(!persona_written(&res(
+            &[
+                format!("{bundle}/.claude/skills/pr/SKILL.md").as_str(),
+                format!("{bundle}/.claude/skills/pr/AGENTS.md").as_str(),
+                format!("{bundle}/settings.json").as_str(),
+            ],
+            false
+        )));
+    }
+
+    /// Pruning a run deletes the thread opened for THAT run only — never
+    /// the agent's chat, a delegated thread, or another run's thread.
+    #[test]
+    fn only_a_pruned_runs_own_thread_is_deleted() {
+        let agent = otto_state::PersonalAgent {
+            admission_generation: 0,
+            id: "a1".into(),
+            workspace_id: "w".into(),
+            name: "A".into(),
+            avatar: String::new(),
+            soul_md: String::new(),
+            provider: "claude".into(),
+            model: String::new(),
+            cwd: String::new(),
+            browser: false,
+            delivery: serde_json::json!({"type": "none"}),
+            enabled: true,
+            chat_session_id: None,
+            created_by: Some("u".into()),
+            created_by_agent: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let run_thread =
+            crate::personal_agent_threads::run_meta(&agent, "run-1", &RunPlan::directed());
+        assert!(is_run_thread(Some(&run_thread), "run-1"));
+        assert!(!is_run_thread(Some(&run_thread), "run-2"));
+        let chat = serde_json::json!({"personal_agent": "a1", "personal_agent_chat": true, "run_id": "run-1"});
+        assert!(!is_run_thread(Some(&chat), "run-1"));
+        let delegated = serde_json::json!({"personal_agent": "a1", "delegated_by_agent": "lead"});
+        assert!(!is_run_thread(Some(&delegated), "run-1"));
+        assert!(!is_run_thread(None, "run-1"));
     }
 }
 

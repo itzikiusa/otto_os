@@ -1,8 +1,8 @@
 <script lang="ts">
   // Status bar: working agents · needs you · event stream · current branch ·
-  // network listener · clock. While the events socket is down the live counts
-  // are stale: the working dot stops pulsing and the stream says
-  // "Reconnecting…" (patterns.md §1, "Stale is a state").
+  // machine load · network listener · clock. While the events socket is down
+  // the live counts are stale: the working dot stops pulsing and the stream
+  // says "Reconnecting…" (patterns.md §1, "Stale is a state").
   import Icon from '../lib/components/Icon.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
   import { agentRunsWorking } from '../lib/stores/agentRunsWorking.svelte';
@@ -12,6 +12,9 @@
   import { git } from '../lib/stores/git.svelte';
   import { router } from '../lib/router.svelte';
   import { nowMinute } from '../lib/stores/now.svelte';
+  import { daemonStatus } from '../modules/settings/daemonStatus.svelte';
+  import { listenerIndicator } from '../modules/settings/daemonIndicators';
+  import MachineChip from './MachineChip.svelte';
 
   const live = $derived(events.state === 'connected');
 
@@ -20,6 +23,19 @@
     ws.needsYouFilter = true;
     if (router.module !== 'agents') router.go('agents');
   }
+
+  // Root-only daemon facts, read once and never polled (daemonStatus): the
+  // secret store's mode, and what the network listener is BOUND to. `/meta`
+  // is re-read on boot, on a daemon restart (new boot id) and after a Daemon
+  // save, so re-reading the posture with it is what clears "after restart".
+  $effect(() => {
+    daemonStatus.ensureSecrets(auth.me?.id, auth.isRoot);
+  });
+  $effect(() => {
+    void auth.meta;
+    daemonStatus.refreshPosture(auth.isRoot);
+  });
+  const listener = $derived(listenerIndicator(auth.meta?.network_listener, daemonStatus.posture));
 
   // The shared clock's minute tick (skips while the window is hidden) — no
   // interval of our own, and the label turns over on the minute.
@@ -85,9 +101,22 @@
         {#if git.primaryStatus.behind > 0}<span class="dim">↓{git.primaryStatus.behind}</span>{/if}
       </button>
     {/if}
-    <span class="sb-item dim" title="Network listener">
+    <MachineChip />
+    {#if daemonStatus.secretsUnencrypted}
+      <button
+        class="sb-item sb-btn sb-warn"
+        onclick={() => router.go('settings/trust-safety')}
+        title="Integration secrets are stored in a plaintext file. Open Trust & safety to encrypt them"
+        aria-label="Secrets not encrypted — open Trust & safety"
+        data-testid="statusbar-secrets-warning"
+      >
+        <Icon name="warning" size={12} />
+        <span class="sb-warn-text">Secrets not encrypted</span>
+      </button>
+    {/if}
+    <span class="sb-item dim" class:pending={listener.pending} title={listener.title} data-testid="statusbar-listener">
       <Icon name="globe" size={12} />
-      {auth.meta?.network_listener ? 'network' : 'loopback'}
+      {listener.text}
     </span>
     <span class="sb-item dim">{clock}</span>
   </div>
@@ -159,6 +188,21 @@
   @media (prefers-reduced-motion: reduce) {
     .working-dot.on {
       animation: none;
+    }
+  }
+  /* Root-only: the secret store is unencrypted (Trust & safety fixes it). */
+  .sb-warn {
+    color: var(--warning);
+    font-weight: 600;
+  }
+  /* A saved listener setting waiting on a daemon restart. */
+  .pending {
+    color: var(--warning);
+  }
+  /* Phone: the icon alone (the button keeps its aria-label + title). */
+  @media (max-width: 640px) {
+    .sb-warn-text {
+      display: none;
     }
   }
   .needs-you {

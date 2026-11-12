@@ -6,13 +6,16 @@
   // per file content). Made for reading a big PR one file at a time: a
   // progress line, "Next unviewed", "Hide viewed", and the row of the file at
   // the top of the diff follows the reader. The tree is DiffFileTree, the same
-  // one as the diff's own navigator rail.
+  // one as the diff's own navigator rail. ⌘/Ctrl-click picks files, and the
+  // ✦ button or a row's menu asks the PR's agent thread to explain them.
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { plural } from '../../lib/plural';
   import DiffFileTree from './DiffFileTree.svelte';
-  import { buildNavTree, type NavDir } from './diff-pr';
+  import { buildNavTree, nextUnviewed as nextUnviewedOf, type NavDir } from './diff-pr';
   import { prFilesBridge, prFilesKey } from './prFilesBridge.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { prAgentBridge } from './pr-agent-bridge.svelte';
 
   interface Props {
     repoId: string;
@@ -60,21 +63,36 @@
     return out;
   });
   /** The first unviewed file after the current one, in tree order (wrapping). */
-  const nextUnviewed = $derived.by(() => {
-    if (!feed) return null;
-    const at = feed.current ? order.indexOf(feed.current) : -1;
-    for (let k = 1; k <= order.length; k++) {
-      const f = order[(at + k) % order.length];
-      if (f !== undefined && !feed.viewed.has(f)) return f;
-    }
-    return null;
-  });
+  const nextUnviewed = $derived(feed ? nextUnviewedOf(order, feed.viewed, feed.current) : null);
   /** Tick the current file viewed and move on — the one-file-at-a-time loop. */
   function viewedAndNext(): void {
     if (!feed) return;
     const cur = feed.current;
     if (cur && !feed.viewed.has(cur)) feed.toggleViewed(cur);
     if (nextUnviewed && nextUnviewed !== cur) open(nextUnviewed);
+  }
+
+  // Files picked for "Explain" (this PR's only).
+  let picked = $state.raw<ReadonlySet<string>>(new Set());
+  $effect(() => { void key; picked = new Set(); });
+  function togglePick(path: string): void {
+    const next = new Set(picked);
+    if (!next.delete(path)) next.add(path);
+    picked = next;
+  }
+  function explain(paths: string[]): void {
+    if (paths.length > 0) prAgentBridge.ask(repoId, number, { kind: 'files', paths });
+  }
+  /** The ✦ button: the picked files, else the file the reader is on. */
+  const explainTarget = $derived(picked.size > 0 ? [...picked] : feed?.current ? [feed.current] : []);
+  function fileMenu(e: MouseEvent, path: string): void {
+    ctxMenu.show(e, [
+      { label: 'Explain this file', icon: 'sparkle', hint: 'agent', action: () => explain([path]) },
+      ...(picked.size > 0 ? [{ label: `Explain the ${plural(picked.size, 'selected file')}`, icon: 'sparkle' as const, hint: 'agent', action: () => explain([...picked]) }] : []),
+      { separator: true },
+      { label: picked.has(path) ? 'Unselect' : 'Select', hint: '⌘-click', action: () => togglePick(path) },
+      ...(picked.size > 0 ? [{ label: 'Clear the selection', action: () => (picked = new Set()) }] : []),
+    ]);
   }
 
 </script>
@@ -97,6 +115,11 @@
         onclick={() => nextUnviewed && open(nextUnviewed)}>
         <Icon name="arrowDown" size={13} />
       </button>
+      <button class="pfp-icon" data-testid="pfp-explain" disabled={explainTarget.length === 0} onclick={() => explain(explainTarget)}
+        aria-label={picked.size > 0 ? `Explain the ${plural(picked.size, 'selected file')}` : 'Explain the current file'}
+        title={picked.size > 0 ? `Explain the ${plural(picked.size, 'selected file')} with the PR’s agent` : 'Explain the current file with the PR’s agent (⌘-click files to pick several)'}>
+        <Icon name="sparkle" size={13} />
+      </button>
       <button class="pfp-icon" aria-pressed={hideViewed} aria-label={hideViewed ? 'Show viewed files' : 'Hide viewed files'}
         title={hideViewed ? 'Show viewed files' : 'Hide viewed files'} onclick={toggleHideViewed}>
         <Icon name={hideViewed ? 'eyeOff' : 'eye'} size={13} />
@@ -118,7 +141,7 @@
           <p class="pfp-note">{filter ? 'No file matches.' : 'Every file is viewed.'}</p>
         {:else}
           <DiffFileTree {tree} matchSet={shown} viewed={feed.viewed} commentCounts={feed.commentCounts} current={feed.current}
-            showStatus onjump={open} ontoggleviewed={(p) => feed.toggleViewed(p)} />
+            showStatus onjump={open} ontoggleviewed={(p) => feed.toggleViewed(p)} {picked} onpick={togglePick} onfilemenu={fileMenu} />
         {/if}
       </div>
     {/if}

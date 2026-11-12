@@ -10,6 +10,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import type { EditFlow } from './EditFlow.svelte';
   import { copyWithToast } from './results-format';
+  import { binaryCellBytes, bytesToHex, bytesToHexCompact } from '../../lib/database/binary-cells';
 
   interface Props {
     flow: EditFlow;
@@ -33,6 +34,11 @@
     !!flow.viewer && expandedFor !== flow.viewer && flow.viewerText.length > VIEW_MAX,
   );
   const shownText = $derived(clipped ? flow.viewerText.slice(0, VIEW_MAX) : flow.viewerText);
+  // A binary column's cell is base64 of raw bytes: show them as hex with the
+  // length (a hex dump of a huge blob is capped like any other long value).
+  const bytes = $derived(flow.viewer?.binary ? binaryCellBytes(flow.viewer.raw) : null);
+  const HEX_MAX_BYTES = 64 * 1024;
+  const hexShown = $derived(bytes ? bytesToHex(clipped ? bytes.subarray(0, HEX_MAX_BYTES) : bytes) : '');
 </script>
 
 {#if flow.viewer}
@@ -55,8 +61,16 @@
             <Icon name="edit" size={12} />Edit
           </button>
         {/if}
-        <button class="btn small" onclick={() => copyWithToast(flow.viewerText, ['Copied', 'Full cell value copied'])} title="Copy full value"><Icon name="file" size={12} />Copy</button>
+        {#if bytes}
+          <button class="btn small" onclick={() => bytes && copyWithToast(bytesToHexCompact(bytes), ['Copied', 'Bytes copied as hex'])} title="Copy the bytes as hex"><Icon name="file" size={12} />Copy as hex</button>
+          <button class="btn small" onclick={() => copyWithToast(flow.viewerText, ['Copied', 'Bytes copied as base64'])} title="Copy the bytes as base64"><Icon name="file" size={12} />Copy as base64</button>
+        {:else}
+          <button class="btn small" onclick={() => copyWithToast(flow.viewerText, ['Copied', 'Full cell value copied'])} title="Copy full value"><Icon name="file" size={12} />Copy</button>
+        {/if}
       </div>
+      {#if bytes}
+        <div class="cv-binary">Binary · {bytes.length.toLocaleString()} {bytes.length === 1 ? 'byte' : 'bytes'} — shown as hex. Read-only here: the grid can’t edit raw bytes as text.</div>
+      {/if}
       {#if nestedPending}
         <div class="cv-pending">Nested change pending on this field — saving a whole value here replaces it.</div>
       {/if}
@@ -78,7 +92,7 @@
           <button class="btn small primary" onclick={() => flow.saveViewerEdit()} title="Validate and review the update (⌘⏎)">Save…</button>
         </div>
       {:else}
-        <pre class="cv-body mono">{shownText}</pre>
+        <pre class="cv-body mono">{bytes ? hexShown : shownText}</pre>
         {#if clipped}
           <div class="cv-more">
             <span>Showing the first {formatBytes(VIEW_MAX)} of {formatBytes(flow.viewerText.length)} — Copy copies the full value.</span>
@@ -148,6 +162,10 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
+  .cv-binary {
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }

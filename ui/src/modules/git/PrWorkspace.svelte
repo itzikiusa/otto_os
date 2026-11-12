@@ -17,6 +17,12 @@
   import PrList from './PrList.svelte';
   import PrDetail from './PrDetail.svelte';
   import PrFilesPanel from './PrFilesPanel.svelte';
+  import PrAgentPanel from './PrAgentPanel.svelte';
+  import PrAgentLinePick from './PrAgentLinePick.svelte';
+  import { prAgentBridge } from './pr-agent-bridge.svelte';
+  import { prAgentOriginId } from './pr-agent-thread';
+  import DockedDrawer from '../../lib/components/DockedDrawer.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { RESIZE_TITLE_VERTICAL } from '../../lib/paneResizer';
 
   interface Props {
@@ -74,6 +80,52 @@
       onEnd: () => persist(FILES_H_KEY, String(filesH)),
     });
   }
+
+  // The open PR's agent thread (PrAgentPanel) under the files: folded until
+  // first used, its height persisted like the Files panel's. Maximised it
+  // takes the whole workspace (the PR stays mounted, hidden, behind it). At
+  // ≤1024 px the column does not exist: the thread opens in a sheet.
+  const AGENT_H_KEY = 'otto_pr_agent_h';
+  const AGENT_FOLDED_KEY = 'otto_pr_agent_folded';
+  let agentH = $state(clampH(readNum(AGENT_H_KEY, 360)));
+  let agentFolded = $state((() => { try { return localStorage.getItem(AGENT_FOLDED_KEY) !== '0'; } catch { return true; } })());
+  let agentMax = $state(false);
+  let agentSheet = $state(false);
+  const narrow = $derived(viewport.isMobile);
+  const agentMaxOn = $derived(agentMax && tabs.active !== null && !narrow);
+  function setAgentH(h: number): void {
+    agentH = clampH(h);
+    persist(AGENT_H_KEY, String(agentH));
+  }
+  function setAgentFolded(v: boolean): void {
+    agentFolded = v;
+    persist(AGENT_FOLDED_KEY, v ? '1' : '0');
+  }
+  function startAgentResize(e: MouseEvent): void {
+    const startY = e.clientY;
+    const startH = agentH;
+    startMouseDrag(e, {
+      cursor: 'row-resize',
+      onMove: (ev) => { agentH = clampH(startH - (ev.clientY - startY)); },
+      onEnd: () => persist(AGENT_H_KEY, String(agentH)),
+    });
+  }
+  // An ask (⋯ menu, Files panel, diff, the panel's own box) brings the thread
+  // forward. Desktop: the docked panel is always mounted and may take the
+  // ask before this component sees it, so the panel calls `revealAgent`
+  // itself. Phone: the sheet's panel mounts only once the sheet opens, so
+  // the waiting ask opens it here.
+  function revealAgent(): void {
+    if (agentFolded) setAgentFolded(false);
+    if (listHidden) toggleList();
+    maximized = false;
+  }
+  $effect(() => {
+    const p = prAgentBridge.pending;
+    const n = tabs.active;
+    if (!p || n === null || !narrow || p.key !== prAgentOriginId(repoId, n)) return;
+    untrack(() => (agentSheet = true));
+  });
 
   function toggleList(): void {
     listHidden = !listHidden;
@@ -135,8 +187,9 @@
   }
 </script>
 
-<div class="prw" class:m-list={mobileList || tabs.active === null} class:list-hidden={listHidden || (tabs.active !== null && maximized)} style="--listw:{listW}px">
-  {#if !(listHidden || (tabs.active !== null && maximized))}
+<div class="prw" class:m-list={mobileList || tabs.active === null} class:agent-max={agentMaxOn}
+  class:list-hidden={!agentMaxOn && (listHidden || (tabs.active !== null && maximized))} style="--listw:{listW}px">
+  {#if agentMaxOn || !(listHidden || (tabs.active !== null && maximized))}
     <section class="prw-list" aria-label="Pull requests">
       <div class="prw-list-main">
         <PrList
@@ -161,6 +214,24 @@
         <div class="prw-files" style={filesFolded ? undefined : `block-size:${filesH}px`}>
           <PrFilesPanel {repoId} number={tabs.active} collapsed={filesFolded} ontogglecollapsed={toggleFilesFolded} />
         </div>
+        {#if !narrow}
+          {#if !agentFolded && !agentMaxOn}
+            <div
+              class="prw-files-resize prw-agent-resize"
+              role="separator"
+              aria-label="Resize the agent thread"
+              title={RESIZE_TITLE_VERTICAL}
+              use:paneResizer={{ value: agentH, min: 120, max: 900, orientation: 'horizontal', invert: true, onChange: setAgentH, onReset: () => setAgentH(360), onDragStart: startAgentResize, text: (v) => `${Math.round(v)} pixels tall` }}
+            ></div>
+          {/if}
+          <div class="prw-agent" class:open={!agentFolded || agentMaxOn} style={agentFolded || agentMaxOn ? undefined : `block-size:${agentH}px`}>
+            {#key `${repoId}:${tabs.active}`}
+              <PrAgentPanel {repoId} number={tabs.active} title={titleOf(tabs.active)} layout={agentMaxOn ? 'max' : 'dock'}
+                folded={agentFolded && !agentMaxOn} ontogglefolded={() => setAgentFolded(!agentFolded)}
+                onmaximize={() => (agentMax = true)} onrestore={() => (agentMax = false)} onasked={revealAgent} />
+            {/key}
+          </div>
+        {/if}
       {/if}
       <div
         class="prw-resize"
@@ -235,6 +306,17 @@
   </section>
 </div>
 
+{#if tabs.active !== null}
+  <PrAgentLinePick onexplain={(n, pick) => prAgentBridge.ask(repoId, n, { kind: 'lines', pick })} />
+  {#if narrow}
+    <DockedDrawer open={agentSheet} modal title="Agent · PR #{tabs.active}" onclose={() => (agentSheet = false)} testid="pr-agent-sheet">
+      {#key `${repoId}:${tabs.active}`}
+        <PrAgentPanel {repoId} number={tabs.active} title={titleOf(tabs.active)} layout="sheet" />
+      {/key}
+    </DockedDrawer>
+  {/if}
+{/if}
+
 <style>
   .prw {
     display: grid;
@@ -263,6 +345,15 @@
     cursor: row-resize;
   }
   .prw-files-resize:hover, .prw-files-resize:focus-visible { background: var(--accent-line); }
+  /* Shrinks before the list does when Files and the agent are both open. */
+  .prw-agent { flex: none; min-height: 0; display: flex; flex-direction: column; }
+  .prw-agent.open { flex: 0 1 auto; min-block-size: 200px; max-block-size: 70%; }
+  /* The agent thread over the whole workspace: list, files and the PR stay
+     mounted (drafts, scroll) but out of the way. */
+  .prw.agent-max { grid-template-columns: minmax(0, 1fr); }
+  .prw.agent-max .prw-list { border-inline-end: none; }
+  .prw.agent-max :is(.prw-detail, .prw-list-main, .prw-files, .prw-files-resize, .prw-resize) { display: none; }
+  .prw.agent-max .prw-agent { flex: 1; max-block-size: none; }
   .prw-resize {
     position: absolute;
     inset-block: 0;
@@ -334,7 +425,7 @@
     .prw-list { border-inline-end: none; }
     .prw-resize { display: none; }
     /* One pane at a time: the files jump into a PR pane that is hidden here. */
-    .prw-files, .prw-files-resize { display: none; }
+    .prw-files, .prw-files-resize, .prw-agent { display: none; }
     .prw:not(.m-list) .prw-list { display: none; }
     .prw.m-list .prw-detail { display: none; }
     .prw-back { display: inline-flex; }

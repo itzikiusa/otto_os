@@ -17,9 +17,7 @@ use mongodb::bson::{
     doc, spec::BinarySubtype, Binary as BsonBinary, Bson, DateTime as BsonDateTime, Decimal128,
     Document, Regex as BsonRegex, Timestamp as BsonTimestamp, Uuid as BsonUuid,
 };
-use mongodb::options::{
-    ClientOptions, Compressor, Credential, ServerAddress, Socks5Proxy, Tls, TlsOptions,
-};
+use mongodb::options::{ClientOptions, Compressor, Credential, ServerAddress, Socks5Proxy};
 use mongodb::{Client, Collection};
 use otto_core::Result;
 use serde_json::{json, Map, Value};
@@ -27,7 +25,6 @@ use serde_json::{json, Map, Value};
 use crate::driver::Driver;
 use crate::drivers::{mongo_parse, mongo_sql};
 use crate::export::{ExportCounts, ExportFormat, ExportSink};
-use crate::tls::TlsFiles;
 use crate::types::{
     self, compact_count, CancelToken, Capabilities, Column, CompletionContext, CompletionResponse,
     DbQueryPlan, Engine, IndexDef, NodeKind, NodePath, ObjectDetail, ObjectHit, ObjectSearchReq,
@@ -1173,7 +1170,7 @@ impl MongoDriver {
                 })
                 .await?;
                 Ok(write_result(
-                    res.modified_count,
+                    res.matched_count, // MATCHED, like MySQL's count: 0 = no such document
                     format!(
                         "matched {}, modified {}",
                         res.matched_count, res.modified_count
@@ -1191,7 +1188,7 @@ impl MongoDriver {
                 })
                 .await?;
                 Ok(write_result(
-                    res.modified_count,
+                    res.matched_count, // MATCHED, like MySQL's count: 0 = no such document
                     format!(
                         "matched {}, modified {}",
                         res.matched_count, res.modified_count
@@ -1631,8 +1628,8 @@ impl MongoDriver {
         let mut opts = match cfg.param_str("conn_string") {
             // A full connection string (e.g. `mongodb+srv://…` for Atlas) wins.
             // SRV discovery + replica-set topology happen inside the driver, so
-            // host/port and TLS come from the URI — we only layer the SOCKS proxy
-            // on below.
+            // host/port come from the URI; the form's TLS fills only what the URI
+            // leaves unset (tls_opts), and the SOCKS proxy is layered on below.
             Some(conn_string) => {
                 let uri = match cfg.password.as_deref() {
                     Some(secret) => conn_string.replace(
@@ -1641,7 +1638,9 @@ impl MongoDriver {
                     ),
                     None => conn_string,
                 };
-                ClientOptions::parse(&uri).await.map_err(types::upstream)?
+                let mut opts = ClientOptions::parse(&uri).await.map_err(types::upstream)?;
+                tls_opts::apply_form_tls(&mut opts, &cfg.tls)?;
+                opts
             }
             None => self.host_port_options(cfg)?,
         };
@@ -1716,14 +1715,7 @@ impl MongoDriver {
             opts.repl_set_name = Some(replica_set);
         }
 
-        if cfg.tls.enabled() {
-            let files = TlsFiles::materialize(&cfg.tls)?;
-            let mut tls = TlsOptions::default();
-            tls.allow_invalid_certificates = Some(!cfg.tls.verify);
-            tls.ca_file_path = files.ca;
-            tls.cert_key_file_path = files.client_pair.or(files.client_cert);
-            opts.tls = Some(Tls::Enabled(tls));
-        }
+        opts.tls = tls_opts::form_tls(&cfg.tls)?;
 
         if let Some(db) = cfg.database.clone() {
             opts.default_database = Some(db);
@@ -2104,13 +2096,16 @@ fn pct(s: &str) -> String {
 /// without spawning a shell.
 fn mongosh_invocation(cfg: &ResolvedConfig, node: Option<&str>) -> Result<String> {
     let mut uri = match cfg.param_str("conn_string") {
-        Some(conn_string) => match cfg.password.as_deref() {
-            Some(secret) => conn_string.replace(
-                "{secret}",
-                &otto_core::connection_credentials::encode_password(secret),
-            ),
-            None => conn_string,
-        },
+        Some(conn_string) => tls_opts::conn_string_with_tls(
+            match cfg.password.as_deref() {
+                Some(secret) => conn_string.replace(
+                    "{secret}",
+                    &otto_core::connection_credentials::encode_password(secret),
+                ),
+                None => conn_string,
+            },
+            &cfg.tls,
+        )?,
         None => {
             let auth = match (cfg.user.as_deref(), cfg.password.as_deref()) {
                 (Some(u), Some(p)) => format!("{}:{}@", pct(u), pct(p)),
@@ -2133,22 +2128,7 @@ fn mongosh_invocation(cfg: &ResolvedConfig, node: Option<&str>) -> Result<String
             if let Some(rs) = cfg.param_str("replica_set") {
                 query.push(format!("replicaSet={}", pct(&rs)));
             }
-            if cfg.tls.enabled() {
-                let files = TlsFiles::materialize(&cfg.tls)?;
-                query.push("tls=true".to_string());
-                if !cfg.tls.verify {
-                    query.push("tlsAllowInvalidCertificates=true".to_string());
-                }
-                if let Some(ca) = files.ca {
-                    query.push(format!("tlsCAFile={}", pct(&ca.to_string_lossy())));
-                }
-                if let Some(pair) = files.client_pair.or(files.client_cert) {
-                    query.push(format!(
-                        "tlsCertificateKeyFile={}",
-                        pct(&pair.to_string_lossy())
-                    ));
-                }
-            }
+            query.extend(tls_opts::mongosh_tls_params("", &cfg.tls)?);
             let query = if query.is_empty() {
                 String::new()
             } else {
@@ -2833,6 +2813,7 @@ fn is_unauthorized(e: &impl std::fmt::Display) -> bool {
 
 mod keyset;
 mod shorthand;
+mod tls_opts;
 #[cfg(test)]
 use keyset::id_after;
 use keyset::{keyset_filter, last_row_id};

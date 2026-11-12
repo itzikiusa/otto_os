@@ -363,7 +363,7 @@ thread_local! {
     static TEST_CACHE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-fn cache_enabled() -> bool {
+pub(crate) fn cache_enabled() -> bool {
     #[cfg(test)]
     {
         TEST_CACHE.with(|c| c.get())
@@ -379,6 +379,8 @@ fn cache_enabled() -> bool {
 #[cfg(test)]
 pub(crate) fn enable_cache_for_tests(server: &str) {
     TEST_CACHE.with(|c| c.set(true));
+    super::identity::forget_for_tests(server);
+    super::bitbucket::checks::forget_rules_for_tests(server);
     let mut guard = get_cache().lock().unwrap_or_else(|p| p.into_inner());
     guard.retain(|_, e| !e.url.starts_with(server));
 }

@@ -10,8 +10,7 @@ use super::super::*;
 use super::NodeCall;
 
 pub(in crate::workflow_engine) use otto_workflows::review_scoring::{
-    aggregate, blended_score, goals_from_reply, review_score, review_verdict, ReviewVerdict,
-    ScoreWeights,
+    aggregate, blended_score, goals_from_reply, review_score, review_verdict, ScoreWeights,
 };
 
 /// What every target of one `review_run` step shares: the node call, the
@@ -125,10 +124,14 @@ pub(in crate::workflow_engine) async fn execute(
     let (mut out, passed) = aggregate(outs, plan.n_targets);
     // `require_pass`: fail the step (so downstream gates error-skip) when the
     // score didn't clear the bar. A failed check surfaces as a blocking
-    // finding from the checks reviewer, which drops the score below it.
-    if require_pass && !passed {
+    // finding from the checks reviewer, which drops the score below it. A
+    // review that did not complete fails the step regardless: downstream
+    // "post comments" / "FAILED" steps must not publish a non-verdict (the
+    // step's own chat post already said "incomplete" and why).
+    let incomplete = out.get("outcome").and_then(Value::as_str) == Some("incomplete");
+    if (require_pass && !passed) || incomplete {
         let reason = if plan.multi() {
-            "one or more required review targets did not pass".to_string()
+            "one or more review targets did not pass or did not complete".to_string()
         } else {
             out.get("reason")
                 .and_then(Value::as_str)
@@ -137,7 +140,10 @@ pub(in crate::workflow_engine) async fn execute(
         };
         out.insert(
             "_workflow_error".into(),
-            json!(format!("review_run: {reason} (require_pass)")),
+            json!(format!(
+                "review_run: {reason}{}",
+                if incomplete { "" } else { " (require_pass)" }
+            )),
         );
     }
     Ok((Value::Object(out), logs))
@@ -719,25 +725,16 @@ async fn score_target(
     let score = blended_score(review_score, goals_score);
     let review_row = ctx.reviews_store.get_review(review_id).await;
     let lens_scores = otto_review::prompts::lens_scores_json(review_row.as_ref().ok());
+    let report = otto_review::verification::report(review_row.as_ref().ok(), status);
+    // Opt-in: when ONLY the verifier failed, the reviewers' stored (unverified)
+    // findings are scored as the result. Off by default: not a verdict.
+    let allow_fallback = plan.node.params["allow_summary_fallback"] == true;
     let coverage_complete = review_row
         .as_ref()
-        .map(|review| {
-            review_coverage_complete(
-                review,
-                plan.node
-                    .params
-                    .get("allow_summary_fallback")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true),
-            )
-        })
+        .map(|review| review_coverage_complete(review, allow_fallback))
         .unwrap_or(false);
-    let ReviewVerdict {
-        complete,
-        passed,
-        reason,
-    } = review_verdict(
-        status,
+    let v = review_verdict(
+        report.gate_status(status, allow_fallback),
         coverage_complete,
         no_changes,
         bugs,
@@ -745,52 +742,20 @@ async fn score_target(
         threshold,
         base,
     );
-    // An unfinished review has no verified findings; 0 open findings must not
-    // read as a perfect 100 in downstream notify templates.
-    let (score, review_score) = if complete {
-        (score, review_score)
-    } else {
-        (0, 0)
-    };
+    let (complete, passed) = (v.complete, v.passed);
+    let s = report.step(
+        passed,
+        complete,
+        no_changes,
+        status,
+        (score, review_score),
+        v.reason,
+    );
+    let (score_text, reason) = (&s.score_text, &s.reason);
     logs.push(format!(
-        "review_run{tag}: score {score} (review {review_score}{}) — {reason}",
-        goals_score
-            .map(|g| format!(", goals {g}"))
-            .unwrap_or_default(),
+        "review_run{tag}: score {score_text} (goals {goals_score:?}) — {reason}"
     ));
-    // Stream the verdict + top findings to the chat thread.
     let finding_briefs = crate::modules::review_finding_briefs(ctx, review_id, 10).await;
-    if plan.progress.enabled() {
-        let verdict = if passed {
-            "✅ passed".to_string()
-        } else if !complete {
-            format!("⚠️ review did not complete (status: {status})")
-        } else if no_changes {
-            format!("⚠️ empty diff vs `{base}` — nothing was reviewed")
-        } else {
-            format!("⚠️ {reason}")
-        };
-        // Only headline a score for a COMPLETED review that had a
-        // diff — otherwise the "100/100" is an artifact of a review
-        // that never finished or never had anything to look at.
-        let mut msg = if complete && !no_changes {
-            format!("🔍 *{iter_label}{tag}* done — score *{score}/100* (pass ≥ {threshold}) — {verdict}")
-        } else {
-            format!("🔍 *{iter_label}{tag}* — {verdict}")
-        };
-        msg.push_str(&otto_review::prompts::lens_scores_chat(&lens_scores));
-        if no_changes {
-            msg.push_str("\nNo reviewers ran. Check the base branch this run declared.");
-        } else if finding_briefs.is_empty() {
-            msg.push_str("\nFindings: none 🎉");
-        } else {
-            msg.push_str(&format!("\nFindings ({open} open):"));
-            for b in &finding_briefs {
-                msg.push_str(&format!("\n • {b}"));
-            }
-        }
-        plan.progress.post(msg);
-    }
     let out = json!({
         "review_id": review_id, "status": status,
         // Publish the exact reference reviewed so a downstream git_pr
@@ -800,20 +765,31 @@ async fn score_target(
         "repo_id": t.repo_id, "base": base, "worktree": t.worktree,
         "total": total, "open": open, "blocking": blocking, "advisory": advisory,
         "severity": { "bug": bugs, "warn": warns, "info": infos },
-        "review_score": review_score, "goals_score": goals_score, "goals": goals_detail,
+        "review_score": s.review_score, "goals_score": goals_score, "goals": goals_detail,
         // The checks delegated to the reviewer agent (it runs them and
         // reports failures as findings — see the cfg injection above).
         "checks_requested": plan.check_specs.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>(),
-        "score": score, "threshold": threshold, "passed": passed,
+        // `outcome`: passed | failed | incomplete (not a verdict: `score` is
+        // null, `partial_score` the score over what WAS verified) | pending.
+        "score": s.score, "score_text": s.score_text, "partial_score": s.partial_score,
+        "threshold": threshold, "passed": passed, "complete": complete, "outcome": s.outcome,
+        "verification": report.json(),
         // TRUE ⇒ the diff vs `base` was empty: no reviewer ran and
         // `total: 0` means "nothing looked at", not "nothing found".
         // A downstream step that posts or gates on this review must
         // branch on it rather than on the finding counts.
-        "no_changes": no_changes, "coverage_complete": coverage_complete, "reason": reason,
+        "no_changes": no_changes, "coverage_complete": coverage_complete, "reason": s.reason,
         "findings": finding_briefs, "providers": plan.providers, "lenses": plan.lenses,
         "lens_scores": lens_scores, // [{lens, score 0–10, reason}]
     });
-    out.as_object().cloned().unwrap_or_default()
+    let out = out.as_object().cloned().unwrap_or_default();
+    // Stream the verdict + top findings (or why there is none) to the chat.
+    if plan.progress.enabled() {
+        let head = format!("🔍 *{iter_label}{tag}*");
+        plan.progress
+            .post(otto_review::verification::step_chat(&head, &out, &report));
+    }
+    out
 }
 
 /// One review target: `(repo_id, worktree, want_base, label)`.

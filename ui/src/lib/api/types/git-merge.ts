@@ -113,6 +113,11 @@ export interface PrSummary {
   /** Source-branch head commit as the provider reports it (Bitbucket
    *  abbreviates). Opaque — pass back as the PR diff's `rev=`. */
   head_sha?: string | null;
+  /** The PR's author is the forge account the request was made with (stable
+   *  user id match; false when that identity couldn't be looked up).
+   *  Optional: an older daemon omits it — read as `?? false`, then fall back
+   *  to matching `author` against the account handles. */
+  is_mine?: boolean;
 }
 
 /** `GET /repos/{id}/prs?state=&page=&per_page=` — one page. `has_more` is the
@@ -144,7 +149,45 @@ export interface PrComment {
   /** The forge no longer maps the comment onto the current diff; `line` is
    *  the original line. Rendered under "File comments" with a chip. */
   outdated?: boolean;
+  /** Written by the forge account Otto uses (stable-id match): it may be
+   *  edited/deleted via `PATCH`/`DELETE …/comments/{id}`. Optional: an older
+   *  daemon omits it. Always false on a GitHub review summary. */
+  can_edit?: boolean;
+  /** A GitHub review's summary body shown as a general comment (`id` is
+   *  `review-<id>`): `approved` | `changes_requested` | `commented` |
+   *  `dismissed`. A reply to it is posted as a quoting comment. */
+  review_state?: PrReviewState | null;
+  /** The comment this reply answers when the forge nests replies (Bitbucket
+   *  chains are flattened under their root). Absent on thread heads. */
+  in_reply_to?: string | null;
+  /** Emoji reactions on this comment (GitHub, GitLab). Absent when the forge
+   *  has none (Bitbucket Cloud) or an older daemon. */
+  reactions?: PrReaction[];
+  /** The reaction routes accept this comment: false on Bitbucket and on a
+   *  GitHub review summary (`review-<id>`). Absent from an older daemon. */
+  can_react?: boolean;
 }
+
+/** `PUT|DELETE /repos/{id}/prs/{number}/comments/{cid}/reactions/{key}`. */
+export type ReactionKey = 'thumbs_up' | 'thumbs_down' | 'laugh' | 'hooray' | 'confused' | 'heart' | 'rocket' | 'eyes';
+
+/** One reaction on a comment: how many, and whether one of them is yours. */
+export interface PrReaction {
+  key: ReactionKey;
+  count: number;
+  me: boolean;
+}
+
+/** One forge merge precondition (Bitbucket merge checks, GitHub branch rules). */
+export interface PrMergeCheck {
+  key: string;
+  label: string;
+  passed: boolean;
+  detail?: string | null;
+}
+
+/** Verdict of the GitHub review a summary comment came from. */
+export type PrReviewState = 'approved' | 'changes_requested' | 'commented' | 'dismissed';
 
 /** Side of a unified diff an inline PR comment anchors to. */
 export type PrCommentSide = 'old' | 'new';
@@ -157,6 +200,10 @@ export interface PrReviewer {
   changes_requested: boolean;
   avatar_url: string | null;
   reviewed_at: string | null;
+  /** This reviewer is the forge account the request was made with (stable
+   *  user id match — Bitbucket names reviewers by display name, which never
+   *  matches an email username). Optional: an older daemon omits it. */
+  is_me?: boolean;
 }
 
 export type PrDetail = PrSummary & {
@@ -166,6 +213,13 @@ export type PrDetail = PrSummary & {
   approved_by: string[];
   reviewers: PrReviewer[];
   mergeable: boolean | null;
+  /** False when the forge has no reactions API (Bitbucket Cloud). Absent from
+   *  an older daemon, which has no reaction routes: no controls then. */
+  reactions_supported?: boolean;
+  /** The forge's own merge preconditions, when it reports them. */
+  merge_checks?: PrMergeCheck[] | null;
+  /** Bitbucket tasks on the PR. */
+  task_count?: { open: number; resolved: number } | null;
 };
 
 export interface CreatePrReq {
@@ -227,6 +281,12 @@ export interface NewPrCommentReq {
   /** Head sha of the diff the reviewer saw (anchors the comment; GitHub
    *  skips a PR round-trip). */
   commit_id?: string | null;
+}
+
+/** Body for PATCH /repos/{id}/prs/{number}/comments/{cid} — `{cid}` is the
+ *  `PrComment.id`. Answers the updated `PrComment`. */
+export interface EditPrCommentReq {
+  body: string;
 }
 
 /** Body for POST /repos/{id}/prs/{number}/comments/{cid}/resolve — `{cid}` is

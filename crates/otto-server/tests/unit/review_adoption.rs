@@ -1,4 +1,10 @@
-use super::review_adoptable;
+use otto_review::restart::{adoption, Adoption};
+
+/// The rule `adopt` applies (`otto_review::restart::adoption`): a review is
+/// taken as it is only while running or once complete.
+fn review_adoptable(review: &otto_core::domain::Review) -> bool {
+    adoption(review) == Adoption::Adopt
+}
 
 fn review(status: &str, agents: &[&str]) -> otto_core::domain::Review {
     let agents: Vec<_> = agents

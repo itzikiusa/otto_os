@@ -1605,8 +1605,9 @@ fn build_native_tls(cfg: &ResolvedConfig) -> Result<tokio_rustls::TlsConnector> 
     let mut roots = rustls::RootCertStore::empty();
     // Start from the bundled webpki trust anchors (system-equivalent roots).
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    // Add any inline CA PEM (private CA / managed-CH bundle).
-    if let Some(ca) = cfg.tls.ca_cert.as_deref().filter(|s| !s.is_empty()) {
+    // Add any CA (private CA / managed-CH bundle): inline PEM or a PEM file path.
+    if let Some(ca) = cfg.tls.ca_cert.as_deref().filter(|s| !s.trim().is_empty()) {
+        let ca = crate::tls::pem_text("ca_cert", ca)?;
         for cert in rustls::pki_types::CertificateDer::pem_slice_iter(ca.as_bytes()) {
             let cert = cert.map_err(|e| types::invalid(format!("clickhouse: bad CA PEM: {e}")))?;
             roots

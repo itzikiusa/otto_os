@@ -16,6 +16,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { daemonStatus } from './daemonStatus.svelte';
 
   let status = $state<SecretsStatus | null>(null);
   let loading = $state(true);
@@ -30,6 +31,9 @@
     loadError = '';
     try {
       status = await api.get<SecretsStatus>('/admin/secrets/status');
+      // The status bar chip and the nav dot read the shared copy: a Secure
+      // here clears them without another read.
+      daemonStatus.setSecrets(status);
     } catch (e) {
       loadError = loadErrorText(e);
     } finally {

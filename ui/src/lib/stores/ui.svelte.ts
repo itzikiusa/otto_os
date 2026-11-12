@@ -10,7 +10,7 @@ import {
   type AutoVerticalEngine,
   type AutoVerticalPrefs,
 } from '../db-view-prefs';
-import { insertFavorite, loadReconciledSidebarStorage, persistKnownSidebarModules } from '../sidebar';
+import { insertFavorite, loadReconciledSidebarStorage, mergeSavedOrder, persistKnownSidebarModules, reorderAmong } from '../sidebar';
 
 export type ThemeName = 'native' | 'pro-dark' | 'warm';
 export type SchemePref = 'auto' | 'light' | 'dark';
@@ -429,8 +429,12 @@ class UiStore {
    *  and NOT `railExpanded` (the desktop sidebar preference) — a phone always
    *  boots onto the page, never under the drawer. */
   navDrawerOpen = $state(false);
-  constructor() {
-    ({ order: this.sidebarOrder, hidden: this.sidebarHidden, favorites: this.sidebarFavorites, collapsedGroups: this.sidebarCollapsedGroups } = loadReconciledSidebarStorage(lsGet, lsGetStrings, lsSet, this.sidebarGroupOrder));
+  constructor() { this.noteSidebarAvailable([], true); }
+  /** Re-run the new-module reconcile with the user's available built-ins (installShell; boot
+   *  passes none): a module counts as seen only once available, so a later grant still surfaces. */
+  noteSidebarAvailable(available: string[], boot = false): void {
+    const r = loadReconciledSidebarStorage(lsGet, lsGetStrings, lsSet, this.sidebarGroupOrder, available);
+    if (boot || r.changed) ({ order: this.sidebarOrder, hidden: this.sidebarHidden, favorites: this.sidebarFavorites, collapsedGroups: this.sidebarCollapsedGroups } = r);
   }
 
   /** Fold / unfold one Navigator section. */
@@ -446,22 +450,17 @@ class UiStore {
     lsSet(LS.sidebarCollapsedGroups, JSON.stringify(this.sidebarCollapsedGroups));
   }
 
-  /** Replace the full module order (the complete resolved id list, incl. hidden). */
+  /** Replace the module order with the resolved id list on screen (incl.
+   *  hidden); saved ids not on screen now keep their slots (mergeSavedOrder). */
   setSidebarOrder(ids: string[]): void {
-    this.sidebarOrder = ids;
-    lsSet(LS.sidebarOrder, JSON.stringify(ids));
+    this.sidebarOrder = mergeSavedOrder(ids, this.sidebarOrder);
+    lsSet(LS.sidebarOrder, JSON.stringify(this.sidebarOrder));
   }
 
   /** Reorder: pull `fromId` out and reinsert it at `toId`'s position. */
   reorderSidebar(ids: string[], fromId: string, toId: string): void {
-    if (fromId === toId) return;
-    const next = [...ids];
-    const from = next.indexOf(fromId);
-    const to = next.indexOf(toId);
-    if (from < 0 || to < 0) return;
-    next.splice(from, 1);
-    next.splice(to, 0, fromId);
-    this.setSidebarOrder(next);
+    const next = reorderAmong(ids, fromId, toId);
+    if (next) this.setSidebarOrder(next);
   }
 
   /** Show/hide a single module. */

@@ -6,6 +6,7 @@ import { ws } from './stores/workspace.svelte';
 import { router } from './router.svelte';
 import { startSnip } from './snip';
 import { selectAllInFocus } from './selectall';
+import { installUndoKeyGuard, undoRedoInFocus } from './undoredo';
 import { sidePane } from './stores/sidePane.svelte';
 import { nativePane } from './nativePane';
 import { isEmbedded, closePopoutWindow } from './desktop';
@@ -22,6 +23,14 @@ export function handleMenu(id: string): void {
   // session items act on that pane (or ⌘W closes it) — not on the main pane
   // behind it. The pane runs the forwarded id through this same function.
   if (sidePane.handleMenu(id)) return;
+  // Edit ▸ Undo / Redo (⌘Z / ⌘⇧Z): custom items, not the predefined ones —
+  // see lib/undoredo.ts. A focused native side view doesn't take these ids,
+  // so drop them rather than rewind an edit in the main pane behind it (and
+  // before the focus hand-off below, which would move focus off the field).
+  if (id === 'undo' || id === 'redo') {
+    if (!(sidePane.nativeState && sidePane.focused)) undoRedoInFocus(id);
+    return;
+  }
   // Window-owned sheets and palettes must receive keyboard focus when the
   // menu was invoked from a native side view (attached or detached).
   if (sidePane.nativeState && sidePane.focused) void nativePane.focus('primary').catch(() => {});
@@ -94,9 +103,14 @@ export async function attachMenuBridge(): Promise<() => void> {
   if (isEmbedded || !('__TAURI_INTERNALS__' in window)) return () => {};
   try {
     const { getCurrentWebview } = await import('@tauri-apps/api/webview');
-    return await getCurrentWebview().listen<string>('otto://menu', (e) =>
+    const unlisten = await getCurrentWebview().listen<string>('otto://menu', (e) =>
       handleMenu(e.payload),
     );
+    const unguard = installUndoKeyGuard();
+    return () => {
+      unguard();
+      unlisten();
+    };
   } catch {
     return () => {};
   }

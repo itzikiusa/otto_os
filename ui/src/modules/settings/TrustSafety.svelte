@@ -21,6 +21,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import { auth } from '../../lib/stores/auth.svelte';
   import SecretsStore from './SecretsStore.svelte';
+  import { daemonStatus } from './daemonStatus.svelte';
 
   const PAGE_SIZE = 100;
 
@@ -75,6 +76,7 @@
     postureLoading = true;
     try {
       posture = await api.get<SecurityPostureResp>('/security-posture');
+      daemonStatus.posture = posture; // the status bar's listener indicator
       postureError = '';
     } catch (e) {
       // Inline, with Retry — a toast vanished and left an empty strip.

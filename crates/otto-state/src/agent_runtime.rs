@@ -6,7 +6,7 @@
 
 mod drafts;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use otto_core::agent_runtime::{
     RuntimeAccessMode, RuntimeProvider, RuntimeSession, RuntimeSessionStatus,
 };
@@ -173,6 +173,92 @@ impl AgentRuntimeRepo {
         .await
         .map_err(dberr("list runtime sessions"))?;
         rows.iter().map(row_to_session).collect()
+    }
+
+    /// [`Self::list`] narrowed to the threads whose `meta.source` and/or
+    /// `meta.origin.id` equal the given values (an embedded page finding its
+    /// thread again) — closed ones included, newest activity first. With a
+    /// `source` the `json_extract(meta, '$.source')` index (migration
+    /// `agent_runtime_source_index`) picks the rows; an `origin_id` alone is
+    /// decided within the workspace / owner rows. Neither = [`Self::list`].
+    pub async fn list_filtered(
+        &self,
+        workspace_id: &Id,
+        owner: Option<&Id>,
+        source: Option<&str>,
+        origin_id: Option<&str>,
+    ) -> Result<Vec<RuntimeSessionRecord>> {
+        let rows = match (source, origin_id) {
+            (None, None) => return self.list(workspace_id, owner).await,
+            (Some(source), origin_id) => {
+                sqlx::query(concat!(
+                    "SELECT ",
+                    session_cols!(),
+                    " FROM agent_runtime_sessions WHERE json_extract(meta, '$.source') = ? \
+                     AND workspace_id = ? AND (? IS NULL OR created_by = ?) \
+                     AND (? IS NULL OR json_extract(meta, '$.origin.id') = ?) \
+                     ORDER BY last_active_at DESC LIMIT 500"
+                ))
+                .bind(source)
+                .bind(workspace_id)
+                .bind(owner)
+                .bind(owner)
+                .bind(origin_id)
+                .bind(origin_id)
+                .fetch_all(&self.pool)
+                .await
+            }
+            (None, Some(origin_id)) => {
+                sqlx::query(concat!(
+                    "SELECT ",
+                    session_cols!(),
+                    " FROM agent_runtime_sessions WHERE workspace_id = ? \
+                     AND (? IS NULL OR created_by = ?) \
+                     AND json_extract(meta, '$.origin.id') = ? \
+                     ORDER BY last_active_at DESC LIMIT 500"
+                ))
+                .bind(workspace_id)
+                .bind(owner)
+                .bind(owner)
+                .bind(origin_id)
+                .fetch_all(&self.pool)
+                .await
+            }
+        }
+        .map_err(dberr("list runtime sessions"))?;
+        rows.iter().map(row_to_session).collect()
+    }
+
+    /// Up to `limit` OPEN sessions whose `meta.source` is one of `sources`
+    /// and whose last persisted activity is before `idle_before`, in id
+    /// order after `after_id` (keyset paging) — the embedded-thread
+    /// auto-close sweep's candidates. The runtime re-checks each one live.
+    pub async fn idle_open_ids_with_source(
+        &self,
+        sources: &[&str],
+        idle_before: DateTime<Utc>,
+        after_id: &str,
+        limit: u32,
+    ) -> Result<Vec<Id>> {
+        if sources.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Only `?` placeholders are spliced in; every value is bound.
+        let sql = format!(
+            "SELECT id FROM agent_runtime_sessions WHERE json_extract(meta, '$.source') IN ({}) \
+             AND closed = 0 AND last_active_at < ? AND id > ? ORDER BY id LIMIT ?",
+            vec!["?"; sources.len()].join(", ")
+        );
+        let mut q = sqlx::query_scalar(sqlx::AssertSqlSafe(sql));
+        for s in sources {
+            q = q.bind(*s);
+        }
+        q.bind(fmt(idle_before))
+            .bind(after_id)
+            .bind(i64::from(limit))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("list idle runtime sessions"))
     }
 
     /// Every session that has an entity a previous life left open — boot
@@ -490,5 +576,146 @@ mod tests {
         );
         repo.delete(&id).await.unwrap();
         assert!(repo.entities(&id).await.unwrap().is_empty());
+    }
+
+    async fn new_session(repo: &AgentRuntimeRepo, id: &str, owner: &str, meta: serde_json::Value) {
+        repo.create(NewRuntimeSession {
+            id: id.into(),
+            workspace_id: "w1".into(),
+            provider: RuntimeProvider::Claude,
+            title: id.into(),
+            cwd: "/tmp".into(),
+            model: None,
+            access_mode: RuntimeAccessMode::ApprovalRequired,
+            parent_id: None,
+            meta: (!meta.is_null()).then_some(meta),
+            created_by: owner.into(),
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn set_active(pool: &DbPool, id: &str, at: DateTime<Utc>) {
+        sqlx::query("UPDATE agent_runtime_sessions SET last_active_at = ? WHERE id = ?")
+            .bind(fmt(at))
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    fn ids(recs: &[RuntimeSessionRecord]) -> Vec<&str> {
+        recs.iter().map(|r| r.session.id.as_str()).collect()
+    }
+
+    /// The embedded page's lookup: by `meta.source` and/or `meta.origin.id`,
+    /// owner-scoped like the plain list, closed rows included, newest first.
+    #[tokio::test]
+    async fn list_filtered_matches_source_and_origin_within_the_owner() {
+        let pool = mem_pool().await;
+        seed(&pool).await;
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, display_name, is_root, created_at) \
+             VALUES ('u2', 'v', 'x', 'V', 0, ?)",
+        )
+        .bind(fmt(Utc::now()))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let repo = AgentRuntimeRepo::new(pool.clone());
+        let pr = |id: &str| json!({"source": "pr-agent", "origin": {"kind": "pr", "id": id}});
+        new_session(&repo, "a", "u1", pr("repo#1")).await;
+        new_session(&repo, "b", "u1", pr("repo#1")).await;
+        new_session(&repo, "c", "u1", pr("repo#2")).await;
+        new_session(&repo, "d", "u1", json!({"source": "connection-diagnose"})).await;
+        new_session(&repo, "e", "u1", serde_json::Value::Null).await;
+        new_session(&repo, "f", "u2", pr("repo#1")).await;
+        let now = Utc::now();
+        set_active(&pool, "a", now - chrono::TimeDelta::hours(2)).await;
+        set_active(&pool, "b", now - chrono::TimeDelta::hours(1)).await;
+        repo.set_closed(&"b".into()).await.unwrap();
+        let (w, u1) = ("w1".to_string(), "u1".to_string());
+
+        let got = repo
+            .list_filtered(&w, Some(&u1), Some("pr-agent"), Some("repo#1"))
+            .await
+            .unwrap();
+        assert_eq!(ids(&got), ["b", "a"], "newest first, closed kept");
+        assert!(got[0].closed);
+        let got = repo
+            .list_filtered(&w, Some(&u1), Some("pr-agent"), None)
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 3);
+        let got = repo
+            .list_filtered(&w, Some(&u1), None, Some("repo#2"))
+            .await
+            .unwrap();
+        assert_eq!(ids(&got), ["c"]);
+        // An admin (no owner) sees the other user's thread too.
+        let got = repo
+            .list_filtered(&w, None, Some("pr-agent"), Some("repo#1"))
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 3);
+        assert!(repo
+            .list_filtered(&w, Some(&u1), Some("connection-diagnose"), Some("repo#1"))
+            .await
+            .unwrap()
+            .is_empty());
+        // No filter = the plain list (all six for the admin view).
+        assert_eq!(
+            repo.list_filtered(&w, None, None, None)
+                .await
+                .unwrap()
+                .len(),
+            6
+        );
+    }
+
+    /// The auto-close sweep's candidates: open, a listed source, idle before
+    /// the cutoff, keyset-paged by id.
+    #[tokio::test]
+    async fn idle_open_ids_with_source_pages_only_idle_open_embedded_rows() {
+        let pool = mem_pool().await;
+        seed(&pool).await;
+        let repo = AgentRuntimeRepo::new(pool.clone());
+        let now = Utc::now();
+        let old = now - chrono::TimeDelta::hours(13);
+        for (id, meta) in [
+            ("s1", json!({"source": "pr-agent"})),
+            ("s2", json!({"source": "connection-diagnose"})),
+            ("s3", json!({"source": "pr-agent"})),
+            ("s4", json!({"source": "personal_agent"})),
+            ("s5", serde_json::Value::Null),
+            ("s6", json!({"source": "pr-agent"})),
+        ] {
+            new_session(&repo, id, "u1", meta).await;
+            set_active(&pool, id, old).await;
+        }
+        repo.set_closed(&"s3".into()).await.unwrap();
+        set_active(&pool, "s6", now).await;
+        let cutoff = now - chrono::TimeDelta::hours(12);
+        let sources = ["pr-agent", "connection-diagnose"];
+        let all = repo
+            .idle_open_ids_with_source(&sources, cutoff, "", 100)
+            .await
+            .unwrap();
+        assert_eq!(all, ["s1", "s2"]);
+        let page = repo
+            .idle_open_ids_with_source(&sources, cutoff, "", 1)
+            .await
+            .unwrap();
+        assert_eq!(page, ["s1"]);
+        let next = repo
+            .idle_open_ids_with_source(&sources, cutoff, "s1", 1)
+            .await
+            .unwrap();
+        assert_eq!(next, ["s2"]);
+        assert!(repo
+            .idle_open_ids_with_source(&[], cutoff, "", 100)
+            .await
+            .unwrap()
+            .is_empty());
     }
 }

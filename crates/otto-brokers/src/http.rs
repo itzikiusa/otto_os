@@ -20,7 +20,6 @@ use serde::Deserialize;
 
 use crate::service::BrokersService;
 use crate::types::*;
-use std::collections::HashMap;
 
 /// Server-side context required by the Message Brokers routes.
 pub trait BrokersCtx: Clone + Send + Sync + 'static {
@@ -602,10 +601,8 @@ async fn list_lag_alerts<S: BrokersCtx>(
     Path(id): Path<Id>,
 ) -> ApiResult<Response> {
     authorize(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
-    // Pass an empty current-lags map (breach evaluation requires live group lag;
-    // the UI triggers a describe-group call separately when needed).
-    let empty: HashMap<String, i64> = HashMap::new();
-    Ok(Json(ctx.brokers().list_lag_alerts(&id, &empty).await?).into_response())
+    // Evaluated on read (bounded): no background evaluator exists yet.
+    Ok(Json(ctx.brokers().evaluate_lag_alerts(&id).await?).into_response())
 }
 
 async fn create_lag_alert<S: BrokersCtx>(

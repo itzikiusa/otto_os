@@ -396,15 +396,14 @@ pub struct ConsumeReq {
     pub max_wait_ms: Option<u64>,
     /// Case-insensitive substring filter on the raw key bytes (applied
     /// server-side during consume so the limit quota counts only matches).
-    /// The service also re-checks after decoding (value_filter cannot be
-    /// applied server-side before decoding, so key_filter is the hot path).
     #[serde(default)]
     pub key_filter: Option<String>,
-    /// Case-insensitive substring filter on the decoded value (applied
-    /// post-decode in the service layer).
+    /// Case-insensitive substring filter on the decoded value. Applied in the
+    /// scan like `key_filter` (each value decoded per `decode`), so the limit
+    /// counts only matches.
     #[serde(default)]
     pub value_filter: Option<String>,
-    /// When `key_filter` is set and `find_from_beginning` is true the consume
+    /// When a key or value filter is set and `find_from_beginning` is true the consume
     /// path scans from the earliest available offset (ignoring `start`) so the
     /// key filter can find old messages. Without this the caller still controls
     /// `start`; set it to `beginning` explicitly for the same effect.
@@ -466,6 +465,14 @@ pub struct ConsumeResp {
     /// (because `ConsumeReq::mask` was `true`). The UI surfaces this as a badge.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub masked: bool,
+    /// With a `key_filter` / `value_filter`: raw messages read to find the
+    /// returned matches (non-matches are scanned past). Absent unfiltered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scanned: Option<usize>,
+    /// The filtered scan stopped at its raw-message cap (50,000) before the
+    /// range ended — more matches may exist further on. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scan_capped: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -822,6 +829,11 @@ pub struct LagAlert {
     /// delta is surfaced here (None = no current breach or not yet evaluated).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub breach_lag: Option<i64>,
+    /// The group's summed lag on the topic as evaluated for THIS response
+    /// (`GET …/lag-alerts` describes each alerted group). Absent when the
+    /// alert is disabled or the group could not be described in time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_lag: Option<i64>,
 }
 
 /// Request body to create a new lag alert.

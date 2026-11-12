@@ -14,6 +14,7 @@
 //! the persistence op all happen under it, so they agree on order; DB writes
 //! run on a per-session persister task fed in that order.
 
+mod auto_close;
 mod fresh;
 mod request_ids;
 use request_ids::RequestIds;
@@ -48,6 +49,8 @@ use crate::ring::{EventRing, RingLimits};
 /// T3 Code `THREAD_RESUME_MAX_REPLAY_EVENTS` / `…_ENCODED_BYTES`.
 pub const MAX_REPLAY_EVENTS: usize = 128;
 pub const MAX_REPLAY_BYTES: usize = 1_048_576;
+/// Open linked threads one group may hold besides its root (`open_peer`).
+pub const MAX_LINKED_OPEN: usize = 8;
 
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
@@ -644,6 +647,14 @@ impl AgentRuntime {
         if c.status == RuntimeSessionStatus::Closed {
             return Err(Error::Conflict("the session is closed".into()));
         }
+        // One confused agent must not fan out without bound: `group` lists
+        // the OPEN threads of this linked group, the root included.
+        if self.group(&c).await?.len() > MAX_LINKED_OPEN {
+            return Err(Error::Conflict(format!(
+                "this thread group already has {MAX_LINKED_OPEN} open linked threads — close \
+                 one (otto_thread_close) before opening another"
+            )));
+        }
         let root = c.parent_id.clone().unwrap_or_else(|| c.id.clone());
         let mut meta = req.meta;
         if c.meta_flag("read_only") {
@@ -652,6 +663,7 @@ impl AgentRuntime {
                 o.insert("read_only".into(), serde_json::Value::Bool(true));
             }
         }
+        inherit_embedded_origin(&c, &mut meta);
         let created = self
             .create_linked(
                 &c.created_by,
@@ -797,13 +809,35 @@ impl AgentRuntime {
 
     pub async fn list(&self, ws: &Id, owner: Option<&Id>) -> Result<Vec<RuntimeSession>> {
         let recs = self.inner.repo.list(ws, owner).await?;
-        Ok(recs
-            .into_iter()
+        Ok(self.with_live(recs))
+    }
+
+    /// [`Self::list`] narrowed to `meta.source` / `meta.origin.id` (either
+    /// may be `None`), closed threads included — how an embedded page finds
+    /// the thread it opened for this PR or connection.
+    pub async fn list_filtered(
+        &self,
+        ws: &Id,
+        owner: Option<&Id>,
+        source: Option<&str>,
+        origin_id: Option<&str>,
+    ) -> Result<Vec<RuntimeSession>> {
+        let recs = self
+            .inner
+            .repo
+            .list_filtered(ws, owner, source, origin_id)
+            .await?;
+        Ok(self.with_live(recs))
+    }
+
+    /// Stored rows with each live session's in-memory state in their place.
+    fn with_live(&self, recs: Vec<otto_state::RuntimeSessionRecord>) -> Vec<RuntimeSession> {
+        recs.into_iter()
             .map(|r| match self.inner.live.get(&r.session.id) {
                 Some(l) => l.lock().session.clone(),
                 None => r.session,
             })
-            .collect())
+            .collect()
     }
 
     /// Record the agent-UI-control grant (closed sessions too — a revoke must
@@ -1525,33 +1559,7 @@ impl AgentRuntime {
         let live = self.live(id).await?;
         let _prompt = live.prompt_lock.lock().await;
         let mut st = live.lock();
-        if st.session.status == RuntimeSessionStatus::Closed {
-            return Ok(st.session.clone());
-        }
-        cancel_pending(&self.inner, &live, &mut st, CancelReason::Closed);
-        finish_turn(
-            &self.inner,
-            &live,
-            &mut st,
-            TurnTerminalStatus::Interrupted,
-            None,
-            Some("the session was closed".into()),
-        );
-        if let Some(p) = st.proc.take() {
-            stop_child(p, self.inner.config.close_grace);
-        }
-        settle_background(&self.inner, &live, &mut st, TurnItemStatus::Interrupted);
-        retire(&self.inner, &st.session);
-        set_session_status(
-            &self.inner,
-            &live,
-            &mut st,
-            ProviderSessionStatus::Stopped,
-            None,
-        );
-        st.session.status = RuntimeSessionStatus::Closed;
-        let _ = live.persist.send(PersistOp::Closed);
-        Ok(st.session.clone())
+        Ok(close_locked(&self.inner, &live, &mut st))
     }
 
     /// Revive a closed or dormant session: it takes prompts again and its agent is
@@ -1726,6 +1734,57 @@ fn check_can_prompt(st: &State) -> Result<()> {
         return Err(Error::Conflict(TURN_RUNNING.into()));
     }
     Ok(())
+}
+
+/// A thread opened from an embedded one (a PR's or a connection's) keeps the
+/// opener's `meta.source` / `meta.origin`, so Threads groups it with its lead
+/// and the auto-close sweep treats it alike. A daemon caller's own `source`
+/// (a delegated personal agent) is left as it is.
+fn inherit_embedded_origin(opener: &RuntimeSession, meta: &mut Option<serde_json::Value>) {
+    if !otto_core::agent_runtime::is_embedded_thread(opener.meta.as_ref()) {
+        return;
+    }
+    let Some(from) = opener.meta.as_ref().and_then(|m| m.as_object()) else {
+        return;
+    };
+    let m = meta.get_or_insert_with(|| serde_json::json!({}));
+    let Some(o) = m.as_object_mut() else {
+        return;
+    };
+    if o.contains_key("source") {
+        return;
+    }
+    for key in ["source", "origin"] {
+        if let Some(v) = from.get(key) {
+            o.insert(key.into(), v.clone());
+        }
+    }
+}
+
+/// [`AgentRuntime::close`]'s body, under the caller's prompt lock and the
+/// session lock (the auto-close sweep checks idleness under the same locks).
+fn close_locked(inner: &Arc<Inner>, live: &Arc<Live>, st: &mut State) -> RuntimeSession {
+    if st.session.status == RuntimeSessionStatus::Closed {
+        return st.session.clone();
+    }
+    cancel_pending(inner, live, st, CancelReason::Closed);
+    finish_turn(
+        inner,
+        live,
+        st,
+        TurnTerminalStatus::Interrupted,
+        None,
+        Some("the session was closed".into()),
+    );
+    if let Some(p) = st.proc.take() {
+        stop_child(p, inner.config.close_grace);
+    }
+    settle_background(inner, live, st, TurnItemStatus::Interrupted);
+    retire(inner, &st.session);
+    set_session_status(inner, live, st, ProviderSessionStatus::Stopped, None);
+    st.session.status = RuntimeSessionStatus::Closed;
+    let _ = live.persist.send(PersistOp::Closed);
+    st.session.clone()
 }
 
 /// Interrupt the running turn (a person's Stop, the stall watchdog): the

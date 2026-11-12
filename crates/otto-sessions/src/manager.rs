@@ -413,26 +413,6 @@ fn normalize_pty_input(bytes: &[u8]) -> String {
     s
 }
 
-/// First `user_message` text recorded in a rollout, if any. codex flushes the
-/// rollout lazily — meta line and first user message land together when the
-/// first prompt is submitted — so `None` means "no prompt reached this
-/// conversation yet".
-fn codex_rollout_first_user_message(path: &std::path::Path) -> Option<String> {
-    use std::io::BufRead;
-    let file = std::fs::File::open(path).ok()?;
-    for line in std::io::BufReader::new(file).lines().take(200) {
-        let Ok(line) = line else { break };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
-            continue;
-        };
-        let p = v.get("payload")?;
-        if p.get("type").and_then(|t| t.as_str()) == Some("user_message") {
-            return p.get("message").and_then(|m| m.as_str()).map(str::to_owned);
-        }
-    }
-    None
-}
-
 /// First input a session's PTY received while its provider-id capture was
 /// pending. `first_at` gates and floors the rollout scan; `raw` (capped) is
 /// normalized and content-matched against candidate rollouts' first
@@ -1467,6 +1447,8 @@ pub struct SessionManager {
     /// (see [`SESSION_PERSISTENCE_SETTING`]). `None` = every PTY is local (the
     /// pre-holder behaviour; bare test harnesses).
     holders: Option<otto_pty::HolderConfig>,
+    /// Machine-aware admission + live agent count (see `manager/resources.rs`).
+    admission: Arc<crate::admission::AdmissionGate>,
 }
 
 impl SessionManager {
@@ -1525,6 +1507,7 @@ impl SessionManager {
             resume_locks: Arc::new(DashMap::new()),
             submit_locks: Arc::new(DashMap::new()),
             holders: None,
+            admission: Arc::new(crate::admission::AdmissionGate::os()),
         }
     }
 
@@ -1571,6 +1554,7 @@ impl SessionManager {
         cols: u16,
         rows: u16,
     ) -> Result<PtyHandle> {
+        let spec = self.with_machine_budget(session, spec).await;
         if is_user_started(session) && self.persistence_enabled().await {
             if let Some(config) = self.holders.clone() {
                 let meta = holder_meta(
@@ -1586,7 +1570,7 @@ impl SessionManager {
                 .await
                 .unwrap_or_else(|e| Err(Error::Internal(format!("pty holder task: {e}"))));
                 match held {
-                    Ok(handle) => return Ok(handle),
+                    Ok(handle) => return Ok(self.track_spawn(session, handle)),
                     Err(e) => tracing::warn!(
                         session = %session.id,
                         "pty holder unavailable — spawning in-process (this session won't survive a daemon restart): {e}"
@@ -1594,9 +1578,7 @@ impl SessionManager {
                 }
             }
         }
-        tokio::task::spawn_blocking(move || PtyHandle::spawn_sized(&spec, cols, rows))
-            .await
-            .unwrap_or_else(|e| Err(Error::Internal(format!("pty spawn task: {e}"))))
+        self.spawn_local_pty(session, spec, cols, rows).await
     }
 
     /// Attach the name-themes store so new agent sessions are auto-named from the
@@ -2320,6 +2302,7 @@ impl SessionManager {
         // nobody kills, its MCP token never revoked, its row `running` until
         // boot recovery. Refused here, and re-checked once the spawn returns.
         self.refuse_while_shutting_down()?;
+        let (req, _admission) = self.admit_create(req).await;
         let _mcp_activation = crate::mcp::activation_gate().read().await;
         let mut req = req;
         // Agent UI control's grant is server-owned and never outlives the
@@ -4312,104 +4295,6 @@ impl SessionManager {
         std::fs::metadata(&path).is_ok().then_some(path)
     }
 
-    /// One sweep of the provider-title auto-namer. For every LIVE foreground
-    /// agent session whose name the user hasn't claimed, read the provider's own
-    /// session title (claude/codex first user prompt) and, when found and
-    /// different, rename the session to it and broadcast `SessionRenamed`.
-    ///
-    /// Cheap + robust: dead/archived/background/user-named sessions are skipped
-    /// without any disk work; an unchanged transcript (same mtime) is not
-    /// re-parsed; a resolved session is never read again; and every per-session
-    /// error is swallowed. All file reads run on the blocking pool. Returns the
-    /// number of sessions renamed this sweep. Driven by a ~20s loop in ottod.
-    pub async fn refresh_provider_titles(&self) -> usize {
-        // SQL pre-filter (SG-06): the sweep used to decode EVERY session ever
-        // (archived too) every 20 s to find a handful of candidates.
-        let Ok(sessions) = self.repo.list_title_candidates().await else {
-            return 0;
-        };
-        let mut renamed = 0;
-        for session in sessions {
-            // Live only (the doc's contract): a dead row's missing transcript
-            // was re-probed (row fetch + rollout walk) every sweep, forever.
-            if !title_eligible(&session) || !self.is_live(&session.id) {
-                continue;
-            }
-            match self.probe_and_apply_title(&session).await {
-                Ok(true) => renamed += 1,
-                Ok(false) => {}
-                Err(e) => tracing::debug!(session = %session.id, "provider-title probe: {e}"),
-            }
-        }
-        renamed
-    }
-
-    /// Probe one session's transcript and adopt its provider title when found.
-    /// Returns `Ok(true)` when the session was actually renamed. Uses the
-    /// in-memory [`TitleProbe`] cache to short-circuit resolved sessions and
-    /// unchanged transcripts; does the file read on the blocking pool.
-    async fn probe_and_apply_title(&self, s: &Session) -> Result<bool> {
-        // Already resolved in this daemon's lifetime — never re-read.
-        if self
-            .title_probe
-            .get(&s.id)
-            .is_some_and(|p| p.resolved || p.gave_up)
-        {
-            return Ok(false);
-        }
-        let Some(path) = self.activity_artifact(&s.id).await else {
-            // Transcript not on disk yet (id just captured, first turn pending).
-            return Ok(false);
-        };
-        // Async stat: this runs every ~20 s per candidate on a runtime worker.
-        let mtime = tokio::fs::metadata(&path)
-            .await
-            .and_then(|m| m.modified())
-            .ok();
-        // Nothing new since the last look — skip the re-parse.
-        if let Some(prev) = self.title_probe.get(&s.id) {
-            if mtime.is_some() && prev.mtime == mtime {
-                return Ok(false);
-            }
-        }
-        let provider = s.provider.clone();
-        let path_owned = path.clone();
-        let read = tokio::task::spawn_blocking(move || read_provider_title(&provider, &path_owned))
-            .await
-            .unwrap_or_default();
-        let title = read.title;
-        // Record the mtime we just parsed at so the next sweep can skip it.
-        {
-            let mut probe = self.title_probe.entry(s.id.clone()).or_default();
-            probe.mtime = mtime;
-            // A found title means the (stable) first prompt exists — done either
-            // way, whether it differs from the current name or already matches.
-            if title.is_some() {
-                probe.resolved = true;
-            } else if read.capped {
-                probe.gave_up = true;
-            }
-        }
-        let Some(title) = title else {
-            return Ok(false); // no user prompt yet — retry on a later sweep
-        };
-        if title == s.title {
-            return Ok(false);
-        }
-        self.repo.set_title(&s.id, &title).await?;
-        let _ = self
-            .repo
-            .merge_meta(&s.id, &serde_json::json!({ "title_source": "provider" }))
-            .await;
-        let _ = self.events.send(Event::SessionRenamed {
-            session_id: s.id.clone(),
-            workspace_id: s.workspace_id.clone(),
-            title: title.clone(),
-        });
-        self.record_lifecycle(s, format!("Auto-named from {} session", s.provider));
-        Ok(true)
-    }
-
     /// One sweep of the idle-suspend policy: suspend every LIVE session that is
     /// resumable, idle (no output for ≥ [`SUSPEND_GRACE`]) and has no attached
     /// WS viewer — and KILL every idle, unattached background session that can
@@ -4724,13 +4609,7 @@ impl SessionManager {
                 Err(e) => tracing::warn!(session = %id, "live-session cap: suspend failed: {e}"),
             }
         }
-        if excess > 0 {
-            tracing::info!(
-                cap,
-                over = excess,
-                "live-session cap exceeded; every remaining session is in use"
-            );
-        }
+        self.note_live_cap(cap, excess);
         freed
     }
 
@@ -4761,8 +4640,10 @@ impl SessionManager {
     /// Never touches live PTYs, attached sessions, or `keep_alive`-pinned
     /// rows; archive keeps the row + history, so nothing is lost — the session
     /// just moves to the sidebar's "Archived" section (and stays unarchivable).
-    /// Returns the number archived.
+    /// Returns the number archived, plus the independent background-session
+    /// pass ([`Self::auto_archive_background`], on by default) that runs first.
     pub async fn auto_archive_stale(&self) -> usize {
+        let background = self.auto_archive_background().await;
         let days = match &self.settings {
             Some(sr) => match sr.get("session_auto_archive_days").await {
                 Ok(Some(v)) => v.as_u64().unwrap_or(0),
@@ -4771,7 +4652,7 @@ impl SessionManager {
             None => 0,
         };
         if days == 0 {
-            return 0;
+            return background;
         }
         // A day count too large for chrono (or for `i64`) means "never":
         // auto-archive stays off rather than panicking or, via an `as i64`
@@ -4781,7 +4662,7 @@ impl SessionManager {
                 days,
                 "auto-archive: day count out of range; treating as off"
             );
-            return 0;
+            return background;
         };
         let mut archived = 0;
         let mut after_id = String::new();
@@ -4819,7 +4700,7 @@ impl SessionManager {
                 }
             }
         }
-        archived
+        archived + background
     }
 
     /// Existence-check pruner: for non-live agent sessions with a
@@ -5129,6 +5010,7 @@ impl SessionManager {
         let _ = self.events.send(Event::SessionRemoved {
             session_id: id.clone(),
             workspace_id: session.workspace_id,
+            owner_id: session.created_by,
         });
         Ok(())
     }
@@ -5972,14 +5854,23 @@ impl SessionManager {
                                 // Superseded: the exit arm finishes this task.
                                 continue;
                             }
-                            current = next;
                             let quiet = adopted_quiet_at
                                 .is_some_and(|at| handle.last_output_at() == at);
-                            if quiet {
-                                let _ = repo.update_status_keep_activity(&id, next).await;
+                            let wrote = if quiet {
+                                repo.update_status_keep_activity(&id, next).await
                             } else {
+                                repo.update_status(&id, next).await
+                            };
+                            // Announce only what was stored, or the UI and the
+                            // row (a reload, a restart) disagree. `current` keeps
+                            // the old value, so the next tick retries the write.
+                            if let Err(e) = wrote {
+                                tracing::warn!(session = %id, status = ?next, "status write failed; retrying next tick: {e}");
+                                continue;
+                            }
+                            current = next;
+                            if !quiet {
                                 adopted_quiet_at = None;
-                                let _ = repo.update_status(&id, next).await;
                             }
                             let _ = events.send(Event::SessionStatus {
                                 session_id: id.clone(),
@@ -6013,7 +5904,12 @@ impl SessionManager {
                                     tracing::warn!(session = %id, "revoke exited session credentials: {e}");
                                 }
                             }
-                            let _ = repo.update_status(&id, SessionStatus::Exited).await;
+                            // The process IS gone, so viewers hear it either way;
+                            // a row left `working`/`idle` is not live (`is_live`
+                            // decides resumes) and boot's dormant pass resets it.
+                            if let Err(e) = repo.update_status(&id, SessionStatus::Exited).await {
+                                tracing::warn!(session = %id, "exit status write failed: {e}");
+                            }
                             let _ = events.send(Event::SessionStatus {
                                 session_id: id.clone(),
                                 workspace_id: workspace_id.clone(),
@@ -6249,8 +6145,13 @@ fn missing_cwd_refusal_in(session: &Session, otto_data: &std::path::Path) -> Opt
     ))
 }
 
+#[path = "manager/background_archive.rs"]
+mod background_archive;
 #[path = "manager/cli_flags.rs"]
 mod cli_flags;
+#[path = "manager/codex_rollout.rs"]
+mod codex_rollout;
+use codex_rollout::codex_rollout_first_user_message;
 #[path = "manager/input_timeout.rs"]
 mod input_timeout;
 use input_timeout::{input_write_timeout, INPUT_WRITE_TIMEOUT};
@@ -6258,6 +6159,10 @@ use input_timeout::{input_write_timeout, INPUT_WRITE_TIMEOUT};
 mod mcp_sync;
 #[path = "manager/otto_tools_env.rs"]
 mod otto_tools_env;
+#[path = "manager/provider_titles.rs"]
+mod provider_titles;
+#[path = "manager/resources.rs"]
+mod resources;
 #[path = "manager/runtime_spawn.rs"]
 mod runtime_spawn;
 pub use runtime_spawn::{RuntimeMcpDelivery, RuntimeMcpServer};

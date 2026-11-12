@@ -509,6 +509,77 @@ impl ReviewFindingsRepo {
         Ok(res.rows_affected())
     }
 
+    /// Flip the given findings' DETECTION `state` to `resolved`: prior findings
+    /// a later run explicitly confirmed fixed (the scope assessment said
+    /// `fixed` with evidence and the final verifier agreed). By id, never by
+    /// absence. A finding this run raised again (`review_id = run_id`) is
+    /// left alone, as is one already settled (`resolved` / `declined`); the
+    /// workflow `status` (human triage) is never written. Returns rows changed.
+    pub async fn resolve_confirmed(&self, ids: &[&str], run_id: &str) -> Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let sql = format!(
+            "UPDATE review_findings SET state = 'resolved', last_seen_run = ?, updated_at = ? \
+             WHERE id IN ({}) AND review_id != ? AND state IN ('open', 'fixing', 'regressed')",
+            vec!["?"; ids.len()].join(", ")
+        );
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+            .bind(run_id)
+            .bind(fmt(Utc::now()));
+        for id in ids {
+            q = q.bind(*id);
+        }
+        let res = q
+            .bind(run_id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("resolve confirmed findings"))?;
+        Ok(res.rows_affected())
+    }
+
+    /// Close (`state` → `declined`) the findings whose latest sighting is
+    /// `review_id`, still open, promoted from a draft whose body starts with
+    /// `mark` (an unverified claim), that this attempt did not raise again
+    /// (`seen_fingerprints`) and that no current comment links to (`linked`
+    /// ids). A summarizer re-run of the same review calls it: the earlier
+    /// attempt's unverified claims were re-verified and their drafts replaced.
+    /// The workflow `status` (human triage) is never written. Returns rows.
+    pub async fn close_superseded(
+        &self,
+        review_id: &str,
+        seen_fingerprints: &[&str],
+        linked: &[&str],
+        mark: &str,
+    ) -> Result<u64> {
+        let marks = |n: usize| vec!["?"; n].join(", ");
+        let mut sql = String::from(
+            "UPDATE review_findings SET state = 'declined', updated_at = ? \
+             WHERE review_id = ? AND state IN ('open', 'fixing', 'regressed') \
+               AND substr(body, 1, length(?)) = ?",
+        );
+        if !seen_fingerprints.is_empty() {
+            let n = marks(seen_fingerprints.len());
+            sql.push_str(&format!(" AND fingerprint NOT IN ({n})"));
+        }
+        if !linked.is_empty() {
+            sql.push_str(&format!(" AND id NOT IN ({})", marks(linked.len())));
+        }
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+            .bind(fmt(Utc::now()))
+            .bind(review_id)
+            .bind(mark)
+            .bind(mark);
+        for v in seen_fingerprints.iter().chain(linked) {
+            q = q.bind(*v);
+        }
+        let res = q
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("close superseded findings"))?;
+        Ok(res.rows_affected())
+    }
+
     /// Fetch a single finding row by its id.
     pub async fn get(&self, id: &Id) -> Result<ReviewFindingRow> {
         let row = sqlx::query("SELECT * FROM review_findings WHERE id = ?")
@@ -1077,6 +1148,95 @@ mod tests {
             repo.get_full(&a.id).await.unwrap().state,
             "open",
             "branch A's finding is not B's to resolve"
+        );
+    }
+
+    /// Explicit resolution: by id only, never a finding the resolving run
+    /// raised again, never a declined one, and the human `status` survives.
+    #[tokio::test]
+    async fn confirmed_resolution_is_by_id_and_keeps_human_triage() {
+        let repo = ReviewFindingsRepo::new(mem_pool().await);
+        let (fixed, _) = repo.upsert(&sample("fp-fixed", "high")).await.unwrap();
+        let (other, _) = repo.upsert(&sample("fp-other", "high")).await.unwrap();
+        let (declined, _) = repo.upsert(&sample("fp-declined", "high")).await.unwrap();
+        repo.set_state(
+            &"rev1".to_string(),
+            "fp-declined",
+            FindingState::Declined,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.set_status(&fixed.id, FindingStatus::Accepted, "alice")
+            .await
+            .unwrap();
+        // Raised again by the resolving run itself: not resolvable.
+        let mut again = sample("fp-again", "high");
+        again.review_id = "rev2";
+        let (reraised, _) = repo.upsert(&again).await.unwrap();
+        let ids = [
+            fixed.id.as_str(),
+            declined.id.as_str(),
+            reraised.id.as_str(),
+        ];
+        assert_eq!(repo.resolve_confirmed(&ids, "rev2").await.unwrap(), 1);
+        let after = repo.get_full(&fixed.id).await.unwrap();
+        assert_eq!(after.state, "resolved");
+        assert_eq!(after.status, FindingStatus::Accepted, "triage untouched");
+        assert_eq!(repo.get_full(&other.id).await.unwrap().state, "open");
+        assert_eq!(repo.get_full(&declined.id).await.unwrap().state, "declined");
+        assert_eq!(repo.get_full(&reraised.id).await.unwrap().state, "open");
+        assert_eq!(repo.resolve_confirmed(&[], "rev2").await.unwrap(), 0);
+    }
+
+    /// A summarizer re-run closes only this review's stale unverified
+    /// findings: not one it raised again, not one a decided comment links to,
+    /// not a verified one, not another review's — and never the `status`.
+    #[tokio::test]
+    async fn superseded_unverified_findings_close_within_the_review_only() {
+        let repo = ReviewFindingsRepo::new(mem_pool().await);
+        let unverified = |fp: &'static str| {
+            let mut f = sample(fp, "high");
+            f.body = "[unverified] format! into a query";
+            f
+        };
+        let (stale, _) = repo.upsert(&unverified("fp-stale")).await.unwrap();
+        let (again, _) = repo.upsert(&unverified("fp-again")).await.unwrap();
+        let (decided, _) = repo.upsert(&unverified("fp-decided")).await.unwrap();
+        let (verified, _) = repo.upsert(&sample("fp-verified", "high")).await.unwrap();
+        let mut elsewhere = unverified("fp-elsewhere");
+        elsewhere.review_id = "rev2";
+        let (other, _) = repo.upsert(&elsewhere).await.unwrap();
+        repo.set_status(&stale.id, FindingStatus::Accepted, "alice")
+            .await
+            .unwrap();
+        let n = repo
+            .close_superseded(
+                "rev1",
+                &["fp-again"],
+                &[decided.id.as_str()],
+                "[unverified] ",
+            )
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        let after = repo.get_full(&stale.id).await.unwrap();
+        assert_eq!(after.state, "declined");
+        assert_eq!(after.status, FindingStatus::Accepted, "triage untouched");
+        for f in [&again, &decided, &verified, &other] {
+            assert_eq!(
+                repo.get_full(&f.id).await.unwrap().state,
+                "open",
+                "{}",
+                f.fingerprint
+            );
+        }
+        // Nothing seen and nothing linked: the plain filter still holds.
+        assert_eq!(
+            repo.close_superseded("rev1", &[], &[], "[unverified] ")
+                .await
+                .unwrap(),
+            2
         );
     }
 

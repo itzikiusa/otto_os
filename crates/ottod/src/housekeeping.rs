@@ -1,5 +1,6 @@
 //! Boot-time housekeeping for the data dir: the unclean-shutdown marker and a
-//! deliberately narrow sweep of files that earlier versions left behind.
+//! deliberately narrow sweep of files that earlier versions left behind —
+//! plus the one periodic chore, re-capping launchd's stderr log.
 //!
 //! The data dir is USER DATA, so the sweep matches only exact, known-dead
 //! patterns and never recurses:
@@ -17,8 +18,13 @@ use std::time::{Duration, SystemTime};
 pub const RESIGNED_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
 
 /// launchd appends the daemon's stderr to one file forever; once it passes
-/// this size the next boot truncates it (the daemon's own log rotates daily).
+/// this size it is truncated — at boot and then every
+/// [`STDERR_LOG_CHECK_EVERY`] (the daemon's own log rotates daily).
 pub const STDERR_LOG_MAX_BYTES: u64 = 20 * 1024 * 1024;
+
+/// How often a running daemon re-applies the stderr cap: a boot-only check
+/// let months of uptime grow it without bound (mostly repeated warnings).
+pub const STDERR_LOG_CHECK_EVERY: Duration = Duration::from_secs(3600);
 
 /// Marker present while a daemon runs; left behind by a crash or SIGKILL.
 pub fn running_marker(data_dir: &Path) -> PathBuf {
@@ -123,6 +129,28 @@ pub fn cap_stderr_log(path: &Path, max: u64) -> Option<u64> {
     Some(len)
 }
 
+/// Re-apply [`cap_stderr_log`] every `every` for the life of the daemon (the
+/// boot call covers the start). The file work runs on the blocking pool.
+pub fn spawn_stderr_log_cap(
+    path: PathBuf,
+    max: u64,
+    every: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(every);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        tick.tick().await; // immediate: boot just capped it
+        loop {
+            tick.tick().await;
+            let p = path.clone();
+            let cut = tokio::task::spawn_blocking(move || cap_stderr_log(&p, max)).await;
+            if let Ok(Some(was)) = cut {
+                tracing::info!("truncated ottod.stderr.log ({was} bytes)");
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // sync test scaffolding
 mod tests {
@@ -224,6 +252,24 @@ mod tests {
         std::fs::write(&log, "much more than ten bytes").unwrap();
         assert_eq!(cap_stderr_log(&log, 10), Some(24));
         assert_eq!(std::fs::metadata(&log).unwrap().len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A long-running daemon keeps the cap: the periodic task truncates a
+    /// log that outgrew it after boot.
+    #[tokio::test]
+    async fn stderr_log_is_recapped_while_running() {
+        let dir = scratch("stderr-loop");
+        let log = dir.join("ottod.stderr.log");
+        std::fs::write(&log, "small").unwrap();
+        let task = spawn_stderr_log_cap(log.clone(), 10, Duration::from_millis(20));
+        std::fs::write(&log, "much more than ten bytes").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::fs::metadata(&log).unwrap().len() > 0 {
+            assert!(std::time::Instant::now() < deadline, "never re-capped");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        task.abort();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

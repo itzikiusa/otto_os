@@ -73,14 +73,19 @@
   // Routines with their next runs: re-read whenever the agent's schedules
   // change (any path — the chat's `otto.routine_*` tools included).
   let routines = $state<PersonalAgentRoutine[]>([]);
+  /** A failed read keeps the routines listed (from the schedules) but says
+   *  their next runs and delivery are unknown, with Retry. */
+  let routinesError = $state<string | null>(null);
+  let routinesAttempt = $state(0);
   $effect(() => {
     const id = agent.id;
     void personalAgents.schedulesByAgent[id];
     void agent.enabled;
+    void routinesAttempt;
     personalAgentsApi
       .routines(id)
-      .then((r) => { if (id === agent.id) routines = r.routines; })
-      .catch(() => {});
+      .then((r) => { if (id === agent.id) { routines = r.routines; routinesError = null; } })
+      .catch((e) => { if (id === agent.id) routinesError = loadErrorText(e); });
   });
 
   /** The routine form: null = closed, 'new', or the routine being edited. */
@@ -100,10 +105,11 @@
     const id = agent.id;
     void agent.soul_md;
     void personalAgents.autonomyById[id];
+    // Optional card: a failed read shows nothing, but is logged.
     personalAgentsApi
       .proposal(id)
       .then((p) => { if (id === agent.id) prop = p; })
-      .catch(() => {});
+      .catch((e) => console.warn('instruction proposal unavailable', e));
   });
   async function applyProposal(): Promise<void> {
     try {
@@ -315,6 +321,9 @@
           {:else}
             <p class="sp-dim">Nothing scheduled yet — add one, or ask {agent.name} in chat.</p>
           {/if}
+        {/if}
+        {#if routinesError && schedules.length > 0}
+          <LoadState what="the routines’ next runs" variant="compact" error={routinesError} empty={false} onretry={() => (routinesAttempt += 1)} />
         {/if}
         {#if schedules.length > 0}
         <ul class="sp-list">

@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use otto_core::domain::ImprovementTrigger;
+use otto_state::improvements::{RUNS_KEPT_PER_WORKSPACE, RUN_RETENTION_DAYS};
 use otto_state::WorkspacesRepo;
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
@@ -21,6 +22,9 @@ use crate::config::{effective_config, is_due};
 use crate::engine::ImprovementEngine;
 
 const SCAN_INTERVAL: Duration = Duration::from_secs(60);
+/// Finished-run retention runs at most this often (first pass an hour after
+/// boot): every live evolve leaves a row, and nothing else ever removed one.
+const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
 
 pub struct SchedulerHandle {
     cancel: Arc<AtomicBool>,
@@ -64,6 +68,7 @@ impl Scheduler {
 
     async fn supervise(self, cancel: Arc<AtomicBool>, wake: Arc<Notify>) {
         let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let mut last_prune = std::time::Instant::now();
         loop {
             if cancel.load(Ordering::Relaxed) {
                 return;
@@ -115,6 +120,10 @@ impl Scheduler {
                 }
                 Err(e) => warn!("self-improvement scheduler: list workspaces: {e}"),
             }
+            if last_prune.elapsed() >= PRUNE_EVERY {
+                last_prune = std::time::Instant::now();
+                self.prune_finished_runs().await;
+            }
 
             // One timer per scan; shutdown wakes it (was 500 ms slices).
             tokio::select! {
@@ -124,6 +133,21 @@ impl Scheduler {
             if cancel.load(Ordering::Relaxed) {
                 return;
             }
+        }
+    }
+
+    /// Batched and paused inside the repo, so it never holds the write lock
+    /// for long; failures only log (the next hour retries).
+    async fn prune_finished_runs(&self) {
+        let pruned = self
+            .engine
+            .improvements
+            .prune_finished_runs(RUN_RETENTION_DAYS, RUNS_KEPT_PER_WORKSPACE)
+            .await;
+        match pruned {
+            Ok(0) => {}
+            Ok(n) => info!("self-improvement: pruned {n} finished run(s) past retention"),
+            Err(e) => warn!("self-improvement: run retention failed: {e}"),
         }
     }
 }

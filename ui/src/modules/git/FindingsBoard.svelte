@@ -25,6 +25,12 @@
   import { findingBus } from '../../lib/events.svelte';
   import FindingActions from './FindingActions.svelte';
   import ProofPackView from './ProofPackView.svelte';
+  import FindingsBulkBar from './FindingsBulkBar.svelte';
+  import PriorFindings from './PriorFindings.svelte';
+  import { canBulk, groupFindings, moveFocus, type GroupBy } from './findingsTriage';
+  import { acceptFinding, falsePositiveFinding } from '../../lib/api/client';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import { toastError } from '../../lib/toastError';
 
   interface Props {
     reviewId: string;
@@ -68,22 +74,31 @@
     }
   });
 
+  // Generation guard: switching reviews quickly must never let the previous
+  // review's (slower) answer land on this board.
+  let gen = 0;
   async function load(rid: string): Promise<void> {
+    const mine = ++gen;
     loading = true;
+    selected = {};
     try {
-      findings = await listFindings(rid);
+      const next = await listFindings(rid);
+      if (mine !== gen) return;
+      findings = next;
       loadError = null;
     } catch (e) {
-      loadError = loadErrorText(e);
+      if (mine === gen) loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (mine === gen) loading = false;
     }
   }
 
   /** Silent refetch (no loading flicker) — used by the WS bus. */
   async function reload(): Promise<void> {
+    const mine = gen;
     try {
       const next = await listFindings(reviewId);
+      if (mine !== gen) return;
       findings = next;
       loadError = null;
       reloadError = null;
@@ -93,7 +108,7 @@
       }
     } catch (e) {
       // Non-blocking: keep what is on screen and say the refresh failed.
-      reloadError = loadErrorText(e);
+      if (mine === gen) reloadError = loadErrorText(e);
     }
   }
 
@@ -141,6 +156,46 @@
         (sevFilter === 'all' || f.severity === sevFilter),
     ),
   );
+
+  // --- triage at scale: groups, multi-select, keyboard -----------------------
+  let groupBy: GroupBy = $state('file');
+  const GROUPS: [GroupBy, string][] = [['file', 'By file'], ['severity', 'By severity']];
+  const groups = $derived(groupFindings(filtered, groupBy));
+  /** The cards in on-screen order (what j / k walk). */
+  const ordered = $derived(groups.flatMap((g) => g.items));
+  let selected: Record<string, boolean> = $state({});
+  const selectedList = $derived(findings.filter((f) => selected[f.id]));
+  let focusIdx = $state(-1);
+  let showKeys = $state(false);
+  let listEl: HTMLElement | null = $state(null);
+
+  function toggleSelect(id: string): void {
+    selected = { ...selected, [id]: !selected[id] };
+  }
+  /** One-key triage on the focused card: a = accept, d = not a problem. */
+  async function quick(f: Finding, action: 'accept' | 'false_positive'): Promise<void> {
+    if (!canBulk(f, action)) return;
+    const title = f.title || f.body.split('\n')[0];
+    if (action === 'false_positive' && !(await confirmer.ask(`Mark “${title}” not a problem? Its draft comment is declined.`, { title: 'Not a problem', confirmLabel: 'Not a problem', danger: false }))) return;
+    try {
+      patchFinding(await (action === 'accept' ? acceptFinding(f.id) : falsePositiveFinding(f.id, 'Keyboard triage: not a problem')));
+    } catch (e) {
+      toastError(action === 'accept' ? 'Couldn’t accept the finding' : 'Couldn’t dismiss the finding', e);
+    }
+  }
+  function onListKey(e: KeyboardEvent): void {
+    if (e.metaKey || e.ctrlKey || e.altKey || (e.target as HTMLElement).closest('input, textarea, select')) return;
+    const f = ordered[focusIdx];
+    if (e.key === 'j' || e.key === 'k') {
+      focusIdx = moveFocus(focusIdx, e.key, ordered.length);
+      listEl?.querySelector<HTMLElement>(`[data-finding-id="${ordered[focusIdx]?.id}"] .fb-card-head`)?.focus();
+    } else if (e.key === 'x' && f) toggleSelect(f.id);
+    else if (e.key === 'a' && f) void quick(f, 'accept');
+    else if (e.key === 'd' && f) void quick(f, 'false_positive');
+    else if (e.key === '?') showKeys = !showKeys;
+    else return;
+    e.preventDefault();
+  }
 
   // --- helpers ---------------------------------------------------------------
   function loc(f: Finding): string {
@@ -233,17 +288,36 @@
           {/if}
         {/each}
       </div>
+      <div class="fb-filter-row" role="group" aria-label="Group findings">
+        <span class="fb-filter-label" aria-hidden="true">Group</span>
+        {#each GROUPS as [g, label] (g)}
+          <button class="fb-pill" class:active={groupBy === g} aria-pressed={groupBy === g} onclick={() => (groupBy = g)}>{label}</button>
+        {/each}
+        <span class="grow"></span>
+        <button class="icon-btn fb-keys-btn" aria-label="Keyboard shortcuts" title="Keyboard shortcuts" aria-expanded={showKeys} onclick={() => (showKeys = !showKeys)}>?</button>
+      </div>
+      {#if showKeys}
+        <p class="dim fb-keys" data-testid="findings-keys">Focus a finding, then: <kbd>j</kbd>/<kbd>k</kbd> move · <kbd>x</kbd> select · <kbd>a</kbd> accept · <kbd>d</kbd> not a problem · <kbd>?</kbd> this hint</p>
+      {/if}
     </div>
 
-    <!-- Finding cards -->
-    <div class="fb-list">
-      {#each filtered as f (f.id)}
+    <FindingsBulkBar selected={selectedList} onupdated={patchFinding} onclear={() => (selected = {})} />
+    <!-- Finding cards, grouped; j/k/x/a/d triage the focused card. -->
+    <div class="fb-list" bind:this={listEl}>
+      {#each groups as g (g.key)}
+        <h4 class="fb-group" class:mono={groupBy === 'file' && g.key !== ''} dir="auto">{g.label} <span class="dim">· {g.items.length}</span></h4>
+      {#each g.items as f (f.id)}
         {@const isOpen = !!expanded[f.id]}
         {@const detail = details[f.id]}
-        <div class="fb-card card" class:fb-regressed={f.regressed}>
+        <div class="fb-card card" class:fb-regressed={f.regressed} class:fb-focused={ordered[focusIdx]?.id === f.id} data-finding-id={f.id}>
+          <div class="fb-card-top">
+          <input type="checkbox" class="fb-select" checked={!!selected[f.id]} onchange={() => toggleSelect(f.id)}
+            aria-label={`Select “${f.title || f.body.split('\n')[0]}”`} />
           <button
             class="fb-card-head"
             onclick={() => toggle(f.id)}
+            onfocus={() => (focusIdx = ordered.indexOf(f))}
+            onkeydown={onListKey}
             aria-expanded={isOpen}
           >
             <Badge tone={sevTone(f.severity)} label={severityLabel(f.severity)} />
@@ -256,6 +330,7 @@
             <span class="grow"></span>
             <span class="dim fb-caret" aria-hidden="true"><Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} /></span>
           </button>
+          </div>
 
           <div class="fb-meta">
             {#if f.category}<span class="fb-cat">{f.category}</span>{/if}
@@ -328,11 +403,13 @@
           {/if}
         </div>
       {/each}
+      {/each}
       {#if filtered.length === 0}
         <p class="dim fb-empty">No findings match the current filters.</p>
       {/if}
     </div>
   </LoadState>
+  <PriorFindings {reviewId} />
 </div>
 
 {#if showProofPack}
@@ -392,6 +469,14 @@
 
   /* Cards */
   .fb-list { display: flex; flex-direction: column; gap: 8px; }
+  .fb-group { margin: 6px 0 0; font-size: var(--fs-xs); font-weight: 600; color: var(--text-dim); overflow-wrap: anywhere; }
+  .fb-card-top { display: flex; align-items: flex-start; gap: 8px; }
+  .fb-card-top .fb-card-head { flex: 1; min-width: 0; }
+  .fb-select { margin-block-start: 2px; flex-shrink: 0; }
+  .fb-focused { outline: 2px solid var(--accent-line); outline-offset: 1px; }
+  .fb-keys { margin: 0; font-size: var(--fs-xs); }
+  .fb-keys kbd { font-family: var(--font-mono); font-size: var(--fs-xs); padding: 0 4px; border: 1px solid var(--border); border-radius: var(--radius-s); }
+  .fb-keys-btn { font-weight: 600; }
   .fb-card { padding: 8px 12px; }
   .fb-regressed { border-color: color-mix(in srgb, var(--warning) 45%, var(--border)); }
   .fb-card-head {
@@ -489,5 +574,6 @@
   @media (max-width: 1024px) {
     .fb-loc { max-width: 100%; }
     .fb-pill { min-height: 30px; padding-block: 4px; }
+    .fb-select { inline-size: 20px; block-size: 20px; }
   }
 </style>

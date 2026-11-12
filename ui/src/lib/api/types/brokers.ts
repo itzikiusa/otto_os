@@ -23,6 +23,9 @@ export interface SshTunnelConfig {
   /** Optional — the server falls back to ~/.ssh/config, then $USER. */
   user?: string;
   identity_file?: string | null;
+  /** Optional `ssh -J` chain: comma-separated `[user@]host[:port]` hops (no
+   *  spaces, none starting with `-`). Hops auth via agent / ~/.ssh/config. */
+  proxy_jump?: string | null;
 }
 
 export interface BrokerCluster {
@@ -241,6 +244,12 @@ export interface ConsumeResp {
   /** True when message payloads were run through `otto_core::redact` server-side
    * (ConsumeReq.mask=true). The UI surfaces this as a badge. */
   masked?: boolean;
+  /** With a key / value filter: raw messages scanned to find these matches
+   *  (non-matches are skipped server-side). Absent for an unfiltered peek. */
+  scanned?: number;
+  /** The filtered scan stopped at its 50,000-message cap before the range
+   *  ended — more matches may exist further on. Absent when false. */
+  scan_capped?: boolean;
 }
 
 export interface ProduceReq {

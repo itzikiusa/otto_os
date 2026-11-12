@@ -233,7 +233,25 @@ pub fn summarizer_prompt(
         })
         .collect::<Vec<_>>()
         .join("\n\n");
-    format!("{}{}\n\n{}\n\nFINAL VERIFIER (these rules take precedence over the configured summarizer wording):\nRead the actual changed code, definitions and affected consumers. Independently trace each claimed defect; do not merely combine reviewer opinions. Only report a concrete NEW defect caused by this PR causal diff. A preexisting issue merely widened by the change belongs once in a not_relevant summary note, not a finding thread. Deduplicate findings with the same fix. Prioritize must-fix/should-fix; optional polish is secondary. Do not demand exhaustive tests: only newly changed critical-path gaps and demonstrable false greens. Calibrate severity by realistic impact and trigger; never demote a real issue because there are many, or inflate a score. Every output item MUST carry source_ids:[the exact source_id values it accounts for]. Account for every input source_id exactly once across the output; one same-fix comment may cover several source IDs. Never invent source IDs. New independently discovered defects may have an empty source_ids array with concrete evidence. Every retained comment MUST have disposition=verified and nonempty evidence with inspected file:line and causal trigger. Unknown dispositions or absent evidence cannot be published. Preserve important uncertainty explicitly.\nFor EVERY discarded/unconfirmed/duplicate claim, return an item in the same JSON array with disposition={}, body identifying the original claim, and evidence explaining the concrete reason (for duplicate, identify the retained fix). These items are persisted as verification notes, not PR comments. If all claims are rejected return these dispositions rather than an unexplained empty array. Verify prior-finding dispositions against current code too. Never describe a code trace as an executed test.", context, summarizer_cfg.prompt, batches, crate::engine::NOTE_DISPOSITIONS.join("|"))
+    format!("{}{}\n\n{}\n\nFINAL VERIFIER (these rules take precedence over the configured summarizer wording):\nRead the actual changed code, definitions and affected consumers. Independently trace each claimed defect; do not merely combine reviewer opinions. Only report a concrete NEW defect caused by this PR causal diff. A preexisting issue merely widened by the change belongs once in a not_relevant summary note, not a finding thread. Deduplicate findings with the same fix. Prioritize must-fix/should-fix; optional polish is secondary. Do not demand exhaustive tests: only newly changed critical-path gaps and demonstrable false greens. Calibrate severity by realistic impact and trigger; never demote a real issue because there are many, or inflate a score. Every output item MUST carry source_ids:[the exact source_id values it accounts for]. Account for every input source_id exactly once across the output; one same-fix comment may cover several source IDs. Never invent source IDs. New independently discovered defects may have an empty source_ids array with concrete evidence. Every retained comment MUST have disposition=verified and nonempty evidence with inspected file:line and causal trigger. Unknown dispositions or absent evidence cannot be published. Preserve important uncertainty explicitly.\nFor EVERY discarded/unconfirmed/duplicate claim, return an item in the same JSON array with disposition={}, body identifying the original claim, and evidence explaining the concrete reason (for duplicate, identify the retained fix). These items are persisted as verification notes, not PR comments. If all claims are rejected return these dispositions rather than an unexplained empty array.\n{}\nNever describe a code trace as an executed test.", context, summarizer_cfg.prompt, batches, crate::engine::NOTE_DISPOSITIONS.join("|"), prior_finding_rules())
+}
+
+/// The lens `history::prior_claims` labels a prior-finding claim with.
+pub const PRIOR_FINDING_LENS: &str = "prior-finding-verification";
+
+/// The verifier's rule for prior-finding claims: one answer per case, in the
+/// only vocabulary the checker accepts (`verified` + [`crate::engine::NOTE_DISPOSITIONS`]).
+/// The FIXED answer is exactly what `resolution::confirmed_fixed` closes a
+/// finding on; without it a fixed finding was answered any which way and
+/// nothing ever resolved.
+pub fn prior_finding_rules() -> String {
+    let fixed = serde_json::json!({
+        "source_ids": ["<its source_id>"],
+        "disposition": crate::resolution::FIXED_PRIOR_DISPOSITION,
+        "body": "Prior finding <finding id>: fixed",
+        "evidence": "fixed: <file:line of the current code that fixes it>",
+    });
+    format!("PRIOR FINDINGS: a claim labelled [lens: {PRIOR_FINDING_LENS}] is a finding an earlier review raised; re-check it against the CURRENT code and account for its source_id like any other claim. Fixed in the current code: {fixed} (the code that fixes it is the evidence). Still present: disposition=verified with the current file:line; it stays a comment. Cannot tell: disposition=unverified, saying what you could not check.")
 }
 
 /// The reviewers' own 0–10 lens scores, as a block appended to the

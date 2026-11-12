@@ -161,9 +161,88 @@ pub fn diagnose(stderr: &str) -> SshDiagnosis {
     }
 }
 
+/// How many trailing lines of a terminal's output [`diagnose_terminal_output`]
+/// looks at: ssh's failure is the last thing an interactive session prints.
+const TERMINAL_TAIL_LINES: usize = 40;
+
+/// [`diagnose`] for the raw output of an interactive `ssh` session (what a PTY
+/// showed before the process exited): ANSI escape sequences and carriage
+/// returns are stripped, and only the last lines are considered, so a long
+/// session's earlier output cannot shadow the failure that ended it.
+pub fn diagnose_terminal_output(output: &str) -> SshDiagnosis {
+    let plain = strip_ansi(output);
+    let lines: Vec<&str> = plain.lines().collect();
+    let start = lines.len().saturating_sub(TERMINAL_TAIL_LINES);
+    diagnose(&lines[start..].join("\n"))
+}
+
+/// Drop CSI (`ESC [ … final`), OSC (`ESC ] … BEL|ESC \\`) and two-byte `ESC x`
+/// sequences, and turn a bare `\r` (cursor return) into a line break.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => match chars.next() {
+                Some('[') => {
+                    for c in chars.by_ref() {
+                        if ('@'..='~').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\u{7}' {
+                            break;
+                        }
+                        if c == '\u{1b}' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\r' => {
+                if chars.peek() != Some(&'\n') {
+                    out.push('\n');
+                }
+            }
+            c if c.is_control() && c != '\n' && c != '\t' => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_output_is_stripped_and_tail_diagnosed() {
+        let out = format!(
+            "{}\x1b[1;31mme@db.example.com: Permission denied (publickey).\x1b[0m\r\n\
+             \x1b]0;title\x07Connection to db.example.com closed.\r\n",
+            "welcome banner line\r\n".repeat(100)
+        );
+        let d = diagnose_terminal_output(&out);
+        assert_eq!(d.line, "me@db.example.com: Permission denied (publickey).");
+        assert!(d.hint.unwrap().contains("ssh-add"));
+    }
+
+    #[test]
+    fn earlier_session_output_does_not_shadow_the_exit() {
+        let out = format!(
+            "ssh: connect to host old port 22: Connection refused\n{}\
+             ssh: Could not resolve hostname nope.internal: nodename nor servname provided\n",
+            "ok\n".repeat(60)
+        );
+        let d = diagnose_terminal_output(&out);
+        assert!(d.line.contains("Could not resolve hostname"), "{}", d.line);
+        assert!(strip_ansi("a\rb").contains('\n'));
+    }
 
     #[test]
     fn skips_known_hosts_notice_and_finds_the_auth_failure() {

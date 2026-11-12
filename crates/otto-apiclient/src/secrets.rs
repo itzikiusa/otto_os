@@ -80,14 +80,86 @@ fn make_marker(r: &str) -> Value {
 /// - empty/absent members simply drop out of the blob.
 ///
 /// An empty returned blob means the Keychain entry should be deleted.
+///
+/// A blob that carries a stored value forward keeps the url its secrets are
+/// bound to ([`bound_url`]) unchanged — moving it is
+/// [`split_auth_secrets_for_save`]'s decision, never a side effect of an edit.
 pub fn split_auth_secrets(
     auth: &Value,
     own_ref: &str,
     existing_blob: &BTreeMap<String, String>,
 ) -> Result<(Value, BTreeMap<String, String>), String> {
+    let (out, mut blob, carried) = split_members(auth, own_ref, existing_blob)?;
+    // Only a value carried forward keeps its binding; freshly typed values
+    // start unrecorded (bound to the request's url, see the engine's
+    // `marker_bound_host`) until a person's save or send records one.
+    if let Some(url) = bound_url(existing_blob).filter(|_| carried) {
+        set_bound_url(&mut blob, url);
+    }
+    Ok((out, blob))
+}
+
+/// [`split_auth_secrets`] for a save of the request whose url is `saved_url`,
+/// recording where its secrets may be sent ([`bound_url`]):
+/// - every stored value is new (typed in this save) → bound to `saved_url`:
+///   whoever supplies a secret decides where it goes;
+/// - a person's save (`by_person`) → bound to `saved_url` (this is also how a
+///   legacy blob with no recorded url gets one);
+/// - an agent's save that carries an existing value forward → the recorded
+///   url is kept, so an agent moving the url can't move the secret with it.
+pub fn split_auth_secrets_for_save(
+    auth: &Value,
+    own_ref: &str,
+    existing_blob: &BTreeMap<String, String>,
+    saved_url: &str,
+    by_person: bool,
+) -> Result<(Value, BTreeMap<String, String>), String> {
+    let (out, mut blob, carried) = split_members(auth, own_ref, existing_blob)?;
+    if blob.is_empty() {
+        return Ok((out, blob));
+    }
+    if !carried || by_person {
+        set_bound_url(&mut blob, saved_url);
+    } else if let Some(url) = bound_url(existing_blob) {
+        set_bound_url(&mut blob, url);
+    }
+    Ok((out, blob))
+}
+
+/// Blob key prefix that records the url a request's secrets are bound to:
+/// `"$bound_url:<url>" → ""`. The url sits in the KEY with an empty value, so
+/// paths that scrub every blob VALUE out of their output never mask it, and
+/// [`resolve_auth_markers`] (which reads members by name) never sees it.
+pub const BOUND_URL_PREFIX: &str = "$bound_url:";
+
+/// The url (raw, `{{vars}}` unresolved) this blob's secrets are bound to;
+/// `None` for a legacy blob saved before bindings were recorded.
+pub fn bound_url(blob: &BTreeMap<String, String>) -> Option<&str> {
+    blob.keys().find_map(|k| k.strip_prefix(BOUND_URL_PREFIX))
+}
+
+/// Record (or replace) the url this blob's secrets are bound to.
+pub fn set_bound_url(blob: &mut BTreeMap<String, String>, url: &str) {
+    blob.retain(|k, _| !k.starts_with(BOUND_URL_PREFIX));
+    blob.insert(format!("{BOUND_URL_PREFIX}{url}"), String::new());
+}
+
+/// Whether the blob holds any secret value (not just its binding).
+pub fn has_secret_values(blob: &BTreeMap<String, String>) -> bool {
+    blob.keys().any(|k| !k.starts_with(BOUND_URL_PREFIX))
+}
+
+/// The member split behind [`split_auth_secrets`]; the flag says whether any
+/// stored value was carried forward from `existing_blob` (a marker kept).
+fn split_members(
+    auth: &Value,
+    own_ref: &str,
+    existing_blob: &BTreeMap<String, String>,
+) -> Result<(Value, BTreeMap<String, String>, bool), String> {
     let Some(obj) = auth.as_object() else {
-        return Ok((auth.clone(), BTreeMap::new()));
+        return Ok((auth.clone(), BTreeMap::new(), false));
     };
+    let mut carried = false;
     let auth_type = obj.get("type").and_then(Value::as_str).unwrap_or("none");
     let members = secret_members(auth_type);
     let mut out = obj.clone();
@@ -109,6 +181,7 @@ pub fn split_auth_secrets(
                         // Marker kept → carry the stored value forward.
                         Some(prev) => {
                             blob.insert((*member).to_string(), prev.clone());
+                            carried = true;
                         }
                         // Dangling marker (no stored value) → clear the field.
                         None => {
@@ -120,7 +193,7 @@ pub fn split_auth_secrets(
             None => {}
         }
     }
-    Ok((Value::Object(out), blob))
+    Ok((Value::Object(out), blob, carried))
 }
 
 /// Resolve every `{"$secret": …}` marker in `auth` in-memory, right before

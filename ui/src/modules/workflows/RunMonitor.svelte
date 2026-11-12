@@ -14,6 +14,8 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import FileTree from '../panels/FileTree.svelte';
   import RunFinalOutput from './RunFinalOutput.svelte';
+  import RunLinkButton from './RunLinkButton.svelte';
+  import RunOrigin from './RunOrigin.svelte';
   import RunSteps from './RunSteps.svelte';
   import { fmtStepMs } from './runProgress';
   import { contextFs, isLive, type RunSync } from './runSync.svelte';
@@ -78,6 +80,7 @@
         <Icon name="stop" size={12} /> Stop run…
       </button>
     {/if}
+    <RunLinkButton workflowId={run.workflow_id} runId={run.id} />
     <button
       class="icon-btn"
       data-testid="run-detail-max"
@@ -89,6 +92,7 @@
       <Icon name={runDetailMax ? 'minimize' : 'maximize'} size={13} />
     </button>
   </div>
+  <RunOrigin input={run.input} />
   <!-- The run-level reason (an invalid graph, an exhausted restart
        resume, a queued run that couldn't start) often has no step
        error to show — without this a failed run said only "Failed". -->

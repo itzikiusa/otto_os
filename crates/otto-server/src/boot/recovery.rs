@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use otto_state::{ReviewsRepo, SkillEvalsRepo};
+use otto_state::SkillEvalsRepo;
 
 use super::BootPhases;
 use crate::state::ServerCtx;
@@ -102,31 +102,25 @@ async fn restore_sessions(ctx: &ServerCtx) -> Result<(), String> {
     Ok(())
 }
 
-/// Fail any reviews orphaned by the previous process exit: a review's
+/// Settle reviews orphaned by the previous process exit: a review's
 /// background task dies with the process, so a row left `running` would
-/// otherwise poll forever in the UI. Mark them error so they're re-runnable.
+/// otherwise poll forever in the UI. One whose reviewers had all finished
+/// gets ONLY its summarizer re-run over their stored findings (at most twice
+/// per review — `otto_review::restart`); the rest fail as re-runnable, and
+/// every live agent row (a per-agent retry's) is settled too.
 async fn fail_orphaned_reviews(ctx: &ServerCtx) {
-    match ReviewsRepo::new(ctx.pool.clone())
-        .fail_running("Interrupted by a daemon restart — re-run the review.")
-        .await
+    let resume = otto_review::restart::settle_after_restart(&ctx.reviews_store).await;
+    let users = otto_state::UsersRepo::new(ctx.pool.clone());
+    for id in resume
+        .inspect_err(|e| tracing::warn!("review recovery: {e}"))
+        .unwrap_or_default()
     {
-        Ok(n) if n > 0 => tracing::info!("review recovery: marked {n} orphaned review(s) as error"),
-        Ok(_) => {}
-        Err(e) => tracing::warn!("review recovery: {e}"),
-    }
-    // After the review-level sweep, so every review is settled: a per-agent
-    // retry's task died with the process too, and its `pending` / `running` /
-    // `waiting` row would otherwise block Retry, Stop and the summarizer
-    // re-run for good.
-    match ReviewsRepo::new(ctx.pool.clone())
-        .fail_orphaned_agents("Interrupted by a daemon restart")
-        .await
-    {
-        Ok(n) if n > 0 => {
-            tracing::info!("review recovery: marked {n} orphaned review agent(s) as error")
+        let user = otto_review::restart::review_user(&users).await;
+        let resumed = async { crate::modules::review::rerun_summarizer(ctx, &id, user?).await };
+        match resumed.await {
+            Ok(()) => tracing::info!(review = %id, "review recovery: resumed the summarizer"),
+            Err(e) => tracing::warn!(review = %id, "review recovery: summarizer resume: {e}"),
         }
-        Ok(_) => {}
-        Err(e) => tracing::warn!("review agent recovery: {e}"),
     }
 }
 

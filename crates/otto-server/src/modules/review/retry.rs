@@ -420,66 +420,43 @@ pub(crate) async fn retry_summarizer(
         .await
         .map_err(crate::error::ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
-    let workspace = ctx
-        .workspaces
-        .get(&repo.workspace_id)
-        .await
-        .map_err(crate::error::ApiError)?;
-
-    if review.status == ReviewStatus::Running {
-        return Err(crate::error::ApiError(Error::Invalid(
-            "review is still running — wait for it to finish first".into(),
-        )));
-    }
-    if review.agents.len() < 2 {
-        return Err(crate::error::ApiError(Error::Invalid(
-            "this review has no summarizer stage to retry".into(),
-        )));
-    }
     review_budget_gate(&ctx, &repo.workspace_id)
         .await
         .map_err(crate::error::ApiError)?;
+    rerun_summarizer(&ctx, &review_id, user)
+        .await
+        .map_err(crate::error::ApiError)?;
+    Ok(Json(
+        ctx.reviews_store
+            .get_review(&review_id)
+            .await
+            .map_err(crate::error::ApiError)?,
+    ))
+}
 
-    // The reviewers' findings are durable on the agent rows — the summarizer is
-    // always the last row and contributes none.
-    let agent_findings: Vec<Vec<otto_core::domain::ReviewFinding>> = review.agents
-        [..review.agents.len() - 1]
-        .iter()
-        .map(|a| a.findings.clone())
-        .collect();
-    // Only findings with actual content count — a run whose findings were
-    // gutted (empty bodies) has nothing to summarize and needs a re-run.
-    if !agent_findings
-        .iter()
-        .flatten()
-        .any(|f| !f.body.trim().is_empty())
-    {
-        return Err(crate::error::ApiError(Error::Invalid(
-            "no stored agent findings with content to summarize — re-run the review instead".into(),
-        )));
+/// The summarizer re-run behind [`retry_summarizer`], a workflow "Retry step"
+/// and a restart resume (`otto_review::restart`): claim the settled review,
+/// then summarize its stored reviewer findings in the background. `user` runs
+/// the summarizer session (the caller, or the root user).
+pub(crate) async fn rerun_summarizer(ctx: &ServerCtx, review_id: &Id, user: User) -> Result<()> {
+    let review = ctx.reviews_store.get_review(review_id).await?;
+    let repo = ctx.git_store.get_repo(&review.repo_id).await?;
+    let workspace = ctx.workspaces.get(&repo.workspace_id).await?;
+    if let Some(why) = otto_review::restart::rerun_block(&review) {
+        return Err(Error::Invalid(why.into()));
     }
-
     // Flip the run back to running so the UI tracks the re-summarize live —
     // atomically: the status check above is a fast-path, this is the guard.
     // Two quick clicks must not both re-summarize (each would persist a full
     // set of drafts).
-    if !ctx
-        .reviews_store
-        .try_begin_rerun(&review_id)
-        .await
-        .map_err(crate::error::ApiError)?
-    {
-        return Err(crate::error::ApiError(Error::Invalid(
+    if !ctx.reviews_store.try_begin_rerun(review_id).await? {
+        return Err(Error::Invalid(
             "review is still running — wait for it to finish first".into(),
-        )));
+        ));
     }
     // The claim excludes live reviewer retries. Reload AFTER claiming: a reviewer
     // may have completed between the handler's initial read and atomic admission.
-    let settled = ctx
-        .reviews_store
-        .get_review(&review_id)
-        .await
-        .map_err(crate::error::ApiError)?;
+    let settled = ctx.reviews_store.get_review(review_id).await?;
     let agent_findings: Vec<Vec<otto_core::domain::ReviewFinding>> = settled
         .agents
         .iter()
@@ -489,9 +466,9 @@ pub(crate) async fn retry_summarizer(
     // Each retry has its own cancellation flag; a cancelled earlier attempt
     // must not poison the new session, and Cancel must cover this task too
     // (registered only once this attempt owns the review).
-    let attempt_registration = ctx.review_cancels.register(&review_id);
+    let attempt_registration = ctx.review_cancels.register(review_id);
     let attempt_cancel = Arc::clone(attempt_registration.flag());
-    announce(&ctx, &workspace.id, &review_id, ReviewStatus::Running);
+    announce(ctx, &workspace.id, review_id, ReviewStatus::Running);
 
     let ctx_bg = ctx.clone();
     let review_id_bg = review_id.clone();
@@ -567,7 +544,7 @@ pub(crate) async fn retry_summarizer(
             // The original run's cwd/head is gone (a PR worktree is torn down
             // after the run; the head may have moved since), so this attempt
             // cannot prove a finding absent — it only re-summarizes.
-            Some("summarizer retry"),
+            Some(otto_review::verification::SUMMARIZER_RETRY_BLOCKER),
         )
         .await;
         if let Some(wt) = pr_wt {
@@ -599,13 +576,7 @@ pub(crate) async fn retry_summarizer(
         };
         let _ = transition(&ctx_bg, &workspace.id, &review_id_bg, status, None).await;
     });
-
-    Ok(Json(
-        ctx.reviews_store
-            .get_review(&review_id)
-            .await
-            .map_err(crate::error::ApiError)?,
-    ))
+    Ok(())
 }
 
 /// Why Stop is refused for an agent row, or `None` when it may be stopped.

@@ -873,3 +873,67 @@ secret question forms are refused instead of being collected into history.
 A stopped agent shows **Revive** above the composer and **Revive thread** in its menu. This starts the agent again without sending a message, keeps the same Otto thread and history, and resumes the provider conversation when available. A live agent is left alone. Closed threads in History have the same action; sending a message also revives them. If the provider has lost its conversation, Otto keeps the visible history and explicitly says the provider started fresh.
 
 The conversation and composer use the available pane width with matching, responsive gutters. Wide screens can show wider answers and code; split panes and phones size themselves independently.
+
+### Embedding a thread in another module
+
+One runtime thread can live inside another module's chrome — today a personal
+agent's chat; next, a pull request's left column and a connection's
+"diagnose" panel — so the person does not switch windows. The host loads the
+view through `ui/src/lib/runtimeThreadPort.ts` (`loadRuntimeThreadView()`,
+bound by the shell at boot) and renders it with these props:
+
+| Prop | Default | Meaning |
+|------|---------|---------|
+| `sessionId`, `workspaceId` | — | The runtime thread and its workspace. The embed reads only that row (`GET /runtime-sessions/{id}`) and its linked group (`GET /runtime-sessions/{id}/peers`), never the workspace's whole thread list. A failed read shows inline with Retry. |
+| `agentName` | — | A personal agent's chat: "Message Scout…", and the model/access pickers give way to the agent's settings. |
+| `focusOnMount` | `false` | Take keyboard focus when mounted. Embeds beside other work leave it off. |
+| `compact` | `false` | Denser gutters for a narrow column (≥ 280 px, usable at 390 px), plus a slim title bar with **Open in Threads**. |
+| `onmaximize()` | — | The host grows the embed. The maximise button renders only when given. |
+| `ondetach(id)` | — | The host moves the thread out (a window, a tab). The detach button renders only when given; without it a compact embed (or a linked thread shown in place) offers **Open in Threads** (`openInThreads`). |
+| `onstatus(status)` | — | Called on mount with the host's thread state and on every change: `'idle'`, `'working'` (a turn, a starting session or background work), `'needs-you'` (an approval or question waits; outranks working) or `'closed'`. Lets a folded host header show a dot without reading the Threads stores. |
+| `hostCommands` | — | The view-level slash commands the host carries out (`RuntimeHostCommands`). |
+
+`hostCommands` handlers (all optional): `openDiff(id)` for `/diff`,
+`openFiles(id)` for `/files`, `openTerminal(id)` for `/terminal`,
+`newThread(id, beside)` for `/new` (`beside` = false) and `/fork` (true), and
+`sideChat(id, question)` for `/btw`. A command with no handler is hidden from
+the slash popup, and typed by hand it goes to the agent like any other
+`/command` — never a silent no-op. `/clear` (fresh context) and `/review` (a
+prompt) belong to the thread and always work. Threads is just another host
+(`ui/src/modules/threads/runtime/threadsHost.ts`).
+
+Threads an embed starts should carry a `meta.source` from
+`EMBEDDED_THREAD_SOURCES` (`ui/src/modules/threads/threadOrigins.ts`:
+`pr-agent`, `connection-diagnose`): the Threads sidebar keeps them out of the
+projects and History, in their own folded group ("Pull requests",
+"Connections", "Helpers"). A personal agent's routine runs fold into one
+**Agent runs** group the same way (newest first, 20 at a time); its chat
+stays under the agent's name.
+
+The daemon side of that tag. `meta` is server-owned, so a page names the
+source in the create body instead — `POST /workspaces/{id}/runtime-sessions`
+with `source` (`pr-agent` or `connection-diagnose`) and an optional
+`origin: {kind, id, label?}` (`kind` `pr` for `pr-agent`, `connection` for
+`connection-diagnose`; `id` 1–200 characters, e.g. `<repo>#<number>` or the
+connection id; `label` ≤ 200). The daemon validates them in one place
+(`otto_core::agent_runtime::embedded_meta`: any other source, an `origin`
+without a `source`, a mismatched kind or a bad length is a 400) and stores
+exactly `meta.source` / `meta.origin`; nothing else in the body reaches
+`meta`. The page finds its thread again with
+`GET /workspaces/{id}/runtime-sessions?source=pr-agent&origin_id=<repo>#<n>`
+(URL-encode the id): the caller's own matching threads (all, for an admin),
+newest activity first, closed ones included so the page can offer to reopen
+rather than start over. A thread the agent opens from an embedded one
+(`…/peers`) inherits its `source` / `origin` and stays in the same group.
+
+Embedded threads close themselves. Shortly after boot and then hourly, the
+runtime closes every open thread with an embedded source that has had no
+activity for `embedded_thread_auto_close_hours` (daemon setting, `PUT
+/settings`; default `12`, `0` = never) — the same Close a person clicks: the
+agent stops, the thread stays in History and reopens on demand. It never
+closes one with a turn or background work running, or with an approval or
+question waiting on the person, and closes at most 50 per pass (the rest wait
+for the next hour); each close is logged at info. The sweep lives in
+`crates/otto-agent-protocol/src/runtime/auto_close.rs`; the
+`json_extract(meta, '$.source')` index keeps both the lookup and the sweep
+off a full scan.

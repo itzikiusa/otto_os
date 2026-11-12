@@ -24,6 +24,7 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { brokersTopicPort } from '../../lib/uiCommands/brokers';
   import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
+  import ConsumeScanNote from './ConsumeScanNote.svelte';
 
   // ── Send-to-agent dialog (B2a) ─────────────────────────────────────────────
   let sendToAgentOpen = $state(false);
@@ -421,7 +422,7 @@
       limit: Number(limit),
       decode,
       key_filter: keyFilter.trim() || null,
-      find_from_beginning: keyFilter.trim() ? keyFromBeginning : false,
+      find_from_beginning: keyFilter.trim() || valueFilter.trim() ? keyFromBeginning : false,
       value_filter: valueFilter.trim() || null,
       // Server-side PII masking: redacts key/value/headers before they leave
       // the server. Only sent when the toggle is explicitly on.
@@ -713,8 +714,8 @@
       </select>
       <div class="filter-group">
         <input dir="ltr" class="grow" bind:value={keyFilter} placeholder="filter key…" aria-label="Filter by key" title="Server-side key filter (case-insensitive substring)" />
-        {#if keyFilter.trim()}
-          <label class="chk-small" title="Scan from beginning to find older matching messages">
+        {#if keyFilter.trim() || valueFilter.trim()}
+          <label class="chk-small" title="Search from the oldest message (up to 50,000 scanned) instead of only the latest">
             <input type="checkbox" bind:checked={keyFromBeginning} /> From start
           </label>
         {/if}
@@ -787,9 +788,7 @@
         {:else if result && result.messages.length === 0}
           <p class="muted pad">No messages in the selected range.</p>
         {/if}
-        {#if result?.truncated}
-          <p class="muted pad small">Showing first {result.messages.length} — increase the limit for more.</p>
-        {/if}
+        <ConsumeScanNote {result} fromStart={keyFromBeginning} />
         {#if result?.masked}
           <p class="masked-note pad small">PII masked — sensitive values were redacted server-side.</p>
         {/if}

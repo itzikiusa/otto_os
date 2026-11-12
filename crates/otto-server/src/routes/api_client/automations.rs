@@ -151,6 +151,10 @@ mod binding_tests {
             Path(wid.clone()),
             State(ctx.clone()),
             CurrentUser(root_user()),
+            CurrentAuthContext(otto_core::auth::AuthContext::automation(
+                &root_user(),
+                "test",
+            )),
             HeaderMap::new(),
             Json(req),
         )
@@ -185,27 +189,30 @@ mod binding_tests {
         let saved = saved_retargeting_request(&ctx, &wid, &a, &b).await;
 
         // Agent run: the binding `start` builds, through the same constructor
-        // (TQ-6-06) — a person gets none, an agent binds the saved request's
-        // host (A), so the script's retarget to B is refused.
+        // (TQ-6-06) — a person's is not enforced (their scripts still see
+        // placeholders), an agent's binds the saved request's host (A), so
+        // the script's retarget to B is refused.
+        let (env_vars, environment, env_blob) =
+            resolve_environment(&ctx, &repo, &wid, None).await.unwrap();
+        let person = StepSecretBinding::for_caller(
+            false,
+            &repo,
+            &wid,
+            &env_vars,
+            environment.as_ref(),
+            &env_blob,
+        )
+        .await
+        .unwrap()
+        .expect("every run carries the placeholder treatment");
+        assert!(!person.enforce, "a person's run is theirs to aim");
+        assert!(person.bound_hosts.is_empty());
         {
             let _guard = Mock::given(method("GET"))
                 .respond_with(ResponseTemplate::new(200))
                 .expect(0)
                 .mount_as_scoped(&b)
                 .await;
-            let (env_vars, environment, env_blob) =
-                resolve_environment(&ctx, &repo, &wid, None).await.unwrap();
-            let person = StepSecretBinding::for_caller(
-                false,
-                &repo,
-                &wid,
-                &env_vars,
-                environment.as_ref(),
-                &env_blob,
-            )
-            .await
-            .unwrap();
-            assert!(person.is_none(), "a person's run carries no binding");
             let binding = StepSecretBinding::for_caller(
                 true,
                 &repo,
@@ -217,6 +224,7 @@ mod binding_tests {
             .await
             .unwrap()
             .expect("an agent's run is bound");
+            assert!(binding.enforce);
             assert!(
                 binding.bound_hosts.contains("127.0.0.1"),
                 "the secret is bound to its saved request's host: {:?}",
@@ -244,7 +252,7 @@ mod binding_tests {
             assert!(error.contains("needs_confirm=new_host"), "{error}");
         } // `.expect(0)` on B is verified here.
 
-        // A person's run (`binding: None`) is theirs to aim: it is sent, with
+        // A person's run (not enforced) is theirs to aim: it is sent, with
         // the resolved bearer.
         let _guard = Mock::given(method("GET"))
             .and(header("authorization", "Bearer tk-secret"))
@@ -260,9 +268,115 @@ mod binding_tests {
             &mut serde_json::Map::new(),
             Some(saved),
             &user.id,
-            None,
+            Some(&person),
         )
         .await;
         assert_eq!(step.status, Some(200), "{:?}", step.error);
     }
+
+    /// A PERSON's run gives scripts the `{{KEY}}` placeholder, not the
+    /// Keychain value, too: passing it through still sends the real secret
+    /// (substituted at send), computing with it is refused before sending.
+    #[tokio::test]
+    async fn person_run_scripts_see_placeholders_not_secret_values() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = mem_pool().await;
+        let wid: Id = "ws-step-placeholders".into();
+        seed_workspace(&pool, &wid).await;
+        sqlx::query("UPDATE workspaces SET settings_json = ? WHERE id = ?")
+            .bind(json!({"api_client": {"allow_local": true}}).to_string())
+            .bind(wid.as_str())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let user = root_user();
+        let repo = repo(&ctx);
+        let a = MockServer::start().await;
+        let Json(env) = create_environment(
+            Path(wid.clone()),
+            State(ctx.clone()),
+            CurrentUser(user.clone()),
+            Json(
+                serde_json::from_value(json!({"name": "dev", "variables": {},
+                    "secret_keys": ["token"], "secret_values": {"token": "env-secret-1"}}))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        let (env_vars, environment, env_blob) =
+            resolve_environment(&ctx, &repo, &wid, Some(&env.id))
+                .await
+                .unwrap();
+        let person = StepSecretBinding::for_caller(
+            false,
+            &repo,
+            &wid,
+            &env_vars,
+            environment.as_ref(),
+            &env_blob,
+        )
+        .await
+        .unwrap();
+        let saved = |name: &str, pre: &str| {
+            let req: UpsertApiRequestReq = serde_json::from_value(json!({
+                "name": name, "method": "GET", "url": format!("{}/me", a.uri()),
+                "extras": {"v": 1, "scripts": {"pre": pre}},
+            }))
+            .unwrap();
+            create_request(
+                Path(wid.clone()),
+                State(ctx.clone()),
+                CurrentUser(user.clone()),
+                CurrentAuthContext(otto_core::auth::AuthContext::automation(&user, "test")),
+                HeaderMap::new(),
+                Json(req),
+            )
+        };
+        let run = |request: ApiRequest| {
+            let mut vars = env_vars.clone();
+            let (ctx, repo, wid, user, person) = (&ctx, &repo, &wid, &user, &person);
+            async move {
+                let step = json!({"request_id": request.id});
+                run_step(
+                    ctx,
+                    repo,
+                    wid,
+                    &step,
+                    &mut vars,
+                    Some(request),
+                    &user.id,
+                    person.as_ref(),
+                )
+                .await
+            }
+        };
+
+        let _guard = Mock::given(method("GET"))
+            .and(header("authorization", "Bearer env-secret-1"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount_as_scoped(&a)
+            .await;
+        let Json(pass) = saved(
+            "pass-through",
+            "pm.request.headers.upsert({ key: 'Authorization', value: 'Bearer ' + pm.environment.get('token') });",
+        )
+        .await
+        .unwrap();
+        let step = run(pass).await;
+        assert_eq!(step.status, Some(200), "{:?}", step.error);
+
+        let Json(computes) = saved(
+            "computes",
+            "pm.request.headers.upsert({ key: 'X-Len', value: String(pm.environment.get('token').length) });",
+        )
+        .await
+        .unwrap();
+        let step = run(computes).await;
+        assert!(!step.ok);
+        let error = step.error.unwrap_or_default();
+        assert!(error.contains("computes with secret 'token'"), "{error}");
+    } // `.expect(1)` on A: only the pass-through request was sent.
 }

@@ -7,7 +7,7 @@ use tokio::sync::oneshot;
 
 /// Largest summarizer brief pasted into the terminal as is; longer ones go
 /// through [`Attempt::instructions_path`].
-pub const PASTE_INLINE_MAX: usize = 16 * 1024;
+pub use crate::handoff::PASTE_INLINE_MAX;
 
 pub struct Attempt {
     dir: tempfile::TempDir,
@@ -56,25 +56,19 @@ impl Attempt {
     /// [`Self::instructions_path`] and only a short pointer is pasted: a
     /// terminal paste that size can outlast the PTY write deadline on a busy
     /// daemon, and then the summarizer never starts. If the file cannot be
-    /// written the brief is pasted whole, as before.
+    /// written the brief is pasted whole, as before. Same hand-off as the
+    /// reviewers ([`crate::handoff::typed_prompt`]); the brief's file lives in
+    /// this attempt's own directory.
     pub fn prompt(&self, prompt: &str) -> String {
         let handoff = format!("Return the final draft comments as a JSON array. Each item must include a string body. \
 Write the COMPLETE JSON array to the temporary file {} first, then atomically rename it to {}. \
 Do not write directly to the final file or publish it before all comments are complete. \
 The final file is the completion signal; a chat reply alone does not complete this task.",
             self.temporary_path().display(), self.result_path().display());
-        let full = format!("{prompt}\n\n{handoff}");
-        if full.len() <= PASTE_INLINE_MAX
-            || std::fs::write(self.instructions_path(), &full).is_err()
-        {
-            return full;
-        }
-        format!(
-            "Your complete instructions for this task are in the file {} ({} KB). \
-Read the WHOLE file first (in parts if it is long) and follow it exactly. \
-Every raw claim it lists needs its own disposition.\n\n{handoff}",
-            self.instructions_path().display(),
-            full.len().div_ceil(1024)
+        crate::handoff::typed_prompt(
+            &format!("{prompt}\n\n{handoff}"),
+            &self.instructions_path(),
+            &format!(" Every raw claim it lists needs its own disposition.\n\n{handoff}"),
         )
     }
 }

@@ -7,6 +7,8 @@
 
 pub mod catalog;
 pub mod chat;
+pub mod chat_rejected;
+pub mod chat_resolve;
 pub mod checkpoint;
 pub mod context;
 pub mod location;
@@ -17,8 +19,10 @@ pub mod review_context;
 pub mod review_history;
 pub mod review_parallel;
 pub mod review_scoring;
+pub mod run_queue;
 pub mod run_refs;
 pub mod templates;
+pub mod trigger_outcome;
 pub mod triggers;
 pub mod validation;
 
@@ -42,6 +46,9 @@ pub trait WorkflowCtx: Clone + Send + Sync + 'static {
     fn workspaces(&self) -> &WorkspacesRepo;
     /// Issue-tracker accounts (`prepare_context` resolves its Jira account).
     fn issues_store(&self) -> &IssuesRepo;
+    /// Secret store — the Slack/Telegram bot token a dequeued run's
+    /// "Started" post goes out with ([`run_queue::announce_dequeued`]).
+    fn secrets(&self) -> &std::sync::Arc<dyn otto_core::secrets::SecretStore>;
     /// Drive an already-admitted run on a background task — the engine's
     /// `spawn_run` entry point (it still lives in otto-server).
     fn spawn_run(&self, ws: Workspace, wf: Workflow, run_id: Id, input: Value, scope: RunScope);

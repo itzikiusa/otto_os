@@ -226,6 +226,12 @@ export interface UsageStatus {
   /** The transcript tailer's ingestion state (PC-2). Absent until the daemon
    *  starts one; `retrying` / `stopped` mean new usage isn't being recorded. */
   tailer?: { state: 'running' | 'retrying' | 'stopped'; cause?: string | null };
+  /** When the usage database went down (RFC 3339); absent while it is up.
+   *  The daemon retries in the background. */
+  outage_since?: string | null;
+  /** How full the ingestion journal is (0–1). At 1 new usage stops being
+   *  recorded until the database is back. */
+  journal_fill?: number | null;
 }
 
 export interface UsageConfigReq {

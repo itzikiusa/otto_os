@@ -33,6 +33,7 @@
   // Work-graph attribution drilldown + cost forecast (B1).
   import AttributionDrilldown from './AttributionDrilldown.svelte';
   import CostForecastChip from './CostForecastChip.svelte';
+  import UsageHealthBanner from './UsageHealthBanner.svelte';
   import ModelBreakdown from './ModelBreakdown.svelte';
   let reportLoad = $state(0);
 
@@ -544,16 +545,8 @@
       </div>
     {/if}
 
-    <!-- Ingestion health (PC-2): a retrying or stopped tailer means the totals
-         below are going stale; say so, with the cause, instead of nothing. -->
-    {#if usage.status?.tailer && usage.status.tailer.state !== 'running'}
-      <div class="budget-banner tailer-banner" use:announceShown={{ text: `Usage isn’t being recorded: ${usage.status.tailer.cause ?? 'the usage journal is unavailable'}`, assertive: true }}>
-        <Icon name="warning" size={14} />
-        <span>
-          Usage isn’t being recorded{usage.status.tailer.state === 'retrying' ? ' — Otto is retrying' : ''}: {usage.status.tailer.cause ?? 'the usage journal is unavailable'}{usage.status.tailer.state === 'stopped' ? '. Restart Otto after fixing it.' : '.'}
-        </span>
-      </div>
-    {/if}
+    <!-- Ingestion health: tailer retrying/stopped, database down, journal filling. -->
+    <UsageHealthBanner status={usage.status} />
 
     <!-- Live budget banner (driven by the BudgetExceeded WS event).
          Dismissible; clears automatically on a "recovered" event. -->
@@ -1891,13 +1884,6 @@
   .budget-banner > :global(svg:first-child) {
     color: var(--danger);
     flex-shrink: 0;
-  }
-  .tailer-banner {
-    background: var(--warning-soft);
-    border-color: color-mix(in srgb, var(--warning) 40%, transparent);
-  }
-  .tailer-banner > :global(svg:first-child) {
-    color: var(--warning);
   }
   .budget-banner.recovered {
     background: var(--success-soft);

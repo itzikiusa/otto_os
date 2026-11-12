@@ -135,6 +135,28 @@ pub fn prompt_path(review_id: &str, agent_index: usize) -> PathBuf {
     PathBuf::from(dir).join(format!("otto-review-{review_id}-{agent_index}.prompt"))
 }
 
+/// What is typed into a reviewer's terminal: the augmented prompt itself, or —
+/// when it is too long to paste reliably — a pointer to `prompt_file` holding
+/// it ([`crate::handoff`]), repeating where the findings go. The pointer holds
+/// no JSON, so the watch can never take it for an answer; the result protocol
+/// (findings file, or claude's last message as a JSON array) is unchanged.
+pub fn typed_reviewer_prompt(
+    base_prompt: &str,
+    findings_path: &str,
+    prompt_file: Option<&Path>,
+) -> String {
+    let full = augment_prompt(base_prompt, findings_path);
+    let Some(file) = prompt_file else {
+        return full;
+    };
+    let tail = format!(
+        "\n\nWhen you have finished, write ONLY the findings array that file describes to \
+         {findings_path} (the complete array to a sibling temporary file first, then rename it \
+         to that path as your final action)."
+    );
+    crate::handoff::typed_prompt(&full, file, &tail)
+}
+
 /// Append the "write findings to this file" instruction to a reviewer prompt.
 pub fn augment_prompt(base_prompt: &str, findings_path: &str) -> String {
     format!(
@@ -437,6 +459,9 @@ fn coerce_finding_value(v: serde_json::Value) -> Option<serde_json::Value> {
 pub struct AgentRunResult {
     pub findings: Vec<ReviewFinding>,
     pub errored: bool,
+    /// Why an errored run failed (or was skipped) — the same text persisted
+    /// as the row's `note`; `None` for a run that finished.
+    pub reason: Option<String>,
 }
 
 /// Shared, persisted live state for all agents in a review.
@@ -520,13 +545,20 @@ pub async fn run_agent_session(
     // each writing its own per-lens file. Empty for fan-out (one lens, no
     // sub-agents) — which also leaves the watch guard's note on today's text.
     lens_slugs: &[String],
+    // Where a prompt too long to paste goes (owned by the recovery wrapper so
+    // it outlives every attempt); None → always pasted whole.
+    prompt_file: Option<&Path>,
+    // Set when this attempt's prompt never reached the agent, cleared
+    // otherwise: the row's error note names the paste, not the model.
+    prompt_refused: &std::sync::atomic::AtomicBool,
 ) -> RunOutcome {
+    prompt_refused.store(false, std::sync::atomic::Ordering::Relaxed);
     let path = findings_path(review_id, agent_index);
     let _ = std::fs::remove_file(&path); // clear any stale file
                                          // …and any per-lens file a previous attempt left behind: the orchestrator
                                          // merges every file it finds, so a stale one would re-import dead findings.
     remove_lens_findings_files(review_id, agent_index);
-    let prompt = augment_prompt(base_prompt, &path.to_string_lossy());
+    let prompt = typed_reviewer_prompt(base_prompt, &path.to_string_lossy(), prompt_file);
 
     let mut meta = review_session_meta(review_id, agent_index, !lens_slugs.is_empty());
     // `extra_dirs` becomes `--add-dir=<bundle>` on spawn (and resume), registering
@@ -582,6 +614,7 @@ pub async fn run_agent_session(
         // the session and retries, instead of watching a promptless session
         // until the 15-min stuck trip.
         tracing::warn!("review_session: agent TUI never drew in session {sid} — failing attempt");
+        prompt_refused.store(true, std::sync::atomic::Ordering::Relaxed);
         return RunOutcome::failed(Some(sid), FailReason::Exited);
     }
 
@@ -733,6 +766,12 @@ pub fn partial_or_count_note(count: usize, missing: &[String]) -> String {
     }
 }
 
+/// The row note when the last attempt's prompt never reached the agent (its
+/// TUI did not draw, or the paste was not taken). Distinct from an agent that
+/// ran and exited: the 2026-11-12 scope failures were logged as the model's.
+pub const PROMPT_REFUSED_NOTE: &str =
+    "the prompt never reached the agent (its terminal did not start or refused the paste)";
+
 /// Map a run failure reason to the human note shown on the review agent row.
 fn review_error_note(reason: Option<FailReason>) -> String {
     match reason {
@@ -807,6 +846,13 @@ pub async fn run_agent_session_with_recovery(
         let g = states.lock().await;
         lens_covered_by(&g, agent_index).is_some()
     };
+    // One instructions file for every attempt, removed when this run returns
+    // (or its future is dropped). Without one the prompt is pasted whole.
+    let prompt_file = crate::handoff::PromptFile::new()
+        .map_err(|e| tracing::warn!("review_session: no prompt file, pasting inline: {e}"))
+        .ok();
+    let prompt_path = prompt_file.as_ref().map(|f| f.path());
+    let prompt_refused = std::sync::atomic::AtomicBool::new(false);
     let outcome = run_with_recovery_until(
         manager,
         attempts,
@@ -829,10 +875,13 @@ pub async fn run_agent_session_with_recovery(
                 timeout,
                 skills_add_dir,
                 lens_slugs,
+                prompt_path.as_deref(),
+                &prompt_refused,
             )
         },
     )
     .await;
+    drop(prompt_file);
 
     // Persist terminal state ONCE (parse findings from the final raw result).
     if let Some(raw) = outcome.raw.as_deref() {
@@ -874,23 +923,33 @@ pub async fn run_agent_session_with_recovery(
         AgentRunResult {
             findings,
             errored: false,
+            reason: None,
         }
     } else if outcome.reason == Some(FailReason::Superseded) {
         let by = {
             let g = states.lock().await;
             lens_covered_by(&g, agent_index).unwrap_or_default()
         };
+        let note = format!("skipped — {} already covered this lens", by);
+        let reason = Some(note.clone());
         persist_agent(states, reviews, review_id, agent_index, move |s| {
             s.status = "skipped".into();
-            s.note = format!("skipped — {} already covered this lens", by);
+            s.note = note;
         })
         .await;
         AgentRunResult {
             findings: Vec::new(),
             errored: true,
+            reason,
         }
     } else {
-        let note = review_error_note(outcome.reason);
+        let refused = prompt_refused.load(std::sync::atomic::Ordering::Relaxed);
+        let note = if refused && outcome.reason == Some(FailReason::Exited) {
+            PROMPT_REFUSED_NOTE.to_string()
+        } else {
+            review_error_note(outcome.reason)
+        };
+        let reason = Some(note.clone());
         persist_agent(states, reviews, review_id, agent_index, move |s| {
             s.status = "error".into();
             s.note = note;
@@ -899,6 +958,7 @@ pub async fn run_agent_session_with_recovery(
         AgentRunResult {
             findings: Vec::new(),
             errored: true,
+            reason,
         }
     }
 }
@@ -1120,6 +1180,39 @@ mod tests {
             .ends_with("otto-review-r-2.json"));
     }
 
+    /// Reviewer prompts stored for the 2026-11-12 reviews were 130–154 KB; a
+    /// paste that size never reached the agent. It goes by file now, for every
+    /// provider; the typed pointer still names the findings path.
+    #[test]
+    fn a_large_reviewer_prompt_is_handed_over_as_a_file_and_a_small_one_inline() {
+        let file = crate::handoff::PromptFile::new().unwrap();
+        let path = file.path();
+        let out = "/tmp/otto-review-R-0.json";
+        let small = typed_reviewer_prompt("Review it.", out, Some(path.as_path()));
+        assert_eq!(small, augment_prompt("Review it.", out));
+        assert!(!path.exists());
+
+        // What run.rs stores for the UI and per-agent Retry is this base
+        // prompt; the hand-off never rewrites it, only what is typed.
+        let base = format!("REVIEW-START {}", "lens method ".repeat(12_000));
+        let typed = typed_reviewer_prompt(&base, out, Some(path.as_path()));
+        assert!(
+            typed.len() < 2048,
+            "typed text stays short: {}",
+            typed.len()
+        );
+        assert!(typed.contains(&path.display().to_string()));
+        assert!(typed.contains(out), "the pointer repeats the findings path");
+        assert!(parse_findings_array(&typed).is_none(), "not a result");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(written, augment_prompt(&base, out), "the file holds it all");
+        // No prompt file (it could not be created) → pasted whole, as before.
+        assert_eq!(
+            typed_reviewer_prompt(&base, out, None),
+            augment_prompt(&base, out)
+        );
+    }
+
     #[test]
     fn augment_prompt_includes_path_and_base() {
         let out = augment_prompt("Review it.", "/tmp/x.json");
@@ -1155,6 +1248,11 @@ mod tests {
         assert_eq!(
             review_error_note(Some(FailReason::Stopped)),
             "stopped by user"
+        );
+        // A prompt that never reached the agent is not "the agent exited".
+        assert_ne!(
+            PROMPT_REFUSED_NOTE,
+            review_error_note(Some(FailReason::Exited))
         );
     }
 

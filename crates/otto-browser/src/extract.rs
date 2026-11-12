@@ -15,28 +15,98 @@ const NOISE_TAGS: &[&str] = &["script", "style", "nav", "footer", "header", "asi
 /// article markup never nests anywhere near this deep.
 const MAX_WALK_DEPTH: usize = 256;
 
+/// Most links [`page_markdown`] keeps per page; later ones keep their text
+/// only. Bounds what a link-farm page adds to the reader text and to every
+/// agent prompt built from it.
+const MAX_LINKS: usize = 200;
+
+/// Link state for one page walk: the URL relative `href`s resolve against and
+/// how many links were kept so far.
+struct Links {
+    base: reqwest::Url,
+    kept: usize,
+}
+
+impl Links {
+    /// The absolute http(s) URL an `href` points to, or `None`: empty or
+    /// fragment-only (`#top`), a non-web scheme (`javascript:`, `data:`,
+    /// `file:`, `mailto:`…), unparseable, or the page's cap already reached.
+    fn resolve(&mut self, href: &str) -> Option<String> {
+        let href = href.trim();
+        if href.is_empty() || href.starts_with('#') || self.kept >= MAX_LINKS {
+            return None;
+        }
+        let url = self.base.join(href).ok()?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return None;
+        }
+        self.kept += 1;
+        Some(url.into())
+    }
+}
+
 /// Convert HTML to a markdown-ish rendering: `<h1>`-`<h6>` become `#`..`######`
 /// headings, `<li>` becomes a `- ` bullet, block elements get their own line.
 /// `<script>`/`<style>` content is always dropped, independent of whether the
 /// caller already ran `readability` first.
 pub fn html_to_markdown(html: &str) -> String {
+    markdown_with(html, &mut None)
+}
+
+fn markdown_with(html: &str, links: &mut Option<Links>) -> String {
     let document = Html::parse_document(html);
     let mut out = String::new();
-    walk_markdown(document.tree.root(), &mut out, &["script", "style"], 0);
+    walk_markdown(
+        document.tree.root(),
+        &mut out,
+        &["script", "style"],
+        0,
+        links,
+    );
     normalize(&out)
+}
+
+/// The reader text of a page: [`readability`] then [`html_to_markdown`], but
+/// keeping the page's links as `[text](<url>)` so documentation can be
+/// clicked through. Relative `href`s resolve against `page_url`; a
+/// fragment-only link, any non-http(s) target and every link past
+/// [`MAX_LINKS`] keeps its text only.
+pub fn page_markdown(html: &str, page_url: &str) -> String {
+    let Ok(base) = reqwest::Url::parse(page_url) else {
+        return html_to_markdown(&readability(html));
+    };
+    let fresh = |base: &reqwest::Url| {
+        Some(Links {
+            base: base.clone(),
+            kept: 0,
+        })
+    };
+    let cleaned = readability_with(html, &mut fresh(&base));
+    markdown_with(&cleaned, &mut fresh(&base))
 }
 
 /// Strip script/style/nav/footer/header/aside subtrees and reconstruct the
 /// remaining article-ish content as plain HTML (attributes dropped) — feed
 /// the result to `html_to_markdown`, or display it directly.
 pub fn readability(html: &str) -> String {
+    readability_with(html, &mut None)
+}
+
+/// [`readability`], keeping each kept link's resolved `href` (see [`Links`]).
+fn readability_with(html: &str, links: &mut Option<Links>) -> String {
     let document = Html::parse_document(html);
     let mut out = String::new();
-    walk_html(document.tree.root(), &mut out, NOISE_TAGS, 0);
+    walk_html(document.tree.root(), &mut out, NOISE_TAGS, 0, links);
     out.trim().to_string()
 }
 
-fn walk_markdown(node: NodeRef<'_, Node>, out: &mut String, skip: &[&str], depth: usize) {
+fn walk_markdown(
+    node: NodeRef<'_, Node>,
+    out: &mut String,
+    skip: &[&str],
+    depth: usize,
+    links: &mut Option<Links>,
+) {
     if depth > MAX_WALK_DEPTH {
         return;
     }
@@ -44,6 +114,24 @@ fn walk_markdown(node: NodeRef<'_, Node>, out: &mut String, skip: &[&str], depth
         Node::Element(el) => {
             let tag = el.name();
             if skip.contains(&tag) {
+                return;
+            }
+            let href = match (tag, links.as_mut()) {
+                ("a", Some(links)) => el.attr("href").and_then(|h| links.resolve(h)),
+                _ => None,
+            };
+            if let Some(href) = href {
+                // `[text](<url>)`: the text on one line, its brackets escaped;
+                // a link with no text (an image-only link) is dropped.
+                let mut text = String::new();
+                for child in node.children() {
+                    walk_markdown(child, &mut text, skip, depth + 1, links);
+                }
+                let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if !text.is_empty() {
+                    let text = text.replace('[', "\\[").replace(']', "\\]");
+                    out.push_str(&format!("[{text}](<{href}>)"));
+                }
                 return;
             }
             let heading_level = match tag {
@@ -67,7 +155,7 @@ fn walk_markdown(node: NodeRef<'_, Node>, out: &mut String, skip: &[&str], depth
                 out.push_str(" | ");
             }
             for child in node.children() {
-                walk_markdown(child, out, skip, depth + 1);
+                walk_markdown(child, out, skip, depth + 1, links);
             }
             if heading_level.is_some() || is_block(tag) {
                 out.push('\n');
@@ -79,13 +167,19 @@ fn walk_markdown(node: NodeRef<'_, Node>, out: &mut String, skip: &[&str], depth
         Node::Text(text) => out.push_str(text),
         _ => {
             for child in node.children() {
-                walk_markdown(child, out, skip, depth + 1);
+                walk_markdown(child, out, skip, depth + 1, links);
             }
         }
     }
 }
 
-fn walk_html(node: NodeRef<'_, Node>, out: &mut String, skip: &[&str], depth: usize) {
+fn walk_html(
+    node: NodeRef<'_, Node>,
+    out: &mut String,
+    skip: &[&str],
+    depth: usize,
+    links: &mut Option<Links>,
+) {
     if depth > MAX_WALK_DEPTH {
         return;
     }
@@ -97,9 +191,19 @@ fn walk_html(node: NodeRef<'_, Node>, out: &mut String, skip: &[&str], depth: us
             }
             out.push('<');
             out.push_str(tag);
+            // The one attribute kept: a link's resolved, web-only `href`.
+            let href = match (tag, links.as_mut()) {
+                ("a", Some(links)) => el.attr("href").and_then(|h| links.resolve(h)),
+                _ => None,
+            };
+            if let Some(href) = href {
+                out.push_str(" href=\"");
+                push_escaped(out, &href.replace('"', "%22"));
+                out.push('"');
+            }
             out.push('>');
             for child in node.children() {
-                walk_html(child, out, skip, depth + 1);
+                walk_html(child, out, skip, depth + 1, links);
             }
             out.push_str("</");
             out.push_str(tag);
@@ -111,7 +215,7 @@ fn walk_html(node: NodeRef<'_, Node>, out: &mut String, skip: &[&str], depth: us
         Node::Text(text) => push_escaped(out, text),
         _ => {
             for child in node.children() {
-                walk_html(child, out, skip, depth + 1);
+                walk_html(child, out, skip, depth + 1, links);
             }
         }
     }
@@ -240,6 +344,59 @@ mod tests {
         assert!(md.contains("Quote\nNext"), "{md}");
     }
 
+    const PAGE: &str = "https://docs.example/guide/intro.html";
+
+    #[test]
+    fn page_markdown_keeps_absolute_and_resolves_relative_links() {
+        let html = "<body><p>See <a href=\"https://other.example/a?b=1&amp;c=2\">the API</a>, \
+                    <a href=\"../ref/\">the reference</a> and <a href=\"//cdn.example/x\">a CDN</a>.</p></body>";
+        let md = page_markdown(html, PAGE);
+        assert!(
+            md.contains("[the API](<https://other.example/a?b=1&c=2>)"),
+            "{md}"
+        );
+        assert!(
+            md.contains("[the reference](<https://docs.example/ref/>)"),
+            "{md}"
+        );
+        assert!(md.contains("[a CDN](<https://cdn.example/x>)"), "{md}");
+    }
+
+    #[test]
+    fn page_markdown_drops_dangerous_and_fragment_links_but_keeps_their_text() {
+        let html = "<body><p><a href=\"javascript:alert(1)\">run</a> \
+                    <a href=\"data:text/html,x\">data</a> <a href=\"file:///etc/passwd\">file</a> \
+                    <a href=\"#install\">jump</a> <a href=\"mailto:a@b.example\">mail</a> \
+                    <a>bare</a></p></body>";
+        let md = page_markdown(html, PAGE);
+        assert!(!md.contains("]("), "no link survives: {md}");
+        for text in ["run", "data", "file", "jump", "mail", "bare"] {
+            assert!(md.contains(text), "{text} kept as text: {md}");
+        }
+        assert!(!md.contains("javascript") && !md.contains("passwd"), "{md}");
+    }
+
+    #[test]
+    fn page_markdown_caps_links_and_escapes_link_text() {
+        let mut html = String::from("<body><p><a href=\"/x\">[a] <b>b</b>\n c</a></p>");
+        for i in 0..(MAX_LINKS + 20) {
+            html.push_str(&format!("<p><a href=\"/p{i}\">p{i}</a></p>"));
+        }
+        let md = page_markdown(&html, PAGE);
+        assert!(
+            md.contains("[\\[a\\] b c](<https://docs.example/x>)"),
+            "{md}"
+        );
+        assert_eq!(md.matches("](<").count(), MAX_LINKS, "capped");
+        assert!(
+            md.contains(&format!("p{}", MAX_LINKS + 19)),
+            "text past the cap stays"
+        );
+        // Plain conversion (no page url) keeps link text only, as before.
+        assert!(!html_to_markdown(&html).contains("]("));
+        assert!(!readability(&html).contains("href"));
+    }
+
     #[test]
     fn deeply_nested_html_does_not_blow_the_stack() {
         // Well past MAX_WALK_DEPTH; both walks must bail out instead of
@@ -256,5 +413,6 @@ mod tests {
         // Must simply return without panicking/overflowing the stack.
         let _ = html_to_markdown(&html);
         let _ = readability(&html);
+        let _ = page_markdown(&html, PAGE);
     }
 }

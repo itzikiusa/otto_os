@@ -80,7 +80,7 @@
   import { paneWindowAction, showPaneDisplays } from '../lib/nativePaneMenu';
   import { ctxMenu } from '../lib/contextmenu.svelte';
   import { viewport } from '../lib/stores/viewport.svelte';
-  import { ws } from '../lib/stores/workspace.svelte';
+  import { ws, LS_ATTENTION } from '../lib/stores/workspace.svelte';
   import { git } from '../lib/stores/git.svelte';
   import { auth, impersonationStartedMs } from '../lib/stores/auth.svelte';
   import { openSessionDeepLink } from '../lib/deepLinkOpen';
@@ -248,7 +248,7 @@
     };
     // Another window lowered / raised a flag: adopt it.
     const onStorage = (e: StorageEvent): void => {
-      if (e.storageArea === localStorage && e.key === 'otto_attention') ws.reloadAttention();
+      if (e.storageArea === localStorage && e.key === LS_ATTENTION) ws.reloadAttention();
     };
     document.addEventListener('visibilitychange', onVis);
     window.addEventListener('focus', onFocus);

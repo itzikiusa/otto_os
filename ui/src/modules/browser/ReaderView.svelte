@@ -27,6 +27,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { buildSelector } from './selector';
+  import { readerLinkAction } from './readerLinks';
   import { announce } from '../../lib/announce.svelte';
   import type { BrowserPage } from '../../lib/api/types';
 
@@ -36,6 +37,7 @@
     error,
     onretry,
     onopenurl,
+    onnavigate,
   }: {
     page: BrowserPage | null;
     loading: boolean;
@@ -43,6 +45,8 @@
     onretry?: () => void;
     /** Empty state's next step: focus the address bar (⌘L). */
     onopenurl?: () => void;
+    /** A link in the page was clicked: navigate this tab to its http(s) URL. */
+    onnavigate?: (url: string) => void;
   } = $props();
 
   const html = $derived(
@@ -120,11 +124,23 @@
   }
 
   function onArticleClick(e: MouseEvent): void {
-    if (!markMode || !articleEl) return;
+    if (!markMode) return followLink(e);
+    if (!articleEl) return;
     const target = e.target as Element | null;
     if (!target || target === articleEl) return;
     e.preventDefault();
     void markElement(target);
+  }
+
+  // A page link moves this tab (guarded navigation), never the app's own
+  // webview or a new window; a non-web scheme does nothing at all.
+  function followLink(e: MouseEvent): void {
+    const link = (e.target as Element | null)?.closest?.('a[href]');
+    if (!link || !articleEl?.contains(link) || !page) return;
+    const action = readerLinkAction(link.getAttribute('href'), page.url);
+    if (action.kind === 'anchor') return;
+    e.preventDefault();
+    if (action.kind === 'open') onnavigate?.(action.url);
   }
 
   function onArticleKey(e: KeyboardEvent): void {

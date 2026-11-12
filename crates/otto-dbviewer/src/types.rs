@@ -826,6 +826,30 @@ pub struct Column {
     /// A human/engine type hint for the column (e.g. "int", "varchar", "json").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_hint: Option<String>,
+    /// The cells are raw bytes sent as base64 TEXT (MySQL BINARY / VARBINARY /
+    /// BLOB, Postgres BYTEA). A client must not treat them as strings: an
+    /// edit, INSERT or key predicate needs the decoded bytes (`FROM_BASE64` /
+    /// `decode(…, 'base64')`), never the base64 text. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub binary: bool,
+}
+
+/// Engine type names (sqlx `type_info().name()`) whose cells the drivers send
+/// as base64: exactly the MySQL `CellDecoder::Bytes` set and `GEOMETRY`
+/// (internal format, `CellDecoder::Geometry`) plus Postgres `BYTEA`. MySQL
+/// `BIT` is not here: sqlx decodes it as an unsigned integer.
+pub fn is_binary_type_name(type_name: &str) -> bool {
+    matches!(
+        type_name,
+        "BINARY"
+            | "VARBINARY"
+            | "TINYBLOB"
+            | "BLOB"
+            | "MEDIUMBLOB"
+            | "LONGBLOB"
+            | "GEOMETRY"
+            | "BYTEA"
+    )
 }
 
 impl Column {
@@ -833,12 +857,15 @@ impl Column {
         Self {
             name: name.into(),
             type_hint: None,
+            binary: false,
         }
     }
     pub fn typed(name: impl Into<String>, type_hint: impl Into<String>) -> Self {
+        let type_hint = type_hint.into();
         Self {
             name: name.into(),
-            type_hint: Some(type_hint.into()),
+            binary: is_binary_type_name(&type_hint),
+            type_hint: Some(type_hint),
         }
     }
 }
@@ -1762,6 +1789,31 @@ mod tests {
         futures_util::stream::iter(items).inspect(move |_| {
             pulled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         })
+    }
+
+    /// Binary columns (base64 cells) carry `binary: true` on the wire; every
+    /// other column omits the field so existing payloads stay byte-identical.
+    #[test]
+    fn binary_columns_are_marked_on_the_wire() {
+        for name in [
+            "BINARY",
+            "VARBINARY",
+            "BLOB",
+            "LONGBLOB",
+            "GEOMETRY",
+            "BYTEA",
+        ] {
+            assert!(Column::typed("c", name).binary, "{name}");
+        }
+        for name in [
+            "VARCHAR", "TEXT", "String", "JSON", "BYTEA[]", "BIT", "geometry",
+        ] {
+            assert!(!Column::typed("c", name).binary, "{name}");
+        }
+        let json = serde_json::to_value(Column::typed("id", "BINARY")).unwrap();
+        assert_eq!(json["binary"], serde_json::json!(true));
+        let plain = serde_json::to_value(Column::typed("n", "INT")).unwrap();
+        assert!(plain.get("binary").is_none());
     }
 
     /// DB2-01: a server-bounded truncated read (LIMIT max_rows+1 → the probe

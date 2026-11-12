@@ -772,6 +772,7 @@ mod wait_session_tests {
         tx.send(Event::SessionRemoved {
             session_id: me.clone(),
             workspace_id: Id::from("ws"),
+            owner_id: Id::from("u"),
         })
         .unwrap();
         tokio::time::timeout(

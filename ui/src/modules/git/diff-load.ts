@@ -93,7 +93,8 @@ interface PrEntry {
   at: number;
   /** The head this entry's data belongs to ('' = not known yet). */
   head: string;
-  /** Query suffix every request of this entry sends (`&rev=<head at creation>`). */
+  /** Query suffix every request of this entry sends (`&rev=<head at creation>`,
+   *  plus `&ignore_whitespace=true` for a `~ws` entry). */
   rev: string;
   summary: Shared<DiffResp> | null;
   files: Map<string, Shared<FileDiff | null>>;
@@ -144,21 +145,70 @@ function charge(key: string, e: PrEntry, bytes: number): void {
   evictPrCache(key);
 }
 
+/** The PR being read (the most recently used entry) holds 3/4 of the byte
+ *  budget: neighbour prefetch (diff-prefetch.ts) stops there rather than
+ *  push the cache into evicting what the reader already opened. Older PRs'
+ *  entries don't count — evicting those first is the cache's design. */
+export function prDiffCacheNearCap(): boolean {
+  let mru = 0;
+  for (const e of prCache.values()) mru = e.bytes;
+  return mru >= PR_MAX_BYTES * 0.75;
+}
+
 /** Test/diagnostic view of the cache: [key, bytes] in LRU → MRU order. */
 export function prCacheSnapshot(): [string, number][] {
   return [...prCache].map(([k, e]) => [k, e.bytes]);
 }
 
+// ── "Hide whitespace changes" (the Code tab's view option) ────────────────
+// A whitespace-ignoring diff is a different diff: its own cache entry (key
+// suffix `~ws`) whose every request carries `ignore_whitespace=true`. The
+// preference is global (like wrap), persisted, and read by the Code tab's
+// loaders; other readers of the cache (Review tab snippets, PR stats) always
+// ask for the normal diff.
+const PREF_IGNORE_WS = 'otto_pr_ignore_ws';
+let ignoreWs = ((): boolean => {
+  try {
+    return localStorage.getItem(PREF_IGNORE_WS) === '1';
+  } catch {
+    return false;
+  }
+})();
+const wsListeners = new Set<() => void>();
+export function prIgnoreWhitespace(): boolean {
+  return ignoreWs;
+}
+/** Change the preference; the Code tab (onPrWhitespaceChange) re-reads its diff. */
+export function setPrIgnoreWhitespace(v: boolean): void {
+  if (v === ignoreWs) return;
+  ignoreWs = v;
+  try {
+    localStorage.setItem(PREF_IGNORE_WS, v ? '1' : '0');
+  } catch {
+    /* blocked storage: the choice just doesn't persist */
+  }
+  for (const fn of wsListeners) fn();
+}
+/** Subscribe to preference changes (returns the unsubscribe). */
+export function onPrWhitespaceChange(fn: () => void): () => void {
+  wsListeners.add(fn);
+  return () => {
+    wsListeners.delete(fn);
+  };
+}
+const prCacheKey = (repoId: string, num: number, ws: boolean): string => `${repoId}#${num}${ws ? '~ws' : ''}`;
+
 /** The live entry for a PR. `head` (when the caller knows it) replaces an
  *  entry built for a different head; an entry that didn't know its head yet
  *  adopts it — it was fetched moments ago, alongside the PR detail. */
-function prEntry(repoId: string, num: number, head?: string | null): PrEntry {
-  const key = `${repoId}#${num}`;
+function prEntry(repoId: string, num: number, head?: string | null, ws = false): PrEntry {
+  const key = prCacheKey(repoId, num, ws);
   let e = prCache.get(key);
   const expired = !e || Date.now() - e.at > PR_TTL_MS;
   if (!e || expired || (head && e.head && e.head !== head)) {
     const h = head || e?.head || '';
-    e = { at: Date.now(), head: h, rev: h ? `&rev=${encodeURIComponent(h)}` : '', summary: null, files: new Map(), bytes: 0 };
+    const rev = (h ? `&rev=${encodeURIComponent(h)}` : '') + (ws ? '&ignore_whitespace=true' : '');
+    e = { at: Date.now(), head: h, rev, summary: null, files: new Map(), bytes: 0 };
     prCache.delete(key);
     prCache.set(key, e);
   } else {
@@ -218,18 +268,21 @@ function join<T>(s: Shared<T>, signal: AbortSignal | undefined, drop: () => void
 }
 
 /** The PR's file list (summary mode). An older daemon that ignores
- *  `summary=true` returns full hunks — those files are cached as loaded. */
+ *  `summary=true` returns full hunks — those files are cached as loaded.
+ *  `ws`: leave whitespace-only changes out (the response says whether the
+ *  forge could, `whitespace_ignored`). */
 export function prDiffSummary(
   repoId: string,
   num: number,
   signal?: AbortSignal,
   head?: string | null,
+  ws = false,
 ): Promise<DiffResp> {
-  const e = prEntry(repoId, num, head);
+  const e = prEntry(repoId, num, head, ws);
   if (!e.summary) {
     const sh = share((sig) => api.get<DiffResp>(`/repos/${repoId}/prs/${num}/diff?summary=true${e.rev}`, sig));
     e.summary = sh;
-    const key = `${repoId}#${num}`;
+    const key = prCacheKey(repoId, num, ws);
     sh.promise.then(
       (resp) => {
         let bytes = 0;
@@ -264,8 +317,9 @@ export function prDiffFile(
   file: FileDiff,
   full: boolean,
   signal?: AbortSignal,
+  ws = false,
 ): Promise<FileDiff | null> {
-  const e = prEntry(repoId, num);
+  const e = prEntry(repoId, num, undefined, ws);
   const key = full ? `${file.path}\u0000full` : file.path;
   let sh = e.files.get(key);
   if (!sh) {
@@ -273,7 +327,7 @@ export function prDiffFile(
       api.get<DiffResp>(`/repos/${repoId}/prs/${num}/diff?${fileQuery(file, full)}${e.rev}`, sig).then((r) => pick(r, file)),
     );
     created.promise.then(
-      (f) => charge(`${repoId}#${num}`, e, fileDiffBytes(f)),
+      (f) => charge(prCacheKey(repoId, num, ws), e, fileDiffBytes(f)),
       () => {
         if (e.files.get(key) === created) e.files.delete(key);
       },
@@ -287,17 +341,19 @@ export function prDiffFile(
   });
 }
 
+/** The Code tab's per-file loader: follows "Hide whitespace changes". */
 export function prDiffFileLoader(repoId: string, num: number): DiffFileLoader {
-  return (file, { full, signal }) => prDiffFile(repoId, num, file, full, signal);
+  return (file, { full, signal }) => prDiffFile(repoId, num, file, full, signal, ignoreWs);
 }
 
-/** Which head the PR's cached diff belongs to ('' = unknown / nothing cached). */
+/** Which head the PR's cached diff (as the Code tab reads it) belongs to
+ *  ('' = unknown / nothing cached). */
 export function prDiffHead(repoId: string, num: number): string {
-  return prCache.get(`${repoId}#${num}`)?.head ?? '';
+  return prCache.get(prCacheKey(repoId, num, ignoreWs))?.head ?? '';
 }
 
 /** Tell the cache the PR's current head (from a PR detail load): an entry
  *  for another head is dropped, one that didn't know its head adopts it. */
 export function notePrHead(repoId: string, num: number, head: string | null | undefined): void {
-  if (head && prCache.has(`${repoId}#${num}`)) prEntry(repoId, num, head);
+  for (const ws of [false, true]) if (head && prCache.has(prCacheKey(repoId, num, ws))) prEntry(repoId, num, head, ws);
 }

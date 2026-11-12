@@ -130,7 +130,7 @@ pub fn public_routes() -> Router<ServerCtx> {
 /// Routes that require a bearer token (the auth middleware is layered on top
 /// of this router, together with any api_extras, by `build_router`).
 pub fn protected_routes() -> Router<ServerCtx> {
-    Router::new()
+    meta::machine_routes() // GET /machine/status (the status-bar chip)
         .merge(provider_accounts::routes())
         .merge(projects::routes())
         .merge(network_profiles::routes())

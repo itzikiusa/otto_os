@@ -185,7 +185,7 @@
           if (f.status !== 'exited' && f.status !== 'reconnectable') e.exitCode = null;
           break;
         case 'exit':
-          e.exitCode = f.code;
+          e.exitCode = f.code; e.status = 'exited'; // the adopting host's onstatus learns it ended
           break;
         case 'error':
           e.term.write(`\r\n\x1b[31m[otto] ${f.code}: ${f.message}\x1b[0m\r\n`);
@@ -907,7 +907,7 @@
         onstatus?.(f.status as SessionStatus);
         break;
       case 'exit':
-        exitCode = f.code;
+        exitCode = f.code; onstatus?.('exited'); // no `status` frame follows an exit (otto-sessions ws.rs)
         break;
       case 'ended': // room relay: every re-upgrade would be refused (termRoom.ts)
         if (socketFactory) { closedByUs = true; reconnecting = false; term?.write(endedLine(f.reason)); }

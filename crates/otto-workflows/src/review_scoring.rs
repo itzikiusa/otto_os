@@ -168,8 +168,27 @@ pub fn aggregate(
         && outs
             .iter()
             .all(|o| o.get("passed").and_then(Value::as_bool).unwrap_or(false));
-    out.insert("score".into(), json!(agg_score));
+    // One target that did not complete makes the whole step not a verdict:
+    // no score (the min of the others would read as the result) and
+    // `outcome: incomplete`, which fails the step.
+    let incomplete = outs
+        .iter()
+        .any(|o| o.get("outcome").and_then(Value::as_str) == Some("incomplete"));
+    let outcome = match (agg_passed, incomplete) {
+        (true, _) => "passed",
+        (_, true) => "incomplete",
+        _ => "failed",
+    };
+    out.insert(
+        "score".into(),
+        if incomplete {
+            Value::Null
+        } else {
+            json!(agg_score)
+        },
+    );
     out.insert("passed".into(), json!(agg_passed));
+    out.insert("outcome".into(), json!(outcome));
     // EVERY reviewed reference, in the `repos[]` shape collect_pr_targets
     // consumes — without this a downstream git_pr would see only the first
     // repo mirrored at top level and never open the other entries' PRs.
@@ -196,6 +215,39 @@ pub fn aggregate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2026-11-12: a target whose verifier never started read as "score 0,
+    /// FAILED". Across repos it must stay "incomplete" with no score.
+    #[test]
+    fn one_incomplete_target_makes_the_step_incomplete_with_no_score() {
+        let t = |score: Value, passed: bool, outcome: &str| {
+            json!({"score": score, "passed": passed, "outcome": outcome, "repo_id": outcome})
+                .as_object()
+                .cloned()
+                .unwrap()
+        };
+        let (out, passed) = aggregate(
+            vec![
+                t(json!(95), true, "passed"),
+                t(Value::Null, false, "incomplete"),
+            ],
+            2,
+        );
+        assert!(!passed);
+        assert_eq!(out["outcome"], "incomplete");
+        assert!(out["score"].is_null());
+        let (out, _) = aggregate(
+            vec![t(json!(95), true, "passed"), t(json!(60), false, "failed")],
+            2,
+        );
+        assert_eq!(
+            (out["outcome"].clone(), out["score"].clone()),
+            (json!("failed"), json!(60))
+        );
+        let (out, passed) = aggregate(vec![t(json!(90), true, "passed")], 1);
+        assert!(passed);
+        assert_eq!(out["outcome"], "passed");
+    }
 
     #[test]
     fn must_fix_blocks_even_when_weight_or_goals_allow_a_passing_score() {

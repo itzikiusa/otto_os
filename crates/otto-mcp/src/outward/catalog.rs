@@ -278,11 +278,14 @@ pub const IRREVERSIBLE: &[&str] = &[
 /// governed caller gets. Since the bridge always offered them, a session-bound
 /// credential may call these through the governed path even when the operator
 /// has not ticked them in the Otto-server catalog (they are still gated).
+/// `api_upsert_request` is not irreversible but rides the same path: a saved
+/// request is what `api_execute` later sends, credentials included.
 pub const NATIVE_SESSION_WRITERS: &[&str] = &[
     "k8s_action",
     "k8s_pod_http",
     "aws_sqs_send",
     "api_execute",
+    "api_upsert_request",
     "api_run_automation",
 ];
 
@@ -1255,7 +1258,7 @@ fn own_tool_specs() -> [Value; 6] {
             "description":"Your routines (recurring tasks on a schedule) with their next 3 runs, and the user's timezone.",
             "inputSchema":{"type":"object","properties":{"agent":agent,"session_id":sid}}}),
         json!({"name":"otto.routine_create","mutating":false,"category":"Sessions",
-            "description":"Set up a routine for yourself (no approval). Turn the user's words into `schedule`; omit `timezone` for the user's own. Returns it with next_runs — confirm the schedule and next run in one line.",
+            "description":"Set up a routine (Slack delivery waits for user approval). Map the user's words to `schedule`; omit `timezone` for theirs. Returns next_runs — confirm schedule and next run in one line.",
             "inputSchema":{"type":"object","required":["schedule","instruction"],"properties":{
                 "schedule":sched,"timezone":{"type":"string","description":"IANA, e.g. Asia/Jerusalem"},
                 "name":{"type":"string","description":"2–5 word title in the user's words, e.g. Morning PR brief"},

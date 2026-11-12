@@ -7,14 +7,20 @@
   import { onDestroy, untrack } from 'svelte';
   import { summaryFallback, summaryFallbackTitle } from './reviewFallback';
   import { toastError } from '../../lib/toastError';
-  import { verdictLabel } from '../../lib/labels';
   import { api, ApiError, isAbortError } from '../../lib/api/client';
   import { prDiffFile, prDiffSummary } from './diff-load';
   import { alreadyOnPr } from './reviewPost';
   import type {
     Review, ReviewComment, ReviewConfig, ReviewAgentCfg, ReviewConfigPreset, RepoReviewBinding,
-    RepoReviewConfigResp, StartReviewReq, FileDiff, DiffLine, MergeReadiness, ReviewFindingRow, EditReviewCommentReq, PrDetail,
+    RepoReviewConfigResp, StartReviewReq, FileDiff, DiffLine, MergeReadiness, ReviewTriage, EditReviewCommentReq, PrDetail,
   } from '../../lib/api/types';
+  import { advancedOf, mergeReviewConfig, syncProviders, type ReviewAdvanced } from './reviewConfigMerge';
+  import { postAllPlan, triageIndex, type PostAllPlan } from './reviewTriage';
+  import { askDismissal, fetchTriage } from './reviewTriageApi';
+  import ReviewConfigAdvanced from './ReviewConfigAdvanced.svelte';
+  import PostCommentsConfirm from './PostCommentsConfirm.svelte';
+  import ReviewCommentTriage from './ReviewCommentTriage.svelte';
+  import ReviewMergeGate from './ReviewMergeGate.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -31,6 +37,7 @@
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import ReviewAgents from './ReviewAgents.svelte';
   import ReviewScope from './ReviewScope.svelte';
+  import ReviewIncomplete from './ReviewIncomplete.svelte';
   import FixReviewButton from './FixReviewButton.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus } from '../../lib/status';
@@ -96,8 +103,9 @@
   let mergeReadinessLoading = $state(false);
   let readinessError = $state<string | null>(null);
   let readinessRequest = 0;
-  // Persistent findings (keyed by fingerprint) from the findings endpoint.
-  let findings: ReviewFindingRow[] = $state([]);
+  // Each comment's finding + copies already on the PR (the board loads its own findings).
+  let triage: ReviewTriage | null = $state.raw(null);
+  const triageIx = $derived(triageIndex(triage));
 
   function pollDelay(count: number): number {
     // While the event socket is up, `review_changed` (reviewBus, below)
@@ -152,6 +160,10 @@
   let selectedPresetId = $state('');
   let presetSaveOpen = $state(false);
   let presetNameDraft = $state('');
+  // The loaded config being edited: a save lays the edits over it, so fields
+  // the modal doesn't show (set via API / MCP / a preset) survive.
+  let editBase: ReviewConfig | null = null;
+  let editAdvanced: ReviewAdvanced = $state(advancedOf(null));
 
   /** Ensure an agent always has a `providers` array (migration from old format). */
   function normalizeAgent(a: ReviewAgentCfg): ReviewAgentCfg {
@@ -267,7 +279,7 @@
     }
   }
 
-  /** Load the merge-readiness and persistent findings for a completed review. */
+  /** Load the merge readiness and the comment triage for a completed review. */
   async function loadFindingsAndReadiness(reviewId: string): Promise<void> {
     const generation = reviewGeneration;
     const request = ++readinessRequest;
@@ -282,12 +294,10 @@
       mergeReadinessLoading = true;
     }
     try {
-      const [fp, mr] = await Promise.all([
-        api.get<ReviewFindingRow[]>(`/reviews/${reviewId}/findings`),
-        api.get<MergeReadiness>(`/reviews/${reviewId}/merge-readiness`),
-      ]);
+      // A failed triage read only loses the badges / Post-all skips, never readiness.
+      const [tr, mr] = await Promise.all([fetchTriage(reviewId).catch(() => null), api.get<MergeReadiness>(`/reviews/${reviewId}/merge-readiness`)]);
       if (!current()) return;
-      findings = fp;
+      triage = tr;
       mergeReadiness = mr;
       readinessError = null;
     } catch (e) {
@@ -322,7 +332,7 @@
     resetSnippets();
     mergeReadiness = null;
     readinessError = null;
-    findings = [];
+    triage = null;
     try {
       const runs = await api.get<Review[]>(`/repos/${rid}/prs/${num}/reviews`);
       if (disposed || generation !== reviewGeneration) return;
@@ -453,7 +463,7 @@
     resetSnippets();
     mergeReadiness = null;
     readinessError = null;
-    findings = [];
+    triage = null;
     try {
       const body: StartReviewReq = {};
       if (attachedIssue) {
@@ -613,21 +623,21 @@
     return c.state === 'draft' || (c.state === 'approved' && !c.posted);
   }
 
+  /** "Post all" skips dismissed / already-posted comments and unverified
+   *  claims unless included; the confirm shows every body in full. */
+  const postPlan = $derived.by(() => postAllPlan((review?.comments ?? []).filter(isPostable), triageIx));
+  let postConfirm: { plan: PostAllPlan; done: (send: ReviewComment[] | null) => void } | null = $state(null);
+  const FORGE: Record<string, string> = { github: 'GitHub', gitlab: 'GitLab', bitbucket: 'Bitbucket' };
+  const forgeName = $derived(FORGE[git.repos.find((r) => r.id === repoId)?.provider ?? ''] ?? '');
   async function postAllDrafts(): Promise<void> {
     if (editingAny) {
       toasts.warn('Save your edits first', 'Some comments have unsaved edits — Save or Cancel them before posting.');
       return;
     }
-    const drafts = (review?.comments ?? []).filter(isPostable);
-    if (drafts.length === 0) return;
-    const ok = await confirmOutward({
-      verb: `Post ${drafts.length} comments`,
-      title: `Post ${drafts.length} comments to PR #${prNumber}?`,
-      where: prWhere,
-      what: drafts.map((c) => `• ${commentPreview(c).split('\n')[0]}`).join('\n'),
-      who: PR_WHO,
-    });
-    if (!ok) return;
+    const plan = postPlan;
+    const drafts = await new Promise<ReviewComment[] | null>((done) => (postConfirm = { plan, done }));
+    postConfirm = null;
+    if (!drafts || drafts.length === 0) return;
     postingAll = true;
     let posted = 0;
     try {
@@ -652,15 +662,20 @@
     }
   }
 
+  /** Decline asks once whether it is "Not a problem" or "Won't fix" — its
+   *  finding is dismissed the same way (it stops counting toward readiness). */
   async function declineComment(c: ReviewComment): Promise<void> {
+    const req = await askDismissal(c);
+    if (!req) return;
     actionBusy = { ...actionBusy, [c.id]: 'decline' };
     try {
-      const updated = await api.post<ReviewComment>(`/pr-review-comments/${c.id}/decline`);
+      const updated = await api.post<ReviewComment>(`/pr-review-comments/${c.id}/decline`, req);
       if (review) {
         review = patchCommentInReview(review, updated);
         if (history.length > 0) history = [review, ...history.slice(1)];
+        void loadFindingsAndReadiness(review.id);
       }
-      toasts.info('Comment declined');
+      toasts.info(req.dismiss === 'waived' ? 'Declined — won’t fix' : 'Declined — not a problem');
     } catch (e) {
       toastError('Couldn’t decline comment', e);
     } finally {
@@ -679,6 +694,7 @@
       if (review) {
         review = patchCommentInReview(review, updated);
         if (history.length > 0) history = [review, ...history.slice(1)];
+        if (req.restore_draft) void loadFindingsAndReadiness(review.id);
       }
       return true;
     } catch (e) {
@@ -727,6 +743,8 @@
 
   /** Seed the edit fields from a config (normalizing `providers` arrays). */
   function seedEditFields(cfg: ReviewConfig): void {
+    editBase = cfg;
+    editAdvanced = advancedOf(cfg);
     crossProviderCheck = cfg.cross_provider_check ?? false;
     editAgents = cfg.agents.map((a) => normalizeAgent({ ...a }));
     editSummarizer = { ...cfg.summarizer };
@@ -789,7 +807,7 @@
   function sameConfig(a: ReviewConfig, b: ReviewConfig): boolean {
     const strip = (c: ReviewConfig): unknown => ({
       agents: c.agents.map((x) => ({ ...normalizeAgent(x), provider: undefined })),
-      summarizer: { ...c.summarizer },
+      summarizer: { ...c.summarizer }, ...advancedOf(c),
     });
     return JSON.stringify(strip(a)) === JSON.stringify(strip(b));
   }
@@ -852,21 +870,15 @@
     editAgents = editAgents.filter((_, idx) => idx !== i);
   }
 
-  /** Build the ReviewConfig body from current edit state (same shape as saveConfig). */
+  /** The config to save: the loaded config with the modal's edits laid over it. */
   function buildConfigFromEditState(presets: ReviewAgentCfg[]): ReviewConfig {
-    const syncedAgents = editAgents.map((a) => {
-      const ps = a.providers && a.providers.length > 0 ? a.providers : [a.provider || defaultAgentProvider()];
-      return { ...a, provider: ps[0], providers: ps };
-    });
-    return {
+    const sync = (a: ReviewAgentCfg): ReviewAgentCfg => syncProviders(a, defaultAgentProvider());
+    return mergeReviewConfig(editBase, {
       cross_provider_check: crossProviderCheck,
-      agents: syncedAgents,
+      agents: editAgents.map(sync),
       summarizer: editSummarizer,
-      custom_presets: presets.map((a) => {
-        const ps = a.providers && a.providers.length > 0 ? a.providers : [a.provider || defaultAgentProvider()];
-        return { ...a, provider: ps[0], providers: ps };
-      }),
-    };
+      custom_presets: presets.map(sync),
+    }, editAdvanced);
   }
 
   /** Persist per-agent presets immediately without closing the modal. They
@@ -875,10 +887,7 @@
    *  them with this repo's edit fields. */
   async function persistPresets(presets: ReviewAgentCfg[]): Promise<void> {
     try {
-      const synced = presets.map((a) => {
-        const ps = a.providers && a.providers.length > 0 ? a.providers : [a.provider || defaultAgentProvider()];
-        return { ...a, provider: ps[0], providers: ps };
-      });
+      const synced = presets.map((a) => syncProviders(a, defaultAgentProvider()));
       const cfg: ReviewConfig =
         configScope === 'repo' && globalCfg
           ? { ...globalCfg, custom_presets: synced }
@@ -1072,7 +1081,7 @@
     const cs = review?.comments ?? [];
     return cs.filter((c: ReviewComment) => c.state === 'draft').length;
   });
-  const postableCount = $derived.by(() => (review?.comments ?? []).filter(isPostable).length);
+  const postableCount = $derived(postPlan.send.length + postPlan.unverified.length);
   const totalCount = $derived.by(() => review?.comments?.length ?? 0);
   /** Who drafted the comments: the summarizer (last agent row) plus the lenses
    *  it merged. Null for reviews without agent rows. */
@@ -1083,11 +1092,6 @@
     const reviewers = ag.length > 1 ? ag.slice(0, -1) : ag;
     const lenses = [...new Set(reviewers.map((a) => a.lens ?? a.name).filter((n) => n.trim() !== ''))];
     return { provider: summ.provider, model: summ.model, lenses };
-  });
-  const blockerCount = $derived.by(() => review?.blocker_count ?? 0);
-  const mergeReady = $derived.by(() => {
-    const r = review;
-    return r !== null && r.status === 'done' && blockerCount === 0;
   });
 
   /** Format an ISO timestamp as "X ago" */
@@ -1105,7 +1109,7 @@
   ]));
 </script>
 
-{#snippet reviewLaunchControls()}
+{#snippet reviewInputs()}
       <div class="rp-jira-row">
         {#if attachedIssue}
           <span class="chip rp-jira-chip">
@@ -1125,6 +1129,9 @@
           bind:value={reviewContext}
         ></textarea>
       </div>
+{/snippet}
+{#snippet reviewLaunchControls()}
+      {@render reviewInputs()}
       <button class="btn small ghost rp-cfg-btn" onclick={openConfig}>
         <Icon name="gear" size={12} /> Configure agents…
         {#if repoCfgBadge !== ''}
@@ -1181,10 +1188,7 @@
   {:else if review.status === 'error'}
     <ReviewScope {review} />
     <ReviewAgents {review} view="done" onretried={onAgentRetried} />
-    <div class="rp-error card" role="alert">
-      <Icon name="warning" size={14} />
-      <span class="rp-error-msg">The review failed. <span class="dim">{review.error ?? 'No reason was reported — check Settings → Logs.'}</span></span>
-    </div>
+    <ReviewIncomplete {review} />
     {@render reviewLaunchControls()}
   {:else}
     <!-- status === 'done' -->
@@ -1228,85 +1232,10 @@
         <Icon name="refresh" size={12} /> {starting ? 'Starting…' : 'Re-run review'}
       </button>
     </div>
-    <div class="rp-jira-row">
-      {#if attachedIssue}
-        <span class="chip rp-jira-chip">
-          <Icon name="ticket" size={12} />
-          <span class="rp-jira-text" title="{attachedIssue.key} — {attachedIssue.summary}">{attachedIssue.key} — {attachedIssue.summary}</span>
-          <button class="rp-jira-remove" onclick={removeAttachedIssue} aria-label="Remove story {attachedIssue.key}" title="Remove story"><Icon name="x" size={12} /></button>
-        </span>
-      {:else}
-        <button class="btn small ghost" onclick={openJiraPicker}><Icon name="ticket" size={12} /> Attach story…</button>
-      {/if}
-    </div>
-    <div class="rp-context-row">
-      <textarea dir="auto" aria-label="Review focus"
-        class="rp-context-input"
-        rows={2}
-        placeholder="What should the reviewers focus on? (optional)"
-        bind:value={reviewContext}
-      ></textarea>
-    </div>
+    {@render reviewInputs()}
 
-    <!-- Merge-readiness banner (item 13) -->
-    {#if review.blocker_count != null || review.verdict != null}
-      <div class="rp-merge-gate" class:rp-merge-ok={mergeReady} class:rp-merge-blocked={!mergeReady}>
-        {#if mergeReady}
-          <Icon name="check" size={13} /> Merge-ready — no bug-severity blockers
-        {:else}
-          <Icon name="zap" size={13} /> {plural(blockerCount, 'blocker')} before merge
-        {/if}
-        {#if review.verdict}
-          <span class="rp-verdict">Verdict: {verdictLabel(review.verdict)}</span>
-        {/if}
-      </div>
-    {/if}
-
-    <!-- A1: Merge-readiness panel — CI pill, approvals, unresolved findings,
-         mergeable/conflicts from the /merge-readiness endpoint. -->
-    {#if readinessError}
-      <LoadState what="merge readiness" error={readinessError} empty={mergeReadiness === null} variant="compact" onretry={() => review && void loadFindingsAndReadiness(review.id)} />
-    {/if}
-    {#if mergeReadiness !== null || mergeReadinessLoading}
-      <div class="rp-readiness card">
-        <div class="rp-readiness-row">
-          <span class="rp-readiness-label">Merge readiness</span>
-          {#if mergeReadinessLoading}
-            <span class="dim" style="font-size: var(--fs-xs)">Checking merge readiness…</span>
-          {:else if mergeReadiness !== null}
-            <!-- CI status pill -->
-            {@const ciState = (mergeReadiness as any).ci_status ?? 'none'}
-            <span
-              class="chip rp-ci-pill rp-ci-{ciState}"
-              title="CI: {ciState}"
-            >
-              {ciState === 'none' ? 'No CI checks' : ciState === 'pending' ? 'CI pending' : ciState === 'success' ? 'CI passed' : ciState === 'failure' ? 'CI failed' : `CI ${ciState}`}
-            </span>
-            <!-- Approvals -->
-            {@const approvals = (mergeReadiness as any).approvals ?? 0}
-            {#if approvals > 0}
-              <span class="chip ok rp-readiness-chip">{plural(approvals, 'approval')}</span>
-            {:else}
-              <span class="chip rp-readiness-chip dim">0 approvals</span>
-            {/if}
-            <!-- Unresolved findings -->
-            {@const unresolved = mergeReadiness.unresolved_total}
-            {#if unresolved > 0}
-              <span class="chip rp-readiness-chip" style="background:var(--danger-soft);color:var(--danger)">{plural(unresolved, 'open finding')}</span>
-            {:else}
-              <span class="chip ok rp-readiness-chip">No open findings</span>
-            {/if}
-            <!-- Mergeable flag -->
-            {@const mergeable = (mergeReadiness as any).mergeable}
-            {#if mergeable === true}
-              <span class="chip ok rp-readiness-chip">Mergeable</span>
-            {:else if mergeable === false}
-              <span class="chip rp-readiness-chip" style="color:var(--danger)">Conflicts</span>
-            {/if}
-          {/if}
-        </div>
-      </div>
-    {/if}
+    <ReviewMergeGate {review} readiness={mergeReadiness} loading={mergeReadinessLoading} error={readinessError}
+      onretry={() => review && void loadFindingsAndReadiness(review.id)} />
 
     <!-- Findings workflow board: persisted Finding rows with the 6-state status,
          the 7 triage actions, and the Proof Pack. Appears once the review is done. -->
@@ -1349,6 +1278,7 @@
               {#if c.path !== null}
                 <span class="mono rp-loc" dir="ltr" title={c.path}>{c.path}{c.line !== null ? `:${c.line}` : ''}</span>
               {/if}
+              <ReviewCommentTriage comment={c} triage={triageIx.get(c.id)} />
               <span class="grow"></span>
               {#if c.state === 'draft'}
                 <button
@@ -1696,6 +1626,7 @@
             </div>
           </div>
         </div>
+        <ReviewConfigAdvanced bind:value={editAdvanced} />
       {/if}
     {/snippet}
     {#snippet footer()}
@@ -1705,6 +1636,10 @@
       </button>
     {/snippet}
   </Modal>
+{/if}
+
+{#if postConfirm}
+  <PostCommentsConfirm plan={postConfirm.plan} where={`${prWhere}${forgeName ? ` on ${forgeName}` : ''}`} who={PR_WHO} onclose={postConfirm.done} />
 {/if}
 
 <!-- Jira story picker modal -->
@@ -1736,61 +1671,6 @@
     margin: 0 0 4px;
   }
 
-  .rp-merge-gate {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 10px;
-    margin: 0 0 8px;
-    border-radius: var(--radius-s);
-    font-size: var(--fs-xs);
-    font-weight: 500;
-    flex-wrap: wrap;
-  }
-  .rp-merge-ok {
-    background: var(--success-soft);
-    border: 1px solid color-mix(in srgb, var(--success) 40%, var(--border));
-    color: var(--success);
-  }
-  .rp-merge-blocked {
-    background: var(--danger-soft);
-    border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
-    color: var(--danger);
-  }
-  .rp-verdict {
-    margin-inline-start: auto;
-    font-weight: 400;
-    font-size: var(--fs-xs);
-    opacity: 0.8;
-  }
-
-  /* Merge-readiness panel (A1) */
-  .rp-readiness {
-    padding: 8px 12px;
-    margin: 0 0 8px;
-  }
-  .rp-readiness-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .rp-readiness-label {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    color: var(--text-dim);
-    white-space: nowrap;
-  }
-  .rp-readiness-chip {
-    font-size: var(--fs-xs);
-    padding: 2px 6px;
-  }
-  /* CI status pill colours */
-  .rp-ci-success { background: var(--success-soft); color: var(--success); }
-  .rp-ci-failure { background: var(--danger-soft); color: var(--danger); }
-  .rp-ci-pending { background: var(--warning-soft); color: var(--warning); }
-  .rp-ci-none    { background: var(--surface-2); color: var(--text-dim); }
-
   /* No-review state with configure button */
   .rp-no-review {
     position: relative;
@@ -1811,82 +1691,6 @@
   .rp-running-title {
     font-size: var(--fs-m);
     font-weight: 600;
-  }
-
-  /* Live agent cards */
-  .rp-agents {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    margin-top: 4px;
-  }
-  .rp-agent {
-    padding: 8px 12px;
-  }
-  /* Mobile (≤640px): stack the agent cards instead of letting them overflow. */
-  @media (max-width: 640px) {
-    .rp-agents { flex-direction: column; }
-    .rp-agent { min-width: 0; width: 100%; }
-  }
-  .rp-agent-top {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .rp-agent-name {
-    font-size: var(--fs-s);
-    font-weight: 600;
-  }
-  .rp-agent-chip {
-    font-size: var(--fs-xs);
-  }
-  .rp-agent-note {
-    margin: 4px 0 0;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    line-height: 1.4;
-  }
-  .rp-agent-count {
-    font-size: var(--fs-xs);
-    display: block;
-    margin-top: 2px;
-  }
-
-
-  /* Per-agent: "waiting for input" callout + expandable findings */
-  .rp-agent-waiting {
-    margin: 6px 0 0;
-    font-size: var(--fs-xs);
-    line-height: 1.45;
-    color: var(--warning);
-  }
-  .rp-term {
-    height: min(360px, 65vh);
-    margin: 8px 0 2px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    overflow: hidden;
-    overscroll-behavior: contain;
-    background: var(--term-bg);
-  }
-  .rp-agent-findings {
-    list-style: none;
-    margin: 6px 0 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .rp-finding {
-    display: flex;
-    align-items: baseline;
-    gap: 6px;
-    font-size: var(--fs-xs);
-    line-height: 1.4;
-  }
-  .rp-finding-body {
-    flex: 1;
-    min-width: 0;
   }
 
   /* Error state */

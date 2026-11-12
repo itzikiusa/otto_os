@@ -59,9 +59,16 @@
   color: var(--accent-text);
 }
 
-/* The PR file list reads as a tight list, not spaced cards. */
+/* The PR file list reads as a tight list, not spaced cards. A jump to a file
+   lands its header below the pinned toolbar (DiffPrToolbar sets the height). */
 .diff-root.pr .drow-file {
   padding-top: 6px;
+  scroll-margin-top: var(--pr-toolbar-h, 0px);
+}
+/* The comment composer, revealed on focus (diff-dom.ts), lands below the
+   pinned toolbar too. */
+.diff-root.pr .composer {
+  scroll-margin-block: calc(var(--pr-toolbar-h, 0px) + 8px) 8px;
 }
 .diff-root.pr .drow-file.first {
   padding-top: 0;
@@ -106,4 +113,21 @@
 @media (max-width: 1024px) {
   .diff-root.pr .dfile-viewed { font-size: var(--fs-s); }
   .diff-root.pr .dfile-viewed input { width: 18px; height: 18px; }
+}
+
+/* A phone in landscape: the code area under the pinned toolbar is ~120 px,
+   so the composer puts Cancel / Comment BESIDE the text, not under it — the
+   whole box then fits between the toolbar and the bottom edge. */
+@media (max-width: 1024px) and (max-height: 500px) {
+  .diff-root.pr .composer {
+    flex-direction: row;
+    align-items: flex-end;
+  }
+  .diff-root.pr .composer textarea {
+    flex: 1;
+    min-width: 0;
+  }
+  .diff-root.pr .composer-actions {
+    flex: none;
+  }
 }

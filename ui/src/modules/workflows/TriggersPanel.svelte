@@ -12,9 +12,10 @@
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { WorkflowTrigger, TriggerKind } from '../../lib/api/types';
-  import { buildTriggerSpec, defaultTriggerForm, formFromTrigger, EVENT_KINDS } from './triggerForm';
+  import { buildTriggerSpec, chatBindingHow, defaultTriggerForm, formFromTrigger, EVENT_KINDS } from './triggerForm';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { cadenceLabel } from '../../lib/cadence';
+  import TriggerStatus from './TriggerStatus.svelte';
 
   interface Props {
     workflowId: string;
@@ -36,7 +37,7 @@
       `Name: ${workflowName || '<workflow name>'}\n` +
       `Msg: what you want done — instructions for the agents\n` +
       `Jira ticket:\n` +
-      `Working Directory: ~/path/to/repo\n` +
+      `Working Directory: /abs/path/to/repo\n` +
       `Branch: <base branch>, create wt from it\n` +
       `Relevant Info: ~/other/repo\n` +
       `Goals:\n` +
@@ -358,6 +359,8 @@
       <div class="trig-body">
         <span class="trig-kind">{KIND_LABEL[t.kind] ?? t.kind}</span>
         <span class="trig-spec" title={describeSpec(t)}>{describeSpec(t)}</span>
+        {#if t.kind === 'chat'}<span class="trig-how">{chatBindingHow(t.spec)}</span>{/if}
+        <TriggerStatus trigger={t} />
       </div>
       <Switch
         checked={t.enabled}
@@ -389,7 +392,8 @@
     <p class="st-hint">
       Post this in a Slack/Telegram channel where the Otto bot is configured for
       this workspace, then <strong>pin it</strong> to reuse it. The bot matches the
-      workflow by <strong>Name</strong> and starts a run.
+      workflow by <strong>Name</strong> and starts a run (case, spacing and dash style
+      don’t matter; an unknown name gets a “Did you mean” reply).
     </p>
     <pre class="st-snip">{chatSnippet}</pre>
     <p class="st-hint">
@@ -553,6 +557,10 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .trig-how {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
   .row-del {
     background: none;

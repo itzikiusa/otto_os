@@ -5,6 +5,7 @@
 pub mod builders;
 pub mod conn_export;
 pub mod conn_import;
+pub mod failure;
 pub mod http;
 mod keyperms;
 pub mod service;

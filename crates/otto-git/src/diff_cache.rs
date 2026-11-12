@@ -41,6 +41,10 @@ struct Slot<V> {
     at: Instant,
     /// Last `get`/`put` — what [`ByteLru::sweep`]'s idle bound reads.
     last: Instant,
+    /// This entry's own lifetime ([`ByteLru::put_for`]), replacing the map's
+    /// TTL AND the sweep's idle bound — content pinned to an immutable
+    /// revision may outlive both; the byte cap still evicts it.
+    ttl: Option<Duration>,
 }
 
 impl<V: Clone> ByteLru<V> {
@@ -64,11 +68,8 @@ impl<V: Clone> ByteLru<V> {
     pub(crate) fn get(&mut self, key: &str) -> Option<V> {
         self.tick += 1;
         let tick = self.tick;
-        let expired = match (self.entries.get(key), self.ttl) {
-            (Some(s), Some(ttl)) => s.at.elapsed() > ttl,
-            (Some(_), None) => false,
-            (None, _) => return None,
-        };
+        let s = self.entries.get(key)?;
+        let expired = s.ttl.or(self.ttl).is_some_and(|t| s.at.elapsed() > t);
         if expired {
             self.remove(key);
             return None;
@@ -89,7 +90,10 @@ impl<V: Clone> ByteLru<V> {
         let stale: Vec<String> = self
             .entries
             .iter()
-            .filter(|(_, s)| ttl.is_some_and(|t| s.at.elapsed() > t) || s.last.elapsed() > idle)
+            .filter(|(_, s)| match s.ttl {
+                Some(own) => s.at.elapsed() > own,
+                None => ttl.is_some_and(|t| s.at.elapsed() > t) || s.last.elapsed() > idle,
+            })
             .map(|(k, _)| k.clone())
             .collect();
         for k in stale {
@@ -105,6 +109,15 @@ impl<V: Clone> ByteLru<V> {
     /// Insert `value` weighing `size` bytes; a value above the per-entry
     /// ceiling is not cached at all.
     pub(crate) fn put(&mut self, key: String, value: V, size: usize) {
+        self.put_slot(key, value, size, None);
+    }
+
+    /// [`Self::put`] with the entry's own lifetime (see `Slot::ttl`).
+    pub(crate) fn put_for(&mut self, key: String, value: V, size: usize, ttl: Duration) {
+        self.put_slot(key, value, size, Some(ttl));
+    }
+
+    fn put_slot(&mut self, key: String, value: V, size: usize, ttl: Option<Duration>) {
         if size > self.max_entry {
             return;
         }
@@ -132,6 +145,7 @@ impl<V: Clone> ByteLru<V> {
                 used: self.tick,
                 at: Instant::now(),
                 last: Instant::now(),
+                ttl,
             },
         );
     }
@@ -222,6 +236,20 @@ pub(crate) fn put_body(key: String, body: Bytes) {
 /// tab and every lazy per-file request of one visit share ONE download.
 /// Short TTL — a PR's head moves and the provider is the source of truth.
 pub(crate) const PR_DIFF_TTL: Duration = Duration::from_secs(60);
+
+/// A PR diff asked for at a head revision (`rev=`, the PR's `head_sha`)
+/// cannot change — a push is a new `rev`, so a new key. It is kept this long
+/// (still under the memo's byte cap) instead of re-downloading every minute.
+pub(crate) const PR_DIFF_PINNED_TTL: Duration = Duration::from_secs(30 * 60);
+
+/// The memo lifetime of a PR diff read at `rev` (empty = unpinned).
+pub(crate) fn pr_diff_ttl(rev: &str) -> Duration {
+    if rev.trim().is_empty() {
+        PR_DIFF_TTL
+    } else {
+        PR_DIFF_PINNED_TTL
+    }
+}
 
 fn pr_diffs_raw() -> &'static Mutex<ByteLru<Arc<DiffResp>>> {
     static C: OnceLock<Mutex<ByteLru<Arc<DiffResp>>>> = OnceLock::new();
@@ -390,6 +418,39 @@ mod tests {
         );
         assert_eq!(idle.get("new"), Some(2));
         assert_eq!(idle.get("old"), None);
+    }
+
+    #[test]
+    fn pinned_entries_outlive_the_map_ttl_and_the_idle_sweep() {
+        let mut c: ByteLru<u32> = ByteLru::new(100, 100, 10, Some(Duration::from_millis(1)));
+        c.put("short".into(), 1, 1);
+        c.put_for("pinned".into(), 2, 1, Duration::from_secs(3600));
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            c.get("short"),
+            None,
+            "the map TTL still applies to plain puts"
+        );
+        assert_eq!(
+            c.sweep(Duration::from_millis(1)),
+            0,
+            "pinned: not idle-swept"
+        );
+        assert_eq!(c.get("pinned"), Some(2));
+        // Its own TTL does end it.
+        c.put_for("brief".into(), 3, 1, Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(c.get("brief"), None);
+        // And the byte cap still evicts it.
+        c.put("big".into(), 4, 100);
+        assert_eq!(c.get("pinned"), None);
+    }
+
+    #[test]
+    fn pr_diff_ttl_pins_only_with_a_revision() {
+        assert_eq!(pr_diff_ttl(""), PR_DIFF_TTL);
+        assert_eq!(pr_diff_ttl("  "), PR_DIFF_TTL);
+        assert_eq!(pr_diff_ttl("abc123def456"), PR_DIFF_PINNED_TTL);
     }
 
     #[test]

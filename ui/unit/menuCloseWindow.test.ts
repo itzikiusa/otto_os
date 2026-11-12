@@ -13,6 +13,7 @@ function menu(closedTab: boolean) {
     './router.svelte': { router: { go() {} } },
     './snip': { startSnip() {} },
     './selectall': { selectAllInFocus() {} },
+    './undoredo': { undoRedoInFocus() {}, installUndoKeyGuard: () => () => {} },
     './stores/sidePane.svelte': { sidePane: { handleMenu: () => false, nativeState: null, focused: false } },
     './nativePane': { nativePane: { focus: async () => {} } },
     './desktop': { isEmbedded: false, closePopoutWindow: async () => { calls.push('window'); return true; } },

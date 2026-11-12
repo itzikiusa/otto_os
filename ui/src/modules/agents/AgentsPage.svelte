@@ -44,6 +44,9 @@
     if (autoOpenedFor === key) return;
     autoOpenedFor = key;
     if (untrack(() => router.module === 'agents' && !!router.parts[1])) return;
+    // Already leaving for another page: this page stays mounted while that
+    // page's chunk loads, and opening a session now pulled the person back.
+    if (untrack(() => !!router.pendingTarget?.[0] && router.pendingTarget[0] !== 'agents')) return;
     if (ws.panes.length > 0 || tiled) return;
     const latest = [...ws.mainSessions].sort(
       (a, b) => Date.parse(b.last_active_at) - Date.parse(a.last_active_at),

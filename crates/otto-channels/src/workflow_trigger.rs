@@ -59,4 +59,23 @@ pub trait WorkflowChatTrigger: Send + Sync {
         let _ = (workspace_id, channel, chat, thread, user, text);
         None
     }
+
+    /// The bridge dropped this message: its sender is not on the
+    /// integration's `allowed_users` list. Record it where the owner looks
+    /// when "the trigger does nothing" — the implementor matches the text to
+    /// a chat binding / explicitly named workflow and stamps that trigger
+    /// rejected; anything else is ignored. Must stay cheap and must NEVER
+    /// reply (answering a stranger would let anyone probe the bot). Called
+    /// only for a fresh (not edited) message.
+    async fn note_rejected_sender(
+        &self,
+        workspace_id: &str,
+        channel: &str,
+        chat: &str,
+        thread: Option<&str>,
+        user: &str,
+        text: &str,
+    ) {
+        let _ = (workspace_id, channel, chat, thread, user, text);
+    }
 }

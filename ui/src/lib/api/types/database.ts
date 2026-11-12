@@ -163,6 +163,9 @@ export interface DbSchemaGraph {
 export interface DbColumn {
   name: string;
   type_hint?: string | null;
+  /** The cells are raw bytes sent as base64 text (MySQL BINARY / VARBINARY /
+   *  BLOB, Postgres BYTEA) — never write them back as a string. Absent = false. */
+  binary?: boolean;
 }
 
 export interface QueryStats {

@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
 import { captureRoomInvite } from '../src/modules/rooms/room-access.ts';
 import { activeNavId } from '../src/lib/sidebar.ts';
+import * as routeKeys from '../src/lib/routeKeys.ts';
 
 const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
 
@@ -47,6 +48,7 @@ function browser(initial = '#/home') {
     './desktop': { isEmbedded: false },
     './rooms/invites': { captureRoomInvite },
     './sidebar': { activeNavId },
+    './routeKeys': routeKeys,
     './shareTokenStore': { dropShareToken: () => {}, storeShareToken: () => {}, storedShareToken: () => null },
     './phonePair': { parsePairRoute: () => null, savePairState: () => {} },
   }, { window, history });

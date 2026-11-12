@@ -9,6 +9,7 @@
   import { sectionLabel } from './sections';
   import { guardUnsaved } from '../../lib/leaveGuard';
   import SectionIntro from './SectionIntro.svelte';
+  import WorkspaceScope from './WorkspaceScope.svelte';
   import SettingToggle from './SettingToggle.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Self-Improvement settings page: per-workspace scheduled self-reflection.
@@ -390,6 +391,7 @@
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
+  <WorkspaceScope />
   <SectionIntro>Otto periodically reviews this workspace’s recent agent sessions and improves its memory and handling skills. <strong>Safe edits apply automatically; risky ones wait for your approval below.</strong></SectionIntro>
 
   {#if !wsId}

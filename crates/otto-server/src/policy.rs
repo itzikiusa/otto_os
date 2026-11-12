@@ -57,6 +57,16 @@ fn is_mcp_rules_path(p: &str) -> bool {
     p == "/mcp/auto-approve" || p == "/mcp/auto-approve/{id}" || p.starts_with("/mcp/profiles")
 }
 
+/// Reads with no per-user data, safe for any signed-in user: static catalogs,
+/// and the machine-load snapshot behind the status-bar chip (load, queue and
+/// free disk of this Mac — not secret).
+fn is_any_user_read(p: &str) -> bool {
+    matches!(
+        p,
+        "/workflows/node-types" | "/lsp/capabilities" | "/walkthroughs/resolve" | "/machine/status"
+    )
+}
+
 /// Room-capability routes, authenticated in their handlers by the room token
 /// (writes also by the driver grant, re-checked by `room_input`).
 fn room_capability_route(p: &str) -> bool {
@@ -274,11 +284,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/refs/directory" || p == "/refs/resolve" {
         return Exempt;
     }
-    // Static catalogs (no per-user data; safe to read for any authed user).
-    if matches!(
-        p,
-        "/workflows/node-types" | "/lsp/capabilities" | "/walkthroughs/resolve"
-    ) {
+    if is_any_user_read(p) {
         return Exempt;
     }
     // Pure workspace-axis routes: workspace CRUD, membership, and per-workspace
@@ -2357,6 +2363,8 @@ mod tests {
         assert_eq!(pol(Method::POST, "/api/v1/onboarding/root"), Exempt);
         assert_eq!(pol(Method::POST, "/api/v1/ingest/claude"), Exempt);
         assert_eq!(pol(Method::POST, "/api/v1/ingest/usage"), Exempt);
+        // The status-bar machine chip: any signed-in user, not secret.
+        assert_eq!(pol(Method::GET, "/api/v1/machine/status"), Exempt);
     }
 
     #[test]

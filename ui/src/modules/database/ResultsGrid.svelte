@@ -68,6 +68,10 @@
   import { ALT_BATCH, cellStr, copyWithToast, isComplex } from './results-format';
   import { newExpansionState } from '../../lib/jsonTree/expansion-plan';
   import { cellMatchesFilter } from './grid-format';
+  import { exactIntTie } from './sort-keys';
+  import SortChip from './SortChip.svelte';
+  import { serverSortSql } from './server-sort';
+  import { binaryFilterOff } from '../../lib/database/binary-cells';
   import {
     colScanFor as cachedColScan,
     dropColScans,
@@ -325,7 +329,7 @@
       sortCol,
       sortDir,
       colFilters: colFiltersInput,
-      pending: flow.pending,
+      pending: flow.parkDraft(), // a half-typed cell edit survives the switch
     };
   }
   // Park the shown tab's state when the grid goes away (view switch, page
@@ -731,9 +735,7 @@
   function numericVal(v: unknown): number | null {
     if (typeof v === 'number') return Number.isFinite(v) ? v : null;
     if (typeof v === 'bigint') return Number(v);
-    if (typeof v === 'string' && v.trim() !== '' && /^-?\d+(\.\d+)?$/.test(v.trim())) {
-      return Number(v);
-    }
+    if (typeof v === 'string' && v.trim() !== '' && /^-?\d+(\.\d+)?$/.test(v.trim())) return Number(v);
     return null;
   }
   /** NULL/undefined/objects are "empty" → always last regardless of direction. */
@@ -785,7 +787,8 @@
         if (empty[a] && empty[b]) return a - b;
         return empty[a] ? 1 : -1;
       }
-      const cmp = isNum[a] && isNum[b] ? nums[a] - nums[b] : SORT_COLLATOR.compare(strs[a], strs[b]);
+      // Equal doubles may be distinct 64-bit ids (exact digit strings): order those exactly.
+      const cmp = isNum[a] && isNum[b] ? nums[a] - nums[b] || exactIntTie(base[a].row[col], base[b].row[col]) : SORT_COLLATOR.compare(strs[a], strs[b]);
       if (cmp !== 0) return cmp * factor;
       return a - b; // stable tiebreak
     });
@@ -956,10 +959,11 @@
     const col = result?.columns[ci]?.name;
     if (!col) return;
     const short = shortLabel(v);
+    const binOff = binaryFilterOff(result?.columns[ci], v); // base64 text never matches the bytes
     const items: import('../../lib/contextmenu.svelte').MenuItem[] = hosted
       ? [
-          { label: `Filter:  ${col} = ${short}`, icon: 'search', action: () => database.addQuickFilter(col, v, 'include') },
-          { label: `Exclude:  ${col} ≠ ${short}`, icon: 'x', action: () => database.addQuickFilter(col, v, 'exclude') },
+          { label: `Filter:  ${col} = ${short}`, icon: 'search', action: () => database.addQuickFilter(col, v, 'include'), ...binOff },
+          { label: `Exclude:  ${col} ≠ ${short}`, icon: 'x', action: () => database.addQuickFilter(col, v, 'exclude'), ...binOff },
         ]
       : [];
     // In-grid foreign-key navigation (0003a): a cell in an FK column gets a
@@ -999,10 +1003,10 @@
       if (setQ || andQ) {
         items.push({ separator: true });
         if (setQ) {
-          items.push({ label: `Query by value:  ${col} = ${short}`, icon: 'search', action: () => applyFilterQuery(setQ, 'set') });
+          items.push({ label: `Query by value:  ${col} = ${short}`, icon: 'search', action: () => applyFilterQuery(setQ, 'set'), ...binOff });
         }
         if (andQ) {
-          items.push({ label: `Add to query:  AND ${col} = ${short}`, icon: 'plus', action: () => applyFilterQuery(andQ, 'and') });
+          items.push({ label: `Add to query:  AND ${col} = ${short}`, icon: 'plus', action: () => applyFilterQuery(andQ, 'and'), ...binOff });
         }
       }
     }
@@ -1725,12 +1729,11 @@
         {:else}
           <span><strong>{result.stats.row_count.toLocaleString()}</strong> {pluralNoun(result.stats.row_count, 'row')}</span>
         {/if}
-        {#if sorting && sortCol !== null}
-          <button class="sort-chip" title="Clear sort on {result.columns[sortCol].name}" onclick={() => { sortCol = null; sortDir = null; }}>
-            <Icon name={sortDir === 'asc' ? 'arrowUp' : 'arrowDown'} size={12} />
-            <span class="sort-chip-name">{result.columns[sortCol].name}</span>
-            <Icon name="x" size={12} />
-          </button>
+        {#if sorting && sortCol !== null && sortDir !== null}
+          <!-- A capped / paged result sorts only its loaded rows: the chip says so and offers an ORDER BY re-run. -->
+          <SortChip name={result.columns[sortCol].name} dir={sortDir} loaded={result.truncated || (showPager && (hasNextPage || offset > 0)) ? liveRows.length : null}
+            serverSql={serverSortSql(database.tab?.statement, statement, result.columns, sortCol, sortDir, engine)} onclear={() => { sortCol = null; sortDir = null; }}
+            onserver={(q) => { sortCol = null; sortDir = null; database.setStatementFromCellFilter(q); void database.runQuery(); }} />
         {/if}
         <span class="dot">·</span>
         <span>{result.stats.duration_ms.toLocaleString()} ms</span>
@@ -2528,29 +2531,6 @@
   }
   .dot {
     opacity: 0.5;
-  }
-  .sort-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    height: 16px;
-    padding: 0 6px;
-    border: 1px solid var(--accent-line);
-    border-radius: 999px;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    color: var(--accent-text);
-    background: var(--accent-soft);
-    cursor: pointer;
-  }
-  .sort-chip:hover {
-    background: var(--accent-soft-strong);
-  }
-  .sort-chip-name {
-    max-width: 180px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .trunc-badge {
     padding: 0 6px;

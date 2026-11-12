@@ -117,8 +117,12 @@ export function ciOf(pr: PrSummary): CiFilter | null {
   return null;
 }
 
+/** Authored by the forge account in use: the daemon's `is_mine` (a stable-id
+ *  match — a Bitbucket author is a display name, the username an email, so a
+ *  name match misses), else — older daemon, or an identity it couldn't look
+ *  up — the author matched against your handles. */
 export function isMine(pr: PrSummary, handles: ReadonlySet<string>): boolean {
-  return handles.has(pr.author.toLowerCase());
+  return (pr.is_mine ?? false) || handles.has(pr.author.toLowerCase());
 }
 
 export function matchesPr(pr: PrSummary, q: PrQuery, handles: ReadonlySet<string>): boolean {
@@ -197,9 +201,10 @@ export interface PrGroup {
   items: PrSummary[];
 }
 
-/** "Authored by you" first, then everyone else; one flat group without handles. */
+/** "Authored by you" first, then everyone else; one flat group when nothing
+ *  can say who you are (no handles and no PR flagged `is_mine`). */
 export function groupPrs(prs: readonly PrSummary[], handles: ReadonlySet<string>): PrGroup[] {
-  if (handles.size === 0) return [{ id: 'all', label: 'Pull requests', items: prs.slice() }];
+  if (handles.size === 0 && !prs.some((p) => p.is_mine)) return [{ id: 'all', label: 'Pull requests', items: prs.slice() }];
   const mine: PrSummary[] = [];
   const others: PrSummary[] = [];
   for (const p of prs) (isMine(p, handles) ? mine : others).push(p);

@@ -6,7 +6,11 @@ later send into a live agent session, and one-click paths to summarize a page or
 save it (plus its marks) into a Vault note. Fetching runs through
 `otto-browser`'s Lightpanda-sidecar-or-plain-fetch engine, started lazily on the
 first fetch. Every URL an Otto-initiated fetch touches is netguard-checked first —
-loopback, private, and cloud-metadata addresses are refused with a `400`.
+loopback, private, and cloud-metadata addresses are refused with a `400`. A
+**native live tab** in the desktop app is different: it is a real browser
+webview driven by the person, so it loads whatever they navigate to, including
+localhost and private-network pages — the daemon never fetches it and the
+guard does not apply to it.
 
 ## What's in it
 
@@ -126,11 +130,18 @@ more):
 | Tool | Args | Returns |
 |---|---|---|
 | `browser_navigate` | `url` | `{ok,title}` — opens a reader tab (the only mutating browser tool: it creates a `browser_tabs` row) |
-| `browser_page` | `url` | `{markdown,title,engine,degraded}` |
-| `browser_query` | `url, selector` | `{matches:[{selector,outer_html,text}]}` |
+| `browser_page` | `url` | `{markdown,title,engine,degraded}` — `markdown` / `title` fenced as untrusted |
+| `browser_query` | `url, selector` | `{result}` — the route's `{matches:[{selector,outer_html,text}]}` as fenced untrusted text |
 | `browser_summarize` | `url` | `{summary,engine,degraded}` |
-| `browser_marks` | `url?` | `{marks:[{id,url,selector,text,excerpt,comment,created_at}]}` — the user's marks in this workspace (one page with `url`), oldest first; `excerpt` capped at 1 000 chars per mark. "The element I marked" lives here |
-| `browser_login` | `domain` | `{logged_in,engine}` — signs in with a stored credential the user marked "allow agent use"; the password never enters the tool call, its result, or the audit log |
+| `browser_marks` | `url?` | `{count,marks}` — `marks` is the fenced text of `[{id,url,selector,text,excerpt,comment,created_at}]`: the user's marks in this workspace (one page with `url`), oldest first; `excerpt` capped at 1 000 chars per mark. "The element I marked" lives here |
+| `browser_login` | `domain` | `{logged_in,engine,note}` — checks that a stored credential the user marked "allow agent use" signs in; the password never enters the tool call, its result, or the audit log. **The signed-in session is not kept**: the sign-in runs in a throwaway browser context that is disposed right after, so `browser_page` / `browser_query` still see the logged-out page (the `note` says so) |
+
+Page-derived text in `browser_page` (`markdown`, `title`), `browser_query` (the
+whole result, as `{result}`) and `browser_marks` (`{count, marks}`) comes back
+**fenced as untrusted page data**: wrapped in markers tagged with a fresh
+per-call nonce and a line telling the agent not to follow instructions inside —
+the same fence the summarize / send / vault-save paths use (see
+*Prompt-injection defense*).
 
 `browser_page` drops the route's `url`/`html` fields from what the agent sees — the
 caller already has the URL, and the raw markup is large relative to the extracted
@@ -219,7 +230,9 @@ the ask bar aimed at the *active* agent session — no second dock, since the
 session is the pane beside it. The switch exists only in agent mode; the
 Browser page itself is always this module. The two hosts share the `browser`
 store but are never mounted together (the panel only exists on the Agents
-module), so they never contend for a live tab's native webview.
+module), so they never contend for a live tab's native webview. (The older
+`v1` right-panel tab strip is a separate host with its own tab ids — see
+*Live tabs* — so it may be open at the same time as the Browser page.)
 
 ## Prompt-injection defense
 
@@ -252,8 +265,13 @@ second, fabricated instruction line once inside the fence.
   mojibake for you (or an agent) to read.
 - Reader extraction keeps text that *shows* markup (`&lt;div&gt;` in a tutorial
   stays visible as `<div>`), keeps table cells of one row apart (`Name | Age`)
-  and breaks lines at lists, quotes, sections and tables. Links and code-block
-  indentation are not preserved yet.
+  and breaks lines at lists, quotes, sections and tables. Links are kept as
+  markdown links (`[text](<url>)`, at most 200 per page): relative ones are
+  resolved against the page, `javascript:` / `data:` / `file:` / `mailto:` and
+  `#fragment`-only links keep only their text. Clicking a link in the reader
+  navigates that tab through the normal (guarded) navigation — never the app
+  window or a new window, and only to `http(s)`. Code-block indentation is not
+  preserved yet.
 - Tab URLs must be `http(s)` (or `about:blank`) and at most 8 KiB.
 - Reader renders are reused: the daemon caches a rendered page per workspace
   and URL (the `#fragment` is ignored) for 60 s — at most 32 pages / 32 MB —
@@ -275,8 +293,9 @@ second, fabricated instruction line once inside the fence.
   attempts don't litter the Browser with blank tabs.
 - No cookies/sessions/auth are carried into a fetch — every request is anonymous,
   so pages behind a login return their logged-out view (or fail).
-- `mode:"live"` tabs are never fetched by the daemon at all — they're a plain
-  iframe URL/title record.
+- `mode:"live"` tabs are never fetched by the daemon at all — the daemon keeps
+  only their URL/title row; the page itself is a native child webview of the
+  desktop app (see *Live tabs* below), outside the SSRF guard.
 
 ## Live tabs (desktop app)
 
@@ -294,6 +313,17 @@ same `otto-browser-<id>` label scheme, keyed by their own (non-overlapping) tab
 ids, so the two can be open at once without one's cleanup tearing down the
 other's tabs.
 
+A live tab's webview keeps its page while the Browser view is hidden or
+mounted again (switching the right panel's tabs, leaving and re-entering the
+Browser page): which URL each webview shows is kept per window
+(`ui/src/modules/browser/liveWebviews.ts`), and `browser_open` never
+re-navigates a webview to the URL it already shows — scroll, form input and
+app state survive. **Back / Forward / Reload / Stop** sit before the address
+bar for a live tab on either engine (native: `history.back()` /
+`history.forward()` / `browser_reload` / `window.stop()` in the page; a native
+webview reports no history, so Back and Forward stay enabled and do nothing at
+either end).
+
 **Manual checklist** (desktop app only — a plain `cargo build`/`npm run
 build` can't exercise the native webview itself):
 
@@ -306,6 +336,10 @@ build` can't exercise the native webview itself):
    navigation without a page reload.
 5. Close the tab (✕ in the tab strip) — the child webview is destroyed, not
    just hidden.
+6. Scroll a live page and type into a form, switch the right panel to another
+   tab and back (or leave the Browser page and return) — the page is still
+   there, scrolled and filled in, not reloaded.
+7. Back / Forward / Reload / Stop act on the live page.
 
 ### Element picker overlay (live tabs)
 

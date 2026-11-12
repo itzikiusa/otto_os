@@ -1,12 +1,11 @@
 // What a runtime thread's composer does that is not view state (kept out of
-// RuntimeThread.svelte): the slash commands that act on the Threads view,
-// and reading pasted / attached files into prompt attachments.
-import { harnessLabel } from '../../../lib/providers';
+// RuntimeThread.svelte): the slash commands that act on the view (through
+// the host's commands, hostCommands.ts), merging an edited queued message
+// into the draft, and reading pasted / attached files into attachments.
+import type { RuntimeHostCommands } from '../../../lib/runtimeThreadPort';
 import type { ParsedSlashIntent } from '../../../lib/slashActions';
-import type { RuntimeSession } from '../../../lib/api/types';
 import { toastError } from '../../../lib/toastError';
-import { threads } from '../threadsStore.svelte';
-import { runtimeThreads } from './runtimeThreads.svelte';
+import { runHostSlash } from './hostCommands';
 
 /** Per file (images and PDFs). */
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
@@ -33,45 +32,15 @@ export async function readAttachments(files: Iterable<File>, takes: (f: File) =>
 }
 
 /** A slash command that acts on the view; `false` = send it to the agent. */
-export function runViewSlash(intent: ParsedSlashIntent, sessionId: string, session: RuntimeSession | null): boolean {
-  switch (intent.kind) {
-    case 'open-diff':
-      threads.setInspectorTab('changes');
-      return true;
-    case 'open-files':
-      threads.setInspectorTab('files');
-      return true;
-    case 'toggle-terminal':
-      threads.toggleTerminal(sessionId);
-      return true;
-    case 'fresh-context':
-      runtimeDrafts.for(sessionId).freshContext = true;
-      return true;
-    case 'new-thread':
-      void newThread(session, intent.beside);
-      return true;
-    case 'side-chat':
-      threads.openSideChat(sessionId, intent.question);
-      return true;
-    default:
-      return false;
-  }
+export function runViewSlash(intent: ParsedSlashIntent, sessionId: string, host: RuntimeHostCommands | undefined): boolean {
+  if (intent.kind !== 'fresh-context') return runHostSlash(intent, sessionId, host);
+  runtimeDrafts.for(sessionId).freshContext = true;
+  return true;
 }
 
-async function newThread(session: RuntimeSession | null, beside: boolean): Promise<void> {
-  if (!session) return;
-  if (!beside) return threads.startNewThread({ workspaceId: session.workspace_id, cwd: session.cwd });
-  try {
-    const { provider, cwd, model } = session;
-    const created = await runtimeThreads.start(session.workspace_id, {
-      provider,
-      cwd,
-      title: `${harnessLabel(provider)} thread`,
-      model: model ?? null,
-      prompt: '',
-    });
-    threads.openBeside(created.id);
-  } catch (e) {
-    toastError('Couldn’t start thread', e);
-  }
+/** "Edit" on a queued message puts it back in the composer without losing
+ *  what is being typed there: unsent text stays, the message goes below it. */
+export function mergeQueuedEdit(current: string, queued: string): string {
+  const kept = current.replace(/\s+$/, '');
+  return kept.trim() ? `${kept}\n${queued}` : queued;
 }

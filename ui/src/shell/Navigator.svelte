@@ -7,6 +7,11 @@
   import { toastError } from '../lib/toastError';
   import { loadErrorText } from '../lib/loadError';
   import { closeConfirm } from './closeConfirm';
+  import { changeWorkspaceDir, removeWorkspace, renameWorkspace } from './workspaceActions';
+  import RemovedWorkspaces from './RemovedWorkspaces.svelte';
+  import { checkOpenTabs } from './openTabsCheck';
+  import { LS_WS_RECENT, activityText, parseRecent, switcherItems, workspaceActivity } from './workspaceSwitch';
+  import { lsGet } from '../lib/storage';
   // Expanded 240px navigator: modules in foldable macOS source-list sections
   // (Agents with its nested session lists in Work), workspaces section,
   // user/settings at the bottom.
@@ -122,12 +127,14 @@
     // Archiving stops a session: ask first when any of them is mid-turn.
     if (ids.some((id) => ws.isAgentMidTurn(id)) && !(await askClose(ids, false, selectable))) return;
     await ws.archiveSessions(ids);
+    checkOpenTabs(true);
     setAgentSelMode(false);
   }
   async function deleteSelectedAgents(): Promise<void> {
     const ids = agentSelIds;
     if (ids.length === 0 || !(await askClose(ids, true, selectable))) return;
     await ws.killSessions(ids);
+    checkOpenTabs(true);
     setAgentSelMode(false);
   }
   const archivedIds = $derived(new Set(ws.archivedAgentSessions.map((s) => s.id)));
@@ -159,6 +166,7 @@
     const ids = ws.archivedAgentSessions.filter((s) => archSel.has(s.id)).map((s) => s.id);
     if (ids.length === 0 || !(await askClose(ids, true, ws.archivedAgentSessions))) return;
     await ws.killSessions(ids);
+    checkOpenTabs(true);
     archSel = new Set();
   }
   let renamingId: string | null = $state(null);
@@ -332,14 +340,10 @@
   /** The current-workspace chip under Agents: a switcher menu (filterable once
    *  the list is long, like the Workspaces section's quick filter). */
   function openWsSwitcher(e: MouseEvent | KeyboardEvent): void {
-    const items: MenuItem[] = ws.workspaces.map((w) => ({
-      label: w.name,
-      checked: ws.currentId === w.id,
-      title: w.root_path,
-      action: () => void ws.select(w.id),
-    }));
+    const items = switcherItems(ws.workspaces, parseRecent(lsGet(LS_WS_RECENT)), wsActivity, ws.currentId, (id) => void ws.select(id));
     if (items.length > 0) items.push({ separator: true });
     items.push({ label: 'Add workspace…', icon: 'plus', pinned: true, action: () => (ui.newWorkspaceOpen = true) });
+    items.push({ label: 'Removed workspaces…', icon: 'archive', pinned: true, action: () => (removedOpen = true) });
     ctxMenu.showAt(
       e.currentTarget as HTMLElement,
       items,
@@ -347,54 +351,9 @@
     );
   }
 
-  // ── Workspace management (context menu on the Workspaces rows) ──────────────
-  async function renameWorkspace(w: WorkspaceWithRole): Promise<void> {
-    const name = await confirmer.promptText('New workspace name', {
-      title: `Rename “${w.name}”`,
-      confirmLabel: 'Rename',
-      initial: w.name,
-    });
-    if (!name || name === w.name) return;
-    try {
-      await ws.updateWorkspace(w.id, { name });
-    } catch (e) {
-      toastError('Couldn’t rename', e);
-    }
-  }
-
-  async function changeWorkspaceDir(w: WorkspaceWithRole): Promise<void> {
-    const root = await confirmer.promptText('Working folder (absolute path, ~ ok)', {
-      title: `Change folder of “${w.name}”`,
-      browseFolder: true,
-      confirmLabel: 'Change',
-      initial: w.root_path,
-      placeholder: '~/projects/my-repo',
-    });
-    if (!root || root === w.root_path) return;
-    try {
-      await ws.updateWorkspace(w.id, { root_path: root });
-      toasts.success('Folder changed', `${w.name} → ${root}`);
-    } catch (e) {
-      toastError('Couldn’t change it', e);
-    }
-  }
-
-  /** "Remove", not "Delete": the workspace is archived (off the sidebar) and
-   *  its folder and files are never touched (patterns.md §7 — Remove detaches,
-   *  the thing still exists). */
-  async function removeWorkspace(w: WorkspaceWithRole): Promise<void> {
-    const ok = await confirmer.ask(
-      `Remove “${w.name}” from Otto? It leaves the sidebar with its sessions; the folder and its files on disk are not touched.`,
-      { title: 'Remove workspace', confirmLabel: 'Remove', danger: true },
-    );
-    if (!ok) return;
-    try {
-      if (!(await ws.archiveWorkspace(w.id))) return;
-      toasts.info('Workspace removed', w.name);
-    } catch (e) {
-      toastError('Couldn’t remove the workspace', e);
-    }
-  }
+  // ── Workspace management: workspaceActions.ts; live counts per workspace row ──
+  const wsActivity = $derived(workspaceActivity([...ws.foregroundActive, ...ws.otherWsSessions], ws.statusMap, ws.needsYou));
+  let removedOpen = $state(false);
 
   function startRename(id: string, current: string): void {
     const s = ws.getSession(id);
@@ -442,7 +401,7 @@
         { label: 'Remove workspace…', icon: 'trash', danger: true, action: () => void removeWorkspace(w) },
       );
     }
-    items.push({ separator: true }, { label: 'Add workspace…', icon: 'plus', action: () => (ui.newWorkspaceOpen = true) });
+    items.push({ separator: true }, { label: 'Add workspace…', icon: 'plus', action: () => (ui.newWorkspaceOpen = true) }, { label: 'Removed workspaces…', icon: 'archive', action: () => (removedOpen = true) });
     return items;
   }
 
@@ -457,7 +416,8 @@
     renamingId = null;
     if (!id) return;
     const next = draft.trim();
-    if (next) await ws.renameSession(id, next);
+    // A failed rename leaves the old title (the store only takes the reply) and says why.
+    if (next) await ws.renameSession(id, next).catch((e) => toastError('Couldn’t rename the session', e));
   }
 
   // ── Module list (shared registry → RBAC + plugins → user order/visibility) ──
@@ -999,6 +959,7 @@
         <div class="nested-empty">No matching workspaces</div>
       {/if}
       {#each fWorkspaces as w (w.id)}
+        {@const act = wsActivity.get(w.id)}
         <button use:rowMenu
           class="nav-item"
           class:active-ws={ws.currentId === w.id}
@@ -1008,6 +969,9 @@
         >
           <Icon name="folder" size={14} />
           <span class="grow ellipsis">{w.name}</span>
+          {#if act}<span class="sr-only">{activityText(act)}</span>{/if}
+          {#if act?.needs}<span class="count-chip needs" aria-hidden="true" title={activityText(act)}>{act.needs}</span>{/if}
+          {#if act?.working}<span class="count-chip working" aria-hidden="true" title={activityText(act)}>{act.working}</span>{/if}
           {#if ws.currentId === w.id}<Icon name="check" size={12} />{/if}
         </button>
       {/each}
@@ -1082,6 +1046,7 @@
   {@const id = shareSessionId}
   <LazyMount lazy={ShareModalChunk} what="the share dialog" quiet onerror={() => (shareSessionId = null)} props={{ sessionId: id, onclose: () => (shareSessionId = null) }} />
 {/if}
+{#if removedOpen}<RemovedWorkspaces onclose={() => (removedOpen = false)} />{/if}
 
 <!-- The module the side-by-side pane shows: a quiet trailing glyph. -->
 {#snippet sideMark(id: string)}

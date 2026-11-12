@@ -42,21 +42,35 @@
   let draft = $state('');
   let busy = $state(false);
 
+  /** The agent `data` belongs to. */
+  let dataFor = '';
   async function load(): Promise<void> {
+    // After a fast switch an older agent's answer lands late: drop it.
+    const id = agentId;
     loading = true;
     try {
-      data = await personalAgentsApi.memories(agentId);
+      const next = await personalAgentsApi.memories(id);
+      if (id !== agentId) return;
+      data = next;
+      dataFor = id;
       error = null;
     } catch (e) {
-      error = loadErrorText(e);
+      if (id === agentId) error = loadErrorText(e);
     } finally {
-      loading = false;
+      if (id === agentId) loading = false;
     }
   }
   $effect(() => {
-    void agentId;
+    const id = agentId;
     void reloadKey;
-    untrack(() => void load());
+    untrack(() => {
+      // Another agent's memories never show under this one's name.
+      if (dataFor !== id) {
+        data = null;
+        error = null;
+      }
+      void load();
+    });
   });
 
   const sources = $derived(

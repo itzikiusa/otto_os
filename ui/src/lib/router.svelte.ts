@@ -13,6 +13,7 @@ import { isEmbedded } from './desktop';
 import { captureRoomInvite } from './rooms/invites';
 import { parsePairRoute, savePairState } from './phonePair';
 import { activeNavId, moduleHome } from './sidebar';
+import { ephemeralHash as ephemeralRoute, knownHash, parseResumePoints } from './routeKeys';
 
 // ---------------------------------------------------------------------------
 // Share-token in-memory store (Task 3.1)
@@ -54,45 +55,26 @@ function restoreLastRoute(): void {
   if (h !== '' && h !== '#/' && h !== '#') return; // explicit route wins
   const saved = lsGet(winKey(LS_LAST_ROUTE));
   // Never restore into a share route (`#/s/…` is one-time-view by design).
-  if (saved && saved.startsWith('#/') && !saved.startsWith('#/s/') && !saved.startsWith('#/pair') && !saved.startsWith('#/room/') && !saved.startsWith('#/room-host/')) {
+  if (saved && saved.startsWith('#/') && !ephemeralRoute(saved) && knownHash(saved)) {
     history.replaceState(null, '', saved);
   }
 }
 
 function persistLastRoute(hash: string): void {
   if (!IS_TAURI) return;
-  if (hash.startsWith('#/s/') || hash.startsWith('#/pair') || hash.startsWith('#/room/') || hash.startsWith('#/room-host/')) return; // ephemeral room/share views are never sticky
+  // Ephemeral room/share views are never sticky, nor is a route no page answers.
+  if (ephemeralRoute(hash) || !knownHash(hash)) return;
   lsSet(winKey(LS_LAST_ROUTE), hash);
 }
 
 // Per-window "resume module" memory: the last route seen under each sidebar
 // module (keyed by its nav id, so database/brokers land under connections), so
 // clicking a module in the sidebar / bottom nav / ⌘K returns to where the
-// person left it instead of the module's bare root. sessionStorage, per
-// window (winKey): survives a reload, not a relaunch (the per-window last
-// route above covers relaunch). The embedded side pane keeps it in memory.
-const SS_LAST_BY_MODULE = 'otto_last_by_module';
-
-function ssGet(key: string): string | null {
-  try {
-    return sessionStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
-function ssSet(key: string, value: string): void {
-  try {
-    sessionStorage.setItem(key, value);
-  } catch {
-    /* private window / blocked storage — memory only */
-  }
-}
-
-/** Routes never remembered as a module's resume point (one-time share/room views). */
-function ephemeralRoute(hash: string): boolean {
-  return hash.startsWith('#/s/') || hash.startsWith('#/pair') || hash.startsWith('#/room/') || hash.startsWith('#/room-host/');
-}
+// person left it instead of the module's bare root. localStorage per window
+// (winKey) like the last route, so it survives a relaunch — and per WORKSPACE
+// (`setResumeScope`), so a module never resumes onto another workspace's
+// repo, story or session. The embedded side pane keeps it in memory.
+const LS_LAST_BY_MODULE = 'otto_last_by_module';
 
 /** The sidebar nav id a hash belongs to (see `activeNavId`). */
 export function navIdForHash(hash: string): string {
@@ -100,22 +82,9 @@ export function navIdForHash(hash: string): string {
   return activeNavId(raw === '' ? [] : raw.split('/').map(safeDecode));
 }
 
-function loadLastByModule(): Map<string, string> {
-  const m = new Map<string, string>();
-  if (typeof window === 'undefined' || isEmbedded) return m;
-  const raw = ssGet(winKey(SS_LAST_BY_MODULE));
-  if (!raw) return m;
-  try {
-    const obj = JSON.parse(raw) as unknown;
-    if (obj && typeof obj === 'object') {
-      for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
-        if (typeof v === 'string' && v.startsWith('#/') && !ephemeralRoute(v)) m.set(k, v);
-      }
-    }
-  } catch {
-    /* corrupt entry — start fresh */
-  }
-  return m;
+function loadLastByModule(scope: string): Map<string, string> {
+  if (typeof window === 'undefined' || isEmbedded) return new Map();
+  return parseResumePoints(lsGet(winKey(LS_LAST_BY_MODULE)), scope);
 }
 
 /** Retrieve the in-memory share token captured for a given session.
@@ -199,8 +168,12 @@ class Router {
   /** Bumped per route commit: a slower page load finishing after a newer
    *  navigation must not switch back to its (stale) route. */
   private commitSeq = 0;
-  /** Last route per sidebar module — see {@link openModule}. Plain field. */
-  private lastByModule = loadLastByModule();
+  /** Last route per sidebar module — see {@link openModule}. Plain fields. */
+  private resumeScope = '';
+  /** False until the first {@link setResumeScope}: nothing is persisted
+   *  before the window knows which workspace its points belong to. */
+  private resumeScoped = false;
+  private lastByModule = loadLastByModule('');
 
   canBack = $derived(this.index > 0);
   canForward = $derived(this.index < this.stack.length - 1);
@@ -515,15 +488,36 @@ class Router {
     this.stamp();
   }
 
-  /** Record the current hash as its module's resume point. */
+  /** Record the current hash as its module's resume point (never a route no
+   *  page answers: an unknown module must not become anyone's resume point). */
   private rememberModule(): void {
     const h = this.currentHash();
-    if (ephemeralRoute(h)) return;
+    if (ephemeralRoute(h) || !knownHash(h)) return;
     const id = navIdForHash(h);
     if (this.lastByModule.get(id) === h) return;
     this.lastByModule.set(id, h);
-    if (isEmbedded) return;
-    ssSet(winKey(SS_LAST_BY_MODULE), JSON.stringify(Object.fromEntries(this.lastByModule)));
+    if (isEmbedded || !this.resumeScoped) return;
+    let all: Record<string, unknown> = {};
+    try {
+      all = (JSON.parse(lsGet(winKey(LS_LAST_BY_MODULE)) ?? '{}') as Record<string, unknown>) ?? {};
+    } catch {
+      /* corrupt — rewrite */
+    }
+    lsSet(winKey(LS_LAST_BY_MODULE), JSON.stringify({ ...all, [this.resumeScope]: Object.fromEntries(this.lastByModule) }));
+  }
+
+  /** The workspace the resume points belong to changed (installShell): use
+   *  that workspace's own points — another workspace's entity routes never
+   *  carry over. At boot the route on screen (restored with the workspace)
+   *  is recorded for it; on a switch it is not (it shows the old workspace). */
+  setResumeScope(workspaceId: string | null): void {
+    const next = workspaceId ?? '';
+    if (this.resumeScoped && next === this.resumeScope) return;
+    const booting = !this.resumeScoped;
+    this.resumeScoped = true;
+    this.resumeScope = next;
+    this.lastByModule = loadLastByModule(next);
+    if (booting) this.rememberModule();
   }
 
   /**

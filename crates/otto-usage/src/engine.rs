@@ -24,6 +24,11 @@ use crate::types::{
     SessionUsage, TokenTotals, UsageConfig, UsageEvent, UsageReport, UsageStatus, UsageSummary,
 };
 
+#[path = "engine/health.rs"]
+mod health;
+#[path = "engine/recovery.rs"]
+mod recovery;
+
 /// Flush the usage buffer at least this often. Every non-empty flush is one
 /// INSERT = one new MergeTree part, and each part is later merged into the
 /// month's big part — at 15 s the October partition was rewritten 1345 times
@@ -124,9 +129,9 @@ struct Inner {
     /// its final flush lands before the server stops.
     writer: Option<tokio::task::JoinHandle<()>>,
     bin_path: Option<PathBuf>,
-    /// Why the last (re)initialization left the engine unavailable — the
-    /// server's own output goes to /dev/null, so this is the only record a
-    /// caller waiting on [`UsageEngine::wait_ready`] can report.
+    /// Why the last (re)initialization left the engine unavailable, with the
+    /// last lines the server printed — the record a caller waiting on
+    /// [`UsageEngine::wait_ready`] can report.
     start_error: Option<String>,
 }
 
@@ -142,6 +147,8 @@ pub struct UsageEngine {
     /// [`Self::start`]) drains it and restarts the server via [`Self::reinit`],
     /// so usage tracking recovers without a daemon restart.
     heal: Arc<HealSignal>,
+    /// Retries a failed (re)initialization with backoff (see `recovery`).
+    recovery: Arc<recovery::Recovery>,
     /// Last measured ClickHouse on-disk size + when (see [`DISK_SIZE_TTL`]).
     disk_cache: std::sync::Mutex<Option<(std::time::Instant, u64)>>,
     /// Last `session_totals(days, otto_only)` result for SESSION_TOTALS_TTL:
@@ -269,6 +276,11 @@ impl FlushSync {
     }
 }
 
+/// Pending journal rows as a 0.0–1.0 fraction of the outbox cap.
+fn journal_fill_ratio(pending: u64) -> f64 {
+    (pending as f64 / crate::ingestion::OUTBOX_MAX as f64).min(1.0)
+}
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -280,6 +292,7 @@ fn unix_now() -> u64 {
 impl Drop for UsageEngine {
     fn drop(&mut self) {
         self.heal.notify.notify_one();
+        self.recovery.notify.notify_one();
         // Ends the wake flusher too (its upgrade fails).
         self.ch_woke.notify_one();
     }
@@ -329,6 +342,7 @@ impl UsageEngine {
             data_dir,
             reinit_lock: tokio::sync::Mutex::new(()),
             heal: Arc::new(HealSignal::default()),
+            recovery: Arc::new(recovery::Recovery::default()),
             disk_cache: std::sync::Mutex::new(None),
             totals_cache: tokio::sync::Mutex::new(None),
             metrics_buf: std::sync::Mutex::new(MetricsBuf::default()),
@@ -349,6 +363,7 @@ impl UsageEngine {
         tokio::spawn(async move {
             bg.reinit(config).await;
         });
+        recovery::spawn(Arc::downgrade(&engine), Arc::clone(&engine.recovery));
         // Self-heal watcher: when an insert path flags the server child as dead
         // (see `heal`), restart it. Weak so the watcher never keeps a dropped
         // engine alive; exits with it.
@@ -388,11 +403,23 @@ impl UsageEngine {
         });
         let weak = Arc::downgrade(&engine);
         tokio::spawn(async move {
+            // Every 90 s for the length of an outage: logged once, then at
+            // most every 15 minutes with a count.
+            let mut deferred = recovery::WarnGate::default();
             loop {
                 tokio::time::sleep(FLUSH_INTERVAL).await;
                 let Some(engine) = weak.upgrade() else { break };
-                if let Err(e) = engine.flush_ingestion().await {
-                    tracing::warn!("usage: durable delivery deferred: {e}");
+                match engine.flush_ingestion().await {
+                    Ok(()) => {
+                        if deferred.clear() {
+                            tracing::info!("usage: durable delivery resumed");
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(n) = deferred.hit(std::time::Instant::now()) {
+                            tracing::warn!("usage: durable delivery deferred ({n}x): {e}");
+                        }
+                    }
                 }
             }
         });
@@ -403,8 +430,20 @@ impl UsageEngine {
     /// locks the data dir, so this STOPS any previous server first (drop the
     /// writer channel → ends its task; shutdown the old server → releases the
     /// lock) BEFORE starting a fresh one. Serialized + safe to call repeatedly.
+    ///
+    /// A start that leaves an enabled engine down arms the background retry
+    /// (see `recovery`), so an outage heals without a daemon restart.
     pub async fn reinit(&self, config: UsageConfig) {
         let _g = self.reinit_lock.lock().await;
+        if self.reinit_locked(config).await {
+            self.recovery.notify.notify_one();
+        }
+    }
+
+    /// [`Self::reinit`]'s body; the caller holds `reinit_lock`. Returns
+    /// whether the engine is enabled, has a binary, and still failed to come
+    /// up — the case worth retrying.
+    async fn reinit_locked(&self, config: UsageConfig) -> bool {
         let ch_dir = self.data_dir.join("clickhouse");
         // `locate` may run a `which` subprocess: off the async workers (S9-11).
         let configured = config.clickhouse_path.clone();
@@ -508,6 +547,9 @@ impl UsageEngine {
         };
 
         let became_available = ch.is_some();
+        let wanted = config.enabled && bin_path.is_some();
+        self.recovery.after_reinit(wanted, became_available);
+        let retry = wanted && !became_available;
         let ch_for_compact = ch.clone();
         *self.config.write().expect("usage config lock") = config.clone();
         *self.inner.write().expect("usage inner lock") = Inner {
@@ -529,6 +571,7 @@ impl UsageEngine {
                 });
             }
         }
+        retry
     }
 
     /// Test seam: raise the self-heal signal as a failed insert would.
@@ -541,6 +584,8 @@ impl UsageEngine {
     /// daemon's graceful-shutdown path so the dir lock is released and the next
     /// daemon start doesn't have to reclaim an orphan.
     pub async fn shutdown(&self) {
+        // No background retry may start a server after this.
+        self.recovery.shut_down.store(true, Ordering::SeqCst);
         // Bounded shutdown never deletes pending rows; restart will replay them.
         if let Ok(Err(e)) = tokio::time::timeout(WRITER_DRAIN, self.flush_ingestion()).await {
             tracing::warn!("usage: shutdown journal retained: {e}");
@@ -2044,6 +2089,8 @@ impl UsageEngine {
         };
         let binary = bin_path.map(|p| p.display().to_string());
         let data_dir = self.data_dir.join("clickhouse").display().to_string();
+        let outage_since = self.recovery.outage_since();
+        let journal_fill = self.journal_fill().await;
 
         if let Some(ch) = ch {
             let version = ch.version().await.ok().filter(|s| !s.is_empty());
@@ -2085,6 +2132,8 @@ impl UsageEngine {
                 disk_bytes,
                 priced_as_of: crate::PRICED_AS_OF.to_string(),
                 tailer: self.tailer_status(),
+                outage_since,
+                journal_fill,
             }
         } else {
             UsageStatus {
@@ -2100,11 +2149,20 @@ impl UsageEngine {
                 disk_bytes: 0,
                 priced_as_of: crate::PRICED_AS_OF.to_string(),
                 tailer: self.tailer_status(),
+                outage_since,
+                journal_fill,
             }
         }
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────────
+
+    /// [`UsageStatus::journal_fill`]: pending outbox rows over the cap, when
+    /// the journal is open (status never opens it).
+    async fn journal_fill(&self) -> Option<f64> {
+        let pending = self.ingestion.get()?.pending_count().await.ok()?;
+        Some(journal_fill_ratio(pending))
+    }
 
     /// On-disk size of the store, cached for [`DISK_SIZE_TTL`] (U2). Read from
     /// `system.parts` (active + outdated parts); the recursive directory walk
@@ -2950,6 +3008,37 @@ mod scope_tests {
         assert_eq!(json_u64(&serde_json::json!(7)), Some(7));
         assert_eq!(json_u64(&serde_json::json!("12")), Some(12));
         assert_eq!(json_u64(&serde_json::json!(null)), None);
+    }
+
+    #[test]
+    fn journal_fill_is_a_capped_fraction_of_the_outbox_limit() {
+        assert_eq!(journal_fill_ratio(0), 0.0);
+        assert_eq!(journal_fill_ratio(50_000), 0.5);
+        assert_eq!(journal_fill_ratio(250_000), 1.0);
+    }
+
+    /// The Usage page reads the outage start and journal fill from status;
+    /// status itself never opens the journal.
+    #[tokio::test]
+    async fn status_reports_journal_fill_once_the_journal_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = UsageEngine::start(
+            UsageConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            dir.path().to_path_buf(),
+        )
+        .await;
+        let st = engine.status().await;
+        assert_eq!(st.journal_fill, None);
+        assert_eq!(st.outage_since, None, "disabled is not an outage");
+        engine
+            .commit_ingestion(&serde_json::json!({"offset": 1}), &[])
+            .await
+            .unwrap();
+        assert_eq!(engine.status().await.journal_fill, Some(0.0));
+        engine.shutdown().await;
     }
 
     /// A binary that is not ClickHouse: the engine stays unavailable and says

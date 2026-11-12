@@ -43,8 +43,8 @@ use otto_review::engine::{
     anchored_line_text, append_to_review_file, compose_orchestrator_prompt, default_review_config,
     expand_agent_runs, general_comment_body, inline_anchor_rejected, is_blocking_severity,
     mode_source, orchestrator_budget, parse_draft_comments, repo_review_binding_key,
-    resolve_blocker, review_agent_cancel_key, review_agent_timeout, review_run_complete,
-    reviewer_slots, same_draft_comment, severity_rank, ReviewBranches, REVIEW_SPAWN_STAGGER,
+    resolve_blocker, review_agent_cancel_key, review_agent_timeout, reviewer_slots,
+    same_draft_comment, severity_rank, ReviewBranches, REVIEW_SPAWN_STAGGER,
 };
 pub(crate) use otto_review::engine::{
     resolve_skill_inline, workflow_review_config, workflow_review_config_from_json,

@@ -287,6 +287,8 @@ test('a comment declined mid "Post all" is skipped', async () => {
     plural,
     commentPreview: (c: { body: string }) => c.body,
     confirmOutward: async () => true,
+    postPlan: {},
+    postConfirm: null,
     toasts: { success() {}, error() {}, warn() {} },
     postComment: async (c: { id: string }) => {
       posted.push(c.id);
@@ -295,7 +297,11 @@ test('a comment declined mid "Post all" is skipped', async () => {
       return true;
     },
   });
-  await s.postAllDrafts();
+  // The full-body confirm (PostCommentsConfirm) opens; answer "post them all".
+  const run = s.postAllDrafts();
+  await Promise.resolve();
+  s.postConfirm.done(review.comments);
+  await run;
   assert.deepEqual(posted, ['a']);
 });
 
@@ -381,6 +387,8 @@ test('merge sends expected_head_sha and explains a moved head', async () => {
     pinSha: 'abc123',
     probeTick: 0,
     mergeAnyway: true,
+    ackUnseen: true,
+    unseenCommits: null,
     onstale() {
       stale++;
     },
@@ -447,7 +455,8 @@ test('a lazily fetched file never borrows another file’s hunks', async () => {
 
 test('⌘] / Ctrl+N are left to the app; a bare ] moves to the next file', () => {
   const moves: number[] = [];
-  const s = componentFunctions(git('DiffViewer.svelte'), ['onDiffKeydown'], { navToFile: (d: number) => moves.push(d) });
+  const { fileNavDelta } = componentFunctions(git('diff-dom.ts'), ['fileNavDelta'], {});
+  const s = componentFunctions(git('DiffViewer.svelte'), ['onDiffKeydown'], { navToFile: (d: number) => moves.push(d), fileNavDelta });
   const ev = (key: string, mods: Record<string, boolean> = {}) => ({ key, target: { tagName: 'DIV' }, preventDefault() {}, ...mods });
   s.onDiffKeydown(ev(']', { metaKey: true }));
   s.onDiffKeydown(ev('n', { ctrlKey: true }));

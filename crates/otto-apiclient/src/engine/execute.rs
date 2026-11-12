@@ -55,6 +55,14 @@ pub async fn run_saved<C: ApiClientCtx>(
         }
     }
 
+    let secret_keys: Vec<String> = environment
+        .as_ref()
+        .map(|env| env.secret_keys.clone())
+        .unwrap_or_default();
+    // Scripts see `{{KEY}}` placeholders, never Keychain values (they are
+    // substituted at send, after the binding check below).
+    let script_secrets = ScriptSecrets::new(&vars, &env_blob, &secret_keys);
+
     // Pre-request script: same mutable request + variables surface as automation steps.
     let pre_code = extras
         .pointer("/scripts/pre")
@@ -67,15 +75,19 @@ pub async fn run_saved<C: ApiClientCtx>(
             headers: exec.headers.clone(),
             body: exec.body.clone(),
         };
-        let svars = string_vars(&vars);
-        let out = api_scripts::run_pre_request_isolated(pre_code, &script_req, &svars).await;
-        if let Some(error) = out.error {
+        let svars = script_secrets.script_vars(&vars);
+        let mut out = api_scripts::run_pre_request_isolated(pre_code, &script_req, &svars).await;
+        if let Some(error) = out.error.take() {
             let error =
                 api_secrets::scrub_str(&error, &env_blob.values().cloned().collect::<Vec<_>>());
             return Err(EngineError::Invalid(format!(
                 "pre-request script failed: {error}"
             )));
         }
+        script_secrets
+            .check_pre(pre_code, &script_req, &out)
+            .map_err(EngineError::Invalid)?;
+        script_secrets.restore(&mut out.vars);
         if let Some(mutated) = out.request {
             exec.method = mutated.method;
             exec.url = mutated.url;
@@ -118,24 +130,36 @@ pub async fn run_saved<C: ApiClientCtx>(
     // URL in a pre-request script, so a stored secret leaving its bound host
     // needs a PERSON's confirmation here too — the agent-authored new-host
     // speed bump above is self-confirmable and does not cover secrets.
-    if let Some(host) = unbound_secret_host(
+    let agent = is_agent_caller(headers, auth);
+    let unbound = find_unbound_secret(
         &repo,
+        Some(ctx.secrets()),
         wid,
         &exec,
         &vars,
         &env_vars,
         &env_blob,
-        environment
-            .as_ref()
-            .map(|env| env.secret_keys.as_slice())
-            .unwrap_or(&[]),
+        &secret_keys,
+        None,
     )
-    .await?
-    {
-        let agent = is_agent_caller(headers, auth);
+    .await?;
+    if let Some(unbound) = &unbound {
         if agent || !req.confirm_new_host {
-            return Err(new_host_conflict(&host, agent));
+            return Err(unbound_secret_conflict(unbound, agent));
         }
+    }
+    if !agent {
+        let confirmed = unbound.as_ref().map(|_| exec.url.as_str());
+        record_person_bindings(
+            &repo,
+            ctx.secrets(),
+            wid,
+            &exec,
+            &vars,
+            &env_vars,
+            confirmed,
+        )
+        .await;
     }
 
     exec = resolve_exec_auth(&repo, ctx.secrets(), wid, &exec)
@@ -190,12 +214,13 @@ pub async fn run_saved<C: ApiClientCtx>(
         }
     };
     let allow_local = workspace_allows_local(ctx, wid).await;
-    let mut response = match build_and_send(
+    let mut response = match build_and_send_with(
         &jar_scope(wid, &user.id),
         &exec,
         &vars,
         proxy.as_deref(),
         allow_local,
+        uses_env_secret(&exec, &vars, &env_blob, &secret_keys),
     )
     .await
     {
@@ -252,13 +277,15 @@ pub async fn run_saved<C: ApiClientCtx>(
             headers: response_headers,
             body_text: response.body.clone(),
         };
-        let out = api_scripts::run_post_response_isolated(
+        let script_secrets = ScriptSecrets::new(&vars, &env_blob, &secret_keys);
+        let mut out = api_scripts::run_post_response_isolated(
             post_code,
             &script_response,
-            &string_vars(&vars),
+            &script_secrets.script_vars(&vars),
         )
         .await;
         if out.error.is_none() {
+            script_secrets.restore(&mut out.vars);
             merge_string_vars(&mut vars, &out.vars);
         }
         tests.extend(
@@ -364,26 +391,37 @@ pub async fn execute_service<C: ApiClientCtx>(
     // Secret ↔ host binding: the caller chooses the URL here, so a stored
     // secret (a `$secret` marker or a Keychain env variable) must not be
     // resolved for a host it isn't bound to without a PERSON's confirmation —
-    // before anything is resolved or sent.
-    if let Some(host) = unbound_secret_host(
+    // before anything is resolved or sent. A person's send records where
+    // each `$secret` marker is bound (see `record_person_bindings`).
+    let agent = is_agent_caller(headers, auth);
+    let secret_keys: &[String] = environment
+        .as_ref()
+        .map(|env| env.secret_keys.as_slice())
+        .unwrap_or(&[]);
+    let unbound = find_unbound_secret(
         &repo,
+        Some(ctx.secrets()),
         wid,
         &req,
         &vars,
         &env_vars,
         &env_blob,
-        environment
-            .as_ref()
-            .map(|env| env.secret_keys.as_slice())
-            .unwrap_or(&[]),
+        secret_keys,
+        None,
     )
-    .await?
-    {
-        let agent = is_agent_caller(headers, auth);
+    .await?;
+    if let Some(unbound) = &unbound {
         if agent || !req.confirm_new_host {
-            return Err(new_host_conflict(&host, agent));
+            return Err(unbound_secret_conflict(unbound, agent));
         }
     }
+    if !agent {
+        let confirmed = unbound.as_ref().map(|_| req.url.as_str());
+        record_person_bindings(&repo, ctx.secrets(), wid, &req, &vars, &env_vars, confirmed).await;
+    }
+    // An environment secret may sit in any header or body: a redirect to
+    // another host is not followed (see `prepare_request_with`).
+    let credentialed = uses_env_secret(&req, &vars, &env_blob, secret_keys);
 
     // Snapshot of the request as executed. Secret auth members are REDACTED —
     // history must never become the plaintext copy that defeats the Keychain.
@@ -433,12 +471,13 @@ pub async fn execute_service<C: ApiClientCtx>(
     let send = match resolve_socks_proxy(ctx, wid, req.ssh_connection_id.as_ref(), &user.id).await {
         Ok(proxy) => {
             let allow_local = workspace_allows_local(ctx, wid).await;
-            build_and_send(
+            build_and_send_with(
                 &jar_scope(wid, &user.id),
                 &exec_req,
                 &vars,
                 proxy.as_deref(),
                 allow_local,
+                credentialed,
             )
             .await
         }

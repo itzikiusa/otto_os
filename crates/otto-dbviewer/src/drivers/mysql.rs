@@ -2425,7 +2425,7 @@ fn raw_row_json_len(row: &MySqlRow, decoders: &[CellDecoder]) -> usize {
             .map(|b| b.len().min(types::MAX_CELL_CHARS));
         n += 3 + match (raw, dec) {
             (None, _) => 4,
-            (Some(len), CellDecoder::Bytes) => len.div_ceil(3) * 4,
+            (Some(len), CellDecoder::Bytes | CellDecoder::Geometry) => len.div_ceil(3) * 4,
             (Some(len), CellDecoder::Text | CellDecoder::Json | CellDecoder::Fallback) => len,
             (Some(len), _) => len.max(24),
         };
@@ -2523,7 +2523,9 @@ enum CellDecoder {
     Text,
     /// BINARY/VARBINARY/BLOB → base64.
     Bytes,
-    /// Anything else (YEAR, BIT, SET, GEOMETRY, NULL, future types): the typed
+    /// GEOMETRY → its internal-format bytes (SRID + WKB) as base64, always.
+    Geometry,
+    /// Anything else (YEAR, BIT, SET, NULL, future types): the typed
     /// cascade, then raw text / base64.
     Fallback,
 }
@@ -2544,6 +2546,7 @@ fn cell_decoder(type_name: &str) -> CellDecoder {
         "TIME" => Time,
         "CHAR" | "VARCHAR" | "TINYTEXT" | "TEXT" | "MEDIUMTEXT" | "LONGTEXT" | "ENUM" => Text,
         "BINARY" | "VARBINARY" | "TINYBLOB" | "BLOB" | "MEDIUMBLOB" | "LONGBLOB" => Bytes,
+        "GEOMETRY" => Geometry,
         _ => Fallback,
     }
 }
@@ -2605,6 +2608,7 @@ fn mysql_cell(row: &MySqlRow, idx: usize, dec: CellDecoder) -> Value {
                     .unwrap_or(Value::Null)
             })
             .ok(),
+        CellDecoder::Geometry => Some(geometry_to_json(row.try_get_raw(idx))),
         CellDecoder::Fallback => None,
     };
     hit.unwrap_or_else(|| mysql_value_to_json(row, idx))
@@ -2729,6 +2733,25 @@ fn raw_cell_fallback(
             Ok(b) => Value::String(B64.encode(b)),
             Err(_) => Value::Null,
         },
+    }
+}
+
+/// A GEOMETRY cell as base64 of MySQL's internal format (4-byte SRID + WKB) —
+/// the bytes `mysqldump --hex-blob` round-trips. sqlx's `Vec<u8>` decode
+/// rejects GEOMETRY, and the text-or-base64 fallback rendered a WKB that
+/// happened to be valid UTF-8 as garbled TEXT, so the column could not be
+/// marked `binary` (types::is_binary_type_name). SQL NULL stays Null.
+fn geometry_to_json(
+    raw: std::result::Result<sqlx::mysql::MySqlValueRef<'_>, sqlx::Error>,
+) -> Value {
+    use sqlx::{Value as _, ValueRef as _};
+    let Ok(raw) = raw else { return Value::Null };
+    if raw.is_null() {
+        return Value::Null;
+    }
+    match sqlx::ValueRef::to_owned(&raw).try_decode_unchecked::<Vec<u8>>() {
+        Ok(bytes) => Value::String(B64.encode(bytes)),
+        Err(_) => raw_cell_fallback(Ok(raw)),
     }
 }
 
@@ -3148,7 +3171,7 @@ mod tests {
             ("YEAR", Fallback),
             ("BIT", Fallback),
             ("SET", Fallback),
-            ("GEOMETRY", Fallback),
+            ("GEOMETRY", Geometry),
             ("NULL", Fallback),
             ("SOMETHING NEW", Fallback),
         ] {

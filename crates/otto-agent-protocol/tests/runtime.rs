@@ -2485,3 +2485,134 @@ async fn fresh_context_waits_for_questions_and_old_cards_cannot_answer_new_proce
     );
     recovered.close(&s.id).await.unwrap();
 }
+
+/// Embedded threads (a PR's Ask / Explain / Fix, a connection's diagnosis):
+/// the create body's `source` / `origin` land in the server-owned meta, the
+/// page finds the thread again by them (closed ones too), a thread it opens
+/// stays grouped with it, and the auto-close pass closes only the idle ones —
+/// never one with a running turn or a pending approval, never a plain thread.
+#[tokio::test]
+async fn embedded_threads_are_found_by_origin_and_auto_close_only_when_idle() {
+    use chrono::TimeDelta;
+    use otto_core::agent_runtime::{CreateRuntimeSessionBody, OpenPeerReq};
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let embedded = |origin_id: &str| {
+        serde_json::from_value::<CreateRuntimeSessionBody>(serde_json::json!({
+            "provider": "gemini",
+            "cwd": cwd,
+            "source": "pr-agent",
+            "origin": {"kind": "pr", "id": origin_id, "label": "Fix the parser"},
+            "meta": {"read_only": true},
+        }))
+        .unwrap()
+        .into_req()
+        .unwrap()
+    };
+    let (u, w): (Id, Id) = ("u1".into(), "w1".into());
+    let idle = rt.create(&u, &w, embedded("repo#7")).await.unwrap();
+    let asking = rt.create(&u, &w, embedded("repo#7")).await.unwrap();
+    let working = rt.create(&u, &w, embedded("repo#7")).await.unwrap();
+    let other_pr = rt.create(&u, &w, embedded("repo#8")).await.unwrap();
+    let plain = create(&rt, cwd).await;
+    let meta = idle.meta.clone().unwrap();
+    assert_eq!(meta["source"], "pr-agent");
+    assert_eq!(meta["origin"]["id"], "repo#7");
+    assert_eq!(meta["origin"]["label"], "Fix the parser");
+    assert!(meta.get("read_only").is_none(), "a body's meta never lands");
+    assert_eq!(rt.get(&idle.id).await.unwrap().meta, idle.meta);
+
+    let found = rt
+        .list_filtered(&w, Some(&u), Some("pr-agent"), Some("repo#7"))
+        .await
+        .unwrap();
+    let mut found_ids: Vec<Id> = found.iter().map(|s| s.id.clone()).collect();
+    found_ids.sort();
+    let mut want = vec![idle.id.clone(), asking.id.clone(), working.id.clone()];
+    want.sort();
+    assert_eq!(found_ids, want);
+    assert!(found.iter().all(|s| s.meta.as_ref() == Some(&meta)));
+
+    rt.prompt(&asking.id, "ask").await.unwrap();
+    host.wait(|e| e.session_id == asking.id && e.body.type_name() == "runtime_request.updated")
+        .await;
+    rt.prompt(&working.id, "hang").await.unwrap();
+
+    // Not idle long enough yet, or switched off: nothing closes.
+    assert!(rt
+        .auto_close_idle_embedded(12, Utc::now())
+        .await
+        .unwrap()
+        .is_empty());
+    let later = Utc::now() + TimeDelta::hours(13);
+    assert!(rt
+        .auto_close_idle_embedded(0, later)
+        .await
+        .unwrap()
+        .is_empty());
+    let mut closed = rt.auto_close_idle_embedded(12, later).await.unwrap();
+    closed.sort();
+    let mut want = vec![idle.id.clone(), other_pr.id.clone()];
+    want.sort();
+    assert_eq!(closed, want, "only the idle embedded threads");
+    rt.flush(&idle.id).await;
+    assert_eq!(
+        rt.get(&idle.id).await.unwrap().status,
+        RuntimeSessionStatus::Closed
+    );
+    assert_eq!(
+        rt.get(&asking.id).await.unwrap().status,
+        RuntimeSessionStatus::AwaitingPermission,
+        "the person's pending answer is kept"
+    );
+    for s in [&working, &plain] {
+        assert_ne!(
+            rt.get(&s.id).await.unwrap().status,
+            RuntimeSessionStatus::Closed
+        );
+    }
+    // Closed, not deleted: still found by the page.
+    let found = rt
+        .list_filtered(&w, Some(&u), Some("pr-agent"), Some("repo#7"))
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 3);
+    assert!(found
+        .iter()
+        .any(|s| s.id == idle.id && s.status == RuntimeSessionStatus::Closed));
+
+    // A thread opened from an embedded one stays grouped with it.
+    let peer = rt
+        .open_peer(
+            &asking.id,
+            OpenPeerReq {
+                provider: RuntimeProvider::Gemini,
+                prompt: None,
+                title: None,
+                model: None,
+                effort: None,
+                cwd: None,
+                meta: None,
+            },
+        )
+        .await
+        .unwrap();
+    let peer_meta = peer.meta.clone().unwrap();
+    assert_eq!(peer_meta["source"], meta["source"]);
+    assert_eq!(peer_meta["origin"], meta["origin"]);
+    assert_eq!(
+        rt.list_filtered(&w, Some(&u), None, Some("repo#7"))
+            .await
+            .unwrap()
+            .len(),
+        4
+    );
+
+    for s in [&idle, &asking, &working, &plain] {
+        rt.close(&s.id).await.unwrap();
+    }
+    rt.close(&peer.id).await.unwrap();
+}

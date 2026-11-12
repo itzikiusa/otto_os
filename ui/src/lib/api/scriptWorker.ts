@@ -1,7 +1,10 @@
-import { runPreRequest, runPostResponse } from './scripts';
+import { blockScriptNetwork, runPreRequest, runPostResponse } from './scripts';
 import { assertScriptPayload, type ScriptInput, type ScriptOutput } from './scriptProtocol';
 
 // This module is loaded only as a dedicated Worker, never in the webview.
+// No script may reach the network from here (see `blockScriptNetwork`).
+blockScriptNetwork(self);
+
 self.onmessage = (event: MessageEvent<ScriptInput>) => {
   try {
     const input = event.data;

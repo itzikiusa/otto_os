@@ -44,6 +44,8 @@ function literals(): Record<string, any> {
     escapeSqlText: (s: string) => s.replace(/'/g, "''"),
     backslashEscapes: () => false,
     boolLiteral: dialect.boolLiteral,
+    isBinaryType: dialect.isBinaryType,
+    binaryLiteral: dialect.binaryLiteral,
     isComplex: () => false,
     compactJson: (v: unknown) => JSON.stringify(v),
   };

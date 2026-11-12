@@ -22,6 +22,15 @@ use std::time::Duration;
 use otto_core::{Error, Result};
 use tokio::process::{Child, Command};
 
+mod server_log;
+use server_log::ServerLog;
+
+/// Per-request cap on one `/ping` probe. The shared client has no global
+/// timeout, and a server stuck mid-boot (memory pressure) can accept the
+/// connection and never answer — `wait_ping` then hung past its own deadline
+/// while the engine's `reinit_lock` was held.
+const PING_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// HTTP settings appended to every query — match the old CLI flags exactly:
 /// emit 64-bit ints as numbers (not strings), and resolve bare identifiers to
 /// columns rather than same-named SELECT aliases (avoids ILLEGAL_AGGREGATION on
@@ -678,6 +687,8 @@ async fn spawn_server(
     http: &reqwest::Client,
 ) -> Result<(Child, String)> {
     let mut last_err = String::new();
+    let log = ServerLog::new(data_dir);
+    let mut log_from = None;
     for attempt in 0..3 {
         let port = free_loopback_port().map_err(|e| Error::Internal(format!("pick port: {e}")))?;
         let cfg = write_server_config(data_dir, port)?;
@@ -688,6 +699,8 @@ async fn spawn_server(
             data_dir.display(),
             port
         );
+        let (stdout, stderr, from) = log.open();
+        log_from.get_or_insert(from);
         let mut child = Command::new(bin)
             .arg("server")
             .arg(format!("--config-file={}", cfg.display()))
@@ -696,8 +709,8 @@ async fn spawn_server(
             // restarts a dead child, and the child we hold IS the server.
             .env("CLICKHOUSE_WATCHDOG_ENABLE", "0")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(stdout)
+            .stderr(stderr)
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| Error::Internal(format!("spawn clickhouse server: {e}")))?;
@@ -712,8 +725,15 @@ async fn spawn_server(
         tracing::warn!("usage: {last_err} — retrying");
         stop_child(child).await; // kill the failed child before retrying
     }
+    // What the server said while failing (memory limit, lock, bad config).
+    let said = log.tail_since(log_from.unwrap_or(0));
+    let said = if said.is_empty() {
+        String::new()
+    } else {
+        format!("; server output: {said}")
+    };
     Err(Error::Internal(format!(
-        "clickhouse server failed to start: {last_err}"
+        "clickhouse server failed to start: {last_err}{said}"
     )))
 }
 
@@ -737,7 +757,11 @@ async fn wait_ping(
     // restart (idle-stop wake) has a request waiting on it.
     let mut delay = Duration::from_millis(50);
     while std::time::Instant::now() < deadline {
-        if let Ok(resp) = http.get(&url).send().await {
+        // Never past the deadline: one probe gets at most PING_TIMEOUT and
+        // never more than what is left of the overall wait.
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let probe = http.get(&url).timeout(PING_TIMEOUT.min(left)).send();
+        if let Ok(resp) = probe.await {
             if resp.status().is_success() {
                 if let Ok(body) = resp.text().await {
                     if body.trim() == "Ok." {
@@ -914,11 +938,12 @@ fn write_server_config(data_dir: &Path, port: u16) -> Result<PathBuf> {
         .map_err(|e| Error::Internal(format!("create tmp dir: {e}")))?;
     let path = xml_escape(&format!("{}/", data_dir.to_string_lossy()));
     let tmp = xml_escape(&format!("{}/tmp/", data_dir.to_string_lossy()));
-    // Console-only logging (stdout/stderr are /dev/null at spawn): Poco's
-    // FileChannel never recovers from ENOSPC — once the disk filled, every log
-    // call threw from RotateBySizeStrategy::mustRotate and the two AsyncLogger
-    // threads spun at ~2 cores until restart, even after space was freed.
-    // Server failures still surface to the daemon as query errors.
+    // Console-only logging: Poco's FileChannel never recovers from ENOSPC —
+    // once the disk filled, every log call threw from
+    // RotateBySizeStrategy::mustRotate and the two AsyncLogger threads spun at
+    // ~2 cores until restart, even after space was freed. The console goes to
+    // a capped file the daemon owns (`server_log`), so a failed start can say
+    // why; server failures still surface to the daemon as query errors.
     //
     // `disable_internal_dns_cache`: a loopback-only single node never resolves a
     // peer, yet with the cache on the server resolves its OWN hostname at boot
@@ -1289,5 +1314,39 @@ mod tests {
     fn free_port_is_loopback() {
         let p = free_loopback_port().unwrap();
         assert!(p > 0);
+    }
+
+    /// A server that accepts `/ping` and never answers must not hold
+    /// `wait_ping` past its deadline (it used to wait on the response forever
+    /// while the engine's reinit lock was held).
+    #[tokio::test]
+    async fn wait_ping_gives_up_at_its_deadline_on_a_silent_server() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _silent = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket); // accept, read nothing, answer nothing
+            }
+        });
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let ok = wait_ping(
+            &reqwest::Client::new(),
+            &format!("http://{addr}"),
+            &mut child,
+            Duration::from_millis(800),
+        )
+        .await;
+        assert!(!ok);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "wait_ping overran its deadline: {:?}",
+            started.elapsed()
+        );
     }
 }

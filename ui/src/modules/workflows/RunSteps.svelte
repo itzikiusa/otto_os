@@ -17,7 +17,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
   import { workflowNodeDetail, workflowCheckpointDetail, workflowCheckpointPage, retryRunNode } from '../../lib/api/workflows';
-  import type { WorkflowRun, NodeRunState, WorkflowCheckpoint, WorkflowCheckpointPage } from '../../lib/api/types';
+  import type { WorkflowRun, NodeRunState, WorkflowCheckpoint, WorkflowCheckpointPage, Review } from '../../lib/api/types';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { recoverStuckStep } from './stepRecovery';
   import { reviewIds } from './reviewAgents';
@@ -117,16 +117,14 @@
     else ws.navigateToSession(id);
   }
 
-  /** Open the review a step produced. There's no standalone review-by-id route,
-   *  so land the user in the repo's git view (which surfaces its reviews) when
-   *  the repo is resolvable; otherwise the git module. The review id is in the
-   *  link tooltip. */
+  /** Open THE review a step produced (`#/git/<repo>/review/<id>`: its findings,
+   *  read-only) — not just the repo. The repo comes from the step or run input,
+   *  else from the review itself; only when neither resolves, the Git module. */
   async function openReview(out: unknown): Promise<void> {
-    if (!repoIdOf(out) && run.summary) {
-      try {const full = await api.get<WorkflowRun>(`/workflow-runs/${encodeURIComponent(run.id)}`); if (full.id === run.id) run.input = full.input;} catch { /* Fall back to the Git overview. */ }
-    }
-    const repo = repoIdOf(out);
-    router.go(repo ? `git/${repo}` : 'git');
+    const id = reviewIdOf(out);
+    let repo = repoIdOf(out);
+    if (!repo && id) try { repo = (await api.get<Review>(`/reviews/${encodeURIComponent(id)}`)).repo_id || null; } catch { /* Fall back to the Git overview. */ }
+    router.go(repo && id ? `git/${encodeURIComponent(repo)}/review/${encodeURIComponent(id)}` : 'git');
   }
 
   async function copy(text: string, label = 'output'): Promise<void> {
@@ -413,7 +411,7 @@
               <Icon name="refresh" size={12} /> Restart step
             </button>
             <button class="link-btn" disabled={recovering === ns.node_id} onclick={() => void recoverStuck(ns, false)}>
-              <Icon name="warning" size={12} /> Mark failed
+              <Icon name="stop" size={12} /> Stop run
             </button>
           </div>
         {/if}

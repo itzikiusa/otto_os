@@ -6,6 +6,9 @@
   import RelTime from '../../lib/components/RelTime.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { runStatus } from '../../lib/status';
+  import { api } from '../../lib/api/client';
+  import type { WorkflowRunQueue } from '../../lib/api/types';
+  import { capNote, hasQueued, queuePlace } from './runQueue';
 
   interface Props {
     /** The run open in the page (highlighted). */
@@ -37,6 +40,28 @@
     }
     return map;
   });
+  // Place in the daemon-wide queue + the cap, fetched only while a listed run
+  // waits for a slot; refetched whenever the active list changes (it is
+  // refreshed on every workflow_run_updated event). A failed fetch just
+  // leaves the plain "Queued" label.
+  let queue = $state<WorkflowRunQueue | null>(null);
+  $effect(() => {
+    const wid = ws.currentId;
+    const runs = ws.activeWorkflowRuns;
+    if (!wid || !hasQueued(runs)) {
+      queue = null;
+      return;
+    }
+    let live = true;
+    api
+      .get<WorkflowRunQueue>(`/workspaces/${encodeURIComponent(wid)}/workflow-runs/queue`)
+      .then((q) => { if (live) queue = q; })
+      .catch(() => { if (live) queue = null; });
+    return () => { live = false; };
+  });
+  const places = $derived(
+    Object.fromEntries(ws.activeWorkflowRuns.map((r) => [r.run_id, queuePlace(r.run_id, queue, ws.activeWorkflowRuns)])),
+  );
   const activeWfRunCounts = $derived.by(() => {
     const c: Record<string, number> = {};
     for (const r of ws.activeWorkflowRuns) c[r.workflow_id] = (c[r.workflow_id] ?? 0) + 1;
@@ -51,15 +76,18 @@
       Running
       <span class="run-count">{ws.activeWorkflowRuns.length}</span>
     </div>
+    {#if queue && queue.queued.length > 0}
+      <p class="cap-note" data-testid="run-queue-cap">{capNote(queue.max_parallel_runs)}</p>
+    {/if}
     {#each ws.activeWorkflowRuns as r (r.run_id)}
       <button
         class="run-row"
         class:active={run?.id === r.run_id}
         onclick={() => openRunById(r.workflow_id, r.run_id)}
-        title={`${r.workflow_name} — ${runStatusLabel(r.status)}${r.current_step ? ` · ${r.current_step}` : ''}`}
+        title={`${r.workflow_name} — ${places[r.run_id]?.line ?? runStatusLabel(r.status)}${r.current_step ? ` · ${r.current_step}` : ''}`}
       >
         <span class="dot {dotKey(r.status)}" aria-hidden="true"></span>
-        <span class="sr-only">{runStatusLabel(r.status)}:</span>
+        <span class="sr-only">{places[r.run_id]?.line ?? runStatusLabel(r.status)}:</span>
         <span class="run-name">{r.workflow_name}</span>
         {#if activeWfRunCounts[r.workflow_id] > 1}
           <span class="run-ord" title={`run #${activeRunOrdinals[r.run_id]} of this workflow`}>#{activeRunOrdinals[r.run_id]}</span>
@@ -67,7 +95,9 @@
         {#if r.waiting_approval}
           <span class="run-badge" role="img" title="Waiting for your approval" aria-label="Waiting for your approval"><Icon name="userCheck" size={12} /></span>
         {/if}
-        {#if !r.current_step}<code class="run-id" title={r.run_id}>{shortRunId(r.run_id)}</code>{/if}
+        {#if places[r.run_id]}
+          <span class="run-step" data-testid="running-queue-place">{places[r.run_id]?.chip}</span>
+        {:else if !r.current_step}<code class="run-id" title={r.run_id}>{shortRunId(r.run_id)}</code>{/if}
         {#if r.current_step}
           <span class="run-step" data-testid="running-step" title={`On step: ${r.current_step}`}>{r.current_step}</span>
         {/if}
@@ -102,6 +132,11 @@
     font-size: var(--fs-xs);
     background: var(--accent-soft-strong);
     color: var(--text);
+  }
+  .cap-note {
+    margin: 0 6px 4px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
   .run-row {
     display: flex;

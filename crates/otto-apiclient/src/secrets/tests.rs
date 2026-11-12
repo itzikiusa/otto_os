@@ -91,6 +91,74 @@ fn split_drops_stale_members_on_type_change() {
     assert_eq!(row["username"], "u");
 }
 
+/// The url a secret is bound to: recorded on a person's save, kept across an
+/// agent's url edit, moved by whoever types a brand-new value, and never
+/// visible as a member or as a scrubbable value.
+#[test]
+fn saves_record_and_keep_the_bound_url() {
+    let own = request_ref("r1");
+    let typed = json!({"type": "bearer", "token": "s3cret"});
+    let (row, blob) =
+        split_auth_secrets_for_save(&typed, &own, &BTreeMap::new(), "{{base}}/me", true).unwrap();
+    assert_eq!(bound_url(&blob), Some("{{base}}/me"));
+    assert!(has_secret_values(&blob));
+    // Never a member, never a non-empty value a scrubber would mask.
+    assert_eq!(blob.get("token").unwrap(), "s3cret");
+    assert!(blob
+        .iter()
+        .filter(|(k, _)| k.starts_with(BOUND_URL_PREFIX))
+        .all(|(_, v)| v.is_empty()));
+
+    // An agent re-saves with the marker carried and a new url: binding kept.
+    let (_, moved) =
+        split_auth_secrets_for_save(&row, &own, &blob, "https://evil.example/x", false).unwrap();
+    assert_eq!(bound_url(&moved), Some("{{base}}/me"));
+    assert_eq!(moved.get("token").unwrap(), "s3cret");
+    // The plain split (secure-all, OAuth) never moves it either.
+    let (_, plain) = split_auth_secrets(&row, &own, &blob).unwrap();
+    assert_eq!(bound_url(&plain), Some("{{base}}/me"));
+    // ...but a freshly typed value through it starts unrecorded.
+    let (_, retyped) = split_auth_secrets(&typed, &own, &blob).unwrap();
+    assert_eq!(bound_url(&retyped), None);
+
+    // A person's save moves it to the url they saved.
+    let (_, person) =
+        split_auth_secrets_for_save(&row, &own, &blob, "https://api.test/v2", true).unwrap();
+    assert_eq!(bound_url(&person), Some("https://api.test/v2"));
+
+    // A brand-new value binds to the url it was typed for, whoever typed it.
+    let fresh = json!({"type": "bearer", "token": "agent-own"});
+    let (_, own_value) =
+        split_auth_secrets_for_save(&fresh, &own, &blob, "https://other.test/", false).unwrap();
+    assert_eq!(bound_url(&own_value), Some("https://other.test/"));
+
+    // No secret left → no binding and an empty blob (the entry is deleted).
+    let none = json!({"type": "none"});
+    let (_, empty) = split_auth_secrets_for_save(&none, &own, &blob, "https://x/", true).unwrap();
+    assert!(empty.is_empty());
+}
+
+/// A legacy blob (no recorded url) stays unrecorded through an agent's save
+/// and gets the url on the first person's save.
+#[test]
+fn legacy_blobs_get_their_url_on_the_first_person_save() {
+    let own = request_ref("r1");
+    let legacy = BTreeMap::from([("token".to_string(), "s3cret".to_string())]);
+    let row = json!({"type": "bearer", "token": { MARKER_KEY: own.clone() }});
+    let (_, agent) =
+        split_auth_secrets_for_save(&row, &own, &legacy, "https://evil.example/", false).unwrap();
+    assert_eq!(bound_url(&agent), None);
+    assert_eq!(agent.get("token").unwrap(), "s3cret");
+    let (_, person) =
+        split_auth_secrets_for_save(&row, &own, &legacy, "https://api.test/x", true).unwrap();
+    assert_eq!(bound_url(&person), Some("https://api.test/x"));
+    // The marker still resolves to the value, not to the binding key.
+    let snap = Prefetched::one(&own, Ok(Some(serde_json::to_string(&person).unwrap())));
+    let mut auth = row.clone();
+    resolve_auth_markers(&snap, &mut auth, &["r1".to_string()]).unwrap();
+    assert_eq!(auth["token"], "s3cret");
+}
+
 #[test]
 fn redact_covers_plaintext_and_markers() {
     let own = request_ref("r1");

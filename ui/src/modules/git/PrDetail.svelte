@@ -27,7 +27,6 @@
     PrSummary,
   } from '../../lib/api/types';
   import { guardUnsaved } from '../../lib/leaveGuard';
-  import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { toastError } from '../../lib/toastError';
   import { git } from '../../lib/stores/git.svelte';
@@ -38,23 +37,28 @@
   import { renderMarkdown } from '../../lib/md';
   import { openExternal } from '../../lib/external';
   import { plural } from '../../lib/plural';
-  import { scrollBehavior } from '../../lib/motion';
   import { loadErrorText } from '../../lib/loadError';
   import { rel } from '../../lib/stores/now.svelte';
   import { pollWhileVisible } from '../../lib/poll';
-  import { defaultAgentProvider } from '../../lib/providers';
   import DiffViewer from './DiffViewer.svelte';
-  import { prFilesBridge, prFilesKey } from './prFilesBridge.svelte';
+  import { prCommitViewedKey, prFilesBridge, prFilesKey } from './prFilesBridge.svelte';
   import PrReviewButtons from './PrReviewButtons.svelte';
   import { myGitHandles } from './myGitHandles.svelte';
   import { myReview, withMyReview } from './pr-review-state';
-  import { prAgentRequest, type PrAgentKind } from './pr-agent';
+  import { prAgentBridge, type PrAgentKind } from './pr-agent-bridge.svelte';
   import { openReviewDoneSlack } from './pr-slack';
   import { fileStat } from './diff-model';
-  import { notePrHead, prDiffFileLoader, prDiffHead, prDiffSummary, repoDiffFileLoader } from './diff-load';
-  import CommentThread from './CommentThread.svelte';
+  import { notePrHead, onPrWhitespaceChange, prDiffFileLoader, prDiffHead, prDiffSummary, prIgnoreWhitespace, repoDiffFileLoader } from './diff-load';
+  import PrConversation from './PrConversation.svelte';
+  import PrMergeChecks from './PrMergeChecks.svelte';
+  import { providePrCommentActions } from './pr-comment-ctx';
+  import { createCommentOps } from './pr-comment-ops';
+  import { withdrawMyReview } from './pr-review-ops';
   import ReviewPanel from './ReviewPanel.svelte';
   import PrMergeModal from './PrMergeModal.svelte';
+  import PrRequestChanges from './PrRequestChanges.svelte';
+  import { checkoutPrBranch } from './pr-checkout-run';
+  import { strategyMenuLabel } from './pr-merge-strategy';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { invalidatePr, prCommitsCache, prDetailCache, prKey } from './pr-cache';
@@ -94,8 +98,11 @@
   function selectTab(t: Tab): void {
     activeTab = t;
     try { localStorage.setItem(tabKey(), t); } catch { /* not persisted */ }
+    // A short screen (a phone in landscape) is filled by the PR header: bring the code into view.
+    if (t === 'code' && matchMedia('(max-height: 500px)').matches) requestAnimationFrame(() => document.querySelector('.prd-code:not([hidden])')?.scrollIntoView({ block: 'start' }));
   }
   $effect(() => prFilesBridge.onReveal(prFilesKey(repoId, number), () => selectTab('code'))); // the workspace Files panel
+  $effect(() => onPrWhitespaceChange(() => void loadDiff(repoId, number))); // the Code tab's "Hide whitespace"
 
   // Server payloads are replaced wholesale: `$state.raw` (no deep proxy over
   // a 100k-line diff).
@@ -111,8 +118,11 @@
   let diffLoading = $state(false);
   let diffError = $state<string | null>(null);
   let commitsError = $state<string | null>(null);
-  /** The PR head the shown diff belongs to ('' = unknown). */
-  let diffHead = '';
+  /** The PR head the shown diff belongs to ('' = unknown); the merge dialog
+   *  compares it with the live head. `diffAsked`: the head the latest diff
+   *  load requested, so a head learned mid-load can tell the load is stale. */
+  let diffHead = $state('');
+  let diffAsked = '';
 
   let editMode = $state(false);
   let editTitle = $state('');
@@ -160,7 +170,8 @@
       // A push moved the head: re-read the diff under it (the old one stays
       // up until the new one lands).
       const head = next.head_sha ?? '';
-      if (head && diff && diffHead && diffHead !== head) void loadDiff(rid, num);
+      const shown = diff ? diffHead : diffAsked; // in flight: what it asked for
+      if (head && shown && shown !== head) void loadDiff(rid, num);
       else {
         notePrHead(rid, num, head);
         if (head && diff && !diffHead) diffHead = head;
@@ -177,11 +188,14 @@
     const ctl = new AbortController();
     diffAbort = ctl;
     diffLoading = true;
+    const asked = (diffAsked = pr?.head_sha ?? '');
     try {
-      const next = await prDiffSummary(rid, num, ctl.signal, pr?.head_sha);
+      const next = await prDiffSummary(rid, num, ctl.signal, asked || undefined, prIgnoreWhitespace());
       if (disposed || ctl.signal.aborted || rid !== repoId || num !== number) return;
       diff = next;
-      diffHead = prDiffHead(rid, num);
+      // The head it was REQUESTED at — the cache entry may already be keyed to
+      // a newer head (notePrHead) while this older answer was in flight.
+      diffHead = asked || prDiffHead(rid, num);
       diffError = null;
     } catch (e) {
       if (isAbortError(e) || ctl.signal.aborted) return;
@@ -390,17 +404,26 @@
   // ── Your review: shown in the header, patched the moment a write lands ──
   myGitHandles.load();
   const isMe = (name: string): boolean => myGitHandles.isMe(name);
-  const myName = $derived([...myGitHandles.handles][0] ?? 'You');
+  const myName = $derived(myGitHandles.displayName ?? 'You');
   const mine = $derived(pr ? myReview(pr, isMe) : null);
   function patchNow(next: PrDetail): void {
     pr = next;
     prDetailCache.set(prKey(repoId, number), next);
     onloaded?.(next);
   }
-  function openRequestChanges(): void {
-    selectTab('summary');
-    showRequestChanges = true;
-  }
+  // A sheet over whatever tab you're on (it used to jump to Summary).
+  const openRequestChanges = (): void => { showRequestChanges = true; };
+  const prWhere = (): string => `${repoLabel} on ${providerName} · PR #${number}${pr ? ` “${pr.title}”` : ''}`;
+  const withdraw = (kind: 'approved' | 'changes'): Promise<void> => withdrawMyReview(kind, {
+    repoId, number, where: prWhere(), author: pr?.author ?? null, get: () => pr, patch: patchNow, isMe,
+    reload: () => load(repoId, number, true),
+    setBusy: (b) => { if (disposed || (b !== '' && busy !== '')) return false; busy = b; return true; },
+  });
+  // Edit / delete / react on comments, for every CommentThread below (pr-comment-ctx).
+  providePrCommentActions(createCommentOps({
+    repoId: () => repoId, number: () => number, get: () => pr, set: patchNow, where: prWhere,
+    reload: () => load(repoId, number, true), alive: (rid, num) => !disposed && rid === repoId && num === number,
+  }));
 
   async function action(kind: 'approve' | 'decline'): Promise<void> {
     const approve = kind === 'approve';
@@ -430,6 +453,7 @@
 
   async function requestChanges(): Promise<void> {
     if (busy !== '') return;
+    showRequestChanges = false; // one dialog at a time; the draft stays bound
     const ok = await confirmOutward({
       verb: 'Request changes',
       title: `Request changes on PR #${number}?`,
@@ -437,7 +461,7 @@
       what: requestChangesBody.trim() || 'A “changes requested” review with no message.',
       who: `${pr?.author ? `${pr.author} (the author)` : 'The author'} and the PR’s reviewers are notified.`,
     });
-    if (!ok || disposed || busy !== '') return;
+    if (!ok || disposed || busy !== '') return void (showRequestChanges = !disposed);
     busy = 'request-changes';
     try {
       invalidatePr(repoId, number);
@@ -450,6 +474,7 @@
       await load(repoId, number, true);
     } catch (e) {
       toastError('Couldn’t request changes', e);
+      if (!disposed) showRequestChanges = true;
     } finally {
       if (!disposed) busy = '';
     }
@@ -460,15 +485,13 @@
     mergeOpen = true;
   }
 
-  // ── Local: check out the branch (fetch, then switch; local edits stashed) ─
+  // ── Local: check out the branch (fetch, switch with edits stashed, verify) ─
   async function checkoutBranch(): Promise<void> {
     if (!pr || busy !== '') return;
     const branch = pr.source_branch;
     busy = 'checkout';
     try {
-      await api.post(`/repos/${repoId}/fetch`);
-      await git.checkout(repoId, { branch, auto_stash: true });
-      if (!disposed) toasts.success(`Checked out ${branch}`, 'Any local changes were stashed first and restored.');
+      await checkoutPrBranch(repoId, branch, () => disposed); // warns + offers Pull when the tip is stale
     } catch (e) {
       toastError(`Couldn’t check out ${branch}`, e);
     } finally {
@@ -485,19 +508,8 @@
     ]);
   }
 
-  // ── Agent sessions that already know which PR is meant ───────────────────
-  async function openAgent(kind: PrAgentKind): Promise<void> {
-    if (!pr || busy !== '') return;
-    busy = 'session';
-    try {
-      const req = prAgentRequest(kind, pr, { repoId, repoSlug, cwd: prRepo?.path ?? null, provider: defaultAgentProvider() });
-      await ws.openSessionWithPrompt(req, { route: true });
-    } catch (e) {
-      toastError('Couldn’t open a session', e);
-    } finally {
-      if (!disposed) busy = '';
-    }
-  }
+  // ── The PR's agent thread: opens beside the PR (PrAgentPanel), never a new page ─
+  const openAgent = (kind: PrAgentKind): void => prAgentBridge.ask(repoId, number, { kind });
 
   function moreMenu(e: MouseEvent): void {
     if (!pr) return;
@@ -505,14 +517,12 @@
     const items: MenuItem[] = [
       { label: 'Refresh', icon: 'refresh', action: refreshAll },
       { separator: true },
-      { label: 'Ask a question', icon: 'comment', hint: 'agent', action: () => void openAgent('ask') },
-      { label: 'Explain this PR', icon: 'sparkle', hint: 'agent', action: () => void openAgent('explain') },
-      { label: 'Fix findings in a session', icon: 'zap', hint: 'agent', disabled: !open, action: () => void openAgent('fix') },
+      { label: 'Ask a question', icon: 'comment', hint: prAgentBridge.hint(repoId, number), action: () => openAgent('ask') },
+      { label: 'Explain this PR', icon: 'sparkle', hint: 'agent', action: () => openAgent('explain') },
+      { label: 'Fix findings with the agent…', icon: 'zap', hint: 'agent', disabled: !open, action: () => openAgent('fix') },
       { label: 'Tell the author on Slack…', icon: 'send', action: () => pr && openReviewDoneSlack(pr, repoSlug) },
       { separator: true },
-      { label: 'Merge', icon: 'merge', disabled: !open, action: () => openMerge('merge') },
-      { label: 'Squash and merge', icon: 'merge', disabled: !open, action: () => openMerge('squash') },
-      { label: 'Rebase and merge', icon: 'merge', disabled: !open, action: () => openMerge('rebase') },
+      ...(['merge', 'squash', 'rebase'] as const).map((st): MenuItem => ({ label: strategyMenuLabel(prRepo?.provider, st), icon: 'merge', disabled: !open, action: () => openMerge(st) })),
       { separator: true },
       { label: 'Approve…', icon: 'check', disabled: !open, action: () => void action('approve') },
       { label: 'Request changes…', icon: 'warning', disabled: !open, action: openRequestChanges },
@@ -577,13 +587,7 @@
     ctxMenu.show(e, items, { filter: (commits?.length ?? 0) > 8, filterPlaceholder: 'Filter commits…' });
   }
 
-  function scrollIntoViewOnFocus(e: FocusEvent): void {
-    const el = e.currentTarget as HTMLElement;
-    setTimeout(() => el.scrollIntoView({ block: 'center', behavior: scrollBehavior() }), 250);
-  }
-
 </script>
-
 
 {#snippet commitPicker()}
   <button class="btn small ghost prd-commit-pick" aria-haspopup="menu" onclick={commitMenu}
@@ -593,7 +597,7 @@
   </button>
 {/snippet}
 
-<div class="prd" data-pr={number}>
+<div class="prd" data-pr={number} data-diff-head={diffHead || null}>
   {#if !pr && (loading || prError)}
     <div class="prd-pad">
       <LoadState what="this pull request" variant="page" rows={5} {loading} error={prError} empty onretry={() => void load(repoId, number)} />
@@ -619,7 +623,8 @@
         {/if}
         <div class="prd-actions">
           {#if pr.state === 'open'}
-            <PrReviewButtons review={mine} {busy} onapprove={() => void action('approve')} onrequestchanges={openRequestChanges} />
+            <PrReviewButtons review={mine} {busy} onapprove={() => void action('approve')} onrequestchanges={openRequestChanges}
+              onwithdraw={(k) => void withdraw(k)} canWithdrawChanges={prRepo?.provider !== 'gitlab'} />
             <button class="btn small primary" disabled={busy !== ''} onclick={() => openMerge()} title="Merge this pull request (asks first)">
               <Icon name="merge" size={12} /> Merge
             </button>
@@ -662,6 +667,7 @@
         {/if}
       </div>
 
+      <PrMergeChecks {pr} compact />
       <div class="segmented prd-tabs" role="tablist" aria-label="Pull request views" tabindex="-1" onkeydown={onTabKey}>
         {#each TABS as t (t.id)}
           <button role="tab" aria-label={t.label} aria-selected={activeTab === t.id} tabindex={activeTab === t.id ? 0 : -1}
@@ -703,40 +709,11 @@
                 {busy === 'decline' ? 'Declining…' : 'Decline…'}
               </button>
             </section>
-            {#if showRequestChanges}
-              <section class="prd-request-changes card">
-                <textarea dir="auto" class="input" rows="3" bind:value={requestChangesBody} disabled={busy === 'request-changes'} use:focusFirstField
-                  aria-label="What needs to change" placeholder="The retry loop needs a cap before this can merge."></textarea>
-                <div class="row prd-compose-foot">
-                  <span class="hint dim">Posts to PR #{number} on {repoLabel} · visible to the author and reviewers</span>
-                  <button class="btn small ghost" disabled={busy === 'request-changes'} onclick={() => (showRequestChanges = false)}>Cancel</button>
-                  <button class="btn small primary" disabled={busy === 'request-changes'} onclick={requestChanges}>
-                    {busy === 'request-changes' ? 'Requesting…' : 'Request changes'}
-                  </button>
-                </div>
-              </section>
-            {/if}
           {/if}
 
-          <section class="prd-comments">
-            <h3 class="prd-h">Conversation <span class="dim">{generalComments.length}</span></h3>
-            {#each generalComments as c (c.id)}
-              <div class="card prd-thread">
-                <CommentThread comment={c} onreply={(parentId, body) => postComment(body, undefined, undefined, parentId)} onresolve={resolveThread} />
-              </div>
-            {:else}
-              <p class="dim prd-none">No comments yet.</p>
-            {/each}
-            <div class="new-comment card">
-              <textarea dir="auto" class="input" rows="3" bind:value={newComment} disabled={busy === 'comment'} aria-label="New comment" placeholder="Leave a comment…" onfocus={scrollIntoViewOnFocus}></textarea>
-              <div class="row prd-compose-foot">
-                <span class="hint dim">Posts to PR #{number} on {repoLabel} · visible to the author and reviewers</span>
-                <button class="btn small" disabled={busy === 'comment' || newComment.trim() === ''} onclick={addGeneralComment}>
-                  {busy === 'comment' ? 'Posting…' : 'Post comment'}
-                </button>
-              </div>
-            </div>
-          </section>
+          <PrConversation comments={generalComments} {number} {repoLabel} {providerName} reactionsSupported={pr.reactions_supported}
+            bind:draft={newComment} posting={busy === 'comment'} onpost={addGeneralComment} onresolve={resolveThread}
+            onreply={(parentId, body) => postComment(body, undefined, undefined, parentId)} />
         </div>
 
         <PrSideColumn {pr} {checks} {commits} {providerName} />
@@ -756,7 +733,7 @@
                 loadFile={commitLoader}
                 toolbarLead={commitPicker}
                 stateKey={`${repoId}#${number}@${commitSha}`}
-                viewedStorageKey={`otto_pr_viewed:${repoId}#${number}`}
+                viewedStorageKey={prCommitViewedKey(repoId, number, commitSha)}
               />
             {:else}
               <div class="prd-code-bar">{@render commitPicker()}</div>
@@ -767,7 +744,7 @@
           {:else}
             <DiffViewer
               {diff}
-              prMode={true}
+              prMode={true} canIgnoreWs
               showNav={true}
               comments={inlineComments}
               onAddComment={(path, line, body, anchor) => postComment(body, path, line, undefined, anchor)}
@@ -776,7 +753,7 @@
               loadFile={loadPrFile}
               toolbarLead={commitPicker}
               stateKey={`${repoId}#${number}`}
-              viewedStorageKey={`otto_pr_viewed:${repoId}#${number}`}
+              viewedStorageKey={prFilesKey(repoId, number)}
             />
           {/if}
         </section>
@@ -791,12 +768,20 @@
   {/if}
 </div>
 
+{#if showRequestChanges && pr}
+  <PrRequestChanges {number} bind:body={requestChangesBody} busy={busy === 'request-changes'} onsubmit={requestChanges} onclose={() => (showRequestChanges = false)}
+    hint="Posts to PR #{number} on {repoLabel} · visible to the author and reviewers" />
+{/if}
+
 {#if mergeOpen && pr}
   <PrMergeModal
     {repoId}
     {number}
     {pr}
     initialStrategy={mergeStrategy}
+    reviewedHead={diffHead}
+    provider={prRepo?.provider ?? null}
+    onreload={() => { mergeOpen = false; activeTab = savedTab(); refreshAll(); }}
     onclose={() => {
       mergeOpen = false;
       activeTab = savedTab();
@@ -938,19 +923,6 @@
   @media (hover: none) { .edit-btn { opacity: 1; } }
   .prd-review-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .danger-text { color: var(--danger); }
-  .prd-request-changes { padding: 12px 16px; }
-  .prd-request-changes textarea, .new-comment textarea { width: 100%; }
-  .prd-h {
-    margin: 0 0 8px;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    color: var(--text-dim);
-  }
-  .prd-thread { padding: 4px 14px 8px; margin-bottom: 8px; }
-  .prd-none { font-size: var(--fs-s); margin: 0 0 8px; }
-  .new-comment { padding: 12px; }
   .prd-compose-foot { justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
   .prd-compose-foot .hint { flex: 1 1 220px; min-width: 0; font-size: var(--fs-xs); }
 
@@ -983,7 +955,7 @@
     .prd-title-input { height: 38px; font-size: 16px; } /* ui-guards: allow — 16px stops iOS zoom-on-focus */
     .prd-body { padding: 12px; }
     .prd-summary { grid-template-columns: minmax(0, 1fr); }
-    .new-comment textarea, .prd-desc textarea, .prd-request-changes textarea { font-size: var(--fs-l); }
+    .prd-desc textarea { font-size: var(--fs-l); }
     .edit-btn { opacity: 1; }
   }
 </style>

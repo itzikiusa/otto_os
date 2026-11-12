@@ -263,6 +263,24 @@ export interface WorkflowTrigger {
   /** When the schedule was last (re)armed — created, resumed, or re-timed.
    *  Runs missed before it are never caught up. Null on pre-0151 rows. */
   armed_at?: string | null;
+  /** When the trigger last fired or was refused. Null = never fired. */
+  last_fired_at?: string | null;
+  /** What that attempt came to. */
+  last_outcome?: TriggerOutcome | null;
+  /** The short reason of a `rejected` attempt. */
+  last_detail?: string | null;
+}
+
+/** Outcome of a trigger's latest attempt: a run started, a run queued behind
+ *  the parallel-run cap, or no run (`last_detail` says why). */
+export type TriggerOutcome = 'started' | 'queued' | 'rejected';
+
+/** `GET /workspaces/{wid}/workflow-runs/queue` — the daemon-wide parallel-run
+ *  cap and this workspace's queued runs with their place in the (global, FIFO)
+ *  line; 1 = next to start. */
+export interface WorkflowRunQueue {
+  max_parallel_runs: number;
+  queued: { run_id: Id; position: number }[];
 }
 
 export interface CreateTriggerReq {

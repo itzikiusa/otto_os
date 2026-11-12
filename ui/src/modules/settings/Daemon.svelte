@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { announce } from '../../lib/announce.svelte';
+  import { announce, announceShown } from '../../lib/announce.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
   import { settingsSaveErrorText } from './ownerOnly';
@@ -25,6 +25,13 @@
     sandboxBody,
     type ProcessSandbox,
   } from './sandboxExempt';
+  import { archiveDaysFrom, archiveDaysError } from './sessionArchive';
+  import MachineResources from './MachineResources.svelte';
+  import { machineStatus } from './machineStatus.svelte';
+  import { machineBody, machineFormErrors, machineFormFrom, sameMachineForm } from './machineSettings';
+  import { daemonStatus } from './daemonStatus.svelte';
+  import { canRestartDaemon, restartDaemonNow } from './daemonRestart';
+  import { copyWithToast } from '../../lib/clipboard';
 
   interface NetworkListener {
     enabled: boolean;
@@ -61,10 +68,25 @@
   // before a session you started is suspended; 0 = never, default 24 h).
   let persistEnabled = $state(true);
   let manualGrace = $state(DEFAULT_MANUAL_GRACE_SECS);
-  let savedSessions = $state({ persist: true, manualGrace: DEFAULT_MANUAL_GRACE_SECS });
+  // `session_auto_archive_days`: archive agent sessions idle this many days
+  // (0 = never, the daemon default). Read by the daemon's hourly archiver.
+  let archiveDays = $state(0);
+  let savedSessions = $state({ persist: true, manualGrace: DEFAULT_MANUAL_GRACE_SECS, archiveDays: 0 });
   const sessionsDirty = $derived(
-    persistEnabled !== savedSessions.persist || manualGrace !== savedSessions.manualGrace,
+    persistEnabled !== savedSessions.persist ||
+      manualGrace !== savedSessions.manualGrace ||
+      archiveDays !== savedSessions.archiveDays,
   );
+  const archiveError = $derived(archiveDaysError(archiveDays));
+  // Machine resources (admission gate, build budget, background priority,
+  // background auto-archive, low-disk warning): one form, the same Save.
+  let machine = $state(machineFormFrom({}));
+  let savedMachine = $state(machineFormFrom({}));
+  const machineDirty = $derived(!sameMachineForm(machine, savedMachine));
+  const machineErrors = $derived(machineFormErrors(machine));
+  // The saved listener setting isn't what the running daemon has bound: it
+  // is bound once, at start (`/security-posture` knows; this page is root).
+  const restartPending = $derived(!!daemonStatus.posture?.network_listener_restart_required);
   /** Presets for the manual idle grace (seconds; 0 = never). A value set
    *  elsewhere (the API) that matches none is offered as-is. */
   const GRACE_PRESETS = [1800, 3600, 4 * 3600, 8 * 3600, 86_400, 3 * 86_400, 7 * 86_400, 0];
@@ -75,11 +97,15 @@
     if (secs === 0) return 'Never';
     return secs === DEFAULT_MANUAL_GRACE_SECS ? `${formatGrace(secs)} (default)` : formatGrace(secs);
   }
-  const dirty = $derived(listenerDirty || sandboxDirty || sessionsDirty);
+  const dirty = $derived(listenerDirty || sandboxDirty || sessionsDirty || machineDirty);
   // The inputs' min/max are advisory only; an out-of-range or empty port would
   // be saved as-is (and an empty one silently falls back to the loopback port).
   const portValid = $derived(Number.isInteger(port) && port >= 1024 && port <= 65535);
   const portError = $derived(enabled && !portValid ? 'Enter a whole number from 1024 to 65535.' : '');
+  /** Where the installed ottod writes its daily files (ottod config.rs; a dev
+   *  daemon with OTTO_DATA_DIR logs elsewhere — Settings ▸ Logs shows that). */
+  const LOG_DIR = '~/Library/Logs/Otto/';
+  const formError = $derived(portError || archiveError || Object.values(machineErrors)[0] || '');
   // Latest full settings object (the PUT response). Saves send ONLY the keys
   // they change: PUT /settings upserts exactly the keys in the body, so
   // spreading this page-load snapshot reverted keys written since (auto-update
@@ -123,7 +149,11 @@
       // Unset = the daemon default (on); only an explicit `false` turns it off.
       persistEnabled = allSettings['session_persistence'] !== false;
       manualGrace = policyFromSettings(allSettings).manualGraceSecs;
-      savedSessions = { persist: persistEnabled, manualGrace };
+      archiveDays = archiveDaysFrom(allSettings);
+      savedSessions = { persist: persistEnabled, manualGrace, archiveDays };
+      machine = machineFormFrom(allSettings);
+      savedMachine = machineFormFrom(allSettings);
+      daemonStatus.refreshPosture(true);
     } catch (e) {
       loadError = loadErrorText(e);
     } finally {
@@ -132,7 +162,7 @@
   }
 
   async function save(): Promise<void> {
-    if (!dirty || portError) return;
+    if (!dirty || formError) return;
     // Exposing the daemon beyond this Mac is outward-facing: say where it
     // goes and who can reach it before writing it.
     if (
@@ -154,20 +184,30 @@
     if (sessionsDirty) {
       if (persistEnabled !== savedSessions.persist) body.session_persistence = persistEnabled;
       if (manualGrace !== savedSessions.manualGrace) body.manual_idle_suspend_secs = manualGrace;
+      if (archiveDays !== savedSessions.archiveDays) body.session_auto_archive_days = archiveDays;
     }
+    if (machineDirty) Object.assign(body, machineBody(machine, savedMachine));
     const saveListener = listenerDirty;
     const saveSandbox = sandboxDirty;
     const saveSessions = sessionsDirty;
+    const savedArchiveBefore = savedSessions.archiveDays;
     const submittedListener = { enabled, port };
     const submittedSandbox = { enabled: sandboxEnabled, network: sandboxNetwork, exempt: [...sandboxExempt] };
-    const submittedSessions = { persist: persistEnabled, manualGrace };
+    const submittedSessions = { persist: persistEnabled, manualGrace, archiveDays };
+    const saveMachine = machineDirty;
+    const submittedMachine = { ...machine };
     saving = true;
     try {
       allSettings = await api.put<Record<string, unknown>>('/settings', body);
       const notes: string[] = [];
       if (saveListener) {
         savedListener = submittedListener;
-        if (auth.meta) auth.meta.network_listener = submittedListener.enabled;
+        // Never set `auth.meta.network_listener` here: the status bar would
+        // say "network" while only loopback is bound. Re-read /meta (the
+        // saved value) and the posture (what is bound) instead — the bar then
+        // shows "(after restart)" until a restart is observed.
+        void auth.refreshMeta();
+        daemonStatus.refreshPosture(true);
         // The listener is bound once at daemon start — say so rather than
         // claim a socket that isn't open yet.
         notes.push(
@@ -196,8 +236,27 @@
             ? 'New sessions you start keep running across daemon restarts'
             : 'New sessions stop when the daemon restarts',
         );
+        if (submittedSessions.archiveDays !== savedArchiveBefore) {
+          notes.push(
+            submittedSessions.archiveDays > 0
+              ? `Agent sessions idle ${submittedSessions.archiveDays} ${submittedSessions.archiveDays === 1 ? 'day' : 'days'} are archived`
+              : 'Sessions are never archived automatically',
+          );
+        }
       }
-      toasts.success('Daemon settings saved', notes.join(' · '));
+      if (saveMachine) {
+        savedMachine = submittedMachine;
+        machineStatus.refresh();
+        notes.push('Machine resource limits apply to the next background agent');
+      }
+      // A listener change only applies on restart: offer it right here.
+      if (saveListener && canRestartDaemon) {
+        toasts.push('success', 'Daemon settings saved', notes.join(' · '), 10_000, {
+          action: { label: 'Restart daemon now', run: () => void restartDaemonNow() },
+        });
+      } else {
+        toasts.success('Daemon settings saved', notes.join(' · '));
+      }
     } catch (e) {
       toasts.error('Couldn’t save daemon settings', settingsSaveErrorText(e, loadErrorText));
     } finally {
@@ -213,11 +272,16 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('daemon')} subtitle={`ottod ${auth.meta?.version ?? ''} · API v${auth.meta?.api_version ?? 1}`}>
     {#snippet actions()}
+      {#if canRestartDaemon}
+        <button class="btn small" data-icon="refresh" onclick={() => void restartDaemonNow()} title="Restart the daemon so saved listener settings take effect">
+          Restart daemon…
+        </button>
+      {/if}
       {#if !loading && !loadError}
         <button
           class="btn small primary"
-          disabled={!dirty || saving || !!portError}
-          title={portError || (dirty ? 'Save the daemon settings' : 'No changes to save')}
+          disabled={!dirty || saving || !!formError}
+          title={formError || (dirty ? 'Save the daemon settings' : 'No changes to save')}
           onclick={() => void save()}
         >
           {saving ? 'Saving…' : 'Save'}
@@ -237,8 +301,21 @@
     <div class="card pad dm-card">
       <SettingToggle label="Enable network listener (binds 0.0.0.0)" checked={enabled} onchange={(v) => { enabled = v; }}>
         Served over HTTPS with a self-signed certificate. Takes effect the next time the daemon
-        starts (quit and reopen Otto).
+        starts — restart it here, or quit and reopen Otto.
       </SettingToggle>
+      {#if restartPending && !listenerDirty}
+        <div class="pending-note indent" data-testid="listener-restart-pending" use:announceShown={'Saved, not applied until the daemon restarts.'}>
+          <Icon name="warning" size={12} />
+          <span>
+            Saved, not applied: the daemon still serves
+            {daemonStatus.posture?.network_listener ? 'on your network' : 'loopback only'} until it restarts.
+            {#if !canRestartDaemon}Quit and reopen Otto on the Mac to apply it.{/if}
+          </span>
+          {#if canRestartDaemon}
+            <button class="btn small" onclick={() => void restartDaemonNow()}>Restart daemon now</button>
+          {/if}
+        </div>
+      {/if}
       {#if enabled}
         <p class="warn-note indent"><Icon name="warning" size={12} /> Anyone on your network can reach the login page. Only enable on trusted networks.</p>
       {/if}
@@ -341,16 +418,50 @@
         nothing is running in the session. A suspended agent resumes its conversation when you
         reopen it; shells are never suspended.
       </p>
+      <!-- One .field + .hint-line per setting: further session/resource rows
+           slot in below in the same shape. -->
+      <div class="field archive">
+        <label for="dm-archive-days">Archive sessions that have been idle for (days)</label>
+        <input
+          id="dm-archive-days"
+          class="input"
+          type="number"
+          min="0"
+          step="1"
+          bind:value={archiveDays}
+          aria-invalid={!!archiveError}
+          aria-describedby="dm-archive-hint{archiveError ? ' dm-archive-err' : ''}"
+          data-testid="session-auto-archive-days"
+        />
+        {#if archiveError}<span class="hint port-error" id="dm-archive-err" use:announceShown={archiveError}>{archiveError}</span>{/if}
+      </div>
+      <p class="hint-line" id="dm-archive-hint">
+        0 = never. Checked hourly; agent sessions with a live terminal, an open viewer or “keep
+        alive” are skipped. Archived sessions keep their history and stay resumable — unarchive one
+        from the sidebar’s Archived section. Nothing is deleted.
+      </p>
     </div>
+
+    <h2 class="section-title">Machine resources</h2>
+    <MachineResources bind:form={machine} errors={machineErrors} />
 
     <h2 class="section-title">Logs</h2>
     <div class="card pad dm-card logs">
       <div class="log-line">
-        <span class="dim">Log file</span>
-        <span class="mono path" title="~/Library/Logs/Otto/ottod.log.YYYY-MM-DD">~/Library/Logs/Otto/ottod.log.YYYY-MM-DD</span>
+        <span class="dim">Folder</span>
+        <span class="mono path" dir="ltr" title={LOG_DIR}>{LOG_DIR}</span>
       </div>
-      <p class="hint-line">A new file each day; older files are kept.</p>
-      <div><button class="btn small" onclick={() => router.go('settings/logs')}>Open log viewer</button></div>
+      <div class="log-line">
+        <span class="dim">Files</span>
+        <span class="mono path" dir="ltr">ottod.log.YYYY-MM-DD</span>
+      </div>
+      <p class="hint-line">A new file each day, named by its date; older files are kept.</p>
+      <div class="log-actions">
+        <button class="btn small" onclick={() => router.go('settings/logs')}>Open log viewer</button>
+        <button class="btn small" onclick={() => void copyWithToast(LOG_DIR, 'the log folder path')}>
+          <Icon name="copy" size={12} /> Copy folder path
+        </button>
+      </div>
     </div>
   {/if}
   </PageBody>
@@ -396,6 +507,27 @@
   }
   .field.grace {
     max-width: 320px;
+  }
+  .field.archive {
+    max-width: 320px;
+  }
+  .pending-note {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 8px;
+    margin: 0;
+    font-size: var(--fs-s);
+    color: var(--warning);
+  }
+  .pending-note span {
+    flex: 1 1 220px;
+    min-width: 0;
+  }
+  .log-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
   }
   .exempt {
     display: flex;

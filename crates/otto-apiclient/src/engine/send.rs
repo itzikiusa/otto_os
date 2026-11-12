@@ -26,8 +26,9 @@ pub async fn prepare_stream<C: ApiClientCtx>(
     // Same secret ↔ host binding as ad-hoc execute. The stream socket only
     // admits Editor credentials that are not MCP-restricted; a managed agent
     // still can't self-confirm (checked by the caller's token at upgrade).
-    if let Some(host) = unbound_secret_host(
+    if let Some(unbound) = find_unbound_secret(
         &repo,
+        Some(ctx.secrets()),
         wid,
         request,
         &vars,
@@ -37,12 +38,13 @@ pub async fn prepare_stream<C: ApiClientCtx>(
             .as_ref()
             .map(|env| env.secret_keys.as_slice())
             .unwrap_or(&[]),
+        None,
     )
     .await
     .map_err(|e| e.to_string())?
     {
         if !request.confirm_new_host || !confirm_allowed {
-            return Err(new_host_conflict(&host, !confirm_allowed).to_string());
+            return Err(unbound_secret_conflict(&unbound, !confirm_allowed).to_string());
         }
     }
     let req = resolve_exec_auth(&repo, ctx.secrets(), wid, request).await?;
@@ -88,7 +90,36 @@ pub async fn prepare_request(
     allow_local: bool,
     whole_body_timeout: bool,
 ) -> Result<(reqwest::RequestBuilder, String, usize), String> {
+    prepare_request_with(
+        wid,
+        req,
+        vars,
+        proxy,
+        allow_local,
+        whole_body_timeout,
+        false,
+    )
+    .await
+}
+
+/// [`prepare_request`] for a request the caller knows carries a stored
+/// secret (`credentialed`: an environment secret, which may sit in any
+/// header or body). Such a request — or one with an API-key header, which
+/// reqwest does not strip on a cross-host hop the way it strips
+/// `Authorization` — is sent through a client that stops at a redirect to
+/// another host instead of carrying the credential there
+/// ([`credential_redirect_policy`]).
+pub async fn prepare_request_with(
+    wid: &Id,
+    req: &ExecuteApiReq,
+    vars: &serde_json::Map<String, Value>,
+    proxy: Option<&str>,
+    allow_local: bool,
+    whole_body_timeout: bool,
+    credentialed: bool,
+) -> Result<(reqwest::RequestBuilder, String, usize), String> {
     use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
+    let credentialed = credentialed || api_key_header_set(&req.auth);
 
     // --- method ---
     let url = substitute(&req.url, vars);
@@ -133,7 +164,7 @@ pub async fn prepare_request(
     // Per-request settings: a custom client when any non-default is set or the
     // request is tunnelled, otherwise the workspace's shared pooled client.
     let shared_client = http_client(wid, allow_local);
-    let custom_client = build_settings_client(wid, req, proxy, allow_local)?;
+    let custom_client = build_settings_client_for(wid, req, proxy, allow_local, credentialed)?;
     let client = custom_client.as_ref().unwrap_or(&shared_client);
     let mut builder = client.request(method, &url);
     if whole_body_timeout {
@@ -214,8 +245,24 @@ pub async fn build_and_send(
     proxy: Option<&str>,
     allow_local: bool,
 ) -> Result<(ApiResponse, Vec<u8>), String> {
+    build_and_send_with(wid, req, vars, proxy, allow_local, false).await
+}
+
+/// [`build_and_send`] for a request the caller knows carries a stored secret
+/// (see [`prepare_request_with`]): a redirect to another host comes back as
+/// the 3xx response itself, with a trace note saying why it stopped.
+pub async fn build_and_send_with(
+    wid: &Id,
+    req: &ExecuteApiReq,
+    vars: &serde_json::Map<String, Value>,
+    proxy: Option<&str>,
+    allow_local: bool,
+    credentialed: bool,
+) -> Result<(ApiResponse, Vec<u8>), String> {
+    let credentialed = credentialed || api_key_header_set(&req.auth);
+    let guarded = proxy.is_none() && !allow_local;
     let (builder, url, header_count) =
-        prepare_request(wid, req, vars, proxy, allow_local, true).await?;
+        prepare_request_with(wid, req, vars, proxy, allow_local, true, credentialed).await?;
     // Trace: resolved request + per-phase timing for the response "Trace" tab.
     let method_str = req.method.to_uppercase();
     let body_desc = match req.body_mode.as_str() {
@@ -265,6 +312,17 @@ pub async fn build_and_send(
     let status = resp.status();
     let status_code = status.as_u16();
     let status_text = status.canonical_reason().unwrap_or("").to_string();
+    if req.follow_redirects != Some(false) {
+        let location = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok());
+        if let Some(note) =
+            unfollowed_redirect_note(status, resp.url(), location, credentialed, guarded)
+        {
+            trace.push(trace_step("Redirect not followed", &note, None, "error"));
+        }
+    }
 
     // Response headers as [{key,value}].
     let resp_headers: Vec<Value> = resp
@@ -450,17 +508,151 @@ pub(crate) fn human_duration(d: Duration) -> String {
 
 /// Human-friendly message for a reqwest error (timeout / DNS / connect / …).
 /// `timeout` is the limit that was applied to this request, so a timeout
-/// reports the user's own setting rather than the default.
+/// reports the user's own setting rather than the default. reqwest's own
+/// text is only "error sending request for url (…)": the cause lives in the
+/// `source()` chain, which is walked and named ([`classify_send_failure`]).
 pub fn describe_reqwest_error(e: &reqwest::Error, timeout: Duration) -> String {
     if e.is_timeout() {
-        format!("request timed out after {}", human_duration(timeout))
-    } else if e.is_connect() {
-        format!("connection failed: {e}")
-    } else if e.is_request() {
-        format!("could not build request: {e}")
-    } else if e.is_body() || e.is_decode() {
-        format!("failed reading response: {e}")
-    } else {
-        format!("request failed: {e}")
+        return format!("request timed out after {}", human_duration(timeout));
     }
+    let chain = source_chain(e);
+    if let Some(cause) = classify_send_failure(&chain) {
+        return cause;
+    }
+    let detail = match chain.last() {
+        Some(root) => format!("{e} ({root})"),
+        None => e.to_string(),
+    };
+    if e.is_connect() {
+        format!("connection failed: {detail}")
+    } else if e.is_request() {
+        format!("could not build request: {detail}")
+    } else if e.is_body() || e.is_decode() {
+        format!("failed reading response: {detail}")
+    } else {
+        format!("request failed: {detail}")
+    }
+}
+
+/// The messages of `e`'s `source()` chain below `e` itself, outermost first,
+/// without repeats (layers often echo their inner error's text).
+pub(crate) fn source_chain(e: &dyn std::error::Error) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut next = e.source();
+    while let Some(err) = next {
+        let text = err.to_string();
+        if !text.is_empty() && out.last() != Some(&text) {
+            out.push(text);
+        }
+        next = err.source();
+    }
+    out
+}
+
+/// Name a send failure from its cause chain ([`source_chain`]): blocked by
+/// the private-address guard (the text keeps "SSRF guard", which the UI's
+/// "Allow private addresses…" helper keys on), DNS failure, connection
+/// refused / reset, a connect timeout, or a TLS certificate problem with its
+/// reason. `None` when nothing in the chain is recognised.
+pub(crate) fn classify_send_failure(chain: &[String]) -> Option<String> {
+    fn first_with<'a>(chain: &'a [String], needles: &[&str]) -> Option<&'a String> {
+        chain.iter().find(|text| {
+            let lower = text.to_ascii_lowercase();
+            needles.iter().any(|needle| lower.contains(needle))
+        })
+    }
+    let find = |needles: &[&str]| first_with(chain, needles);
+    if let Some(guard) = find(&["ssrf guard", "blocked address"]) {
+        return Some(format!(
+            "blocked by the private-address guard: {guard} — allow private addresses for this workspace to reach it"
+        ));
+    }
+    if let Some(cert) = find(&["certificate", "unknownissuer", "notvalidforname"]) {
+        let lower = cert.to_ascii_lowercase();
+        let reason = if lower.contains("unknownissuer") || lower.contains("unknown issuer") {
+            "it is signed by an unknown authority (self-signed or a private CA)"
+        } else if lower.contains("expired") {
+            "it has expired"
+        } else if lower.contains("notvalidforname") || lower.contains("not valid for name") {
+            "it is not valid for this host name"
+        } else if lower.contains("notyetvalid") || lower.contains("not yet valid") {
+            "it is not valid yet"
+        } else if lower.contains("revoked") {
+            "it has been revoked"
+        } else {
+            "it was rejected"
+        };
+        return Some(format!(
+            "TLS certificate problem: {reason} ({cert}). Turn off TLS verification in the request's Settings only if you trust this server"
+        ));
+    }
+    if let Some(dns) = find(&[
+        "dns",
+        "failed to lookup address",
+        "nodename nor servname",
+        "name or service not known",
+        "did not resolve",
+        "no such host",
+    ]) {
+        return Some(format!("DNS lookup failed: {dns}"));
+    }
+    if let Some(refused) = find(&["connection refused"]) {
+        return Some(format!(
+            "connection refused: nothing is accepting connections at that address and port ({refused})"
+        ));
+    }
+    if let Some(reset) = find(&["connection reset", "broken pipe"]) {
+        return Some(format!("connection reset by the server ({reset})"));
+    }
+    if let Some(slow) = find(&["timed out", "timeout"]) {
+        return Some(format!("connection timed out ({slow})"));
+    }
+    None
+}
+
+/// An `api_key` auth sent as a header with a value: a credential reqwest does
+/// not strip on a cross-host redirect (it strips only `Authorization`,
+/// cookies and proxy auth).
+pub(crate) fn api_key_header_set(auth: &Value) -> bool {
+    auth.get("type").and_then(Value::as_str) == Some("api_key")
+        && auth.get("in").and_then(Value::as_str) != Some("query")
+        && auth
+            .get("key")
+            .and_then(Value::as_str)
+            .is_some_and(|key| !key.is_empty())
+        && match auth.get("value") {
+            Some(Value::String(value)) => !value.is_empty(),
+            Some(value) => api_secrets::marker_ref(value).is_some(),
+            None => false,
+        }
+}
+
+/// Why a redirect came back unfollowed, for the response trace: a
+/// credential-carrying request stops at a hop to another host
+/// ([`credential_redirect_policy`]), and the SSRF guard stops at a hop to a
+/// private address literal. `None` for anything else (not a redirect, no
+/// `Location`, following was simply turned off).
+pub(crate) fn unfollowed_redirect_note(
+    status: reqwest::StatusCode,
+    current: &reqwest::Url,
+    location: Option<&str>,
+    credentialed: bool,
+    guarded: bool,
+) -> Option<String> {
+    if !status.is_redirection() {
+        return None;
+    }
+    let next = current.join(location?).ok()?;
+    let host = next.host_str().unwrap_or("?");
+    if credentialed && !same_site_hop(current, &next) {
+        return Some(format!(
+            "redirect to another host ({host}) not followed because this request carries credentials"
+        ));
+    }
+    if guarded && !otto_netguard::check_url_literal(&next) {
+        return Some(format!(
+            "redirect to {host} not followed: blocked address (SSRF guard)"
+        ));
+    }
+    None
 }

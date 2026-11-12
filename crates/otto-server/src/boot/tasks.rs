@@ -91,6 +91,9 @@ pub async fn spawn_background(ctx: &ServerCtx, root_user_id: Option<String>) -> 
     spawn_idle_session_suspender(ctx);
     spawn_nested_agent_capture(ctx);
     spawn_stale_session_archiver(ctx);
+    // Embedded threads (PR / connection pages) close after their idle hours.
+    ctx.agent_runtime
+        .spawn_embedded_auto_close(SettingsRepo::new(ctx.pool.clone()));
     spawn_provider_title_namer(ctx);
     spawn_dead_session_pruner(ctx);
     spawn_activity_trail_pruner(ctx);
@@ -752,6 +755,7 @@ fn start_usage_tracking(ctx: &ServerCtx) {
     // once), so `available()` here is almost always still false — report the
     // outcome once the bring-up has actually resolved.
     let usage = Arc::clone(&ctx.usage);
+    usage.spawn_health_notices(ctx.pool.clone(), ctx.events.clone());
     tokio::spawn(async move {
         if usage.wait_ready(Duration::from_secs(120)).await {
             tracing::info!("usage tracking started (embedded clickhouse)");

@@ -30,6 +30,8 @@
   import AllowedIdsEditor from './AllowedIdsEditor.svelte';
   import SlackActAsMe from './SlackActAsMe.svelte';
   import { pendingRejected, senderLabel, withAllowed } from './channelAllow';
+  import { channelAccess } from './channelAccess';
+  import WorkspaceScope from './WorkspaceScope.svelte';
 
   // ---------------------------------------------------------------------------
   // State
@@ -108,11 +110,9 @@
   let fReplyInstructions = $state('');
   let fPreferredCli = $state('');
 
-  // ---------------------------------------------------------------------------
-  // Derived helpers
-  // ---------------------------------------------------------------------------
-
+  // ── Derived helpers ── (`access` mirrors the daemon's owner/editor gates)
   const wsId = $derived(ws.currentId);
+  const access = $derived(channelAccess(auth.isRoot, ws.myRole));
 
   const slack = $derived(integrations.find((i) => i.channel === 'slack') ?? null);
   const telegram = $derived(integrations.find((i) => i.channel === 'telegram') ?? null);
@@ -162,11 +162,7 @@
   // Load on workspace change
   // ---------------------------------------------------------------------------
 
-  $effect(() => {
-    if (wsId) {
-      void load(wsId);
-    }
-  });
+  $effect(() => { if (wsId) void load(wsId); });
 
   $effect(() => {
     const id = wsId;
@@ -213,7 +209,7 @@
       if (!t.current || wsId !== id) return;
       integrations = rows;
       slackDir = null;
-      if (rows.some((i) => i.channel === 'slack' && i.has_bot_token)) void loadSlackDir(id);
+      if (access.editWorkspace && rows.some((i) => i.channel === 'slack' && i.has_bot_token)) void loadSlackDir(id);
     } catch (e) {
       if (!t.current || wsId !== id) return;
       // Inline, not a toast: the cards would otherwise all read "Not
@@ -402,9 +398,7 @@
     } catch (e) {
       toasts.error(`Couldn’t remove the ${label} integration`, loadErrorText(e));
     } finally {
-      const next = { ...removing };
-      delete next[channel];
-      removing = next;
+      removing = { ...removing, [channel]: false };
     }
   }
 
@@ -509,6 +503,7 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('channels')} subtitle="Slack, Telegram and webhook bridges" />
   <PageBody width="readable">
+  <WorkspaceScope readonly={access.note} />
   <SectionIntro>Configure Slack, Telegram and inbound webhook integrations per workspace. Tokens and webhook keys are stored in the <strong>macOS Keychain</strong>, never in Otto’s database.</SectionIntro>
 
   {#if !wsId}
@@ -530,7 +525,7 @@
           role="presentation"
           class="channel-card card"
           class:off={configured && !intg?.enabled}
-          oncontextmenu={(e) => ctxMenu.show(e, [
+          oncontextmenu={(e) => access.configure && ctxMenu.show(e, [
             { label: configured ? 'Edit…' : 'Set up…', icon: 'edit', action: () => openEdit(channel) },
             ...(intg && configured ? [
               { label: intg.enabled ? 'Disable' : 'Enable', icon: intg.enabled ? 'eyeOff' : 'eye', action: () => toggleEnabled(intg) },
@@ -580,7 +575,7 @@
                         <button
                           class="btn small"
                           title="Add {r.user} to the {label} allowed users"
-                          disabled={allowing !== null}
+                          disabled={allowing !== null || !access.configure}
                           onclick={() => void allowSender(intg, r)}
                         >{allowing === r.user ? 'Allowing…' : 'Allow…'}</button>
                       </li>
@@ -595,7 +590,7 @@
               <label class="checkbox-row ch-enabled" title={intg.enabled ? `Stop the ${label} bridge` : `Start the ${label} bridge`}>
                 <input
                   type="checkbox"
-                  checked={intg.enabled}
+                  checked={intg.enabled} disabled={!access.configure}
                   onchange={async (e) => {
                     const el = e.currentTarget;
                     await toggleEnabled(intg);
@@ -609,17 +604,17 @@
               <button
                 class="btn small ch-tool"
                 title={intg.channel_id ? `Send “Otto is connected ✅” to ${intg.channel_id}` : `Set a default ${channel === 'webhook' ? 'reply URL' : 'chat'} first (Edit)`}
-                disabled={testBusy === channel || !intg.channel_id}
+                disabled={testBusy === channel || !intg.channel_id || !access.editWorkspace}
                 onclick={() => void sendTest(channel, intg)}
               >
                 {testBusy === channel ? 'Sending…' : 'Test…'}
               </button>
             {/if}
             {#if configured}
-              <button class="icon-btn ch-tool" title="Edit {label} integration" aria-label="Edit {label} integration" onclick={() => openEdit(channel)}>
+              {#if access.configure}<button class="icon-btn ch-tool" title="Edit {label} integration" aria-label="Edit {label} integration" onclick={() => openEdit(channel)}>
                 <Icon name="edit" size={14} />
-              </button>
-              <button
+              </button>{/if}
+              {#if access.editWorkspace}<button
                 class="icon-btn ch-tool"
                 title={removing[channel] ? `Removing ${label} integration…` : `Remove ${label} integration`}
                 aria-label={removing[channel] ? `Removing ${label} integration…` : `Remove ${label} integration`}
@@ -628,8 +623,8 @@
                 onclick={() => remove(channel)}
               >
                 {#if removing[channel]}<span class="spinner" aria-hidden="true"></span>{:else}<Icon name="trash" size={14} />{/if}
-              </button>
-            {:else}
+              </button>{/if}
+            {:else if access.configure}
               <button class="btn small ch-tool" onclick={() => openEdit(channel)}>Set up…</button>
             {/if}
           </div>

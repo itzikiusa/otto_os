@@ -21,7 +21,12 @@ use serde_json::{json, Value};
 use tracing::{info, warn};
 
 use super::copy_result_destinations;
+use crate::trigger_outcome::{stamp_admitted, stamp_rejected};
 use crate::WorkflowCtx;
+
+/// The stamped reason when a due trigger is skipped because the workflow is
+/// still running (shared with the event-trigger listener).
+pub(crate) const ACTIVE_RUN: &str = "previous run of this workflow still active";
 
 /// One scheduler pass: admit and start every enabled schedule trigger that is
 /// due at `now`. `cancelled` is polled between steps; once it returns true no
@@ -61,15 +66,21 @@ pub async fn tick<C: WorkflowCtx>(
         };
         let ws = match ctx.workspaces().get(&wf.workspace_id).await {
             Ok(w) => w,
-            Err(_) => continue,
+            Err(e) => {
+                let why = format!("workspace could not be loaded: {e}");
+                stamp_rejected(ctx.pool(), &trigger.id, &why).await;
+                continue;
+            }
         };
 
         // Overlap guard: a run longer than the cadence must not stack a second
         // concurrent copy (each provisions its own worktrees). The cursor is
-        // NOT advanced, so the missed tick fires once the run finishes.
+        // NOT advanced, so the missed tick fires once the run finishes — and
+        // the trigger reads "rejected: previous run still active" meanwhile.
         match workflows_repo.has_active_run(&wf.id).await {
             Ok(true) => {
                 info!(workflow_id = %wf.id, "workflow scheduler: previous run still active — skipping tick");
+                stamp_rejected(ctx.pool(), &trigger.id, ACTIVE_RUN).await;
                 continue;
             }
             Ok(false) => {}
@@ -91,9 +102,11 @@ pub async fn tick<C: WorkflowCtx>(
             Ok(None) => continue,
             Err(e) => {
                 warn!(workflow_id = %wf.id, "workflow scheduler: admit run: {e}");
+                stamp_rejected(ctx.pool(), &trigger.id, &format!("run not admitted: {e}")).await;
                 continue;
             }
         };
+        stamp_admitted(ctx.pool(), &trigger.id, &run.id).await;
 
         // Admission may have committed while shutdown arrived. Keep that
         // durable pending row for resume_queued_runs on next boot; never start

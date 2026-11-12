@@ -318,6 +318,12 @@ async fn run(cfg: Config) -> Result<(), String> {
     // deadline anchored at the signal, since launchd's ExitTimeOut is too.
     let (shutdown_tx, shutdown_rx) = watch::channel::<Option<std::time::Instant>>(None);
     let signals = ShutdownSignals::install();
+    // main() capped launchd's stderr log at boot; keep it capped while up.
+    housekeeping::spawn_stderr_log_cap(
+        cfg.log_dir().join("ottod.stderr.log"),
+        housekeeping::STDERR_LOG_MAX_BYTES,
+        housekeeping::STDERR_LOG_CHECK_EVERY,
+    );
     tokio::spawn(async move {
         signals.recv().await;
         let at = std::time::Instant::now();

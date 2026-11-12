@@ -17,6 +17,10 @@ pub(crate) struct DurableEvent {
     pub event: crate::UsageEvent,
 }
 
+/// Undelivered rows the outbox holds before it refuses new source batches
+/// (the tailer then stops reading until delivery drains it).
+pub(crate) const OUTBOX_MAX: u64 = 100_000;
+
 pub(crate) struct IngestionJournal {
     pool: SqlitePool,
     parts: tokio::sync::Mutex<std::collections::BTreeMap<String, String>>,
@@ -83,7 +87,7 @@ impl IngestionJournal {
             .await?;
         // Backpressure keeps disk bounded; never drop accepted spend. Caller
         // retains this source batch and retries without reading further bytes.
-        if pending.saturating_add(events.len() as i64) > 100_000 {
+        if pending.saturating_add(events.len() as i64) > OUTBOX_MAX as i64 {
             return Err(sqlx::Error::Protocol(
                 "usage outbox full; source checkpoint retained".into(),
             ));

@@ -47,10 +47,12 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(600);
 /// Coalesce a burst of FSEvents (an agent writing many lines) into one pass.
 const FS_DEBOUNCE: Duration = Duration::from_secs(2);
 
-/// How long the attribution index is reused across passes before it is
-/// re-read from `sessions` (a lookup miss after a sessions write rebuilds
-/// sooner — see [`UsageTailer::refresh_after_miss`]).
-const ATTRIBUTION_TTL: Duration = Duration::from_secs(60);
+/// Safety net only: the attribution index is rebuilt when the sessions write
+/// generation moves (insert, provider-session id, delete — see
+/// [`UsageTailer::attribution`]); this bounds staleness for a write that
+/// bypassed the repo. It was 60 s, which re-read all ~4k session rows every
+/// minute an agent streamed although nothing had changed.
+const ATTRIBUTION_TTL: Duration = Duration::from_secs(3600);
 
 /// A held response whose file stayed quiet this long is counted as final.
 const HOLD_IDLE: Duration = Duration::from_secs(15);
@@ -791,12 +793,15 @@ impl UsageTailer {
     }
 
     /// The cached attribution, (re)querying `sessions` only when there is
-    /// none yet or it is older than ATTRIBUTION_TTL.
+    /// none yet, a sessions write moved the generation since it was built
+    /// (at most once per pass), or it is older than the ATTRIBUTION_TTL
+    /// safety net.
     async fn attribution(&mut self) -> &Attribution {
         let stale = self
             .attr_built
             .is_none_or(|t| t.elapsed() >= ATTRIBUTION_TTL);
-        if self.attr.is_none() || stale {
+        let moved = !self.attr_fresh_this_pass && (self.generation)() != self.attr_gen;
+        if self.attr.is_none() || stale || moved {
             self.rebuild_attribution().await;
         }
         self.attr.get_or_insert_with(Attribution::default)
@@ -873,19 +878,20 @@ impl UsageTailer {
             }
         };
         let mut attr = Attribution::default();
+        // Only rows with a provider-session id can be looked up; the rest
+        // (most of a long install's history) build nothing, not even a ref.
         for r in rows {
+            let Some(psid) = r.provider_session_id.filter(|p| !p.is_empty()) else {
+                continue;
+            };
             let sref = SessionRef {
                 otto_session_id: r.id,
                 workspace_id: r.workspace_id,
                 provider: r.provider,
             };
-            if let Some(psid) = r.provider_session_id {
-                if !psid.is_empty() {
-                    attr.by_provider_identity
-                        .insert((sref.provider.clone(), psid.clone()), sref.clone());
-                    attr.by_provider_session.insert(psid, sref.clone());
-                }
-            }
+            attr.by_provider_identity
+                .insert((sref.provider.clone(), psid.clone()), sref.clone());
+            attr.by_provider_session.insert(psid, sref);
         }
         attr
     }
@@ -1992,11 +1998,28 @@ mod tests {
             "external misses never re-query"
         );
 
-        // The TTL bounds staleness for writes that bypass the repo.
-        t.attr_built = Instant::now().checked_sub(ATTRIBUTION_TTL);
+        // No timer: minutes of streaming with no sessions write reuse the
+        // index (it used to be re-read every 60 s).
+        // (Skipped on a host booted under 10 minutes ago: no such Instant.)
+        if let Some(earlier) = Instant::now().checked_sub(Duration::from_secs(600)) {
+            t.attr_built = Some(earlier);
+        }
+        let a = append("known");
+        t.scan_paths(HashSet::from([a])).await.unwrap();
+        assert_eq!(t.stats.attribution_builds, 2, "no rebuild without a write");
+
+        // A write moves the generation: the next lookup rebuilds even on a
+        // HIT (a deleted or re-stamped session must not keep its old row).
+        TEST_GEN.fetch_add(1, SeqCst);
         let a = append("known");
         t.scan_paths(HashSet::from([a])).await.unwrap();
         assert_eq!(t.stats.attribution_builds, 3);
+
+        // The safety TTL bounds staleness for writes that bypass the repo.
+        t.attr_built = Instant::now().checked_sub(ATTRIBUTION_TTL);
+        let a = append("known");
+        t.scan_paths(HashSet::from([a])).await.unwrap();
+        assert_eq!(t.stats.attribution_builds, 4);
         std::fs::remove_dir_all(root).unwrap();
     }
 

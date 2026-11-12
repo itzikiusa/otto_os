@@ -643,6 +643,25 @@ impl Bridge {
         Ok(detached)
     }
 
+    /// A message from a sender the allow-list drops: a workflow trigger from
+    /// them would otherwise "do nothing" with no trace, so the workflow side
+    /// stamps the trigger it was meant for. Never a reply to the sender; an
+    /// edit re-fires nothing, this included.
+    async fn note_rejected_sender(&self, channel: Channel, msg: &Inbound) {
+        if let Some(trigger) = self.workflow_trigger.as_ref().filter(|_| !msg.edited) {
+            trigger
+                .note_rejected_sender(
+                    &msg.workspace_id,
+                    channel.as_str(),
+                    &msg.chat,
+                    msg.thread.as_deref(),
+                    &msg.user,
+                    &msg.text,
+                )
+                .await;
+        }
+    }
+
     /// Handle one inbound message.
     pub async fn handle(
         &self,
@@ -677,6 +696,7 @@ impl Bridge {
                 &msg.user,
                 msg.user_name.as_deref(),
             );
+            self.note_rejected_sender(adapter.channel(), &msg).await;
             return;
         }
 

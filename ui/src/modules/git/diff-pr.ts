@@ -7,6 +7,7 @@ import type { FileDiff } from '../../lib/api/types';
 export const PREF_TREE = 'otto_pr_tree';
 export const PREF_HIDE_TESTS = 'otto_pr_hide_tests';
 export const PREF_WRAP = 'otto_diff_wrap';
+export const PREF_SPLIT = 'otto_diff_split';
 
 /** A boolean preference ('1' / '0'); `dflt` when unset or storage is blocked. */
 export function readPref(key: string, dflt: boolean): boolean {
@@ -87,4 +88,15 @@ export function buildNavTree(files: readonly FileDiff[]): NavDir {
     return { label: lbl, path: pth, dirs, files: fs };
   };
   return emit(root, '', '');
+}
+
+/** The first file after `current` in `order` (wrapping) that is not viewed —
+ *  "Next unviewed" in the Files panel and the phone's file stepper. */
+export function nextUnviewed(order: readonly string[], viewed: ReadonlySet<string>, current: string | null): string | null {
+  const at = current ? order.indexOf(current) : -1;
+  for (let k = 1; k <= order.length; k++) {
+    const f = order[(at + k) % order.length];
+    if (f !== undefined && !viewed.has(f)) return f;
+  }
+  return null;
 }

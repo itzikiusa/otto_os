@@ -12,12 +12,12 @@ use axum::routing::{get, patch, post};
 use axum::{Extension, Json, Router};
 use otto_core::api::{
     AddRepoReq, BranchInfo, CheckoutReq, CleanupBaseResp, Collaborator, CommitReq, ConflictFile,
-    CreateGitAccountReq, CreatePrReq, DiffResp, GitAccountTestResp, MergeBranchReq, MergeCommitReq,
-    MergeConflictStatus, MergePrReq, MergePreview, MergePreviewReq, MergeResult, NewPrCommentReq,
-    PrComment, PrCommit, PrDetail, PrState, PrSummary, Problem, RefsResp, RepoStatusResp,
-    RequestChangesReq, ResolveConflictReq, ResolvePrThreadReq, SetCleanupBaseReq, StagePathsReq,
-    StashInfo, SubmoduleInfo, TestGitAccountReq, UpdateGitAccountReq, UpdatePrReq, UpdateRepoReq,
-    WorktreeInfo,
+    CreateGitAccountReq, CreatePrReq, DiffResp, EditPrCommentReq, GitAccountTestResp,
+    MergeBranchReq, MergeCommitReq, MergeConflictStatus, MergePrReq, MergePreview, MergePreviewReq,
+    MergeResult, NewPrCommentReq, PrComment, PrCommit, PrDetail, PrState, PrSummary, Problem,
+    RefsResp, RepoStatusResp, RequestChangesReq, ResolveConflictReq, ResolvePrThreadReq,
+    SetCleanupBaseReq, StagePathsReq, StashInfo, SubmoduleInfo, TestGitAccountReq,
+    UpdateGitAccountReq, UpdatePrReq, UpdateRepoReq, WorktreeInfo,
 };
 use otto_core::auth::{authorize_owner, AuthUser, RoleChecker};
 use otto_core::domain::{GitAccount, GitProviderKind, Repo, WorkspaceRole};
@@ -175,19 +175,27 @@ pub fn router<S: GitCtx>() -> Router<S> {
         .route("/repos/{id}/prs/{number}/diff", get(pr_diff::<S>))
         .route("/repos/{id}/prs/{number}/comments", post(pr_comment::<S>))
         .route(
+            "/repos/{id}/prs/{number}/comments/{cid}",
+            patch(pr_comment_edit::<S>).delete(pr_comment_delete::<S>),
+        )
+        .route(
             "/repos/{id}/prs/{number}/comments/{cid}/resolve",
             post(pr_resolve_thread::<S>),
         )
-        .route("/repos/{id}/prs/{number}/approve", post(pr_approve::<S>))
+        .route(
+            "/repos/{id}/prs/{number}/approve",
+            post(pr_approve::<S>).delete(pr_unapprove::<S>),
+        )
         .route("/repos/{id}/prs/{number}/merge", post(pr_merge::<S>))
         .route("/repos/{id}/prs/{number}/decline", post(pr_decline::<S>))
         .route(
             "/repos/{id}/prs/{number}/request-changes",
-            post(pr_request_changes::<S>),
+            post(pr_request_changes::<S>).delete(pr_withdraw_request_changes::<S>),
         )
         .route("/repos/{id}/prs/{number}/commits", get(pr_commits::<S>))
         .merge(crate::patch::router::<S>())
         .merge(crate::pr_checks::router::<S>())
+        .merge(crate::pr_reactions::router::<S>())
         .merge(crate::history::router::<S>())
         .merge(crate::ops::router::<S>())
         .merge(crate::recovery::router::<S>())
@@ -1728,6 +1736,7 @@ impl DiffQuery {
             old_path,
             summary,
             caps,
+            ignore_whitespace: false,
         }
     }
 }
@@ -1784,7 +1793,7 @@ pub(crate) async fn json_off_runtime<T: serde::Serialize + Send + 'static>(
 }
 
 /// Serialize a diff off the async workers once it is big enough to matter.
-async fn diff_json(resp: DiffResp) -> Result<axum::body::Bytes> {
+pub(crate) async fn diff_json(resp: DiffResp) -> Result<axum::body::Bytes> {
     let lines: usize = resp
         .files
         .iter()
@@ -1804,7 +1813,7 @@ async fn diff_json(resp: DiffResp) -> Result<axum::body::Bytes> {
 /// full commit ids first (one `rev-parse` each; a full hex id costs nothing),
 /// so a branch that moves never serves a stale entry. A rev that doesn't
 /// resolve falls through to the uncached path and its usual git error.
-async fn immutable_diff_key(
+pub(crate) async fn immutable_diff_key(
     git: &LocalGit,
     target: &DiffTarget,
     opts: &crate::local::DiffOpts,
@@ -1835,11 +1844,14 @@ async fn immutable_diff_key(
         DiffTarget::Range(a, b) | DiffTarget::MergeBase(a, b) => format!("{a}:{b}"),
         _ => return None,
     };
-    let mode = match (opts.summary, opts.caps) {
+    let mut mode = match (opts.summary, opts.caps) {
         (true, _) => "summary".to_string(),
         (false, Some(c)) => format!("capped:{}:{}", c.file_lines, c.total_lines),
         (false, None) => "full".to_string(),
     };
+    if opts.ignore_whitespace {
+        mode.push_str(":ws");
+    }
     let key = format!(
         "{}\0{kind}\0{oids}\0{}\0{}\0{mode}",
         git.path().display(),
@@ -2805,8 +2817,14 @@ struct PrDiffQuery {
     /// With `path`: lift the per-file cap to the hard ceiling.
     full: Option<bool>,
     /// Opaque revision token (the UI passes `PrSummary.head_sha`): part of the
-    /// memo key, so a push is a new key rather than a stale hit.
+    /// memo key, so a push is a new key rather than a stale hit — and, the
+    /// content being immutable then, a longer memo lifetime.
     rev: Option<String>,
+    /// Leave whitespace-only changes out: by the forge (Bitbucket), else from
+    /// the local clone when it has both PR commits (GitHub, GitLab); failing
+    /// both, the normal diff comes back with `whitespace_ignored: false`.
+    #[serde(default)]
+    ignore_whitespace: bool,
 }
 
 async fn pr_diff<S: GitCtx>(
@@ -2816,14 +2834,44 @@ async fn pr_diff<S: GitCtx>(
     Query(q): Query<PrDiffQuery>,
 ) -> ApiResult<Response> {
     use crate::diff_cache::{approx_size, pr_diffs, pr_flights};
-    let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
     // Access is decided per request (role + the caller's provider credential)
     // BEFORE the shared memo is consulted.
     let (provider, remote, account) = provider_ctx_with_account(&s, &user, &repo).await?;
+    // Whitespace-ignoring reads come from the forge's own twin client; one
+    // without that switch serves (and shares the memo of) its normal diff.
+    let ignore_ws = q.ignore_whitespace;
+    let ws_provider = if ignore_ws {
+        provider.ignoring_whitespace()
+    } else {
+        None
+    };
+    let ws_applied = ws_provider.is_some();
+    let opts = DiffQuery {
+        target: None,
+        path: q.path.clone(),
+        old_path: q.old_path.clone(),
+        summary: q.summary,
+        full: q.full,
+    }
+    .opts();
+    if ignore_ws && !ws_applied {
+        // No forge switch (GitHub, GitLab): this repo's own clone answers
+        // with `-w` when it holds both of the PR's commits.
+        let local = crate::pr_ws::local_ws_diff(&git, &*provider, &remote, number, &opts);
+        if let Some((body, cache)) = local.await {
+            return Ok(json_body(body, cache));
+        }
+    }
+    let provider = ws_provider.unwrap_or(provider);
     let rev = q.rev.as_deref().unwrap_or("");
+    let ttl = crate::diff_cache::pr_diff_ttl(rev);
     let key = format!(
-        "{}\0{}/{}\0{number}\0{account}\0{rev}",
-        repo.id, remote.owner, remote.repo
+        "{}\0{}/{}\0{number}\0{account}\0{rev}{}",
+        repo.id,
+        remote.owner,
+        remote.repo,
+        if ws_applied { "\0ws" } else { "" }
     );
     let cached = pr_diffs()
         .lock()
@@ -2878,11 +2926,10 @@ async fn pr_diff<S: GitCtx>(
                                     }
                                     crate::parse::fill_totals(&mut d);
                                     let d = Arc::new(d);
-                                    pr_diffs().lock().unwrap_or_else(|p| p.into_inner()).put(
-                                        nk,
-                                        d.clone(),
-                                        approx_size(&d),
-                                    );
+                                    pr_diffs()
+                                        .lock()
+                                        .unwrap_or_else(|p| p.into_inner())
+                                        .put_for(nk, d.clone(), approx_size(&d), ttl);
                                     d
                                 }))
                             }
@@ -2907,11 +2954,10 @@ async fn pr_diff<S: GitCtx>(
                         }
                         crate::parse::fill_totals(&mut d);
                         let d = Arc::new(d);
-                        pr_diffs().lock().unwrap_or_else(|p| p.into_inner()).put(
-                            key,
-                            d.clone(),
-                            approx_size(&d),
-                        );
+                        pr_diffs()
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .put_for(key, d.clone(), approx_size(&d), ttl);
                         Ok(d)
                     }
                 })
@@ -2919,14 +2965,6 @@ async fn pr_diff<S: GitCtx>(
             (d, "miss")
         }
     };
-    let opts = DiffQuery {
-        target: None,
-        path: q.path,
-        old_path: q.old_path,
-        summary: q.summary,
-        full: q.full,
-    }
-    .opts();
     let size = if opts.path.is_some() || opts.summary {
         0
     } else {
@@ -2941,7 +2979,10 @@ async fn pr_diff<S: GitCtx>(
                     || (old.is_some() && f.old_path.as_deref() == old.as_deref())
             }
         };
-        let view = crate::parse::capped_view(&diff, keep, opts.caps.as_ref(), opts.summary);
+        let mut view = crate::parse::capped_view(&diff, keep, opts.caps.as_ref(), opts.summary);
+        if ignore_ws {
+            view.whitespace_ignored = Some(ws_applied);
+        }
         serde_json::to_vec(&view)
     })
     .await?
@@ -2961,6 +3002,38 @@ async fn pr_comment<S: GitCtx>(
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
     Ok(Json(provider.comment(&remote, number, &req).await?))
+}
+
+/// Replace the text of comment `{cid}` (a `PrComment.id`). The forge refuses
+/// an edit of someone else's comment; `PrComment.can_edit` tells the UI first.
+async fn pr_comment_edit<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path((id, number, cid)): Path<(Id, u64, String)>,
+    Json(req): Json<EditPrCommentReq>,
+) -> ApiResult<Json<PrComment>> {
+    if req.body.trim().is_empty() {
+        return Err(Error::Invalid("comment body must not be empty".into()).into());
+    }
+    let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
+    Ok(Json(
+        provider
+            .edit_comment(&remote, number, &cid, &req.body)
+            .await?,
+    ))
+}
+
+/// Delete comment `{cid}` (a `PrComment.id`).
+async fn pr_comment_delete<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path((id, number, cid)): Path<(Id, u64, String)>,
+) -> ApiResult<StatusCode> {
+    let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
+    provider.delete_comment(&remote, number, &cid).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Resolve (`{"resolved":true}`) or reopen (`false`) a review thread. `{cid}`
@@ -2987,6 +3060,30 @@ async fn pr_approve<S: GitCtx>(
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
     provider.approve(&remote, number).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Withdraw the caller's approval (`DELETE …/approve`).
+async fn pr_unapprove<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path((id, number)): Path<(Id, u64)>,
+) -> ApiResult<StatusCode> {
+    let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
+    provider.unapprove(&remote, number).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Withdraw the caller's change request (`DELETE …/request-changes`).
+async fn pr_withdraw_request_changes<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path((id, number)): Path<(Id, u64)>,
+) -> ApiResult<StatusCode> {
+    let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
+    provider.withdraw_request_changes(&remote, number).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

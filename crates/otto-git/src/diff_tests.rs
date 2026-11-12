@@ -829,3 +829,56 @@ async fn working_diff_small_total_bounds_child_capture_with_unlimited_file_cap()
         .flat_map(|h| &h.lines)
         .any(|line| line.content.len() == 2 * 1024 * 1024));
 }
+
+/// The PR diff's local `-w` fallback: whitespace-only edits leave the patch
+/// and the summary counts, real edits stay; `has_commits` says whether the
+/// clone holds a PR's commits (an unknown or non-hex name is "absent").
+#[tokio::test]
+async fn ignore_whitespace_drops_whitespace_only_changes() {
+    let (_tmp, dir) = init();
+    write(&dir, "ws.rs", b"fn a() {\n    x();\n}\n");
+    write(&dir, "real.rs", b"one\n");
+    sh_git(&dir, &["add", "-A"]);
+    sh_git(&dir, &["commit", "-q", "-m", "base"]);
+    let base = sh_git(&dir, &["rev-parse", "HEAD"]);
+    write(&dir, "ws.rs", b"fn a() {\n\tx();  \n}\n");
+    write(&dir, "real.rs", b"two\n");
+    sh_git(&dir, &["add", "-A"]);
+    sh_git(&dir, &["commit", "-q", "-m", "edit"]);
+    let head = sh_git(&dir, &["rev-parse", "HEAD"]);
+    let git = LocalGit::new(&dir);
+    assert!(git.has_commits(&[base.as_str(), head.as_str()]).await);
+    let unknown = "0".repeat(40);
+    assert!(!git.has_commits(&[base.as_str(), unknown.as_str()]).await);
+    assert!(!git.has_commits(&["HEAD"]).await, "only hex object names");
+
+    let target = DiffTarget::MergeBase(base.clone(), head.clone());
+    let ws = |summary: bool| DiffOpts {
+        summary,
+        ignore_whitespace: true,
+        ..DiffOpts::default()
+    };
+    let plain = git.diff_with(&target, &DiffOpts::default()).await.unwrap();
+    assert!(!by_path(&plain, "ws.rs").hunks.is_empty());
+    let ignored = git.diff_with(&target, &ws(false)).await.unwrap();
+    assert!(
+        ignored
+            .files
+            .iter()
+            .filter(|f| f.path == "ws.rs")
+            .all(|f| f.hunks.is_empty()),
+        "{:?}",
+        paths(&ignored)
+    );
+    assert!(!by_path(&ignored, "real.rs").hunks.is_empty());
+    let summary = git.diff_with(&target, &ws(true)).await.unwrap();
+    let counts = |p: &str| {
+        summary
+            .files
+            .iter()
+            .find(|f| f.path == p)
+            .map(|f| (f.added.unwrap_or(0), f.deleted.unwrap_or(0)))
+    };
+    assert_eq!(counts("real.rs"), Some((1, 1)));
+    assert!(matches!(counts("ws.rs"), None | Some((0, 0))));
+}

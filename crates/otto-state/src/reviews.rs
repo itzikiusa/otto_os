@@ -172,6 +172,16 @@ impl ReviewsRepo {
         Ok(res.rows_affected())
     }
 
+    /// Every review still marked `running`, without comments (the daemon's
+    /// restart recovery reads only the rows: agents, scope plan, status).
+    pub async fn list_running(&self) -> Result<Vec<Review>> {
+        let rows = sqlx::query("SELECT * FROM pr_reviews WHERE status = 'running'")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("list running reviews"))?;
+        rows.iter().map(|r| row_to_review(r, Vec::new())).collect()
+    }
+
     /// Settle every agent row a dead process left live. Called on daemon
     /// startup after [`Self::fail_running`]: a per-agent Retry runs on a
     /// SETTLED review, so its `pending` / `running` / `waiting` row is not
@@ -894,6 +904,25 @@ mod tests {
         assert_eq!(live[0].status, "pending", "a running review is not swept");
         // Idempotent: nothing left to settle.
         assert_eq!(repo.fail_orphaned_agents(note).await.unwrap(), 0);
+    }
+
+    /// Restart recovery reads the running rows (agents included) BEFORE the
+    /// sweep fails them; settled reviews are not listed.
+    #[tokio::test]
+    async fn list_running_returns_only_running_reviews_with_their_agents() {
+        let repo = ReviewsRepo::new(mem_pool().await);
+        let running = repo.create_review(&"r".to_string(), 1).await.unwrap();
+        let done = repo.create_review(&"r".to_string(), 1).await.unwrap();
+        repo.set_status(&done.id, ReviewStatus::Done, None)
+            .await
+            .unwrap();
+        repo.set_agents(&running.id, &[agent("a", "done"), agent("s", "running")])
+            .await
+            .unwrap();
+        let listed = repo.list_running().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, running.id);
+        assert_eq!(listed[0].agents[1].status, "running");
     }
 
     /// Regression for the "agents look capped/stuck at PENDING" bug: each agent

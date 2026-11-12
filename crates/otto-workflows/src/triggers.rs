@@ -14,6 +14,7 @@ use otto_state::{TriggersRepo, WorkflowsRepo};
 use serde_json::{json, Value};
 use tracing::{info, warn};
 
+use crate::trigger_outcome::{stamp_admitted, stamp_rejected};
 use crate::WorkflowCtx;
 
 pub mod schedule;
@@ -378,6 +379,7 @@ pub fn spawn_event_trigger_listener<C: WorkflowCtx>(ctx: C) -> Arc<AtomicBool> {
                     Ok(true) => {
                         info!(workflow_id = %wf.id, event_kind = kind_str,
                               "workflow event-trigger listener: run already active — skipping");
+                        stamp_rejected(ctx.pool(), &trigger.id, schedule::ACTIVE_RUN).await;
                         continue;
                     }
                     Err(e) => {
@@ -421,6 +423,7 @@ pub fn spawn_event_trigger_listener<C: WorkflowCtx>(ctx: C) -> Arc<AtomicBool> {
                     Ok(None) => {
                         info!(workflow_id = %wf.id, event_kind = kind_str,
                               "workflow event-trigger listener: run already active — skipping");
+                        stamp_rejected(ctx.pool(), &trigger.id, schedule::ACTIVE_RUN).await;
                         continue;
                     }
                     Err(e) => {
@@ -429,9 +432,12 @@ pub fn spawn_event_trigger_listener<C: WorkflowCtx>(ctx: C) -> Arc<AtomicBool> {
                             event_kind = kind_str,
                             "workflow event-trigger listener: create run: {e}"
                         );
+                        let why = format!("run not admitted: {e}");
+                        stamp_rejected(ctx.pool(), &trigger.id, &why).await;
                         continue;
                     }
                 };
+                stamp_admitted(ctx.pool(), &trigger.id, &run.id).await;
 
                 // A commit racing shutdown stays pending for startup recovery.
                 // Do not launch side effects after the admission await when

@@ -34,11 +34,12 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
-  import { settingsMenuItems, settingsSummary as querySettingsSummary, setMask } from './query-settings';
+  import { confirmRun, settingsMenuItems, settingsSummary as querySettingsSummary, setMask } from './query-settings';
   import { clipHistory } from '../../lib/stores/clipHistory.svelte';
   import { parkedEditCount } from '../../lib/database/grid-tab-state';
   import { confirmer } from '../../lib/confirm.svelte';
-  import type { DbCompletionKind } from '../../lib/api/types';
+  import type { DbCompletionKind, MongoshInfo } from '../../lib/api/types';
+  import TxSessionNotice from './TxSessionNotice.svelte';
   import {
     statementAtCursor,
     analyzeStatement,
@@ -53,7 +54,6 @@
   import { splitModeFor } from '../../lib/database/sql-dialect';
   import { loadErrorText } from '../../lib/loadError';
   import { api } from '../../lib/api/client';
-  import type { MongoshInfo } from '../../lib/api/types';
   import { paneResizer } from '../../lib/paneResizer';
 
   const tab = $derived(database.tab);
@@ -580,7 +580,7 @@
       names.map((n) => [n, renderVar(tab.vars[n] ?? defaultVarSpec(), splitMode)]),
     );
     const finalSql = names.length > 0 ? substituteVars(base, rendered, splitMode) : base;
-    void database.runQuery(finalSql, undefined, { transient: true });
+    void confirmRun(finalSql).then((ok) => { if (ok) void database.runQuery(finalSql, undefined, { transient: true }); }); // an open-ended transaction / unguarded DELETE-without-WHERE, DROP, … ask first
   }
 
   const canQuery = $derived(!!database.selectedConnId && ['db_query','db_data','db_schema'].some(op=>resourceAccess.can('connection',database.selectedConnId!,op,'database','edit',databaseAccessChild(database.activeDb))));
@@ -1515,11 +1515,11 @@
         <PlanView plan={database.queryPlan} onclose={() => database.closePlan()} />
       </div>
     {/if}
-    <!-- `statement` is the one that PRODUCED what is on screen — the rows
-         (ran_statement) or the error (err_statement) — never the live buffer:
-         the grid, ErrorPanel's caret and "Ask AI to fix" describe what RAN, and
-         the live buffer re-ran the grid's effects on every keystroke. -->
+    <!-- `statement` is the one that PRODUCED what is on screen — the rows (ran_statement)
+         or the error (err_statement) — never the live buffer: the grid, ErrorPanel and "Ask
+         AI to fix" describe what RAN (the buffer re-ran the grid's effects per keystroke). -->
     {#if !planOnly}
+      <TxSessionNotice statement={tab.error ? tab.err_statement : tab.ran_statement} engine={database.capabilities?.engine} bufferCount={stmtCount} running={tab.running} onrunall={runAll} />
       <ResultsGrid
         result={tab.result}
         error={tab.error}

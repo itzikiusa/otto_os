@@ -58,3 +58,12 @@ export function buildTriggerSpec(form: TriggerForm, original: Record<string, unk
     result_thread: form.resultThread.trim(), result_webhook: form.resultWebhook.trim() });
   return spec;
 }
+
+/** What a chat binding fires on, said plainly — a binding needs no keyword,
+ *  which is easy to forget once it is configured. A blank thread is "any". */
+export function chatBindingHow(spec: Record<string, unknown>): string {
+  const where = typeof spec.thread === 'string' && spec.thread.trim() ? 'in that thread' : 'in this chat';
+  return spec.mention_only === true
+    ? `Any message ${where} that @mentions the bot starts a run.`
+    : `Any message ${where} starts a run — no keyword needed.`;
+}

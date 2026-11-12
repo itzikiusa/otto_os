@@ -1,10 +1,49 @@
 // Mock fixtures for the PR workspace (split out of mock.ts): a T3-sized PR
 // (#51) with many files across languages (a few of them tests), its commits
 // and per-commit diffs, plus a couple more open PRs for the list pane.
-import type { DiffResp, FileDiff, PrComment, PrSummary } from './types';
+import type { DiffResp, FileDiff, PrComment, PrDetail, PrSummary } from './types';
 
 const NOW = Date.now();
 const ago = (mins: number): string => new Date(NOW - mins * 60_000).toISOString();
+
+/** "You" on the forge, as the forge NAMES you — a display name that matches
+ *  none of the mock git accounts' usernames (`dev-otto`, `dev@work.io`), the
+ *  Bitbucket shape. Only the daemon's `is_me` / `is_mine` flags say it's you. */
+export const MOCK_ME = 'Dev Otto';
+/** PRs you authored (author spelled either way). */
+export const mockIsMine = (author: string): boolean => author === MOCK_ME || author === 'dev-otto';
+
+/** Detail-only fields per PR: reactions (none on Bitbucket Cloud), the
+ *  forge's merge checks and open tasks (#51 has a failing approvals rule). */
+export function mockPrExtras(repoId: string, num: number): Partial<PrDetail> {
+  if (repoId === 'rep_wallet') return { reactions_supported: false };
+  if (num !== 51) return { reactions_supported: true };
+  return {
+    reactions_supported: true,
+    merge_checks: [
+      { key: 'minimum_approvals', label: 'At least 2 approvals', passed: false, detail: '1 of 2 approvals' },
+      { key: 'all_builds_passed', label: 'All builds passed', passed: false },
+      { key: 'no_conflicts', label: 'No merge conflicts', passed: true },
+    ],
+    task_count: { open: 1, resolved: 2 },
+  };
+}
+
+/** Simulated push for e2e: `localStorage.otto_mock_pr_pushed = '<number>'`
+ *  makes that PR's head a newer commit (after its diff was loaded). */
+const PUSHED_SHA = 'c7e57a11';
+function pushed(num: string | number): boolean {
+  try {
+    return localStorage.getItem('otto_mock_pr_pushed') === String(num);
+  } catch {
+    return false;
+  }
+}
+/** A PR summary as the forge reports it now: `is_mine`, and the head moved
+ *  by a simulated push. */
+export function mockPrLive(s: PrSummary): PrSummary {
+  return { ...s, is_mine: mockIsMine(s.author), head_sha: pushed(s.number) ? PUSHED_SHA : (s.head_sha ?? null) };
+}
 
 function fdiff(path: string, body: [('context' | 'add' | 'del'), string][]): FileDiff {
   let o = 1;
@@ -136,8 +175,22 @@ export const mockExtraPrs: ExtraPr[] = [
       {
         id: 'c51_1', author: 'maya', body: 'Can the level thresholds come from config instead of being hard-coded?',
         path: null, line: null, created_at: ago(60 * 20), replies: [
-          { id: 'c51_2', author: 'dev-otto', body: 'Good call — moved them to the wallet config in the latest push.', path: null, line: null, created_at: ago(60 * 18), replies: [], resolved: false },
+          { id: 'c51_2', author: 'dev-otto', body: 'Good call — moved them to the wallet config in the latest push.', path: null, line: null, created_at: ago(60 * 18), replies: [], resolved: false, in_reply_to: 'c51_1' },
+          // A reply to the reply (Bitbucket flattens the chain under the root).
+          { id: 'c51_4', author: 'maya', body: 'Thanks — can the config be per brand?', path: null, line: null, created_at: ago(60 * 17), replies: [], resolved: false, in_reply_to: 'c51_2' },
         ], resolved: false, thread_id: 'c51_1',
+        reactions: [{ key: 'thumbs_up', count: 2, me: false }, { key: 'eyes', count: 1, me: false }],
+      },
+      {
+        // A GitHub review summary: verdict chip, Reply only.
+        id: 'review-901', author: 'maya', body: 'Looks good once the effect handles its errors.', review_state: 'approved',
+        path: null, line: null, created_at: ago(60 * 4), replies: [], resolved: false, can_edit: false,
+      },
+      {
+        // Yours (MOCK_ME): Edit / Delete in its menu.
+        id: 'c51_5', author: MOCK_ME, body: 'Rebased on develop — ready for another look.', can_edit: true,
+        path: null, line: null, created_at: ago(60 * 2), replies: [], resolved: false, thread_id: 'c51_5',
+        reactions: [{ key: 'rocket', count: 1, me: true }],
       },
       {
         id: 'c51_3', author: 'maya', body: 'Nit: this effect swallows the error — add a `catchError` that dispatches a failure action.',
@@ -173,7 +226,7 @@ export const mockExtraPrs: ExtraPr[] = [
     summary: {
       number: 49,
       title: 'fix(wallet): round bonus balance before conversion',
-      author: 'dev-otto',
+      author: MOCK_ME,
       state: 'open',
       draft: true,
       source_branch: 'fix/bonus-rounding',
@@ -198,7 +251,10 @@ export function mockBigPrDiff(path: string | null): DiffResp {
 
 /** A PR's commits: #51 has six, any other PR two. */
 export function mockPrCommits(num: string): typeof bigPrCommits {
-  return num === '51' ? bigPrCommits : bigPrCommits.slice(0, 2).map((c) => ({ ...c, sha: `x${c.sha.slice(1)}` }));
+  const list = num === '51' ? bigPrCommits : bigPrCommits.slice(0, 2).map((c) => ({ ...c, sha: `x${c.sha.slice(1)}` }));
+  if (!pushed(num)) return list;
+  const sha = `${PUSHED_SHA}${'0'.repeat(32)}`;
+  return [{ sha, short_sha: sha.slice(0, 7), author: 'maya', date: new Date().toISOString(), subject: 'fix: late push after review' }, ...list];
 }
 
 /** `commit:<sha>` of one of #51's commits → the slice of files it touched. */

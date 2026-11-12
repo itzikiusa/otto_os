@@ -8,9 +8,14 @@ pub mod client;
 pub mod detect;
 pub mod github;
 pub mod gitlab;
+pub mod identity;
 
 #[cfg(test)]
 mod wire_tests;
+#[cfg(test)]
+mod wire_tests_review;
+#[cfg(test)]
+mod wire_tests_wave2;
 
 use std::sync::Arc;
 
@@ -18,7 +23,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use otto_core::api::{
     Collaborator, CreatePrReq, DiffResp, MergeStrategy, NewPrCommentReq, PrComment, PrCommit,
-    PrDetail, PrState, PrSummary, UpdatePrReq,
+    PrDetail, PrReaction, PrState, PrSummary, ReactionKey, UpdatePrReq,
 };
 use otto_core::domain::{GitAccount, GitProviderKind};
 use otto_core::Result;
@@ -148,6 +153,70 @@ pub trait GitProvider: Send + Sync {
         ))
     }
     async fn approve(&self, r: &RemoteRef, number: u64) -> Result<()>;
+    /// Withdraw the bound account's approval. Default: unsupported.
+    async fn unapprove(&self, _r: &RemoteRef, _number: u64) -> Result<()> {
+        Err(otto_core::Error::Invalid(
+            "withdrawing an approval is not supported for this provider".into(),
+        ))
+    }
+    /// Withdraw the bound account's change request. Default: unsupported.
+    async fn withdraw_request_changes(&self, _r: &RemoteRef, _number: u64) -> Result<()> {
+        Err(otto_core::Error::Invalid(
+            "withdrawing a change request is not supported for this provider".into(),
+        ))
+    }
+    /// Replace the text of comment `comment_id` (a `PrComment.id` from
+    /// `get_pr`). The forge itself refuses an edit of someone else's comment.
+    async fn edit_comment(
+        &self,
+        _r: &RemoteRef,
+        _number: u64,
+        _comment_id: &str,
+        _body: &str,
+    ) -> Result<PrComment> {
+        Err(otto_core::Error::Invalid(
+            "editing comments is not supported for this provider".into(),
+        ))
+    }
+    /// Delete comment `comment_id` (a `PrComment.id` from `get_pr`).
+    async fn delete_comment(&self, _r: &RemoteRef, _number: u64, _comment_id: &str) -> Result<()> {
+        Err(otto_core::Error::Invalid(
+            "deleting comments is not supported for this provider".into(),
+        ))
+    }
+    /// Add (`on: true`) or remove the bound account's `key` reaction on
+    /// comment `comment_id` (a `PrComment.id`); answers the comment's
+    /// reactions afterwards. Default: 409 — the forge has no reactions.
+    async fn set_reaction(
+        &self,
+        _r: &RemoteRef,
+        _number: u64,
+        _comment_id: &str,
+        _key: ReactionKey,
+        _on: bool,
+    ) -> Result<Vec<PrReaction>> {
+        Err(otto_core::Error::Conflict(
+            "reactions are not supported for this provider".into(),
+        ))
+    }
+    /// The two commits the forge computes PR `number`'s diff between, as a
+    /// local diff target — for computing a whitespace-ignoring diff in the
+    /// repo's own clone when the forge has no such switch. `Ok(None)` =
+    /// unknown (the default).
+    async fn pr_diff_target(
+        &self,
+        _r: &RemoteRef,
+        _number: u64,
+    ) -> Result<Option<crate::local::DiffTarget>> {
+        Ok(None)
+    }
+    /// A twin of this client whose diff reads (whole, summary, one file)
+    /// leave whitespace-only changes out, computed by the forge. `None` = the
+    /// forge has no such switch; the caller serves the normal diff and says
+    /// so (`DiffResp::whitespace_ignored: false`).
+    fn ignoring_whitespace(&self) -> Option<Arc<dyn GitProvider>> {
+        None
+    }
     /// Merge PR `number`. `delete_source_branch` asks the provider to drop the
     /// source branch as part of (or right after) the merge — GitHub has no
     /// merge-body flag for it, so its impl issues a follow-up ref delete.

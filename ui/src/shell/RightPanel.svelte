@@ -255,6 +255,8 @@
    *  the debounce used to save whatever workspace was current WHEN IT FIRED,
    *  so switching within 600 ms wrote B's text back to B and lost A's edit. */
   let pendingNotes: { wsId: string; text: string; token: string | null } | null = null;
+  /** Saving notes is `PATCH /workspaces/{id}` — admin-only; others read them. */
+  const canEditNotes = $derived(ws.myRole === 'admin');
 
   $effect(() => {
     // (re)load notes when workspace changes
@@ -463,7 +465,9 @@
               aria-label="Workspace notes"
               bind:value={notes}
               oninput={onNotesInput}
-              placeholder="Workspace notes (markdown)…"
+              readonly={!canEditNotes}
+              title={canEditNotes ? undefined : 'Workspace admins can edit this'}
+              placeholder={canEditNotes ? 'Workspace notes (markdown)…' : 'No workspace notes yet.'}
               spellcheck="false"
             ></textarea>
             <!-- Not a live region: "Saving…" / "Saved" swap on every typing
@@ -477,6 +481,7 @@
                   </div>
                 {/if}
               </div>
+              {#if !canEditNotes}<span class="dim">Workspace admins can edit this.</span>{/if}
               {#if saveState === 'saving'}<span class="dim">Saving…</span>
               {:else if saveState === 'saved'}<span class="dim">Saved</span>
               {:else if saveState !== 'error'}<span class="dim">Saved to this workspace as you type</span>{/if}

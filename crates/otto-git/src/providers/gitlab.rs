@@ -18,7 +18,10 @@ use serde_json::{json, Value};
 use crate::types::CiStatus;
 
 use super::client::Http;
+use super::identity::{self, Me};
 use super::{map_state, ts, varr, vbool, vstr, vstr_opt, vu64, RemoteRef, RemoteRepoSummary};
+
+pub(crate) mod reactions;
 
 /// Percent-encode characters that must be escaped in GitLab query/path values.
 fn percent_encode_query(s: &str) -> String {
@@ -68,6 +71,43 @@ impl Gitlab {
             .client()
             .request(method, format!("{}/api/v4{path}", self.base))
             .header("PRIVATE-TOKEN", &self.token)
+    }
+
+    /// The account this client authenticates as (`GET /user` → `id`), cached
+    /// per credential. `None` when the lookup fails — nothing is then "you".
+    pub(crate) async fn me(&self) -> Option<Me> {
+        let key = identity::cache_key("gitlab", &self.base, &self.token);
+        identity::cached(&key, || async {
+            let v = self
+                .http
+                .json(self.req(reqwest::Method::GET, "/user"))
+                .await?;
+            Ok::<_, Error>(Me::from_keys(user_keys(&v)))
+        })
+        .await
+    }
+
+    /// The note behind a `PrComment.id`: a reply's id IS its note id; a
+    /// thread head exposes its discussion id, whose first non-system note is
+    /// read back from the discussion.
+    async fn note_id(&self, r: &RemoteRef, number: u64, comment_id: &str) -> Result<u64> {
+        if let Ok(n) = comment_id.parse::<u64>() {
+            return Ok(n);
+        }
+        let disc = Self::discussion_id(comment_id)?;
+        let d = self
+            .http
+            .json(self.req(
+                reqwest::Method::GET,
+                &Self::mr_path(r, &format!("/{number}/discussions/{disc}")),
+            ))
+            .await?;
+        varr(&d, &["notes"])
+            .iter()
+            .find(|n| !n.get("system").and_then(Value::as_bool).unwrap_or(false))
+            .map(|n| vu64(n, &["id"]))
+            .filter(|id| *id > 0)
+            .ok_or_else(|| Error::NotFound(format!("no note in discussion {disc}")))
     }
 
     /// `PRIVATE-TOKEN` pair for the raw-`reqwest` pagination helper.
@@ -264,7 +304,23 @@ fn summary_from(v: &Value) -> PrSummary {
             })
             .unwrap_or_default(),
         url: vstr(v, &["web_url"]),
+        is_mine: false,
     }
+}
+
+/// [`summary_from`] with `is_mine` set from the author's id.
+fn summary_for(v: &Value, me: Option<&Me>) -> PrSummary {
+    let mut s = summary_from(v);
+    s.is_mine = v
+        .get("author")
+        .is_some_and(|a| identity::is_me(me, &user_keys(a)));
+    s
+}
+
+/// A GitLab user object's stable id: the numeric `id` (never `name`, which
+/// the user can change, nor `username`, which they can rename).
+pub(crate) fn user_keys(u: &Value) -> Vec<String> {
+    vec![identity::num_key(vu64(u, &["id"]))]
 }
 
 /// Create-MR request body. Draft = `Draft: ` title prefix (idempotent when the
@@ -311,6 +367,12 @@ pub(crate) fn text_position(c: &NewPrCommentReq, path: &str, line: u32, mr: &Val
     pos
 }
 
+/// A note this credential just wrote: the caller's own.
+fn own(mut c: PrComment) -> PrComment {
+    c.can_edit = true;
+    c
+}
+
 fn note_to_comment(note: &Value, id_override: Option<String>) -> PrComment {
     let path = vstr_opt(note, &["position", "new_path"])
         .or_else(|| vstr_opt(note, &["position", "old_path"]));
@@ -344,7 +406,99 @@ fn note_to_comment(note: &Value, id_override: Option<String>) -> PrComment {
         thread_id: None, // stamped on resolvable thread heads in get_pr
         side,
         outdated: false,
+        can_edit: false,
+        review_state: None,
+        in_reply_to: None,
+        // Filled by `Gitlab::fill_reactions` (award emoji).
+        reactions: Vec::new(),
+        can_react: true,
     }
+}
+
+/// [`note_to_comment`] with `can_edit` set from the note author's id, and
+/// `outdated` when the note is anchored to a diff version older than the
+/// MR's current head (`mr_head`, the MR's `diff_refs.head_sha`). GitLab
+/// re-anchors a note whose line survives a push; one it could not carry
+/// over keeps its old `position.head_sha` — pinned to today's diff it would
+/// sit on an unrelated line.
+fn note_for(
+    note: &Value,
+    id_override: Option<String>,
+    me: Option<&Me>,
+    mr_head: &str,
+) -> PrComment {
+    let mut c = note_to_comment(note, id_override);
+    c.can_edit = note
+        .get("author")
+        .is_some_and(|a| identity::is_me(me, &user_keys(a)));
+    let note_head = vstr(note, &["position", "head_sha"]);
+    c.outdated =
+        c.line.is_some() && !mr_head.is_empty() && !note_head.is_empty() && note_head != mr_head;
+    c
+}
+
+/// `detailed_merge_status` (+ `blocking_discussions_resolved`) of an open MR
+/// as merge checks: the thread rule when GitLab reports it, then the one
+/// blocking reason GitLab names — or "Ready to merge". Statuses GitLab is
+/// still computing (`checking`, `unchecked`, `preparing`, …) add nothing.
+pub(crate) fn merge_checks_from(mr: &Value) -> Vec<otto_core::api::MergeCheck> {
+    use otto_core::api::MergeCheck;
+    if vstr(mr, &["state"]) != "opened" {
+        return Vec::new();
+    }
+    let check = |key: &str, label: &str, passed: bool, detail: Option<&str>| MergeCheck {
+        key: key.into(),
+        label: label.into(),
+        passed,
+        detail: detail.map(str::to_string),
+    };
+    let mut out = Vec::new();
+    let status = vstr(mr, &["detailed_merge_status"]);
+    let threads = vbool(mr, &["blocking_discussions_resolved"])
+        .or((status == "discussions_not_resolved").then_some(false));
+    if let Some(ok) = threads {
+        out.push(check("discussions", "All threads resolved", ok, None));
+    }
+    let blocked = |key: &str, label: &str, detail: Option<&str>| check(key, label, false, detail);
+    match status.as_str() {
+        "mergeable" => out.push(check("mergeable", "Ready to merge", true, None)),
+        "not_approved" => out.push(blocked("approvals", "All required approvals given", None)),
+        "ci_must_pass" => out.push(blocked("pipeline", "Pipeline succeeded", None)),
+        "ci_still_running" => out.push(blocked(
+            "pipeline",
+            "Pipeline succeeded",
+            Some("Still running"),
+        )),
+        "draft_status" => out.push(blocked("draft", "Not a draft", None)),
+        "conflict" => out.push(blocked("conflicts", "No merge conflicts", None)),
+        "need_rebase" => out.push(blocked("rebase", "Rebased onto the target branch", None)),
+        "requested_changes" => out.push(blocked(
+            "no_changes_requested",
+            "No changes requested",
+            None,
+        )),
+        "blocked_status" => out.push(blocked("dependencies", "No blocking merge requests", None)),
+        "external_status_checks" => out.push(blocked(
+            "status_checks",
+            "External status checks passed",
+            None,
+        )),
+        "jira_association_missing" => out.push(blocked("jira", "Linked to a Jira issue", None)),
+        // Covered by the thread row above; still computing; or closed.
+        ""
+        | "discussions_not_resolved"
+        | "checking"
+        | "unchecked"
+        | "preparing"
+        | "approvals_syncing"
+        | "not_open" => {}
+        other => out.push(blocked(
+            "mergeable",
+            "Ready to merge",
+            Some(other.replace('_', " ").as_str()),
+        )),
+    }
+    out
 }
 
 #[async_trait]
@@ -372,12 +526,16 @@ impl super::GitProvider for Gitlab {
         // GitLab answers with `x-next-page` (empty on the last page); older /
         // proxied instances only set `Link` — the cached page's `next` is
         // either one.
-        let (body, next) = self.http.get_cached_page(rb).await?;
+        let (page, me) = tokio::join!(self.http.get_cached_page(rb), self.me());
+        let (body, next) = page?;
         let has_more = next.is_some();
         let v: Value = serde_json::from_str(&body)
             .map_err(|e| otto_core::Error::Upstream(format!("gitlab: bad json: {e}")))?;
         Ok(super::PrPage {
-            items: varr(&v, &[]).iter().map(summary_from).collect(),
+            items: varr(&v, &[])
+                .iter()
+                .map(|m| summary_for(m, me.as_ref()))
+                .collect(),
             has_more,
         })
     }
@@ -390,7 +548,7 @@ impl super::GitProvider for Gitlab {
         // For threads the exposed comment id is the DISCUSSION id so that
         // replies can target it (`in_reply_to`). An MR detail must be WHOLE, so
         // follow `Link rel="next"` rather than stopping at the first 100.
-        let (mr, discussions, approvals, ci) = tokio::join!(
+        let (mr, discussions, approvals, ci, me) = tokio::join!(
             self.http.get_cached_json(self.req(
                 reqwest::Method::GET,
                 &Self::mr_path(r, &format!("/{number}")),
@@ -410,9 +568,14 @@ impl super::GitProvider for Gitlab {
             )),
             // Best-effort CI pipeline status — never fails the MR fetch.
             self.fetch_ci_status(r, number),
+            self.me(),
         );
         let (mr, discussions) = (mr?, discussions?);
+        let me = me.as_ref();
+        let mr_head = vstr(&mr, &["diff_refs", "head_sha"]);
         let mut comments: Vec<PrComment> = Vec::new();
+        // Per comment: its notes' ids (head first) — for the award reads.
+        let mut note_ids: Vec<Vec<u64>> = Vec::new();
         for d in &discussions {
             let disc_id = vstr(d, &["id"]);
             let notes: Vec<&Value> = varr(d, &["notes"])
@@ -420,7 +583,7 @@ impl super::GitProvider for Gitlab {
                 .filter(|n| !n.get("system").and_then(Value::as_bool).unwrap_or(false))
                 .collect();
             let Some(first) = notes.first() else { continue };
-            let mut head = note_to_comment(first, Some(disc_id.clone()));
+            let mut head = note_for(first, Some(disc_id.clone()), me, &mr_head);
             // Resolve targets the discussion; only resolvable threads get one.
             if first
                 .get("resolvable")
@@ -430,10 +593,13 @@ impl super::GitProvider for Gitlab {
                 head.thread_id = Some(disc_id);
             }
             for reply in &notes[1..] {
-                head.replies.push(note_to_comment(reply, None));
+                head.replies.push(note_for(reply, None, me, &mr_head));
             }
             comments.push(head);
+            note_ids.push(notes.iter().map(|n| vu64(n, &["id"])).collect());
         }
+        self.fill_reactions(r, number, &mut comments, &note_ids, me)
+            .await;
 
         // Approvals (best effort — endpoint exists on CE and SaaS).
         // GitLab exposes no per-approver timestamp, so reviewed_at is None and
@@ -454,6 +620,9 @@ impl super::GitProvider for Gitlab {
                         changes_requested: false,
                         avatar_url: vstr_opt(e, &["user", "avatar_url"]),
                         reviewed_at: None,
+                        is_me: e
+                            .get("user")
+                            .is_some_and(|u| identity::is_me(me, &user_keys(u))),
                     })
                     .collect();
                 (approved_by, reviewers)
@@ -467,7 +636,7 @@ impl super::GitProvider for Gitlab {
             _ => None,
         };
 
-        let mut summary = summary_from(&mr);
+        let mut summary = summary_for(&mr, me);
         summary.ci_status = Some(ci.state.clone());
 
         Ok(PrDetail {
@@ -477,6 +646,9 @@ impl super::GitProvider for Gitlab {
             approved_by,
             reviewers,
             mergeable,
+            reactions_supported: true,
+            merge_checks: merge_checks_from(&mr),
+            task_count: None,
         })
     }
 
@@ -568,6 +740,8 @@ impl super::GitProvider for Gitlab {
             )
             .await?;
         let mut summary = summary_from(&v);
+        // Opened with this credential: the author is the caller.
+        summary.is_mine = true;
         summary.reviewer_warnings = warnings;
         Ok(summary)
     }
@@ -607,7 +781,7 @@ impl super::GitProvider for Gitlab {
                     .json(&json!({ "body": c.body })),
                 )
                 .await?;
-            return Ok(note_to_comment(&v, None));
+            return Ok(own(note_to_comment(&v, None)));
         }
         // Inline comment → discussion with a text position (needs diff_refs).
         if let (Some(path), Some(line)) = (&c.path, c.line) {
@@ -633,7 +807,7 @@ impl super::GitProvider for Gitlab {
                 .await?;
             let disc_id = vstr_opt(&v, &["id"]);
             let note = varr(&v, &["notes"]).first().cloned().unwrap_or(v.clone());
-            return Ok(note_to_comment(&note, disc_id));
+            return Ok(own(note_to_comment(&note, disc_id)));
         }
         // General note.
         let v = self
@@ -646,7 +820,75 @@ impl super::GitProvider for Gitlab {
                 .json(&json!({ "body": c.body })),
             )
             .await?;
-        Ok(note_to_comment(&v, None))
+        Ok(own(note_to_comment(&v, None)))
+    }
+
+    /// `PUT …/merge_requests/{iid}/notes/{note_id}` — the MR notes API covers
+    /// discussion notes too. A thread head keeps its discussion id as `id`.
+    async fn edit_comment(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        comment_id: &str,
+        body: &str,
+    ) -> Result<PrComment> {
+        let note = self.note_id(r, number, comment_id).await?;
+        let v = self
+            .http
+            .json(
+                self.req(
+                    reqwest::Method::PUT,
+                    &Self::mr_path(r, &format!("/{number}/notes/{note}")),
+                )
+                .json(&json!({ "body": body })),
+            )
+            .await?;
+        let keep_id = (comment_id.parse::<u64>().is_err()).then(|| comment_id.to_string());
+        Ok(own(note_to_comment(&v, keep_id)))
+    }
+
+    /// The MR's `diff_refs`: `base_sha` is already the merge base, so the
+    /// diff is the plain `base_sha..head_sha`. (GitLab's MR diff API has no
+    /// documented whitespace switch — the web UI's `w=1` is not REST.)
+    async fn pr_diff_target(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+    ) -> Result<Option<crate::local::DiffTarget>> {
+        let mr = self
+            .http
+            .get_cached_json(self.req(
+                reqwest::Method::GET,
+                &Self::mr_path(r, &format!("/{number}")),
+            ))
+            .await?;
+        let base = vstr(&mr, &["diff_refs", "base_sha"]);
+        let head = vstr(&mr, &["diff_refs", "head_sha"]);
+        Ok((!base.is_empty() && !head.is_empty())
+            .then_some(crate::local::DiffTarget::Range(base, head)))
+    }
+
+    /// Award emoji on the note — see [`reactions`].
+    async fn set_reaction(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        comment_id: &str,
+        key: otto_core::api::ReactionKey,
+        on: bool,
+    ) -> Result<Vec<otto_core::api::PrReaction>> {
+        self.set_reaction_impl(r, number, comment_id, key, on).await
+    }
+
+    /// `DELETE …/merge_requests/{iid}/notes/{note_id}`.
+    async fn delete_comment(&self, r: &RemoteRef, number: u64, comment_id: &str) -> Result<()> {
+        let note = self.note_id(r, number, comment_id).await?;
+        self.http
+            .ok(self.req(
+                reqwest::Method::DELETE,
+                &Self::mr_path(r, &format!("/{number}/notes/{note}")),
+            ))
+            .await
     }
 
     /// `PUT .../discussions/{disc_id}?resolved=` toggles the whole thread.
@@ -674,6 +916,18 @@ impl super::GitProvider for Gitlab {
             .ok(self.req(
                 reqwest::Method::POST,
                 &Self::mr_path(r, &format!("/{number}/approve")),
+            ))
+            .await
+    }
+
+    /// `POST …/unapprove` withdraws the bound account's approval. (GitLab's
+    /// "request changes" here is a plain note — there is no state to
+    /// withdraw, so `withdraw_request_changes` stays unsupported.)
+    async fn unapprove(&self, r: &RemoteRef, number: u64) -> Result<()> {
+        self.http
+            .ok(self.req(
+                reqwest::Method::POST,
+                &Self::mr_path(r, &format!("/{number}/unapprove")),
             ))
             .await
     }

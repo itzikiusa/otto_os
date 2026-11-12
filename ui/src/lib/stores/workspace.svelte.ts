@@ -16,14 +16,14 @@ import { isEmbedded } from '../desktop';
 import { SCRATCH_WORKSPACE_ID, sessionVerbsApply } from './sessionScope';
 import { runtimeFlagged } from './runtimeAttention.svelte';
 import { applyStatusPatches, canDropExited, patchSessionIn, staleStatusIds, type StatusPatch } from './sessionPatch';
-import { bucketSessions, idChunks, isForeground, isShownKind, isThreadSurfaceSession, shownListQuery } from './sessionBuckets';
+import { bucketSessions, idChunks, isForeground, isShownKind, isThreadSurfaceSession, parseTabIds, shownListQuery } from './sessionBuckets';
 import { whenIdle } from '../lazy-component.svelte';
 import { toastError } from '../toastError';
 import { loadErrorText } from '../loadError';
 import { flaggedIds, forget, mergeAttention, noticeIsNew, parseAttention, raise, see, serializeAttention, type Attention } from '../attention';
 
 /** Persisted raise/seen times behind the "needs you" flag (lib/attention.ts). */
-const LS_ATTENTION = 'otto_attention_v2';
+export const LS_ATTENTION = 'otto_attention_v2';
 
 /** Archived rows per "Load more" page (per scope: workspace / scratch). */
 const ARCHIVED_PAGE = 100;
@@ -697,14 +697,13 @@ class WorkspaceStore {
     // otherwise write the OLD workspace's tabs under the NEW id.
     this.tabsKey = key;
     // restore tabs for this workspace
-    const raw = lsGet(winKey(LS_TABS + key));
-    const ids: Id[] = raw ? JSON.parse(raw) : [];
-    // Keep real sessions + the DB-Explorer pane sentinel (it has no session row).
-    const valid = ids.filter((t) => t === DB_PANE_ID || this.sessionById.has(t));
+    const ids: Id[] = parseTabIds(lsGet(winKey(LS_TABS + key)));
+    // Keep live sessions + the DB-Explorer pane sentinel (it has no session row).
+    const valid = ids.filter((t) => this.tabbable(t));
     // Tabs opened while this key was still un-hydrated (see {@link bindTabsKey})
     // are appended — the route→store effect's session must survive the restore.
     const pendingAll = this.pendingTabs.filter((t) => !valid.includes(t));
-    const pending = pendingAll.filter((t) => t === DB_PANE_ID || this.sessionById.has(t));
+    const pending = pendingAll.filter((t) => this.tabbable(t));
     // A route-opened session the shown list doesn't carry (a background
     // agent's `#/agents/<id>`): fetch it by id, then open it.
     for (const t of pendingAll) if (!pending.includes(t)) this.openWhenLoaded(t);
@@ -717,6 +716,12 @@ class WorkspaceStore {
     const open = this.openTabs;
     layout.restore(key, (sid) => open.includes(sid), open[0] ?? null);
     this.layoutReady = true;
+  }
+
+  /** A tab may show `t`: the DB pane, or a loaded session that isn't archived
+   *  (a by-id fetch returns archived rows too; archiving closes the tab). */
+  private tabbable(t: Id): boolean {
+    return t === DB_PANE_ID || this.sessionById.get(t)?.archived === false;
   }
 
   /** Whether a session with this workspace id belongs in `sessions`: the
@@ -799,8 +804,9 @@ class WorkspaceStore {
   /** {@link ensureSession}, then open it — once (no retry loop when the row
    *  turns out not to be listable here). */
   private openWhenLoaded(id: Id): void {
-    void this.ensureSession(id).then(() => {
-      if (this.sessionById.has(id)) this.openSession(id);
+    void this.ensureSession(id).then((s) => {
+      if (s && !s.archived && this.sessionById.has(id)) this.openSession(id);
+      else if (s?.archived) toasts.info('Session archived', 'Restore it from the Archived list to open it.');
     });
   }
 
@@ -862,12 +868,7 @@ class WorkspaceStore {
    *  agent being watched) — so a refresh never drops what is on screen. */
   private pinnedIds(): Id[] {
     const ids = new Set<Id>();
-    try {
-      const raw = lsGet(winKey(LS_TABS + this.tabsKey));
-      for (const t of raw ? (JSON.parse(raw) as Id[]) : []) ids.add(t);
-    } catch {
-      /* corrupt payload: restoreLayout handles it */
-    }
+    for (const t of parseTabIds(lsGet(winKey(LS_TABS + this.tabsKey)))) ids.add(t);
     for (const t of this.openTabs) ids.add(t);
     for (const t of this.pendingTabs) ids.add(t);
     for (const t of layout.panes) ids.add(t);
@@ -1007,8 +1008,7 @@ class WorkspaceStore {
    *  sentinel pane, which has no session row. Ids in `unknown` (their by-id
    *  fetch failed this refresh) are kept: absence there is not evidence. */
   private reconcileTabs(unknown: ReadonlySet<Id> = new Set()): void {
-    const exists = (t: Id): boolean =>
-      t === DB_PANE_ID || this.sessionById.has(t) || unknown.has(t);
+    const exists = (t: Id): boolean => this.tabbable(t) || unknown.has(t);
     const tabs = this.openTabs.filter(exists);
     if (tabs.length !== this.openTabs.length) {
       this.openTabs = tabs;
@@ -1073,7 +1073,7 @@ class WorkspaceStore {
     // left in the `#/agents/<id>` route hash after the session was reaped (the
     // cause of an undismissable "phantom" tab). Allowed while sessions are still
     // loading; reconcileTabs() prunes any that turn out invalid once loaded.
-    if (id !== DB_PANE_ID && !this.sessionsLoading && !this.sessionById.has(id)) {
+    if (!this.sessionsLoading && !this.tabbable(id)) {
       // Not in the shown list — maybe a background agent opened from its
       // panel (the list no longer carries those): fetch it by id and open it
       // if it exists. A reaped id stays closed (no phantom tab).
@@ -2043,12 +2043,10 @@ class WorkspaceStore {
           this.unread = next;
         }
         this.dropArchived(ev.session_id);
-        if (this.belongsHere(ev.workspace_id)) {
-          this.sessions = this.sessions.filter((s) => s.id !== ev.session_id);
-          if (this.openTabs.includes(ev.session_id)) this.closeTab(ev.session_id);
-        } else {
-          this.otherWsSessions = this.otherWsSessions.filter((s) => s.id !== ev.session_id);
-        }
+        // By id, whatever workspace the event names: a tab or pane never outlives its session.
+        if (this.sessionById.has(ev.session_id)) this.sessions = this.sessions.filter((s) => s.id !== ev.session_id);
+        this.otherWsSessions = this.otherWsSessions.filter((s) => s.id !== ev.session_id);
+        if (this.openTabs.includes(ev.session_id) || layout.panes.includes(ev.session_id)) this.closeTab(ev.session_id);
         break;
       }
       case 'notice': {

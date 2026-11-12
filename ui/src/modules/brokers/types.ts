@@ -64,8 +64,12 @@ export interface LagAlert {
   threshold: number;
   enabled: boolean;
   created_at: string;
-  /** Lag at last evaluation if the alert is breached; absent when not breached. */
+  /** The current lag when it is at or over the threshold (evaluated when the
+   *  list is fetched); absent when not breached or not evaluated. */
   breach_lag?: number;
+  /** The group's summed lag on the topic, evaluated for this response; absent
+   *  when the alert is disabled or the group couldn't be described in time. */
+  current_lag?: number;
 }
 
 /** The per-cluster views, in tab order (BrokersPage + the embedded ClusterViewer).

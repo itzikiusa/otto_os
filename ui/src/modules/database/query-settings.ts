@@ -7,6 +7,22 @@ import { confirmer } from '../../lib/confirm.svelte';
 import type { MenuItem } from '../../lib/contextmenu.svelte';
 import { unpersistEditorState } from '../../lib/editor-history';
 import { database, DEFAULT_ROW_LIMIT, ROW_LIMIT_ALL, TAB_HISTORY_PREFIX } from '../../lib/stores/database.svelte';
+import { runSafety } from '../../lib/stores/database/runSafety.svelte';
+
+// The editor's run path imports its pre-run confirms from here, next to the
+// setting that turns the destructive-statement one off.
+export { confirmRun } from './destructive-gate';
+
+/** Flip the destructive-statement confirm. Turning a safety net OFF asks once
+ *  (a stray click in a menu must not silently disarm it); turning it on doesn't. */
+export async function toggleConfirmDestructive(): Promise<void> {
+  if (!runSafety.confirmDestructive) return runSafety.setConfirmDestructive(true);
+  const ok = await confirmer.ask(
+    'DELETE or UPDATE without WHERE, DROP, TRUNCATE and ALTER TABLE … DROP will run on the first ⌘↵ on every connection not marked Prod or read-only (those keep their typed confirmation). This applies on this device only.',
+    { title: 'Stop confirming destructive statements?', confirmLabel: 'Turn off', cancelLabel: 'Keep confirming', danger: true },
+  );
+  if (ok) runSafety.setConfirmDestructive(false);
+}
 
 /** Default row-cap options (applied when a statement has no explicit LIMIT). */
 export const ROW_LIMIT_OPTS: { label: string; value: number }[] = [
@@ -72,6 +88,12 @@ export function settingsMenuItems(): MenuItem[] {
       checked: !!tab.mask,
       title: 'The server redacts emails, tokens and keys before results leave the daemon',
       action: () => setMask(!tab.mask),
+    },
+    {
+      label: 'Confirm destructive statements (DELETE/UPDATE without WHERE, DROP, TRUNCATE)',
+      checked: runSafety.confirmDestructive,
+      title: 'Safety: ask before DELETE / UPDATE without WHERE, DROP, TRUNCATE or ALTER TABLE … DROP on any connection (this device). Prod and read-only connections always take the typed confirm.',
+      action: () => void toggleConfirmDestructive(),
     },
   ];
 }

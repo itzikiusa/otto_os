@@ -743,6 +743,29 @@ impl governance::Stages for OttoStages<'_> {
                         let detail = admin_detail(&ctx.pool, tool, self.arguments)
                             .await
                             .unwrap_or_else(|| dangerous_detail(tool, self.arguments));
+                        // A saved request's id says nothing: name its method and host.
+                        let rid = self.arguments.get("request_id").and_then(Value::as_str);
+                        let detail = match (self.short, self.ws, rid) {
+                            ("api_execute", Some(ws), Some(rid)) => {
+                                let repo = otto_state::ApiClientRepo::new(ctx.pool.clone());
+                                let env =
+                                    self.arguments.get("environment_id").and_then(Value::as_str);
+                                let (ws, rid, env) =
+                                    (ws.to_string(), rid.to_string(), env.map(str::to_string));
+                                match otto_apiclient::engine::saved_request_target(
+                                    &repo,
+                                    &ws,
+                                    &rid,
+                                    env.as_ref(),
+                                )
+                                .await
+                                {
+                                    Some(target) => format!("{target} — {detail}"),
+                                    None => detail,
+                                }
+                            }
+                            _ => detail,
+                        };
                         ctx.mcp
                             .approvals()
                             .create(NewApproval {

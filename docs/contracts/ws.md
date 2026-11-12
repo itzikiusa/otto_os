@@ -610,7 +610,7 @@ Session lifecycle (session-family — owner/admin/root, viewer-gated):
 {"type":"session_archive_changed","session":{…Session…}}
 {"type":"session_meta_updated","session_id":"…","workspace_id":"…","meta":{…}}
 {"type":"session_renamed","session_id":"…","workspace_id":"…","title":"…"}
-{"type":"session_removed","session_id":"…","workspace_id":"…"}
+{"type":"session_removed","session_id":"…","workspace_id":"…","owner_id":"…"}
 {"type":"session_attention","session_id":"…","workspace_id":"…","reason":"turn_end"|"prompt"}
 ```
 
@@ -628,7 +628,10 @@ Session lifecycle (session-family — owner/admin/root, viewer-gated):
   (`PATCH /sessions/{id}`, `meta.title_source = "user"`) and by the background
   provider-title auto-namer adopting the CLI's own session title
   (`meta.title_source = "provider"`).
-- `session_removed` — a session row was removed (PTY killed).
+- `session_removed` — a session row was removed (PTY killed). `owner_id` is the session's
+  `created_by`: the row is already deleted when the event is sent, so delivery uses the owner
+  carried on the event (like `session_created`) instead of a row lookup — a non-admin owner
+  receives it in every window/device.
 - `session_attention` — an AGENT session signal: `reason: "prompt"` (an interactive approval
   or question prompt is blocked on the operator: Claude's Notification hook or a confirmed
   terminal approval prompt on any agent provider — raises the SPA's sticky "needs you" flag)

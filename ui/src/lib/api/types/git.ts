@@ -741,6 +741,8 @@ export interface DiffResp {
   total_deleted?: number | null;
   /** git skipped rename detection (past `-l1000`): some renames show as delete + add. */
   renames_incomplete?: boolean | null;
+  /** PR diff with `ignore_whitespace=true` only: false = the forge can't (normal diff). */
+  whitespace_ignored?: boolean | null;
 }
 
 export interface StagePathsReq {

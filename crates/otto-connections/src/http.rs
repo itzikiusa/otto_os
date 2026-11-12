@@ -21,7 +21,7 @@ use otto_core::domain::{
 use otto_core::{Error, Id};
 use otto_ssh::{SftpParams, SftpSession};
 use otto_state::{capability_for_role, DbPool, GrantsRepo};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::conn_import::{
     self, ImportCreateReq, ImportCreateResult, ImportFailure, ImportScanResult, ImportSource,
@@ -524,6 +524,18 @@ async fn open_connection<S: ConnectionsCtx>(
     Ok(Json(session))
 }
 
+/// The test endpoints' body: [`TestConnectionResp`] plus `detail`, the failed
+/// client's full stderr (capped to 8 KB; PEM blocks, the profile's own secret
+/// and URI/argv passwords redacted). Absent on success and on the driver-backed
+/// DB path, whose `message` already is the driver's whole error.
+#[derive(Debug, Serialize)]
+pub struct TestConnectionOut {
+    #[serde(flatten)]
+    pub resp: TestConnectionResp,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// #30 POST /connections/{id}/test — editor
 ///
 /// For DB-kind connections (MySQL, Redis, MongoDB, ClickHouse) the probe is
@@ -536,7 +548,7 @@ async fn test_connection<S: ConnectionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
-) -> ApiResult<Json<TestConnectionResp>> {
+) -> ApiResult<Json<TestConnectionOut>> {
     let conn = ctx.connections().get(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
     if owner_private_enabled(&ctx).await && !ctx.connections().is_enforced(&conn.id).await? {
@@ -557,21 +569,25 @@ async fn test_connection<S: ConnectionsCtx>(
     ctx.connections()
         .authorize(&id, &user.id, "configure")
         .await?;
-    let mut resp = if is_db_kind {
-        if let Some(tester) = ctx.db_tester() {
-            tester.test_db_connection(&id, &user.id).await?
-        } else {
-            ctx.connections().test(&conn, &user.id).await?
+    let (mut resp, detail) = match ctx.db_tester().filter(|_| is_db_kind) {
+        Some(tester) => {
+            let mut resp = tester.test_db_connection(&id, &user.id).await?;
+            // The driver path reports the driver's error verbatim; add the
+            // "what to check" hint for the recognisable classes. A tunnel
+            // failure ("ssh tunnel …") already carries otto-ssh's own hint.
+            if !resp.ok && resp.hint.is_none() && !resp.message.starts_with("ssh tunnel") {
+                resp.hint = crate::failure::classify_failure(&resp.message).map(str::to_string);
+            }
+            (resp, None)
         }
-    } else {
-        ctx.connections().test(&conn, &user.id).await?
+        None => ctx.connections().test_detailed(&conn, &user.id).await?,
     };
     // Overlay the SSH key-permission warning here — this single spot covers both
     // the driver path (which can't see the key file) and the CLI path uniformly,
     // including DB-over-SSH-tunnel connections (params["ssh"]["identity_file"]).
     // Independent of the probe outcome.
     resp.warn_key_perms = key_perms_warning_for(&conn.params);
-    Ok(Json(resp))
+    Ok(Json(TestConnectionOut { resp, detail }))
 }
 
 /// POST /connections/unsaved/test — ws editor + root. Test-before-save for an
@@ -581,16 +597,16 @@ async fn test_unsaved_connection<S: ConnectionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<TestUnsavedConnectionReq>,
-) -> ApiResult<Json<TestConnectionResp>> {
+) -> ApiResult<Json<TestConnectionOut>> {
     ctx.roles()
         .check(&user, &req.workspace_id, WorkspaceRole::Editor)
         .await?;
-    let mut resp = ctx
+    let (mut resp, detail) = ctx
         .connections()
-        .test_unsaved(&user.id, req.kind, req.params.clone())
+        .test_unsaved_detailed(&user.id, req.kind, req.params.clone())
         .await?;
     resp.warn_key_perms = key_perms_warning_for(&req.params);
-    Ok(Json(resp))
+    Ok(Json(TestConnectionOut { resp, detail }))
 }
 
 /// PATCH /connections/{id}/pin — editor (global: root); toggle the pinned flag.

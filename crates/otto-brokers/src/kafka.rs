@@ -36,9 +36,10 @@ const WATERMARK_TIMEOUT: Duration = Duration::from_secs(8);
 /// Includes both batched requests and all fallback waves, not per partition.
 const WATERMARK_BUDGET: Duration = Duration::from_secs(16);
 const GROUP_TIMEOUT: Duration = Duration::from_secs(15);
-/// Maximum raw messages scanned when a key_filter is active (prevents infinite
-/// loops on sparse matches; the caller's `limit` still caps *matching* results).
-const MAX_SCAN_WITH_FILTER: usize = 50_000;
+/// Maximum raw messages scanned when a key or value filter is active (prevents
+/// infinite loops on sparse matches; the caller's `limit` still caps *matching*
+/// results).
+pub const MAX_SCAN_WITH_FILTER: usize = 50_000;
 /// Parallelism for the cluster-wide watermark scan (throughput total). librdkafka
 /// is thread-safe, so we fan the per-partition ListOffsets queries across worker
 /// threads — a few hundred partitions over a slow/tunnelled link complete in a
@@ -164,7 +165,17 @@ pub struct RawConsume {
     pub truncated: bool,
     /// Requested count/range was not completely read before a resource limit.
     pub incomplete: bool,
+    /// Raw messages read from the broker, matching or not (a filtered peek
+    /// scans past non-matches; unfiltered it equals `messages.len()`).
+    pub scanned: usize,
+    /// A filtered scan stopped at [`MAX_SCAN_WITH_FILTER`] raw messages with
+    /// the range not exhausted — older/newer matches may exist.
+    pub scan_capped: bool,
 }
+
+/// A predicate over a message's raw value bytes, evaluated in the scan loop so
+/// a filtered peek's `limit` counts only matches (see [`KafkaClient::consume_raw_filtered`]).
+pub type ValueMatch<'a> = &'a dyn Fn(Option<&[u8]>) -> bool;
 
 pub struct KafkaClient {
     /// Created on the first admin op / produce (see [`lazy_client`]): each
@@ -1042,6 +1053,24 @@ impl KafkaClient {
         starts: Option<&HashMap<i32, i64>>,
         byte_budget: Option<usize>,
     ) -> Result<RawConsume> {
+        self.consume_raw_filtered(topic, req, starts, byte_budget, None)
+    }
+
+    /// [`Self::consume_raw_from`] plus a server-side VALUE filter: like the key
+    /// filter, non-matching messages are scanned past (up to
+    /// [`MAX_SCAN_WITH_FILTER`] raw messages, within `max_wait_ms`) and only
+    /// matches count toward `limit` — the value filter used to run after a
+    /// `limit`-sized read, so a match outside the first 50 messages read as
+    /// "not there". With `find_from_beginning` the scan starts at the earliest
+    /// offset, exactly as for the key filter.
+    pub fn consume_raw_filtered(
+        &self,
+        topic: &str,
+        req: &ConsumeReq,
+        starts: Option<&HashMap<i32, i64>>,
+        byte_budget: Option<usize>,
+        value_match: Option<ValueMatch<'_>>,
+    ) -> Result<RawConsume> {
         // Partition ids from the per-cluster cache (60 s TTL, invalidated on
         // create/delete): a live-tail tick every 3 s no longer pays a metadata
         // round trip before its ListOffsets batch.
@@ -1069,6 +1098,8 @@ impl KafkaClient {
                 partitions: Vec::new(),
                 truncated: false,
                 incomplete: false,
+                scanned: 0,
+                scan_capped: false,
             });
         }
         let limit = req.limit.clamp(1, 5000);
@@ -1127,7 +1158,8 @@ impl KafkaClient {
         // When find_from_beginning is requested alongside a key_filter, scan from
         // the earliest offset so the filter can match older messages regardless of
         // the caller's `start` position.
-        let effective_start = if req.find_from_beginning && req.key_filter.is_some() {
+        let filtered = req.key_filter.is_some() || value_match.is_some();
+        let effective_start = if req.find_from_beginning && filtered {
             StartPosition::Beginning
         } else {
             req.start
@@ -1179,6 +1211,8 @@ impl KafkaClient {
                 partitions: ranges,
                 truncated: false,
                 incomplete: false,
+                scanned: 0,
+                scan_capped: false,
             });
         }
 
@@ -1189,7 +1223,7 @@ impl KafkaClient {
         // When a key filter is active the want quota counts only matching messages
         // so we may scan more than `limit` raw messages from the broker. Use a
         // large enough inner cap so we don't spin forever on sparse matches.
-        let raw_cap = if key_filter_lower.is_some() {
+        let raw_cap = if filtered {
             expected.min(MAX_SCAN_WITH_FILTER as i64) as usize
         } else {
             (limit as i64).min(expected) as usize
@@ -1240,6 +1274,12 @@ impl KafkaClient {
                             }
                             continue;
                         }
+                    }
+                    if value_match.is_some_and(|matches| !matches(m.payload())) {
+                        if offset + 1 >= high_of.get(&part).copied().unwrap_or(i64::MAX) {
+                            done.insert(part);
+                        }
+                        continue;
                     }
 
                     let header_bytes = m.headers().map_or(0usize, |hs| {
@@ -1296,12 +1336,16 @@ impl KafkaClient {
         let incomplete = over_budget || (messages.len() < want && done.len() < parts.len());
         let truncated =
             incomplete || ((messages.len() as i64) < expected && messages.len() >= want);
+        let scan_capped =
+            filtered && scanned >= raw_cap && messages.len() < want && done.len() < parts.len();
         messages.sort_by(|a, b| a.partition.cmp(&b.partition).then(a.offset.cmp(&b.offset)));
         Ok(RawConsume {
             messages,
             partitions: ranges,
             truncated,
             incomplete,
+            scanned,
+            scan_capped,
         })
     }
 
@@ -2417,6 +2461,42 @@ mod tests {
             "a record larger than the entire budget must not be copied"
         );
         assert!(raw.truncated);
+    }
+
+    /// The value filter used to run after a `limit`-sized read, so a match
+    /// past the first page read as "not there". In the scan, non-matches are
+    /// skipped and only matches count toward the limit.
+    #[test]
+    fn mock_value_filter_scans_past_non_matches() {
+        let mock = TrackedMock::new(&[("vf", 3)]);
+        mock.produce("vf", 30);
+        let client = mock.client();
+        let req: ConsumeReq = serde_json::from_value(serde_json::json!({
+            "limit": 5, "max_wait_ms": 5000, "start": {"type": "beginning"}
+        }))
+        .unwrap();
+        // Every third message "matches".
+        let seen = std::cell::Cell::new(0usize);
+        let every_third = |_: Option<&[u8]>| {
+            seen.set(seen.get() + 1);
+            seen.get().is_multiple_of(3)
+        };
+        let raw = client
+            .consume_raw_filtered("vf", &req, None, None, Some(&every_third))
+            .unwrap();
+        assert_eq!(raw.messages.len(), 5, "the limit counts matches only");
+        assert!(raw.scanned >= 15, "scanned {}", raw.scanned);
+        assert!(!raw.scan_capped);
+
+        // Nothing matches: the whole range is scanned and the result is empty
+        // — complete, not capped.
+        let none = |_: Option<&[u8]>| false;
+        let raw = client
+            .consume_raw_filtered("vf", &req, None, None, Some(&none))
+            .unwrap();
+        assert!(raw.messages.is_empty());
+        assert_eq!(raw.scanned, 30);
+        assert!(!raw.scan_capped);
     }
 
     #[test]

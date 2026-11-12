@@ -157,7 +157,7 @@ async fn resolve_request(
     agent: bool,
 ) -> ApiResult<Vec<String>> {
     use otto_apiclient::engine::{
-        new_host_conflict, resolve_environment, substitute, unbound_secret_host,
+        find_unbound_secret, resolve_environment, substitute, unbound_secret_conflict,
     };
     use serde_json::json;
     let repo = otto_state::ApiClientRepo::new(ctx.pool.clone());
@@ -181,12 +181,13 @@ async fn resolve_request(
         .as_ref()
         .map(|e| e.secret_keys.as_slice())
         .unwrap_or(&[]);
-    if let Some(host) =
-        unbound_secret_host(&repo, wid, &probe, &vars, &bind_vars, &blob, keys).await?
-    {
-        if agent || !options.confirm_new_host {
-            return Err(new_host_conflict(&host, agent).into());
-        }
+    let secrets = Some(&ctx.secrets);
+    let unbound = find_unbound_secret(
+        &repo, secrets, wid, &probe, &vars, &bind_vars, &blob, keys, None,
+    )
+    .await?;
+    if let Some(unbound) = unbound.filter(|_| agent || !options.confirm_new_host) {
+        return Err(unbound_secret_conflict(&unbound, agent).into());
     }
     let secrets: Vec<String> = blob.values().cloned().collect();
     // Validate/resolve the body before mutating the URL or metadata.
@@ -291,11 +292,14 @@ mod tests {
             confirm_new_host: true,
             ..options
         };
-        assert!(
-            resolve_request(&ctx, &wid, &mut url, &mut headers, None, &confirmed, true)
-                .await
-                .is_err()
-        );
+        // An agent can't confirm; the refusal (the same text as REST, from
+        // `find_unbound_secret` with the store) says a person has to send it.
+        let refused = resolve_request(&ctx, &wid, &mut url, &mut headers, None, &confirmed, true)
+            .await
+            .expect_err("an agent can't confirm a new host");
+        let text = refused.0.to_string();
+        assert!(text.contains("host '127.0.0.1'"), "{text}");
+        assert!(text.contains("a person must send it"), "{text}");
         resolve_request(&ctx, &wid, &mut url, &mut headers, None, &confirmed, false)
             .await
             .unwrap();

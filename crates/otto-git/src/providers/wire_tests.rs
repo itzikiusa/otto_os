@@ -21,6 +21,18 @@ fn rr() -> RemoteRef {
     }
 }
 
+/// Requests that reached the stub, minus the identity lookup (`GET /user`)
+/// that PR lists and details make alongside their own reads.
+async fn forge_requests(server: &MockServer) -> Vec<wiremock::Request> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| !r.url.path().ends_with("/user"))
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // GitHub
 // ---------------------------------------------------------------------------
@@ -419,7 +431,7 @@ mod github {
         assert_eq!(p2.items.len(), 1);
         assert_eq!(p2.items[0].number, 3);
         // One request per page — no hidden 20-page sweep.
-        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        assert_eq!(forge_requests(&server).await.len(), 2);
     }
 
     #[tokio::test]
@@ -509,7 +521,7 @@ mod github {
         let page = gh.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
         assert_eq!(page.items.len(), 1);
         assert_eq!(
-            server.received_requests().await.unwrap().len(),
+            forge_requests(&server).await.len(),
             2,
             "a short rate limit is slept off and retried exactly once"
         );
@@ -535,7 +547,7 @@ mod github {
         assert!(msg.contains("rate limited"), "got {msg}");
         assert!(msg.contains("120s"), "the wait is quoted back: {msg}");
         assert_eq!(
-            server.received_requests().await.unwrap().len(),
+            forge_requests(&server).await.len(),
             1,
             "a two-minute wait is reported, never slept off"
         );
@@ -1487,7 +1499,7 @@ mod cached_reads {
         expire_cached_for_tests(&server.uri());
         let c = gh.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
         assert_eq!(c.items.len(), 2, "the 304 serves the cached body");
-        let reqs = server.received_requests().await.unwrap();
+        let reqs = forge_requests(&server).await;
         let last = reqs.last().unwrap();
         assert_eq!(
             last.headers
@@ -1545,6 +1557,13 @@ mod cached_reads {
         Mock::given(method("GET"))
             .and(path_regex(r"^/repos/acme/app/commits/.+"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        // The identity is looked up once and then cached (hours, per
+        // credential) — a re-open makes no `/user` request either.
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"login": "me", "id": 1})))
             .mount(&server)
             .await;
 
