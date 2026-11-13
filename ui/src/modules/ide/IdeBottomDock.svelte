@@ -4,10 +4,12 @@
   import Badge from '../../lib/components/Badge.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
   import { copyWithToast } from '../../lib/clipboard';
   import { startMouseDrag } from '../../lib/dragCursor';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import {
     loadPaneWidth,
     paneResizer,
@@ -16,16 +18,17 @@
   } from '../../lib/paneResizer';
   import { plural } from '../../lib/plural';
   import { viewport } from '../../lib/stores/viewport.svelte';
-  import IdeDebuggerPanel from './IdeDebuggerPanel.svelte';
-  import IdeProblemsPanel from './IdeProblemsPanel.svelte';
-  import IdeRunPanel from './IdeRunPanel.svelte';
-  import IdeTerminalPanel from './IdeTerminalPanel.svelte';
   import {
     ide,
     ideBasename,
     type IdeBottomTab,
     type IdeReferenceLocation,
   } from './ideStore.svelte';
+
+  const IdeDebuggerPanelLazy = lazyComponent(() => import('./IdeDebuggerPanel.svelte'));
+  const IdeProblemsPanelLazy = lazyComponent(() => import('./IdeProblemsPanel.svelte'));
+  const IdeRunPanelLazy = lazyComponent(() => import('./IdeRunPanel.svelte'));
+  const IdeTerminalPanelLazy = lazyComponent(() => import('./IdeTerminalPanel.svelte'));
 
   interface Props {
     defaultHeight?: number;
@@ -246,11 +249,11 @@
       aria-labelledby="ide-dock-tab-{ide.activeBottomTab}"
     >
       {#if ide.activeBottomTab === 'debug'}
-        <IdeDebuggerPanel />
+        <LazyMount lazy={IdeDebuggerPanelLazy} what="the debugger" variant="panel" />
       {:else if ide.activeBottomTab === 'run'}
-        <IdeRunPanel />
+        <LazyMount lazy={IdeRunPanelLazy} what="run & tests" variant="panel" />
       {:else if ide.activeBottomTab === 'problems'}
-        <IdeProblemsPanel />
+        <LazyMount lazy={IdeProblemsPanelLazy} what="the problems list" variant="panel" />
       {:else if ide.activeBottomTab === 'usages'}
         <div class="usg-root" data-testid="ide-usages-panel">
           {#if ide.usages.length > 0 || ide.usagesSymbol}
@@ -354,7 +357,7 @@
           </div>
         </div>
       {:else if ide.activeBottomTab === 'terminal'}
-        <IdeTerminalPanel />
+        <LazyMount lazy={IdeTerminalPanelLazy} what="the terminal" variant="panel" />
       {/if}
     </div>
   {/if}

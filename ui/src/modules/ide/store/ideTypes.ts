@@ -12,6 +12,19 @@ export type IdeCollabRole = 'viewer' | 'editor';
 export interface IdeTargetSpec {
   kind: IdeTargetKind; workspace_id?: string | null; root: string;
   connection_id?: string | null; connection_name?: string | null;
+  additional_roots?: string[];
+}
+
+export interface IdeProjectRoot {
+  path: string;
+  name: string;
+  isPrimary: boolean;
+}
+
+export interface IdeNavLocation {
+  path: string;
+  line: number;
+  col: number;
 }
 
 export interface IdeFsEntry {
@@ -33,6 +46,7 @@ export interface IdeOpenTab {
   path: string; name: string; content: string; savedContent: string; dirty?: boolean;
   sha256: string; language: string; readOnly: boolean; truncated: boolean;
   loading: boolean; error: string | null; preview: boolean;
+  pinned?: boolean; external?: boolean;
 }
 
 export interface IdeSearchItem {
@@ -67,9 +81,9 @@ export interface IdeDiagnostic {
 export interface IdeReferenceLocation { path: string; line: number; column: number; preview: string }
 export interface IdeRenameEdit { path: string; occurrences: number; preview_lines: { line: number; before: string; after: string }[] }
 export interface IdeCodeAction { id: string; title: string; kind?: string; edit_preview?: string; replacement_content?: string }
-export interface IdeInstalledSdk { id: string; version: string; path: string; source: 'system' | 'otto' | string; active: boolean }
+export interface IdeInstalledSdk { id: string; version: string; path: string; source: 'system' | 'otto' | 'local' | string; active: boolean }
 export interface IdeToolStatus { name: string; available: boolean; path?: string | null }
-export interface IdeDownloadableSdk { version: string; label: string; lts: boolean; os: string; arch: string; url: string; size_hint?: string | null }
+export interface IdeDownloadableSdk { version: string; label: string; lts: boolean; os: string; arch: string; url: string; size_hint?: string | null; sha256?: string | null }
 
 export interface IdeToolchainEcosystem {
   ecosystem: 'java' | 'go' | 'rust' | 'node' | 'python' | string; display_name: string;
@@ -82,20 +96,29 @@ export interface IdeInstallJob {
   progress_pct: number; log_lines: string[]; installed_path?: string | null; error?: string | null;
 }
 
+export interface IdeShellEnvResp {
+  status?: string; shell: string; vars: Record<string, string>; env?: Record<string, string>;
+  var_count?: number; count?: number; loaded_at?: string; duration_ms?: number; error?: string | null;
+}
+
 export interface IdeEnvVar { key: string; value?: string; secret: boolean; has_secret?: boolean }
 
 export interface IdeProjectEnvironment {
   java_home?: string | null; go_root?: string | null; rust_toolchain?: string | null;
   node_home?: string | null; python_interpreter?: string | null;
-  dotenv_path?: string | null; extra_path?: string | null; env_vars: IdeEnvVar[];
+  dotenv_path?: string | null; extra_path?: string | null;
+  inherit_shell_env?: boolean; additional_roots?: string[];
+  env_vars: IdeEnvVar[];
 }
 
 export interface IdePythonVenv { path: string; interpreter_path?: string; version: string; kind: 'venv' | 'conda' | 'poetry' | 'uv' | string }
 
 export interface IdeRunConfig {
   id: string; name: string; runner: string; command?: string | null; args: string[];
-  cwd?: string | null; env_overrides: Record<string, string>; before_launch?: string | null;
-  target_path?: string | null; test_filter?: string | null;
+  build_flags?: string[]; cwd?: string | null; env_overrides: Record<string, string>;
+  env_file?: string | null; inherit_shell_env?: boolean; sdk_path?: string | null;
+  toolchain_id?: string | null; compound_configs?: string[]; auto_detected?: boolean;
+  before_launch?: string | null; target_path?: string | null; test_filter?: string | null;
 }
 
 export interface IdeTestResult {
@@ -111,6 +134,7 @@ export interface IdeRunState {
 export interface IdeBreakpoint {
   path: string; line: number; enabled: boolean;
   condition?: string | null; hit_condition?: string | null; log_message?: string | null;
+  verified?: boolean; message?: string | null;
 }
 
 export interface IdeThread { id: number; name: string }
@@ -175,16 +199,27 @@ export interface IdeEditorHandle {
 }
 
 export function ideBasename(p: string): string {
-  const idx = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
-  return idx >= 0 ? p.slice(idx + 1) : p;
+  const clean = /^(?:jdt|jar):/i.test(p) ? p.split('?')[0] : p;
+  const bangIdx = clean.lastIndexOf('!/');
+  const tail = bangIdx >= 0 ? clean.slice(bangIdx + 2) : clean;
+  const trimmed = tail.replace(/\/+$/, '') || tail;
+  const idx = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
 }
 
 export function detectIdeLanguage(p: string): string {
-  const ext = ideBasename(p).split('.').pop()?.toLowerCase() ?? '';
+  if (/^jdt:/i.test(p)) return 'java';
+  const base = ideBasename(p.split('?')[0]);
+  const lower = base.toLowerCase();
+  if (lower === 'bashrc' || lower === '.bashrc' || lower === '.zshrc' || lower === '.zshenv') return 'shell';
+  const ext = lower.includes('.') ? (lower.split('.').pop() ?? '') : '';
   const map: Record<string, string> = {
-    go: 'go', java: 'java', rs: 'rust', py: 'python', ts: 'typescript', tsx: 'tsx',
-    js: 'javascript', jsx: 'jsx', json: 'json', yaml: 'yaml', yml: 'yaml', md: 'markdown',
-    sql: 'sql', sh: 'shell', bash: 'shell', zsh: 'shell', html: 'html', css: 'css', svelte: 'html',
+    go: 'go', java: 'java', class: 'java', rs: 'rust', py: 'python', pyi: 'python',
+    ts: 'typescript', mts: 'typescript', cts: 'typescript', tsx: 'tsx',
+    js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'jsx',
+    json: 'json', jsonc: 'json', jsonl: 'jsonl', csv: 'csv', tsv: 'tsv',
+    yaml: 'yaml', yml: 'yaml', md: 'markdown', mdx: 'markdown', sql: 'sql',
+    sh: 'shell', bash: 'shell', zsh: 'shell', html: 'html', css: 'css', scss: 'css', svelte: 'html',
   };
   return map[ext] ?? 'txt';
 }
@@ -192,9 +227,37 @@ export function detectIdeLanguage(p: string): string {
 export function defaultRunnerForLanguage(lang: string): string {
   const map: Record<string, string> = {
     go: 'go_run', rust: 'cargo_run', java: 'java_main', python: 'python',
-    javascript: 'node', typescript: 'npm', tsx: 'npm', jsx: 'node',
+    javascript: 'node', typescript: 'npm', tsx: 'npm', jsx: 'node', shell: 'shell',
   };
   return map[lang] ?? 'custom';
+}
+
+export function buildNewFileTemplate(fullPath: string, rootPath: string, siblingEntries: IdeFsEntry[] = []): string {
+  const name = ideBasename(fullPath);
+  const lower = name.toLowerCase();
+  const slashIdx = fullPath.lastIndexOf('/');
+  const parentDir = slashIdx > 0 ? fullPath.slice(0, slashIdx) : rootPath;
+  const cleanRoot = rootPath.replace(/\/+$/, '');
+  if (lower.endsWith('.go')) {
+    const isMainDir = parentDir === cleanRoot && siblingEntries.some((e) => e.name === 'main.go');
+    const isCmdDir = /\/cmd\/[^/]+$/.test(parentDir) || lower === 'main.go';
+    const rawPkg = (isMainDir || isCmdDir || parentDir === cleanRoot)
+      ? 'main'
+      : ideBasename(parentDir).toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/^[0-9]+/, 'pkg_$&') || 'main';
+    if (lower.endsWith('_test.go')) return `package ${rawPkg}\n\nimport "testing"\n\n`;
+    if (lower === 'main.go') return `package main\n\nfunc main() {\n}\n`;
+    return `package ${rawPkg}\n\n`;
+  }
+  if (lower.endsWith('.java')) {
+    const stem = name.slice(0, -5).replace(/[^A-Za-z0-9_$]/g, '') || 'Main';
+    const m = parentDir.match(/\/src\/(?:main|test)\/java\/(.+)$/);
+    const pkgLine = m?.[1] ? `package ${m[1].replace(/\//g, '.')};\n\n` : '';
+    return `${pkgLine}public class ${stem} {\n}\n`;
+  }
+  if (lower.endsWith('.sh') || lower.endsWith('.bash')) return '#!/usr/bin/env bash\nset -euo pipefail\n\n';
+  if (lower.endsWith('.zsh')) return '#!/usr/bin/env zsh\nset -euo pipefail\n\n';
+  if (lower.endsWith('.json')) return '{\n  \n}\n';
+  return '';
 }
 
 export async function streamIdeSse(path: string, headers: Record<string, string>, signal: AbortSignal, onData: (raw: string) => void): Promise<void> {
