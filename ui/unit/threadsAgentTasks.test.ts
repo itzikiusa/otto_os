@@ -66,3 +66,15 @@ test('a background command opens its launch call and output, running or finished
   const sub = agentTasks([card('t1:tool:a', 'alpha', 'running', '2026-11-13T10:00:00Z')], []).running[0];
   assert.deepEqual([sub.itemId, sub.taskId], ['t1:tool:a', null]);
 });
+
+test('swarm members without a card join the list; carded ones are not repeated', async () => {
+  const { withSwarm } = await import('../src/modules/threads/runtime/agentTasks.ts');
+  const carded = card('t1:swarm:echoer', 'echoer', 'running', '2026-11-13T10:00:00Z', { tool_name: 'swarm' });
+  const t = withSwarm(agentTasks([carded], []), [
+    { name: 'echoer', killed: false },
+    { name: 'dap-lsp', killed: false, phase: 'RUNNING' },
+    { name: 'monitor', killed: true },
+  ], [carded]);
+  assert.deepEqual(t.running.map((r) => r.label), ['echoer', 'dap-lsp']);
+  assert.deepEqual(t.finished.map((r) => [r.label, r.status, r.id]), [['monitor', 'stopped', 'swarm:monitor']]);
+});

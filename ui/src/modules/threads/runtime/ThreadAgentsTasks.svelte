@@ -16,7 +16,10 @@
   import type { TurnItem } from '../../../lib/api/types';
   import { now } from '../../../lib/stores/now.svelte';
   import { threads } from '../threadsStore.svelte';
-  import { agentTasks, taskElapsed, type AgentTask } from './agentTasks';
+  import { agentTasks, SWARM_ROW, taskElapsed, withSwarm, type AgentTask, type SwarmMemberLite } from './agentTasks';
+  import { api } from '../../../lib/api/client';
+  import type { RuntimeSwarm } from '../../../lib/api/types';
+  import RuntimeSwarmWork from './RuntimeSwarmWork.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
   import { runtimeViews } from './runtimeView.svelte';
   import { subagentChildren } from './timeline';
@@ -30,7 +33,35 @@
   const FINISHED_SHOWN = 5;
 
   const p = $derived(runtimeViews.projections[sessionId] ?? null);
-  const tasks = $derived(agentTasks(p?.items ?? [], p?.session?.background_tasks ?? runtimeThreads.get(sessionId)?.background_tasks ?? []));
+  /** An Antigravity thread's swarm, read from agy's own files: members of a
+   *  swarm started before this thread's cards (or before an agent restart)
+   *  still show. Refreshed while the panel is open. */
+  let swarm = $state<SwarmMemberLite[]>([]);
+  const agy = $derived(runtimeThreads.get(sessionId)?.provider === 'agy');
+  $effect(() => {
+    if (!agy) return;
+    const id = sessionId;
+    let stop = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const load = async (): Promise<void> => {
+      try {
+        const s = await api.bg.get<RuntimeSwarm>(`/runtime-sessions/${encodeURIComponent(id)}/swarm`);
+        if (!stop) swarm = s.members;
+      } catch {
+        if (!stop) swarm = [];
+      }
+      if (!stop) timer = setTimeout(() => void load(), 15_000);
+    };
+    void load();
+    return () => {
+      stop = true;
+      if (timer) clearTimeout(timer);
+      swarm = [];
+    };
+  });
+  const tasks = $derived(
+    withSwarm(agentTasks(p?.items ?? [], p?.session?.background_tasks ?? runtimeThreads.get(sessionId)?.background_tasks ?? []), swarm, p?.items ?? []),
+  );
   const any = $derived(tasks.running.length + tasks.finished.length > 0);
   const byId = $derived(new Map((p?.items ?? []).map((i) => [i.id, i] as const)));
   const children = $derived(p ? subagentChildren(p.items) : new Map<string, TurnItem[]>());
@@ -103,7 +134,9 @@
 
 {#snippet detail(t: AgentTask)}
   {@const card = cardOf(t)}
-  {#if card}
+  {#if t.id.startsWith(SWARM_ROW)}
+    <RuntimeSwarmWork {sessionId} member={t.label} live={t.status === 'running'} />
+  {:else if card}
     <RuntimeSubagentCard item={card} activity={children.get(card.id) ?? []} output={p?.output} {sessionId} startOpen />
   {:else}
     {@const launch = t.itemId ? byId.get(t.itemId) : undefined}

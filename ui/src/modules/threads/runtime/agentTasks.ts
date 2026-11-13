@@ -128,3 +128,37 @@ export function taskElapsed(t: Pick<AgentTask, 'startedAt' | 'endedAt'>, nowMs: 
   if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
   return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
 }
+
+/** An Antigravity swarm member as the daemon reads it from agy's files. */
+export interface SwarmMemberLite {
+  name: string;
+  killed: boolean;
+  phase?: string;
+}
+
+/** `swarm:<name>`: a swarm member row with no card of its own. */
+export const SWARM_ROW = 'swarm:';
+
+/** Swarm members not already shown as a card (a thread whose `swarm add`
+ *  calls predate the mapping, or whose agent restarted) as rows. */
+export function withSwarm(tasks: AgentTasks, members: readonly SwarmMemberLite[], items: readonly TurnItem[]): AgentTasks {
+  const carded = new Set(items.flatMap((i) => (i.type === 'subagent' && i.tool_name === 'swarm' && i.description ? [i.description] : [])));
+  const extra = members.filter((m) => !carded.has(m.name));
+  if (!extra.length) return tasks;
+  const row = (m: SwarmMemberLite): AgentTask => ({
+    id: `${SWARM_ROW}${m.name}`,
+    kind: 'agent',
+    label: m.name,
+    status: m.killed ? 'stopped' : 'running',
+    background: true,
+    startedAt: null,
+    endedAt: null,
+    itemId: null,
+    taskId: null,
+    command: null,
+  });
+  return {
+    running: [...tasks.running, ...extra.filter((m) => !m.killed).map(row)],
+    finished: [...tasks.finished, ...extra.filter((m) => m.killed).map(row)],
+  };
+}
