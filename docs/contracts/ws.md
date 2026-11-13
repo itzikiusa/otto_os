@@ -443,9 +443,17 @@ credentials are refused with 403 (`RootRoute::Lsp`).
   dir or a secret directory (`~/.ssh`, key files). Binary discovery checks
   `<data_dir>/toolchains/**/bin` first (prepend to `PATH`, plus managed JDK
   `JAVA_HOME`), then standard developer bin directories (`~/.cargo/bin`,
-  `~/go/bin`, `~/.local/bin`, Homebrew, …), and includes both the 10 built-in
-  language servers and any enabled runtime IDE plugin language servers
-  (`IdePluginRegistry`). Missing binary → HTTP 503 `server_unavailable`.
+  `~/go/bin`, `~/.local/bin`, Homebrew, …), and includes both the built-in
+  language servers (`gopls`, `typescript-language-server`, `jdtls`,
+  `rust-analyzer`, `pyright-langserver`, `bash-language-server`,
+  `vscode-json-language-server`, `clangd`, …) and any enabled runtime IDE plugin
+  language servers (`IdePluginRegistry`). Local spawns inherit the cached user
+  login+interactive shell environment (`$SHELL -lic`, e.g. `GOPRIVATE`) merged
+  with the project's SDK environment and enforce explicit child memory caps
+  (`gopls` `GOMEMLIMIT=256MiB`/`GOGC=50`, `jdtls` `-Xmx256m`, `rust-analyzer`
+  `RA_LRU_CAP=64`, Node-based LSPs `--max-old-space-size=192`) in a dedicated
+  Unix process group (`process_group(0)`). Missing binary → HTTP 503
+  `server_unavailable`.
 - **Remote SSH target (`connection_id` set):** Resolves the saved SSH
   `Connection` (`ConnectionKind::Ssh`) through the caller's workspace/global
   `Connections` grants and resource access (`discover` + `shell`, plus
@@ -455,14 +463,19 @@ credentials are refused with 403 (`RootRoute::Lsp`).
   port / ProxyJump) inside `cd <root>` with remote toolchain `PATH` discovery
   (`~/.otto/toolchains/**/bin`, `~/.cargo/bin`, `~/go/bin`,
   `~/.local/bin`, …).
-- **Multiplexing & back-pressure:** Sockets share one language-server process
-  per `(user_id, lang, root, ssh_target)` — never across users — reaped 60 s
-  after the last socket closes. JSON-RPC text frames carry bare LSP messages
-  (the daemon adds `Content-Length` stdio framing on the child pipe, caps
-  inbound headers at 8 KiB / body at 16 MiB, bounds stdin backlog at 8 MiB,
-  rewrites client request IDs per socket, caches the first `initialize` result,
-  ref-counts `textDocument/didOpen` + `didClose` per URI, and routes
-  `textDocument/publishDiagnostics` to sockets holding that URI).
+- **Multiplexing, multi-root & back-pressure:** Sockets share one language-server
+  process per `(user_id, lang, root, ssh_target)` — never across users — capped
+  at `MAX_SERVERS_PER_OWNER = 2` LRU per user, reaped after `450ms` once
+  detached with zero open documents (or immediately when switching workspace
+  roots, and `45s` otherwise) via `shutdown` → `exit` → process-group
+  `-SIGTERM`/`-SIGKILL`. JSON-RPC text frames carry bare LSP messages (the
+  daemon adds `Content-Length` stdio framing on the child pipe, caps inbound
+  headers at 8 KiB / body at 16 MiB, bounds stdin backlog at 8 MiB, rewrites
+  client request IDs per socket, enriches `initialize` with any attached
+  project folders (`additional_roots` → `workspaceFolders`) and caches the first
+  `initialize` result, ref-counts `textDocument/didOpen` + `didClose` per URI,
+  routes `textDocument/publishDiagnostics` to sockets holding that URI, and
+  pushes `workspace/didChangeWatchedFiles` on build-manifest writes).
 
 ## 2. Event stream — `WS /ws/events`
 

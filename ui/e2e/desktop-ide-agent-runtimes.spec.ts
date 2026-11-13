@@ -20,7 +20,7 @@ import {
 //   4. Live Workspace Terminal PTY (IdeTerminalPanel): spawn, I/O, axe a11y & kill
 
 const SCREENSHOT_DIR =
-  '/Users/itziklavon/.gemini/antigravity-cli/brain/2fb92e16-6abc-4a33-985b-8e29db6f04eb/scratch/screenshots';
+  '/Users/itziklavon/.gemini/antigravity-cli/brain/4814dd52-6e20-428a-88b9-51174ddd8f0e/scratch/screenshots';
 
 interface IdeTargetSpec {
   kind: 'local' | 'ssh';
@@ -268,6 +268,16 @@ async function openFileFromTree(page: Page, ...segments: string[]): Promise<void
   }
 }
 
+async function selectRunConfig(page: Page, label: string): Promise<void> {
+  const cfgBtn = page.getByTestId('ide-run-config-select');
+  await expect(cfgBtn).toBeVisible({ timeout: 15_000 });
+  await cfgBtn.click();
+  const pop = page.getByTestId('ide-run-config-popover');
+  await expect(pop).toBeVisible({ timeout: 10_000 });
+  await expectFullyInViewport(page, pop, 'IDE run configuration popover');
+  await pop.locator('.run-item').filter({ hasText: label }).first().click();
+}
+
 function activeEditor(page: Page): Locator {
   return page.locator('.ide-editor-area .cm-editor .cm-content').first();
 }
@@ -301,6 +311,7 @@ async function toggleGutterBreakpoint(page: Page, line: number): Promise<void> {
 }
 
 test.describe('Desktop IDE Round 2 — Agent Dock, Inline Edit, Multi-Language Debug & Live PTY', () => {
+  test.describe.configure({ mode: 'serial' });
   test.use({
     viewport: { width: 1440, height: 900 },
     isMobile: false,
@@ -369,9 +380,7 @@ test.describe('Desktop IDE Round 2 — Agent Dock, Inline Edit, Multi-Language D
     await expect(dbgPanel).toContainText(/Terminated/i, { timeout: 15_000 });
 
     // B) Run failing test (`TestBroken` / `test_broken_sum`) and attach `✗` test-failure chip
-    const cfgSelect = page.getByTestId('ide-run-config-select');
-    await expect(cfgSelect).toBeVisible({ timeout: 15_000 });
-    await cfgSelect.selectOption({ label: cfgBrokenLabel });
+    await selectRunConfig(page, cfgBrokenLabel);
     await page.getByTestId('ide-run-btn').click();
 
     const runPanel = page.getByTestId('ide-run-panel');
@@ -555,9 +564,7 @@ test.describe('Desktop IDE Round 2 — Agent Dock, Inline Edit, Multi-Language D
     await bootIdePage(page);
 
     // ── Part A: Python `unittest` Run + Real Python `bdb` Live Debugger ──────
-    const cfgSelect = page.getByTestId('ide-run-config-select');
-    await expect(cfgSelect).toBeVisible({ timeout: 15_000 });
-    await cfgSelect.selectOption({ label: 'Python Unit Suite' });
+    await selectRunConfig(page, 'Python Unit Suite');
     await page.getByTestId('ide-run-btn').click();
 
     const runPanel = page.getByTestId('ide-run-panel');
@@ -621,7 +628,7 @@ test.describe('Desktop IDE Round 2 — Agent Dock, Inline Edit, Multi-Language D
     await toggleGutterBreakpoint(page, 7).catch(() => {});
 
     // ── Part B: Node.js `node --test` Run + Real V8 Inspector Debugger ───────
-    await cfgSelect.selectOption({ label: 'Node Test Suite' });
+    await selectRunConfig(page, 'Node Test Suite');
     await page.getByTestId('ide-run-btn').click();
     await expect(runPanel).toBeVisible({ timeout: 15_000 });
     await expect(runPanel).toContainText('combineTotals sums values accurately', { timeout: 20_000 });
@@ -631,7 +638,7 @@ test.describe('Desktop IDE Round 2 — Agent Dock, Inline Edit, Multi-Language D
     await expect(activeEditor(page)).toContainText('const boosted = subtotal + 8;');
     await toggleGutterBreakpoint(page, 5);
 
-    await cfgSelect.selectOption({ label: 'Node Debug Demo' });
+    await selectRunConfig(page, 'Node Debug Demo');
     const nodeDbgStart = page.waitForResponse(
       (r) => r.request().method() === 'POST' && r.url().includes('/api/v1/ide/debug/sessions'),
       { timeout: 20_000 },
@@ -728,5 +735,95 @@ test.describe('Desktop IDE Round 2 — Agent Dock, Inline Edit, Multi-Language D
     // Kill terminal cleanly via UI button
     await termPanel.getByRole('button', { name: 'Kill active terminal' }).click();
     await expect(termPanel).toContainText('No open terminal', { timeout: 10_000 });
+  });
+
+  test('5. unified Otto Threads in IDE Agent Dock: all 7 harnesses (claude, codex, gemini, agy, grok, opencode, pi), workspace thread switching & Open in Threads', async ({
+    page,
+  }) => {
+    test.setTimeout(90_000);
+    const { ctx, base: apiBase } = await apiCtx();
+    const origSettings = (await (await ctx.get(`${apiBase}/api/v1/settings`)).json()) as {
+      providers?: Record<string, unknown>;
+    };
+    const origProviders = { ...(origSettings.providers ?? {}) };
+
+    try {
+      const mergedProviders: Record<string, unknown> = { ...origProviders };
+      for (const custom of ['gemini', 'grok', 'opencode', 'pi']) {
+        if (!mergedProviders[custom]) {
+          mergedProviders[custom] = { cmd: '/bin/cat', args: [] };
+        }
+      }
+      const putRes = await ctx.put(`${apiBase}/api/v1/settings`, {
+        data: { providers: mergedProviders },
+      });
+      expect(putRes.ok(), await putRes.text()).toBeTruthy();
+
+      // Seed a PTY workspace thread (`agy`) so workspace thread switcher has multiple real threads
+      const ptyResp = await ctx.post(`${apiBase}/api/v1/workspaces/${workspaceId}/sessions`, {
+        data: {
+          kind: 'agent',
+          provider: 'agy',
+          title: 'IDE Antigravity Architecture Thread',
+          cwd: workspaceRoot,
+          meta: { surface: 'threads', origin: 'e2e' },
+        },
+      });
+      expect(ptyResp.ok(), await ptyResp.text()).toBeTruthy();
+      const ptySessionId = ((await ptyResp.json()) as { id: string }).id;
+
+      await bootIdePage(page);
+      await openFileFromTree(page, 'calc', 'calc.go');
+
+      // Open IDE Agent Dock (`⌘L`)
+      await page.keyboard.press('Meta+l');
+      const agentPanel = page.getByTestId('ide-agent-panel');
+      await expect(agentPanel).toBeVisible({ timeout: 15_000 });
+
+      // Start fresh thread draft so provider rail is unlocked and inspect all 7 harnesses
+      await page.getByTestId('ide-agent-new').click();
+      const provChip = page.getByTestId('ide-agent-provider');
+      await expect(provChip).toBeVisible({ timeout: 10_000 });
+      await provChip.click();
+
+      const picker = page.getByTestId('model-picker');
+      await expect(picker).toBeVisible({ timeout: 10_000 });
+      await expectFullyInViewport(page, picker, 'IDE Threads ModelPickerPopover');
+
+      for (const harness of ['claude', 'codex', 'gemini', 'agy', 'grok', 'opencode', 'pi']) {
+        await expect(picker.getByTestId(`model-picker-provider-${harness}`)).toBeVisible();
+      }
+      await saveShot(page, '21-ide-unified-threads-agent-dock-pickers-dark-1440.png');
+
+      // Close model picker and open workspace thread switcher menu
+      await page.keyboard.press('Escape');
+      await expect(picker).toBeHidden();
+
+      await page.getByTestId('ide-agent-sessions').click();
+      const sessMenu = page.locator('.ctx-menu');
+      await expect(sessMenu).toBeVisible({ timeout: 10_000 });
+      await expectFullyInViewport(page, sessMenu, 'IDE workspace Threads menu');
+      await expect(sessMenu).toContainText('IDE Antigravity Architecture Thread');
+      await sessMenu
+        .locator('[role^="menuitem"], button')
+        .filter({ hasText: 'IDE Antigravity Architecture Thread' })
+        .first()
+        .click();
+
+      await expect(page.getByTestId('ide-agent-sessions')).toContainText('IDE Antigravity Architecture Thread');
+
+      // Attach editor selection to the PTY thread and verify `ide-agent-pty-send-context` CTA appears
+      await selectEditorLines(page, 3, 6);
+      await page.getByTestId('ide-selection-add-agent').click();
+      await expect(page.getByTestId('ide-agent-context-tray')).toContainText('@calc/calc.go:L3-L6');
+      await expect(page.getByTestId('ide-agent-pty-send-context')).toBeVisible();
+
+      // Click `Open in Threads` -> navigates cleanly to `#/threads/<id>`
+      await page.getByTestId('ide-agent-open-in-threads').click();
+      await expect.poll(() => page.url(), { timeout: 10_000 }).toContain(`#/threads/${ptySessionId}`);
+    } finally {
+      await ctx.put(`${apiBase}/api/v1/settings`, { data: { providers: origProviders } }).catch(() => {});
+      await ctx.dispose();
+    }
   });
 });

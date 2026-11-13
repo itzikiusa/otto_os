@@ -42,10 +42,16 @@ zero-rebuild **runtime IDE plugins**.
 
 Every IDE subsystem operates over a unified `IdeTargetSpec`:
 
-- **Local target (`kind: "local"`):** Reads and writes inside the selected
-  workspace or folder root on the macOS host, rejecting path traversal (`..`),
-  Otto's own data directory, `~/.ssh`, and credential/key files for non-root
-  callers.
+- **Local target (`kind: "local"`, plus IntelliJ-style multi-folder projects):**
+  Reads and writes inside the selected workspace or folder root **plus any
+  user-attached project folders** (`POST / DELETE /ide/projects/folders`,
+  persisted in `additional_roots` and rendered alongside the top-level primary
+  project folder node in `IdeProjectTree`), plus read-only inspection of
+  external SDK and dependency sources (`$GOROOT/src`, `$GOMODCACHE`,
+  `node_modules`, JDK `src.zip` / `jar:file://!...` / `javap`, Rust `rustup`
+  stdlib & Cargo registry, Python stdlib & `.venv`), while rejecting path
+  traversal (`..`), Otto's own data directory, `~/.ssh`, and credential/key
+  files for non-root callers.
 - **Remote SSH target (`kind: "ssh"`, `connection_id`):** Reuses saved SSH
   connections from **Connections** (`ConnectionKind::Ssh`, verified through
   workspace/global RBAC plus `discover` and `shell` resource access and SSH
@@ -84,15 +90,30 @@ global system directories:
 | **Java / JVM** | Adoptium Temurin JDK (17, 21 LTS), Maven, Gradle, Eclipse `jdtls`, `java-debug-adapter` |
 | **Python** | `uv`, standalone CPython (3.11 / 3.12 / 3.13), `pyright`, `ruff`, `debugpy` |
 | **Rust** | `rustup` (`rustc` + `cargo`), `rust-analyzer`, `CodeLLDB` (`codelldb`) |
-| **Go** | Official Go SDK tarball, `gopls`, Delve (`dlv`), `gofumpt` |
+| **Go** | Official Go SDK tarball, local SDK registration (`POST /ide/toolchains/local`), `gopls`, Delve (`dlv`), `gofumpt` |
 | **Node / TypeScript** | Node LTS (22), `pnpm`, `typescript-language-server`, `vscode-langservers-extracted`, `prettier`, `js-debug` |
+| **Shell (Bash / Zsh)** | `bash-language-server`, `shellcheck`, `shfmt`, built-in `otto-sh-dap` (`DEBUG` trap DAP debugger) |
+| **JSON & CSV / TSV** | `vscode-json-language-server`, live JSONPath breadcrumb, Pretty / Minify / Sort Keys, `$ref` navigation, virtualized `IdeCsvView` (`Table ↔ Text` toggle, rainbow columns, sort/filter, inline cell edit + undo, column stats) |
 | **C / C++** | `clangd`, `clang-format`, `CodeLLDB` |
 
-Installed `<data_dir>/toolchains/**/bin` directories are automatically prepended
-to `PATH` (and managed JDKs set `JAVA_HOME`) across IDE runs, debug sessions,
-and `/ws/lsp`.
+Installed `<data_dir>/toolchains/**/bin` directories and custom registered local
+SDKs (`POST /ide/toolchains/local`) are automatically prepended to `PATH` (setting
+`GOROOT` / `JAVA_HOME` / `NODE_HOME` as appropriate) across IDE runs, debug
+sessions, terminals, and `/ws/lsp`.
 
-### 4. Environments & Run Configurations
+### 4. Cached Shell Environment, Environments & Run Configurations
+
+Because `ottod` runs under macOS `launchd` / `Otto.app`, `std::env` lacks user
+variables exported in `~/.zshenv`, `~/.zprofile`, or `~/.zshrc` (such as
+`GOPRIVATE` or app-specific debug params). `otto-ide` captures a **cached
+login+interactive `$SHELL -lic` environment snapshot** once (`3s` timeout,
+viewable at `GET /ide/shell-env` and reloadable via `POST /ide/shell-env/reload`,
+never spawned per request) and merges:
+
+`daemon base env → cached login shell env → selected SDK env → project .env file → Run/Debug config overrides`
+
+into **all** Run executions, DAP Debug sessions, IDE Terminals, and local LSP
+servers (`gopls`, `jdtls`, `rust-analyzer`, `pyright`, `tsserver`).
 
 Per-project configuration is persisted in SQLite (`0214_ide_configs.sql`), with
 secret environment variable values stored in the macOS Keychain via
@@ -100,15 +121,17 @@ secret environment variable values stored in the macOS Keychain via
 
 - Select SDK/toolchain overrides per project (`java_home`, `go_root`,
   `rust_toolchain`, `node_home`, `python_interpreter`, `dotenv_path`,
-  `extra_path`).
+  `extra_path`, `inherit_shell_env`, `additional_roots`).
 - Create project-local Python virtual environments (`POST /ide/environments/python-venv`
   via `uv venv` or `python3 -m venv`), discover `.env*` files, and configure
   environment variables (marking secrets so plaintext never touches SQLite).
-- Define reusable **Run Configurations** (`go_test`, `go_run`, `java_junit`,
-  `java_main`, `maven`, `gradle`, `cargo_test`, `cargo_run`, `node`, `npm`,
-  `vitest`, `pytest`, `python`, `custom`), launch them in the **Run** bottom
-  dock (`POST /ide/runs`) with live output and structured test-result trees, or
-  stop running jobs (`POST /ide/runs/{run_id}/stop`).
+- Instant (`< 25ms`, pure file-stat/manifest scan with zero subprocess spawns)
+  runner discovery across primary and attached folders plus reusable **Run
+  Configurations** (`go_test`, `go_run`, `java_junit`, `java_main`, `maven`,
+  `gradle`, `cargo_test`, `cargo_run`, `node`, `npm`, `vitest`, `pytest`,
+  `python`, `shell`, `compound`, `custom`), launched in the **Run** bottom dock
+  (`POST /ide/runs`) with live output and structured test-result trees, or
+  stopped via `POST /ide/runs/{run_id}/stop`.
 
 ### 5. Gutter Run / Debug
 
@@ -193,12 +216,13 @@ Install an `otto-ide-plugin.json` extension into `<data_dir>/ide-plugins/<slug>/
 - Enable, disable (`POST /ide/plugins/{slug}/toggle`), or uninstall
   (`DELETE /ide/plugins/{slug}`) at runtime.
 
-### 10. Side-by-Side AI Coding Agent (`⌘L`) & Inline Edit (`⌘I`)
+### 10. Unified Otto Threads AI Coding Agent (`⌘L`) & Inline Edit (`⌘I`)
 
-`IdeAgentPanel.svelte` and `IdeInlinePromptBar.svelte` connect the IDE editor,
-explorer, diagnostics, test runner, and debugger directly to Otto's structured
-runtime sessions (`/api/v1/workspaces/{id}/runtime-sessions` across Claude,
-Codex, and Gemini):
+`IdeAgentPanel.svelte` and `IdeInlinePromptBar.svelte` share the **exact same
+Otto Threads pool** as `#/threads` (`threadsSessionStore`), uniting structured
+runtime sessions (`/api/v1/workspaces/{id}/runtime-sessions` for `claude`,
+`codex`, `gemini`) and PTY-backed agent harnesses (`agy`, `grok`, `opencode`,
+`pi`) with the shared `ModelPicker` and thread switcher:
 
 - **6-source context marking (`ideAgentController.svelte.ts`):**
   1. **Editor selection (`⌘L` / contextual selection bar / right-click menu):**
@@ -240,21 +264,25 @@ Codex, and Gemini):
   `GET /ide/runs/{run_id}?tail_lines=`), finished runs (`MAX_FINISHED_RUNS = 16`),
   debug output (`1,000` entries) and terminated DAP sessions (`6`), collab rooms
   (`32` rooms, `2h` idle TTL, `32` buffers / `16 MiB` per room, zero buffer
-  clones on cursor moves), and pooled LSP servers (`MAX_SERVERS_PER_OWNER = 3`,
-  `45s` idle eviction, `rg --files-with-matches` reference pre-filtering, and a
-  `2s` `otto_git_cmd::hardened_command()` git-status cache) are all strictly
-  bounded.
+  clones on cursor moves), and pooled LSP servers (`MAX_SERVERS_PER_OWNER = 2`
+  LRU with child heap caps, `450ms` 0-doc detach reaping + instant workspace-root
+  eviction, `rg --files-with-matches` reference pre-filtering, and a `2s`
+  `otto_git_cmd::hardened_command()` git-status cache) are all strictly bounded
+  with zero stale FS/tree caches.
 
 ## API & WebSocket summary
 
 Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api.md)
 (**IDE** section) and [`docs/contracts/ws.md`](../contracts/ws.md) (§1c).
 
-- Target, FS, Search & Gutter: `GET /ide/fs/tree`, `GET /ide/fs/file`,
-  `PUT /ide/fs/file`, `POST /ide/fs/mutate`, `POST /ide/search`,
-  `POST /ide/replace`, `POST /ide/gutter`.
-- Toolchains & Environments: `GET /ide/toolchains`, `POST /ide/toolchains/install`,
-  `GET /ide/toolchains/jobs/{job_id}`, `GET /ide/environments`,
+- Target, Multi-Folder, FS, Search & Gutter: `GET /ide/fs/tree`, `GET /ide/fs/file`,
+  `PUT /ide/fs/file`, `POST /ide/fs/mutate`, `POST /ide/projects/folders`,
+  `DELETE /ide/projects/folders`, `POST /ide/search`, `POST /ide/replace`,
+  `POST /ide/gutter`.
+- Toolchains, Shell Env & Environments: `GET /ide/toolchains`,
+  `POST /ide/toolchains/install`, `POST /ide/toolchains/local`,
+  `DELETE /ide/toolchains/local`, `GET /ide/toolchains/jobs/{job_id}`,
+  `GET /ide/shell-env`, `POST /ide/shell-env/reload`, `GET /ide/environments`,
   `PUT /ide/environments`, `POST /ide/environments/python-venv`,
   `POST /ide/run-configs`, `DELETE /ide/run-configs/{id}`.
 - Run & DAP Debugger: `POST /ide/runs`, `GET /ide/runs/{run_id}`,
@@ -265,7 +293,8 @@ Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api
   `POST /ide/debug/sessions/{id}/command`,
   `POST /ide/debug/sessions/{id}/variables`,
   `POST /ide/debug/sessions/{id}/evaluate`.
-- LSP Intelligence: `POST /ide/lsp/symbols`, `POST /ide/lsp/references`,
+- LSP Intelligence: `POST /ide/lsp/symbols`, `POST /ide/lsp/definition`,
+  `POST /ide/lsp/implementation`, `POST /ide/lsp/references`,
   `POST /ide/lsp/rename`, `POST /ide/lsp/format`, `POST /ide/lsp/code-actions`,
   plus `WS /ws/lsp?lang=&root=&connection_id=`.
 - Collaboration: `POST /ide/collab/rooms`, `GET /ide/collab/rooms`,

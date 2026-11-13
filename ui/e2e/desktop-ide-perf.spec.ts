@@ -17,10 +17,12 @@ import {
 } from './perf';
 import { processResources } from './process-resources';
 
-// Otto IDE — Desktop Performance, Virtualization, Retention & Parallel Load Gate
+// Otto IDE — Desktop Performance, Virtualization, Retention, Cold-Load & Zero-Leak Gate
 // Runs on BOTH `desktop-webkit` (WKWebView proxy) and `desktop-browser` (Chromium):
 // 1) 4.0s idle zero-polling + CPU/RSS gate; 2) 2,500-file tree virtualization + 5,000-line
-// keystroke/Prefix-Suffix latency; 3) 20-tab JS heap + RSS retention; 4) N=0,1,4,8 parallel load.
+// keystroke/Prefix-Suffix latency; 3) 20-tab JS heap + RSS retention; 4) N=0,1,4,8 parallel load;
+// 5) 5-file workspace cold load (<150ms) + <10ms tree / <25ms runner discovery + zero stale FS cache;
+// 6) <100MB IDE overhead / <1GB Otto ceiling & 25-cycle 8-language zero-leak torture gate.
 
 test.use({ serviceWorkers: 'block' });
 test.describe.configure({ mode: 'serial' });
@@ -38,6 +40,8 @@ interface ResourceSample {
   daemon: ProcMetric;
   browser: ProcMetric;
   agentChildren: ProcMetric;
+  clickhouse: ProcMetric;
+  collector: ProcMetric;
   total: ProcMetric;
   runtimeAgentProcs: number;
 }
@@ -102,7 +106,15 @@ async function sampleResources(daemonPid: number, gapMs = 700): Promise<Resource
     const b = pick(second, label);
     return { cpuPct: round2((a.cpu_percent + b.cpu_percent) / 2), rssMb: round2(b.rss_mb), count: b.pids.length };
   };
-  return { daemon: merge('daemon'), browser: merge('browser'), agentChildren: merge('agent-children'), total: merge('total'), runtimeAgentProcs: countRuntimeAgentProcs(daemonPid) };
+  return {
+    daemon: merge('daemon'),
+    browser: merge('browser'),
+    agentChildren: merge('agent-children'),
+    clickhouse: merge('clickhouse'),
+    collector: merge('collector'),
+    total: merge('total'),
+    runtimeAgentProcs: countRuntimeAgentProcs(daemonPid),
+  };
 }
 
 function buildBigGoSource(lineCount: number): string {
@@ -730,6 +742,506 @@ test.describe('Desktop IDE — Perf, Virtualization, Retention & Parallel Load',
         await conn.ctx.fetch(`${base}/api/v1/runtime-sessions/${id}`, { method: 'DELETE' }).catch(() => {});
       }
       await conn.ctx.dispose().catch(() => {});
+    }
+  });
+
+  test('5. 5-file workspace cold load (< 150ms), sub-10ms tree, sub-25ms discovery & zero stale FS/tree cache', async ({
+    page,
+  }, info) => {
+    test.setTimeout(90_000);
+    const fatal = watchFatalUiErrors(page);
+    const coldRoot = realpathSync(mkdtempSync(join(tmpdir(), 'otto-e2e-ide-cold5-')));
+    writeFileSync(join(coldRoot, 'go.mod'), 'module example.com/cold5\n\ngo 1.22\n');
+    writeFileSync(
+      join(coldRoot, 'main.go'),
+      'package main\n\nimport "fmt"\n\nfunc main() {\n\tfmt.Println("ide cold five-file ready")\n}\n',
+    );
+    writeFileSync(join(coldRoot, 'calc.go'), 'package main\n\nfunc AddCold(a, b int) int { return a + b }\n');
+    writeFileSync(
+      join(coldRoot, 'calc_test.go'),
+      'package main\n\nimport "testing"\n\nfunc TestAddCold(t *testing.T) { if AddCold(2, 3) != 5 { t.Fatal() } }\n',
+    );
+    writeFileSync(join(coldRoot, 'config.json'), '{\n  "service": "cold5",\n  "port": 8080\n}\n');
+
+    const conn = await apiCtx();
+    let coldWsId = '';
+    const coldWsName = `IDE Cold5 ${Date.now()}`;
+    try {
+      const wsCreated = await apiJson<{ id: string }>(conn.ctx, 'POST', '/workspaces', {
+        name: coldWsName,
+        root_path: coldRoot,
+      });
+      coldWsId = wsCreated.id;
+
+      // 1. Measure cold backend tree listing (`< 10ms`) & runner discovery (`< 25ms`) on never-visited root.
+      const tTree0 = performance.now();
+      const treeResp = await apiJson<{ entries: Array<{ name: string }> }>(
+        conn.ctx,
+        'GET',
+        `/ide/fs/tree?kind=local&root=${encodeURIComponent(coldRoot)}`,
+      );
+      const coldTreeMs = performance.now() - tTree0;
+
+      const tEnv0 = performance.now();
+      const envResp = await apiJson<{ configs: Array<{ runner: string }> }>(
+        conn.ctx,
+        'GET',
+        `/ide/environments?kind=local&root=${encodeURIComponent(coldRoot)}&workspace_id=${encodeURIComponent(coldWsId)}`,
+      );
+      const coldEnvMs = performance.now() - tEnv0;
+
+      expect(treeResp.entries.map((e) => e.name)).toEqual(
+        expect.arrayContaining(['go.mod', 'main.go', 'calc.go', 'calc_test.go', 'config.json']),
+      );
+      expect(envResp.configs.length).toBeGreaterThan(0);
+
+      // 2. Measure end-to-end UI workspace cold open (click workspace -> tree + first file painted in CodeMirror).
+      await bootIde(page);
+      await page.getByTestId('ide-target-switcher').click();
+      const wsPopover = page.getByTestId('ide-workspace-popover');
+      await expect(wsPopover).toBeVisible({ timeout: 10_000 });
+      await expect(wsPopover.locator('[data-testid="ide-workspace-option"]', { hasText: coldWsName })).toBeVisible({
+        timeout: 10_000,
+      });
+
+      const coldUiOpenMs = await page.evaluate(async (targetName: string) => {
+        const opts = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-testid="ide-workspace-option"]'));
+        const btn = opts.find((el) => (el.textContent ?? '').includes(targetName));
+        if (!btn) throw new Error(`Workspace option not found: ${targetName}`);
+        const t0 = performance.now();
+        btn.click();
+        await new Promise<void>((resolve, reject) => {
+          const deadline = performance.now() + 5_000;
+          const poll = (): void => {
+            const cm = document.querySelector('.cm-editor .cm-content');
+            if ((cm?.textContent ?? '').includes('ide cold five-file ready')) {
+              requestAnimationFrame(() => {
+                const ch = new MessageChannel();
+                ch.port1.onmessage = () => {
+                  ch.port1.close();
+                  resolve();
+                };
+                ch.port2.postMessage(null);
+              });
+              return;
+            }
+            if (performance.now() > deadline) {
+              reject(new Error('Timed out waiting for cold5 main.go in CodeMirror'));
+              return;
+            }
+            requestAnimationFrame(poll);
+          };
+          requestAnimationFrame(poll);
+        });
+        return performance.now() - t0;
+      }, coldWsName);
+
+      // 3. Zero stale FS/tree cache ("no devil caches"): external create, modify, delete reflect immediately.
+      const extPath = join(coldRoot, 'external_live.go');
+      writeFileSync(extPath, 'package main\n\nconst ExternalLive = 1\n');
+      const treeAfterCreate = await apiJson<{ entries: Array<{ name: string }> }>(
+        conn.ctx,
+        'GET',
+        `/ide/fs/tree?kind=local&root=${encodeURIComponent(coldRoot)}`,
+      );
+      const createdVisibleImmediately = treeAfterCreate.entries.some((e) => e.name === 'external_live.go');
+
+      const fileBeforeMod = await apiJson<{ content: string; sha256: string }>(
+        conn.ctx,
+        'GET',
+        `/ide/fs/file?kind=local&root=${encodeURIComponent(coldRoot)}&path=${encodeURIComponent(extPath)}`,
+      );
+      writeFileSync(extPath, 'package main\n\nconst ExternalLive = 2 // external disk edit\n');
+      const fileAfterMod = await apiJson<{ content: string; sha256: string }>(
+        conn.ctx,
+        'GET',
+        `/ide/fs/file?kind=local&root=${encodeURIComponent(coldRoot)}&path=${encodeURIComponent(extPath)}`,
+      );
+
+      rmSync(extPath, { force: true });
+      const treeAfterDelete = await apiJson<{ entries: Array<{ name: string }> }>(
+        conn.ctx,
+        'GET',
+        `/ide/fs/tree?kind=local&root=${encodeURIComponent(coldRoot)}`,
+      );
+      const deletedGoneImmediately = !treeAfterDelete.entries.some((e) => e.name === 'external_live.go');
+
+      emitPerfMetric(info, 'test5_cold_open_and_no_stale_cache', {
+        coldTreeMs: round2(coldTreeMs),
+        coldEnvMs: round2(coldEnvMs),
+        coldUiOpenMs: round2(coldUiOpenMs),
+        createdVisibleImmediately,
+        shaChangedImmediately: fileAfterMod.sha256 !== fileBeforeMod.sha256,
+        deletedGoneImmediately,
+      });
+
+      expect(fatal).toEqual([]);
+      expect(coldTreeMs, '5-file GET /ide/fs/tree < 10ms').toBeLessThan(perfBudget(10));
+      expect(coldEnvMs, '5-file GET /ide/environments < 25ms').toBeLessThan(perfBudget(25));
+      expect(coldUiOpenMs, '5-file end-to-end cold workspace load < 150ms').toBeLessThan(perfBudget(150));
+      expect(createdVisibleImmediately, 'external file creation visible immediately without stale cache').toBe(true);
+      expect(fileAfterMod.content).toContain('ExternalLive = 2 // external disk edit');
+      expect(fileAfterMod.sha256).not.toBe(fileBeforeMod.sha256);
+      expect(deletedGoneImmediately, 'external file deletion visible immediately without stale cache').toBe(true);
+    } finally {
+      if (coldWsId) {
+        await conn.ctx.fetch(`${base}/api/v1/workspaces/${coldWsId}`, { method: 'DELETE' }).catch(() => {});
+      }
+      await conn.ctx.dispose().catch(() => {});
+      rmSync(coldRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('6. < 100 MB IDE memory budget, < 1 GB Otto ceiling & 25-cycle 8-language zero-leak torture gate', async ({
+    page,
+    browserName,
+  }, info) => {
+    test.setTimeout(240_000);
+    const fatal = watchFatalUiErrors(page);
+
+    const poly8Root = realpathSync(mkdtempSync(join(tmpdir(), 'otto-e2e-ide-poly8-')));
+    const altRoot = realpathSync(mkdtempSync(join(tmpdir(), 'otto-e2e-ide-alt-')));
+
+    // Seed all 8 mandatory languages in `poly8Root` + minimal `altRoot` for workspace-switch eviction.
+    writeFileSync(join(poly8Root, 'go.mod'), 'module example.com/poly8\n\ngo 1.22\n');
+    writeFileSync(
+      join(poly8Root, 'service.go'),
+      'package main\n\nfunc HandleAdmission(code int) int {\n\treturn code + 1\n}\n',
+    );
+    writeFileSync(join(poly8Root, 'package.json'), '{"name":"poly8","version":"1.0.0","type":"module"}\n');
+    writeFileSync(
+      join(poly8Root, 'index.ts'),
+      'export function computeScore(v: number): number {\n  return v * 2;\n}\n',
+    );
+    writeFileSync(
+      join(poly8Root, 'App.java'),
+      'public class App {\n  public static int run(int n) {\n    return n + 1;\n  }\n}\n',
+    );
+    writeFileSync(
+      join(poly8Root, 'Cargo.toml'),
+      '[package]\nname = "poly8"\nversion = "0.1.0"\nedition = "2021"\n',
+    );
+    writeFileSync(join(poly8Root, 'lib.rs'), 'pub fn check_quota(n: u32) -> bool {\n    n < 100\n}\n');
+    writeFileSync(
+      join(poly8Root, 'worker.py'),
+      'def process_batch(items: list[int]) -> int:\n    return sum(items)\n',
+    );
+    writeFileSync(
+      join(poly8Root, 'deploy.sh'),
+      '#!/usr/bin/env bash\nrun_step() {\n  echo "step:$1"\n}\nrun_step "ok"\n',
+    );
+    writeFileSync(
+      join(poly8Root, 'manifest.json'),
+      JSON.stringify({ service: 'admission', limits: { rps: 500, burst: 1000 } }, null, 2) + '\n',
+    );
+    const csvRows = ['ts,route,latency_ms,status'];
+    for (let r = 1; r <= 60; r++) {
+      csvRows.push(`2026-11-13T12:00:${String(r % 60).padStart(2, '0')}Z,/v1/check,${10 + (r % 25)},200`);
+    }
+    writeFileSync(join(poly8Root, 'metrics.csv'), csvRows.join('\n') + '\n');
+
+    writeFileSync(join(altRoot, 'go.mod'), 'module example.com/altws\n\ngo 1.22\n');
+    writeFileSync(join(altRoot, 'alt.go'), 'package altws\n\nfunc Ping() string { return "pong" }\n');
+
+    const countOrphanIdeTools = (): number => {
+      const out = execFileSync('ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8', timeout: 3_000 });
+      const rows = out
+        .trim()
+        .split('\n')
+        .map((l) => /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(l))
+        .filter(Boolean) as RegExpExecArray[];
+      const ppidMap = new Map(rows.map((m) => [Number(m[1]), Number(m[2])]));
+      const isDaemonDescendant = (pid: number): boolean => {
+        for (let d = 0, cur = pid; d < 32 && cur > 1; d++) {
+          if (cur === daemonPid) return true;
+          cur = ppidMap.get(cur) ?? 0;
+        }
+        return false;
+      };
+      return rows.filter((m) => {
+        const pid = Number(m[1]);
+        const cmd = m[3];
+        if (!/(?:\bdlv\b|\bgopls\b|\bjdtls\b|\brust-analyzer\b|\bpyright\b|typescript-language-server|otto-sh-dap|\bdebugpy\b)/.test(cmd)) {
+          return false;
+        }
+        return isDaemonDescendant(pid) || cmd.includes(poly8Root) || cmd.includes(altRoot);
+      }).length;
+    };
+
+    const sampleCdpMetrics = async (): Promise<{ jsHeapBytes: number; nodes: number; listeners: number } | null> => {
+      if (browserName !== 'chromium') return null;
+      const cdp = await page.context().newCDPSession(page);
+      try {
+        await cdp.send('Performance.enable');
+        await cdp.send('HeapProfiler.collectGarbage');
+        await cdp.send('HeapProfiler.collectGarbage');
+        const [{ usedSize }, { metrics }] = await Promise.all([
+          cdp.send('Runtime.getHeapUsage'),
+          cdp.send('Performance.getMetrics'),
+        ]);
+        const pickMetric = (name: string): number => metrics.find((m) => m.name === name)?.value ?? 0;
+        return {
+          jsHeapBytes: usedSize,
+          nodes: pickMetric('Nodes'),
+          listeners: pickMetric('JSEventListeners'),
+        };
+      } finally {
+        await cdp.detach().catch(() => {});
+      }
+    };
+
+    const conn = await apiCtx();
+    let poly8WsId = '';
+    let altWsId = '';
+    const poly8Name = `IDE Poly8 ${Date.now()}`;
+    const altName = `IDE AltSwitch ${Date.now()}`;
+
+    try {
+      poly8WsId = (
+        await apiJson<{ id: string }>(conn.ctx, 'POST', '/workspaces', {
+          name: poly8Name,
+          root_path: poly8Root,
+        })
+      ).id;
+      altWsId = (
+        await apiJson<{ id: string }>(conn.ctx, 'POST', '/workspaces', {
+          name: altName,
+          root_path: altRoot,
+        })
+      ).id;
+
+      // Pre-IDE baseline on `#/home` to measure exact IDE memory delta.
+      await page.addInitScript((wsId: string) => {
+        localStorage.setItem('otto_workspace', wsId);
+        localStorage.setItem('otto_rail_expanded', '0');
+        localStorage.setItem('otto.ide.dockOpen', '0');
+        localStorage.setItem('otto.ide.agentOpen', '0');
+      }, poly8WsId);
+      await page.goto('/#/home');
+      await expect(page.locator('.shell')).toBeVisible({ timeout: 20_000 });
+      await sleep(300);
+      const preIdeRes = await sampleResources(daemonPid, 400);
+      const preIdeCdp = await sampleCdpMetrics();
+
+      // Navigate into `#/ide` on `poly8WsId`.
+      await page.goto('/#/ide');
+      await expect(page.getByTestId('ide-project-tree')).toBeVisible({ timeout: 20_000 });
+      await expect(page.locator('.cm-editor .cm-content').first()).toBeVisible({ timeout: 20_000 });
+
+      const eightFiles = [
+        'service.go',
+        'index.ts',
+        'App.java',
+        'lib.rs',
+        'worker.py',
+        'deploy.sh',
+        'manifest.json',
+        'metrics.csv',
+      ];
+
+      const switchWorkspaceTo = async (wsLabel: string): Promise<void> => {
+        await page.getByTestId('ide-target-switcher').click();
+        const pop = page.getByTestId('ide-workspace-popover');
+        await expect(pop).toBeVisible({ timeout: 10_000 });
+        await pop.locator('[data-testid="ide-workspace-option"]', { hasText: wsLabel }).first().click();
+        await expect(pop).toBeHidden({ timeout: 10_000 });
+      };
+
+      let activePeakRes: Awaited<ReturnType<typeof sampleResources>> | null = null;
+
+      const runOneTortureCycle = async (cycleIdx: number): Promise<void> => {
+        const tree = page.getByTestId('ide-project-tree');
+        for (const fname of eightFiles) {
+          await tree.locator(`button.tree-item[title="${fname}"]`).first().click();
+        }
+        await expect(page.getByTestId('ide-csv-view')).toBeVisible({ timeout: 10_000 });
+
+        // Switch back to Go file, edit buffer, and save cleanly via Cmd+S.
+        await page.locator('.ide-tab-btn', { hasText: 'service.go' }).first().click();
+        const editor = page.locator('.cm-editor .cm-content').first();
+        await expect(editor).toContainText('HandleAdmission', { timeout: 10_000 });
+        await editor.click();
+        await page.keyboard.press('Meta+ArrowDown');
+        await page.keyboard.insertText(`\n// cycle ${cycleIdx}`);
+        await page.keyboard.press('Meta+s');
+        await expect(page.locator('.ide-dirty-dot')).toHaveCount(0, { timeout: 5_000 });
+
+        // Cmd+F12 Move-to-Function / File Structure modal open + close.
+        await page.getByTestId('ide-structure-btn').click();
+        await expect(page.getByTestId('ide-file-structure-modal')).toBeVisible({ timeout: 8_000 });
+        await page.keyboard.press('Escape');
+        await expect(page.getByTestId('ide-file-structure-modal')).toBeHidden({ timeout: 8_000 });
+
+        // Find in Path / Search Everywhere modal open + close.
+        await page.keyboard.press('Meta+Shift+f');
+        const seModal = page.locator('.sheet[role="dialog"]').last();
+        await expect(seModal).toBeVisible({ timeout: 8_000 });
+        await page.keyboard.press('Escape');
+        await expect(seModal).toBeHidden({ timeout: 8_000 });
+
+        // Run Configurations modal + stacked SDK Toolchains modal open + close.
+        await page.getByTestId('ide-edit-configs-btn').click();
+        const envModal = page.locator('.sheet[role="dialog"]').last();
+        await expect(envModal).toBeVisible({ timeout: 8_000 });
+        await envModal.getByTestId('ide-cfg-open-toolchains').click();
+        const tcModal = page.locator('.sheet[role="dialog"]').last();
+        await expect(tcModal).toContainText(/SDKs, toolchains/i, { timeout: 8_000 });
+        await page.keyboard.press('Escape');
+        await page.keyboard.press('Escape');
+        await expect(page.locator('.sheet[role="dialog"]')).toHaveCount(0, { timeout: 8_000 });
+
+        if (cycleIdx === 25) {
+          activePeakRes = await sampleResources(daemonPid, 250);
+        }
+
+        // Close all open tabs via tab-bar overflow menu.
+        await page.getByTestId('ide-tabs-overflow-btn').click();
+        const menu = page.locator('.ctx-menu');
+        await expect(menu).toBeVisible({ timeout: 5_000 });
+        await menu.getByRole('menuitem', { name: /Close all tabs/i }).click();
+        await expect(page.locator('.ide-tab')).toHaveCount(0, { timeout: 8_000 });
+
+        // Switch workspace (`poly8` -> `alt` -> `poly8`) to exercise target & LSP eviction.
+        await switchWorkspaceTo(altName);
+        await expect(tree.locator('button.tree-item[title="alt.go"]').first()).toBeVisible({ timeout: 10_000 });
+        await switchWorkspaceTo(poly8Name);
+        await expect(tree.locator('button.tree-item[title="service.go"]').first()).toBeVisible({ timeout: 10_000 });
+      };
+
+      // Warm 2 cycles so lazy chunks (`IdeCsvView`, modals, CodeMirror lang packs) settle.
+      await runOneTortureCycle(0);
+      await runOneTortureCycle(1);
+      // Close the auto-opened initial tab after warm-up so cycle baseline and cycle-25 end in identical state (0 tabs).
+      if ((await page.locator('.ide-tab').count()) > 0) {
+        await page.getByTestId('ide-tabs-overflow-btn').click();
+        await page.locator('.ctx-menu').getByRole('menuitem', { name: /Close all tabs/i }).click();
+        await expect(page.locator('.ide-tab')).toHaveCount(0, { timeout: 8_000 });
+      }
+      await sleep(350);
+
+      const cycle0Res = await sampleResources(daemonPid, 400);
+      const cycle0Cdp = await sampleCdpMetrics();
+      const liveDomElementsCycle0 = await page.evaluate(() => document.getElementsByTagName('*').length);
+
+      const ideDaemonDeltaMb = round2(Math.max(0, cycle0Res.daemon.rssMb - preIdeRes.daemon.rssMb));
+      const ideHeapDeltaMb =
+        cycle0Cdp && preIdeCdp
+          ? round2(Math.max(0, (cycle0Cdp.jsHeapBytes - preIdeCdp.jsHeapBytes) / (1024 * 1024)))
+          : null;
+
+      // Execute 25 full cycles across all 8 languages, modals, tab evictions, and workspace switches!
+      for (let c = 1; c <= 25; c++) {
+        await runOneTortureCycle(c);
+      }
+      if ((await page.locator('.ide-tab').count()) > 0) {
+        await page.getByTestId('ide-tabs-overflow-btn').click();
+        await page.locator('.ctx-menu').getByRole('menuitem', { name: /Close all tabs/i }).click();
+        await expect(page.locator('.ide-tab')).toHaveCount(0, { timeout: 8_000 });
+      }
+      const liveDomElementsCycle25 = await page.evaluate(() => document.getElementsByTagName('*').length);
+      const liveDomElementsDelta = liveDomElementsCycle25 - liveDomElementsCycle0;
+
+      // Switch to `altName` at the end so any `poly8` LSP servers are evicted immediately on workspace switch.
+      await switchWorkspaceTo(altName);
+      if ((await page.locator('.ide-tab').count()) > 0) {
+        await page.getByTestId('ide-tabs-overflow-btn').click();
+        await page.locator('.ctx-menu').getByRole('menuitem', { name: /Close all tabs/i }).click();
+      }
+      await sleep(600);
+
+      const cycle25Res = await sampleResources(daemonPid, 400);
+      const cycle25Cdp = await sampleCdpMetrics();
+      const orphanIdeTools = countOrphanIdeTools();
+
+      const heapSlopeMb =
+        cycle0Cdp && cycle25Cdp ? round2((cycle25Cdp.jsHeapBytes - cycle0Cdp.jsHeapBytes) / (1024 * 1024)) : null;
+      const domNodesDelta = cycle0Cdp && cycle25Cdp ? cycle25Cdp.nodes - cycle0Cdp.nodes : null;
+      const listenersDelta = cycle0Cdp && cycle25Cdp ? cycle25Cdp.listeners - cycle0Cdp.listeners : null;
+      const daemonRssSlopeMb = round2(cycle25Res.daemon.rssMb - cycle0Res.daemon.rssMb);
+
+      const daemonTreeRssMbCycle0 = round2(
+        cycle0Res.daemon.rssMb +
+          cycle0Res.agentChildren.rssMb +
+          cycle0Res.clickhouse.rssMb +
+          cycle0Res.collector.rssMb,
+      );
+      const daemonTreeRssMbCycle25 = round2(
+        cycle25Res.daemon.rssMb +
+          cycle25Res.agentChildren.rssMb +
+          cycle25Res.clickhouse.rssMb +
+          cycle25Res.collector.rssMb,
+      );
+      const peakRes = activePeakRes ?? cycle25Res;
+      const activePeakOttoCoreRssMb = round2(
+        peakRes.daemon.rssMb + peakRes.agentChildren.rssMb + peakRes.collector.rssMb,
+      );
+      const activePeakDaemonTreeRssMb = round2(activePeakOttoCoreRssMb + peakRes.clickhouse.rssMb);
+
+      emitPerfMetric(info, 'test6_memory_budget_and_25cycle_torture', {
+        browserEngine: browserName,
+        preIdeDaemonRssMb: preIdeRes.daemon.rssMb,
+        ideDaemonDeltaMb,
+        ideHeapDeltaMb,
+        activePeakOttoCoreRssMb,
+        activePeakDaemonTreeRssMb,
+        activePeakAgentChildrenRssMb: peakRes.agentChildren.rssMb,
+        daemonTreeRssMbCycle0,
+        daemonTreeRssMbCycle25,
+        clickhouseRssMbCycle25: cycle25Res.clickhouse.rssMb,
+        totalWithTestRunnerBrowserMbCycle25: cycle25Res.total.rssMb,
+        cycle0HeapMb: cycle0Cdp ? round2(cycle0Cdp.jsHeapBytes / (1024 * 1024)) : null,
+        cycle25HeapMb: cycle25Cdp ? round2(cycle25Cdp.jsHeapBytes / (1024 * 1024)) : null,
+        heapSlopeMb,
+        liveDomElementsCycle0,
+        liveDomElementsCycle25,
+        liveDomElementsDelta,
+        domNodesCycle0: cycle0Cdp?.nodes ?? null,
+        domNodesCycle25: cycle25Cdp?.nodes ?? null,
+        domNodesDelta,
+        listenersCycle0: cycle0Cdp?.listeners ?? null,
+        listenersCycle25: cycle25Cdp?.listeners ?? null,
+        listenersDelta,
+        daemonRssSlopeMb,
+        orphanIdeTools,
+      });
+
+      expect(fatal).toEqual([]);
+      expect(ideDaemonDeltaMb, 'ottod IDE RSS delta < 80 MB').toBeLessThan(80);
+      expect(activePeakOttoCoreRssMb, 'ottod + active LSP/DAP children RSS < 450 MB at peak 8-tab load').toBeLessThan(450);
+      expect(activePeakDaemonTreeRssMb, 'whole ottod + active LSP/DAP + ClickHouse tree RSS < 1 GB at peak').toBeLessThan(1024);
+      expect(daemonTreeRssMbCycle0, 'whole ottod daemon process tree RSS < 1 GB (cycle 0)').toBeLessThan(1024);
+      expect(daemonTreeRssMbCycle25, 'whole ottod daemon process tree RSS < 1 GB (cycle 25)').toBeLessThan(1024);
+      expect(liveDomElementsDelta, '25-cycle live DOM element delta <= 25 (zero leaked DOM subtrees)').toBeLessThanOrEqual(25);
+      expect(daemonRssSlopeMb, 'ottod RSS stays flat across 25 8-language cycles').toBeLessThan(25);
+      expect(orphanIdeTools, 'zero leaked LSP/DAP child processes after workspace switch & close').toBe(0);
+
+      if (cycle25Cdp) {
+        const heap25Mb = round2(cycle25Cdp.jsHeapBytes / (1024 * 1024));
+        expect(activePeakDaemonTreeRssMb + heap25Mb, 'peak Otto daemon tree + UI JSHeap < 1 GB').toBeLessThan(1024);
+        expect(daemonTreeRssMbCycle25 + heap25Mb, 'settled Otto daemon tree + UI JSHeap < 1 GB').toBeLessThan(1024);
+      }
+      if (ideHeapDeltaMb !== null) {
+        expect(ideHeapDeltaMb, 'browser IDE JSHeapUsedSize delta < 80 MB').toBeLessThan(80);
+        expect(
+          ideDaemonDeltaMb + ideHeapDeltaMb,
+          'combined IDE daemon + JSHeap overhead < 100 MB',
+        ).toBeLessThan(100);
+      }
+      if (heapSlopeMb !== null && domNodesDelta !== null && listenersDelta !== null) {
+        expect(heapSlopeMb, '25-cycle net JSHeapUsedSize slope < 5 MB').toBeLessThan(5);
+        expect(domNodesDelta, '25-cycle net DOM Nodes delta <= 25').toBeLessThanOrEqual(25);
+        expect(listenersDelta, '25-cycle net JSEventListeners delta <= 5').toBeLessThanOrEqual(5);
+      }
+    } finally {
+      if (poly8WsId) {
+        await conn.ctx.fetch(`${base}/api/v1/workspaces/${poly8WsId}`, { method: 'DELETE' }).catch(() => {});
+      }
+      if (altWsId) {
+        await conn.ctx.fetch(`${base}/api/v1/workspaces/${altWsId}`, { method: 'DELETE' }).catch(() => {});
+      }
+      await conn.ctx.dispose().catch(() => {});
+      rmSync(poly8Root, { recursive: true, force: true });
+      rmSync(altRoot, { recursive: true, force: true });
     }
   });
 });

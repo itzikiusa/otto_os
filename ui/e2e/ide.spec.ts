@@ -1,6 +1,6 @@
 import { test, expect, type Page, type Locator, type APIRequestContext } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, platform, arch, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { apiCtx } from './seed';
@@ -50,7 +50,7 @@ import {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const SCREENSHOT_DIR =
-  '/Users/itziklavon/.gemini/antigravity-cli/brain/2fb92e16-6abc-4a33-985b-8e29db6f04eb/scratch/screenshots';
+  '/Users/itziklavon/.gemini/antigravity-cli/brain/4814dd52-6e20-428a-88b9-51174ddd8f0e/scratch/screenshots';
 const KOTLIN_PLUGIN_DIR = resolve(process.cwd(), '..', 'examples', 'ide-plugins', 'kotlin-ide');
 
 interface IdeTargetSpec {
@@ -561,6 +561,8 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
   });
 
+  test.describe.configure({ mode: 'serial' });
+
   test.beforeAll(async () => {
     await ensureSeeded();
   });
@@ -694,7 +696,7 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
     await searchInput.fill('compute_total');
     await expect(searchDialog).toContainText('compute_total', { timeout: 10_000 });
 
-    const textTab = searchDialog.getByRole('tab', { name: /Text/i }).first();
+    const textTab = searchDialog.getByRole('tab', { name: /Find in path|Text/i }).first();
     if ((await textTab.count()) > 0 && (await textTab.isVisible())) {
       await textTab.click();
     }
@@ -702,24 +704,16 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
     await expect(searchDialog).toContainText('.env.example', { timeout: 10_000 });
 
     // Exercise Replace preview (via UI toggle in Search Everywhere + dry-run contract)
-    const replaceToggle = searchDialog
-      .getByRole('button', { name: /Replace/i })
-      .or(searchDialog.getByLabel(/Replace/i))
-      .first();
-    if ((await replaceToggle.count()) > 0 && (await replaceToggle.isVisible())) {
-      await replaceToggle.click();
-      const replaceInputs = searchDialog.locator(
-        'input[type="text"], input[type="search"], input:not([type="checkbox"])',
-      );
-      if ((await replaceInputs.count()) >= 2) {
-        await replaceInputs.nth(1).fill('FEATURE_FLAG=turbo');
-        const previewBtn = searchDialog.getByRole('button', { name: /Preview/i }).first();
-        if ((await previewBtn.count()) > 0 && (await previewBtn.isVisible())) {
-          await previewBtn.click();
-        }
-        await expect(searchDialog).toContainText('FEATURE_FLAG=turbo', { timeout: 10_000 });
-      }
-    }
+    const replaceToggle = searchDialog.getByTestId('ide-se-replace-toggle');
+    await expect(replaceToggle).toBeVisible();
+    await replaceToggle.click();
+    const replaceInput = searchDialog.getByTestId('ide-replace-input');
+    await expect(replaceInput).toBeVisible();
+    await replaceInput.fill('FEATURE_FLAG=turbo');
+    const previewBtn = searchDialog.getByRole('button', { name: /^Preview$/i }).first();
+    await expect(previewBtn).toBeVisible();
+    await previewBtn.click();
+    await expect(searchDialog).toContainText('FEATURE_FLAG=turbo', { timeout: 10_000 });
     // Also verify backend dry-run replace preview leaves file untouched until applied
     const replacePreview = await daemon<{
       files_changed: number;
@@ -989,24 +983,15 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
     await expect(page.locator('.cm-ide-bp-marker').first()).toBeVisible();
 
     if (useGoDlv) {
-      // Right-click breakpoint on line 8 -> click `Edit condition / logpoint...` -> set `x == 20`
+      // Right-click breakpoint on line 8 -> opens GoLand-style inline breakpoint popover -> set `x == 20`
       await page.mouse.click(bpBox!.x + bpBox!.width / 2, ln1Box!.y + ln1Box!.height / 2, {
         button: 'right',
       });
-      const bpCtxMenu = page.locator('.ctx-menu');
-      if (
-        await bpCtxMenu
-          .waitFor({ state: 'visible', timeout: 3_000 })
-          .then(() => true, () => false)
-      ) {
-        await expectFullyInViewport(page, bpCtxMenu, 'Breakpoint context menu');
-        await bpCtxMenu.getByRole('menuitem', { name: /Edit condition/i }).first().click();
-      }
-      const condDialog = page.locator('.sheet[role="dialog"]').last();
-      await expectFullyInViewport(page, condDialog, 'Edit breakpoint condition dialog');
-      await condDialog.locator('input').first().fill('x == 20');
-      await condDialog.getByRole('button', { name: /^Save$/i }).click();
-      await expect(condDialog).toBeHidden();
+      const bpPop = page.getByTestId('ide-breakpoint-popover');
+      await expectFullyInViewport(page, bpPop, 'Breakpoint condition popover');
+      await bpPop.getByTestId('ide-bp-condition-input').fill('x == 20');
+      await bpPop.getByTestId('ide-bp-done-btn').click();
+      await expect(bpPop).toBeHidden();
     }
 
     // Start live debug session from the CodeMirror gutter Run/Debug play button!
@@ -1174,6 +1159,10 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
     const configsTab = modal.getByRole('tab', { name: /Run \/ debug configurations|Run|Config/i }).first();
     await expect(configsTab).toBeVisible();
     await configsTab.click();
+    const newCfgBtn = modal.getByRole('button', { name: /^New$/i }).first();
+    if ((await newCfgBtn.count()) > 0 && (await newCfgBtn.isVisible())) {
+      await newCfgBtn.click();
+    }
 
     await modal.locator('#cfg-name').fill('Go Calc Unit Suite');
     await modal.locator('#cfg-runner').selectOption('go_test');
@@ -1554,6 +1543,1000 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
     await expectAccessible(page, { key: 'ide' });
     await saveShot(page, '14-ide-desktop-rtl.png');
   });
+
+  test('11. GoLand workflow on go_admission_demo + attached go_shared_kit: multi-root tree, New Go file, 3-tab persistence + Split Right, Shell/.env/Config env in Run & dlv Debug with inline values, $GOROOT Dive-In & 0 leaked dlv', async ({
+    page,
+  }) => {
+    test.setTimeout(180_000);
+    const goBin = join(homedir(), 'go', 'bin');
+    const extraPath = [goBin, '/opt/homebrew/bin', '/usr/local/bin'].filter(existsSync).join(':');
+    const hasDlv = existsSync(join(goBin, 'dlv')) || existsSync('/opt/homebrew/bin/dlv');
+
+    const admParent = realpathSync(mkdtempSync(join(tmpdir(), 'otto-e2e-admission-suite-')));
+    const admRoot = join(admParent, 'go_admission_demo');
+    const sharedKitRoot = join(admParent, 'go_shared_kit');
+    const entRoot1 = join(admParent, 'go_admission_enterprise_multi_region_gateway_service');
+    const entRoot2 = join(admParent, 'bo_common_ui_player_loyalty_orchestrator_portal');
+    mkdirSync(join(admRoot, 'cmd', 'server'), { recursive: true });
+    mkdirSync(join(admRoot, 'internal', 'admission'), { recursive: true });
+    mkdirSync(sharedKitRoot, { recursive: true });
+    mkdirSync(entRoot1, { recursive: true });
+    mkdirSync(entRoot2, { recursive: true });
+
+    writeFileSync(join(admRoot, 'go.mod'), 'module example.com/go_admission_demo\n\ngo 1.22\n');
+    writeFileSync(join(admRoot, '.env'), 'DOTENV_FILE_VAR=dotenv-admission-ok\n');
+    writeFileSync(
+      join(admRoot, 'internal', 'admission', 'check.go'),
+      [
+        'package admission',
+        '',
+        'type Request struct {',
+        '\tTenantID string',
+        '\tQuotaRPS int',
+        '}',
+        '',
+        'type Decision struct {',
+        '\tAllowed   bool',
+        '\tShellEnv  string',
+        '\tDotenvVar string',
+        '\tCustomCfg string',
+        '}',
+        '',
+        'func EvaluateAdmission(req Request, shellEnv, dotenvVar, customCfg string) Decision {',
+        '\tallowed := req.QuotaRPS > 0 && len(req.TenantID) > 0',
+        '\tdec := Decision{',
+        '\t\tAllowed:   allowed,',
+        '\t\tShellEnv:  shellEnv,',
+        '\t\tDotenvVar: dotenvVar,',
+        '\t\tCustomCfg: customCfg,',
+        '\t}',
+        '\treturn dec',
+        '}',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(admRoot, 'internal', 'admission', 'check_test.go'),
+      [
+        'package admission',
+        '',
+        'import "testing"',
+        '',
+        'func TestEvaluateAdmission(t *testing.T) {',
+        '\td := EvaluateAdmission(Request{TenantID: "t1", QuotaRPS: 100}, "sh", "env", "cfg")',
+        '\tif !d.Allowed {',
+        '\t\tt.Fatal("expected allowed")',
+        '\t}',
+        '}',
+        '',
+      ].join('\n'),
+    );
+    const shellVarKey = process.env.GO_DEBUGGING_PARAMS ? 'GO_DEBUGGING_PARAMS' : 'HOME';
+    const expectedShellVal = process.env[shellVarKey] ?? '';
+    expect(expectedShellVal.length).toBeGreaterThan(0);
+
+    writeFileSync(
+      join(admRoot, 'cmd', 'server', 'main.go'),
+      [
+        'package main',
+        '',
+        'import (',
+        '\t"fmt"',
+        '\t"os"',
+        '',
+        '\t"example.com/go_admission_demo/internal/admission"',
+        ')',
+        '',
+        'func main() {',
+        `\tshellEnv := os.Getenv(${JSON.stringify(shellVarKey)})`,
+        '\tdotenvVar := os.Getenv("DOTENV_FILE_VAR")',
+        '\tcustomCfg := os.Getenv("CUSTOM_CFG_VAR")',
+        '\treq := admission.Request{TenantID: "casino-eu-1", QuotaRPS: 250}',
+        '\tdec := admission.EvaluateAdmission(req, shellEnv, dotenvVar, customCfg)',
+        '\tfmt.Printf("ADMISSION_OK=%v SHELL=%s DOTENV=%s CUSTOM=%s\\n", dec.Allowed, dec.ShellEnv, dec.DotenvVar, dec.CustomCfg)',
+        '}',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(join(sharedKitRoot, 'go.mod'), 'module example.com/go_shared_kit\n\ngo 1.22\n');
+    writeFileSync(
+      join(sharedKitRoot, 'kit.go'),
+      [
+        'package kit',
+        '',
+        'import "strings"',
+        '',
+        'func NormalizeTenant(id string) string {',
+        '\treturn strings.TrimSpace(strings.ToLower(id))',
+        '}',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(join(entRoot1, 'go.mod'), 'module example.com/ent1\n\ngo 1.22\n');
+    writeFileSync(join(entRoot2, 'package.json'), '{"name":"bo-common-ui-portal","version":"1.0.0"}\n');
+
+    const setLiveScheme = async (scheme: 'dark' | 'light'): Promise<void> => {
+      await page.evaluate(() => {
+        localStorage.setItem('otto_scheme', 'auto');
+      });
+      await page.emulateMedia({ colorScheme: scheme });
+      await expect
+        .poll(() => page.evaluate(() => document.documentElement.dataset.scheme))
+        .toBe(scheme);
+      // Wait for active CSS transitions (`--dur-fast` / `--dur-enter`) to finish settling cleanly.
+      await expect
+        .poll(() =>
+          page.evaluate(() =>
+            document.getAnimations().every((a) => a.playState !== 'running'),
+          ),
+        )
+        .toBe(true);
+    };
+
+    const createdWsIds: string[] = [];
+    try {
+      const admWs = await daemon<{ id: string }>(page.request, 'POST', '/workspaces', {
+        name: 'go_admission_demo',
+        root_path: admRoot,
+      });
+      createdWsIds.push(admWs.id);
+
+      for (const [nm, rp] of [
+        ['go_admission_enterprise_multi_region_gateway_service', entRoot1],
+        ['bo_common_ui_player_loyalty_orchestrator_portal', entRoot2],
+      ] as const) {
+        const w = await daemon<{ id: string }>(page.request, 'POST', '/workspaces', { name: nm, root_path: rp });
+        createdWsIds.push(w.id);
+      }
+
+      const admTarget: IdeTargetSpec = {
+        kind: 'local',
+        workspace_id: admWs.id,
+        root: admRoot,
+        connection_id: null,
+      };
+
+      // 1. Measure instant runner discovery (< 100ms) + verify cached shell env snapshot!
+      const tDisc0 = performance.now();
+      const admEnvInit = await daemon<{
+        env: { inherit_shell_env?: boolean; additional_roots?: string[] };
+        configs: Array<{ id: string; name: string; runner: string }>;
+        shell_env?: { vars?: Record<string, string> };
+      }>(
+        page.request,
+        'GET',
+        `/ide/environments?kind=local&root=${encodeURIComponent(admRoot)}&workspace_id=${encodeURIComponent(admWs.id)}`,
+      );
+      const discoveryMs = performance.now() - tDisc0;
+      expect(discoveryMs, `Runner discovery latency (${discoveryMs.toFixed(1)}ms) must be < 100ms`).toBeLessThan(100);
+      expect(admEnvInit.configs.some((c) => c.runner === 'go_run' || c.runner === 'go_test')).toBe(true);
+
+      const expectedShellDbgParam = process.env.GO_DEBUGGING_PARAMS || '';
+      const shellSnap = await daemon<{ shell: string; vars: Record<string, string> }>(
+        page.request,
+        'GET',
+        '/ide/shell-env?kind=local',
+      );
+      expect(shellSnap.vars.HOME).toBeTruthy();
+      if (expectedShellDbgParam) {
+        expect(shellSnap.vars.GO_DEBUGGING_PARAMS).toBe(expectedShellDbgParam);
+      }
+
+      const shellReloaded = await daemon<{ shell: string; vars: Record<string, string> }>(
+        page.request,
+        'POST',
+        '/ide/shell-env/reload',
+        { target: admTarget },
+      );
+      expect(shellReloaded.vars.HOME).toBe(shellSnap.vars.HOME);
+      if (expectedShellDbgParam) {
+        expect(shellReloaded.vars.GO_DEBUGGING_PARAMS).toBe(expectedShellDbgParam);
+      }
+
+      // Configure extra_path + .env on `go_admission_demo` AND attach `go_shared_kit` via `/ide/projects/folders`!
+      await daemon(page.request, 'PUT', '/ide/environments', {
+        target: admTarget,
+        inherit_shell_env: true,
+        dotenv_path: '.env',
+        extra_path: extraPath,
+        env_vars: expectedShellDbgParam
+          ? []
+          : [{ key: 'GO_DEBUGGING_PARAMS', value: 'admission-e2e-shell-ok', secret: false }],
+      });
+      const attachResp = await daemon<{ env: { additional_roots: string[] } }>(
+        page.request,
+        'POST',
+        '/ide/projects/folders',
+        { target: admTarget, folder_path: sharedKitRoot },
+      );
+      expect(attachResp.env.additional_roots).toContain(sharedKitRoot);
+
+      // Boot IDE directly on `go_admission_demo`
+      await page.addInitScript((wsId: string) => {
+        localStorage.setItem('otto_workspace', wsId);
+        localStorage.setItem('otto_rail_expanded', '0');
+        localStorage.setItem('otto_scheme', 'auto');
+        localStorage.setItem('otto_direction', 'ltr');
+      }, admWs.id);
+      await page.emulateMedia({ colorScheme: 'dark' });
+      await page.goto('/#/ide');
+      await expect(page.locator('.shell')).toBeVisible({ timeout: 20_000 });
+      const tree = page.getByTestId('ide-project-tree');
+      await expect(tree).toBeVisible({ timeout: 15_000 });
+
+      // 2. Verify IntelliJ Project Tree root node (`go_admission_demo`) + attached root (`go_shared_kit`)
+      await expect(tree.getByTestId('ide-tree-root-node')).toContainText('go_admission_demo');
+      await expect(tree.getByTestId('ide-tree-attached-root')).toContainText('go_shared_kit', { timeout: 15_000 });
+
+      // Expand `go_shared_kit` if needed and open `kit.go` from the attached folder!
+      const kitRootBtn = tree.getByTestId('ide-tree-attached-root').locator('button.tree-item').first();
+      if ((await kitRootBtn.getAttribute('aria-expanded')) !== 'true') {
+        await kitRootBtn.click();
+      }
+      const kitFileBtn = tree.locator(`button.tree-item[title$="kit.go"]`).first();
+      await expect(kitFileBtn).toBeVisible({ timeout: 10_000 });
+      await kitFileBtn.click();
+      await expect(activeEditorContent(page)).toContainText('func NormalizeTenant');
+
+      // Expand `internal` -> `admission` and create `New Go file…` (`policy` -> `policy.go` with `package admission` auto-header!)
+      for (const seg of ['internal', 'internal/admission']) {
+        const dirBtn = tree.locator(`button.tree-item[title="${seg}"]`).first();
+        await expect(dirBtn).toBeVisible({ timeout: 10_000 });
+        if ((await dirBtn.getAttribute('aria-expanded')) !== 'true') await dirBtn.click();
+      }
+      await tree.locator('button.tree-item[title="internal/admission"]').first().click({ button: 'right' });
+      const ctx = page.locator('.ctx-menu');
+      await expectFullyInViewport(page, ctx, 'Project tree folder context menu');
+      await ctx.getByRole('menuitem', { name: /New Go file/i }).click();
+      const goFileDialog = page.locator('.sheet[role="dialog"]').last();
+      await expectFullyInViewport(page, goFileDialog, 'New Go file dialog');
+      await goFileDialog.locator('input').first().fill('policy');
+      await goFileDialog.getByRole('button', { name: /^Create$/i }).click();
+      await expect(goFileDialog).toBeHidden();
+      await expect(activeEditorContent(page)).toContainText('package admission');
+      expect(readFileSync(join(admRoot, 'internal', 'admission', 'policy.go'), 'utf8')).toContain('package admission');
+
+      // 3. Multi-Tab Opening (zero tab overwriting!) + edit/undo preservation + Split Right
+      for (const seg of ['cmd', 'cmd/server']) {
+        const dirBtn = tree.locator(`button.tree-item[title="${seg}"]`).first();
+        await expect(dirBtn).toBeVisible({ timeout: 10_000 });
+        if ((await dirBtn.getAttribute('aria-expanded')) !== 'true') await dirBtn.click();
+      }
+      await tree.locator('button.tree-item[title="cmd/server/main.go"]').first().click();
+      await tree.locator('button.tree-item[title="internal/admission/check.go"]').first().click();
+      await tree.locator('button.tree-item[title="internal/admission/check_test.go"]').first().click();
+
+      const tabStrip = page.getByTestId('ide-tabs-strip');
+      for (const tabName of ['main.go', 'check.go', 'check_test.go']) {
+        await expect(tabStrip.locator('.ide-tab-btn', { hasText: tabName }).first()).toBeVisible();
+      }
+
+      // Edit `check.go`, switch to `main.go`, switch back to `check.go` -> unsaved edit & Undo (`⌘Z`) preserved!
+      await tabStrip.locator('.ide-tab-btn', { hasText: 'check.go' }).first().click();
+      await expect(activeEditorContent(page)).toContainText('func EvaluateAdmission');
+      await activeEditorContent(page).click();
+      await page.keyboard.press('Meta+ArrowDown');
+      await page.keyboard.insertText('\n// transient multi-tab edit\n');
+      await tabStrip.locator('.ide-tab-btn', { hasText: 'main.go' }).first().click();
+      await expect(activeEditorContent(page)).toContainText('func main()');
+      await tabStrip.locator('.ide-tab-btn', { hasText: 'check.go' }).first().click();
+      await expect(activeEditorContent(page)).toContainText('// transient multi-tab edit');
+      await activeEditorContent(page).click();
+      for (let u = 0; u < 30; u++) {
+        const txt = (await activeEditorContent(page).textContent()) ?? '';
+        if (!txt.includes('transient multi-tab edit')) break;
+        await page.keyboard.press('Meta+z');
+      }
+      await expect(activeEditorContent(page)).not.toContainText('transient multi-tab edit');
+      // Save clean `check.go` via ⌘S so line numbers match disk for `dlv dap`
+      await activeEditorContent(page).click();
+      await page.keyboard.press('Meta+s');
+      await tabStrip.locator('.ide-tab-btn', { hasText: 'check_test.go' }).first().click();
+
+      // Test Split Right (`ide-split-right-btn` -> `ide-split-pane`)
+      await page.getByTestId('ide-split-right-btn').click();
+      await expect(page.getByTestId('ide-split-pane')).toBeVisible({ timeout: 10_000 });
+      await page.getByTestId('ide-split-pane').getByRole('button', { name: 'Close split pane' }).click();
+      await expect(page.getByTestId('ide-split-pane')).toBeHidden();
+
+      // 4. Workspace Switcher at 2560x1440 AND 1440x900 with long enterprise names
+      for (const vp of [
+        { width: 2560, height: 1440 },
+        { width: 1440, height: 900 },
+      ]) {
+        await page.setViewportSize(vp);
+        const switcher = page.getByTestId('ide-target-switcher');
+        await expect(switcher).toBeVisible();
+        const swBox = await switcher.boundingBox();
+        expect(swBox && swBox.width > 160).toBeTruthy();
+        await switcher.click();
+        const wsPop = page.getByTestId('ide-workspace-popover');
+        await expectFullyInViewport(page, wsPop, `Workspace popover at ${vp.width}x${vp.height}`);
+        await expect(wsPop).toContainText('Folders in current project (2)');
+        await expect(wsPop).toContainText('go_admission_enterprise_multi_region_gateway_service');
+        await expect(wsPop).toContainText('bo_common_ui_player_loyalty_orchestrator_portal');
+        await page.keyboard.press('Escape');
+        await expect(wsPop).toBeHidden();
+      }
+
+      // 5. Inspect Login Shell Env in UI + create `Admission Server` Run Config + verify Shell/.env/Config env in Run!
+      await page.getByTestId('ide-edit-configs-btn').click();
+      const envModal = page.locator('.sheet[role="dialog"]').last();
+      await expectFullyInViewport(page, envModal, 'Environments & Run Configurations modal');
+
+      // Switch to Project environment tab first to inspect `IdeShellEnvCard` (`GO_DEBUGGING_PARAMS`)
+      await envModal.getByRole('tab', { name: /Project environment/i }).click();
+      await expect(page.getByTestId('ide-shell-env-card')).toBeVisible();
+      await page.getByTestId('ide-shell-env-preview-btn').click();
+      await expect(page.getByTestId('ide-shell-env-preview')).toBeVisible();
+      await page.getByTestId('ide-shell-env-search').fill(shellVarKey);
+      await expect(page.getByTestId('ide-shell-env-preview')).toContainText(expectedShellVal);
+      if (shellVarKey === 'GO_DEBUGGING_PARAMS') {
+        await expect(page.getByTestId('ide-shell-env-preview')).toContainText('Go / Debug');
+      }
+
+      // Switch to Run / debug configurations tab & save `Admission Server`
+      await envModal.getByRole('tab', { name: /Run \/ debug configurations/i }).click();
+      await envModal.getByRole('button', { name: /^New$/i }).click();
+      await envModal.locator('#cfg-name').fill('Admission Server');
+      await envModal.locator('#cfg-runner').selectOption('go_run');
+      await envModal.locator('#cfg-target').fill('./cmd/server');
+      await envModal.locator('#cfg-cwd').fill(admRoot);
+      await envModal.locator('#cfg-env-file').fill('.env');
+      await envModal.getByRole('button', { name: /Add override/i }).click();
+      await envModal.getByLabel('Override variable name').last().fill('CUSTOM_CFG_VAR');
+      await envModal.getByLabel('Override value').last().fill('cfg-override-ok');
+      await envModal.getByRole('button', { name: /^Save configuration$/i }).click();
+      await expect(envModal.locator('.env-cfg-rail')).toContainText('Admission Server');
+
+      // Open SDK Version Downloader directly via `SDKs…` inside `Environments & run configurations` (verifies clean modal stacking!)
+      await envModal.getByTestId('ide-cfg-open-toolchains').click();
+      const tcModal = page.locator('.sheet[role="dialog"]').last();
+      await expectFullyInViewport(page, tcModal, 'SDK Version Downloader modal');
+      await expect(tcModal.getByTestId('ide-sdk-version-select')).toBeVisible({ timeout: 10_000 });
+      await expect(tcModal.getByTestId('ide-add-local-sdk-btn')).toBeVisible();
+      const goEnvRoot = execFileSync('go', ['env', 'GOROOT'], { encoding: 'utf8' }).trim();
+      if (goEnvRoot && existsSync(goEnvRoot)) {
+        const regSdk = await daemon<{ sdk: { id: string; path: string; version: string; source: string } }>(
+          page.request,
+          'POST',
+          '/ide/toolchains/local',
+          { target: admTarget, ecosystem: 'go', path: goEnvRoot },
+        );
+        expect(regSdk.sdk.source).toBe('local');
+        expect(regSdk.sdk.path).toBeTruthy();
+      }
+      await page.keyboard.press('Escape');
+      await page.keyboard.press('Escape');
+      await expect(page.locator('.sheet[role="dialog"]')).toHaveCount(0);
+
+      // Select `Admission Server` in `ide-run-config-select` & click `Run` -> assert all 3 env layers print!
+      await page.getByTestId('ide-run-config-select').click();
+      const runPop = page.getByTestId('ide-run-config-popover');
+      await expectFullyInViewport(page, runPop, 'Launch target popover');
+      await runPop.locator('.run-item', { hasText: 'Admission Server' }).first().click();
+
+      const runRespWait = page.waitForResponse(
+        (r) => r.request().method() === 'POST' && r.url().includes('/api/v1/ide/runs'),
+        { timeout: 20_000 },
+      );
+      await page.getByTestId('ide-run-btn').click();
+      const startedRunId = ((await (await runRespWait).json()) as { run: { id: string } }).run.id;
+      await expect
+        .poll(
+          async () => {
+            const r = await daemon<{ run: { status: string; output: string[] } }>(
+              page.request,
+              'GET',
+              `/ide/runs/${encodeURIComponent(startedRunId)}`,
+            );
+            return r.run.status === 'passed' ? r.run.output.join('\n') : '';
+          },
+          { timeout: 30_000 },
+        )
+        .toContain(
+          `ADMISSION_OK=true SHELL=${expectedShellVal} DOTENV=dotenv-admission-ok CUSTOM=cfg-override-ok`,
+        );
+
+      // 6. Real Gutter Breakpoint + `dlv dap` Debugging on `check.go` + Inline Values + Audit (b) PNGs + 0 Leaked `dlv`!
+      if (hasDlv) {
+        await tabStrip.locator('.ide-tab-btn', { hasText: 'check.go' }).first().click();
+        await expect(activeEditorContent(page)).toContainText('return dec');
+
+        // Click gutter on line 23 (`return dec`) in `check.go`
+        const bpGutter = page.locator('.cm-ide-bp-gutter').first();
+        const ln23 = page
+          .locator('.cm-lineNumbers .cm-gutterElement')
+          .filter({ hasText: /^23$/ })
+          .first();
+        const bpBox = await bpGutter.boundingBox();
+        const ln23Box = await ln23.boundingBox();
+        expect(bpBox && ln23Box).toBeTruthy();
+        await page.mouse.click(bpBox!.x + bpBox!.width / 2, ln23Box!.y + ln23Box!.height / 2);
+        await expect(page.locator('.cm-ide-bp-marker.cm-ide-bp-enabled').first()).toBeVisible();
+
+        const startDbgWait = page.waitForResponse(
+          (r) => r.request().method() === 'POST' && r.url().includes('/api/v1/ide/debug/sessions'),
+          { timeout: 25_000 },
+        );
+        await page.getByTestId('ide-debug-btn').click();
+        const dbgSessionId = ((await (await startDbgWait).json()) as { session: IdeDebugSnapshot }).session.id;
+
+        try {
+          const dbgPanel = page.getByTestId('ide-debugger-panel');
+          await expect(dbgPanel).toBeVisible({ timeout: 20_000 });
+          await expect(dbgPanel).toContainText(/Paused/i, { timeout: 45_000 });
+          await expect(page.locator('.cm-ide-paused-line').first()).toBeVisible({ timeout: 15_000 });
+
+          // Assert GoLand-style inline variable values render directly inside CodeMirror!
+          await expect(page.locator('.cm-ide-inline-values').first()).toBeVisible({ timeout: 15_000 });
+          const inlineText = (await page.locator('.cm-ide-inline-values').allTextContents()).join(' ');
+          expect(inlineText).toMatch(/allowed|shellEnv|customCfg|dec/);
+
+          // Expand Go struct `req` in the Variables tree -> assert `TenantID` & `"casino-eu-1"`!
+          const expandReqBtn = dbgPanel.getByRole('button', { name: /Expand req/i }).first();
+          await expect(expandReqBtn).toBeVisible({ timeout: 15_000 });
+          await expandReqBtn.click();
+          await expect(dbgPanel).toContainText('TenantID', { timeout: 10_000 });
+          await expect(dbgPanel).toContainText('casino-eu-1', { timeout: 10_000 });
+
+          // Evaluate both `shellEnv` (from login shell) and `customCfg` (from Run Config) in Debug REPL!
+          const replIn = dbgPanel
+            .locator('input[placeholder*="Evaluate" i], input[aria-label*="Evaluate" i], form input[type="text"]')
+            .last();
+          await replIn.fill('shellEnv');
+          await replIn.press('Enter');
+          await expect(dbgPanel).toContainText(expectedShellVal, { timeout: 10_000 });
+          await replIn.fill('customCfg');
+          await replIn.press('Enter');
+          await expect(dbgPanel).toContainText('cfg-override-ok', { timeout: 10_000 });
+
+          // Capture Mandatory Visual Audit (b) PNGs at 2560x1440 & 1440x900 in BOTH Dark and Light mode!
+          for (const vp of [
+            { w: 2560, h: 1440 },
+            { w: 1440, h: 900 },
+          ]) {
+            await page.setViewportSize({ width: vp.w, height: vp.h });
+            for (const sc of ['dark', 'light'] as const) {
+              await setLiveScheme(sc);
+              await expectNoHorizontalOverflow(page);
+              await expect(page.locator('.cm-ide-paused-line').first()).toBeVisible();
+              await expect(page.locator('.cm-ide-inline-values').first()).toBeVisible();
+              await saveShot(page, `audit-b-paused-go-debug-inline-${vp.w}x${vp.h}-${sc}.png`);
+            }
+          }
+          await setLiveScheme('dark');
+          await page.setViewportSize({ width: 1440, height: 900 });
+
+          // Click caller frame (`main.main`) -> editor navigates to `main.go`, then click `EvaluateAdmission` -> back to `check.go`!
+          const callerFrame = dbgPanel.locator('.dbg-frame', { hasText: /main\.main/ }).first();
+          await expect(callerFrame).toBeVisible();
+          await callerFrame.click();
+          await expect(activeEditorContent(page)).toContainText(`os.Getenv(${JSON.stringify(shellVarKey)})`, {
+            timeout: 10_000,
+          });
+          await dbgPanel.locator('.dbg-frame', { hasText: /EvaluateAdmission/ }).first().click();
+          await expect(activeEditorContent(page)).toContainText('return dec', { timeout: 10_000 });
+
+          // Step Over (`check.go:23` -> `main.go`) & Stop Debug Session
+          await dbgPanel.getByRole('button', { name: 'Step over' }).click();
+          await expect
+            .poll(
+              async () =>
+                (
+                  await daemon<{ session: IdeDebugSnapshot }>(
+                    page.request,
+                    'GET',
+                    `/ide/debug/sessions/${dbgSessionId}`,
+                  )
+                ).session.state,
+              { timeout: 20_000 },
+            )
+            .toBe('paused');
+          await dbgPanel.getByRole('button', { name: 'Stop debug session' }).click();
+          await expect
+            .poll(
+              async () =>
+                (
+                  await daemon<{ session: IdeDebugSnapshot }>(
+                    page.request,
+                    'GET',
+                    `/ide/debug/sessions/${dbgSessionId}`,
+                  )
+                ).session.state,
+              { timeout: 15_000 },
+            )
+            .toBe('terminated');
+        } finally {
+          await daemon(page.request, 'POST', `/ide/debug/sessions/${dbgSessionId}/command`, {
+            action: 'stop',
+          }).catch(() => {});
+        }
+
+        // Assert ZERO leaked `dlv` processes referencing `admRoot`!
+        await expect
+          .poll(() => {
+            const psOut = execFileSync('ps', ['-axo', 'command='], { encoding: 'utf8' });
+            return psOut
+              .split('\n')
+              .filter((ln) => ln.includes(admRoot) && /\bdlv\b|__debug_bin/.test(ln)).length;
+          })
+          .toBe(0);
+      }
+
+      // 7. Real "Dive In" Navigation: `main.go` -> `check.go` AND `fmt.Printf` -> `$GOROOT/src/fmt/print.go` (Go SDK + Read-only) + `Cmd+[` Back + Find Usages!
+      await tabStrip.locator('.ide-tab-btn', { hasText: 'main.go' }).first().click();
+      const mainContent = readFileSync(join(admRoot, 'cmd', 'server', 'main.go'), 'utf8');
+
+      // Dive 1: Place caret on `EvaluateAdmission` in `main.go` (line 15) and press `F12`!
+      const evalLineEl = page
+        .locator('.cm-editor .cm-content .cm-line')
+        .filter({ hasText: 'EvaluateAdmission' })
+        .first();
+      await expect(evalLineEl).toBeVisible();
+      const evalBox = await evalLineEl.boundingBox();
+      expect(evalBox).toBeTruthy();
+      // Click on `EvaluateAdmission` token and press F12
+      await activeEditorContent(page).click();
+      await page.keyboard.press('Meta+ArrowUp');
+      for (let down = 0; down < 14; down++) await page.keyboard.press('ArrowDown');
+      await page.keyboard.press('Home');
+      for (let right = 0; right < 22; right++) await page.keyboard.press('ArrowRight');
+      await page.keyboard.press('F12');
+      await expect(activeEditorContent(page)).toContainText('func EvaluateAdmission', { timeout: 15_000 });
+
+      // Navigate Back via `ide-nav-back` (`Cmd+[`) -> returns to `main.go`!
+      await expect(page.getByTestId('ide-nav-back')).toBeEnabled();
+      await page.getByTestId('ide-nav-back').click();
+      await expect(activeEditorContent(page)).toContainText('os.Getenv("GO_DEBUGGING_PARAMS")', {
+        timeout: 10_000,
+      });
+
+      // Dive 2: Jump into Go stdlib `$GOROOT/src/fmt/print.go` (`fmt.Printf` on line 16) -> verify `Go SDK` + `Read-only` badges!
+      const stdlibDef = await daemon<{
+        symbol: string;
+        locations: Array<{ path: string; line: number; column: number }>;
+      }>(page.request, 'POST', '/ide/lsp/definition', {
+        target: admTarget,
+        path: join(admRoot, 'cmd', 'server', 'main.go'),
+        line: 16,
+        column: 8,
+        symbol: 'Printf',
+        content: mainContent,
+      });
+      expect(stdlibDef.locations.length).toBeGreaterThan(0);
+      expect(stdlibDef.locations[0].path).toMatch(/\/src\/fmt\/print\.go$/);
+
+      // Trigger real F12 jump on `Printf` in CodeMirror!
+      await activeEditorContent(page).click();
+      await page.keyboard.press('Meta+ArrowUp');
+      for (let down = 0; down < 15; down++) await page.keyboard.press('ArrowDown');
+      await page.keyboard.press('Home');
+      for (let right = 0; right < 7; right++) await page.keyboard.press('ArrowRight');
+      await page.keyboard.press('F12');
+
+      const subbar = page.locator('.ide-subbar');
+      await expect(subbar).toContainText('Go SDK', { timeout: 15_000 });
+      await expect(subbar).toContainText('Read-only', { timeout: 15_000 });
+      await expect(activeEditorContent(page)).toContainText('func Printf(', { timeout: 15_000 });
+
+      // Navigate Back (`Cmd+[`) from `$GOROOT/src/fmt/print.go` -> returns directly to `main.go`!
+      await page.getByTestId('ide-nav-back').click();
+      await expect(activeEditorContent(page)).toContainText('os.Getenv("GO_DEBUGGING_PARAMS")', {
+        timeout: 10_000,
+      });
+
+      // Find Usages (`Alt+F7`) on `EvaluateAdmission` -> shows usages across `check.go`, `check_test.go`, `main.go`!
+      const refsResp = await daemon<{ symbol: string; locations: Array<{ path: string; line: number }> }>(
+        page.request,
+        'POST',
+        '/ide/lsp/references',
+        {
+          target: admTarget,
+          path: join(admRoot, 'internal', 'admission', 'check.go'),
+          line: 15,
+          column: 7,
+          symbol: 'EvaluateAdmission',
+        },
+      );
+      expect(refsResp.locations.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      for (const id of createdWsIds) {
+        await page.request
+          .fetch(`${base}/api/v1/workspaces/${id}`, {
+            method: 'DELETE',
+            headers: { Authorization: `Bearer ${token}` },
+          })
+          .catch(() => {});
+      }
+      rmSync(admParent, { recursive: true, force: true });
+    }
+  });
+
+  test('12. 8-language deep support: Shell source dive & bash DAP debugger, JSON outline/JSONPath/transforms/$ref, CSV virtualized Table Grid + Rainbow columns, and node_modules/Python stdlib drill-down', async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    await ensureSeeded();
+
+    // Seed Shell, JSON ($ref), CSV (50 rows), and node_modules `.d.ts` fixtures in `workspaceRoot`
+    mkdirSync(join(workspaceRoot, 'scripts'), { recursive: true });
+    mkdirSync(join(workspaceRoot, 'schemas'), { recursive: true });
+    mkdirSync(join(workspaceRoot, 'data'), { recursive: true });
+    mkdirSync(join(workspaceRoot, 'node_modules', 'mini-pkg'), { recursive: true });
+
+    writeFileSync(
+      join(workspaceRoot, 'scripts', 'lib.sh'),
+      ['#!/usr/bin/env bash', 'validate_env() {', '  local tag="$1"', '  echo "ok:$tag"', '}', ''].join('\n'),
+    );
+    const deployShPath = join(workspaceRoot, 'scripts', 'deploy.sh');
+    writeFileSync(
+      deployShPath,
+      [
+        '#!/usr/bin/env bash',
+        'source ./lib.sh',
+        'count=41',
+        'count=$((count + 1))',
+        'validate_env "$count"',
+        '',
+      ].join('\n'),
+    );
+
+    writeFileSync(
+      join(workspaceRoot, 'schemas', 'base.json'),
+      JSON.stringify({ $id: 'base', type: 'object', required: ['tenant'] }, null, 2) + '\n',
+    );
+    writeFileSync(
+      join(workspaceRoot, 'schemas', 'admission.json'),
+      JSON.stringify(
+        {
+          $ref: './base.json',
+          zed: 99,
+          alpha: { nested: [10, 20], enabled: true },
+        },
+        null,
+        2,
+      ) + '\n',
+    );
+
+    const csvLines = ['tenant_id,region,quota_rps,tier'];
+    for (let i = 1; i <= 50; i++) {
+      csvLines.push(`tenant_${String(i).padStart(2, '0')},${i % 2 === 0 ? 'eu-west' : 'us-east'},${i * 10},${i % 3 === 0 ? 'vip' : 'std'}`);
+    }
+    writeFileSync(join(workspaceRoot, 'data', 'tenants.csv'), csvLines.join('\n') + '\n');
+
+    writeFileSync(
+      join(workspaceRoot, 'node_modules', 'mini-pkg', 'package.json'),
+      JSON.stringify({ name: 'mini-pkg', version: '1.0.0', types: 'index.d.ts' }, null, 2) + '\n',
+    );
+    writeFileSync(
+      join(workspaceRoot, 'node_modules', 'mini-pkg', 'index.d.ts'),
+      'export declare function parseToken(raw: string): boolean;\n',
+    );
+    const authTsPath = join(workspaceRoot, 'web', 'auth.ts');
+    writeFileSync(
+      authTsPath,
+      ["import { parseToken } from 'mini-pkg';", '', "export const valid = parseToken('tok_123');", ''].join('\n'),
+    );
+
+    await bootIdePage(page);
+
+    // A. Shell (`.sh`): `Cmd+F12` Move-to-Function, `source ./lib.sh` Dive-In, Gutter Run & Real Bash DAP Debug!
+    await openFileFromTree(page, 'scripts', 'lib.sh');
+    await page.getByTestId('ide-structure-btn').click();
+    const structModal = page.getByTestId('ide-file-structure-modal');
+    await expect(structModal).toBeVisible();
+    await expect(structModal).toContainText('validate_env');
+    await page.keyboard.press('Escape');
+
+    await openFileFromTree(page, 'scripts', 'deploy.sh');
+    await expect(activeEditorContent(page)).toContainText('source ./lib.sh');
+    // Dive from `source ./lib.sh` (line 2) into `scripts/lib.sh` via F12!
+    await activeEditorContent(page).click();
+    await page.keyboard.press('Meta+ArrowUp');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('End');
+    await page.keyboard.press('F12');
+    await expect(activeEditorContent(page)).toContainText('validate_env()', { timeout: 10_000 });
+    await page.getByTestId('ide-nav-back').click();
+    await expect(activeEditorContent(page)).toContainText('source ./lib.sh', { timeout: 10_000 });
+
+    // Real Bash DAP debugger (`otto-sh-dap` / `shell_bridge`): pause on line 5 (`validate_env "$count"`), inspect `count` == 42!
+    const shDbg = await daemon<{ session: IdeDebugSnapshot }>(page.request, 'POST', '/ide/debug/sessions', {
+      target: localTarget(),
+      language: 'shell',
+      launch: { program: deployShPath, cwd: workspaceRoot },
+      breakpoints: [{ path: deployShPath, line: 5, enabled: true }],
+    });
+    const shDbgId = shDbg.session.id;
+    try {
+      await expect
+        .poll(
+          async () =>
+            (await daemon<{ session: IdeDebugSnapshot }>(page.request, 'GET', `/ide/debug/sessions/${shDbgId}`))
+              .session.state,
+          { timeout: 15_000 },
+        )
+        .toBe('paused');
+      const shSnap = (
+        await daemon<{ session: IdeDebugSnapshot }>(page.request, 'GET', `/ide/debug/sessions/${shDbgId}`)
+      ).session;
+      expect(shSnap.paused_line).toBe(5);
+      const localsScope = shSnap.scopes?.[0];
+      expect(localsScope).toBeTruthy();
+      const shVars = await daemon<{ variables: Array<{ name: string; value: string }> }>(
+        page.request,
+        'POST',
+        `/ide/debug/sessions/${shDbgId}/variables`,
+        { variables_reference: localsScope!.variables_reference },
+      );
+      expect(shVars.variables.some((v) => v.name === 'count' && /42/.test(v.value))).toBe(true);
+    } finally {
+      await daemon(page.request, 'POST', `/ide/debug/sessions/${shDbgId}/command`, { action: 'stop' }).catch(
+        () => {},
+      );
+    }
+    await expect
+      .poll(() => {
+        const psOut = execFileSync('ps', ['-axo', 'command='], { encoding: 'utf8' });
+        return psOut.split('\n').filter((ln) => ln.includes('otto-sh-dap') && ln.includes(deployShPath)).length;
+      })
+      .toBe(0);
+
+    // B. JSON (`.json`): `Cmd+F12` key outline, live JSONPath breadcrumb, Pretty/Minify/Sort keys & `$ref` Dive-In!
+    await openFileFromTree(page, 'schemas', 'admission.json');
+    await expect(activeEditorContent(page)).toContainText('"nested"');
+    await page.getByTestId('ide-structure-btn').click();
+    await expect(page.getByTestId('ide-file-structure-modal')).toContainText('alpha');
+    await expect(page.getByTestId('ide-file-structure-modal')).toContainText('nested');
+    await page.getByTestId('ide-file-structure-modal').getByRole('option', { name: /nested/i }).first().click();
+    await expect(page.getByTestId('ide-jsonpath-crumb')).toContainText('$.alpha');
+    await page.keyboard.press('ArrowDown');
+    await expect(page.getByTestId('ide-jsonpath-crumb')).toContainText('$.alpha.nested');
+
+    // Sort keys -> `"alpha"` appears before `"zed"`; Minify -> single line; Pretty -> multi-line
+    await page.locator('.ide-subbar').getByRole('button', { name: 'Sort keys' }).click();
+    await expect
+      .poll(async () => {
+        const txt = (await activeEditorContent(page).textContent()) ?? '';
+        return txt.indexOf('"alpha"') < txt.indexOf('"zed"');
+      })
+      .toBe(true);
+    await page.locator('.ide-subbar').getByRole('button', { name: 'Minify' }).click();
+    await expect(page.locator('.cm-editor .cm-content .cm-line')).toHaveCount(1);
+    await page.locator('.ide-subbar').getByRole('button', { name: 'Pretty' }).click();
+    await expect
+      .poll(async () => page.locator('.cm-editor .cm-content .cm-line').count())
+      .toBeGreaterThan(4);
+
+    // `$ref` jump (`"$ref": "./base.json"` on line 2) -> opens `schemas/base.json`!
+    await activeEditorContent(page).click();
+    await page.keyboard.press('Meta+ArrowUp');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('End');
+    await page.keyboard.press('ArrowLeft');
+    await page.keyboard.press('ArrowLeft');
+    await page.keyboard.press('F12');
+    await expect(activeEditorContent(page)).toContainText('"$id": "base"', { timeout: 10_000 });
+
+    // C. CSV (`.csv`): DataGrip virtualized Table Grid, stats, filter, sort, cell edit + Undo, +Row/+Col & Text Rainbow Columns!
+    await openFileFromTree(page, 'data', 'tenants.csv');
+    const csvGrid = page.getByTestId('ide-csv-view');
+    await expect(csvGrid).toBeVisible({ timeout: 15_000 });
+    await expect(csvGrid).toContainText('50 rows · 4 cols');
+
+    // Click `quota_rps` header to sort & show numeric aggregate stats (`min=10`, `max=500`, `sum=12750`, `avg=255`)
+    await csvGrid.getByRole('button', { name: 'quota_rps', exact: true }).click();
+    const statsBar = page.getByTestId('ide-csv-stats');
+    await expect(statsBar).toContainText('quota_rps:');
+    await expect(statsBar).toContainText('min=10');
+    await expect(statsBar).toContainText('max=500');
+
+    // Filter rows (`tenant_42`), then clear
+    await page.getByTestId('ide-csv-filter-input').fill('tenant_42');
+    await expect(csvGrid).toContainText('1 row · 4 cols');
+    await page.getByTestId('ide-csv-filter-input').fill('');
+    await expect(csvGrid).toContainText('50 rows · 4 cols');
+
+    // Inline cell edit + `Undo table edit` (`⌘Z`), then `+ Row` & `+ Column`
+    const firstCell = csvGrid.locator('.csv-cell-btn').first();
+    await firstCell.dblclick();
+    const cellInput = csvGrid.locator('.csv-cell-input').first();
+    await expect(cellInput).toBeVisible();
+    await cellInput.fill('edited_tenant');
+    await cellInput.press('Enter');
+    await expect(csvGrid).toContainText('edited_tenant');
+    await csvGrid.getByRole('button', { name: 'Undo table edit' }).click();
+    await expect(csvGrid).not.toContainText('edited_tenant');
+
+    await page.getByTestId('ide-csv-add-row').click();
+    await expect(csvGrid).toContainText('51 rows · 4 cols');
+    await page.getByTestId('ide-csv-add-col').click();
+    await expect(csvGrid).toContainText('51 rows · 5 cols');
+
+    // Switch to `Text` mode -> verify CodeMirror Rainbow Column Highlighting (`.cm-ide-csv-col-0..2`)!
+    await page.getByTestId('ide-csv-mode-toggle').getByRole('button', { name: 'Text' }).click();
+    await expect(page.locator('.cm-ide-csv-col-0').first()).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('.cm-ide-csv-col-1').first()).toBeVisible();
+    await expect(page.locator('.cm-ide-csv-col-2').first()).toBeVisible();
+    await page.getByTestId('ide-csv-mode-toggle').getByRole('button', { name: 'Table' }).click();
+    await expect(csvGrid).toBeVisible();
+
+    // D. JS/TS `node_modules` `.d.ts` Dive-In (`node_modules` + `Read-only` badges) & Python stdlib resolution!
+    const tsDef = await daemon<{ locations: Array<{ path: string; line: number }> }>(
+      page.request,
+      'POST',
+      '/ide/lsp/definition',
+      {
+        target: localTarget(),
+        path: authTsPath,
+        line: 3,
+        column: 24,
+        symbol: 'parseToken',
+        content: readFileSync(authTsPath, 'utf8'),
+      },
+    );
+    expect(tsDef.locations.some((l) => l.path.endsWith('node_modules/mini-pkg/index.d.ts'))).toBe(true);
+
+    await openFileFromTree(page, 'web', 'auth.ts');
+    await activeEditorContent(page).click();
+    await page.keyboard.press('Meta+ArrowUp');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('Home');
+    for (let r = 0; r < 24; r++) await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('F12');
+    await expect(page.locator('.ide-subbar')).toContainText('node_modules', { timeout: 10_000 });
+    await expect(page.locator('.ide-subbar')).toContainText('Read-only');
+    await expect(activeEditorContent(page)).toContainText('export declare function parseToken');
+  });
+
+  test('13. Mandatory 2560x1440 & 1440x900 Dark + Light Visual PNG Audit across multi-root main view, Run/Debug Configs, SDK Downloader, Unified Threads Agent Dock & CSV Grid', async ({
+    page,
+  }) => {
+    test.setTimeout(150_000);
+    await ensureSeeded();
+
+    // Ensure an attached project folder + CSV fixture exist so main view shows multi-root tree + multiple open tabs!
+    const extraAuditFolder = realpathSync(mkdtempSync(join(tmpdir(), 'otto-e2e-audit-kit-')));
+    writeFileSync(join(extraAuditFolder, 'shared_audit.go'), 'package shared\n\nconst AuditReady = true\n');
+    mkdirSync(join(workspaceRoot, 'data'), { recursive: true });
+    if (!existsSync(join(workspaceRoot, 'data', 'tenants.csv'))) {
+      writeFileSync(
+        join(workspaceRoot, 'data', 'tenants.csv'),
+        'tenant_id,region,quota_rps,tier\ntenant_01,eu-west,250,vip\ntenant_02,us-east,120,std\n',
+      );
+    }
+
+    const setLiveScheme = async (scheme: 'dark' | 'light'): Promise<void> => {
+      await page.evaluate(() => {
+        localStorage.setItem('otto_scheme', 'auto');
+      });
+      await page.emulateMedia({ colorScheme: scheme });
+      await expect
+        .poll(() => page.evaluate(() => document.documentElement.dataset.scheme))
+        .toBe(scheme);
+      // Wait for active CSS transitions (`--dur-fast` / `--dur-enter`) to finish settling cleanly.
+      await expect
+        .poll(() =>
+          page.evaluate(() =>
+            document.getAnimations().every((a) => a.playState !== 'running'),
+          ),
+        )
+        .toBe(true);
+    };
+
+    try {
+      await daemon(page.request, 'POST', '/ide/projects/folders', {
+        target: localTarget(),
+        folder_path: extraAuditFolder,
+      });
+
+      await page.emulateMedia({ colorScheme: 'dark' });
+      await bootIdePage(page, { scheme: 'auto' as 'dark', direction: 'ltr' });
+      await openFileFromTree(page, 'cmd', 'demo', 'main.go');
+      await openFileFromTree(page, 'calc', 'calc.go');
+      await openFileFromTree(page, 'calc', 'calc_test.go');
+
+      const viewports = [
+        { w: 2560, h: 1440 },
+        { w: 1440, h: 900 },
+      ] as const;
+
+      // (a) IDE main view with multi-root Project Tree + multiple open tabs + workspace dropdown open
+      for (const vp of viewports) {
+        await page.setViewportSize({ width: vp.w, height: vp.h });
+        for (const sc of ['dark', 'light'] as const) {
+          await setLiveScheme(sc);
+          await page.getByTestId('ide-target-switcher').click();
+          const wsPop = page.getByTestId('ide-workspace-popover');
+          await expectFullyInViewport(page, wsPop, `Audit (a) workspace popover ${vp.w}x${vp.h} ${sc}`);
+          await expectNoHorizontalOverflow(page);
+          await saveShot(page, `audit-a-main-multiroot-switcher-${vp.w}x${vp.h}-${sc}.png`);
+          await page.keyboard.press('Escape');
+          await expect(wsPop).toBeHidden();
+        }
+      }
+
+      // (c) Edit Run/Debug Configurations modal showing Env Vars & Shell Env + SDK selector
+      await page.getByTestId('ide-edit-configs-btn').click();
+      const envModal = page.locator('.sheet[role="dialog"]').last();
+      await expect(envModal).toBeVisible();
+      for (const vp of viewports) {
+        await page.setViewportSize({ width: vp.w, height: vp.h });
+        for (const sc of ['dark', 'light'] as const) {
+          await setLiveScheme(sc);
+          await expectFullyInViewport(page, envModal, `Audit (c) run configs modal ${vp.w}x${vp.h} ${sc}`);
+          await saveShot(page, `audit-c-run-debug-configs-shellenv-${vp.w}x${vp.h}-${sc}.png`);
+        }
+      }
+
+      // (d) SDK Version Downloader modal opened directly from `SDKs…` inside `Environments & run configurations`
+      await envModal.getByTestId('ide-cfg-open-toolchains').click();
+      const tcModal = page.locator('.sheet[role="dialog"]').last();
+      await expect(tcModal.getByTestId('ide-sdk-version-select')).toBeVisible({ timeout: 10_000 });
+      for (const vp of viewports) {
+        await page.setViewportSize({ width: vp.w, height: vp.h });
+        for (const sc of ['dark', 'light'] as const) {
+          await setLiveScheme(sc);
+          await expectFullyInViewport(page, tcModal, `Audit (d) SDK downloader modal ${vp.w}x${vp.h} ${sc}`);
+          await saveShot(page, `audit-d-sdk-version-downloader-${vp.w}x${vp.h}-${sc}.png`);
+        }
+      }
+      await page.keyboard.press('Escape');
+      await page.keyboard.press('Escape');
+      await expect(page.locator('.sheet[role="dialog"]')).toHaveCount(0);
+
+      // (e) Unified Threads AI Agent Dock with provider/model/thread pickers
+      await daemon(page.request, 'POST', `/workspaces/${workspaceId}/sessions`, {
+        kind: 'agent',
+        provider: 'agy',
+        title: 'Admission Auth Service Refactor',
+        cwd: workspaceRoot,
+        meta: { surface: 'threads', origin: 'e2e' },
+      });
+      await daemon(page.request, 'POST', `/workspaces/${workspaceId}/sessions`, {
+        kind: 'agent',
+        provider: 'claude',
+        title: 'Debug Delve Env Inheritance',
+        cwd: workspaceRoot,
+        meta: { surface: 'threads', origin: 'e2e' },
+      });
+      await page.getByTestId('ide-toggle-agent').click();
+      const agentPanel = page.getByTestId('ide-agent-panel');
+      await expect(agentPanel).toBeVisible({ timeout: 15_000 });
+      await page.getByTestId('ide-agent-new').click();
+      await agentPanel.getByRole('button', { name: /Include active file|Attach active file/i }).first().click();
+      for (const vp of viewports) {
+        await page.setViewportSize({ width: vp.w, height: vp.h });
+        for (const sc of ['dark', 'light'] as const) {
+          await setLiveScheme(sc);
+          await page.getByTestId('ide-agent-provider').click();
+          const mp = page.getByTestId('model-picker');
+          await expectFullyInViewport(page, mp, `Audit (e) model picker ${vp.w}x${vp.h} ${sc}`);
+          await saveShot(page, `audit-e-unified-threads-agent-dock-${vp.w}x${vp.h}-${sc}.png`);
+          await page.keyboard.press('Escape');
+          await expect(mp).toBeHidden();
+        }
+      }
+      await page.getByTestId('ide-agent-close').click();
+
+      // (f) CSV virtualized Table Grid at 2560x1440 & 1440x900 Dark + Light
+      await openFileFromTree(page, 'data', 'tenants.csv');
+      await expect(page.getByTestId('ide-csv-view')).toBeVisible({ timeout: 15_000 });
+      for (const vp of viewports) {
+        await page.setViewportSize({ width: vp.w, height: vp.h });
+        for (const sc of ['dark', 'light'] as const) {
+          await setLiveScheme(sc);
+          await expectNoHorizontalOverflow(page);
+          await saveShot(page, `audit-f-csv-table-grid-${vp.w}x${vp.h}-${sc}.png`);
+        }
+      }
+    } finally {
+      await daemon(page.request, 'DELETE', `/ide/projects/folders?kind=local&root=${encodeURIComponent(workspaceRoot)}&folder_path=${encodeURIComponent(extraAuditFolder)}`).catch(() => {});
+      rmSync(extraAuditFolder, { recursive: true, force: true });
+    }
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1561,6 +2544,8 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 test.describe('Responsive Mobile & Tablet IDE Verification', () => {
+  test.describe.configure({ mode: 'serial' });
+
   test.beforeAll(async () => {
     await ensureSeeded();
   });
