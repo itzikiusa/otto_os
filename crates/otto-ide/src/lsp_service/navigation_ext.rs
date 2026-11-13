@@ -331,6 +331,7 @@ pub(super) fn resolve_go_package_dirs(
                 if !dirs.contains(&canon) {
                     dirs.push(canon);
                 }
+                break;
             }
         }
     }
