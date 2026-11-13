@@ -3,6 +3,7 @@
   // interrupting it. Empty: one question box. Running: the side conversation
   // (its own composer for follow-ups) with two quiet actions — open it as a
   // normal thread, or dismiss it. Loaded lazily by ThreadInspector.
+  import { enterSends } from '../../lib/enterSends';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -47,7 +48,7 @@
   });
 
   function onKey(e: KeyboardEvent): void {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    if (enterSends(e)) {
       e.preventDefault();
       void ask(question);
     }

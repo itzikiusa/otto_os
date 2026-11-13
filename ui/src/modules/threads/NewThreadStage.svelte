@@ -5,6 +5,7 @@
   // row under it: checkout on the start, branch + access mode on the end. Every
   // other launch option (empty thread, open beside) lives in the agent chip's
   // menu; the project card floats top-right on wide screens.
+  import { enterSends } from '../../lib/enterSends';
   import { untrack } from 'svelte';
   import { announceShown } from '../../lib/announce.svelte';
   import { api } from '../../lib/api/client';
@@ -376,7 +377,7 @@
       threads.newDraftMode = false;
       return;
     }
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (enterSends(e)) {
       e.preventDefault();
       // ⌘↵ with nothing typed opens the session without a first prompt.
       void launch(!((e.metaKey || e.ctrlKey) && !prompt.trim()));
