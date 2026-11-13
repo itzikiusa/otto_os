@@ -28,6 +28,8 @@ let token = '';
 let homeWs = '';
 let otherWs = '';
 let threadId = '';
+let deskWs = '';
+let deskThread = '';
 const dirs: string[] = [];
 
 async function workspace(name: string): Promise<string> {
@@ -51,10 +53,18 @@ test.beforeAll(async () => {
   });
   expect(r.ok(), await r.text()).toBeTruthy();
   threadId = (await r.json()).id as string;
+  // A terminal (PTY) thread the desktop started in a third workspace.
+  deskWs = await workspace('Desk WS');
+  const d = await ctx.post(`${base}/api/v1/workspaces/${deskWs}/sessions`, {
+    data: { kind: 'agent', provider: 'shell', title: 'Desk terminal thread', cwd: dirs[dirs.length - 1], meta: { origin: 'e2e', surface: 'threads' } },
+  });
+  expect(d.ok(), await d.text()).toBeTruthy();
+  deskThread = (await d.json()).id as string;
 });
 
 test.afterAll(async () => {
   if (ctx && threadId) await ctx.post(`${base}/api/v1/runtime-sessions/${threadId}/close`).catch(() => {});
+  if (ctx && deskThread) await ctx.delete(`${base}/api/v1/sessions/${deskThread}`).catch(() => {});
   await ctx?.dispose();
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
 });
@@ -192,6 +202,28 @@ test('a thread deep link from another workspace opens the thread at phone width'
   await page.screenshot({ path: info.outputPath('phone-thread-approval.png'), animations: 'disabled' });
   await approval.getByRole('button', { name: 'Approve', exact: true }).click();
   await expect(approval).toHaveCount(0, { timeout: 20_000 });
+});
+
+test('the phone lists every workspace’s threads under their folders, light and dark', async ({ page }) => {
+  await mockPhone(page, true);
+  const folder = (i: number) => dirs[i].split('/').pop()!;
+  for (const scheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await page.goto('/#/threads');
+    await page.getByTestId('threads-toggle-sidebar').click();
+    const sidebar = page.getByTestId('threads-sidebar');
+    // The window has the home workspace open; both threads live elsewhere.
+    for (const [title, dir] of [['Phone thread', 1], ['Desk terminal thread', 2]] as const) {
+      const group = sidebar.getByRole('region', { name: `Project ${folder(dir)}` });
+      await expect(group, `${scheme}: ${title}`).toBeVisible({ timeout: 30_000 });
+      await expect(group).toContainText(title);
+    }
+    await expectFullyInViewport(page, sidebar, `threads sidebar (${scheme})`);
+    await expectNoHorizontalOverflow(page);
+  }
+  // A terminal thread of another workspace opens there.
+  await page.getByTestId(`thread-row-${deskThread}`).getByRole('button', { name: /Desk terminal thread/ }).first().click();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('otto_workspace'))).toBe(deskWs);
 });
 
 test('Continue on phone (desktop credential) offers the thread QR when Phone access is on', async ({ page }) => {

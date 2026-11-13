@@ -86,6 +86,12 @@
   onMount(() => void phoneDevice.ensure());
   // Structured runtime threads: their rows, and live events for open ones.
   onMount(() => runtimeThreads.mount());
+  // …and every workspace's terminal threads, whatever the sidebar toggle says.
+  onMount(() => {
+    ws.otherWsWanted++;
+    void ws.refreshOtherSessions();
+    return () => void ws.otherWsWanted--;
+  });
   $effect(() => {
     for (const wid of new Set([ws.currentId, ws.scratch ? SCRATCH_WORKSPACE_ID : null])) {
       if (wid) untrack(() => runtimeThreads.load(wid)).catch(() => {});

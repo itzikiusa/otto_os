@@ -67,9 +67,11 @@
   const folderLabel = (cwd: string, fallback?: string): string => agentFolderNames.get(cwd) ?? projectNameFromCwd(cwd, fallback);
   // Id index over live + archived sessions: a delegated worker's parent
   // lookup is O(1) instead of a scan of every session per row.
-  const allPool = $derived(new Map([...ws.archivedSessions, ...ws.sessions].map((s) => [s.id, s] as const)));
+  const allPool = $derived(new Map([...ws.archivedSessions, ...ws.otherWsSessions, ...ws.sessions].map((s) => [s.id, s] as const)));
+  // Every workspace's threads (the desktop and the phone may have different
+  // workspaces open; the same person sees the same threads on both).
   const allLiveThreads = $derived([
-    ...ws.sessions.filter((s) => !s.archived && isThreadSession(s, allPool)),
+    ...[...ws.sessions, ...ws.otherWsSessions].filter((s) => !s.archived && isThreadSession(s, allPool)),
     ...runtimeThreads.rows(),
   ]);
 
@@ -195,6 +197,7 @@
     try {
       threadRepos.reset();
       await ws.refreshSessions();
+      await ws.refreshOtherSessions();
       if (ws.currentId) await runtimeThreads.load(ws.currentId);
       await runtimeThreads.loadAll();
       if (ws.currentId) await git.loadRepos(ws.currentId, true);
@@ -359,7 +362,13 @@
       return;
     }
     threads.unsettle(s.id);
-    threads.selectThread(s.id, { split });
+    // A terminal thread of another workspace opens there (its pane reads the
+    // open workspace's sessions).
+    if (!ws.getSession(s.id) && !isRuntimeThread(s)) {
+      void ws.select(s.workspace_id).then((ok) => {
+        if (ok) threads.selectThread(s.id);
+      });
+    } else threads.selectThread(s.id, { split });
     onselect?.();
   }
 </script>
