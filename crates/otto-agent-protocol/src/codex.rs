@@ -67,7 +67,7 @@ use crate::driver::{
     LaunchSpec, StructuredDriver,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum ReqProto {
     /// `item/*/requestApproval` — `{decision}` in v2 spelling.
     V2Decision,
@@ -76,6 +76,7 @@ enum ReqProto {
     Question,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Pending {
     rpc_id: Value,
     proto: ReqProto,
@@ -83,12 +84,13 @@ struct Pending {
 }
 
 /// Accumulated state of one Codex item.
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct Item {
     text: String,
     output: String,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CodexDriver {
     program: String,
     next_id: u64,
@@ -1104,6 +1106,15 @@ fn thread_in_use(e: &Value) -> bool {
 }
 
 impl StructuredDriver for CodexDriver {
+    fn export_state(&self) -> Option<Value> {
+        serde_json::to_value(self).ok()
+    }
+
+    fn import_state(&mut self, state: Value) -> Result<(), DriverError> {
+        *self = serde_json::from_value(state).map_err(|e| DriverError(e.to_string()))?;
+        Ok(())
+    }
+
     fn provider(&self) -> RuntimeProvider {
         RuntimeProvider::Codex
     }

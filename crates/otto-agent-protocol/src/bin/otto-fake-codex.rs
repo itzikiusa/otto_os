@@ -128,6 +128,37 @@ fn main() {
                     (m, e) => format!(" [{} {} {images}]", m.unwrap_or("-"), e.unwrap_or("-")),
                 };
                 match text.as_str() {
+                    // `stream:<n>:<ms>`: `c0 `…`c<n-1> `, one delta per <ms>.
+                    t if t.starts_with("stream:") => {
+                        let mut f = t[7..].split(':');
+                        let n: usize = f.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                        let ms: u64 = f.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                        notify(
+                            "item/started",
+                            json!({"threadId": thread, "turnId": tid, "startedAtMs": 0,
+                                   "item": {"type": "agentMessage", "id": "msg-s", "text": ""}}),
+                        );
+                        let mut all = String::new();
+                        for i in 0..n {
+                            let d = format!("c{i} ");
+                            all.push_str(&d);
+                            notify(
+                                "item/agentMessage/delta",
+                                json!({"threadId": thread, "turnId": tid, "itemId": "msg-s", "delta": d}),
+                            );
+                            std::thread::sleep(std::time::Duration::from_millis(ms));
+                        }
+                        notify(
+                            "item/completed",
+                            json!({"threadId": thread, "turnId": tid, "completedAtMs": 0,
+                                   "item": {"type": "agentMessage", "id": "msg-s", "text": all}}),
+                        );
+                        notify(
+                            "turn/completed",
+                            json!({"threadId": thread, "turn": turn(&tid, "completed")}),
+                        );
+                        current = None;
+                    }
                     "tool image" => {
                         let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5V8AAAAASUVORK5CYII=";
                         notify(

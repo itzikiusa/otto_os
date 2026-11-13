@@ -440,6 +440,26 @@ impl AgentRuntimeRepo {
         Ok(())
     }
 
+    /// Upsert one bookkeeping entity (the runtime's process checkpoint)
+    /// without touching the session row: it is not activity, and its
+    /// sequence is not one a client saw.
+    pub async fn put_entity(&self, session_id: &Id, r: &RuntimeEntityRow) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO agent_runtime_entities (session_id, kind, entity_id, sequence, \
+             payload_json) VALUES (?, ?, ?, ?, ?) ON CONFLICT (session_id, kind, entity_id) \
+             DO UPDATE SET sequence = excluded.sequence, payload_json = excluded.payload_json",
+        )
+        .bind(session_id)
+        .bind(&r.kind)
+        .bind(&r.entity_id)
+        .bind(i(r.sequence))
+        .bind(r.payload.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("put runtime entity"))?;
+        Ok(())
+    }
+
     /// Every entity of a session, oldest update first.
     pub async fn entities(&self, session_id: &Id) -> Result<Vec<RuntimeEntityRow>> {
         let rows = sqlx::query(

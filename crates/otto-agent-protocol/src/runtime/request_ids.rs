@@ -13,6 +13,15 @@ impl RequestIds {
         }
     }
 
+    /// The same generation again (a process a new daemon adopted).
+    pub(super) fn from_prefix(prefix: String) -> Self {
+        Self { prefix }
+    }
+
+    pub(super) fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
     pub(super) fn scoped(&self, native: &str) -> String {
         format!("{}{native}", self.prefix)
     }

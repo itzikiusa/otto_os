@@ -153,12 +153,15 @@ pub(super) fn watch(live: Arc<Live>, epoch: u64, pid: u32) {
         let mut last_seq = None;
         loop {
             tokio::time::sleep(POLL).await;
-            let (alive, busy, seq) = {
+            let (alive, busy, seq, detached) = {
                 let st = live.lock();
                 let alive = st.proc.as_ref().is_some_and(|p| p.epoch == epoch);
                 let busy = st.turn.is_some() || !st.session.background_tasks.is_empty();
-                (alive, busy, st.next_seq)
+                (alive, busy, st.next_seq, st.detached)
             };
+            if detached {
+                return; // left running for the next daemon (held.rs)
+            }
             if !alive {
                 break;
             }

@@ -80,7 +80,7 @@ const M_REQUEST_PERMISSION: &str = "session/request_permission";
 const M_SESSION_SET_MODE: &str = "session/set_mode";
 const M_SESSION_SET_MODEL: &str = "session/set_model";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Phase {
     Initializing,
     Creating { loading: bool },
@@ -130,12 +130,13 @@ pub struct AcpFlavor {
     pub bundle_env: Option<&'static str>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum SegmentKind {
     Message,
     Thought,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Segment {
     kind: SegmentKind,
     item_id: String,
@@ -145,7 +146,7 @@ struct Segment {
     text: String,
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct Tool {
     title: String,
     kind: ToolKind,
@@ -194,18 +195,25 @@ fn multi_file_patch(diffs: &[(String, Option<String>, String)]) -> String {
     out
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Pending {
     rpc_id: Value,
     options: Vec<PermissionOption>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AcpDriver {
     provider: RuntimeProvider,
+    /// Static per provider (fn pointers): kept from the factory's driver.
+    #[serde(skip)]
     flavor: AcpFlavor,
     cwd: String,
     resume: Option<String>,
     /// Handed over in `session/new|load` (Otto's `otto` tools + the user's
-    /// enabled servers — the set a terminal session gets).
+    /// enabled servers — the set a terminal session gets). Never exported:
+    /// their env carries the session's credential, and the handshake that
+    /// sends them is over by the time a state is restored.
+    #[serde(skip)]
     mcp_servers: Vec<McpServerDef>,
     /// The model to apply through `flavor.model_config_id` / `set_model`
     /// once ready.
@@ -1331,6 +1339,18 @@ fn command_text(raw: Option<&Value>) -> Option<String> {
 }
 
 impl StructuredDriver for AcpDriver {
+    fn export_state(&self) -> Option<Value> {
+        serde_json::to_value(self).ok()
+    }
+
+    fn import_state(&mut self, state: Value) -> Result<(), DriverError> {
+        let mut restored: Self =
+            serde_json::from_value(state).map_err(|e| DriverError(e.to_string()))?;
+        restored.flavor = std::mem::take(&mut self.flavor);
+        *self = restored;
+        Ok(())
+    }
+
     fn provider(&self) -> RuntimeProvider {
         self.provider
     }

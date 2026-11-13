@@ -112,13 +112,13 @@ fn classify(tool: &str) -> (ToolType, RequestKind) {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum BlockKind {
     Text,
     Thinking,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Block {
     kind: BlockKind,
     item_id: String,
@@ -126,6 +126,7 @@ struct Block {
     text: String,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Tool {
     name: String,
     input: Value,
@@ -135,6 +136,7 @@ struct Tool {
     status: TurnItemStatus,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Pending {
     cli_request_id: String,
     tool_name: String,
@@ -143,6 +145,7 @@ struct Pending {
     suggestions: Vec<Value>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ClaudeDriver {
     program: String,
     /// `--session-id` for a fresh thread (the resume key from the start).
@@ -947,6 +950,15 @@ fn terminal_from_result(
 }
 
 impl StructuredDriver for ClaudeDriver {
+    fn export_state(&self) -> Option<Value> {
+        serde_json::to_value(self).ok()
+    }
+
+    fn import_state(&mut self, state: Value) -> Result<(), DriverError> {
+        *self = serde_json::from_value(state).map_err(|e| DriverError(e.to_string()))?;
+        Ok(())
+    }
+
     fn provider(&self) -> RuntimeProvider {
         RuntimeProvider::Claude
     }
