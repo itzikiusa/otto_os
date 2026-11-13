@@ -21,6 +21,7 @@
 
 import { startMeasurement } from '../lib/telemetry';
 import { loadErrorText } from '../lib/loadError';
+import { reloadForStaleChunk } from '../lib/staleChunk';
 import type { Component } from 'svelte';
 import { SvelteMap } from 'svelte/reactivity';
 import { auth } from '../lib/stores/auth.svelte';
@@ -183,6 +184,15 @@ export function loadPage(key: string): Promise<PageComponent> {
     pending.set(key, p);
   }
   return p;
+}
+
+/** Load the page being SHOWN; never throws. A failure reloads once — usually
+ *  a deploy since this tab opened (lib/staleChunk.ts). Prefetches never do. */
+export function showPage(key: string): Promise<void> {
+  return loadPage(key).then(
+    () => {},
+    () => void reloadForStaleChunk(),
+  );
 }
 
 /** Warm a route's page; never throws. */
