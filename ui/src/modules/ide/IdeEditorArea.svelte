@@ -3,7 +3,6 @@
   import { copyWithToast } from '../../lib/clipboard';
   import Badge from '../../lib/components/Badge.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
-  import { disposePooledLspClients } from '../../lib/components/cm-ide-lsp';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
@@ -15,9 +14,6 @@
   import { ide, type IdeEditorHandle, type IdeOpenTab, type IdeSymbolNode } from './ideStore.svelte';
   import { ideAgent } from './store/ideAgentController.svelte';
   import { subscribeIdeBufferEvictions, subscribeIdeFileSaved } from './store/ideBufferPerf';
-  import IdeBreakpointPopover from './editor/IdeBreakpointPopover.svelte';
-  import IdeFileStructureModal from './editor/IdeFileStructureModal.svelte';
-  import IdeRenameModal from './editor/IdeRenameModal.svelte';
   import IdeTabBar from './editor/IdeTabBar.svelte';
   import {
     areIdeBreakpointsMuted,
@@ -42,14 +38,19 @@
 
   const IdeInlinePromptBarLazy = lazyComponent(() => import('./IdeInlinePromptBar.svelte'));
   const IdeCsvViewLazy = lazyComponent(() => import('./editor/IdeCsvView.svelte'));
+  const IdeBreakpointPopoverLazy = lazyComponent(() => import('./editor/IdeBreakpointPopover.svelte'));
+  const IdeFileStructureModalLazy = lazyComponent(() => import('./editor/IdeFileStructureModal.svelte'));
+  const IdeRenameModalLazy = lazyComponent(() => import('./editor/IdeRenameModal.svelte'));
 
   type ExtendedEditorRef = IdeEditorHandle & {
     evictPaths?: (paths: Iterable<string> | 'all') => void;
     notifyDidSave?: () => void;
+    disposeLspClients?: (rootPath?: string) => void;
   };
 
   let primaryEditorRef = $state<ExtendedEditorRef | undefined>(undefined);
   let splitEditorRef = $state<ExtendedEditorRef | undefined>(undefined);
+  let everMountedEditor = false;
   let linePrefix = $state('');
   let lineSuffix = $state('');
   let structureOpen = $state(false);
@@ -65,16 +66,27 @@
   $effect(() => {
     const cur = ide.activeTab;
     if (!cur) { stagedPrimaryTab = null; return; }
-    if (!cur.loading && !cur.error) stagedPrimaryTab = cur;
+    if (!cur.loading && !cur.error) { stagedPrimaryTab = cur; everMountedEditor = true; }
     else if (stagedPrimaryTab && !ide.tabs.some((t) => t.path === stagedPrimaryTab?.path)) stagedPrimaryTab = null;
   });
 
   $effect(() => {
     const cur = ide.splitTab;
     if (!cur) { stagedSplitTab = null; return; }
-    if (!cur.loading && !cur.error) stagedSplitTab = cur;
+    if (!cur.loading && !cur.error) { stagedSplitTab = cur; everMountedEditor = true; }
     else if (stagedSplitTab && !ide.tabs.some((t) => t.path === stagedSplitTab?.path)) stagedSplitTab = null;
   });
+
+  function disposeAllPooledLsp(): void {
+    primaryEditorRef?.disposeLspClients?.();
+    splitEditorRef?.disposeLspClients?.();
+    if (everMountedEditor) {
+      everMountedEditor = false;
+      void import('../../lib/components/cm-ide-lsp')
+        .then((m) => m.disposePooledLspClients({ forceAll: true }))
+        .catch(() => {});
+    }
+  }
 
   const unsubEvict = subscribeIdeBufferEvictions((paths) => {
     primaryEditorRef?.evictPaths?.(paths);
@@ -82,7 +94,7 @@
     if (paths === 'all') {
       blameEnabledByPath = {}; blameByPath = {}; tableModeByPath = {}; bpEditor = null;
       resetIdeEditorBridgeState();
-      disposePooledLspClients({ forceAll: true });
+      disposeAllPooledLsp();
       return;
     }
     let blameChanged = false;
@@ -97,7 +109,7 @@
     }
     if (blameChanged) { blameByPath = nextBlame; blameEnabledByPath = nextBlameOn; }
     if (modeChanged) tableModeByPath = nextMode;
-    if (ide.tabs.length === 0) disposePooledLspClients({ forceAll: true });
+    if (ide.tabs.length === 0) disposeAllPooledLsp();
   });
 
   const unsubSaved = subscribeIdeFileSaved((savedPath) => {
@@ -108,7 +120,7 @@
   onDestroy(() => {
     unsubEvict();
     unsubSaved();
-    disposePooledLspClients({ forceAll: true });
+    disposeAllPooledLsp();
   });
 
   const hasNonEmptySelection = $derived(ide.cursorInfo.selections.some((s) => s.anchor !== s.head));
@@ -523,23 +535,50 @@
 </section>
 
 {#if bpEditor}
-  <IdeBreakpointPopover path={bpEditor.path} line={bpEditor.line} anchorX={bpEditor.x} anchorY={bpEditor.y} onclose={() => (bpEditor = null)} />
+  <LazyMount
+    lazy={IdeBreakpointPopoverLazy}
+    what="breakpoint editor"
+    quiet
+    onerror={() => (bpEditor = null)}
+    props={{
+      path: bpEditor.path,
+      line: bpEditor.line,
+      anchorX: bpEditor.x,
+      anchorY: bpEditor.y,
+      onclose: () => (bpEditor = null),
+    }}
+  />
 {/if}
 
-<IdeFileStructureModal
-  open={structureOpen}
-  fileName={ide.activeTab?.name ?? ''}
-  symbols={effectiveSymbols}
-  currentLine={ide.cursorInfo.line}
-  onjump={(line, col) => {
-    if (ide.activePath) pushIdeNavLocation(ide.activePath, ide.cursorInfo.line, ide.cursorInfo.col);
-    if (effectiveViewMode === 'table' && ide.activePath) tableModeByPath = { ...tableModeByPath, [ide.activePath]: 'text' };
-    requestAnimationFrame(() => primaryEditorRef?.goToLine(line, col));
-  }}
-  onclose={() => (structureOpen = false)}
-/>
+{#if structureOpen}
+  <LazyMount
+    lazy={IdeFileStructureModalLazy}
+    what="file structure"
+    quiet
+    onerror={() => (structureOpen = false)}
+    props={{
+      open: structureOpen,
+      fileName: ide.activeTab?.name ?? '',
+      symbols: effectiveSymbols,
+      currentLine: ide.cursorInfo.line,
+      onjump: (line: number, col: number) => {
+        if (ide.activePath) pushIdeNavLocation(ide.activePath, ide.cursorInfo.line, ide.cursorInfo.col);
+        if (effectiveViewMode === 'table' && ide.activePath) tableModeByPath = { ...tableModeByPath, [ide.activePath]: 'text' };
+        requestAnimationFrame(() => primaryEditorRef?.goToLine(line, col));
+      },
+      onclose: () => (structureOpen = false),
+    }}
+  />
+{/if}
 
-<IdeRenameModal />
+{#if ide.renameState.open}
+  <LazyMount
+    lazy={IdeRenameModalLazy}
+    what="rename symbol dialog"
+    quiet
+    onerror={() => (ide.renameState.open = false)}
+  />
+{/if}
 
 <style>
   .ide-editor-area { display: flex; flex-direction: column; flex: 1; min-inline-size: 0; min-block-size: 0; background: var(--bg); }
