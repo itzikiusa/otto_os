@@ -66,6 +66,8 @@ test.beforeEach(async ({ page }, info) => {
 
 test('a Codex runtime thread streams, asks inline, queues a follow-up and stops', async ({ page }, info) => {
   await page.goto('/#/threads');
+  // Other specs' threads (any workspace) may open first; start a new one.
+  await page.getByTestId('threads-new-btn').click();
   const stage = page.getByTestId('new-thread-stage');
   await expect(stage).toBeVisible({ timeout: 30_000 });
 

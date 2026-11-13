@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Route } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
@@ -20,6 +20,8 @@ test('thread drafts, attachments and permissions stay with their owner; mobile c
     localStorage.removeItem('otto_threads_v1');
   }, workspaceId);
   await page.route(`**/api/v1/workspaces/${workspaceId}/runtime-sessions`, (route) => route.fulfill({ json: sessions }));
+  // Threads lists every workspace's threads; keep this page to the seeded two.
+  await page.route('**/api/v1/runtime-sessions', (route) => route.fulfill({ json: sessions }));
   await page.route('**/api/v1/runtime-sessions/focus-thread-*/events**', (route) => route.fulfill({ json: {
     kind: 'snapshot', snapshot_sequence: 1, snapshot: {
       provider_session: { status: 'ready', cwd: '/tmp', model: null, updated_at: ts, last_error: null },
@@ -112,9 +114,12 @@ test('a failed initial thread list shows Retry instead of an empty composer', as
     localStorage.removeItem('otto_threads_v1');
   }, workspaceId);
   let failed = true;
-  await page.route(`**/api/v1/workspaces/${workspaceId}/runtime-sessions`, (route) => failed
+  const list = (route: Route) => failed
     ? route.fulfill({ status: 503, json: { code: 'unavailable', message: 'Thread service unavailable' } })
-    : route.fulfill({ json: [] }));
+    : route.fulfill({ json: [] });
+  // Both lists: this workspace's and every workspace's (Threads loads both).
+  await page.route(`**/api/v1/workspaces/${workspaceId}/runtime-sessions`, list);
+  await page.route('**/api/v1/runtime-sessions', list);
   await page.goto('/#/threads');
   const error = page.getByTestId('load-error').filter({ hasText: 'Couldn’t load threads' });
   await expect(error).toBeVisible();
