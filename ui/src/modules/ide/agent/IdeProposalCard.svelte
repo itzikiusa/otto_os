@@ -5,7 +5,7 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import { copyWithToast } from '../../../lib/clipboard';
   import { ide } from '../ideStore.svelte';
-  import { ideAgent, type IdeCodeProposal } from '../store/ideAgentController.svelte';
+  import { ideAgentEngine as ideAgent, type IdeCodeProposal } from './ideAgentEngine.svelte';
 
   interface Props {
     proposal: IdeCodeProposal;

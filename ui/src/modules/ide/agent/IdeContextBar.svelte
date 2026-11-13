@@ -2,7 +2,7 @@
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { harnessLabel } from '../../../lib/providers';
   import { ide, ideBasename } from '../ideStore.svelte';
-  import { ideAgent } from '../store/ideAgentController.svelte';
+  import { ideAgentEngine as ideAgent } from './ideAgentEngine.svelte';
 
   export function showIdeSessionMenu(anchor: HTMLElement): void {
     void ideAgent.refreshWorkspaceSessions();

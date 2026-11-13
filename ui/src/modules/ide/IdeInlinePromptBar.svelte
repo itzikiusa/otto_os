@@ -14,7 +14,7 @@
   import { harnessLabel } from '../../lib/providers';
   import { auth } from '../../lib/stores/auth.svelte';
   import { ide } from './ideStore.svelte';
-  import { ideAgent } from './store/ideAgentController.svelte';
+  import { ideAgentEngine as ideAgent } from './agent/ideAgentEngine.svelte';
 
   const ModelPicker = lazyComponent(() => import('../../lib/components/ModelPickerPopover.svelte'));
 

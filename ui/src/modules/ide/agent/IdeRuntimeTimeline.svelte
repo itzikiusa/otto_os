@@ -40,12 +40,12 @@
   import { shouldFold } from '../../threads/runtime/workLog'; // ui-guards: allow — shared work-log fold policy
   import { ide } from '../ideStore.svelte';
   import {
-    ideAgent,
+    ideAgentEngine as ideAgent,
     parseIdeContextChipsFromPrompt,
     stripIdeContextBlocks,
     type IdeCodeProposal,
     type ParsedPromptContextSummary,
-  } from '../store/ideAgentController.svelte';
+  } from './ideAgentEngine.svelte';
   import IdeProposalCard from './IdeProposalCard.svelte';
 
   interface Props {

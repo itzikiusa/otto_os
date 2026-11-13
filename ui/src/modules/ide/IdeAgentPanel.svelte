@@ -18,7 +18,7 @@
   import IdeContextBar, { showIdeSessionMenu } from './agent/IdeContextBar.svelte';
   import IdeRuntimeTimeline from './agent/IdeRuntimeTimeline.svelte';
   import { ide } from './ideStore.svelte';
-  import { ideAgent } from './store/ideAgentController.svelte';
+  import { ideAgentEngine as ideAgent } from './agent/ideAgentEngine.svelte';
 
   const PtyConversationView = lazyComponent(() => import('../agents/conversation/ConversationView.svelte')); // ui-guards: allow — lazy PTY thread conversation view
 
