@@ -242,7 +242,7 @@
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    padding: 4px 2px;
+    padding: 4px 0;
     min-width: 0;
     position: relative;
   }
@@ -271,13 +271,15 @@
   .bn-btn.active .bn-icon {
     background: var(--accent-soft);
   }
-  /* Light version: "More" is a narrow ⋯ beside the five tabs, not a sixth. */
+  /* Light version: "More" is a narrow ⋯ beside the five tabs, not a sixth
+     (narrow enough that "Connections" fits its tab at 360 px wide). */
   .bn-btn.bn-compact {
-    flex: 0 0 48px;
+    flex: 0 0 40px;
   }
   .bn-label {
     font-size: var(--fs-xs);
     font-weight: 500;
+    letter-spacing: -0.01em;
     line-height: 1;
     overflow: hidden;
     text-overflow: ellipsis;

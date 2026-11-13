@@ -26,6 +26,6 @@
 
 {#if open}
   <Modal title="Which automation should I use?" width={560} onclose={() => (open = false)}>
-    <AutomateGuide {current} open onnavigate={() => (open = false)} />
+    <AutomateGuide {current} open titled={false} onnavigate={() => (open = false)} />
   </Modal>
 {/if}

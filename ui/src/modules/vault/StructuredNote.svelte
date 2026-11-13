@@ -109,7 +109,7 @@
       </div>
     </div>
     <div class="col" data-testid="vault-structured-backlinks">
-      <h4>Linked from <span class="n">{vault.backlinks.length}</span></h4>
+      <h4>Linked from <span class="n">{vault.backlinksTotal.toLocaleString()}</span></h4>
       <!-- A failed lookup is never shown as "No backlinks yet": the first load
            fails inline with Retry, a failed refresh keeps the last good links
            under a slim stale bar (LoadState). -->
@@ -134,7 +134,7 @@
             onblur={hidePreview}
           >{b.title}</button>
         {/each}
-        {#if vault.backlinks.length > 40}<span class="dim">+{vault.backlinks.length - 40} more in the side panel</span>{/if}
+        {#if vault.backlinksTotal > 40}<span class="dim">+{(vault.backlinksTotal - 40).toLocaleString()} more in the side panel</span>{/if}
       </div>
       </LoadState>
     </div>

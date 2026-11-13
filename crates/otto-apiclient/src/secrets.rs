@@ -8,7 +8,7 @@
 //! map `member → value`. Markers resolve ONLY at execute time (here), never in
 //! any export path — exporters read the stored rows and see markers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -96,6 +96,7 @@ pub fn split_auth_secrets(
     if let Some(url) = bound_url(existing_blob).filter(|_| carried) {
         set_bound_url(&mut blob, url);
     }
+    carry_sent_hosts(existing_blob, &mut blob);
     Ok((out, blob))
 }
 
@@ -123,6 +124,7 @@ pub fn split_auth_secrets_for_save(
     } else if let Some(url) = bound_url(existing_blob) {
         set_bound_url(&mut blob, url);
     }
+    carry_sent_hosts(existing_blob, &mut blob);
     Ok((out, blob))
 }
 
@@ -138,15 +140,50 @@ pub fn bound_url(blob: &BTreeMap<String, String>) -> Option<&str> {
     blob.keys().find_map(|k| k.strip_prefix(BOUND_URL_PREFIX))
 }
 
-/// Record (or replace) the url this blob's secrets are bound to.
+/// Record (or replace) the url this blob's secrets are bound to. A NEW url
+/// drops the hosts a person's sends resolved the old one to ([`sent_hosts`]).
 pub fn set_bound_url(blob: &mut BTreeMap<String, String>, url: &str) {
+    if bound_url(blob) != Some(url) {
+        blob.retain(|k, _| !k.starts_with(SENT_HOST_PREFIX));
+    }
     blob.retain(|k, _| !k.starts_with(BOUND_URL_PREFIX));
     blob.insert(format!("{BOUND_URL_PREFIX}{url}"), String::new());
 }
 
+/// Blob key prefix recording a host a PERSON's send resolved the bound url
+/// to: `"$sent_host:<host>" → ""` (key-only, like [`BOUND_URL_PREFIX`]). An
+/// agent's send may reach these hosts only — a `{{base}}` url does not follow
+/// the environment an agent selects (see the engine's `agent_marker_hosts`).
+pub const SENT_HOST_PREFIX: &str = "$sent_host:";
+
+/// The hosts a person's sends resolved this blob's bound url to.
+pub fn sent_hosts(blob: &BTreeMap<String, String>) -> BTreeSet<String> {
+    blob.keys()
+        .filter_map(|k| k.strip_prefix(SENT_HOST_PREFIX))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Record `host` as one a person's send reached; `true` when it is new.
+pub fn add_sent_host(blob: &mut BTreeMap<String, String>, host: &str) -> bool {
+    blob.insert(format!("{SENT_HOST_PREFIX}{host}"), String::new())
+        .is_none()
+}
+
+/// Copy the recorded sent hosts of `existing` into a rebuilt `blob` when both
+/// are bound to the same url (a save that kept the binding keeps them).
+fn carry_sent_hosts(existing: &BTreeMap<String, String>, blob: &mut BTreeMap<String, String>) {
+    if bound_url(blob).is_some() && bound_url(blob) == bound_url(existing) {
+        for host in sent_hosts(existing) {
+            add_sent_host(blob, &host);
+        }
+    }
+}
+
 /// Whether the blob holds any secret value (not just its binding).
 pub fn has_secret_values(blob: &BTreeMap<String, String>) -> bool {
-    blob.keys().any(|k| !k.starts_with(BOUND_URL_PREFIX))
+    blob.keys()
+        .any(|k| !k.starts_with(BOUND_URL_PREFIX) && !k.starts_with(SENT_HOST_PREFIX))
 }
 
 /// The member split behind [`split_auth_secrets`]; the flag says whether any

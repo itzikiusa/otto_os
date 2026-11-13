@@ -1,7 +1,7 @@
 ---
 description: Generate an action-first coding-agent usage report across ALL providers Otto uses (Claude, Codex, agy/Gemini) for a chosen period (day/week/month or explicit range), compare it to the previous comparable period for trends, and emit a self-contained HTML report where every finding — even the good ones — carries Evidence/threshold → Action → Expected effect. Use when the user wants a usage/productivity insights report, a weekly/daily/monthly review, or trend tracking of how they work with AI agents.
 category: insights
-version: 4
+version: 5
 ---
 
 # Insights
@@ -60,18 +60,18 @@ relies on exactly this per-period check so it never double-generates.
 
 ### Step 1 — Collect (run the script; parse its JSON)
 
-Run the collector and detect the Israel timezone offset in parallel:
+Run the collector and detect this machine's timezone offset in parallel:
 
 ```bash
 python3 <skill-dir>/scripts/collect_insights.py --period week --offset 1
 ```
 ```bash
-python3 -c "from datetime import datetime; from zoneinfo import ZoneInfo; print(int(datetime.now(ZoneInfo('Asia/Jerusalem')).utcoffset().total_seconds()//3600))"
+python3 -c "from datetime import datetime; print(round(datetime.now().astimezone().utcoffset().total_seconds()/3600))"
 ```
 
 Parse the first command's JSON. If it has an `"error"` key, tell the user (e.g. "no
 sessions in that period for any provider") and stop. The second command gives
-`ISRAEL_UTC_OFFSET` (2 or 3) — the default for the Time-of-Day chart.
+`LOCAL_UTC_OFFSET` (whole hours east of UTC, e.g. 2 or -5) — the default for the Time-of-Day chart.
 
 The JSON shape:
 - `period` — kind/start/end/label.
@@ -80,6 +80,11 @@ The JSON shape:
 - `per_provider.{claude,codex,agy}` — each with `depth` (`full`|`basic`) and a `note`.
 - `history` — `metrics_path`, `previous_metrics_path`, `previous_summary_path`,
   `index_path`, `summary_target`, `report_target`.
+- In every aggregate view, `unavailable_window_metrics` lists the per-session fields NO
+  session measured in this window (e.g. `lines_added` — a Claude transcript cannot tell it;
+  `git_commits`/`tool_error_categories` for Codex). Their stats/charts are `null`: render
+  "not available", never 0, and draw no finding from them. `partial_window_metrics` maps a
+  field to how many sessions measured it — label that number "partial (N of M sessions)".
 
 The collector has **already written** this run's compact metrics JSON. It did **not** write
 the HTML or summary — that's you, in Step 5.
@@ -202,7 +207,7 @@ Load `references/html-template.md`. Build the report from `assets/report-skeleto
 **Combined view first**, then per-provider sections/tabs (provider switcher), with the
 **Trend** section and the **Action Plan** section near the top, and every narrative section
 rewritten action-first. Self-contained: inline CSS/JS, `file://`-openable. Default the
-Time-of-Day chart to `ISRAEL_UTC_OFFSET`.
+Time-of-Day chart to `LOCAL_UTC_OFFSET`.
 
 Then write **three** artifacts to the history dir (paths are in the `history` block):
 
@@ -235,6 +240,7 @@ Tell the user:
 | A bare note ("sessions are long") | The original's core failure. No threshold, no action, no target = useless. Every finding needs all four parts. |
 | Praising without a next level | "What's working" with no level-up action wastes the win. Good items still get an action. |
 | A vague action ("be more efficient") | Not executable. Name the concrete steps and the target number. |
+| Showing an unmeasured metric as 0 | A `null` stat (listed in `unavailable_window_metrics`) means "not measured". "0 commits" or "no tool errors" from it is a false finding. |
 | Inventing narrative for Codex/agy | They have no facets. Fabricated friction/outcome analysis is a lie — state the depth limit. |
 | Re-reading a past HTML report for trends | The token trap. Read `index.json` + the prior `metrics.json`/`summary.md` only. |
 | A summary.md over 10 sentences | Breaks the cheap-read contract; the cap is hard. |

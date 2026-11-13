@@ -71,3 +71,37 @@ export const PhonePair: React.FC<{ frames: number }> = () => {
     </AbsoluteFill>
   );
 };
+
+/**
+ * The opt-in light version on a phone (captured in a phone viewport): the
+ * five-tab Otto, then one of its tabs. Lands on successive downbeats.
+ */
+export const PhoneLight: React.FC<{ frames: number }> = () => {
+  const f = useCurrentFrame();
+  const chip = sp(f, beats(2.5), SNAP);
+  return (
+    <AbsoluteFill>
+      <Phone src="capture/phone-light.jpg" step="1" label="Five tabs, opening on Threads" k={sp(f, beats(0.25), SNAP)} x={430} rot={-2.5} />
+      <Phone src="capture/phone-light-usage.jpg" step="2" label="Usage, a tap away" k={sp(f, beats(1.25), SNAP)} x={1130} rot={2.5} />
+      <div
+        style={{
+          position: 'absolute',
+          left: '50%',
+          top: 470,
+          transform: `translateX(-50%) scale(${0.85 + 0.15 * chip})`,
+          opacity: Math.min(1, chip * 1.5),
+          padding: '14px 26px',
+          borderRadius: 999,
+          background: rgba(C.bg, 0.85),
+          border: `1px solid ${rgba(TINT, 0.55)}`,
+          boxShadow: `0 0 40px ${rgba(TINT, 0.3)}`,
+          font: `700 24px ${FONT}`,
+          color: C.text,
+          whiteSpace: 'nowrap',
+        }}
+      >
+        Opt-in · one tap back to the full app
+      </div>
+    </AbsoluteFill>
+  );
+};

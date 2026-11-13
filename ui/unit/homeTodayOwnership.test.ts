@@ -4,7 +4,7 @@ import { deferred, loadSource } from './sourceHarness.ts';
 
 function fixture() {
   const pending = deferred<any[]>();
-  const ws = { currentId: 'A', listSettled: true, foregroundActive: [], activeWorkflowRuns: [], needsYou: {}, statusMap: {} };
+  const ws = { currentId: 'A', listSettled: true, foregroundActive: [], activeSessions: [], sessionById: new Map(), threadsNeedsYouCount: 0, activeWorkflowRuns: [], needsYou: {}, statusMap: {} };
   const { today } = loadSource(new URL('../src/modules/home/today.svelte.ts', import.meta.url), {
     '../../lib/api/client': { api: { get: () => pending.promise } }, '../../lib/api/design': { listArtifacts: async () => [] },
     '../../lib/api/scheduledTasks': { scheduledTasksApi: { list: async () => [] } }, svelte: { untrack: (fn: () => unknown) => fn() },
@@ -12,6 +12,7 @@ function fixture() {
     '../../lib/stores/notifications.svelte': { notifications: { notices: [], ensureLoaded() {} } },
     '../../lib/stores/workspace.svelte': { ws }, './boxes/poll': { livePoll: () => ({ now() {}, stop() {} }) },
     '../../lib/plural': { plural: () => '' },
+    './homeThreads': { threadSessions: () => [], threadRoute: (id: string) => `threads/${id}`, unlistedWaiting: () => 0 },
   });
   return { today, ws, pending };
 }

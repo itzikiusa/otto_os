@@ -23,6 +23,7 @@ use otto_core::workflows::{
     ConvertTaskReq, ConvertTaskResp, WorkflowEdge, WorkflowGraph, WorkflowNode,
 };
 use otto_core::{Error, Id};
+use otto_mcp::outward::agent_task_write;
 use otto_state::{
     NewScheduledTask, NewWorkflowTrigger, ScheduledTaskPatch, TriggersRepo, WorkflowsRepo,
 };
@@ -442,6 +443,7 @@ async fn create(
     if kind == "workflow" {
         validate_workflow(&ctx, &ws_id, workflow_id.as_deref()).await?;
     }
+    agent_task_write(None, req.destination.as_ref(), &[])?;
     let destination = req.destination.unwrap_or_else(|| json!({"type":"none"}));
     let tz = cadence::task_tz(&timezone);
     let next = cadence::next_run(&schedule, chrono::Utc::now(), tz).map(|d| d.to_rfc3339());
@@ -511,6 +513,7 @@ async fn update(
     // call: another Editor changing them would make A's agent run B's prompt
     // and mail it to B's address (S3-05). Schedule/enable edits stay open.
     let changed = owner_only_changes(&task, &req);
+    agent_task_write(Some(&task.destination), req.destination.as_ref(), &changed)?;
     if !changed.is_empty()
         && task.created_by.as_deref() != Some(user.id.as_str())
         && require_ws_role(&ctx, &user, &task.workspace_id, WorkspaceRole::Admin)

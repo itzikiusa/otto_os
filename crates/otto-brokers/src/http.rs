@@ -191,16 +191,30 @@ async fn authorize<S: BrokersCtx>(
 }
 
 /// Reject a mutation on a guarded (prod / read-only) cluster unless confirmed.
+/// `confirm` is a flag the client asserts, so an agent session's own
+/// credential never gives it (S6-304, the rule the k8s/AWS confirms apply):
+/// only a person's request, or a governed tool call a person approved (it
+/// replays as that person), gets past a guarded cluster.
 fn guard(row: &BrokerClusterRow, confirmed: bool) -> Result<(), Error> {
     let guarded = row.read_only || row.environment == "prod";
-    if guarded && !confirmed {
-        let why = if row.read_only {
-            "read-only"
-        } else {
-            "production"
-        };
+    if !guarded {
+        return Ok(());
+    }
+    let why = if row.read_only {
+        "read-only"
+    } else {
+        "production"
+    };
+    if !confirmed {
         return Err(Error::Forbidden(format!(
             "cluster '{}' is {why}; set confirm=true to proceed",
+            row.name
+        )));
+    }
+    if otto_core::auth::request_is_agent() {
+        return Err(Error::Forbidden(format!(
+            "cluster '{}' is {why}; an agent session's credential cannot confirm a change \
+             there — a person signed in to Otto must run it",
             row.name
         )));
     }
@@ -268,8 +282,30 @@ async fn update_cluster<S: BrokersCtx>(
     Path(id): Path<Id>,
     Json(req): Json<UpsertClusterReq>,
 ) -> ApiResult<Response> {
-    authorize(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let row = authorize(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    refuse_agent_unguard(&row, &req)?;
     Ok(Json(ctx.brokers().update_cluster(&id, req).await?).into_response())
+}
+
+/// Read-only and Production are what [`guard`] holds an agent to, so an agent
+/// session's own credential may not loosen them (turn Read-only off, move the
+/// cluster out of Production); a person changes them in Message Brokers.
+/// Tightening removes no guard and stays open. Absent fields keep the stored
+/// value, so they are no change.
+fn refuse_agent_unguard(row: &BrokerClusterRow, req: &UpsertClusterReq) -> Result<(), Error> {
+    let unlocks = row.read_only && req.read_only == Some(false);
+    let leaves_prod = row.environment == "prod"
+        && req
+            .environment
+            .is_some_and(|e| e != otto_core::domain::Environment::Prod);
+    if (unlocks || leaves_prod) && otto_core::auth::request_is_agent() {
+        return Err(Error::Forbidden(format!(
+            "an agent session's credential cannot turn off Read-only or move cluster '{}' out \
+             of Production — a person must change it in Message Brokers",
+            row.name
+        )));
+    }
+    Ok(())
 }
 
 async fn delete_cluster<S: BrokersCtx>(
@@ -860,11 +896,114 @@ mod lag_alert_route_tests {
                 assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}: {text}");
                 assert!(text.contains(why), "{method} {uri} names the guard: {text}");
             }
-            // The guard honours confirm: replay then fails its own validation.
+            // The guard honours a person's confirm: replay then fails its own
+            // validation.
             let (method, uri, body) = mutations(&id, true).pop().unwrap();
-            let (status, text) = call(&app, method, &uri, body).await;
+            let (status, text) = as_person(call(&app, method, &uri, body)).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "confirmed replay: {text}");
         }
+    }
+
+    fn as_person<F: std::future::Future>(fut: F) -> impl std::future::Future<Output = F::Output> {
+        otto_core::auth::with_request_credential(otto_core::auth::RequestCredential::default(), fut)
+    }
+
+    fn as_agent<F: std::future::Future>(fut: F) -> impl std::future::Future<Output = F::Output> {
+        let agent = otto_core::auth::RequestCredential {
+            agent: true,
+            root_withheld: true,
+        };
+        otto_core::auth::with_request_credential(agent, fut)
+    }
+
+    /// F9: `confirm` is a flag the client asserts, so an agent session's own
+    /// `confirm=true` is no confirmation on a guarded cluster — every one of
+    /// the six mutations needs a person (or a governed call a person approved).
+    #[tokio::test]
+    async fn an_agents_own_confirm_does_not_pass_a_guarded_cluster() {
+        for (extra, why) in [
+            (serde_json::json!({"environment": "prod"}), "production"),
+            (serde_json::json!({"read_only": true}), "read-only"),
+        ] {
+            let (_dir, pool, root) = fixture(true).await;
+            let svc = BrokersService::new(
+                BrokerClustersRepo::new(pool.clone()),
+                Arc::new(NoSecrets),
+                None,
+            );
+            let id = cluster(&svc, &root, extra).await;
+            let app = app_for(svc, root, None);
+            for (method, uri, body) in mutations(&id, true) {
+                let (status, text) = as_agent(call(&app, method, &uri, body)).await;
+                assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}: {text}");
+                assert!(text.contains(why), "{method} {uri} names the guard: {text}");
+                assert!(
+                    text.contains("a person signed in to Otto must run it"),
+                    "{method} {uri} says who may: {text}"
+                );
+            }
+        }
+        // A dev cluster has no guard, so an agent's work there is unchanged.
+        let (_dir, pool, root) = fixture(true).await;
+        let svc = BrokersService::new(BrokerClustersRepo::new(pool), Arc::new(NoSecrets), None);
+        let dev = cluster(&svc, &root, serde_json::json!({"environment": "dev"})).await;
+        let app = app_for(svc, root, None);
+        let (method, uri, body) = mutations(&dev, false).pop().unwrap();
+        let (status, text) = as_agent(call(&app, method, &uri, body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "dev replay: {text}");
+    }
+
+    /// F9: an agent may not clear Read-only or move a cluster out of
+    /// Production (then produce unconfirmed); a rename, or tightening, is open.
+    #[tokio::test]
+    async fn an_agent_cannot_loosen_a_clusters_guard_but_a_person_can() {
+        let (_dir, pool, root) = fixture(true).await;
+        let svc = BrokersService::new(BrokerClustersRepo::new(pool), Arc::new(NoSecrets), None);
+        let id = cluster(
+            &svc,
+            &root,
+            serde_json::json!({"environment": "prod", "read_only": true}),
+        )
+        .await;
+        let app = app_for(svc, root, None);
+        let uri = format!("/brokers/clusters/{id}");
+        let patch = |extra: serde_json::Value| {
+            let mut body = serde_json::json!({
+                "name": "c", "bootstrap_servers": "127.0.0.1:1", "security_protocol": "plaintext"
+            });
+            for (k, v) in extra.as_object().unwrap() {
+                body[k] = v.clone();
+            }
+            Some(body)
+        };
+        for extra in [
+            serde_json::json!({"read_only": false}),
+            serde_json::json!({"environment": "dev"}),
+        ] {
+            let (status, text) = as_agent(call(&app, "PATCH", &uri, patch(extra.clone()))).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{extra}: {text}");
+            assert!(
+                text.contains("a person must change it in Message Brokers"),
+                "{extra}: {text}"
+            );
+        }
+        let (status, text) = as_agent(call(
+            &app,
+            "PATCH",
+            &uri,
+            patch(serde_json::json!({"name": "renamed", "environment": "prod", "read_only": true})),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK, "a rename is open: {text}");
+        let (status, text) = as_person(call(
+            &app,
+            "PATCH",
+            &uri,
+            patch(serde_json::json!({"environment": "dev", "read_only": false})),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK, "a person loosens it: {text}");
+        assert!(text.contains(r#""read_only":false"#), "{text}");
     }
 
     #[tokio::test]

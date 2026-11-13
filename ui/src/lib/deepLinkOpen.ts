@@ -5,13 +5,15 @@
 import { api } from './api/client';
 import type { Id, Session } from './api/types';
 import { deepLinkErrorText, resolveDeepLink } from './deepLink';
+import { router } from './router.svelte';
+import { inThreadsScope } from './stores/sessionBuckets';
 import { SCRATCH_WORKSPACE_ID } from './stores/sessionScope';
 import { toasts } from './toast.svelte';
 
 /** The workspace-store members a deep link needs (structural: no cycle). */
 export interface DeepLinkStore {
   readonly currentId: Id | null;
-  sessionById: { has(id: Id): boolean };
+  sessionById: ReadonlyMap<Id, Session>;
   select(id: Id): Promise<boolean>;
   openSession(id: Id): void;
 }
@@ -49,9 +51,11 @@ export async function prepareDeepLink(store: DeepLinkStore, id: Id, what: 'sessi
 
 /** The `#/agents/<id>` route → store sync: resolve, switch, then open. */
 export async function openSessionDeepLink(store: DeepLinkStore, id: Id): Promise<void> {
-  if (store.sessionById.has(id) || id.startsWith('__')) {
-    store.openSession(id);
-    return;
-  }
-  if (await prepareDeepLink(store, id, 'session')) store.openSession(id);
+  if (!store.sessionById.has(id) && !id.startsWith('__') && !(await prepareDeepLink(store, id, 'session'))) return;
+  // An old or outside link (`agents/<id>` from the tray, the floating bar, a
+  // notice written before the session moved) to a session that lives in
+  // Threads opens there, never as a terminal tab over the same conversation.
+  const s = store.sessionById.get(id);
+  if (s && inThreadsScope(s, store.sessionById)) router.replace(`threads/${id}`);
+  else store.openSession(id);
 }

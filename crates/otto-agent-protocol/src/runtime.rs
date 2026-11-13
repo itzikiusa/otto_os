@@ -16,7 +16,7 @@
 
 mod auto_close;
 mod children;
-mod council;
+pub mod council;
 mod descendants;
 mod fresh;
 mod request_ids;
@@ -399,31 +399,42 @@ impl AgentRuntime {
     /// provider session `stopped`. Written above the persisted sequence
     /// floor. The next prompt respawns the CLI and resumes the provider's own
     /// session id. Also removes the attachments of sessions that no longer
-    /// exist (a workspace delete cascades their rows). Returns sessions touched.
+    /// exist (a workspace delete cascades their rows). A child thread whose
+    /// turn this cut off reports it to its parent (`children.rs`). Returns
+    /// sessions touched.
     pub async fn recover(&self) -> Result<usize> {
         self.inner.repo.expire_drafts().await?;
         let mut touched = 0;
         let mut queued = Vec::new();
+        let mut cut_children = Vec::new();
         for sid in self.inner.repo.session_ids().await? {
             let rec = self.inner.repo.get(&sid).await?;
             let mut seq = rec.seq_reserved.max(rec.session.last_sequence);
             let now = Utc::now();
             let mut rows = Vec::new();
             let entities = self.inner.repo.entities(&sid).await?;
-            // Messages queued before the restart go out now.
+            // Messages a PERSON queued before the restart go out now (which
+            // respawns the agent). A queue holding only child threads'
+            // replies waits for the person instead (children.rs).
             if !rec.closed
-                && entities.iter().any(|e| {
-                    e.kind == K_QUEUE && e.payload.as_array().is_some_and(|a| !a.is_empty())
-                })
+                && entities
+                    .iter()
+                    .any(|e| e.kind == K_QUEUE && has_person_entry(e))
             {
                 queued.push(sid.clone());
             }
+            let is_child = rec.session.child_of().is_some();
+            // The latest turn this restart cut off (ordinal, id).
+            let mut cut: Option<(u32, Id)> = None;
             for mut r in entities {
                 let changed = match r.kind.as_str() {
                     K_TURN => serde_json::from_value::<ProviderTurn>(r.payload.clone())
                         .ok()
                         .filter(|t| !t.status.is_terminal())
                         .map(|mut t| {
+                            if is_child && cut.as_ref().is_none_or(|(o, _)| t.ordinal > *o) {
+                                cut = Some((t.ordinal, t.id.clone()));
+                            }
                             t.status = ProviderTurnStatus::Interrupted;
                             t.completed_at = Some(now);
                             serde_json::to_value(t)
@@ -472,7 +483,13 @@ impl AgentRuntime {
                 touched += 1;
                 self.inner.repo.upsert_entities(&sid, &rows).await?;
             }
+            if let Some((_, turn)) = cut {
+                cut_children.push((rec.session, turn));
+            }
         }
+        // After every session's own settling, so each parent loads its
+        // recovered state before the notice lands in it.
+        self.report_restart_cut(cut_children).await;
         if let Ok(mut dirs) = tokio::fs::read_dir(&self.inner.config.attachments_dir).await {
             while let Ok(Some(d)) = dirs.next_entry().await {
                 let sid = d.file_name().to_string_lossy().to_string();
@@ -1390,6 +1407,12 @@ impl AgentRuntime {
             if st.session.status == RuntimeSessionStatus::Closed || st.turn.is_some() {
                 return;
             }
+            // A child thread's reply never respawns a stopped agent: it waits
+            // for the person (their next message, or Revive). A queue with a
+            // person's message in it goes out in order.
+            if st.proc.is_none() && st.proj.queue.iter().all(|q| q.wake.is_some()) {
+                return;
+            }
             st.proj.queue.first().cloned()
         };
         let Some(rec) = next else {
@@ -1643,6 +1666,7 @@ impl AgentRuntime {
     /// A provider that cannot resume it (its process dies before it is
     /// ready) gets a fresh thread instead and the timeline says so (a
     /// `system_notice`). Its meta is kept. A live process is left alone.
+    /// What waits in its queue (a child thread's reply) then goes out.
     pub async fn reopen(&self, id: &Id) -> Result<RuntimeSession> {
         let live = self.live(id).await?;
         let _prompt = live.prompt_lock.lock().await;
@@ -1658,7 +1682,16 @@ impl AgentRuntime {
         }
         self.flush(id).await;
         self.spawn_resuming(id, &live).await?;
-        let s = live.lock().session.clone();
+        let (s, queued) = {
+            let st = live.lock();
+            (st.session.clone(), !st.proj.queue.is_empty())
+        };
+        // What waited for the person — a child thread's reply above all —
+        // goes out now, oldest first (after this call: the drain takes the
+        // prompt lock held here).
+        if queued {
+            self.kick_queue(id);
+        }
         Ok(s)
     }
 
@@ -1810,6 +1843,13 @@ impl AgentRuntime {
 }
 
 const TURN_RUNNING: &str = "a turn is already running";
+
+/// A stored `queue` row holds a message a person queued (a child thread's
+/// reply carries `wake`).
+fn has_person_entry(row: &RuntimeEntityRow) -> bool {
+    serde_json::from_value::<Vec<QueuedRecord>>(row.payload.clone())
+        .is_ok_and(|q| q.iter().any(|r| r.wake.is_none()))
+}
 
 fn check_can_prompt(st: &State) -> Result<()> {
     if st.session.status == RuntimeSessionStatus::Closed {

@@ -1,4 +1,5 @@
 import { refreshVisibleTree } from './treeRefresh';
+import { appendBacklinks, toBacklinkPage } from './backlinkPaging';
 // Vault module store — the docs home. One class instance holds the vault
 // list + selection, the lazy file tree, the open note (edit/read), panels,
 // and status polling (only while the page is visible).
@@ -117,13 +118,13 @@ class VaultStore {
   saving = $state(false);
   /** 409 conflict from autosave — the banner offers Reload / Overwrite. */
   conflict = $state(false);
+  /** The loaded pages of backlinks; `backlinksTotal` counts every one. */
   backlinks = $state<VaultBacklink[]>([]);
+  backlinksTotal = $state(0);
   backlinksLoading = $state(false);
   backlinksError = $state('');
-  /** Visible rows and their hydrated windows share the same refresh lifetime. */
-  visibleBacklinks = $state(100);
   private backlinksGeneration = 0;
-  loadingBacklinkContexts = $state(false);
+  loadingMoreBacklinks = $state(false);
 
   // Open tabs — multiple notes/files at once, persisted per vault (survives
   // module switches AND app restarts; restored in select()).
@@ -305,11 +306,11 @@ class VaultStore {
     this.conflict = false;
     this.note = null;
     this.notePath = null;
-    this.backlinks = [];
+    this.backlinks = []; this.backlinksTotal = 0;
     this.backlinksGeneration++;
     this.backlinksLoading = false;
     this.backlinksError = '';
-    this.loadingBacklinkContexts = false;
+    this.loadingMoreBacklinks = false;
     this.searchSeq++;
     this.searchHits = [];
     this.searchedQuery = '';
@@ -646,10 +647,10 @@ class VaultStore {
       if (!(await this.canLeaveNote()) || !current()) return false;
       if (this.notePath !== path) {
         this.backlinksGeneration++;
-        this.backlinks = [];
+        this.backlinks = []; this.backlinksTotal = 0;
         this.backlinksError = '';
         this.backlinksLoading = false;
-        this.loadingBacklinkContexts = false;
+        this.loadingMoreBacklinks = false;
       }
       this.note = n;
       this.notePath = path;
@@ -883,15 +884,12 @@ class VaultStore {
     const id = this.current.id, path = this.notePath, wsId = this.wsId;
     const generation = ++this.backlinksGeneration;
     const current = () => this.current?.id === id && this.notePath === path && this.wsId === wsId && generation === this.backlinksGeneration;
-    this.loadingBacklinkContexts = false;
+    this.loadingMoreBacklinks = false;
     this.backlinksLoading = true;
     this.backlinksError = '';
     try {
-      const next = await vaultBacklinks(wsId, id, path);
-      if (current()) {
-        this.backlinks = next;
-        this.visibleBacklinks = 100;
-      }
+      const page = toBacklinkPage(await vaultBacklinks(wsId, id, path), 0);
+      if (current()) [this.backlinks, this.backlinksTotal] = [page.backlinks, page.total];
     } catch (e) {
       if (current()) this.backlinksError = msg(e);
     } finally {
@@ -899,23 +897,23 @@ class VaultStore {
     }
   }
 
-  async loadBacklinkContexts(offset: number): Promise<boolean> {
-    if (!this.current || !this.notePath || this.loadingBacklinkContexts) return false;
+  /** The panel's "Show more": the next page after the rows already shown. */
+  async loadMoreBacklinks(): Promise<boolean> {
+    if (!this.current || !this.notePath || this.loadingMoreBacklinks) return false;
     const id = this.current.id, path = this.notePath, generation = this.backlinksGeneration;
     const current = () => this.current?.id === id && this.notePath === path && generation === this.backlinksGeneration;
-    this.loadingBacklinkContexts = true;
+    this.loadingMoreBacklinks = true;
     try {
-      const rows = await vaultBacklinks(this.wsId, id, path, offset);
+      const page = toBacklinkPage(await vaultBacklinks(this.wsId, id, path, this.backlinks.length), this.backlinks.length);
       if (!current()) return false;
-      const snippets = new Map(rows.slice(offset, offset + 100).map(row => [row.path + '\n' + row.kind, row.context]));
-      this.backlinks = this.backlinks.map(row => ({ ...row, context: snippets.get(row.path + '\n' + row.kind) ?? row.context }));
-      this.visibleBacklinks = Math.max(this.visibleBacklinks, offset + 100);
+      this.backlinks = appendBacklinks(this.backlinks, page.backlinks);
+      this.backlinksTotal = page.total;
       return true;
     } catch (e) {
-      if (current()) toasts.error('Couldn’t load backlink contexts', loadErrorText(e));
+      if (current()) toasts.error('Couldn’t load more backlinks', loadErrorText(e));
       return false;
     } finally {
-      if (current()) this.loadingBacklinkContexts = false;
+      if (current()) this.loadingMoreBacklinks = false;
     }
   }
 

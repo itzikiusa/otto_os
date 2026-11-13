@@ -116,7 +116,7 @@ export function chipState(s: MachineStatus | null): ChipState | null {
     return {
       tone: 'low-disk',
       text: `Low disk · ${formatGiB(s.disk_free_bytes)} free`,
-      label: `Low disk space: ${formatGiB(s.disk_free_bytes)} free (warning below ${s.low_disk_gb ?? 30} GB). Show details`,
+      label: `Low disk space: ${formatGiB(s.disk_free_bytes)} free (warning below ${s.low_disk_gb ?? 10} GB). Show details`,
     };
   }
   return {

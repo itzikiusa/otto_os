@@ -6,6 +6,7 @@ import type {
   OkfReport,
   Vault,
   VaultBacklink,
+  VaultBacklinkPage,
   VaultDirListing,
   VaultDocsRun,
   VaultDocsReviewSkill,
@@ -83,8 +84,10 @@ export function createVaultFolder(ws: string, id: number, path: string) {
   return api.post<void>(`${base(ws)}/${id}/folder`, { path });
 }
 
-export function vaultBacklinks(ws: string, id: number, path: string, contextOffset = 0) {
-  return api.get<VaultBacklink[]>(`${base(ws)}/${id}/backlinks?path=${enc(path)}&context_offset=${contextOffset}&context_limit=100`);
+/** One page of backlinks (100) from `offset`, with the total. A pre-paging
+ *  daemon answers the bare array (see `toBacklinkPage`). */
+export function vaultBacklinks(ws: string, id: number, path: string, offset = 0) {
+  return api.get<VaultBacklinkPage | VaultBacklink[]>(`${base(ws)}/${id}/backlinks?path=${enc(path)}&offset=${offset}&with_total=true`);
 }
 
 export function vaultSearch(ws: string, id: number, req: VaultSearchReq) {

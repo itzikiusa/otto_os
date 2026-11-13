@@ -573,7 +573,7 @@
       </span>
       {#if vault.note}
         <span>
-          {vault.backlinks.length} backlinks{#if vault.backlinksLoading}<span class="spinner vs-inline" role="img" aria-label="Loading backlinks"></span>{:else if vault.backlinksError}<span class="vs-warn" title={vault.backlinksError}><Icon name="warning" size={12} /> couldn’t refresh</span>{/if}
+          {vault.backlinksTotal.toLocaleString()} backlinks{#if vault.backlinksLoading}<span class="spinner vs-inline" role="img" aria-label="Loading backlinks"></span>{:else if vault.backlinksError}<span class="vs-warn" title={vault.backlinksError}><Icon name="warning" size={12} /> couldn’t refresh</span>{/if}
         </span>
         <span>{vault.note.meta.word_count} words</span>
         <span>{(vault.editing ? vault.draft : vault.note.raw).length} characters</span>

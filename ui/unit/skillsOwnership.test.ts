@@ -10,7 +10,7 @@ test('file deletion confirmation keeps the skill shown in the question', async (
   const state = componentFunctions(new URL('../src/modules/skills-lab/SkillEditor.svelte', import.meta.url), ['deleteFile'], {
     name: 'original', source: 'library', currentFile: 'SKILL.md', loadGeneration: 1, disposed: false,
     confirmer: { ask: () => answer.promise }, skillLabApi: { deleteFile: async (n: string) => calls.push(n), listFiles: async () => [] },
-    onsaved() {}, open() {}, toastError() {},
+    onsaved() {}, open() {}, toastError() {}, noteKeptCopies() {},
   });
   const deleting = state.deleteFile('notes.md'); state.name = 'replacement'; state.loadGeneration++;
   answer.resolve(true); await deleting;
@@ -23,9 +23,10 @@ test('save completing after selecting another skill cannot replace its body or f
     editable: true, saving: false, loading: false, loadError: null, binary: false, dirty: true,
     name: 'original', source: 'library', currentFile: 'SKILL.md', content: 'old submitted', original: 'old', loadGeneration: 1, disposed: false,
     skillLabApi: { putFile: () => response.promise }, onsaved() { published++; }, toasts: quiet, toastError() {}, sha256Hex: () => 'base',
+    noteKeptCopies() {},
   });
   const saving = state.save(); state.name = 'replacement'; state.loadGeneration++; state.original = 'new';
-  response.resolve([]); await saving;
+  response.resolve({ files: [] }); await saving;
   assert.equal(published, 0); assert.equal(state.original, 'new');
 });
 
@@ -72,7 +73,7 @@ test('library replacement and removal cannot switch targets while confirmation i
     const answer=deferred<boolean>();const targets:string[]=[];
     const state=componentFunctions(new URL('../src/modules/skills-lab/SkillDetail.svelte',import.meta.url),[action],{
       group:{name:'original',variants:[{source:'bundled',bundledVersion:1}]},source:'library',hasLibrary:true,
-      bundled:{source:'bundled',bundledVersion:1,bundledState:'update_available'},replaceQuestion,deleteQuestion,installedNote,noteUserOwned(){},
+      bundled:{source:'bundled',bundledVersion:1,bundledState:'update_available'},replaceQuestion,deleteQuestion,installedNote,noteUserOwned(){},noteKeptCopies(){},
       selectionKey:'library:original',disposed:false,loadGeneration:1,busy:false,
       confirmer:{ask:()=>answer.promise},skillLabApi:{install:async(n:string)=>targets.push(n),remove:async(n:string)=>targets.push(n)},
       toasts:quiet,toastError(){},onchanged(){},ondeleted(){},sourceLabel:String,
@@ -99,9 +100,9 @@ test('unchanged save acknowledges only submitted text while newer typing stays d
   const state=componentFunctions(new URL('../src/modules/skills-lab/SkillEditor.svelte',import.meta.url),['save'],{
     editable:true,saving:false,loading:false,loadError:null,binary:false,dirty:true,name:'same',source:'library',currentFile:'SKILL.md',
     content:'submitted',original:'old',loadGeneration:1,disposed:false,skillLabApi:{putFile:()=>response.promise},
-    onsaved(_files:unknown,md:string){body=md;},toasts:quiet,toastError(){},sha256Hex:()=>'base',
+    onsaved(_files:unknown,md:string){body=md;},toasts:quiet,toastError(){},sha256Hex:()=>'base',noteKeptCopies(){},
   });
-  const pending=state.save();state.content='newer typing';response.resolve([]);await pending;
+  const pending=state.save();state.content='newer typing';response.resolve({files:[]});await pending;
   assert.equal(state.original,'submitted');assert.equal(state.content,'newer typing');assert.equal(body,'submitted');
 });
 

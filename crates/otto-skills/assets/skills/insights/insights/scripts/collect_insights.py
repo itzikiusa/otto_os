@@ -72,6 +72,7 @@ import calendar
 import glob
 import json
 import os
+import re
 import sys
 import uuid
 from collections import defaultdict
@@ -206,6 +207,58 @@ def in_window(dt, start, end):
     return start <= dt <= end
 
 
+# A `git commit` / `git push` invocation inside a shell command: `git` as its
+# own word (`/usr/bin/git` counts, `legit` does not), optional global options
+# (`-C dir`, `-c k=v`, `--no-pager`), then the subcommand as a whole word
+# (`git commit-tree` and `git pushd`-style lookalikes do not count).
+_GIT_GLOBAL_OPTS = r"(?:\s+-[cC]\s+\S+|\s+--[\w-]+(?:=\S+)?)*"
+GIT_COMMIT_RE = re.compile(r"(?<![\w.-])git" + _GIT_GLOBAL_OPTS + r"\s+commit(?![\w-])")
+GIT_PUSH_RE = re.compile(r"(?<![\w.-])git" + _GIT_GLOBAL_OPTS + r"\s+push(?![\w-])")
+
+
+def git_ops(command):
+    """(commits, pushes) a shell command string runs."""
+    text = str(command or "")
+    return len(GIT_COMMIT_RE.findall(text)), len(GIT_PUSH_RE.findall(text))
+
+
+# A reply faster than this is a queued/pasted message, and one this slow means
+# the person left — neither is "time to respond to the agent's turn".
+RESPONSE_TIME_MIN_S = 2
+RESPONSE_TIME_MAX_S = 3600
+
+# Per-session meta fields that feed a stat or chart, and what they feed. A
+# session that did not MEASURE a field in the window (it is absent, or listed
+# in the session's `_unavailable_window_metrics`) adds nothing to it — never a
+# silent 0. A view where no session measured a field reports `null` and lists
+# it in `unavailable_window_metrics`; a view where only some did lists it in
+# `partial_window_metrics` (field → sessions that measured it).
+WINDOW_METRIC_STATS = {
+    "git_commits": "total_commits",
+    "git_pushes": "total_pushes",
+    "lines_added": "total_lines_added",
+    "lines_removed": "total_lines_removed",
+    "files_modified": "total_files_modified",
+    "input_tokens": "total_input_tokens",
+    "output_tokens": "total_output_tokens",
+    "duration_minutes": "total_duration_minutes",
+}
+WINDOW_METRIC_CHARTS = {
+    "tool_counts": "tool_counts",
+    "tool_error_categories": "tool_error_categories",
+    "user_response_times": "response_time_buckets",
+}
+WINDOW_METRIC_FIELDS = tuple(WINDOW_METRIC_STATS) + tuple(WINDOW_METRIC_CHARTS)
+
+# What a Claude transcript cannot tell for a window (line/file counts live only
+# in session-meta, which covers the whole session).
+CLAUDE_TRANSCRIPT_UNMEASURED = ("lines_added", "lines_removed", "files_modified")
+
+
+def _measured(meta, field):
+    return field in meta and field not in meta.get("_unavailable_window_metrics", [])
+
+
 def empty_aggregate(provider, depth, note):
     """The shape every provider/combined view conforms to (matches the original)."""
     return {
@@ -250,6 +303,8 @@ def empty_aggregate(provider, depth, note):
             "overlap_sessions": 0,
             "overlap_messages_pct": 0,
         },
+        "unavailable_window_metrics": [],
+        "partial_window_metrics": {},
         "session_summaries": [],
         "friction_details": [],
         "project_sessions": {},
@@ -269,10 +324,16 @@ def aggregate(sessions, provider, depth, note, start, end):
 
     sessions = sorted(sessions, key=lambda x: x["date"])
 
+    measured = {f: sum(1 for s in sessions if _measured(s["meta"], f))
+                for f in WINDOW_METRIC_FIELDS}
+
+    def window_total(field):
+        """Sum over the sessions that measured `field`; None if none did."""
+        if not measured[field]:
+            return None
+        return sum(s["meta"][field] for s in sessions if _measured(s["meta"], field))
+
     total_messages = sum(s["meta"].get("user_message_count", 0) for s in sessions)
-    total_duration = sum(s["meta"].get("duration_minutes", 0) for s in sessions)
-    total_commits = sum(s["meta"].get("git_commits", 0) for s in sessions)
-    total_pushes = sum(s["meta"].get("git_pushes", 0) for s in sessions)
     total_sessions = len(sessions)
     analyzed_sessions = sum(1 for s in sessions if s["facet"])
 
@@ -291,11 +352,6 @@ def aggregate(sessions, provider, depth, note, start, end):
             active_day_set.add(s["date"][:10])
     active_days = len(active_day_set)
 
-    total_lines_added = sum(s["meta"].get("lines_added", 0) for s in sessions)
-    total_lines_removed = sum(s["meta"].get("lines_removed", 0) for s in sessions)
-    total_files_modified = sum(s["meta"].get("files_modified", 0) for s in sessions)
-    total_input_tokens = sum(s["meta"].get("input_tokens", 0) for s in sessions)
-    total_output_tokens = sum(s["meta"].get("output_tokens", 0) for s in sessions)
 
     tool_counts = defaultdict(int)
     lang_counts = defaultdict(int)
@@ -381,9 +437,10 @@ def aggregate(sessions, provider, depth, note, start, end):
             }
         )
 
-    sorted_rt = sorted(response_times) if response_times else [0]
-    median_rt = sorted_rt[len(sorted_rt) // 2]
-    avg_rt = sum(sorted_rt) / len(sorted_rt) if sorted_rt else 0
+    # No measured reply at all is "not available", not a 0 s median.
+    sorted_rt = sorted(response_times)
+    median_rt = sorted_rt[len(sorted_rt) // 2] if sorted_rt else None
+    avg_rt = sum(sorted_rt) / len(sorted_rt) if sorted_rt else None
 
     fully = outcome_counts.get("fully_achieved", 0)
     mostly = outcome_counts.get("mostly_achieved", 0)
@@ -435,31 +492,27 @@ def aggregate(sessions, provider, depth, note, start, end):
         round(overlap_messages / total_messages * 100) if total_messages > 0 else 0
     )
 
-    out["unavailable_window_metrics"] = sorted({field for session in sessions
-        for field in session["meta"].get("_unavailable_window_metrics", [])})
+    out["unavailable_window_metrics"] = sorted(f for f, n in measured.items() if n == 0)
+    out["partial_window_metrics"] = {
+        f: n for f, n in sorted(measured.items()) if 0 < n < total_sessions}
     out["stats"] = {
         "total_sessions": total_sessions,
         "analyzed_sessions": analyzed_sessions,
         "total_messages": total_messages,
-        "total_duration_minutes": total_duration,
-        "total_commits": total_commits,
-        "total_pushes": total_pushes,
         "active_days": active_days,
         "msgs_per_day": round(total_messages / active_days, 1)
         if active_days > 0
         else 0,
         "achievement_rate": achievement_rate,
-        "median_response_time": round(median_rt, 1),
-        "avg_response_time": round(avg_rt, 1),
-        "total_lines_added": total_lines_added,
-        "total_lines_removed": total_lines_removed,
-        "total_files_modified": total_files_modified,
-        "total_input_tokens": total_input_tokens,
-        "total_output_tokens": total_output_tokens,
+        "median_response_time": None if median_rt is None else round(median_rt, 1),
+        "avg_response_time": None if avg_rt is None else round(avg_rt, 1),
     }
+    for field, stat in WINDOW_METRIC_STATS.items():
+        out["stats"][stat] = window_total(field)
     out["charts"] = {
         "goal_categories": dict(sorted(goal_cats.items(), key=lambda x: -x[1])),
-        "tool_counts": dict(sorted(tool_counts.items(), key=lambda x: -x[1])[:8]),
+        "tool_counts": None if not measured["tool_counts"]
+        else dict(sorted(tool_counts.items(), key=lambda x: -x[1])[:8]),
         "languages": dict(sorted(lang_counts.items(), key=lambda x: -x[1])[:6]),
         "session_types": dict(sorted(session_types.items(), key=lambda x: -x[1])),
         "outcomes": dict(sorted(outcome_counts.items(), key=lambda x: -x[1])),
@@ -469,10 +522,10 @@ def aggregate(sessions, provider, depth, note, start, end):
         "helpfulness": dict(sorted(helpfulness_counts.items(), key=lambda x: -x[1])),
         "projects": dict(sorted(project_counts.items(), key=lambda x: -x[1])),
         "hour_counts": dict(hour_counts),
-        "tool_error_categories": dict(
+        "tool_error_categories": None if not measured["tool_error_categories"] else dict(
             sorted(tool_error_cats.items(), key=lambda x: -x[1])
         ),
-        "response_time_buckets": {
+        "response_time_buckets": None if not sorted_rt else {
             "2-10s": sum(1 for t in response_times if t < 10),
             "10-30s": sum(1 for t in response_times if 10 <= t < 30),
             "30s-1m": sum(1 for t in response_times if 30 <= t < 60),
@@ -615,14 +668,15 @@ def collect_claude(start, end, extra_facets_dir=None):
                             "files_modified", "tool_counts", "user_response_times", "tool_error_categories")
                 for field in lifetime:
                     meta.pop(field, None)
-                meta["_unavailable_window_metrics"] = ["git_commits", "git_pushes", "lines_added", "lines_removed", "files_modified"]
                 if window_meta:
+                    # Carries its own `_unavailable_window_metrics`.
                     meta.update(window_meta)
                     effective_date = parse_date(meta["start_time"])
                 else:
                     meta["user_message_timestamps"] = in_window_ts
                     meta["user_message_count"] = len(in_window_ts)
-                    meta["_unavailable_window_metrics"].extend(lifetime)
+                    meta["_unavailable_window_metrics"] = sorted(
+                        set(CLAUDE_TRANSCRIPT_UNMEASURED) | set(lifetime))
                 sessions.append(
                     {
                         "meta": meta,
@@ -695,9 +749,27 @@ def _accumulate_claude_usage(obj, start, end, responses):
             prev[i] = int(val)
 
 
+def _claude_tool_name(block):
+    name = block.get("name", "unknown") or "unknown"
+    return name.split("__")[-1] if name.startswith("mcp__") else name
+
+
 def _parse_claude_jsonl(path, project_dir, start, end):
+    """Window metrics from one Claude transcript. Everything it returns is
+    measured inside [start, end]; what a transcript cannot tell is listed in
+    `_unavailable_window_metrics`."""
     real_ts = []
     tool_counts = defaultdict(int)
+    # In-window failed tool results, by the tool that failed (a result names
+    # its call by `tool_use_id`; the call may sit before the window).
+    tool_names = {}
+    tool_errors = defaultdict(int)
+    # Seconds from the end of an agent turn (its last assistant line) to the
+    # person's next real message, for replies landing in the window.
+    response_times = []
+    last_assistant = None
+    git_commits = 0
+    git_pushes = 0
     # Token usage per API response, keyed like Otto's usage tailer
     # (message.id:requestId). A streamed response is written as several
     # lines and only the LAST carries the final output_tokens, so keep the
@@ -723,26 +795,48 @@ def _parse_claude_jsonl(path, project_dir, start, end):
                         if isinstance(content, str) and content.strip():
                             is_real = True
                         elif isinstance(content, list):
-                            if not any(
-                                c.get("type") == "tool_result"
-                                for c in content
-                                if isinstance(c, dict)
-                            ):
+                            results = [c for c in content if isinstance(c, dict)
+                                       and c.get("type") == "tool_result"]
+                            if not results:
                                 is_real = True
+                            elif timestamp_in_window(ts, start, end):
+                                for r in results:
+                                    if r.get("is_error"):
+                                        name = tool_names.get(r.get("tool_use_id"), "unknown")
+                                        tool_errors[name] += 1
                     if is_real and ts:
                         real_ts.append(ts)
+                        try:
+                            replied = parse_date(ts)
+                            if last_assistant is not None and in_window(replied, start, end):
+                                gap = (replied - last_assistant).total_seconds()
+                                if RESPONSE_TIME_MIN_S <= gap < RESPONSE_TIME_MAX_S:
+                                    response_times.append(round(gap, 1))
+                        except (ValueError, TypeError, OverflowError, OSError):
+                            pass
+                        last_assistant = None
                 elif mt == "assistant":
                     msg = obj.get("message", {})
                     if isinstance(msg, dict):
                         _accumulate_claude_usage(obj, start, end, responses)
+                        try:
+                            last_assistant = parse_date(obj.get("timestamp"))
+                        except (ValueError, TypeError, OverflowError, OSError):
+                            pass
+                        blocks = [b for b in (msg.get("content", []) or [])
+                                  if isinstance(b, dict) and b.get("type") == "tool_use"]
+                        for block in blocks:
+                            tool_names[block.get("id")] = _claude_tool_name(block)
                         if not timestamp_in_window(obj.get("timestamp"), start, end):
                             continue
-                        for block in msg.get("content", []) or []:
-                            if isinstance(block, dict) and block.get("type") == "tool_use":
-                                name = block.get("name", "unknown")
-                                if name.startswith("mcp__"):
-                                    name = name.split("__")[-1]
-                                tool_counts[name] += 1
+                        for block in blocks:
+                            name = _claude_tool_name(block)
+                            tool_counts[name] += 1
+                            if name == "Bash":
+                                commits, pushes = git_ops(
+                                    (block.get("input") or {}).get("command", ""))
+                                git_commits += commits
+                                git_pushes += pushes
     except (IOError, OSError):
         return None
 
@@ -784,6 +878,11 @@ def _parse_claude_jsonl(path, project_dir, start, end):
         "duration_minutes": int((last_ts - first_ts).total_seconds() / 60),
         "project_path": project_dir,
         "tool_counts": dict(tool_counts),
+        "tool_error_categories": dict(tool_errors),
+        "user_response_times": response_times,
+        "git_commits": git_commits,
+        "git_pushes": git_pushes,
+        "_unavailable_window_metrics": list(CLAUDE_TRANSCRIPT_UNMEASURED),
         "transcript_path": path,
         "input_tokens": sum(r[0] for r in responses.values()),
         "output_tokens": sum(r[1] for r in responses.values()),
@@ -1051,6 +1150,14 @@ def find_previous_metrics(kind, start):
     return best
 
 
+def _snapshot(view):
+    """The stored part of one aggregate view (with what it could not measure,
+    so a later trend never reads a missing metric as a drop to 0)."""
+    return {k: view.get(k) for k in ("stats", "charts", "multi_clauding",
+                                      "unavailable_window_metrics",
+                                      "partial_window_metrics")}
+
+
 def write_history(kind, start, end, period, providers_present, combined, per_provider):
     kind_dir, metrics_path = history_paths(kind, start, end)
     os.makedirs(kind_dir, exist_ok=True)
@@ -1059,13 +1166,8 @@ def write_history(kind, start, end, period, providers_present, combined, per_pro
     snapshot = {
         "period": period,
         "providers_present": providers_present,
-        "combined": {"stats": combined["stats"], "charts": combined["charts"],
-                     "multi_clauding": combined["multi_clauding"]},
-        "per_provider": {
-            p: {"stats": v["stats"], "charts": v["charts"],
-                "multi_clauding": v["multi_clauding"]}
-            for p, v in per_provider.items()
-        },
+        "combined": _snapshot(combined),
+        "per_provider": {p: _snapshot(v) for p, v in per_provider.items()},
         "written_at": datetime.now().isoformat(),
     }
     try:
@@ -1157,8 +1259,10 @@ def update_index(kind, start, end, label, combined):
             "achievement_rate": st["achievement_rate"],
             "median_response_time": st["median_response_time"],
             "total_duration_minutes": st["total_duration_minutes"],
-            "tool_error_total": sum(combined["charts"].get(
-                "tool_error_categories", {}).values()),
+            # null when no session measured tool errors (not "0 errors").
+            "tool_error_total": None
+            if combined["charts"].get("tool_error_categories") is None
+            else sum(combined["charts"]["tool_error_categories"].values()),
         },
         "provider_mix": combined.get("provider_mix", {}),
     }
@@ -1251,11 +1355,10 @@ def _extract_claude_transcript(path):
                             tool_counts[name] += 1
                             tool_calls += 1
                             if name == "Bash":
-                                cmd = (b.get("input", {}) or {}).get("command", "")
-                                if "git commit" in cmd:
-                                    git_commits += 1
-                                if "git push" in cmd:
-                                    git_pushes += 1
+                                commits, pushes = git_ops(
+                                    (b.get("input", {}) or {}).get("command", ""))
+                                git_commits += commits
+                                git_pushes += pushes
     except (IOError, OSError):
         return None
     return _build_extract(
@@ -1296,11 +1399,9 @@ def _extract_codex_transcript(path):
                     name = payload.get("name", "unknown") or "unknown"
                     tool_counts[name] += 1
                     tool_calls += 1
-                    args = str(payload.get("arguments", ""))
-                    if "git commit" in args:
-                        git_commits += 1
-                    if "git push" in args:
-                        git_pushes += 1
+                    commits, pushes = git_ops(payload.get("arguments", ""))
+                    git_commits += commits
+                    git_pushes += pushes
     except (IOError, OSError):
         return None
     return _build_extract(

@@ -37,6 +37,7 @@
 pub mod blobs;
 pub mod brand;
 pub mod cite;
+pub mod comments;
 pub mod diff;
 pub mod extract;
 pub mod format;

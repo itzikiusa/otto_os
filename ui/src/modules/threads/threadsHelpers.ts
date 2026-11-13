@@ -1,5 +1,6 @@
 import type { Repo, Session } from '../../lib/api/types';
-import { isThreadSurfaceSession, ws } from '../../lib/stores/workspace.svelte';
+import { ws } from '../../lib/stores/workspace.svelte';
+import { delegatedParentId, inThreadsScope, type SessionPool } from '../../lib/stores/sessionBuckets';
 
 export type PreviewKind = 'markdown' | 'json' | 'csv' | 'svg' | 'image' | 'code';
 
@@ -10,23 +11,17 @@ export function isPlainShellSession(s: Session | null | undefined): boolean {
 }
 
 /**
- * Whether a session belongs in the Threads workspace (`#/threads`):
- * strictly sessions created on the `threads` surface (`meta.surface === 'threads'`),
- * plus delegated subagent workers whose parent session is a thread.
- * Sessions created in `#/agents` never leak into `#/threads`.
+ * Whether a session belongs in the Threads workspace (`#/threads`): the shared
+ * Agents-vs-Threads rule (`inThreadsScope`: its own `meta.surface`, else the
+ * delegating parent's), minus what lives inside a thread rather than as one.
  */
-export function isThreadSession(s: Session, pool: readonly Session[] | ReadonlyMap<string, Session> = ws.sessions): boolean {
+export function isThreadSession(s: Session, pool: SessionPool = ws.sessions): boolean {
   if (s.kind === 'connection') return false;
   // A side chat lives in its main thread's right panel until promoted.
   if (sideChatOf(s)) return false;
   // The bottom terminal drawer's shells are not threads.
   if ((s.meta as Record<string, unknown> | undefined)?.threads_terminal === true) return false;
-  if (isThreadSurfaceSession(s)) return true;
-  const parentId = delegatedParentId(s);
-  if (!parentId || parentId === s.id) return false;
-  // A Map (the sidebar's id index) keeps a whole-list filter linear.
-  const parent = 'get' in pool ? pool.get(parentId) : pool.find((p) => p.id === parentId);
-  return parent ? isThreadSurfaceSession(parent) : false;
+  return inThreadsScope(s, pool);
 }
 
 /** Main thread id when `s` is a side chat (`meta.side_of`), else null. */
@@ -36,18 +31,7 @@ export function sideChatOf(s: Session | null | undefined): string | null {
 }
 
 /** Parent session ID when this session was delegated or handed over from another thread. */
-export function delegatedParentId(s: Session | null | undefined): string | null {
-  if (!s?.meta) return null;
-  const m = s.meta as Record<string, unknown>;
-  if (typeof m.delegated_by === 'string' && m.delegated_by.trim() !== '') return m.delegated_by.trim();
-  if (typeof m.parent_session_id === 'string' && m.parent_session_id.trim() !== '') return m.parent_session_id.trim();
-  if (typeof m.handover_from === 'string' && m.handover_from.trim() !== '') return m.handover_from.trim();
-  const work = m.work as { parent_session_id?: unknown } | undefined;
-  if (typeof work?.parent_session_id === 'string' && work.parent_session_id.trim() !== '') {
-    return work.parent_session_id.trim();
-  }
-  return null;
-}
+export { delegatedParentId };
 
 /** Short human project folder label from a working directory or workspace name. */
 export function projectNameFromCwd(cwd: string | null | undefined, fallback = 'Workspace'): string {

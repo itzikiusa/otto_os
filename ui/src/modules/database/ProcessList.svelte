@@ -1,7 +1,8 @@
 <script lang="ts">
   // Processes panel (connection menu → Processes…): what is running on a MySQL /
-  // ClickHouse server, with Refresh, and Kill behind a confirm that names the
-  // query. Listing is read-only (process-list.ts); Kill is a write, so it is not
+  // PostgreSQL / ClickHouse / MongoDB server, with Refresh, and Kill behind a
+  // confirm that names the query (PostgreSQL: Cancel the query, or Terminate
+  // the connection). Listing is read-only (process-list.ts); Kill is a write, so it is not
   // offered on a Read-only connection (the server refuses it there too) and a
   // production connection takes the usual typed confirm after this one.
   import { untrack } from 'svelte';
@@ -17,13 +18,15 @@
   import { loadErrorText } from '../../lib/loadError';
   import { database } from '../../lib/stores/database.svelte';
   import { isWriteBlocked } from '../../lib/stores/database/model';
-  import { PROCESS_SQL, killSql, parseProcesses, processEngine, queryPreview, type ProcessRow } from './process-list';
+  import { PROCESS_SQL, killChoices, killNotDone, killSql, parseProcesses, processEngine, processNotices, queryPreview, type KillChoice, type ProcessRow } from './process-list';
 
   let { conn, onclose }: { conn: Connection; onclose: () => void } = $props();
 
   const engine = $derived(processEngine(conn.kind));
   const canKill = $derived(!conn.read_only);
+  const choices = $derived(engine ? killChoices(engine) : []);
   let rows = $state<ProcessRow[]>([]);
+  let notices = $state<string[]>([]);
   let loading = $state(false);
   let error = $state<string | null>(null);
   let killing = $state<string | null>(null);
@@ -38,6 +41,7 @@
         max_rows: 500,
       });
       rows = parseProcesses(engine, res.columns, res.rows);
+      notices = processNotices(engine, rows, res.message);
       error = null;
     } catch (e) {
       error = loadErrorText(e);
@@ -52,34 +56,40 @@
     untrack(() => void load());
   });
 
-  async function kill(p: ProcessRow): Promise<void> {
-    const sql = engine ? killSql(engine, p) : null;
-    if (!sql || !canKill) return;
+  async function kill(p: ProcessRow, c: KillChoice): Promise<void> {
+    const sql = engine ? killSql(engine, p, c.action) : null;
+    if (!engine || !sql || !canKill) return;
+    const shown = p.hidden ? '(query hidden by PostgreSQL)' : queryPreview(p.query);
     const ok = await confirmer.ask(
-      `Stop this statement on “${conn.name}”${p.user ? ` (run by ${p.user})` : ''}?\n\n${queryPreview(p.query)}\n\nOtto sends: ${sql}`,
-      { title: 'Kill query', confirmLabel: 'Kill query', danger: true },
+      `${c.effect}\n\nOn “${conn.name}”${p.user ? `, run by ${p.user}` : ''}:\n${shown}\n\nOtto sends: ${sql}`,
+      { title: c.title, confirmLabel: c.title, cancelLabel: engine === 'postgres' ? 'Keep running' : undefined, danger: true },
     );
     if (!ok) return;
     killing = p.id;
     const send = (confirm_write: boolean) => api.post<QueryResult>(`/connections/${conn.id}/db/query`, { statement: sql, confirm_write });
     try {
+      let res: QueryResult;
       try {
-        await send(false);
+        res = await send(false);
       } catch (e) {
         // Production: the server asks for the typed confirmation first.
         if (!isWriteBlocked(e)) throw e;
         if ((await database.confirmGuardedWrite(conn, e)) !== 'confirmed') return;
-        await send(true);
+        res = await send(true);
       }
-      toasts.success('Kill sent', `Query ${p.id} on ${conn.name}`);
+      const notDone = killNotDone(engine, p, res.rows);
+      if (notDone) toasts.warn(`${c.title}: nothing to stop`, notDone);
+      else toasts.success(`${c.title} sent`, `${p.id} on ${conn.name}`);
       await load();
     } catch (e) {
-      toastError('Couldn’t kill the query', e);
+      // A refusal (no privilege, Read-only, production) carries the server's message.
+      toastError(`Couldn’t ${c.label.toLowerCase()} ${p.id}`, e);
     } finally {
       killing = null;
     }
   }
 
+  const hasDb = $derived(engine === 'postgres' || engine === 'mongodb');
   const seconds = (s: number | null): string => (s === null ? '' : s < 1 ? '<1 s' : `${Math.round(s)} s`);
 </script>
 
@@ -93,26 +103,36 @@
     </button>
   </div>
   {#if !engine}
-    <EmptyState title="Not available for this database" body="The process list covers MySQL and ClickHouse connections." />
+    <EmptyState title="Not available for this database" body="The process list covers MySQL, PostgreSQL, ClickHouse and MongoDB connections." />
   {:else}
     <LoadState what="the process list" {loading} {error} empty={rows.length === 0} onretry={() => void load()} rows={4}>
       {#snippet emptyView()}<EmptyState title="Nothing running" body="Refresh to check again." />{/snippet}
+      {#each notices as n (n)}<p class="pl-notice" role="note" data-testid="db-processes-notice"><Icon name="info" size={13} /> {n}</p>{/each}
       <div class="pl-scroll">
         <table class="pl-table" data-testid="db-processes">
           <thead>
-            <tr><th>Id</th><th>User</th><th>Time</th><th>State</th><th>Query</th>{#if canKill}<th><span class="sr-only">Kill</span></th>{/if}</tr>
+            <tr><th>Id</th><th>User</th>{#if hasDb}<th>{engine === 'mongodb' ? 'Namespace' : 'Database'}</th>{/if}<th>Time</th><th>State</th><th>Query</th>{#if canKill}<th><span class="sr-only">Kill</span></th>{/if}</tr>
           </thead>
           <tbody>
             {#each rows as p (p.id)}
               <tr>
                 <td class="mono">{p.id}</td>
                 <td>{p.user}</td>
+                {#if hasDb}<td>{p.database}</td>{/if}
                 <td class="num">{seconds(p.seconds)}</td>
                 <td>{p.state}</td>
-                <td class="mono pl-query" title={p.query} dir="ltr">{queryPreview(p.query, 160)}</td>
+                {#if p.hidden}
+                  <td class="pl-hidden" title="PostgreSQL hides another role’s query from a login without pg_read_all_stats">Hidden by PostgreSQL</td>
+                {:else}
+                  <td class="mono pl-query" title={p.query} dir="ltr">{queryPreview(p.query, 160)}</td>
+                {/if}
                 {#if canKill}
                   <td>
-                    <button class="btn" type="button" disabled={killing !== null || !killSql(engine, p)} onclick={() => void kill(p)} aria-label={`Kill query ${p.id}`} title="Stop this statement (asks first)">Kill</button>
+                    <div class="pl-actions">
+                      {#each choices as c (c.action)}
+                        <button class="btn" type="button" disabled={killing !== null || !killSql(engine, p, c.action)} onclick={() => void kill(p, c)} aria-label={`${c.title} ${p.id}`} title={`${c.effect} (asks first)`} data-testid={`db-processes-${c.action}`}>{c.label}</button>
+                      {/each}
+                    </div>
                   </td>
                 {/if}
               </tr>
@@ -161,6 +181,27 @@
     text-align: end;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
+  }
+  .pl-notice {
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+    margin-block: 0 8px;
+    padding-block: 6px;
+    padding-inline: 8px;
+    border-radius: var(--radius-s);
+    background: var(--info-soft);
+    color: var(--text);
+    font-size: var(--fs-s);
+  }
+  .pl-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .pl-hidden {
+    color: var(--text-dim);
+    font-style: italic;
   }
   .pl-query {
     max-inline-size: 320px;

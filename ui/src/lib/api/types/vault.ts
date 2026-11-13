@@ -154,9 +154,18 @@ export interface WriteTextFileReq {
 export interface VaultBacklink {
   path: string;
   title: string;
-  /** Empty outside the requested context window (default first 100 rows). */
+  /** The line mentioning the note; empty when none could be read. */
   context: string;
   kind: string;
+}
+
+/** `GET …/backlinks?with_total=true`: one page (ordered by source path, then
+ *  kind; `limit` defaults to 100 and is capped at 200) and the total. */
+export interface VaultBacklinkPage {
+  backlinks: VaultBacklink[];
+  total: number;
+  offset: number;
+  limit: number;
 }
 
 export interface VaultRenameResult {
@@ -218,7 +227,13 @@ export interface VaultGraphPayload {
   tag_labels: string[];
   flags: number[];
   edges: number[];
+  /** A cap left nodes or links out (full: edge budget; local: 300 notes /
+   *  1,500 links, nearest first). */
   truncated: boolean;
+  /** Local mode, when truncated: notes the walk found (at least this many). */
+  total_nodes?: number;
+  /** When truncated: links before the cap. */
+  total_edges?: number;
 }
 
 export interface OkfFinding {

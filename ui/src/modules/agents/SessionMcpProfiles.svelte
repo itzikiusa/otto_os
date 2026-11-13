@@ -82,7 +82,7 @@
           <li><strong>{s.server}</strong>: {s.reason}</li>
         {/each}
       </ul>
-      <p class="hint">Fix the server in Settings → MCP servers, then restart the agent.</p>
+      <p class="hint">Fix the server in MCP Control Plane → External servers, then restart the agent.</p>
     </section>
   {/if}
   {#snippet footer()}

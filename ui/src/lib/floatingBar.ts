@@ -235,27 +235,57 @@ export function moveSelection(current: number, delta: number, count: number): nu
   return (((current + delta) % count) + count) % count;
 }
 
-/** Module route for a cross-module search hit ("Open" target). */
+/** Every hit kind `GET /workspaces/{id}/search` emits (otto-server
+ *  `routes/search.rs` + otto-state `search.rs` `Source::kind`). The unit test
+ *  reads both Rust files and fails when a kind appears there without a route. */
+export const HIT_KINDS = [
+  'story',
+  'workflow',
+  'api_request',
+  'repo',
+  'broker_cluster',
+  'canvas',
+  'memory',
+  'vault_note',
+] as const;
+
+/** Module route for a cross-module search hit ("Open" target). Each module
+ *  deep-links its item as `<module>/<id>` (the router decodes segments). */
 export function hitRoute(hit: { kind: string; id: string }): string {
+  const id = encodeURIComponent(hit.id);
   switch (hit.kind) {
     case 'repo':
-      return `git/${hit.id}`;
+      return `git/${id}`;
     case 'workflow':
-      return 'workflows';
+      return `workflows/${id}`;
     case 'story':
-      return 'product';
+      return `product/${id}`;
     case 'api_request':
-      return 'api';
+      return `api/${id}`;
     case 'broker_cluster':
-      return 'brokers';
+      return `brokers/${id}`;
     case 'memory':
+      // Workspace memories are listed in Settings → Workspace context.
+      return 'settings/context-soul';
+    case 'vault_note':
+      // The Vault has no note deep link; the in-app opener selects the note
+      // after this navigation (`hitVaultNote` + lib/searchHitOpen.ts).
       return 'vault';
     case 'canvas':
       // `#/canvas/<scene>` forwards to the board's Design Hall mirror.
-      return `canvas/${encodeURIComponent(hit.id)}`;
+      return `canvas/${id}`;
     default:
       return 'home';
   }
+}
+
+/** The vault + note a `vault_note` hit names (id `<vault_id>:<path>`; the
+ *  path may itself hold ':'), or null for any other / malformed hit. */
+export function hitVaultNote(hit: { kind: string; id: string }): { vault: string; path: string } | null {
+  if (hit.kind !== 'vault_note') return null;
+  const at = hit.id.indexOf(':');
+  if (at <= 0 || at === hit.id.length - 1) return null;
+  return { vault: hit.id.slice(0, at), path: hit.id.slice(at + 1) };
 }
 
 /** The search-hit actions the ⌘K palette can perform. The server may list

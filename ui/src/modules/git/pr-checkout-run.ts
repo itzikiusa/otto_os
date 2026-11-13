@@ -22,10 +22,10 @@ export async function checkoutPrBranch(repoId: string, branch: string, quiet: ()
       const c = updateConfirm(branch, v);
       if (!(await confirmer.ask(c.message, { title: c.title, confirmLabel: c.confirmLabel, danger: false }))) return;
       try {
-        const r = await api.post<{ status: RepoStatusResp; backup: string }>(`/repos/${repoId}/branch/update-to-upstream`, { branch, ahead: v.ahead });
+        const r = await api.post<{ status: RepoStatusResp; backup: string; also_kept?: string }>(`/repos/${repoId}/branch/update-to-upstream`, { branch, ahead: v.ahead });
         git.setStatus(repoId, r.status);
         git.bumpRefs(repoId);
-        toasts.success(`Updated ${branch} to the pull request`, `Your earlier commits are on ${r.backup}.`);
+        toasts.success(`Updated ${branch} to the pull request`, `Your earlier commits are on ${r.backup}.${r.also_kept ? ` A commit made meanwhile is on ${r.also_kept}.` : ''}`);
       } catch (e) {
         toastError(`Couldn’t update ${branch}`, e);
       }

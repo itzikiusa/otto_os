@@ -56,6 +56,57 @@ export function carryPending(flow: CarryFlow, rows: unknown[][]): Map<string, Ro
   return out.size ? out : null;
 }
 
+/** The statement text as "the same query" compares it: outer whitespace and a
+ *  trailing semicolon dropped, whitespace runs OUTSIDE quotes collapsed to one
+ *  space. Identifiers and literals (and the spaces inside a literal) are kept
+ *  exactly — `users_stg` and `users` are different queries. */
+export function sameQueryText(statement: string | null | undefined): string {
+  const src = (statement ?? '').trim().replace(/;\s*$/, '');
+  let out = '';
+  let quote: string | null = null;
+  let esc = false;
+  let ws = false;
+  for (const ch of src) {
+    if (quote) {
+      out += ch;
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      ws = true;
+      continue;
+    }
+    if (ws) out += ' ';
+    ws = false;
+    if (ch === "'" || ch === '"' || ch === '`') quote = ch;
+    out += ch;
+  }
+  return out;
+}
+
+/** What a result was produced BY: the statement (see `sameQueryText`), the
+ *  scope node it ran on and the connection. Drafts carry to a new result only
+ *  when this is unchanged — matching rows by key alone would move an edit made
+ *  on `users_stg` row 5 onto `users` row 5 after the FROM was changed, because
+ *  the edit's target table is resolved from the NEW statement. */
+export function carryScope(statement: string | null | undefined, node: string | null | undefined, connectionId: string | null | undefined): string {
+  return JSON.stringify([sameQueryText(statement), node ?? null, connectionId ?? null]);
+}
+
+/** A new result arrived in the same tab. `same` = same column shape AND same
+ *  `carryScope`: then the drafts are keyed for `restorePending`. Otherwise every
+ *  draft (open editors parked first, so a half-typed cell is counted too) is
+ *  dropped and counted — the grid tells the person instead of losing them
+ *  silently or re-targeting them. */
+export function carryOrDrop(flow: CarryFlow, rows: unknown[][], same: boolean): { carry: Map<string, RowPatch> | null; dropped: number } {
+  if (same) return { carry: carryPending(flow, rows), dropped: 0 };
+  if (flow.liveRows === rows) parkOpenEditors(flow);
+  else flow.editing = null;
+  return { carry: null, dropped: flow.pending.size };
+}
+
 /** After the re-seed: re-attach each carried draft to the row with the same
  *  key in the NEW `rows` (first match; a non-unique key never doubles a draft).
  *  Returns how many drafts found no row and were dropped. */

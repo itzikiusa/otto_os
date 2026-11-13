@@ -16,6 +16,7 @@
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { cadenceLabel } from '../../lib/cadence';
   import TriggerStatus from './TriggerStatus.svelte';
+  import ScheduledByTasks from './ScheduledByTasks.svelte';
 
   interface Props {
     workflowId: string;
@@ -379,6 +380,7 @@
     </div>
   {/each}
   </LoadState>
+  <ScheduledByTasks {workflowId} />
 
   <!-- Trigger from chat: a copy-paste message that starts this workflow by name.
        Copy → paste into Slack/Telegram → pin it for one-click reuse. -->

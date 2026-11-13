@@ -30,7 +30,7 @@ under [Capabilities & limitations](#10-capabilities--limitations) and
 | **Where requests run** | Inside `ottod` (the daemon), via a shared `reqwest` client — *not* the webview. |
 | **Persistence** | Workspace-scoped SQLite (collections, requests, environments, history, automations). |
 | **Scoping & auth** | All data is per-workspace. Reads need workspace **Viewer**; mutations + execution need **Editor**. |
-| **Guarded by default** | SSRF guard blocks loopback, private, link-local (incl. `169.254.169.254`), CGNAT, etc. Two sanctioned ways through: an SSH-tunnelled request (the bastion resolves + dials, so the local check is skipped) and the per-workspace **"Private addresses: allowed"** toggle in the request toolbar (admin-only; `settings.api_client.allow_local`) for localhost/private dev servers. With the toggle on, cloud-metadata / link-local addresses (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`, `100.100.100.200`, `192.0.0.192`, in any IPv6-embedded form) and Otto's own daemon port (7700, `$OTTO_PORT`; any hostname on that port, and any non-public address on it) **stay blocked** — at the pre-flight check, at connect time and on every redirect hop, for REST, gRPC, WebSocket and the OAuth token exchange alike. All other daemon egress keeps the full guard. |
+| **Guarded by default** | SSRF guard blocks loopback, private, link-local (incl. `169.254.169.254`), CGNAT, etc. Two sanctioned ways through: an SSH-tunnelled request (the bastion resolves + dials, so the local check is skipped — except that cloud-metadata literals and names such as `metadata.google.internal` are still refused, before the send and per redirect hop) and the per-workspace **"Private addresses: allowed"** toggle in the request toolbar (admin-only, and a person's credential only — an agent gets 403 turning it on; `settings.api_client.allow_local`) for localhost/private dev servers. With the toggle on, cloud-metadata / link-local addresses (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`, `100.100.100.200`, `192.0.0.192`, in any IPv6-embedded form) and Otto's own daemon port (7700, `$OTTO_PORT`; any hostname on that port, and any non-public address on it) **stay blocked** — at the pre-flight check, at connect time and on every redirect hop, for REST, gRPC, WebSocket and the OAuth token exchange alike. All other daemon egress keeps the full guard. |
 | **Secrets** | Keychain-backed: secret auth members + secret environment variables live in the macOS **Keychain**; the DB stores opaque `$secret` markers (lazy-migrated on save, or in one pass via **Secure secrets**). History snapshots redact them to `***`. |
 
 ---
@@ -376,8 +376,11 @@ the workspace. Exactly one can be **active** at a time.
 
 - **Switch** — the header's **Environment ▾** menu (always visible) or **Make
   active** in the editor (`POST …/environments/{id}/activate`).
-- **New environment** / **⋯ → Rename…, Delete…** — Editor only. Delete says
-  how many Keychain secrets go with it.
+- **New environment** / **⋯ → Rename…, Delete…** — Editor only, and a
+  person's credential only: an environment's variables decide where its bound
+  secrets may go, so an agent session's token gets 403 on create / edit /
+  delete (it may still switch the active one). Delete says how many Keychain
+  secrets go with it.
 - **Variables table** — Name · Value · Secret, one row per variable; typing
   into the trailing blank row adds another. **Save changes** is enabled once
   something changed; switching environments with unsaved edits asks first.
@@ -622,9 +625,9 @@ mutations and execution require Editor.** Cross-workspace IDs 404
 | `PATCH /requests/{id}` | Editor | `UpsertApiRequestReq` → `Request` |
 | `DELETE /requests/{id}` | Editor | → 204 |
 | `GET /environments` | Viewer | → `Environment[]` |
-| `POST /environments` | Editor | `UpsertApiEnvironmentReq` → `Environment` |
-| `PATCH /environments/{id}` | Editor | `UpsertApiEnvironmentReq` → `Environment` |
-| `DELETE /environments/{id}` | Editor | → 204 |
+| `POST /environments` | Editor, person only | `UpsertApiEnvironmentReq` → `Environment` |
+| `PATCH /environments/{id}` | Editor, person only | `UpsertApiEnvironmentReq` → `Environment` |
+| `DELETE /environments/{id}` | Editor, person only | → 204 |
 | `POST /environments/{id}/activate` | Editor | → `Environment` (sets active) |
 | `GET /history` (`?limit&q&status&request_id&source=agent\|human`) | Viewer | → filtered `ApiHistoryEntry[]` |
 | `GET /history/{id}` | Viewer | → `ApiHistoryEntry` |
@@ -820,6 +823,14 @@ sensitive data your endpoints returned; clear history when appropriate.
   gets the url recorded on the first person's send. A person can confirm a new
   host (which rebinds the secret there); an agent never can (the step / call
   fails with `needs_confirm=new_host`, naming the target and the bound host).
+  A `{{base_url}}` binding follows the selected environment for a person. Each
+  person's send also records the host it reached next to the binding; once a
+  binding has a recorded host, an **agent's** send (a session, workflow or
+  automation) may take the secret only to a recorded host, or to the bound
+  url's host when the url names it outright — selecting another environment no
+  longer carries it there. A binding with no recorded host yet (saved before
+  this release) keeps following the selected environment for agents too, until
+  a person's next send records one.
 - **Redirects never carry a credential to another host.** A request with an
   API-key header, or one using a Keychain environment variable (which may sit
   in any header or body), stops at a redirect to a different host (an

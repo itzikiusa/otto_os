@@ -33,7 +33,7 @@ fn bound_session(auth: &AuthContext) -> Option<&otto_core::Id> {
 }
 
 /// A person's own credential (not an agent's, an MCP token's or a share link).
-fn is_human(auth: &AuthContext) -> bool {
+pub(crate) fn is_human(auth: &AuthContext) -> bool {
     bound_session(auth).is_none() && !auth.mcp_only && !auth.is_scoped()
 }
 
@@ -76,6 +76,71 @@ pub async fn caller_scope(pool: &DbPool, auth: &AuthContext) -> Result<AsMe> {
                 .autonomy(&a)
                 .await?
                 .slack_as_me_teams,
+        )),
+    }
+}
+
+/// A governed Slack write AS THE PERSON (the twin of `otto-mcp`'s
+/// `outward::slack_write_as_me`): a post or reaction with `as` user|me, and
+/// every read-cursor move.
+fn governed_as_me_write(bare: &str, args: &Value) -> bool {
+    let as_me = matches!(
+        args.get("as").and_then(Value::as_str).map(str::trim),
+        Some("user" | "me")
+    );
+    match bare {
+        "slack_post_message" | "slack_react" => as_me,
+        "slack_mark_unread" => true,
+        _ => false,
+    }
+}
+
+/// An AGENT's governed Slack write as the person is person-only: the call a
+/// person approves replays AS THEM, and a person may act in every team they
+/// connected. So the REQUESTING credential's own grant is checked here,
+/// before the approval is asked: `Some(reason)` refuses the call outright.
+/// A session the person runs directly may use any team ([`AsMe::All`]). A
+/// personal agent must NAME one of the teams its owner allowed — a default
+/// team is resolved only on the replay, among all of the person's teams —
+/// and that name must pick the same team among all of them.
+pub async fn team_refusal<S: ChannelsCtx>(
+    s: &S,
+    auth: &AuthContext,
+    bare: &str,
+    args: &Value,
+) -> Option<String> {
+    if !governed_as_me_write(bare, args) || is_human(auth) {
+        return None;
+    }
+    let scope = match s.slack_as_me(auth).await {
+        Ok(AsMe::All) => return None,
+        Ok(scope) => scope,
+        Err(e) => return Some(e.to_string()),
+    };
+    let Some(want) = args
+        .get("team")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    else {
+        return Some(
+            "name the Slack `team` to act in as the person — this personal agent may act only \
+             in the Slack workspaces its owner allowed (otto.slack_my_workspaces lists them)"
+                .into(),
+        );
+    };
+    let teams = match store::list(s.secrets(), &auth.effective_user.id).await {
+        Ok(t) => t,
+        Err(e) => return Some(e.to_string()),
+    };
+    let allowed = match store::pick(&teams, Some(want), &scope) {
+        Ok(m) => m.team_id.clone(),
+        Err(e) => return Some(e.to_string()),
+    };
+    match store::pick(&teams, Some(want), &AsMe::All) {
+        Ok(m) if m.team_id == allowed => None,
+        _ => Some(format!(
+            "'{want}' names more than one of your Slack workspaces — pass the team id ({allowed})"
         )),
     }
 }

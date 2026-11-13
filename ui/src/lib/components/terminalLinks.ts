@@ -1,4 +1,8 @@
-/** Terminal text recognition is independent of session state and side effects. */
+/** Terminal text recognition is independent of session state and side effects.
+ * Which file a printed relative path names is decided on click, against the
+ * session's folders (lib/pathLinks): nothing here joins it onto a cwd. */
+import { looksLikeNonPath } from '../pathLinks/resolve.ts';
+
 export interface TerminalLink {
   start: number;
   end: number;
@@ -11,14 +15,19 @@ export interface TerminalLink {
 const SOURCE_EXTS = new Set('rs ts tsx js jsx mjs cjs go py rb java kt c h cc cpp hpp cs php swift scala sh bash zsh sql html css scss svelte vue json toml yaml yml md mdx txt xml proto lock cfg ini env csv log'.split(' '));
 const SOURCE_NAMES = new Set(['Dockerfile', 'Makefile', 'Justfile', 'LICENSE', 'README', '.gitignore', '.env']);
 
-function fileTarget(raw: string): Pick<TerminalLink, 'path' | 'line' | 'col'> | null {
+// `file`: needs an extension or a known name (prose is full of `a/b`).
+// `dir`: also a folder printed with its trailing slash (`marketing/tour/`).
+// `any`: an explicit OSC8 target — the program said it is a link.
+function fileTarget(raw: string, mode: 'file' | 'dir' | 'any' = 'file'): Pick<TerminalLink, 'path' | 'line' | 'col'> | null {
   if (!raw || /[\n\r\x00]/.test(raw) || /^[a-z][a-z\d+.-]*:\/\//i.test(raw)) return null;
   const location = /(?::([1-9]\d*)(?::([1-9]\d*))?|#L([1-9]\d*)(?:C([1-9]\d*))?)$/.exec(raw);
   const path = location ? raw.slice(0, location.index) : raw;
-  if (/[<>|*?]/.test(path) || path.includes(':') || path.endsWith('/')) return null;
+  if (/[<>|*?]/.test(path) || path.includes(':') || path === '/' || looksLikeNonPath(path)) return null;
+  const folder = path.endsWith('/');
+  if (folder && (mode === 'file' || location || (mode === 'dir' && !/^(?:~\/|\.{1,2}\/|\/)?[\p{L}\p{N}_@.+-]+(?:\/[\p{L}\p{N}_@.+-]+)*\/$/u.test(path)))) return null;
   const name = path.split('/').at(-1) ?? '';
   const ext = /\.([a-z\d]{1,12})$/i.exec(name)?.[1].toLowerCase();
-  if (!SOURCE_NAMES.has(name) && !(ext && (path.includes('/') || SOURCE_EXTS.has(ext)))) return null;
+  if (!folder && mode !== 'any' && !SOURCE_NAMES.has(name) && !(ext && (path.includes('/') || SOURCE_EXTS.has(ext)))) return null;
   const line = location ? Number(location[1] ?? location[3]) : undefined;
   const col = location?.[2] || location?.[4] ? Number(location[2] ?? location[4]) : undefined;
   if ((line !== undefined && !Number.isSafeInteger(line)) || (col !== undefined && !Number.isSafeInteger(col))) return null;
@@ -50,7 +59,7 @@ export function scanTerminalLinks(text: string, allowFiles = true): TerminalLink
     if (/^https?:\/\//i.test(raw)) {
       hits.push({ start, end: start + raw.length, text: raw, kind: 'url' });
     } else {
-      const target = allowFiles ? fileTarget(raw) : null;
+      const target = allowFiles ? fileTarget(raw, 'dir') : null;
       if (!target) return;
       hits.push({ start, end: start + raw.length, text: raw, kind: 'file', ...target });
     }
@@ -73,23 +82,16 @@ export function scanTerminalLinks(text: string, allowFiles = true): TerminalLink
     }
     // Tokenize separately from classifying: no guessing routes, host:port, or
     // task identifiers merely because they contain slash characters.
-    for (const match of text.matchAll(/(?<![\p{L}\p{N}_@.+/:~-])(?:~\/|\.{1,2}\/|\/)?[\p{L}\p{N}_@.+-]+(?:\/[\p{L}\p{N}_@.+-]+)*(?::\d+(?::\d+)?|#L\d+(?:C\d+)?)?/gu)) {
+    for (const match of text.matchAll(/(?<![\p{L}\p{N}_@.+/:~-])(?:~\/|\.{1,2}\/|\/)?[\p{L}\p{N}_@.+-]+(?:\/[\p{L}\p{N}_@.+-]+)*(?:\/(?![\p{L}\p{N}_@+-])|(?::\d+(?::\d+)?|#L\d+(?:C\d+)?))?/gu)) {
       add(match[0].replace(/[.,;]+$/, ''), match.index);
     }
   }
   return hits.sort((a, b) => a.start - b.start);
 }
 
-/** No file lookup or cwd mutation: resolve exactly the printed path. */
-export function resolveTerminalFile(path: string, cwd: string): string | null {
-  if (path.startsWith('/') || path.startsWith('~/')) return path;
-  if (!cwd) return null;
-  // The daemon canonicalizes through the real filesystem. Lexically removing
-  // '..' here changes its meaning when an earlier component is a symlink.
-  return `${cwd.replace(/\/$/, '')}/${path}`;
-}
-
-export function oscTerminalLink(target: string, cwd: string, allowFiles: boolean): TerminalLink | null {
+/** An OSC8 target as a link: http(s), or a local file / folder exactly as the
+ * program wrote it (a relative one is resolved on click, like printed text). */
+export function oscTerminalLink(target: string, allowFiles: boolean): TerminalLink | null {
   if (/^https?:\/\//i.test(target)) return { start: 0, end: target.length, text: target, kind: 'url' };
   if (!allowFiles) return null;
   let raw = target;
@@ -104,10 +106,8 @@ export function oscTerminalLink(target: string, cwd: string, allowFiles: boolean
       raw = decodeURIComponent(original[1]) + (original[2] ?? '');
     } catch { return null; }
   } else if (/^[a-z][a-z\d+.-]*:/i.test(raw)) return null;
-  const parsed = fileTarget(raw);
-  if (!parsed?.path) return null;
-  const path = resolveTerminalFile(parsed.path, cwd);
-  return path ? { start: 0, end: target.length, text: target, kind: 'file', ...parsed, path } : null;
+  const parsed = fileTarget(raw, 'any');
+  return parsed?.path ? { start: 0, end: target.length, text: target, kind: 'file', ...parsed, path: parsed.path } : null;
 }
 
 interface Cell {

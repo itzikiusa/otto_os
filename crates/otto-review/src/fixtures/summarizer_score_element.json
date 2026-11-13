@@ -1,0 +1,42 @@
+[
+ {
+  "path": "internal/handler/deposit.go",
+  "line": 101,
+  "severity": "bug",
+  "category": "correctness",
+  "title": "Deposit limit compared in cents vs units",
+  "body": "The new limit check compares cents to units, so every deposit over 1.00 is rejected.",
+  "evidence": "deposit.go:101 multiplies by 100 once; limits.go:22 already stores cents",
+  "reasoning": "Valid deposits fail.",
+  "suggested_fix": "Drop the second multiplication.",
+  "disposition": "verified",
+  "source_ids": [
+   "batch:1:claim:1",
+   "batch:2:claim:1"
+  ]
+ },
+ {
+  "path": "internal/handler/deposit.go",
+  "line": 140,
+  "severity": "warn",
+  "title": "Error swallowed",
+  "body": "The audit write error is logged and dropped.",
+  "evidence": "deposit.go:140 ignores the error from audit.Write",
+  "disposition": "verified",
+  "source_ids": [
+   "batch:2:claim:2"
+  ]
+ },
+ {
+  "body": "Claim batch:1:claim:2 (missing nil check on the wallet)",
+  "disposition": "not_relevant",
+  "evidence": "wallet.go:12 returns a non-nil wallet or an error",
+  "source_ids": [
+   "batch:1:claim:2"
+  ]
+ },
+ {
+  "lens_score": 6,
+  "score_reason": "one must-fix and one should-fix defect verified"
+ }
+]

@@ -888,7 +888,7 @@
 >
   {#snippet leading()}
     {#if creating || editId}
-      <button class="icon-btn" title="Back to Scheduled Tasks" aria-label="Back to Scheduled Tasks" disabled={busy} onclick={closeForm}>
+      <button class="icon-btn" title="Back to scheduled tasks" aria-label="Back to scheduled tasks" disabled={busy} onclick={closeForm}>
         <Icon name="chevronLeft" size={14} />
       </button>
     {/if}
@@ -1008,7 +1008,7 @@
       {/if}
 
       {#if fKind === 'workflow'}
-        <p class="hint">The task launches this workflow on its cadence and reports the run outcome.</p>
+        <p class="hint">The task launches this workflow on its cadence and reports the run outcome — or add a Schedule trigger on the workflow itself.</p>
       {:else if fProvider === 'shell'}
         <label class="field">
           <span>Shell command</span>
@@ -1238,7 +1238,7 @@
           actionIcon="plus"
           onaction={startCreate}
         >
-          <AutomateGuide current="scheduled-tasks" />
+          <AutomateGuide current="scheduled-tasks" open />
         </EmptyState>
       {/snippet}
       <ul class="tasks">

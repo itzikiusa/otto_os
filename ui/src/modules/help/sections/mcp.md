@@ -84,7 +84,7 @@ There are no other shortcuts specific to this page. For app-wide keys, see [Keyb
 - **Dry run never calls the tool.** It validates and shows what would be called, so it can't reflect the tool's own validation.
 - Results are redacted and capped at 500 rows. Cost in dollars isn't metered; bytes are the proxy.
 - An MCP token can only reach the MCP endpoints, never the rest of Otto's API.
-- **Settings → MCP Servers** is a separate, simpler list: per-workspace servers written into `.mcp.json` when a session starts, without governance. Its **Connections MCP** switch turns Otto's built-in tools on or off for every workspace at once, replacing the per-workspace attach choices on this page.
+- **Native servers are not governed.** A server set to *Native* is written into `.mcp.json` when a session starts and the agent calls it directly: no policy, approval or audit. Switch it to *Governed* from ⋯ when its calls should go through Otto. The old **Settings → MCP servers** link opens **External servers** here.
 
 ## Related
 

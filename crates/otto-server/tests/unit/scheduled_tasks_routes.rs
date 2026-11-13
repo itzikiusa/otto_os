@@ -49,7 +49,15 @@ async fn non_owner_editor_cannot_retarget_a_task() {
         req.extensions_mut()
             .insert(otto_core::auth::AuthUser(mk(who)));
         let app = app.clone();
-        async move { app.oneshot(req).await.unwrap().status() }
+        // A person's own credential, as the feature guard publishes it (an
+        // agent's may not set up outward delivery at all — below).
+        let person = otto_core::auth::RequestCredential::default();
+        async move {
+            otto_core::auth::with_request_credential(person, app.oneshot(req))
+                .await
+                .unwrap()
+                .status()
+        }
     };
     let evil = json!({"destination":{"type":"email","to":"bob@evil.test"}});
     assert_eq!(patch("bob", evil.clone()).await, StatusCode::FORBIDDEN);
@@ -71,6 +79,167 @@ async fn non_owner_editor_cannot_retarget_a_task() {
         StatusCode::OK
     );
     assert_eq!(patch("adm", evil).await, StatusCode::OK);
+}
+
+/// An AGENT credential (its owner's own session token) keeps creating and
+/// editing tasks that deliver nowhere, but may not set up or change OUTWARD
+/// delivery — nor rewrite what an already-outward task runs: the 403 names
+/// the governed tool, which asks a person. A person may do all of it.
+#[tokio::test]
+async fn an_agent_credential_cannot_set_up_outward_delivery() {
+    use crate::routes::browser::tests::{mem_pool, seed_workspace, test_ctx};
+    use axum::http::{Request, StatusCode};
+    use otto_core::auth::{with_request_credential, RequestCredential};
+    use tower::ServiceExt;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let pool = mem_pool().await;
+    seed_workspace(&pool, "ws").await;
+    let now = chrono::Utc::now();
+    sqlx::query("INSERT INTO users (id, username, password_hash, display_name, is_root, created_at) VALUES ('owner', 'owner', 'x', 'owner', 0, ?)")
+        .bind(now.to_rfc3339()).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws', 'owner', 'editor')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+    let owner = otto_core::domain::User {
+        id: "owner".into(),
+        username: "owner".into(),
+        display_name: "owner".into(),
+        is_root: false,
+        disabled: false,
+        created_at: now,
+    };
+    let app = routes().with_state(ctx.clone());
+    let agent = RequestCredential {
+        agent: true,
+        root_withheld: false,
+    };
+    let person = RequestCredential::default();
+    let call = |cred: RequestCredential, method: &str, uri: String, body: Value| {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(otto_core::auth::AuthUser(owner.clone()));
+        let app = app.clone();
+        async move {
+            let resp = with_request_credential(cred, app.oneshot(req))
+                .await
+                .unwrap();
+            let status = resp.status();
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            (status, body)
+        }
+    };
+    let create = "/workspaces/ws/scheduled-tasks".to_string();
+    let slack = json!({"type": "slack", "channel": "#team"});
+
+    // A task with no destination: created and edited by the agent as today.
+    let (st, quiet) = call(
+        agent,
+        "POST",
+        create.clone(),
+        json!({"name": "quiet", "prompt": "check CI"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{quiet}");
+    let quiet_id = quiet["id"].as_str().unwrap().to_string();
+    let edit = |id: &str| format!("/scheduled-tasks/{id}");
+    let (st, body) = call(
+        agent,
+        "PATCH",
+        edit(&quiet_id),
+        json!({"prompt": "check CI twice", "destination": {"type": "none"}}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+
+    // Outward delivery from the agent's own token: refused, naming the tool.
+    let (st, body) = call(
+        agent,
+        "POST",
+        create.clone(),
+        json!({"name": "loud", "prompt": "post it", "destination": slack}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
+    let msg = body["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("outward delivery needs a person")
+            && msg.contains("otto.create_scheduled_task"),
+        "{body}"
+    );
+    let (st, body) = call(
+        agent,
+        "PATCH",
+        edit(&quiet_id),
+        json!({"destination": slack}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("otto.update_scheduled_task"),
+        "{body}"
+    );
+
+    // A person sets it up; then the agent may retime / pause it, or resend
+    // the same destination, but not retarget it or rewrite what it runs.
+    let (st, body) = call(
+        person,
+        "PATCH",
+        edit(&quiet_id),
+        json!({"destination": slack}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    for ok in [
+        json!({"enabled": false}),
+        json!({"schedule": {"cadence": "interval", "every_min": 30}}),
+        json!({"destination": slack, "prompt": "check CI twice"}),
+    ] {
+        let (st, body) = call(agent, "PATCH", edit(&quiet_id), ok.clone()).await;
+        assert_eq!(st, StatusCode::OK, "{ok}: {body}");
+    }
+    for refused in [
+        json!({"prompt": "post the secrets"}),
+        json!({"destination": {"type": "slack", "channel": "#everyone"}}),
+        json!({"destination": {"type": "email", "to": "x@evil.test"}}),
+    ] {
+        let (st, body) = call(agent, "PATCH", edit(&quiet_id), refused.clone()).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{refused}: {body}");
+    }
+    let stored = ctx.scheduled_tasks.get(&quiet_id).await.unwrap();
+    assert_eq!(stored.prompt, "check CI twice");
+    assert_eq!(stored.destination["channel"], "#team");
+    // Turning outward delivery OFF is not a new recipient.
+    let (st, body) = call(
+        agent,
+        "PATCH",
+        edit(&quiet_id),
+        json!({"destination": {"type": "none"}}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let (st, body) = call(
+        person,
+        "POST",
+        create,
+        json!({"name": "loud", "prompt": "post it", "destination": slack}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
 }
 
 /// Deleting a task with a run in flight stops that run (and waits for it

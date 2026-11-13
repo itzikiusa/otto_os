@@ -70,14 +70,28 @@ class LightMode {
     return viewport.isPhone || (viewport.isTablet && this.onItsSide);
   }
 
-  /** Light is in effect: chosen on this device AND the screen is a phone's. */
+  /** One route the person opened in the full app from the gate (a "Continue
+   *  on phone" link to a terminal session): light steps aside while that
+   *  route shows and is back once they move on. Never remembered. */
+  private fullVisit = $state<string | null>(null);
+
+  /** Light is in effect: chosen on this device AND the screen is a phone's,
+   *  except on the route of a {@link openFullOnce} visit. */
   get active(): boolean {
-    return this.chosen && this.phoneSized;
+    return this.chosen && this.phoneSized && (this.fullVisit === null || router.parts.join('/') !== this.fullVisit);
+  }
+
+  /** Show `route` (e.g. `agents/<id>`) in the full app for this one visit,
+   *  without changing the person's choice — the gate's way into a session
+   *  the light version leaves out, so a handoff link is never a dead end. */
+  openFullOnce(route: string): void {
+    this.fullVisit = route;
   }
 
   /** Switch and remember it for this device. Turning light on from a page it
    *  hides goes to Threads instead of leaving the person on the gate. */
   set(on: boolean): void {
+    this.fullVisit = null;
     this.chosen = on;
     lsSet(LS_PHONE_LIGHT, on ? '1' : '0');
     if (on && this.phoneSized && !lightRouteAllowed(router.parts[0] ?? '')) router.go(LIGHT_HOME);

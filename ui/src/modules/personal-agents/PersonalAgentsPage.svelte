@@ -134,7 +134,7 @@
       <AutomateTasksTabs active={sub === 'rooms' ? 'rooms' : 'agents'} />
     {/snippet}
     {#snippet actions()}
-      <AutomateGuideButton current="scheduled-tasks" />
+      <AutomateGuideButton current="personal-agents" />
     {/snippet}
   </PageHeader>
   {/if}
@@ -170,7 +170,7 @@
             variant="page"
             onaction={() => (creating = true)}
           >
-            <AutomateGuide current="scheduled-tasks" />
+            <AutomateGuide current="personal-agents" open />
           </EmptyState>
         {/snippet}
         <div class="pa-home">

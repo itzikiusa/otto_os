@@ -47,6 +47,25 @@ type StatusCountsEntry = ((i64, i64), crate::store::StatusCounts);
 type GraphCacheEntry = (i64, Vec<(String, Arc<GraphPayload>)>);
 /// Cached graph payloads kept per vault (full view + a few local views).
 const GRAPH_CACHE_PER_VAULT: usize = 6;
+/// Backlinks per page when the caller names no limit, and the most one
+/// request may ask for (each row may read its source note for context).
+const BACKLINKS_DEFAULT_LIMIT: usize = 100;
+const BACKLINKS_MAX_LIMIT: usize = 200;
+
+/// What a guarded replace finds at its target just before the rename.
+enum Recheck {
+    Absent,
+    /// Not a regular file (FIFO, socket, device).
+    Special,
+    Regular(Vec<u8>),
+}
+
+/// Test-only: run a closure (an "external editor" save) at the exact point
+/// a guarded replace re-checks its target, keyed by the target's file name.
+#[cfg(test)]
+type SaveRaceHook = Box<dyn FnOnce() + Send>;
+#[cfg(test)]
+pub(crate) static SAVE_RACE_HOOKS: Mutex<Vec<(String, SaveRaceHook)>> = Mutex::new(Vec::new());
 
 /// Created only while publication is held, and dropped before that lock. Errors
 /// or cancellation after a durable write invalidate derived caches, never source.
@@ -1250,6 +1269,72 @@ impl VaultEngine {
         name: &str,
         bytes: &[u8],
     ) -> Result<()> {
+        Self::atomic_replace_guarded(parent, name, bytes, None).await
+    }
+
+    /// [`Self::atomic_replace_at`] that refuses to replace a file someone
+    /// else changed: `unchanged` holds the bytes the caller's conflict check
+    /// passed on (`None` = the file was absent). The temp is written and
+    /// flushed FIRST, then the target is re-read and compared immediately
+    /// before the rename, so an external editor's save during the history
+    /// snapshot and temp write is never overwritten. An absent target is
+    /// created with `NOREPLACE`, closing that window completely. A mismatch is
+    /// the ordinary "changed on disk" conflict; the editor's bytes stay on disk.
+    pub(crate) async fn atomic_replace_if_unchanged(
+        parent: &OwnedFd,
+        name: &str,
+        bytes: &[u8],
+        unchanged: Option<&[u8]>,
+        what: &str,
+    ) -> Result<()> {
+        Self::atomic_replace_guarded(parent, name, bytes, Some((unchanged, what))).await
+    }
+
+    /// The target as it is right before a guarded rename, read through the
+    /// held parent fd: `NOFOLLOW` (a swapped-in symlink is refused) and
+    /// `NONBLOCK` (a FIFO put in its place cannot park the save), and only a
+    /// regular file's bytes are read (checked by `fstat` on the opened fd).
+    async fn recheck_target(parent: &OwnedFd, name: &str) -> Result<Recheck> {
+        let fd = match rustix::fs::openat(
+            parent,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(Errno::NOENT) => return Ok(Recheck::Absent),
+            Err(Errno::LOOP) => {
+                return Err(Error::Forbidden(
+                    "text artifact target must not be a symlink".into(),
+                ))
+            }
+            // ENXIO: a socket or a write-only FIFO end — not a regular file.
+            Err(Errno::NXIO | Errno::OPNOTSUPP) => return Ok(Recheck::Special),
+            Err(e) => {
+                return Err(Error::Internal(format!(
+                    "recheck text artifact {name}: {e}"
+                )))
+            }
+        };
+        let stat = rustix::fs::fstat(&fd)
+            .map_err(|e| Error::Internal(format!("recheck text artifact {name}: {e}")))?;
+        if !FileType::from_raw_mode(stat.st_mode).is_file() {
+            return Ok(Recheck::Special);
+        }
+        let mut file = tokio::fs::File::from_std(std::fs::File::from(fd));
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .await
+            .map_err(|e| Error::Internal(format!("recheck text artifact {name}: {e}")))?;
+        Ok(Recheck::Regular(bytes))
+    }
+
+    async fn atomic_replace_guarded(
+        parent: &OwnedFd,
+        name: &str,
+        bytes: &[u8],
+        guard: Option<(Option<&[u8]>, &str)>,
+    ) -> Result<()> {
         let temp = format!(".{name}.otto-tmp-{}", otto_core::new_id());
         let mode = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
             .map(|stat| Mode::from_bits_truncate(stat.st_mode & 0o777))
@@ -1270,8 +1355,65 @@ impl VaultEngine {
                 .await
                 .map_err(|e| Error::Internal(format!("flush text artifact temp {temp}: {e}")))?;
             drop(file);
-            rustix::fs::renameat(parent, temp.as_str(), parent, name)
-                .map_err(|e| Error::Internal(format!("replace text artifact {name}: {e}")))?;
+            match guard {
+                None => rustix::fs::renameat(parent, temp.as_str(), parent, name)
+                    .map_err(|e| Error::Internal(format!("replace text artifact {name}: {e}")))?,
+                Some((expected, what)) => {
+                    #[cfg(test)]
+                    {
+                        // Taken out first: no lock is held while the hook runs.
+                        let hook = {
+                            let mut hooks = SAVE_RACE_HOOKS.lock().unwrap();
+                            let at = hooks.iter().position(|(n, _)| n == name);
+                            at.map(|i| hooks.remove(i).1)
+                        };
+                        if let Some(hook) = hook {
+                            hook();
+                        }
+                    }
+                    match Self::recheck_target(parent, name).await? {
+                        Recheck::Absent if expected.is_some() => {
+                            return Err(Error::Conflict(format!(
+                                "{what} changed on disk (removed meanwhile)"
+                            )))
+                        }
+                        // A FIFO/socket/device holds no readable content to
+                        // lose (and reading it again would block): only an
+                        // existing-target replace may proceed over it.
+                        Recheck::Special if expected.is_none() => {
+                            return Err(Error::Conflict(format!(
+                                "{what} changed on disk (created meanwhile)"
+                            )))
+                        }
+                        Recheck::Regular(now) if Some(now.as_slice()) != expected => {
+                            return Err(Error::Conflict(format!(
+                                "{what} changed on disk (hash {})",
+                                hex_sha256(&now)
+                            )))
+                        }
+                        _ => {}
+                    }
+                    if expected.is_none() {
+                        rustix::fs::renameat_with(
+                            parent,
+                            temp.as_str(),
+                            parent,
+                            name,
+                            rustix::fs::RenameFlags::NOREPLACE,
+                        )
+                        .map_err(|e| match e {
+                            Errno::EXIST => Error::Conflict(format!(
+                                "{what} changed on disk (created meanwhile)"
+                            )),
+                            e => Error::Internal(format!("create text artifact {name}: {e}")),
+                        })?;
+                    } else {
+                        rustix::fs::renameat(parent, temp.as_str(), parent, name).map_err(|e| {
+                            Error::Internal(format!("replace text artifact {name}: {e}"))
+                        })?;
+                    }
+                }
+            }
             rustix::fs::fsync(parent)
                 .map_err(|e| Error::Internal(format!("flush text artifact directory: {e}")))
         }
@@ -1406,6 +1548,8 @@ impl VaultEngine {
         if !rel.to_ascii_lowercase().ends_with(".md") {
             return Err(Error::Invalid("notes must end in .md".into()));
         }
+        // Protected-path rule shared with read/rename/delete/restore.
+        Self::abs_guarded(&v.root_path, &rel)?;
         let lock = self.write_lock(&v.root_path);
         let _guard = lock.lock().await;
         let state = self.index_state(id);
@@ -1446,7 +1590,18 @@ impl VaultEngine {
             graph: self.graph_generation(id),
             complete: false,
         };
-        Self::atomic_replace_at(&parent, &name, content.as_bytes()).await?;
+        if if_hash.is_some() {
+            Self::atomic_replace_if_unchanged(
+                &parent,
+                &name,
+                content.as_bytes(),
+                before.as_deref(),
+                "note",
+            )
+            .await?;
+        } else {
+            Self::atomic_replace_at(&parent, &name, content.as_bytes()).await?;
+        }
         Self::commit_revision(&v.root_path, revision).await?;
         let written = rustix::fs::statat(&parent, name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
             .map_err(|e| Error::Internal(format!("written note metadata: {e}")))?;
@@ -1482,6 +1637,7 @@ impl VaultEngine {
                 "text artifacts must end in .yaml, .yml, .json, .d2, .mmd, .txt, or .csv (got {path})"
             )));
         }
+        Self::abs_guarded(&v.root_path, &rel)?;
         let bytes = content.as_bytes();
         if bytes.len() as u64 > MAX_FTS_BYTES {
             return Err(Error::PayloadTooLarge(format!(
@@ -1534,7 +1690,18 @@ impl VaultEngine {
             graph: self.graph_generation(id),
             complete: false,
         };
-        Self::atomic_replace_at(&parent, &name, bytes).await?;
+        if if_hash.is_some() {
+            Self::atomic_replace_if_unchanged(
+                &parent,
+                &name,
+                bytes,
+                before.as_deref(),
+                "text artifact",
+            )
+            .await?;
+        } else {
+            Self::atomic_replace_at(&parent, &name, bytes).await?;
+        }
         Self::commit_revision(&v.root_path, revision).await?;
         let written = rustix::fs::statat(&parent, name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
             .map_err(|e| Error::Internal(format!("written artifact metadata: {e}")))?;
@@ -1750,11 +1917,9 @@ impl VaultEngine {
             ix_after.insert(new.clone());
         }
 
-        if let Some(parent) = to_abs.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| Error::Internal(format!("mkdir: {e}")))?;
-        }
+        // Only the parents created here are taken back if the move fails.
+        let created = crate::created_dirs::create_parents(&to_abs, &to_rel)
+            .map_err(|e| Error::Internal(format!("mkdir: {e}")))?;
         // NOREPLACE closes the existence-check race with external editors too.
         let move_exclusive = |from: &Path, to: &Path| {
             rustix::fs::renameat_with(
@@ -1782,10 +1947,12 @@ impl VaultEngine {
                         tmp.display()
                     )));
                 }
+                crate::created_dirs::remove_created(&created);
                 return Err(error);
             }
-        } else {
-            move_exclusive(&from_abs, &to_abs)?;
+        } else if let Err(error) = move_exclusive(&from_abs, &to_abs) {
+            crate::created_dirs::remove_created(&created);
+            return Err(error);
         }
         #[cfg(test)]
         {
@@ -1910,7 +2077,14 @@ impl VaultEngine {
             )
             .await?;
             state.mutated(&[&src_now]);
-            Self::atomic_replace_at(&parent, &name, new_content.as_bytes()).await?;
+            Self::atomic_replace_if_unchanged(
+                &parent,
+                &name,
+                new_content.as_bytes(),
+                Some(content.as_bytes()),
+                &src_now,
+            )
+            .await?;
             Self::commit_revision(root, revision).await?;
             return Ok(count_here);
         }
@@ -2091,42 +2265,40 @@ impl VaultEngine {
         id: i64,
         path: &str,
     ) -> Result<Vec<Backlink>> {
-        self.backlinks_context_window(ws, id, path, 0, 100).await
+        Ok(self
+            .backlinks_page(ws, id, path, 0, BACKLINKS_DEFAULT_LIMIT)
+            .await?
+            .backlinks)
     }
 
-    /// Keep lightweight identities/counts compatible; hydrate at most 100
-    /// source contexts per request, independent of the note's total fan-in.
-    pub async fn backlinks_context_window(
+    /// One page of backlinks with their context snippets, plus the total.
+    /// `limit` 0 means the default; anything above [`BACKLINKS_MAX_LIMIT`] is
+    /// clamped, so neither a hub note's fan-in nor a caller (the UI, an MCP
+    /// agent) can make one request read and ship thousands of rows.
+    pub async fn backlinks_page(
         self: &Arc<Self>,
         ws: &str,
         id: i64,
         path: &str,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<Backlink>> {
+    ) -> Result<BacklinkPage> {
         let v = self.get_scoped(ws, id).await?;
         self.ensure_fresh(id);
         let rel = Self::check_rel(path)?;
+        let limit = match limit {
+            0 => BACKLINKS_DEFAULT_LIMIT,
+            n => n.min(BACKLINKS_MAX_LIMIT),
+        };
         let stem = rel.rsplit('/').next().unwrap_or(&rel);
         let stem_noext = stem.strip_suffix(".md").unwrap_or(stem).to_lowercase();
         let rel_lower = rel.to_lowercase();
-        let mut out = Vec::new();
-        for (index, (src, title, kind, hash)) in self
+        let (rows, total) = self
             .store
-            .backlinks_hashed(id, &rel)
-            .await?
-            .into_iter()
-            .enumerate()
-        {
-            if index < offset || index >= offset.saturating_add(limit.min(100)) {
-                out.push(Backlink {
-                    path: src,
-                    title,
-                    context: String::new(),
-                    kind,
-                });
-                continue;
-            }
+            .backlinks_hashed_page(id, &rel, offset, limit)
+            .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (src, title, kind, hash) in rows {
             let key = (id, src.clone(), rel.clone());
             let cached = self
                 .backlink_ctx
@@ -2184,7 +2356,12 @@ impl VaultEngine {
                 kind,
             });
         }
-        Ok(out)
+        Ok(BacklinkPage {
+            backlinks: out,
+            total,
+            offset,
+            limit,
+        })
     }
 
     /// Absolute, guarded path of an attachment for streaming.
@@ -2277,12 +2454,16 @@ impl VaultEngine {
         if !visible(meta.get(&focus_rel).unwrap_or(&None)) {
             return Err(Error::NotFound(format!("note {focus_rel}")));
         }
+        // Breadth-first and capped (crate::local_graph): the nearest notes
+        // win; `found` counts every visible note the walk saw, admitted or not.
         let mut keep: Vec<String> = vec![focus_rel.clone()];
         let mut seen: HashSet<String> = HashSet::from([focus_rel.clone()]);
         let mut edges: HashSet<(String, String)> = HashSet::new();
         let mut frontier = vec![focus_rel];
+        let mut truncated = false;
+        let mut found = 1u64;
         for _ in 0..depth {
-            if frontier.is_empty() {
+            if frontier.is_empty() || truncated {
                 break;
             }
             let pairs = self.store.link_neighbors(id, &frontier).await?;
@@ -2297,7 +2478,8 @@ impl VaultEngine {
             for (p, m) in self.store.notes_meta_for(id, &fresh).await? {
                 meta.insert(p, m);
             }
-            let mut next = Vec::new();
+            let mut ties: HashMap<String, usize> = HashMap::new();
+            let mut layer = Vec::new();
             for (s, d) in pairs {
                 if s == d
                     || !visible(meta.get(&s).unwrap_or(&None))
@@ -2306,13 +2488,27 @@ impl VaultEngine {
                     continue;
                 }
                 for n in [&s, &d] {
-                    if seen.insert(n.clone()) {
-                        keep.push(n.clone());
-                        next.push(n.clone());
+                    if !seen.contains(n) {
+                        *ties.entry(n.clone()).or_default() += 1;
                     }
                 }
-                edges.insert((s, d));
+                layer.push((s, d));
             }
+            found += ties.len() as u64;
+            let room = crate::local_graph::MAX_NODES.saturating_sub(keep.len());
+            let (admitted, over) = crate::local_graph::admit_layer(ties, room);
+            truncated |= over;
+            let mut next = Vec::with_capacity(admitted.len());
+            for n in admitted {
+                seen.insert(n.clone());
+                keep.push(n.clone());
+                next.push(n);
+            }
+            edges.extend(
+                layer
+                    .into_iter()
+                    .filter(|(s, d)| seen.contains(s) && seen.contains(d)),
+            );
             frontier = next;
         }
         // Edges among kept nodes the BFS frontier never walked (the outer
@@ -2324,6 +2520,14 @@ impl VaultEngine {
                 }
             }
         }
+        let total_edges = edges.len() as u64;
+        let rank: HashMap<String, usize> = keep
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.clone(), i))
+            .collect();
+        let (edges, dropped) = crate::local_graph::cap_edges(&rank, edges);
+        truncated |= dropped;
         let tags = self.store.note_tags_for(id, &keep).await?;
         let mut nodes = NodeTable::default();
         let mut index: HashMap<String, u32> = HashMap::new();
@@ -2352,7 +2556,12 @@ impl VaultEngine {
             .collect();
         edge_list.sort_unstable();
         let flat: Vec<u32> = edge_list.iter().flat_map(|(a, b)| [*a, *b]).collect();
-        Ok(finish_graph(nodes, flat, false, orphans_ok))
+        let mut payload = finish_graph(nodes, flat, truncated, orphans_ok);
+        if truncated {
+            payload.total_nodes = Some(found);
+            payload.total_edges = Some(total_edges);
+        }
+        Ok(payload)
     }
 
     /// Build the global/local graph. The SQL reads stay async; the O(N+E)
@@ -2492,26 +2701,51 @@ fn assemble_graph(
                 adj.entry(*a).or_default().push(*b);
                 adj.entry(*b).or_default().push(*a);
             }
+            // Breadth-first and capped like the indexed walk (crate::local_graph).
+            let mut order: Vec<u32> = vec![fi];
             let mut keep: HashSet<u32> = HashSet::from([fi]);
             let mut frontier = vec![fi];
+            let mut truncated = false;
+            let mut found = 1u64;
             for _ in 0..depth {
-                let mut next = Vec::new();
-                for n in frontier {
-                    for m in adj.get(&n).into_iter().flatten() {
-                        if keep.insert(*m) {
-                            next.push(*m);
+                if frontier.is_empty() || truncated {
+                    break;
+                }
+                let mut ties: HashMap<u32, usize> = HashMap::new();
+                for n in &frontier {
+                    for m in adj.get(n).into_iter().flatten() {
+                        if !keep.contains(m) {
+                            *ties.entry(*m).or_default() += 1;
                         }
                     }
                 }
-                frontier = next;
+                found += ties.len() as u64;
+                let room = crate::local_graph::MAX_NODES.saturating_sub(order.len());
+                let (admitted, over) = crate::local_graph::admit_layer(ties, room);
+                truncated |= over;
+                for m in &admitted {
+                    keep.insert(*m);
+                    order.push(*m);
+                }
+                frontier = admitted;
             }
             let remap = nodes.retain(&keep);
             edge_list.retain(|(a, b)| keep.contains(a) && keep.contains(b));
-            let edges: Vec<u32> = edge_list
+            let total_edges = edge_list.len() as u64;
+            let rank: HashMap<u32, usize> =
+                order.iter().enumerate().map(|(i, n)| (*n, i)).collect();
+            let (capped, dropped) = crate::local_graph::cap_edges(&rank, edge_list);
+            truncated |= dropped;
+            let edges: Vec<u32> = capped
                 .iter()
                 .flat_map(|(a, b)| [remap[a], remap[b]])
                 .collect();
-            return Ok(finish_graph(nodes, edges, false, orphans_ok));
+            let mut payload = finish_graph(nodes, edges, truncated, orphans_ok);
+            if truncated {
+                payload.total_nodes = Some(found);
+                payload.total_edges = Some(total_edges);
+            }
+            return Ok(payload);
         }
 
         // Full mode: edge budget (degree-prioritized, deterministic).
@@ -2521,6 +2755,7 @@ fn assemble_graph(
             o.edge_budget
         };
         let mut truncated = false;
+        let total_edges = edge_list.len() as u64;
         if edge_list.len() > budget {
             truncated = true;
             let mut deg: Vec<u32> = vec![0; nodes.len()];
@@ -2532,7 +2767,11 @@ fn assemble_graph(
             edge_list.truncate(budget);
         }
         let edges: Vec<u32> = edge_list.iter().flat_map(|(a, b)| [*a, *b]).collect();
-        Ok(finish_graph(nodes, edges, truncated, orphans_ok))
+        let mut payload = finish_graph(nodes, edges, truncated, orphans_ok);
+        if truncated {
+            payload.total_edges = Some(total_edges);
+        }
+        Ok(payload)
     }
 }
 
@@ -2721,6 +2960,8 @@ fn finish_graph(
         flags: nodes.flags,
         edges,
         truncated,
+        total_nodes: None,
+        total_edges: None,
     }
 }
 

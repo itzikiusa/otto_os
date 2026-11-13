@@ -9,8 +9,12 @@
 //!   fan-out / orchestrator expansion, reviewer prompts, draft-comment parsing,
 //!   severity and run-completeness rules.
 //!
+//! - [`contract`]: the canonical example answer of every agent-output format
+//!   and the allowed-value lists the prompts and the readers share.
+//!
 //! otto-server mounts the routes and drives the ctx-bound orchestration.
 
+pub mod contract;
 pub mod engine;
 pub mod fallback;
 pub mod fix_goal;

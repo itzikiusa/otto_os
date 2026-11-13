@@ -17,9 +17,9 @@ async fn fixture() -> (Arc<VaultEngine>, tempfile::TempDir, i64) {
 }
 
 #[tokio::test]
-async fn backlink_context_reads_are_bounded_to_the_requested_window() {
+async fn backlinks_are_paged_with_a_total_and_a_hard_maximum() {
     let (e, dir, id) = fixture().await;
-    for i in 0..125 {
+    for i in 0..249 {
         std::fs::write(
             dir.path().join(format!("source-{i:03}.md")),
             format!("# Source {i}\nSee [[b]]"),
@@ -27,27 +27,32 @@ async fn backlink_context_reads_are_bounded_to_the_requested_window() {
         .unwrap();
     }
     e.scan(id).await.unwrap();
+    // The default page is bounded, whatever the note's fan-in.
     let first = e.backlinks("ws", id, "b.md").await.unwrap();
-    assert_eq!(first.len(), 126);
-    assert_eq!(
-        first.iter().filter(|row| !row.context.is_empty()).count(),
-        100
-    );
+    assert_eq!(first.len(), 100);
+    assert!(first.iter().all(|row| !row.context.is_empty()));
     assert_eq!(
         e.backlink_ctx.lock().unwrap().len(),
         100,
-        "only visible contexts are read"
+        "only the returned page's contexts are read"
     );
-    let next = e
-        .backlinks_context_window("ws", id, "b.md", 100, usize::MAX)
+    let page = e.backlinks_page("ws", id, "b.md", 100, 100).await.unwrap();
+    assert_eq!((page.total, page.offset, page.limit), (250, 100, 100));
+    assert_eq!(page.backlinks.len(), 100);
+    assert!(
+        page.backlinks[0].path > first[99].path,
+        "pages do not overlap"
+    );
+    // A huge limit is clamped to the maximum, never "everything".
+    let clamped = e
+        .backlinks_page("ws", id, "b.md", 0, usize::MAX)
         .await
         .unwrap();
-    assert_eq!(next.len(), 126);
-    assert_eq!(
-        next.iter().filter(|row| !row.context.is_empty()).count(),
-        26
-    );
-    assert_eq!(next[100].path, first[100].path);
+    assert_eq!((clamped.limit, clamped.backlinks.len()), (200, 200));
+    let tail = e.backlinks_page("ws", id, "b.md", 200, 200).await.unwrap();
+    assert_eq!((tail.total, tail.backlinks.len()), (250, 50));
+    let past = e.backlinks_page("ws", id, "b.md", 900, 0).await.unwrap();
+    assert_eq!((past.total, past.backlinks.len()), (250, 0));
 }
 
 #[tokio::test]
@@ -1032,6 +1037,53 @@ async fn local_graph_bfs_uses_indexed_neighbourhood() {
         engine.graph_local_indexed(id, &o).await.is_err(),
         "a reserved focus is hidden unless reserved=true"
     );
+}
+
+#[tokio::test]
+async fn local_graph_around_a_hub_is_capped_nearest_first() {
+    let engine = Arc::new(VaultEngine::new(otto_state::db::test_pool().await));
+    let dir = tempfile::tempdir().unwrap();
+    // hub → near-000..399; near-000 → far-000..049 (depth 2 only).
+    let near: String = (0..400).map(|i| format!("[[near-{i:03}]] ")).collect();
+    std::fs::write(dir.path().join("hub.md"), near).unwrap();
+    for i in 0..400 {
+        std::fs::write(dir.path().join(format!("near-{i:03}.md")), "near").unwrap();
+    }
+    let far: String = (0..50).map(|i| format!("[[far-{i:03}]] ")).collect();
+    std::fs::write(dir.path().join("near-000.md"), far).unwrap();
+    for i in 0..50 {
+        std::fs::write(dir.path().join(format!("far-{i:03}.md")), "far").unwrap();
+    }
+    let id = engine
+        .store
+        .create_vault("ws", "T", dir.path().to_str().unwrap(), true)
+        .await
+        .unwrap();
+    engine.scan(id).await.unwrap();
+    let o = graph_opts("local", Some("hub.md"), 3);
+    let mut ghosts = o.clone();
+    ghosts.ghosts = true; // the in-memory assembly path
+    for g in [
+        engine.graph_local_indexed(id, &o).await.unwrap(),
+        engine.graph_build(id, &ghosts).await.unwrap(),
+    ] {
+        assert_eq!(g.paths.len(), crate::local_graph::MAX_NODES);
+        assert!(g.truncated);
+        assert_eq!(g.total_nodes, Some(401), "the walk stops at the full layer");
+        assert!(g.paths.iter().any(|p| p == "hub.md"));
+        // Nearest first: the depth-2 notes never displace a depth-1 note.
+        assert!(
+            g.paths.iter().all(|p| !p.starts_with("far-")),
+            "{:?}",
+            g.paths
+        );
+        assert!(g.edges.len() / 2 <= crate::local_graph::MAX_EDGES);
+    }
+    // A small neighbourhood is whole and says so.
+    let small = graph_opts("local", Some("far-001.md"), 1);
+    let g = engine.graph_local_indexed(id, &small).await.unwrap();
+    assert!(!g.truncated);
+    assert_eq!(g.total_nodes, None);
 }
 
 #[tokio::test]

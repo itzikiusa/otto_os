@@ -9,6 +9,7 @@
   import SessionPickerModal from './SessionPickerModal.svelte';
   import {
     copyFilled,
+    filled,
     looksLikeCurl,
     pasteIntoSession,
     sendToApiClient,
@@ -16,6 +17,7 @@
     sendToVault,
     type SendCtx,
   } from './sendTo';
+  import { isMultiLine } from './pasteSafety';
 
   interface Props {
     ws: string;
@@ -51,7 +53,7 @@
         label: 'Terminal / agent session…',
         icon: 'terminal',
         disabled: empty || isImage,
-        title: 'Paste into a live session — never executed',
+        title: 'Paste into a live session — never executed (one line only for ssh / database sessions)',
         action: () => (picking = true),
       },
       {
@@ -90,7 +92,7 @@
 </button>
 
 {#if picking}
-  <SessionPickerModal {ws} onpick={(s) => void pick(s)} onclose={() => (picking = false)} />
+  <SessionPickerModal {ws} multiLine={isMultiLine(filled(ctx()))} onpick={(s) => void pick(s)} onclose={() => (picking = false)} />
 {/if}
 
 <style>

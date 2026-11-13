@@ -31,6 +31,7 @@ use otto_core::domain::{User, WorkspaceRole};
 use otto_core::{Error, Id};
 use serde::Deserialize;
 
+use crate::runtime::council::{CouncilFollowUpReq, CouncilRoundsResp};
 use crate::RuntimeCtx;
 
 mod drafts;
@@ -81,6 +82,10 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
         .route(
             "/runtime-sessions/{id}/council/synthesize",
             post(synthesize_council::<S>),
+        )
+        .route(
+            "/runtime-sessions/{id}/council/rounds",
+            get(council_rounds::<S>).post(follow_up_council::<S>),
         )
         .route(
             "/runtime-sessions/{id}",
@@ -364,6 +369,35 @@ async fn synthesize_council<S: RuntimeCtx>(
         .await?;
     let judge = ctx.agent_runtime().synthesize_council(&id, req).await?;
     Ok((StatusCode::CREATED, Json(judge)))
+}
+
+/// GET /runtime-sessions/{id}/council/rounds — the council's rounds
+/// (`{id}` = any of its threads).
+async fn council_rounds<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<CouncilRoundsResp>> {
+    authorized(&ctx, &user, &id).await?;
+    Ok(Json(ctx.agent_runtime().council_rounds(&id).await?))
+}
+
+/// POST /runtime-sessions/{id}/council/rounds — a follow-up round to every
+/// seat or the named ones; a seat still working queues it.
+async fn follow_up_council<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Id>,
+    Json(req): Json<CouncilFollowUpReq>,
+) -> ApiResult<(StatusCode, Json<CouncilRoundsResp>)> {
+    require_human(&ctx, &auth)?;
+    let s = authorized(&ctx, &user, &id).await?;
+    ctx.roles()
+        .check(&user, &s.workspace_id, WorkspaceRole::Editor)
+        .await?;
+    let rounds = ctx.agent_runtime().follow_up_council(&id, req).await?;
+    Ok((StatusCode::CREATED, Json(rounds)))
 }
 
 async fn get_one<S: RuntimeCtx>(

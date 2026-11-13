@@ -42,6 +42,20 @@ For written reports on how you work, open [Insights](#/walkthroughs/insights).
   Claude Code and Codex session on this Mac, grouped as External.
 - Windows: last 7, 30, 90 or 180 days, including today.
 
+**Remaining plan usage**
+
+- The **Remaining** card at the top of the overview shows, for each provider
+  login, how much of each plan limit is left and when it resets. It updates
+  once a minute while the page is open.
+- Codex numbers come from the files the Codex CLI already writes. A reading
+  older than 30 minutes is marked **Stale**, with its age.
+- Claude Code doesn't write its limits to disk. A Claude row shows numbers once
+  a structured Claude session reports them, or when you turn on **Check with
+  Anthropic** for that login. The check is off by default and asks before it
+  turns on: Otto runs that login's own `claude` CLI, which asks Anthropic, at
+  most once every 5 minutes while the page is open. **Check now** runs one.
+- A login Otto has no reading for shows **Unknown** and says why.
+
 **Headline cards**
 
 - **Total tokens**, with a bar split into input, cache write, cache read and

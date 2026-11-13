@@ -33,7 +33,7 @@
   import SkillEditor from './SkillEditor.svelte';
   import SkillActivity from './SkillActivity.svelte';
   import { metaList, parseFrontmatter, sourceLabel, type SkillGroup, type VariantSource } from './skillGroups';
-  import { deleteQuestion, installedNote, noteUserOwned, replaceQuestion } from './bundledActions';
+  import { deleteQuestion, installedNote, noteKeptCopies, noteUserOwned, replaceQuestion } from './bundledActions';
 
   interface Props {
     group: SkillGroup;
@@ -217,7 +217,7 @@
       const r = await skillLabApi.install(name);
       if (disposed || owner !== selectionKey || generation !== loadGeneration) return;
       toasts.success(updating ? 'Library copy updated' : 'Installed to library', installedNote(r, updating));
-      noteUserOwned(r.user_owned);
+      noteUserOwned(r.user_owned, r.kept_copies);
       onchanged({ name, source: 'library' });
     } catch (e) {
       toastError(`Couldn’t install ${group.name}`, e);
@@ -250,7 +250,8 @@
     if (!(await confirmer.ask(...deleteQuestion(group.name)))) return;
     try {
       if (disposed || owner !== selectionKey || generation !== loadGeneration) return;
-      await skillLabApi.remove(name);
+      const r = await skillLabApi.remove(name);
+      noteKeptCopies(r?.kept_copies);
       if (disposed || owner !== selectionKey || generation !== loadGeneration) return;
       toasts.success('Skill deleted', group.name);
       ondeleted();

@@ -587,28 +587,19 @@ pub async fn oauth2_token(
         form.push(("client_secret", &client_secret));
     }
 
-    // SSRF guard: never let the token endpoint point at an internal address —
-    // unless the workspace opted in to local/private targets, exactly like the
-    // requests the token is for (a dev Keycloak on localhost is the usual case).
+    // SSRF guard under the requests' own rule (a dev Keycloak on localhost is
+    // fine once the workspace allows private addresses; metadata and the
+    // daemon never): resolve + vet once, dial exactly those addresses. No
+    // redirects — a 307/308 would resend the form (the client secret /
+    // password) to wherever the endpoint points, around the host binding above.
     let allow_local = workspace_allows_local(&ctx, &wid).await;
-    if !allow_local {
-        otto_netguard::check_url(&req.token_url)
-            .await
-            .map_err(|m| ApiError(Error::Invalid(m)))?;
-    }
-
-    // A dedicated client: no redirects — a 307/308 would resend the form (the
-    // client secret / password) to wherever the endpoint points, around the
-    // host binding above — and the connect-time SSRF guard unless opted out.
-    let client = if allow_local {
-        reqwest::Client::builder()
-    } else {
-        otto_netguard::guarded_client_builder()
-    }
-    .user_agent("Otto-ApiClient/1.0")
-    .redirect(reqwest::redirect::Policy::none())
-    .build()
-    .map_err(|e| ApiError(Error::Internal(format!("http client: {e}"))))?;
+    let client = otto_netguard::pinned_client_builder_for(&req.token_url, allow_local)
+        .await
+        .map_err(|m| ApiError(Error::Invalid(m)))?
+        .user_agent("Otto-ApiClient/1.0")
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| ApiError(Error::Internal(format!("http client: {e}"))))?;
     let mut resp = client
         .post(&req.token_url)
         .header("Accept", "application/json")

@@ -1,9 +1,9 @@
 <script lang="ts" module>
-  export type DetailsTab = 'design' | 'otto' | 'versions' | 'links';
+  export type DetailsTab = 'design' | 'otto' | 'versions' | 'links' | 'comments';
 </script>
 
 <script lang="ts">
-  // The artifact view's side panel: Otto · Versions · Links (Site Studio puts
+  // The artifact view's side panel: Otto · Versions · Links · Comments (Site Studio puts
   // its Design inspector first). Otto is the default (the Otto panel pins the
   // brief on top); "Find references" lives inside Links (LinksTab). Below 900 px the view
   // hides this panel behind its "Details" button — "Back to design" returns.
@@ -17,6 +17,9 @@
     otto: Snippet;
     versions: Snippet;
     links: Snippet;
+    /** Review comments (the tab shows when given); `commentCount` = open threads. */
+    comments?: Snippet;
+    commentCount?: number | null;
     /** Site Studio's inspector, as a first "Design" tab. */
     design?: Snippet;
     backButton?: HTMLButtonElement;
@@ -30,6 +33,8 @@
     otto,
     versions,
     links,
+    comments,
+    commentCount = null,
     design,
     backButton = $bindable(),
     onback,
@@ -40,6 +45,7 @@
     { id: 'otto', label: 'Otto' },
     { id: 'versions', label: 'Versions', count: versionCount },
     { id: 'links', label: 'Links', count: linkCount },
+    ...(comments ? [{ id: 'comments' as const, label: 'Comments', count: commentCount || null }] : []),
   ]);
 </script>
 
@@ -60,6 +66,8 @@
       {@render otto()}
     {:else if tab === 'versions'}
       {@render versions()}
+    {:else if tab === 'comments' && comments}
+      {@render comments()}
     {:else}
       {@render links()}
     {/if}

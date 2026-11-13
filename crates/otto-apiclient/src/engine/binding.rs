@@ -341,11 +341,100 @@ pub fn marker_bound_host(
     host_of(&substitute(&owner.url, bind_vars))
 }
 
+/// The hosts an AGENT's send may take the `$secret` marker owned by `owner`
+/// to once its binding is strict ([`strict_agent_binding`]): the hosts a
+/// person's sends resolved it to ([`api_secrets::sent_hosts`]), plus the bound
+/// url's host when the url names it outright — a `{{base}}` url then no longer
+/// follows the environment an agent selects (F5).
+pub fn agent_marker_hosts(
+    owner: &ApiRequest,
+    blob: Option<&BTreeMap<String, String>>,
+) -> BTreeSet<String> {
+    let mut hosts = blob.map(api_secrets::sent_hosts).unwrap_or_default();
+    let url = match blob.and_then(api_secrets::bound_url) {
+        Some(url) => Some(url),
+        None if is_agent_authored(owner) => None,
+        None => Some(owner.url.as_str()),
+    };
+    if let Some(host) = url.and_then(literal_host) {
+        hosts.insert(host);
+    }
+    hosts
+}
+
+/// The host of `url` when no `{{variable}}` can change it (none in its scheme
+/// or authority); `None` for a templated host.
+fn literal_host(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if scheme.contains("{{") || authority.contains("{{") {
+        return None;
+    }
+    host_of(url)
+}
+
+/// Whether an `agent`'s send is held to [`agent_marker_hosts`]: only once a
+/// person's send has recorded a host for the binding. A binding recorded
+/// before sent hosts existed (an upgrade) keeps following the selected
+/// environment until a person sends it — unattended workflows and
+/// automations keep working; the person's next send makes it strict.
+pub fn strict_agent_binding(agent: bool, blob: Option<&BTreeMap<String, String>>) -> bool {
+    agent && blob.is_some_and(|blob| !api_secrets::sent_hosts(blob).is_empty())
+}
+
+/// Whether the marker owned by `owner` may go to `target`: the bound url
+/// resolved with the environment's own variables ([`marker_bound_host`]), or
+/// for a strict agent binding [`agent_marker_hosts`] only.
+pub fn marker_send_bound(
+    agent: bool,
+    owner: &ApiRequest,
+    blob: Option<&BTreeMap<String, String>>,
+    bind_vars: &serde_json::Map<String, Value>,
+    target: &str,
+) -> bool {
+    if strict_agent_binding(agent, blob) {
+        agent_marker_hosts(owner, blob).contains(target)
+    } else {
+        marker_bound_host(owner, blob, bind_vars).as_deref() == Some(target)
+    }
+}
+
 /// The secret in `req` that would leave its bound host, if any (see the
-/// section comment and [`marker_bound_host`]). `secrets` lets the check read
-/// each marker's recorded binding; `None` applies the legacy rule.
+/// section comment and [`marker_bound_host`]), under a PERSON's rule — see
+/// [`find_unbound_secret_as`]. `secrets` lets the check read each marker's
+/// recorded binding; `None` applies the legacy rule.
 #[allow(clippy::too_many_arguments)]
 pub async fn find_unbound_secret(
+    repo: &ApiClientRepo,
+    secrets: Option<&Arc<dyn SecretStore>>,
+    wid: &Id,
+    req: &ExecuteApiReq,
+    vars: &serde_json::Map<String, Value>,
+    bind_vars: &serde_json::Map<String, Value>,
+    env_blob: &BTreeMap<String, String>,
+    secret_keys: &[String],
+    bound_hosts: Option<&BTreeSet<String>>,
+) -> EngineResult<Option<UnboundSecret>> {
+    find_unbound_secret_as(
+        false,
+        repo,
+        secrets,
+        wid,
+        req,
+        vars,
+        bind_vars,
+        env_blob,
+        secret_keys,
+        bound_hosts,
+    )
+    .await
+}
+
+/// [`find_unbound_secret`] for an `agent` caller or a person: an agent's
+/// `$secret` markers are held to [`agent_marker_hosts`] ([`marker_send_bound`]).
+#[allow(clippy::too_many_arguments)]
+pub async fn find_unbound_secret_as(
+    agent: bool,
     repo: &ApiClientRepo,
     secrets: Option<&Arc<dyn SecretStore>>,
     wid: &Id,
@@ -366,8 +455,12 @@ pub async fn find_unbound_secret(
             ),
             None => None,
         };
-        let bound = marker_bound_host(&owner, blob.as_ref(), bind_vars);
-        if bound.as_deref() != Some(target.as_str()) {
+        if !marker_send_bound(agent, &owner, blob.as_ref(), bind_vars, &target) {
+            let bound = if strict_agent_binding(agent, blob.as_ref()) {
+                agent_marker_hosts(&owner, blob.as_ref()).into_iter().next()
+            } else {
+                marker_bound_host(&owner, blob.as_ref(), bind_vars)
+            };
             return Ok(Some(UnboundSecret { target, bound }));
         }
     }
@@ -431,11 +524,29 @@ pub async fn record_person_bindings(
         let Ok(mut blob) = api_secrets::load_blob_checked_async(secrets, &own_ref).await else {
             continue;
         };
-        if let Some(url) = person_send_binding(&owner, &blob, &target, bind_vars, confirmed_url) {
-            api_secrets::set_bound_url(&mut blob, &url);
+        let rebind = person_send_binding(&owner, &blob, &target, bind_vars, confirmed_url);
+        if let Some(url) = &rebind {
+            api_secrets::set_bound_url(&mut blob, url);
+        }
+        let sent = person_sent_host(&owner, &mut blob, &target, bind_vars);
+        if rebind.is_some() || sent {
             let _ = api_secrets::store_blob_async(secrets, &own_ref, &blob).await;
         }
     }
+}
+
+/// Record `target` as a host a person's send resolved the marker's binding
+/// to (what an agent's later send may reach, [`agent_marker_hosts`]); `true`
+/// when the blob changed. Only a send that stayed on its binding counts.
+pub fn person_sent_host(
+    owner: &ApiRequest,
+    blob: &mut BTreeMap<String, String>,
+    target: &str,
+    bind_vars: &serde_json::Map<String, Value>,
+) -> bool {
+    api_secrets::has_secret_values(blob)
+        && marker_bound_host(owner, Some(&*blob), bind_vars).as_deref() == Some(target)
+        && api_secrets::add_sent_host(blob, target)
 }
 
 /// The 409 for a secret leaving its bound host. `agent` callers are told a

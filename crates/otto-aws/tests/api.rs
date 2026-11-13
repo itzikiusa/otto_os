@@ -1459,9 +1459,10 @@ async fn s3_upload_streams_and_aborts_an_interrupted_multipart_upload() {
         .await;
         ids.push(a["id"].as_str().unwrap().to_string());
     }
-    // Complete body → streamed, nothing spooled under <data_dir>/tmp.
+    // Complete body → streamed, nothing spooled under <data_dir>/tmp. A
+    // person's upload (the UI): an overwrite on this prod account pays no HEAD.
     let payload = "x".repeat(200_000);
-    let (st, r) = put_raw(
+    let (st, r) = as_person(put_raw(
         &ctx,
         &root,
         &format!(
@@ -1470,7 +1471,7 @@ async fn s3_upload_streams_and_aborts_an_interrupted_multipart_upload() {
         ),
         Body::from(payload.clone()),
         Some(payload.len() as u64),
-    )
+    ))
     .await;
     assert_eq!(st, StatusCode::CREATED, "{r}");
     assert_eq!(r["size"], 200_000);
@@ -1496,7 +1497,7 @@ async fn s3_upload_streams_and_aborts_an_interrupted_multipart_upload() {
             "client went away",
         )),
     ];
-    let (st, r) = put_raw(
+    let (st, r) = as_person(put_raw(
         &ctx,
         &root,
         &format!(
@@ -1505,7 +1506,7 @@ async fn s3_upload_streams_and_aborts_an_interrupted_multipart_upload() {
         ),
         Body::from_stream(futures_util::stream::iter(chunks)),
         Some(10 * 1024 * 1024),
-    )
+    ))
     .await;
     assert!(st.is_client_error(), "{st} {r}");
     // The abort runs detached after the child is reaped; give it a moment.
@@ -1523,6 +1524,77 @@ async fn s3_upload_streams_and_aborts_an_interrupted_multipart_upload() {
     assert!(
         aborted,
         "interrupted upload was not aborted:\n{}",
+        calls_log()
+    );
+    assert!(
+        !calls_log()
+            .lines()
+            .any(
+                |l| (l.contains("PROFILE=upload-ok ") || l.contains("PROFILE=upload-cut "))
+                    && l.contains("ARGS=s3api head-object")
+            ),
+        "a person's overwrite must not HEAD the key:\n{}",
+        calls_log()
+    );
+}
+
+/// The request's credential: a person signed in to Otto (the UI).
+fn as_person<F: std::future::Future>(fut: F) -> impl std::future::Future<Output = F::Output> {
+    otto_core::auth::with_request_credential(otto_core::auth::RequestCredential::default(), fut)
+}
+
+/// F7: an agent's `overwrite=true` over an EXISTING key on a production
+/// account is refused before anything is uploaded; the fake's head-object
+/// always answers "exists". Without `overwrite` it is the usual 409.
+#[tokio::test]
+async fn s3_upload_an_agent_cannot_replace_a_prod_object() {
+    let ctx = TestCtx::new().await;
+    let root = seed_user(&ctx.pool, "root", true).await;
+    let (_, a, _) = call(
+        &ctx,
+        &root,
+        "POST",
+        "/aws/accounts",
+        Some(profile_req("upload-agent", "upload-agent")),
+    )
+    .await;
+    let id = a["id"].as_str().unwrap().to_string();
+    let agent = otto_core::auth::RequestCredential {
+        agent: true,
+        root_withheld: false,
+    };
+    let uri = |overwrite: &str| {
+        format!("/aws/accounts/{id}/s3/buckets/logs-prod/object?key=up/agent.txt{overwrite}")
+    };
+    let (st, r) = otto_core::auth::with_request_credential(
+        agent,
+        put_raw(
+            &ctx,
+            &root,
+            &uri("&overwrite=true"),
+            Body::from("v"),
+            Some(1),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{r}");
+    assert!(
+        r["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("replacing an object on a production account")),
+        "{r}"
+    );
+    let (st, r) = otto_core::auth::with_request_credential(
+        agent,
+        put_raw(&ctx, &root, &uri(""), Body::from("v"), Some(1)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{r}");
+    assert!(
+        !calls_log()
+            .lines()
+            .any(|l| l.contains("PROFILE=upload-agent ") && l.contains("ARGS=s3 cp")),
+        "nothing was uploaded:\n{}",
         calls_log()
     );
 }

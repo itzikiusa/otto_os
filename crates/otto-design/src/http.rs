@@ -295,6 +295,7 @@ pub fn router<S: DesignCtx>() -> Router<S> {
         .route("/design/admin/storage", get(storage::<S>))
         .route("/design/admin/auto-tidy", put(set_auto_tidy::<S>))
         .merge(crate::brand::http::routes::<S>())
+        .merge(crate::comments::http::routes::<S>())
         .merge(crate::site::http::routes::<S>())
 }
 

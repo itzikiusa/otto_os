@@ -232,9 +232,9 @@
   import { ui } from '../stores/ui.svelte';
   import { viewport } from '../stores/viewport.svelte';
   import { ws } from '../stores/workspace.svelte';
-  import { openFile } from '../stores/openfile.svelte';
   import { openExternal } from '../external';
-  import { terminalLinksForRow, resolveTerminalFile, oscTerminalLink, type TerminalLink } from './terminalLinks';
+  import { terminalLinksForRow, oscTerminalLink, type TerminalLink } from './terminalLinks';
+  import { activatePathLink, hoverPathLink, showPathLinkMenu, type PathLinkTarget } from '../pathLinks/open';
   import { keyContext, registerFindOwner } from '../keys';
   import { parkFind, takeFind } from './termFindMemo';
   import { copyText, copyWithToast } from '../clipboard';
@@ -1764,23 +1764,22 @@
   }
 
   // Native OSC8 has xterm priority; text links supplement it without ever
-  // interpreting output as a shell command or application route.
-  function localFileContext(): { cwd: string; allowed: boolean } {
+  // interpreting output as a shell command or application route. A file link
+  // is resolved on click against the session's folders (lib/pathLinks/open.ts).
+  function localFileContext(): { target: PathLinkTarget; allowed: boolean } {
     const session = ws.sessions.find(s => s.id === sessionId);
-    return { cwd: session?.cwd ?? '', allowed: !shareToken && !socketFactory && session?.kind === 'agent' };
+    return { target: { sessionId, cwd: session?.cwd, workspaceId: session?.workspace_id }, allowed: !shareToken && !socketFactory && session?.kind === 'agent' };
   }
-
+  let hoveredLink: TerminalLink | null = null; // the right-click target (onLinkMenu)
   function activateLink(event: MouseEvent, link: TerminalLink): void {
     event.preventDefault();
+    if (event.button !== 0 || event.ctrlKey) return; // a right-click / ⌃-click is the link menu's
     if (link.kind === 'url') {
       if (socketFactory) { void copyWithToast(link.text, 'the link'); return; }
       void openExternal(link.text);
-    } else if (link.path) {
-      const context = localFileContext();
-      const path = context.allowed ? resolveTerminalFile(link.path, context.cwd) : null;
-      if (path) openFile.open(path, link.line, link.col);
-    }
+    } else if (localFileContext().allowed) void activatePathLink(link, localFileContext().target);
   }
+  const onLinkMenu = (e: MouseEvent) => { if (hoveredLink?.kind === 'file' && localFileContext().allowed) showPathLinkMenu(e, hoveredLink, localFileContext().target); };
 
   function makeLinkProvider(): LinkProvider {
     return {
@@ -1794,8 +1793,8 @@
           range: hit.range,
           decorations: { pointerCursor: true, underline: true },
           activate: (event: MouseEvent) => activateLink(event, hit),
-          hover: () => { if (term?.element) term.element.title = hit.path ? (resolveTerminalFile(hit.path, context.cwd) ?? hit.path) : hit.text; },
-          leave: () => { term?.element?.removeAttribute('title'); },
+          hover: () => { hoveredLink = hit; if (hit.path) hoverPathLink(hit, context.target, title => { if (hoveredLink === hit) term?.element?.setAttribute('title', title); }); else term?.element?.setAttribute('title', hit.text); },
+          leave: () => { hoveredLink = null; term?.element?.removeAttribute('title'); },
         })));
       },
     };
@@ -1829,10 +1828,10 @@
       linkHandler: {
         allowNonHttpProtocols: true,
         activate(event, target) {
-          const context = localFileContext();
-          const link = oscTerminalLink(target, context.cwd, context.allowed);
+          const link = oscTerminalLink(target, localFileContext().allowed);
           if (link) activateLink(event, link);
         },
+        hover: (_event, target) => { hoveredLink = oscTerminalLink(target, localFileContext().allowed); }, leave: () => { hoveredLink = null; },
       },
       // Keep fallback-font glyphs (e.g. Hebrew from Cousine) inside their grid
       // cell when their advance width differs from the primary font's cell.
@@ -3041,6 +3040,7 @@
       onpointermove={onTouchPointerMove}
       onpointerup={onTouchPointerUp}
       onpointercancel={onTouchPointerCancel}
+      oncontextmenu={onLinkMenu}
     ></div>
 
     {#if exitCode !== null}

@@ -10,6 +10,8 @@ import { HOME_KINDS, isHomeKind, kindDef, type HomeBoxKind } from '../../lib/hom
 import type { Feature } from '../../lib/api/types';
 import { spaces } from '../../lib/stores/spaces.svelte';
 import { registerHomePort } from '../../lib/uiCommands/homePort';
+import { ws } from '../../lib/stores/workspace.svelte';
+import { probeSeedData, seedBoxes, type SeedBox } from './seed';
 
 export const MAX_VIEWS = 4;
 export const MAX_BOXES = 8;
@@ -153,18 +155,29 @@ class HomeStore {
     spaces.setNames(this.views.map((v) => v.name));
   }
 
-  /** First visit: seed one view with the kinds this user can actually see so the
-   *  page is never a blank canvas. No-op when anything is already persisted. */
+  /** First visit: seed one view so the page is never a blank canvas — Agents
+   *  at once, then Kubernetes / a DB dashboard only once the daemon says there
+   *  is a cluster / a dashboard (./seed.ts), so a new user never starts on
+   *  empty widgets. No-op when anything is already persisted; the late
+   *  widgets are only added while the seeded view is still untouched. */
   ensureDefault(can: (f: Feature) => boolean): void {
     if (this.views.length > 0) return;
-    const boxes: HomeBox[] = [];
-    for (const kind of ['sessions', 'k8s', 'db-dashboard'] as HomeBoxKind[]) {
-      const def = kindDef(kind);
-      if (can(def.feature)) boxes.push({ id: uid(), kind, w: def.w, h: def.h, config: {} });
-    }
-    this.views = [{ id: uid(), name: 'Overview', boxes }];
+    const toBox = (b: SeedBox): HomeBox => {
+      const def = kindDef(b.kind);
+      return { id: uid(), kind: b.kind, w: def.w, h: def.h, config: b.config };
+    };
+    const view: HomeView = { id: uid(), name: 'Overview', boxes: seedBoxes(can, { clusters: false, dashboardId: null }).map(toBox) };
+    this.views = [view];
     this.activeIndex = 0;
     this.persist();
+    if (!can('kubernetes') && !can('database')) return;
+    const seeded = JSON.stringify(view.boxes);
+    void probeSeedData(ws.currentId, can).then((data) => {
+      const cur = this.views;
+      if (cur.length !== 1 || cur[0].id !== view.id || JSON.stringify(cur[0].boxes) !== seeded) return;
+      const extra = seedBoxes(can, data).filter((b) => b.kind !== 'sessions').map(toBox);
+      if (extra.length) this.patchView(view.id, (x) => ({ ...x, boxes: [...x.boxes, ...extra].slice(0, MAX_BOXES) }));
+    });
   }
 
   // ── Views ────────────────────────────────────────────────────────────────

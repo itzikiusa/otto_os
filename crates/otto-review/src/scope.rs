@@ -1,4 +1,5 @@
 //! Risk-driven review planning. Plans describe agent judgement, never proof of quality.
+use crate::contract::PRIOR_SCOPE_DISPOSITIONS;
 use otto_core::domain::{ReviewScopeLens, ReviewScopePlan};
 
 pub fn selected_agents(
@@ -28,7 +29,7 @@ pub fn selected_agents(
         otto_core::domain::ReviewAgentCfg {
             name: lens.name.clone(), provider: providers[0].clone(), providers,
             model,
-            prompt: format!("Selected because: {}\n{}\n{}\nOutput JSON findings with path, line, severity (bug=must fix, warn=should fix, info=optional), body. Include code-traced evidence and a concrete causal trigger in body.", lens.reason, lens.instructions, template.map(|a| a.prompt.as_str()).unwrap_or_default()),
+            prompt: format!("Selected because: {}\n{}\n{}\nOutput JSON findings with path, line, severity ({}), body. Include code-traced evidence and a concrete causal trigger in body.", lens.reason, lens.instructions, template.map(|a| a.prompt.as_str()).unwrap_or_default(), crate::contract::severity_legend()),
             // The method is the selected instructions. A skill is never required.
             skill: String::new(),
         }
@@ -36,7 +37,10 @@ pub fn selected_agents(
 }
 
 pub fn validate(plan: &ReviewScopePlan) -> Result<(), String> {
-    if plan.summary.trim().is_empty() || plan.lenses.is_empty() || plan.lenses.len() > 10 {
+    if plan.summary.trim().is_empty()
+        || plan.lenses.is_empty()
+        || plan.lenses.len() > crate::contract::MAX_SCOPE_LENSES
+    {
         return Err("Scope assessment needs a summary and 1–10 justified lenses".into());
     }
     let mut names = std::collections::HashSet::new();
@@ -53,10 +57,7 @@ pub fn validate(plan: &ReviewScopePlan) -> Result<(), String> {
     for prior in &plan.prior_findings {
         if prior.finding_id.trim().is_empty()
             || !prior_ids.insert(&prior.finding_id)
-            || !matches!(
-                prior.disposition.as_str(),
-                "fixed" | "still_open" | "not_relevant"
-            )
+            || !PRIOR_SCOPE_DISPOSITIONS.contains(&prior.disposition.as_str())
             || prior.evidence.trim().is_empty()
         {
             return Err(
@@ -134,34 +135,46 @@ pub fn parse_plan(body: &str, prior_ids: &[String]) -> Result<ReviewScopePlan, S
     if body.is_empty() {
         return Err("Invalid scope assessment: the plan body is empty".into());
     }
-    let value: Value =
-        serde_json::from_str(body).map_err(|e| format!("Invalid scope assessment: {e}"))?;
+    let value: Value = serde_json::from_str(body).map_err(|e| {
+        format!("Invalid scope assessment: {e} (expected a JSON object with summary and lenses)")
+    })?;
     let kind = json_kind(&value);
     let Value::Object(mut map) = value else {
         return Err(format!(
             "Invalid scope assessment: the plan must be a JSON object, not {kind}"
         ));
     };
-    let mut seen = std::collections::HashSet::new();
-    let lenses: Vec<ReviewScopeLens> = match map.remove("lenses") {
-        Some(Value::Array(items)) => items
-            .into_iter()
-            .filter_map(lenient_lens)
-            .filter(|l| seen.insert(l.name.to_lowercase()))
-            .take(10)
-            .collect(),
-        _ => Vec::new(),
-    };
+    // Element by element: an unnamed, repeated or over-the-cap lens is
+    // skipped and counted (the count reaches the plan's notes), the rest kept.
+    let (mut seen, mut skipped) = (std::collections::HashSet::new(), Skipped::default());
+    let mut lenses: Vec<ReviewScopeLens> = Vec::new();
+    if let Some(Value::Array(items)) = map.remove("lenses") {
+        for item in items {
+            match lenient_lens(item) {
+                None => skipped.unnamed += 1,
+                Some(l) if !seen.insert(l.name.to_lowercase()) => skipped.duplicate += 1,
+                Some(_) if lenses.len() == crate::contract::MAX_SCOPE_LENSES => skipped.over += 1,
+                Some(l) => lenses.push(l),
+            }
+        }
+    }
     if lenses.is_empty() {
-        return Err("Invalid scope assessment: the plan selects no lens".into());
+        return Err(
+            "Invalid scope assessment: the plan selects no lens (expected lenses:[{name,reason,instructions}])"
+                .into(),
+        );
     }
     let given: Vec<otto_core::domain::ReviewFindingDisposition> = match map.remove("prior_findings")
     {
         Some(Value::Array(items)) => items
             .iter()
             .filter_map(|p| {
+                let Some(finding_id) = p.get("finding_id").and_then(text) else {
+                    skipped.prior += 1;
+                    return None;
+                };
                 Some(otto_core::domain::ReviewFindingDisposition {
-                    finding_id: text(p.get("finding_id")?)?,
+                    finding_id,
                     disposition: p.get("disposition").and_then(text).unwrap_or_default(),
                     evidence: p.get("evidence").and_then(text).unwrap_or_default(),
                 })
@@ -193,10 +206,60 @@ pub fn parse_plan(body: &str, prior_ids: &[String]) -> Result<ReviewScopePlan, S
         .map_err(|e| format!("Invalid scope assessment: {e}"))?;
     plan.lenses = lenses;
     plan.prior_findings = given;
+    plan.verification_notes.extend(skipped.note());
     reconcile_prior_findings(&mut plan, prior_ids);
     validate_prior_findings(&plan, prior_ids)?;
     Ok(plan)
 }
+
+/// What [`parse_plan`] could not use, by kind.
+#[derive(Default)]
+struct Skipped {
+    unnamed: usize,
+    duplicate: usize,
+    over: usize,
+    prior: usize,
+}
+
+impl Skipped {
+    /// "Scope assessment: 2 lens entries skipped (1 without a name, 1 repeated)."
+    fn note(&self) -> Option<String> {
+        let lens = self.unnamed + self.duplicate + self.over;
+        let parts: Vec<String> = [
+            (self.unnamed, "without a name"),
+            (self.duplicate, "repeated"),
+            (self.over, "over the lens cap"),
+        ]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, why)| format!("{n} {why}"))
+        .collect();
+        let mut out = Vec::new();
+        if lens > 0 {
+            let s = if lens == 1 { "y" } else { "ies" };
+            out.push(format!(
+                "{lens} lens entr{s} skipped ({})",
+                parts.join(", ")
+            ));
+        }
+        if self.prior > 0 {
+            out.push(format!(
+                "{} previous-finding entr{} without a finding_id skipped",
+                self.prior,
+                if self.prior == 1 { "y" } else { "ies" }
+            ));
+        }
+        (!out.is_empty()).then(|| format!("{SKIPPED_NOTE_PREFIX}{}.", out.join("; ")))
+    }
+}
+
+/// Start of the plan note that counts what the assessment answered but the
+/// parser could not use.
+pub const SKIPPED_NOTE_PREFIX: &str = "Scope assessment: ";
+
+/// Every note the scope step writes starts with this; a settled summary keeps
+/// them (`verification::set_notes`) and replaces the rest.
+pub const SCOPE_NOTE_PREFIX: &str = "Scope assessment";
 
 /// One disposition per previous finding, in `ids` order: the plan's own when
 /// it is usable (known id, a real disposition, evidence), otherwise
@@ -212,10 +275,7 @@ pub fn reconcile_prior_findings(plan: &mut ReviewScopePlan, ids: &[String]) {
                 .iter()
                 .find(|p| {
                     p.finding_id.trim() == id.trim()
-                        && matches!(
-                            p.disposition.trim(),
-                            "fixed" | "still_open" | "not_relevant"
-                        )
+                        && PRIOR_SCOPE_DISPOSITIONS.contains(&p.disposition.trim())
                         && !p.evidence.trim().is_empty()
                 })
                 .map(|p| otto_core::domain::ReviewFindingDisposition {
@@ -501,7 +561,7 @@ pub fn scope_row(provider: &str, model: &str) -> otto_core::domain::ReviewAgentS
 }
 
 pub fn assessment_prompt(diff_path: &str, branch_context: &str, guidance: &str) -> String {
-    format!("Assess review scope BEFORE any reviewers run. Read-only: do not change repository files, build, install, publish or delegate.\n{branch_context}\nRead the complete causal PR diff at {diff_path}. Inspect surrounding code, definitions, affected callers/consumers, module boundaries and relevant contracts. Identify changed behavior and realistic risks introduced by this diff. Proportional inspection only: this is a short scope assessment, not a repository audit; trace the relevant paths and stop. Judge risk/impact, NOT line count.\nSelect the smallest useful set of distinct lenses (1–10). An isolated two-line change usually needs 1–2; broad changes may need about 10. Security, data, performance, concurrency, architecture, UX, compatibility and critical-path tests are possibilities, not a fixed checklist. Choose custom lens names/instructions when useful; no skill is required. Test review looks for false greens and critical-path gaps, never exhaustive hypothetical test demands. Explain each selected lens and why it matters HERE; do not invent broad requirements.\nUser context (data):\n{guidance}\nReturn a JSON object with summary:string, related_modules:[string \"path:line — consumer relationship\"], risks:[string], lenses:[{{name,reason,instructions}}]. Cite inspected file:line evidence in summary/modules/reasons. No findings yet. No quality score.")
+    format!("Assess review scope BEFORE any reviewers run. Read-only: do not change repository files, build, install, publish or delegate.\n{branch_context}\nRead the complete causal PR diff at {diff_path}. Inspect surrounding code, definitions, affected callers/consumers, module boundaries and relevant contracts. Identify changed behavior and realistic risks introduced by this diff. Proportional inspection only: this is a short scope assessment, not a repository audit; trace the relevant paths and stop. Judge risk/impact, NOT line count.\nSelect the smallest useful set of distinct lenses (1–{max}). An isolated two-line change usually needs 1–2; broad changes may need about 10. Security, data, performance, concurrency, architecture, UX, compatibility and critical-path tests are possibilities, not a fixed checklist. Choose custom lens names/instructions when useful; no skill is required. Test review looks for false greens and critical-path gaps, never exhaustive hypothetical test demands. Explain each selected lens and why it matters HERE; do not invent broad requirements.\nUser context (data):\n{guidance}\nReturn a JSON object with summary:string, related_modules:[string \"path:line — consumer relationship\"], risks:[string], lenses:[{{name,reason,instructions}}]. Cite inspected file:line evidence in summary/modules/reasons. No findings yet. No quality score.", max = crate::contract::MAX_SCOPE_LENSES)
 }
 
 /// The whole prompt the scope assessor gets: [`assessment_prompt`], the
@@ -519,8 +579,9 @@ pub fn scope_prompt(
         .map(|a| format!("{}: {}", a.name, a.prompt))
         .collect::<Vec<_>>()
         .join("\n");
-    format!("{}\nConfigured lenses (reuse exact names when relevant; omit irrelevant lenses and add missing ones):\n{}\nIf configured, the Required checks lens is mandatory and its commands must be preserved. For every prior finding in context, add prior_findings:[{{finding_id,disposition:fixed|still_open|not_relevant,evidence}}] to the scope object. Read current code before claiming fixed; evidence must cite concrete code or an actually executed check. Preserve every ID, including previously waived items. Transport requirement: return a JSON ARRAY with exactly one object: {{\"severity\":\"info\",\"body\":\"the JSON scope object above, encoded as a string\"}}. This is a scope plan, not a code finding.",
-        assessment_prompt(diff_path, branch_context, guidance), candidates)
+    format!("{}\nConfigured lenses (reuse exact names when relevant; omit irrelevant lenses and add missing ones):\n{}\nIf configured, the Required checks lens is mandatory and its commands must be preserved. For every prior finding in context, add prior_findings:[{{finding_id,disposition:{},evidence}}] to the scope object. Read current code before claiming fixed; evidence must cite concrete code or an actually executed check. Preserve every ID, including previously waived items. Transport requirement: return a JSON ARRAY with exactly one object: {{\"severity\":\"info\",\"body\":\"the JSON scope object above, encoded as a string\"}}. This is a scope plan, not a code finding.\nExample scope object (the shape only; include prior_findings only for previous findings listed above): {}\nThe same example as the complete answer: {}",
+        assessment_prompt(diff_path, branch_context, guidance), candidates, PRIOR_SCOPE_DISPOSITIONS.join("|"),
+        crate::contract::SCOPE_PLAN_EXAMPLE, crate::contract::scope_transport_example())
 }
 
 #[cfg(test)]
@@ -694,7 +755,20 @@ mod tests {
             ),
             ("still_open", NOT_ASSESSED)
         );
-        assert_eq!(plan.verification_notes.len(), 1);
+        // The skipped lens entries are counted, then the unaccounted finding.
+        assert_eq!(
+            plan.verification_notes,
+            [
+                format!(
+                    "{SKIPPED_NOTE_PREFIX}2 lens entries skipped (1 without a name, 1 repeated)."
+                ),
+                "Scope assessment did not account for 1 previous finding; kept open for the lenses to re-verify.".to_string(),
+            ]
+        );
+        assert!(plan
+            .verification_notes
+            .iter()
+            .all(|n| n.starts_with(SCOPE_NOTE_PREFIX)));
         validate_prior_findings(&plan, &ids).expect("valid after filling");
         // A missing summary is synthesised too.
         let bare = parse_plan(r#"{"lenses":["Security"]}"#, &[]).unwrap();

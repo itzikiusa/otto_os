@@ -16,7 +16,7 @@ Spaces 01–04 on Home are the same spaces as the floating command bar's 01–04
 1. Open **Home** from the sidebar. On your first visit Otto creates a space called "Overview" with the widgets your role can see (Agents, Kubernetes, DB dashboard).
 2. Choose **Add widget** in the toolbar and pick a widget.
 3. Drag the corner handle to resize it, and drag the grip in its header onto another widget to reorder.
-4. Choose **+** next to the space tabs to add another space (up to 4). With 2 or more spaces, Home cycles between them every 30 seconds — choose **30s** to pause.
+4. Choose **+** next to the space tabs to add another space (up to 4). Home stays on the space you pick. To cycle between spaces every 30 seconds, choose **Paused** next to the tabs (or ⌘K **Cycle spaces every 30 s**); choose **30s** to stop again.
 5. Double-click a widget's header to zoom it to fill the page. Press `Esc` to exit.
 
 ## Everything it can do
@@ -35,7 +35,7 @@ Spaces 01–04 on Home are the same spaces as the floating command bar's 01–04
 - Switch with the tabs, `←` / `→`, a horizontal swipe on touch screens, ⌘K ("Home: space 01 · …"), or the floating bar's space picker.
 - Right-click a tab, or choose **⋯**, to rename, add or delete a space. You can't delete the last space.
 - Renaming a space in the floating bar renames it on Home, and the other way round.
-- **Cycling:** with 2 or more spaces, Home moves to the next space every 30 seconds. A thin progress bar under the toolbar shows the countdown. Cycling pauses while a widget is zoomed, the Add widget sheet is open, you are resizing or dragging, or the window is hidden. Any manual switch restarts the countdown.
+- **Cycling** (off by default): when you turn it on with 2 or more spaces, Home moves to the next space every 30 seconds. The choice is saved on this device. A thin progress bar under the toolbar shows the countdown. Cycling pauses while a widget is zoomed, the Add widget sheet is open, you are resizing or dragging, or the window is hidden. Any manual switch restarts the countdown.
 
 **Widgets** (up to 8 per space, on a 12-column grid)
 - **Agents:** working, needs-you, idle and open counts, plus the live session list. Click a row to open the session.

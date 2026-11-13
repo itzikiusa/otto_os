@@ -76,7 +76,7 @@ export const STUDIOS: readonly StudioInfo[] = [
     name: 'Whiteboard',
     blurb: 'Excalidraw boards, Mermaid and D2 diagrams',
     icon: 'edit',
-    note: 'Diagrams and boards made here are versioned in Design Hall. Boards drawn in Canvas are mirrored into the library automatically.',
+    note: 'Diagrams and boards made here are versioned in Design Hall. Canvas scenes (from agents or a story chat) are mirrored into the library automatically.',
     formats: ['mermaid', 'd2', 'excalidraw'],
   },
   {

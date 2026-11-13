@@ -7,11 +7,60 @@ multi-agent code review, Jira/Confluence product workflows, SSH/database
 connections, an HTTP API client, real token-usage tracking, and Slack/Telegram
 bridges so an agent can work a ticket from a chat thread.
 
-**Version 0.2.1** · macOS (Apple Silicon and Intel) · actively developed, so
+**Version 0.2.2** · macOS (Apple Silicon; Intel from source) · actively developed, so
 expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 
-🎬 **[Watch the 2:30 product tour](https://github.com/itzikiusa/otto_os/releases/download/v0.2.1/otto-tour-20261105.mp4)**
+🎬 **[Watch the product tour](https://github.com/itzikiusa/otto_os/releases/download/v0.2.2/otto-tour-20261113.mp4)**
 (also in the app under **Help → Walkthroughs**).
+
+### What's new in 0.2.2
+
+- **Threads: several agents, one conversation.** Ask another agent from inside
+  a thread: its answer arrives as a child thread, shown as a live card in the
+  parent and nested under it in the sidebar. **Council** sends one prompt to
+  two to four agents, shows the answers side by side and synthesizes them. One
+  **Related threads** control replaces the Peers tab and the relay bar. A
+  session now opens where it lives: a thread opened from ⌘K, a notice or Home
+  lands in Threads, and ⌘T on Threads starts a thread.
+- **One home per feature.** **Design Hall** is the home for designs (new
+  lobby, autosave, versions with compare / restore / approve, export; Canvas
+  boards and story attachments are mirrored in and stay read-only until
+  **Edit here**). **Skills Lab** holds skills and the evaluator. The **MCP
+  Control Plane** holds MCP servers, each running Native or Governed. Product
+  **Chat** and **Refine** are one tab.
+- **Agents ask first.** An agent can no longer confirm its own destructive
+  Kubernetes, AWS, Kafka or database change, turn off a connection's
+  Read-only setting, change its own instructions or delivery, post in Slack as
+  you, or edit API-client environments without a person. Approval cards show
+  where a message goes and its full text. Read-only database connections run
+  every statement in the database's own read-only mode.
+- **Usage you can trust.** Remaining plan usage per account on the Usage page;
+  Codex and Antigravity first-turn tokens are counted with their session
+  instead of as "External"; Insights reports follow your local calendar and
+  say "not available" instead of 0 for what was not measured.
+- **Paths that open.** A file or folder path in a terminal or a thread opens
+  from the folder where it really exists; folders open in the side panel or in
+  Finder; a path found nowhere says so.
+- **Phone.** An opt-in light version with five tabs (Threads, Connections,
+  Git, API, Usage) and one tap back to the full app.
+- **Git and pull requests.** The PR page is a workspace: PRs as tabs, a
+  timeline, per-commit diffs, viewed files, review requests, changes since
+  your review, reviewers, merge checks.
+- **Your work is kept.** A skill you edited in a CLI's own skills folder is
+  backed up instead of overwritten; an external editor's save is no longer
+  lost under a Vault save; a Canvas board the Hall cannot copy still opens;
+  Workbench "Paste into session" can no longer run what it pastes.
+- **Calmer machine.** Background agents wait when the Mac is overloaded, old
+  background sessions are archived, and the low-disk warning starts at 10 GB.
+
+See the [0.2.2 release notes](../../releases/tag/v0.2.2) for the full list,
+including behaviour changes to know before upgrading.
+
+| Threads — ask another agent | Council — rounds and synthesis |
+| :---: | :---: |
+| ![A thread with a child thread's live card, nested under it in the sidebar](docs/screenshots/threads-ask-agent.jpg) | ![A council of two agents answering round 2, with the synthesis of round 1](docs/screenshots/council-rounds.jpg) |
+| **Design Hall — comments on a design** | **Phone — the light version** |
+| ![A pinned comment on a checkout design, listed in the Comments tab](docs/screenshots/design-comments.jpg) | ![The phone light version with its five tabs](docs/screenshots/phone-light.jpg) |
 
 ### What's new in 0.2.1
 
@@ -104,16 +153,22 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
     `Thinking` blocks, inline MCP approval docks, `@file` typeahead, and
     explicit **Steer** (interrupt/nudge now) vs **Queue** (wait for turn end)
     submission.
-  - **Workspace inspector (`Files · Changes · Connections · Peers`):** multi-tab
+  - **Several agents in one conversation:** ask another agent from inside a
+    thread (its answer arrives as a child thread: a live card in the parent,
+    nested under it in the sidebar), or start a **Council**: one prompt to two
+    to four agents, answers side by side, follow-up rounds, and a judge that
+    synthesizes each round.
+  - **Workspace inspector (`Files · Changes · Connections`):** multi-tab
     file explorer with rendered Markdown/image preview + source lines, working-tree
     git status + Unified/Split diffs, live `otto_db_query` activity with 1-click
-    **Open side-by-side** Database Explorer, and direct **Session-to-Session**
-    message relay, broadcast, peer timeline, and **Session Rooms**.
+    **Open side-by-side** Database Explorer, and one **Related threads** control
+    for message relay, broadcast and **Session Rooms**. File and folder paths in
+    a message are links that open where the path really exists.
 - **Agent sessions** — run `claude`, `codex`, `agy`, a plain shell, or **any
   custom agent CLI you register** (custom providers are first-class on every
   agent surface, with per-surface provider/model pickers) in real PTY-backed
-  terminals you can watch, split, and type into, or flip any session between
-  **Terminal** and **Chat** mode. Every session can **pin its
+  terminals you can watch, split, and type into, or open the same session in
+  **Threads** for a chat view. Every session can **pin its
   own model** — chosen from a live per-provider **model catalog** (refreshed
   hourly from the providers' docs/CLIs, no API keys needed) — and the pin
   applies to that session only, so switching models never leaks into the next
@@ -293,7 +348,7 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   safe edits auto-apply, risky ones queue for approval). Can run on multiple
   providers for varied suggestions.
 - **Skills library** — a bundled, versioned skill library (`otto-skills`) you
-  can browse and install/update from Settings; skills drive review lenses,
+  can browse and install/update in Skills Lab; skills drive review lenses,
   product analysis, and insights, and the self-improvement engine refines them
   from your sessions.
 - **Skills Lab** — a three-tab workbench over your skills: a **viewer/editor**
@@ -430,8 +485,8 @@ Otto is a Tauri 2 desktop app with a Rust backend daemon and a Svelte 5 frontend
 
 ## Download (prebuilt DMG)
 
-**Versioned releases:** [Otto 0.2.1](../../releases/tag/v0.2.1) ships
-`Otto_0.2.1_aarch64.dmg` with its `.sha256` and the tour film.
+**Versioned releases:** [Otto 0.2.2](../../releases/tag/v0.2.2) ships
+`Otto_0.2.2_aarch64.dmg` with its `.sha256` and the tour film.
 
 A GitHub Actions workflow builds the Apple-Silicon `.dmg` **monthly** (on the
 1st, 05:00 UTC; maintainers can also run it on demand via `workflow_dispatch`)

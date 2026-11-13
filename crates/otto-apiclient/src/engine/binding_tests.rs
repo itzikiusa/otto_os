@@ -125,10 +125,13 @@ fn an_agent_upsert_that_moves_the_host_leaves_the_secret_behind() {
     );
 }
 
-/// A recorded `{{base}}` url keeps following the selected environment, and
-/// an override of `{{base}}` (not in `bind_vars`) can't move it.
+/// A recorded `{{base}}` url keeps following the selected environment for a
+/// person, and an override of `{{base}}` (not in `bind_vars`) can't move it.
+/// F5 (deliberate change): once a person's send has RECORDED a host, an
+/// agent's send is held to the recorded hosts — selecting another
+/// environment no longer takes the secret to that environment's host.
 #[test]
-fn a_recorded_template_url_resolves_with_the_environment() {
+fn a_recorded_template_url_follows_the_environment_for_a_person_only() {
     let mut blob = BTreeMap::from([("token".to_string(), "tk".to_string())]);
     api_secrets::set_bound_url(&mut blob, "{{base}}/me");
     let mut staging = serde_json::Map::new();
@@ -144,6 +147,127 @@ fn a_recorded_template_url_resolves_with_the_environment() {
         marker_bound_host(&row, Some(&blob), &prod).as_deref(),
         Some("api.test")
     );
+
+    // A person's send with prod records api.test; from then on the agent may
+    // follow that send, but selecting staging does not move the secret there.
+    assert!(person_sent_host(&row, &mut blob, "api.test", &prod));
+    assert!(
+        !person_sent_host(&row, &mut blob, "api.test", &prod),
+        "recorded once"
+    );
+    assert!(
+        !person_sent_host(&row, &mut blob, "evil.example", &prod),
+        "off-binding"
+    );
+    assert!(strict_agent_binding(true, Some(&blob)));
+    assert!(!strict_agent_binding(false, Some(&blob)));
+    assert!(marker_send_bound(
+        true,
+        &row,
+        Some(&blob),
+        &prod,
+        "api.test"
+    ));
+    assert!(!marker_send_bound(
+        true,
+        &row,
+        Some(&blob),
+        &staging,
+        "staging.api.test"
+    ));
+    // A person still follows the environment they select.
+    assert!(marker_send_bound(
+        false,
+        &row,
+        Some(&blob),
+        &staging,
+        "staging.api.test"
+    ));
+    assert_eq!(
+        agent_marker_hosts(&row, Some(&blob)),
+        BTreeSet::from(["api.test".to_string()])
+    );
+    // The recorded host is binding metadata, not a secret value.
+    let mut bare = BTreeMap::new();
+    api_secrets::set_bound_url(&mut bare, "{{base}}/me");
+    api_secrets::add_sent_host(&mut bare, "api.test");
+    assert!(!api_secrets::has_secret_values(&bare));
+    // A person's confirmed rebind to a new url forgets the old send hosts
+    // (and the same send records the new one, see `record_person_bindings`).
+    api_secrets::set_bound_url(&mut blob, "https://other.test/me");
+    assert!(api_secrets::sent_hosts(&blob).is_empty());
+    assert_eq!(
+        agent_marker_hosts(&row, Some(&blob)),
+        BTreeSet::from(["other.test".to_string()])
+    );
+}
+
+/// Upgrade safety: a binding recorded before sent hosts existed has none, so
+/// an agent's (workflow's, automation's) send keeps following the selected
+/// environment exactly as before — until a person's next send records a host.
+#[test]
+fn a_legacy_binding_with_no_recorded_host_still_follows_the_environment_for_an_agent() {
+    let mut blob = BTreeMap::from([("token".to_string(), "tk".to_string())]);
+    api_secrets::set_bound_url(&mut blob, "{{base}}/me");
+    let mut staging = serde_json::Map::new();
+    staging.insert("base".into(), json!("https://staging.api.test"));
+    let mut prod = serde_json::Map::new();
+    prod.insert("base".into(), json!("https://api.test"));
+    let row = owner("{{base}}/me", false);
+    assert!(!strict_agent_binding(true, Some(&blob)));
+    assert!(!strict_agent_binding(true, None));
+    for (vars, host) in [(&prod, "api.test"), (&staging, "staging.api.test")] {
+        assert!(
+            marker_send_bound(true, &row, Some(&blob), vars, host),
+            "{host}"
+        );
+        assert!(!marker_send_bound(
+            true,
+            &row,
+            Some(&blob),
+            vars,
+            "evil.example"
+        ));
+    }
+    // No store at hand (the legacy rule): the same.
+    assert!(marker_send_bound(
+        true,
+        &row,
+        None,
+        &staging,
+        "staging.api.test"
+    ));
+    // The person's next send makes it strict.
+    assert!(person_sent_host(&row, &mut blob, "api.test", &prod));
+    assert!(!marker_send_bound(
+        true,
+        &row,
+        Some(&blob),
+        &staging,
+        "staging.api.test"
+    ));
+}
+
+/// Under a strict binding an absolute bound url (no `{{var}}` in its host) is
+/// the same host under every environment, so it is always one an agent may
+/// reach; a legacy blob falls back to the owner's literal url unless an agent
+/// wrote it.
+#[test]
+fn an_agent_may_reach_a_literal_bound_host() {
+    let mut blob = BTreeMap::from([("token".to_string(), "tk".to_string())]);
+    api_secrets::set_bound_url(&mut blob, "https://api.test/v1/{{path}}");
+    let row = owner("https://api.test/v1/{{path}}", false);
+    assert_eq!(
+        agent_marker_hosts(&row, Some(&blob)),
+        BTreeSet::from(["api.test".to_string()])
+    );
+    let templated_host = owner("https://{{tenant}}.api.test/me", false);
+    assert!(agent_marker_hosts(&templated_host, None).is_empty());
+    assert_eq!(
+        agent_marker_hosts(&owner("https://api.test/me", false), None),
+        BTreeSet::from(["api.test".to_string()])
+    );
+    assert!(agent_marker_hosts(&owner("https://api.test/me", true), None).is_empty());
 }
 
 /// Legacy blobs (no recorded url) keep working for their current host when a

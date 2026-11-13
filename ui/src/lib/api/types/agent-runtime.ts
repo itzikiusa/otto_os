@@ -390,11 +390,38 @@ export interface AskChildResp {
   children: RuntimeSession[];
 }
 
-/** Body of `POST /runtime-sessions/{id}/council/synthesize` — the judge. 409 while a seat works. */
+/** Body of `POST /runtime-sessions/{id}/council/synthesize` — the judge of the
+ *  CURRENT round. 409 while a seat of the round works. */
 export interface SynthesizeCouncilReq {
   provider: RuntimeProvider;
   model?: string;
   effort?: string;
+}
+
+/** One round of a council: round 1 is its first question, then follow-ups. */
+export interface CouncilRound {
+  n: number;
+  text: string;
+  /** Seat numbers it was sent to, ascending. */
+  seats: number[];
+  /** Seats among `seats` it never reached, and why (a closed seat). */
+  refused?: { seat: number; reason: string }[];
+  /** The judges opened on this round, oldest first. */
+  syntheses?: Id[];
+  created_at: string;
+}
+
+/** `GET|POST /runtime-sessions/{id}/council/rounds`. */
+export interface CouncilRoundsResp {
+  rounds: CouncilRound[];
+  max_rounds: number;
+}
+
+/** Body of `POST /runtime-sessions/{id}/council/rounds` — a follow-up round.
+ *  `seats` omitted / empty = every seat; a seat still working queues it. */
+export interface CouncilFollowUpReq {
+  text: string;
+  seats?: number[];
 }
 
 /** One member of a linked group (`GET /runtime-sessions/{id}/peers`). */

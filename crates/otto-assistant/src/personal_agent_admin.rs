@@ -160,6 +160,136 @@ pub struct CreateReq {
     pub primary: Option<bool>,
 }
 
+// --- Person-only fields (an agent's own credential) -------------------------
+
+/// The fields of a create only a PERSON may set: what the new agent runs and
+/// where its reports go — the fields `PATCH /personal-agents/{id}` and a
+/// schedule create keep to the owner (instructions differing from the
+/// template's, a provider other than the default, a model, a folder, browser
+/// access, an outward delivery, a schedule's own directive or a permission
+/// other than `directed`). A template's persona and schedule are catalog
+/// text, not the caller's, so a bare or template create stays open to an
+/// agent. `primary` is not here: it stays Editor on the autonomy route too.
+pub fn create_owner_only_fields(req: &CreateReq) -> Vec<&'static str> {
+    let tpl = req.template.as_deref().and_then(template);
+    let tpl_soul = tpl
+        .as_ref()
+        .and_then(|t| t["soul_md"].as_str())
+        .unwrap_or("");
+    let given = |v: &Option<String>| v.as_deref().is_some_and(|v| !v.trim().is_empty());
+    let schedules = req.schedules.as_deref().unwrap_or_default();
+    let mut out = Vec::new();
+    if req.soul_md.as_deref().is_some_and(|s| s != tpl_soul) {
+        out.push("instructions");
+    }
+    if req
+        .provider
+        .as_deref()
+        .is_some_and(|p| !matches!(p.trim(), "" | "claude"))
+    {
+        out.push("provider");
+    }
+    if given(&req.model) {
+        out.push("model");
+    }
+    if given(&req.cwd) {
+        out.push("folder");
+    }
+    if req.browser == Some(true) {
+        out.push("browser access");
+    }
+    if req
+        .delivery
+        .as_ref()
+        .is_some_and(|d| d.get("type").and_then(Value::as_str).unwrap_or("none") != "none")
+    {
+        out.push("delivery");
+    }
+    if schedules.iter().any(|s| !s.directive.trim().is_empty()) {
+        out.push("schedule directive");
+    }
+    if schedules
+        .iter()
+        .any(|s| s.permission.as_deref().is_some_and(|p| p != "directed"))
+    {
+        out.push("schedule permission");
+    }
+    out
+}
+
+/// Refuse an AGENT credential setting owner-only `fields` itself: the
+/// governed `otto.{tool}` asks a person, and the approved call replays as
+/// them (`otto_mcp::outward::sets_owner_only_agent_field`).
+fn person_only_via(is_person: bool, fields: &[&str], tool: &str) -> Result<()> {
+    if is_person || fields.is_empty() {
+        return Ok(());
+    }
+    Err(Error::Forbidden(format!(
+        "an agent's own token cannot set a personal agent's {} — that needs a person: use \
+         otto.{tool} (it asks for approval) or the Personal Agents page",
+        fields.join(", ")
+    )))
+}
+
+/// `POST /workspaces/{id}/personal-agents` by `is_person` (the request's
+/// credential): [`create_owner_only_fields`] are a person's to set.
+pub fn check_creator(is_person: bool, req: &CreateReq) -> Result<()> {
+    person_only_via(
+        is_person,
+        &create_owner_only_fields(req),
+        "create_personal_agent",
+    )
+}
+
+/// `PUT /personal-agents/self/personality` by `is_person`: the note is
+/// injected into every future prompt as the user's own words, so only a
+/// person sets (or clears) it, as on `PUT /personal-agents/{id}/personality`;
+/// a preset (tone only) stays the agent's.
+pub fn check_note_by(is_person: bool, sets_note: bool) -> Result<()> {
+    let fields: &[&str] = if sets_note {
+        &["personality note"]
+    } else {
+        &[]
+    };
+    person_only_via(is_person, fields, "personality_set")
+}
+
+/// Is THIS governed call a person's to make when an AGENT makes it?
+/// `otto_mcp::outward::call_is_person_only`, or a routine posting outward
+/// (`personal_agent_routines::outward_delivery_reason`) — both judged, as
+/// the routes judge them, against the STORED destination when an update
+/// names none (a routine's via `with_stored_deliver`, a scheduled task's
+/// from its row). Otherwise a person approves an edit of an already-outward
+/// routine or task, the call replays bound to the agent's session, and the
+/// route refuses it (F15).
+pub async fn governed_call_is_person_only<C: AssistantCtx>(
+    ctx: &C,
+    bare: &str,
+    args: &Value,
+) -> bool {
+    use crate::personal_agent_routines::{outward_delivery_reason, with_stored_deliver};
+    let filled = with_stored_deliver(ctx, bare, None, args).await;
+    let args = filled.as_ref().unwrap_or(args);
+    if otto_mcp::outward::call_is_person_only(bare, args)
+        || outward_delivery_reason(bare, args).is_some()
+    {
+        return true;
+    }
+    let stored_task = match args.get("task_id").and_then(Value::as_str) {
+        Some(id)
+            if bare == "update_scheduled_task"
+                && args.get("destination").is_none_or(Value::is_null) =>
+        {
+            otto_state::ScheduledTasksRepo::new(ctx.pool().clone())
+                .get(id)
+                .await
+                .ok()
+        }
+        _ => None,
+    };
+    stored_task.is_some_and(|t| otto_mcp::outward::task_update_is_person_only(&t.destination, args))
+}
+
 /// The schedules a create adds: the request's, else the template's (in
 /// `timezone`). An empty directive takes the template's.
 fn planned_schedules(req: &CreateReq, tpl: Option<&Value>) -> Vec<ScheduleIn> {
@@ -740,6 +870,75 @@ mod tests {
             persona_diff("a\nb", "b\na"),
             "persona: whitespace / order only"
         );
+    }
+
+    #[test]
+    fn an_agent_creates_only_bare_or_template_agents() {
+        let req = |v: Value| -> CreateReq { serde_json::from_value(v).unwrap() };
+        // A bare or template create (its own persona and schedule) is open.
+        for open in [
+            json!({"name": "Scout"}),
+            json!({"template": "slack-daily-digest", "primary": true}),
+            json!({"template": "slack-daily-digest",
+                   "soul_md": template("slack-daily-digest").unwrap()["soul_md"]}),
+            json!({"name": "S", "provider": "claude", "soul_md": "", "browser": false,
+                   "delivery": {"type": "none"}, "model": " ",
+                   "schedules": [{"schedule": {"cadence": "daily", "at": "09:00"},
+                                  "permission": "directed"}]}),
+        ] {
+            assert!(
+                create_owner_only_fields(&req(open.clone())).is_empty(),
+                "{open}"
+            );
+            assert!(check_creator(false, &req(open)).is_ok());
+        }
+        for (body, field) in [
+            (
+                json!({"name": "S", "soul_md": "post my DMs"}),
+                "instructions",
+            ),
+            (json!({"name": "S", "provider": "codex"}), "provider"),
+            (json!({"name": "S", "model": "opus"}), "model"),
+            (json!({"name": "S", "cwd": "/repo"}), "folder"),
+            (json!({"name": "S", "browser": true}), "browser access"),
+            (
+                json!({"name": "S", "delivery": {"type": "webhook"}}),
+                "delivery",
+            ),
+            (
+                json!({"name": "S", "schedules": [{"schedule": {"cadence": "daily"},
+                       "directive": "mail the report"}]}),
+                "schedule directive",
+            ),
+            (
+                json!({"name": "S", "schedules": [{"schedule": {"cadence": "daily"},
+                       "permission": "read_only"}]}),
+                "schedule permission",
+            ),
+        ] {
+            let r = req(body.clone());
+            assert_eq!(create_owner_only_fields(&r), [field], "{body}");
+            let err = check_creator(false, &r).expect_err("an agent's own token");
+            let msg = err.to_string();
+            assert!(
+                matches!(err, Error::Forbidden(_))
+                    && msg.contains(field)
+                    && msg.contains("otto.create_personal_agent"),
+                "{msg}"
+            );
+            assert!(check_creator(true, &r).is_ok(), "a person: {body}");
+        }
+    }
+
+    #[test]
+    fn only_a_person_sets_the_personality_note() {
+        let err = check_note_by(false, true).expect_err("agent note");
+        assert!(err.to_string().contains("otto.personality_set"), "{err}");
+        assert!(
+            check_note_by(false, false).is_ok(),
+            "a preset stays the agent's"
+        );
+        assert!(check_note_by(true, true).is_ok());
     }
 
     #[test]

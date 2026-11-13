@@ -123,6 +123,29 @@ export interface WriteSkillFileReq {
   /** SHA-256 (hex) of the file as the editor read it. A mismatch on disk
    *  writes nothing and answers 409 `{code:'conflict', current_hash}`. */
   if_hash?: string;
+  /** Reply `{ files, kept_copies? }` instead of the bare file list. */
+  report?: boolean;
+}
+
+/** One of Otto's provider copies (`~/.claude/skills/<name>`, …) the person had
+ *  edited in place, moved to `<data dir>/library/provider-skills-backup/`
+ *  before Otto replaced or removed it. */
+export interface KeptProviderCopy {
+  /** The provider copy that was replaced or removed. */
+  copy: string;
+  /** Where its whole tree now lives. */
+  kept_at: string;
+}
+
+/** Library writes that refresh the provider copies add `kept_copies` when a
+ *  hand-edited copy was moved aside (absent otherwise, and from older daemons). */
+export interface KeptCopiesResp {
+  kept_copies?: KeptProviderCopy[];
+}
+
+/** `PUT /library/skills/{name}/file` with `report: true`. */
+export interface SkillFileWriteResp extends KeptCopiesResp {
+  files: SkillFileEntry[];
 }
 
 export interface CreateLibrarySkillReq {
@@ -331,6 +354,8 @@ export interface InstallBundledResp {
   backup_path: string | null;
   /** Provider skill paths (`~/.claude/skills/<name>`, …) left untouched because a user-owned skill of that name lives there. Omitted when empty. */
   user_owned?: string[];
+  /** Otto's provider copies the person had edited, moved aside before the update. Omitted when empty. */
+  kept_copies?: KeptProviderCopy[];
 }
 
 /** Result of installing every bundled skill (optionally a single category). */
@@ -350,6 +375,8 @@ export interface InstallAllBundledResp {
   failed: { name: string; error: string }[];
   /** `<provider skills dir>/<name>` paths left untouched: a user-owned skill of that name already lives there. */
   user_owned: string[];
+  /** Otto's provider copies the person had edited, moved aside before being replaced. Omitted when empty. */
+  kept_copies?: KeptProviderCopy[];
 }
 
 export interface GlobalSoulReq {

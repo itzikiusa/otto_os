@@ -373,17 +373,15 @@ async fn enrich_sessions(
 }
 
 /// Derive a short usage-kind label for an Otto session: prefer the meta `source`
-/// tag set by the review/product/channel runners, else fall back to the session
-/// kind.
+/// tag set by the review/product/channel runners (a review's summarizer is part
+/// of that review), else the lowercase `sessions.kind` (`agent` / `connection`).
 fn session_kind_label(s: &otto_state::UsageLabelRow) -> String {
-    if let Some(src) = s.source.as_deref() {
-        return match src {
-            "product-analysis" | "product-plan" => "product".to_string(),
-            other => other.to_string(), // "review", "channel"
-        };
+    match s.source.as_deref() {
+        Some("product-analysis" | "product-plan") => "product".to_string(),
+        Some("review_summarizer") => "review".to_string(),
+        Some(other) => other.to_string(), // "review", "channel"
+        None => s.kind.clone(),
     }
-    // `sessions.kind` is the lowercase SessionKind (`agent` / `connection`).
-    s.kind.clone()
 }
 
 /// `GET /usage/metrics?minutes=N` — system metrics time-series (root).
@@ -961,6 +959,31 @@ mod session_usage_tests {
         let got = filter_session_totals(&rows, &visible);
         let ids: Vec<&str> = got.iter().map(|r| r.session_id.as_str()).collect();
         assert_eq!(ids, vec!["a", "c"]);
+    }
+}
+
+#[cfg(test)]
+mod kind_label_tests {
+    use super::session_kind_label;
+
+    fn label(kind: &str, source: Option<&str>) -> String {
+        session_kind_label(&otto_state::UsageLabelRow {
+            id: "s".into(),
+            workspace_id: "w".into(),
+            title: "t".into(),
+            created_by: "u".into(),
+            kind: kind.into(),
+            source: source.map(str::to_string),
+        })
+    }
+
+    #[test]
+    fn the_review_summarizer_counts_as_review() {
+        assert_eq!(label("agent", Some("review_summarizer")), "review");
+        assert_eq!(label("agent", Some("review")), "review");
+        assert_eq!(label("agent", Some("product-plan")), "product");
+        assert_eq!(label("agent", Some("channel")), "channel");
+        assert_eq!(label("connection", None), "connection");
     }
 }
 

@@ -191,6 +191,16 @@ pub struct Backlink {
     pub kind: String,
 }
 
+/// `GET …/backlinks?with_total=true`: one page of backlinks (ordered by
+/// source path, then link kind) and how many there are in all.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BacklinkPage {
+    pub backlinks: Vec<Backlink>,
+    pub total: u64,
+    pub offset: usize,
+    pub limit: usize,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RenameResult {
     pub from: String,
@@ -284,7 +294,17 @@ pub struct GraphPayload {
     pub tag_labels: Vec<String>,
     pub flags: Vec<u8>,
     pub edges: Vec<u32>,
+    /// A cap left nodes or links out: the full graph's edge budget, or the
+    /// local graph's node/link caps (the nearest notes win).
     pub truncated: bool,
+    /// When `truncated` in `local` mode: the notes the walk found before it
+    /// stopped — at least this many are in the neighbourhood.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_nodes: Option<u64>,
+    /// When `truncated`: the links among the walked notes (local) or in
+    /// the vault (full) before the cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_edges: Option<u64>,
 }
 
 /// Synthetic attribute buckets for nodes that are not notes, and for notes

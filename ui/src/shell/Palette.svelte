@@ -31,8 +31,8 @@
   import Icon, { type IconName } from '../lib/components/Icon.svelte';
   import { lsGet, lsSet } from '../lib/storage';
   import { COPY_FAILED_BODY, copyText } from '../lib/clipboard';
-  import { router } from '../lib/router.svelte';
-  import { hitActions, hitContext, hitRoute, type HitAction } from '../lib/floatingBar';
+  import { openHitInApp } from '../lib/searchHitOpen';
+  import { hitActions, hitContext, type HitAction } from '../lib/floatingBar';
 
   const HIT_ACTION_LABEL: Record<HitAction, string> = {
     open: 'Open',
@@ -129,7 +129,7 @@
   }
 
   /** Run a search hit's action. `open` navigates the way the floating bar
-   *  does (`hitRoute`); copy-context copies the hit's description; send-to-
+   *  does (`openHitInApp`); copy-context copies the hit's description; send-to-
    *  agent hands it to the plain-English box as a draft. */
   async function hitAction(hit: SearchHit, action: HitAction): Promise<void> {
     if (action === 'send-to-agent') {
@@ -141,7 +141,7 @@
     }
     close();
     if (action === 'open') {
-      router.go(hitRoute(hit));
+      openHitInApp(hit);
     } else if (await copyText(hitContext(hit))) {
       toasts.success('Copied', hit.title);
     } else {

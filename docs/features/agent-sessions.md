@@ -476,12 +476,29 @@ takes the size back too.
 
 In a local agent terminal, click an HTTP(S) URL to open the system browser, or a
 file reference such as `ui/src/App.svelte:42:3`, `../Cargo.toml#L8`, or
-`/tmp/report.md` to open the Files viewer. Hover shows the resolved target.
-Relative paths and source basenames such as `SKILL.md` resolve from the session's
-saved working folder. A CLI may print only a basename for a nested file; Otto
-cannot infer its hidden directory. Use the full path if the resolved file is
-missing; the viewer error includes the attempted path. Changing directories
-inside a shell command does not change that saved session folder.
+`/tmp/report.md` to open the Files viewer. A folder printed with its trailing
+slash (`marketing/videos/tour/`) is a link too: clicking it opens the side
+panel's Files tree at that folder. Version tags (`v0.2.2`), numbers and
+fractions (`1/2`) are never links.
+
+The printed text is relative to wherever the agent was standing, so Otto does
+not guess: on click (or hover) it asks the daemon (`GET /fs/stat`) about the
+path under each candidate folder **in order** and opens the first that exists —
+the session's working folder, its additional folders (`--add-dir`), the
+registered repository that holds that folder, the workspace's other
+repositories, then the workspace folder. Absolute and `~` paths are checked as
+printed. A path found nowhere opens nothing: a toast says it was not found,
+how many places were checked, and offers **Copy path**. Hover shows the
+resolved target. Otto does not track `cd` inside a running agent; a basename
+printed for a nested file is found only if it sits directly in one of those
+folders.
+
+Right-click (or ⌃-click) a file or folder link for its menu: **Open in side
+panel**, **Show in Finder** (desktop app on this Mac only — hidden in a
+browser, on a phone and for a remote daemon) and **Copy path**. Chat and
+Threads messages use the same resolver for their file references, with the
+thread's own folder first; their menu adds **Reveal in side panel** next to
+**Preview**.
 
 Soft-wrapped paths remain clickable across rows. Explicit filesystem paths can
 include spaces, such as `/Users/me/Library/Application Support/report.md`.
@@ -1067,10 +1084,10 @@ Activity is one tab of the desktop right panel (Git / Files / Notes / Activity /
 **Canvas** / Info / Browser / API — a drawer on tablet/phone), shown only for
 `agent`-kind sessions. **Canvas** (`CanvasPanel.svelte`) lists the Canvas scenes
 *referenced* by the focused session — attach an existing scene or create a new
-one, expand a row for an inline SVG preview, jump to the full editor ("Open in
-Canvas"), or detach it. Live updates arrive over `canvas_refs_changed` when a
-scene is attached/detached from anywhere (this panel, the Canvas module, or an
-MCP write tool). See **[Canvas §7a](./canvas.md#7a-session-references)** for the
+one, expand a row for an inline SVG preview, open the scene's Design Hall mirror
+("Open in Design Hall"), or detach it. Live updates arrive over
+`canvas_refs_changed` when a scene is attached/detached from anywhere (this
+panel, the session ⋯ **Canvas…** item, or an MCP write tool). See **[Canvas §7a](./canvas.md#7a-session-references)** for the
 full behavior and the `GET/POST/DELETE /sessions/{id}/canvas-refs` endpoints.
 
 ---
@@ -1503,7 +1520,7 @@ the efficiency cores, which made a review crawl even on an idle machine.
 | `agent_background_low_priority` | `true` | run background agents at `nice 10` |
 | `agent_build_parallelism` | auto | `0`/absent = auto, a number = fixed workers, `"off"` = set no variable |
 | `session_auto_archive_background_days` | `7` | archive engine-owned background sessions (reviews, workflow steps, …) idle this many days, checked hourly, 200 per pass; live, attached and kept-alive sessions are skipped; `0` = never. Archiving deletes nothing: the history stays and the session can be unarchived and resumed |
-| `machine_low_disk_gb` | `30` | free GiB on the data volume below which the chip and the bell warn; `0` = never |
+| `machine_low_disk_gb` | `10` | free GiB on the data volume below which the chip and the bell warn; `0` = never |
 
 The live-session cap (`max_live_agent_sessions`) is still soft: it only
 suspends *quiet* sessions. When every session over it is busy the sweep now

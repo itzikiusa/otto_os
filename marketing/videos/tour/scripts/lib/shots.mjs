@@ -319,6 +319,104 @@ export const SHOTS = {
     await rec.stop(join(c.out, 'threads-runtime.mp4'));
     await context.close();
   },
+  // Ask another agent from inside that thread: Claude Opus answers in a child
+  // thread, live as a card in the parent and nested under it in the sidebar
+  // (lib/demo-claude.mjs on the real structured runtime).
+  'threads-ask': async (c) => {
+    const tid = await runtimeThread(c);
+    if (!tid) return console.log('  (no runtime thread: run threads-runtime first)');
+    const { context, page } = await open(c, `threads/${tid}`, { settle: 4000, extra: [{ name: 'otto_rail_expanded', value: '0' }] });
+    const thread = page.locator('[data-testid^="runtime-thread-"]');
+    const composer = thread.getByTestId('runtime-composer');
+    await composer.waitFor({ timeout: 30_000 });
+    const rec = await record(page);
+    await wait(700);
+    await glide(page, thread.getByTestId('runtime-ask-agent'));
+    await wait(800);
+    await glide(page, page.getByTestId('model-picker').getByTestId('model-picker-provider-claude'));
+    await wait(600);
+    await glide(page, page.getByTestId('model-picker').getByRole('button', { name: /Opus/ }).first());
+    await wait(500);
+    await page.keyboard.press('Escape');
+    await composer.click();
+    await typeSlow(page, 'Review tests/rateLimit.test.ts for missing edge cases', 40);
+    await wait(700);
+    await still(page, c, 'threads-ask-chip');
+    await page.keyboard.press('Enter');
+    await thread.locator('[data-testid^="runtime-child-"]').first().waitFor({ timeout: 20_000 }).catch(() => {});
+    await wait(1200);
+    await still(page, c, 'threads-ask-live');
+    await thread.getByText('Done', { exact: false }).last().waitFor({ timeout: 30_000 }).catch(() => {});
+    await wait(2500);
+    await still(page, c, 'threads-ask');
+    await rec.stop(join(c.out, 'threads-ask.mp4'));
+    await context.close();
+  },
+  // Council: one prompt to two agents side by side, then Synthesize.
+  'threads-council': async (c) => {
+    const { context, page } = await open(c, 'threads', { settle: 3500, extra: [{ name: 'otto_rail_expanded', value: '0' }] });
+    await tryClick(page.getByTestId('threads-new-btn'), 'new thread');
+    const stage = page.getByTestId('new-thread-stage');
+    await stage.getByTestId('picker-agent').waitFor({ timeout: 30_000 });
+    await wait(1200);
+    const rec = await record(page);
+    await wait(600);
+    await glide(page, stage.getByTestId('picker-agent'));
+    await wait(600);
+    await glide(page, page.getByTestId('model-picker').getByTestId('model-picker-provider-claude'));
+    await wait(400);
+    await glide(page, page.getByTestId('model-picker').getByRole('button', { name: /Opus/ }).first());
+    await wait(500);
+    await page.keyboard.press('Escape');
+    await wait(300);
+    await glide(page, stage.getByTestId('new-thread-ask-several'));
+    await wait(600);
+    await glide(page, stage.getByTestId('picker-agent'));
+    await wait(600);
+    await glide(page, page.getByTestId('model-picker').getByTestId('model-picker-provider-codex'));
+    await wait(400);
+    await glide(page, page.getByTestId('model-picker').locator('.mp-row').nth(1));
+    await wait(500);
+    await page.keyboard.press('Escape');
+    await wait(300);
+    await stage.getByTestId('new-thread-input').click();
+    await typeSlow(page, 'Should checkout payment retries use exponential backoff or a fixed delay?', 38);
+    await wait(700);
+    await still(page, c, 'council-stage');
+    await glide(page, stage.getByTestId('new-thread-send-btn'));
+    await page.getByTestId('council-view').waitFor({ timeout: 30_000 });
+    await wait(2600);
+    await still(page, c, 'council-live');
+    const synth = page.getByTestId('council-synthesize');
+    await page.waitForFunction(() => {
+      const b = document.querySelector('[data-testid="council-synthesize"]');
+      return b && !b.hasAttribute('disabled');
+    }, null, { timeout: 40_000 }).catch(() => {});
+    await wait(1500);
+    await still(page, c, 'council');
+    await glide(page, synth);
+    await page.getByText('Open question.', { exact: false }).last().waitFor({ timeout: 40_000 }).catch(() => {});
+    await wait(2500);
+    await still(page, c, 'council-synthesis');
+    // Round 2: one follow-up to every seat.
+    const follow = page.getByTestId('council-followup');
+    if (await follow.isVisible().catch(() => false)) {
+      await follow.click();
+      await typeSlow(page, 'What should the customer see while it retries?', 38);
+      await wait(600);
+      await still(page, c, 'council-followup');
+      await glide(page, page.getByTestId('council-send-followup'));
+      await page.getByText('Try another card', { exact: false }).last().waitFor({ timeout: 40_000 }).catch(() => {});
+      await page.getByText('retry link', { exact: false }).last().waitFor({ timeout: 40_000 }).catch(() => {});
+      await wait(1500);
+      // Each seat column keeps its scroll and offers "1 new message": follow it.
+      for (const pill of await page.getByText(/new message/).all()) await pill.click({ timeout: 3000 }).catch(() => {});
+      await wait(1800);
+      await still(page, c, 'council-round2');
+    } else console.log('  (skip: council follow-up)');
+    await rec.stop(join(c.out, 'council.mp4'));
+    await context.close();
+  },
   // ── Automate ──────────────────────────────────────────────────────────────
   loops: async (c) => {
     const { context, page } = await open(c, 'loops', { settle: 3500 });
@@ -344,8 +442,10 @@ export const SHOTS = {
   'pa-chat': async (c) => {
     const id = c.meta.ids.personalAgent;
     if (!id) return console.log('  (no personal agent)');
-    const { context, page } = await open(c, `personal-agents/${id}/chat`, { settle: 4500 });
-    const composer = page.getByTestId('runtime-composer').first();
+    // The agent opens on its conversation: a composer that starts the chat
+    // (pa-composer), which then becomes a runtime thread.
+    const { context, page } = await open(c, `personal-agents/${id}`, { settle: 4500 });
+    const composer = page.getByTestId('pa-composer').or(page.getByTestId('runtime-composer')).first();
     await composer.waitFor({ timeout: 30_000 });
     await still(page, c, 'pa-chat-empty');
     const rec = await record(page);
@@ -407,6 +507,51 @@ export const SHOTS = {
     await still(page, c, 'design-learned');
     await context.close();
   },
+  // Design Hall, the one home for designs: lobby grouped by story, an
+  // artifact with its versions, compare, and export.
+  'design-hall': async (c) => {
+    const { context, page } = await open(c, 'design', { settle: 4500 });
+    await tryClick(page.getByTestId('design-group-story'), 'group by story');
+    await wait(1800);
+    await still(page, c, 'design-lobby');
+    if (c.meta.ids.frame) {
+      await page.goto(`${UI}/#/design/a/${c.meta.ids.frame}`);
+      await wait(4000);
+      await still(page, c, 'design-artifact');
+      if (await tryClick(page.getByRole('button', { name: /^Comments/ }).or(page.getByRole('tab', { name: /^Comments/ })), 'comments tab')) {
+        await wait(1800);
+        await still(page, c, 'design-comments');
+      }
+      await tryClick(page.getByRole('button', { name: /^Versions/ }).or(page.getByRole('tab', { name: /^Versions/ })), 'versions tab');
+      await wait(1800);
+      await still(page, c, 'design-versions');
+      const oldest = page.getByTestId('design-version-row').last();
+      await tryClick(oldest.locator('.row-main'), 'oldest version row');
+      await wait(900);
+      if (await tryClick(page.getByTestId('design-version-compare'), 'compare')) {
+        await wait(3500);
+        await still(page, c, 'design-compare');
+        await page.keyboard.press('Escape');
+        await wait(800);
+      }
+      if (await tryClick(page.getByTestId('design-more'), 'more')) {
+        await wait(600);
+        if (await tryClick(page.getByText('Export…', { exact: true }), 'export')) {
+          await wait(900);
+          await still(page, c, 'design-export');
+        }
+        await page.keyboard.press('Escape');
+      }
+    }
+    await context.close();
+    if (c.meta.ids.story) {
+      const { context: sc, page: sp } = await open(c, `product/${c.meta.ids.story}`, { settle: 4000 });
+      await tryClick(sp.getByRole('button', { name: 'Design', exact: true }).or(sp.getByRole('tab', { name: 'Design', exact: true })), 'story design tab');
+      await wait(3500);
+      await still(sp, c, 'product-design');
+      await sc.close();
+    }
+  },
   'skills-eval': route('skills-eval', 'skills-eval', 3500),
   // ── Infrastructure ────────────────────────────────────────────────────────
   connections: route('connections', 'connections', 3500),
@@ -443,6 +588,51 @@ export const SHOTS = {
     await wait(3500);
     await still(page, c, 'db-results');
     await rec.stop(join(c.out, 'db-builder.mp4'));
+    await context.close();
+  },
+  // The demo ClickHouse (read-only connection): a query, a refused write, the
+  // history across connections and the process list.
+  'db-ch': async (c) => {
+    if (!c.meta.ids.clickhouse) return console.log('  (no clickhouse)');
+    const { context, page } = await open(c, `database/${c.meta.ids.clickhouse}`, { settle: 5000 });
+    await tryClick(page.locator('.main-tabs .mt', { hasText: 'Query' }), 'query tab');
+    await wait(1200);
+    const content = page.locator('.qe-edit .cm-content').first();
+    const run = async (sql) => {
+      await content.click({ timeout: 15_000 });
+      await page.keyboard.press('ControlOrMeta+A');
+      await page.keyboard.press('Backspace');
+      await typeSlow(page, sql, 18);
+      await wait(400);
+      await page.keyboard.press('Escape'); // close the completion popup
+      await wait(300);
+      await page.keyboard.press('ControlOrMeta+Enter');
+    };
+    const rec = await record(page);
+    await wait(500);
+    await run("SELECT region, count() AS orders, round(sum(total_cents) / 100) AS revenue\nFROM shopdb.orders WHERE status != 'refunded'\nGROUP BY region ORDER BY revenue DESC");
+    await wait(3500);
+    await still(page, c, 'db-query');
+    await run("ALTER TABLE shopdb.orders DELETE WHERE status = 'refunded'");
+    await wait(3000);
+    await still(page, c, 'db-readonly');
+    await rec.stop(join(c.out, 'db-ch.mp4'));
+    if (await tryClick(page.getByRole('tab', { name: 'History', exact: true }).or(page.getByRole('button', { name: 'History', exact: true })), 'history tab')) {
+      await wait(1200);
+      await page.locator('select.hist-scope').selectOption('true').catch(() => console.log('  (skip: history scope)'));
+      await wait(2000);
+      await still(page, c, 'db-history');
+    }
+    try {
+      await page.getByRole('button', { name: 'More actions for warehouse · clickhouse' }).first().click({ timeout: 6000 });
+      await wait(600);
+      if (await tryClick(page.getByText('Processes…', { exact: true }), 'processes')) {
+        await wait(3500);
+        await still(page, c, 'db-processes');
+      }
+    } catch {
+      console.log('  (skip: connection menu)');
+    }
     await context.close();
   },
   'db-mongo': async (c) => {
@@ -568,7 +758,15 @@ export const SHOTS = {
       // No phone is paired yet, so Continue on phone starts a pairing whose
       // `next` is this thread.
       const created = page.waitForResponse((r) => r.url().endsWith('/phone/pairings') && r.request().method() === 'POST', { timeout: 20_000 });
-      await glide(page, page.getByRole('button', { name: /^Continue on phone/ }).first());
+      created.catch(() => {});
+      // The calmer thread header keeps it in the ⋯ menu ("Continue on phone…").
+      const direct = page.getByRole('button', { name: /^Continue on phone/ }).first();
+      if (await direct.isVisible().catch(() => false)) await glide(page, direct);
+      else {
+        await glide(page, page.getByRole('button', { name: /^(Thread and view actions|More thread actions)$/ }).first());
+        await wait(600);
+        await glide(page, page.getByText('Continue on phone…', { exact: true }).first());
+      }
       const pairing = await (await created).json();
       await page.locator('canvas.ph-qr').waitFor({ timeout: 15_000 });
       await wait(1600);
@@ -608,6 +806,27 @@ export const SHOTS = {
     await still(page, c, 'phone');
     await context.close();
   },
+  // The opt-in light version on a phone: five tabs, one tap back.
+  'phone-light': async (c) => {
+    const { context, page } = await open(c, 'threads', { settle: 5000, viewport: { width: 390, height: 844 }, dpr: 3, mobile: true });
+    await tryClick(page.getByRole('button', { name: /^More/ }), 'more sheet');
+    await wait(1200);
+    await still(page, c, 'phone-more');
+    if (await tryClick(page.getByTestId('light-toggle'), 'light toggle')) {
+      await wait(3000);
+      await still(page, c, 'phone-light');
+      await tryClick(page.getByRole('button', { name: /^Usage/ }).or(page.getByRole('link', { name: /^Usage/ })), 'usage tab');
+      await wait(3500);
+      await still(page, c, 'phone-light-usage');
+    }
+    await context.close();
+  },
 };
+
+/** The film's runtime thread (made by threads-runtime). */
+async function runtimeThread(c) {
+  const threads = (await api(c, 'GET', `/workspaces/${c.meta.ids.ws}/runtime-sessions`)) ?? [];
+  return threads.find((t) => (t.title ?? '').startsWith('Add a regression test'))?.id ?? null;
+}
 
 export { open, still, glide, typeSlow, wait, record };

@@ -31,12 +31,11 @@ Product is the product owner's workspace. Import a Jira issue or Confluence page
 **Story tabs**
 - **Story → Overview**: the story body, with live Jira details for Jira stories. For a draft it becomes an editor with a place to add transcripts. An epic shows a board of its children.
 - **Story → Rewrite**: generate a suggested rewrite (Jira stories use the story writer, others the RFC writer), compare it word by word with the source, and publish it back.
-- **Story → Design**: the design arena for screens, boards, diagrams and 3D scenes, with the designs from Design Hall that implement the story.
-- **Discover → Chat**: a discovery chat for early ideas. It can see your draft, designs, open questions and notes, and proposes action cards (fill the draft, add questions, add notes, open a diagram) that you apply yourself.
+- **Story → Design**: this story's designs from Design Hall (an epic also shows its stories' designs). **New design** starts one with the story set; **Ask Otto** describes one and lets an agent draft it. Each card opens in Design Hall.
+- **Discover → Chat**: chat with an agent about the story (this tab replaces the old separate Chat and Refine tabs). Start a **New chat** or reopen one from the list; chats from the old discovery chat stay readable under **Earlier chats**. The agent proposes cards (add questions, add notes, create a diagram) that you apply yourself. When it suggests a new story text, it saves it as a suggested version and links to **Rewrite**.
 - **Discover → Analysis**: run the PO Overview, Architecture and Clarifying Questions lenses on one or more providers. Each lens is an openable session you can stop or retry. A summarizer merges the results into related repos, functionalities, integration points, risks, open questions and suggested learnings.
 - **Discover → Questions**: filter by status and category, then edit, answer, discard or delete. Tick questions to post them as one comment on the Jira issue or Confluence page.
 - **Discover → Notes**: private notes on the story.
-- **Discover → Refine**: chat threads that refine the story.
 - **Deliver → Plan**: one or more planning agents write a task-by-task plan. They don't ask questions unless you untick **Don't ask me questions**. Tick items to track progress.
 - **Deliver → Test Cases**: generate test cases grouped as happy path, validation, error and edge cases. Approve, request changes, edit, reorder and bulk-approve them, then publish the approved ones to a Confluence page.
 - **Deliver → Inject**: build a context bundle (story, analysis summary, answered questions, approved test cases, learnings and plan) and open it in a new agent session.
@@ -55,14 +54,15 @@ Product is the product owner's workspace. Import a Jira issue or Confluence page
 
 **Watching and design**
 - A watched story is checked every few minutes (at least 5). New comments are recorded and matched to open questions, and you get a notification.
-- The Design tab creates screens (HTML in device frames), Excalidraw boards, Mermaid diagrams and 3D scenes, each with an assistant that edits it. Export PNG, SVG, the source file, GLB or a Blender script. With Blender installed, **Render + export GLB** attaches a rendered image and a GLB of a 3D scene.
+- Designs live in Design Hall. Story attachments (an agent's mockups included) appear there too, read-only until you choose **Edit here**.
+- The Design tab's **⋯ → Open the classic arena** opens the older editor. It still has pinned review notes and, with Blender installed, **Render + export GLB** for 3D scenes.
 
 ## Keyboard shortcuts
 
 | Keys | Action |
 |---|---|
-| `Enter` | Send a message in Chat or Refine |
-| `⇧Enter` | New line in Chat or Refine |
+| `Enter` | Send a message in Chat |
+| `⇧Enter` | New line in Chat |
 | `W` / `E` / `R` | Move, rotate or scale in the 3D viewport |
 | `F` | Frame the selection in the 3D viewport |
 | `⌘D` | Duplicate the selected 3D object |

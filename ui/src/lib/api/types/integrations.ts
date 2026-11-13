@@ -242,7 +242,10 @@ export type ListenerState =
   | 'connected'
   | 'reconnecting'
   | 'failing'
-  | 'conflict';
+  | 'conflict'
+  /** Connected, but the inbound queue is full; events are left for the
+   *  platform to redeliver (clears on the next event taken in). */
+  | 'busy';
 
 export interface ListenerStatus {
   workspace_id: string;

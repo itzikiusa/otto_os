@@ -14,6 +14,7 @@
   import type { DesignVersion } from '../../lib/api/types';
   import { versionAuthor } from './model';
   import { versionKindLabel, versionRows } from './versionRows';
+  import { sideVersionNote } from './mirrorSync';
   import type { VersionList } from './versionList.svelte';
 
   interface Props {
@@ -24,12 +25,15 @@
     /** The version shown alone in the stage (null: the working copy). */
     viewingId: string | null;
     canEdit: boolean;
+    /** The design's source (`canvas_scene` / `product_attachment`): names a
+     *  side version a source sync wrote ("from the Canvas board"). */
+    sourceKind?: string | null;
     onview: (v: DesignVersion | null) => void;
     oncompare: (v: DesignVersion) => void;
     onrestore: (v: DesignVersion) => void;
     onapprove: (v: DesignVersion) => void;
   }
-  let { list, headId, approvedId, meId, viewingId, canEdit, onview, oncompare, onrestore, onapprove }: Props = $props();
+  let { list, headId, approvedId, meId, viewingId, canEdit, sourceKind = null, onview, oncompare, onrestore, onapprove }: Props = $props();
 
   let expanded = $state<Set<string>>(new Set());
   const rows = $derived(versionRows(list.items, { headId, approvedId, keep: viewingId ? [viewingId] : [], expanded }));
@@ -81,6 +85,7 @@
           {@const v = r.version}
           {@const isHead = v.id === headId}
           {@const viewed = v.id === viewingId}
+          {@const side = sideVersionNote(v, sourceKind)}
           <li class="vrow" class:viewed class:named={v.kind === 'named'} data-testid="design-version-row" data-seq={v.seq} data-kind={v.kind}>
             <div class="line">
               <button class="row-main" onkeydown={onKey} aria-current={viewed || (isHead && !viewingId) ? 'true' : undefined}
@@ -91,6 +96,7 @@
                   <span class="av" class:agent={v.author_kind === 'agent'} class:system={v.author_kind === 'system'} aria-hidden="true"></span>
                   {versionAuthor(v, meId)}{#if v.author_kind === 'agent'}<span class="agent-tag">agent</span>{/if}
                   · {versionKindLabel(v.kind)} · {when(v)}{#if isHead} · current{/if}
+                  {#if side}<span class="side-tag" data-testid="design-version-side" title="A side version: it never replaced the current one">{side}</span>{/if}
                 </span>
               </button>
               {#if v.id === approvedId}<span class="appr" title="Approved version"><Icon name="check" size={12} /> Approved</span>{/if}
@@ -211,6 +217,12 @@
   .agent-tag {
     padding: 0 4px;
     border: 1px solid var(--border-strong);
+    border-radius: var(--radius-s);
+    font-size: var(--fs-xs);
+  }
+  .side-tag {
+    padding: 0 4px;
+    border: 1px dashed var(--border-strong);
     border-radius: var(--radius-s);
     font-size: var(--fs-xs);
   }

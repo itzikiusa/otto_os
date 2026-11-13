@@ -3,8 +3,8 @@
   import { plural } from '../../lib/plural';
   // Home: Otto's one "desktop". The ambient backdrop fills the page; on it sit
   // a greeting + today's glance cards (HomeToday) and the active space's
-  // widgets — up to 8 live boxes (Agents, Mission Control, DB dashboards,
-  // Kubernetes, Insights, Usage) on a 12-column grid. Spaces 01–04 are Home's
+  // widgets — up to 8 live boxes (Agents, DB dashboards, Kubernetes,
+  // Insights, Usage) on a 12-column grid. Spaces 01–04 are Home's
   // views, shared with the floating bar through lib/stores/spaces.svelte.ts;
   // they slide (tabs, ←/→, swipe, ⌘K) and can cycle every 30 s. Any widget
   // zooms to fill the page. Layout is per device (see home.svelte.ts).
@@ -18,6 +18,7 @@
   import { ui } from '../../lib/stores/ui.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { registry } from '../../lib/commands.svelte';
@@ -30,10 +31,11 @@
   const can = (f: Parameters<typeof auth.can>[0]): boolean => auth.can(f, 'view');
   const kinds = $derived(HOME_KINDS.filter((k) => can(k.feature)));
 
-  // First visit seeds a sensible view — only once the RBAC snapshot is in so
-  // the seed reflects what this user can actually see.
+  // First visit seeds a sensible view — only once the RBAC snapshot and the
+  // workspace are in, so the seed reflects what this user can see and which
+  // workspace's dashboards to look for (first visit only).
   $effect(() => {
-    if (auth.me) home.ensureDefault(can);
+    if (auth.me && (ws.currentId || ws.listSettled)) home.ensureDefault(can);
   });
 
   // ── Auto-rotation ────────────────────────────────────────────────────────
@@ -173,6 +175,11 @@
   });
 
   const full = $derived((home.active?.boxes.length ?? 0) >= MAX_BOXES);
+  // The zoomed box of the space on screen (null = the normal grid).
+  const zoomId = $derived.by(() => {
+    const id = home.zoomedId;
+    return id && home.active?.boxes.some((b) => b.id === id) ? id : null;
+  });
 </script>
 
 <svelte:window onkeydown={onKey} />
@@ -257,18 +264,14 @@
       if (!(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node | null)) focusInside = false;
     }}
   >
-    {#if home.zoomed && home.active}
-      <div class="zoom">
-        <HomeBox box={home.zoomed} viewId={home.active.id} zoomed />
-      </div>
-    {/if}
     <!-- Every space stays mounted (review 06 F3): switching only toggles
          `hidden` + `inert`, and the off-screen boxes pause their pollers but
          keep their data — a slide no longer remounts and re-fetches every
-         widget (or re-runs a "manual only" DB widget’s SQL). While a widget
-         is zoomed the grid stays mounted underneath, paused. -->
-    <div class="desk" class:phone={viewport.isPhone} hidden={!!(home.zoomed && home.active)}>
-      <HomeToday />
+         widget (or re-runs a "manual only" DB widget’s SQL). Zoom is in place
+         too: the zoomed box fills the desk and everything else is hidden,
+         inert and paused — no second copy, no re-fetch. -->
+    <div class="desk" class:phone={viewport.isPhone} class:zooming={!!zoomId}>
+      <div class="today" hidden={!!zoomId} inert={!!zoomId}><HomeToday /></div>
       {#if home.active}
         {#each home.views as v, vi (v.id)}
           {@const on = v.id === home.active.id}
@@ -288,7 +291,7 @@
                   variant="page"
                   icon="grid"
                   title="This space is empty"
-                  body="Pin live widgets here: your agents, Mission Control, usage, clusters or a database dashboard. Resize from the corner, drag the grip to reorder."
+                  body="Pin live widgets here: your agents, usage, insights, clusters or a database dashboard. Resize from the corner, drag the grip to reorder."
                   actionLabel="Add widget"
                   actionIcon="plus"
                   onaction={() => (picking = true)}
@@ -304,7 +307,8 @@
               </div>
             {:else}
               {#each v.boxes as b, i (b.id)}
-                <HomeBox box={b} viewId={v.id} index={i} count={v.boxes.length} active={on && !home.zoomedId} ondragbox={(id) => (dragId = id)} ondropon={dropOn} />
+                {@const z = on && zoomId === b.id}
+                <HomeBox box={b} viewId={v.id} index={i} count={v.boxes.length} zoomed={z} covered={on && !!zoomId && !z} active={on && (!zoomId || z)} ondragbox={(id) => (dragId = id)} ondropon={dropOn} />
               {/each}
             {/if}
           </div>
@@ -433,6 +437,26 @@
     padding: 16px 14px max(24px, var(--fb-clearance, 0px));
     gap: 16px;
   }
+  /* Zoomed: the desk is the zoomed box's containing block. Everything else in
+     it is hidden, so nothing scrolls and the box sits over the whole stage. */
+  .desk.zooming {
+    overflow: hidden;
+    --zoom-inset: 16px;
+  }
+  .desk.phone.zooming {
+    --zoom-inset: 8px;
+  }
+  /* A slide-in mid-flight carries a transform, which would make the view
+     (zero height while zoomed) the box's containing block. */
+  .desk.zooming .view {
+    animation: none;
+  }
+  .today {
+    display: contents;
+  }
+  .today[hidden] {
+    display: none;
+  }
   .view {
     display: grid;
     grid-template-columns: repeat(12, minmax(0, 1fr));
@@ -445,7 +469,6 @@
     grid-template-columns: minmax(0, 1fr);
   }
   /* `hidden` must win over the grid/flex display above. */
-  .desk[hidden],
   .view[hidden] {
     display: none;
   }
@@ -462,11 +485,6 @@
     .view:not([hidden]) {
       animation: none;
     }
-  }
-  .zoom {
-    position: absolute;
-    inset: 0;
-    padding: 16px;
   }
   .empty {
     grid-column: 1 / -1;

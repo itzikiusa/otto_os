@@ -15,7 +15,9 @@
 //! remove. A token is never returned.
 //!
 //! Outward-facing writes (post, react, mark) are reached by agents only
-//! through approval-gated tools; the routes themselves are tagged Outward.
+//! through approval-gated tools; the routes themselves are tagged Outward, and
+//! refuse an agent credential's own as-me write outright (the tool's approved
+//! call replays as the person).
 
 use std::collections::HashMap;
 
@@ -141,6 +143,21 @@ fn as_user(v: Option<&str>) -> Result<bool, Error> {
             "`as` must be bot or user (got '{other}')"
         ))),
     }
+}
+
+/// An AGENT credential's own token never writes in Slack AS THE PERSON: a
+/// post, a reaction or a read-cursor move in their name goes through the
+/// approval-gated `otto.slack_*` tool (`tool`), whose card names the team,
+/// the channel and the full text and whose approved call replays as the
+/// person. Writing as the bot is unchanged.
+fn refuse_agent_as_me_write(auth: &AuthContext, as_user: bool, tool: &str) -> Result<(), Error> {
+    if as_user && !crate::slack_as_me::is_human(auth) {
+        return Err(Error::Forbidden(format!(
+            "acting as you in Slack (post, react, mark read) needs a person — an agent's own \
+             token cannot; use otto.{tool}, which asks for approval"
+        )));
+    }
+    Ok(())
 }
 
 /// The Slack identity a call acts as: the workspace bot, or the caller's own
@@ -714,6 +731,7 @@ async fn post_message<S: ChannelsCtx>(
         return Err(Error::Invalid("`thread_ts` is not a Slack timestamp".into()).into());
     }
     let as_user = as_user(req.as_.as_deref())?;
+    refuse_agent_as_me_write(&auth, as_user, "slack_post_message")?;
     let (api, me) = identity(&s, &ws_id, &user, &auth, as_user, req.team.as_deref()).await?;
     let channel = api.resolve_channel(as_user, &req.channel).await?;
     let posted = api.post_message(&channel, &req.text, thread).await?;
@@ -749,6 +767,7 @@ async fn react<S: ChannelsCtx>(
         return Err(Error::Invalid("`name` (the emoji) is empty".into()).into());
     }
     let as_user = as_user(req.as_.as_deref())?;
+    refuse_agent_as_me_write(&auth, as_user, "slack_react")?;
     let (api, me) = identity(&s, &ws_id, &user, &auth, as_user, req.team.as_deref()).await?;
     let channel = api.resolve_channel(as_user, &req.channel).await?;
     api.react(&channel, &req.ts, &req.name).await?;
@@ -788,6 +807,7 @@ async fn mark<S: ChannelsCtx>(
         slack_api::valid_ts(&req.ts).then(|| req.ts.trim().to_string())
     }
     .ok_or_else(|| Error::Invalid("`ts` is not a Slack timestamp".into()))?;
+    refuse_agent_as_me_write(&auth, true, "slack_mark_unread")?;
     let (api, me) = identity(&s, &ws_id, &user, &auth, true, req.team.as_deref()).await?;
     let channel = api.resolve_channel(true, &req.channel).await?;
     api.mark(&channel, &cursor).await?;

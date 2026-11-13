@@ -205,7 +205,8 @@ pub async fn run_step<C: ApiClientCtx>(
     // rewritten request, a dataset row or a chained value can retarget the
     // URL). The step fails instead of sending; a person can run it from the UI.
     if let Some(binding) = binding.filter(|b| b.enforce) {
-        let unbound = find_unbound_secret(
+        let unbound = find_unbound_secret_as(
+            true,
             repo,
             Some(ctx.secrets()),
             wid,

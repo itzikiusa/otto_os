@@ -547,6 +547,17 @@ Behaviour that came with the move:
   /library/skills/{name}` or import re-copies the skill into each provider skills
   folder whose `.otto-managed.json` says Otto owns it. A copy Otto does not own, a
   symlink, or a copy the person removed is never written.
+- **Edits made in the CLI folder are kept.** People (and agents such as Claude
+  Code's skill-creator) edit `~/.claude/skills/<name>/` directly. Otto records the
+  tree hash of each copy it writes (`.otto-managed-hashes.json` in that folder);
+  when a save, an improvement edit, an install, Install all or a delete would
+  replace or remove a copy that no longer matches (or an unrecorded copy from an
+  older Otto that differs), the copy is moved to
+  `<library>/provider-skills-backup/<provider>/<name>-<secs>-<id>/` first (newest
+  three per provider and skill) and a toast says where it went
+  (`crates/otto-context/src/user_skills/copies.rs`). The improvement engine's
+  hidden `.<file>.bak-<ts>` files stay in the Library (newest five per file) and
+  are never copied to the CLI folders.
 - **Self-improvement edits too.** An applied, approved or rolled-back improvement
   to a Library skill file is written through the same Library write (lock + hash
   check) and refreshes the Otto-owned provider copies

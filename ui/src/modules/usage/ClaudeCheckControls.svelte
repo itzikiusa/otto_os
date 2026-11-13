@@ -4,14 +4,16 @@
   // usage (PUT /usage/limits/claude-check, POST …/run); Otto never reads the
   // login. Turning it on confirms first and says what runs and where it goes.
   // While on, a check that is missing or older than the daemon's 5-minute
-  // cache runs once when the page opens; "Check now" runs one on demand.
+  // cache runs when the page opens and again on the page's 60 s poll once it
+  // is due (never while the tab is hidden, never more than once per 5 min);
+  // "Check now" runs one on demand.
   import { api } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import Switch from '../../lib/components/Switch.svelte';
   import type { AccountLimits, ClaudeCheck, LimitsResp } from '../../lib/api/types/usage-limits';
-  import { CHECK_CONFIRM, checkDue, checkStatusText } from './limitsText';
+  import { CHECK_CONFIRM, autoCheckDue, checkStatusText } from './limitsText';
 
   interface Props {
     row: AccountLimits;
@@ -24,7 +26,8 @@
   let { row, check, now, onresp }: Props = $props();
 
   let busy = $state(false);
-  let autoTried = false;
+  /** The page clock at our last automatic run (not reactive: bookkeeping). */
+  let lastAutoAt: number | null = null;
 
   async function run(): Promise<void> {
     if (busy) return;
@@ -53,10 +56,12 @@
     if (next) await run();
   }
 
-  // Once per page visit: an opted-in login with no recent check gets one.
+  // Re-evaluated whenever `now` moves (the parent's poll, which pauses while
+  // the tab is hidden) or the check state changes.
   $effect(() => {
-    if (!autoTried && checkDue(check, now)) {
-      autoTried = true;
+    const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+    if (autoCheckDue(check, now, lastAutoAt, hidden)) {
+      lastAutoAt = now;
       void run();
     }
   });

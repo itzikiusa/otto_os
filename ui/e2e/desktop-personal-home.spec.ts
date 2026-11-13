@@ -14,6 +14,15 @@ test.use({ serviceWorkers: 'block' });
 const MAIN = '01MAINAGENT0000000000000000';
 const SCOUT = '01M1RX7QZDVJ236Y7MZKAD9XYZ';
 
+// Times are relative to the run: a fixed calendar date turns a "next run"
+// into the past, and a thread's last activity into History, a week later.
+const at = (ms: number): string => new Date(Date.now() + ms).toISOString();
+const HOUR = 3_600_000;
+const NEXT_RUN = at(24 * HOUR);
+const RAN_START = at(-2 * HOUR);
+const RAN_END = at(-2 * HOUR + 180_000);
+const LAST_ACTIVE = at(-HOUR);
+
 /** Switch the app's color scheme the way Settings does (stored, reloaded). */
 async function setScheme(page: Page, scheme: 'light' | 'dark'): Promise<void> {
   await page.evaluate((s) => localStorage.setItem('otto_scheme', s), scheme);
@@ -37,7 +46,7 @@ async function setup(page: Page): Promise<string> {
     agent(SCOUT, 'Scout', { avatar: 'char:nerd', soul_md: 'Watches the build and digs into failures.', created_by_agent: MAIN }),
     agent(MAIN, 'Otto', { avatar: 'char:chief', soul_md: '<!-- otto-template:main-agent -->\nI’m your main agent: your one point of contact.' }),
   ];
-  const schedule = { id: 'sch-1', agent_id: SCOUT, schedule: { cadence: 'cron', expr: '0 9 * * 0,1,2,3,4' }, timezone: 'Asia/Jerusalem', directive: 'Morning brief\nSummarise failing builds', enabled: true, permission: 'directed', last_run_at: null, next_run_at: '2026-11-08T07:00:00Z', created_at: '', updated_at: '' };
+  const schedule = { id: 'sch-1', agent_id: SCOUT, schedule: { cadence: 'cron', expr: '0 9 * * 0,1,2,3,4' }, timezone: 'Asia/Jerusalem', directive: 'Morning brief\nSummarise failing builds', enabled: true, permission: 'directed', last_run_at: null, next_run_at: NEXT_RUN, created_at: '', updated_at: '' };
   await page.route(`**/api/v1/workspaces/${ws}/personal-agents`, (r) => r.fulfill({ json: agents }));
   await page.route('**/api/v1/personal-agents/*/autonomy', (r) => {
     const main = r.request().url().includes(MAIN);
@@ -46,14 +55,14 @@ async function setup(page: Page): Promise<string> {
   await page.route('**/api/v1/personal-agents/*/schedules', (r) => r.fulfill({ json: r.request().url().includes(SCOUT) ? [schedule] : [] }));
   await page.route('**/api/v1/personal-agents/*/routines', (r) => r.fulfill({ json: {
     agent: { id: SCOUT, name: 'Scout', enabled: true }, user_timezone: 'Asia/Jerusalem',
-    routines: r.request().url().includes(SCOUT) ? [{ id: 'sch-1', agent_id: SCOUT, agent_name: 'Scout', name: 'Morning brief', instruction: schedule.directive, schedule: schedule.schedule, timezone: 'Asia/Jerusalem', enabled: true, paused: false, agent_paused: false, permission: 'directed', deliver: { type: 'chat' }, last_run_at: null, next_runs: ['2026-11-08T07:00:00Z', '2026-11-09T07:00:00Z', '2026-11-10T07:00:00Z'] }] : [],
+    routines: r.request().url().includes(SCOUT) ? [{ id: 'sch-1', agent_id: SCOUT, agent_name: 'Scout', name: 'Morning brief', instruction: schedule.directive, schedule: schedule.schedule, timezone: 'Asia/Jerusalem', enabled: true, paused: false, agent_paused: false, permission: 'directed', deliver: { type: 'chat' }, last_run_at: null, next_runs: [NEXT_RUN, '2026-11-09T07:00:00Z', '2026-11-10T07:00:00Z'] }] : [],
   } }));
   await page.route('**/api/v1/personal-agents/*/runs', (r) => r.fulfill({ json: r.request().url().includes(SCOUT) ? [{
-    id: 'run-1', agent_id: SCOUT, schedule_id: 'sch-1', workspace_id: ws, status: 'ok', trigger: 'schedule', mode: 'scheduled', started_at: '2026-11-05T07:00:00Z', finished_at: '2026-11-05T07:03:00Z',
-    summary: 'Two builds failed on main', report_path: '/x', report_rel: `${SCOUT}/reports/r.md`, delivered: false, delivery_error: null, error: null, session_id: 'thr-run', report_hash: null, attempts: 1, skipped_delivery: true, goal_id: null, read_only: false, created_at: '2026-11-05T07:00:00Z',
+    id: 'run-1', agent_id: SCOUT, schedule_id: 'sch-1', workspace_id: ws, status: 'ok', trigger: 'schedule', mode: 'scheduled', started_at: RAN_START, finished_at: RAN_END,
+    summary: 'Two builds failed on main', report_path: '/x', report_rel: `${SCOUT}/reports/r.md`, delivered: false, delivery_error: null, error: null, session_id: 'thr-run', report_hash: null, attempts: 1, skipped_delivery: true, goal_id: null, read_only: false, created_at: RAN_START,
   }] : [] }));
   await page.route('**/api/v1/personal-agents/*/delegations', (r) => r.fulfill({ json: [{
-    id: 'thr-del', workspace_id: ws, lead_agent_id: MAIN, lead_thread_id: 'thr-chat', member_agent_id: SCOUT, member_name: 'Scout', task: 'Why did the nightly build fail?', status: 'running', summary: '', created_at: '2026-11-05T08:00:00Z', finished_at: null, delivered_at: null,
+    id: 'thr-del', workspace_id: ws, lead_agent_id: MAIN, lead_thread_id: 'thr-chat', member_agent_id: SCOUT, member_name: 'Scout', task: 'Why did the nightly build fail?', status: 'running', summary: '', created_at: LAST_ACTIVE, finished_at: null, delivered_at: null,
   }] }));
   await page.route('**/api/v1/personal-agents/*/instructions-proposal', (r) => r.fulfill({ json: { proposal: null, can_undo: false } }));
   await page.route('**/api/v1/personal-agents/*/memories', (r) => r.fulfill({ json: { version: 'v', items: [] } }));
@@ -61,7 +70,7 @@ async function setup(page: Page): Promise<string> {
   const dir = (id: string) => `/tmp/otto-e2e/personal/${id}`;
   const thread = (id: string, title: string, cwd: string, meta: Record<string, unknown>, status = 'idle', parent: string | null = null) => ({
     id, workspace_id: ws, provider: 'claude', title, cwd, status, access_mode: 'approval-required', created_by: 'root',
-    created_at: '2026-11-05T07:00:00Z', last_active_at: '2026-11-05T08:00:00Z', last_sequence: 1, parent_id: parent, meta,
+    created_at: RAN_START, last_active_at: LAST_ACTIVE, last_sequence: 1, parent_id: parent, meta,
   });
   await page.route(`**/api/v1/workspaces/${ws}/runtime-sessions`, (r) => r.fulfill({ json: [
     thread('thr-chat', 'Chat: Otto', dir(MAIN), { source: 'personal_agent', personal_agent: MAIN, personal_agent_chat: true }),
@@ -233,16 +242,21 @@ test('no chat yet: a running routine replaces the intro, and its first result op
   await expect(page.getByTestId('pa-intro')).toHaveCount(0);
 });
 
-test('Threads groups agent threads by NAME and badges what started each', async ({ page }, info) => {
+test('Threads keeps an agent’s chat under its NAME, folds its runs into “Agent runs”, and badges what started each', async ({ page }, info) => {
   await setup(page);
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/#/threads');
   const sidebar = page.getByTestId('threads-sidebar');
-  // The group header is the agent's name — never its folder's ULID.
-  await expect(sidebar.getByRole('region', { name: 'Project Scout' }).or(sidebar.locator('section[aria-label="Project Scout"]'))).toBeVisible();
-  await expect(sidebar).not.toContainText(SCOUT);
+  // The chat's group header is the agent's name — never its folder's ULID.
   await expect(sidebar.locator('section[aria-label="Project Otto"]')).toBeVisible();
+  await expect(sidebar).not.toContainText(SCOUT);
   await expect(page.getByTestId('thread-badge-thr-chat')).toHaveText('Chat');
+  // Routine runs and delegated work are not conversations a person started:
+  // they sit in one folded "Agent runs" group, opened on demand.
+  const runs = sidebar.getByTestId('threads-group-agent-runs');
+  await expect(runs).toContainText('Agent runs');
+  await runs.getByRole('button', { expanded: false }).click();
+  await expect(sidebar).not.toContainText(SCOUT);
   await expect(page.getByTestId('thread-badge-thr-run')).toHaveText('Scheduled · Morning brief');
   await expect(page.getByTestId('thread-badge-thr-del')).toHaveText('Delegated by Otto');
   // The breadcrumb names the agent too.

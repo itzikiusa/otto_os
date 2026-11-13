@@ -16,7 +16,7 @@ mod changes;
 mod completion;
 mod metadata;
 mod multirun;
-mod process_list;
+pub mod process_list;
 mod read_only_guard;
 mod validation;
 
@@ -2417,17 +2417,16 @@ impl DbViewerService {
                 .unwrap()
                 .remove("__read_only_execution");
         }
-        if read_only {
+        if read_only || snap.conn.read_only {
             // Set AFTER the enforced-mode removal above: the MCP path is
             // read-only whatever the statement classified as. The flag is
             // server-derived (config parsing strips `__` keys from stored
-            // params) and excluded from the pool cache key.
-            if !r.config.params.is_object() {
-                r.config.params = Value::Object(serde_json::Map::new());
-            }
-            if let Some(map) = r.config.params.as_object_mut() {
-                map.insert("__read_only_execution".into(), Value::Bool(true));
-            }
+            // params) and excluded from the pool cache key. A Read-only
+            // connection runs every statement this way too: the classifier
+            // cannot see inside a function, so `SELECT writes_rows()` passes
+            // it — the engine's own READ ONLY transaction (ClickHouse
+            // `readonly=2`) refuses the write.
+            force_read_only_execution(&mut r.config.params);
         }
         self.verify_native_snap(&snap, conn_id, user_id, &r).await?;
         let token = CancelToken::new();
@@ -4479,5 +4478,7 @@ mod lifecycle_tests;
 mod native_owner_tests;
 #[cfg(test)]
 mod perf_budget_tests;
+#[cfg(test)]
+mod read_only_execution_tests;
 #[cfg(test)]
 mod scoped_metadata_tests;

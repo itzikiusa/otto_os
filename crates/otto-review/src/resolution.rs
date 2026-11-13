@@ -60,7 +60,7 @@ pub fn confirmed_fixed(
         .iter()
         .enumerate()
         .filter(|(_, p)| {
-            p.disposition.trim() == "fixed"
+            p.disposition.trim() == crate::contract::PRIOR_SCOPE_DISPOSITIONS[0]
                 && !p.evidence.trim().is_empty()
                 && p.evidence.trim() != crate::scope::NOT_ASSESSED
         })

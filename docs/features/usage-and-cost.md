@@ -146,6 +146,16 @@ A turn that maps to nothing is recorded under the special workspace id
 session id. External usage gives a complete machine-wide picture but is excluded by
 default in the dashboard (the **Otto / All** toggle — see §6).
 
+**Codex / Antigravity owner grace.** Their provider session id is learnt only
+after the CLI starts (the session manager finds the conversation it spawned), so
+a **new** Codex or Antigravity transcript whose owner lookup misses is **not**
+recorded as external at once: the tailer leaves it unconsumed and retries for up
+to **180 seconds** from the file's birth (`OWNER_GRACE`,
+`tailer/driver/owner.rs`). Its first turns are then attributed to the Otto
+session that started it (and to the `review` bucket for review agents) instead of
+landing in `external`. A transcript nobody claims within that window is external
+as before; nothing is read twice.
+
 ### 3.4 No double-counting, true-time stamping
 
 Source offsets, response deduplication, held streaming responses, and Codex
@@ -393,8 +403,12 @@ tooltip *"Estimated — model not in the rate table; priced at the Opus tier."*
   **Download HTML** fetch the full one once (`sessions_limit=1000&include=daily_models`)
   and write every table to one self-contained file (inline CSS, light/dark).
 - **Compare with ccusage** (root, opt-in, `POST /usage/ccusage-check {days}`):
-  the daemon runs `npx --yes ccusage daily --json --breakdown --since … --until …`
-  on demand (no Otto dependency; npx downloads/caches ccusage on first use;
+  the daemon runs `npx --yes ccusage@20.0.26 daily --json --breakdown --since … --until …`
+  only when a person clicks **Compare with ccusage** — never on its own. The
+  version is pinned (`ccusage::VERSION`, the release the parser was written
+  against) because the command runs as the daemon user, unsandboxed, over every
+  transcript on the Mac; the page shows the exact command before and after the
+  run (no Otto dependency; npx downloads/caches that release on first use;
   120 s timeout; 1–90 days, default 7) and shows its numbers beside Otto's for
   the same dates — **external sessions included** on Otto's side, because
   ccusage reads every local transcript — with the difference per
@@ -435,7 +449,8 @@ providers.
   session's SQLite metadata. Labels: `review` (Code review), `product` (Product AI),
   `channel` (Channels), `agent` (Ad-hoc agents), `connection` (Connections), `swarm`
   (Swarm), `external` (External). The label prefers the session meta `source` tag set
-  by the review/product/channel runners, else the session kind.
+  by the review/product/channel runners, else the session kind. The review
+  summarizer's sessions (`source: review_summarizer`) count as `review`.
 
 ### 6.1 Work-graph attribution & forecast (the drilldown)
 
@@ -444,8 +459,12 @@ providers.
 sessions per group (empty "not set" keys filtered out). Dimensions (`by=`):
 `repo`, `branch`, `pr`, `story`, `swarm_task`, `workflow`, `channel`, `review`,
 `origin` (default). The columns are populated from each session's
-`meta_json["work"]` `WorkRef` at ingest time. Pre-migration installs that haven't
-restarted simply return empty rows for the new columns until the migration runs.
+`meta_json["work"]` `WorkRef` at ingest time — **only** on the
+`POST /ingest/usage` path. The transcript tailer, where nearly all real usage
+comes from, writes no work tags, so the drilldown is usually empty; the panel
+then says so (usage is still counted in the tables above) instead of showing a
+blank table. Pre-migration installs that haven't restarted simply return empty
+rows for the new columns until the migration runs.
 
 `POST /usage/forecast` (`{feature, provider, est_tokens?}`) estimates the cost of a
 future run, returning `{projected_cost_usd, basis}` (always `Ok`, with a "no data"
@@ -491,10 +510,18 @@ settings or hooks, no MCP servers, no transcript, no prompt) and sends it the
 Agent SDK's `initialize` and `get_usage` control requests over stream-json; the
 CLI asks Anthropic with its own sign-in — **Otto never reads the login**. One
 exchange has a 10 s hard timeout (the CLI is killed), answers are cached for
-5 minutes, and only one check per login runs at a time. The page runs a check
-when it opens if the last one is older than that, and **Check now** runs one on
-demand. A failed check shows as `Unknown` with the reason, never as 0 %. The
-switch is stored in the `settings` table (`usage_limits_claude_check`). The
+5 minutes, and only one check per login runs at a time. While the Usage page is
+open and visible, it runs a check whenever the last one is older than that —
+asked again on every minute's re-read, so an opted-in row does not go Stale on an
+open page — and never more than once per 5 minutes (also after a run that
+failed); a hidden tab runs none. **Check now** runs one on demand. A failed
+check shows as `Unknown` with the reason, never as 0 %. Turning the switch
+**off** also drops the numbers the check left behind (and its plan), so the row
+falls back to what passive session events alone support. Only a person's own
+credential may flip the switch or start a check: an agent session's token is
+refused with 403 even when it acts as root, because the check runs that
+person's CLI against their Anthropic account. The switch is stored in the
+`settings` table (`usage_limits_claude_check`). The
 `get_usage` request is marked experimental in the Agent SDK, so a CLI update
 can change its answer; Otto then reports "answered in a shape Otto doesn’t know".
 

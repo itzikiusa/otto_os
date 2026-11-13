@@ -20,8 +20,8 @@ use otto_state::{NewNotice, NotificationsRepo, TriggersRepo, WorkflowTrigger, Wo
 use serde_json::Value;
 
 use crate::chat::{
-    binding_candidates, binding_matches, is_own_ack, parse_run_command, parse_workflow_command,
-    strip_slack_tokens,
+    binding_candidates, binding_matches, is_own_ack, mentions_someone, parse_run_command,
+    parse_workflow_command,
 };
 use crate::chat_resolve::{resolve_name, NameMatch};
 use crate::trigger_outcome::{stamp, TriggerOutcome};
@@ -79,7 +79,7 @@ pub async fn note<C: WorkflowCtx>(
     user: &str,
     text: &str,
 ) {
-    if is_own_ack(text) || strip_slack_tokens(text).trim().is_empty() {
+    if is_own_ack(text) || text.trim().is_empty() {
         return;
     }
     let repo = WorkflowsRepo::new(ctx.pool().clone());
@@ -92,7 +92,7 @@ pub async fn note<C: WorkflowCtx>(
     let mut hits: Vec<&WorkflowTrigger> = Vec::new();
     // (1) The binding a message here would have fired: the first candidate
     // owned by the receiving workspace, as in `try_start`.
-    let has_mention = text.contains("<@");
+    let has_mention = mentions_someone(text);
     for t in binding_candidates(&chat_triggers, channel, chat, thread, has_mention) {
         if repo
             .get(&t.workflow_id)

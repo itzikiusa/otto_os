@@ -64,7 +64,7 @@ A skill is a `SKILL.md` that tells an agent how to do a kind of work. Skills Lab
 ## Tips and limits
 
 - Skills Lab appears in the sidebar with the **Skills Evaluator** feature. Reading the skill library needs the **Skills** feature, and editing library skills needs Skills admin. Evaluator runs follow the **Product** feature (View to read, Edit to start, cancel or retry). Promoting a skill into the library needs Skills Evaluator admin.
-- Default evaluator settings live in **Settings → Skills Evaluator**, and the skill library in **Settings → Skills**; both are for admins.
+- Default evaluator settings are in **Evaluator** → page ⋯ → **Evaluator defaults…**, and **Install all bundled skills…** is in the **Skills** page ⋯; both are for Settings admins.
 - Every implement, validate and improve step is a real agent session that uses your provider tokens. Check the session estimate before you start.
 - Scores are judged by agents, so treat them as relative. Use more validation passes to reduce noise.
 - A round with no findings ends the run early. With 1 iteration, the improver never runs.

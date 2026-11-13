@@ -319,36 +319,134 @@ pub fn tool_is_person_only(bare: &str) -> bool {
 
 /// True iff THIS call is a person's to decide: a [`PERSON_ONLY_TOOLS`] entry,
 /// a cluster write whose arguments carry a typed confirm (`k8s_action`
-/// `params.confirm_name`, `k8s_pod_http` `confirm_name`), or an agent-admin
-/// call that sets an owner-only field ([`sets_owner_only_agent_field`]). The
-/// route refuses those from an agent credential (S6-304; the personal-agent
-/// handlers' `person_only_change`), so the governed path always files a human
-/// approval for an agent caller and replays only the approved call as that
-/// person — exactly as for a person-only tool.
+/// `params.confirm_name`, `k8s_pod_http` `confirm_name`), an agent-admin
+/// call that sets an owner-only field ([`sets_owner_only_agent_field`]), a
+/// Slack write AS THE PERSON ([`slack_write_as_me`]) or a scheduled task
+/// that delivers outside Otto ([`task_destination_is_outward`]). The route
+/// refuses those from an agent credential (S6-304; the personal-agent
+/// handlers' `person_only_change`, [`agent_task_write`], the Slack routes),
+/// so the governed path always files a human approval for an agent caller
+/// and replays only the approved call as that person — exactly as for a
+/// person-only tool. An update naming no destination is judged against the
+/// stored one by the caller ([`task_update_is_person_only`]).
 pub fn call_is_person_only(bare: &str, args: &Value) -> bool {
     let confirm = match bare {
         "k8s_action" => args.pointer("/params/confirm_name"),
         "k8s_pod_http" => args.get("confirm_name"),
         _ => None,
     };
+    let outward_task = matches!(bare, "create_scheduled_task" | "update_scheduled_task")
+        && task_destination_is_outward(args.get("destination"));
     tool_is_person_only(bare)
         || sets_owner_only_agent_field(bare, args)
+        || (bare == "produce_broker_message"
+            && args.get("confirm").and_then(Value::as_bool) == Some(true))
+        || slack_write_as_me(bare, args)
+        || outward_task
         || confirm
             .and_then(Value::as_str)
             .is_some_and(|c| !c.trim().is_empty())
 }
 
+/// A governed Slack write that acts AS THE PERSON: a post or a reaction with
+/// `as` = `user` | `me`, and every read-cursor move (it is always theirs).
+/// Posting as the bot is not.
+pub fn slack_write_as_me(bare: &str, args: &Value) -> bool {
+    let as_me = matches!(
+        args.get("as").and_then(Value::as_str).map(str::trim),
+        Some("user" | "me")
+    );
+    match bare {
+        "slack_post_message" | "slack_react" => as_me,
+        "slack_mark_unread" => true,
+        _ => false,
+    }
+}
+
+/// A scheduled-task destination that delivers OUTSIDE Otto — any type but
+/// `none` (a missing or empty type is `none`, as the engine reads it).
+pub fn task_destination_is_outward(d: Option<&Value>) -> bool {
+    let kind = d
+        .and_then(|d| d.get("type"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    !matches!(kind, "" | "none")
+}
+
+/// Does a scheduled-task write set up or change OUTWARD delivery? A create
+/// (`stored` = `None`) with an outward destination; an update whose resulting
+/// task delivers outward and that changes its destination (type or target)
+/// or what it runs (`changed` holds `prompt`, `skill` or `workflow` — the
+/// route's owner-only change names). A retime, a pause or a run stays open.
+pub fn task_write_needs_person(
+    stored: Option<&Value>,
+    new: Option<&Value>,
+    changed: &[&str],
+) -> bool {
+    let edits = stored.is_none()
+        || new.is_some_and(|d| Some(d) != stored)
+        || changed
+            .iter()
+            .any(|c| matches!(*c, "prompt" | "skill" | "workflow"));
+    edits && task_destination_is_outward(new.or(stored))
+}
+
+/// The scheduled-task routes' refusal of an AGENT credential's own write that
+/// [`task_write_needs_person`] (the request's credential, as the feature
+/// guard published it): it names the governed tool, which asks for approval
+/// and replays the approved call as the person.
+pub fn agent_task_write(
+    stored: Option<&Value>,
+    new: Option<&Value>,
+    changed: &[&str],
+) -> Result<(), Error> {
+    if !otto_core::auth::request_is_agent() || !task_write_needs_person(stored, new, changed) {
+        return Ok(());
+    }
+    let tool = match stored {
+        None => "create_scheduled_task",
+        Some(_) => "update_scheduled_task",
+    };
+    Err(Error::Forbidden(format!(
+        "outward delivery needs a person — set the destination in Scheduled Tasks, or use the \
+         `otto.{tool}` tool, which asks for approval"
+    )))
+}
+
+/// [`call_is_person_only`] for an `update_scheduled_task` that names no
+/// destination, against the task's STORED one: an edit of what an
+/// already-outward task runs (any of the keys present counts — a superset of
+/// what the route refuses, so the approved call replays as the person).
+pub fn task_update_is_person_only(stored: &Value, args: &Value) -> bool {
+    task_destination_is_outward(Some(stored))
+        && ["prompt", "skill", "workflow_id"]
+            .iter()
+            .any(|k| args.get(*k).is_some())
+}
+
 /// An agent-admin call that sets a personal agent's OWNER-ONLY field: what it
 /// runs and where its report goes (instructions, provider, model, folder,
 /// browser, delivery), a schedule's directive or permission, its standing
-/// goals or rules. Per CALL, not per tool: the same routes stay open to an
-/// agent for a rename, a pause or a cadence change (the route itself is not
-/// person-only, so these tools are not [`PERSON_ONLY_TOOLS`]). Any such key
-/// present counts, even one re-sending the stored value — a superset of
-/// what the handler refuses, never less.
+/// goals or rules, its personality note (the user's own words in every
+/// prompt). Per CALL, not per tool: the same routes stay open to an agent for
+/// a rename, a pause, a cadence change, a bare create or a preset (the route
+/// itself is not person-only, so these tools are not [`PERSON_ONLY_TOOLS`]).
+/// Any such key present counts, even one re-sending the stored value — a
+/// superset of what the handler refuses, never less.
 pub fn sets_owner_only_agent_field(bare: &str, args: &Value) -> bool {
     let keys: &[&str] = match bare {
         "update_personal_agent" => &["soul_md", "provider", "model", "cwd", "browser", "delivery"],
+        "create_personal_agent" => &[
+            "soul_md",
+            "provider",
+            "model",
+            "cwd",
+            "browser",
+            "delivery",
+            "schedules",
+        ],
+        "personality_set" => &["note"],
         "add_personal_agent_schedule" | "update_personal_agent_schedule" => {
             &["directive", "permission"]
         }
@@ -365,6 +463,14 @@ pub fn person_only_reason(bare: &str) -> &'static str {
         "deciding an improvement edit is a person's decision — approve to apply it as yourself"
     } else if bare == "set_personal_agent_slack_as_me" {
         "lending your Slack identity to an agent is your decision — approve to apply it as yourself"
+    } else if bare.starts_with("slack_") {
+        "acting as you in Slack is your decision — approve to send it as yourself"
+    } else if bare.ends_with("_scheduled_task") {
+        "a scheduled task that delivers outside Otto is your decision — approve to set it up as \
+         yourself"
+    } else if bare == "personality_set" {
+        "an agent's personality note is written in your words into its every prompt — approve to \
+         set it as yourself"
     } else if bare.contains("personal_agent") {
         "a personal agent's instructions, delivery, schedule permissions, goals and rules are its \
          owner's — approve to apply this change as yourself"
@@ -1216,14 +1322,17 @@ fn slack_tool_specs() -> [Value; 9] {
 /// and (for a post) the text.
 fn slack_detail(short: &str, args: &Value) -> Option<String> {
     let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("");
-    let who = match (s("as"), s("team")) {
-        ("user" | "me", "") => "AS YOU".to_string(),
+    let who = match (s("as").trim(), s("team")) {
+        ("user" | "me", "") => "AS YOU in your default Slack workspace".to_string(),
         ("user" | "me", t) => format!("AS YOU in Slack workspace '{t}'"),
         _ => "as the workspace's Slack bot".to_string(),
     };
     Some(match short {
         "slack_post_message" => {
-            let text: String = s("text").chars().take(500).collect();
+            // The route's own cap (`slack_api::MAX_POST_CHARS`): the card
+            // holds the WHOLE post — a person approves what is sent in their
+            // name, not its first lines.
+            let text = preview(s("text"), 40_000);
             let thread = match s("thread_ts") {
                 "" => String::new(),
                 t => format!(" (thread {t})"),
@@ -1245,10 +1354,52 @@ fn slack_detail(short: &str, args: &Value) -> Option<String> {
             } else {
                 "unread"
             },
-            s("team")
+            match s("team") {
+                "" => "your default",
+                t => t,
+            }
         ),
         _ => return None,
     })
+}
+
+/// The first `max` CHARACTERS of `text` (never a cut inside a multi-byte
+/// one), with ` … (+N more characters)` when it was longer — an approver
+/// never says yes to half a message believing it is all of it.
+pub fn preview(text: &str, max: usize) -> String {
+    let total = text.chars().count();
+    if total <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max).collect();
+    format!("{head} … (+{} more characters)", total - max)
+}
+
+/// The issue account a Jira / Confluence call names (its id, label, email or
+/// base URL, as given — [`detail_with_target`] leads with the resolved
+/// account's label and site), or the caller's only one when it names none.
+fn issue_account(args: &Value) -> String {
+    match args
+        .get("account_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+    {
+        Some(a) if !a.is_empty() => format!("account '{a}'"),
+        _ => "your only issue account".into(),
+    }
+}
+
+/// A Markdown / storage body an approver must read before it is published.
+fn body_preview(args: &Value) -> String {
+    let body = ["body", "body_md", "body_html"]
+        .iter()
+        .find_map(|k| args.get(*k).and_then(Value::as_str))
+        .unwrap_or("");
+    if body.trim().is_empty() {
+        "(no body)".into()
+    } else {
+        format!("\"{}\"", preview(body, 600))
+    }
 }
 
 /// The Linked Threads slice of [`otto_tool_specs`] (split out to keep that
@@ -1637,6 +1788,28 @@ pub async fn detail_with_target(pool: &otto_state::DbPool, tool: &str, args: &Va
     } else {
         None
     };
+    // A Jira / Confluence write names its account by an opaque id once
+    // resolved: lead with the account's label and site instead.
+    let issue_write = matches!(
+        short,
+        "comment_issue"
+            | "transition_issue"
+            | "create_confluence_page"
+            | "update_confluence_page"
+            | "comment_confluence_page"
+    );
+    if let Some(acct) = id("account_id").filter(|_| issue_write) {
+        if let Ok(a) = otto_state::IssuesRepo::new(pool.clone())
+            .get_account(&acct)
+            .await
+        {
+            let site = match a.base_url.trim() {
+                "" => String::new(),
+                url => format!(" at {url}"),
+            };
+            return format!("Issue account '{}'{site}: {detail}", a.label);
+        }
+    }
     match target {
         Some((what, name, env)) => format!(
             "{}{what} '{name}': {detail}",
@@ -1670,18 +1843,23 @@ pub fn dangerous_detail(tool: &str, args: &Value) -> String {
                 Some(m) => format!("{cadence} (every {m} min)"),
                 None => cadence.to_string(),
             };
-            let dest = args
-                .get("destination")
+            let d = args.get("destination");
+            let kind = d
                 .and_then(|d| d.get("type"))
                 .and_then(Value::as_str)
                 .unwrap_or("none");
-            let prompt: String = args
-                .get("prompt")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .chars()
-                .take(160)
-                .collect();
+            // Where it goes, not only how: the channel / chat / address / URL.
+            let target = ["channel", "chat_id", "to", "url"]
+                .iter()
+                .find_map(|k| d.and_then(|d| d.get(*k)).and_then(Value::as_str));
+            let dest = match target {
+                Some(t) => format!("{kind} ({t})"),
+                None => kind.to_string(),
+            };
+            let prompt = preview(
+                args.get("prompt").and_then(Value::as_str).unwrap_or(""),
+                400,
+            );
             format!(
                 "Recurring agent job '{name}' — cadence: {cad}; destination: {dest}; prompt: {prompt}"
             )
@@ -1697,13 +1875,7 @@ pub fn dangerous_detail(tool: &str, args: &Value) -> String {
             args.get("run_id").and_then(Value::as_str).unwrap_or("?")
         ),
         "query_db" => {
-            let stmt: String = args
-                .get("statement")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .chars()
-                .take(400)
-                .collect();
+            let stmt = preview(args.get("statement").and_then(Value::as_str).unwrap_or(""), 400);
             format!(
                 "Run a database statement that may write, on connection '{}'{}: {stmt}",
                 args.get("connection_id").and_then(Value::as_str).unwrap_or("?"),
@@ -1785,13 +1957,73 @@ pub fn dangerous_detail(tool: &str, args: &Value) -> String {
             )
         }
         "comment_issue" => format!(
-            "Comment on issue '{}'",
-            args.get("key").and_then(Value::as_str).unwrap_or("?")
-        ),
-        "transition_issue" => format!(
-            "Transition issue '{}' (transition '{}')",
+            "Comment on issue '{}' ({}): {}",
             args.get("key").and_then(Value::as_str).unwrap_or("?"),
-            args.get("transition_id").and_then(Value::as_str).unwrap_or("?")
+            issue_account(args),
+            body_preview(args)
+        ),
+        // `transition_id` takes a transition id, its name or the target
+        // status name — the card shows what the caller gave, labelled as such.
+        "transition_issue" => {
+            let t = args
+                .get("transition_id")
+                .map(|v| v.as_str().map_or(v.to_string(), str::to_string))
+                .unwrap_or_else(|| "?".into());
+            let label = if !t.is_empty() && t.chars().all(|c| c.is_ascii_digit()) {
+                format!("transition id {t}")
+            } else {
+                format!("to '{t}'")
+            };
+            format!(
+                "Transition issue '{}' {label} ({})",
+                args.get("key").and_then(Value::as_str).unwrap_or("?"),
+                issue_account(args)
+            )
+        }
+        "create_confluence_page" => format!(
+            "Publish a new Confluence page '{}' in space '{}'{} ({}): {}",
+            args.get("title").and_then(Value::as_str).unwrap_or("?"),
+            args.get("space_key").and_then(Value::as_str).unwrap_or("?"),
+            args.get("parent_id")
+                .and_then(Value::as_str)
+                .map(|p| format!(" under parent page {p}"))
+                .unwrap_or_default(),
+            issue_account(args),
+            body_preview(args)
+        ),
+        "update_confluence_page" => format!(
+            "REPLACE the body of Confluence page {}{}{} ({}): {}",
+            args.get("page_id").and_then(Value::as_str).unwrap_or("?"),
+            args.get("title")
+                .and_then(Value::as_str)
+                .map(|t| format!(", retitled '{t}'"))
+                .unwrap_or_default(),
+            match args.get("base_version").and_then(i64_lenient) {
+                Some(v) => format!(" (from version {v})"),
+                None => " (overwrites the latest version)".into(),
+            },
+            issue_account(args),
+            body_preview(args)
+        ),
+        "comment_confluence_page" => format!(
+            "Comment on Confluence page {} ({}): {}",
+            args.get("page_id").and_then(Value::as_str).unwrap_or("?"),
+            issue_account(args),
+            body_preview(args)
+        ),
+        "personality_set" => format!(
+            "Set this agent's personality{}; note (your words, in its every prompt): {}",
+            args.get("preset")
+                .and_then(Value::as_str)
+                .map(|p| format!(" preset '{p}'"))
+                .unwrap_or_default(),
+            match args.get("note") {
+                None | Some(Value::Null) => "unchanged".into(),
+                Some(n) => match n.as_str().map(str::trim) {
+                    Some("") => "(cleared)".to_string(),
+                    _ => format!("\"{}\"", preview(n.as_str().unwrap_or_default(), 600)),
+                },
+            }
         ),
         "api_execute" => format!(
             "API request '{}' executed against environment '{}' (confirm={}, confirm_new_host={}) in workspace '{}'",
@@ -1821,13 +2053,7 @@ pub fn dangerous_detail(tool: &str, args: &Value) -> String {
             args.get("channel").and_then(Value::as_str).unwrap_or("?")
         ),
         "broadcast_message" => {
-            let text: String = args
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .chars()
-                .take(120)
-                .collect();
+            let text = preview(args.get("text").and_then(Value::as_str).unwrap_or(""), 120);
             format!("Broadcast a message to live agent sessions: {text}")
         }
         "open_session" => format!(
@@ -1836,13 +2062,7 @@ pub fn dangerous_detail(tool: &str, args: &Value) -> String {
             args.get("workspace_id").and_then(Value::as_str).unwrap_or("?")
         ),
         "send_message" => {
-            let text: String = args
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .chars()
-                .take(120)
-                .collect();
+            let text = preview(args.get("text").and_then(Value::as_str).unwrap_or(""), 120);
             format!(
                 "Send a message to agent session '{}': {text}",
                 args.get("session_id").and_then(Value::as_str).unwrap_or("?")
@@ -1866,13 +2086,7 @@ pub fn dangerous_detail(tool: &str, args: &Value) -> String {
         ),
         // AWS / Kubernetes console writers: show the approver the exact target.
         "aws_athena_query" => {
-            let sql: String = args
-                .get("sql")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .chars()
-                .take(200)
-                .collect();
+            let sql = preview(args.get("sql").and_then(Value::as_str).unwrap_or(""), 200);
             format!(
                 "Run an Athena query (billed per byte scanned) on AWS account '{}' (database '{}', workgroup '{}'): {sql}",
                 args.get("account_id").and_then(Value::as_str).unwrap_or("?"),
@@ -1921,13 +2135,7 @@ pub fn dangerous_detail(tool: &str, args: &Value) -> String {
             k8s_risky_params(args.get("params"))
         ),
         "design_assist" => {
-            let prompt: String = args
-                .get("prompt")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .chars()
-                .take(160)
-                .collect();
+            let prompt = preview(args.get("prompt").and_then(Value::as_str).unwrap_or(""), 160);
             format!(
                 "Start a design agent turn ({}) on design artifact '{}' — it spawns an agent session and commits a new version: {prompt}",
                 args.get("mode").and_then(Value::as_str).unwrap_or("refine"),

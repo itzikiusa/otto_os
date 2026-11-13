@@ -1,7 +1,7 @@
 // Seed the throwaway daemon with a believable, entirely FICTIONAL company
 // ("Acme Storefront") through its public HTTP API. Nothing here touches the
 // user's real daemon, data or accounts. Returns the ids the capture needs.
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildDemoRepo } from './demo-repo.mjs';
 import { writeVault } from './vault.mjs';
@@ -138,6 +138,18 @@ export async function seedAll(api, { dataDir, home, fakeBin, repoRoot, docker })
     await api.try('POST', `/connections/${c.id}/test`, {});
   }
 
+  // ClickHouse (a throwaway local server, capture.mjs) — read-only, so the
+  // explorer refuses writes on it.
+  if (docker.clickhouse) {
+    const c = await api.post(`${W}/connections`, {
+      name: 'warehouse · clickhouse', kind: 'clickhouse', params: { host: '127.0.0.1', port: docker.clickhouse, user: 'default', db: 'shopdb' },
+      secret: null, environment: 'prod', read_only: true,
+    });
+    ids.clickhouse = c.id;
+    await api.try('POST', `/connections/${c.id}/test`, {});
+    await api.try('POST', `${W}/db/saved-queries`, { connection_id: c.id, name: 'Revenue by region', statement: "SELECT region, count() AS orders, round(sum(total_cents) / 100) AS revenue\nFROM shopdb.orders\nWHERE status != 'refunded'\nGROUP BY region\nORDER BY revenue DESC" });
+  }
+
   // ── SSH hosts in sections (rows render without a reachable host) ─────────
   const prod = await api.try('POST', `${W}/connection-sections`, { name: 'Production', parent_id: null });
   const stg = await api.try('POST', `${W}/connection-sections`, { name: 'Staging', parent_id: null });
@@ -190,14 +202,16 @@ export async function seedAll(api, { dataDir, home, fakeBin, repoRoot, docker })
   // ── API client: collection, env, requests against the demo daemon ────────
   await api.try('PATCH', W, { settings: { api_client: { allow_local: true } } });
   const col = await api.try('POST', `${W}/api-client/collections`, { name: 'Checkout API', parent_id: null });
-  const env = await api.try('POST', `${W}/api-client/environments`, { name: 'Local', variables: { base_url: `http://127.0.0.1:${process.env.OTTO_E2E_PORT ?? '7811'}` } });
+  // Requests go to the throwaway ClickHouse's HTTP API (capture.mjs): Otto's
+  // own daemon port is always blocked by the SSRF guard.
+  const env = await api.try('POST', `${W}/api-client/environments`, { name: 'Local', variables: { base_url: `http://127.0.0.1:${docker.clickhouse ?? 18911}` } });
   if (env?.id) await api.try('POST', `${W}/api-client/environments/${env.id}/activate`, {});
   if (col?.id) {
     const reqs = [
-      ['Health check', 'GET', '{{base_url}}/api/v1/health'],
-      ['List orders', 'GET', '{{base_url}}/api/v1/health?orders=recent'],
-      ['Create order', 'POST', '{{base_url}}/api/v1/health'],
-      ['Refund order', 'POST', '{{base_url}}/api/v1/health?refund=1'],
+      ['Health check', 'GET', "{{base_url}}/?query=SELECT%20'ok'%20AS%20status%2C%20count()%20AS%20orders%20FROM%20shopdb.orders%20FORMAT%20JSON"],
+      ['List orders', 'GET', '{{base_url}}/?query=SELECT%20*%20FROM%20shopdb.orders%20LIMIT%2010%20FORMAT%20JSON'],
+      ['Create order', 'POST', '{{base_url}}/?query=SELECT%201'],
+      ['Refund order', 'POST', '{{base_url}}/?query=SELECT%202'],
     ];
     ids.apiRequests = [];
     for (const [name, method, url] of reqs) {
@@ -217,7 +231,18 @@ export async function seedAll(api, { dataDir, home, fakeBin, repoRoot, docker })
   if (existsSync(mockSrc)) {
     mkdirSync(join(home, 'mcp'), { recursive: true });
     copyFileSync(mockSrc, mock);
-    const srv = await api.try('POST', `${W}/mcp/servers`, { name: 'inventory', transport: 'stdio', command: 'node', args: [mock], enabled: true, default_tool_access: 'allow', description: 'Warehouse inventory tools' });
+    // Launched through a tiny wrapper on the daemon's PATH, so the server row
+    // shows a plain command, never a host temp path.
+    for (const name of ['inventory-mcp', 'docs-mcp']) {
+      writeFileSync(join(fakeBin, name), `#!/bin/sh\nexec "${process.execPath}" "${mock}" "$@"\n`);
+      chmodSync(join(fakeBin, name), 0o755);
+    }
+    const srv = await api.try('POST', `${W}/mcp/servers`, { name: 'inventory', transport: 'stdio', command: 'inventory-mcp', args: [], enabled: true, default_tool_access: 'allow', description: 'Warehouse inventory tools' });
+    const docs = await api.try('POST', `${W}/mcp/servers`, { name: 'docs-search', transport: 'stdio', command: 'docs-mcp', args: [], enabled: true, default_tool_access: 'allow', description: 'Search the platform docs' });
+    if (docs?.id) {
+      await api.try('POST', `/mcp/servers/${docs.id}/discover`, {});
+      await api.try('PATCH', `/mcp/servers/${docs.id}`, { runs: 'native' });
+    }
     if (srv?.id) {
       ids.mcp = srv.id;
       await api.try('POST', `/mcp/servers/${srv.id}/discover`, {});
@@ -353,21 +378,24 @@ export async function seedAll(api, { dataDir, home, fakeBin, repoRoot, docker })
 
   // ── Design Hall ──────────────────────────────────────────────────────────
   const dp = await api.try('POST', '/design/projects', { workspace_id: ws.id, name: 'Checkout redesign', description: 'One-page checkout, saved cards and the refunds flow.', brand_kit_id: null });
-  const art = async (format, studio, title, content, tags = []) => {
-    const r = await api.try('POST', '/design/artifacts', { workspace_id: ws.id, project_id: dp?.id ?? null, format, studio, title, content, tags });
+  const art = async (format, studio, title, content, tags = [], story = null) => {
+    const r = await api.try('POST', '/design/artifacts', { workspace_id: ws.id, project_id: dp?.id ?? null, format, studio, title, content, tags, ...(story ? { story_id: story } : {}) });
     return r?.artifact?.id ?? r?.id;
   };
   const kitJson = JSON.parse(readFileSync(join(import.meta.dirname, '../demo-design/brand-kit.json'), 'utf8'));
   ids.brand = await art('otto-brand', 'brand', 'Acme Brand Kit', JSON.stringify(kitJson, null, 2), ['brand']);
   ids.frame = await art('html', 'frames', 'One-page checkout', readFileSync(join(import.meta.dirname, '../demo-design/checkout.html'), 'utf8'), ['checkout']);
-  ids.frame2 = await art('html', 'frames', 'Refund confirmation', readFileSync(join(import.meta.dirname, '../demo-design/refund.html'), 'utf8'), ['refunds']);
+  ids.frame2 = await art('html', 'frames', 'Refund confirmation', readFileSync(join(import.meta.dirname, '../demo-design/refund.html'), 'utf8'), ['refunds'], ids.story);
   ids.scene3d = await art('scene3d', '3d', 'Gift card hero', readFileSync(join(import.meta.dirname, '../demo-design/scene3d.json'), 'utf8'), ['launch']);
   ids.diagram = await art('mermaid', 'whiteboard', 'Checkout sequence', 'sequenceDiagram\n  participant C as Customer\n  participant W as Web\n  participant A as Checkout API\n  participant P as Payments\n  C->>W: Pay\n  W->>A: POST /checkout\n  A->>P: charge(card)\n  P-->>A: ok\n  A-->>W: order confirmed\n  W-->>C: Thank you!\n', ['checkout']);
-  ids.site = await art('otto-site', 'site', 'Refunds launch site', JSON.stringify({ ...JSON.parse(readFileSync(join(import.meta.dirname, '../demo-design/site.json'), 'utf8')), ...(ids.brand ? { brand: `otto://design/${ids.brand}` } : {}) }, null, 2), ['launch']);
+  ids.site = await art('otto-site', 'site', 'Refunds launch site', JSON.stringify({ ...JSON.parse(readFileSync(join(import.meta.dirname, '../demo-design/site.json'), 'utf8')), ...(ids.brand ? { brand: `otto://design/${ids.brand}` } : {}) }, null, 2), ['launch'], ids.story);
   if (ids.frame) {
     await api.try('POST', `/design/artifacts/${ids.frame}/versions`, { message: 'v2 — saved cards first', content: readFileSync(join(import.meta.dirname, '../demo-design/checkout.html'), 'utf8').replace('Pay now', 'Pay $148.00') });
+    await api.try('POST', `/design/artifacts/${ids.frame}/versions`, { message: 'v3 — Apple Pay on top', content: readFileSync(join(import.meta.dirname, '../demo-design/checkout.html'), 'utf8').replace('Pay now', 'Pay $148.00').replace('Saved cards first.', 'Saved cards and Apple Pay first.') });
     if (ids.brand) await api.try('POST', `/design/artifacts/${ids.frame}/links`, { rel: 'uses_tokens', dst_kind: 'artifact', dst_id: ids.brand });
     await api.try('PATCH', `/design/artifacts/${ids.frame}`, { status: 'review' });
+    // A review comment pinned on the Pay button (Comments tab + a numbered pin).
+    await api.try('POST', `/design/artifacts/${ids.frame}/comments`, { body: 'Make Pay sticky on mobile so it never scrolls out of view.', pin: { x: 0.33, y: 0.5 } });
   }
   for (const a of [ids.frame, ids.frame2, ids.site].filter(Boolean)) {
     for (const dir of ['rounded', 'rounded', 'bold']) await api.try('POST', '/design/signals', { artifact_id: a, kind: 'variant_accepted', payload: { direction: dir } });

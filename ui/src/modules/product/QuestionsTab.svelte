@@ -6,7 +6,8 @@
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import { confirmOutward } from '../../lib/confirmOutward';
+  import { publishReview } from './publishReviewStore.svelte';
+  import PublishReviewDialog from './PublishReviewDialog.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { rel } from '../../lib/stores/now.svelte';
   import Modal from '../../lib/components/Modal.svelte';
@@ -266,12 +267,11 @@
     if (ids.length === 0) return;
     const texts = product.questions.filter((q) => selectedIds.has(q.id)).map((q) => `• ${q.text}`);
     const n = ids.length;
-    const ok = await confirmOutward({
-      verb: 'Post comment',
+    // The full list (confirmOutward capped it at 400 characters) and the site.
+    const ok = await publishReview.ask({
+      verb: 'Post comment', owner: 'questions', url: story?.url,
       title: `Post ${plural(n, 'question')} to ${postTarget}?`,
-      where: isJira
-        ? `Jira ${story?.source_key ?? ''} “${story?.title ?? ''}” — as one comment`
-        : `Confluence page “${story?.title ?? ''}” — as one comment`,
+      where: `${isJira ? `Jira ${story?.source_key ?? ''}` : 'Confluence page'} “${story?.title ?? ''}” — as one comment`,
       what: texts.join('\n'),
       who: 'Everyone who can see it; Jira/Confluence notify its watchers.',
     });
@@ -557,7 +557,7 @@
     {/if}
   </div>
 {/if}
-
+<PublishReviewDialog owner="questions" />
 <style>
   .muted {
     padding: 24px 0;

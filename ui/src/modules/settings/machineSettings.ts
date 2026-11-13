@@ -20,7 +20,7 @@ export const MACHINE_KEYS = {
 export const DEFAULT_MAX_LOAD_PER_CORE = 1.5;
 export const DEFAULT_MAX_WAIT_SECS = 300;
 export const DEFAULT_BG_ARCHIVE_DAYS = 7;
-export const DEFAULT_LOW_DISK_GB = 30;
+export const DEFAULT_LOW_DISK_GB = 10;
 const MAX_ARCHIVE_DAYS = 36_500;
 
 export type BuildMode = 'auto' | 'fixed' | 'off';
@@ -43,7 +43,7 @@ export interface MachineForm {
   buildWorkers: Num;
   /** 0 = never. Never blank: the daemon reads a stored blank as "off". */
   bgArchiveDays: Num;
-  /** Blank = 30; 0 = no warning. */
+  /** Blank = 10; 0 = no warning. */
   lowDiskGb: Num;
 }
 
@@ -105,7 +105,7 @@ export function machineFormErrors(f: MachineForm): MachineErrors {
     e.bgArchiveDays = `Enter a whole number of days from 0 (never) to ${MAX_ARCHIVE_DAYS.toLocaleString('en-US')}.`;
   }
   if (!blank(f.lowDiskGb) && !(typeof f.lowDiskGb === 'number' && f.lowDiskGb >= 0 && f.lowDiskGb <= 100_000)) {
-    e.lowDiskGb = 'Enter a number of GB from 0 (no warning) to 100,000, or leave it blank for 30.';
+    e.lowDiskGb = 'Enter a number of GB from 0 (no warning) to 100,000, or leave it blank for 10.';
   }
   return e;
 }

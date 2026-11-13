@@ -153,6 +153,7 @@ You can also press `?` anywhere outside a text field to open the shortcut sheet 
 | `⌘R` | In a live browser tab: reload the page instead of Otto |
 | `⌘↵` | On the API page: send the request |
 | `⌘T` | On the API page: new request tab instead of a new session |
+| `⌘T` | On the Threads page: start a new thread instead of a terminal session |
 | `⌘D` | On the API page: duplicate the request instead of splitting |
 | `⌘⌥←` / `⌘⌥→` | In a Database pane: previous / next query tab instead of moving the pane |
 | `?` | In a Kubernetes cluster view: that view's own key hints instead of this sheet |

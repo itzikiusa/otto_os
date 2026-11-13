@@ -10,8 +10,12 @@
 //! - only the CHECKED-OUT branch, and only when it has an upstream;
 //! - `ahead` is the local-only commit count the person confirmed; any other
 //!   count now is a 409 "changed — re-check" (someone committed meanwhile);
-//! - the old tip is kept on a backup branch `otto-backup/<b>-<short sha>`
-//!   (also in the reflog) BEFORE the branch moves;
+//! - the old tip is kept on a backup branch `otto-backup/<b>-<yyyymmdd>-<short
+//!   sha>` (also in the reflog) BEFORE the branch moves; Otto never removes one;
+//! - the repo lock does not cover a commit made in a terminal meanwhile: the
+//!   move starts only while `HEAD` is still the backed-up tip (else 409,
+//!   nothing changed), and a commit that slips in between that check and the
+//!   reset is backed up too (`also_kept`, from `ORIG_HEAD`);
 //! - `git reset --keep`: uncommitted changes stay, and a change the move would
 //!   overwrite makes git refuse with nothing moved (409 with git's words).
 
@@ -41,6 +45,11 @@ pub struct UpdateToUpstreamReq {
 pub struct UpdateToUpstreamResp {
     pub status: RepoStatusResp,
     pub backup: String,
+    /// A second backup branch: a commit made on the branch while it was
+    /// being updated (an agent in a terminal), kept rather than left only in
+    /// the reflog.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub also_kept: Option<String>,
 }
 
 /// Routes owned by this module.
@@ -48,10 +57,16 @@ pub fn router<S: GitCtx>() -> Router<S> {
     Router::new().route("/repos/{id}/branch/update-to-upstream", post(update::<S>))
 }
 
-/// The backup branch for `branch` at `tip`.
-pub(crate) fn backup_name(branch: &str, tip: &str) -> String {
+/// The backup branch for `branch` at `tip`, made on `day` (`YYYYMMDD`):
+/// unique per commit, and it says when. Never removed by Otto.
+pub(crate) fn backup_name(branch: &str, day: &str, tip: &str) -> String {
     let short: String = tip.chars().take(10).collect();
-    format!("otto-backup/{branch}-{short}")
+    format!("otto-backup/{branch}-{day}-{short}")
+}
+
+/// Today in the person's time zone, as a backup name carries it.
+fn today() -> String {
+    chrono::Local::now().format("%Y%m%d").to_string()
 }
 
 /// A `git reset --keep` refusal ("Entry '…' not uptodate. Cannot merge.")
@@ -65,7 +80,43 @@ fn reset_refusal(e: Error) -> Error {
     }
 }
 
-async fn move_to_upstream(git: &LocalGit, branch: &str, ahead: u32) -> Result<String> {
+/// Where the branch moved and what was kept.
+#[derive(Debug)]
+struct Moved {
+    backup: String,
+    also_kept: Option<String>,
+}
+
+/// Create-only `refs/heads/<name>` at `at` (`""` = must not exist yet).
+/// `true` = made now; `false` = it already pointed at `at` (the same backup
+/// from an earlier attempt).
+async fn keep_at(git: &LocalGit, name: &str, at: &str) -> Result<bool> {
+    let full = format!("refs/heads/{name}");
+    if git.run(&["update-ref", &full, at, ""]).await.is_ok() {
+        return Ok(true);
+    }
+    let cur = git
+        .run(&["rev-parse", "--verify", "--quiet", &full])
+        .await?;
+    if cur.trim() != at {
+        return Err(Error::Conflict(format!(
+            "{name} already exists at another commit — nothing was changed"
+        )));
+    }
+    Ok(false)
+}
+
+/// Undo a backup made for an attempt that moved nothing (compare-and-delete:
+/// only while it still points at `tip`).
+async fn drop_backup(git: &LocalGit, name: &str, tip: &str, created: bool) {
+    if created {
+        let _ = git
+            .run(&["update-ref", "-d", &format!("refs/heads/{name}"), tip])
+            .await;
+    }
+}
+
+async fn move_to_upstream(git: &LocalGit, branch: &str, ahead: u32) -> Result<Moved> {
     if !is_syncable_branch_name(branch) {
         return Err(Error::Invalid(format!("not a branch name: {branch:?}")));
     }
@@ -115,33 +166,69 @@ async fn move_to_upstream(git: &LocalGit, branch: &str, ahead: u32) -> Result<St
             "{branch} changed — re-check: it now has {now} commit(s) the pull request doesn't (you confirmed {ahead})"
         )));
     }
-    let backup = backup_name(branch, &tip);
-    // Create-only (`""` = must not exist yet); an existing backup at the same
-    // tip is the same backup from an earlier attempt.
-    let backup_ref = format!("refs/heads/{backup}");
-    let created = git
-        .run(&["update-ref", &backup_ref, &tip, ""])
-        .await
-        .is_ok();
-    if !created {
-        let at = git
-            .run(&["rev-parse", "--verify", "--quiet", &backup_ref])
-            .await?;
-        if at.trim() != tip {
-            return Err(Error::Conflict(format!(
-                "{backup} already exists at another commit — nothing was changed"
-            )));
-        }
+    let day = today();
+    let backup = backup_name(branch, &day, &tip);
+    let created = keep_at(git, &backup, &tip).await?;
+    finish_move(git, branch, &day, &tip, &upstream, backup, created).await
+}
+
+/// Move the checked-out branch from the backed-up `tip` to `upstream`. Otto's
+/// repo lock does not cover a commit made in a terminal meanwhile, so the
+/// move starts only while `HEAD` is still `tip` (else nothing changes: 409),
+/// and whatever the reset did move away from (`ORIG_HEAD`) is backed up too
+/// should a commit slip in between that check and the reset.
+async fn finish_move(
+    git: &LocalGit,
+    branch: &str,
+    day: &str,
+    tip: &str,
+    upstream: &str,
+    backup: String,
+    created: bool,
+) -> Result<Moved> {
+    let head = git
+        .run(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
+        .await?
+        .trim()
+        .to_string();
+    if head != tip {
+        drop_backup(git, &backup, tip, created).await;
+        return Err(Error::Conflict(format!(
+            "{branch} changed — re-check: a commit landed on it while it was being updated; nothing was changed"
+        )));
     }
-    if let Err(e) = git.run(&["reset", "--keep", &upstream]).await {
-        // Refused: nothing moved, so the backup made for this attempt goes
-        // too (compare-and-delete — only if it still points at `tip`).
-        if created {
-            let _ = git.run(&["update-ref", "-d", &backup_ref, &tip]).await;
-        }
+    if let Err(e) = git.run(&["reset", "--keep", upstream]).await {
+        // Refused: nothing moved, so the backup made for this attempt goes too.
+        drop_backup(git, &backup, tip, created).await;
         return Err(reset_refusal(e));
     }
-    Ok(backup)
+    let also_kept = keep_what_moved(git, branch, day, tip).await;
+    Ok(Moved { backup, also_kept })
+}
+
+/// After the reset: a second backup at `ORIG_HEAD` (what the reset moved
+/// away from) when that is not the backed-up `tip`.
+async fn keep_what_moved(git: &LocalGit, branch: &str, day: &str, tip: &str) -> Option<String> {
+    let orig = git
+        .run(&["rev-parse", "--verify", "--quiet", "ORIG_HEAD^{commit}"])
+        .await
+        .ok()?;
+    let orig = orig.trim();
+    if orig.is_empty() || orig == tip {
+        return None;
+    }
+    let name = backup_name(branch, day, orig);
+    match keep_at(git, &name, orig).await {
+        Ok(_) => Some(name),
+        Err(e) => {
+            tracing::warn!(
+                branch,
+                commit = orig,
+                "could not back up a commit made during the update: {e}"
+            );
+            None
+        }
+    }
 }
 
 async fn update<S: GitCtx>(
@@ -153,11 +240,12 @@ async fn update<S: GitCtx>(
     let lock = repo_lock(&id);
     let guard = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    let backup = move_to_upstream(&git, req.branch.trim(), req.ahead).await?;
+    let moved = move_to_upstream(&git, req.branch.trim(), req.ahead).await?;
     drop(guard);
     Ok(Json(UpdateToUpstreamResp {
         status: git.status().await?,
-        backup,
+        backup: moved.backup,
+        also_kept: moved.also_kept,
     }))
 }
 
@@ -232,13 +320,70 @@ mod tests {
         assert!(matches!(wrong, Error::Conflict(_)), "{wrong}");
         assert_eq!(git(&clone, &["rev-parse", "feat"]), old, "nothing moved");
 
-        let backup = move_to_upstream(&local, "feat", 1).await.unwrap();
+        let moved = move_to_upstream(&local, "feat", 1).await.unwrap();
         assert_eq!(
             git(&clone, &["rev-parse", "feat"]),
             git(&clone, &["rev-parse", "origin/feat"])
         );
-        assert_eq!(git(&clone, &["rev-parse", &backup]), old, "old tip kept");
+        assert_eq!(
+            git(&clone, &["rev-parse", &moved.backup]),
+            old,
+            "old tip kept"
+        );
+        assert_eq!(moved.backup, backup_name("feat", &today(), &old));
+        assert_eq!(moved.also_kept, None, "nothing slipped in");
         assert_eq!(std::fs::read_to_string(clone.join("a.txt")).unwrap(), "3\n");
+    }
+
+    /// A commit made after the tip was backed up (an agent in a terminal)
+    /// stops the move: nothing changes, and this attempt's backup goes.
+    #[tokio::test]
+    async fn a_commit_landing_after_the_backup_moves_nothing() {
+        let (_root, clone, local) = force_pushed();
+        let old = git(&clone, &["rev-parse", "feat"]);
+        let upstream = git(&clone, &["rev-parse", "origin/feat"]);
+        let backup = backup_name("feat", "20261113", &old);
+        assert!(keep_at(&local, &backup, &old).await.unwrap());
+        git(
+            &clone,
+            &["commit", "-q", "--allow-empty", "-m", "agent's commit"],
+        );
+        let sneaky = git(&clone, &["rev-parse", "feat"]);
+        let err = finish_move(&local, "feat", "20261113", &old, &upstream, backup, true)
+            .await
+            .expect_err("HEAD moved");
+        assert!(err.to_string().contains("changed — re-check"), "{err}");
+        assert_eq!(git(&clone, &["rev-parse", "feat"]), sneaky, "nothing moved");
+        assert_eq!(git(&clone, &["branch", "--list", "otto-backup/*"]), "");
+    }
+
+    /// A commit that slips in between the check and the reset is what the
+    /// reset moves away from (`ORIG_HEAD`): it gets its own backup.
+    #[tokio::test]
+    async fn a_commit_the_reset_moved_away_from_gets_its_own_backup() {
+        let (_root, clone, local) = force_pushed();
+        let old = git(&clone, &["rev-parse", "feat"]);
+        git(
+            &clone,
+            &["commit", "-q", "--allow-empty", "-m", "agent's commit"],
+        );
+        let sneaky = git(&clone, &["rev-parse", "feat"]);
+        git(&clone, &["reset", "-q", "--keep", "origin/feat"]);
+        let kept = keep_what_moved(&local, "feat", "20261113", &old)
+            .await
+            .expect("a second backup");
+        assert_eq!(kept, backup_name("feat", "20261113", &sneaky));
+        assert_eq!(git(&clone, &["rev-parse", &kept]), sneaky);
+        // Asked again: the same backup, not a second copy.
+        assert_eq!(
+            keep_what_moved(&local, "feat", "20261113", &old).await,
+            Some(kept)
+        );
+        // Nothing else moved away: no second backup.
+        assert_eq!(
+            keep_what_moved(&local, "feat", "20261113", &sneaky).await,
+            None
+        );
     }
 
     #[tokio::test]
@@ -279,9 +424,10 @@ mod tests {
     #[test]
     fn backup_names_carry_the_branch_and_a_short_tip() {
         assert_eq!(
-            backup_name("feat/x", "0123456789abcdef"),
-            "otto-backup/feat/x-0123456789"
+            backup_name("feat/x", "20261113", "0123456789abcdef"),
+            "otto-backup/feat/x-20261113-0123456789"
         );
+        assert_eq!(today().len(), 8);
     }
 
     #[test]

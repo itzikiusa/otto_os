@@ -1900,6 +1900,372 @@ async fn a_queued_message_survives_a_daemon_restart() {
     );
 }
 
+// ---- threads inside a thread across a daemon restart -----------------------
+
+fn worker_req(title: &str, prompt: Option<&str>) -> otto_core::agent_runtime::OpenPeerReq {
+    otto_core::agent_runtime::OpenPeerReq {
+        provider: RuntimeProvider::Gemini,
+        prompt: prompt.map(str::to_string),
+        title: Some(title.into()),
+        model: None,
+        effort: None,
+        cwd: None,
+        meta: None,
+    }
+}
+
+/// `id`'s queue as the latest `queue.updated` of `host` shows it.
+fn queue_texts(host: &TestHost, id: &Id) -> Option<Vec<String>> {
+    host.all().into_iter().rev().find_map(|e| match e.body {
+        RuntimeEventBody::QueueUpdated { queued_prompts } if &e.session_id == id => {
+            Some(queued_prompts.into_iter().map(|q| q.text).collect())
+        }
+        _ => None,
+    })
+}
+
+/// A Claude lead busy with a long turn while each worker its agent opened
+/// answers: the replies wait in the lead's queue, oldest first. Then the
+/// daemon stops.
+async fn lead_with_queued_replies(
+    pool: &DbPool,
+    cwd: &str,
+    workers: &[&str],
+    person_queues: Option<&str>,
+) -> RuntimeSession {
+    use otto_core::agent_runtime::PromptDelivery;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(pool, &host, RuntimeConfig::default());
+    let lead = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    rt.prompt(&lead.id, "slow 30").await.unwrap();
+    host.wait(|e| {
+        e.session_id == lead.id
+            && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+                if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, streaming: false, .. } if text == "Working…"))
+    })
+    .await;
+    for (n, title) in workers.iter().enumerate() {
+        rt.open_peer(&lead.id, worker_req(title, Some("check the tests")))
+            .await
+            .unwrap();
+        let lead_id = lead.id.clone();
+        host.wait(move |e| {
+            e.session_id == lead_id
+                && matches!(&e.body, RuntimeEventBody::QueueUpdated { queued_prompts }
+                    if queued_prompts.len() == n + 1)
+        })
+        .await;
+    }
+    if let Some(text) = person_queues {
+        rt.prompt_with(&lead.id, &queued(PromptDelivery::Queue, text))
+            .await
+            .unwrap();
+    }
+    let q = queue_texts(&host, &lead.id).unwrap();
+    for (title, text) in workers.iter().zip(&q) {
+        assert!(
+            text.starts_with(&format!("[Reply from thread \"{title}\"")),
+            "{q:?}"
+        );
+    }
+    rt.flush(&lead.id).await;
+    rt.shutdown().await;
+    lead
+}
+
+/// A queue holding only child threads' replies does not respawn its (now
+/// dormant) parent at boot: an agent with access must not start on its own.
+#[tokio::test]
+async fn restart_does_not_respawn_a_parent_for_a_queued_child_reply() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let lead = lead_with_queued_replies(&pool, cwd, &["worker"], None).await;
+
+    let host2 = TestHost::new(cwd, false);
+    let rt2 = runtime(&pool, &host2, RuntimeConfig::default());
+    rt2.recover().await.unwrap();
+    // Proves an absence (no spawn follows the recovery).
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(
+        host2.prepared.lock().unwrap().is_empty(),
+        "no agent was started"
+    );
+    assert_eq!(
+        rt2.get(&lead.id).await.unwrap().status,
+        RuntimeSessionStatus::Dormant
+    );
+    let RuntimeReplay::Snapshot { snapshot, .. } = rt2.replay(&lead.id, 0).await.unwrap() else {
+        panic!("a fresh daemon has no ring: snapshot")
+    };
+    assert_eq!(snapshot.queued_prompts.len(), 1, "the reply still waits");
+    assert!(snapshot.queued_prompts[0]
+        .text
+        .starts_with("[Reply from thread \"worker\""));
+    assert!(user_texts(&host2).is_empty(), "nothing was sent");
+}
+
+/// A message the PERSON queued still goes out after a restart, and a child's
+/// reply queued before it goes first, each once.
+#[tokio::test]
+async fn a_person_queued_message_still_resumes_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let lead = lead_with_queued_replies(&pool, cwd, &["worker"], Some("later")).await;
+
+    let host2 = TestHost::new(cwd, false);
+    let rt2 = runtime(&pool, &host2, RuntimeConfig::default());
+    rt2.recover().await.unwrap();
+    host2.wait_n(is_terminal, 2).await;
+    let sent = user_texts(&host2);
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert!(
+        sent[0].starts_with("[Reply from thread \"worker\""),
+        "{sent:?}"
+    );
+    assert_eq!(sent[1], "later");
+    assert_eq!(last_assistant_text(&host2), "echo: later");
+    host2
+        .wait(|e| {
+            e.session_id == lead.id
+                && matches!(&e.body, RuntimeEventBody::QueueUpdated { queued_prompts } if queued_prompts.is_empty())
+        })
+        .await;
+    let prepared = host2.prepared.lock().unwrap().clone();
+    assert_eq!(prepared.len(), 1, "one respawn");
+    assert!(prepared[0].args.iter().any(|a| a == "--resume"));
+    rt2.shutdown().await;
+}
+
+/// Revive sends what waited for the person: every child's reply, in the
+/// order they arrived, one turn each.
+#[tokio::test]
+async fn queued_child_replies_are_delivered_when_the_parent_is_revived() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let lead = lead_with_queued_replies(&pool, cwd, &["worker 1", "worker 2"], None).await;
+
+    let host2 = TestHost::new(cwd, false);
+    let rt2 = runtime(&pool, &host2, RuntimeConfig::default());
+    rt2.recover().await.unwrap();
+    assert!(host2.prepared.lock().unwrap().is_empty());
+    rt2.reopen(&lead.id).await.unwrap();
+    host2.wait_n(is_terminal, 2).await;
+    let sent = user_texts(&host2);
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert!(
+        sent[0].starts_with("[Reply from thread \"worker 1\""),
+        "{sent:?}"
+    );
+    assert!(
+        sent[1].starts_with("[Reply from thread \"worker 2\""),
+        "{sent:?}"
+    );
+    host2
+        .wait(|e| {
+            e.session_id == lead.id
+                && matches!(&e.body, RuntimeEventBody::QueueUpdated { queued_prompts } if queued_prompts.is_empty())
+        })
+        .await;
+    assert_eq!(host2.prepared.lock().unwrap().len(), 1, "revived once");
+    rt2.shutdown().await;
+}
+
+/// A child whose turn the restart cut off tells its parent — the card's
+/// `stopped` marker and, as its agent asked, one queued reply saying so —
+/// without respawning the parent, and only once.
+#[tokio::test]
+async fn a_child_interrupted_by_restart_reports_to_its_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let lead = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    let worker = rt
+        .open_peer(&lead.id, worker_req("worker", None))
+        .await
+        .unwrap();
+    rt.flush(&lead.id).await;
+    rt.flush(&worker.id).await;
+    rt.shutdown().await;
+    drop(rt);
+
+    // What the dead daemon left behind: the worker mid-turn on what the
+    // lead's agent asked, with part of an answer.
+    let repo = AgentRuntimeRepo::new(pool.clone());
+    let rec = repo.get(&worker.id).await.unwrap();
+    let base = rec.seq_reserved.max(rec.session.last_sequence);
+    let now = Utc::now();
+    let turn = otto_core::agent_runtime::ProviderTurn {
+        id: "t-cut".into(),
+        ordinal: 1,
+        status: ProviderTurnStatus::Running,
+        started_at: Some(now),
+        completed_at: None,
+        turn_token_usage: None,
+        origin: otto_core::agent_runtime::TurnOrigin::User,
+    };
+    let in_turn = |id: &str, ordinal: u32, status: TurnItemStatus, kind: TurnItemKind| {
+        let mut i = otto_agent_protocol::driver::item(id.into(), status, None, kind);
+        i.turn_id = Some("t-cut".into());
+        i.ordinal = ordinal;
+        i
+    };
+    let asked = format!(
+        "[Opened by thread \"{}\" (claude, id {}). Answer it with the otto_thread_message tool \
+         (session_id {}); see every linked thread with otto_thread_list.]\n\nlook into it",
+        lead.title, lead.id, lead.id
+    );
+    let user = in_turn(
+        "t-cut:user",
+        1,
+        TurnItemStatus::Completed,
+        TurnItemKind::UserMessage {
+            text: asked,
+            attachments: Vec::new(),
+        },
+    );
+    let partial = in_turn(
+        "t-cut:a",
+        2,
+        TurnItemStatus::Running,
+        TurnItemKind::AssistantMessage {
+            message_id: "m1".into(),
+            text: "Half way there".into(),
+            streaming: false,
+        },
+    );
+    let row = |kind: &str, id: &str, seq: u64, v: serde_json::Value| otto_state::RuntimeEntityRow {
+        kind: kind.into(),
+        entity_id: id.into(),
+        sequence: seq,
+        payload: v,
+    };
+    repo.upsert_entities(
+        &worker.id,
+        &[
+            row(
+                "turn",
+                "t-cut",
+                base + 1,
+                serde_json::to_value(&turn).unwrap(),
+            ),
+            row(
+                "turn_item",
+                "t-cut:user",
+                base + 2,
+                serde_json::to_value(&user).unwrap(),
+            ),
+            row(
+                "turn_item",
+                "t-cut:a",
+                base + 3,
+                serde_json::to_value(&partial).unwrap(),
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let host2 = TestHost::new(cwd, false);
+    let rt2 = runtime(&pool, &host2, RuntimeConfig::default());
+    rt2.recover().await.unwrap();
+    let marker = format!("[otto-thread:{}:stopped]", worker.id);
+    let lead_notices = |host: &TestHost| -> Vec<String> {
+        host.all()
+            .into_iter()
+            .filter(|e| e.session_id == lead.id)
+            .filter_map(|e| match e.body {
+                RuntimeEventBody::TurnItemUpdated { turn_item } => match turn_item.kind {
+                    TurnItemKind::SystemNotice { message } => Some(message),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    };
+    let got = lead_notices(&host2);
+    assert_eq!(
+        got,
+        vec![format!(
+            "Gemini was interrupted when Otto restarted: Half way there {marker}"
+        )]
+    );
+    let q = queue_texts(&host2, &lead.id).expect("a reply was queued");
+    assert_eq!(q.len(), 1, "{q:?}");
+    assert!(q[0].starts_with("[Reply from thread \"worker\""), "{q:?}");
+    assert!(
+        q[0].contains("was interrupted when Otto restarted"),
+        "{q:?}"
+    );
+    assert!(q[0].ends_with("Half way there"), "{q:?}");
+    // The worker's own card reads its turn as interrupted, not working.
+    let w = rt2.latest_reply(&worker.id, Duration::ZERO).await.unwrap();
+    assert!(!w.busy);
+    assert_eq!(w.turn_status.as_deref(), Some("interrupted"));
+    // Proves an absence (no spawn follows the report).
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        host2.prepared.lock().unwrap().is_empty(),
+        "nobody respawned"
+    );
+    rt2.flush(&lead.id).await;
+    rt2.shutdown().await;
+    drop(rt2);
+
+    // The next restart has nothing new to say.
+    let host3 = TestHost::new(cwd, false);
+    let rt3 = runtime(&pool, &host3, RuntimeConfig::default());
+    rt3.recover().await.unwrap();
+    assert!(
+        lead_notices(&host3).is_empty(),
+        "{:?}",
+        lead_notices(&host3)
+    );
+    let RuntimeReplay::Snapshot { snapshot, .. } = rt3.replay(&lead.id, 0).await.unwrap() else {
+        panic!("a fresh daemon has no ring: snapshot")
+    };
+    assert_eq!(snapshot.queued_prompts.len(), 1, "queued once");
+}
+
+/// Closing a parent does not stop its children (Threads keeps them, marked
+/// detached, with their answers); what they finish afterwards is not written
+/// into the closed parent.
+#[tokio::test]
+async fn closing_a_parent_leaves_its_children_running_and_tells_it_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let lead = create(&rt, cwd).await;
+    let mut req = worker_req("worker", None);
+    req.provider = RuntimeProvider::Claude;
+    let worker = rt.open_peer(&lead.id, req).await.unwrap();
+    rt.prompt(&worker.id, "slow 1").await.unwrap();
+    rt.close(&lead.id).await.unwrap();
+    let w = rt.latest_reply(&worker.id, WAIT).await.unwrap();
+    assert_eq!(
+        w.turn_status.as_deref(),
+        Some("completed"),
+        "it ran to its end"
+    );
+    // Proves an absence (the turn-end hook runs spawned).
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let finished = format!("[otto-thread:{}:finished]", worker.id);
+    assert!(
+        !host.all().iter().any(|e| e.session_id == lead.id
+            && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+                if matches!(&turn_item.kind, TurnItemKind::SystemNotice { message } if message.ends_with(&finished)))),
+        "nothing lands in a closed parent"
+    );
+    assert!(queue_texts(&host, &lead.id).unwrap_or_default().is_empty());
+    rt.close(&worker.id).await.unwrap();
+}
+
 #[tokio::test]
 async fn reopen_resumes_the_thread_or_starts_fresh_with_a_notice() {
     let dir = tempfile::tempdir().unwrap();
@@ -3128,4 +3494,340 @@ async fn synthesis_waits_for_every_seat_and_respects_the_group_cap() {
         "the interrupted seats' partial answers: {}",
         verdict.text
     );
+}
+
+// ---- council rounds: follow-ups, per-round synthesis, restart ----
+
+fn follow_up(
+    text: &str,
+    seats: &[u32],
+) -> otto_agent_protocol::runtime::council::CouncilFollowUpReq {
+    otto_agent_protocol::runtime::council::CouncilFollowUpReq {
+        text: text.into(),
+        seats: seats.to_vec(),
+    }
+}
+
+fn gemini_judge() -> otto_core::agent_runtime::SynthesizeCouncilReq {
+    otto_core::agent_runtime::SynthesizeCouncilReq {
+        provider: RuntimeProvider::Gemini,
+        model: None,
+        effort: None,
+    }
+}
+
+/// A follow-up goes to every seat (or only the named one) as its own
+/// thread's next turn; the judge reads the CURRENT round only, with the
+/// council's first question, and is recorded under that round.
+#[tokio::test]
+async fn council_follow_ups_reach_every_seat_or_one_and_the_judge_reads_the_current_round() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let g = || seat(RuntimeProvider::Gemini, None);
+    let seats = rt
+        .create_council(
+            &"u1".into(),
+            &"w1".into(),
+            council_req("which cache?", vec![g(), g()]),
+        )
+        .await
+        .unwrap();
+    for s in &seats {
+        assert!(!rt.latest_reply(&s.id, WAIT).await.unwrap().busy);
+    }
+    let one = rt.council_rounds(&seats[1].id).await.unwrap();
+    assert_eq!(one.max_rounds, 10);
+    assert_eq!(one.rounds.len(), 1);
+    assert_eq!(
+        (
+            one.rounds[0].n,
+            one.rounds[0].text.as_str(),
+            one.rounds[0].seats.clone()
+        ),
+        (1, "which cache?", vec![1, 2])
+    );
+
+    // Round 2 to every seat (no seats named), sent through seat 2.
+    let two = rt
+        .follow_up_council(&seats[1].id, follow_up("why redis?", &[]))
+        .await
+        .unwrap();
+    assert_eq!(two.rounds.len(), 2);
+    assert_eq!(two.rounds[1].seats, vec![1, 2]);
+    assert!(two.rounds[1].refused.is_empty());
+    for s in &seats {
+        let r = rt.latest_reply(&s.id, WAIT).await.unwrap();
+        assert!(r.text.contains("why redis?"), "{}", r.text);
+    }
+    // Round 3 to seat 2 only: seat 1 keeps its round-2 answer.
+    let three = rt
+        .follow_up_council(&seats[0].id, follow_up("only you", &[2]))
+        .await
+        .unwrap();
+    assert_eq!(three.rounds[2].seats, vec![2]);
+    assert!(rt
+        .latest_reply(&seats[1].id, WAIT)
+        .await
+        .unwrap()
+        .text
+        .contains("only you"));
+    assert!(rt
+        .latest_reply(&seats[0].id, WAIT)
+        .await
+        .unwrap()
+        .text
+        .contains("why redis?"));
+
+    let judge = rt
+        .synthesize_council(&seats[0].id, gemini_judge())
+        .await
+        .unwrap();
+    assert_eq!(judge.title, "which cache? · synthesis of round 3");
+    let verdict = rt.latest_reply(&judge.id, WAIT).await.unwrap();
+    for want in [
+        "## The council's first question\n\nwhich cache?",
+        "## The question (round 3)\n\nonly you",
+        "## Seat 2 — gemini",
+    ] {
+        assert!(verdict.text.contains(want), "{want}: {}", verdict.text);
+    }
+    assert!(
+        !verdict.text.contains("## Seat 1 —"),
+        "seat 1 sat out round 3: {}",
+        verdict.text
+    );
+    let after = rt.council_rounds(&judge.id).await.unwrap();
+    assert_eq!(after.rounds[2].syntheses, vec![judge.id.clone()]);
+    assert!(after.rounds[1].syntheses.is_empty());
+
+    for bad in [follow_up("x", &[7]), follow_up("   ", &[])] {
+        assert!(matches!(
+            rt.follow_up_council(&seats[0].id, bad).await,
+            Err(Error::Invalid(_))
+        ));
+    }
+    let plain = create(&rt, cwd).await;
+    assert!(matches!(
+        rt.follow_up_council(&plain.id, follow_up("x", &[])).await,
+        Err(Error::Invalid(_))
+    ));
+}
+
+/// A closed seat is listed as refused for the round and the judge names it
+/// as missing; a round no seat takes is not recorded; ten rounds is the cap.
+#[tokio::test]
+async fn a_round_names_the_seat_it_never_reached_and_stops_at_the_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let g = || seat(RuntimeProvider::Gemini, None);
+    let seats = rt
+        .create_council(
+            &"u1".into(),
+            &"w1".into(),
+            council_req("q1", vec![g(), g()]),
+        )
+        .await
+        .unwrap();
+    for s in &seats {
+        assert!(!rt.latest_reply(&s.id, WAIT).await.unwrap().busy);
+    }
+    rt.close(&seats[1].id).await.unwrap();
+    let two = rt
+        .follow_up_council(&seats[0].id, follow_up("q2", &[]))
+        .await
+        .unwrap();
+    let r2 = &two.rounds[1];
+    assert_eq!(r2.seats, vec![1, 2]);
+    assert_eq!(r2.refused.len(), 1);
+    assert_eq!(r2.refused[0].seat, 2);
+    assert!(r2.refused[0].reason.contains("closed"), "{:?}", r2.refused);
+    assert!(rt
+        .latest_reply(&seats[0].id, WAIT)
+        .await
+        .unwrap()
+        .text
+        .contains("q2"));
+    let judge = rt
+        .synthesize_council(&seats[0].id, gemini_judge())
+        .await
+        .unwrap();
+    let verdict = rt.latest_reply(&judge.id, WAIT).await.unwrap();
+    assert!(
+        verdict
+            .text
+            .contains("No answer in this round from: seat 2 (the question never reached it"),
+        "{}",
+        verdict.text
+    );
+
+    // Only the closed seat: nothing takes it, nothing is recorded.
+    let none = rt
+        .follow_up_council(&seats[0].id, follow_up("q3", &[2]))
+        .await
+        .expect_err("seat 2 is closed");
+    assert!(
+        matches!(&none, Error::Conflict(m) if m.contains("no seat took the follow-up")),
+        "{none:?}"
+    );
+    assert_eq!(
+        rt.council_rounds(&seats[0].id).await.unwrap().rounds.len(),
+        2
+    );
+
+    // Up to ten rounds (queued behind each other at seat 1), then 409.
+    for i in 3..=10 {
+        rt.follow_up_council(&seats[0].id, follow_up(&format!("r{i}"), &[1]))
+            .await
+            .unwrap();
+    }
+    let cap = rt
+        .follow_up_council(&seats[0].id, follow_up("r11", &[1]))
+        .await
+        .expect_err("the cap");
+    assert!(
+        matches!(&cap, Error::Conflict(m) if m.contains("10 rounds")),
+        "{cap:?}"
+    );
+    // The queued rounds drain in order; the last one is answered last.
+    let deadline = std::time::Instant::now() + WAIT;
+    while !rt
+        .latest_reply(&seats[0].id, WAIT)
+        .await
+        .unwrap()
+        .text
+        .contains("r10")
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "round 10 never answered"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// The rounds live on seat 1 and survive a daemon restart. What counts as a
+/// seat's answer in a round: any assistant text it has on record there,
+/// whole or cut off. A restart loses text still streaming (it is never
+/// persisted mid-stream), so a seat cut mid-answer has none; a seat that
+/// finished before the restart keeps its answer and counts. A round no seat
+/// answered is refused (409, nothing opened) and the person asks again.
+#[tokio::test]
+async fn council_rounds_survive_a_restart_and_a_cut_round_can_be_asked_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let g = || seat(RuntimeProvider::Gemini, None);
+    // Council A: both seats hang on round 2. Council B: the Claude seat
+    // answers "hang" at once (its fake echoes it), the Gemini seat hangs.
+    let a = rt
+        .create_council(
+            &"u1".into(),
+            &"w1".into(),
+            council_req("q1", vec![g(), g()]),
+        )
+        .await
+        .unwrap();
+    let b = rt
+        .create_council(
+            &"u1".into(),
+            &"w1".into(),
+            council_req("q1", vec![g(), seat(RuntimeProvider::Claude, None)]),
+        )
+        .await
+        .unwrap();
+    for s in a.iter().chain(&b) {
+        assert!(!rt.latest_reply(&s.id, WAIT).await.unwrap().busy);
+    }
+    for c in [&a, &b] {
+        rt.follow_up_council(&c[0].id, follow_up("hang", &[]))
+            .await
+            .unwrap();
+    }
+    for s in [&a[0], &a[1], &b[0]] {
+        host.wait(|e| {
+            e.session_id == s.id
+                && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+                    if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, .. } if text == "working"))
+        })
+        .await;
+    }
+    let done = rt.latest_reply(&b[1].id, WAIT).await.unwrap();
+    assert!(
+        !done.busy && done.text.contains("echo: hang"),
+        "{}",
+        done.text
+    );
+    for s in a.iter().chain(&b) {
+        rt.flush(&s.id).await;
+    }
+    rt.shutdown().await;
+    drop(rt);
+
+    let host2 = TestHost::new(cwd, false);
+    let rt2 = runtime(&pool, &host2, RuntimeConfig::default());
+    rt2.recover().await.unwrap();
+    let rounds = rt2.council_rounds(&a[1].id).await.unwrap();
+    assert_eq!(rounds.rounds.len(), 2);
+    assert_eq!(rounds.rounds[1].text, "hang");
+
+    // A: no seat answered round 2 — refused, with the reason, nothing opened.
+    let none = rt2
+        .synthesize_council(&a[0].id, gemini_judge())
+        .await
+        .expect_err("round 2 has no answer");
+    assert!(
+        matches!(&none, Error::Conflict(m) if m == "no seat has answered round 2 yet — nothing to synthesize"),
+        "{none:?}"
+    );
+    assert!(rt2.council_rounds(&a[0].id).await.unwrap().rounds[1]
+        .syntheses
+        .is_empty());
+    // Asked again (a new round): answered, then it synthesizes.
+    let three = rt2
+        .follow_up_council(&a[0].id, follow_up("again", &[]))
+        .await
+        .unwrap();
+    assert_eq!(three.rounds.len(), 3);
+    for s in &a {
+        assert!(rt2
+            .latest_reply(&s.id, WAIT)
+            .await
+            .unwrap()
+            .text
+            .contains("again"));
+    }
+    let judge = rt2
+        .synthesize_council(&a[0].id, gemini_judge())
+        .await
+        .unwrap();
+    assert!(rt2
+        .latest_reply(&judge.id, WAIT)
+        .await
+        .unwrap()
+        .text
+        .contains("## The question (round 3)"));
+
+    // B: the seat that finished before the restart counts; the cut one is
+    // named as missing, never dropped.
+    let judge = rt2
+        .synthesize_council(&b[0].id, gemini_judge())
+        .await
+        .unwrap();
+    let verdict = rt2.latest_reply(&judge.id, WAIT).await.unwrap();
+    for want in [
+        "## The question (round 2)",
+        "No answer in this round from: seat 1 (",
+        "## Seat 2 — claude",
+        "echo: hang",
+    ] {
+        assert!(verdict.text.contains(want), "{want}: {}", verdict.text);
+    }
 }

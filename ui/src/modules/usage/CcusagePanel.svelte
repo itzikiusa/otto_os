@@ -1,6 +1,7 @@
 <script lang="ts">
   // Opt-in cross-check against ccusage (root only). Nothing runs until the
-  // user clicks: the daemon then runs `npx ccusage` locally with a timeout and
+  // user clicks: the daemon then runs a PINNED ccusage release through npx
+  // (`otto-usage` ccusage.rs `VERSION`) locally with a timeout and
   // returns its numbers next to Otto's for the same dates, every session
   // (external included) on both sides.
   import Icon from '../../lib/components/Icon.svelte';
@@ -9,6 +10,8 @@
   import { usage, type TokenTotals } from '../../lib/api/usage.svelte';
 
   const RANGES = [7, 14, 30];
+  /** What the daemon runs, shown before the click (ccusage.rs `args`). */
+  const COMMAND = 'npx --yes ccusage@20.0.26 daily --json --breakdown --since … --until …';
   let days = $state(7);
 
   const check = $derived(usage.ccusage);
@@ -49,7 +52,7 @@
     </div>
   </div>
   <p class="dim small intro">
-    Runs <span class="mono">npx ccusage</span> on this Mac and puts its numbers next to Otto’s for the same days, with
+    Runs <span class="mono">{COMMAND}</span> on this Mac and puts its numbers next to Otto’s for the same days, with
     every session counted on both sides. The first run may download ccusage through npx and take up to 2 minutes.
     Nothing is sent anywhere. ccusage also counts tools Otto doesn’t track (for example Hermes), so those rows only
     appear on its side.

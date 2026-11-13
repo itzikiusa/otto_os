@@ -1333,3 +1333,51 @@ async fn execute_errors_keep_their_status_and_problem_body() {
         json!({"error": "auth references a secret for an unknown request"})
     );
 }
+
+/// F6: with private addresses allowed, the OAuth token fetch still runs the
+/// guard — a token endpoint on cloud metadata or Otto's own daemon port is
+/// refused before the form (the client secret) goes anywhere.
+#[tokio::test]
+async fn oauth_token_fetch_keeps_metadata_and_the_daemon_blocked_with_private_allowed() {
+    use crate::routes::browser::tests::{mem_pool, root_user, seed_workspace, test_ctx};
+    let tmp = tempfile::TempDir::new().unwrap();
+    let pool = mem_pool().await;
+    let wid: Id = "ws-oauth-guard".into();
+    seed_workspace(&pool, &wid).await;
+    sqlx::query("UPDATE workspaces SET settings_json = ? WHERE id = ?")
+        .bind(json!({"api_client": {"allow_local": true}}).to_string())
+        .bind(wid.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+    let user = root_user();
+    for token_url in [
+        "http://169.254.169.254/latest/meta-data/iam/token",
+        "http://[fd00:ec2::254]/token",
+        "http://127.0.0.1:7700/api/v1/auth/tokens",
+        "http://localhost:7700/token",
+    ] {
+        let result = oauth2_token(
+            Path(wid.clone()),
+            State(ctx.clone()),
+            CurrentUser(user.clone()),
+            CurrentAuthContext(auth_for(&user)),
+            HeaderMap::new(),
+            Json(
+                serde_json::from_value(json!({"grant": "client_credentials",
+                    "token_url": token_url, "client_id": "c", "client_secret": "s3cret-value"}))
+                .unwrap(),
+            ),
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("{token_url} must be refused")
+        };
+        let (status, body) = wire(error).await;
+        assert_eq!(status, 400, "{token_url}: {body}");
+        let text = body.to_string();
+        assert!(text.contains("SSRF guard"), "{token_url}: {text}");
+        assert!(!text.contains("s3cret-value"), "{token_url}: {text}");
+    }
+}

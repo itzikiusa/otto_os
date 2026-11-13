@@ -9,7 +9,7 @@ import { GLIDE, POP, SNAP, beats, clamp, easeIn, sp } from '../motion';
 const CLAIMS = [
   { word: 'agents.', tint: C.accent, src: 'capture/agents-tiled.jpg', x: 110, y: 110, rot: -6 },
   { word: 'repos.', tint: C.green, src: 'capture/git.jpg', x: 1190, y: 130, rot: 5 },
-  { word: 'data.', tint: C.amber, src: 'capture/db-results.jpg', x: 150, y: 640, rot: 4 },
+  { word: 'data.', tint: C.amber, src: 'capture/db-query.jpg', x: 150, y: 640, rot: 4 },
   { word: 'infrastructure.', tint: C.violet, src: 'capture/kubernetes.jpg', x: 1150, y: 620, rot: -5 },
 ];
 
@@ -19,10 +19,10 @@ export const WALL = [
   'capture/threads-split.jpg',
   'capture/agents-tiled.jpg',
   'capture/git.jpg',
-  'capture/design.jpg',
-  'capture/db-builder.jpg',
+  'capture/design-versions.jpg',
+  'capture/council.jpg',
   'capture/workflows.jpg',
-  'capture/vault-graph.jpg',
+  'capture/design-lobby.jpg',
   'capture/scheduled-tasks.jpg',
 ];
 

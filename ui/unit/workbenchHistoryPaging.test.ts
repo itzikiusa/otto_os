@@ -37,7 +37,7 @@ function history(overrides: Record<string, any> = {}) {
     ws: 'workspace-A', docId: 'doc-A', rev: 305, current: 'current',
     revs: [], loading: false, error: null, selected: null, compareTo: 'current', detail: null, other: null, restoring: false,
     listWorkbenchRevisions: async () => [], restoreWorkbenchRevision: async () => ({ id: 'doc-A' }),
-    onrestored() {}, confirmer: { ask: async () => true }, toasts: { success() {}, error() {} },
+    onrestored() {}, beforeRestore: undefined, confirmer: { ask: async () => true }, toasts: { success() {}, error() {} },
     loadErrorText: (error: Error) => error.message,
     $state: (value: unknown) => value,
     onDestroy: (fn: () => void) => destroy.push(fn), destroy: () => destroy.forEach(fn => fn()),
@@ -131,6 +131,32 @@ test('History old restore completion cannot replace a newly selected document', 
   assert.equal(c.selected, 9);
 });
 
+
+test('History restore asks the page first and stops when unsaved edits must be kept', async () => {
+  const calls: any[][] = [];
+  let mutations = 0;
+  const c = history({ selected: 3, beforeRestore: async (...args: any[]) => { calls.push(args); return false; },
+    restoreWorkbenchRevision: async () => { mutations++; return { id: 'doc-A' }; } });
+  await c.restore();
+  assert.deepEqual(calls, [['doc-A', 3]]);
+  assert.equal(mutations, 0, 'a refused pre-restore check must not restore over the tab');
+  const ok = history({ selected: 3, beforeRestore: async () => true,
+    restoreWorkbenchRevision: async () => { mutations++; return { id: 'doc-A' }; } });
+  await ok.restore();
+  assert.equal(mutations, 1);
+});
+
+test('History restore does not apply when the document changed during the pre-restore save', async () => {
+  const saving = deferred<boolean>();
+  let mutations = 0;
+  const c = history({ selected: 3, beforeRestore: () => saving.promise,
+    restoreWorkbenchRevision: async () => { mutations++; return {}; } });
+  const restoring = c.restore();
+  await Promise.resolve(); await Promise.resolve();
+  c.docId = 'doc-B';
+  saving.resolve(true); await restoring;
+  assert.equal(mutations, 0);
+});
 
 test('History actual destroy callback cancels pending restore approval', async () => {
   const approval = deferred<boolean>();

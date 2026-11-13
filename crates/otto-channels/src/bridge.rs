@@ -662,6 +662,23 @@ impl Bridge {
         }
     }
 
+    /// Record a message the allow-list turned away — the ONE place for it,
+    /// shared by [`Self::handle`] and the listeners that drop a stranger's
+    /// message before it reaches the bridge (Slack's pre-download gate and
+    /// its busy path, a Telegram file with no caption). The sender is listed
+    /// in Settings → Channels with an "Allow" action (a Telegram id is
+    /// invisible in the app), and the workflow trigger the message was meant
+    /// for is stamped (see [`Self::note_rejected_sender`]). Never a reply.
+    pub(crate) async fn record_rejected(&self, channel: Channel, msg: &Inbound) {
+        crate::health::rejected(
+            &msg.workspace_id,
+            channel,
+            &msg.user,
+            msg.user_name.as_deref(),
+        );
+        self.note_rejected_sender(channel, msg).await;
+    }
+
     /// Handle one inbound message.
     pub async fn handle(
         &self,
@@ -688,15 +705,7 @@ impl Bridge {
                 user = %msg.user,
                 "bridge: user not in allowed_users, dropping"
             );
-            // Listed in Settings → Channels with an "Allow" action, so the
-            // owner can find the (invisible) Telegram id to admit.
-            crate::health::rejected(
-                &msg.workspace_id,
-                adapter.channel(),
-                &msg.user,
-                msg.user_name.as_deref(),
-            );
-            self.note_rejected_sender(adapter.channel(), &msg).await;
+            self.record_rejected(adapter.channel(), &msg).await;
             return;
         }
 

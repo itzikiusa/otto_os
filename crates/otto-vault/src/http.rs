@@ -298,28 +298,38 @@ async fn folder<C: VaultCtx>(
 struct BacklinksQ {
     path: String,
     #[serde(default)]
-    context_offset: usize,
-    context_limit: Option<usize>,
+    offset: usize,
+    /// 0/absent = the engine default (100); clamped to its maximum (200).
+    #[serde(default)]
+    limit: usize,
+    /// `true` answers a [`BacklinkPage`] (rows + total); otherwise the bare
+    /// row array, with the total in [`BACKLINKS_TOTAL_HEADER`].
+    #[serde(default)]
+    with_total: bool,
 }
+
+/// Header on a bare-array backlinks answer: the backlink count across pages.
+const BACKLINKS_TOTAL_HEADER: &str = "x-otto-total";
 
 async fn backlinks<C: VaultCtx>(
     State(c): State<C>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(WsVaultPath { ws, id }): Path<WsVaultPath>,
     Query(q): Query<BacklinksQ>,
-) -> ApiResult<Json<Vec<Backlink>>> {
+) -> ApiResult<Response> {
     require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
-    Ok(Json(
-        c.vault()
-            .backlinks_context_window(
-                &ws,
-                id,
-                &q.path,
-                q.context_offset,
-                q.context_limit.unwrap_or(100),
-            )
-            .await?,
-    ))
+    let page = c
+        .vault()
+        .backlinks_page(&ws, id, &q.path, q.offset, q.limit)
+        .await?;
+    if q.with_total {
+        return Ok(Json(page).into_response());
+    }
+    let total = page.total;
+    let mut resp = Json(page.backlinks).into_response();
+    resp.headers_mut()
+        .insert(BACKLINKS_TOTAL_HEADER, header::HeaderValue::from(total));
+    Ok(resp)
 }
 
 /// Header on a bare-array search answer drawn from an incomplete index:

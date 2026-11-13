@@ -9,9 +9,11 @@ import {
   SCRATCH_ID,
   bucketSessions,
   idChunks,
+  inThreadsScope,
   isForeground,
   isShownKind,
   isThreadSurfaceSession,
+  sessionRoute,
   shownListQuery,
 } from '../src/lib/stores/sessionBuckets.ts';
 import { SCRATCH_WORKSPACE_ID } from '../src/lib/stores/sessionScope.ts';
@@ -131,4 +133,45 @@ test('bucketSessions strictly isolates Threads surface sessions from Agents buck
   assert.deepEqual(b.agent, [agentSess]);
   assert.deepEqual(b.foregroundActive, [agentSess]);
   assert.deepEqual(b.scratch, []);
+});
+
+test('a worker delegated by a thread is listed once, in Threads; an explicit Agents child stays in Agents', () => {
+  const lead = mk({ meta: { surface: 'threads' } });
+  const worker = mk({ meta: { delegated_by: lead.id } });
+  const grandchild = mk({ meta: { parent_session_id: worker.id } });
+  const reopened = mk({ meta: { delegated_by: lead.id, surface: 'agents' } });
+  const agentLead = mk({});
+  const agentWorker = mk({ meta: { delegated_by: agentLead.id } });
+  const orphan = mk({ meta: { delegated_by: 'gone' } });
+  const all = [lead, worker, grandchild, reopened, agentLead, agentWorker, orphan];
+  const b = bucketSessions(all);
+  assert.deepEqual(b.threads, [lead, worker, grandchild]);
+  for (const list of [b.plainAgent, b.agent, b.foregroundActive]) {
+    assert.ok(!list.includes(worker) && !list.includes(grandchild), 'a thread worker is not in an Agents list');
+  }
+  assert.deepEqual(b.plainAgent, [reopened, agentLead, agentWorker, orphan]);
+  // Every non-archived row lands in exactly one of the two scopes.
+  for (const s of all) assert.equal(b.threads.includes(s) !== b.foregroundActive.includes(s), true, s.id);
+  // A list and an id index answer the same.
+  const index = new Map(all.map((s) => [s.id, s] as const));
+  for (const s of all) assert.equal(inThreadsScope(s, all), inThreadsScope(s, index), s.id);
+});
+
+test('inThreadsScope survives a delegation cycle and a self-parent', () => {
+  const a = mk({ id: 'cyc-a', meta: { delegated_by: 'cyc-b' } });
+  const c = mk({ id: 'cyc-b', meta: { delegated_by: 'cyc-a' } });
+  const self = mk({ id: 'self', meta: { delegated_by: 'self' } });
+  assert.equal(inThreadsScope(a, [a, c]), false);
+  assert.equal(inThreadsScope(self, [self]), false);
+});
+
+test('sessionRoute opens a session where it lives', () => {
+  const lead = mk({ meta: { surface: 'threads' } });
+  const worker = mk({ meta: { delegated_by: lead.id } });
+  const term = mk({});
+  const pool = new Map([lead, worker, term].map((s) => [s.id, s] as const));
+  assert.equal(sessionRoute(lead, lead.id, pool), `threads/${lead.id}`);
+  assert.equal(sessionRoute(worker, worker.id, pool), `threads/${worker.id}`);
+  assert.equal(sessionRoute(term, term.id, pool), `agents/${term.id}`);
+  assert.equal(sessionRoute(undefined, 'not-loaded', pool), 'agents/not-loaded', 'an unknown row keeps the old route');
 });

@@ -172,6 +172,41 @@ pub fn check_delete_confirm(
     crate::access::refuse_agent_confirm("deleting an object on a production account")
 }
 
+/// Whether an upload must ask S3 if its key exists. A plain upload refuses an
+/// existing key (409). With `overwrite=true` only an AGENT's upload to a
+/// production account asks — to tell a new key (fine) from a replacement
+/// (a person's call, [`check_overwrite_confirm`]); a person's overwrite, or
+/// any off production, never pays the HEAD.
+pub fn upload_needs_existence_check(env: otto_core::domain::Environment, overwrite: bool) -> bool {
+    !overwrite
+        || (env == otto_core::domain::Environment::Prod && otto_core::auth::request_is_agent())
+}
+
+/// Replacing an existing object destroys its bytes (unless the bucket keeps
+/// versions), so on a production account the client-asserted
+/// `overwrite=true` must come from a person — the rule a prod delete follows
+/// ([`check_delete_confirm`]). A new key, or any other account, needs neither.
+/// `exists` is the HEAD's answer: when S3 could not answer it, the upload may
+/// replace an object, so an agent is refused (fail closed) and told why.
+pub fn check_overwrite_confirm(
+    env: otto_core::domain::Environment,
+    overwrite: bool,
+    exists: Result<bool>,
+) -> Result<()> {
+    if env != otto_core::domain::Environment::Prod || !overwrite {
+        return Ok(());
+    }
+    match exists {
+        Ok(false) => Ok(()),
+        Ok(true) => {
+            crate::access::refuse_agent_confirm("replacing an object on a production account")
+        }
+        Err(e) => crate::access::refuse_agent_confirm(&format!(
+            "an overwrite on a production account whose key could not be checked ({e})"
+        )),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Normalizers (pure)
 // ---------------------------------------------------------------------------
@@ -1136,6 +1171,68 @@ mod tests {
         })
         .await;
         assert!(dev.is_ok());
+    }
+
+    /// F7: `overwrite=true` replacing an existing object on a production
+    /// account is a person's call; a new key, or a dev account, is not. A
+    /// HEAD that could not answer fails closed for an agent.
+    #[tokio::test]
+    async fn an_agent_credential_cannot_replace_a_prod_object() {
+        use otto_core::auth::{with_request_credential, RequestCredential};
+        use otto_core::domain::Environment;
+        let agent = RequestCredential {
+            agent: true,
+            root_withheld: false,
+        };
+        let person = RequestCredential::default();
+        let check =
+            |cred: RequestCredential, env: Environment, overwrite: bool, exists: Result<bool>| {
+                with_request_credential(cred, async move {
+                    check_overwrite_confirm(env, overwrite, exists)
+                })
+            };
+        match check(agent, Environment::Prod, true, Ok(true)).await {
+            Err(Error::Forbidden(msg)) => assert!(
+                msg.contains("replacing an object on a production account"),
+                "{msg}"
+            ),
+            other => panic!("an agent replaced a prod object: {other:?}"),
+        }
+        let unknown = Err(Error::Invalid("head-object failed (403)".into()));
+        match check(agent, Environment::Prod, true, unknown).await {
+            Err(Error::Forbidden(msg)) => assert!(
+                msg.contains("could not be checked") && msg.contains("head-object failed (403)"),
+                "{msg}"
+            ),
+            other => panic!("an unanswered HEAD let an agent overwrite on prod: {other:?}"),
+        }
+        for (env, overwrite, exists) in [
+            (Environment::Prod, true, false),
+            (Environment::Prod, false, true),
+            (Environment::Dev, true, true),
+            (Environment::Staging, true, true),
+        ] {
+            assert!(
+                check(agent, env, overwrite, Ok(exists)).await.is_ok(),
+                "{env:?} overwrite={overwrite} exists={exists}"
+            );
+        }
+        assert!(check(person, Environment::Prod, true, Ok(true))
+            .await
+            .is_ok());
+        // Who pays the HEAD: a plain upload always; an overwrite only for an
+        // agent on production.
+        let needs = |cred: RequestCredential, env: Environment, overwrite: bool| {
+            with_request_credential(
+                cred,
+                async move { upload_needs_existence_check(env, overwrite) },
+            )
+        };
+        assert!(needs(person, Environment::Prod, false).await);
+        assert!(!needs(person, Environment::Prod, true).await);
+        assert!(needs(agent, Environment::Prod, true).await);
+        assert!(!needs(agent, Environment::Dev, true).await);
+        assert!(needs(agent, Environment::Dev, false).await);
     }
 
     #[tokio::test]

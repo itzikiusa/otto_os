@@ -896,27 +896,42 @@ impl VaultEngine {
         };
         Self::check_rel(&item.stored_path)?;
         let dest = Self::check_rel(destination.unwrap_or(&item.original_path))?;
+        // The same symlink-escape and protected-path rule as every other
+        // write: a restore must not land a file on a key-like name or in
+        // Otto's own state, whatever the manifest or the caller says.
+        let dest_abs = Self::abs_guarded(&v.root_path, &dest)?;
         let state = self.index_state(id);
         state.ensure(self.store(), id).await?;
         let publication = state.publication.lock().await;
         state.mutated(&[&dest]);
         let (source_parent, source_name) =
             Self::text_parent(&v.root_path, &format!(".trash/{}", item.stored_path))?;
-        let (target_parent, target_name) = Self::text_parent(&v.root_path, &dest)?;
-        rustix::fs::renameat_with(
-            &source_parent,
-            source_name.as_str(),
-            &target_parent,
-            target_name.as_str(),
-            RenameFlags::NOREPLACE,
-        )
-        .map_err(|e| match e {
-            rustix::io::Errno::EXIST => {
-                Error::Conflict(format!("target exists: {dest}; choose another destination"))
-            }
-            rustix::io::Errno::NOENT => Error::NotFound("trash entry no longer exists".into()),
-            _ => Error::Internal(format!("restore trash: {e}")),
-        })?;
+        // Parents made for this restore are taken back if it fails.
+        let created = crate::created_dirs::create_parents(&dest_abs, &dest)
+            .map_err(|e| Error::Internal(format!("restore trash: mkdir: {e}")))?;
+        let moved =
+            Self::text_parent(&v.root_path, &dest).and_then(|(target_parent, target_name)| {
+                rustix::fs::renameat_with(
+                    &source_parent,
+                    source_name.as_str(),
+                    &target_parent,
+                    target_name.as_str(),
+                    RenameFlags::NOREPLACE,
+                )
+                .map_err(|e| match e {
+                    rustix::io::Errno::EXIST => Error::Conflict(format!(
+                        "target exists: {dest}; choose another destination"
+                    )),
+                    rustix::io::Errno::NOENT => {
+                        Error::NotFound("trash entry no longer exists".into())
+                    }
+                    _ => Error::Internal(format!("restore trash: {e}")),
+                })
+            });
+        if let Err(e) = moved {
+            crate::created_dirs::remove_created(&created);
+            return Err(e);
+        }
         if !legacy {
             let (parent, name) = Self::text_parent(&v.root_path, &manifest)?;
             rustix::fs::unlinkat(parent, name, AtFlags::empty())

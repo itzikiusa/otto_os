@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import {
   ageText,
   barTone,
+  autoCheckDue,
   CHECK_CONFIRM,
   checkDue,
   checkStatusText,
@@ -113,6 +114,21 @@ test('Claude check: due only when on, idle and older than the daemon cache', () 
   assert.equal(checkDue({ ...base, checking: true }, NOW), false, 'one at a time');
   assert.equal(checkDue({ ...base, enabled: false }, NOW), false, 'off never runs');
   assert.equal(checkDue(null, NOW), false);
+});
+
+test('Claude check on an open page: re-run each time it is due, never faster than the cache', () => {
+  const base = { enabled: true, checking: false, checked_at: iso(NOW - 6 * MIN), error: null as string | null };
+  assert.equal(autoCheckDue(base, NOW, null, false), true, 'due on open');
+  // Not a one-shot: a later poll past the cache runs again.
+  assert.equal(autoCheckDue(base, NOW, NOW - 6 * MIN, false), true, 'due again after 5 min');
+  // A run that never reached the daemon (checked_at unchanged) is not retried every 60 s poll.
+  assert.equal(autoCheckDue(base, NOW, NOW - 1 * MIN, false), false, 'our own attempt 1 min ago');
+  assert.equal(autoCheckDue(base, NOW, NOW - 5 * MIN, false), true, 'exactly one cache window later');
+  assert.equal(autoCheckDue({ ...base, checked_at: iso(NOW - 2 * MIN) }, NOW, null, false), false, 'fresh');
+  assert.equal(autoCheckDue(base, NOW, null, true), false, 'never while the tab is hidden');
+  assert.equal(autoCheckDue({ ...base, enabled: false }, NOW, null, false), false, 'never while off');
+  assert.equal(autoCheckDue({ ...base, checking: true }, NOW, null, false), false, 'one at a time');
+  assert.match(CHECK_CONFIRM, /at most once every 5 minutes/);
 });
 
 test('Claude check status line: off, checking, failed, checked', () => {

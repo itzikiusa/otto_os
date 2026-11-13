@@ -22,6 +22,11 @@ use otto_core::agent_runtime::{
 
 use super::*;
 
+mod rounds;
+pub use rounds::{
+    CouncilFollowUpReq, CouncilRound, CouncilRoundsResp, CouncilSeatRefusal, COUNCIL_MAX_ROUNDS,
+};
+
 /// Characters of one seat's answer the synthesis prompt carries.
 const ANSWER_MAX_CHARS: usize = 24_000;
 /// Characters of the prompt a council's default title takes.
@@ -109,10 +114,36 @@ struct SeatAnswer {
     model: Option<String>,
     text: String,
     turn_status: Option<String>,
+    /// Why the seat has no answer in this round at all (the question never
+    /// reached it, or is still queued there).
+    missing: Option<String>,
 }
 
-/// The judge's prompt: the question, each seat's last answer, the task.
-fn synthesis_prompt(question: &str, answers: &[SeatAnswer]) -> String {
+impl SeatAnswer {
+    /// "seat 2 (interrupted)" — how the judge's missing list names it.
+    fn missing_label(&self) -> Option<String> {
+        if let Some(why) = &self.missing {
+            return Some(format!("seat {} ({why})", self.seat));
+        }
+        if self.text.trim().is_empty() {
+            let how = self.turn_status.as_deref().unwrap_or("no reply");
+            return Some(format!("seat {} ({how})", self.seat));
+        }
+        None
+    }
+}
+
+/// Which round the judge reads: its number, its text and (after round 1)
+/// the council's first question, which a follow-up builds on.
+struct RoundAsked<'a> {
+    n: u32,
+    first: &'a str,
+    question: &'a str,
+}
+
+/// The judge's prompt: the question, each seat's answer in this round, the
+/// seats without one (named, never dropped), the task.
+fn synthesis_prompt(round: &RoundAsked<'_>, answers: &[SeatAnswer]) -> String {
     let mut p = format!(
         "You are the judge of a council: the same question went to {} agents, \
          and their answers are below. Do not redo the work and do not change any \
@@ -120,23 +151,51 @@ fn synthesis_prompt(question: &str, answers: &[SeatAnswer]) -> String {
          1. Where do they agree?\n\
          2. Where do they disagree, and which side is right (say why)?\n\
          3. Pick the best answer, or merge them into one better answer.\n\
-         4. List the open questions none of them settled.\n\n\
-         ## The question\n\n{}\n",
+         4. List the open questions none of them settled.\n\n",
         answers.len(),
-        question.trim()
     );
+    if round.n > 1 {
+        p.push_str(&format!(
+            "## The council's first question\n\n{}\n\n## The question (round {})\n\n{}\n",
+            round.first.trim(),
+            round.n,
+            round.question.trim()
+        ));
+    } else {
+        p.push_str(&format!("## The question\n\n{}\n", round.question.trim()));
+    }
+    let missing: Vec<String> = answers
+        .iter()
+        .filter_map(SeatAnswer::missing_label)
+        .collect();
+    if !missing.is_empty() {
+        p.push_str(&format!(
+            "\nNo answer in this round from: {}. Name them as missing; do not guess \
+             what they would have said.\n",
+            missing.join(", ")
+        ));
+    }
     for a in answers {
         let who = match &a.model {
             Some(m) => format!("{} ({m})", a.provider),
             None => a.provider.to_string(),
         };
         p.push_str(&format!("\n## Seat {} — {who}\n\n", a.seat));
-        if a.text.trim().is_empty() {
+        if let Some(why) = &a.missing {
+            p.push_str(&format!("(no answer: {why})\n"));
+        } else if a.text.trim().is_empty() {
             let how = a.turn_status.as_deref().unwrap_or("without a reply");
             p.push_str(&format!("(no answer: its turn ended {how})\n"));
         } else {
             p.push_str(&truncate(a.text.trim(), ANSWER_MAX_CHARS));
             p.push('\n');
+            // A seat a Stop or a daemon restart cut off: say so, so the
+            // judge does not read a half answer as the seat's last word.
+            if let Some(how) = a.turn_status.as_deref().filter(|s| *s != "completed") {
+                p.push_str(&format!(
+                    "(its last turn ended {how}: this answer may be incomplete)\n"
+                ));
+            }
         }
     }
     p
@@ -225,6 +284,15 @@ impl AgentRuntime {
             self.discard_seats(&seats).await;
             return Err(e);
         }
+        // Round 1 on record (a failed write leaves the fallback: the first
+        // question to every seat, which is the same round).
+        let round = rounds::first_round(prompt.to_string(), (1..=n as u32).collect(), Utc::now());
+        if let Err(e) = self
+            .save_rounds(&seats[0].id, std::slice::from_ref(&round), 0)
+            .await
+        {
+            tracing::warn!(council = %council, "could not record the council's first round: {e}");
+        }
         let mut out = Vec::with_capacity(n);
         for s in &seats {
             out.push(self.get(&s.id).await?);
@@ -282,95 +350,127 @@ impl AgentRuntime {
         Ok(text)
     }
 
-    /// Open the council's judge: a thread linked to seat 1 whose prompt is
-    /// the question plus each seat's last answer. Refused (409), in this
-    /// order: a seat or an earlier synthesis is still working, seat 1 is
-    /// closed, the linked group is full, no seat has answered yet.
+    /// Open the council's judge on its CURRENT round: a thread linked to
+    /// seat 1 whose prompt is that round's question plus each of its seats'
+    /// answers in that round (a seat without one is named as missing).
+    /// Refused (409), in this order: a seat of the round or an earlier
+    /// synthesis is still working, seat 1 is closed, the linked group is
+    /// full, no seat of the round has an answer in it (see `reply_of` for
+    /// what counts). The judge is recorded under the round.
     pub async fn synthesize_council(
         &self,
         id: &Id,
         req: SynthesizeCouncilReq,
     ) -> Result<RuntimeSession> {
-        let me = self.get(id).await?;
-        let (council, members) = self.council_members(&me).await?;
-        for s in members
+        let _rounds = rounds::rounds_lock().await;
+        let c = self.council_of(id).await?;
+        let (rounds, seq) = self.load_rounds(&c).await?;
+        let round = rounds
+            .last()
+            .cloned()
+            .ok_or_else(|| Error::Internal("the council has no rounds".into()))?;
+        for s in c
+            .members
             .iter()
             .filter(|s| s.status != RuntimeSessionStatus::Closed)
         {
+            let what = match s.council() {
+                Some(m) if m.role == CouncilRole::Seat => {
+                    if !round.seats.contains(&m.seat) {
+                        continue;
+                    }
+                    format!("seat {}", m.seat)
+                }
+                _ => "the last synthesis".to_string(),
+            };
             let busy = self
                 .inner
                 .live
                 .get(&s.id)
                 .is_some_and(|l| is_busy(&l.lock()));
             if busy {
-                let what = match s.council() {
-                    Some(c) if c.role == CouncilRole::Seat => format!("seat {}", c.seat),
-                    _ => "the last synthesis".to_string(),
-                };
                 return Err(Error::Conflict(format!(
                     "{what} is still working — wait for it or stop it, then synthesize"
                 )));
             }
         }
-        let mut seats: Vec<(u32, &RuntimeSession)> = members
-            .iter()
-            .filter_map(|s| {
-                s.council()
-                    .filter(|c| c.role == CouncilRole::Seat)
-                    .map(|c| (c.seat, s))
-            })
-            .collect();
-        seats.sort_by_key(|(n, _)| *n);
-        let root = seats
-            .iter()
-            .find(|(_, s)| s.parent_id.is_none())
-            .map(|(_, s)| (*s).clone())
-            .ok_or_else(|| Error::NotFound("the council's first seat is gone".into()))?;
-        if root.status == RuntimeSessionStatus::Closed {
+        if c.root.status == RuntimeSessionStatus::Closed {
             return Err(Error::Conflict(
                 "seat 1 is closed — reopen it, then synthesize".into(),
             ));
         }
         // A full group refuses before the answers are read: closing a thread
         // is what the person must do either way.
-        self.ensure_group_room(&root).await?;
-        let mut answers = Vec::with_capacity(seats.len());
-        for (n, s) in &seats {
-            let reply = self.latest_reply(&s.id, Duration::ZERO).await?;
-            answers.push(SeatAnswer {
+        self.ensure_group_room(&c.root).await?;
+        let mut answers = Vec::with_capacity(round.seats.len());
+        for (n, s) in c.seats.iter().filter(|(n, _)| round.seats.contains(n)) {
+            let mut a = SeatAnswer {
                 seat: *n,
                 provider: s.provider.as_str(),
                 model: s.model.clone(),
-                text: reply.text,
-                turn_status: reply.turn_status,
-            });
+                text: String::new(),
+                turn_status: None,
+                missing: None,
+            };
+            if let Some(r) = round.refused.iter().find(|r| r.seat == *n) {
+                a.missing = Some(format!("the question never reached it: {}", r.reason));
+            } else {
+                let asked = rounds::asked_of(&rounds, *n);
+                match self.round_replies(&s.id, &asked).await?.pop().flatten() {
+                    Some(r) => {
+                        a.text = r.text;
+                        a.turn_status = r.turn_status;
+                    }
+                    None => a.missing = Some("the question has not reached it yet".into()),
+                }
+            }
+            answers.push(a);
         }
         if answers.iter().all(|a| a.text.trim().is_empty()) {
-            return Err(Error::Conflict(
-                "no seat has answered yet — nothing to synthesize".into(),
-            ));
+            return Err(Error::Conflict(format!(
+                "no seat has answered round {} yet — nothing to synthesize",
+                round.n
+            )));
         }
-        let question = self.first_user_text(&root.id).await?;
-        let base = root
+        let base = c
+            .root
             .title
             .rsplit_once(" · ")
-            .map_or(root.title.as_str(), |(b, _)| b)
+            .map_or(c.root.title.as_str(), |(b, _)| b)
             .to_string();
-        let effort = req.effort.filter(|e| !e.trim().is_empty());
-        self.open_linked(
-            &root.id,
-            OpenPeerReq {
-                provider: req.provider,
-                prompt: Some(synthesis_prompt(&question, &answers)),
-                title: Some(format!("{base} · synthesis")),
-                model: req.model,
-                effort: effort.clone(),
-                cwd: None,
-                meta: Some(council_meta(&council.id, 0, CouncilRole::Synthesis, effort)),
+        let title = if round.n > 1 {
+            format!("{base} · synthesis of round {}", round.n)
+        } else {
+            format!("{base} · synthesis")
+        };
+        let first = rounds.first().map_or("", |r| r.text.as_str()).to_string();
+        let prompt = synthesis_prompt(
+            &RoundAsked {
+                n: round.n,
+                first: &first,
+                question: &round.text,
             },
-            false,
-        )
-        .await
+            &answers,
+        );
+        let effort = req.effort.filter(|e| !e.trim().is_empty());
+        let judge = self
+            .open_linked(
+                &c.root.id,
+                OpenPeerReq {
+                    provider: req.provider,
+                    prompt: Some(prompt),
+                    title: Some(title),
+                    model: req.model,
+                    effort: effort.clone(),
+                    cwd: None,
+                    meta: Some(council_meta(&c.meta.id, 0, CouncilRole::Synthesis, effort)),
+                },
+                false,
+            )
+            .await?;
+        self.note_synthesis(&c.root.id, rounds, seq, &judge.id)
+            .await;
+        Ok(judge)
     }
 }
 
@@ -398,8 +498,13 @@ mod tests {
 
     #[test]
     fn the_judge_prompt_carries_the_question_every_answer_and_the_task() {
+        let one = RoundAsked {
+            n: 1,
+            first: "Which cache?",
+            question: "Which cache?",
+        };
         let p = synthesis_prompt(
-            "Which cache?",
+            &one,
             &[
                 SeatAnswer {
                     seat: 1,
@@ -407,6 +512,7 @@ mod tests {
                     model: Some("opus".into()),
                     text: "Redis".into(),
                     turn_status: Some("completed".into()),
+                    missing: None,
                 },
                 SeatAnswer {
                     seat: 2,
@@ -414,6 +520,7 @@ mod tests {
                     model: None,
                     text: String::new(),
                     turn_status: Some("failed".into()),
+                    missing: None,
                 },
             ],
         );
@@ -421,10 +528,70 @@ mod tests {
         assert!(p.contains("## The question\n\nWhich cache?"));
         assert!(p.contains("## Seat 1 — claude (opus)\n\nRedis"));
         assert!(p.contains("## Seat 2 — codex\n\n(no answer: its turn ended failed)"));
+        assert!(
+            !p.contains("may be incomplete"),
+            "a completed answer is whole"
+        );
+        assert!(
+            p.contains("No answer in this round from: seat 2 (failed)."),
+            "a seat without an answer is named: {p}"
+        );
+        let cut = synthesis_prompt(
+            &one,
+            &[SeatAnswer {
+                seat: 1,
+                provider: "claude",
+                model: None,
+                text: "Redis, beca".into(),
+                turn_status: Some("interrupted".into()),
+                missing: None,
+            }],
+        );
+        assert!(cut.contains(
+            "Redis, beca\n(its last turn ended interrupted: this answer may be incomplete)"
+        ));
         assert!(p.contains("agree") && p.contains("disagree") && p.contains("open questions"));
         let meta = council_meta(&"c1".into(), 0, CouncilRole::Synthesis, Some("high".into()));
         assert_eq!(meta["council"]["effort"], "high");
         assert_eq!(meta["council"]["role"], "synthesis");
         assert_eq!(meta["read_only"], true);
+    }
+
+    /// A follow-up round's judge reads that round's question with the
+    /// council's first one, and a seat the round never reached is named.
+    #[test]
+    fn a_later_round_s_judge_reads_its_question_and_names_the_missing_seat() {
+        let p = synthesis_prompt(
+            &RoundAsked {
+                n: 3,
+                first: "Which cache?",
+                question: "Where do you disagree?",
+            },
+            &[
+                SeatAnswer {
+                    seat: 1,
+                    provider: "claude",
+                    model: None,
+                    text: "On TTLs".into(),
+                    turn_status: Some("completed".into()),
+                    missing: None,
+                },
+                SeatAnswer {
+                    seat: 3,
+                    provider: "codex",
+                    model: None,
+                    text: String::new(),
+                    turn_status: None,
+                    missing: Some("the question has not reached it yet".into()),
+                },
+            ],
+        );
+        assert!(p.contains("## The council's first question\n\nWhich cache?"));
+        assert!(p.contains("## The question (round 3)\n\nWhere do you disagree?"));
+        assert!(p.contains(
+            "No answer in this round from: seat 3 (the question has not reached it yet)."
+        ));
+        assert!(p.contains("## Seat 3 — codex\n\n(no answer: the question has not reached it yet)"));
+        assert!(!p.contains("## The question\n\n"), "round 3 is labelled");
     }
 }

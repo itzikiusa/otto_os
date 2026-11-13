@@ -213,6 +213,7 @@ impl PluginManager {
         }
         self.stop(&p.slug).await;
         let port = free_port().ok_or("no free loopback port")?;
+        otto_netguard::register_daemon_port(port); // allow-local API calls can't reach it
         let data_dir = self.data_dir.join("plugins").join(&p.slug);
         let _ = std::fs::create_dir_all(&data_dir);
 

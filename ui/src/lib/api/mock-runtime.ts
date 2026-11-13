@@ -107,9 +107,84 @@ function addThread(ws: string, row: Partial<RuntimeSession> & { title: string; p
 const councilOf = (t: RuntimeSession | undefined): { id: string; seat: number; role: string } | undefined =>
   t?.meta?.council as { id: string; seat: number; role: string } | undefined;
 
+/** A council's rounds (`…/council/rounds`), by council id. */
+const councilRounds = new Map<string, { n: number; text: string; seats: number[]; syntheses?: string[]; created_at: string }[]>();
+
+/** The council `id` sits on: its id, seat 1 and its seats in order. */
+function councilSeats(id: string): { cid: string; root: RuntimeSession; seats: RuntimeSession[] } | null {
+  const me = find(id);
+  const c = councilOf(me);
+  if (!me || !c) return null;
+  const rootId = me.parent_id ?? me.id;
+  const seats = threads
+    .filter((t) => (t.id === rootId || t.parent_id === rootId) && councilOf(t)?.id === c.id && councilOf(t)?.role === 'seat')
+    .sort((a, b) => (councilOf(a)?.seat ?? 0) - (councilOf(b)?.seat ?? 0));
+  const root = find(rootId);
+  return root ? { cid: c.id, root, seats } : null;
+}
+
+function roundsOf(cid: string, root: RuntimeSession, seats: RuntimeSession[]) {
+  if (!councilRounds.has(cid)) {
+    const first = (items.get(root.id) ?? []).find((i) => i.type === 'user_message');
+    councilRounds.set(cid, [{ n: 1, text: first && first.type === 'user_message' ? first.text : '', seats: seats.map((t) => councilOf(t)?.seat ?? 0), created_at: root.created_at }]);
+  }
+  return councilRounds.get(cid)!;
+}
+
+/** The judge's first message as the daemon builds it (council.rs
+ *  `synthesis_prompt`): the question, then every seat's latest answer. */
+function judgePrompt(question: string, seats: RuntimeSession[]): string {
+  const parts = seats.map((t) => {
+    const said = (items.get(t.id) ?? []).filter((i) => i.type === 'assistant_message');
+    const last = said[said.length - 1];
+    return `## Seat ${councilOf(t)?.seat} — ${t.provider}\n\n${last && last.type === 'assistant_message' ? last.text : '(no answer)'}`;
+  });
+  return `You are the judge of a council: the same question went to ${seats.length} agents, and their answers are below.\n\n## The question\n\n${question}\n\n${parts.join('\n\n')}\n`;
+}
+
+/** `kind` lands in `sid`'s timeline live, like a streamed-in item. */
+function liveItem(sid: string, kind: Record<string, unknown>): void {
+  const it = item(sid, kind);
+  appLive.dispatch({ type: 'agent_runtime_event', event: { session_id: sid, sequence: seqs.get(sid) ?? 0, ts: now(), type: 'turn_item.updated', turn_item: it } });
+}
+
 // Council (docs/features/threads-structured-runtime.md "Council"). e2e:
-// `__mockRuntime.councilFail = 'codex'` makes that provider's seat fail to start.
+// `__mockRuntime.councilFail = 'codex'` makes that provider's seat fail to
+// start; follow-up bodies land on `__mockRuntime.followUps`, and each seat
+// asked answers at once ("Mock <provider> (seat N): round K answer.").
 const councilRoutes: MockRoute[] = [
+  {
+    method: 'GET', re: /^\/runtime-sessions\/([^/]+)\/council\/rounds$/,
+    handle: (m) => {
+      const c = councilSeats(m[1]);
+      if (!c) return { status: 400, json: { code: 'invalid', message: 'invalid: this thread is not part of a council' } };
+      return { json: { rounds: roundsOf(c.cid, c.root, c.seats), max_rounds: 10 } };
+    },
+  },
+  {
+    method: 'POST', re: /^\/runtime-sessions\/([^/]+)\/council\/rounds$/,
+    handle: (m, b) => {
+      const l = log() as any;
+      (l.followUps ??= []).push(b);
+      const c = councilSeats(m[1]);
+      if (!c) return { status: 400, json: { code: 'invalid', message: 'invalid: this thread is not part of a council' } };
+      const rounds = roundsOf(c.cid, c.root, c.seats);
+      const text = String(b?.text ?? '').trim();
+      if (!text) return { status: 400, json: { code: 'invalid', message: 'invalid: a follow-up needs text' } };
+      if (rounds.length >= 10) return { status: 409, json: { code: 'conflict', message: 'conflict: this council has had its 10 rounds — start a new council to keep going' } };
+      const all = c.seats.map((t) => councilOf(t)?.seat ?? 0);
+      const want: number[] = b?.seats?.length ? [...b.seats].sort((x: number, y: number) => x - y) : all;
+      const bad = want.find((x) => !all.includes(x));
+      if (bad !== undefined) return { status: 400, json: { code: 'invalid', message: `invalid: this council has no seat ${bad}` } };
+      const round = { n: rounds.length + 1, text, seats: want, created_at: now() };
+      rounds.push(round);
+      for (const t of c.seats.filter((x) => want.includes(councilOf(x)?.seat ?? 0))) {
+        liveItem(t.id, { type: 'user_message', text });
+        liveItem(t.id, { type: 'assistant_message', message_id: `msg_${t.id}_r${round.n}`, text: `Mock ${t.provider} (seat ${councilOf(t)?.seat}): round ${round.n} answer.`, streaming: false });
+      }
+      return { status: 201, json: { rounds, max_rounds: 10 } };
+    },
+  },
   {
     method: 'POST', re: /^\/workspaces\/([^/]+)\/runtime-sessions\/council$/,
     handle: (m, b) => {
@@ -143,10 +218,15 @@ const councilRoutes: MockRoute[] = [
       const busy = members.find((t) => t.status === 'working');
       if (busy) return { status: 409, json: { code: 'conflict', message: `conflict: seat ${councilOf(busy)?.seat} is still working` } };
       const base = (find(root)?.title ?? 'Council').replace(/ · [^·]*$/, '');
+      const cs = councilSeats(me.id);
+      const rounds = cs ? roundsOf(cs.cid, cs.root, cs.seats) : [];
+      const cur = rounds[rounds.length - 1];
+      const r = cur?.n ?? 1;
       const judge = addThread(me.workspace_id, {
-        provider: b?.provider ?? 'claude', title: `${base} · synthesis`, parent_id: root,
+        provider: b?.provider ?? 'claude', title: r > 1 ? `${base} · synthesis of round ${r}` : `${base} · synthesis`, parent_id: root,
         meta: { council: { id: c.id, seat: 0, role: 'synthesis' }, read_only: true },
-      }, 'Compare the answers.', 'Mock synthesis: they agree on the approach.');
+      }, judgePrompt(cur?.text ?? '', (cs?.seats ?? []).filter((t) => !cur || cur.seats.includes(councilOf(t)?.seat ?? 0))), `Mock synthesis of round ${r}: they agree on the approach.`);
+      if (cur) cur.syntheses = [...(cur.syntheses ?? []), judge.id];
       return { status: 201, json: judge };
     },
   },

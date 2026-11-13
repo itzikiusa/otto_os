@@ -55,6 +55,17 @@ export function councilMembers(
   return { meta, seats, synthesis: synth[0] ?? null };
 }
 
+/** Every synthesis of the council `id` belongs to, oldest first. */
+export function councilSyntheses(all: readonly RuntimeSession[], id: string): RuntimeSession[] {
+  const me = all.find((s) => s.id === id);
+  const meta = councilOf(me);
+  if (!me || !meta) return [];
+  const root = me.parent_id ?? me.id;
+  return all
+    .filter((s) => (s.id === root || s.parent_id === root) && councilOf(s)?.id === meta.id && councilOf(s)?.role === 'synthesis')
+    .sort((a, b) => a.created_at.localeCompare(b.created_at));
+}
+
 /** `other` sits in the same council as `self` (a seat or its synthesis).
  *  Inside a council the other seats are the council itself, not "linked
  *  threads": the Related chip and an embed's "N linked" chip leave them out. */

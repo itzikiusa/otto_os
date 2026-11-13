@@ -1,7 +1,7 @@
 // The words of the Skills Lab bundled-skill actions (see bundledActions.ts),
 // kept free of API / store imports so unit tests can load them in plain Node.
 
-import type { InstallBundledResp } from '../../lib/api/types';
+import type { InstallBundledResp, KeptProviderCopy } from '../../lib/api/types';
 
 /** Where the daemon keeps backups and deleted skills, as the person sees it. */
 export const BACKUP_FOLDER = '<data dir>/library/skills-backup/';
@@ -34,11 +34,24 @@ export function installedNote(r: Pick<InstallBundledResp, 'backed_up' | 'backup_
   return updating ? 'Updated from bundled.' : 'You can edit it now.';
 }
 
+/** Where the daemon keeps the agent-CLI copies a person had edited in place. */
+export const PROVIDER_BACKUP_FOLDER = '<data dir>/library/provider-skills-backup/';
+
+/** The toast for Otto's agent-CLI copies (`~/.claude/skills/<name>`, …) that
+ *  the person had edited and Otto moved aside before replacing or removing
+ *  them; `null` when there were none. */
+export function keptCopiesNote(kept: KeptProviderCopy[] | undefined): [string, string] | null {
+  if (!kept || kept.length === 0) return null;
+  const title = kept.length === 1 ? 'Kept your edited copy' : `Kept ${kept.length} edited copies`;
+  const lines = kept.map((k) => `Your edited copy in ${k.copy} was kept at ${k.kept_at}`);
+  return [title, `It had changed since Otto put it there, so Otto saved it before replacing or removing it.\n${lines.join('\n')}`];
+}
+
 /** The confirm for deleting a library skill: where it goes, what else goes. */
 export function deleteQuestion(name: string): [string, { title: string; confirmLabel: string; danger: boolean }] {
   return [
     `Delete “${name}” from the Otto library? Its folder moves to ${BACKUP_FOLDER} (the newest three per skill are kept), so you can put it back by hand. ` +
-      'The copies Otto installed for Claude, Codex and Antigravity are removed too; skills you made yourself in those folders are not touched.',
+      `The copies Otto installed for Claude, Codex and Antigravity are removed too (one you edited there is kept in ${PROVIDER_BACKUP_FOLDER}); skills you made yourself in those folders are not touched.`,
     { title: 'Delete skill', confirmLabel: 'Delete', danger: true },
   ];
 }

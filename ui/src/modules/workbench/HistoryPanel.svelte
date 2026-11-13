@@ -27,10 +27,14 @@
     rev: number;
     /** The live editor buffer (diff target for "vs current"). */
     current: string;
+    /** Runs after the person confirms, before the restore: saves unsaved edits
+     *  (so "kept in history" is true) or asks before discarding them. False
+     *  cancels the restore. */
+    beforeRestore?: (docId: string, seq: number) => Promise<boolean>;
     onrestored: (doc: WorkbenchDocFull) => void;
     onclose: () => void;
   }
-  let { ws, docId, rev, current, onrestored, onclose }: Props = $props();
+  let { ws, docId, rev, current, beforeRestore, onrestored, onclose }: Props = $props();
 
   let revs: WorkbenchRevision[] = $state([]);
   let loading = $state(true);
@@ -197,6 +201,8 @@
         { title: `Restore revision ${seq}?`, confirmLabel: 'Restore', danger: false },
       );
       if (!ok || !owns()) return;
+      if (beforeRestore && !(await beforeRestore(id, seq))) return;
+      if (!owns()) return;
       const doc = await restoreWorkbenchRevision(workspace, id, seq);
       if (!owns()) return;
       onrestored(doc);

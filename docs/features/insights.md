@@ -95,7 +95,12 @@ the on-disk subdirectory and file prefixes use `daily | weekly | monthly`.
 | Weekly | `week` | `weekly` | the **previous ISO week** (Monday … Sunday) |
 | Monthly | `month` | `monthly` | the **previous calendar month** (1st … last day) |
 
-All dates are computed in **UTC**. The due period is always the most recent
+All dates are computed on the **daemon host's local calendar** — the same day
+the collector builds its windows from (local midnight to 23:59:59), and the same
+one a manual Run uses, so a scheduled and a manual report for one period share a
+key. (Before 0.2.2 the scheduler used the UTC date: west of UTC its 00:00 UTC
+check fired the previous local evening and asked for a "yesterday" that was not
+over yet.) The due period is always the most recent
 **complete** period — i.e. `--offset 1`. Examples (from the unit tests): on
 Thu 2026-06-18, the due daily period is 2026-06-17; the due weekly period is
 Mon 2026-06-08 … Sun 2026-06-14; the due monthly period is 2026-05-01 …
@@ -113,12 +118,15 @@ Mon 2026-06-08 … Sun 2026-06-14; the due monthly period is 2026-05-01 …
   due-check runs **at most once per hour**. The first due-check runs
   **immediately on startup** — this is the catch-up path after the app was
   closed.
-- On each due-check, for every *enabled* cadence: compute the currently-due
-  period; if it is **not** already done (§5 idempotency) and nothing is already
-  in flight for that cadence, **spawn a run** at `offset 1`.
-- **One run at a time per cadence.** An in-flight set keyed by cadence word
-  prevents double-spawning the same period; a slow weekly run does not block a
-  daily run the next hour.
+- On each due-check, if **no** scheduled run is in flight: take the first
+  *enabled* cadence (daily → weekly → monthly) whose currently-due period is
+  **not** already done (§5 idempotency) and may still be retried, and **spawn
+  one run** at `offset 1`.
+- **One scheduled run at a time overall.** A run holds the slot until its
+  session is archived (report landed, session exited or idle, or the 2 h cap).
+  When daily, weekly and monthly are all due — the boot catch-up, or a Monday
+  that is the 1st — they run one after another on later hourly checks instead
+  of three agents at once. A check that finds the slot busy uses up no retry.
 - **Bounded catch-up.** Only the *most recent* missed period per cadence is
   generated — Otto does not backfill a long gap of older periods automatically.
   Use a manual run with a larger `offset` to reach further back (§5).
@@ -141,7 +149,7 @@ confirms "Insights schedule updated". The config persists to
 ```
 
 The settings page also notes the dependency on the `insights` skill and links to
-**Settings → Skills** and the **Insights view**.
+**Skills Lab → Skills** (Bundled) and the **Insights view**.
 
 ---
 
@@ -192,7 +200,7 @@ otto POST /insights/run '{"period":"week","offset":1}'
   reasons are: the **`insights` skill is not installed** in the Library (it is a
   manual-install skill), or **no non-archived workspace exists** to host the run
   (a session row needs a valid workspace + creator). The UI surfaces this as an
-  *"Insights skill not available"* card linking to **Settings → Skills**.
+  *"Insights skill not available"* card linking to **Skills Lab → Skills**.
 
 After a successful start, the UI **polls** `GET /insights/reports` every 3 s (up
 to 20 attempts ≈ 1 minute) and toasts "Insights report ready" when a new report
@@ -390,6 +398,14 @@ to all enabled integrations.
   (`message.id:requestId`) ONCE with its **final** usage — the per-bucket max
   over its streamed lines, not the first line's partial `output_tokens` — the
   same rule as the usage tailer ([usage-and-cost.md §3.4](./usage-and-cost.md)).
+- Every window metric is measured from the period itself (skill v5): failed
+  tool results per tool, response time (end of an agent turn to your next real
+  message, 2 s – 1 h), and Bash `git commit` / `git push` invocations matched
+  as whole commands. What no session in the period could measure — e.g. lines
+  added/removed and files touched, which only Claude's whole-session metadata
+  holds, or commits and tool errors for Codex — is `null` in the metrics and
+  shown as **not available**, never as 0 (`unavailable_window_metrics`;
+  `partial_window_metrics` counts the sessions behind a partial figure).
 - A plain-text summary per report (no HTML needed to skim).
 - Cross-client push via the `insight_ready` WS event and optional Slack/Telegram
   relay.
@@ -402,7 +418,8 @@ to all enabled integrations.
 - **Requires a non-archived workspace** to host the headless run (session FK).
 - **Bounded catch-up**: the scheduler backfills only the *single most recent*
   missed period per cadence; older gaps need manual runs.
-- **UTC periods**; there is no per-cadence custom clock time — the hourly gate
+- **Host-local periods** (the daemon machine's timezone, not the browser's);
+  there is no per-cadence custom clock time — the hourly gate
   decides when within the day a due period actually runs.
 - **No fixed minute**: "next morning / Sunday / 1st" describes the period, not a
   precise scheduled instant.
@@ -440,7 +457,7 @@ to all enabled integrations.
 
 | Symptom | Cause / fix |
 |---|---|
-| *Run now* returns `started:false` with "the 'insights' skill is not installed, or no workspace is available to host the run" | One of two causes, reported together. (1) The `insights` skill isn't installed: install it from **Settings → Skills** — the scheduler and runs depend on it. (2) Every workspace is archived: the headless run needs a non-archived workspace + member to attribute the session to — create or unarchive one. |
+| *Run now* returns `started:false` with "the 'insights' skill is not installed, or no workspace is available to host the run" | One of two causes, reported together. (1) The `insights` skill isn't installed: install it from **Skills Lab → Skills** (Bundled filter) — the scheduler and runs depend on it. (2) Every workspace is archived: the headless run needs a non-archived workspace + member to attribute the session to — create or unarchive one. |
 | `403` on `PUT /insights/config` or `POST /insights/run` | Needs a **root** token (handler `require_root`). Mint one per the `otto-api` skill. |
 | `403` on `GET /insights/report?path=` | The path resolved outside the insights directory — only paths under `<data_dir>/insights/` are served. Use the exact `html_path` from `GET /insights/reports`. |
 | Report card shows but won't open / `404` | `html_path` is `null` or the file isn't written yet (a run still in progress). Re-list after a moment. |

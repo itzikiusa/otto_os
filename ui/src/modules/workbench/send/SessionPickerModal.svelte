@@ -1,21 +1,24 @@
 <script lang="ts">
   // Pick the live session a workbench file is PASTED into (Send to → Terminal /
   // agent session…). Picking still asks a confirm naming the session; the text
-  // goes in as a bracketed paste with no Enter, so nothing executes.
+  // goes in cleaned of control bytes, with no Enter. Connection sessions (ssh,
+  // DB clients) take one line only — see pasteSafety.ts.
   import Modal from '../../../lib/components/Modal.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { ws as wsStore } from '../../../lib/stores/workspace.svelte';
   import type { Session } from '../../../lib/api/types';
   import { sessionState } from '../../../lib/status';
-  import { pasteTargets } from './sendTo';
+  import { pasteTargets, targetNote } from './pasteSafety';
 
   interface Props {
     ws: string;
+    /** The file is more than one line: connection rows say they will refuse it. */
+    multiLine: boolean;
     onpick: (session: Session) => void;
     onclose: () => void;
   }
-  let { ws, onpick, onclose }: Props = $props();
+  let { ws, multiLine, onpick, onclose }: Props = $props();
 
   let query = $state('');
   const all = $derived(pasteTargets(wsStore.sessions, ws));
@@ -28,7 +31,7 @@
 
 <Modal title="Paste into which session?" width={520} {onclose}>
   <div class="sp" data-testid="wb-session-picker">
-    <p class="sp-hint">The file is pasted, never run — you press Enter in the session yourself.</p>
+    <p class="sp-hint">The file is pasted, never run — you press Enter in the session yourself. Connection sessions (ssh, database clients) take a single line.</p>
     {#if all.length > 0}
       <input dir="ltr"
         class="input sp-filter"
@@ -50,11 +53,12 @@
     {:else}
       <ul class="sp-list">
         {#each shown as s (s.id)}
+          {@const note = targetNote(s, multiLine)}
           <li>
             <button class="sp-row" type="button" onclick={() => onpick(s)} title="Paste into {s.title || s.id}">
               <Icon name={s.kind === 'agent' ? 'assistant' : 'terminal'} size={14} />
               <span class="sp-title">{s.title || s.id}</span>
-              <span class="sp-meta">{s.provider} · {sessionState(s, wsStore.statusMap[s.id], wsStore.needsYou[s.id] === true).label}</span>
+              <span class="sp-meta">{s.provider} · {sessionState(s, wsStore.statusMap[s.id], wsStore.needsYou[s.id] === true).label}{note ? ` · ${note}` : ''}</span>
             </button>
           </li>
         {/each}

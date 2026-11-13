@@ -2,8 +2,9 @@
 // line/column) in the right-panel Files tab. The terminal's link provider
 // raises a request when a `path:line(:col)` reference is clicked; the primary
 // FileTree section listens for it (via the bumped `n` counter) and loads +
-// reveals the file. Kept tiny and decoupled so any source can drive it without
-// reaching into the FileTree internals.
+// reveals the file — or, for a folder (`dir`), lists it. Kept tiny and
+// decoupled so any source can drive it without reaching into the FileTree
+// internals.
 
 import { ui } from './ui.svelte';
 
@@ -14,6 +15,8 @@ export interface OpenFileRequest {
   line?: number;
   /** 1-based column to place the cursor at, if known. */
   col?: number;
+  /** A FOLDER to list (the Files tree opens at it; no viewer). */
+  dir?: boolean;
   /** Monotonic counter — bumped on every request so listeners fire exactly once. */
   n: number;
 }
@@ -27,6 +30,12 @@ class OpenFileStore {
     this.request = { path, line, col, n: prev + 1 };
     // Surface the Files tab so the reveal is visible even if it was collapsed
     // or showing another tab.
+    ui.openRight('files');
+  }
+
+  /** Ask the Files panel to list the folder `path` (absolute). */
+  openDir(path: string): void {
+    this.request = { path, dir: true, n: (this.request?.n ?? 0) + 1 };
     ui.openRight('files');
   }
 }

@@ -225,7 +225,8 @@ converted to storage format for Confluence). Each posted question flips to statu
 **UI (Rewrite tab)** — Pick a **Provider** and click **"Generate suggested
 rewrite."** When ready you get a **word diff** (Source vs Suggested, with
 "Source only / Suggested only" views) and **Publish to Jira/Confluence** (a
-confirm step warns it overwrites the live ticket/page).
+review step shows where it goes and the full text, and warns it overwrites the
+live ticket/page).
 
 **Behind it** — `POST /workspaces/{id}/product/stories/{sid}/rewrite`
 (`RewriteReq`, **202**). `run_rewrite` auto-selects the writer skill by source
@@ -243,7 +244,21 @@ since Otto last synced it — Confluence by page version, Jira by comparing the 
 description with the one recorded at import / refresh / the last publish (a Jira
 publish records what Jira holds right after the write as the next base). The
 Rewrite tab shows that refusal as a "Changed since the last sync" dialog whose
-**Refresh** re-pulls the story so you can review and publish again.
+**Refresh** re-pulls the story so you can review and publish again. A Jira
+publish also refuses (409, "Otto could not confirm what is in Jira after the last
+publish") when the read-back after the previous publish failed (or that publish
+predates recorded descriptions): Otto cannot tell a teammate's later edit from
+its own, so **Refresh** first — it records a `source` version even when the text
+reads the same, which re-arms the check. A story never synced (no `source` or
+`published` row) still publishes.
+
+The publish review names the destination (issue key or page, plus the site from
+the story URL) and shows the **full** text sent in a scrollable block, not its
+first lines. A suggestion written before the newest `source` version (for
+example the Jira edit a conflict Refresh just pulled in) is marked **"Based on an
+older version of the story"**, and its review says plainly that publishing
+replaces the current Jira description / page body. Posting questions uses the
+same review (every question, the site and the issue).
 
 ### 4.5 Test Cases — generate, approve/edit, and publish to Confluence
 

@@ -19,6 +19,7 @@
 //! source advancement until retry succeeds; corrupt journals stop ingestion.
 
 mod native;
+mod owner;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -165,6 +166,11 @@ pub struct UsageTailer {
     native: native::NativeState,
     commit_failed: bool,
     checkpoint_initialized: bool,
+    /// Young transcripts left unconsumed until their Otto session claims
+    /// them, with the first miss (see [`owner`]); every pass retries them.
+    owner_wait: HashMap<PathBuf, Instant>,
+    /// [`owner::OWNER_GRACE`] (a test seam).
+    owner_grace: Duration,
 }
 
 /// How much work the tailer did — the unchanged-tree guard asserts these stay
@@ -246,6 +252,8 @@ impl UsageTailer {
             native: native::NativeState::default(),
             commit_failed: false,
             checkpoint_initialized: false,
+            owner_wait: HashMap::new(),
+            owner_grace: owner::OWNER_GRACE,
         }
     }
 
@@ -530,10 +538,13 @@ impl UsageTailer {
     }
 
     /// An event-driven pass over just the paths the watcher reported.
-    async fn scan_paths(&mut self, paths: HashSet<PathBuf>) -> Result<(), String> {
+    async fn scan_paths(&mut self, mut paths: HashSet<PathBuf>) -> Result<(), String> {
         if self.commit_failed {
             self.persist().await?;
         }
+        // Transcripts waiting for their owner are retried on every pass,
+        // whether or not they wrote anything since.
+        paths.extend(self.owner_wait.keys().cloned());
         // Grok / Antigravity are polled only when the watcher saw one of
         // their files change; the reconcile pass (scan_once) covers the rest.
         // An idle event-driven pass used to walk both trees every ≤20 s.
@@ -615,6 +626,10 @@ impl UsageTailer {
             }
             if let Err(e) = self.tail_codex_file(file, *size).await {
                 tracing::debug!("usage tailer: codex file {} skipped: {e}", file.display());
+                continue;
+            }
+            // Left unread for its owner: the next pass must try it again.
+            if self.owner_wait.contains_key(file) {
                 continue;
             }
             self.last_size.insert(file.clone(), *size);
@@ -739,6 +754,7 @@ impl UsageTailer {
                 claude.iter().chain(codex.iter()).map(|(f, _)| f).collect();
             self.last_size.retain(|f, _| live.contains(f));
         }
+        self.forget_stale_owner_waits();
     }
 
     /// List both transcript trees (with sizes) in ONE blocking task.
@@ -1037,6 +1053,7 @@ impl UsageTailer {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| CODEX_FALLBACK_MODEL.to_string());
 
+        let mut consumed = false;
         loop {
             let Some((totals, new_offset, more)) =
                 self.read_new_lines(file, size, parse_codex_record).await?
@@ -1044,6 +1061,14 @@ impl UsageTailer {
                 return Ok(());
             };
             let sref = self.lookup_codex(&codex_session_id).await;
+            // The manager learns a codex id from this very rollout, after the
+            // CLI wrote it: a young rollout nobody owns yet stays unread (no
+            // baseline, cursor or event moves) and is retried next pass.
+            if sref.is_none() && !consumed && self.wait_for_owner(file).await {
+                self.pin_codex_for_owner(file, &codex_session_id);
+                return Ok(());
+            }
+            self.owner_wait.remove(file);
             for (_, record) in totals {
                 if let Some(m) = record.model {
                     model = m;
@@ -1085,6 +1110,7 @@ impl UsageTailer {
             }
             self.codex_meta.entry(file.to_path_buf()).or_default().model = Some(model.clone());
             self.set_cursor(file, new_offset);
+            consumed = true;
             if !more {
                 return Ok(());
             }
@@ -2475,6 +2501,192 @@ mod accounting_tests {
         usage.shutdown().await;
         pool.close().await;
         tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    static OWNER_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// A state DB with one codex session whose provider id is not learnt yet,
+    /// a usage journal (ClickHouse missing, so owed rows stay in the outbox)
+    /// and a tailer over `<root>/home`.
+    async fn owner_fixture(tag: &str) -> (PathBuf, DbPool, Arc<UsageEngine>, UsageTailer) {
+        let root = std::env::temp_dir().join(format!("otto-owner-{tag}-{}", otto_core::new_id()));
+        std::fs::create_dir_all(root.join("home/.codex/sessions/2026/11/13")).unwrap();
+        let pool = otto_state::open(&root.join("state.db")).await.unwrap();
+        let now = "2026-11-13T00:00:00Z";
+        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('u','u','x','U',0,?)").bind(now).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO workspaces(id,name,root_path,created_at) VALUES('w','w','/repo',?)",
+        )
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO sessions(id,workspace_id,kind,provider,title,status,cwd,created_by,created_at,last_active_at,meta_json) VALUES('reviewer','w','agent','codex','t','running','/repo','u',?,?,'{}')").bind(now).bind(now).execute(&pool).await.unwrap();
+        let usage = UsageEngine::start(
+            crate::UsageConfig {
+                enabled: true,
+                clickhouse_path: Some(
+                    root.join("missing-clickhouse")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                ..Default::default()
+            },
+            root.join("usage"),
+        )
+        .await;
+        let mut tailer = UsageTailer::new(
+            usage.clone(),
+            pool.clone(),
+            root.join("data"),
+            root.join("home"),
+        );
+        tailer.generation = || OWNER_GEN.load(std::sync::atomic::Ordering::SeqCst);
+        tailer.seed_existing_files().await;
+        (root, pool, usage, tailer)
+    }
+
+    /// A fresh rollout: session_meta (id `psid`) and one cumulative snapshot.
+    fn write_rollout(root: &Path, psid: &str) -> PathBuf {
+        let file = root.join(
+            "home/.codex/sessions/2026/11/13/rollout-2026-11-13T10-00-00-019ed94a-994a-7010-b01f-9b840c5b7068.jsonl",
+        );
+        let token = serde_json::json!({"type":"event_msg", "timestamp":"2026-11-13T10:00:05Z", "payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":10}}}});
+        let meta = serde_json::json!({"type":"session_meta","payload":{"id":psid,"cwd":"/repo"}});
+        std::fs::write(&file, format!("{meta}\n{token}\n")).unwrap();
+        file
+    }
+
+    async fn outbox(root: &Path) -> Vec<UsageEvent> {
+        let journal = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(root.join("usage/usage-ingestion.sqlite3"))
+                    .read_only(true),
+            )
+            .await
+            .unwrap();
+        let rows: Vec<String> = sqlx::query_scalar("SELECT payload FROM outbox")
+            .fetch_all(&journal)
+            .await
+            .unwrap();
+        journal.close().await;
+        rows.iter()
+            .map(|r| serde_json::from_str(r).unwrap())
+            .collect()
+    }
+
+    /// Codex learns its provider id from the rollout after the CLI wrote it
+    /// (parallel same-cwd reviewers stay ambiguous for a while). The first
+    /// turns used to land as external and stay there; now the young rollout
+    /// waits unread — across passes and a daemon restart — and is billed to
+    /// its Otto session exactly once when the id appears.
+    #[tokio::test]
+    async fn a_young_codex_rollout_waits_for_its_session_and_bills_once() {
+        let (root, pool, usage, mut tailer) = owner_fixture("codex").await;
+        let file = write_rollout(&root, "psid-late");
+        tailer
+            .scan_paths(HashSet::from([file.clone()]))
+            .await
+            .unwrap();
+        assert!(
+            outbox(&root).await.is_empty(),
+            "no owner yet: nothing billed"
+        );
+        assert_eq!(
+            tailer.cursors.get(&file),
+            Some(0),
+            "the cursor did not move"
+        );
+        // The watcher reports nothing new: the waiting rollout is still retried
+        // (and still waits), and other files' passes are not held up by it.
+        tailer.scan_paths(HashSet::new()).await.unwrap();
+        assert!(tailer.owner_wait.contains_key(&file));
+        assert!(outbox(&root).await.is_empty());
+
+        // Restart while it waits: the boot seed must not skip the rollout to EOF.
+        let mut restarted = UsageTailer::new(
+            usage.clone(),
+            pool.clone(),
+            root.join("data"),
+            root.join("home"),
+        );
+        restarted.generation = || OWNER_GEN.load(std::sync::atomic::Ordering::SeqCst);
+        restarted
+            .restore_checkpoint(usage.ingestion_checkpoint().await.unwrap().unwrap())
+            .unwrap();
+        restarted.seed_existing_files().await;
+        assert_eq!(restarted.cursors.get(&file), Some(0));
+        restarted.scan_once().await.unwrap();
+        assert!(
+            outbox(&root).await.is_empty(),
+            "still no owner after restart"
+        );
+
+        // The manager claims the rollout (a sessions write moves the generation).
+        sqlx::query("UPDATE sessions SET provider_session_id='psid-late' WHERE id='reviewer'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        OWNER_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        restarted.scan_paths(HashSet::new()).await.unwrap();
+        let rows = outbox(&root).await;
+        assert_eq!(rows.len(), 1, "billed once: {rows:?}");
+        assert_eq!(
+            (rows[0].workspace_id.as_str(), rows[0].session_id.as_str()),
+            ("w", "reviewer")
+        );
+        assert_eq!(
+            (
+                rows[0].input_tokens,
+                rows[0].cache_read_tokens,
+                rows[0].output_tokens
+            ),
+            (20, 80, 10)
+        );
+        assert!(!restarted.owner_wait.contains_key(&file));
+        // Later passes (event-driven and full) never bill it again.
+        restarted
+            .scan_paths(HashSet::from([file.clone()]))
+            .await
+            .unwrap();
+        restarted.scan_once().await.unwrap();
+        assert_eq!(outbox(&root).await.len(), 1);
+        usage.shutdown().await;
+        pool.close().await;
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    /// A rollout no Otto session ever claims is external once the grace is
+    /// over — still exactly once.
+    #[tokio::test]
+    async fn an_unclaimed_codex_rollout_lands_as_external_after_the_grace() {
+        let (root, pool, usage, mut tailer) = owner_fixture("external").await;
+        let file = write_rollout(&root, "psid-terminal");
+        tailer
+            .scan_paths(HashSet::from([file.clone()]))
+            .await
+            .unwrap();
+        assert!(outbox(&root).await.is_empty());
+        // The grace runs out (a zero grace stands in for 180 s passing).
+        tailer.owner_grace = Duration::ZERO;
+        tailer.scan_paths(HashSet::new()).await.unwrap();
+        let rows = outbox(&root).await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].workspace_id, EXTERNAL_WORKSPACE);
+        assert_eq!(rows[0].session_id, "019ed94a-994a-7010-b01f-9b840c5b7068");
+        assert_eq!(rows[0].input_tokens, 20);
+        assert!(tailer.owner_wait.is_empty());
+        tailer
+            .scan_paths(HashSet::from([file.clone()]))
+            .await
+            .unwrap();
+        tailer.scan_once().await.unwrap();
+        assert_eq!(outbox(&root).await.len(), 1, "no row is written twice");
+        usage.shutdown().await;
+        pool.close().await;
+        let _ = tokio::fs::remove_dir_all(root).await;
     }
 
     #[test]

@@ -13,7 +13,7 @@ researches, asks the right questions, surfaces edge cases, and shapes a story.
 It can see your draft, mockups/attachments, the latest discovery findings, your
 open questions and notes, and it proposes concrete next steps as **action cards**
 you apply explicitly — fill the draft, add questions, add notes, or open a diagram
-in Canvas. When the draft is ready you publish it as a Jira story or a Confluence
+(today a Canvas scene that opens in Design Hall). When the draft is ready you publish it as a Jira story or a Confluence
 RFC from the usual Product flow.
 
 > **Where this lives in the code.** Handlers + context assembly:
@@ -58,12 +58,13 @@ RFC from the usual Product flow.
 
 ## 2. Where it sits in the Product page
 
-The story page's tabs are grouped; Discovery Chat is the **Chat** sub-tab under the
-**Discover** group (alongside *Analysis*, *Questions*, *Notes*, *Discovery* (the
-swarm runs), and *Refine*). `ChatTab.svelte` is a 220px chat list + a chat pane,
-mirroring the Refine tab's layout. The list shows this story's chats newest-first
-with their `active`/`archived` status; it auto-selects the first active chat. A
-chat you no longer need is **Archived** (it stays readable, just out of the way).
+The story page's tabs are grouped; the **Chat** sub-tab sits under the **Discover**
+group (alongside *Analysis*, *Questions* and *Notes*). The old Chat and Refine tabs
+are merged into it, and the old `discovery` / `refine` tab ids open it
+(`canonicalProductTab` in `ui/src/modules/product/chatActions.ts`). `ChatTab.svelte`
+lists this story's conversations (refinement threads) newest-first, and, when the
+story has any, its discovery chats under **Earlier chats**, read-only
+(`EarlierChat.svelte`). The live conversation is `RefineChat.svelte`.
 
 A chat is scoped to **one story** (`story_id`) and lives in a workspace; switching
 the selected story reloads its own chats.
@@ -130,7 +131,7 @@ dir under `<data_dir>/product/discovery-chat/<id>`.
   readers through the shell announcer (`speakStopNotice`; neither bubble is a live
   region), focus moves to **Reload chat** when the stop control vanished under it
   (`rescueStopFocus`), and after the reload focus returns to the composer.
-  `RefineChat.svelte` (Refine tab) behaves the same with **Reload thread**.
+  `RefineChat.svelte` (today's Chat conversation) behaves the same with **Reload thread**.
 - **Composer** — Enter sends, Shift+Enter inserts a newline. On send failure the
   optimistic bubble rolls back and your text is restored.
 
@@ -149,7 +150,7 @@ action object; the server dispatches by the action's `type` (`apply_action`).
 | `apply_draft` | A **diff preview** (collapsed 3-line peek → expandable) of the proposed `body_md` vs the current draft. On a non-empty draft, **Replace draft** is a danger-styled confirm (it overwrites). | `update_draft_body(story, title, body_md)` — the same write the draft PATCH route performs. Keeps the current title when the action omits one. | Re-applies the captured prior body via the draft update. |
 | `add_questions` | A **checkbox per item** (default all checked) over the proposed questions (`text`, optional `rationale`, `category`). Applies only the checked ones. | `create_question(...)` per item (defaults `category` to `other`). | Deletes the just-created question ids (`DELETE /product/questions/{qid}`). |
 | `add_notes` | A **checkbox per item** (default all checked) over the proposed notes. | `create_note(... section: "discovery")` per item. | Deletes the just-created note ids (`DELETE /product/notes/{nid}`). |
-| `create_canvas` | A lazily-rendered **Mermaid thumbnail** (when the action carries `mermaid`) + **Open in Canvas**. | Creates a `CanvasScene` linked to the story (`story_id`), then deep-links: sets `canvas.pendingOpenId` and navigates to the Canvas module, which opens the scene on mount. | — (the scene persists; delete it from Canvas). |
+| `create_canvas` | A lazily-rendered **Mermaid thumbnail** (when the action carries `mermaid`) + **Open in Design Hall**. | Creates a `CanvasScene` linked to the story (`story_id`); the UI then opens the scene's Design Hall mirror (`openSceneInHall`). | — (the scene persists; its mirror stays in Design Hall). |
 
 After a successful apply the card collapses to a sticky **"✓ … · Undo"** row (where
 an Undo applies). `ApplyResult` returns `{ story_updated, created_question_ids,
@@ -158,9 +159,8 @@ created_note_ids, canvas_id }` so the UI can refresh the right panels and wire U
 > **Note on `create_canvas` permissions.** That route is gated on the **Product**
 > capability (it lives under the `/product/` policy prefix), so a Product-Editor
 > creates the scene as a byproduct of discovery — the Canvas axis is intentionally
-> *not* additionally required here. The scene lands in the user's workspace;
-> `Feature::Canvas` View then gates whether they can open the Canvas module to see
-> it.
+> *not* additionally required here. The scene lands in the user's workspace and
+> opens through its Design Hall mirror (the Canvas page is retired).
 
 ---
 
@@ -170,8 +170,8 @@ created_note_ids, canvas_id }` so the UI can refresh the right panels and wire U
 2. Click **+ New chat**. From the empty state, click a starter chip to prefill the
    composer (or just type), edit, and send. Describe the rough idea or problem.
 3. Read the reply. Apply any action cards you like — preview the draft diff first;
-   un-tick questions/notes you don't want; **Open in Canvas** to turn a proposed
-   diagram into a scene.
+   un-tick questions/notes you don't want; **Open in Design Hall** to turn a
+   proposed diagram into a scene and open it.
 4. Iterate. Because the chat is one resumable session, the agent remembers the
    thread; each turn also re-reads the freshest draft/mockups/notes.
 5. When the draft is ready, **publish** it from the Product flow:
@@ -275,10 +275,9 @@ session does emit the usual session-family events as any agent session would).
   **Undo** to restore the prior text.
 - **"Add questions/notes" added nothing.** All items were un-ticked — at least one
   checkbox must be checked (the button disables at zero).
-- **"Open in Canvas" didn't navigate.** The scene is still created (`canvas_id` in
-  the result); the deep-link sets `canvas.pendingOpenId` and routes to Canvas —
-  open the Canvas module manually if navigation was blocked, and find the scene
-  (linked to the story).
+- **"Open in Design Hall" didn't navigate.** The scene is still created (`canvas_id`
+  in the result) and mirrored into Design Hall within a few seconds — find it in
+  the Hall's library, or on the story's **Design** tab (it is linked to the story).
 - **The reply has no action cards.** The agent only emits actions when it has a
   concrete proposal; otherwise it just answers in prose. Ask it directly (e.g.
   "draft the story", "list the open questions") to elicit cards.
@@ -293,8 +292,8 @@ session does emit the usual session-family events as any agent session would).
 - **[Product](./product.md)** — the full product-owner workflow (analysis, rewrite,
   test cases, the multi-agent Plan, swarm Discovery, Learnings, and publishing
   drafts to Jira/Confluence) that Discovery Chat feeds into.
-- **[Canvas](./canvas.md)** — where a `create_canvas` action opens the scene it
-  creates.
+- **[Canvas](./canvas.md)** — the scene a `create_canvas` action creates (it opens
+  through its [Design Hall](./design-hall.md) mirror).
 - **[Agent sessions](./agent-sessions.md)** — the managed-session/PTY machinery the
   chat's resumable session reuses.
 - **[Jira / Confluence](./jira-confluence.md)** — the integration the publish step

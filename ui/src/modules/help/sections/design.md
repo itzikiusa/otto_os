@@ -41,6 +41,7 @@ Design Hall is where your team's visual work lives. Every design is an artifact 
 - **Links** shows what the design uses and where it is used, and lets you add or remove links. **References** searches the library: add a design as a reference, start from it, or compare with it.
 - Designs that come from a Product story or a Canvas board are badged **From a story** / **From Canvas** and stay in sync with it, read-only, until you press **Edit here**. After that the design is yours: a later change at the source arrives as a version you can accept. **Make an editable copy** forks it instead.
 - If someone else saves while you edit, you choose between saving yours on top or loading theirs.
+- **Comments** (a tab beside Links): press **C** or **Comment** on the design, click or tap a spot and type to pin a note there, or write one about the whole design. Threads show who wrote them and which version they were about (**made on v3** opens it); reply, **Resolve** or **Reopen**. When you ask Otto to change the design it reads the open comments and says which ones it addressed; resolving stays yours.
 
 **The Otto tab (every studio)**
 - Pick an agent and model, then ask for a change. Quick actions: **More engaging**, **Check accessibility**, **On-brand check**, **Fix mobile**, **Real copy from story** and **3 variants**. The two checks report first and you choose what to fix.

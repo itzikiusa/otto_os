@@ -38,6 +38,7 @@
   import { canPreview } from './preview/kinds';
   import { WB_LANGUAGES, cmExtFor, detectLanguage, explicitLanguage, extensionFor } from './lib/detect';
   import { canFormat, formatContent, validateContent, type ValidationIssue } from './lib/format';
+  import { readyToRestore, renameBlocked } from './docGuards';
 
   let quickOpen = $state(false);
   /** The files list width (drag / ←→ on its divider; remembered per device). */
@@ -250,10 +251,9 @@
 
   function saveNow(): void {
     const id = workbench.active;
-    if (!id) return;
     // Always checkpoint: unchanged content seals the open autosave burst so
     // History keeps this exact state as its own version.
-    void workbench.save(id, true);
+    if (id) void workbench.save(id, true);
   }
 
   async function format(): Promise<void> {
@@ -302,7 +302,9 @@
       confirmLabel: 'Rename',
       initial: cur.name,
     });
-    if (!name || name === cur.name || wsId !== workspace || workbench.metaOf(id) !== cur) return;
+    if (!name || name === cur.name || wsId !== workspace) return;
+    const blocked = renameBlocked(workbench.metaOf(id), cur.name);
+    if (blocked) return void toasts.info('Not renamed', blocked);
     try {
       await workbench.patchMeta(id, { name });
     } catch (e) {
@@ -720,10 +722,8 @@
             <div class="wb-col-side">
               {#if workbench.panel === 'history'}
                 <HistoryPanel
-                  ws={wsId}
-                  docId={doc.id}
-                  rev={doc.rev}
-                  current={active?.buffer ?? ''}
+                  ws={wsId} docId={doc.id} rev={doc.rev} current={active?.buffer ?? ''}
+                  beforeRestore={(id, seq) => readyToRestore(workbench, id, seq, (body, opts) => confirmer.ask(body, opts))}
                   onrestored={(d) => workbench.applyDoc(d)}
                   onclose={() => closeSidePanel('history')}
                 />

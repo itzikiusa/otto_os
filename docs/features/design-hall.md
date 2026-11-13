@@ -158,6 +158,41 @@ sets status `approved`. Consumers that embed the artifact with the default
 hear about every new head (`target_updated`); `pinned` consumers never move.
 Only humans approve — the route is Editor-gated and no agent tool writes it.
 
+### Comments
+
+Review notes live ON the design (`otto_design::comments`, table
+`design_comments`). A comment belongs to the artifact and to the version it
+was made on (`version_id` + `version_seq`, so "made on v3" still reads after
+retention prunes v3); a top-level comment may carry a **pin** — `{x, y}` as
+fractions 0..1 of the rendered stage's content box, plus an optional
+`frame` id — and a resolved state; replies are one level deep and inherit the
+thread's version. Routes: `GET|POST /design/artifacts/{id}/comments`,
+`PATCH|DELETE …/comments/{comment_id}` (viewer reads; editors write; the body
+is the author's; any editor resolves; the author or a workspace admin
+deletes). A comment never changes the design, so mirrored and archived designs
+take comments; a hard delete removes them, archiving keeps them. Every write
+emits `design_artifact_updated {change: "comments"}`.
+
+In the artifact view the **Comments** tab (Otto · Versions · Links ·
+Comments) lists open threads first and the resolved ones folded below; each
+names its author, time and — when it was made on another version — a "made
+on vN" chip that opens that version. **Comment** on the stage (or **C**) turns
+on comment mode: a click or tap drops a pin, a composer docks at the bottom of
+the stage (⌘↩ posts; from the keyboard, Enter drops a pin in the middle and the
+arrows move it). Open pins draw numbered over the stage; one made on another
+version is drawn muted (autosave moves the head every few seconds of editing,
+so hiding them would make a reviewer's pins vanish). The pin layer sits over
+the rendered content box and is re-measured on every resize and re-render, so
+pins stay on their spot when the pane resizes or the device frame changes;
+with comment mode off it lets every click through to the design. Site Studio
+takes comments without pins; the 3D Studio has no Comments tab yet.
+
+**Agents read open comments.** A design-assist turn's `CONTEXT.md` lists up to
+12 open threads as `[C1] on v3 · pinned at 42% across, 18% down · Ana: …`,
+fenced as reviewer notes (data, not instructions — a comment can't close the
+fence), and the prompt asks the agent to name what it addressed in its summary
+("addressed [C2]"). The agent never resolves a comment; a person does.
+
 ### Links
 
 Documents reference other artifacts only through a URI:
@@ -270,6 +305,22 @@ source changes again, the sync commits it as the side version
 and accepted like any variant; nothing is overwritten. An adopted mirror
 whose source disappears is only flagged `source_missing`, never archived.
 Only the adopt route writes the `adopted*` keys (a PATCH can't clear them).
+The banner of an adopted Canvas design says agents working on the board still
+change the board (the agent Canvas tools and the session Canvas panel read and
+write the scene, not the design), and points at the newest change that
+arrived from it ("View that version"); such rows say "from the Canvas board"
+in Versions.
+
+**A copy that falls behind.** Canvas saves keep image references, so a board
+can be small while its self-contained copy (images inlined) is over the 25 MB
+design cap; an image can also be missing, or a file unreadable. Then the sync
+keeps the copy's last good content and writes `meta.sync_error {reason, at}`:
+the banner says "This copy is behind its Canvas board: <reason>" with **Open
+the board**. The next successful sync clears it. A read error never archives
+anything. A board that never reached the Hall (or whose unadopted copy is
+behind) opens from `#/canvas/<id>` in the kept Canvas editor
+(`CanvasPage.svelte`, loaded lazily by `CanvasRedirect.svelte`) under one line
+that says why; `#/canvas/<id>/editor` opens it there directly.
 
 `GET /design/artifacts?source_kind=canvas_scene&source_id=<scene>` (or
 `product_attachment` + the attachment id; add `include_archived=true` for an
@@ -309,7 +360,9 @@ one (UI only, no server change):
   still using the old hand-off, or `#/canvas/<scene id>`) through
   `openSceneInHall(sceneId)` (`design-hall/nav.ts`): it looks the mirror up by
   `source_kind=canvas_scene&source_id=<id>`, polls ~3 s for a scene the sync
-  hasn't reached yet, then falls back to the Whiteboard studio with a note.
+  hasn't reached yet; a board with no copy, or whose unadopted copy is behind
+  it (`meta.sync_error`), then opens in the kept Canvas editor (§4, "A copy
+  that falls behind").
   Bare `#/canvas` lands on `#/design/studio/whiteboard`. The session Canvas
   panel's **Open in Design Hall** uses the same helper; a non-agent session's
   Canvas button opens the Whiteboard studio. `routeAllowed('canvas')` checks

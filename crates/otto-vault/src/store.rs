@@ -791,24 +791,41 @@ impl Store {
             .collect())
     }
 
-    /// [`Self::backlinks`] plus each source note's indexed content hash (the
-    /// backlink-context cache key).
-    pub async fn backlinks_hashed(
+    /// One page of [`Self::backlinks`] plus each source note's indexed content
+    /// hash (the backlink-context cache key) and the total row count. A hub
+    /// note in a 10k-note vault has thousands of sources; only `limit` rows
+    /// are read and sent (the count is one indexed aggregate).
+    pub async fn backlinks_hashed_page(
         &self,
         vault: i64,
         path: &str,
-    ) -> Result<Vec<(String, String, String, String)>> {
-        let rows = sqlx::query(
-            "SELECT DISTINCT l.src_path, n.title, l.kind, n.hash FROM vault_links l \
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<(String, String, String, String)>, u64)> {
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM (SELECT DISTINCT l.src_path, l.kind FROM vault_links l \
              JOIN vault_notes n ON n.vault_id = l.vault_id AND n.path = l.src_path \
-             WHERE l.vault_id = ? AND l.dst_path = ? ORDER BY l.src_path, l.kind",
+             WHERE l.vault_id = ? AND l.dst_path = ?)",
         )
         .bind(vault)
         .bind(path)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("vault.backlinks_count"))?;
+        let rows = sqlx::query(
+            "SELECT DISTINCT l.src_path, n.title, l.kind, n.hash FROM vault_links l \
+             JOIN vault_notes n ON n.vault_id = l.vault_id AND n.path = l.src_path \
+             WHERE l.vault_id = ? AND l.dst_path = ? ORDER BY l.src_path, l.kind \
+             LIMIT ? OFFSET ?",
+        )
+        .bind(vault)
+        .bind(path)
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .bind(i64::try_from(offset).unwrap_or(i64::MAX))
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("vault.backlinks"))?;
-        Ok(rows
+        let rows = rows
             .iter()
             .map(|r| {
                 (
@@ -818,7 +835,8 @@ impl Store {
                     r.get("hash"),
                 )
             })
-            .collect())
+            .collect();
+        Ok((rows, total.max(0) as u64))
     }
 
     /// Every src_path that has at least one link whose dst is `path`.

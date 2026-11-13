@@ -44,13 +44,19 @@
   $effect(() => {
     if (!loadError || Bar) return;
     void bar.resize(56).catch(() => {});
+    // The listener resolves async: if the effect is torn down first, drop it on arrival.
     let unlisten: (() => void) | null = null;
-    void onDesktopEvent('otto://bar-shown', () => pillEl?.querySelector('button')?.focus()).then((fn) => (unlisten = fn));
+    let disposed = false;
+    void onDesktopEvent('otto://bar-shown', () => pillEl?.querySelector('button')?.focus()).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') void bar.hide().catch(() => {});
     };
     window.addEventListener('keydown', onKey);
     return () => {
+      disposed = true;
       unlisten?.();
       window.removeEventListener('keydown', onKey);
     };

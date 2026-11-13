@@ -209,6 +209,14 @@ Other retention passes:
     that run's `workflow-runs/<run id>/` folder is gone. Your own repositories'
     unmarked bundles are never removed; they get a marker on their next launch.
 
+  In both cases a bundle whose private Codex home (`codex-home/`) holds
+  anything real that Otto did not write there (only `skills/` is Otto's; the
+  rest are links into `~/.codex`) is **kept**: Codex saves what it creates
+  later — a `sessions/` folder, `session_index.jsonl` — inside it, and for a
+  first Codex run through Otto that is the only copy of the history. The log
+  line counts them as "kept: holds agent history". The other providers'
+  bundles hold no home of their own.
+
   Only real directories directly under `claude/`, `codex/`, `agy/`, `grok/`
   and `opencode/` are looked at (never a symlink, never `review-skills/` or
   `vault-docs-skills/`); the codex bundle's links into `~/.codex` are unlinked,

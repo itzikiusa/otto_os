@@ -184,13 +184,14 @@ struct PersonalityReq {
     note: Option<String>,
 }
 
-/// `PUT /personal-agents/self/personality` — "be more blunt".
+/// `PUT /personal-agents/self/personality` — "be more blunt" (a `note` is a person's).
 async fn self_personality(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
     CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<PersonalityReq>,
 ) -> ApiResult<Json<Value>> {
+    super::check_note_by(otto_core::auth::request_is_person(), req.note.is_some())?;
     let me = caller(&ctx, &user, &auth, req.session_id.as_deref(), Editor).await?;
     let p = own::set_personality(&ctx, &me, req.preset.as_deref(), req.note.as_deref()).await?;
     Ok(Json(

@@ -1,6 +1,6 @@
 # Otto product tour film
 
-One music-led film (2:30, 1920×1080, 30 fps, H.264 + AAC) that walks through
+One music-led film (2:36, 1920×1080, 30 fps, H.264 + AAC) that walks through
 every main area of the app, chaptered by sidebar section. The Help →
 Walkthroughs page plays it from `ui/src/lib/walkthroughs/film.json`.
 
@@ -22,6 +22,7 @@ scripts/capture.mjs       isolated daemon + demo DBs + seed + Playwright → pub
 scripts/capture-rooms.mjs genuine two-person Rooms footage → public/capture/rooms/
 scripts/reuse-rooms.mjs   the same genuine Rooms clips, cut from the published (hash-checked) capture
 scripts/lib/demo-codex.mjs scripted `codex app-server` for Threads / Personal Agents on the structured runtime
+scripts/lib/demo-claude.mjs scripted stream-json `claude` for Council seats, the judge and child threads
 scripts/lib/stack.mjs     the isolated stack, incl. the fictional tailnet for Phone access
 scripts/lib/shots.mjs     the shot list (routes, clicks, stills, flow clips)
 scripts/render.mjs        Remotion render → loudnorm → poster → out/film.candidate.json
@@ -39,10 +40,10 @@ and is arranged from the edit's music sections in `chapters.json`:
 | Section | Chapters | What plays |
 |---|---|---|
 | Intro build | Meet Otto | The filter opens on a supersaw pad, the pluck arp comes in, then the kick from bar 3, a snare roll, a riser and half a beat of silence |
-| Drop / chorus | Home → Run with Otto | Four-on-the-floor kick, clap with a short room, swung 16th hats with open off-beats, pumping 8th bass, side-chained pad, arp and the lead hook. The last 4 bars are a post-chorus. |
+| Drop / chorus | Home → Council | Four-on-the-floor kick, clap with a short room, swung 16th hats with open off-beats, pumping 8th bass, side-chained pad, arp and the lead hook. The last 4 bars are a post-chorus. |
 | Verse | Goal Loops, Workflows, Personal Agents | Lighter hats, a syncopated bass, a darker pad and a prominent arp, with the hook's figure answered on the pluck |
-| Chorus | Git → Design Hall | Riser and impact in, then the hook again |
-| Verse | Database, Connections | As the first verse |
+| Chorus | Git → Vault and Skills Lab | Riser and impact in, then the hook again |
+| Verse | Database Explorer, Connections and cloud | As the first verse |
 | Breakdown | Insights | Drums out, a resonant pad sweep, the hook on the pluck, then a 2-bar riser and snare roll |
 | Final chorus | Rooms, Phone access | Full energy, with the hook harmonised a third below |
 | Outro | Everywhere | vi–IV–V resolves to I under the logo lockup, followed by a tonic hit and the hook's tag. The track then rings out. |
@@ -90,8 +91,8 @@ ffmpeg -hide_banner -nostats -i public/audio/music.wav -af ebur128=peak=true -f 
   from `tokens.css` (`--accent` and `--cat-*`). It has a soft ring on each
   chapter downbeat and a gentle on-beat lift in the choruses. There is no
   flashing.
-- **Montages.** Design Hall's studios and Connections are quick cuts, one
-  every two beats, each with a glass name card.
+- **Montages.** Connections and cloud is quick cuts, one every two beats,
+  each with a glass name card.
 - **Rooms** is the final chorus. It uses five genuine room clips: start and
   invite, live screen share, annotation, terminal hand-over, and the recap
   draft.
@@ -104,7 +105,12 @@ ffmpeg -hide_banner -nostats -i public/audio/music.wav -af ebur128=peak=true -f 
 - A daemon binary built from this tree: `cargo build -p ottod` (or point
   `OTTO_E2E_BIN` at an existing one).
 - The production UI build: `cd ui && npm run build` (→ `ui/dist`).
-- Docker (optional) for the demo databases. The capture uses local images
+- A local `clickhouse` binary (optional; `~/.local/bin/clickhouse` or
+  `OTTO_TOUR_CLICKHOUSE`) for the Database Explorer chapter: the capture
+  starts a throwaway ClickHouse server on its own temp dir and 127.0.0.1:18911,
+  loads the fictional storefront and stops it at the end
+  (`OTTO_TOUR_NO_CLICKHOUSE=1` skips it).
+- Docker (optional) for the other demo databases. The capture uses local images
   `mariadb:11.8.4`, `mongo:8.2` and `redpandadata/redpanda:v24.2.7`. It skips
   any image that isn't present, and the chapters that need it look emptier.
 - `npm install` in this folder. This installs Remotion, which downloads its own
@@ -202,11 +208,15 @@ basename.
 
 ## Runtime threads and Phone access: what is staged
 
-- **Threads and Personal Agents** run on the real structured runtime, the real
-  Codex driver and the production UI. Only the agent process is a stand-in:
-  `scripts/lib/demo-codex.mjs` speaks the `codex app-server` wire protocol and
-  streams scripted turns (plan, commands, a file change, a test run, an inline
-  approval, an `otto.slack_digest` tool call). No account or network is used.
+- **Threads, Council and Personal Agents** run on the real structured
+  runtime, the real Codex and Claude drivers and the production UI. Only the
+  agent processes are stand-ins: `scripts/lib/demo-codex.mjs` speaks the
+  `codex app-server` wire protocol and `scripts/lib/demo-claude.mjs` the
+  Claude Agent SDK's stream-json protocol. They stream scripted turns (plan,
+  commands, a file change, a test run, an inline approval, an
+  `otto.slack_digest` tool call, a Council seat's answer, the judge's
+  synthesis, a child thread's review) and report fictional plan windows for
+  Usage → Remaining. No account or network is used.
 - **Phone access** pairs through the daemon's real pairing routes and its real
   tailnet-only peer check. The tailnet is fictional: `OTTO_TAILSCALE_CLI`
   points the daemon at a scripted CLI (`acme-mbp.tail0demo.ts.net`, 100.101.10.x),

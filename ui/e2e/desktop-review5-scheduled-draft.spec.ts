@@ -40,7 +40,7 @@ test('scheduled task deep link and save retry preserve newer edits and the leave
   release();
   await expect(page.getByRole('button', {name: 'Save changes', exact: true})).toBeEnabled();
   await expect(prompt).toHaveValue('Newer scheduled prompt');
-  await page.getByRole('button', {name: 'Back to Scheduled Tasks', exact: true}).click();
+  await page.getByRole('button', {name: 'Back to scheduled tasks', exact: true}).click();
   await page.getByRole('dialog').getByRole('button', {name: 'Cancel', exact: true}).click();
   await expect(prompt).toHaveValue('Newer scheduled prompt');
   await page.getByRole('button', {name: 'Save changes', exact: true}).click();

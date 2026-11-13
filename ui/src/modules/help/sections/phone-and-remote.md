@@ -37,6 +37,12 @@ Both are off by default. The daemon only listens on `127.0.0.1`, so nothing is r
 - **Drawers**: close with a tap on the backdrop, the close button or `Esc`.
 - The command palette sheet replaces the floating bar on phones and tablets.
 
+**Light version (phone only, off by default)**
+- A thinner Otto for a phone: only **Threads**, **Connections**, **Git**, **API** and **Usage**, as five tabs in the bottom bar, opening on Threads.
+- Turn it on from the top of the bottom bar's **More** sheet, from **Settings → Appearance → Light version**, or with ⌘K **Use the light version**. Switch back the same ways (**Show the full app**). The choice is saved on this device.
+- It applies only on a phone-sized screen (a phone held on its side included). Tablets and desktops always show the full app.
+- A link to a page outside the five says so and offers **Open the full app**. A terminal session link can open just that session in the full app, once.
+
 **Terminals on touch**
 - Tap the terminal to raise the keyboard. Text never renders smaller than 15 px on a phone.
 - Tap the keyboard button for a key bar with the keys a soft keyboard lacks: **Esc**, **Tab**, **Ctrl** (tap, then a letter), **Ctrl-C**, **⇧↵** (a new line in an agent's prompt), the 4 arrows, and `|`, `/` and `~`.

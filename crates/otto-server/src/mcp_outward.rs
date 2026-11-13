@@ -35,6 +35,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 
 use otto_assistant::personal_agent_admin::approval_detail as admin_detail;
+use otto_assistant::personal_agent_admin::governed_call_is_person_only;
 pub use otto_mcp::outward::*;
 
 const MAX_WAIT_SECS: u64 = 30;
@@ -209,14 +210,6 @@ async fn in_thread(ctx: &ServerCtx, auth: &AuthContext, tool: &str) -> bool {
     }
 }
 
-/// A call only a person may make: a person-only tool, a cluster write that
-/// carries a typed confirm, or a routine that posts outward.
-fn person_only_call(short: &str, arguments: &Value) -> bool {
-    use otto_assistant::personal_agent_routines::outward_delivery_reason;
-    otto_mcp::outward::call_is_person_only(short, arguments)
-        || outward_delivery_reason(short, arguments).is_some()
-}
-
 pub(crate) async fn governed_invoke(
     ctx: &ServerCtx,
     auth: &AuthContext,
@@ -339,9 +332,9 @@ pub(crate) async fn governed_invoke(
     // therefore ALWAYS a person's call for a non-human caller: force the
     // approval (never covered by an auto-approve rule or a token grant), and
     // only the approved call replays as that person (`SelfCallAs` below).
-    // Same for a cluster write carrying a typed confirm (`call_is_person_only`).
-    let person_only_by_agent =
-        person_only_call(&short, arguments) && !crate::ui_bridge::is_human(auth);
+    // Same for a typed confirm, an outward routine / task, … (`governed_call_is_person_only`).
+    let person_only_by_agent = !crate::ui_bridge::is_human(auth)
+        && governed_call_is_person_only(ctx, &short, arguments).await;
     let forced_approval = match &agent_gate {
         crate::personal_agent_policy::AgentGate::ForceApproval { reason, risk } => {
             Some((reason.clone(), *risk))

@@ -251,6 +251,14 @@ export function dismissTopDialog(): void {
   target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
 }
 
+/** Whether the mounted page claims the ⌘`key` chord a browser-tab alias
+ *  (⌃⇧T / ⌃⇧W) stands for: the claim sees a plain ⌘`key` keydown, so a page
+ *  handles the alias exactly like the chord. */
+export function pageClaimsAlias(key: string): boolean {
+  const claim = keyContext.pageChords;
+  return !!claim && claim(new KeyboardEvent('keydown', { key, metaKey: true, cancelable: true }));
+}
+
 /** `index` is the 1-based session number for the `jumpSession` action. */
 export type KeyDispatcher = (action: KeyAction, e: KeyboardEvent, index?: number) => void;
 
@@ -297,16 +305,14 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
     // (macOS browsers leave ⌃⇧T / ⌃⇧W free. On Windows/Linux Chrome, Ctrl+Shift+T
     // is "reopen closed tab" — the same reservation, and no chord escapes it
     // there; Otto's own shell is macOS-only.)
+    // A page's own ⌘T / ⌘W claim (keyContext.pageChords) wins for the alias
+    // too, exactly as for the chord it stands in for.
     if (e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey) {
       const k = e.key.toLowerCase();
-      if (k === 't') {
+      if (k === 't' || k === 'w') {
         e.preventDefault();
-        dispatch('newSession', e);
-        return;
-      }
-      if (k === 'w') {
-        e.preventDefault();
-        dispatch('closeTab', e);
+        if (!term && pageClaimsAlias(k)) return;
+        dispatch(k === 't' ? 'newSession' : 'closeTab', e);
         return;
       }
     }
@@ -626,6 +632,7 @@ export const KEYMAP: ShortcutGroup[] = [
       { keys: '⌘R', label: 'In a live browser tab: reload the page instead of Otto' },
       { keys: '⌘↵', label: 'On the API page: send the request' },
       { keys: '⌘T', label: 'On the API page: new request tab instead of a new session' },
+      { keys: '⌘T', label: 'On the Threads page: start a new thread instead of a terminal session' },
       { keys: '⌘D', label: 'On the API page: duplicate the request instead of splitting' },
       { keys: '⌘⌥← / ⌘⌥→', label: 'In a Database pane: previous / next query tab instead of moving the pane' },
       { keys: '?', label: 'In a Kubernetes cluster view: that view\'s own key hints instead of this sheet' },

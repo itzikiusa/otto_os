@@ -163,8 +163,10 @@ mod os {
 /// below this much free space on the data volume the status chip turns to
 /// warning and one notice is raised. Nothing is held back on it.
 pub const LOW_DISK_SETTING: &str = "machine_low_disk_gb";
-/// The owner keeps 30 GB free at all times: builds and swap fail hard below.
-pub const DEFAULT_LOW_DISK_GB: f64 = 30.0;
+/// 10 GB: low enough that a small (256 GB) Mac does not warn from first
+/// launch, high enough to warn before builds and swap start failing. Anyone
+/// who wants a bigger floor sets it in Settings → Daemon (Machine resources).
+pub const DEFAULT_LOW_DISK_GB: f64 = 10.0;
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 /// `machine_low_disk_gb`; anything missing, negative or not a number takes

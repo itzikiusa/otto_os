@@ -189,7 +189,7 @@
     const req = openFileSignal.request;
     if (!req || req.n <= lastOpenN) return;
     lastOpenN = req.n;
-    void openPath(req.path, req.line, req.col);
+    if (req.dir) { closeViewer(); navigate(req.path); } else void openPath(req.path, req.line, req.col);
   });
 
   // ── helpers ───────────────────────────────────────────────────────────────

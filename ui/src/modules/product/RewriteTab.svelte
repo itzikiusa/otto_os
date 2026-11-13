@@ -14,7 +14,9 @@
   import AgentByline from '../../lib/components/AgentByline.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
-  import { confirmOutward } from '../../lib/confirmOutward';
+  import { publishReview } from './publishReviewStore.svelte';
+  import PublishReviewDialog from './PublishReviewDialog.svelte';
+  import { STALE_SUGGESTION, suggestionIsStale } from './publishReview';
   import { confirmer } from '../../lib/confirm.svelte';
   import { publishConflictMessage } from './publishConflict';
   import type { ProductStoryVersion } from './types';
@@ -223,6 +225,9 @@
     isJira ? `Jira ${story?.source_key ?? ''} “${story?.title ?? ''}”` : `Confluence page “${story?.title ?? ''}”`,
   );
   const targetNoun = $derived(isJira ? 'description' : 'page body');
+  // Written before the newest source version (e.g. the Jira edit a conflict
+  // Refresh just pulled in): publishing it would replace that edit.
+  const stale = $derived.by(() => suggestionIsStale(suggestedVersion, product.versions, source));
 
   async function publish(): Promise<void> {
     if (!suggestedVersion || publishing) return;
@@ -235,13 +240,18 @@
       toasts.warn('Not published', 'This suggestion belongs to another story — reopen Rewrite and try again.');
       return;
     }
-    const first = (v.body_md ?? '').split('\n').filter((l) => l.trim() !== '').slice(0, 4).join('\n');
-    const ok = await confirmOutward({
+    // WHERE (site + issue/page) and the FULL text sent — not its first lines.
+    const ok = await publishReview.ask({
+      owner: 'rewrite',
       verb: `Overwrite ${targetShort}`,
       title: `Overwrite ${targetShort}?`,
       where: targetLabel,
-      what: `Suggested v${v.version_no} replaces the live ${targetNoun}:\n${first}`,
+      url: story?.url,
+      what: v.body_md ?? '',
       who: 'Everyone who can see it; Jira/Confluence notify its watchers.',
+      note: suggestionIsStale(v, product.versions, source)
+        ? `${STALE_SUGGESTION}. Publishing suggested v${v.version_no} replaces the current ${targetNoun} of ${targetShort}, including any change made there after this suggestion was written.`
+        : null,
       danger: true,
     });
     if (!ok) return;
@@ -350,6 +360,7 @@
               <!-- Agent-written draft: attributed, and only reaches the source
                    when a person overwrites it below. -->
               <AgentByline at={suggestedVersion.created_at} testid="rewrite-byline" />
+              {#if stale}<span class="vm-stale" data-testid="rewrite-stale">{STALE_SUGGESTION}</span>{/if}
             </div>
             {#if suggestedVersion.change_notes}
               <div class="change-notes">
@@ -433,6 +444,7 @@
       {/if}
     </LoadState>
   </div>
+  <PublishReviewDialog owner="rewrite" />
 {/if}
 
 <style>
@@ -529,6 +541,10 @@
   }
 
   /* ── Publish (below the diff) ────────────────────────────────── */
+  .vm-stale {
+    font-size: var(--fs-s);
+    color: var(--warning);
+  }
   .rw-publish {
     display: flex;
     align-items: center;

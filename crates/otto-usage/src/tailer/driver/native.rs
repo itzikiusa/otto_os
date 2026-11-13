@@ -329,6 +329,13 @@ impl super::UsageTailer {
                     session = self.lookup_native("agy", ancestor).await;
                 }
             }
+            // The manager learns an Antigravity id from this DB after the CLI
+            // wrote it: a young one nobody owns yet is left unbilled (no
+            // baseline or mark moves) and re-read from its old mark next pass.
+            if session.is_none() && self.wait_for_owner(&path).await {
+                continue;
+            }
+            self.owner_wait.remove(&path);
             for row in snapshot.rows {
                 let cost = crate::estimate_cost(
                     &row.usage.model,

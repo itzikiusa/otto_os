@@ -106,7 +106,10 @@ export type DesignArtifactChange =
   | 'live'
   /** A new rendered thumbnail was stored (`PUT …/thumbnail`) — refresh the
    *  image only (not an edit; never re-render in response). */
-  | 'thumbnail';
+  | 'thumbnail'
+  /** A review comment was added, edited, resolved/reopened or deleted —
+   *  re-fetch `GET …/comments` (the design itself did not change). */
+  | 'comments';
 export type DesignLinkUpdateReason =
   | 'created'
   | 'deleted'
@@ -135,6 +138,10 @@ export interface DesignMirrorMeta {
   /** User id. */
   adopted_by?: Id;
   source_missing?: boolean;
+  /** The source changed but could not be copied here (too large with its
+   *  images, an image missing, a read error): this copy keeps its last good
+   *  content and is BEHIND the source. Cleared by the next successful sync. */
+  sync_error?: { reason: string; /** RFC 3339: when it first fell behind. */ at: string };
 }
 
 export interface DesignProject {
@@ -473,4 +480,56 @@ export interface DesignPruneReq {
   /** Dry run unless true. */
   apply?: boolean;
   window_secs?: number;
+}
+
+// ── Review comments (`/design/artifacts/{id}/comments`) ─────────────────────
+
+/** A point on the rendered stage as fractions (0..1) of its content box —
+ *  survives a resize or a device-frame change. */
+export interface DesignCommentPin {
+  x: number;
+  y: number;
+  /** Frame / page id for multi-frame formats. */
+  frame?: string | null;
+}
+
+export interface DesignComment {
+  id: Id;
+  artifact_id: Id;
+  workspace_id: Id;
+  /** The version it was made on (null: the design had no version yet). */
+  version_id: Id | null;
+  version_seq: number | null;
+  /** The thread a reply belongs to (null: a top-level comment). */
+  parent_id: Id | null;
+  author_kind: 'user' | 'agent';
+  author_id: Id;
+  author_name: string;
+  session_id: Id | null;
+  /** Plain text (≤ 4,000 characters). */
+  body: string;
+  /** Top-level comments only. */
+  pin: DesignCommentPin | null;
+  resolved: boolean;
+  resolved_by: Id | null;
+  resolved_by_name: string | null;
+  resolved_at: string | null;
+  edited_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateDesignCommentReq {
+  body: string;
+  /** Default: the head. Ignored for a reply (it inherits the thread's). */
+  version_id?: Id;
+  parent_id?: Id;
+  pin?: DesignCommentPin;
+}
+
+export interface UpdateDesignCommentReq {
+  /** The author only. */
+  body?: string;
+  /** Resolve / reopen a thread (any editor). */
+  resolved?: boolean;
 }

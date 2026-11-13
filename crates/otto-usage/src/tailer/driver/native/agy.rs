@@ -311,6 +311,115 @@ mod tests {
         tokio::fs::remove_dir_all(temp).await.unwrap();
     }
 
+    static OWNER_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// The manager learns an Antigravity id from the conversation DB after
+    /// the CLI wrote it: a young unowned DB is left unbilled (its mark and
+    /// baselines do not move) and billed to its Otto session exactly once
+    /// when the id appears.
+    #[tokio::test]
+    async fn a_young_unowned_conversation_waits_for_its_session() {
+        let temp = std::env::temp_dir().join(format!("otto-agy-owner-{}", otto_core::new_id()));
+        let home = temp.join("home");
+        let path = home.join(".gemini/antigravity-cli/conversations/late-conv.db");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let mut writer = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .unwrap();
+        sqlx::raw_sql("CREATE TABLE steps(idx INTEGER, metadata BLOB); CREATE TABLE gen_metadata(idx INTEGER,data BLOB); CREATE TABLE trajectory_metadata_blob(data BLOB);").execute(&mut writer).await.unwrap();
+        sqlx::query("INSERT INTO steps VALUES(1,?)")
+            .bind(step(20))
+            .execute(&mut writer)
+            .await
+            .unwrap();
+        let pool = otto_state::open(&temp.join("state.db")).await.unwrap();
+        let now = "2026-11-13T00:00:00Z";
+        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('u','u','x','U',0,?)").bind(now).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO workspaces(id,name,root_path,created_at) VALUES('w','w','/repo',?)",
+        )
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO sessions(id,workspace_id,kind,provider,title,status,cwd,created_by,created_at,last_active_at,meta_json) VALUES('s','w','agent','agy','t','running','/repo','u',?,?,'{}')").bind(now).bind(now).execute(&pool).await.unwrap();
+        // ClickHouse is missing, so owed rows stay in the journal's outbox.
+        let engine = crate::UsageEngine::start(
+            crate::UsageConfig {
+                enabled: true,
+                clickhouse_path: Some(
+                    temp.join("missing-clickhouse")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                ..Default::default()
+            },
+            temp.join("usage"),
+        )
+        .await;
+        let journal = temp.join("usage/usage-ingestion.sqlite3");
+        let outbox = || {
+            let journal = journal.clone();
+            async move {
+                let options = sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(&journal)
+                    .read_only(true);
+                let mut db = sqlx::SqliteConnection::connect_with(&options)
+                    .await
+                    .unwrap();
+                let rows: Vec<String> = sqlx::query_scalar("SELECT payload FROM outbox")
+                    .fetch_all(&mut db)
+                    .await
+                    .unwrap();
+                db.close().await.unwrap();
+                rows.iter()
+                    .map(|r| serde_json::from_str::<crate::UsageEvent>(r).unwrap())
+                    .collect::<Vec<_>>()
+            }
+        };
+        let mut tailer = super::super::super::UsageTailer::new(
+            engine.clone(),
+            pool.clone(),
+            temp.join("data"),
+            home.clone(),
+        );
+        tailer.generation = || OWNER_GEN.load(std::sync::atomic::Ordering::SeqCst);
+        // Real passes: a full one, then event-driven ones with nothing new —
+        // the waiting DB alone must bring the Antigravity scan back.
+        tailer.scan_once().await.unwrap();
+        tailer.scan_paths(Default::default()).await.unwrap();
+        assert!(outbox().await.is_empty(), "no owner yet: nothing billed");
+        assert!(tailer.owner_wait.contains_key(&path));
+        sqlx::query("UPDATE sessions SET provider_session_id='late-conv' WHERE id='s'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        OWNER_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        tailer.scan_paths(Default::default()).await.unwrap();
+        let rows = outbox().await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].session_id, "s");
+        assert_eq!(rows[0].workspace_id, "w");
+        assert_eq!(rows[0].output_tokens, 20);
+        assert!(tailer.owner_wait.is_empty());
+        // Re-reading the same DB (a rewrite moves its fingerprint) bills nothing more.
+        sqlx::query("UPDATE steps SET metadata=? WHERE idx=1")
+            .bind(step(20))
+            .execute(&mut writer)
+            .await
+            .unwrap();
+        tailer.scan_once().await.unwrap();
+        tailer.scan_paths(Default::default()).await.unwrap();
+        assert_eq!(outbox().await.len(), 1, "no row is billed twice");
+        engine.shutdown().await;
+        pool.close().await;
+        writer.close().await.unwrap();
+        tokio::fs::remove_dir_all(temp).await.unwrap();
+    }
+
     #[tokio::test]
     async fn historical_sqlite_rows_keep_disjoint_cache_and_revised_steps() {
         let temp = std::env::temp_dir().join(format!("otto-agy-reader-{}", otto_core::new_id()));

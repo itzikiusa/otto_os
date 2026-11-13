@@ -6,7 +6,7 @@
   // second tile of a loaded kind renders synchronously (no skeleton flash).
   import type { Component } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
-  // Bodies take different subsets of { box, viewId, zoomed, zoomedAway, tick, active }.
+  // Bodies take different subsets of { box, viewId, zoomed, tick, active }.
   type BoxBody = Component<any>;
   const BODY_LOADERS: Record<string, () => Promise<{ default: BoxBody }>> = {
     sessions: () => import('./boxes/SessionsBox.svelte'),
@@ -40,9 +40,11 @@
   // One widget on the Home desktop: a quiet header (kind icon + title; the
   // refresh / zoom / menu controls surface on hover or focus), the kind’s live
   // body, and — in the grid — a drag grip for reordering plus a corner handle
-  // for resizing in grid units. The same component renders the zoomed
-  // (full-page) widget, minus the grid affordances. Widgets are opaque content
-  // cards resting on the ambient backdrop (elevation 1, --shadow-card).
+  // for resizing in grid units. Zoom is in place: the SAME instance fills the
+  // stage without the grid affordances, so its body keeps its data (no
+  // re-fetch, no re-run of a DB widget's SQL), while its siblings are
+  // `covered` (hidden, inert, paused). Widgets are opaque content cards
+  // resting on the ambient backdrop (elevation 1, --shadow-card).
   import Icon from '../../lib/components/Icon.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { router } from '../../lib/router.svelte';
@@ -66,15 +68,22 @@
     /** False while the box’s space is not the one on screen (every space
      *  stays mounted): the body pauses its poller and keeps its data. */
     active?: boolean;
+    /** Another box of this space is zoomed over this one: hidden + inert. */
+    covered?: boolean;
   }
-  let { box, viewId, zoomed = false, index = 0, count = 1, ondragbox, ondropon, active = true }: Props = $props();
+  let { box, viewId, zoomed = false, index = 0, count = 1, ondragbox, ondropon, active = true, covered = false }: Props = $props();
 
   const def = $derived(kindDef(box.kind));
   const Body = $derived(bodies.get(box.kind) ?? null);
-  // The grid copy of the zoomed box (it stays mounted, hidden, under the zoom):
-  // a body with a heavy scene (Classrooms' WebGL school) releases it, so only
-  // the zoomed copy holds a live graphics context.
-  const zoomedAway = $derived(!zoomed && home.zoomedId === box.id);
+  // Leaving zoom keeps keyboard focus on this widget: if focus fell to the
+  // page (the control that had it was hidden), park it on the zoom button.
+  let zoomBtn = $state<HTMLButtonElement | null>(null);
+  let wasZoomed = false;
+  $effect(() => {
+    const z = zoomed;
+    if (wasZoomed && !z && (!document.activeElement || document.activeElement === document.body)) zoomBtn?.focus();
+    wasZoomed = z;
+  });
   const hasLoader = $derived(box.kind in BODY_LOADERS);
   let loadFailed = $state<string | null>(null);
   let loadAttempt = $state(0);
@@ -206,6 +215,8 @@
   style:grid-row={zoomed ? null : `span ${box.h}`}
   data-kind={box.kind}
   data-box-id={box.id}
+  hidden={covered}
+  inert={covered}
   aria-label={def.label}
   oncontextmenu={menu}
   ondragover={onDragOver}
@@ -219,14 +230,14 @@
     <span class="hb-icon"><Icon name={def.icon} size={13} /></span>
     <span class="hb-title ellipsis">{def.label}</span>
     <button class="icon-btn" onclick={() => (tick += 1)} title="Refresh {def.label}" aria-label="Refresh {def.label}"><Icon name="refresh" size={12} /></button>
-    <button class="icon-btn" onclick={() => home.toggleZoom(box.id)} title={zoomed ? 'Exit zoom' : 'Zoom in'} aria-label={zoomed ? 'Exit zoom' : 'Zoom in'} aria-keyshortcuts={zoomed ? 'Escape' : undefined}>
+    <button class="icon-btn" bind:this={zoomBtn} onclick={() => home.toggleZoom(box.id)} title={zoomed ? 'Exit zoom' : 'Zoom in'} aria-label={zoomed ? 'Exit zoom' : 'Zoom in'} aria-keyshortcuts={zoomed ? 'Escape' : undefined}>
       <Icon name={zoomed ? 'minimize' : 'maximize'} size={12} />
     </button>
     <button class="icon-btn" onclick={menu} title="{def.label} widget options" aria-label="{def.label} widget options" aria-haspopup="menu"><Icon name="more" size={14} /></button>
   </header>
   <div class="hb-body">
     {#if Body}
-      <Body {box} {viewId} {zoomed} {zoomedAway} {tick} {active} />
+      <Body {box} {viewId} {zoomed} {tick} {active} />
     {:else if loadFailed}
       <LoadState what="this widget" variant="compact" error={loadFailed} empty={true} onretry={retryLoad} />
     {:else if hasLoader}
@@ -272,8 +283,16 @@
   .hbox.drag-over {
     border-color: var(--accent);
   }
+  /* `hidden` must win over the flex display above. */
+  .hbox[hidden] {
+    display: none;
+  }
+  /* Zoomed in place over the stage (HomePage's `.desk.zooming` is the
+     containing block; its other content is hidden). */
   .hbox.zoomed {
-    height: 100%;
+    position: absolute;
+    inset: var(--zoom-inset, 16px);
+    z-index: 1;
   }
   .hb-head {
     display: flex;

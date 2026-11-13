@@ -30,8 +30,7 @@
     buildRows,
     barKeyAction,
     barPresence,
-    barWindowHeight,
-    hitRoute,
+    barWindowHeight, hitRoute,
     moveSelection,
     panelBudget,
     spaceLabel,
@@ -51,6 +50,7 @@
   import { agentProviders, defaultAgentProvider } from '../providers';
   import { SIDEBAR_MODULES, availableModules, goToEntries } from '../sidebar';
   import { bar, onDesktopEvent, openInOtto } from '../desktop';
+  import { openHitInApp } from '../searchHitOpen';
 
   interface Props {
     host?: 'app' | 'window';
@@ -388,7 +388,7 @@
     if (!row) return;
     if (row.kind === 'cmd') void runCommand(row.cmd);
     else if (row.kind === 'ask') void submitAsk(row.text);
-    else openRoute(hitRoute(row.hit));
+    else if (inApp) { closeBar(); openHitInApp(row.hit); } else openRoute(hitRoute(row.hit));
   }
 
   function onKey(e: KeyboardEvent): void {

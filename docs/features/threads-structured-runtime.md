@@ -677,15 +677,22 @@ and still remembered the image.
 - **The queue survives a restart.** A message sent with `delivery: "queue"`
   (or `"interrupt"`) while a turn runs is stored whole (text, images, files)
   as the projection's `queue` entity. After a restart `recover` sends what is
-  queued (respawning the CLI, resuming its thread). Messages go out one per
-  turn, oldest first, each exactly once (one drain at a time per session).
+  queued when a PERSON queued any of it (respawning the CLI, resuming its
+  thread). A queue holding only child threads' replies does not respawn the
+  agent: they wait for the person's next message or **Revive** (`reopen`),
+  then go out in order. Messages go out one per turn, oldest first, each
+  exactly once (one drain at a time per session). A child thread whose turn
+  the restart cut off tells its parent: "Codex was interrupted when Otto
+  restarted: …" (`stopped` on its card) and, when the parent's agent asked
+  it, one queued reply saying so — once, without respawning the parent.
 - **Stall watchdog.** A turn that emits nothing for 15 min (45 min while one
   of its tools runs) is interrupted with `turn.terminal reason: "stalled"`
   and a `system_notice`. A pending approval or pending background work is
   never a stall (`RuntimeConfig::stall_after` / `stall_tool_after`).
 - **Revive and delete.** `POST /runtime-sessions/{id}/reopen` clears
   `closed` (in order with the close's own write) and respawns a closed or dormant agent with
-  its resume key, without sending a prompt. An already-live process is preserved. If the process exits before it is ready, the runtime resumes
+  its resume key, without sending a prompt of its own (what waits in its
+  queue — a child thread's reply — then goes out). An already-live process is preserved. If the process exits before it is ready, the runtime resumes
   once more unless the exit says the conversation is gone ("No
   conversation found"): a passing failure keeps the provider's conversation
   (T3 Code #34762). If that fails too (the provider lost
@@ -872,7 +879,7 @@ secret question forms are refused instead of being collected into history.
 | `ui/src/modules/threads/runtime/Runtime{Questions,QuestionCard,ToolImages,ContextChips,DraftStatus}.svelte` | typed questions, image enlargement, context preview/removal and save status |
 | `ui/src/modules/threads/runtime/composerContext.ts` | attributed review conversations and file/hunk/line excerpts assembled on send |
 | `ui/src/modules/threads/runtime/runtimeMenu.ts` | the thread menu: Reopen, Close, Delete (confirmed unless "Closing a session tab" is Always delete) |
-| `crates/otto-agent-protocol/src/runtime/council.rs`, `ui/src/modules/threads/runtime/{council.ts,councilStore.svelte.ts,Council*.svelte}` | Council: seats created all or none, the judge's prompt; the stage multi-select, columns, sidebar row |
+| `crates/otto-agent-protocol/src/runtime/council.rs` (+ `council/rounds.rs`), `ui/src/modules/threads/runtime/{council.ts,councilRounds.ts,councilStore.svelte.ts,Council*.svelte}` | Council: seats created all or none, follow-up rounds, the judge's prompt per round; the stage multi-select, columns, rounds strip, composer, sidebar row |
 | `ui/e2e/desktop-threads-runtime.spec.ts` | E2E against `otto-fake-codex` and `otto-fake-claude` (global-setup's shims exec them for `app-server` / `--input-format stream-json`) |
 
 ## 9. Gaps and next steps
@@ -950,28 +957,80 @@ effort). One model is today's single thread, unchanged.
 each headed by the provider, model, effort, status, elapsed time and tokens
 (tokens, not cost — most people run on subscriptions), with **Continue
 here** to take that seat on as a normal thread (the sidebar's council row
-brings the columns back). A seat whose turn failed says so and offers **Ask
-again**. On a phone the columns become a segmented control, one seat at a
+brings the columns back). A seat that did not finish the current round
+(its turn failed, a Stop or a daemon restart cut it off, or the follow-up was
+removed from its queue) says so and offers **Ask again**, which sends the
+round's question to that seat once more (queued if it is busy). On a phone the columns become a segmented control, one seat at a
 time. The sidebar shows the council as one row, "Council · 3" with the
 seats' provider icons, that unfolds into the seats and the synthesis.
 
-**Synthesis.** The footer's one primary action is **Synthesize with
-<judge>** (the judge defaults to seat 1's provider; any runtime provider can
-judge). It is disabled, with the reason, while a seat or an earlier
-synthesis still works. `POST /runtime-sessions/{id}/council/synthesize`
-opens a thread linked to seat 1 (`role: "synthesis"`, read-only) whose
-prompt the daemon builds: the question, each seat's last answer, and the
-task — where they agree, where they disagree and who is right, a pick or a
-merge, open questions. It is sent without the "Opened by …" header (the
-daemon wrote it, not an agent). The answer is the last, full-width column.
+**Rounds: keep talking to the council.** Under the columns sits one
+composer (`CouncilComposer.svelte`) with a target chooser — **All seats**
+(the default) or one seat; clicking a seat's name in its header aims the
+next follow-up at that seat only. **Ask round N** sends it
+(`POST /runtime-sessions/{id}/council/rounds`, `council/rounds.rs`): each
+chosen seat gets the text as its own thread's next turn, so every seat keeps
+its own context, with the seat's effort; a seat still working **queues** it
+exactly like a message sent mid-turn (the seat's queue bar shows it). A
+closed seat is listed as not reached, with the reason. **Ask the others** on
+a seat that answered the round drafts "Seat X answered: <its answer>. Where
+do you disagree, and why?" for the other seats — the person reads and can
+edit it before sending: the cheap way to get real cross-examination. Each
+column shows the new question and answer under the earlier ones (the seat's
+own thread, newest in view); above the columns, from round 2, a **Rounds**
+strip lists "Round 2 · <question>" with every seat's state in that round
+(working, queued, done, interrupted, failed, not delivered, not reached, sat
+out) and time on it, and the syntheses judged on it. **Stop all** stops the
+round's working seats. A council runs at most **10 rounds**; the composer
+then says so and asks for a new council. Nothing is ever sent by itself:
+every round starts with a click (the tokens are the person's).
 
-**Limits.** 4 seats + 1 synthesis = 5 threads, inside the group cap
-(`MAX_LINKED_OPEN`, 8 besides the root). A council is started and watched by
-a person, so it is not a background source and takes no admission slot.
+The rounds are one `council_rounds` entity on seat 1
+(`GET /runtime-sessions/{id}/council/rounds`), so they survive a reload and
+a daemon restart without a migration; a council from before rounds reads as
+one round. Which message answers which round is read off each seat's own
+timeline by the round's text (a re-ask of the same text before the next
+round takes its place), in the daemon for the judge and in
+`councilRounds.ts` for the view. After a restart a seat that was mid-turn
+shows **interrupted** and the round can be asked again.
+
+**Synthesis.** The footer's one primary action is **Synthesize with
+<judge>** — from round 2 **Synthesize round N with <judge>** (the judge
+defaults to seat 1's provider; any runtime provider can judge). It judges
+the CURRENT round: it is disabled, with the daemon's own reason, while a
+seat of that round or an earlier synthesis still works, while seat 1 is
+closed, or while no seat has an answer in the round. **What counts as an
+answer:** any answer text the seat has on record in the round, whole or cut
+off by a Stop (the judge is told it may be incomplete). Text still streaming
+when the daemon stopped is not kept, so a seat a restart cut mid-answer has
+none: a round a restart cut for every seat reads "No seat has answered round
+N yet — nothing to synthesize", and **Ask again** (or a new round) is the way
+on; a seat that finished before the restart keeps its answer and counts. `POST /runtime-sessions/{id}/council/synthesize` opens a thread linked
+to seat 1 (`role: "synthesis"`, read-only, titled "… · synthesis of round
+N" after round 1, recorded under the round) whose prompt the daemon builds:
+the round's question (after round 1 with the council's first question), each
+of the round's seats' answer in that round, a line naming every seat of the
+round **without** an answer (no reply, never reached, still queued) — never
+silently dropped; the footer shows the same list before you click — and the
+task: where they agree, where they disagree and who is right, a pick or a
+merge, open questions. A cut-off answer is marked as possibly incomplete. It
+is sent without the "Opened by …" header (the daemon wrote it, not an
+agent). In the Synthesis column that prompt folds to one quiet line —
+"Asked the judge to compare N answers · Show prompt" (a button; it unfolds
+the full prompt) — so the column opens on the verdict. The answer is the
+last, full-width column, labelled with its round;
+earlier syntheses stay in the Rounds strip, one click away.
+
+**Limits.** 4 seats, 10 rounds; seats + syntheses count against the group
+cap (`MAX_LINKED_OPEN`, 8 besides the root), so close an old synthesis to
+judge again once the group is full. A council is started and watched by a
+person, so it is not a background source and takes no admission slot. The
+Rounds strip loads when the council opens and after your own sends; a round
+sent from another device shows after a reopen.
 
 **Left for later, on purpose:** a worktree per seat so seats can edit;
-follow-up rounds sent to every seat; scored rubrics; merging the chosen
-seat's work back; an `otto.council` MCP tool; cost in dollars.
+scored rubrics; merging the chosen seat's work back; an `otto.council` MCP
+tool; cost in dollars.
 
 ### Threads inside a thread
 
@@ -1049,8 +1108,11 @@ opencode, pi) alike:
   parent's queue — the queue bar shows it, with Send now / Remove — and goes
   out at the parent's next idle moment; one entry per child (a newer answer
   replaces an older one), never twice for one turn. A dormant parent is not
-  respawned for it (Revive sends it), a closed one gets nothing, and a
-  delivered reply never wakes a grandparent. The parent's turn runs under
+  respawned for it, not after a restart either (the person's next message or
+  Revive sends it); a closed one gets nothing — closing a parent does not
+  stop its children (they stay, marked detached, with their answers; Stop
+  them in their own thread) — and a delivered reply never wakes a
+  grandparent. The parent's turn runs under
   the parent's own access mode, so every approval it would need is asked as
   usual. A person's ask never wakes the parent's agent.
 - **Both at once** — **Open beside** (card, sidebar row) puts the child in

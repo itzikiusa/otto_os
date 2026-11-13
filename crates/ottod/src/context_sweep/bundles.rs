@@ -15,7 +15,12 @@
 //! - a bundle WITHOUT a marker (made before markers existed) only when it is
 //!   untouched for [`UNMARKED_MIN_DAYS`] (or the grace, if longer), its name
 //!   is a workflow worktree's (`enc(<data>/workflow-runs)-<26-char run id>…`)
-//!   and that run's `<data>/workflow-runs/<run_id>` folder is gone.
+//!   and that run's `<data>/workflow-runs/<run_id>` folder is gone;
+//! - and in both cases never a bundle whose private agent home holds a real
+//!   entry Otto did not write (`codex-home/sessions/` …: Codex keeps what it
+//!   creates after Otto linked `~/.codex` in there, and for a first Codex run
+//!   through Otto that is the only copy). Such a bundle is kept and counted
+//!   ("kept: holds agent history").
 //!
 //! Only real directories directly under the five provider folders (`claude`,
 //! `codex`, `agy`, `grok`, `opencode`) are considered — never a symlink, never
@@ -94,9 +99,67 @@ fn workflow_run_id<'a>(name: &'a str, runs_root: &Path) -> Option<&'a str> {
     (id.len() == 26 && id.bytes().all(|b| b.is_ascii_alphanumeric())).then_some(id)
 }
 
-/// Whether the bundle folder `dir` (named `name`) is an orphan at `now`.
+/// Private agent homes a bundle may hold, with the entries Otto itself
+/// writes there (`otto_context::materialize`): Codex runs with
+/// `CODEX_HOME=<bundle>/codex-home`, whose `skills/` Otto manages and whose
+/// other entries Otto LINKS to the real `~/.codex`. The other providers'
+/// bundles hold no home of their own (Claude, agy, grok and opencode get
+/// flags / a config file pointing into the bundle, and write their history
+/// in their own homes).
+const PRIVATE_HOMES: [(&str, &[&str]); 1] = [("codex-home", &["skills"])];
+
+/// Whether a private home in `dir` holds something real the agent made —
+/// a `sessions/` folder or `session_index.jsonl` Codex created after Otto
+/// linked the rest, on a first Codex run through Otto the only copy of that
+/// history. A home that is itself a symlink is not looked through (deleting
+/// the link loses nothing); an entry Otto linked never counts; anything that
+/// cannot be read counts (the bundle is kept).
 #[allow(clippy::disallowed_methods)]
+fn holds_agent_history(dir: &Path) -> bool {
+    for (home, generated) in PRIVATE_HOMES {
+        let home = dir.join(home);
+        match std::fs::symlink_metadata(&home) {
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return true,
+        }
+        let Ok(rd) = std::fs::read_dir(&home) else {
+            return true;
+        };
+        for entry in rd {
+            let Ok(entry) = entry else {
+                return true;
+            };
+            if generated.iter().any(|g| entry.file_name() == **g) {
+                continue;
+            }
+            // `file_type` does not follow a link.
+            match entry.file_type() {
+                Ok(t) if t.is_symlink() => {}
+                _ => return true,
+            }
+        }
+    }
+    false
+}
+
+/// Whether the bundle folder `dir` (named `name`) is an orphan at `now` that
+/// may be removed: never one holding agent history ([`holds_agent_history`]).
+#[cfg(test)]
 pub fn judge(
+    dir: &Path,
+    name: &str,
+    now: SystemTime,
+    grace: Duration,
+    runs_root: &Path,
+) -> Option<Orphan> {
+    orphan_reason(dir, name, now, grace, runs_root).filter(|_| !holds_agent_history(dir))
+}
+
+/// Why `dir` is an orphan, before the agent-history veto.
+#[allow(clippy::disallowed_methods)]
+fn orphan_reason(
     dir: &Path,
     name: &str,
     now: SystemTime,
@@ -120,37 +183,51 @@ pub fn judge(
     }
 }
 
-/// The orphans under `ctx_root`, at most `limit`, plus how many bundle
-/// folders were looked at.
+/// What a scan found under the context root.
+struct Scan {
+    /// Bundle folders looked at.
+    scanned: usize,
+    /// Orphans kept because they hold agent history.
+    kept_history: usize,
+    found: Vec<(PathBuf, Orphan)>,
+}
+
+/// The removable orphans under `ctx_root`, at most `limit` (a kept one does
+/// not use up the limit).
 #[allow(clippy::disallowed_methods)]
-pub fn orphans(
+fn orphans(
     ctx_root: &Path,
     runs_root: &Path,
     now: SystemTime,
     grace: Duration,
     limit: usize,
-) -> (usize, Vec<(PathBuf, Orphan)>) {
-    let mut scanned = 0;
-    let mut found = Vec::new();
+) -> Scan {
+    let mut scan = Scan {
+        scanned: 0,
+        kept_history: 0,
+        found: Vec::new(),
+    };
     for provider in PROVIDERS {
         let Ok(rd) = std::fs::read_dir(ctx_root.join(provider)) else {
             continue;
         };
         for entry in rd.flatten() {
-            if found.len() >= limit || scanned >= MAX_SCANNED_PER_PASS {
-                return (scanned, found);
+            if scan.found.len() >= limit || scan.scanned >= MAX_SCANNED_PER_PASS {
+                return scan;
             }
-            scanned += 1;
+            scan.scanned += 1;
             let Ok(name) = entry.file_name().into_string() else {
                 continue;
             };
             let path = entry.path();
-            if let Some(why) = judge(&path, &name, now, grace, runs_root) {
-                found.push((path, why));
+            match orphan_reason(&path, &name, now, grace, runs_root) {
+                Some(_) if holds_agent_history(&path) => scan.kept_history += 1,
+                Some(why) => scan.found.push((path, why)),
+                None => {}
             }
         }
     }
-    (scanned, found)
+    scan
 }
 
 /// What one pass did (for the log line).
@@ -160,14 +237,21 @@ pub struct Report {
     pub marked: usize,
     pub unmarked: usize,
     pub failed: usize,
+    /// Orphans kept: they hold agent history (a Codex `sessions/` …).
+    pub kept_history: usize,
 }
 
 /// One synchronous pass: find and remove up to [`MAX_REMOVALS_PER_PASS`].
 #[allow(clippy::disallowed_methods)]
 pub fn sweep(ctx_root: &Path, runs_root: &Path, now: SystemTime, grace: Duration) -> Report {
-    let (scanned, found) = orphans(ctx_root, runs_root, now, grace, MAX_REMOVALS_PER_PASS);
+    let Scan {
+        scanned,
+        kept_history,
+        found,
+    } = orphans(ctx_root, runs_root, now, grace, MAX_REMOVALS_PER_PASS);
     let mut report = Report {
         scanned,
+        kept_history,
         ..Report::default()
     };
     for (path, why) in found {
@@ -192,15 +276,16 @@ pub async fn pass(ctx_root: PathBuf, runs_root: PathBuf, days: u64) {
         tokio::task::spawn_blocking(move || sweep(&ctx_root, &runs_root, SystemTime::now(), grace))
             .await
             .unwrap_or_default();
-    if report.marked + report.unmarked + report.failed > 0 {
+    if report.marked + report.unmarked + report.failed + report.kept_history > 0 {
         tracing::info!(
             "retention: removed {} orphaned context bundle(s) whose folder is gone and {} \
-             unmarked workflow-worktree bundle(s) ({} scanned, {} could not be removed; \
-             grace {days} d)",
+             unmarked workflow-worktree bundle(s) ({} scanned, {} could not be removed, \
+             {} kept: holds agent history; grace {days} d)",
             report.marked,
             report.unmarked,
             report.scanned,
-            report.failed
+            report.failed,
+            report.kept_history
         );
     }
 }
@@ -341,6 +426,129 @@ mod tests {
         let report = sweep(&ctx, &runs, later, days(7));
         assert_eq!((report.marked, report.unmarked, report.failed), (0, 0, 0));
         assert!(review.is_dir() && target.is_dir());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A gone-cwd codex bundle with Otto's own `skills/` in its home.
+    fn codex_bundle(ctx: &Path, name: &str, gone: &str) -> PathBuf {
+        let dir = bundle(ctx, "codex", name, Some(gone));
+        std::fs::create_dir_all(dir.join("codex-home/skills/triage")).unwrap();
+        std::fs::write(dir.join("codex-home/skills/triage/SKILL.md"), "s").unwrap();
+        std::fs::write(dir.join("codex-home/skills/.otto-managed.json"), "{}").unwrap();
+        dir
+    }
+
+    /// `~/.codex`-like real state outside the bundles.
+    fn real_codex(tmp: &Path) -> PathBuf {
+        let real = tmp.join("real-codex");
+        std::fs::create_dir_all(real.join("sessions/2026/11")).unwrap();
+        std::fs::write(real.join("sessions/2026/11/rollout.jsonl"), "history").unwrap();
+        std::fs::write(real.join("config.toml"), "model = \"x\"").unwrap();
+        real
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bundle_with_a_real_codex_sessions_dir_is_kept() {
+        let tmp = scratch("history");
+        let ctx = tmp.join("context");
+        let runs = tmp.join("runs");
+        let real = real_codex(&tmp);
+        let gone = tmp.join("gone").to_string_lossy().into_owned();
+        // Codex wrote its first sessions into the shadow home itself.
+        let sessions = codex_bundle(&ctx, "sessions", &gone);
+        std::os::unix::fs::symlink(
+            real.join("config.toml"),
+            sessions.join("codex-home/config.toml"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(sessions.join("codex-home/sessions/2026/11")).unwrap();
+        std::fs::write(
+            sessions.join("codex-home/sessions/2026/11/r.jsonl"),
+            "only copy",
+        )
+        .unwrap();
+        // … or one real file at the top of it.
+        let index = codex_bundle(&ctx, "index", &gone);
+        std::fs::write(sessions.join("codex-home/session_index.jsonl"), "{}").unwrap();
+        std::fs::write(index.join("codex-home/session_index.jsonl"), "{}").unwrap();
+        let later = SystemTime::now() + days(30);
+        assert_eq!(judge(&sessions, "sessions", later, days(7), &runs), None);
+        assert_eq!(judge(&index, "index", later, days(7), &runs), None);
+        let report = sweep(&ctx, &runs, later, days(7));
+        assert_eq!(
+            (
+                report.marked,
+                report.unmarked,
+                report.failed,
+                report.kept_history
+            ),
+            (0, 0, 0, 2)
+        );
+        assert!(sessions
+            .join("codex-home/sessions/2026/11/r.jsonl")
+            .is_file());
+        assert!(index.join("codex-home/session_index.jsonl").is_file());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bundle_with_only_links_and_generated_files_is_swept() {
+        let tmp = scratch("links");
+        let ctx = tmp.join("context");
+        let runs = tmp.join("runs");
+        let real = real_codex(&tmp);
+        let gone = tmp.join("gone").to_string_lossy().into_owned();
+        let dir = codex_bundle(&ctx, "linked", &gone);
+        for name in ["config.toml", "sessions"] {
+            std::os::unix::fs::symlink(real.join(name), dir.join("codex-home").join(name)).unwrap();
+        }
+        let later = SystemTime::now() + days(8);
+        assert_eq!(
+            judge(&dir, "linked", later, days(7), &runs),
+            Some(Orphan::Marked)
+        );
+        let report = sweep(&ctx, &runs, later, days(7));
+        assert_eq!((report.marked, report.kept_history), (1, 0));
+        assert!(!dir.exists());
+        // The links went, never what they point at.
+        assert_eq!(
+            std::fs::read_to_string(real.join("sessions/2026/11/rollout.jsonl")).unwrap(),
+            "history"
+        );
+        assert!(real.join("config.toml").is_file());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_pointing_outside_is_never_followed() {
+        let tmp = scratch("outside");
+        let ctx = tmp.join("context");
+        let runs = tmp.join("runs");
+        let real = real_codex(&tmp);
+        let gone = tmp.join("gone").to_string_lossy().into_owned();
+        // The whole home is a link to real state: nothing of it is in the
+        // bundle, so the link alone goes.
+        let dir = bundle(&ctx, "codex", "home-link", Some(&gone));
+        std::os::unix::fs::symlink(&real, dir.join("codex-home")).unwrap();
+        // A linked `skills` (not Otto's real one) is not looked through either.
+        let skills = codex_bundle(&ctx, "skills-link", &gone);
+        std::fs::remove_dir_all(skills.join("codex-home/skills")).unwrap();
+        std::os::unix::fs::symlink(&real, skills.join("codex-home/skills")).unwrap();
+        let later = SystemTime::now() + days(8);
+        let report = sweep(&ctx, &runs, later, days(7));
+        assert_eq!(
+            (report.marked, report.kept_history, report.failed),
+            (2, 0, 0)
+        );
+        assert!(!dir.exists() && !skills.exists());
+        assert_eq!(
+            std::fs::read_to_string(real.join("sessions/2026/11/rollout.jsonl")).unwrap(),
+            "history"
+        );
+        assert!(real.join("config.toml").is_file());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

@@ -131,7 +131,8 @@ pub async fn run_saved<C: ApiClientCtx>(
     // needs a PERSON's confirmation here too — the agent-authored new-host
     // speed bump above is self-confirmable and does not cover secrets.
     let agent = is_agent_caller(headers, auth);
-    let unbound = find_unbound_secret(
+    let unbound = find_unbound_secret_as(
+        agent,
         &repo,
         Some(ctx.secrets()),
         wid,
@@ -398,7 +399,8 @@ pub async fn execute_service<C: ApiClientCtx>(
         .as_ref()
         .map(|env| env.secret_keys.as_slice())
         .unwrap_or(&[]);
-    let unbound = find_unbound_secret(
+    let unbound = find_unbound_secret_as(
+        agent,
         &repo,
         Some(ctx.secrets()),
         wid,
