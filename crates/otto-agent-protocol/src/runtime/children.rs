@@ -501,6 +501,7 @@ mod tests {
 
     fn session(provider: RuntimeProvider) -> RuntimeSession {
         RuntimeSession {
+            title_auto: false,
             id: "kid".into(),
             workspace_id: "w".into(),
             provider,

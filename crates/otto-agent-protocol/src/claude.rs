@@ -63,9 +63,10 @@ use std::collections::HashMap;
 mod tasks;
 
 use otto_core::agent_runtime::{
-    ApprovalDecision, ApprovalOption, BackgroundTask, PlanStep, PlanStepStatus, ProviderFailure,
-    RequestKind, RuntimeAccessMode, RuntimePromptReq, RuntimeProvider, RuntimeRequestStatus,
-    ThreadTokenUsage, TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
+    ApprovalDecision, ApprovalOption, BackgroundTask, PlanStep, PlanStepStatus, ProviderCommand,
+    ProviderFailure, RequestKind, RuntimeAccessMode, RuntimePromptReq, RuntimeProvider,
+    RuntimeRequestStatus, ThreadTokenUsage, TurnItem, TurnItemKind, TurnItemStatus,
+    TurnTerminalStatus, TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
@@ -76,6 +77,14 @@ use crate::driver::{
 
 /// Claude Code's switch for connecting MCP servers before the first request.
 const MCP_NONBLOCKING: &str = "MCP_CONNECTION_NONBLOCKING";
+
+/// Claude Code's project folder for `cwd` (otto-transcript `encode_cwd`:
+/// every non-ASCII-alphanumeric character becomes `-`).
+fn claude_project_dir(cwd: &str) -> String {
+    cwd.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
 
 /// `permissionModeForClaudeRuntimePolicy` (`ClaudeAdapterV2.ts:2573-2620`).
 fn permission_mode(mode: RuntimeAccessMode) -> &'static str {
@@ -190,6 +199,18 @@ pub struct ClaudeDriver {
     finished: Vec<String>,
     /// The background list last reported.
     reported_background: Vec<BackgroundTask>,
+    /// This process's running `result.total_cost_usd` (it sums every turn
+    /// the process ran): a turn's cost is the difference.
+    #[serde(default)]
+    cost_total: f64,
+    /// The last prompt asked for plan mode (`set_permission_mode: plan`).
+    #[serde(default)]
+    plan: bool,
+    /// Where Claude Code keeps this session's transcript (its `ai-title`).
+    #[serde(default)]
+    transcript: Option<std::path::PathBuf>,
+    #[serde(default)]
+    cwd: String,
 }
 
 impl Default for ClaudeDriver {
@@ -225,6 +246,10 @@ impl ClaudeDriver {
             bg_inputs: HashMap::new(),
             finished: Vec::new(),
             reported_background: Vec::new(),
+            cost_total: 0.0,
+            plan: false,
+            transcript: None,
+            cwd: String::new(),
         }
     }
 
@@ -441,6 +466,7 @@ impl ClaudeDriver {
                 patterns: s("query").or_else(|| s("url")).into_iter().collect(),
             },
             ToolType::Dynamic => TurnItemKind::DynamicTool {
+                image_files: Vec::new(),
                 tool_name: t.name.clone(),
                 input: t.input.clone(),
                 output: t.output.clone(),
@@ -769,10 +795,16 @@ impl ClaudeDriver {
         if let Some(usage) = self.context_usage(msg) {
             step.push(DriverEvent::ContextUsage(usage));
         }
+        let cost = msg
+            .get("total_cost_usd")
+            .and_then(Value::as_f64)
+            .filter(|c| c.is_finite() && *c >= self.cost_total)
+            .map(|total| total - std::mem::replace(&mut self.cost_total, total));
         if let Some(u) = msg.get("usage") {
             let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
             let cached = n("cache_read_input_tokens");
             step.push(DriverEvent::Usage(TurnTokenUsage {
+                cost_usd: cost,
                 input_tokens: n("input_tokens") + cached + n("cache_creation_input_tokens"),
                 output_tokens: n("output_tokens"),
                 cached_input_tokens: (cached > 0).then_some(cached),
@@ -781,6 +813,8 @@ impl ClaudeDriver {
                     .and_then(Value::as_u64)
                     .filter(|t| *t > 0),
             }));
+        } else if let Some(c) = cost {
+            step.push(DriverEvent::TurnCost(c));
         }
         step.push(DriverEvent::Terminal {
             status,
@@ -871,6 +905,25 @@ impl ClaudeDriver {
             native_thread_id: self.session_id.clone(),
             model: None,
         });
+        // Its skills, custom and built-in commands, with descriptions.
+        if let Some(list) = resp.pointer("/response/commands").and_then(Value::as_array) {
+            step.push(DriverEvent::Commands(
+                list.iter()
+                    .filter_map(|c| {
+                        let mut cmd = ProviderCommand::new(
+                            c.get("name")?.as_str()?,
+                            c.get("description").and_then(Value::as_str).unwrap_or(""),
+                        );
+                        cmd.hint = c
+                            .get("argumentHint")
+                            .and_then(Value::as_str)
+                            .filter(|h| !h.trim().is_empty())
+                            .map(str::to_string);
+                        Some(cmd)
+                    })
+                    .collect(),
+            ));
+        }
     }
 }
 
@@ -1010,6 +1063,7 @@ impl StructuredDriver for ClaudeDriver {
 
     fn start(&mut self, ctx: &LaunchContext) -> DriverStep {
         self.model = ctx.model.clone();
+        self.cwd = ctx.cwd.clone();
         self.access = ctx.access_mode;
         self.bypass_allowed = ctx.access_mode == RuntimeAccessMode::FullAccess;
         self.session_id = Some(
@@ -1033,11 +1087,20 @@ impl StructuredDriver for ClaudeDriver {
         // `initialize` before its answer (as the SDK streams them).
         let mut step = DriverStep::default();
         self.switch_selection(&mut step, req);
-        if let Some(mode) = req.access_mode.filter(|m| *m != self.access) {
-            self.access = mode;
-            let (id, line) = self.control_request(
-                json!({"subtype": "set_permission_mode", "mode": permission_mode(mode)}),
-            );
+        let access = req.access_mode.unwrap_or(self.access);
+        // Plan mode is a permission mode; leaving it restores the access
+        // mode. Re-sent on every plan turn: approving `ExitPlanMode` leaves
+        // plan mode inside the CLI.
+        if access != self.access || req.plan || self.plan {
+            self.access = access;
+            self.plan = req.plan;
+            let mode = if req.plan {
+                "plan"
+            } else {
+                permission_mode(access)
+            };
+            let (id, line) =
+                self.control_request(json!({"subtype": "set_permission_mode", "mode": mode}));
             self.switches.push(id);
             step.write(line);
         }
@@ -1065,6 +1128,30 @@ impl StructuredDriver for ClaudeDriver {
 
     fn switches_access_live(&self, to: RuntimeAccessMode) -> bool {
         to != RuntimeAccessMode::FullAccess || self.bypass_allowed
+    }
+
+    /// The config dir the CLI runs with (a subscription account's own, else
+    /// `~/.claude`) locates its transcript, where it writes its `ai-title`.
+    fn adopt_spec(&mut self, spec: &mut LaunchSpec) {
+        let dir = spec
+            .env
+            .iter()
+            .rev()
+            .find(|(k, _)| k == "CLAUDE_CONFIG_DIR")
+            .map(|(_, v)| std::path::PathBuf::from(v))
+            .or_else(|| std::env::var_os("CLAUDE_CONFIG_DIR").map(Into::into))
+            .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".claude")));
+        self.transcript = dir.map(|d| d.join("projects"));
+    }
+
+    fn title_transcript(&self) -> Option<std::path::PathBuf> {
+        let sid = self.session_id.as_deref()?;
+        Some(
+            self.transcript
+                .as_ref()?
+                .join(claude_project_dir(&self.cwd))
+                .join(format!("{sid}.jsonl")),
+        )
     }
 
     fn interrupt(&mut self) -> DriverStep {
@@ -1589,6 +1676,7 @@ mod tests {
         ready(&mut d);
         let pdf = RuntimePromptReq {
             files: vec![otto_core::agent_runtime::PromptFile {
+                path: None,
                 mime: "application/pdf".into(),
                 name: "spec.pdf".into(),
                 data_base64: "JVBERg==".into(),

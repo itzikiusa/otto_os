@@ -117,6 +117,8 @@ fn arg_after(args: &[String], flag: &str) -> Option<String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let mut mode = arg_after(&args, "--permission-mode").unwrap_or_default();
+    let mut cost = 0.0f64;
     let store = std::path::Path::new(".fake-claude");
     let session = match arg_after(&args, "--resume") {
         Some(id) => {
@@ -224,8 +226,24 @@ fn main() {
             Some("control_request") => {
                 let rid = msg.get("request_id").cloned().unwrap_or(Value::Null);
                 let sub = msg.pointer("/request/subtype").and_then(Value::as_str);
+                if sub == Some("set_permission_mode") {
+                    mode = msg
+                        .pointer("/request/mode")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                }
+                // `initialize` lists its slash commands, as Claude Code does.
+                let body = if sub == Some("initialize") {
+                    json!({"commands": [
+                        {"name": "review", "description": "Review the current changes", "argumentHint": "[focus]"},
+                        {"name": "compact", "description": "Clear history but keep a summary", "argumentHint": ""}
+                    ]})
+                } else {
+                    json!({})
+                };
                 out(
-                    json!({"type":"control_response","response":{"subtype":"success","request_id":rid,"response":{}}}),
+                    json!({"type":"control_response","response":{"subtype":"success","request_id":rid,"response":body}}),
                 );
                 if sub == Some("initialize") {
                     out(
@@ -358,9 +376,18 @@ fn main() {
                         text_message(&mid, &format!("echo: {text}"));
                         result_ok();
                     }
+                    // `mode`: the permission mode it runs in (plan, default…).
+                    "mode" => {
+                        text_message(&mid, &format!("mode: {mode}"));
+                        result_ok();
+                    }
                     _ => {
                         text_message(&mid, &format!("echo: {text}"));
-                        result_ok();
+                        // Claude Code sums the process's cost on every result.
+                        cost += 0.0125;
+                        out(
+                            json!({"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1},"total_cost_usd":cost}),
+                        );
                     }
                 }
             }

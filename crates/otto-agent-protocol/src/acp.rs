@@ -43,20 +43,21 @@
 
 use std::collections::HashMap;
 
-use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::schema::{MaybeUndefined, ProtocolVersion};
 use agent_client_protocol::v1::schema::{
-    AuthenticateRequest, BlobResourceContents, CancelNotification, ContentBlock, EmbeddedResource,
-    EmbeddedResourceResource, EnvVariable, ImageContent, InitializeRequest, InitializeResponse,
-    LoadSessionRequest, McpServer, McpServerStdio, NewSessionRequest, NewSessionResponse,
-    PermissionOption, PermissionOptionKind, Plan, PlanEntryStatus, PromptRequest, PromptResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionNotification, SessionUpdate, SetSessionModeRequest,
-    StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
+    AuthenticateRequest, AvailableCommandInput, BlobResourceContents, CancelNotification,
+    ContentBlock, EmbeddedResource, EmbeddedResourceResource, EnvVariable, ImageContent,
+    InitializeRequest, InitializeResponse, LoadSessionRequest, McpServer, McpServerStdio,
+    NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind, Plan,
+    PlanEntryStatus, PromptRequest, PromptResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionNotification, SessionUpdate, SetSessionModeRequest, StopReason, TextContent, ToolCall,
+    ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 use otto_core::agent_runtime::{
-    ApprovalDecision, ApprovalOption, PlanStep, PlanStepStatus, ProviderFailure, RequestKind,
-    RuntimeAccessMode, RuntimeCapabilities, RuntimePromptReq, RuntimeProvider, TurnItem,
-    TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
+    ApprovalDecision, ApprovalOption, PlanStep, PlanStepStatus, ProviderCommand, ProviderFailure,
+    RequestKind, RuntimeAccessMode, RuntimeCapabilities, RuntimePromptReq, RuntimeProvider,
+    ThreadTokenUsage, TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
@@ -260,6 +261,19 @@ pub struct AcpDriver {
     effort_req: Option<u64>,
     /// agy swarm members this session added, by member name.
     swarm: HashMap<String, TurnItem>,
+    /// The mode the session opened in (`modes.currentModeId`): where leaving
+    /// plan mode returns when the access mode has no mode of its own.
+    #[serde(default)]
+    base_mode: Option<String>,
+    /// The session is in the agent's `plan` mode.
+    #[serde(default)]
+    plan_active: bool,
+    /// The session's running cost (`usage_update.cost`, USD) and its value
+    /// when the running turn started.
+    #[serde(default)]
+    cost_total: Option<f64>,
+    #[serde(default)]
+    cost_at_turn: Option<f64>,
 }
 
 impl AcpDriver {
@@ -313,6 +327,10 @@ impl AcpDriver {
             effort: None,
             effort_req: None,
             swarm: HashMap::new(),
+            base_mode: None,
+            plan_active: false,
+            cost_total: None,
+            cost_at_turn: None,
         }
     }
 
@@ -548,10 +566,41 @@ impl AcpDriver {
         if !req.text.is_empty() {
             blocks.push(ContentBlock::Text(TextContent::new(&req.text)));
         }
-        if let Some(mode) = req.access_mode.filter(|m| *m != self.access) {
-            self.access = mode;
-            self.write_mode(step, &sid, mode);
+        let access_changed = req.access_mode.is_some_and(|m| m != self.access);
+        self.access = req.access_mode.unwrap_or(self.access);
+        if req.plan && self.modes.iter().any(|m| m == "plan") {
+            // Plan mode is one of the agent's session modes (agy `plan`).
+            if !self.plan_active {
+                let (id, line) = self.request(
+                    M_SESSION_SET_MODE,
+                    SetSessionModeRequest::new(sid.clone(), "plan"),
+                );
+                self.mode_req = Some(id);
+                step.write(line);
+                self.plan_active = true;
+            }
+        } else if self.plan_active {
+            // Leaving plan mode: back to the access mode's own mode, else
+            // the one the session opened in.
+            self.plan_active = false;
+            let back = self
+                .flavor
+                .mode_id
+                .and_then(|f| f(self.access))
+                .map(str::to_string)
+                .or_else(|| self.base_mode.clone());
+            if let Some(mode) = back {
+                let (id, line) = self.request(
+                    M_SESSION_SET_MODE,
+                    SetSessionModeRequest::new(sid.clone(), mode),
+                );
+                self.mode_req = Some(id);
+                step.write(line);
+            }
+        } else if access_changed {
+            self.write_mode(step, &sid, self.access);
         }
+        self.cost_at_turn = self.cost_total;
         // The effort as the session's own config option (T3 Code:
         // `antigravityThinkingConfig`, grok's `reasoning_effort`).
         let effort = req.effort.as_deref().and_then(|e| {
@@ -702,6 +751,7 @@ impl AcpDriver {
                 new_str: t.diff.as_ref().map(|d| d.1.clone()),
             },
             _ => TurnItemKind::DynamicTool {
+                image_files: Vec::new(),
                 tool_name: t.title.clone(),
                 input: t.raw_input.clone().unwrap_or(Value::Null),
                 output,
@@ -953,6 +1003,59 @@ impl AcpDriver {
     }
 
     fn on_update(&mut self, step: &mut DriverStep, n: SessionNotification) {
+        // Session-level news counts during a `session/load` replay too.
+        match &n.update {
+            SessionUpdate::AvailableCommandsUpdate(u) => {
+                step.push(DriverEvent::Commands(
+                    u.available_commands
+                        .iter()
+                        .map(|c| {
+                            let mut cmd =
+                                ProviderCommand::new(c.name.clone(), c.description.clone());
+                            cmd.hint = match &c.input {
+                                Some(AvailableCommandInput::Unstructured(i)) => {
+                                    Some(i.hint.clone())
+                                }
+                                _ => None,
+                            }
+                            .filter(|h| !h.trim().is_empty());
+                            cmd
+                        })
+                        .collect(),
+                ));
+                return;
+            }
+            SessionUpdate::UsageUpdate(u) => {
+                step.push(DriverEvent::ContextUsage(ThreadTokenUsage {
+                    used_tokens: u.used,
+                    max_tokens: (u.size > 0).then_some(u.size),
+                    ..ThreadTokenUsage::default()
+                }));
+                if let Some(c) = u
+                    .cost
+                    .as_ref()
+                    .filter(|c| c.currency.eq_ignore_ascii_case("USD"))
+                {
+                    self.cost_total = Some(c.amount);
+                    let at_turn = self.cost_at_turn.unwrap_or(c.amount);
+                    if self.turn_id.is_some() && c.amount >= at_turn {
+                        step.push(DriverEvent::TurnCost(c.amount - at_turn));
+                    }
+                }
+                return;
+            }
+            SessionUpdate::SessionInfoUpdate(u) => {
+                if let MaybeUndefined::Value(t) = &u.title {
+                    step.push(DriverEvent::Title(t.clone()));
+                }
+                return;
+            }
+            SessionUpdate::CurrentModeUpdate(u) => {
+                self.plan_active = u.current_mode_id.0.as_ref() == "plan";
+                return;
+            }
+            _ => {}
+        }
         if matches!(self.phase, Phase::Creating { loading: true }) {
             return; // history replayed by session/load
         }
@@ -1123,6 +1226,11 @@ impl AcpDriver {
                 .and_then(|r| r.pointer("/modes/currentModeId"))
                 .and_then(Value::as_str)
                 .map(str::to_string);
+            self.plan_active = current_mode.as_deref() == Some("plan");
+            // A new session has spent nothing; a loaded one's running cost is
+            // unknown until its first `usage_update` (that turn counts none).
+            self.cost_total = (!loading).then_some(0.0);
+            self.base_mode = current_mode.clone().filter(|m| m != "plan");
             self.session_id = if loading {
                 self.resume.clone()
             } else {
@@ -1185,6 +1293,7 @@ impl AcpDriver {
                     if let Some(u) = r.get("usage").filter(|u| u.is_object()) {
                         let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
                         step.push(DriverEvent::Usage(TurnTokenUsage {
+                            cost_usd: None,
                             input_tokens: n("inputTokens") + n("cachedReadTokens"),
                             output_tokens: n("outputTokens"),
                             cached_input_tokens: Some(n("cachedReadTokens")),
@@ -1367,6 +1476,7 @@ impl StructuredDriver for AcpDriver {
                 .as_ref()
                 .map(|(_, l)| effort_levels(l))
                 .unwrap_or_default();
+            c.plan = self.modes.iter().any(|m| m == "plan");
         }
         c
     }
@@ -1438,6 +1548,9 @@ impl StructuredDriver for AcpDriver {
                     "{name} does not take reasoning effort {e}"
                 )));
             }
+        }
+        if ready && req.plan && !self.modes.iter().any(|m| m == "plan") {
+            return Err(DriverError(format!("{name} has no plan mode")));
         }
         if ready && !req.images.is_empty() && !self.images {
             return Err(DriverError(format!("{name} does not accept images")));
@@ -2242,6 +2355,7 @@ mod tests {
     fn pdfs_need_embedded_context_and_failed_tools_carry_their_text() {
         let pdf = RuntimePromptReq {
             files: vec![otto_core::agent_runtime::PromptFile {
+                path: None,
                 mime: "application/pdf".into(),
                 name: "a.pdf".into(),
                 data_base64: "JVBERg==".into(),

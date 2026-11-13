@@ -18,12 +18,15 @@
 //! * `plan`       — a `plan` update, then `end_turn`.
 //! * `fs`         — calls `fs/read_text_file` on the client and reports the error.
 //! * `big:<n>`    — `n` one-byte message chunks.
+//! * `usage`      — a `usage_update` (context 1200 of 1048576, $0.25 so far)
+//!   and a `session_info_update` naming the session, then `end_turn`.
 //! * anything else — a thought chunk + `echo: <text>` in two chunks.
 //!
 //! With `--refuse-session` every `session/new` fails with `-32000` (signed
 //! out, no auth method to offer). `--approval-mode <m>` sets the starting
-//! mode; `session/new|load` advertise the modes `default`, `autoEdit` and
-//! `accept-edits` (not `yolo`), which `session/set_mode` switches between.
+//! mode; `session/new|load` advertise the modes `default`, `autoEdit`,
+//! `accept-edits` and `plan` (not `yolo`), which `session/set_mode` switches
+//! between, and list two slash commands (`available_commands_update`).
 //! `initialize` advertises `promptCapabilities.embeddedContext` (no images).
 //!
 //! `session/load` replays one history chunk before answering (clients must
@@ -65,6 +68,16 @@ fn chunk(sid: &str, kind: &str, text: &str) {
     );
 }
 
+/// The agent's slash commands (`available_commands_update`).
+fn commands(sid: &str) {
+    update(
+        sid,
+        json!({"sessionUpdate":"available_commands_update","availableCommands":[
+            {"name":"compact","description":"Summarize the conversation"},
+            {"name":"review","description":"Review changes","input":{"hint":"what to focus on"}}]}),
+    );
+}
+
 fn reply(id: &Value, result: Value) {
     out(json!({"jsonrpc":"2.0","id":id,"result":result}));
 }
@@ -81,7 +94,7 @@ fn main() {
         .map_or("default".to_string(), |w| w[1].clone());
     let modes = json!({"currentModeId": "default", "availableModes": [
         {"id": "default", "name": "Default"}, {"id": "autoEdit", "name": "Auto edit"},
-        {"id": "accept-edits", "name": "Accept edits"}]});
+        {"id": "accept-edits", "name": "Accept edits"}, {"id": "plan", "name": "Plan"}]});
     let mut model = "none".to_string();
     let mut system = "none".to_string();
     let system_of = |p: &Value| {
@@ -104,10 +117,9 @@ fn main() {
             ),
             "session/new" => {
                 system = system_of(&params);
-                reply(
-                    &id,
-                    json!({"sessionId": format!("fake-{}", std::process::id()), "modes": modes}),
-                )
+                let sid = format!("fake-{}", std::process::id());
+                reply(&id, json!({"sessionId": sid, "modes": modes}));
+                commands(&sid);
             }
             "session/set_model" => {
                 model = params["modelId"].as_str().unwrap_or_default().to_string();
@@ -122,6 +134,7 @@ fn main() {
                 let sid = params["sessionId"].as_str().unwrap_or_default().to_string();
                 chunk(&sid, "agent_message_chunk", "(history)");
                 reply(&id, json!({"modes": modes}));
+                commands(&sid);
             }
             "session/prompt" => {
                 let sid = params["sessionId"].as_str().unwrap_or_default().to_string();
@@ -243,6 +256,19 @@ fn main() {
                                 break;
                             }
                         }
+                    }
+                    "usage" => {
+                        update(
+                            &sid,
+                            json!({"sessionUpdate":"usage_update","used":1200,"size":1048576,
+                                "cost":{"amount":0.25,"currency":"USD"}}),
+                        );
+                        update(
+                            &sid,
+                            json!({"sessionUpdate":"session_info_update","title":"Named by the agent"}),
+                        );
+                        chunk(&sid, "agent_message_chunk", "counted");
+                        done("end_turn");
                     }
                     "plan" => {
                         update(

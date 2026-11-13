@@ -56,15 +56,15 @@
 use std::collections::HashMap;
 
 use otto_core::agent_runtime::{
-    ApprovalDecision, ApprovalOption, PlanStep, PlanStepStatus, ProviderFailure, RequestKind,
-    RuntimeAccessMode, RuntimePromptReq, RuntimeProvider, RuntimeRequestStatus, ThreadTokenUsage,
-    TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
+    ApprovalDecision, ApprovalOption, PlanStep, PlanStepStatus, ProviderCommand, ProviderFailure,
+    RequestKind, RuntimeAccessMode, RuntimePromptReq, RuntimeProvider, RuntimeRequestStatus,
+    ThreadTokenUsage, TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
 use crate::driver::{
-    item, rpc_failure, rpc_key, tool_error, DriverError, DriverEvent, DriverStep, LaunchContext,
-    LaunchSpec, StructuredDriver,
+    item, rpc_failure, rpc_key, tool_error, with_file_paths, DriverError, DriverEvent, DriverStep,
+    LaunchContext, LaunchSpec, StructuredDriver,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -117,6 +117,22 @@ pub struct CodexDriver {
     steers: Vec<u64>,
     /// Sub-agent cards by the sub-agent's own Codex thread id.
     agents: HashMap<String, TurnItem>,
+    /// The model the thread runs (a plan-mode turn names it).
+    #[serde(default)]
+    thread_model: Option<String>,
+    /// The last turn ran in plan mode: the next one names `default` to leave.
+    #[serde(default)]
+    plan: bool,
+    /// Otto's `-c developer_instructions=…` (the context hook's): a
+    /// `collaborationMode` replaces the thread's instructions, so leaving
+    /// plan mode hands them back.
+    #[serde(default)]
+    developer_instructions: Option<String>,
+    /// Skills from `skills/list`: name → path (`/name` runs one).
+    #[serde(default)]
+    skills: HashMap<String, String>,
+    #[serde(default)]
+    skills_req: Option<u64>,
 }
 
 impl CodexDriver {
@@ -144,6 +160,11 @@ impl CodexDriver {
             mcp_failures: Vec::new(),
             steers: Vec::new(),
             agents: HashMap::new(),
+            thread_model: None,
+            plan: false,
+            developer_instructions: None,
+            skills: HashMap::new(),
+            skills_req: None,
         }
     }
 
@@ -210,15 +231,29 @@ impl CodexDriver {
         step.write(line);
     }
 
-    /// A prompt's images then text as Codex `UserInput`s.
-    fn input(req: &RuntimePromptReq) -> Vec<Value> {
+    /// A prompt's images then text as Codex `UserInput`s. A leading
+    /// `/skill` names one of its skills (`{type: skill}`); a PDF goes as the
+    /// path it was saved at (Codex's input has no document type — T3 Code's
+    /// `providerMessageTextWithAttachmentPaths`).
+    fn input(&self, req: &RuntimePromptReq) -> Vec<Value> {
         let mut input: Vec<Value> = req
             .images
             .iter()
             .map(|i| json!({"type": "image", "url": format!("data:{};base64,{}", i.mime, i.data_base64)}))
             .collect();
-        if !req.text.is_empty() {
-            input.push(json!({"type": "text", "text": req.text}));
+        let mut text = req.text.clone();
+        if let Some((name, rest)) = text
+            .strip_prefix('/')
+            .map(|t| t.split_once(char::is_whitespace).unwrap_or((t, "")))
+        {
+            if let Some(path) = self.skills.get(name) {
+                input.push(json!({"type": "skill", "name": name, "path": path}));
+                text = rest.trim_start().to_string();
+            }
+        }
+        text = with_file_paths(&text, &req.files);
+        if !text.is_empty() {
+            input.push(json!({"type": "text", "text": text}));
         }
         input
     }
@@ -228,7 +263,7 @@ impl CodexDriver {
         self.access = req.access_mode.unwrap_or(self.access);
         let mut params = json!({
             "threadId": self.thread_id,
-            "input": Self::input(req),
+            "input": self.input(req),
             "approvalPolicy": self.approval_policy(),
             "approvalsReviewer": "user",
             "sandboxPolicy": self.sandbox_policy(),
@@ -238,6 +273,33 @@ impl CodexDriver {
         }
         if let Some(e) = &req.effort {
             params["effort"] = json!(e);
+        }
+        // Plan mode is a collaboration mode, sent while it is on and once
+        // more to leave it (Codex keeps the last one). Its settings name the
+        // model; `null` instructions are the mode's built-in ones.
+        if req.plan || self.plan {
+            let model = req
+                .model
+                .clone()
+                .or_else(|| self.model.clone())
+                .or_else(|| self.thread_model.clone());
+            if let Some(model) = model {
+                let mut settings = json!({"model": model});
+                if let Some(e) = &req.effort {
+                    settings["reasoning_effort"] = json!(e);
+                }
+                if !req.plan {
+                    settings["developer_instructions"] = json!(self.developer_instructions);
+                }
+                params["collaborationMode"] = json!({
+                    "mode": if req.plan { "plan" } else { "default" },
+                    "settings": settings,
+                });
+                self.plan = req.plan;
+            }
+        }
+        if req.model.is_some() {
+            self.thread_model = req.model.clone();
         }
         let (id, line) = self.request("turn/start", params);
         self.turn_req = Some(id);
@@ -697,6 +759,7 @@ impl CodexDriver {
                         input: it.get("arguments").cloned().unwrap_or(Value::Null),
                         output,
                         images: result.images,
+                        image_files: Vec::new(),
                     },
                     Some(name),
                 )
@@ -713,6 +776,35 @@ impl CodexDriver {
                 },
                 None,
             ),
+            // Images Codex looked at or made exist only as files: the item
+            // names them and the runtime serves them read-only.
+            "imageView" => (
+                TurnItemKind::DynamicTool {
+                    tool_name: "view_image".into(),
+                    input: json!({"path": s("path")}),
+                    output: None,
+                    images: Vec::new(),
+                    image_files: s("path").into_iter().collect(),
+                },
+                Some("View image".to_string()),
+            ),
+            "imageGeneration" => {
+                let failure = it.get("failure").filter(|f| !f.is_null()).map(|f| {
+                    f.get("message")
+                        .and_then(Value::as_str)
+                        .map_or_else(|| f.to_string(), str::to_string)
+                });
+                (
+                    TurnItemKind::DynamicTool {
+                        tool_name: "image_generation".into(),
+                        input: json!({"prompt": s("revisedPrompt")}),
+                        output: failure,
+                        images: Vec::new(),
+                        image_files: s("savedPath").into_iter().collect(),
+                    },
+                    Some("Generate image".to_string()),
+                )
+            }
             _ => return None,
         };
         let status = match kind {
@@ -808,6 +900,7 @@ impl CodexDriver {
         let n = |v: &Value, k: &str| v.get(k).and_then(Value::as_u64);
         if let Some(last) = u.get("last") {
             step.push(DriverEvent::Usage(TurnTokenUsage {
+                cost_usd: None,
                 input_tokens: n(last, "inputTokens").unwrap_or(0),
                 output_tokens: n(last, "outputTokens").unwrap_or(0),
                 cached_input_tokens: n(last, "cachedInputTokens").filter(|t| *t > 0),
@@ -1037,13 +1130,58 @@ impl CodexDriver {
                 .map(str::to_string)
                 .or_else(|| self.resume.clone());
             self.ready = true;
+            if let Some(m) = r.get("model").and_then(Value::as_str) {
+                self.thread_model = Some(m.to_string());
+            }
             step.push(DriverEvent::Ready {
                 native_thread_id: self.thread_id.clone(),
                 model: r.get("model").and_then(Value::as_str).map(str::to_string),
             });
+            // Its skills are its slash commands (`/name` → `{type: skill}`).
+            let (id, line) = self.request("skills/list", json!({"cwds": [self.cwd]}));
+            self.skills_req = Some(id);
+            step.write(line);
             if let Some(req) = self.queued.take() {
                 self.send_turn(step, &req);
             }
+        } else if Some(id) == self.skills_req {
+            self.skills_req = None;
+            let skills = result
+                .as_ref()
+                .and_then(|r| r.get("data"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .flat_map(|e| {
+                    e.get("skills")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                })
+                .filter(|s| s.get("enabled").and_then(Value::as_bool) != Some(false))
+                .filter_map(|s| {
+                    let name = s.get("name")?.as_str()?.to_string();
+                    let path = s.get("path")?.as_str()?.to_string();
+                    let desc = s
+                        .pointer("/interface/short_description")
+                        .or_else(|| s.get("shortDescription"))
+                        .or_else(|| s.get("description"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    Some((name, path, desc))
+                })
+                .collect::<Vec<_>>();
+            self.skills = skills
+                .iter()
+                .map(|(n, p, _)| (n.clone(), p.clone()))
+                .collect();
+            step.push(DriverEvent::Commands(
+                skills
+                    .into_iter()
+                    .map(|(n, _, d)| ProviderCommand::new(n, d))
+                    .collect(),
+            ));
         } else if let Some(n) = self.steers.iter().position(|s| *s == id) {
             self.steers.remove(n);
             // The turn ended (or moved on) before Codex took it.
@@ -1131,6 +1269,16 @@ impl StructuredDriver for CodexDriver {
         }
     }
 
+    /// Otto's context rides `-c developer_instructions=…`; a plan-mode turn
+    /// replaces the thread's instructions, so leaving it hands these back.
+    fn adopt_spec(&mut self, spec: &mut LaunchSpec) {
+        self.developer_instructions = spec
+            .args
+            .windows(2)
+            .find(|w| w[0] == "-c" && w[1].starts_with("developer_instructions="))
+            .map(|w| w[1]["developer_instructions=".len()..].to_string());
+    }
+
     fn start(&mut self, ctx: &LaunchContext) -> DriverStep {
         self.cwd = ctx.cwd.clone();
         self.model = ctx.model.clone();
@@ -1157,9 +1305,14 @@ impl StructuredDriver for CodexDriver {
         if self.turn_id.is_some() {
             return Err(DriverError("a prompt is already running".into()));
         }
-        if !req.files.is_empty() {
+        if req.plan
+            && !self.plan
+            && self.thread_model.is_none()
+            && self.model.is_none()
+            && self.ready
+        {
             return Err(DriverError(
-                "Codex does not accept file attachments (only images)".into(),
+                "Codex has not named its model yet; send again in a moment".into(),
             ));
         }
         self.turn_id = Some(turn_id.to_string());
@@ -1184,12 +1337,7 @@ impl StructuredDriver for CodexDriver {
         else {
             return Err(DriverError("no Codex turn is running yet".into()));
         };
-        if !req.files.is_empty() {
-            return Err(DriverError(
-                "Codex does not accept file attachments (only images)".into(),
-            ));
-        }
-        let params = json!({"threadId": thread, "expectedTurnId": turn, "input": Self::input(req)});
+        let params = json!({"threadId": thread, "expectedTurnId": turn, "input": self.input(req)});
         let (id, line) = self.request("turn/steer", params);
         self.steers.push(id);
         let mut step = DriverStep::default();
@@ -1360,6 +1508,19 @@ impl StructuredDriver for CodexDriver {
                 }
                 "turn/plan/updated" if self.turn_id.is_some() => self.on_plan(&mut step, &params),
                 "thread/tokenUsage/updated" => self.on_usage(&mut step, &params),
+                "thread/name/updated" => {
+                    if let Some(name) = params.get("threadName").and_then(Value::as_str) {
+                        step.push(DriverEvent::Title(name.to_string()));
+                    }
+                }
+                "skills/changed" => {
+                    let (id, line) = self.request(
+                        "skills/list",
+                        json!({"cwds": [self.cwd], "forceReload": true}),
+                    );
+                    self.skills_req = Some(id);
+                    step.write(line);
+                }
                 "mcpServer/startupStatus/updated" => self.on_mcp_startup(&mut step, &params),
                 "error" => {
                     if params.get("willRetry").and_then(Value::as_bool) != Some(true) {
@@ -1786,8 +1947,10 @@ mod tests {
         assert!(
             matches!(&s.events[0], DriverEvent::Request { tool_item_id: Some(t), .. } if t == "t1:codex:f1")
         );
+        // A PDF goes as the path the runtime saved it at (no document input).
         let pdf = RuntimePromptReq {
             files: vec![otto_core::agent_runtime::PromptFile {
+                path: Some("/data/att/x.pdf".into()),
                 mime: "application/pdf".into(),
                 name: "a.pdf".into(),
                 data_base64: "JVBERg==".into(),
@@ -1796,7 +1959,130 @@ mod tests {
         };
         let mut d = CodexDriver::with_program("codex");
         ready(&mut d, false);
-        assert!(d.prompt("t1", &pdf).is_err());
+        let s = d.prompt("t1", &pdf).unwrap();
+        let turn: Value = serde_json::from_str(s.writes.last().unwrap()).unwrap();
+        assert_eq!(
+            turn["params"]["input"][0]["text"],
+            "read\n\n[Attached file \"a.pdf\" (application/pdf) is saved at: /data/att/x.pdf]"
+        );
+    }
+
+    #[test]
+    fn plan_mode_rides_the_turn_and_leaving_it_restores_the_instructions() {
+        let mut d = CodexDriver::with_program("codex");
+        let mut spec = LaunchSpec {
+            args: vec!["-c".into(), "developer_instructions=OTTO CONTEXT".into()],
+            ..LaunchSpec::default()
+        };
+        d.adopt_spec(&mut spec);
+        ready(&mut d, false);
+        let plan = RuntimePromptReq {
+            plan: true,
+            ..RuntimePromptReq::of("think first")
+        };
+        let s = d.prompt("t1", &plan).unwrap();
+        let turn: Value = serde_json::from_str(s.writes.last().unwrap()).unwrap();
+        assert_eq!(turn["params"]["collaborationMode"]["mode"], "plan");
+        assert_eq!(
+            turn["params"]["collaborationMode"]["settings"]["model"],
+            "gpt"
+        );
+        assert!(turn["params"]["collaborationMode"]["settings"]
+            .get("developer_instructions")
+            .is_none());
+        feed(
+            &mut d,
+            json!({"method": "turn/completed", "params": {"threadId": "th1", "turn": {"id": "ct1", "status": "completed"}}}),
+        );
+        let s = d.prompt("t2", &RuntimePromptReq::of("now do it")).unwrap();
+        let turn: Value = serde_json::from_str(s.writes.last().unwrap()).unwrap();
+        assert_eq!(turn["params"]["collaborationMode"]["mode"], "default");
+        assert_eq!(
+            turn["params"]["collaborationMode"]["settings"]["developer_instructions"],
+            "OTTO CONTEXT"
+        );
+        feed(
+            &mut d,
+            json!({"method": "turn/completed", "params": {"threadId": "th1", "turn": {"id": "ct2", "status": "completed"}}}),
+        );
+        // Out of plan mode, turns carry no collaboration mode at all.
+        let s = d.prompt("t3", &RuntimePromptReq::of("more")).unwrap();
+        let turn: Value = serde_json::from_str(s.writes.last().unwrap()).unwrap();
+        assert!(turn["params"].get("collaborationMode").is_none());
+    }
+
+    #[test]
+    fn skills_are_its_commands_and_a_slash_skill_runs_one() {
+        let mut d = CodexDriver::with_program("codex");
+        ready(&mut d, false);
+        let s = feed(
+            &mut d,
+            json!({"id": 3, "result": {"data": [{"cwd": "/w", "errors": [], "skills": [
+                {"name": "review", "description": "Review a diff thoroughly", "enabled": true, "path": "/s/review/SKILL.md", "scope": "user"},
+                {"name": "off", "description": "x", "enabled": false, "path": "/s/off/SKILL.md", "scope": "user"}
+            ]}]}}),
+        );
+        let DriverEvent::Commands(c) = &s.events[0] else {
+            panic!("commands missing: {:?}", s.events)
+        };
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].name, "review");
+        let s = d
+            .prompt("t1", &RuntimePromptReq::of("/review the last commit"))
+            .unwrap();
+        let turn: Value = serde_json::from_str(s.writes.last().unwrap()).unwrap();
+        assert_eq!(
+            turn["params"]["input"],
+            json!([{"type": "skill", "name": "review", "path": "/s/review/SKILL.md"}, {"type": "text", "text": "the last commit"}])
+        );
+        // An unknown `/word` stays text.
+        feed(
+            &mut d,
+            json!({"method": "turn/completed", "params": {"threadId": "th1", "turn": {"id": "ct1", "status": "completed"}}}),
+        );
+        let s = d
+            .prompt("t2", &RuntimePromptReq::of("/etc/hosts?"))
+            .unwrap();
+        let turn: Value = serde_json::from_str(s.writes.last().unwrap()).unwrap();
+        assert_eq!(
+            turn["params"]["input"],
+            json!([{"type": "text", "text": "/etc/hosts?"}])
+        );
+    }
+
+    #[test]
+    fn thread_names_and_image_items_are_projected() {
+        let mut d = CodexDriver::with_program("codex");
+        ready(&mut d, false);
+        let s = feed(
+            &mut d,
+            json!({"method": "thread/name/updated", "params": {"threadId": "th1", "threadName": "Fix the login bug"}}),
+        );
+        assert_eq!(
+            s.events,
+            vec![DriverEvent::Title("Fix the login bug".into())]
+        );
+        d.prompt("t1", &RuntimePromptReq::of("draw")).unwrap();
+        let s = feed(
+            &mut d,
+            json!({"method": "item/completed", "params": {"threadId": "th1", "turnId": "ct1", "item": {"type": "imageGeneration", "id": "ig1", "status": "completed", "revisedPrompt": "a cat", "savedPath": "/tmp/cat.png", "inputImages": []}}}),
+        );
+        let DriverEvent::TurnItem(i) = &s.events[0] else {
+            panic!()
+        };
+        assert!(
+            matches!(&i.kind, TurnItemKind::DynamicTool { image_files, tool_name, .. } if image_files == &vec!["/tmp/cat.png".to_string()] && tool_name == "image_generation")
+        );
+        let s = feed(
+            &mut d,
+            json!({"method": "item/completed", "params": {"threadId": "th1", "turnId": "ct1", "item": {"type": "imageView", "id": "iv1", "path": "/w/shot.png"}}}),
+        );
+        let DriverEvent::TurnItem(i) = &s.events[0] else {
+            panic!()
+        };
+        assert!(
+            matches!(&i.kind, TurnItemKind::DynamicTool { image_files, .. } if image_files == &vec!["/w/shot.png".to_string()])
+        );
     }
     #[test]
     fn questions_preserve_rpc_id_and_validate_before_consuming() {

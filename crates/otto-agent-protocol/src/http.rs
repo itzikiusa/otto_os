@@ -121,6 +121,10 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
             "/runtime-sessions/{id}/attachments/{attachment_id}",
             get(attachment::<S>),
         )
+        .route(
+            "/runtime-sessions/{id}/items/{item_id}/images/{n}",
+            get(tool_image::<S>),
+        )
         // Work the agent runs off its protocol stream (Agents & tasks).
         .route(
             "/runtime-sessions/{id}/tasks/{task_id}/output",
@@ -602,6 +606,24 @@ async fn attachment<S: RuntimeCtx>(
     use axum::http::header;
     // The mime is the uploader's (`image/svg+xml` can carry script): never
     // run it on the daemon's origin.
+    let headers = [
+        (header::CONTENT_TYPE, mime),
+        (header::CONTENT_SECURITY_POLICY, "sandbox".into()),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff".into()),
+    ];
+    Ok((headers, bytes).into_response())
+}
+
+/// GET /runtime-sessions/{id}/items/{item_id}/images/{n} — an image a tool
+/// left on disk (Codex `imageView` / `imageGeneration`), read-only.
+async fn tool_image<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path((id, item_id, n)): Path<(Id, String, usize)>,
+) -> ApiResult<Response> {
+    authorized(&ctx, &user, &id).await?;
+    let (mime, bytes) = ctx.agent_runtime().tool_image(&id, &item_id, n).await?;
+    use axum::http::header;
     let headers = [
         (header::CONTENT_TYPE, mime),
         (header::CONTENT_SECURITY_POLICY, "sandbox".into()),

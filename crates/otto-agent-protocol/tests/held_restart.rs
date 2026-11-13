@@ -286,6 +286,7 @@ async fn create_with(
         &"u1".into(),
         &"w1".into(),
         CreateRuntimeSessionReq {
+            title_auto: false,
             provider: Some(provider),
             cwd: Some(cwd.into()),
             title: None,

@@ -27,6 +27,8 @@ export interface ProviderSession {
   background_tasks?: BackgroundTask[];
   /** What the running driver reported it takes (after its handshake). */
   capabilities?: RuntimeCapabilities;
+  /** The thread's title: a rename, or the agent's own name for it. */
+  title?: string;
 }
 
 /** What a thread's agent takes besides plain text — the provider baseline
@@ -40,6 +42,17 @@ export interface RuntimeCapabilities {
   files: boolean;
   /** Effort levels a prompt may carry; absent / empty = none. */
   efforts?: string[];
+  /** A prompt may ask for plan mode (`plan: true`). */
+  plan?: boolean;
+}
+
+/** One of the agent's own slash commands (`commands.updated`). */
+export interface ProviderCommand {
+  /** Without the leading `/`. */
+  name: string;
+  description?: string;
+  /** What to type after it, when it takes input. */
+  hint?: string;
 }
 
 /** `GET /runtime-sessions/{id}/tasks/{task_id}/output` — a Claude background
@@ -105,6 +118,8 @@ export interface TurnTokenUsage {
   output_tokens: number;
   cached_input_tokens?: number;
   reasoning_tokens?: number;
+  /** What the turn cost in USD, where the provider says. */
+  cost_usd?: number;
 }
 
 export interface ProviderTurn {
@@ -154,7 +169,9 @@ export type TurnItemKind =
   /* Tool items carry `error` (the tool's error text, ~2 KB max) when failed. */
   | { type: 'file_change'; file_name: string; diff_str?: string; old_str?: string; new_str?: string; error?: string }
   | { type: 'command_execution'; input: string; output?: string; exit_code?: number; error?: string }
-  | { type: 'dynamic_tool'; tool_name: string; input: unknown; output?: string; images?: ToolOutputImage[]; error?: string }
+  /** `image_files`: images the tool left on disk, served by
+   *  GET /runtime-sessions/{id}/items/{item_id}/images/{n}. */
+  | { type: 'dynamic_tool'; tool_name: string; input: unknown; output?: string; images?: ToolOutputImage[]; image_files?: string[]; error?: string }
   /** Web search / fetch tools; `patterns` are the queries or URLs. */
   | { type: 'web_search'; patterns?: string[]; error?: string }
   | {
@@ -272,6 +289,8 @@ export type RuntimeEventBody =
   | { type: 'plan.updated'; plan: PlanArtifact }
   /** The messages waiting for the running turn, whole (persisted). */
   | { type: 'queue.updated'; queued_prompts: QueuedPrompt[] }
+  /** The agent's own slash commands, whole. */
+  | { type: 'commands.updated'; commands: ProviderCommand[] }
   | { type: 'command_output.delta'; item_id: Id; chunk: string }
   | {
       type: 'turn.terminal';
@@ -302,6 +321,8 @@ export interface RuntimeSnapshot {
   plans: PlanArtifact[];
   /** Messages queued behind the running turn, oldest first. */
   queued_prompts?: QueuedPrompt[];
+  /** The agent's own slash commands. */
+  commands?: ProviderCommand[];
 }
 
 /** A message waiting in a thread's queue (sent when the running turn ends). */
@@ -360,6 +381,9 @@ export interface RuntimeSession {
   background_tasks?: BackgroundTask[];
   /** What its agent takes (see `ProviderSession.capabilities` for the live value). */
   capabilities: RuntimeCapabilities;
+  /** The title is still the placeholder it was created with; the agent's own
+   *  name for the conversation replaces it. */
+  title_auto?: boolean;
 }
 
 /** Body of `POST /runtime-sessions/{id}/peers` — open a linked thread. */
@@ -507,8 +531,14 @@ export interface CreateRuntimeSessionReq {
   /** Absolute; defaults to the workspace root. */
   cwd?: string | null;
   title?: string | null;
+  /** `title` is a placeholder the agent's own name for it replaces. */
+  title_auto?: boolean;
   model?: string | null;
   access_mode?: RuntimeAccessMode;
+  /** A named provider account (`meta.account_id`), applied at every spawn. */
+  account_id?: string;
+  /** A network profile of the workspace (`meta.network_profile_id`). */
+  network_profile_id?: string;
   /** Makes this an embedded thread (stored as `meta.source`); any other value
    *  is a 400. Embedded threads close after `embedded_thread_auto_close_hours`
    *  idle (default 12, 0 = never) and reopen from History. */
@@ -546,6 +576,8 @@ export interface RuntimePromptReq {
   files?: PromptFile[];
   /** Applies from this turn on and sticks. */
   access_mode?: RuntimeAccessMode;
+  /** Plan mode for this turn (`capabilities.plan`). */
+  plan?: boolean;
   /** While a turn runs; omitted = refused (409). */
   delivery?: PromptDelivery;
 }

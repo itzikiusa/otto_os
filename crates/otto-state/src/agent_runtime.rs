@@ -59,7 +59,8 @@ pub struct RuntimeEntityRow {
 macro_rules! session_cols {
     () => {
         "id, workspace_id, provider, title, cwd, model, native_thread_id, closed, \
-         created_by, created_at, last_active_at, last_seq, seq_reserved, access_mode, parent_id, ui_control, meta"
+         created_by, created_at, last_active_at, last_seq, seq_reserved, access_mode, parent_id, ui_control, meta, \
+         title_auto"
     };
 }
 
@@ -102,6 +103,7 @@ fn row_to_session(r: &sqlx::sqlite::SqliteRow) -> Result<RuntimeSessionRecord> {
                 .and_then(|j| serde_json::from_str(&j).ok()),
             background_tasks: Vec::new(),
             capabilities: RuntimeCapabilities::for_provider(provider),
+            title_auto: r.get::<i64, _>("title_auto") != 0,
             meta: r
                 .get::<Option<String>, _>("meta")
                 .and_then(|j| serde_json::from_str(&j).ok()),
@@ -299,9 +301,12 @@ impl AgentRuntimeRepo {
         Ok(())
     }
 
-    pub async fn set_title(&self, id: &Id, title: &str) -> Result<()> {
-        sqlx::query("UPDATE agent_runtime_sessions SET title = ? WHERE id = ?")
+    /// `auto`: the title is still Otto's placeholder (the agent's own name
+    /// for the conversation may replace it); a person's rename is not.
+    pub async fn set_title(&self, id: &Id, title: &str, auto: bool) -> Result<()> {
+        sqlx::query("UPDATE agent_runtime_sessions SET title = ?, title_auto = ? WHERE id = ?")
             .bind(title)
+            .bind(auto)
             .bind(id)
             .execute(&self.pool)
             .await
