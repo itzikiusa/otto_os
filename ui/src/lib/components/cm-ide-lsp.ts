@@ -18,6 +18,8 @@ export interface IdeLspJumpTarget {
   line: number;
   column: number;
   symbol?: string;
+  originLine?: number;
+  originColumn?: number;
 }
 
 export interface IdeDiveCallbacks {
@@ -102,7 +104,7 @@ interface PooledClientEntry {
   rootPath: string;
   client: InstanceType<MarimoMod['LanguageServerClient']>;
   transport: InstanceType<MarimoMod['WebSocketTransport']>;
-  rawWs: WebSocket | null;
+  offTransportClose: (() => void) | null;
   evictFn: () => void;
   diagListeners: Map<string, Set<(diags: IdeDiagnostic[]) => void>>;
   refCount: number;
@@ -128,14 +130,11 @@ function disposePooledEntry(entry: PooledClientEntry): void {
   }
   if (clientPool.get(entry.key) === entry) clientPool.delete(entry.key);
   entry.diagListeners.clear();
-  try {
-    entry.rawWs?.removeEventListener?.('close', entry.evictFn);
-    entry.rawWs?.removeEventListener?.('error', entry.evictFn);
-  } catch { /* ignore */ }
+  try { entry.offTransportClose?.(); } catch { /* ignore */ }
+  entry.offTransportClose = null;
   try { (entry.client as unknown as { close?: () => void }).close?.(); } catch { /* ignore */ }
-  try { (entry.transport as unknown as { close?: () => void }).close?.(); } catch { /* ignore */ }
-  try { entry.rawWs?.close(); } catch { /* ignore */ }
-  entry.rawWs = null;
+  try { entry.transport.close(); } catch { /* ignore */ }
+  try { (entry.transport as unknown as { socket?: WebSocket }).socket?.close(); } catch { /* ignore */ }
 }
 
 function scheduleIdleDispose(entry: PooledClientEntry, delayMs = IDLE_CLOSE_MS): void {
@@ -192,9 +191,6 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions): Pool
   const rootUri = `file://${opts.rootPath}`;
   const transport = new mod.WebSocketTransport(opts.wsUri, opts.protocols);
   const diagListeners = new Map<string, Set<(diags: IdeDiagnostic[]) => void>>();
-  const rawWs = (transport as unknown as { connection?: WebSocket; ws?: WebSocket }).connection
-    ?? (transport as unknown as { ws?: WebSocket }).ws
-    ?? null;
 
   const client = new mod.LanguageServerClient({
     rootUri,
@@ -225,7 +221,7 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions): Pool
     rootPath: opts.rootPath,
     client,
     transport,
-    rawWs,
+    offTransportClose: null,
     evictFn: () => {},
     diagListeners,
     refCount: 0,
@@ -233,8 +229,8 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions): Pool
     disposed: false,
   };
   entry.evictFn = () => disposePooledEntry(entry);
-  rawWs?.addEventListener?.('close', entry.evictFn);
-  rawWs?.addEventListener?.('error', entry.evictFn);
+  entry.offTransportClose = transport.onClose?.(() => entry.evictFn()) ?? null;
+  void client.initializePromise.catch(() => entry.evictFn());
 
   client.onNotification((n) => {
     if (entry.disposed || n.method !== 'textDocument/publishDiagnostics' || !n.params?.uri) return;
@@ -422,7 +418,14 @@ export async function requestIdeDiveAtPos(
   // hand the string token straight to the host resolver first if LSP has no jump.
   const locs = await queryPluginLocations(view, pos, mode);
   if (locs.length === 1) {
-    cb({ path: locs[0].path, line: locs[0].line, column: locs[0].column, symbol: span?.word });
+    cb({
+      path: locs[0].path,
+      line: locs[0].line,
+      column: locs[0].column,
+      symbol: span?.word,
+      originLine: ln.number,
+      originColumn: column,
+    });
     return;
   }
   if (locs.length > 1) {
@@ -430,7 +433,15 @@ export async function requestIdeDiveAtPos(
       label: `${pathBasename(loc.path)}:${loc.line}`,
       hint: loc.path,
       icon: 'file' as const,
-      action: () => cb({ path: loc.path, line: loc.line, column: loc.column, symbol: span?.word }),
+      action: () =>
+        cb({
+          path: loc.path,
+          line: loc.line,
+          column: loc.column,
+          symbol: span?.word,
+          originLine: ln.number,
+          originColumn: column,
+        }),
     }));
     if (clickEvent) {
       ctxMenu.show(clickEvent, items);
@@ -439,14 +450,21 @@ export async function requestIdeDiveAtPos(
       if (coords) {
         ctxMenu.show({ clientX: coords.left, clientY: coords.bottom, preventDefault() {}, stopPropagation() {} } as MouseEvent, items);
       } else {
-        cb({ path: locs[0].path, line: locs[0].line, column: locs[0].column, symbol: span?.word });
+        cb({
+          path: locs[0].path,
+          line: locs[0].line,
+          column: locs[0].column,
+          symbol: span?.word,
+          originLine: ln.number,
+          originColumn: column,
+        });
       }
     }
     return;
   }
 
   // Fallback to backend HTTP `/ide/lsp/definition` | `/ide/lsp/implementation` + local fast resolver.
-  cb({ line: ln.number, column, symbol: span?.word });
+  cb({ line: ln.number, column, symbol: span?.word, originLine: ln.number, originColumn: column });
 }
 
 // ── Cmd/Ctrl Hover Symbol Underline + Cmd+Click / Cmd+Alt+Click Extension ────
