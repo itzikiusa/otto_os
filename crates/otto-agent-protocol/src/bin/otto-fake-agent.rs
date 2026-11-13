@@ -9,6 +9,10 @@
 //!   each answer settles its tool (allowed → `completed`, else `failed` with
 //!   content), the turn ends when both are answered.
 //! * `mode`       — `mode: <current mode id>`.
+//! * `model`      — `model: <the session/set_model id, or none>`; the
+//!   response carries a draft `usage` (5 in + 2 cached, 3 out).
+//! * `system`     — `system: <the _meta.antigravity.systemPrompt.append of
+//!   session/new|load, or none>`.
 //! * `hang`       — one chunk, then waits for `session/cancel` → `cancelled`.
 //! * `hang-hard`  — like `hang` but ignores `session/cancel`.
 //! * `plan`       — a `plan` update, then `end_turn`.
@@ -18,8 +22,8 @@
 //!
 //! With `--refuse-session` every `session/new` fails with `-32000` (signed
 //! out, no auth method to offer). `--approval-mode <m>` sets the starting
-//! mode; `session/new|load` advertise the modes `default` and `autoEdit`
-//! (not `yolo`), which `session/set_mode` switches between.
+//! mode; `session/new|load` advertise the modes `default`, `autoEdit` and
+//! `accept-edits` (not `yolo`), which `session/set_mode` switches between.
 //! `initialize` advertises `promptCapabilities.embeddedContext` (no images).
 //!
 //! `session/load` replays one history chunk before answering (clients must
@@ -76,7 +80,16 @@ fn main() {
         .find(|w| w[0] == "--approval-mode")
         .map_or("default".to_string(), |w| w[1].clone());
     let modes = json!({"currentModeId": "default", "availableModes": [
-        {"id": "default", "name": "Default"}, {"id": "autoEdit", "name": "Auto edit"}]});
+        {"id": "default", "name": "Default"}, {"id": "autoEdit", "name": "Auto edit"},
+        {"id": "accept-edits", "name": "Accept edits"}]});
+    let mut model = "none".to_string();
+    let mut system = "none".to_string();
+    let system_of = |p: &Value| {
+        p.pointer("/_meta/antigravity/systemPrompt/append")
+            .and_then(Value::as_str)
+            .unwrap_or("none")
+            .to_string()
+    };
     while let Some(msg) = next(&mut lines) {
         let id = msg.get("id").cloned().unwrap_or(Value::Null);
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
@@ -89,15 +102,23 @@ fn main() {
             "session/new" if refuse => out(
                 json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":"Authentication required"}}),
             ),
-            "session/new" => reply(
-                &id,
-                json!({"sessionId": format!("fake-{}", std::process::id()), "modes": modes}),
-            ),
+            "session/new" => {
+                system = system_of(&params);
+                reply(
+                    &id,
+                    json!({"sessionId": format!("fake-{}", std::process::id()), "modes": modes}),
+                )
+            }
+            "session/set_model" => {
+                model = params["modelId"].as_str().unwrap_or_default().to_string();
+                reply(&id, json!({}));
+            }
             "session/set_mode" => {
                 mode = params["modeId"].as_str().unwrap_or_default().to_string();
                 reply(&id, json!({}));
             }
             "session/load" => {
+                system = system_of(&params);
                 let sid = params["sessionId"].as_str().unwrap_or_default().to_string();
                 chunk(&sid, "agent_message_chunk", "(history)");
                 reply(&id, json!({"modes": modes}));
@@ -160,6 +181,18 @@ fn main() {
                     }
                     "mode" => {
                         chunk(&sid, "agent_message_chunk", &format!("mode: {mode}"));
+                        done("end_turn");
+                    }
+                    "model" => {
+                        chunk(&sid, "agent_message_chunk", &format!("model: {model}"));
+                        reply(
+                            &id,
+                            json!({"stopReason":"end_turn","usage":{"inputTokens":5,
+                                "cachedReadTokens":2,"outputTokens":3,"thoughtTokens":1}}),
+                        );
+                    }
+                    "system" => {
+                        chunk(&sid, "agent_message_chunk", &format!("system: {system}"));
                         done("end_turn");
                     }
                     "ask2" => {

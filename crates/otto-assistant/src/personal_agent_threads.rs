@@ -1,7 +1,7 @@
 //! Personal agents on the **structured runtime** — their runs and their chat
 //! are Threads threads (`otto-agent-protocol`), rendered with the Threads
 //! conversation view, for every provider the runtime drives as a Threads
-//! thread ([`THREAD_PROVIDERS`]). Any other provider (`agy`, custom ones)
+//! thread ([`THREAD_PROVIDERS`]). Any other provider (custom ones)
 //! keeps a terminal session (`personal_agent_session`).
 //!
 //! A thread runs under the same server-owned meta a terminal session would
@@ -34,7 +34,8 @@ use crate::AssistantCtx;
 /// Providers whose personal-agent runs and chats are Threads threads — the
 /// ones Threads starts on the structured runtime (`isRuntimeProvider` in
 /// `ui/src/modules/threads/runtime/runtimeThreads.svelte.ts`).
-pub const THREAD_PROVIDERS: &[&str] = &["claude", "codex", "gemini", "grok", "opencode", "pi"];
+pub const THREAD_PROVIDERS: &[&str] =
+    &["claude", "codex", "gemini", "grok", "agy", "opencode", "pi"];
 
 /// How long one wait for the run's turn lasts before the progress check.
 const POLL: Duration = Duration::from_secs(20);
@@ -663,12 +664,10 @@ mod tests {
     fn thread_providers_are_the_runtime_ones() {
         assert_eq!(thread_provider(""), Some(RuntimeProvider::Claude));
         assert_eq!(thread_provider(" codex "), Some(RuntimeProvider::Codex));
-        for p in ["gemini", "grok", "opencode", "pi"] {
+        for p in ["gemini", "grok", "agy", "opencode", "pi"] {
             assert!(thread_provider(p).is_some(), "{p}");
         }
-        // agy (its runtime driver is not a Threads default) and custom
-        // providers keep a terminal session.
-        assert_eq!(thread_provider("agy"), None);
+        // Custom providers keep a terminal session.
         assert_eq!(thread_provider("my-cli"), None);
     }
 
