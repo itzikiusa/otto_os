@@ -12,7 +12,9 @@
 //!     structured Claude sessions and, only for a login whose owner turned on
 //!     "Check with Anthropic", by that login's own CLI answering `get_usage`
 //!     ([`cli`], [`logins`]). Otto never reads a login token;
-//!   * Antigravity: no local source, so the row is `unknown` with the reason.
+//!   * Antigravity and Grok: no local source, so Otto asks each installed CLI
+//!     ([`probes`]: `agy -p /usage`, grok's ACP `_x.ai/billing`), cached for
+//!     five minutes. [`refresh_cli_limits`] runs before the rows are built.
 //!
 //! A snapshot older than [`STALE_AFTER_SECS`] is `stale`, and a window whose
 //! reset time has passed since the snapshot drops its percent (it reset; the
@@ -22,10 +24,12 @@
 mod claude;
 mod cli;
 mod logins;
+mod probes;
 mod scan;
 
 pub use claude::{claude_config_dir, record_claude_line, record_claude_rate_limit};
 pub use logins::{run_claude_check, set_claude_check, ClaudeCheckReq, ClaudeRunReq};
+pub use probes::refresh as refresh_cli_limits;
 
 use std::path::Path;
 
@@ -45,8 +49,8 @@ pub const STALE_AFTER_SECS: i64 = 30 * 60;
 
 /// Why a Claude row has no numbers (check off, no session reported any).
 pub const CLAUDE_REASON: &str = "Claude Code does not write its plan limits to disk. Otto shows them once a structured Claude session reports them, or when Check with Anthropic is on for this login.";
-/// Why an Antigravity row has no numbers.
-pub const AGY_REASON: &str = "Antigravity does not write its quota to files Otto reads.";
+/// Why an Antigravity row has no numbers before agy first answered.
+pub const AGY_REASON: &str = "Otto has not heard back from agy yet.";
 
 /// `GET /usage/limits`.
 #[derive(Debug, Clone, Serialize)]
@@ -72,7 +76,7 @@ pub enum LimitStatus {
 pub struct AccountLimits {
     /// Stable row key (`codex:default`, `codex:account:<id>`, `claude:~/.claude-work`).
     pub key: String,
-    /// `codex` | `claude` | `agy`.
+    /// `codex` | `claude` | `agy` | `grok`.
     pub provider: String,
     /// The Otto subscription profile, when the row is one.
     pub account_id: Option<Id>,
@@ -140,6 +144,7 @@ pub async fn remaining_limits(
         .await?;
     let checks = logins::load_checks(pool).await;
     let data_dir = data_dir.to_path_buf();
+    let readings = probes::readings();
     let now = Utc::now();
     let rows = tokio::task::spawn_blocking(move || {
         build(
@@ -149,6 +154,7 @@ pub async fn remaining_limits(
             &home_dir(),
             &RootsEnv::from_process(),
             &checks,
+            &readings,
             now,
         )
     })
@@ -161,8 +167,9 @@ pub async fn remaining_limits(
     })
 }
 
-/// The rows, in display order: Codex, Claude, Antigravity; within each the
-/// default login, `~/.claude-*` dirs, then profiles by label.
+/// The rows, in display order: Codex, Claude, Antigravity, Grok; within each
+/// the default login, `~/.claude-*` dirs, then profiles by label.
+#[allow(clippy::too_many_arguments)]
 fn build(
     accounts: &[ProviderAccount],
     is_root: bool,
@@ -170,6 +177,7 @@ fn build(
     home: &Path,
     env: &RootsEnv,
     checks: &logins::Checks,
+    readings: &probes::Readings,
     now: DateTime<Utc>,
 ) -> Vec<AccountLimits> {
     let mut rows: Vec<AccountLimits> =
@@ -202,14 +210,22 @@ fn build(
             .iter()
             .any(|r| r.kind != RootKind::Account && r.dir.is_dir())
         {
-            rows.push(unknown_row(
-                "agy:default".into(),
-                "agy",
-                None,
-                "Antigravity".into(),
-                "default",
-                AGY_REASON,
-            ));
+            rows.push(match readings.get("agy") {
+                Some(r) => probes::agy_row(r, now),
+                None => unknown_row(
+                    "agy:default".into(),
+                    "agy",
+                    None,
+                    probes::AGY_LABEL.into(),
+                    "default",
+                    AGY_REASON,
+                ),
+            });
+        }
+        // A reading exists only when a `grok` provider is set up (the route
+        // passes its program to `refresh_cli_limits`).
+        if let Some(r) = readings.get("grok") {
+            rows.push(probes::grok_row(r, now));
         }
     }
     let homes = data_dir.join("provider-accounts");
@@ -237,7 +253,8 @@ fn provider_rank(p: &str) -> u8 {
     match p {
         "codex" => 0,
         "claude" => 1,
-        _ => 2,
+        "agy" => 2,
+        _ => 3,
     }
 }
 
@@ -440,6 +457,7 @@ mod tests {
             dir.path(),
             &env_for(&claude, &codex),
             &Default::default(),
+            &Default::default(),
             now,
         );
         let row = rows.iter().find(|r| r.key == "codex:default").unwrap();
@@ -477,6 +495,7 @@ mod tests {
             dir.path(),
             &env_for(&claude, &codex),
             &Default::default(),
+            &Default::default(),
             now,
         );
         let row = &rows[0];
@@ -510,6 +529,7 @@ mod tests {
             dir.path(),
             dir.path(),
             &env_for(&claude, &codex),
+            &Default::default(),
             &Default::default(),
             now,
         );
@@ -549,6 +569,7 @@ mod tests {
             dir.path(),
             &env_for(&claude, &codex),
             &Default::default(),
+            &Default::default(),
             now,
         );
         let row = rows.iter().find(|r| r.provider == "claude").unwrap();
@@ -558,6 +579,60 @@ mod tests {
         assert_eq!(row.windows[0].left_percent, Some(75.0));
         let check = row.check.as_ref().unwrap();
         assert!(!check.enabled && !check.checking);
+    }
+
+    #[test]
+    fn agy_and_grok_rows_come_from_the_cli_readings() {
+        let dir = tempfile::tempdir().unwrap();
+        let agy = dir.path().join("agy");
+        std::fs::create_dir_all(&agy).unwrap();
+        let (claude, codex) = (dir.path().join("claude"), dir.path().join("codex"));
+        let env = RootsEnv {
+            explicit: Some(format!(
+                "{}:{}:{}",
+                claude.display(),
+                codex.display(),
+                agy.display()
+            )),
+            isolated: false,
+            codex_home: None,
+        };
+        let now = at("2026-11-13T13:05:00Z");
+        let build_with = |readings: &probes::Readings| {
+            build(
+                &[],
+                true,
+                dir.path(),
+                dir.path(),
+                &env,
+                &Default::default(),
+                readings,
+                now,
+            )
+        };
+        // agy has not answered yet: a row with the reason; no grok provider: no row.
+        let rows = build_with(&Default::default());
+        let keys: Vec<_> = rows.iter().map(|r| r.key.as_str()).collect();
+        assert!(keys.contains(&"agy:default"), "{keys:?}");
+        assert!(!keys.contains(&"grok:default"));
+        let reading = |answer| probes::Reading {
+            taken_at: at("2026-11-13T13:00:00Z"),
+            answer,
+        };
+        let agy_data = serde_json::json!({"groups":[{"name":"Gemini Models","buckets":[{"id":"gemini-5h","window":"5h","remaining_fraction":0.66,"reset_time":"2026-11-13T15:24:17Z"}]}]});
+        let readings = probes::Readings::from([
+            ("agy", reading(Ok(agy_data))),
+            ("grok", reading(Err("grok exited before answering.".into()))),
+        ]);
+        let rows = build_with(&readings);
+        let agy_row = rows.iter().find(|r| r.key == "agy:default").unwrap();
+        assert_eq!(agy_row.status, LimitStatus::Ok);
+        assert_eq!(agy_row.windows[0].left_percent, Some(66.0));
+        let grok = rows.last().unwrap();
+        assert_eq!(
+            (grok.key.as_str(), grok.status),
+            ("grok:default", LimitStatus::Unknown)
+        );
     }
 
     #[test]

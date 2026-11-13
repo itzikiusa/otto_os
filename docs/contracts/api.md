@@ -213,8 +213,8 @@ failure on a read returns an error (500) — never a 200 with zero totals.
 - GET /usage/limits → LimitsResp `{accounts: AccountLimits[], generated_at, stale_after_secs}`
   (`otto_usage::limits`) — remaining subscription allowance, one row per provider login: root
   also sees the machine's default CLI homes (`~/.codex` / `$CODEX_HOME`, `~/.claude`, every
-  `~/.claude-*`, Antigravity), everyone sees their own subscription profiles
-  (`/auth/provider-accounts`). `AccountLimits{key, provider: "codex"|"claude"|"agy", account_id?,
+  `~/.claude-*`, Antigravity, Grok), everyone sees their own subscription profiles
+  (`/auth/provider-accounts`). `AccountLimits{key, provider: "codex"|"claude"|"agy"|"grok", account_id?,
   label, source: "default"|"config_dir"|"account", status: "ok"|"stale"|"unknown", reason?,
   plan?, taken_at?, windows: WindowLimit[], credits?: {has_credits, unlimited, balance?},
   limit_reached?, check?: ClaudeCheck}`; `WindowLimit{id, name, window_minutes?, used_percent?,
@@ -228,7 +228,13 @@ failure on a read returns an error (500) — never a 200 with zero totals.
   `seven_day_<model>` (from the old keys or, on newer CLIs, `rate_limits.limits[]`: `weekly_all`
   IS `seven_day`, a model-scoped entry is `Weekly · <display_name>`, an unknown group/kind is
   shown by its group and scope; null windows are left out); a Claude row's `taken_at` is its OLDEST window's reading. Nothing is
-  persisted and no login token is read. Antigravity rows are `unknown` with `reason`. `stale` = the snapshot is older than
+  persisted and no login token is read. Antigravity (root, when an agy home exists): the
+  installed CLI answers `agy -p /usage --output-format json` (no turn, no quota) — one window per
+  `command.data.groups[].buckets[]` (`<group> · 5-hour|Weekly`, id = bucket id). Grok (root, when
+  a `grok` provider is set up): `grok agent stdio` answers the ACP `_x.ai/billing` request after
+  `initialize` — one `subscription` window (`Weekly`/`Monthly` from `config.currentPeriod`),
+  `plan` = `subscription_tier`. Both answers (or failures, as `unknown` + `reason`) are cached
+  5 min per CLI, refreshed in the background once expired; the first request waits (≤ 15 s). `stale` = the snapshot is older than
   `stale_after_secs` (1800); a window whose `resets_at` passed after the snapshot has
   `reset_since_snapshot: true` and null percents — an old percent is never served as current.
 - PUT /usage/limits/claude-check `{key, enabled}` → LimitsResp — turn "Check with Anthropic" on/off
@@ -3324,7 +3330,7 @@ Workspace-independent: one Mac, one daemon. `busy` = a background agent arriving
 | GET /usage/report | Usage:View (non-root: own sessions) | `sessions_limit` (1–1000, default 100), `include=daily_models` | UsageReport (daily/monthly/model/session tables; `daily_models` only when included) |
 | POST /usage/ccusage-check | root | `{days?}` | CcusageCheck (opt-in `npx ccusage` cross-check) |
 | GET /usage/metrics | root | — | system CPU/RAM metrics |
-| GET /usage/limits | Usage:View (non-root: own subscription profiles only) | — | LimitsResp — remaining allowance per provider login (Codex from local rollouts; Claude from session events or the opt-in check; Antigravity `unknown` with a reason); see the Usage bullets above |
+| GET /usage/limits | Usage:View (non-root: own subscription profiles only) | — | LimitsResp — remaining allowance per provider login (Codex from local rollouts; Claude from session events or the opt-in check; Antigravity and Grok asked of their CLIs, cached 5 min); see the Usage bullets above |
 | PUT /usage/limits/claude-check | Usage:View + the caller sees that login | `{key, enabled}` | LimitsResp (opt-in switch, off by default) |
 | POST /usage/limits/claude-check/run | Usage:View + the caller sees that login | `{key}` | LimitsResp (runs the login's own `claude` CLI `get_usage`; 400 while the switch is off; 10 s timeout, 5 min cache, single flight) |
 | PUT /usage/config | root | UsageConfig | config |

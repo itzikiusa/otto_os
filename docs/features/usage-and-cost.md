@@ -494,14 +494,16 @@ ClickHouse: the numbers come from files the CLIs already write, read on demand
 | Codex (default `~/.codex` / `$CODEX_HOME`, and each Codex subscription profile) | The `rate_limits` object on the newest `token_count` line of the newest rollouts (`primary` / `secondary` windows with `used_percent`, `window_minutes`, `resets_at`; `credits`; `plan_type`). Both rollout layouts; older `resets_in_seconds` and RFC 3339 `resets_at` are read too. | Each window: `% left · resets in 3 d 4 h`, plan, credits. Model-specific buckets (`limit_id` other than `codex`) appear as extra windows named after the bucket. |
 | Codex with an API key | `rate_limits: null` | `Unknown` — "This login reports no plan limits". |
 | Claude Code (default, every `~/.claude-*`, each Claude profile) | Claude Code writes no plan limits to disk. Otto keeps the newest reading per window in memory, keyed by the login's config dir, from (1) `rate_limit_event` frames a structured (stream-json) Claude session prints, and (2) only when the owner turns on **Check with Anthropic** for that login, the login's own `claude` CLI answering the `get_usage` control request. | `5-hour`, `Weekly`, `Weekly · Opus/Sonnet/<model>` windows (newer CLIs list them in `rate_limits.limits[]`; a limit listed but not in effect, `is_active: false`, is shown dimmed with "not in effect now"; a null window is left out), plan; `Unknown` with the reason when nothing was seen or a check failed. |
-| Antigravity | None local. | `Unknown`, with the reason. |
+| Antigravity (root, default login) | Nothing on disk. Otto asks the installed CLI: `agy -p /usage --output-format json` answers without a turn or quota spend. | One window per quota bucket: `Gemini Models · 5-hour`, `Claude and GPT models · Weekly`, …; `Unknown` with agy's error when it fails. |
+| Grok (root, when a `grok` provider is set up) | Nothing on disk. Otto starts `grok agent stdio` and asks the ACP `_x.ai/billing` extension after `initialize` — no session, no prompt. | One `Weekly`/`Monthly` window from the current billing period's credit use, plan = subscription tier; `Unknown` for an API-key login. |
 
 Root also sees the machine's default CLI homes; everyone sees their own
 subscription profiles (Settings ▸ Providers). **Freshness:** a reading older
 than 30 min is marked **Stale** and every percent on it carries its age ("8% left
 5 h ago"); a window whose reset time passed after the reading shows no percent
 at all ("Reset since the last reading"). The page re-reads once a minute while
-visible; the daemon caches each Codex root's answer for 15 s.
+visible; the daemon caches each Codex root's answer for 15 s and each agy/grok
+answer for 5 min (an expired one is shown while a fresh one is fetched).
 
 **Check with Anthropic (Claude, opt-in per login, off by default).** The switch
 on a Claude row asks first, naming what runs and where it goes. When on, Otto
