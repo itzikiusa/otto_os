@@ -207,18 +207,18 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('council-stage.jpg'),
-        beats: 4,
+        beats: 3,
         label: 'Ask several: Claude Opus and GPT side by side',
         cam: [
           { b: 0, x: 0.5, y: 0.5, z: 1.6 },
           { b: 1, x: 0.5, y: 0.52, z: 2 },
         ],
-        callouts: [{ b: 1.5, x: 0.43, y: 0.548, label: 'Two seats', side: 'bottom' }],
+        callouts: [{ b: 1, x: 0.43, y: 0.548, label: 'Two seats', side: 'bottom' }],
       },
       {
         kind: 'screen',
         src: cap('council.jpg'),
-        beats: 6,
+        beats: 4,
         transition: 'push',
         label: 'Each seat answers in its own column',
         cam: [
@@ -229,13 +229,25 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('council-synthesis.jpg'),
-        beats: 6,
+        beats: 4,
         transition: 'whip',
         label: 'The judge: agreement, disagreement, a pick',
         cam: [
           { b: 0, x: 0.6, y: 0.6, z: 1.1 },
-          { b: 1.5, x: 0.5, y: 0.73, z: 1.5 },
+          { b: 1, x: 0.5, y: 0.6, z: 1.5 },
         ],
+      },
+      {
+        kind: 'screen',
+        src: cap('council-round2.jpg'),
+        beats: 5,
+        transition: 'push',
+        label: 'A follow-up goes to every seat as round 2',
+        cam: [
+          { b: 0, x: 0.5, y: 0.3, z: 1.2 },
+          { b: 1.5, x: 0.38, y: 0.25, z: 1.6 },
+        ],
+        callouts: [{ b: 2, x: 0.36, y: 0.185, label: 'Round 2: every seat answered', side: 'right' }],
       },
     ],
   },
@@ -398,7 +410,7 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('design-lobby.jpg'),
-        beats: 6,
+        beats: 5,
         transition: 'push',
         label: 'Design Hall: one prompt, every design',
         cam: [
@@ -413,7 +425,7 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('design-versions.jpg'),
-        beats: 5,
+        beats: 4,
         transition: 'whip',
         label: 'Autosaved, with every version kept',
         cam: [
@@ -424,13 +436,25 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('design-compare.jpg'),
-        beats: 5,
+        beats: 4,
         transition: 'push',
         label: 'Compare two versions, then restore or approve',
         cam: [
           { b: 0, x: 0.5, y: 0.5, z: 1.05 },
           { b: 1.5, x: 0.5, y: 0.45, z: 1.25 },
         ],
+      },
+      {
+        kind: 'screen',
+        src: cap('design-comments.jpg'),
+        beats: 3,
+        transition: 'whip',
+        label: 'Comments pin to the design',
+        cam: [
+          { b: 0, x: 0.6, y: 0.4, z: 1.1 },
+          { b: 1, x: 0.65, y: 0.38, z: 1.3 },
+        ],
+        callouts: [{ b: 1, x: 0.357, y: 0.535, label: 'A pinned comment', side: 'bottom' }],
       },
     ],
   },

@@ -56,6 +56,12 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 See the [0.2.2 release notes](../../releases/tag/v0.2.2) for the full list,
 including behaviour changes to know before upgrading.
 
+| Threads — ask another agent | Council — rounds and synthesis |
+| :---: | :---: |
+| ![A thread with a child thread's live card, nested under it in the sidebar](docs/screenshots/threads-ask-agent.jpg) | ![A council of two agents answering round 2, with the synthesis of round 1](docs/screenshots/council-rounds.jpg) |
+| **Design Hall — comments on a design** | **Phone — the light version** |
+| ![A pinned comment on a checkout design, listed in the Comments tab](docs/screenshots/design-comments.jpg) | ![The phone light version with its five tabs](docs/screenshots/phone-light.jpg) |
+
 ### What's new in 0.2.1
 
 - **Threads on structured agent protocols.** Codex, Claude, Antigravity, pi and
@@ -147,16 +153,22 @@ including behaviour changes to know before upgrading.
     `Thinking` blocks, inline MCP approval docks, `@file` typeahead, and
     explicit **Steer** (interrupt/nudge now) vs **Queue** (wait for turn end)
     submission.
-  - **Workspace inspector (`Files · Changes · Connections · Peers`):** multi-tab
+  - **Several agents in one conversation:** ask another agent from inside a
+    thread (its answer arrives as a child thread: a live card in the parent,
+    nested under it in the sidebar), or start a **Council**: one prompt to two
+    to four agents, answers side by side, follow-up rounds, and a judge that
+    synthesizes each round.
+  - **Workspace inspector (`Files · Changes · Connections`):** multi-tab
     file explorer with rendered Markdown/image preview + source lines, working-tree
     git status + Unified/Split diffs, live `otto_db_query` activity with 1-click
-    **Open side-by-side** Database Explorer, and direct **Session-to-Session**
-    message relay, broadcast, peer timeline, and **Session Rooms**.
+    **Open side-by-side** Database Explorer, and one **Related threads** control
+    for message relay, broadcast and **Session Rooms**. File and folder paths in
+    a message are links that open where the path really exists.
 - **Agent sessions** — run `claude`, `codex`, `agy`, a plain shell, or **any
   custom agent CLI you register** (custom providers are first-class on every
   agent surface, with per-surface provider/model pickers) in real PTY-backed
-  terminals you can watch, split, and type into, or flip any session between
-  **Terminal** and **Chat** mode. Every session can **pin its
+  terminals you can watch, split, and type into, or open the same session in
+  **Threads** for a chat view. Every session can **pin its
   own model** — chosen from a live per-provider **model catalog** (refreshed
   hourly from the providers' docs/CLIs, no API keys needed) — and the pin
   applies to that session only, so switching models never leaks into the next

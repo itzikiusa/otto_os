@@ -394,6 +394,8 @@ export async function seedAll(api, { dataDir, home, fakeBin, repoRoot, docker })
     await api.try('POST', `/design/artifacts/${ids.frame}/versions`, { message: 'v3 — Apple Pay on top', content: readFileSync(join(import.meta.dirname, '../demo-design/checkout.html'), 'utf8').replace('Pay now', 'Pay $148.00').replace('Saved cards first.', 'Saved cards and Apple Pay first.') });
     if (ids.brand) await api.try('POST', `/design/artifacts/${ids.frame}/links`, { rel: 'uses_tokens', dst_kind: 'artifact', dst_id: ids.brand });
     await api.try('PATCH', `/design/artifacts/${ids.frame}`, { status: 'review' });
+    // A review comment pinned on the Pay button (Comments tab + a numbered pin).
+    await api.try('POST', `/design/artifacts/${ids.frame}/comments`, { body: 'Make Pay sticky on mobile so it never scrolls out of view.', pin: { x: 0.33, y: 0.5 } });
   }
   for (const a of [ids.frame, ids.frame2, ids.site].filter(Boolean)) {
     for (const dir of ['rounded', 'rounded', 'bold']) await api.try('POST', '/design/signals', { artifact_id: a, kind: 'variant_accepted', payload: { direction: dir } });

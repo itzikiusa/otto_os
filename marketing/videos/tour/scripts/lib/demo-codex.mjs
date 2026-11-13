@@ -161,6 +161,13 @@ async function judge(t) {
   finish(t);
 }
 
+// A Council follow-up (round 2), sent to every seat.
+async function councilFollowUp(t) {
+  await stream(t, `${t}-m`, 'Keep the spinner on Pay for the first 2 s, then show **"Your bank is slow to answer. We are retrying."** Disable Pay while it retries; after attempt 4, show the decline reason and a retry link.');
+  usage(t, 8100, 230);
+  finish(t);
+}
+
 // A child thread this one asked finished: its answer arrives as a new turn.
 async function wake(t) {
   await stream(t, `${t}-m`, 'Claude found two gaps: separate keys and the window edge. I will add both cases to **tests/rateLimit.test.ts** before CI finishes.');
@@ -172,6 +179,7 @@ function pick(text) {
   const s = text.toLowerCase();
   if (s.startsWith('[reply from thread')) return wake;
   if (s.includes('you are the judge of a council')) return judge;
+  if (s.includes('customer see')) return councilFollowUp;
   if (s.includes('retries') || s.includes('backoff')) return councilSeat;
   if (s.includes('regression test') || s.includes('rate limit') || s.includes('rate-limit')) return regressionTest;
   if (s.includes('draft pr') || s.includes('open a pr') || s.includes('open the pr')) return draftPr;

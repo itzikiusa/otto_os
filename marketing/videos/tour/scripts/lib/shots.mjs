@@ -398,6 +398,22 @@ export const SHOTS = {
     await page.getByText('Open question.', { exact: false }).last().waitFor({ timeout: 40_000 }).catch(() => {});
     await wait(2500);
     await still(page, c, 'council-synthesis');
+    // Round 2: one follow-up to every seat.
+    const follow = page.getByTestId('council-followup');
+    if (await follow.isVisible().catch(() => false)) {
+      await follow.click();
+      await typeSlow(page, 'What should the customer see while it retries?', 38);
+      await wait(600);
+      await still(page, c, 'council-followup');
+      await glide(page, page.getByTestId('council-send-followup'));
+      await page.getByText('Try another card', { exact: false }).last().waitFor({ timeout: 40_000 }).catch(() => {});
+      await page.getByText('retry link', { exact: false }).last().waitFor({ timeout: 40_000 }).catch(() => {});
+      await wait(1500);
+      // Each seat column keeps its scroll and offers "1 new message": follow it.
+      for (const pill of await page.getByText(/new message/).all()) await pill.click({ timeout: 3000 }).catch(() => {});
+      await wait(1800);
+      await still(page, c, 'council-round2');
+    } else console.log('  (skip: council follow-up)');
     await rec.stop(join(c.out, 'council.mp4'));
     await context.close();
   },
@@ -502,6 +518,10 @@ export const SHOTS = {
       await page.goto(`${UI}/#/design/a/${c.meta.ids.frame}`);
       await wait(4000);
       await still(page, c, 'design-artifact');
+      if (await tryClick(page.getByRole('button', { name: /^Comments/ }).or(page.getByRole('tab', { name: /^Comments/ })), 'comments tab')) {
+        await wait(1800);
+        await still(page, c, 'design-comments');
+      }
       await tryClick(page.getByRole('button', { name: /^Versions/ }).or(page.getByRole('tab', { name: /^Versions/ })), 'versions tab');
       await wait(1800);
       await still(page, c, 'design-versions');

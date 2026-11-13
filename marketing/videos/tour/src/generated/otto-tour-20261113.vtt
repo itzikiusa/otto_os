@@ -46,7 +46,7 @@ Council sends one prompt to several agents, side by side.
 
 12
 00:00:44.000 --> 00:00:47.850
-Synthesize: a judge compares the answers and picks or merges.
+A judge compares the answers. A follow-up goes to every seat as round 2.
 
 13
 00:00:48.250 --> 00:00:51.850
@@ -86,7 +86,7 @@ A story's Design tab lists the designs that implement it.
 
 22
 00:01:25.000 --> 00:01:29.850
-Design Hall is the one home for designs: compare versions, restore or approve one.
+Design Hall is the one home for designs: versions, compare, approve, and comments pinned on the design.
 
 23
 00:01:30.250 --> 00:01:32.850

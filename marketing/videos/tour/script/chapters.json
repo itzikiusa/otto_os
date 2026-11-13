@@ -63,7 +63,7 @@
       "bars": 4,
       "captions": [
         "Council sends one prompt to several agents, side by side.",
-        "Synthesize: a judge compares the answers and picks or merges."
+        "A judge compares the answers. A follow-up goes to every seat as round 2."
       ]
     },
     {
@@ -115,7 +115,7 @@
       "bars": 5,
       "captions": [
         "A story's Design tab lists the designs that implement it.",
-        "Design Hall is the one home for designs: compare versions, restore or approve one."
+        "Design Hall is the one home for designs: versions, compare, approve, and comments pinned on the design."
       ]
     },
     {

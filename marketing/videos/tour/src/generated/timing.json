@@ -134,7 +134,7 @@
           "end": 43.85
         },
         {
-          "text": "Synthesize: a judge compares the answers and picks or merges.",
+          "text": "A judge compares the answers. A follow-up goes to every seat as round 2.",
           "start": 44,
           "end": 47.85
         }
@@ -244,7 +244,7 @@
           "end": 84.85
         },
         {
-          "text": "Design Hall is the one home for designs: compare versions, restore or approve one.",
+          "text": "Design Hall is the one home for designs: versions, compare, approve, and comments pinned on the design.",
           "start": 85,
           "end": 89.85
         }

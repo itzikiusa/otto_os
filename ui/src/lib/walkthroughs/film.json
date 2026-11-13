@@ -1,8 +1,8 @@
 {
-  "file": "otto-tour-20261105.mp4",
-  "poster": "otto-tour-20261105-poster.jpg",
-  "captions": "otto-tour-20261105.vtt",
-  "duration": 150.02,
+  "file": "otto-tour-20261113.mp4",
+  "poster": "otto-tour-20261113-poster.jpg",
+  "captions": "otto-tour-20261113.vtt",
+  "duration": 156.01,
   "chapters": [
     {
       "id": "intro",
@@ -30,97 +30,104 @@
       "section": "agents",
       "title": "Agents",
       "start": 22,
-      "duration": 10
+      "duration": 6
     },
     {
       "id": "threads",
       "section": "threads",
       "title": "Threads",
-      "start": 32,
+      "start": 28,
       "duration": 12
+    },
+    {
+      "id": "council",
+      "section": "threads",
+      "title": "Council",
+      "start": 40,
+      "duration": 8
     },
     {
       "id": "loops",
       "section": "loops",
       "title": "Goal Loops",
-      "start": 44,
-      "duration": 6
+      "start": 48,
+      "duration": 8
     },
     {
       "id": "workflows",
       "section": "workflows",
       "title": "Workflows and Scheduled Tasks",
-      "start": 50,
+      "start": 56,
       "duration": 8
     },
     {
       "id": "personal-agents",
       "section": "personal-agents",
       "title": "Personal Agents",
-      "start": 58,
+      "start": 64,
       "duration": 8
     },
     {
       "id": "git",
       "section": "git",
       "title": "Git and AI review",
-      "start": 66,
+      "start": 72,
       "duration": 8
     },
     {
       "id": "product",
       "section": "product",
       "title": "Product and Design Hall",
-      "start": 74,
+      "start": 80,
       "duration": 10
     },
     {
       "id": "vault",
       "section": "vault",
       "title": "Vault and Skills Lab",
-      "start": 84,
+      "start": 90,
       "duration": 6
     },
     {
       "id": "database",
       "section": "database",
       "title": "Database Explorer",
-      "start": 90,
+      "start": 96,
       "duration": 8
     },
     {
       "id": "infra",
       "section": "connections",
       "title": "Connections and cloud",
-      "start": 98,
+      "start": 104,
       "duration": 8
     },
     {
       "id": "insights",
       "section": "insights",
       "title": "Insights and Usage",
-      "start": 106,
+      "start": 112,
       "duration": 8
     },
     {
       "id": "rooms",
       "section": "rooms",
       "title": "Rooms · collaborate and recap",
-      "start": 114,
+      "start": 120,
       "duration": 16
     },
     {
       "id": "phone",
       "section": "phone-and-remote",
       "title": "Phone access",
-      "start": 130,
+      "start": 136,
       "duration": 8
     },
     {
       "id": "outro",
       "section": "channels",
       "title": "Everywhere",
-      "start": 138,
+      "start": 144,
       "duration": 12
     }
   ]

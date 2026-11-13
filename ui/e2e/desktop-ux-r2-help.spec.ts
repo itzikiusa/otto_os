@@ -142,7 +142,7 @@ test('long chapter names remain readable in desktop columns', async ({ page }) =
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.route('**/__r2tour.mp4', (route) => route.abort());
   await page.goto('/#/walkthroughs');
-  const title = page.locator('.chapter-title').filter({ hasText: 'Run with Otto and Mission Control' });
+  const title = page.locator('.chapter-title').filter({ hasText: 'Workflows and Scheduled Tasks' });
   await expect(title).toBeVisible();
   expect(await title.evaluate((el) => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1);
 });

@@ -78,6 +78,14 @@ async function reviewTests() {
   done(9400, 310);
 }
 
+// A Council follow-up (round 2), sent to every seat.
+async function followUp() {
+  await say(
+    'After 2 s, swap the spinner for **"Still confirming your payment…"** and keep Pay disabled, so nobody taps twice. If the last attempt fails, show the bank\'s reason and a **Try another card** button.',
+  );
+  done(7200, 260);
+}
+
 async function generic() {
   await say('Done. Nothing else needs changing here.');
   done(900, 20);
@@ -86,6 +94,7 @@ async function generic() {
 function pick(text) {
   const s = text.toLowerCase();
   if (s.includes('you are the judge of a council')) return synthesis;
+  if (s.includes('customer see')) return followUp;
   if (s.includes('retries') || s.includes('backoff')) return seat;
   if (s.includes('review') && s.includes('test')) return reviewTests;
   return generic;
