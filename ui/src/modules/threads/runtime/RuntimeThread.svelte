@@ -20,6 +20,7 @@
   // The access chip beside the model is T3's runtime mode (runtimeModeConfig.ts:
   // labels, icons, descriptions); it rides the next prompt and sticks. PDFs go
   // as file chips to the providers that take them (Claude).
+  import { enterSends } from '../../../lib/enterSends';
   import { snapshotDraft, acknowledgeComposer } from '../../../lib/stores/runtimeDraftPersistence';
   import RuntimeDraftStatus from './RuntimeDraftStatus.svelte';
   import RuntimeContextChips from './RuntimeContextChips.svelte';
@@ -330,7 +331,7 @@
         return;
       }
     }
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (enterSends(e)) {
       e.preventDefault();
       submit();
     }
