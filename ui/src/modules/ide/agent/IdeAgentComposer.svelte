@@ -41,7 +41,7 @@
   import { latestTurn } from '../../threads/runtime/timeline'; // ui-guards: allow — shared latest turn lookup for active plan
   import StageSlashPopup from '../../threads/StageSlashPopup.svelte'; // ui-guards: allow — shared slash command completion popup
   import { ide } from '../ideStore.svelte';
-  import { ideAgent } from '../store/ideAgentController.svelte';
+  import { ideAgentEngine as ideAgent } from './ideAgentEngine.svelte';
   import IdeContextBar, { showIdeContextMenu } from './IdeContextBar.svelte';
 
   let { onsent }: { onsent?: () => void } = $props();

@@ -4,6 +4,7 @@
 
 import { api } from '../../../lib/api/client';
 import type { PromptImage, RuntimeAccessMode, RuntimeProvider } from '../../../lib/api/types';
+import { loadErrorText } from '../../../lib/loadError';
 import { normalizeEffort, type EffortLevel, type InteractionMode } from '../../../lib/providerModels';
 import { harnessLabel } from '../../../lib/providers';
 import { router } from '../../../lib/router.svelte';
@@ -16,6 +17,7 @@ import { council } from '../../threads/runtime/councilStore.svelte'; // ui-guard
 import { isRuntimeProvider, runtimeThreads } from '../../threads/runtime/runtimeThreads.svelte'; // ui-guards: allow — IDE agent dock drives real Otto Threads
 import { runtimeViews } from '../../threads/runtime/runtimeView.svelte'; // ui-guards: allow — IDE agent dock streams structured runtime views
 import { threads } from '../../threads/threadsStore.svelte'; // ui-guards: allow — IDE agent dock syncs shared thread focus and project drafts
+import { ide } from '../ideStore.svelte';
 import {
   buildIdeAgentPrompt,
   stripIdeContextBlocks,
@@ -28,6 +30,8 @@ import {
   extractInlineEditProposal,
   waitForInlineTurnCompletion,
 } from './ideAgentRuntimeOps.svelte';
+import { ideAgentState } from './ideAgentState.svelte';
+import { resolveIdeProjectCwd, resolveIdeWorkspaceId } from './ideContextBuilders';
 
 export function summarizeIdeThreadTitle(text: string, provider = 'Agent'): string {
   const first =
@@ -298,4 +302,115 @@ export async function executeIdePromptSend(opts: {
   transcript.recordOptimisticPrompt(created.id, opts.fullPrompt);
   threads.rememberProject(opts.localCwd);
   await opts.selectSession(created.id);
+}
+
+export async function runIdeInlineEditStateTurn(opts: {
+  query?: string;
+  planMode: boolean;
+  accessMode: RuntimeAccessMode;
+  handoffAndSend: () => void;
+  syncSubscriptions: () => void;
+}): Promise<void> {
+  const st = ideAgentState.inlinePrompt;
+  if (!st || !st.open || st.busy) return;
+  const q = (opts.query ?? st.query).trim();
+  if (!q) return;
+  if (!isRuntimeProvider(st.provider)) {
+    opts.handoffAndSend();
+    return;
+  }
+  st.query = q;
+  st.busy = true;
+  st.error = null;
+  st.proposal = null;
+  const reqSeq = ++ideAgentState.inlineReqSeq;
+  try {
+    const proposal = await executeIdeInlineEdit({
+      state: st,
+      query: q,
+      wsId: resolveIdeWorkspaceId(),
+      localCwd: resolveIdeProjectCwd(),
+      planMode: opts.planMode,
+      accessMode: opts.planMode ? 'approval-required' : opts.accessMode,
+      existingSessionId: ideAgentState.sessionId,
+      onSessionBound: (id) => {
+        ideAgentState.sessionId = id;
+      },
+      syncSubscriptions: opts.syncSubscriptions,
+      isCancelled: () => ideAgentState.inlineReqSeq !== reqSeq || !ideAgentState.inlinePrompt?.open,
+    });
+    if (ideAgentState.inlineReqSeq !== reqSeq || !ideAgentState.inlinePrompt?.open) return;
+    if (!proposal) ideAgentState.inlinePrompt.error = 'Agent reply did not include a code change.';
+    else ideAgentState.inlinePrompt.proposal = proposal;
+  } catch (e) {
+    if (ideAgentState.inlineReqSeq === reqSeq && ideAgentState.inlinePrompt?.open) {
+      ideAgentState.inlinePrompt.error = loadErrorText(e);
+    }
+  } finally {
+    if (ideAgentState.inlineReqSeq === reqSeq && ideAgentState.inlinePrompt?.open) {
+      ideAgentState.inlinePrompt.busy = false;
+    }
+  }
+}
+
+export async function runIdeComposerStateTurn(opts: {
+  overrideText?: string;
+  interactionMode: InteractionMode;
+  accessMode: RuntimeAccessMode;
+  planMode: boolean;
+  ensurePanelOpen: () => void;
+  selectSession: (id: string) => Promise<void>;
+  syncSubscriptions: () => void;
+}): Promise<void> {
+  const userText = (opts.overrideText ?? ideAgentState.composerText).trim();
+  if ((!userText && ideAgentState.contexts.length === 0 && ideAgentState.attachments.length === 0) || ideAgentState.sending) {
+    return;
+  }
+  opts.ensurePanelOpen();
+  const snapshotContexts = ideAgentState.contexts.slice();
+  const snapshotFiles = ideAgentState.attachments.slice();
+  const snapshotFresh = ideAgentState.freshContext;
+  const seedText =
+    userText ||
+    (snapshotContexts.length > 0
+      ? 'Inspect the attached context and propose improvements.'
+      : 'Inspect the attached files.');
+  const fullPrompt = buildIdeAgentPrompt(seedText, snapshotContexts, {
+    workspaceRoot: resolveIdeProjectCwd() ?? undefined,
+    activePath: ide.activePath,
+    planMode: opts.planMode,
+    omitWhenEmpty: true,
+  });
+
+  ideAgentState.sending = true;
+  ideAgentState.error = null;
+  try {
+    await executeIdePromptSend({
+      seedText,
+      fullPrompt,
+      provider: ideAgentState.provider,
+      model: ideAgentState.model,
+      effort: ideAgentState.effort,
+      interactionMode: opts.interactionMode,
+      accessMode: opts.planMode ? 'approval-required' : opts.accessMode,
+      freshContext: snapshotFresh,
+      files: snapshotFiles,
+      wsId: resolveIdeWorkspaceId(),
+      localCwd: resolveIdeProjectCwd(),
+      currentSessionId: ideAgentState.sessionId,
+      onSessionBound: (id) => {
+        ideAgentState.sessionId = id;
+      },
+      selectSession: opts.selectSession,
+      syncSubscriptions: opts.syncSubscriptions,
+    });
+    if (opts.overrideText === undefined) ideAgentState.composerText = '';
+    ideAgentState.contexts = [];
+    ideAgentState.attachments = [];
+    ideAgentState.freshContext = false;
+  } catch (e) {
+    ideAgentState.error = loadErrorText(e);
+  } finally {
+    ideAgentState.sending = false;
+  }
 }

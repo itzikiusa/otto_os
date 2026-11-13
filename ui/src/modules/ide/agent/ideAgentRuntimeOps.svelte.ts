@@ -7,7 +7,15 @@ import type { ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
 import type { RuntimeProjection } from '../../threads/runtime/projection'; // ui-guards: allow — IDE agent dock shares structured runtime projections
 import { runtimeThreads } from '../../threads/runtime/runtimeThreads.svelte'; // ui-guards: allow — IDE agent dock drives real Otto Threads
 import { runtimeViews } from '../../threads/runtime/runtimeView.svelte'; // ui-guards: allow — IDE agent dock streams structured runtime views
-import { ide } from '../ideStore.svelte';
+import {
+  ide,
+  ideBasename,
+  type IdeDebugSessionSnapshot,
+  type IdeDiagnostic,
+  type IdeSymbolNode,
+  type IdeTestResult,
+  type IdeVariable,
+} from '../ideStore.svelte';
 import {
   computeLineDiff,
   extractCodeProposals,
@@ -16,8 +24,16 @@ import {
   spliceCodeRange,
   stripIdeContextBlocks,
   type IdeCodeProposal,
+  type IdeContextChip,
   type IdeInlinePromptState,
 } from '../store/ideDiffApplier';
+import {
+  buildDebugFrameDraftChip,
+  buildDiagnosticDraftChip,
+  buildFileDraftChip,
+  buildSymbolDraftChip,
+  buildTestFailureDraftChip,
+} from './ideContextBuilders';
 
 const MAX_PROPOSAL_CACHE = 32;
 const MAX_UNDO_SNAPSHOTS = 16;
@@ -307,4 +323,51 @@ export async function undoIdeCodeProposal(
   const rest = { ...appliedUndoByProposalId };
   delete rest[proposalId];
   return rest;
+}
+
+export async function createFileChipFromPath(path: string): Promise<Omit<IdeContextChip, 'id'>> {
+  return buildFileDraftChip(path, readIdeFileBuffer);
+}
+
+export function createSymbolChipFromPath(path: string, sym: IdeSymbolNode): Omit<IdeContextChip, 'id'> {
+  const fullPath = ide.resolvePath(path);
+  const relPath = ide.relativePath(fullPath) || ideBasename(fullPath);
+  return buildSymbolDraftChip(fullPath, relPath, readIdeFileBuffer(fullPath), sym);
+}
+
+export function createDiagnosticChipEntry(diag: IdeDiagnostic): { chip: Omit<IdeContextChip, 'id'>; prompt: string } {
+  const fullPath = ide.resolvePath(diag.path);
+  const relPath = ide.relativePath(fullPath) || ideBasename(fullPath);
+  return {
+    chip: buildDiagnosticDraftChip(fullPath, relPath, readIdeFileBuffer(fullPath), diag),
+    prompt: `Fix this ${diag.severity} in ${relPath}:${diag.line}: ${diag.message}`,
+  };
+}
+
+export function createTestFailureChipEntry(
+  test: IdeTestResult,
+  outputLines: string[],
+): { chip: Omit<IdeContextChip, 'id'>; prompt: string } {
+  const fullPath = test.file ? ide.resolvePath(test.file) : undefined;
+  const relPath = fullPath ? ide.relativePath(fullPath) : undefined;
+  return {
+    chip: buildTestFailureDraftChip(test, outputLines, fullPath, relPath),
+    prompt: `Investigate and fix the failing test ${test.name}.`,
+  };
+}
+
+export function createDebugFrameChipEntry(
+  dbg: IdeDebugSessionSnapshot,
+  expandedVars?: Record<number, IdeVariable[]>,
+): { chip: Omit<IdeContextChip, 'id'>; prompt: string } {
+  const { chip, shortFile, line } = buildDebugFrameDraftChip(
+    dbg,
+    expandedVars,
+    (p) => ide.resolvePath(p),
+    (p) => ide.relativePath(p),
+  );
+  return {
+    chip,
+    prompt: `Inspect the paused debugger frame at ${shortFile}:${line} and help fix the issue.`,
+  };
 }
