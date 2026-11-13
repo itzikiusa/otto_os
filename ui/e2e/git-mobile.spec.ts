@@ -1,6 +1,7 @@
 import { test, expect, type Page, type TestInfo } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx, seedWorkspace, seedGitRepo, seedConflictRepo, seedDirtyRepo } from './seed';
 
@@ -236,6 +237,49 @@ test('pull requests: a repo with no remote says so and offers the fix', async ({
   await expect(page.getByText('No remote yet', { exact: true })).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole('button', { name: 'Add a remote…' })).toBeVisible();
   await expectFitsWidth(page);
+});
+
+test.describe('pull requests: review state', () => {
+  // The PWA's service worker would answer the API before page.route sees it.
+  test.use({ serviceWorkers: 'block' });
+
+  test('pull requests: each open row says where its review stands, and fits', async ({ page }) => {
+    // A Bitbucket remote from the start (the forge is read when the repo is added).
+    const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-bb-'));
+    for (const args of [['init', '-q'], ['remote', 'add', 'origin', 'https://bitbucket.org/acme/app.git'], ['-c', 'user.email=e2e@otto.local', '-c', 'user.name=E2E', 'commit', '-q', '--allow-empty', '-m', 'init']]) {
+      execFileSync('git', ['-C', dir, ...args], { stdio: 'ignore' });
+    }
+    const { ctx, base } = await apiCtx();
+    const added = await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/repos`, { data: { path: dir, name: 'e2e-bitbucket' } });
+    const r = { repoId: (await added.json()).id as string };
+    await ctx.dispose();
+    const row = (number: number, review: unknown) => ({
+      number, title: `Pull request ${number} with a reasonably long title for a phone`, author: 'Reviewer Name',
+      state: 'open', source_branch: `feature/long-branch-name-${number}`, target_branch: 'develop',
+      updated_at: '2026-11-13T10:00:00Z', url: '', labels: [], ...(review ? { review } : {}),
+    });
+    await page.route((url) => url.pathname.endsWith(`/api/v1/repos/${r.repoId}/prs`), (route) =>
+      route.fulfill({ json: { items: [
+        row(1, { status: 'approved', approvals: 2 }),
+        row(2, { status: 'changes_requested', approvals: 1 }),
+        row(3, { status: 'waiting', approvals: 0 }),
+        row(4, null),
+      ], has_more: false, page: 1, per_page: 50 } }),
+    );
+    // Nothing reaches the real forge: per-row reads (diff stats, …) answer 404.
+    await page.route(`**/api/v1/repos/${r.repoId}/prs/**`, (route) => route.fulfill({ status: 404, json: { error: 'stub' } }));
+    await page.goto(`/#/git/${r.repoId}/prs`);
+    await expect(page.getByTestId('pr-review')).toHaveCount(3, { timeout: 25_000 });
+    const chip = (n: number) => page.locator('.pr-row', { hasText: `#${n}` }).getByTestId('pr-review');
+    await expect(chip(1)).toHaveText('2 approvals');
+    await expect(chip(1)).toHaveAttribute('aria-label', 'Approved — 2 approvals');
+    await expect(chip(2)).toHaveText('Changes requested');
+    await expect(chip(3)).toHaveText('Awaiting review');
+    await expect(chip(4)).toHaveCount(0);
+    await chip(1).scrollIntoViewIfNeeded();
+    await expect(chip(1)).toBeInViewport();
+    await expectFitsWidth(page);
+  });
 });
 
 test('pull requests: detail route renders without overflow', async ({ page }) => {

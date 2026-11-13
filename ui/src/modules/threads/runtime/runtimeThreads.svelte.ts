@@ -29,7 +29,7 @@ import type {
 } from '../../../lib/api/types';
 import { threads } from '../threadsStore.svelte';
 
-const RUNTIME_PROVIDERS: readonly string[] = ['claude', 'codex', 'gemini', 'grok', 'opencode', 'pi'];
+const RUNTIME_PROVIDERS: readonly string[] = ['claude', 'codex', 'gemini', 'grok', 'agy', 'opencode', 'pi'];
 
 /** Providers a new thread runs on the structured runtime (the rest stay PTY). */
 export function isRuntimeProvider(provider: string): provider is RuntimeProvider {
@@ -143,6 +143,20 @@ class RuntimeThreads {
     } finally {
       this.loaded = { ...this.loaded, [workspaceId]: true };
     }
+  }
+
+  /** Add the caller's threads of EVERY workspace (`GET /runtime-sessions`):
+   *  a thread started on another device lives in whatever workspace that
+   *  device had open, and must still show here. Merges — the per-workspace
+   *  {@link load} stays the authority for its own workspace. */
+  async loadAll(): Promise<void> {
+    const rows = await api.get<RuntimeSession[]>('/runtime-sessions');
+    const next = { ...this.byId };
+    for (const r of rows) {
+      next[r.id] = r;
+      noteRuntimeWaiting(r.id, r.status === 'awaiting_permission');
+    }
+    this.byId = next;
   }
 
   /** Read one thread's row: an embed needs only its own, never the

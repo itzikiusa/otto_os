@@ -20,6 +20,7 @@
   // The access chip beside the model is T3's runtime mode (runtimeModeConfig.ts:
   // labels, icons, descriptions); it rides the next prompt and sticks. PDFs go
   // as file chips to the providers that take them (Claude).
+  import { enterSends } from '../../../lib/enterSends';
   import { snapshotDraft, acknowledgeComposer } from '../../../lib/stores/runtimeDraftPersistence';
   import RuntimeDraftStatus from './RuntimeDraftStatus.svelte';
   import RuntimeContextChips from './RuntimeContextChips.svelte';
@@ -64,6 +65,7 @@
   import type { BannerBlock } from './banners';
   import { shouldFold } from './workLog';
   import { threadCall } from './agentRows';
+  import { agentTasks } from './agentTasks';
   import RuntimeThreadCallRow from './RuntimeThreadCallRow.svelte';
   import { uiControl } from '../../../lib/stores/uiControl.svelte';
   import RuntimeWorkGroup from './RuntimeWorkGroup.svelte';
@@ -115,7 +117,8 @@
   /** Each subagent card's own activity. */
   const children = $derived(p ? subagentChildren(p.items) : new Map<string, never[]>());
   /** Background work still pending (the live session entity first). */
-  const background = $derived(p?.session?.background_tasks ?? session?.background_tasks ?? []);
+  const tasks = $derived(agentTasks(p?.items ?? [], p?.session?.background_tasks ?? session?.background_tasks ?? []));
+  const background = $derived(tasks.running.filter((t) => t.background));
   /** The agent couldn't start (a refused handshake answers the prompt 400;
    *  the session goes dormant with `last_error`) — shown inline, T3 Code's
    *  ThreadErrorBanner, until the next prompt starts it. */
@@ -330,7 +333,7 @@
         return;
       }
     }
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (enterSends(e)) {
       e.preventDefault();
       submit();
     }
@@ -438,6 +441,7 @@
           <RuntimeQueueBar
             {sessionId}
             {background}
+            onshowtasks={hostCommands?.showTasks ? () => hostCommands.showTasks!(sessionId) : undefined}
             queued={p?.queued ?? []}
             {running}
             canSteer={provider === 'claude'}

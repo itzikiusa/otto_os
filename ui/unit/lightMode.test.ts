@@ -145,6 +145,7 @@ function loadPages(active: boolean) {
   const pages = loadSource(new URL('../src/shell/pages.svelte.ts', import.meta.url), {
     '../lib/telemetry': { startMeasurement: () => null },
     '../lib/loadError': { loadErrorText: String },
+    '../lib/staleChunk': { reloadForStaleChunk: () => false },
     'svelte/reactivity': { SvelteMap: Map },
     '../lib/stores/auth.svelte': { auth: { phase: 'loading', me: null, capabilitiesError: null, can: () => true } },
     '../lib/sidebar': { routeAllowed },

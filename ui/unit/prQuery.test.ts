@@ -8,6 +8,7 @@ import {
   matchesPr,
   mergeRefreshed,
   parsePrQuery,
+  reviewChip,
   sortPrs,
   tokenize,
 } from '../src/modules/git/pr-query.ts';
@@ -111,4 +112,14 @@ test('refresh merge replaces page 1 and keeps later pages', () => {
   const out = mergeRefreshed(prev, fresh, 3);
   assert.deepEqual(out.map((p) => p.number), [6, 5, 3, 2, 1]);
   assert.equal(out[2].title, 'new');
+});
+
+test('review chip: approvals with their count, changes requested, awaiting; open rows only', () => {
+  const chip = (o: Partial<PrSummary>) => reviewChip(pr(1, o));
+  assert.equal(chip({}), null);
+  assert.deepEqual(chip({ review: { status: 'approved', approvals: 2 } }), { tone: 'ok', text: '2 approvals', label: 'Approved — 2 approvals' });
+  assert.equal(chip({ review: { status: 'approved', approvals: 1 } })?.text, '1 approval');
+  assert.equal(chip({ review: { status: 'changes_requested', approvals: 1 } })?.tone, 'bad');
+  assert.equal(chip({ review: { status: 'waiting', approvals: 0 } })?.text, 'Awaiting review');
+  assert.equal(chip({ state: 'merged', review: { status: 'approved', approvals: 2 } }), null);
 });

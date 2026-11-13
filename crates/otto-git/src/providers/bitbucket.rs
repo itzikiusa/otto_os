@@ -8,7 +8,8 @@
 use async_trait::async_trait;
 use otto_core::api::{
     CreatePrReq, DiffResp, FileChangeStatus, FileDiff, MergeStrategy, NewPrCommentReq, PrComment,
-    PrCommentSide, PrCommit, PrDetail, PrReviewer, PrState, PrSummary, UpdatePrReq,
+    PrCommentSide, PrCommit, PrDetail, PrReviewSummary, PrReviewer, PrState, PrSummary,
+    UpdatePrReq,
 };
 use otto_core::{Error, Result};
 use serde_json::{json, Value};
@@ -485,7 +486,28 @@ fn summary_from(v: &Value) -> PrSummary {
         reviewer_warnings: Vec::new(),
         head_sha: super::vstr_opt(v, &["source", "commit", "hash"]),
         is_mine: false,
+        review: review_from(v),
     }
+}
+
+/// Lists add `participants` to each PR (Bitbucket's partial-response
+/// `fields=+…`), so the row's verdict needs no per-PR read.
+pub(crate) const LIST_FIELDS: &str = "fields=%2Bvalues.participants";
+
+/// The verdict of a PR object's `participants` (absent → `None`).
+fn review_from(v: &Value) -> Option<PrReviewSummary> {
+    let people = varr(v, &["participants"]);
+    let approvals = people
+        .iter()
+        .filter(|p| vbool(p, &["approved"]).unwrap_or(false))
+        .count() as u32;
+    PrReviewSummary::from_counts(
+        people
+            .iter()
+            .any(|p| vstr(p, &["state"]) == "changes_requested"),
+        approvals,
+        people.iter().any(|p| vstr(p, &["role"]) == "REVIEWER"),
+    )
 }
 
 /// [`summary_from`] with `is_mine` set from the author's stable ids.
@@ -777,7 +799,10 @@ impl super::GitProvider for Bitbucket {
         // Build the path with query params manually because we need to add
         // multiple `state` values and we no longer have a raw RequestBuilder
         // at this layer. Encode them directly into the URL.
-        let mut path = format!("{}?pagelen={per_page}&page={page}", Self::pr_path(r, ""));
+        let mut path = format!(
+            "{}?pagelen={per_page}&page={page}&{LIST_FIELDS}",
+            Self::pr_path(r, "")
+        );
         for s in states {
             path.push_str(&format!("&state={s}"));
         }
