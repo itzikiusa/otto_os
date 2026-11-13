@@ -112,6 +112,22 @@ pub(crate) fn collect_readonly_sdk_roots(extra_dirs: &[PathBuf]) -> Vec<PathBuf>
             candidates.push(PathBuf::from(part));
         }
     }
+    if let Some(path_var) = env_val("PATH") {
+        for seg in path_var.split(':').filter(|s| !s.trim().is_empty()) {
+            let go_bin = Path::new(seg).join("go");
+            if go_bin.is_file() {
+                if let Ok(canon_go) = go_bin.canonicalize() {
+                    if let Some(go_home) = canon_go.parent().and_then(Path::parent) {
+                        if go_home.join("src/runtime").is_dir()
+                            || go_home.join("libexec/src/runtime").is_dir()
+                        {
+                            candidates.push(go_home.to_path_buf());
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     if let Some(home) = dirs::home_dir() {
         for rel in [

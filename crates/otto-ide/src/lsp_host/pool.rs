@@ -26,10 +26,10 @@ use tokio::time::Instant;
 use super::{framing, servers};
 use crate::types::IdeSshSpec;
 
-/// How long an unused server outlives its last socket.
+/// How long an unused server outlives its last socket when documents remain open.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
-/// Fast grace period after the last open document + socket of a server closes.
-const POST_DOC_IDLE_GRACE: Duration = Duration::from_secs(3);
+/// Fast grace period after a server has 0 attached sockets and 0 open documents.
+const POST_DOC_IDLE_GRACE: Duration = Duration::from_millis(450);
 /// Maximum concurrent pooled language servers per user (`<= 2` LRU).
 pub const MAX_SERVERS_PER_OWNER: usize = 2;
 /// Queued client → server messages per pooled server (backpressure).
@@ -135,6 +135,26 @@ pub fn notify_watched_file_if_build_manifest(path: &Path, change_type: u8) {
     }
 }
 
+/// Immediately evict detached (`active_clients == 0`) local LSP servers belonging to
+/// other workspace roots when switching active projects (`0ms` workspace-switch reap).
+pub fn evict_detached_other_roots(active_root: &str) {
+    let trimmed = active_root.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let Some(reg) = ACTIVE_POOLS.get() else {
+        return;
+    };
+    let pools: Vec<Arc<LspPool>> = {
+        let mut guard = reg.lock().unwrap_or_else(|e| e.into_inner());
+        guard.retain(|w| w.strong_count() > 0);
+        guard.iter().filter_map(Weak::upgrade).collect()
+    };
+    for pool in pools {
+        pool.evict_detached_other_roots_inner(trimmed);
+    }
+}
+
 fn path_to_file_uri(path: &Path) -> String {
     let s = path.to_string_lossy();
     if s.starts_with('/') {
@@ -207,12 +227,17 @@ fn apply_language_memory_caps(
 ) {
     let norm = servers::normalize_lsp_lang(lang);
     match norm {
+        "rust" => {
+            if !inherited.contains_key("RA_LRU_CAP") && std::env::var_os("RA_LRU_CAP").is_none() {
+                command.env("RA_LRU_CAP", "64");
+            }
+        }
         "go" => {
             if !inherited.contains_key("GOGC") && std::env::var_os("GOGC").is_none() {
-                command.env("GOGC", "75");
+                command.env("GOGC", "50");
             }
             if !inherited.contains_key("GOMEMLIMIT") && std::env::var_os("GOMEMLIMIT").is_none() {
-                command.env("GOMEMLIMIT", "384MiB");
+                command.env("GOMEMLIMIT", "256MiB");
             }
         }
         "java" => {
@@ -251,9 +276,9 @@ fn set_node_heap_cap(command: &mut tokio::process::Command, inherited: &BTreeMap
         .unwrap_or_default();
     if !existing.contains("--max-old-space-size") {
         let merged = if existing.trim().is_empty() {
-            "--max-old-space-size=256".to_string()
+            "--max-old-space-size=192".to_string()
         } else {
-            format!("{} --max-old-space-size=256", existing.trim())
+            format!("{} --max-old-space-size=192", existing.trim())
         };
         command.env("NODE_OPTIONS", merged);
     }
@@ -466,7 +491,13 @@ impl LspPool {
 
     /// [`Self::new`] with an explicit stdin backlog bound (tests).
     pub fn with_write_cap(spawner: Spawner, idle: Duration, write_cap: usize) -> Arc<Self> {
-        let pool = Arc::new(Self {
+        let pool = Self::new_unregistered(spawner, idle, write_cap);
+        register_pool(&pool);
+        pool
+    }
+
+    fn new_unregistered(spawner: Spawner, idle: Duration, write_cap: usize) -> Arc<Self> {
+        Arc::new(Self {
             entries: Mutex::new(HashMap::new()),
             spawner,
             idle,
@@ -474,9 +505,7 @@ impl LspPool {
             next_client: AtomicU64::new(1),
             next_gen: AtomicU64::new(1),
             activity_seq: Arc::new(AtomicU64::new(1)),
-        });
-        register_pool(&pool);
-        pool
+        })
     }
 
     /// Number of live pooled servers.
@@ -486,6 +515,39 @@ impl LspPool {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PoolKey, Entry>> {
         self.entries.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn evict_detached_other_roots_inner(&self, active_root: &str) {
+        let active_canon = std::fs::canonicalize(active_root).ok();
+        let attached: Vec<String> =
+            crate::environments::cached_additional_roots(&format!("local:{active_root}"))
+                .into_iter()
+                .chain(crate::environments::cached_additional_roots(active_root))
+                .collect();
+        let mut entries = self.lock();
+        let victims: Vec<PoolKey> = entries
+            .iter()
+            .filter(|(k, e)| {
+                if k.ssh.is_some() || e.active_clients.load(Ordering::Acquire) > 0 {
+                    return false;
+                }
+                if k.root == active_root || attached.iter().any(|ar| ar == &k.root) {
+                    return false;
+                }
+                if let Some(ac) = &active_canon {
+                    if std::fs::canonicalize(&k.root).ok().as_ref() == Some(ac) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        for victim in victims {
+            if let Some(removed) = entries.remove(&victim) {
+                let _ = removed.ctl.send(Ctl::Evict);
+            }
+        }
     }
 
     fn notify_watched_path(&self, path_str: &str, uri: &str, change_type: u8) {
@@ -745,7 +807,7 @@ async fn run_actor(
             }
         }
         if mux.clients.is_empty() {
-            let delay = if mux.ever_opened_doc && mux.docs.is_empty() {
+            let delay = if mux.docs.is_empty() {
                 pool.idle.min(POST_DOC_IDLE_GRACE)
             } else {
                 pool.idle
@@ -762,9 +824,9 @@ async fn run_actor(
     mux.to_server(&json!({"jsonrpc": "2.0", "id": "otto-pool-shutdown", "method": "shutdown"}));
     mux.to_server(&json!({"jsonrpc": "2.0", "method": "exit"}));
     drop(mux);
-    let _ = tokio::time::timeout(Duration::from_millis(800), writer_task).await;
+    let _ = tokio::time::timeout(Duration::from_millis(150), writer_task).await;
     if let Some(mut child) = child {
-        if tokio::time::timeout(Duration::from_millis(600), child.wait())
+        if tokio::time::timeout(Duration::from_millis(150), child.wait())
             .await
             .is_err()
         {
@@ -773,6 +835,7 @@ async fn run_actor(
                 terminate_process_group(pgid);
             }
             let _ = child.kill().await;
+            let _ = tokio::time::timeout(Duration::from_millis(150), child.wait()).await;
         } else {
             #[cfg(unix)]
             if let Some(pgid) = child_pgid {
@@ -810,7 +873,6 @@ struct Mux {
     init: Init,
     initialized_sent: bool,
     docs: HashMap<String, usize>,
-    ever_opened_doc: bool,
     next_id: u64,
 }
 
@@ -872,7 +934,6 @@ impl Mux {
             init: Init::NotStarted,
             initialized_sent: false,
             docs: HashMap::new(),
-            ever_opened_doc: false,
             next_id: 1,
         }
     }
@@ -1147,7 +1208,6 @@ impl Mux {
                     return;
                 };
                 let uri = uri.to_owned();
-                self.ever_opened_doc = true;
                 let newly = self
                     .clients
                     .get_mut(&client)
@@ -1381,7 +1441,7 @@ mod tests {
             })
         });
         (
-            LspPool::new(spawner, idle),
+            LspPool::new_unregistered(spawner, idle, WRITE_QUEUE_MAX_BYTES),
             Fake {
                 spawns,
                 inits,
@@ -1613,6 +1673,7 @@ mod tests {
         assert_eq!(MAX_SERVERS_PER_OWNER, 2);
 
         let (pool, fake) = fake_pool(IDLE_TIMEOUT);
+        register_pool(&pool);
         let lang_key = |lang: &str, root: &str| PoolKey {
             owner: "u1".into(),
             lang: lang.into(),
@@ -1620,12 +1681,16 @@ mod tests {
             ssh: None,
         };
 
-        let mut s_rust = pool.attach(lang_key("rust", "/repo"), "ra", &[]).unwrap();
+        let mut s_rust = pool
+            .attach(lang_key("rust", "/repo-lru-test"), "ra", &[])
+            .unwrap();
         init(&mut s_rust, 1).await;
-        s_rust.send(open("file:///repo/main.rs")).await;
+        s_rust.send(open("file:///repo-lru-test/main.rs")).await;
         let _ = recv(&mut s_rust).await;
 
-        let mut s_go = pool.attach(lang_key("go", "/repo"), "gopls", &[]).unwrap();
+        let mut s_go = pool
+            .attach(lang_key("go", "/repo-lru-test"), "gopls", &[])
+            .unwrap();
         init(&mut s_go, 1).await;
 
         assert_eq!(pool.live_servers(), 2);
@@ -1633,7 +1698,7 @@ mod tests {
 
         // Spawning a 3rd server (`typescript`) for `u1` must evict `go` (`open_docs == 0`) while keeping `rust` (`open_docs == 1`).
         let mut s_ts = pool
-            .attach(lang_key("typescript", "/repo"), "tsls", &[])
+            .attach(lang_key("typescript", "/repo-lru-test"), "tsls", &[])
             .unwrap();
         init(&mut s_ts, 1).await;
 
@@ -1643,32 +1708,42 @@ mod tests {
             .expect("evicted server channel should close promptly");
         assert!(go_closed.is_none());
 
-        // Manifest file notification reaches active `/repo` servers immediately,
-        // while sibling prefix `/repo-other` is strictly excluded by `Path::starts_with`:
-        notify_watched_file_if_build_manifest(Path::new("/repo-other/pom.xml"), 2);
-        notify_watched_file_if_build_manifest(Path::new("/repo/pom.xml"), 2);
+        // Manifest file notification reaches active `/repo-lru-test` servers immediately,
+        // while sibling prefix `/repo-lru-test-other` is strictly excluded by `Path::starts_with`:
+        notify_watched_file_if_build_manifest(Path::new("/repo-lru-test-other/pom.xml"), 2);
+        notify_watched_file_if_build_manifest(Path::new("/repo-lru-test/pom.xml"), 2);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
             let log = fake.doc_log.lock().unwrap().clone();
-            if log.iter().any(|l| l == "watched file:///repo/pom.xml")
+            if log
+                .iter()
+                .any(|l| l == "watched file:///repo-lru-test/pom.xml")
                 || tokio::time::Instant::now() >= deadline
             {
-                assert!(log.iter().any(|l| l == "watched file:///repo/pom.xml"));
+                assert!(log
+                    .iter()
+                    .any(|l| l == "watched file:///repo-lru-test/pom.xml"));
                 assert!(!log
                     .iter()
-                    .any(|l| l == "watched file:///repo-other/pom.xml"));
+                    .any(|l| l == "watched file:///repo-lru-test-other/pom.xml"));
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
-        // Close all tabs/sockets on `/repo` and switch workspace to `/repo2`: `/repo` 0-doc servers evict immediately!
-        s_rust.send(close("file:///repo/main.rs")).await;
+        // Close all tabs/sockets on `/repo-lru-test` and call `evict_detached_other_roots`: `0ms` reap!
+        s_rust.send(close("file:///repo-lru-test/main.rs")).await;
+        tokio::task::yield_now().await;
         drop(s_rust);
         drop(s_ts);
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let _s_new = pool.attach(lang_key("go", "/repo2"), "gopls", &[]).unwrap();
+        evict_detached_other_roots("/repo2-lru-test");
+        assert_eq!(pool.live_servers(), 0);
+
+        let _s_new = pool
+            .attach(lang_key("go", "/repo2-lru-test"), "gopls", &[])
+            .unwrap();
         assert_eq!(pool.live_servers(), 1);
     }
 }

@@ -1547,5 +1547,43 @@ mod tests {
             navigation_ext::resolve_js_ts_module_files("zod", &ws.join("app.ts"), &roots);
         assert_eq!(ts_files.len(), 1);
         assert!(ts_files[0].ends_with("node_modules/zod/index.d.ts"));
+
+        // Explicit `symbol = Some("Printf")` still extracts `"fmt"` qualifier from `content`,
+        // AND Homebrew `Cellar/go/<ver>/libexec/src` + `PATH` `go` canonicalization resolve `fmt/print.go`
+        // even when `GOROOT` is unset.
+        let go_call = "package main\nimport \"fmt\"\nfunc main() {\n\tfmt.Printf(\"ok\\n\")\n}\n";
+        assert_eq!(
+            navigation::extract_symbol_and_qualifier(Some("Printf"), "go", go_call, 4, 6),
+            Some(("Printf".into(), Some("fmt".into())))
+        );
+        assert_eq!(
+            navigation::extract_symbol_and_qualifier(Some("Printf"), "go", go_call, 4, 1),
+            Some(("Printf".into(), Some("fmt".into())))
+        );
+
+        let brew_cellar_ver = tmp.path().join("Cellar/go/1.27.0");
+        std::fs::create_dir_all(brew_cellar_ver.join("libexec/src/runtime")).unwrap();
+        std::fs::create_dir_all(brew_cellar_ver.join("libexec/src/fmt")).unwrap();
+        std::fs::create_dir_all(brew_cellar_ver.join("libexec/bin")).unwrap();
+        std::fs::write(
+            brew_cellar_ver.join("libexec/src/fmt/print.go"),
+            "package fmt\n\nfunc Printf(format string, a ...any) (int, error) { return 0, nil }\n",
+        )
+        .unwrap();
+        std::fs::write(brew_cellar_ver.join("libexec/bin/go"), "#!/bin/sh\n").unwrap();
+        let mut no_goroot_env = BTreeMap::new();
+        no_goroot_env.insert(
+            "PATH".into(),
+            brew_cellar_ver
+                .join("libexec/bin")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let brew_dirs =
+            navigation_ext::resolve_go_package_dirs("fmt", &main_go, &roots, &[], &no_goroot_env);
+        let brew_defs = navigation_ext::search_go_package_dirs(&brew_dirs, "Printf");
+        assert_eq!(brew_defs.len(), 1);
+        assert!(brew_defs[0].path.ends_with("libexec/src/fmt/print.go"));
+        assert_eq!(brew_defs[0].line, 3);
     }
 }

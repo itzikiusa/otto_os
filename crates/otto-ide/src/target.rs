@@ -413,6 +413,11 @@ impl TargetManager {
                     *is_root_user,
                     path.unwrap_or(""),
                 )?;
+                if path.unwrap_or("").trim().is_empty() {
+                    crate::lsp_host::pool::evict_detached_other_roots(
+                        &matched_root.to_string_lossy(),
+                    );
+                }
                 let dir_for_scan = resolved_dir.clone();
                 let restricted = !*is_root_user;
                 let entries = tokio::task::spawn_blocking(move || {
