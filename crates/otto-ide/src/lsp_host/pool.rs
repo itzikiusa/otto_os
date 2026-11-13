@@ -489,9 +489,19 @@ impl LspPool {
     }
 
     fn notify_watched_path(&self, path_str: &str, uri: &str, change_type: u8) {
+        let watched_path = Path::new(path_str);
         let entries = self.lock();
         for (k, e) in entries.iter() {
-            if k.ssh.is_none() && path_str.starts_with(k.root.as_str()) {
+            if k.ssh.is_some() {
+                continue;
+            }
+            let in_primary = watched_path.starts_with(Path::new(&k.root));
+            let in_attached = !in_primary
+                && crate::environments::cached_additional_roots(&format!("local:{}", k.root))
+                    .into_iter()
+                    .chain(crate::environments::cached_additional_roots(&k.root))
+                    .any(|ar| watched_path.starts_with(Path::new(&ar)));
+            if in_primary || in_attached {
                 let _ = e.ctl.send(Ctl::WatchedFile {
                     uri: uri.to_string(),
                     change_type,
@@ -1633,15 +1643,24 @@ mod tests {
             .expect("evicted server channel should close promptly");
         assert!(go_closed.is_none());
 
-        // Manifest file notification reaches active `/repo` servers immediately:
+        // Manifest file notification reaches active `/repo` servers immediately,
+        // while sibling prefix `/repo-other` is strictly excluded by `Path::starts_with`:
+        notify_watched_file_if_build_manifest(Path::new("/repo-other/pom.xml"), 2);
         notify_watched_file_if_build_manifest(Path::new("/repo/pom.xml"), 2);
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(fake
-            .doc_log
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|l| l == "watched file:///repo/pom.xml"));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let log = fake.doc_log.lock().unwrap().clone();
+            if log.iter().any(|l| l == "watched file:///repo/pom.xml")
+                || tokio::time::Instant::now() >= deadline
+            {
+                assert!(log.iter().any(|l| l == "watched file:///repo/pom.xml"));
+                assert!(!log
+                    .iter()
+                    .any(|l| l == "watched file:///repo-other/pom.xml"));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
 
         // Close all tabs/sockets on `/repo` and switch workspace to `/repo2`: `/repo` 0-doc servers evict immediately!
         s_rust.send(close("file:///repo/main.rs")).await;
