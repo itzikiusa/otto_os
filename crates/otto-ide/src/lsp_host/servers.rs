@@ -1,5 +1,7 @@
-//! LSP server registry: 10 built-in languages + runtime IDE plugin servers,
-//! with `<data_dir>/toolchains/**/bin` and `PATH` executable resolution.
+//! LSP server registry: 11 built-in languages (including Go, Python, TS, JS,
+//! Java, Rust, Shell, JSON, CSS, HTML, Markdown) + runtime IDE plugin servers,
+//! with `<data_dir>/toolchains/**/bin`, `~/.otto/toolchains/**/bin`, cached
+//! login-shell `PATH`, and standard developer `bin` resolution.
 
 use std::path::{Path, PathBuf};
 
@@ -23,7 +25,18 @@ pub struct ServerDef {
     pub install_command: Option<&'static str>,
 }
 
-/// The full built-in registry, in the order defined in the design spec.
+/// Normalize language aliases (`sh`/`bash`/`zsh` -> `shell`, `jsonl`/`jsonc` -> `json`).
+pub fn normalize_lsp_lang(lang: &str) -> &str {
+    match lang.trim() {
+        "sh" | "bash" | "zsh" | "shellscript" => "shell",
+        "jsonc" | "jsonl" | "ndjson" => "json",
+        "tsx" => "typescript",
+        "jsx" => "javascript",
+        other => other,
+    }
+}
+
+/// The full built-in registry covering all core IDE languages.
 pub static REGISTRY: &[ServerDef] = &[
     ServerDef {
         lang: "go",
@@ -40,26 +53,62 @@ pub static REGISTRY: &[ServerDef] = &[
         args: &["--stdio"],
         fallback_cmd: Some("pylsp"),
         fallback_args: &[],
-        extensions: &[".py"],
+        extensions: &[".py", ".pyi"],
         install_command: Some("npm install -g pyright"),
     },
     ServerDef {
         lang: "typescript",
         cmd: "typescript-language-server",
         args: &["--stdio"],
-        fallback_cmd: None,
-        fallback_args: &[],
+        fallback_cmd: Some("vtsls"),
+        fallback_args: &["--stdio"],
         extensions: &[".ts", ".tsx", ".mts", ".cts"],
-        install_command: Some("npm install -g typescript-language-server"),
+        install_command: Some("npm install -g typescript-language-server typescript"),
     },
     ServerDef {
         lang: "javascript",
         cmd: "typescript-language-server",
         args: &["--stdio"],
+        fallback_cmd: Some("vtsls"),
+        fallback_args: &["--stdio"],
+        extensions: &[".js", ".jsx", ".mjs", ".cjs"],
+        install_command: Some("npm install -g typescript-language-server typescript"),
+    },
+    ServerDef {
+        lang: "java",
+        cmd: "jdtls",
+        args: &[],
         fallback_cmd: None,
         fallback_args: &[],
-        extensions: &[".js", ".jsx", ".mjs", ".cjs"],
-        install_command: Some("npm install -g typescript-language-server"),
+        extensions: &[".java"],
+        install_command: Some("brew install jdtls"),
+    },
+    ServerDef {
+        lang: "rust",
+        cmd: "rust-analyzer",
+        args: &[],
+        fallback_cmd: None,
+        fallback_args: &[],
+        extensions: &[".rs"],
+        install_command: Some("rustup component add rust-analyzer"),
+    },
+    ServerDef {
+        lang: "shell",
+        cmd: "bash-language-server",
+        args: &["start"],
+        fallback_cmd: None,
+        fallback_args: &[],
+        extensions: &[".sh", ".bash", ".zsh", ".bats"],
+        install_command: Some("npm install -g bash-language-server"),
+    },
+    ServerDef {
+        lang: "json",
+        cmd: "vscode-json-language-server",
+        args: &["--stdio"],
+        fallback_cmd: Some("vscode-json-languageserver"),
+        fallback_args: &["--stdio"],
+        extensions: &[".json", ".jsonc", ".jsonl"],
+        install_command: Some("npm install -g vscode-langservers-extracted"),
     },
     ServerDef {
         lang: "css",
@@ -80,15 +129,6 @@ pub static REGISTRY: &[ServerDef] = &[
         install_command: Some("npm install -g vscode-langservers-extracted"),
     },
     ServerDef {
-        lang: "java",
-        cmd: "jdtls",
-        args: &[],
-        fallback_cmd: None,
-        fallback_args: &[],
-        extensions: &[".java"],
-        install_command: None,
-    },
-    ServerDef {
         lang: "markdown",
         cmd: "marksman",
         args: &["server"],
@@ -96,24 +136,6 @@ pub static REGISTRY: &[ServerDef] = &[
         fallback_args: &[],
         extensions: &[".md", ".markdown"],
         install_command: Some("brew install marksman"),
-    },
-    ServerDef {
-        lang: "json",
-        cmd: "vscode-json-language-server",
-        args: &["--stdio"],
-        fallback_cmd: None,
-        fallback_args: &[],
-        extensions: &[".json", ".jsonc"],
-        install_command: Some("npm install -g vscode-langservers-extracted"),
-    },
-    ServerDef {
-        lang: "rust",
-        cmd: "rust-analyzer",
-        args: &[],
-        fallback_cmd: None,
-        fallback_args: &[],
-        extensions: &[".rs"],
-        install_command: Some("rustup component add rust-analyzer"),
     },
 ];
 
@@ -130,8 +152,7 @@ pub struct Resolved {
     pub install_command: Option<String>,
 }
 
-/// Remote SSH launch specification for a language server (resolved on the remote
-/// host at spawn time so a remote-only toolchain works even when absent locally).
+/// Remote SSH launch specification for a language server.
 #[derive(Debug, Clone)]
 pub struct RemoteLspSpec {
     pub lang: String,
@@ -142,8 +163,8 @@ pub struct RemoteLspSpec {
 }
 
 /// Collect `bin` / `.bin` / `shims` directories installed under `<data_dir>/toolchains`
-/// (bounded depth <= 5, skipping large non-bin SDK trees).
-#[allow(clippy::disallowed_methods)] // bounded depth<=5 scan of local <data_dir>/toolchains dirs
+/// and `~/.otto/toolchains` (bounded depth <= 5, skipping bulky SDK source trees).
+#[allow(clippy::disallowed_methods)]
 pub fn collect_toolchain_bin_dirs(data_dir: &Path) -> Vec<PathBuf> {
     let mut out =
         crate::toolchains::ToolchainManager::new(data_dir.to_path_buf()).extra_local_bin_dirs();
@@ -151,12 +172,53 @@ pub fn collect_toolchain_bin_dirs(data_dir: &Path) -> Vec<PathBuf> {
     if root.is_dir() {
         walk_toolchain_bins(&root, 0, &mut out);
     }
+    if !otto_core::e2e::isolated() {
+        if let Some(dot_otto) = dirs::home_dir().map(|h| h.join(".otto/toolchains")) {
+            if dot_otto != root && dot_otto.is_dir() {
+                walk_toolchain_bins(&dot_otto, 0, &mut out);
+            }
+        }
+    }
     out.sort();
     out.dedup();
     out
 }
 
-#[allow(clippy::disallowed_methods)] // bounded depth<=5 scan of local <data_dir>/toolchains dirs
+/// Standard user/system developer `bin` directories missing under macOS `launchd`
+/// (`~/go/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, `/usr/local/go/bin`, + cached shell `PATH`).
+fn collect_shell_and_developer_bin_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::with_capacity(24);
+    let shell_env = crate::environments::cached_shell_env_snapshot();
+    if let Some(shell_path) = shell_env.get("PATH") {
+        for p in shell_path.split(':').filter(|s| !s.is_empty()) {
+            dirs.push(PathBuf::from(p));
+        }
+    }
+    if !otto_core::e2e::isolated() {
+        if let Some(home) = dirs::home_dir() {
+            for rel in [
+                "go/bin",
+                ".cargo/bin",
+                ".local/bin",
+                ".npm-global/bin",
+                ".volta/bin",
+            ] {
+                dirs.push(home.join(rel));
+            }
+        }
+    }
+    for sys in [
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/go/bin",
+        "/usr/local/bin",
+    ] {
+        dirs.push(PathBuf::from(sys));
+    }
+    dirs
+}
+
+#[allow(clippy::disallowed_methods)]
 fn walk_toolchain_bins(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     if depth > 5 {
         return;
@@ -190,7 +252,6 @@ fn walk_toolchain_bins(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
             }
             continue;
         }
-        // Skip bulky SDK directories that never hold top-level binaries.
         if matches!(
             name,
             "src"
@@ -214,25 +275,31 @@ fn walk_toolchain_bins(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Build an augmented `PATH` string prepending `<data_dir>/toolchains` bin dirs.
+/// Build an augmented `PATH` string prepending `<data_dir>/toolchains` bin dirs,
+/// cached login-shell `PATH`, and standard developer `bin` directories.
 pub fn augmented_local_path(data_dir: &Path) -> String {
-    let extra = collect_toolchain_bin_dirs(data_dir);
-    let sys_path = std::env::var("PATH").unwrap_or_default();
-    if extra.is_empty() {
-        return sys_path;
+    let mut parts: Vec<String> = Vec::with_capacity(32);
+    let mut push_unique = |s: String| {
+        if !s.is_empty() && !parts.contains(&s) {
+            parts.push(s);
+        }
+    };
+    for p in collect_toolchain_bin_dirs(data_dir) {
+        push_unique(p.to_string_lossy().into_owned());
     }
-    let mut parts: Vec<String> = extra
-        .into_iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect();
-    if !sys_path.is_empty() {
-        parts.push(sys_path);
+    for p in collect_shell_and_developer_bin_dirs() {
+        if p.is_dir() {
+            push_unique(p.to_string_lossy().into_owned());
+        }
+    }
+    let sys_path = std::env::var("PATH").unwrap_or_default();
+    for seg in sys_path.split(':') {
+        push_unique(seg.to_string());
     }
     parts.join(":")
 }
 
-/// Discover a `JAVA_HOME` candidate inside `<data_dir>/toolchains` when the
-/// daemon environment does not already define `JAVA_HOME`.
+/// Discover a `JAVA_HOME` candidate inside `<data_dir>/toolchains` or system JDKs.
 pub fn detect_toolchain_java_home(data_dir: &Path) -> Option<PathBuf> {
     for bin in collect_toolchain_bin_dirs(data_dir) {
         if bin.join("java").is_file() {
@@ -241,10 +308,19 @@ pub fn detect_toolchain_java_home(data_dir: &Path) -> Option<PathBuf> {
             }
         }
     }
+    for fixed in [
+        "/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home",
+        "/usr/local/opt/openjdk/libexec/openjdk.jdk/Contents/Home",
+    ] {
+        let p = PathBuf::from(fixed);
+        if p.join("bin/java").is_file() {
+            return Some(p);
+        }
+    }
     None
 }
 
-/// Locate `executable` across `extra_dirs` first, then `PATH`.
+/// Locate `executable` across `extra_dirs` first, then `PATH`, then login-shell/dev dirs.
 fn which_in(executable: &str, extra_dirs: &[PathBuf]) -> Option<String> {
     let exec_path = Path::new(executable);
     if exec_path.is_absolute() {
@@ -263,6 +339,12 @@ fn which_in(executable: &str, extra_dirs: &[PathBuf]) -> Option<String> {
             return Some(candidate.to_string_lossy().into_owned());
         }
     }
+    for dir in collect_shell_and_developer_bin_dirs() {
+        let candidate = dir.join(executable);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
     None
 }
 
@@ -275,6 +357,17 @@ fn resolve_def(def: &ServerDef, extra_dirs: &[PathBuf]) -> Resolved {
             args: def.args.iter().map(|s| s.to_string()).collect(),
             install_command: def.install_command.map(str::to_string),
         };
+    }
+    if def.lang == "python" {
+        if let Some(resolved) = which_in("basedpyright-langserver", extra_dirs) {
+            return Resolved {
+                lang: def.lang.to_string(),
+                available: true,
+                command: resolved,
+                args: vec!["--stdio".into()],
+                install_command: def.install_command.map(str::to_string),
+            };
+        }
     }
     if let Some(fb_cmd) = def.fallback_cmd {
         if let Some(resolved) = which_in(fb_cmd, extra_dirs) {
@@ -316,13 +409,13 @@ fn resolve_plugin_spec(spec: &PluginLspServerSpec, extra_dirs: &[PathBuf]) -> Re
     }
 }
 
-/// Resolve all built-in entries against the current system `PATH`.
+/// Resolve all built-in entries against system + user developer `PATH`.
 pub fn detect_all() -> Vec<Resolved> {
     REGISTRY.iter().map(|def| resolve_def(def, &[])).collect()
 }
 
 /// Resolve all built-in entries + active IDE plugin LSP servers against
-/// `<data_dir>/toolchains/**/bin` and system `PATH`.
+/// `<data_dir>/toolchains/**/bin` and system/shell `PATH`.
 pub fn detect_all_with_ide(data_dir: &Path, plugins: &IdePluginRegistry) -> Vec<Resolved> {
     let extra = collect_toolchain_bin_dirs(data_dir);
     let mut out: Vec<Resolved> = REGISTRY
@@ -333,8 +426,6 @@ pub fn detect_all_with_ide(data_dir: &Path, plugins: &IdePluginRegistry) -> Vec<
     for spec in plugins.active_lsp_servers() {
         let plugin_resolved = resolve_plugin_spec(&spec, &extra);
         if let Some(existing) = out.iter_mut().find(|r| r.lang == spec.language) {
-            // Let an enabled plugin fill in an unavailable built-in language or
-            // override when the plugin's server binary is available.
             if !existing.available || plugin_resolved.available {
                 *existing = plugin_resolved;
             }
@@ -345,9 +436,10 @@ pub fn detect_all_with_ide(data_dir: &Path, plugins: &IdePluginRegistry) -> Vec<
     out
 }
 
-/// Resolve one language against system `PATH` only.
+/// Resolve one language against system/shell `PATH`.
 pub fn resolve_lang(lang: &str) -> Option<Resolved> {
-    detect_all().into_iter().find(|r| r.lang == lang)
+    let norm = normalize_lsp_lang(lang);
+    detect_all().into_iter().find(|r| r.lang == norm)
 }
 
 /// Resolve one language against `<data_dir>/toolchains/**/bin`, `PATH`, and
@@ -357,16 +449,17 @@ pub fn resolve_lang_with_ide(
     data_dir: &Path,
     plugins: &IdePluginRegistry,
 ) -> Option<Resolved> {
+    let norm = normalize_lsp_lang(lang);
     detect_all_with_ide(data_dir, plugins)
         .into_iter()
-        .find(|r| r.lang == lang)
+        .find(|r| r.lang == norm)
 }
 
 /// Resolve remote command metadata for a language when launching over SSH.
 pub fn resolve_remote_lang(lang: &str, plugins: &IdePluginRegistry) -> Option<RemoteLspSpec> {
-    // Check active plugins first if they contribute a custom language or override.
+    let norm = normalize_lsp_lang(lang);
     for spec in plugins.active_lsp_servers() {
-        if spec.language == lang {
+        if spec.language == norm {
             return Some(RemoteLspSpec {
                 lang: spec.language,
                 primary_cmd: spec.command,
@@ -378,7 +471,7 @@ pub fn resolve_remote_lang(lang: &str, plugins: &IdePluginRegistry) -> Option<Re
     }
     REGISTRY
         .iter()
-        .find(|def| def.lang == lang)
+        .find(|def| def.lang == norm)
         .map(|def| RemoteLspSpec {
             lang: def.lang.to_string(),
             primary_cmd: def.cmd.to_string(),
@@ -394,7 +487,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn finds_binaries_installed_under_data_dir_toolchains() {
+    fn finds_binaries_installed_under_data_dir_toolchains_and_normalizes_shell_alias() {
         let tmp = tempfile::tempdir().unwrap();
         let go_bin = tmp
             .path()
@@ -413,6 +506,12 @@ mod tests {
         let resolved = resolve_lang_with_ide("go", tmp.path(), &reg).unwrap();
         assert!(resolved.available);
         assert_eq!(resolved.command, fake_gopls.to_string_lossy());
+
+        // Shell alias resolution (`bash`, `zsh`, `sh` -> `shell`):
+        assert_eq!(normalize_lsp_lang("bash"), "shell");
+        assert_eq!(normalize_lsp_lang("jsonl"), "json");
+        assert!(resolve_remote_lang("bash", &reg).is_some());
+        assert!(resolve_remote_lang("jsonc", &reg).is_some());
     }
 
     #[test]

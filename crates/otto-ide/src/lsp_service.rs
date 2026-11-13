@@ -28,8 +28,12 @@ use crate::types::{
 };
 use crate::IdeCtx;
 
+mod navigation;
+mod navigation_ext;
 mod symbols;
+mod symbols_data;
 
+pub use navigation::{goto_definition, goto_implementation};
 pub use symbols::parse_document_symbols;
 use symbols::{match_brace_symbol, parse_python_symbols};
 
@@ -72,8 +76,17 @@ pub async fn find_references<S: IdeCtx>(
     {
         Some(s) => s.to_string(),
         None => {
-            let file = ctx.ide().targets.read_file(&resolved, &req.path).await?;
-            extract_identifier_at(&file.content, req.line, req.column).ok_or_else(|| {
+            let text = match req.content.as_deref() {
+                Some(c) => c.to_string(),
+                None => {
+                    ctx.ide()
+                        .targets
+                        .read_file(&resolved, &req.path)
+                        .await?
+                        .content
+                }
+            };
+            extract_identifier_at(&text, req.line, req.column).ok_or_else(|| {
                 Error::Invalid(format!(
                     "no identifier found at {}:{} in '{}'",
                     req.line, req.column, req.path
@@ -89,14 +102,26 @@ pub async fn find_references<S: IdeCtx>(
         collect_candidate_files(ctx, &resolved, &req.target, &symbol, &req.path).await?;
     let mut locations = Vec::new();
     for path in candidates {
-        let Ok(file) = ctx.ide().targets.read_file(&resolved, &path).await else {
-            continue;
+        let (file_lang_hint, file_content) = if path == req.path {
+            if let Some(unsaved) = &req.content {
+                (None, unsaved.clone())
+            } else {
+                let Ok(file) = ctx.ide().targets.read_file(&resolved, &path).await else {
+                    continue;
+                };
+                (Some(file.language), file.content)
+            }
+        } else {
+            let Ok(file) = ctx.ide().targets.read_file(&resolved, &path).await else {
+                continue;
+            };
+            (Some(file.language), file.content)
         };
-        let lang = resolve_language(ctx, &path, Some(&file.language));
+        let lang = resolve_language(ctx, &path, file_lang_hint.as_deref());
         locations.extend(find_symbol_occurrences_in_text(
             &path,
             &lang,
-            &file.content,
+            &file_content,
             &symbol,
         ));
         if locations.len() >= 500 {
@@ -182,6 +207,17 @@ pub async fn format_document<S: IdeCtx>(
 ) -> Result<IdeFormatResp> {
     let resolved = ctx.ide().targets.resolve(ctx, user, &req.target).await?;
     let lang = resolve_language(ctx, &req.path, req.language.as_deref());
+    // Fast-path native Rust formatters for JSON, JSONL, and CSV/TSV (<0.2ms, zero subprocess).
+    if matches!(lang.as_str(), "json" | "jsonl" | "csv" | "tsv") {
+        if let Some(formatted) = try_native_data_format(&lang, &req.path, &req.content) {
+            let changed = formatted != req.content;
+            return Ok(IdeFormatResp {
+                formatted,
+                changed,
+                formatter: "otto-native".into(),
+            });
+        }
+    }
     let mut env_map = build_formatter_env(ctx, user, &resolved, &req.target).await;
     if !env_map.contains_key("PATH") {
         env_map.insert(
@@ -212,7 +248,7 @@ pub async fn format_document<S: IdeCtx>(
     })
 }
 
-async fn build_formatter_env<S: IdeCtx>(
+pub(super) async fn build_formatter_env<S: IdeCtx>(
     ctx: &S,
     _user: &User,
     _resolved: &ResolvedTarget,
@@ -224,11 +260,18 @@ async fn build_formatter_env<S: IdeCtx>(
         .build_effective_env(&ctx.pool(), ctx.secrets(), target)
         .await
         .unwrap_or_default();
-    if target.kind == crate::types::IdeTargetKind::Local && !env_map.contains_key("PATH") {
-        env_map.insert(
-            "PATH".into(),
-            crate::lsp_host::servers::augmented_local_path(ctx.data_dir()),
-        );
+    if target.kind == crate::types::IdeTargetKind::Local {
+        let shell_env =
+            crate::environments::cached_effective_env_for_local_root(ctx.data_dir(), &target.root);
+        for (k, v) in shell_env {
+            env_map.entry(k).or_insert(v);
+        }
+        if !env_map.contains_key("PATH") {
+            env_map.insert(
+                "PATH".into(),
+                crate::lsp_host::servers::augmented_local_path(ctx.data_dir()),
+            );
+        }
     }
     env_map
 }
@@ -263,7 +306,7 @@ pub async fn code_actions<S: IdeCtx>(
     Ok(IdeCodeActionsResp { actions })
 }
 
-fn resolve_language<S: IdeCtx>(ctx: &S, path: &str, hint: Option<&str>) -> String {
+pub(super) fn resolve_language<S: IdeCtx>(ctx: &S, path: &str, hint: Option<&str>) -> String {
     if let Some(h) = hint
         .map(str::trim)
         .filter(|s| !s.is_empty() && *s != "plaintext")
@@ -276,16 +319,25 @@ fn resolve_language<S: IdeCtx>(ctx: &S, path: &str, hint: Option<&str>) -> Strin
     detect_language(path).unwrap_or("plaintext").to_string()
 }
 
-async fn collect_candidate_files<S: IdeCtx>(
+pub(super) async fn collect_candidate_files<S: IdeCtx>(
     ctx: &S,
     resolved: &ResolvedTarget,
     target_spec: &crate::types::IdeTargetSpec,
     symbol: &str,
     origin_path: &str,
 ) -> Result<Vec<String>> {
-    if let ResolvedTarget::Local { root, is_root_user } = resolved {
+    if let ResolvedTarget::Local {
+        root,
+        additional_roots,
+        is_root_user,
+        ..
+    } = resolved
+    {
+        let mut all_roots = vec![root.clone()];
+        all_roots.extend(additional_roots.iter().cloned());
         if let Some(files) =
-            rg_local_candidate_files(root, *is_root_user, symbol, origin_path).await
+            rg_local_candidate_files_multi(&all_roots, root, *is_root_user, symbol, origin_path)
+                .await
         {
             return Ok(files);
         }
@@ -297,8 +349,10 @@ async fn collect_candidate_files<S: IdeCtx>(
         query: symbol.to_string(),
         mode: IdeSearchMode::Text,
         case_sensitive: true,
+        whole_word: true,
         regex: false,
         file_glob: None,
+        scope_path: None,
         limit: Some(250),
     };
     for item in ctx.ide().targets.search(resolved, &search_req).await?.items {
@@ -309,8 +363,26 @@ async fn collect_candidate_files<S: IdeCtx>(
     Ok(ordered)
 }
 
+#[cfg(test)]
 async fn rg_local_candidate_files(
     root: &Path,
+    is_root_user: bool,
+    symbol: &str,
+    origin_path: &str,
+) -> Option<Vec<String>> {
+    rg_local_candidate_files_multi(
+        &[root.to_path_buf()],
+        root,
+        is_root_user,
+        symbol,
+        origin_path,
+    )
+    .await
+}
+
+async fn rg_local_candidate_files_multi(
+    roots: &[PathBuf],
+    primary_root: &Path,
     is_root_user: bool,
     symbol: &str,
     origin_path: &str,
@@ -331,12 +403,14 @@ async fn rg_local_candidate_files(
         "!target",
         "--",
         symbol,
-    ])
-    .arg(root)
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null())
-    .kill_on_drop(true);
+    ]);
+    for r in roots {
+        cmd.arg(r);
+    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
 
     let out = tokio::time::timeout(Duration::from_secs(5), cmd.output())
         .await
@@ -352,7 +426,7 @@ async fn rg_local_candidate_files(
     let origin_abs = if Path::new(origin_path).is_absolute() {
         PathBuf::from(origin_path)
     } else {
-        root.join(origin_path)
+        primary_root.join(origin_path)
     };
     let mut seen_canon = BTreeSet::new();
     if let Ok(c) = origin_abs.canonicalize() {
@@ -367,7 +441,7 @@ async fn rg_local_candidate_files(
         let Ok(canon) = Path::new(raw.trim()).canonicalize() else {
             continue;
         };
-        if !canon.starts_with(root) {
+        if !roots.iter().any(|r| canon.starts_with(r)) {
             continue;
         }
         if !is_root_user
@@ -378,13 +452,13 @@ async fn rg_local_candidate_files(
             continue;
         }
         if seen_canon.insert(canon.clone()) {
-            let formatted = if keep_abs {
-                canon.to_string_lossy().into_owned()
-            } else {
+            let formatted = if !keep_abs && canon.starts_with(primary_root) {
                 canon
-                    .strip_prefix(root)
+                    .strip_prefix(primary_root)
                     .map(|r| r.to_string_lossy().replace('\\', "/"))
                     .unwrap_or_else(|_| canon.to_string_lossy().into_owned())
+            } else {
+                canon.to_string_lossy().into_owned()
             };
             ordered.push(formatted);
         }
@@ -600,7 +674,10 @@ pub fn rename_identifier_in_text(
 
 fn formatter_candidates(lang: &str, path: &str) -> Vec<(&'static str, String, Vec<String>)> {
     match lang {
-        "go" => vec![("gofmt", "gofmt".into(), vec![])],
+        "go" => vec![
+            ("goimports", "goimports".into(), vec![]),
+            ("gofmt", "gofmt".into(), vec![]),
+        ],
         "rust" => vec![(
             "rustfmt",
             "rustfmt".into(),
@@ -624,8 +701,13 @@ fn formatter_candidates(lang: &str, path: &str) -> Vec<(&'static str, String, Ve
             "google-java-format".into(),
             vec!["-".into()],
         )],
-        "javascript" | "typescript" | "json" | "css" | "scss" | "html" | "markdown" | "yaml"
-        | "graphql" | "svelte" => vec![
+        "shell" | "bash" | "sh" | "zsh" => vec![(
+            "shfmt",
+            "shfmt".into(),
+            vec!["-i".into(), "2".into(), "-ci".into(), "-".into()],
+        )],
+        "javascript" | "typescript" | "json" | "jsonc" | "css" | "scss" | "html" | "markdown"
+        | "yaml" | "graphql" | "svelte" => vec![
             (
                 "prettier",
                 "prettier".into(),
@@ -644,6 +726,59 @@ fn formatter_candidates(lang: &str, path: &str) -> Vec<(&'static str, String, Ve
         "protobuf" => vec![("buf", "buf".into(), vec!["format".into(), "-".into()])],
         _ => Vec::new(),
     }
+}
+
+fn try_native_data_format(lang: &str, path: &str, content: &str) -> Option<String> {
+    let lower = path.to_ascii_lowercase();
+    if lang == "jsonl" || lower.ends_with(".jsonl") || lower.ends_with(".ndjson") {
+        let mut out = Vec::new();
+        for raw in content.lines() {
+            let t = raw.trim();
+            if t.is_empty() {
+                continue;
+            }
+            let val: serde_json::Value = serde_json::from_str(t).ok()?;
+            out.push(serde_json::to_string(&val).ok()?);
+        }
+        return Some(if out.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", out.join("\n"))
+        });
+    }
+    if lang == "json" && !lower.ends_with(".jsonc") {
+        let val: serde_json::Value = serde_json::from_str(content).ok()?;
+        let pretty = serde_json::to_string_pretty(&val).ok()?;
+        return Some(format!("{pretty}\n"));
+    }
+    if matches!(lang, "csv" | "tsv") {
+        let first = content.lines().find(|l| !l.trim().is_empty())?;
+        let delim = symbols_data::detect_csv_delimiter(path, lang, first);
+        let mut rows = Vec::new();
+        for line in content.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let cells: Vec<String> = symbols_data::split_delimited_row(line, delim)
+                .into_iter()
+                .map(|c| {
+                    let t = c.trim();
+                    if t.contains(delim) || t.contains('"') {
+                        format!("\"{}\"", t.replace('"', "\"\""))
+                    } else {
+                        t.to_string()
+                    }
+                })
+                .collect();
+            rows.push(cells.join(&delim.to_string()));
+        }
+        return Some(if rows.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", rows.join("\n"))
+        });
+    }
+    None
 }
 
 async fn run_stdin_formatter<S: IdeCtx>(
@@ -678,12 +813,37 @@ async fn run_stdin_formatter<S: IdeCtx>(
 }
 
 pub fn format_builtin_fallback(lang: &str, content: &str) -> String {
+    if matches!(lang, "json" | "jsonl" | "csv" | "tsv") {
+        let fake_path = format!("doc.{lang}");
+        if let Some(formatted) = try_native_data_format(lang, &fake_path, content) {
+            return formatted;
+        }
+    }
+    if matches!(lang, "shell" | "bash" | "sh" | "zsh") {
+        return format_shell_fallback(content);
+    }
     let normalized = content.replace("\r\n", "\n");
     let brace_indent = matches!(
         lang,
-        "java" | "kotlin" | "javascript" | "typescript" | "rust" | "go" | "c" | "cpp" | "protobuf"
+        "java"
+            | "kotlin"
+            | "javascript"
+            | "typescript"
+            | "json"
+            | "jsonc"
+            | "rust"
+            | "go"
+            | "c"
+            | "cpp"
+            | "protobuf"
     );
-    let unit = if lang == "go" { "\t" } else { "    " };
+    let unit = if lang == "go" {
+        "\t"
+    } else if matches!(lang, "json" | "jsonc") {
+        "  "
+    } else {
+        "    "
+    };
     let mut depth = 0usize;
     let mut out_lines: Vec<String> = Vec::new();
     let mut blanks = 0usize;
@@ -728,6 +888,56 @@ pub fn format_builtin_fallback(lang: &str, content: &str) -> String {
         };
     }
 
+    while out_lines.last().is_some_and(|l| l.is_empty()) {
+        out_lines.pop();
+    }
+    if out_lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", out_lines.join("\n"))
+    }
+}
+
+fn format_shell_fallback(content: &str) -> String {
+    let normalized = content.replace("\r\n", "\n");
+    let mut depth = 0usize;
+    let mut out_lines: Vec<String> = Vec::new();
+    let mut blanks = 0usize;
+    for raw in normalized.lines() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            blanks += 1;
+            if blanks <= 2 {
+                out_lines.push(String::new());
+            }
+            continue;
+        }
+        blanks = 0;
+        let deindent_before = matches!(trimmed, "fi" | "done" | "esac" | "}")
+            || trimmed.starts_with("elif ")
+            || trimmed == "else"
+            || trimmed.starts_with(";;");
+        let line_depth = if deindent_before {
+            depth.saturating_sub(1)
+        } else {
+            depth
+        };
+        out_lines.push(format!("{}{}", "  ".repeat(line_depth), trimmed));
+
+        if matches!(trimmed, "fi" | "done" | "esac" | "}") {
+            depth = depth.saturating_sub(1);
+        }
+        let code_part = trimmed.split('#').next().unwrap_or("").trim();
+        if code_part.ends_with("; then")
+            || code_part == "then"
+            || code_part.ends_with("; do")
+            || code_part == "do"
+            || code_part.ends_with('{')
+            || (code_part.starts_with("case ") && code_part.ends_with(" in"))
+        {
+            depth += 1;
+        }
+    }
     while out_lines.last().is_some_and(|l| l.is_empty()) {
         out_lines.pop();
     }
@@ -1084,6 +1294,39 @@ fn add_language_specific_actions(
             ));
         }
     }
+    if matches!(lang, "shell" | "bash" | "sh")
+        && !lines
+            .iter()
+            .take(8)
+            .any(|l| l.contains("set -e") || l.contains("pipefail"))
+    {
+        let mut updated: Vec<String> = lines.iter().map(|s| (*s).to_string()).collect();
+        let insert_at = usize::from(lines.first().is_some_and(|l| l.starts_with("#!")));
+        updated.insert(insert_at, "set -euo pipefail".into());
+        out.push(make_action(
+            "quickfix.shell.strict_mode",
+            "Add 'set -euo pipefail' strict shell guard",
+            "quickfix",
+            "+ set -euo pipefail".into(),
+            join_preserving_nl(&updated, content),
+        ));
+    }
+    if lang == "json" {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(content) {
+            if let Ok(compact) = serde_json::to_string(&val) {
+                let compact_nl = format!("{compact}\n");
+                if compact_nl != content {
+                    out.push(make_action(
+                        "refactor.json.minify",
+                        "Minify JSON to single line",
+                        "refactor.rewrite",
+                        compact.chars().take(60).collect(),
+                        compact_nl,
+                    ));
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1181,5 +1424,128 @@ mod tests {
                     .unwrap();
             assert_eq!(none_match, vec!["src/origin.rs"]);
         }
+    }
+
+    #[test]
+    fn document_symbols_and_formatters_cover_shell_json_jsonl_and_csv_tsv() {
+        let sh_src = "#!/usr/bin/env bash\nexport DEPLOY_ENV=\"prod\"\n\ndeploy_service() {\n  if [ -n \"$DEPLOY_ENV\" ]; then\n  echo \"ok\"\n  fi\n}\n";
+        let sh_syms = parse_document_symbols("scripts/deploy.sh", "shell", sh_src);
+        assert_eq!(sh_syms.len(), 2);
+        assert_eq!(sh_syms[0].name, "DEPLOY_ENV");
+        assert_eq!(sh_syms[1].name, "deploy_service");
+        assert_eq!(sh_syms[1].line, 4);
+        assert_eq!(sh_syms[1].end_line, 8);
+        let sh_fmt = format_builtin_fallback("shell", sh_src);
+        assert!(sh_fmt.contains("  if [ -n \"$DEPLOY_ENV\" ]; then\n    echo \"ok\"\n  fi"));
+
+        let jsonc_src = "{\n  // service port\n  \"port\": 8080,\n  \"routes\": [\n    { \"path\": \"/health\" }\n  ]\n}\n";
+        let json_syms = parse_document_symbols("config.jsonc", "jsonc", jsonc_src);
+        assert_eq!(json_syms.len(), 2);
+        assert_eq!(json_syms[0].name, "port");
+        assert_eq!(json_syms[1].name, "routes");
+        assert_eq!(json_syms[1].children.len(), 1);
+        assert_eq!(json_syms[1].children[0].children[0].name, "path");
+
+        let json_pretty = format_builtin_fallback("json", "{\"b\":1,\"a\":[true,false]}");
+        assert!(json_pretty.contains("  \"b\": 1"));
+
+        let jsonl_src = "{\"id\":\"evt-1\",\"ok\":true}\n{\"id\":\"evt-2\",\"ok\":false}\n";
+        let jsonl_syms = parse_document_symbols("events.jsonl", "jsonl", jsonl_src);
+        assert_eq!(jsonl_syms.len(), 2);
+        assert!(jsonl_syms[0].name.contains("evt-1"));
+
+        let csv_src = "player_id,brand_id,balance\n1001,20,50.25\n1002,20,99.00\n";
+        let csv_syms = parse_document_symbols("players.csv", "csv", csv_src);
+        assert_eq!(csv_syms.len(), 3);
+        assert_eq!(csv_syms[0].name, "player_id");
+        assert!(csv_syms[0]
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("2 rows"));
+    }
+
+    #[test]
+    fn external_sdk_navigation_resolves_goroot_gomodcache_and_node_modules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("go_admission");
+        let goroot = tmp.path().join("goroot");
+        let gomodcache = tmp.path().join("pkg/mod");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(goroot.join("src/fmt")).unwrap();
+        std::fs::create_dir_all(gomodcache.join("github.com/!azure/sdk@v1.2.0")).unwrap();
+
+        std::fs::write(
+            ws.join("go.mod"),
+            "module bitbucket.org/org/go_admission\n\nrequire (\n\tgithub.com/Azure/sdk v1.2.0\n)\n",
+        )
+        .unwrap();
+        let main_go = ws.join("main.go");
+        let main_src = "package main\n\nimport (\n\t\"fmt\"\n\t\"github.com/Azure/sdk\"\n)\n\nfunc main() {\n\tfmt.Println(sdk.NewClient())\n}\n";
+        std::fs::write(&main_go, main_src).unwrap();
+        std::fs::write(
+            goroot.join("src/fmt/print.go"),
+            "package fmt\n\nfunc Println(a ...any) (n int, err error) { return 0, nil }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            gomodcache.join("github.com/!azure/sdk@v1.2.0/client.go"),
+            "package sdk\n\nfunc NewClient() string { return \"ok\" }\n",
+        )
+        .unwrap();
+
+        let imports = navigation_ext::parse_go_imports(main_src);
+        assert_eq!(imports.get("fmt").map(String::as_str), Some("fmt"));
+        assert_eq!(
+            imports.get("sdk").map(String::as_str),
+            Some("github.com/Azure/sdk")
+        );
+
+        let mut env = BTreeMap::new();
+        env.insert("GOROOT".into(), goroot.to_string_lossy().into_owned());
+        env.insert(
+            "GOMODCACHE".into(),
+            gomodcache.to_string_lossy().into_owned(),
+        );
+        let roots = vec![ws.canonicalize().unwrap()];
+        let ro = vec![
+            goroot.canonicalize().unwrap(),
+            gomodcache.canonicalize().unwrap(),
+        ];
+
+        let fmt_dirs = navigation_ext::resolve_go_package_dirs("fmt", &main_go, &roots, &ro, &env);
+        let fmt_defs = navigation_ext::search_go_package_dirs(&fmt_dirs, "Println");
+        assert_eq!(fmt_defs.len(), 1);
+        assert!(fmt_defs[0].path.ends_with("src/fmt/print.go"));
+        assert_eq!(fmt_defs[0].line, 3);
+
+        let sdk_dirs = navigation_ext::resolve_go_package_dirs(
+            "github.com/Azure/sdk",
+            &main_go,
+            &roots,
+            &ro,
+            &env,
+        );
+        let sdk_defs = navigation_ext::search_go_package_dirs(&sdk_dirs, "NewClient");
+        assert_eq!(sdk_defs.len(), 1);
+        assert_eq!(sdk_defs[0].line, 3);
+
+        // Node `node_modules` `.d.ts` resolution.
+        let nm_pkg = ws.join("node_modules/zod");
+        std::fs::create_dir_all(&nm_pkg).unwrap();
+        std::fs::write(
+            nm_pkg.join("package.json"),
+            "{\"name\":\"zod\",\"types\":\"index.d.ts\"}",
+        )
+        .unwrap();
+        std::fs::write(
+            nm_pkg.join("index.d.ts"),
+            "export declare function object(shape: unknown): unknown;\n",
+        )
+        .unwrap();
+        let ts_files =
+            navigation_ext::resolve_js_ts_module_files("zod", &ws.join("app.ts"), &roots);
+        assert_eq!(ts_files.len(), 1);
+        assert!(ts_files[0].ends_with("node_modules/zod/index.d.ts"));
     }
 }

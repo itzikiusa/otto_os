@@ -96,9 +96,17 @@ class _OttoDapBdb(bdb.Bdb):
                         return
                 except Exception:
                     return
+            bp_meta['_hits'] = bp_meta.get('_hits', 0) + 1
+            hit_cond = str(bp_meta.get('hitCondition') or '').strip().lstrip('=> ')
+            if hit_cond.isdigit() and bp_meta['_hits'] < int(hit_cond):
+                return
             log_msg = bp_meta.get('logMessage')
             if log_msg:
-                _send({'type': 'event', 'event': 'output', 'body': {'category': 'console', 'output': str(log_msg) + '\n'}})
+                try:
+                    formatted = str(log_msg).format(**{**frame.f_globals, **frame.f_locals})
+                except Exception:
+                    formatted = str(log_msg)
+                _send({'type': 'event', 'event': 'output', 'body': {'category': 'console', 'output': formatted + '\n'}})
                 return
         if self.initial_run and self.bps and not bp_meta:
             return

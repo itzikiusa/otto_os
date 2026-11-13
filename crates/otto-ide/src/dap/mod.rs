@@ -18,9 +18,11 @@ pub(crate) mod node_bridge;
 pub(crate) mod py_bridge;
 pub mod session;
 pub(crate) mod session_inspect;
+pub(crate) mod shell_bridge;
 pub mod wire;
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -35,13 +37,16 @@ pub use adapters::{resolve_dap_adapter, DapAdapterTransport, ResolvedDapAdapter}
 pub use java_bridge::JavaJdbBridgeSpec;
 pub use node_bridge::NodeInspectorBridgeSpec;
 pub use session::{DapManager, DapStartContext};
+pub use shell_bridge::ShellBridgeSpec;
 pub use wire::{DapEvent, DapMessage, DapReader, DapRequest, DapResponse, DapWriter};
 
-/// Owns background child processes and optional SSH port-forwards for a session.
+/// Owns background child processes, Unix process-group IDs, temp IPC dirs, and SSH tunnels.
 #[derive(Default)]
 pub(crate) struct BridgeGuard {
     children: Mutex<Vec<Child>>,
+    pgids: Mutex<Vec<u32>>,
     tunnels: Mutex<Vec<SshTunnel>>,
+    temp_dirs: Mutex<Vec<PathBuf>>,
 }
 
 impl BridgeGuard {
@@ -50,6 +55,11 @@ impl BridgeGuard {
     }
 
     pub(crate) fn push_child(&self, child: Child) {
+        if let Some(pid) = child.id() {
+            if let Ok(mut pg) = self.pgids.lock() {
+                pg.push(pid);
+            }
+        }
         if let Ok(mut guard) = self.children.lock() {
             guard.push(child);
         }
@@ -61,7 +71,19 @@ impl BridgeGuard {
         }
     }
 
+    pub(crate) fn push_temp_dir(&self, dir: PathBuf) {
+        if let Ok(mut guard) = self.temp_dirs.lock() {
+            guard.push(dir);
+        }
+    }
+
     pub(crate) fn kill_all(&self) {
+        #[cfg(unix)]
+        let pgids_to_kill: Vec<u32> = self
+            .pgids
+            .lock()
+            .map(|mut g| g.drain(..).collect())
+            .unwrap_or_default();
         if let Ok(mut guard) = self.children.lock() {
             for child in guard.iter_mut() {
                 let _ = child.start_kill();
@@ -70,6 +92,45 @@ impl BridgeGuard {
         }
         if let Ok(mut guard) = self.tunnels.lock() {
             guard.clear();
+        }
+        let dirs_to_remove: Vec<PathBuf> = self
+            .temp_dirs
+            .lock()
+            .map(|mut d| d.drain(..).collect())
+            .unwrap_or_default();
+
+        #[cfg(unix)]
+        let need_thread = !pgids_to_kill.is_empty() || !dirs_to_remove.is_empty();
+        #[cfg(not(unix))]
+        let need_thread = !dirs_to_remove.is_empty();
+
+        if need_thread {
+            std::thread::spawn(move || {
+                #[cfg(unix)]
+                for pgid in pgids_to_kill {
+                    if pgid > 1 {
+                        let neg = format!("-{pgid}");
+                        #[allow(clippy::disallowed_methods)] // dedicated cleanup OS thread
+                        let _ = std::process::Command::new("/bin/kill")
+                            .args(["-TERM", "--", &neg])
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .status();
+                        #[allow(clippy::disallowed_methods)] // dedicated cleanup OS thread
+                        let _ = std::process::Command::new("/bin/kill")
+                            .args(["-KILL", "--", &neg])
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .status();
+                    }
+                }
+                for d in dirs_to_remove {
+                    #[allow(clippy::disallowed_methods)] // dedicated cleanup OS thread
+                    let _ = std::fs::remove_dir_all(d);
+                }
+            });
         }
     }
 }
@@ -181,6 +242,8 @@ pub(crate) fn spawn_target_process(
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            #[cfg(unix)]
+            cmd.process_group(0);
             cmd.spawn()
                 .map_err(|e| Error::Upstream(format!("failed to spawn '{command}': {e}")))
         }

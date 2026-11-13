@@ -8,19 +8,20 @@ use regex::Regex;
 use crate::types::{detect_language, IdeSymbolNode};
 
 use super::code_mask_for_line;
+use super::symbols_data::{parse_csv_symbols, parse_json_symbols, parse_shell_symbols};
 
-struct RawSymbol {
-    name: String,
-    kind: String,
-    detail: Option<String>,
-    line: u32,
-    end_line: u32,
-    indent: usize,
-    is_container: bool,
+pub(super) struct RawSymbol {
+    pub(super) name: String,
+    pub(super) kind: String,
+    pub(super) detail: Option<String>,
+    pub(super) line: u32,
+    pub(super) end_line: u32,
+    pub(super) indent: usize,
+    pub(super) is_container: bool,
 }
 
 impl RawSymbol {
-    fn into_node(self) -> IdeSymbolNode {
+    pub(super) fn into_node(self) -> IdeSymbolNode {
         IdeSymbolNode {
             name: self.name,
             kind: self.kind,
@@ -38,15 +39,21 @@ pub fn parse_document_symbols(path: &str, lang: &str, content: &str) -> Vec<IdeS
     } else {
         lang
     };
+    let lower = effective.to_ascii_lowercase();
+    if matches!(lower.as_str(), "json" | "jsonc" | "jsonl") {
+        return parse_json_symbols(path, &lower, content);
+    }
     let lines: Vec<&str> = content.lines().collect();
     if lines.is_empty() {
         return Vec::new();
     }
-    match effective {
+    match lower.as_str() {
         "python" => parse_python_symbols(&lines),
+        "shell" | "bash" | "sh" | "zsh" => parse_shell_symbols(&lines),
+        "csv" | "tsv" => parse_csv_symbols(path, &lower, &lines),
         "markdown" => parse_markdown_symbols(&lines),
         "makefile" => parse_makefile_symbols(&lines),
-        _ => parse_brace_language_symbols(effective, &lines),
+        other => parse_brace_language_symbols(other, &lines),
     }
 }
 
@@ -155,21 +162,32 @@ fn match_rust_symbol(trimmed: &str) -> Option<(String, String, Option<String>, b
 
 fn match_go_symbol(trimmed: &str) -> Option<(String, String, Option<String>, bool)> {
     static RE_TYPE: OnceLock<Regex> = OnceLock::new();
+    static RE_TYPE_ALIAS: OnceLock<Regex> = OnceLock::new();
     static RE_M: OnceLock<Regex> = OnceLock::new();
     static RE_F: OnceLock<Regex> = OnceLock::new();
     static RE_C: OnceLock<Regex> = OnceLock::new();
 
     if let Some(cap) = RE_TYPE
         .get_or_init(|| {
-            Regex::new(r"^type\s+([A-Za-z_][A-Za-z0-9_]*)\s+(struct|interface)\b").unwrap()
+            Regex::new(r"^type\s+([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?\s+(struct|interface)\b")
+                .unwrap()
         })
         .captures(trimmed)
     {
         return Some((cap[1].to_string(), cap[2].to_string(), None, true));
     }
+    if let Some(cap) = RE_TYPE_ALIAS
+        .get_or_init(|| Regex::new(r"^type\s+([A-Za-z_][A-Za-z0-9_]*)\s+=").unwrap())
+        .captures(trimmed)
+    {
+        return Some((cap[1].to_string(), "type".into(), None, false));
+    }
     if let Some(cap) = RE_M
         .get_or_init(|| {
-            Regex::new(r"^func\s*\(([^)]+)\)\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)").unwrap()
+            Regex::new(
+                r"^func\s*\(([^)]+)\)\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]*\])?\s*\(([^)]*)\)",
+            )
+            .unwrap()
         })
         .captures(trimmed)
     {
@@ -207,7 +225,7 @@ fn match_jvm_symbol(trimmed: &str) -> Option<(String, String, Option<String>, bo
     if let Some(cap) = RE_CLS
         .get_or_init(|| {
             Regex::new(
-                r"^(?:(?:public|private|protected|abstract|final|static|sealed|open|data|internal)\s+)*(class|interface|enum|record|object)\s+([A-Za-z_][A-Za-z0-9_]*)",
+                r"^(?:(?:public|private|protected|abstract|final|static|sealed|non-sealed|open|data|internal)\s+)*(class|interface|enum|record|object)\s+([A-Za-z_][A-Za-z0-9_]*)",
             )
             .unwrap()
         })
@@ -231,16 +249,19 @@ fn match_jvm_symbol(trimmed: &str) -> Option<(String, String, Option<String>, bo
             false,
         ));
     }
-    if ["if ", "for ", "while ", "switch ", "return ", "new "]
-        .iter()
-        .any(|p| trimmed.starts_with(p))
+    if [
+        "if ", "if(", "for ", "for(", "while ", "while(", "switch ", "switch(", "catch ", "catch(",
+        "return ", "new ", "super(", "this(", "throw ",
+    ]
+    .iter()
+    .any(|p| trimmed.starts_with(p))
     {
         return None;
     }
     let cap = RE_M
         .get_or_init(|| {
             Regex::new(
-                r"^(?:(?:public|private|protected|static|final|synchronized|abstract|default)\s+)+(?:<[^>]+>\s+)?(?:[A-Za-z_][A-Za-z0-9_<>,.\[\]?]*\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*(?:throws\s+[^{]+)?\{",
+                r"^(?:(?:public|private|protected|static|final|synchronized|abstract|default|native)\s+)*(?:<[^>]+>\s+)?(?:[A-Za-z_][A-Za-z0-9_<>,.\[\]?]*\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*(?:throws\s+[^{;]+)?(?:\{|;)",
             )
             .unwrap()
         })
@@ -461,7 +482,7 @@ fn parse_makefile_symbols(lines: &[&str]) -> Vec<IdeSymbolNode> {
         .collect()
 }
 
-fn compute_brace_block_ends(lang: &str, lines: &[&str]) -> BTreeMap<u32, u32> {
+pub(super) fn compute_brace_block_ends(lang: &str, lines: &[&str]) -> BTreeMap<u32, u32> {
     let mut stack: Vec<u32> = Vec::new();
     let mut ends = BTreeMap::new();
     let mut in_block = false;
@@ -484,7 +505,7 @@ fn compute_brace_block_ends(lang: &str, lines: &[&str]) -> BTreeMap<u32, u32> {
     ends
 }
 
-fn nest_symbols(raw: Vec<RawSymbol>, by_indent: bool) -> Vec<IdeSymbolNode> {
+pub(super) fn nest_symbols(raw: Vec<RawSymbol>, by_indent: bool) -> Vec<IdeSymbolNode> {
     let mut stack: Vec<(usize, IdeSymbolNode)> = Vec::new();
     let mut roots: Vec<IdeSymbolNode> = Vec::new();
     let pop_to_parent = |stack: &mut Vec<(usize, IdeSymbolNode)>,

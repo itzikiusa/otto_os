@@ -7,9 +7,10 @@
 //! SSH hosts.
 
 mod fs_ops;
+pub(crate) mod sdk_paths;
 mod search;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,15 +34,19 @@ use crate::types::{
 use crate::IdeCtx;
 
 use self::fs_ops::{
-    build_file_read_resp, build_remote_tree_entries, cached_local_git_status, list_local_dir_sync,
-    mutate_local_fs, mutate_remote_fs, normalize_arch_name, normalize_os_name, parse_git_porcelain,
-    parse_uname_output, read_bounded_bytes, sha256_hex, verify_local_expected_sha,
+    build_file_read_resp, build_remote_tree_entries, list_local_dir_sync, mutate_local_fs_in_roots,
+    mutate_remote_fs, normalize_arch_name, normalize_os_name, parse_uname_output,
+    read_bounded_bytes, resolve_local_existing_in_roots, sha256_hex, verify_local_expected_sha,
     verify_remote_expected_sha, write_local_atomic,
 };
 pub(super) use self::fs_ops::{enforce_non_root_path, resolve_local_existing};
+use self::sdk_paths::{
+    collect_readonly_sdk_roots, is_virtual_archive_uri, read_virtual_java_archive,
+    resolve_local_readable, strip_file_uri,
+};
 use self::search::{
-    build_matcher, collect_local_files, replace_local_sync, replace_remote_ssh, search_local_sync,
-    search_remote_ssh,
+    build_matcher, collect_local_files_multi, replace_local_sync, replace_remote_ssh,
+    search_local_sync, search_remote_ssh,
 };
 
 /// Maximum bytes read into the text editor buffer (`4 MiB`).
@@ -53,7 +58,7 @@ const DEFAULT_SEARCH_LIMIT: usize = 200;
 /// Hard ceiling on returned search items.
 const MAX_SEARCH_LIMIT: usize = 1000;
 /// Idle retention for pooled SFTP sessions.
-const SFTP_IDLE_TTL: Duration = Duration::from_secs(120);
+const SFTP_IDLE_TTL: Duration = Duration::from_secs(90);
 
 /// Captured output of a bounded command executed on a [`ResolvedTarget`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,11 +79,14 @@ impl ExecOutput {
 pub enum ResolvedTarget {
     Local {
         root: PathBuf,
+        additional_roots: Vec<PathBuf>,
+        readonly_roots: Vec<PathBuf>,
         is_root_user: bool,
     },
     Ssh {
         spec: IdeSshSpec,
         root: String,
+        additional_roots: Vec<String>,
         actor_id: String,
     },
 }
@@ -93,6 +101,29 @@ impl ResolvedTarget {
 
     pub fn is_ssh(&self) -> bool {
         matches!(self, Self::Ssh { .. })
+    }
+
+    pub fn local_project_roots(&self) -> Vec<PathBuf> {
+        match self {
+            Self::Local {
+                root,
+                additional_roots,
+                ..
+            } => {
+                let mut v = Vec::with_capacity(1 + additional_roots.len());
+                v.push(root.clone());
+                v.extend(additional_roots.iter().cloned());
+                v
+            }
+            Self::Ssh { .. } => Vec::new(),
+        }
+    }
+
+    pub fn local_readonly_roots(&self) -> &[PathBuf] {
+        match self {
+            Self::Local { readonly_roots, .. } => readonly_roots,
+            Self::Ssh { .. } => &[],
+        }
     }
 
     pub fn cache_key(&self) -> String {
@@ -127,7 +158,6 @@ impl SshControlSocket {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
         let pid = std::process::id();
-        // Keep socket path well below macOS's 104-byte sun_path limit.
         let base = if Path::new("/tmp").is_dir() {
             PathBuf::from("/tmp")
         } else {
@@ -177,7 +207,7 @@ impl Drop for SshControlSocket {
                     .stderr(Stdio::null())
                     .spawn();
             }
-            #[allow(clippy::disallowed_methods)] // dedicated cleanup thread
+            #[allow(clippy::disallowed_methods)]
             let _ = std::fs::remove_dir_all(dir);
         });
     }
@@ -188,7 +218,7 @@ impl Drop for SshControlSocket {
 pub struct TargetManager {
     sftp_pool: Arc<DashMap<SshPoolKey, (Arc<SftpSession>, Instant)>>,
     ssh_sockets: Arc<DashMap<SshPoolKey, Arc<SshControlSocket>>>,
-    platform_cache: Arc<DashMap<String, IdePlatformInfo>>,
+    ssh_platform_cache: Arc<DashMap<String, IdePlatformInfo>>,
 }
 
 impl Default for TargetManager {
@@ -202,7 +232,7 @@ impl TargetManager {
         Self {
             sftp_pool: Arc::new(DashMap::new()),
             ssh_sockets: Arc::new(DashMap::new()),
-            platform_cache: Arc::new(DashMap::new()),
+            ssh_platform_cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -215,7 +245,40 @@ impl TargetManager {
     ) -> Result<ResolvedTarget> {
         spec.validate()?;
         match spec.kind {
-            IdeTargetKind::Local => self.resolve_local(spec, user.is_root),
+            IdeTargetKind::Local => {
+                let mut merged_spec = spec.clone();
+                let mut extra_sdk_dirs = vec![ctx.ide().toolchains.toolchains_dir()];
+                if let Ok(proj_env) = ctx
+                    .ide()
+                    .environments
+                    .get_project_env(&ctx.pool(), spec)
+                    .await
+                {
+                    for ar in proj_env.additional_roots {
+                        if !ar.trim().is_empty() && !merged_spec.additional_roots.contains(&ar) {
+                            merged_spec.additional_roots.push(ar);
+                        }
+                    }
+                    for sdk_opt in [
+                        proj_env.goroot,
+                        proj_env.java_home,
+                        proj_env.python_venv,
+                        proj_env.node_home,
+                    ] {
+                        if let Some(p) = sdk_opt.filter(|s| !s.trim().is_empty()) {
+                            extra_sdk_dirs.push(PathBuf::from(p));
+                        }
+                    }
+                }
+                for cached_ar in crate::environments::cached_additional_roots(&spec.project_key()) {
+                    if !cached_ar.trim().is_empty()
+                        && !merged_spec.additional_roots.contains(&cached_ar)
+                    {
+                        merged_spec.additional_roots.push(cached_ar);
+                    }
+                }
+                self.resolve_local_with_sdks(&merged_spec, user.is_root, &extra_sdk_dirs)
+            }
             IdeTargetKind::Ssh => {
                 let conn_id = spec.connection_id.as_ref().ok_or_else(|| {
                     Error::Invalid("connection_id is required for SSH targets".into())
@@ -233,24 +296,34 @@ impl TargetManager {
         spec: &IdeTargetSpec,
         is_root_user: bool,
     ) -> Result<ResolvedTarget> {
+        self.resolve_local_with_sdks(spec, is_root_user, &[])
+    }
+
+    pub fn resolve_local_with_sdks(
+        &self,
+        spec: &IdeTargetSpec,
+        is_root_user: bool,
+        extra_sdk_dirs: &[PathBuf],
+    ) -> Result<ResolvedTarget> {
         spec.validate()?;
-        let expanded = otto_core::paths::expand_home_strict(&spec.root).map_err(Error::Invalid)?;
-        let canonical = expanded
-            .canonicalize()
-            .map_err(|e| map_io_err("resolve workspace root", &expanded, e))?;
-        let meta = std::fs::metadata(&canonical)
-            .map_err(|e| map_io_err("stat workspace root", &canonical, e))?;
-        if !meta.is_dir() {
-            return Err(Error::Invalid(format!(
-                "target root '{}' is not a directory",
-                canonical.display()
-            )));
+        let canonical = canonicalize_local_root_dir(&spec.root, is_root_user)?;
+        let mut additional_roots = Vec::with_capacity(spec.additional_roots.len());
+        for raw_extra in &spec.additional_roots {
+            let trimmed = raw_extra.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(canon_extra) = canonicalize_local_root_dir(trimmed, is_root_user) {
+                if canon_extra != canonical && !additional_roots.contains(&canon_extra) {
+                    additional_roots.push(canon_extra);
+                }
+            }
         }
-        if !is_root_user {
-            enforce_non_root_path(&canonical)?;
-        }
+        let readonly_roots = collect_readonly_sdk_roots(extra_sdk_dirs);
         Ok(ResolvedTarget::Local {
             root: canonical,
+            additional_roots,
+            readonly_roots,
             is_root_user,
         })
     }
@@ -265,25 +338,34 @@ impl TargetManager {
         spec.validate()?;
         validate_ssh_spec(&ssh)?;
         let norm_root = normalize_remote_root(&spec.root)?;
+        let mut additional_roots = Vec::new();
+        for extra in &spec.additional_roots {
+            if let Ok(nr) = normalize_remote_root(extra) {
+                if nr != norm_root && !additional_roots.contains(&nr) {
+                    additional_roots.push(nr);
+                }
+            }
+        }
         Ok(ResolvedTarget::Ssh {
             spec: ssh,
             root: norm_root,
+            additional_roots,
             actor_id: actor_id.to_string(),
         })
     }
 
     /// Detect `(os, arch)` of `target` (`macos`/`linux` × `aarch64`/`x86_64`).
     pub async fn detect_platform(&self, target: &ResolvedTarget) -> Result<IdePlatformInfo> {
-        let key = target.cache_key();
-        if let Some(cached) = self.platform_cache.get(&key) {
-            return Ok(cached.clone());
-        }
-        let info = match target {
-            ResolvedTarget::Local { .. } => IdePlatformInfo {
+        match target {
+            ResolvedTarget::Local { .. } => Ok(IdePlatformInfo {
                 os: normalize_os_name(std::env::consts::OS),
                 arch: normalize_arch_name(std::env::consts::ARCH),
-            },
+            }),
             ResolvedTarget::Ssh { .. } => {
+                let key = target.cache_key();
+                if let Some(cached) = self.ssh_platform_cache.get(&key) {
+                    return Ok(cached.clone());
+                }
                 let out = self
                     .exec_command(
                         target,
@@ -300,14 +382,17 @@ impl TargetManager {
                         out.stderr.trim()
                     )));
                 }
-                parse_uname_output(&out.stdout)
+                let info = parse_uname_output(&out.stdout);
+                if self.ssh_platform_cache.len() >= 64 {
+                    self.ssh_platform_cache.clear();
+                }
+                self.ssh_platform_cache.insert(key, info.clone());
+                Ok(info)
             }
-        };
-        self.platform_cache.insert(key, info.clone());
-        Ok(info)
+        }
     }
 
-    /// List directory entries on `target` with git status and language hints.
+    /// Shallow 1-level directory listing on `target` (`<1ms` locally, zero subprocesses).
     pub async fn list_tree(
         &self,
         target: &ResolvedTarget,
@@ -315,28 +400,36 @@ impl TargetManager {
         show_hidden: bool,
     ) -> Result<IdeFsTreeResp> {
         let platform = self.detect_platform(target).await?;
-        let git_map = self.git_status_map(target).await;
         match target {
-            ResolvedTarget::Local { root, is_root_user } => {
-                let dir_path = resolve_local_existing(root, *is_root_user, path.unwrap_or(""))?;
-                let root_clone = root.clone();
+            ResolvedTarget::Local {
+                root,
+                additional_roots,
+                is_root_user,
+                ..
+            } => {
+                let (resolved_dir, matched_root) = resolve_local_existing_in_roots(
+                    root,
+                    additional_roots,
+                    *is_root_user,
+                    path.unwrap_or(""),
+                )?;
+                let dir_for_scan = resolved_dir.clone();
                 let restricted = !*is_root_user;
                 let entries = tokio::task::spawn_blocking(move || {
-                    list_local_dir_sync(&root_clone, &dir_path, show_hidden, restricted, &git_map)
+                    list_local_dir_sync(&dir_for_scan, show_hidden, restricted)
                 })
                 .await
                 .map_err(|e| Error::Internal(format!("list_tree join: {e}")))??;
-                let resolved_dir = resolve_local_existing(root, *is_root_user, path.unwrap_or(""))?;
-                let parent = if resolved_dir == *root {
+                let parent = if resolved_dir == matched_root {
                     None
                 } else {
                     resolved_dir
                         .parent()
-                        .filter(|p| p.starts_with(root))
+                        .filter(|p| p.starts_with(&matched_root))
                         .map(|p| p.to_string_lossy().into_owned())
                 };
                 Ok(IdeFsTreeResp {
-                    root: root.to_string_lossy().into_owned(),
+                    root: matched_root.to_string_lossy().into_owned(),
                     path: resolved_dir.to_string_lossy().into_owned(),
                     parent,
                     target_os: platform.os,
@@ -347,25 +440,21 @@ impl TargetManager {
             ResolvedTarget::Ssh {
                 spec,
                 root,
+                additional_roots,
                 actor_id,
             } => {
-                let remote_dir = resolve_remote_subpath(root, path.unwrap_or(""))?;
+                let (remote_dir, matched_root) =
+                    resolve_remote_in_roots(root, additional_roots, path.unwrap_or(""))?;
                 let sftp = self.acquire_sftp(actor_id, spec)?;
                 let (raw_entries, _) = sftp.list_capped(&remote_dir, 5_000).await?;
-                let entries = build_remote_tree_entries(
-                    root,
-                    &remote_dir,
-                    raw_entries,
-                    show_hidden,
-                    &git_map,
-                );
-                let parent = if remote_dir == *root {
+                let entries = build_remote_tree_entries(&remote_dir, raw_entries, show_hidden);
+                let parent = if remote_dir == matched_root {
                     None
                 } else {
-                    remote_parent(&remote_dir).filter(|p| p.starts_with(root.as_str()))
+                    remote_parent(&remote_dir).filter(|p| p.starts_with(matched_root.as_str()))
                 };
                 Ok(IdeFsTreeResp {
-                    root: root.clone(),
+                    root: matched_root,
                     path: remote_dir,
                     parent,
                     target_os: platform.os,
@@ -376,11 +465,33 @@ impl TargetManager {
         }
     }
 
-    /// Read a UTF-8 file from `target`, computing its SHA-256 and metadata.
+    /// Read a UTF-8 file from `target` (including attached folders, allowlisted
+    /// read-only external SDK/module paths, and Java `jar:file://`/`jdt://` archives).
     pub async fn read_file(&self, target: &ResolvedTarget, path: &str) -> Result<IdeFileReadResp> {
         match target {
-            ResolvedTarget::Local { root, is_root_user } => {
-                let canonical = resolve_local_existing(root, *is_root_user, path)?;
+            ResolvedTarget::Local {
+                root,
+                additional_roots,
+                readonly_roots,
+                is_root_user,
+            } => {
+                if is_virtual_archive_uri(path) {
+                    return read_virtual_java_archive(
+                        root,
+                        additional_roots,
+                        readonly_roots,
+                        *is_root_user,
+                        path,
+                    )
+                    .await;
+                }
+                let (canonical, force_readonly) = resolve_local_readable(
+                    root,
+                    additional_roots,
+                    readonly_roots,
+                    *is_root_user,
+                    path,
+                )?;
                 let meta = tokio::fs::metadata(&canonical)
                     .await
                     .map_err(|e| map_io_err("stat file", &canonical, e))?;
@@ -391,7 +502,7 @@ impl TargetManager {
                     )));
                 }
                 let size = meta.len();
-                let read_only = meta.permissions().readonly();
+                let read_only = force_readonly || meta.permissions().readonly();
                 let (bytes, truncated) =
                     read_bounded_bytes(&canonical, MAX_FILE_READ_BYTES).await?;
                 build_file_read_resp(
@@ -405,9 +516,12 @@ impl TargetManager {
             ResolvedTarget::Ssh {
                 spec,
                 root,
+                additional_roots,
                 actor_id,
             } => {
-                let remote_path = resolve_remote_subpath(root, path)?;
+                let (remote_path, matched_root) =
+                    resolve_remote_in_roots_or_sdk(root, additional_roots, path)?;
+                let force_ro = matched_root.is_none();
                 let sftp = self.acquire_sftp(actor_id, spec)?;
                 let tmp = tempfile::NamedTempFile::new()
                     .map_err(|e| Error::Internal(format!("temp file: {e}")))?;
@@ -425,7 +539,7 @@ impl TargetManager {
                 } else {
                     bytes.len() as u64
                 };
-                build_file_read_resp(remote_path, &bytes, size, false, truncated)
+                build_file_read_resp(remote_path, &bytes, size, force_ro, truncated)
             }
         }
     }
@@ -440,12 +554,28 @@ impl TargetManager {
         expected_sha256: Option<&str>,
         create_dirs: bool,
     ) -> Result<IdeFileWriteResp> {
+        if is_virtual_archive_uri(path) {
+            return Err(Error::Forbidden(
+                "archive and external SDK files are read-only".into(),
+            ));
+        }
         let new_bytes = content.as_bytes();
         let new_sha = sha256_hex(new_bytes);
         match target {
-            ResolvedTarget::Local { root, is_root_user } => {
-                let dest =
-                    resolve_local_prospective(root, *is_root_user, path, create_dirs).await?;
+            ResolvedTarget::Local {
+                root,
+                additional_roots,
+                is_root_user,
+                ..
+            } => {
+                let (dest, _) = resolve_local_prospective_in_roots(
+                    root,
+                    additional_roots,
+                    *is_root_user,
+                    path,
+                    create_dirs,
+                )
+                .await?;
                 if let Some(exp) = expected_sha256.filter(|s| !s.is_empty()) {
                     verify_local_expected_sha(&dest, exp).await?;
                 }
@@ -459,9 +589,10 @@ impl TargetManager {
             ResolvedTarget::Ssh {
                 spec,
                 root,
+                additional_roots,
                 actor_id,
             } => {
-                let remote_path = resolve_remote_subpath(root, path)?;
+                let (remote_path, _) = resolve_remote_in_roots(root, additional_roots, path)?;
                 let sftp = self.acquire_sftp(actor_id, spec)?;
                 if let Some(exp) = expected_sha256.filter(|s| !s.is_empty()) {
                     verify_remote_expected_sha(&sftp, &remote_path, exp).await?;
@@ -506,13 +637,20 @@ impl TargetManager {
         dest_path: Option<&str>,
     ) -> Result<IdeFsMutateResp> {
         match target {
-            ResolvedTarget::Local { root, is_root_user } => {
-                mutate_local_fs(root, *is_root_user, op, path, dest_path).await
+            ResolvedTarget::Local {
+                root,
+                additional_roots,
+                is_root_user,
+                ..
+            } => {
+                mutate_local_fs_in_roots(root, additional_roots, *is_root_user, op, path, dest_path)
+                    .await
             }
             ResolvedTarget::Ssh {
                 spec,
                 root,
                 actor_id,
+                ..
             } => {
                 let sftp = self.acquire_sftp(actor_id, spec)?;
                 mutate_remote_fs(&sftp, root, op, path, dest_path).await
@@ -520,16 +658,21 @@ impl TargetManager {
         }
     }
 
-    /// List workspace source file paths (honoring `.gitignore` locally, or
-    /// `rg --files` / `find` on SSH), bounded by `limit`.
+    /// List workspace source file paths across primary + attached roots.
     pub async fn list_files(&self, target: &ResolvedTarget, limit: usize) -> Result<Vec<String>> {
         let cap = limit.clamp(1, 20_000);
         match target {
-            ResolvedTarget::Local { root, is_root_user } => {
+            ResolvedTarget::Local {
+                root,
+                additional_roots,
+                is_root_user,
+                ..
+            } => {
                 let root_clone = root.clone();
+                let extra_clone = additional_roots.clone();
                 let restricted = !*is_root_user;
                 tokio::task::spawn_blocking(move || {
-                    collect_local_files(&root_clone, restricted, cap)
+                    collect_local_files_multi(&root_clone, &extra_clone, restricted, None, cap)
                 })
                 .await
                 .map_err(|e| Error::Internal(format!("list_files join: {e}")))?
@@ -578,12 +721,18 @@ impl TargetManager {
             .unwrap_or(DEFAULT_SEARCH_LIMIT)
             .clamp(1, MAX_SEARCH_LIMIT);
         match target {
-            ResolvedTarget::Local { root, is_root_user } => {
+            ResolvedTarget::Local {
+                root,
+                additional_roots,
+                is_root_user,
+                ..
+            } => {
                 let root_clone = root.clone();
+                let extra_clone = additional_roots.clone();
                 let restricted = !*is_root_user;
                 let req_clone = req.clone();
                 tokio::task::spawn_blocking(move || {
-                    search_local_sync(&root_clone, restricted, &req_clone, limit)
+                    search_local_sync(&root_clone, &extra_clone, restricted, &req_clone, limit)
                 })
                 .await
                 .map_err(|e| Error::Internal(format!("search join: {e}")))?
@@ -603,14 +752,20 @@ impl TargetManager {
         if req.query.is_empty() {
             return Err(Error::Invalid("replace query must not be empty".into()));
         }
-        let matcher = build_matcher(&req.query, req.regex, req.case_sensitive)?;
+        let matcher = build_matcher(&req.query, req.regex, req.case_sensitive, req.whole_word)?;
         match target {
-            ResolvedTarget::Local { root, is_root_user } => {
+            ResolvedTarget::Local {
+                root,
+                additional_roots,
+                is_root_user,
+                ..
+            } => {
                 let root_clone = root.clone();
+                let extra_clone = additional_roots.clone();
                 let restricted = !*is_root_user;
                 let req_clone = req.clone();
                 tokio::task::spawn_blocking(move || {
-                    replace_local_sync(&root_clone, restricted, &req_clone, &matcher)
+                    replace_local_sync(&root_clone, &extra_clone, restricted, &req_clone, &matcher)
                 })
                 .await
                 .map_err(|e| Error::Internal(format!("replace join: {e}")))?
@@ -671,9 +826,16 @@ impl TargetManager {
             }
         }
         match target {
-            ResolvedTarget::Local { root, is_root_user } => {
+            ResolvedTarget::Local {
+                root,
+                additional_roots,
+                is_root_user,
+                ..
+            } => {
                 let work_dir = match cwd.filter(|c| !c.trim().is_empty()) {
-                    Some(c) => resolve_local_existing(root, *is_root_user, c)?,
+                    Some(c) => {
+                        resolve_local_existing_in_roots(root, additional_roots, *is_root_user, c)?.0
+                    }
                     None => root.clone(),
                 };
                 let mut cmd = Command::new(program);
@@ -690,6 +852,7 @@ impl TargetManager {
                 spec,
                 root,
                 actor_id,
+                ..
             } => {
                 validate_ssh_spec(spec)?;
                 let ctl = self.acquire_ssh_socket(actor_id, spec)?;
@@ -713,8 +876,7 @@ impl TargetManager {
         }
     }
 
-    /// Spawn a long-lived piped child process (for DAP adapters, LSP bridges,
-    /// or streaming test runs) on either local OS or multiplexed SSH.
+    /// Spawn a long-lived piped child process on either local OS or multiplexed SSH.
     pub async fn spawn_piped(
         &self,
         target: &ResolvedTarget,
@@ -796,39 +958,37 @@ impl TargetManager {
         self.ssh_sockets.insert(key, sock.clone());
         Ok(sock)
     }
-
-    async fn git_status_map(&self, target: &ResolvedTarget) -> Arc<HashMap<String, String>> {
-        if let ResolvedTarget::Local { root, .. } = target {
-            return cached_local_git_status(root).await;
-        }
-        let args = vec![
-            "status".to_string(),
-            "--porcelain=v1".to_string(),
-            "-uall".to_string(),
-        ];
-        let Ok(out) = self
-            .exec_command(
-                target,
-                "git",
-                &args,
-                None,
-                &BTreeMap::new(),
-                Duration::from_secs(3),
-            )
-            .await
-        else {
-            return Arc::new(HashMap::new());
-        };
-        if !out.success() {
-            return Arc::new(HashMap::new());
-        }
-        Arc::new(parse_git_porcelain(&out.stdout))
-    }
 }
 
 // ---------------------------------------------------------------------------
 // Validation & Path Resolution Helpers
 // ---------------------------------------------------------------------------
+
+fn canonicalize_local_root_dir(raw_root: &str, is_root_user: bool) -> Result<PathBuf> {
+    let decoded = strip_file_uri(raw_root);
+    let expanded = otto_core::paths::expand_home_strict(&decoded).map_err(Error::Invalid)?;
+    let canonical = expanded
+        .canonicalize()
+        .map_err(|e| map_io_err("resolve workspace root", &expanded, e))?;
+    let meta = std::fs::metadata(&canonical)
+        .map_err(|e| map_io_err("stat workspace root", &canonical, e))?;
+    if !meta.is_dir() {
+        return Err(Error::Invalid(format!(
+            "target root '{}' is not a directory",
+            canonical.display()
+        )));
+    }
+    if otto_core::secret_paths::is_denied_dir(&canonical) {
+        return Err(Error::Forbidden(format!(
+            "{} holds protected credentials; access denied",
+            canonical.display()
+        )));
+    }
+    if !is_root_user {
+        enforce_non_root_path(&canonical)?;
+    }
+    Ok(canonical)
+}
 
 fn validate_ssh_spec(spec: &IdeSshSpec) -> Result<()> {
     if !valid_ssh_host(&spec.host) {
@@ -935,13 +1095,15 @@ async fn run_command_bounded(mut cmd: Command, timeout: Duration) -> Result<Exec
     }
 }
 
-pub(super) async fn resolve_local_prospective(
+pub(super) async fn resolve_local_prospective_in_roots(
     root: &Path,
+    additional_roots: &[PathBuf],
     is_root_user: bool,
     raw: &str,
     create_dirs: bool,
-) -> Result<PathBuf> {
-    let trimmed = raw.trim();
+) -> Result<(PathBuf, PathBuf)> {
+    let decoded = strip_file_uri(raw);
+    let trimmed = decoded.trim();
     if trimmed.is_empty() {
         return Err(Error::Invalid("file path must not be empty".into()));
     }
@@ -957,13 +1119,19 @@ pub(super) async fn resolve_local_prospective(
     };
     let mut prospective = otto_core::secret_paths::canonicalize_prospective(&abs)
         .ok_or_else(|| Error::Invalid(format!("invalid target path '{}'", abs.display())))?;
-    if !prospective.starts_with(root) {
-        return Err(Error::Forbidden(format!(
-            "path '{}' escapes workspace root '{}'",
-            prospective.display(),
-            root.display()
-        )));
-    }
+
+    let matched_root = std::iter::once(root)
+        .chain(additional_roots.iter().map(PathBuf::as_path))
+        .find(|r| prospective.starts_with(r))
+        .ok_or_else(|| {
+            Error::Forbidden(format!(
+                "path '{}' escapes workspace root '{}'",
+                prospective.display(),
+                root.display()
+            ))
+        })?
+        .to_path_buf();
+
     if !is_root_user {
         enforce_non_root_path(&prospective)?;
     }
@@ -973,7 +1141,7 @@ pub(super) async fn resolve_local_prospective(
                 .await
                 .map_err(|e| map_io_err("create parent directories", parent, e))?;
             if let Ok(canon_parent) = parent.canonicalize() {
-                if !canon_parent.starts_with(root) {
+                if !canon_parent.starts_with(&matched_root) {
                     return Err(Error::Forbidden(
                         "parent directory escapes workspace root".into(),
                     ));
@@ -987,7 +1155,7 @@ pub(super) async fn resolve_local_prospective(
             }
         }
     }
-    Ok(prospective)
+    Ok((prospective, matched_root))
 }
 
 fn normalize_remote_root(raw: &str) -> Result<String> {
@@ -1009,14 +1177,24 @@ fn normalize_remote_root(raw: &str) -> Result<String> {
 }
 
 pub(super) fn resolve_remote_subpath(root: &str, raw: &str) -> Result<String> {
-    if raw.chars().any(char::is_control) {
+    let (p, _) = resolve_remote_in_roots(root, &[], raw)?;
+    Ok(p)
+}
+
+fn resolve_remote_in_roots(
+    root: &str,
+    additional_roots: &[String],
+    raw: &str,
+) -> Result<(String, String)> {
+    let decoded = strip_file_uri(raw);
+    if decoded.chars().any(char::is_control) {
         return Err(Error::Invalid(
             "remote path contains control characters".into(),
         ));
     }
-    let trimmed = raw.trim();
+    let trimmed = decoded.trim();
     if trimmed.is_empty() || trimmed == "." {
-        return Ok(root.to_string());
+        return Ok((root.to_string(), root.to_string()));
     }
     let combined = if trimmed.starts_with('/') || trimmed.starts_with('~') {
         trimmed.to_string()
@@ -1024,12 +1202,48 @@ pub(super) fn resolve_remote_subpath(root: &str, raw: &str) -> Result<String> {
         join_remote(root, trimmed)
     };
     let normalized = lexical_normalize_remote(&combined)?;
-    if root != "/" && normalized != root && !normalized.starts_with(&format!("{root}/")) {
-        return Err(Error::Forbidden(format!(
-            "remote path '{normalized}' is outside workspace root '{root}'"
-        )));
+    for candidate_root in std::iter::once(root).chain(additional_roots.iter().map(String::as_str)) {
+        if candidate_root == "/"
+            || normalized == candidate_root
+            || normalized.starts_with(&format!("{candidate_root}/"))
+        {
+            return Ok((normalized, candidate_root.to_string()));
+        }
     }
-    Ok(normalized)
+    Err(Error::Forbidden(format!(
+        "remote path '{normalized}' is outside workspace root '{root}'"
+    )))
+}
+
+fn resolve_remote_in_roots_or_sdk(
+    root: &str,
+    additional_roots: &[String],
+    raw: &str,
+) -> Result<(String, Option<String>)> {
+    if let Ok((p, r)) = resolve_remote_in_roots(root, additional_roots, raw) {
+        return Ok((p, Some(r)));
+    }
+    let decoded = strip_file_uri(raw);
+    let normalized = lexical_normalize_remote(decoded.trim())?;
+    let is_remote_sdk = [
+        "/usr/local/go/",
+        "/usr/lib/go",
+        "/usr/share/go",
+        "/usr/lib/python",
+        "/usr/lib/jvm/",
+        "/.otto/toolchains/",
+        "/go/pkg/mod/",
+        "/.cargo/registry/",
+        "/.rustup/toolchains/",
+    ]
+    .iter()
+    .any(|prefix| normalized.contains(prefix));
+    if is_remote_sdk {
+        return Ok((normalized, None));
+    }
+    Err(Error::Forbidden(format!(
+        "remote path '{normalized}' is outside workspace root '{root}'"
+    )))
 }
 
 fn lexical_normalize_remote(path: &str) -> Result<String> {

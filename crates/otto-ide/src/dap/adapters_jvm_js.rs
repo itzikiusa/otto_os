@@ -266,10 +266,23 @@ pub(super) async fn resolve_java_adapter(
         let fqcn = infer_java_fqcn(&req.target, &program).await;
         (out_dir, fqcn)
     } else {
-        let cp = env
-            .get("CLASSPATH")
-            .cloned()
-            .unwrap_or_else(|| cwd.to_string());
+        let cp = env.get("CLASSPATH").cloned().unwrap_or_else(|| {
+            let mut entries = Vec::new();
+            for rel in [
+                "target/test-classes",
+                "target/classes",
+                "build/classes/java/test",
+                "build/classes/java/main",
+                "out/production",
+            ] {
+                let p = Path::new(cwd).join(rel);
+                if p.is_dir() {
+                    entries.push(p.to_string_lossy().into_owned());
+                }
+            }
+            entries.push(cwd.to_string());
+            entries.join(":")
+        });
         (cp, program)
     };
 

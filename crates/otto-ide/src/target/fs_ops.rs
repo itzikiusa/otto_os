@@ -1,14 +1,14 @@
-//! Platform normalization, git porcelain status parsing, and local/remote
-//! filesystem tree, read, atomic write, and mutation helpers for [`super::TargetManager`].
+//! Platform normalization and local/remote filesystem tree, read, atomic write,
+//! and mutation helpers for [`super::TargetManager`].
+//!
+//! Performance & memory invariants:
+//! - `list_local_dir_sync` performs a shallow 1-level `read_dir` (`<1ms` for
+//!   typical directories) with ZERO subprocess spawns and ZERO retained caches.
+//! - File reads stream bounded slices (`<= 4 MiB`) and drop buffers immediately.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
-use std::time::{Duration, Instant};
 
-use dashmap::DashMap;
 use otto_core::{Error, Result};
 use otto_ssh::SftpSession;
 use sha2::{Digest, Sha256};
@@ -19,7 +19,8 @@ use crate::types::{
     IdePlatformInfo,
 };
 
-use super::{join_remote, map_io_err, resolve_local_prospective, resolve_remote_subpath};
+use super::sdk_paths::strip_file_uri;
+use super::{join_remote, map_io_err, resolve_local_prospective_in_roots, resolve_remote_subpath};
 
 pub(crate) fn enforce_non_root_path(canonical: &Path) -> Result<()> {
     use otto_core::secret_paths as sp;
@@ -35,12 +36,16 @@ pub(crate) fn enforce_non_root_path(canonical: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn resolve_local_existing(
+/// Resolve an existing path within `root` or any attached `additional_roots`,
+/// returning `(canonical_path, matched_root)`.
+pub(crate) fn resolve_local_existing_in_roots(
     root: &Path,
+    additional_roots: &[PathBuf],
     is_root_user: bool,
     raw: &str,
-) -> Result<PathBuf> {
-    let trimmed = raw.trim();
+) -> Result<(PathBuf, PathBuf)> {
+    let decoded = strip_file_uri(raw);
+    let trimmed = decoded.trim();
     let candidate = if trimmed.is_empty() || trimmed == "." {
         root.to_path_buf()
     } else if trimmed.starts_with('~') {
@@ -56,17 +61,30 @@ pub(crate) fn resolve_local_existing(
     let canonical = candidate
         .canonicalize()
         .map_err(|e| map_io_err("resolve path", &candidate, e))?;
-    if !canonical.starts_with(root) {
-        return Err(Error::Forbidden(format!(
-            "path '{}' is outside workspace root '{}'",
-            canonical.display(),
-            root.display()
-        )));
-    }
+
+    let matched_root = std::iter::once(root)
+        .chain(additional_roots.iter().map(PathBuf::as_path))
+        .find(|r| canonical.starts_with(r))
+        .ok_or_else(|| {
+            Error::Forbidden(format!(
+                "path '{}' is outside workspace root '{}'",
+                canonical.display(),
+                root.display()
+            ))
+        })?;
+
     if !is_root_user {
         enforce_non_root_path(&canonical)?;
     }
-    Ok(canonical)
+    Ok((canonical, matched_root.to_path_buf()))
+}
+
+pub(crate) fn resolve_local_existing(
+    root: &Path,
+    is_root_user: bool,
+    raw: &str,
+) -> Result<PathBuf> {
+    resolve_local_existing_in_roots(root, &[], is_root_user, raw).map(|(c, _)| c)
 }
 
 pub(super) fn normalize_os_name(raw: &str) -> String {
@@ -95,98 +113,36 @@ pub(super) fn parse_uname_output(stdout: &str) -> IdePlatformInfo {
     }
 }
 
-const LOCAL_GIT_STATUS_TTL: Duration = Duration::from_secs(2);
-const MAX_GIT_STATUS_CACHE_ENTRIES: usize = 64;
-
-type GitStatusCacheEntry = (Instant, Arc<HashMap<String, String>>);
-
-static LOCAL_GIT_STATUS_CACHE: LazyLock<DashMap<PathBuf, GitStatusCacheEntry>> =
-    LazyLock::new(DashMap::new);
-
-/// Run `git status --porcelain=v1 -uall` via `otto_git_cmd::hardened_command()`
-/// cached per canonical local `root` for `2s` so rapid Explorer folder expands
-/// never spawn redundant `git status` subprocesses.
-pub(super) async fn cached_local_git_status(root: &Path) -> Arc<HashMap<String, String>> {
-    let now = Instant::now();
-    if let Some(entry) = LOCAL_GIT_STATUS_CACHE.get(root) {
-        let (ts, ref map) = *entry.value();
-        if now.saturating_duration_since(ts) < LOCAL_GIT_STATUS_TTL {
-            return Arc::clone(map);
-        }
+fn detect_entry_language(path: &str) -> Option<String> {
+    if let Some(lang) = detect_language(path) {
+        return Some(lang.to_string());
     }
-
-    let mut cmd = otto_git_cmd::hardened_command();
-    cmd.args(["status", "--porcelain=v1", "-uall"])
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-
-    let parsed = match tokio::time::timeout(Duration::from_secs(3), cmd.output()).await {
-        Ok(Ok(out)) if out.status.success() => {
-            parse_git_porcelain(&String::from_utf8_lossy(&out.stdout))
-        }
-        _ => HashMap::new(),
-    };
-    let arc_map = Arc::new(parsed);
-
-    if LOCAL_GIT_STATUS_CACHE.len() >= MAX_GIT_STATUS_CACHE_ENTRIES {
-        LOCAL_GIT_STATUS_CACHE
-            .retain(|_, (ts, _)| now.saturating_duration_since(*ts) < LOCAL_GIT_STATUS_TTL);
-        if LOCAL_GIT_STATUS_CACHE.len() >= MAX_GIT_STATUS_CACHE_ENTRIES {
-            if let Some(oldest_key) = LOCAL_GIT_STATUS_CACHE
-                .iter()
-                .min_by_key(|e| e.value().0)
-                .map(|e| e.key().clone())
-            {
-                LOCAL_GIT_STATUS_CACHE.remove(&oldest_key);
-            }
-        }
+    let clean = path.split('?').next().unwrap_or(path);
+    if clean.starts_with("jdt://") || clean.ends_with(".class") {
+        return Some("java".into());
     }
-    LOCAL_GIT_STATUS_CACHE.insert(root.to_path_buf(), (Instant::now(), Arc::clone(&arc_map)));
-    arc_map
+    let base = clean.rsplit('/').next().unwrap_or(clean);
+    match base {
+        ".zshrc" | ".bashrc" | ".zshenv" | ".zprofile" | ".bash_profile" => {
+            return Some("shell".into());
+        }
+        _ => {}
+    }
+    let ext = base.rsplit_once('.')?.1.to_ascii_lowercase();
+    match ext.as_str() {
+        "csv" => Some("csv".into()),
+        "tsv" => Some("tsv".into()),
+        "jsonl" | "ndjson" => Some("jsonl".into()),
+        "bats" => Some("shell".into()),
+        _ => None,
+    }
 }
 
-pub(super) fn parse_git_porcelain(stdout: &str) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for line in stdout.lines() {
-        if line.len() < 4 {
-            continue;
-        }
-        let status_pair = &line[..2];
-        let mut rel = line[3..].trim();
-        if let Some((_, renamed_to)) = rel.split_once(" -> ") {
-            rel = renamed_to.trim();
-        }
-        let rel = rel.trim_matches('"');
-        let code = if status_pair == "??" {
-            "?"
-        } else if status_pair.contains('D') {
-            "D"
-        } else if status_pair.contains('A') {
-            "A"
-        } else {
-            "M"
-        };
-        map.insert(rel.to_string(), code.to_string());
-        // Propagate modified indicator to ancestor folders so collapsed dirs show state.
-        let mut cur = rel;
-        while let Some((parent, _)) = cur.rsplit_once('/') {
-            map.entry(parent.to_string())
-                .or_insert_with(|| code.to_string());
-            cur = parent;
-        }
-    }
-    map
-}
-
-#[allow(clippy::disallowed_methods)] // runs inside spawn_blocking
+#[allow(clippy::disallowed_methods)] // runs inside spawn_blocking (pure 1-level read_dir, <1ms)
 pub(super) fn list_local_dir_sync(
-    root: &Path,
     dir_path: &Path,
     show_hidden: bool,
     restricted: bool,
-    git_map: &HashMap<String, String>,
 ) -> Result<Vec<IdeFsEntry>> {
     let rd = std::fs::read_dir(dir_path).map_err(|e| map_io_err("list directory", dir_path, e))?;
     let mut dirs = Vec::new();
@@ -202,16 +158,21 @@ pub(super) fn list_local_dir_sync(
         }
         let entry_path = item.path();
         if restricted {
+            if otto_core::secret_paths::is_denied_file(&entry_path) {
+                continue;
+            }
             if let Ok(canon) = entry_path.canonicalize() {
                 if enforce_non_root_path(&canon).is_err() {
                     continue;
                 }
-            } else if otto_core::secret_paths::is_denied_file(&entry_path) {
-                continue;
             }
         }
         let Ok(ft) = item.file_type() else { continue };
-        let meta = std::fs::metadata(&entry_path).ok();
+        let meta = if ft.is_symlink() {
+            std::fs::metadata(&entry_path).ok()
+        } else {
+            item.metadata().ok()
+        };
         let kind = if ft.is_symlink() {
             match &meta {
                 Some(m) if m.is_dir() => IdeFsEntryKind::Dir,
@@ -229,17 +190,11 @@ pub(super) fn list_local_dir_sync(
             .as_ref()
             .and_then(|m| m.modified().ok())
             .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
-        let rel = entry_path
-            .strip_prefix(root)
-            .ok()
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_default();
-        let git_status = git_map.get(&rel).cloned();
         let path_str = entry_path.to_string_lossy().into_owned();
         let language = if kind == IdeFsEntryKind::Dir {
             None
         } else {
-            detect_language(&path_str).map(str::to_string)
+            detect_entry_language(&path_str)
         };
         let entry = IdeFsEntry {
             name,
@@ -247,7 +202,7 @@ pub(super) fn list_local_dir_sync(
             kind,
             size,
             mtime,
-            git_status,
+            git_status: None,
             language,
         };
         if kind == IdeFsEntryKind::Dir {
@@ -264,11 +219,9 @@ pub(super) fn list_local_dir_sync(
 }
 
 pub(super) fn build_remote_tree_entries(
-    root: &str,
     remote_dir: &str,
     raw_entries: Vec<otto_ssh::SftpEntry>,
     show_hidden: bool,
-    git_map: &HashMap<String, String>,
 ) -> Vec<IdeFsEntry> {
     let mut dirs = Vec::new();
     let mut files = Vec::new();
@@ -286,15 +239,10 @@ pub(super) fn build_remote_tree_entries(
             _ => continue,
         };
         let full_path = join_remote(remote_dir, &item.name);
-        let rel = full_path
-            .strip_prefix(root)
-            .map(|s| s.trim_start_matches('/'))
-            .unwrap_or("");
-        let git_status = git_map.get(rel).cloned();
         let language = if kind == IdeFsEntryKind::Dir {
             None
         } else {
-            detect_language(&full_path).map(str::to_string)
+            detect_entry_language(&full_path)
         };
         let entry = IdeFsEntry {
             name: item.name,
@@ -302,7 +250,7 @@ pub(super) fn build_remote_tree_entries(
             kind,
             size: item.size,
             mtime: item.mtime,
-            git_status,
+            git_status: None,
             language,
         };
         if kind == IdeFsEntryKind::Dir {
@@ -335,7 +283,7 @@ pub(super) async fn read_bounded_bytes(path: &Path, max_bytes: u64) -> Result<(V
     }
 }
 
-pub(super) fn build_file_read_resp(
+pub(crate) fn build_file_read_resp(
     path: String,
     bytes: &[u8],
     size: u64,
@@ -345,7 +293,7 @@ pub(super) fn build_file_read_resp(
     let sample_len = bytes.len().min(8192);
     let is_binary = bytes[..sample_len].contains(&0);
     let sha256 = sha256_hex(bytes);
-    let language = detect_language(&path).unwrap_or("plaintext").to_string();
+    let language = detect_entry_language(&path).unwrap_or_else(|| "plaintext".to_string());
     if is_binary {
         return Ok(IdeFileReadResp {
             path,
@@ -453,11 +401,17 @@ pub(super) async fn write_local_atomic(dest: &Path, bytes: &[u8]) -> Result<()> 
         let _ = tokio::fs::remove_file(&tmp_path).await;
         return Err(map_io_err("commit file save", dest, e));
     }
+    crate::lsp_host::pool::notify_watched_file_if_build_manifest(dest, 2);
     Ok(())
 }
 
-pub(super) async fn mutate_local_fs(
+fn is_protected_root(target_path: &Path, root: &Path, additional_roots: &[PathBuf]) -> bool {
+    target_path == root || additional_roots.iter().any(|r| r == target_path)
+}
+
+pub(super) async fn mutate_local_fs_in_roots(
     root: &Path,
+    additional_roots: &[PathBuf],
     is_root_user: bool,
     op: IdeFsMutateOp,
     path: &str,
@@ -465,7 +419,14 @@ pub(super) async fn mutate_local_fs(
 ) -> Result<IdeFsMutateResp> {
     match op {
         IdeFsMutateOp::Mkdir => {
-            let dir = resolve_local_prospective(root, is_root_user, path, true).await?;
+            let (dir, _) = resolve_local_prospective_in_roots(
+                root,
+                additional_roots,
+                is_root_user,
+                path,
+                true,
+            )
+            .await?;
             tokio::fs::create_dir_all(&dir)
                 .await
                 .map_err(|e| map_io_err("create directory", &dir, e))?;
@@ -475,14 +436,24 @@ pub(super) async fn mutate_local_fs(
             })
         }
         IdeFsMutateOp::CreateFile => {
-            let file = resolve_local_prospective(root, is_root_user, path, true).await?;
+            let (file, _) = resolve_local_prospective_in_roots(
+                root,
+                additional_roots,
+                is_root_user,
+                path,
+                true,
+            )
+            .await?;
             if tokio::fs::metadata(&file).await.is_ok() {
                 return Err(Error::Conflict(format!(
                     "'{}' already exists",
                     file.display()
                 )));
             }
-            write_local_atomic(&file, b"").await?;
+            // Auto-populate Go `package <pkg>` header when creating a new `.go` file!
+            let initial_bytes = default_new_file_template(&file);
+            write_local_atomic(&file, initial_bytes.as_bytes()).await?;
+            crate::lsp_host::pool::notify_watched_file_if_build_manifest(&file, 1);
             Ok(IdeFsMutateResp {
                 ok: true,
                 path: file.to_string_lossy().into_owned(),
@@ -492,22 +463,33 @@ pub(super) async fn mutate_local_fs(
             let dst_raw = dest_path
                 .filter(|s| !s.trim().is_empty())
                 .ok_or_else(|| Error::Invalid("dest_path is required for rename".into()))?;
-            let src = resolve_local_existing(root, is_root_user, path)?;
-            if src == root {
+            let (src, _) =
+                resolve_local_existing_in_roots(root, additional_roots, is_root_user, path)?;
+            if is_protected_root(&src, root, additional_roots) {
                 return Err(Error::Forbidden("cannot rename workspace root".into()));
             }
-            let dst = resolve_local_prospective(root, is_root_user, dst_raw, true).await?;
+            let (dst, _) = resolve_local_prospective_in_roots(
+                root,
+                additional_roots,
+                is_root_user,
+                dst_raw,
+                true,
+            )
+            .await?;
             tokio::fs::rename(&src, &dst)
                 .await
                 .map_err(|e| map_io_err("rename path", &src, e))?;
+            crate::lsp_host::pool::notify_watched_file_if_build_manifest(&src, 3);
+            crate::lsp_host::pool::notify_watched_file_if_build_manifest(&dst, 1);
             Ok(IdeFsMutateResp {
                 ok: true,
                 path: dst.to_string_lossy().into_owned(),
             })
         }
         IdeFsMutateOp::Delete => {
-            let target_path = resolve_local_existing(root, is_root_user, path)?;
-            if target_path == root {
+            let (target_path, _) =
+                resolve_local_existing_in_roots(root, additional_roots, is_root_user, path)?;
+            if is_protected_root(&target_path, root, additional_roots) {
                 return Err(Error::Forbidden("cannot delete workspace root".into()));
             }
             let meta = tokio::fs::symlink_metadata(&target_path)
@@ -521,6 +503,7 @@ pub(super) async fn mutate_local_fs(
                 tokio::fs::remove_file(&target_path)
                     .await
                     .map_err(|e| map_io_err("delete file", &target_path, e))?;
+                crate::lsp_host::pool::notify_watched_file_if_build_manifest(&target_path, 3);
             }
             Ok(IdeFsMutateResp {
                 ok: true,
@@ -531,8 +514,16 @@ pub(super) async fn mutate_local_fs(
             let dst_raw = dest_path
                 .filter(|s| !s.trim().is_empty())
                 .ok_or_else(|| Error::Invalid("dest_path is required for duplicate".into()))?;
-            let src = resolve_local_existing(root, is_root_user, path)?;
-            let dst = resolve_local_prospective(root, is_root_user, dst_raw, true).await?;
+            let (src, _) =
+                resolve_local_existing_in_roots(root, additional_roots, is_root_user, path)?;
+            let (dst, _) = resolve_local_prospective_in_roots(
+                root,
+                additional_roots,
+                is_root_user,
+                dst_raw,
+                true,
+            )
+            .await?;
             tokio::fs::copy(&src, &dst)
                 .await
                 .map_err(|e| map_io_err("duplicate file", &src, e))?;
@@ -542,6 +533,60 @@ pub(super) async fn mutate_local_fs(
             })
         }
     }
+}
+
+/// Infer an idiomatic `package <name>\n` header when creating a new `.go` file
+/// (matching sibling `.go` files in the same directory or directory name).
+#[allow(clippy::disallowed_methods)]
+fn default_new_file_template(file: &Path) -> String {
+    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if !ext.eq_ignore_ascii_case("go") {
+        return String::new();
+    }
+    let Some(dir) = file.parent() else {
+        return "package main\n".into();
+    };
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten().take(16) {
+            let p = entry.path();
+            if p != file
+                && p.extension().and_then(|e| e.to_str()) == Some("go")
+                && !p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with("_test.go"))
+            {
+                if let Ok(src) = std::fs::read_to_string(&p) {
+                    for line in src.lines().take(20) {
+                        let t = line.trim();
+                        if let Some(rest) = t.strip_prefix("package ") {
+                            let pkg = rest.split_whitespace().next().unwrap_or("");
+                            if !pkg.is_empty() {
+                                return format!("package {pkg}\n\n");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let dir_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("main");
+    let pkg: String =
+        if matches!(dir_name, "cmd" | "main" | "server" | "cli") || dir.join("go.mod").is_file() {
+            "main".into()
+        } else {
+            let cleaned: String = dir_name
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .map(|c| c.to_ascii_lowercase())
+                .collect();
+            if cleaned.is_empty() || cleaned.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                "main".into()
+            } else {
+                cleaned
+            }
+        };
+    format!("package {pkg}\n\n")
 }
 
 pub(super) async fn mutate_remote_fs(
@@ -608,34 +653,5 @@ pub(super) async fn mutate_remote_fs(
                 path: dst,
             })
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn cached_local_git_status_serves_2s_cache_via_hardened_git() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
-
-        let init = otto_git_cmd::hardened_command()
-            .arg("init")
-            .current_dir(&root)
-            .output()
-            .await
-            .unwrap();
-        assert!(init.status.success());
-
-        std::fs::write(root.join("first.txt"), "hello\n").unwrap();
-        let first = cached_local_git_status(&root).await;
-        assert_eq!(first.get("first.txt").map(String::as_str), Some("?"));
-
-        // Mutate working tree immediately; within the 2s TTL the cached Arc must be returned.
-        std::fs::write(root.join("second.txt"), "world\n").unwrap();
-        let second = cached_local_git_status(&root).await;
-        assert!(Arc::ptr_eq(&first, &second));
-        assert!(!second.contains_key("second.txt"));
     }
 }
