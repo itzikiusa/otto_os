@@ -9,12 +9,14 @@ import type {
   BundledSkillView,
   CreateLibrarySkillReq,
   InstallBundledResp,
+  KeptCopiesResp,
   LibrarySkill,
   Problem,
   ProviderSkillContent,
   ProviderSkillInfo,
   SkillFileContentResp,
   SkillFileEntry,
+  SkillFileWriteResp,
   WriteSkillFileReq,
 } from './types';
 
@@ -23,7 +25,8 @@ export const skillLabApi = {
   listLibrary: () => api.get<LibrarySkill[]>('/library/skills'),
   getLibrary: (name: string) => api.get<LibrarySkill>(`/library/skills/${encodeURIComponent(name)}`),
   create: (body: CreateLibrarySkillReq) => api.post<LibrarySkill>('/library/skills', body),
-  remove: (name: string) => api.del<void>(`/library/skills/${encodeURIComponent(name)}`),
+  /** `kept_copies`: edited provider copies moved aside instead of deleted. */
+  remove: (name: string) => api.del<KeptCopiesResp | undefined>(`/library/skills/${encodeURIComponent(name)}`),
 
   listFiles: (name: string) =>
     api.get<SkillFileEntry[]>(`/library/skills/${encodeURIComponent(name)}/files`),
@@ -31,10 +34,14 @@ export const skillLabApi = {
     api.get<SkillFileContentResp>(
       `/library/skills/${encodeURIComponent(name)}/file?path=${encodeURIComponent(path)}`,
     ),
-  putFile: (name: string, body: WriteSkillFileReq) =>
-    api.put<SkillFileEntry[]>(`/library/skills/${encodeURIComponent(name)}/file`, body),
+  /** Save one file; the reply also names any edited provider copy that was
+   *  moved aside before the save reached it (a bare list from an older daemon). */
+  putFile: async (name: string, body: WriteSkillFileReq): Promise<SkillFileWriteResp> => {
+    const r = await api.put<SkillFileEntry[] | SkillFileWriteResp>(`/library/skills/${encodeURIComponent(name)}/file`, { ...body, report: true });
+    return Array.isArray(r) ? { files: r } : r;
+  },
   deleteFile: (name: string, path: string) =>
-    api.del<void>(`/library/skills/${encodeURIComponent(name)}/file?path=${encodeURIComponent(path)}`),
+    api.del<KeptCopiesResp | undefined>(`/library/skills/${encodeURIComponent(name)}/file?path=${encodeURIComponent(path)}`),
 
   // --- bundled catalog (read-only until installed) --------------------------
   listBundled: () => api.get<BundledSkillView[]>('/library/bundled'),
@@ -56,7 +63,7 @@ export const skillLabApi = {
     ),
 
   /** Import a skill package from a `.zip` file (raw body upload). */
-  importZip: async (file: File | Blob, nameOverride?: string): Promise<LibrarySkill> => {
+  importZip: async (file: File | Blob, nameOverride?: string): Promise<LibrarySkill & KeptCopiesResp> => {
     const token = getToken();
     const headers: Record<string, string> = { 'Content-Type': 'application/octet-stream' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -75,6 +82,6 @@ export const skillLabApi = {
       }
       throw new ApiError(resp.status, problem);
     }
-    return (await resp.json()) as LibrarySkill;
+    return (await resp.json()) as LibrarySkill & KeptCopiesResp;
   },
 };

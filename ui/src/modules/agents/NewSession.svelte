@@ -10,6 +10,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import ContextPreview from './ContextPreview.svelte';
+  import SessionKindHint from './SessionKindHint.svelte';
   import McpProfilePicker from './McpProfilePicker.svelte';
   import { router } from '../../lib/router.svelte';
   import { api } from '../../lib/api/client';
@@ -427,7 +428,7 @@
 
   /** Esc / backdrop / ✕: an opening message or title typed here must not
    *  vanish on a stray key — ask first when something was entered. */
-  async function requestClose(): Promise<void> {
+  async function requestClose(): Promise<boolean> {
     const edited = prompt.trim() !== '' || title.trim() !== '' || extraDirs.length > 0;
     if (edited) {
       const ok = await confirmer.ask('The title, opening message and folders you entered will be lost.', {
@@ -436,19 +437,18 @@
         cancelLabel: 'Keep editing',
         danger: true,
       });
-      if (!ok) return;
+      if (!ok) return false;
     }
     onclose();
+    return true;
   }
-
 </script>
 
 <svelte:window onkeydown={onGlobalKeydown} />
 
 <Modal title="New session" height={800} onclose={requestClose} dismissable={!busy}>
-  <!-- Workspace: the current one, or none (a workspace-less session in the
-       daemon's hidden scratch workspace). With no workspace at all only "No
-       workspace" exists, pre-selected. -->
+  <SessionKindHint onclose={requestClose} />
+  <!-- Workspace: the current one, or none (a workspace-less session in the daemon's hidden scratch workspace); with no workspace only "No workspace", pre-selected. -->
   <div class="field">
     <div id="ns-ws-label" class="provider-label">Workspace</div>
     <div class="seg" role="radiogroup" aria-labelledby="ns-ws-label">

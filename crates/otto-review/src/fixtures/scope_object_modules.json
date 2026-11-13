@@ -1,0 +1,6 @@
+[
+ {
+  "severity": "info",
+  "body": "{\"summary\": \"Client-only change (7 files): adds two promotion reads (clients/promotions/client.go:27-56).\", \"related_modules\": [{\"path\": \"clients/promotions/interface.go:78-102\", \"relationship\": \"imported by go_marketing\"}, {\"module\": \"go_bonus_management\", \"relationship\": \"compiles against the interface\", \"evidence\": \"bonus/client.go:3\"}], \"risks\": [{\"risk\": \"kit/server field drift\", \"evidence\": \"models.go:12\"}, \"URL escaping of the promotion code\"], \"lenses\": [{\"name\": \"Correctness review\", \"reason\": \"new URL building in client.go:31\", \"instructions\": \"trace escaping of the code path segment\", \"priority\": \"high\"}, {\"name\": \"Golang conventions review\", \"reason\": \"new exported client methods\", \"instructions\": \"check doc comments and error wrapping\"}], \"prior_findings\": [], \"confidence\": 0.8}"
+ }
+]

@@ -8,7 +8,9 @@ import { test, expect, type Page } from '@playwright/test';
 //      error names it, the picks stay), the retry opens the council view;
 //   2. a seeded council: one sidebar row ("Council · 3") that unfolds into
 //      its seats, Synthesize disabled with a reason while a seat works, the
-//      synthesis as the last column, "Continue here" and back.
+//      synthesis as the last column, "Continue here" and back;
+//   3. follow-up rounds to every seat or one, "Ask the others", and
+//      Synthesize on the current round.
 // ─────────────────────────────────────────────────────────────────────────────
 
 type Hooks = {
@@ -140,4 +142,112 @@ test('a council is one sidebar row; Synthesize waits for every seat; Continue he
   await expect(page.getByTestId('runtime-thread-rt_s2')).toBeVisible();
   await row.locator('.tr-main').click();
   await expect(page.getByTestId('council-view')).toBeVisible();
+});
+
+/** Start a council of Claude and Codex from the new-thread stage (mock). */
+async function startCouncil(page: Page, prompt: string): Promise<void> {
+  await page.evaluate(() => { location.hash = '#/threads'; });
+  const stage = page.getByTestId('new-thread-stage');
+  await expect(stage).toBeVisible({ timeout: 15_000 });
+  await stage.getByTestId('picker-agent').click();
+  const picker = page.getByTestId('model-picker');
+  await picker.getByTestId('model-picker-provider-claude').click();
+  await page.keyboard.press('Escape');
+  await stage.getByTestId('new-thread-ask-several').click();
+  await stage.getByTestId('picker-agent').click();
+  await picker.getByTestId('model-picker-provider-codex').click();
+  await picker.getByRole('button', { name: 'Default model' }).click();
+  await page.keyboard.press('Escape');
+  await stage.getByTestId('new-thread-input').fill(prompt);
+  await stage.getByTestId('new-thread-send-btn').click();
+  await expect(page.getByTestId('council-view')).toBeVisible({ timeout: 15_000 });
+}
+
+const lastFollowUp = (page: Page): Promise<Record<string, unknown>> =>
+  page.evaluate(() => (window as unknown as { __mockRuntime: { followUps: Record<string, unknown>[] } }).__mockRuntime.followUps.at(-1)!);
+
+// 3. Follow-up rounds: one composer under the columns asks every seat (or
+//    one, picked from its header), "Ask the others" drafts a follow-up that
+//    quotes one seat's answer to the rest (editable before it is sent), and
+//    Synthesize judges the CURRENT round while earlier syntheses stay listed.
+test('a council keeps talking: follow-up rounds, Ask the others, Synthesize per round', async ({ page }, info) => {
+  await waitForMock(page);
+  await startCouncil(page, 'Which cache should we use?');
+  const view = page.getByTestId('council-view');
+  const one = view.getByTestId('council-column-1');
+  const two = view.getByTestId('council-column-2');
+  await expect(one).toContainText('Mock claude (seat 1)');
+  await expect(view.getByTestId('council-rounds')).toHaveCount(0);
+  await expect(view.getByTestId('council-round-count')).toHaveText('Round 1 of 10');
+
+  // Round 2 to every seat: each answers in its own thread, under the earlier answer.
+  const box = view.getByTestId('council-followup');
+  const send = view.getByTestId('council-send-followup');
+  await expect(view.getByTestId('council-target')).toHaveText(/To: All seats/);
+  await expect(send).toBeDisabled();
+  await box.fill('Why that one?');
+  await expect(send).toHaveText(/Ask round 2/);
+  await send.click();
+  await expect(one).toContainText('Mock claude (seat 1): round 2 answer.');
+  await expect(two).toContainText('Mock codex (seat 2): round 2 answer.');
+  await expect(one).toContainText('Mock claude (seat 1): my answer.');
+  expect(await lastFollowUp(page)).toEqual({ text: 'Why that one?' });
+  await expect(box).toHaveValue('');
+  const rounds = view.getByTestId('council-rounds');
+  await expect(rounds.getByTestId('council-round-2')).toContainText('Round 2 · Why that one?');
+  await expect(rounds.getByTestId('council-round-2-seat-1')).toContainText('Seat 1 · Done');
+  await expect(view.getByTestId('council-round-count')).toHaveText('Round 2 of 10');
+
+  // Round 3 to seat 2 only (picked from its header): seat 1 sits it out.
+  await view.getByTestId('council-target-seat-2').click();
+  await expect(view.getByTestId('council-target-seat-2')).toHaveAttribute('aria-pressed', 'true');
+  await expect(view.getByTestId('council-target')).toHaveText(/To: Seat 2/);
+  await box.fill('Only you: are you sure?');
+  await send.click();
+  await expect(two).toContainText('round 3 answer.');
+  await expect(one).not.toContainText('round 3 answer.');
+  expect(await lastFollowUp(page)).toEqual({ text: 'Only you: are you sure?', seats: [2] });
+  await expect(rounds.getByTestId('council-round-3-seat-1')).toHaveCount(0);
+  await expect(view.getByTestId('council-seat-round-1')).toHaveText('R3 · Sat out');
+  await expect(view.getByTestId('council-target')).toHaveText(/To: All seats/);
+
+  // Ask the others: seat 2's answer drafted for seat 1, edited, then sent.
+  await view.getByTestId('council-ask-others-2').click();
+  await expect(box).toHaveValue('Seat 2 answered:\n\nMock codex (seat 2): round 3 answer.\n\nWhere do you disagree, and why?');
+  await expect(view.getByTestId('council-target')).toHaveText(/To: Seat 1/);
+  await box.fill(`${await box.inputValue()} Be brief.`);
+  await send.click();
+  await expect(one).toContainText('round 4 answer.');
+  const asked = await lastFollowUp(page);
+  expect(asked.seats).toEqual([1]);
+  expect(String(asked.text)).toMatch(/^Seat 2 answered:[\s\S]*Where do you disagree, and why\? Be brief\.$/);
+
+  // Synthesize judges round 4; after round 5 it offers round 5, and the
+  // round-4 synthesis stays in the timeline.
+  const synth = view.getByTestId('council-synthesize');
+  await expect(synth).toHaveText(/Synthesize round 4 with Claude/);
+  await synth.click();
+  await expect(view.getByTestId('council-column-synthesis')).toContainText('Mock synthesis of round 4', { timeout: 15_000 });
+  const judgeCol = view.getByTestId('council-column-synthesis');
+  await expect(judgeCol).toContainText('Synthesis · round 4');
+  // The judge's prompt is plumbing: one quiet line, the column opens on the verdict.
+  await expect(judgeCol.getByTestId('council-judge-prompt')).toHaveText(/Asked the judge to compare 1 answer/);
+  await expect(judgeCol.getByText('You are the judge of a council')).toBeHidden();
+  const toggle = judgeCol.getByTestId('council-judge-prompt-toggle');
+  await toggle.focus();
+  await page.keyboard.press('Enter');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(judgeCol.getByTestId('council-judge-prompt-text')).toHaveValue(/## Seat 1 — claude/);
+  await page.keyboard.press('Enter');
+  await expect(judgeCol.getByTestId('council-judge-prompt-text')).toHaveCount(0);
+  await expect(rounds.getByTestId('council-round-4-synthesis')).toBeVisible();
+  await expect(synth).toHaveText(/Synthesize round 4 again with Claude/);
+  await box.fill('Final check?');
+  await send.click();
+  await expect(two).toContainText('round 5 answer.');
+  await expect(synth).toHaveText(/Synthesize round 5 with Claude/);
+  await expect(rounds.getByTestId('council-round-4-synthesis')).toBeVisible();
+  await page.screenshot({ path: info.outputPath('council-rounds-light.png'), animations: 'disabled' });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.screenshot({ path: info.outputPath('council-rounds-dark.png'), animations: 'disabled' });
 });

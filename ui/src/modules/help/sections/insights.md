@@ -24,8 +24,8 @@ and CPU or memory use, open [Usage](#/walkthroughs/usage).
 
 ## Getting started
 
-1. Install the `insights` skill: open **Settings → Skills** and add it to the
-   library. Every report is written by this skill, so nothing runs without it.
+1. Install the `insights` skill: open **Skills Lab → Skills**, pick the
+   **Bundled** filter and install it to the library. Every report is written by this skill, so nothing runs without it.
 2. Open **Insights** from the sidebar (Insight group).
 3. With no reports yet, click **Run yesterday's report**. With reports already
    there, pick a period in the header (Yesterday, 2 days ago, Last week,

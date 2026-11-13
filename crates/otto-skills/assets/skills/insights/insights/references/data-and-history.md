@@ -138,6 +138,10 @@ for a weekly run, last month for a monthly run. If none exists, it's the first c
 `metrics-…json` → `summary-…md` next to the previous metrics file (null if the skill hadn't
 written one yet).
 
+A metric that is `null` in either period (listed in that period's
+`unavailable_window_metrics`; older metrics files predate the list and may hold a 0 that
+was never measured) has **no delta**: say "not comparable", never "▼ to 0" or "▲ from 0".
+
 ## Idempotency (for the catch-up scheduler)
 
 The Phase-2 daemon does **missed-run catch-up** via an hourly due-check (cron said 07:00 but

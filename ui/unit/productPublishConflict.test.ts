@@ -11,6 +11,9 @@ test('the Jira and Confluence "changed since sync" 409s are publish conflicts', 
   assert.equal(publishConflictMessage({ status: 409, message: jira }), jira);
   const page = 'the Confluence page changed since Otto last synced it (version 3 → 4); refresh the story';
   assert.equal(publishConflictMessage({ status: 409, message: page }), page);
+  // The last publish's read-back failed: also refreshed away, not toasted.
+  const unconfirmed = 'Otto could not confirm what is in Jira after the last publish. Refresh the story first, then publish again';
+  assert.equal(publishConflictMessage({ status: 409, message: unconfirmed }), unconfirmed);
 });
 
 test('other failures stay ordinary errors', () => {
@@ -34,11 +37,17 @@ test('the Rewrite tab offers Refresh on a publish conflict instead of an error t
     targetShort: 'PROJ-1', targetLabel: 'Jira PROJ-1', targetNoun: 'description',
     product: {
       selectedId: 's1',
+      versions: [],
       captureSelection: () => () => true,
       publishVersion: async () => { calls.push('publish'); throw conflict; },
       refresh: async () => { calls.push('refresh'); },
     },
-    confirmOutward: async () => true,
+    story: { url: 'https://acme.atlassian.net/browse/PROJ-1' },
+    source: null,
+    publishReview: { ask: async () => true },
+    storySite: () => 'acme.atlassian.net',
+    suggestionIsStale: () => false,
+    STALE_SUGGESTION: 'Based on an older version of the story',
     confirmer: { ask: async (msg: string, opts: { confirmLabel: string }) => { calls.push(`ask:${opts.confirmLabel}:${msg}`); return refreshAnswer; } },
     publishConflictMessage,
     initialLoad: async () => { calls.push('reload'); },

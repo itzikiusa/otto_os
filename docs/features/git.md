@@ -459,7 +459,7 @@ the list when the pane is at least 760 px wide, below it otherwise.
 - **Draft a commit message with an agent** — `POST /repos/{id}/draft-commit-message`
   produces a Conventional-Commits-style message from the **staged** diff (falling
   back to the full working diff when nothing is staged). If the bundled
-  **`commit-message`** skill is installed (Settings → Skills), its full method is
+  **`commit-message`** skill is installed (Skills Lab → Skills), its full method is
   prepended to the draft prompt, and the branch's Jira key (e.g. `PROJ-1234`) is
   injected into the subject. PR drafting (`/repos/{id}/pr/draft`) does the same
   with the **`pull-request`** skill — Jira key as the title prefix only (never in
@@ -686,10 +686,13 @@ in parallel too).
   lacks (the PR branch was rewritten since an earlier checkout, or you
   committed on it), the toast says so and offers **Update…**: after a confirm
   it moves your checked-out branch to the PR's version, keeping your old tip
-  on a backup branch `otto-backup/<branch>-<sha>` (and in the reflog) and your
-  uncommitted changes in place. If the move would overwrite an uncommitted
-  change, or the branch changed since you confirmed, nothing happens and you
-  are told why. It is never done without asking.
+  on a backup branch `otto-backup/<branch>-<yyyymmdd>-<sha>` (and in the
+  reflog) and your uncommitted changes in place. If the move would overwrite
+  an uncommitted change, or the branch changed since you confirmed (an agent
+  committed on it in a terminal meanwhile), nothing happens and you are told
+  why; a commit that lands in the instant of the move itself gets a backup
+  branch of its own (`also_kept`). Otto never deletes these backup branches.
+  It is never done without asking.
 
 ### Ask the agent about a pull request
 
@@ -820,7 +823,7 @@ distinction from the **"Draft message with agent"** button, which drafts the
 | `POST /repos/{id}/checkout` | ws editor | `CheckoutReq` (`create`) |
 | `POST /repos/{id}/cherry-pick` · `/revert` | ws editor | `{sha}`; a conflicting pick/revert is a normal 200 — status carries `op_in_progress` + conflicted paths, resolved/aborted via the merge lifecycle routes |
 | `POST /repos/{id}/branch` · `/branch/rename` · `/branch/delete` | ws editor | Create / rename / delete branch |
-| `POST /repos/{id}/branch/update-to-upstream` | ws editor | `{branch, ahead}` → `{status, backup}` — move the checked-out branch to its upstream after a force-push, old tip kept on `otto-backup/…` |
+| `POST /repos/{id}/branch/update-to-upstream` | ws editor | `{branch, ahead}` → `{status, backup, also_kept?}` — move the checked-out branch to its upstream after a force-push, old tip kept on `otto-backup/…` |
 | `POST /repos/{id}/tag` · `/tag/push` · `/tag/delete` | ws editor | Create / push / delete tags |
 | `POST /repos/{id}/stash` | ws editor | `{op: save\|pop\|apply\|drop, sha?}` — `save` runs `git stash push -u` (untracked included) and 400s with "nothing to stash" on a clean tree; mutating ops retry briefly on a concurrent `index.lock` |
 | `POST /repos/{id}/merge` · `/merge/preview` · `/merge/abort` · `/merge/commit` | ws editor/viewer | Local merge + conflict lifecycle |

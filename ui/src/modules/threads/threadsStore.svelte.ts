@@ -668,11 +668,20 @@ class ThreadsStore {
     this.save();
   }
 
-  /** Consume global `openFile.request` while inside `#/threads`. */
+  /** A folder link's request to list it in the Files tab (ThreadFileTabs takes it). */
+  browseRequest = $state<{ path: string; n: number } | null>(null);
+
+  /** Consume global `openFile.request` while inside `#/threads`: a file opens
+   *  as a tab, a folder (`dir`) is listed in the Files tab's tree. */
   consumeOpenFileRequest(wsKey: string): void {
     const req = openFile.request;
     if (!req) return;
     openFile.request = null;
+    if (req.dir) {
+      this.browseRequest = { path: req.path, n: req.n };
+      this.setInspectorTab('files');
+      return;
+    }
     this.openFileTab(wsKey, req.path, { line: req.line, pin: true });
   }
 

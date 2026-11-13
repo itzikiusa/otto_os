@@ -1719,7 +1719,7 @@
           body="Describe an automation in plain words and an agent wires up the steps — or start blank, or from a template, and build it on the canvas."
         >
           {@render generator('page')}
-          <AutomateGuide current="workflows" />
+          <AutomateGuide current="workflows" open />
         </EmptyState>
       </div>
     {:else}

@@ -442,6 +442,9 @@ pub async fn evaluate_with(
     let filled =
         otto_assistant::personal_agent_routines::with_stored_deliver(ctx, bare, None, args).await;
     let args = filled.as_ref().unwrap_or(args);
+    if let Some(why) = otto_channels::slack_as_me::team_refusal(ctx, auth, bare, args).await {
+        return (AgentGate::Deny(why), None);
+    }
     let Some(sid) = bound_session(auth) else {
         return (decide(false, &[], bare, args), None);
     };

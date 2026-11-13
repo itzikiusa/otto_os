@@ -234,12 +234,13 @@ pub fn default_review_config(default_provider: &str) -> ReviewConfig {
                 provider: default_provider.to_string(),
                 providers: vec![default_provider.to_string()],
                 model: "".to_string(),
-                prompt: "You are reviewing a pull request diff. Output ONLY a JSON array \
-                         (no prose, no markdown fence) of objects \
-                         {\"path\":string,\"line\":number,\"severity\":\"info\"|\"warn\"|\"bug\",\
-                         \"body\":string}. Focus on correctness and bugs: logic errors, off-by-one, \
-                         nullability, panics, data races, incorrect assumptions."
-                    .to_string(),
+                prompt: format!(
+                    "You are reviewing a pull request diff. Output ONLY a JSON array \
+                     (no prose, no markdown fence) of objects {}. Focus on correctness and \
+                     bugs: logic errors, off-by-one, nullability, panics, data races, incorrect \
+                     assumptions.",
+                    crate::contract::finding_schema()
+                ),
                 skill: "correctness-review".to_string(),
             },
             ReviewAgentCfg {
@@ -247,12 +248,13 @@ pub fn default_review_config(default_provider: &str) -> ReviewConfig {
                 provider: default_provider.to_string(),
                 providers: vec![default_provider.to_string()],
                 model: "".to_string(),
-                prompt: "You are reviewing a pull request diff. Output ONLY a JSON array \
-                         (no prose, no markdown fence) of objects \
-                         {\"path\":string,\"line\":number,\"severity\":\"info\"|\"warn\"|\"bug\",\
-                         \"body\":string}. Focus on security and error handling: injection, \
-                         unhandled errors, missing auth checks, sensitive data exposure."
-                    .to_string(),
+                prompt: format!(
+                    "You are reviewing a pull request diff. Output ONLY a JSON array \
+                     (no prose, no markdown fence) of objects {}. Focus on security and error \
+                     handling: injection, unhandled errors, missing auth checks, sensitive data \
+                     exposure.",
+                    crate::contract::finding_schema()
+                ),
                 skill: "security-review".to_string(),
             },
         ],
@@ -261,11 +263,11 @@ pub fn default_review_config(default_provider: &str) -> ReviewConfig {
             provider: "claude".to_string(),
             providers: vec![],
             model: "".to_string(),
-            prompt: "You are deduplicating and prioritizing code review comments. Output ONLY \
+            prompt: format!("You are deduplicating and prioritizing code review comments. Output ONLY \
                      a JSON array (no prose, no markdown fence) of objects \
-                     {\"path\":string,\"line\":number,\"severity\":\"info\"|\"warn\"|\"bug\",\
+                     {{\"path\":string,\"line\":number,\"severity\":{},\
                      \"category\":string,\"title\":string,\"body\":string,\"evidence\":string,\
-                     \"reasoning\":string,\"suggested_fix\":string}. `title` is a short one-line \
+                     \"reasoning\":string,\"suggested_fix\":string}}. `title` is a short one-line \
                      summary; `category` is one of security|correctness|performance|architecture|\
                      devex|test|docs|style|other; `evidence` is the offending code excerpt or quote \
                      that proves the issue; `reasoning` is why it is a problem; `suggested_fix` is a \
@@ -275,8 +277,9 @@ pub fn default_review_config(default_provider: &str) -> ReviewConfig {
                      verified finding, however many that is (on a large diff, 100+ is normal). \
                      Never drop a finding merely to shorten the list, and never drop one just \
                      because other findings are more severe. Rank by severity (bug first). \
-                     Here are the batches of comments from each agent:"
-                .to_string(),
+                     Here are the batches of comments from each agent:",
+                crate::contract::severity_choices()
+            ),
             skill: String::new(),
         },
         custom_presets: vec![],
@@ -640,12 +643,34 @@ impl DraftComment {
     pub fn verification_complete(&self) -> bool {
         self.disposition
             .as_deref()
-            .is_some_and(|d| d == "verified" || NOTE_DISPOSITIONS.contains(&d))
+            .is_some_and(|d| crate::contract::verifier_dispositions().contains(&d))
             && !self.body.trim().is_empty()
             && self.evidence.as_ref().is_some_and(|s| !s.trim().is_empty())
     }
     pub fn suppressed(&self) -> bool {
-        self.disposition.as_deref() != Some("verified") || !self.verification_complete()
+        self.disposition.as_deref() != Some(crate::contract::VERIFIED)
+            || !self.verification_complete()
+    }
+    /// The stand-in [`parse_draft_comments`] keeps for a verifier item it
+    /// could not read (its body says which and why).
+    pub fn unreadable(&self) -> bool {
+        self.disposition.as_deref() == Some(crate::contract::UNREADABLE)
+    }
+    fn unreadable_item(item: usize, why: &str) -> Self {
+        Self {
+            source_ids: Vec::new(),
+            disposition: Some(crate::contract::UNREADABLE.into()),
+            path: None,
+            line: None,
+            line_end: None,
+            severity: default_draft_severity(),
+            body: format!("item {item}: {why}"),
+            category: None,
+            title: None,
+            evidence: None,
+            reasoning: None,
+            suggested_fix: None,
+        }
     }
 }
 
@@ -739,7 +764,8 @@ pub fn verifier_covers_claims(comments: &[DraftComment], batch_sizes: &[usize]) 
         .flat_map(|(batch, count)| (0..*count).map(move |claim| raw_claim_id(batch, claim)))
         .collect();
     let mut seen = std::collections::HashSet::new();
-    for comment in comments {
+    // An unreadable item names no claim; the claims it meant stay unseen.
+    for comment in comments.iter().filter(|c| !c.unreadable()) {
         if !comment.verification_complete() {
             return false;
         }
@@ -783,10 +809,30 @@ pub fn parse_draft_comments(review_id: &Id, summary_text: &str) -> Vec<DraftComm
         tracing::warn!(review = %review_id, "final reply holds no JSON array; no comments stored");
         return vec![];
     }
-    draft_comments_from_json(&stripped[start..end]).unwrap_or_else(|e| {
-        tracing::warn!(review = %review_id, "failed to parse final JSON ({e}); no comments stored");
-        vec![]
-    })
+    match read_draft_array(&stripped[start..end]) {
+        // Each unreadable item rides along as a suppressed stand-in, so
+        // `verification::settle` can say "2 of 14 items could not be read"
+        // in the review's notes. It is never stored as a comment.
+        Ok(read) => {
+            if !read.unreadable.is_empty() {
+                tracing::warn!(review = %review_id, skipped = read.unreadable.len(), "final reply has unreadable items; kept the rest");
+            }
+            let skipped = read.unreadable.into_iter();
+            let stand_ins = skipped.map(|(item, why)| DraftComment::unreadable_item(item, why));
+            read.comments.into_iter().chain(stand_ins).collect()
+        }
+        Err(e) => {
+            tracing::warn!(review = %review_id, "failed to parse final JSON ({e}); no comments stored");
+            vec![]
+        }
+    }
+}
+
+/// One read of the summarizer's array: the comments, and each element that
+/// could not be read as one (1-based position, why).
+struct DraftRead {
+    comments: Vec<DraftComment>,
+    unreadable: Vec<(usize, &'static str)>,
 }
 
 /// THE reader of the summarizer's JSON array — both the handoff-file check
@@ -801,30 +847,46 @@ pub fn parse_draft_comments(review_id: &Id, summary_text: &str) -> Vec<DraftComm
 /// and any JSON array is a valid result — unless it had elements and NONE of
 /// them is a comment (the agent misread the format; waiting is still right).
 pub fn draft_comments_from_json(json: &str) -> Result<Vec<DraftComment>, serde_json::Error> {
+    read_draft_array(json).map(|read| read.comments)
+}
+
+fn read_draft_array(json: &str) -> Result<DraftRead, serde_json::Error> {
     use serde::de::Error as _;
-    let items: Vec<Value> = serde_json::from_str(json)?;
-    let mut dropped = 0usize;
-    let comments: Vec<DraftComment> = items
-        .into_iter()
-        .filter(|v| v.get(crate::session::LENS_SCORE_KEY).is_none())
-        .filter_map(|v| {
-            let c = coerce_draft_value(v).and_then(|v| serde_json::from_value(v).ok());
-            dropped += usize::from(c.is_none());
-            c
-        })
-        .collect();
-    if comments.is_empty() && dropped > 0 {
+    let items: Vec<Value> = serde_json::from_str(json).map_err(|e| {
+        serde_json::Error::custom(format!(
+            "expected a JSON array of comments with a string `body` ({e})"
+        ))
+    })?;
+    let mut read = DraftRead {
+        comments: Vec::new(),
+        unreadable: Vec::new(),
+    };
+    for (i, v) in items.into_iter().enumerate() {
+        if v.get(crate::session::LENS_SCORE_KEY).is_some() {
+            continue;
+        }
+        let Some(v) = coerce_draft_value(v) else {
+            read.unreadable.push((i + 1, "not a JSON object"));
+            continue;
+        };
+        match serde_json::from_value(v) {
+            Ok(c) => read.comments.push(c),
+            Err(_) => read.unreadable.push((i + 1, "no text `body`")),
+        }
+    }
+    if read.comments.is_empty() && !read.unreadable.is_empty() {
         return Err(serde_json::Error::custom(
             "no element of the array is a comment with a string body",
         ));
     }
-    Ok(comments)
+    Ok(read)
 }
 
 /// Normalize one summarizer element into what [`DraftComment`] reads: lines
 /// from a number or a numeric string (`"42-45"` also yields `line_end`), a
 /// scalar severity as text (`null` ⇒ the default), text fields dropped when
-/// not text, `source_ids` reduced to its strings. `None` ⇒ not an object.
+/// not text, the disposition in its listed spelling, `source_ids` reduced to
+/// its strings. `None` ⇒ not an object.
 fn coerce_draft_value(v: Value) -> Option<Value> {
     let Value::Object(mut map) = v else {
         return None;
@@ -874,6 +936,11 @@ fn coerce_draft_value(v: Value) -> Option<Value> {
                 map.remove(key);
             }
         }
+    }
+    // `Verified`, ` not-relevant ` and `not relevant` are the listed words in
+    // another spelling; a word that is not listed still fails the check.
+    if let Some(Value::String(d)) = map.get_mut("disposition") {
+        *d = d.trim().to_ascii_lowercase().replace([' ', '-'], "_");
     }
     match map.remove("source_ids") {
         Some(Value::Array(ids)) => {
@@ -1418,13 +1485,17 @@ pub fn title_case_lens(s: &str) -> String {
 /// `lenses` empty → the two default lenses (correctness + security) retargeted to
 /// `providers`.
 /// The lens prompt shared by every workflow-review reviewer: it pins the JSON
-/// output contract; the per-lens `skill` text is prepended at run time.
-pub const WORKFLOW_REVIEW_LENS_PROMPT: &str =
-    "You are reviewing a pull request diff. Output ONLY a JSON array \
-     (no prose, no markdown fence) of objects \
-     {\"path\":string,\"line\":number,\"severity\":\"info\"|\"warn\"|\"bug\",\"body\":string}. \
-     Review through your lens — the skill prepended above defines what to look for. Open and \
-     read the real files around you to verify each finding before reporting it.";
+/// output contract ([`crate::contract::finding_schema`]); the per-lens
+/// `skill` text is prepended at run time.
+pub fn workflow_review_lens_prompt() -> String {
+    format!(
+        "You are reviewing a pull request diff. Output ONLY a JSON array \
+         (no prose, no markdown fence) of objects {}. \
+         Review through your lens — the skill prepended above defines what to look for. Open and \
+         read the real files around you to verify each finding before reporting it.",
+        crate::contract::finding_schema()
+    )
+}
 
 pub fn workflow_review_config(
     default_provider: &str,
@@ -1450,7 +1521,7 @@ pub fn workflow_review_config(
                 provider: provs[0].clone(),
                 providers: provs.clone(),
                 model: String::new(),
-                prompt: WORKFLOW_REVIEW_LENS_PROMPT.to_string(),
+                prompt: workflow_review_lens_prompt(),
                 skill: lens.clone(),
             })
             .collect();
@@ -1492,7 +1563,12 @@ pub fn workflow_review_config_from_json(
             if provs.is_empty() {
                 provs = vec![default_provider.to_string()];
             }
-            let instr = r.get("instructions").and_then(Value::as_str).unwrap_or("").trim().to_string();
+            let instr = r
+                .get("instructions")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
             let name = r
                 .get("name")
                 .and_then(Value::as_str)
@@ -1505,11 +1581,18 @@ pub fn workflow_review_config_from_json(
                         title_case_lens(&lens)
                     }
                 });
-            let model = r.get("model").and_then(Value::as_str).unwrap_or("").to_string();
+            let model = r
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             let prompt = if instr.is_empty() {
-                WORKFLOW_REVIEW_LENS_PROMPT.to_string()
+                workflow_review_lens_prompt()
             } else {
-                format!("{WORKFLOW_REVIEW_LENS_PROMPT}\n\n--- Reviewer-specific instructions ---\n{instr}")
+                format!(
+                    "{}\n\n--- Reviewer-specific instructions ---\n{instr}",
+                    workflow_review_lens_prompt()
+                )
             };
             // A reviewer with neither a lens nor a name nor providers is noise.
             if lens.is_empty() && instr.is_empty() {
@@ -1608,11 +1691,14 @@ pub fn compose_orchestrator_prompt(
          available, otherwise run the lenses one after another yourself).\n\
          Give every sub-agent: the lens method verbatim (below), the diff file path, the checkout \
          path, the read-only rules, and its OWN output path (named in its section) \u{2014} a JSON \
-         array of {{path,line,severity,body,lens:\"<lens-slug>\"}}.\n\
+         array of {{path,line,severity,body,lens:\"<lens-slug>\"}}, severity one of {}, for \
+         example: {}\n\
          Wait for ALL sub-agents to finish. Then read every per-lens file, drop exact duplicates, \
          keep the `lens` field, and write the merged array to:\n  {}\n\
          Writing that merged file is the LAST thing you do; never write it while a sub-agent is \
          still running.\n",
+        crate::contract::severity_choices(),
+        crate::contract::LENS_FILE_EXAMPLE,
         merged_path.display()
     );
     for (i, l) in lenses.iter().enumerate() {

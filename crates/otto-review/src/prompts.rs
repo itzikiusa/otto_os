@@ -138,8 +138,10 @@ pub fn reviewer_prompt(
              LENS SCORE — mandatory: end the SAME array with exactly one object \
              {{\"lens_score\": <0-10>, \"score_reason\": \"<one sentence>\"}} rating this change through \
              your lens: 10 = no concern, 8-9 = optional polish only, 5-7 = should-fix issues, 0-4 = \
-             must-fix defects. It is not a finding and is required even when there are no findings.",
-            changed_files, changed_lines, prompt_lens, user_ctx, jira_ctx, diff_path_str
+             must-fix defects. It is not a finding and is required even when there are no findings.\n\n\
+             Example of a complete answer (the shape only; severity is one of {}): {}",
+            changed_files, changed_lines, prompt_lens, user_ctx, jira_ctx, diff_path_str,
+            crate::contract::severity_choices(), crate::contract::REVIEWER_OUTPUT_EXAMPLE
         )
 }
 
@@ -233,7 +235,7 @@ pub fn summarizer_prompt(
         })
         .collect::<Vec<_>>()
         .join("\n\n");
-    format!("{}{}\n\n{}\n\nFINAL VERIFIER (these rules take precedence over the configured summarizer wording):\nRead the actual changed code, definitions and affected consumers. Independently trace each claimed defect; do not merely combine reviewer opinions. Only report a concrete NEW defect caused by this PR causal diff. A preexisting issue merely widened by the change belongs once in a not_relevant summary note, not a finding thread. Deduplicate findings with the same fix. Prioritize must-fix/should-fix; optional polish is secondary. Do not demand exhaustive tests: only newly changed critical-path gaps and demonstrable false greens. Calibrate severity by realistic impact and trigger; never demote a real issue because there are many, or inflate a score. Every output item MUST carry source_ids:[the exact source_id values it accounts for]. Account for every input source_id exactly once across the output; one same-fix comment may cover several source IDs. Never invent source IDs. New independently discovered defects may have an empty source_ids array with concrete evidence. Every retained comment MUST have disposition=verified and nonempty evidence with inspected file:line and causal trigger. Unknown dispositions or absent evidence cannot be published. Preserve important uncertainty explicitly.\nFor EVERY discarded/unconfirmed/duplicate claim, return an item in the same JSON array with disposition={}, body identifying the original claim, and evidence explaining the concrete reason (for duplicate, identify the retained fix). These items are persisted as verification notes, not PR comments. If all claims are rejected return these dispositions rather than an unexplained empty array.\n{}\nNever describe a code trace as an executed test.", context, summarizer_cfg.prompt, batches, crate::engine::NOTE_DISPOSITIONS.join("|"), prior_finding_rules())
+    format!("{}{}\n\n{}\n\nFINAL VERIFIER (these rules take precedence over the configured summarizer wording):\nRead the actual changed code, definitions and affected consumers. Independently trace each claimed defect; do not merely combine reviewer opinions. Only report a concrete NEW defect caused by this PR causal diff. A preexisting issue merely widened by the change belongs once in a not_relevant summary note, not a finding thread. Deduplicate findings with the same fix. Prioritize must-fix/should-fix; optional polish is secondary. Do not demand exhaustive tests: only newly changed critical-path gaps and demonstrable false greens. Calibrate severity by realistic impact and trigger; never demote a real issue because there are many, or inflate a score. Every output item MUST carry source_ids:[the exact source_id values it accounts for]. Account for every input source_id exactly once across the output; one same-fix comment may cover several source IDs. Never invent source IDs. New independently discovered defects may have an empty source_ids array with concrete evidence. Every retained comment MUST have disposition={verified} and nonempty evidence with inspected file:line and causal trigger. Unknown dispositions or absent evidence cannot be published. Preserve important uncertainty explicitly.\nFor EVERY discarded/unconfirmed/duplicate claim, return an item in the same JSON array with disposition={}, body identifying the original claim, and evidence explaining the concrete reason (for duplicate, identify the retained fix). These items are persisted as verification notes, not PR comments. If all claims are rejected return these dispositions rather than an unexplained empty array.\n{}\nNever describe a code trace as an executed test.\nExample of a complete answer when batch 1 has two claims and batch 2 has one (the shape only): {example}", context, summarizer_cfg.prompt, batches, crate::engine::NOTE_DISPOSITIONS.join("|"), prior_finding_rules(), verified = crate::contract::VERIFIED, example = crate::contract::VERIFIER_OUTPUT_EXAMPLE)
 }
 
 /// The lens `history::prior_claims` labels a prior-finding claim with.
@@ -251,7 +253,7 @@ pub fn prior_finding_rules() -> String {
         "body": "Prior finding <finding id>: fixed",
         "evidence": "fixed: <file:line of the current code that fixes it>",
     });
-    format!("PRIOR FINDINGS: a claim labelled [lens: {PRIOR_FINDING_LENS}] is a finding an earlier review raised; re-check it against the CURRENT code and account for its source_id like any other claim. Fixed in the current code: {fixed} (the code that fixes it is the evidence). Still present: disposition=verified with the current file:line; it stays a comment. Cannot tell: disposition=unverified, saying what you could not check.")
+    format!("PRIOR FINDINGS: a claim labelled [lens: {PRIOR_FINDING_LENS}] is a finding an earlier review raised; re-check it against the CURRENT code and account for its source_id like any other claim. Fixed in the current code: {fixed} (the code that fixes it is the evidence). Still present: disposition={verified} with the current file:line; it stays a comment. Cannot tell: disposition={unverified}, saying what you could not check.", verified = crate::contract::VERIFIED, unverified = crate::verification::UNVERIFIED)
 }
 
 /// The reviewers' own 0–10 lens scores, as a block appended to the
@@ -290,13 +292,19 @@ pub fn apply_lens_score(row: &mut otto_core::domain::ReviewAgentState, reply: &s
 }
 
 /// `[{lens, score, reason}]` for every scored row; the summarizer row is the
-/// verifier's overall rating after verification.
+/// verifier's overall rating after verification — left out when no reviewer
+/// finished: a verifier handed no claims rates nothing ("10/10" over a review
+/// whose every lens failed read as a clean verdict).
 pub fn lens_scores_json(review: Option<&otto_core::domain::Review>) -> Vec<serde_json::Value> {
     review
         .map(|r| {
+            let last = r.agents.len().saturating_sub(1);
+            let reviewed = crate::verification::missing_lenses(&r.agents[..last]).len() < last;
             r.agents
                 .iter()
-                .filter(|a| a.score.is_some())
+                .enumerate()
+                .filter(|(i, a)| a.score.is_some() && (reviewed || *i < last))
+                .map(|(_, a)| a)
                 .map(|a| serde_json::json!({ "lens": a.name, "score": a.score, "reason": a.score_reason }))
                 .collect()
         })

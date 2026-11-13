@@ -59,17 +59,15 @@ test('Home is the first sidebar entry and seeds a default view of live boxes', a
   await expect(page).toHaveURL(/#\/home$/);
   const home = page.getByRole('region', { name: 'Home dashboard' });
   await expect(home).toBeVisible();
-  // Root sees every kind → the seed places three boxes.
+  // The seed places only widgets with data: the isolated daemon has no
+  // clusters and no DB dashboards, so a first Home is just Agents — never a
+  // wall of empty Kubernetes / DB widgets.
   const boxes = home.locator('section.hbox');
-  await expect(boxes).toHaveCount(3);
-  await expect(boxes.nth(0)).toHaveAttribute('data-kind', 'sessions');
-  await expect(boxes.nth(1)).toHaveAttribute('data-kind', 'k8s');
-  await expect(boxes.nth(2)).toHaveAttribute('data-kind', 'db-dashboard');
-  // Every box body reaches a settled state (empty state or data), never a
-  // permanent skeleton.
-  await expect(boxes.nth(0)).toContainText(/open|No open agent sessions/);
-  await expect(boxes.nth(1)).toContainText(/No clusters yet|cluster/);
-  await expect(boxes.nth(2)).toContainText(/No DB dashboards yet|Pick a dashboard/);
+  await expect(boxes.first()).toHaveAttribute('data-kind', 'sessions');
+  await expect(boxes.first()).toContainText(/open|No open agent sessions/);
+  // The cluster / dashboard probe has settled and added nothing.
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('otto_home_views') ?? '[]')[0]?.boxes?.length)).toBe(1);
+  await expect(boxes).toHaveCount(1);
   // A single space: no cycling control; one numbered tab.
   await expect(page.getByRole('tab')).toHaveCount(1);
   await expect(current(page)).toHaveAccessibleName('Overview');
@@ -167,20 +165,20 @@ test('widgets: add from the picker (max 8), resize in grid units, zoom, remove',
   await boot(page);
   const home = page.getByRole('region', { name: 'Home dashboard' });
   const boxes = home.locator('section.hbox');
-  await expect(boxes).toHaveCount(4);
+  await expect(boxes).toHaveCount(1);
 
   // Add box picker lists every kind for root and adds one.
   await page.getByRole('button', { name: 'Add widget' }).click();
   const sheet = page.getByRole('dialog');
   await expectFullyInViewport(page, sheet, 'add-widget sheet');
-  await expect(sheet.locator('.kind')).toHaveCount(7);
+  await expect(sheet.locator('.kind')).toHaveCount(5);
   await sheet.locator('.kind', { hasText: 'Usage' }).click();
-  await expect(boxes).toHaveCount(5);
-  await expect(boxes.nth(4)).toHaveAttribute('data-kind', 'usage');
-  await expect(boxes.nth(4)).toContainText(/spend|Usage engine is off|Usage unavailable/);
+  await expect(boxes).toHaveCount(2);
+  await expect(boxes.nth(1)).toHaveAttribute('data-kind', 'usage');
+  await expect(boxes.nth(1)).toContainText(/spend|Usage engine is off|Usage unavailable/);
 
   // Cap: fill to 8 then the button disables.
-  for (const k of ['Insights', 'Agents', 'Kubernetes']) {
+  for (const k of ['Insights', 'Agents', 'Kubernetes', 'DB dashboard', 'Agents', 'Insights']) {
     await page.getByRole('button', { name: 'Add widget' }).click();
     await page.getByRole('dialog').locator('.kind', { hasText: k }).click();
   }
@@ -232,6 +230,12 @@ test('widgets: add from the picker (max 8), resize in grid units, zoom, remove',
   await expect(home.locator('section.hbox.zoomed')).toHaveCount(0);
   await expect(boxes).toHaveCount(8);
 
+  // Zoom with the close button returns focus to the widget's zoom control.
+  await first.getByRole('button', { name: 'Zoom in' }).click();
+  await zoomed.getByRole('button', { name: 'Exit zoom' }).click();
+  await expect(home.locator('section.hbox.zoomed')).toHaveCount(0);
+  await expect(first.getByRole('button', { name: 'Zoom in' })).toBeFocused();
+
   // Remove via the box menu; the resize survives a reload.
   await boxes.nth(7).getByRole('button', { name: /widget options/ }).click();
   await page.getByRole('menuitem', { name: /Remove widget/ }).click();
@@ -240,6 +244,37 @@ test('widgets: add from the picker (max 8), resize in grid units, zoom, remove',
   await expect(page.locator('.shell')).toBeVisible();
   await expect(boxes).toHaveCount(7);
   expect(await boxes.nth(0).evaluate((el) => (el as HTMLElement).style.gridColumn)).toBe('span 5');
+});
+
+test('zooming a loaded widget reuses it: no second mount, no new request', async ({ page }) => {
+  await boot(page);
+  const home = page.getByRole('region', { name: 'Home dashboard' });
+  let reports = 0;
+  page.on('request', (r) => {
+    if (r.url().includes('/insights/reports')) reports += 1;
+  });
+  await page.getByRole('button', { name: 'Add widget' }).click();
+  await page.getByRole('dialog').locator('.kind', { hasText: 'Insights' }).click();
+  const box = home.locator('section.hbox[data-kind="insights"]');
+  await expect.poll(() => reports).toBeGreaterThan(0);
+  // Settled: the first load is done (empty state, a report, or its error).
+  await expect(box.locator('.hb-body .skeleton-list')).toHaveCount(0);
+  await expect(box.locator('.hb-body')).toContainText(/No reports yet|Insights|report/);
+  const before = reports;
+  // Tag the live body node: a remount would replace it.
+  await box.locator('.hb-body > *').first().evaluate((el) => ((el as HTMLElement).dataset.e2eMark = 'kept'));
+  await box.getByRole('button', { name: 'Zoom in' }).click();
+  const zoomed = home.locator('section.hbox.zoomed');
+  await expect(zoomed).toHaveAttribute('data-kind', 'insights');
+  await expect(zoomed.locator('.hb-body > [data-e2e-mark="kept"]')).toHaveCount(1);
+  await expect(home.locator('section.hbox')).toHaveCount(2); // Agents (covered) + Insights: no copy
+  await expect(home.locator('section.hbox:visible')).toHaveCount(1);
+  await expect(home.locator('section.hbox:not(.zoomed)')).toHaveAttribute('inert', '');
+  await page.waitForTimeout(1500); // ui-guards: allow — proves an absence: a zoom must not fire a re-fetch
+  expect(reports, 'zoom re-fetched the widget').toBe(before);
+  await page.keyboard.press('Escape');
+  await expect(home.locator('section.hbox.zoomed')).toHaveCount(0);
+  await expect(box.locator('.hb-body > [data-e2e-mark="kept"]')).toHaveCount(1);
 });
 
 test('Go to Home is one ⌘K away and the page never overflows horizontally', async ({ page }) => {

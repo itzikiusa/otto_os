@@ -474,6 +474,31 @@ fn a_real_payload_with_one_broken_element_keeps_the_rest() {
     ])
     .to_string();
     let parsed = parse_draft_comments(&"r".into(), &payload);
-    assert_eq!(parsed.len(), 4, "only the bodiless verdict is dropped");
+    // The bodiless verdict is not a comment; it rides along as an unreadable
+    // stand-in so the notes can count it.
+    assert_eq!(parsed.iter().filter(|c| !c.unreadable()).count(), 4);
+    assert_eq!(parsed.iter().filter(|c| c.unreadable()).count(), 1);
     assert_eq!(parsed.iter().filter(|c| !c.suppressed()).count(), 2);
+    let b: Vec<Vec<ReviewFinding>> = [1, 0, 0, 1, 2, 0, 1, 1]
+        .iter()
+        .map(|n| {
+            (0..*n)
+                .map(|j| finding("a.go", j + 1, "warn", "c"))
+                .collect()
+        })
+        .collect();
+    let s = settle(parsed, &b, None);
+    assert!(s.comments.iter().all(|c| !c.unreadable()), "never stored");
+    let note = s
+        .notes
+        .iter()
+        .find(|n| n.starts_with(UNREADABLE_NOTE_PREFIX))
+        .expect("unreadable note");
+    assert!(
+        note.starts_with("Verifier output: 1 of 5 items could not be read"),
+        "{note}"
+    );
+    assert!(note.contains("item 3: no text `body`"), "{note}");
+    // batch:5:claim:2 was in the unreadable item: carried forward, not lost.
+    assert_eq!((s.accounted, s.total, s.unverified), (5, 6, 1));
 }

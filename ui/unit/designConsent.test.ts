@@ -60,7 +60,7 @@ test('Product question posting does not follow a changed story after consent', a
     selectedIds: new Set(['q-A']), postingIds: false, postTarget: 'JIRA-A', isJira: true,
     story: { source_key: 'JIRA-A', title: 'Story A' },
     product: { questions: [{ id: 'q-A', text: 'Question A' }], captureSelection: () => () => current, postQuestions: async () => calls.push('posted') },
-    confirmOutward: () => confirm.promise, plural: (n: number) => String(n),
+    publishReview: { ask: () => confirm.promise }, plural: (n: number) => String(n),
     toasts: { success() {} }, toastError() {},
   });
   const pending = state.postSelected(); current = false; confirm.resolve(true); await pending;

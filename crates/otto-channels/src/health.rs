@@ -62,6 +62,11 @@ pub enum ListenerState {
     Failing,
     /// Not started: another enabled workspace already listens with this token.
     Conflict,
+    /// Connected, but the inbound queue is full: new events are left
+    /// unacknowledged so the platform redelivers them. Clears on the next
+    /// event that is taken in. Never shown as a connection problem — the
+    /// socket is fine.
+    Busy,
 }
 
 /// One listener's live status (`GET /workspaces/{id}/integrations/status`).
@@ -283,9 +288,29 @@ impl Health {
         });
     }
 
-    /// An inbound event arrived.
+    /// The connection is fine but the inbound queue is full, so events are
+    /// left for the platform to redeliver. Only a connected listener turns
+    /// busy (a dropped one already says why); not counted as a failure.
+    pub fn busy(&self, reason: &str) {
+        let reason = clip(reason);
+        self.update(|s| {
+            if matches!(s.state, ListenerState::Connected | ListenerState::Busy) {
+                Self::enter(s, ListenerState::Busy);
+                s.detail = Some(reason);
+            }
+        });
+    }
+
+    /// An inbound event arrived (and was taken in): a busy listener is
+    /// connected again.
     pub fn event(&self) {
-        self.update(|s| s.last_event_at = Some(Utc::now()));
+        self.update(|s| {
+            s.last_event_at = Some(Utc::now());
+            if s.state == ListenerState::Busy {
+                Self::enter(s, ListenerState::Connected);
+                s.detail = None;
+            }
+        });
     }
 
     #[cfg(test)]
@@ -417,6 +442,35 @@ mod tests {
         // A different reason is a new state.
         waiting_for_token("ws_health_since", Channel::Slack, "bot token is not saved");
         assert!(snapshot("ws_health_since")[0].since > first);
+    }
+
+    /// A full inbound queue is not a connection problem: the badge says busy
+    /// (no failure counted, still connected) and clears on the next event.
+    #[test]
+    fn a_full_queue_is_busy_not_disconnected_and_clears_on_the_next_event() {
+        let h = Health::begin("ws_health_busy", Channel::Slack);
+        h.busy("queue full");
+        assert_eq!(
+            h.state().unwrap().state,
+            ListenerState::Connecting,
+            "only a connected listener turns busy"
+        );
+        h.connected();
+        h.busy("Inbound message queue is full");
+        let s = h.state().unwrap();
+        assert_eq!(s.state, ListenerState::Busy);
+        assert_eq!(s.failures, 0);
+        assert!(s.connected_at.is_some(), "the socket is still up");
+        assert!(s.last_error.is_none());
+        assert_eq!(serde_json::to_value(&s).unwrap()["state"], "busy");
+        h.event();
+        let s = h.state().unwrap();
+        assert_eq!(s.state, ListenerState::Connected);
+        assert!(s.detail.is_none());
+        // A drop while busy still reports the drop.
+        h.busy("full");
+        h.failed("stream ended", false);
+        assert_eq!(h.state().unwrap().state, ListenerState::Reconnecting);
     }
 
     #[test]

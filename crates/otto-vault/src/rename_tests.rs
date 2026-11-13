@@ -71,3 +71,68 @@ async fn an_unreadable_source_is_reported_not_skipped() {
     assert_eq!(std::fs::read(dir.path().join("bad.md")).unwrap(), bad);
     assert!(dir.path().join("renamed.md").is_file());
 }
+
+/// A rename the filesystem refuses after its target's parents were made (a
+/// folder moved into itself) leaves none of those new folders behind, and
+/// never touches folders that existed before. It used to leave them empty.
+#[tokio::test]
+async fn a_failed_rename_takes_back_only_the_folders_it_created() {
+    let (e, dir, id) = vault(&[("dir/had/keep.md", b"# K\n"), ("dir/n.md", b"# N\n")]).await;
+    let err = e
+        .rename("ws", id, "dir", "dir/had/new/deeper/moved")
+        .await
+        .expect_err("a folder cannot move into itself");
+    assert!(matches!(err, Error::Internal(_)), "{err:?}");
+    assert!(dir.path().join("dir/n.md").is_file(), "the source stays");
+    assert!(
+        dir.path().join("dir/had/keep.md").is_file(),
+        "existing folders stay"
+    );
+    assert!(
+        !dir.path().join("dir/had/new").exists(),
+        "folders this rename made are taken back"
+    );
+}
+
+/// Restoring from trash obeys the same protected-path rule as every write,
+/// a restore onto an existing file is a conflict that keeps the trash entry,
+/// and a restore that fails after making its target's folders removes them.
+#[tokio::test]
+async fn trash_restore_is_guarded_and_cleans_up_after_a_failure() {
+    let (e, dir, id) = vault(&[("notes/a.md", b"# A\n"), ("taken/sub/a.md", b"theirs")]).await;
+    e.delete_note("ws", id, "notes/a.md").await.unwrap();
+    let item = e.trash_entries("ws", id).await.unwrap().remove(0);
+    let err = e
+        .restore_trash("ws", id, &item.id, Some("keys/server.pem"))
+        .await
+        .expect_err("a key-like name is protected");
+    assert!(matches!(err, Error::Forbidden(_)), "{err:?}");
+    assert!(!dir.path().join("keys").exists(), "nothing was created");
+    let err = e
+        .restore_trash("ws", id, &item.id, Some("taken/sub/a.md"))
+        .await
+        .expect_err("the target exists");
+    assert!(matches!(err, Error::Conflict(_)), "{err:?}");
+    assert_eq!(
+        std::fs::read(dir.path().join("taken/sub/a.md")).unwrap(),
+        b"theirs"
+    );
+    assert!(
+        dir.path().join("taken/sub").is_dir(),
+        "existing folders stay"
+    );
+    let entries = e.trash_entries("ws", id).await.unwrap();
+    assert!(entries.iter().any(|t| t.id == item.id), "still restorable");
+    // The trashed file vanishes (emptied by hand): the move fails after the
+    // destination's folders were made, and they are taken back.
+    std::fs::remove_file(dir.path().join(".trash").join(&item.stored_path)).unwrap();
+    let err = e
+        .restore_trash("ws", id, &item.id, Some("made/here/a.md"))
+        .await
+        .expect_err("nothing left to restore");
+    assert!(matches!(err, Error::NotFound(_)), "{err:?}");
+    assert!(
+        !dir.path().join("made").exists(),
+        "created folders are taken back"
+    );
+}

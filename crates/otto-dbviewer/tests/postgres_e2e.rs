@@ -554,3 +554,62 @@ async fn postgres_batch_preserves_explicit_limit_forms() {
         );
     }
 }
+
+/// Processes panel: the listing runs in read-only execution (as the panel's
+/// `read_only: true` request does), shows another session's running statement
+/// with its pid, and `pg_cancel_backend(pid)` stops it.
+#[tokio::test]
+#[ignore]
+async fn postgres_process_list_and_cancel() {
+    if gated() {
+        return;
+    }
+    use otto_dbviewer::service::process_list::POSTGRES_ACTIVITY;
+    let d = Arc::new(PostgresDriver::default());
+    let marker = format!("otto_process_list_{}", std::process::id());
+    let sleeper = format!("SELECT pg_sleep(5), '{marker}'");
+    let run_d = d.clone();
+    let run_sql = sleeper.clone();
+    let run = tokio::spawn(async move { run_d.run(&cfg(), &query(&run_sql)).await });
+
+    let mut ro = cfg();
+    ro.params = json!({ "__read_only_execution": true });
+    let mut pid = None;
+    for _ in 0..60 {
+        let res = d
+            .run(&ro, &query(POSTGRES_ACTIVITY))
+            .await
+            .expect("listing");
+        let names: Vec<&str> = res.columns.iter().map(|c| c.name.as_str()).collect();
+        let (p, q) = (
+            names.iter().position(|n| *n == "pid").expect("pid column"),
+            names
+                .iter()
+                .position(|n| *n == "query")
+                .expect("query column"),
+        );
+        for col in ["usename", "state", "wait_event", "seconds", "client_addr"] {
+            assert!(names.contains(&col), "{col} in {names:?}");
+        }
+        pid = res
+            .rows
+            .iter()
+            .find(|r| r[q].as_str().is_some_and(|s| s.contains(&marker)))
+            .and_then(|r| r[p].as_i64());
+        if pid.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let pid = pid.expect("the sleeping session is listed");
+    let res = d
+        .run(&cfg(), &query(&format!("SELECT pg_cancel_backend({pid})")))
+        .await
+        .expect("cancel");
+    assert_eq!(res.rows[0][0], json!(true));
+    let slept = tokio::time::timeout(Duration::from_secs(4), run)
+        .await
+        .expect("cancelled well before the 5s sleep")
+        .expect("join");
+    assert!(slept.is_err(), "a cancelled statement returns an error");
+}

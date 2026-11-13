@@ -726,6 +726,23 @@ async fn settle_notice(result: anyhow::Result<String>, cancel: &AtomicBool) -> b
     settled
 }
 
+/// The bridge [`Inbound`] of a Telegram message carrying `text`.
+fn tg_inbound(msg: &TgMessage, integ: &Integration, text: String) -> Inbound {
+    Inbound {
+        workspace_id: integ.workspace_id.clone(),
+        chat: msg.chat.id.to_string(),
+        thread: msg.message_thread_id.map(|t| t.to_string()),
+        user: msg
+            .from
+            .as_ref()
+            .map(|u| u.id.to_string())
+            .unwrap_or_default(),
+        user_name: msg.from.as_ref().and_then(TgUser::display),
+        text,
+        edited: false,
+    }
+}
+
 async fn handle_update(
     update: &TgUpdate,
     integ: &Integration,
@@ -739,14 +756,13 @@ async fn handle_update(
     }
     if let Some(msg) = &update.message {
         if inbound_text(msg).is_none() && msg.has_attachment() {
-            // A bare file: tell an admitted sender instead of
-            // dropping it silently (strangers get nothing).
-            let user = msg
-                .from
-                .as_ref()
-                .map(|u| u.id.to_string())
-                .unwrap_or_default();
-            if crate::bridge::integration_admits(integ, &user) {
+            // A bare file: tell an admitted sender instead of dropping it
+            // silently. A stranger gets no reply but is listed like any
+            // other turned-away sender (no text, so it names no trigger).
+            let bare = tg_inbound(msg, integ, String::new());
+            if !crate::bridge::integration_admits(integ, &bare.user) {
+                bridge.record_rejected(Channel::Telegram, &bare).await;
+            } else {
                 let adapter = Arc::clone(adapter);
                 let chat = msg.chat.id.to_string();
                 let reply_to = msg.message_id.to_string();
@@ -763,24 +779,8 @@ async fn handle_update(
             }
         }
         if let Some(text) = &inbound_text(msg) {
-            let user = msg
-                .from
-                .as_ref()
-                .map(|u| u.id.to_string())
-                .unwrap_or_default();
-            let chat = msg.chat.id.to_string();
-            let thread = msg.message_thread_id.map(|t| t.to_string());
             health.event();
-
-            let inbound = Inbound {
-                workspace_id: integ.workspace_id.clone(),
-                chat,
-                thread,
-                user,
-                user_name: msg.from.as_ref().and_then(TgUser::display),
-                text: text.clone(),
-                edited: false,
-            };
+            let inbound = tg_inbound(msg, integ, text.clone());
             info!(
                 workspace = %inbound.workspace_id,
                 chat = %inbound.chat,
@@ -828,15 +828,17 @@ async fn handle_update(
                 Admission::Busy(_permit) => {
                     // Telegram has no socket heartbeat to service here.
                     // A failed notice keeps this update and its suffix
-                    // pending at Telegram instead of silently losing it.
-                    if crate::bridge::integration_admits(integ, &inbound.user)
-                        && !settle_notice(
-                            adapter
-                                .send_notice(&inbound.chat, inbound.thread.as_deref(), BUSY_REPLY)
-                                .await,
-                            cancel,
-                        )
-                        .await
+                    // pending at Telegram instead of silently losing it. A
+                    // stranger gets no notice but is still recorded.
+                    if !crate::bridge::integration_admits(integ, &inbound.user) {
+                        bridge.record_rejected(Channel::Telegram, &inbound).await;
+                    } else if !settle_notice(
+                        adapter
+                            .send_notice(&inbound.chat, inbound.thread.as_deref(), BUSY_REPLY)
+                            .await,
+                        cancel,
+                    )
+                    .await
                     {
                         return false;
                     }
@@ -1125,6 +1127,78 @@ mod tests {
             manager.list_by_workspace(&ws).await.unwrap().is_empty(),
             "a stranger's message starts no session"
         );
+        crate::health::remove(&ws, Channel::Telegram);
+        drop((bridge, manager, pool));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A stranger's file with no caption used to vanish without a trace: it
+    /// never reached the bridge, so the owner had no id to "Allow". It is
+    /// listed now — and still answered with nothing.
+    #[tokio::test]
+    async fn a_strangers_bare_file_is_listed_rejected_without_a_reply() {
+        use std::sync::atomic::AtomicUsize;
+        let sends = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&sends);
+        let base = fixture(axum::Router::new().route(
+            "/botTOKEN/sendMessage",
+            axum::routing::post(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { axum::Json(serde_json::json!({"ok": true, "result": {"message_id": 1}})) }
+            }),
+        ))
+        .await;
+        let directory =
+            std::env::temp_dir().join(format!("otto-tg-bare-file-{}", otto_core::new_id()));
+        let pool = otto_state::db::open(&directory.join("state.sqlite"))
+            .await
+            .unwrap();
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let manager = Arc::new(otto_sessions::SessionManager::new(
+            otto_state::SessionsRepo::new(pool.clone()),
+            events,
+            otto_sessions::providers::ProviderRegistry::new(None),
+        ));
+        let bridge = Bridge::new(
+            manager.clone(),
+            otto_state::WorkspacesRepo::new(pool.clone()),
+            otto_state::SettingsRepo::new(pool.clone()),
+            crate::mirror::Mirror::new(manager.clone()),
+            "root".into(),
+        );
+        let ws = format!("ws-tg-bare-file-{}", otto_core::new_id());
+        let integ: Integration = serde_json::from_value(serde_json::json!({
+            "workspace_id": ws, "channel":"telegram", "enabled":true,
+            "allowed_users":"7", "open_to_all":false, "agent_reply":false,
+            "reply_instructions":"", "channel_id":"1", "preferred_cli":"claude",
+            "has_bot_token":true, "has_app_token":false, "updated_at":"2026-11-13T00:00:00Z"
+        }))
+        .unwrap();
+        let update: TgUpdate = serde_json::from_value(serde_json::json!({"update_id":12,
+            "message":{"message_id":7,"from":{"id":9,"username":"eve"},"chat":{"id":1},
+                       "document":{"file_id":"f"}}}))
+        .unwrap();
+        let adapter = Arc::new(TelegramAdapter::with_base("TOKEN", base));
+        let health = crate::health::Health::begin(&ws, Channel::Telegram);
+        assert!(
+            handle_update(
+                &update,
+                &integ,
+                &adapter,
+                &bridge,
+                &health,
+                &AtomicBool::new(false)
+            )
+            .await,
+            "settled"
+        );
+        assert_eq!(sends.load(Ordering::SeqCst), 0, "a stranger gets no reply");
+        let row = crate::health::snapshot(&ws)
+            .into_iter()
+            .flat_map(|s| s.rejected_senders)
+            .find(|r| r.user == "9")
+            .expect("user 9 is listed as a rejected sender");
+        assert_eq!(row.name.as_deref(), Some("@eve"));
         crate::health::remove(&ws, Channel::Telegram);
         drop((bridge, manager, pool));
         std::fs::remove_dir_all(directory).unwrap();

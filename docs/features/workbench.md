@@ -58,7 +58,8 @@ sweep), the API client, a terminal or agent session, or the Vault.
 5. **History.** Every save lands in an append-only revision timeline. Select a
    revision to see it or diff it against the current text or another revision.
    **Restore this version** adds a new `restore` revision, so nothing is
-   overwritten.
+   overwritten. Unsaved edits in the tab are saved into the history first; if
+   they cannot be saved, Restore asks before discarding them.
 6. **Placeholders.** The side panel lists the placeholders it detects. In SQL
    these are `:name`, `{name}` and `{{name}}`, using the DB Explorer's parser.
    In other languages only `{name}` and `{{name}}` count. Values are remembered
@@ -71,8 +72,12 @@ sweep), the API client, a terminal or agent session, or the Vault.
    - **API client: new request.** Text starting with `curl` goes through the
      curl importer. Anything else becomes an unsaved POST draft with the content
      as the body.
-   - **Terminal / agent session.** Pick a live session and confirm. The text is
-     pasted as a bracketed paste with no Enter, so it is never executed.
+   - **Terminal / agent session.** Pick a live session and confirm. Control
+     characters are removed from the text first, and the confirm says how many.
+     An agent or shell session gets a bracketed paste with no Enter. A
+     connection session (SSH, a database client, a pod shell) takes a single
+     line only, because such clients can run each line as it arrives; a
+     multi-line file is refused there and **Copy** is offered instead.
    - **Vault: save as note.** Choose the vault and path; the default is
      `workbench/<name>.md`. Overwriting an existing note asks first.
    - **Copy with placeholders filled.**

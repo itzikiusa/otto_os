@@ -845,25 +845,55 @@ different connection, is always a benign `204` — never an error.
 
 ### Processes (what is running on the server)
 
-Connection right-click → **Processes…** (MySQL and ClickHouse) opens a small
-panel listing what runs on the server now — id, user, time, state and the
-statement — with **Refresh** (`ProcessList.svelte`, `process-list.ts`).
+Connection right-click → **Processes…** (MySQL, PostgreSQL, ClickHouse and
+MongoDB) opens a small panel listing what runs on the server now — id, user,
+database / namespace (PostgreSQL / MongoDB), time, state and the statement —
+with **Refresh** (`ProcessList.svelte`, `process-list.ts`). Redis has no list.
 
-- **Listing is read-only.** It sends `SHOW FULL PROCESSLIST` (MySQL) or
-  `SELECT … FROM system.processes` (ClickHouse) through `…/db/query` with
-  `read_only: true`, so the server classifies it as a read and runs it in the
-  engine's native read-only mode. These exact listings, sent read-only, are
-  **not recorded in query history** (`service/process_list.rs`); the same
-  text typed into the editor is.
-- **Kill asks first and stops the query, not the connection.** **Kill** opens a
-  confirm that names the connection, the user and the statement, and shows the
-  exact SQL — `KILL QUERY <id>` (MySQL) or `KILL QUERY WHERE query_id = '…'
-  ASYNC` (ClickHouse). It is a write: a **production** connection then takes
-  its typed confirmation, and on a **Read-only** connection Kill is not offered
-  (the server would refuse it anyway).
-- **MongoDB** (`$currentOp`) and PostgreSQL are not covered yet: Mongo needs a
-  driver op the native path does not have, and Postgres' `pg_cancel_backend()`
-  is a `SELECT` the write guard would classify as a read.
+- **Listing is read-only.** One fixed statement per engine goes through
+  `…/db/query` with `read_only: true`, so the server classifies it as a read
+  and runs it in the engine's native read-only mode — it works on a Read-only
+  connection. These exact listings, sent read-only, are **not recorded in query
+  history** (`service/process_list.rs`); the same text typed into the editor is.
+  - MySQL `SHOW FULL PROCESSLIST`; ClickHouse `SELECT … FROM system.processes`.
+  - PostgreSQL `SELECT … FROM pg_stat_activity`: client sessions plus busy
+    background workers, the time in the current state, wait event, client
+    address, and the statement capped at 4,000 characters. It uses only the
+    built-ins restricted SQL allows, so it also runs on an access-enforced
+    connection; the panel drops its own session by its query text. Another
+    role's session reads `<insufficient privilege>` in PostgreSQL unless the
+    login has `pg_read_all_stats` (or is superuser): the row shows **Hidden by
+    PostgreSQL** and a notice above the table names the missing privilege.
+  - MongoDB: the JSON aggregate
+    `{"collection":"$cmd.currentOp","pipeline":[{"$currentOp":{"allUsers":true,"idleConnections":false}}]}`
+    — the classifier reads it as a plain aggregate (a read), and the driver
+    (`drivers/mongodb/processes.rs`) runs it as `$currentOp` on `admin`. Columns
+    `opid, user, client, ns, op, secs_running, waiting_for_lock, desc, command`
+    (command text capped at 2,000 characters). A login without the `inprog`
+    privilege is refused `allUsers`; the driver retries for its own operations
+    and sets the result `message`, which the panel shows as a notice.
+- **Kill asks first.** Each action opens a confirm that says what happens,
+  names the connection, the user and the statement, and shows the exact
+  statement Otto sends:
+  - MySQL `KILL QUERY <id>`; ClickHouse `KILL QUERY WHERE query_id = '…' ASYNC`
+    (the statement, not the connection).
+  - PostgreSQL **Cancel** → `SELECT pg_cancel_backend(<pid>)` (the default:
+    the session stays) and **Terminate** → `SELECT pg_terminate_backend(<pid>)`
+    (closes the session; its transaction rolls back). A pid is accepted only as
+    a positive int4. A `false` result (the pid has gone) is reported as
+    "nothing to stop", not as success; a refusal (`permission denied …`) shows
+    the server's message.
+  - MongoDB **Kill** → `{"killOp":1,"op":<opid>}`: a mongod opid as a JSON
+    number, a mongos `"<shard>:<n>"` as a string. The driver checks the opid
+    and passes it to `killOp` as typed BSON; anything else is a 400.
+- **A kill is a write, with every write rule.** It goes through the same
+  `…/db/query` path as any write, so the classifier decides — `KILL` is not a
+  read keyword, `pg_cancel_backend` / `pg_terminate_backend` are side-effect
+  built-ins (`access::function_has_side_effect`), and `killOp` is not a
+  parseable Mongo read. A **Read-only** connection refuses it (Kill is not
+  offered there either); a **production** connection takes its typed
+  confirmation, which an agent credential can never give; a read-only run
+  (MCP) refuses it; and it leaves a query-history row as its audit trail.
 
 ---
 

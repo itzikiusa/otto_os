@@ -7,10 +7,12 @@
 import { api, ApiError, baseUrl, getToken } from './client';
 import type {
   CreateDesignArtifactReq,
+  CreateDesignCommentReq,
   CreateDesignLinkReq,
   CreateDesignProjectReq,
   DesignArtifact,
   DesignArtifactDetail,
+  DesignComment,
   DesignCommitReq,
   DesignContentPutReq,
   DesignLink,
@@ -29,6 +31,7 @@ import type {
   Id,
   Problem,
   UpdateDesignArtifactReq,
+  UpdateDesignCommentReq,
   UpdateDesignProjectReq,
 } from './types';
 
@@ -153,6 +156,28 @@ export function createLink(id: Id, body: CreateDesignLinkReq) {
 
 export function deleteLink(id: Id, linkId: Id) {
   return api.del<void>(`/design/artifacts/${enc(id)}/links/${enc(linkId)}`);
+}
+
+// ── Review comments ─────────────────────────────────────────────────────────
+
+/** Oldest first; the newest `limit` (default 500, cap 1,000). */
+export function listComments(id: Id, p: { version?: Id; resolved?: boolean; limit?: number } = {}) {
+  // `resolved=false` must reach the daemon (qs drops `false`).
+  const q = qs({ version: p.version, limit: p.limit, resolved: p.resolved === undefined ? undefined : String(p.resolved) });
+  return api.get<DesignComment[]>(`/design/artifacts/${enc(id)}/comments${q}`);
+}
+
+export function createComment(id: Id, body: CreateDesignCommentReq) {
+  return api.post<DesignComment>(`/design/artifacts/${enc(id)}/comments`, body);
+}
+
+export function updateComment(id: Id, commentId: Id, body: UpdateDesignCommentReq) {
+  return api.patch<DesignComment>(`/design/artifacts/${enc(id)}/comments/${enc(commentId)}`, body);
+}
+
+/** A thread takes its replies with it. */
+export function deleteComment(id: Id, commentId: Id) {
+  return api.del<void>(`/design/artifacts/${enc(id)}/comments/${enc(commentId)}`);
 }
 
 // ── Search + signals ────────────────────────────────────────────────────────

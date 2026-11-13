@@ -186,7 +186,7 @@
           actionIcon="plus"
           onaction={() => (creating = true)}
         >
-          <AutomateGuide current="loops" />
+          <AutomateGuide current="loops" open />
         </EmptyState>
       {/snippet}
       <ul class="cards">

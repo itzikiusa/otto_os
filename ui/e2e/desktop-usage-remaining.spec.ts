@@ -144,8 +144,8 @@ test.describe('usage remaining limits (desktop)', () => {
     await expect(row.getByTestId('limits-check-status')).toContainText('Last check failed');
 
     await page.unroute('**/api/v1/usage/limits');
-    // A stale check is not re-run behind the user's back more than once per
-    // visit; the route answers any run with the same stale reading.
+    // A stale check is not re-run behind the user's back more than once every
+    // five minutes; the route answers any run with the same stale reading.
     await page.route('**/api/v1/usage/limits**', (route) =>
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(claudeLimits('stale')) }),
     );

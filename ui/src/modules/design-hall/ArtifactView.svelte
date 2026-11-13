@@ -6,8 +6,8 @@
   //
   //   PageHeader: Design Hall › Project › Title · status ▾ · vN      Saved ✓  ⋯
   //   [mirror banner: "This design mirrors a story attachment" · Edit here]
-  //   ┌ stage toolbar + ArtifactStage ────────────────────────────┬ Otto | Versions | Links ┐
-  //   │  existing viewers/editors per format                      │ (DetailsPanel)          │
+  //   ┌ stage toolbar + ArtifactStage (+ review pins: PinHost) ───┬ Otto | Versions | Links | Comments ┐
+  //   │  existing viewers/editors per format                      │ (DetailsPanel)                     │
   //   └───────────────────────────────────────────────────────────┴─────────────────────────┘
   //   (a `scene3d` design opens the 3D Studio layout and an `otto-site` design
   //    Site Studio's own three-column layout instead — each over the same
@@ -61,11 +61,12 @@
   import LinksPanel from './LinksPanel.svelte';
   import ReferencesPanel from './ReferencesPanel.svelte';
   import OttoPanel from './assist/OttoPanel.svelte';
+  import { CommentsTab, PinHost, commentsFor, openCount } from './comments';
   import type { AssistSelection } from './assist/model';
   import StatusPill from './StatusPill.svelte';
   import StudioBadge from './StudioBadge.svelte';
   import { formatLabel, isTextFormat, newerHeadAfterTypedLoad, renderKind, seqLookup, splitLinks, statusLabel, studioInfo } from './model';
-  import { canAutosave, isMirrored, isMirroredError, mirrorSourceLabel, statusPillOf } from './versionRows';
+  import { canAutosave, conflictHead, isMirrored, isMirroredError, mirrorSourceLabel, statusPillOf } from './versionRows';
   import { VersionList } from './versionList.svelte';
   import { Autosaver } from './autosave.svelte';
   import { exportItems } from './exportMenu';
@@ -107,6 +108,7 @@
   let viewing = $state<Viewing | null>(null);
 
   const vlist = new VersionList();
+  const comments = $derived(commentsFor(id)); // review comments: the stage's pins + the Comments tab
   const versions = $derived(vlist.items);
   let links = $state<DesignLinksResp | null>(null);
   let linksLoading = $state(false);
@@ -415,7 +417,7 @@
   async function resolveConflict(namedMessage?: string): Promise<void> {
     let latest: DesignVersion | null = null;
     try {
-      latest = (await api.listVersions(id, { limit: 1 }))[0] ?? null;
+      latest = conflictHead(await api.getArtifact(id)); // the real head, never a newer-numbered side version
     } catch {
       /* fall through with an unknown author */
     }
@@ -740,6 +742,7 @@
       { id: 'design.approve', title: 'Approve this version…', group: 'Design Hall', keywords: 'status review sign off', run: () => void approve() },
       { id: 'design.references', title: 'Find references', group: 'Design Hall', keywords: 'inspiration library search', run: () => openTab('links', true) },
       { id: 'design.otto', title: 'Ask Otto about this design', group: 'Design Hall', keywords: 'agent assist variants accessibility refine', run: () => openTab('otto') },
+      { id: 'design.comments', title: 'Show comments', group: 'Design Hall', keywords: 'review feedback pin notes', run: () => openTab('comments') },
     ]);
   });
 
@@ -843,7 +846,7 @@
         <button class="btn small" onclick={() => void load(id)}>Retry</button>
       </div>
     {:else}
-      <MirrorBanner {artifact} canEdit={auth.can('design', 'edit') && artifact.status !== 'archived'} refused={mirrorRefused} {adopting} onadopt={() => void adopt()} />
+      <MirrorBanner {artifact} {versions} canEdit={auth.can('design', 'edit') && artifact.status !== 'archived'} refused={mirrorRefused} {adopting} onadopt={() => void adopt()} onview={(v) => void view(v)} />
       {#snippet notices()}
         {#if viewing}
           <ViewingBar {viewing} {canEdit} approved={viewing.v.id === artifact.approved_version_id} onback={() => void view(null)}
@@ -862,7 +865,7 @@
           readonlyReason={assistBlocked} oncompare={(left, right) => (compare = { left, right })} />
       {/snippet}
       {#snippet versionsPanel()}
-        <VersionsPanel list={vlist} headId={head?.id ?? null} approvedId={artifact.approved_version_id} {meId} viewingId={viewing?.v.id ?? null}
+        <VersionsPanel list={vlist} headId={head?.id ?? null} approvedId={artifact.approved_version_id} {meId} viewingId={viewing?.v.id ?? null} sourceKind={artifact.source_kind}
           {canEdit} onview={(v) => void view(v)} oncompare={openCompare} onrestore={(v) => void restore(v.id, v.seq)} onapprove={(v) => void approve(v)} />
       {/snippet}
       {#snippet linksOnly()}
@@ -877,9 +880,12 @@
         <LinksTab bind:refs links={linksOnly} references={referencesPanel} />
       {/snippet}
       {#snippet ottoTab()}{@render ottoPanel(null)}{/snippet}
+      {#snippet commentsPanel()}<CommentsTab store={comments} {versions} shownVersionId={viewing?.v.id ?? head?.id ?? null} canComment={auth.can('design', 'edit')} {meId} canDeleteAny={auth.isRoot}
+          onview={(v) => void view(v)} onpin={artifact.format === 'otto-site' ? undefined : () => void setDetails(false)} />{/snippet}
       {#snippet details(design: Snippet | undefined)}
         <DetailsPanel bind:tab={rightTab} bind:backButton={designButton} linkCount={split.uses.length + split.usedIn.length}
           versionCount={vlist.total ?? (versions.length || null)} otto={ottoTab} versions={versionsPanel} links={linksPanel} {design}
+          comments={commentsPanel} commentCount={comments.loaded ? openCount(comments.threads) : null}
           onback={design ? undefined : () => void setDetails(false)} />
       {/snippet}
       {#if kind === 'scene3d'}
@@ -913,12 +919,12 @@
             <button class="btn small ghost compact-details" aria-label="Show design details" bind:this={detailsButton} onclick={() => void setDetails(true)}><Icon name="info" size={12} /> Details</button>
             {@render notices()}
           </div>
-          <div class="stage-host">
+          <PinHost store={comments} versionId={viewing?.v.id ?? head?.id ?? null} canComment={auth.can('design', 'edit')} onshow={() => openTab('comments')}>
             {#key `${artifact.id}:${viewing?.v.id ?? ''}`}
               <ArtifactStage {artifact} source={shownSource} {dirty} blobUrl={shownBlob} noVersion={!head} readonly={stageReadonly}
                 {showSource} {device} onchange={(s) => (source = s)} />
             {/key}
-          </div>
+          </PinHost>
         </section>
         {@render details(undefined)}
       </div>
@@ -1039,16 +1045,6 @@
   }
   .linkbtn:hover {
     text-decoration: underline;
-  }
-  .stage-host {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-    container-type: inline-size;
-  }
-  .stage-host > :global(*) {
-    flex: 1;
   }
   .compact-details { display: none; }
   @container (max-width: 900px) {

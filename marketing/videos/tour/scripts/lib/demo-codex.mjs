@@ -20,7 +20,7 @@ const turnObj = (id, status) => ({ id, items: [], status });
 
 async function stream(t, id, text, { reasoning = false, pace = 38 } = {}) {
   const type = reasoning ? 'reasoning' : 'agentMessage';
-  notify('item/started', { threadId: thread, turnId: t, startedAtMs: 0, item: { type, id, text: '', ...(reasoning ? { summary: [] } : {}) } });
+  notify('item/started', { threadId: thread, turnId: t, startedAtMs: Date.now(), item: { type, id, text: '', ...(reasoning ? { summary: [] } : {}) } });
   const parts = text.match(/\S+\s*|\s+/g) ?? [];
   for (let i = 0; i < parts.length; i += 2) {
     const delta = parts.slice(i, i + 2).join('');
@@ -28,7 +28,7 @@ async function stream(t, id, text, { reasoning = false, pace = 38 } = {}) {
     await sleep(pace);
   }
   const done = reasoning ? { type, id, summary: [text] } : { type, id, text };
-  notify('item/completed', { threadId: thread, turnId: t, completedAtMs: 0, item: done });
+  notify('item/completed', { threadId: thread, turnId: t, completedAtMs: Date.now(), item: done });
 }
 
 const cmdItem = (id, command, status, output, exitCode) => ({
@@ -37,14 +37,14 @@ const cmdItem = (id, command, status, output, exitCode) => ({
 });
 
 async function command(t, id, cmd, lines, { pause = 140 } = {}) {
-  notify('item/started', { threadId: thread, turnId: t, startedAtMs: 0, item: cmdItem(id, cmd, 'inProgress') });
+  notify('item/started', { threadId: thread, turnId: t, startedAtMs: Date.now(), item: cmdItem(id, cmd, 'inProgress') });
   let all = '';
   for (const l of lines) {
     await sleep(pause);
     all += `${l}\n`;
     notify('item/commandExecution/outputDelta', { threadId: thread, turnId: t, itemId: id, delta: `${l}\n` });
   }
-  notify('item/completed', { threadId: thread, turnId: t, completedAtMs: 0, item: cmdItem(id, cmd, 'completed', all, 0) });
+  notify('item/completed', { threadId: thread, turnId: t, completedAtMs: Date.now(), item: cmdItem(id, cmd, 'completed', all, 0) });
 }
 
 const plan = (t, steps) => notify('turn/plan/updated', { threadId: thread, turnId: t, plan: steps.map(([step, status]) => ({ step, status })) });
@@ -83,9 +83,9 @@ async function regressionTest(t) {
   plan(t, [['Read src/middleware/rateLimit.ts', 'completed'], ['Write tests/rateLimit.test.ts', 'inProgress'], ['Run the suite', 'pending']]);
   await sleep(500);
   const fc = { type: 'fileChange', id: `${t}-f`, status: 'completed', changes: [{ path: 'tests/rateLimit.test.ts', kind: { type: 'add' }, diff: TEST_DIFF }] };
-  notify('item/started', { threadId: thread, turnId: t, startedAtMs: 0, item: { ...fc, status: 'inProgress' } });
+  notify('item/started', { threadId: thread, turnId: t, startedAtMs: Date.now(), item: { ...fc, status: 'inProgress' } });
   await sleep(700);
-  notify('item/completed', { threadId: thread, turnId: t, completedAtMs: 0, item: fc });
+  notify('item/completed', { threadId: thread, turnId: t, completedAtMs: Date.now(), item: fc });
   plan(t, [['Read src/middleware/rateLimit.ts', 'completed'], ['Write tests/rateLimit.test.ts', 'completed'], ['Run the suite', 'inProgress']]);
   await command(t, `${t}-c2`, 'npm test -- rateLimit', [' RUN  v3.2.4 ~/Code/acme-checkout', ' ✓ tests/rateLimit.test.ts (3 tests) 9ms', '   ✓ allows 60 requests a minute', '   ✓ answers 429 with Retry-After on the 61st', '   ✓ resets after the window', ' Test Files  1 passed (1)', '      Tests  3 passed (3)'], { pause: 220 });
   plan(t, [['Read src/middleware/rateLimit.ts', 'completed'], ['Write tests/rateLimit.test.ts', 'completed'], ['Run the suite', 'completed']]);
@@ -97,35 +97,35 @@ async function regressionTest(t) {
 async function draftPr(t) {
   await stream(t, `${t}-m0`, 'Pushing the branch and opening a draft PR against `main`.', { pace: 32 });
   const cmd = 'gh pr create --draft --title "test: checkout rate limit regression"';
-  notify('item/started', { threadId: thread, turnId: t, startedAtMs: 0, item: cmdItem(`${t}-c`, cmd, 'inProgress') });
+  notify('item/started', { threadId: thread, turnId: t, startedAtMs: Date.now(), item: cmdItem(`${t}-c`, cmd, 'inProgress') });
   const rid = ++nextServerId;
   asking = {
     rid,
     turn: t,
     resume: async (accepted) => {
       if (!accepted) {
-        notify('item/completed', { threadId: thread, turnId: t, completedAtMs: 0, item: cmdItem(`${t}-c`, cmd, 'declined') });
+        notify('item/completed', { threadId: thread, turnId: t, completedAtMs: Date.now(), item: cmdItem(`${t}-c`, cmd, 'declined') });
         await stream(t, `${t}-m`, 'Okay, I left the branch local.');
         return finish(t);
       }
       const o = 'https://github.com/acme/checkout/pull/218\n';
       await sleep(400);
       notify('item/commandExecution/outputDelta', { threadId: thread, turnId: t, itemId: `${t}-c`, delta: o });
-      notify('item/completed', { threadId: thread, turnId: t, completedAtMs: 0, item: cmdItem(`${t}-c`, cmd, 'completed', o, 0) });
+      notify('item/completed', { threadId: thread, turnId: t, completedAtMs: Date.now(), item: cmdItem(`${t}-c`, cmd, 'completed', o, 0) });
       await stream(t, `${t}-m`, 'Draft PR **#218** is up with the new test. CI is running; I will tell you when it is green.');
       usage(t, 21900, 420);
       finish(t);
     },
   };
-  out({ id: rid, method: 'item/commandExecution/requestApproval', params: { threadId: thread, turnId: t, itemId: `${t}-c`, startedAtMs: 0, command: cmd, reason: 'push the branch and open a draft PR' } });
+  out({ id: rid, method: 'item/commandExecution/requestApproval', params: { threadId: thread, turnId: t, itemId: `${t}-c`, startedAtMs: Date.now(), command: cmd, reason: 'push the branch and open a draft PR' } });
 }
 
 async function brief(t) {
   await stream(t, `${t}-r`, 'Pulling the last day of Slack mentions, DMs and open threads.', { reasoning: true, pace: 30 });
   const call = { type: 'mcpToolCall', id: `${t}-s`, server: 'otto', tool: 'slack_digest', arguments: { since: '24h', include: ['mentions', 'dms', 'unanswered'] }, status: 'inProgress' };
-  notify('item/started', { threadId: thread, turnId: t, startedAtMs: 0, item: call });
+  notify('item/started', { threadId: thread, turnId: t, startedAtMs: Date.now(), item: call });
   await sleep(1100);
-  notify('item/completed', { threadId: thread, turnId: t, completedAtMs: 0, item: { ...call, status: 'completed', result: '14 messages · 3 need a reply · 2 action items' } });
+  notify('item/completed', { threadId: thread, turnId: t, completedAtMs: Date.now(), item: { ...call, status: 'completed', result: '14 messages · 3 need a reply · 2 action items' } });
   await stream(
     t,
     `${t}-m`,
@@ -142,8 +142,37 @@ async function generic(t) {
   finish(t);
 }
 
+// A Council seat (the same question went to several agents side by side).
+async function councilSeat(t) {
+  await stream(t, `${t}-r`, 'Checking how charge() retries today and what the card network returns on a soft decline.', { reasoning: true, pace: 28 });
+  await command(t, `${t}-c`, 'rg -n "attempt|sleep" src/payments/charge.ts', ['14:  for (let attempt = 0; attempt < 3; attempt++) {', '22:    await sleep(500);']);
+  await stream(
+    t,
+    `${t}-m`,
+    'Switch to **exponential backoff**: 250 ms, 500 ms, 1 s, 2 s, then stop.\n\n- Cap it at **4 attempts** so checkout never hangs past ~4 s.\n- Retry `soft_decline` and timeouts only.\n- Keep one idempotency key per order across attempts.\n\nThe fixed 500 ms loop retries too fast while the network is degraded.',
+  );
+  usage(t, 14800, 470);
+  finish(t);
+}
+
+async function judge(t) {
+  await stream(t, `${t}-m`, '**Agreement.** Exponential backoff, soft declines only, one idempotency key.\n\n**Pick.** 250 ms base, doubling, full jitter, 4 attempts.\n\n**Open question.** What does the customer see while it retries?');
+  usage(t, 3900, 210);
+  finish(t);
+}
+
+// A child thread this one asked finished: its answer arrives as a new turn.
+async function wake(t) {
+  await stream(t, `${t}-m`, 'Claude found two gaps: separate keys and the window edge. I will add both cases to **tests/rateLimit.test.ts** before CI finishes.');
+  usage(t, 6200, 160);
+  finish(t);
+}
+
 function pick(text) {
   const s = text.toLowerCase();
+  if (s.startsWith('[reply from thread')) return wake;
+  if (s.includes('you are the judge of a council')) return judge;
+  if (s.includes('retries') || s.includes('backoff')) return councilSeat;
   if (s.includes('regression test') || s.includes('rate limit') || s.includes('rate-limit')) return regressionTest;
   if (s.includes('draft pr') || s.includes('open a pr') || s.includes('open the pr')) return draftPr;
   if (s.includes('needs me') || s.includes('brief') || s.includes('digest')) return brief;

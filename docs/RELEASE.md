@@ -4,11 +4,11 @@ Deterministic, gated steps to cut a local Otto release (macOS-only). Each gate
 must pass before moving on — stop on the first failure. There is no Makefile;
 these are the real commands (mirrors `README.md` + `packaging/`).
 
-> **CI weekly DMG:** `.github/workflows/release-dmg.yml` runs this same build
+> **CI monthly DMG:** `.github/workflows/release-dmg.yml` runs this same build
 > (UI → `ottod --release --features embed-ui` → sidecar → `tauri build`) on a
-> macOS runner every Sunday 05:00 UTC (+ `workflow_dispatch`), and publishes
-> `Otto-macos-arm64.dmg` (+ a versioned copy and sha256) to the rolling `weekly`
-> GitHub Release. Weekly builds are versioned `YYYY.MM.DD-{buildnum}` (buildnum =
+> macOS runner at 05:00 UTC on the 1st of every month (+ `workflow_dispatch`),
+> and publishes `Otto-macos-arm64.dmg` (+ a versioned copy and sha256) to the
+> rolling `latest` GitHub Release. These builds are versioned `YYYY.MM.DD-{buildnum}` (buildnum =
 > the workflow run number); the bundle itself is stamped with the semver-legal
 > unpadded form (e.g. `2026.9.7-3` — semver forbids leading zeros). The
 > CI bundle is ad-hoc signed unless the Apple Developer ID secrets

@@ -28,7 +28,7 @@ test('a stale save keeps the draft, sends the base hash and shows their version'
       putFile: async (_n: string, body: unknown) => { sent.push(body); throw new ApiError(409); },
       getFile: async () => ({ path: 'references/a.md', content: 'theirs', binary: false, hash: 'their-hash' }),
     },
-    onsaved() { published++; }, toasts: quiet, toastError() { toasted++; },
+    onsaved() { published++; }, toasts: quiet, toastError() { toasted++; }, noteKeptCopies() {},
   });
   await state.save();
   assert.equal(sent[0].if_hash, sha256Hex('base text'));
@@ -44,8 +44,8 @@ test('Keep mine writes over their version using their hash; Reload theirs swaps 
     saving: false, name: 'skill', source: 'library', currentFile: 'references/a.md', content: 'mine', original: 'base',
     loadGeneration: 1, disposed: false, docKey: 0, files: [], ApiError, sha256Hex,
     conflict: { path: 'references/a.md', theirs: 'theirs', hash: 'their-hash' },
-    skillLabApi: { putFile: async (_n: string, body: unknown) => { sent.push(body); return []; } },
-    onsaved() {}, toasts: quiet, toastError() {},
+    skillLabApi: { putFile: async (_n: string, body: unknown) => { sent.push(body); return { files: [] }; } },
+    onsaved() {}, toasts: quiet, toastError() {}, noteKeptCopies() {},
   });
   await state.keepMine();
   assert.equal(sent[0].if_hash, 'their-hash'); assert.equal(sent[0].content, 'mine');

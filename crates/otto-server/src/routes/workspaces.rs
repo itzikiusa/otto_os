@@ -125,6 +125,7 @@ pub async fn update(
 ) -> ApiResult<Json<Workspace>> {
     reject_system_workspace(&id)?;
     require_ws_role(&ctx, &user, &id, WorkspaceRole::Admin).await?;
+    otto_apiclient::engine::refuse_agent_guard_settings(&ctx, &id, &req).await?;
     if let Some(patch) = &req.settings_patch {
         if req.settings.is_some() {
             return Err(Error::Invalid(
@@ -255,6 +256,80 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(saved.settings["notes"], "root can save");
+    }
+
+    /// F10: "allow private addresses" opens the LAN and this Mac's loopback
+    /// services to the API client — an agent credential (root's own agent
+    /// included) can't switch it on, by merge patch or full replace; a
+    /// person can, after which the agent may re-send it or switch it off.
+    #[tokio::test]
+    async fn only_a_person_allows_private_addresses() {
+        use otto_core::auth::{with_request_credential, RequestCredential};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = crate::test_support::mem_pool().await;
+        let ctx = ServerCtx::for_tests(&pool, tmp.path().to_path_buf()).await;
+        let user = otto_state::UsersRepo::new(pool.clone())
+            .create("allow-local-root", "x", "Root", true)
+            .await
+            .unwrap();
+        let ws = repo(&ctx).create("Local", "/tmp", &user.id).await.unwrap();
+        let agent = RequestCredential {
+            agent: true,
+            root_withheld: true,
+        };
+        let person = RequestCredential::default();
+        let send = |cred: RequestCredential, body: serde_json::Value| {
+            let (ctx, user, id) = (ctx.clone(), user.clone(), ws.id.clone());
+            async move {
+                let req = serde_json::from_value(body).unwrap();
+                with_request_credential(
+                    cred,
+                    update(Path(id), State(ctx), CurrentUser(user), Json(req)),
+                )
+                .await
+            }
+        };
+        let patch_on = serde_json::json!({"settings_patch":{"api_client":{"allow_local":true}}});
+        let replace_on = serde_json::json!({"settings":{"api_client":{"allow_local":true}}});
+        for body in [patch_on.clone(), replace_on.clone()] {
+            let error = send(agent, body).await.unwrap_err();
+            assert!(matches!(error.0, Error::Forbidden(_)), "{:?}", error.0);
+        }
+        let settings = repo(&ctx).get(&ws.id).await.unwrap().settings;
+        assert!(settings.pointer("/api_client/allow_local").is_none());
+        // Other settings stay an agent's to change.
+        let _ = send(
+            agent,
+            serde_json::json!({"settings_patch":{"notes":"agent"}}),
+        )
+        .await
+        .unwrap();
+        let _ = send(person, patch_on).await.unwrap();
+        let _ = send(agent, replace_on).await.unwrap();
+        let off = serde_json::json!({"settings_patch":{"api_client":{"allow_local":false}}});
+        let Json(saved) = send(agent, off).await.unwrap();
+        assert_eq!(saved.settings["api_client"]["allow_local"], false);
+
+        // Self-improvement: its own route is person-only, and the generic
+        // patch is no way around it — on, autonomy and allow-list alike.
+        for body in [
+            serde_json::json!({"settings_patch":{"self_improvement":{"enabled":true}}}),
+            serde_json::json!({"settings":{"self_improvement":{"enabled":true,"autonomy":"auto"}}}),
+        ] {
+            let error = send(agent, body).await.unwrap_err();
+            assert!(matches!(error.0, Error::Forbidden(_)), "{:?}", error.0);
+        }
+        let on = serde_json::json!({"settings_patch":{"self_improvement":{"enabled":true,"autonomy":"propose"}}});
+        let _ = send(person, on).await.unwrap();
+        let raise = serde_json::json!({"settings_patch":{"self_improvement":{"autonomy":"auto"}}});
+        let error = send(agent, raise).await.unwrap_err();
+        assert!(matches!(error.0, Error::Forbidden(_)), "{:?}", error.0);
+        let resend =
+            serde_json::json!({"settings_patch":{"self_improvement":{"autonomy":"propose"}}});
+        let _ = send(agent, resend).await.unwrap();
+        let disable = serde_json::json!({"settings_patch":{"self_improvement":{"enabled":false}}});
+        let Json(saved) = send(agent, disable).await.unwrap();
+        assert_eq!(saved.settings["self_improvement"]["enabled"], false);
     }
 
     /// Regression: `DELETE /workspaces/{id}` archives the row, and the list

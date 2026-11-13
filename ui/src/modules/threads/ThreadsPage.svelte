@@ -9,6 +9,7 @@
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import { registry } from '../../lib/commands.svelte';
+  import { keyContext } from '../../lib/keys';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { events } from '../../lib/events.svelte';
   import { loadPaneWidth } from '../../lib/paneResizer';
@@ -148,12 +149,19 @@
     untrack(() => threads.consumeOpenFileRequest(wsKey));
   });
 
-  // Route sync: `#/threads` and `#/threads/<sessionId>`.
+  // Route sync: `#/threads`, `#/threads/<sessionId>` and `#/threads/new`
+  // (the composer — the New session sheet's "Start a thread" link).
   let lastRoutedId: string | null = null;
   $effect(() => {
     if (router.module !== 'threads') return;
     const routeSessionId = router.parts[1] ?? null;
-    if (routeSessionId && routeSessionId !== lastRoutedId) {
+    if (routeSessionId === 'new') {
+      lastRoutedId = null;
+      untrack(() => {
+        threads.startNewThread({ workspaceId: ws.currentId });
+        router.replace('threads');
+      });
+    } else if (routeSessionId && routeSessionId !== lastRoutedId) {
       lastRoutedId = routeSessionId;
       untrack(() => {
         // Resolve the thread's workspace first: a link from another workspace
@@ -198,6 +206,22 @@
     });
   });
 
+  // ⌘T (and its browser-tab alias ⌃⇧T) starts a thread here, not the
+  // terminal New session sheet; an open dialog keeps the chord.
+  $effect(() => {
+    const claim = (e: KeyboardEvent): boolean => {
+      if (router.module !== 'threads' || !(e.metaKey || e.ctrlKey) || e.shiftKey || ui.overlayOpen) return false;
+      if (e.key.toLowerCase() !== 't') return false;
+      e.preventDefault();
+      threads.startNewThread({ workspaceId: ws.currentId });
+      return true;
+    };
+    keyContext.pageChords = claim;
+    return () => {
+      if (keyContext.pageChords === claim) keyContext.pageChords = null;
+    };
+  });
+
   // Register ⌘K commands while Threads is open.
   $effect(() =>
     registry.register('threads', [
@@ -205,6 +229,7 @@
         id: 'threads.new',
         title: 'New thread',
         group: 'Threads',
+        shortcut: '⌘T',
         keywords: 'start create thread claude codex antigravity',
         run: () => threads.startNewThread({ workspaceId: ws.currentId }),
       },

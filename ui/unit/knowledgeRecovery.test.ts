@@ -119,7 +119,7 @@ test('failed publishing preview remains unavailable until a successful retry', a
 test('artifact keep-mine never reloads over a draft when history lookup fails', async () => {
   let reloads = 0;
   const s = functions('../src/modules/design-hall/ArtifactView.svelte', ['resolveConflict'], {
-    id: 'A', source: 'my draft', api: { listVersions: async () => { throw new Error('offline'); } },
+    id: 'A', source: 'my draft', api: { getArtifact: async () => { throw new Error('offline'); } }, conflictHead: () => null,
     confirmer: { choose: async () => ({value:'mine'}) }, toasts: { error() {} }, load: async () => { ++reloads; },
   });
   await s.resolveConflict(); assert.equal(reloads, 0); assert.equal(s.source, 'my draft');

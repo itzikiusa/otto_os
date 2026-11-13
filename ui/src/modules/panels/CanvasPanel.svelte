@@ -311,7 +311,7 @@
                   {#if formatOf(ref) === 'excalidraw'}
                     <div class="board-card">
                       <Icon name="shapes" size={16} />
-                      <span>Excalidraw board — open in Canvas to view/edit</span>
+                      <span>Excalidraw board — open it in Design Hall to view or edit</span>
                     </div>
                   {:else if previews[ref.id]?.loading}
                     <p class="empty-line dim">Rendering…</p>

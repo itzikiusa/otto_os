@@ -111,6 +111,10 @@ pub struct InstallResult {
     /// already hold a user-owned skill of this name (S7-304).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub user_owned: Vec<String>,
+    /// Otto's provider copies the person had edited in place: moved to
+    /// `<library>/provider-skills-backup/` before being replaced.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept_copies: Vec<user_skills::KeptCopy>,
 }
 
 /// Result of a bulk install (all bundled skills, or one category).
@@ -132,6 +136,10 @@ pub struct InstallAllResult {
     /// user-owned skill of that name already lives there (S7-304).
     #[serde(default)]
     pub user_owned: Vec<String>,
+    /// Edited provider copies moved to `<library>/provider-skills-backup/`
+    /// before being replaced (omitted when none).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept_copies: Vec<user_skills::KeptCopy>,
 }
 
 /// One skill a bulk install could not install.
@@ -338,6 +346,7 @@ fn install_many_into_dirs(
         modified: Vec::new(),
         failed: Vec::new(),
         user_owned: Vec::new(),
+        kept_copies: Vec::new(),
     };
     for b in list_bundled() {
         if category.is_some_and(|c| b.category != c) {
@@ -345,17 +354,22 @@ fn install_many_into_dirs(
         }
         match install_state(library, &b.name) {
             Some(InstallState::UpToDate) => {
+                // Reconcile the provider mirrors: a copy that already matches
+                // is not rewritten; one the person edited is kept aside first.
                 match user_skills::install_into_dirs(
                     provider_dirs,
+                    &library.root,
                     &b.name,
                     &library.root.join("skills").join(&b.name),
                 ) {
-                    Ok(user_owned) => {
+                    Ok(report) => {
                         out.user_owned.extend(
-                            user_owned
+                            report
+                                .user_owned
                                 .into_iter()
                                 .map(|dir| dir.join(&b.name).to_string_lossy().into_owned()),
                         );
+                        out.kept_copies.extend(report.kept);
                         out.skipped.push(b.name);
                     }
                     Err(error) => out.failed.push(InstallFailure {
@@ -379,6 +393,7 @@ fn install_many_into_dirs(
         match install_one_into_dirs(library, &b.name, backup, provider_dirs) {
             Ok(r) => {
                 out.user_owned.extend(r.user_owned.iter().cloned());
+                out.kept_copies.extend(r.kept_copies.iter().cloned());
                 if r.installed {
                     out.installed.push(r.name.clone());
                 }
@@ -422,6 +437,7 @@ fn install_one_into_dirs(
             backed_up: false,
             backup_path: None,
             user_owned: Vec::new(),
+            kept_copies: Vec::new(),
         });
     };
     let installed_dir = library.root.join("skills").join(name);
@@ -452,16 +468,24 @@ fn install_one_into_dirs(
     // After the Library copy, mirror the freshly-installed skill tree into each
     // provider's user-level skills dir (~/.claude/skills, $CODEX_HOME/skills,
     // ~/.gemini/skills) so the CLIs discover it globally — not just inside Otto's
-    // per-session bundle. Clean-overwrite + per-dir manifest, so this doubles as
+    // per-session bundle. Swap-overwrite + per-dir manifest, so this doubles as
     // the update path. Skipped when `name` isn't a bundled skill (installed=false).
-    // A provider dir already holding a user-owned `<name>` is left alone.
+    // A provider dir already holding a user-owned `<name>` is left alone; an
+    // Otto copy the person edited is moved to `provider-skills-backup/` first.
     let mut user_owned = Vec::new();
+    let mut kept_copies = Vec::new();
     if installed {
-        user_owned = user_skills::install_into_dirs(provider_dirs, name, &installed_dir)
-            .map_err(|e| Error::Internal(format!("materialize user-level skill '{name}': {e}")))?
+        let report =
+            user_skills::install_into_dirs(provider_dirs, &library.root, name, &installed_dir)
+                .map_err(|e| {
+                    Error::Internal(format!("materialize user-level skill '{name}': {e}"))
+                })?;
+        user_owned = report
+            .user_owned
             .into_iter()
             .map(|d| d.join(name).to_string_lossy().into_owned())
             .collect();
+        kept_copies = report.kept;
     }
 
     Ok(InstallResult {
@@ -470,6 +494,7 @@ fn install_one_into_dirs(
         backed_up: backup_path.is_some(),
         backup_path,
         user_owned,
+        kept_copies,
     })
 }
 
@@ -662,6 +687,41 @@ mod tests {
             install_state(&lib, &skill.name),
             Some(InstallState::UpToDate)
         );
+    }
+
+    /// Install all on a skill that is already current in the Library still
+    /// reconciles its provider copy, and a copy edited in the CLI folder is
+    /// kept aside (never just overwritten); an untouched one is not rewritten.
+    #[test]
+    fn install_all_up_to_date_backs_up_hand_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::new(dir.path().join("library"));
+        let skill = list_bundled().into_iter().next().unwrap();
+        let provider = dir.path().join("provider");
+        let providers = std::slice::from_ref(&provider);
+        let first = install_one_into_dirs(&lib, &skill.name, false, providers)
+            .map_err(|ApiErr(e)| e)
+            .unwrap();
+        assert!(first.kept_copies.is_empty());
+        let copy = provider.join(&skill.name).join("SKILL.md");
+        std::fs::write(&copy, "edited in the CLI folder\n").unwrap();
+
+        let all = install_many_into_dirs(&lib, Some(&skill.category), true, false, providers);
+
+        assert!(all.skipped.contains(&skill.name), "{all:?}");
+        assert_eq!(all.kept_copies.len(), 1, "{all:?}");
+        let kept = std::path::PathBuf::from(&all.kept_copies[0].kept_at);
+        assert!(kept.starts_with(lib.root.join(user_skills::PROVIDER_BACKUP_DIR)));
+        assert_eq!(
+            std::fs::read_to_string(kept.join("SKILL.md")).unwrap(),
+            "edited in the CLI folder\n"
+        );
+        assert_eq!(
+            std::fs::read(&copy).unwrap(),
+            std::fs::read(lib.root.join("skills").join(&skill.name).join("SKILL.md")).unwrap()
+        );
+        let again = install_many_into_dirs(&lib, Some(&skill.category), true, false, providers);
+        assert!(again.kept_copies.is_empty(), "{again:?}");
     }
 
     #[test]

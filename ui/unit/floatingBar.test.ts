@@ -2,6 +2,7 @@
 // `.ts` extension on the import is required in strip mode).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   BAR_MAX_H,
   MAX_THREAD,
@@ -11,7 +12,9 @@ import {
   barWindowHeight,
   buildRows,
   defaultSpaces,
+  HIT_KINDS,
   hitRoute,
+  hitVaultNote,
   looksLikeCommand,
   moveSelection,
   panelBudget,
@@ -142,10 +145,41 @@ test('selection wraps and handles empty lists', () => {
 
 test('search hits map to module routes', () => {
   assert.equal(hitRoute({ kind: 'repo', id: 'abc' }), 'git/abc');
-  assert.equal(hitRoute({ kind: 'story', id: 'x' }), 'product');
+  // Each hit opens its item, not just the module (ids URL-encoded).
+  assert.equal(hitRoute({ kind: 'story', id: 'x' }), 'product/x');
+  assert.equal(hitRoute({ kind: 'workflow', id: 'w/1' }), 'workflows/w%2F1');
+  assert.equal(hitRoute({ kind: 'api_request', id: 'a1' }), 'api/a1');
+  assert.equal(hitRoute({ kind: 'broker_cluster', id: 'k 1' }), 'brokers/k%201');
+  // Memories live in Settings → Workspace context, not the Vault.
+  assert.equal(hitRoute({ kind: 'memory', id: 'm1' }), 'settings/context-soul');
+  assert.equal(hitRoute({ kind: 'vault_note', id: '3:notes/a.md' }), 'vault');
   assert.equal(hitRoute({ kind: 'weird', id: 'x' }), 'home');
   // A board opens itself: `#/canvas/<id>` forwards to its Design Hall mirror.
   assert.equal(hitRoute({ kind: 'canvas', id: 'sc 1' }), 'canvas/sc%201');
+});
+
+test('a vault_note hit names its vault and note (the path may hold colons)', () => {
+  assert.deepEqual(hitVaultNote({ kind: 'vault_note', id: '3:notes/a:b.md' }), { vault: '3', path: 'notes/a:b.md' });
+  assert.equal(hitVaultNote({ kind: 'vault_note', id: 'nocolon' }), null);
+  assert.equal(hitVaultNote({ kind: 'vault_note', id: '3:' }), null);
+  assert.equal(hitVaultNote({ kind: 'memory', id: '3:a.md' }), null);
+});
+
+test('every hit kind the search route emits has a route of its own', () => {
+  // Read the kinds straight from the Rust sources so a new source without a
+  // route fails here instead of silently opening Home.
+  const state = readFileSync(new URL('../../crates/otto-state/src/search.rs', import.meta.url), 'utf8');
+  const server = readFileSync(new URL('../../crates/otto-server/src/routes/search.rs', import.meta.url), 'utf8');
+  const kindFn = state.slice(state.indexOf('pub fn kind('), state.indexOf('pub fn feature('));
+  const emitted = new Set<string>([
+    ...[...kindFn.matchAll(/=>\s*"([a-z_]+)"/g)].map((m) => m[1]),
+    ...[...server.matchAll(/kind:\s*"([a-z_]+)"\.into\(\)/g)].map((m) => m[1]),
+  ]);
+  assert.ok(emitted.has('story') && emitted.has('vault_note') && emitted.has('memory'), [...emitted].join(','));
+  for (const kind of emitted) {
+    assert.ok((HIT_KINDS as readonly string[]).includes(kind), `HIT_KINDS lacks ${kind}`);
+    assert.notEqual(hitRoute({ kind, id: 'x' }), 'home', `${kind} has no route`);
+  }
 });
 
 // ─── keys ──────────────────────────────────────────────────────────────────

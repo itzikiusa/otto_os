@@ -9,17 +9,26 @@ import { confirmer } from '../../lib/confirm.svelte';
 import { toasts } from '../../lib/toast.svelte';
 import { toastError } from '../../lib/toastError';
 import { plural } from '../../lib/plural';
-import { BACKUP_FOLDER } from './bundledText';
+import type { KeptProviderCopy } from '../../lib/api/types';
+import { BACKUP_FOLDER, keptCopiesNote } from './bundledText';
 
 export { BACKUP_FOLDER, deleteQuestion, installedNote, replaceQuestion } from './bundledText';
 
-/** An agent CLI already had its own skill of that name: Otto left it alone. */
-export function noteUserOwned(paths: string[] | undefined): void {
+/** An agent CLI already had its own skill of that name: Otto left it alone.
+ *  `kept`: Otto's own copies there that the person had edited, moved aside. */
+export function noteUserOwned(paths: string[] | undefined, kept?: KeptProviderCopy[]): void {
+  noteKeptCopies(kept);
   if (!paths || paths.length === 0) return;
   toasts.info(
     'Kept your own skills',
     `These agent CLI skill folders already hold a skill you own, so Otto did not replace them:\n${paths.join('\n')}`,
   );
+}
+
+/** Say where an edited agent-CLI copy went (after a save, install or delete). */
+export function noteKeptCopies(kept: KeptProviderCopy[] | undefined): void {
+  const note = keptCopiesNote(kept);
+  if (note) toasts.info(...note);
 }
 
 /** "Install all bundled skills" (optionally one category). Asks first, skips
@@ -54,7 +63,7 @@ export async function installAllBundled(category: string | null): Promise<boolea
         `You changed these since Otto installed them, so Install all left them alone. Open one and use Replace with bundled to update it:\n${edited.join('\n')}`,
       );
     }
-    noteUserOwned(r.user_owned);
+    noteUserOwned(r.user_owned, r.kept_copies);
     return true;
   } catch (e) {
     toastError(`Couldn’t install the ${what}`, e);

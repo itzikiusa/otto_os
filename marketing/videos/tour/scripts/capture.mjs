@@ -15,8 +15,9 @@
 //      OTTO_E2E_PORT (7811), OTTO_E2E_PW_PORT (5211), OTTO_TOUR_DIST (ui/dist),
 //      OTTO_TOUR_NO_DOCKER=1 to skip the demo databases.
 import { chromium } from 'playwright';
-import { execFileSync, execSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, execSync, spawn } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { client, startStack, storageState, UI, PORT } from './lib/stack.mjs';
@@ -129,9 +130,73 @@ function stopContainers() {
   }
 }
 
+// ── demo ClickHouse (no Docker needed) ─────────────────────────────────────
+// A throwaway local `clickhouse server` on its own temp dir and loopback
+// ports, loaded with the same fictional storefront. Stopped with the stack.
+const CH_HTTP = 18911;
+let chProc = null;
+let chDir = null;
+async function startClickhouse() {
+  if (process.env.OTTO_TOUR_NO_CLICKHOUSE === '1') return null;
+  const bin = [process.env.OTTO_TOUR_CLICKHOUSE, `${process.env.HOME}/.local/bin/clickhouse`, '/opt/homebrew/bin/clickhouse'].find((c) => c && existsSync(c));
+  if (!bin) return null;
+  chDir = mkdtempSync(join(tmpdir(), 'otto-tour-ch-'));
+  for (const d of ['data', 'uf']) mkdirSync(join(chDir, d), { recursive: true });
+  chProc = spawn('nice', ['-n', '10', bin, 'server', '--', `--http_port=${CH_HTTP}`, `--tcp_port=${CH_HTTP + 1000}`, '--mysql_port=0', '--postgresql_port=0', '--interserver_http_port=0', '--listen_host=127.0.0.1', `--path=${chDir}/data/`, `--user_files_path=${chDir}/uf/`, `--logger.log=${chDir}/ch.log`, `--logger.errorlog=${chDir}/ch.err`, '--logger.level=warning'], { cwd: chDir, stdio: 'ignore' });
+  const q = async (sql) => {
+    const r = await fetch(`http://127.0.0.1:${CH_HTTP}/`, { method: 'POST', body: sql });
+    if (!r.ok) throw new Error(`clickhouse: ${(await r.text()).slice(0, 200)}`);
+  };
+  for (let i = 0; i < 60; i++) {
+    try {
+      await q('SELECT 1');
+      break;
+    } catch {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+  const regions = ['us-east', 'eu-west', 'eu-central', 'ap-south'];
+  const statuses = ['paid', 'paid', 'shipped', 'paid', 'refunded', 'pending'];
+  const names = ['Avery Stone', 'Jordan Blake', 'Riley Park', 'Casey Morgan', 'Taylor Reed', 'Quinn Harper', 'Rowan Ellis', 'Sage Patel', 'Emery Cole', 'Finley Hart', 'Hayden Brooks', 'Kai Navarro'];
+  const plans = ['free', 'pro', 'team', 'enterprise'];
+  await q('CREATE DATABASE IF NOT EXISTS shopdb');
+  await q("CREATE TABLE shopdb.customers (id UInt32, name String, plan LowCardinality(String), country FixedString(2), created_at DateTime) ENGINE = MergeTree ORDER BY id");
+  await q("CREATE TABLE shopdb.orders (id UInt32, customer_id UInt32, status LowCardinality(String), region LowCardinality(String), total_cents UInt32, created_at DateTime) ENGINE = MergeTree ORDER BY (created_at, id)");
+  await q("CREATE TABLE shopdb.events (at DateTime, order_id UInt32, kind LowCardinality(String), region LowCardinality(String)) ENGINE = MergeTree ORDER BY at");
+  await q(`INSERT INTO shopdb.customers VALUES ${names.map((n, i) => `(${i + 1}, '${n}', '${plans[i % 4]}', '${['US', 'GB', 'DE', 'PT', 'IN'][i % 5]}', now() - INTERVAL ${400 - i * 17} DAY)`).join(',')}`);
+  const rows = [];
+  for (let i = 1; i <= 2400; i++) rows.push(`(${1000 + i}, ${1 + (i * 7) % names.length}, '${statuses[(i * 5) % statuses.length]}', '${regions[(i * 3 + (i % 7)) % regions.length]}', ${1500 + ((i * 7919) % 60000)}, now() - INTERVAL ${(i * 37) % 43200} MINUTE)`);
+  await q(`INSERT INTO shopdb.orders VALUES ${rows.join(',')}`);
+  await q("INSERT INTO shopdb.events SELECT created_at, id, status, region FROM shopdb.orders");
+  console.log(`[tour] started a demo ClickHouse on 127.0.0.1:${CH_HTTP}`);
+  return CH_HTTP;
+}
+function stopClickhouse() {
+  if (chProc) {
+    try {
+      process.kill(chProc.pid, 'SIGTERM');
+    } catch {
+      /* gone */
+    }
+    // `nice` execs the server, but a watchdog child may linger: kill by data dir.
+    try {
+      execSync(`pkill -f -- "--path=${chDir}/data/"`);
+    } catch {
+      /* none left */
+    }
+  }
+  if (chDir) rmSync(chDir, { recursive: true, force: true });
+  chProc = null;
+}
+
 // ── stack up / down ─────────────────────────────────────────────────────────
 async function bringUp() {
   const dockerPorts = await startContainers();
+  const ch = await startClickhouse().catch((e) => {
+    console.warn(`[tour] demo ClickHouse failed: ${e.message}`);
+    return null;
+  });
+  if (ch) dockerPorts.clickhouse = ch;
   const stack = await startStack({
     bin,
     dist,
@@ -209,9 +274,12 @@ const cleanup = async () => {
   if (up) {
     await up.stack.stop();
     stopContainers();
+    stopClickhouse();
     rmSync(META, { force: true });
   }
 };
+// A shot's stray promise must never take the whole run (and its cleanup) down.
+process.on('unhandledRejection', (e) => console.error(`[tour] unhandled: ${String(e?.message ?? e).split('\n')[0]}`));
 process.on('SIGINT', async () => {
   await cleanup();
   process.exit(130);

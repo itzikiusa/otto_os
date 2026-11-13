@@ -55,6 +55,47 @@ export function isThreadSurfaceSession(s: Session): boolean {
   return (s.meta as { surface?: unknown } | null)?.surface === 'threads';
 }
 
+/** A session index or list to resolve a delegating parent from. */
+export type SessionPool = ReadonlyMap<string, Session> | readonly Session[];
+
+/** Parent session ID when this session was delegated or handed over from another session. */
+export function delegatedParentId(s: Session | null | undefined): string | null {
+  if (!s?.meta) return null;
+  const m = s.meta as Record<string, unknown>;
+  if (typeof m.delegated_by === 'string' && m.delegated_by.trim() !== '') return m.delegated_by.trim();
+  if (typeof m.parent_session_id === 'string' && m.parent_session_id.trim() !== '') return m.parent_session_id.trim();
+  if (typeof m.handover_from === 'string' && m.handover_from.trim() !== '') return m.handover_from.trim();
+  const work = m.work as { parent_session_id?: unknown } | undefined;
+  if (typeof work?.parent_session_id === 'string' && work.parent_session_id.trim() !== '') {
+    return work.parent_session_id.trim();
+  }
+  return null;
+}
+
+/** THE one membership rule for Agents vs Threads: a session's own
+ *  `meta.surface` decides (an explicit `'agents'`, e.g. after "Open in
+ *  Terminal", wins over its parent); without one it inherits from the session
+ *  that delegated it, up the chain. A parent not in `pool` counts as Agents. */
+export function inThreadsScope(s: Session, pool: SessionPool = []): boolean {
+  const get = (id: string): Session | undefined => ('get' in pool ? pool.get(id) : pool.find((p) => p.id === id));
+  const seen = new Set<string>();
+  for (let cur: Session | undefined = s; cur && !seen.has(cur.id); ) {
+    const surface = (cur.meta as { surface?: unknown } | null)?.surface;
+    if (surface === 'threads') return true;
+    if (surface === 'agents') return false;
+    seen.add(cur.id);
+    const parentId = delegatedParentId(cur);
+    cur = parentId ? get(parentId) : undefined;
+  }
+  return false;
+}
+
+/** The route a session opens on: `threads/<id>` for a Threads-scope session,
+ *  else `agents/<id>` (also when the row isn't loaded). */
+export function sessionRoute(s: Session | null | undefined, id: string, pool: SessionPool = []): string {
+  return s && inThreadsScope(s, pool) ? `threads/${id}` : `agents/${id}`;
+}
+
 /** Whether the sidebar lists `s` (when live): a connection, a foreground
  *  agent, or a Slack/Telegram channel ticket — the client twin of the
  *  daemon's `foreground=true&with_sources=channel` filter. */
@@ -97,7 +138,7 @@ export interface SessionBuckets {
   active: Session[];
   /** Non-archived, foreground `#/agents` scope (excludes `#/threads` surface). */
   foregroundActive: Session[];
-  /** Non-archived, foreground `#/threads` surface sessions. */
+  /** Non-archived, foreground `#/threads` scope sessions ({@link inThreadsScope}). */
   threads: Session[];
   /** Non-archived agents of the current workspace (not scratch, not `#/threads`). */
   agent: Session[];
@@ -114,7 +155,8 @@ export interface SessionBuckets {
 
 /** ONE pass over `sessions` into every sidebar list (each keeps the input
  *  order; the channel groups are sorted newest first). */
-export function bucketSessions(sessions: readonly Session[]): SessionBuckets {
+export function bucketSessions(sessions: readonly Session[], byId?: ReadonlyMap<string, Session>): SessionBuckets {
+  const pool = byId ?? new Map(sessions.map((s) => [s.id, s] as const));
   const b: SessionBuckets = {
     active: [],
     foregroundActive: [],
@@ -130,7 +172,7 @@ export function bucketSessions(sessions: readonly Session[]): SessionBuckets {
     if (s.archived) continue;
     b.active.push(s);
     const fg = isForeground(s);
-    const inThreads = isThreadSurfaceSession(s);
+    const inThreads = inThreadsScope(s, pool);
     if (inThreads) {
       if (fg && s.kind !== 'connection') b.threads.push(s);
       continue;

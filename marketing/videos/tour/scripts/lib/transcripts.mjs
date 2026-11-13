@@ -102,5 +102,20 @@ export function writeTranscripts(home, { cwds, count = 46, codex = 14, days = 28
     writeFileSync(join(dir, `rollout-${stamp}-${id}.jsonl`), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
     n++;
   }
+  // Usage → Remaining: Codex writes its plan windows into the newest
+  // token_count line. A fresh, fictional snapshot (5-hour and weekly window).
+  {
+    const d = new Date(now);
+    const p2 = (x) => String(x).padStart(2, '0');
+    const dir = join(codexRoot, String(d.getUTCFullYear()), p2(d.getUTCMonth() + 1), p2(d.getUTCDate()));
+    mkdirSync(dir, { recursive: true });
+    const id = uuid(9001);
+    const at = Math.floor(now / 1000);
+    const lines = [
+      { timestamp: d.toISOString(), type: 'session_meta', payload: { session_id: id, id, cwd: cwds[0], cli_version: '0.150.0', model: 'gpt-5.5-codex' } },
+      { timestamp: d.toISOString(), type: 'event_msg', payload: { type: 'token_count', info: null, rate_limits: { limit_id: 'codex', limit_name: null, primary: { used_percent: 23.0, window_minutes: 300, resets_at: at + 3 * 3600 + 1260 }, secondary: { used_percent: 41.0, window_minutes: 10080, resets_at: at + 4 * 86400 + 7200 }, credits: null, plan_type: 'pro', rate_limit_reached_type: null } } },
+    ];
+    writeFileSync(join(dir, `rollout-${d.toISOString().slice(0, 19).replace(/:/g, '-')}-${id}.jsonl`), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  }
   return { claudeRoot, codexRoot, files: n };
 }

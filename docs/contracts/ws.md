@@ -1359,7 +1359,7 @@ live legacy-source sync and its startup/admin catch-up pass). They supersede `mo
 their own routes.
 
 ```json
-{ "type": "design_artifact_updated", "workspace_id": "<Id>", "artifact_id": "<Id>", "format": "html|scene3d|otto-canvas|png|…", "change": "created|content|meta|approved|archived|deleted|live|thumbnail", "version_id": "<Id>" | null, "content": "..." | null }
+{ "type": "design_artifact_updated", "workspace_id": "<Id>", "artifact_id": "<Id>", "format": "html|scene3d|otto-canvas|png|…", "change": "created|content|meta|approved|archived|deleted|live|thumbnail|comments", "version_id": "<Id>" | null, "content": "..." | null }
 { "type": "design_link_updated", "workspace_id": "<Id>", "artifact_id": "<Id>", "link_id": "<Id>" | null, "target_artifact_id": "<Id>" | null, "target_version_id": "<Id>" | null, "reason": "created|deleted|extracted|target_approved|target_updated|target_deleted" }
 { "type": "design_learning_update", "workspace_id": "<Id>", "kind": "variant_chosen|…|shipped|rule_proposed", "signal_id": "<Id>" | null, "artifact_id": "<Id>" | null }
 ```
@@ -1371,7 +1371,10 @@ their own routes.
   `version_id: null` except `approved` (the approved version). `thumbnail`
   (`version_id: null`, `content: null`): a new rendered thumbnail was stored
   (`PUT /design/artifacts/{id}/thumbnail`) — refresh the image only; it is
-  not an edit (`updated_at` unchanged), so never re-render in response. `live`
+  not an edit (`updated_at` unchanged), so never re-render in response.
+  `comments` (`version_id: null`, `content: null`): a review comment on the
+  design was added, edited, resolved/reopened or deleted — re-fetch
+  `GET /design/artifacts/{id}/comments`; the design itself did not change. `live`
   (`version_id: null`) is an UNCOMMITTED mid-turn save by a design-assist agent
   on the working copy — already validated for the format (an invalid,
   half-written file is never broadcast); the turn's commit follows as

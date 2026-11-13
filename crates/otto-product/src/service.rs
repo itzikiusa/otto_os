@@ -381,7 +381,7 @@ impl ProductService {
         // A new page VERSION counts as a change even when the Markdown is the
         // same (e.g. an edit to a macro the converter drops): the recorded
         // version is the base the publish conflict check compares against.
-        let changed = match &latest {
+        let mut changed = match &latest {
             None => true,
             Some(v) => {
                 v.body_md != src.body_md
@@ -389,6 +389,19 @@ impl ProductService {
                         != raw_page_version(src.raw_json.as_deref())
             }
         };
+        // A Jira publish Otto could not read back refuses the next publish
+        // until a `source` row is newer than it — record one even when the
+        // description reads the same (see `publish_guard`).
+        if !changed && story.source_kind == "jira" {
+            let published = self
+                .repo
+                .latest_version_of_kind(story_id, "published")
+                .await?;
+            changed = crate::publish_guard::refresh_rearms_jira_guard(
+                latest.as_ref(),
+                published.as_ref(),
+            );
+        }
 
         if changed {
             self.repo
@@ -678,7 +691,8 @@ impl ProductService {
                     .update_description(&story.source_key, &version.body_md)
                     .await?;
                 // What Jira now holds (its ADF round-trip of our Markdown) is
-                // the NEXT publish's base. A failed re-read leaves no base.
+                // the NEXT publish's base. A failed re-read leaves no base, and
+                // the next publish then refuses until a Refresh re-arms it.
                 match client.get_issue(&story.source_key).await {
                     Ok(after) => serde_json::to_string(&serde_json::json!({
                         "description": after.description
@@ -3894,6 +3908,48 @@ mod tests {
             svc.synced_jira_description(&sid).await.unwrap().as_deref(),
             Some("As a user I want to reset my password.")
         );
+    }
+
+    #[tokio::test]
+    async fn jira_publish_refuses_after_an_unconfirmed_publish_until_refresh() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/rest/api/3/issue/PROJ-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (svc, repo, sid, vid, user) =
+            jira_publish_fixture("As a user I want to reset my password.", &server).await;
+        // The last publish's re-read failed: a `published` row with no
+        // description is the newest synced row.
+        repo.add_version(NewVersion {
+            story_id: sid.clone(),
+            kind: "published".into(),
+            title: "Reset password".into(),
+            body_md: "As a user I want to reset my password.".into(),
+            raw_json: None,
+            change_notes: None,
+            created_by: user.clone(),
+        })
+        .await
+        .unwrap();
+
+        match svc.publish_version(&vid, &user).await {
+            Err(Error::Conflict(m)) => {
+                assert_eq!(m, crate::publish_guard::JIRA_UNCONFIRMED)
+            }
+            other => panic!("expected the unconfirmed refusal, got {other:?}"),
+        }
+
+        // Refresh reads the same description back, yet records a source row:
+        // that re-arms the guard and the publish goes through (the one PUT).
+        svc.refresh_story(&sid, &user).await.expect("refresh");
+        assert_eq!(
+            svc.synced_jira_description(&sid).await.unwrap().as_deref(),
+            Some("As a user I want to reset my password.")
+        );
+        svc.publish_version(&vid, &user).await.expect("publish");
     }
 
     #[tokio::test]

@@ -27,6 +27,12 @@
     'review',
   ];
 
+  // Honest empty state: only usage that carries work tags (POST /ingest/usage
+  // stamps them) lands here; the transcript tailer — where nearly all real
+  // usage comes from — writes none, so an empty table is the normal case.
+  const ATTRIBUTION_EMPTY_BODY =
+    'This breakdown fills only for usage tagged with a repo, branch, PR, review or other work item. Usage read from session transcripts carries no such tags yet — it is counted in the tables above.';
+
   let selectedDim: AttributionDim = $state('origin');
   let rows: AttributionRow[] = $state([]);
   let loading = $state(false);
@@ -151,10 +157,8 @@
     {#snippet emptyView()}
       <EmptyState
         icon="chart"
-        title="Nothing attributed by {DIM_LABELS[selectedDim].toLowerCase()} in the last {days} days"
-        body={selectedDim === 'origin'
-          ? 'Usage shows up here once agents run in this window.'
-          : 'Reviews, product stories and workflows tag the sessions they start. Ad-hoc sessions only appear under Origin.'}
+        title="No tagged usage by {DIM_LABELS[selectedDim].toLowerCase()} in the last {days} days"
+        body={ATTRIBUTION_EMPTY_BODY}
       />
     {/snippet}
     <div class="attr-table-wrap">

@@ -35,7 +35,9 @@
     type Scene3dObject,
   } from '../../lib/design/scene3d';
   import { renderMermaid } from '../../lib/render/mermaid';
+  import { router } from '../../lib/router.svelte';
   import { brandColors, contrastRatio, renderKind } from './model';
+  import { canvasEditorRoute } from './nav';
   import SiteStudio from './site/SiteStudio.svelte';
   import { modelScope } from './studio3d/sources';
 
@@ -288,7 +290,7 @@
         <DesignBoard source={inner.src} readonly={!editable} onchange={emitInner} />
       </div>
     {:else if kind === 'canvas'}
-      <p class="msg">This Canvas board uses a format Design Hall can’t render yet. Open it in Canvas.</p>
+      <p class="msg">This Canvas board uses a format Design Hall can’t show yet.{#if artifact.source_kind === 'canvas_scene' && artifact.source_id} <button class="msg-link" onclick={() => router.go(canvasEditorRoute(artifact.source_id!))}>Open the board</button>{/if}</p>
     {:else if kind === 'scene3d'}
       {#if sceneDoc}
         <Scene3DViewport
@@ -489,6 +491,15 @@
     margin: 16px;
     font-size: var(--fs-s);
     color: var(--text-dim);
+  }
+  .msg-link {
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    color: var(--accent-text);
+    text-decoration: underline;
+    cursor: pointer;
   }
   .msg.err {
     display: flex;

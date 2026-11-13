@@ -14,6 +14,7 @@ import { renderNote, type RenderCtx } from '../../../lib/render/markdown.ts';
 import { decorateCodeBlocks } from './codeBlocks';
 import { escapeHtml } from '../../../lib/html.ts';
 import { applyHtmlBlockDirections } from '../../../lib/textDirection.ts';
+import { looksLikeNonPath } from '../../../lib/pathLinks/resolve.ts';
 
 const esc = escapeHtml;
 const LOCAL_IMG_EXT = /\.(?:png|jpe?g|gif|webp|svg|avif|bmp)$/i;
@@ -62,6 +63,9 @@ export function splitLocation(raw: string): FileRef {
 export function codeSpanFile(text: string): FileRef | null {
   const t = text.trim();
   if (!t || t.length > 300 || /\s/.test(t)) return null;
+  // A folder printed with its trailing slash (`marketing/videos/tour/`); which
+  // folder it is gets decided on click (lib/pathLinks).
+  if (/^(?:~\/|\.{1,2}\/|\/)?[\w@.+-]+(?:\/[\w@.+-]+)*\/$/.test(t)) return looksLikeNonPath(t) ? null : { path: t, line: null, col: null };
   if (!/^(?:~\/|\.{1,2}\/|\/)?[\w@.+-]+(?:\/[\w@.+-]+)*(?::\d+(?::\d+)?|#L\d+)?$/.test(t)) return null;
   const ref = splitLocation(t);
   const name = ref.path.split('/').pop() ?? '';

@@ -193,7 +193,7 @@ struct MessagesQuery {
 // Validation lives in `otto_assistant::personal_agent_admin` (shared with
 // the governed agent-admin tools).
 use otto_assistant::personal_agent_admin::{
-    check_delivery, check_permission, check_provider, check_timezone,
+    check_creator, check_delivery, check_note_by, check_permission, check_provider, check_timezone,
 };
 
 // --- Owner-only changes (S3-05 for personal agents) ------------------------
@@ -304,6 +304,7 @@ async fn create(
     Json(req): Json<otto_assistant::personal_agent_admin::CreateReq>,
 ) -> ApiResult<Json<Value>> {
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
+    check_creator(otto_core::auth::request_is_person(), &req)?;
     let made = otto_assistant::personal_agent_admin::create(&ctx, &ws_id, &user.id, req).await?;
     if let Some(id) = made["id"].as_str() {
         changed(&ctx, &ws_id, id, "agent");

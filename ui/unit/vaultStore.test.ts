@@ -7,6 +7,7 @@ import ts from 'typescript';
 import { deferred } from './sourceHarness.ts';
 import { strictRequire, unused } from './strictRequire.ts';
 import * as loadError from '../src/lib/loadError.ts';
+import * as backlinkPaging from '../src/modules/vault/backlinkPaging.ts';
 
 // Execute the actual store methods; the harness supplies only transport and
 // browser globals. State proxies are immaterial to these transition tests.
@@ -29,6 +30,7 @@ function setup(overrides: Record<string, unknown> = {}) {
     exports: {} as Record<string, any>, $state: (v: unknown) => v,
     require: strictRequire([
       ['/treeRefresh', {refreshVisibleTree}],
+      ['/backlinkPaging', backlinkPaging],
       ['/api/vault', api],
       ['/api/client', {ApiError, authedBlobUrl: unused('client.authedBlobUrl')}],
       ['/api/types', unused('/api/types')],
@@ -112,18 +114,19 @@ test('switching notes clears old backlinks before the new read and never restore
   assert.equal(v.backlinksLoading, false);
 });
 
-test('backlink refresh resets the visible window and allows rehydrating edited sources', async () => {
+test('backlinks load a page at a time and a refresh starts again from the first page', async () => {
   let revision = 'first';
   const offsets: number[] = [];
+  const rows = () => Array.from({length:226}, (_, i) => ({path:`source-${String(i).padStart(3, '0')}.md`, kind:'wiki', title:`Source ${i}`, context:`${revision}-${i}`}));
   const v = setup({vaultStatus: async () => ({generation:revision,scan_state:'idle',last_scan_at:revision,notes:1,links:226,attachments:0}),
     vaultBacklinks: async (_ws: string, _id: number, _path: string, offset = 0) => {
     offsets.push(offset);
-    return Array.from({length:226}, (_, i) => ({path:`source-${i}.md`, kind:'wiki', title:`Source ${i}`,
-      context:i >= offset && i < offset + 100 ? `${revision}-${i}` : ''}));
+    return {backlinks: rows().slice(offset, offset + 100), total: 226, offset, limit: 100};
   }});
   await v.reloadBacklinks();
-  await v.loadBacklinkContexts(100); await v.loadBacklinkContexts(200);
-  assert.equal(v.visibleBacklinks, 300);
+  assert.equal(v.backlinks.length, 100); assert.equal(v.backlinksTotal, 226);
+  assert.equal(await v.loadMoreBacklinks(), true); assert.equal(await v.loadMoreBacklinks(), true);
+  assert.equal(v.backlinks.length, 226);
   assert.equal(v.backlinks[225].context, 'first-225');
   v.dirty = false;
   v.status = {generation:revision,scan_state:'idle',last_scan_at:revision,notes:1,links:226,attachments:0};
@@ -131,12 +134,17 @@ test('backlink refresh resets the visible window and allows rehydrating edited s
   await v.refreshStatus();
   // The external-generation path intentionally schedules the backlink reload.
   await new Promise(resolve => setTimeout(resolve, 0));
-  assert.equal(v.visibleBacklinks, 100, 'refresh must not leave unhydrated rows expanded');
+  assert.equal(v.backlinks.length, 100, 'a refresh drops pages loaded under the old generation');
   assert.equal(v.backlinks[0].context, 'edited-0');
-  assert.equal(v.backlinks[125].context, '', 'do not retain snippets from obsolete source hashes');
-  await v.loadBacklinkContexts(v.visibleBacklinks);
-  assert.equal(v.visibleBacklinks, 200); assert.equal(v.backlinks[125].context, 'edited-125');
+  await v.loadMoreBacklinks();
+  assert.equal(v.backlinks.length, 200); assert.equal(v.backlinks[125].context, 'edited-125');
   assert.deepEqual(offsets, [0,100,200,0,100]);
+});
+
+test('a pre-paging bare-array reply is the whole list', async () => {
+  const v = setup({vaultBacklinks: async () => [{path: 'a.md', kind: 'wiki', title: 'A', context: ''}]});
+  await v.reloadBacklinks();
+  assert.equal(v.backlinks.length, 1); assert.equal(v.backlinksTotal, 1);
 });
 
 test('failed save retains draft, conflict and current tab on navigation', async () => {

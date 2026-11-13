@@ -2,6 +2,8 @@
   // Agents box: the live session roster straight from the workspace store (no
   // fetch of its own — `ws` is already kept current by the daemon WS), with
   // working / needs-you / idle counts and a click-to-open row per session.
+  // Threads-scope sessions are listed too (the Agents list leaves them out),
+  // tagged "Thread" and opening `#/threads/<id>` (../homeThreads.ts).
   import Icon from '../../../lib/components/Icon.svelte';
   import Badge from '../../../lib/components/Badge.svelte';
   import StatusDot from '../../../lib/components/StatusDot.svelte';
@@ -16,6 +18,8 @@
   import type { Session } from '../../../lib/api/types';
   import { rel } from '../../../lib/stores/now.svelte';
   import type { HomeBox } from '../home.svelte';
+  import { plural } from '../../../lib/plural';
+  import { threadRoute, threadSessions, unlistedWaiting } from '../homeThreads';
 
   interface Props {
     box: HomeBox;
@@ -28,8 +32,10 @@
   // tabs and tiles show, incl. suspended (resumable) and stale (socket down).
   const stateOf = (s: Session): SessionStateInfo =>
     sessionState(s, ws.statusMap[s.id], ws.needsYou[s.id] === true, { stale: events.state !== 'connected' });
+  const threads = $derived(threadSessions(ws.activeSessions, ws.sessionById));
+  const threadIds = $derived(new Set(threads.map((s) => s.id)));
   const sessions = $derived(
-    [...ws.plainAgentSessions].sort((a, b) => {
+    [...ws.plainAgentSessions, ...threads.filter((t) => !ws.plainAgentSessions.some((s) => s.id === t.id))].sort((a, b) => {
       // Needs-you first (blocked on you), then working, then most recently active.
       const rank = (s: Session): number => {
         const k = stateOf(s).key;
@@ -39,8 +45,11 @@
     }),
   );
   const idle = $derived(sessions.filter((s) => (ws.statusMap[s.id] ?? s.status) === 'idle').length);
-  const working = $derived(ws.workingCount);
-  const needsYou = $derived(ws.needsYouCount);
+  const working = $derived(ws.workingCount + (ws.threadsWorkingCount ?? 0));
+  const needsYou = $derived(ws.needsYouCount + (ws.threadsNeedsYouCount ?? 0));
+  // Runtime threads waiting on a person are counted, not listed: one row.
+  const moreThreads = $derived(unlistedWaiting(ws.threadsNeedsYouCount, threads.filter((s) => ws.needsYou[s.id] === true).length));
+  const open = (s: Session): void => (threadIds.has(s.id) ? router.go(threadRoute(s.id)) : ws.navigateToSession(s.id));
   // Nothing listed yet: the first session load is still running (or has not
   // settled), or it failed. Neither may read as "No open agent sessions" with
   // 0 / 0 / 0 / 0 stats — the box shows the load state and "—" counts.
@@ -61,7 +70,7 @@
     variant="compact"
     loading={loadingList}
     error={ws.sessionsError}
-    empty={sessions.length === 0}
+    empty={sessions.length === 0 && moreThreads === 0}
     onretry={() => void ws.refreshSessions().catch(() => {})}
   >
     {#snippet emptyView()}
@@ -73,16 +82,27 @@
     <ul class="rows">
       {#each sessions as s (s.id)}
         <li>
-          <button class="srow" onclick={() => ws.navigateToSession(s.id)} title="Open {s.title}">
+          <button class="srow" onclick={() => open(s)} title="Open {s.title}">
             <StatusDot state={stateOf(s)} />
             <ProviderIcon provider={s.provider} size={12} />
             <span class="title ellipsis">{s.title}</span>
+            {#if threadIds.has(s.id)}<Badge tone="neutral" label="Thread" />{/if}
             {#if ws.needsYou[s.id]}<Badge tone="warn" label="Needs you" />{/if}
             <span class="ago" title={new Date(s.last_active_at).toLocaleString()}>{rel(s.last_active_at, { compact: true })}</span>
             <span class="go" aria-hidden="true"><Icon name="chevronRight" size={12} /></span>
           </button>
         </li>
       {/each}
+      {#if moreThreads > 0}
+        <li>
+          <button class="srow" onclick={() => router.go('threads')} title="Open Threads">
+            <Icon name="threads" size={12} />
+            <span class="title ellipsis">{plural(moreThreads, 'thread')} waiting on you</span>
+            <Badge tone="warn" label="Needs you" />
+            <span class="go" aria-hidden="true"><Icon name="chevronRight" size={12} /></span>
+          </button>
+        </li>
+      {/if}
     </ul>
     <!-- Anchors the card's foot (a short roster no longer floats in a tall,
          empty box) and gives the widget an obvious way into the module. -->

@@ -29,6 +29,7 @@
   import { startMouseDrag } from '../../lib/dragCursor';
   import type { GraphWorkerIn, GraphWorkerOut } from './graph.worker';
   import { carrySeed } from './graphSeed';
+  import { truncationNote, type TruncationNote } from './graphTruncation';
 
   let { local = false, onNewNote }: { local?: boolean; onNewNote?: () => void } = $props();
 
@@ -89,7 +90,7 @@
   let errorMsg = $state('');
   let nodeCount = $state(0);
   let edgeCount = $state(0);
-  let truncated = $state(false);
+  let truncated = $state<TruncationNote | null>(null);
   let alphaLive = $state(0); // last tick's alpha (drives "simulating…")
   let stopped = $state(false);
   let hoverIdx = $state(-1);
@@ -293,7 +294,7 @@
     rawE = rawEdges.length >> 1;
     rawNodeCount = rawN;
     rawEdgeCount = rawE;
-    truncated = p.truncated;
+    truncated = truncationNote(p);
 
     rawIndex = new Map();
     for (let i = 0; i < rawN; i++) rawIndex.set(rawPaths[i], i);
@@ -1371,9 +1372,7 @@
         {nodeCount.toLocaleString()} nodes · {edgeCount.toLocaleString()} links
       {/if}
     </span>
-    {#if truncated}
-      <Badge tone="warn" label="Truncated" title="Edge budget hit — some links were omitted by the server" />
-    {/if}
+    {#if truncated}<Badge tone="warn" label={truncated.label} title={truncated.title} />{/if}
     {#if loading}
       <Badge label="Loading graph…" />
     {:else if alphaLive > 0.02 && !stopped}
@@ -1672,6 +1671,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    flex-wrap: wrap; max-width: calc(100% - 20px); /* the "Showing N of M" note wraps on a phone */
     font-size: var(--fs-xs);
     color: var(--text-dim);
     /* Opaque over the live canvas: a blur would re-composite every frame. */

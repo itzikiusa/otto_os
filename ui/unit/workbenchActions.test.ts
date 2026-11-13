@@ -48,3 +48,20 @@ test('unchanged editor still receives its format result', async () => {
   const { c, edits } = fixture({ formatContent: async () => ({ ok: true, changed: true, text: 'formatted' }) });
   await c.format(); assert.deepEqual(edits, [['A', 'formatted']]); assert.equal(c.formatting, false);
 });
+
+test('rename still applies after an autosave replaced the file metadata while the prompt was open', async () => {
+  const { renameBlocked } = await import('../src/modules/workbench/docGuards.ts');
+  const patched: any[][] = []; const info: string[] = [];
+  let name = 'q.sql';
+  const { c } = fixture({ renameBlocked, toasts: { info: (_t: string, b: string) => info.push(b), error() {} },
+    confirmer: { promptText: async () => 'renamed.sql' },
+    workbench: { metaOf: () => ({ id: 'A', name }), patchMeta: async (...args: any[]) => patched.push(args) } });
+  await c.rename('A');
+  assert.deepEqual(JSON.parse(JSON.stringify(patched)), [['A', { name: 'renamed.sql' }]]);
+  name = 'q.sql';
+  const prompt = c.confirmer;
+  c.confirmer = { promptText: async () => { name = 'theirs.sql'; return prompt.promptText(); } };
+  await c.rename('A');
+  assert.equal(patched.length, 1, 'a rename made underneath is not overwritten');
+  assert.match(info[0]!, /renamed to “theirs\.sql”/);
+});

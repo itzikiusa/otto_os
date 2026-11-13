@@ -78,7 +78,7 @@ test('Usage auto-refresh cannot restore an old budget after save completes', asy
   await expect(days).toHaveValue('7');
 });
 
-test('Insights report timeout releases generation and retry detects the new result', async ({ page }) => {
+test('A long Insights run keeps its banner, polls more slowly, and shows the report when it lands', async ({ page }) => {
   let polls = 0, activeChecks = 0, runs = 0, ready = false;
   // A run that remains alive is distinct from one that disappeared/failed.
   await page.route('**/api/v1/insights/runs/active', r => {
@@ -100,14 +100,15 @@ test('Insights report timeout releases generation and retry detects the new resu
     // Flush the fulfilled response before advancing the next recursive timer.
     await page.waitForTimeout(20);
   }
-  await expect(page.getByText('Still generating the insights report', { exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Run now', exact: true })).toBeEnabled();
-  expect(runs).toBe(1);
-  await page.getByRole('button', { name: 'Run now', exact: true }).click(); ready = true;
-  await expect.poll(() => runs).toBe(2);
+  // A run may take up to two hours: after the fast polls the page keeps
+  // waiting at a slower pace instead of giving up and re-enabling Run.
+  await expect(page.getByText('Still generating the insights report', { exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Running…', exact: true })).toBeDisabled();
-  await page.clock.runFor(3100);
+  const before = polls; await page.clock.runFor(30_100);
+  await expect.poll(() => polls).toBeGreaterThan(before);
+  ready = true; await page.clock.runFor(30_100);
   await expect(page.getByTestId('insight-report')).toContainText('Ready after retry');
+  expect(runs).toBe(1);
 });
 
 for (const [theme, scheme, width, dir] of [['native', 'light', 1440, 'ltr'], ['native', 'dark', 1440, 'ltr'], ['warm', 'dark', 834, 'rtl']] as const) {

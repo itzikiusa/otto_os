@@ -25,7 +25,8 @@
   import RuntimeContextChips from './RuntimeContextChips.svelte';
   import { assembleComposerMessage } from './composerContext';
   import { runtimeDrafts } from '../../../lib/stores/runtimeDrafts.svelte';
-  import { untrack } from 'svelte';
+  import { setContext, untrack } from 'svelte';
+  import { PATH_LINK_CTX } from '../../../lib/pathLinks/open';
   import { announceShown } from '../../../lib/announce.svelte';
   import { ApiError } from '../../../lib/api/client';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
@@ -98,6 +99,8 @@
   });
 
   const session = $derived(runtimeThreads.get(sessionId));
+  // Paths in this thread's messages resolve against ITS folder (Markdown.svelte).
+  setContext(PATH_LINK_CTX, () => ({ sessionId, cwd: session?.cwd, workspaceId: session?.workspace_id }));
   const p = $derived(runtimeViews.projections[sessionId] ?? null);
   const loadError = $derived(runtimeViews.loadError[sessionId] ?? null);
   /** A later resync failed: LoadState's quiet "Couldn’t refresh · Retry" bar over the timeline. */

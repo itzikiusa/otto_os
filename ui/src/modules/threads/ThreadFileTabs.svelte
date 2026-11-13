@@ -57,6 +57,15 @@
     }
   });
 
+  // A folder link clicked in a thread (lib/pathLinks → threads.browseRequest): list it.
+  $effect(() => {
+    const req = threads.browseRequest;
+    if (!req) return;
+    browseDir = req.path;
+    treeOpen = true;
+    threads.browseRequest = null;
+  });
+
   // Load directory listing.
   $effect(() => {
     const dir = browseDir || rootPath;

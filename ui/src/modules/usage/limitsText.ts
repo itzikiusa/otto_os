@@ -125,6 +125,22 @@ export function checkDue(c: ClaudeCheck | null | undefined, now: number): boolea
   return at === null || now - at >= CHECK_TTL_MS;
 }
 
+/** Whether the open page should start a check on its own now. Re-asked on
+ *  every 60 s poll, so an opted-in row never goes Stale while the page is
+ *  open: due by the daemon's clock (`checkDue`), the tab visible, and no
+ *  automatic attempt of ours within the cache window — a run that failed
+ *  before the daemon recorded it (offline, refused) is not retried every
+ *  poll, so the promise in `CHECK_CONFIRM` holds either way. */
+export function autoCheckDue(
+  c: ClaudeCheck | null | undefined,
+  now: number,
+  lastAutoAt: number | null,
+  hidden: boolean,
+): boolean {
+  if (hidden || !checkDue(c, now)) return false;
+  return lastAutoAt === null || now - lastAutoAt >= CHECK_TTL_MS;
+}
+
 /** The line under a Claude row's switch. */
 export function checkStatusText(c: ClaudeCheck | null | undefined, busy: boolean, now: number): string {
   if (!c?.enabled) return 'Off — Otto never asks Anthropic for this login.';
@@ -136,4 +152,4 @@ export function checkStatusText(c: ClaudeCheck | null | undefined, busy: boolean
 
 /** What the switch's confirmation says: what runs, where it goes, what is read. */
 export const CHECK_CONFIRM =
-  'Otto will run this login’s own claude CLI and ask it for plan usage. The CLI sends that request to Anthropic with its own sign-in; Otto does not read the login. Otto checks at most once every 5 minutes while the Usage page is open. You can turn this off at any time.';
+  'Otto will run this login’s own claude CLI and ask it for plan usage. The CLI sends that request to Anthropic with its own sign-in; Otto does not read the login. Otto checks at most once every 5 minutes, and only while the Usage page is open on screen. You can turn this off at any time.';

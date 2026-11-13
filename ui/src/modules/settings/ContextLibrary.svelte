@@ -364,7 +364,7 @@
           icon="book"
           title={`No ${meta.label.toLowerCase()} yet`}
           body={tab === 'skills'
-            ? 'Library skills are materialized into every workspace’s agent CLIs. Install bundled ones from Settings → Skills, or write your own.'
+            ? 'Library skills are materialized into every workspace’s agent CLIs. Install bundled ones from Skills Lab → Skills, or write your own.'
             : tab === 'souls'
               ? 'A soul is a persona injected into every interaction in a workspace.'
               : 'Context snippets are reusable markdown blocks added to agent context.'}

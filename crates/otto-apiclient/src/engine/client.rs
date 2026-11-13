@@ -190,7 +190,8 @@ pub(crate) fn build_settings_client_uncached(
 ) -> Result<reqwest::Client, String> {
     // Tunnelled: the target resolves and is dialled at the FAR end — the local
     // guard would only false-block bastion-only hosts (and would refuse the
-    // local SOCKS endpoint itself). allow_local: the workspace explicitly opted
+    // local SOCKS endpoint itself); cloud metadata stays refused per hop
+    // (`tunnelled_redirect_policy`). allow_local: the workspace explicitly opted
     // in to private targets — metadata and the daemon's own listener stay
     // refused. Everything else keeps the full connect-time guard.
     let guarded = otto_netguard::Guard::for_fetch(proxy.is_some(), allow_local);
@@ -211,7 +212,7 @@ pub(crate) fn build_settings_client_uncached(
         builder.redirect(match guarded {
             otto_netguard::Guard::Strict => otto_netguard::guarded_redirect_policy(),
             otto_netguard::Guard::AllowLocal => otto_netguard::allow_local_redirect_policy(),
-            otto_netguard::Guard::Tunnelled => reqwest::redirect::Policy::limited(10),
+            otto_netguard::Guard::Tunnelled => otto_netguard::tunnelled_redirect_policy(),
         })
     };
     if no_verify {

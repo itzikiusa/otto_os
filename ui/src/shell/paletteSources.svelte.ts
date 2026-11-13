@@ -54,7 +54,8 @@ export function installPaletteSources(deps: PaletteDeps): () => void {
         { id: 'core.new-workspace', title: 'New workspace…', group: 'Session', keywords: 'create new project folder directory', run: () => (ui.newWorkspaceOpen = true) },
         { id: 'core.slack-send', title: 'Send a Slack message as me…', group: 'Tools', keywords: 'slack message dm post channel send as me reviewer bot', run: () => slackSend.open() },
         { id: 'core.update-clis', title: 'Update all CLIs', group: 'Tools', shortcut: '⌘U / ⌘⇧U', keywords: 'upgrade claude codex agy cli version', run: () => void deps.updateAllCLIs() },
-        { id: 'core.snip', title: 'Take a screenshot (snip)', group: 'Tools', shortcut: '⌘⇧S', keywords: 'snip screenshot capture screen region annotate clipboard grab shot', run: () => void startSnip() },
+        // Snip captures the HOST Mac's screen (a phone / remote browser would wait on a crosshair it can't see) and needs Agents:edit.
+        ...(isTauri && auth.can('agents', 'edit') ? [{ id: 'core.snip', title: 'Take a screenshot (snip)', group: 'Tools', shortcut: '⌘⇧S', keywords: 'snip screenshot capture screen region annotate clipboard grab shot', run: () => void startSnip() }] : []),
         { id: 'core.go-settings', title: 'Go to Settings', group: 'Navigate', shortcut: '⌘,', keywords: 'preferences appearance', run: () => router.go('settings/appearance') },
         { id: 'core.go-back', title: 'Go back', group: 'Navigate', shortcut: '⌘⇧←', keywords: 'previous page history return', run: () => router.back() },
         { id: 'core.go-forward', title: 'Go forward', group: 'Navigate', shortcut: '⌘⇧→', keywords: 'next page history', run: () => router.forward() },

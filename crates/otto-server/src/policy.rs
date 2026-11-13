@@ -1489,6 +1489,9 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
                     | "/settings/skill-eval"
                     | "/settings/pr-review"
                     | "/settings/pr-review/presets"
+                    // API-client environment writes move a bound secret's host (F5).
+                    | "/workspaces/{wid}/api-client/environments"
+                    | "/workspaces/{wid}/api-client/environments/{id}"
                     | "/room-settings"
                     | "/room-recap-settings"
                     // Kills every live session of every user (root-only in
@@ -1763,6 +1766,36 @@ mod tests {
         // Reading the bridges / k8s clusters stays untagged.
         assert_eq!(c(Method::GET, "/api/v1/workspaces/{id}/integrations"), None);
         assert_eq!(c(Method::GET, "/api/v1/k8s/clusters"), None);
+    }
+
+    /// F5: an environment's variables decide where a bound secret may go, so
+    /// an agent credential can't create, edit or delete one (403 from the
+    /// feature guard); listing and switching the active one stay open.
+    #[test]
+    fn api_client_environment_writes_are_person_only() {
+        let c = |m: Method, p: &str| route_class(&m, p);
+        let list = "/api/v1/workspaces/{wid}/api-client/environments";
+        let one = "/api/v1/workspaces/{wid}/api-client/environments/{id}";
+        for (m, p) in [
+            (Method::POST, list),
+            (Method::PATCH, one),
+            (Method::DELETE, one),
+        ] {
+            assert_eq!(c(m.clone(), p), Some(RouteClass::Admin), "{m} {p}");
+            assert!(!agent_root_write_allowed(&m, p), "{m} {p}");
+            assert!(crate::feature_guard::credential_class_gate(RouteClass::Admin, false).is_err());
+            assert!(crate::feature_guard::credential_class_gate(RouteClass::Admin, true).is_ok());
+        }
+        assert_eq!(c(Method::GET, list), None);
+        assert_eq!(
+            c(Method::POST, &format!("{one}/activate")),
+            None,
+            "an agent may still select an environment"
+        );
+        assert_eq!(
+            c(Method::POST, "/api/v1/workspaces/{wid}/api-client/requests"),
+            None
+        );
     }
 
     #[test]

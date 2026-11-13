@@ -166,7 +166,7 @@ pub(crate) async fn summarize_and_persist(
     );
     let settled = otto_review::verification::settle(summary.value, agent_findings, cause);
     if let Some(mut plan) = ctx.reviews_store.get_review(review_id).await?.scope_plan {
-        plan.verification_notes = settled.notes.clone();
+        otto_review::verification::set_notes(&mut plan, &settled.notes);
         ctx.reviews_store.set_scope_plan(review_id, &plan).await?;
     }
     let incomplete = otto_review::verification::incomplete_reason(

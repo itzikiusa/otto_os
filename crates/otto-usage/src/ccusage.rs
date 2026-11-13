@@ -7,6 +7,11 @@
 //! Otto's rows for the same dates, broken down by provider/model. Everything
 //! here except [`run`] is pure, so parsing and diffing are unit-tested against
 //! the exact shape ccusage 20 emits.
+//!
+//! The version is PINNED ([`VERSION`]): `npx` runs it as the daemon user,
+//! unsandboxed, over every transcript on the Mac, so it runs the exact release
+//! the parser was written against — never whatever npm serves as `latest`.
+//! It only ever runs when a person clicks Run on the Usage page.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -18,6 +23,10 @@ use crate::types::{CcusageDayRow, CcusageDiffRow, DailyModelUsage, TokenTotals};
 
 /// How long ccusage may run (a first `npx` run downloads it).
 pub const TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The ccusage release the parser and its test fixture were taken from
+/// (`tests::SAMPLE`). Bump both together, after checking the new output.
+pub const VERSION: &str = "20.0.26";
 
 /// One (day, model) cell of ccusage's output.
 #[derive(Debug, Clone, PartialEq)]
@@ -31,7 +40,7 @@ pub struct TheirCell {
 pub fn args(since: &str, until: &str) -> Vec<String> {
     vec![
         "--yes".into(),
-        "ccusage".into(),
+        format!("ccusage@{VERSION}"),
         "daily".into(),
         "--json".into(),
         "--breakdown".into(),
@@ -250,6 +259,9 @@ pub fn diff(ours: &[DailyModelUsage], theirs: &[TheirCell]) -> Diff {
 mod tests {
     use super::*;
 
+    /// Where [`SAMPLE`] came from; [`VERSION`] must match it.
+    const SAMPLE_VERSION_NOTE: &str = "ccusage v20.0.26";
+
     /// Trimmed real output of `ccusage daily --json --breakdown` (v20.0.26).
     const SAMPLE: &str = r#"{"daily":[{"agent":"all","cacheCreationTokens":25245942,
         "cacheReadTokens":581555584,"inputTokens":9758414,"metadata":{"agents":["claude","codex","hermes"]},
@@ -265,7 +277,11 @@ mod tests {
     #[test]
     fn args_use_compact_dates() {
         let a = args("2026-09-26", "2026-10-03");
-        assert_eq!(a[1], "ccusage");
+        assert_eq!(a[1], "ccusage@20.0.26", "an exact pinned release");
+        assert!(
+            SAMPLE_VERSION_NOTE.contains(VERSION),
+            "the fixture's version"
+        );
         assert!(a.windows(2).any(|w| w == ["--since", "20260926"]));
         assert!(a.windows(2).any(|w| w == ["--until", "20261003"]));
         assert!(a.contains(&"--breakdown".to_string()));

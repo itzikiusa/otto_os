@@ -20,6 +20,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import { sourceLabel } from './skillGroups';
+  import { noteKeptCopies } from './bundledActions';
   import { guardUnsaved } from '../../lib/leaveGuard';
 
   interface Props {
@@ -152,11 +153,12 @@
     try {
       // `if_hash`: what this draft was based on. A newer write on disk turns
       // the save into a 409 instead of silently replacing it.
-      const next = await skillLabApi.putFile(target, { path, content: submitted, if_hash: sha256Hex(original) });
+      const r = await skillLabApi.putFile(target, { path, content: submitted, if_hash: sha256Hex(original) });
+      noteKeptCopies(r.kept_copies); // the edited CLI copy moved either way
       // A save acknowledges only the submitted snapshot, never later typing.
       if (disposed || owner !== `${source}:${name}` || generation !== loadGeneration) return;
       original = submitted;
-      onsaved(next, path === 'SKILL.md' ? submitted : null);
+      onsaved(r.files, path === 'SKILL.md' ? submitted : null);
       toasts.success('Saved', path);
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) await loadTheirs(target, path, owner, generation);
@@ -198,11 +200,12 @@
     saving = true;
     try {
       // Based on THEIR version now: a third write in between conflicts again.
-      const next = await skillLabApi.putFile(target, { path: c.path, content: submitted, ...(c.hash ? { if_hash: c.hash } : {}) });
+      const r = await skillLabApi.putFile(target, { path: c.path, content: submitted, ...(c.hash ? { if_hash: c.hash } : {}) });
+      noteKeptCopies(r.kept_copies);
       if (disposed || owner !== `${source}:${name}` || generation !== loadGeneration) return;
       original = submitted;
       conflict = null;
-      onsaved(next, c.path === 'SKILL.md' ? submitted : null);
+      onsaved(r.files, c.path === 'SKILL.md' ? submitted : null);
       toasts.success('Saved your version', c.path);
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) await loadTheirs(target, c.path, owner, generation);
@@ -232,9 +235,10 @@
       return;
     }
     try {
-      const next = await skillLabApi.putFile(target, { path: wanted, content: '', create_only: true });
+      const r = await skillLabApi.putFile(target, { path: wanted, content: '', create_only: true });
+      noteKeptCopies(r.kept_copies);
       if (disposed || owner !== `${source}:${name}` || generation !== loadGeneration) return;
-      onsaved(next, null);
+      onsaved(r.files, null);
       await open(wanted);
     } catch (e) {
       toastError('Couldn’t add the file', e);
@@ -248,7 +252,7 @@
     if (!(await confirmer.ask(`Delete ${path} from ${name}? The file is removed from the library copy.`, { title: 'Delete file' }))) return;
     try {
       if (disposed || owner !== `${source}:${name}` || generation !== loadGeneration) return;
-      await skillLabApi.deleteFile(target, path);
+      noteKeptCopies((await skillLabApi.deleteFile(target, path))?.kept_copies);
       const next = await skillLabApi.listFiles(target);
       if (disposed || owner !== `${source}:${name}` || generation !== loadGeneration) return;
       onsaved(next, null);

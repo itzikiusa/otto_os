@@ -16,7 +16,7 @@ import { isEmbedded } from '../desktop';
 import { SCRATCH_WORKSPACE_ID, sessionVerbsApply } from './sessionScope';
 import { runtimeFlagged } from './runtimeAttention.svelte';
 import { applyStatusPatches, canDropExited, patchSessionIn, staleStatusIds, type StatusPatch } from './sessionPatch';
-import { bucketSessions, idChunks, isForeground, isShownKind, isThreadSurfaceSession, parseTabIds, shownListQuery } from './sessionBuckets';
+import { bucketSessions, idChunks, inThreadsScope, isForeground, isShownKind, isThreadSurfaceSession, parseTabIds, sessionRoute, shownListQuery } from './sessionBuckets';
 import { whenIdle } from '../lazy-component.svelte';
 import { toastError } from '../toastError';
 import { loadErrorText } from '../loadError';
@@ -111,7 +111,7 @@ class WorkspaceStore {
     return id ? (this.sessionById.get(id) ?? null) : null;
   }
   /** Every sidebar list in ONE pass over `sessions` (see `bucketSessions`). */
-  private buckets = $derived(bucketSessions(this.sessions));
+  private buckets = $derived(bucketSessions(this.sessions, this.sessionById));
   /** Background sources a mounted panel asked to have loaded with the main
    *  list — {@link includeSources}. */
   private extraSources = new Map<string, number>();
@@ -257,7 +257,7 @@ class WorkspaceStore {
 
   private mainOf(active: Session[], open: Set<Id>): Session[] {
     return active.filter(
-      (s) => (!isThreadSurfaceSession(s) && isForeground(s) && (this.currentId === null || s.workspace_id !== SCRATCH_WORKSPACE_ID)) || open.has(s.id),
+      (s) => (!inThreadsScope(s, this.sessionById) && isForeground(s) && (this.currentId === null || s.workspace_id !== SCRATCH_WORKSPACE_ID)) || open.has(s.id),
     );
   }
 
@@ -297,7 +297,7 @@ class WorkspaceStore {
       .map((w) => ({
         ws: w,
         sessions: this.otherWsSessions
-          .filter((s) => s.workspace_id === w.id && s.kind === 'agent' && isForeground(s) && !isThreadSurfaceSession(s))
+          .filter((s) => s.workspace_id === w.id && s.kind === 'agent' && isForeground(s) && !inThreadsScope(s, this.otherWsSessions))
           .sort((a, b) => b.last_active_at.localeCompare(a.last_active_at)),
       }))
       .filter((g) => g.sessions.length > 0),
@@ -1097,7 +1097,7 @@ class WorkspaceStore {
     }
   }
 
-  /** Navigate to a session via the router (route = `#/agents/<id>`).
+  /** Navigate to a session via the router (`#/agents/<id>`, or `#/threads/<id>` for a Threads-scope one).
    *
    * This is the **user-facing navigation action**: it pushes a history entry so
    * browser/in-app Back/Forward walk session history. The route change triggers
@@ -1108,7 +1108,7 @@ class WorkspaceStore {
    * use this instead of the old `ws.openSession(id) + router.go('agents')` pair.
    */
   navigateToSession(id: Id): void {
-    router.go(`agents/${id}`);
+    router.go(sessionRoute(this.sessionById.get(id), id, this.sessionById));
   }
 
   /**
@@ -1945,7 +1945,7 @@ class WorkspaceStore {
           prevStatus === 'working' &&
           (ev.status === 'idle' || ev.status === 'exited') &&
           !this.watching(ev.session_id) &&
-          (this.openTabs.includes(ev.session_id) || Boolean(this.sessionById.get(ev.session_id) && isThreadSurfaceSession(this.sessionById.get(ev.session_id)!)))
+          (this.openTabs.includes(ev.session_id) || Boolean(this.sessionById.get(ev.session_id) && inThreadsScope(this.sessionById.get(ev.session_id)!, this.sessionById)))
         ) {
           this.unread = { ...this.unread, [ev.session_id]: true };
         }

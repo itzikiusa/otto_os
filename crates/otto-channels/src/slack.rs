@@ -88,6 +88,28 @@ const CLIENT_PING_INTERVAL: Duration = Duration::from_secs(30);
 /// and no reconnect. Bound the dial so a stuck connect just retries.
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// The Socket Mode WebSocket, as `connect_async` returns it.
+type SocketStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Dial the Socket Mode WebSocket, bounded by `deadline` (production passes
+/// [`WS_CONNECT_TIMEOUT`]). `Err` is the user-facing reason, URL redacted; a
+/// timeout is just another connect failure, so the caller treats every error
+/// alike — report it, back off, retry.
+async fn dial_socket(url: &str, deadline: Duration) -> Result<SocketStream, String> {
+    match tokio::time::timeout(deadline, tokio_tungstenite::connect_async(url)).await {
+        Ok(Ok((stream, _))) => Ok(stream),
+        Ok(Err(e)) => Err(format!(
+            "Socket Mode connect failed: {}",
+            redact_url(&e, url)
+        )),
+        Err(_elapsed) => Err(format!(
+            "Socket Mode connect timed out after {}s (network down or Slack unreachable)",
+            deadline.as_secs()
+        )),
+    }
+}
+
 /// How long to wait for a TCP/TLS connection to Slack to establish.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Overall per-request deadline for ordinary Web API calls. A hung Slack
@@ -169,6 +191,11 @@ fn build_upload_client() -> reqwest::Client {
         })
         .clone()
 }
+
+/// The listener badge while the inbound queue is full and events are left
+/// unacknowledged for Slack to redeliver (the socket itself is fine).
+const QUEUE_FULL_DETAIL: &str =
+    "Otto is busy: new Slack messages are being retried until earlier ones finish";
 
 /// Concurrent attachment downloads per inbound message.
 const ATTACHMENT_PARALLELISM: usize = 3;
@@ -793,32 +820,12 @@ pub async fn run(
         info!("slack: connecting to socket mode");
         // The dial MUST be bounded — see `WS_CONNECT_TIMEOUT`. A timeout is
         // just another connect failure: fall through to the same backoff.
-        let dial = tokio::time::timeout(
-            WS_CONNECT_TIMEOUT,
-            tokio_tungstenite::connect_async(&wss_url),
-        )
-        .await;
-        let ws_stream = match dial {
-            Ok(Ok((stream, _))) => stream,
-            Ok(Err(e)) => {
-                let why = redact_url(&e, &wss_url);
-                error!("slack: websocket connect failed: {why}");
-                problem = format!("Socket Mode connect failed: {why}");
-                health.failed(&problem, false);
-                sleep_unless_cancelled(backoff_ms, &cancel).await;
-                backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
-                continue 'outer;
-            }
-            Err(_elapsed) => {
-                error!(
-                    "slack: websocket connect timed out after {}s, retrying in {backoff_ms}ms",
-                    WS_CONNECT_TIMEOUT.as_secs()
-                );
-                problem = format!(
-                    "Socket Mode connect timed out after {}s (network down or Slack unreachable)",
-                    WS_CONNECT_TIMEOUT.as_secs()
-                );
-                health.failed(&problem, false);
+        let ws_stream = match dial_socket(&wss_url, WS_CONNECT_TIMEOUT).await {
+            Ok(stream) => stream,
+            Err(why) => {
+                error!("slack: {why}, retrying in {backoff_ms}ms");
+                health.failed(&why, false);
+                problem = why;
                 sleep_unless_cancelled(backoff_ms, &cancel).await;
                 backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                 continue 'outer;
@@ -948,7 +955,7 @@ pub async fn run(
                     break 'inner (format!("Slack asked to reconnect ({reason})"), false);
                 }
                 "events_api" => {
-                    use crate::admission::{Admission, BUSY_REPLY};
+                    use crate::admission::Admission;
                     let envelope_id = val["envelope_id"].as_str().unwrap_or("").to_string();
                     let event = &val["payload"]["event"];
                     let content = if event["subtype"].as_str() == Some("message_changed") {
@@ -991,19 +998,15 @@ pub async fn run(
                     };
                     match admission {
                         Some(Admission::Retry) => {
-                            health.failed("Inbound message queue is full; Slack will retry unacknowledged events", false);
+                            // The socket is fine: say busy, not disconnected.
+                            health.busy(QUEUE_FULL_DETAIL);
                             continue 'inner;
                         }
                         Some(Admission::Busy(permit)) => {
-                            let user = content["user"]
-                                .as_str()
-                                .or_else(|| event["user"].as_str())
-                                .unwrap_or("");
                             // `drop_reason` already let only user messages in.
-                            let notify =
-                                crate::bridge::integration_admits(&integ, user) && !chat.is_empty();
-                            let chat = chat.to_owned();
-                            let thread = thread.map(str::to_owned);
+                            let event = event.clone();
+                            let integ = integ.clone();
+                            let bridge = Arc::clone(&bridge);
                             let adapter = SlackAdapter::new(bot_token.clone());
                             let acks = notice_acks.clone();
                             let seen = seen.clone();
@@ -1011,16 +1014,7 @@ pub async fn run(
                             pending.lock().await.insert(dedup_key.clone());
                             tokio::spawn(async move {
                                 let _permit = permit;
-                                let notice = async {
-                                    if notify {
-                                        adapter
-                                            .send_notice(&chat, thread.as_deref(), BUSY_REPLY)
-                                            .await
-                                            .map(|_| ())
-                                    } else {
-                                        Ok(())
-                                    }
-                                };
+                                let notice = settle_busy(&event, &integ, &bridge, &adapter);
                                 if acknowledge_rejection(notice, &acks, envelope_id).await {
                                     seen.lock().await.insert(dedup_key.clone(), DEDUP_CAP);
                                 }
@@ -1051,7 +1045,10 @@ pub async fn run(
                                     Some(q) => Some(q.acquire().await),
                                     None => None,
                                 };
-                                handle_event(&event, &integ, &bot_token, bridge, permit).await;
+                                let adapter = Arc::new(SlackAdapter::new(bot_token.clone()))
+                                    as Arc<dyn Adapter>;
+                                handle_event(&event, &integ, &bot_token, adapter, bridge, permit)
+                                    .await;
                             });
                         }
                         None => {} // already admitted/delivered: ACK the retry
@@ -1207,12 +1204,69 @@ fn drop_reason(event: &serde_json::Value) -> Option<&'static str> {
     None
 }
 
+/// The [`Inbound`] of a user message event, its text decoded from Slack's
+/// wire format ([`decode_slack_text`], the ONE place Slack text is decoded —
+/// everything downstream, workflow triggers included, reads plain text) with
+/// the leading bot mention stripped. Attachments are not part of it: only an
+/// admitted sender's files are downloaded ([`handle_event`]).
+fn slack_inbound(event: &serde_json::Value, integ: &Integration) -> Inbound {
+    let edited = event["subtype"].as_str() == Some("message_changed");
+    let content = if edited { &event["message"] } else { event };
+    let field = |k: &str| content[k].as_str().or_else(|| event[k].as_str());
+    Inbound {
+        workspace_id: integ.workspace_id.clone(),
+        chat: field("channel").unwrap_or("").to_string(),
+        // The thread, else the message itself starts one.
+        thread: field("thread_ts")
+            .or_else(|| field("ts"))
+            .map(str::to_string),
+        user: field("user").unwrap_or("").to_string(),
+        user_name: ["display_name", "real_name"]
+            .iter()
+            .find_map(|k| content["user_profile"][*k].as_str())
+            .filter(|n| !n.trim().is_empty())
+            .map(str::to_string),
+        text: decode_slack_text(strip_mention(content["text"].as_str().unwrap_or(""))),
+        edited,
+    }
+}
+
+/// A message the inbound queue refused as busy: an admitted sender is told
+/// to send it again ([`BUSY_REPLY`](crate::admission::BUSY_REPLY)); a sender
+/// the allow-list turns away gets no reply but is recorded as turned away,
+/// exactly as when there is room ([`handle_event`]). `Ok` = settled, so the
+/// event may be acknowledged.
+async fn settle_busy(
+    event: &serde_json::Value,
+    integ: &Integration,
+    bridge: &Bridge,
+    adapter: &dyn Adapter,
+) -> anyhow::Result<()> {
+    let inbound = slack_inbound(event, integ);
+    if !crate::bridge::integration_admits(integ, &inbound.user) {
+        bridge.record_rejected(Channel::Slack, &inbound).await;
+        return Ok(());
+    }
+    if inbound.chat.is_empty() {
+        return Ok(());
+    }
+    adapter
+        .send_notice(
+            &inbound.chat,
+            inbound.thread.as_deref(),
+            crate::admission::BUSY_REPLY,
+        )
+        .await
+        .map(|_| ())
+}
+
 /// Inspect a single `events_api` payload event and, if it is a user message,
-/// build an `Inbound` and forward it to the bridge.
+/// build an `Inbound` and forward it to the bridge through `adapter`.
 async fn handle_event(
     event: &serde_json::Value,
     integ: &Integration,
     bot_token: &str,
+    adapter: Arc<dyn Adapter>,
     bridge: Arc<Bridge>,
     permit: crate::admission::WorkPermit,
 ) {
@@ -1224,86 +1278,51 @@ async fn handle_event(
         return;
     }
     debug!(event_type, "slack: message-like event received");
-    let subtype = event["subtype"].as_str();
-    let content = if subtype == Some("message_changed") {
-        &event["message"]
-    } else {
-        event
-    };
-
-    let user = content["user"]
-        .as_str()
-        .or_else(|| event["user"].as_str())
-        .unwrap_or("")
-        .to_string();
+    let mut inbound = slack_inbound(event, integ);
 
     // The allowed-users gate runs HERE as well as in the bridge: before it,
     // anyone who could message the bot made the daemon download up to 50 MB
-    // per attachment into the temp dir — only for the bridge to drop it.
-    if !crate::bridge::integration_admits(integ, &user) {
+    // per attachment into the temp dir — only for the bridge to drop it. The
+    // turned-away sender is still recorded (Settings → Channels lists them
+    // with "Allow"; a workflow trigger they aimed at says so) — this return
+    // used to leave no trace at all.
+    if !crate::bridge::integration_admits(integ, &inbound.user) {
         info!(
             event_type,
-            user = %user,
+            user = %inbound.user,
             "slack: sender not in allowed_users, dropped before attachment download"
         );
+        bridge.record_rejected(Channel::Slack, &inbound).await;
         return;
     }
-
-    let raw_text = content["text"].as_str().unwrap_or("");
-    let text = decode_slack_text(strip_mention(raw_text));
+    if inbound.chat.is_empty() {
+        warn!("slack: message event missing channel, skipping");
+        return;
+    }
 
     // Download any attached files to local paths so the agent can read them
     // (Slack `url_private` needs the bot token, so the agent can't fetch them
     // itself). Returns a note listing the saved paths, appended to the message.
+    let content = if inbound.edited {
+        &event["message"]
+    } else {
+        event
+    };
     let files_note = collect_attachments(content, bot_token).await;
 
     // Only skip when there is genuinely nothing to act on (no text AND no
     // attachments). Everything else is forwarded.
-    if text.is_empty() && files_note.is_empty() {
-        info!(event_type, user = %user, "slack: no text or attachments, skipping");
-        return;
-    }
-
-    let combined = match (text.is_empty(), files_note.is_empty()) {
+    let text = std::mem::take(&mut inbound.text);
+    inbound.text = match (text.is_empty(), files_note.is_empty()) {
+        (true, true) => {
+            info!(event_type, user = %inbound.user, "slack: no text or attachments, skipping");
+            return;
+        }
         (false, true) => text,
         (true, false) => format!(
             "[The user sent attachment(s) with no message text — read them and act:]\n{files_note}"
         ),
         (false, false) => format!("{text}\n\n{files_note}"),
-        (true, true) => unreachable!(),
-    };
-
-    let channel = match content["channel"]
-        .as_str()
-        .or_else(|| event["channel"].as_str())
-    {
-        Some(c) if !c.is_empty() => c.to_string(),
-        _ => {
-            warn!("slack: message event missing channel, skipping");
-            return;
-        }
-    };
-
-    // Use thread_ts if present, otherwise fall back to ts (the message itself).
-    let thread = content["thread_ts"]
-        .as_str()
-        .or_else(|| event["thread_ts"].as_str())
-        .or_else(|| content["ts"].as_str())
-        .or_else(|| event["ts"].as_str())
-        .map(|s| s.to_string());
-
-    let inbound = Inbound {
-        workspace_id: integ.workspace_id.clone(),
-        chat: channel,
-        thread,
-        user,
-        user_name: ["display_name", "real_name"]
-            .iter()
-            .find_map(|k| content["user_profile"][*k].as_str())
-            .filter(|n| !n.trim().is_empty())
-            .map(str::to_string),
-        text: combined,
-        edited: subtype == Some("message_changed"),
     };
     info!(
         workspace = %inbound.workspace_id,
@@ -1313,8 +1332,6 @@ async fn handle_event(
         event_type,
         "slack: forwarding inbound event to bridge"
     );
-
-    let adapter = Arc::new(SlackAdapter::new(bot_token.to_string())) as Arc<dyn Adapter>;
     bridge.handle(integ, adapter, inbound, permit).await;
 }
 
@@ -1500,6 +1517,14 @@ mod tests {
             decode_slack_text("ask <@U1|dana> or <@U2> in <#C1|ops> <!here> <!subteam^S1|@devs>"),
             "ask @dana or @U2 in #ops @here @devs"
         );
+        // Workflow trigger text, as Slack sends it: decoded HERE, once — the
+        // workflow parsers downstream read plain text and decode nothing.
+        assert_eq!(
+            decode_slack_text("Action: Workflow\nName: A &lt;B&gt;\nMsg: x &lt; 5 and y &gt; 3"),
+            "Action: Workflow\nName: A <B>\nMsg: x < 5 and y > 3"
+        );
+        assert_eq!(decode_slack_text("Name: R&amp;D"), "Name: R&D");
+        assert_eq!(decode_slack_text("Vec&lt;String&gt;"), "Vec<String>");
         // No markup: unchanged; an unterminated `<` can't be a sequence.
         assert_eq!(decode_slack_text("plain text"), "plain text");
         assert_eq!(decode_slack_text("odd <tail"), "odd <tail");
@@ -1746,5 +1771,244 @@ mod tests {
         for e in &kept {
             assert_eq!(drop_reason(e), None, "{e} must be forwarded");
         }
+    }
+
+    /// Item: Socket Mode dial deadline. A server that accepts the TCP
+    /// connection and then never answers the WebSocket handshake (the
+    /// boot-time network flap that silenced every workspace for hours) must
+    /// fail within the deadline, as an ordinary error the listener backs off
+    /// on — never park the task.
+    #[tokio::test]
+    async fn a_dial_accepted_but_never_answered_fails_within_its_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            // Accept, then hold the socket open in silence.
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let deadline = Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let Err(why) = dial_socket(&format!("ws://{addr}/link/?ticket=t1"), deadline).await else {
+            panic!("a silent server must not complete the handshake");
+        };
+        assert!(why.contains("timed out"), "{why}");
+        assert!(
+            started.elapsed() < deadline + Duration::from_secs(2),
+            "bounded by the deadline: {:?}",
+            started.elapsed()
+        );
+        server.abort();
+
+        // A closed port fails fast as an ordinary connect failure, with the
+        // ticket-bearing URL kept out of the reason.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let Err(why) = dial_socket(&format!("ws://{closed}/link/?ticket=t2"), deadline).await
+        else {
+            panic!("nothing listens there");
+        };
+        assert!(why.starts_with("Socket Mode connect failed"), "{why}");
+        assert!(!why.contains("ticket=t2"), "{why}");
+    }
+
+    /// What the bridge saw from the listener: the hook calls and the replies.
+    #[derive(Default)]
+    struct Seen {
+        noted: std::sync::Mutex<Vec<(String, String)>>,
+        started: std::sync::Mutex<Vec<String>>,
+        sent: std::sync::atomic::AtomicUsize,
+    }
+
+    struct Trigger(Arc<Seen>);
+
+    #[async_trait::async_trait]
+    impl crate::workflow_trigger::WorkflowChatTrigger for Trigger {
+        async fn try_start(
+            &self,
+            _workspace_id: &str,
+            _channel: &str,
+            _chat: &str,
+            _thread: Option<&str>,
+            _user: &str,
+            text: &str,
+        ) -> Option<crate::workflow_trigger::WorkflowChatAck> {
+            self.0.started.lock().unwrap().push(text.to_string());
+            Some(crate::workflow_trigger::WorkflowChatAck {
+                reply: "started".into(),
+            })
+        }
+
+        async fn note_rejected_sender(
+            &self,
+            _workspace_id: &str,
+            channel: &str,
+            _chat: &str,
+            _thread: Option<&str>,
+            user: &str,
+            text: &str,
+        ) {
+            assert_eq!(channel, "slack");
+            self.0
+                .noted
+                .lock()
+                .unwrap()
+                .push((user.to_string(), text.to_string()));
+        }
+    }
+
+    /// Never reaches Slack: counts what would have been posted.
+    struct Counting(Arc<Seen>);
+
+    #[async_trait::async_trait]
+    impl Adapter for Counting {
+        async fn send(&self, _c: &str, _t: Option<&str>, _x: &str) -> anyhow::Result<String> {
+            self.0.sent.fetch_add(1, Ordering::SeqCst);
+            Ok("1.0".into())
+        }
+        async fn edit(&self, _c: &str, _m: &str, _x: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn channel(&self) -> Channel {
+            Channel::Slack
+        }
+    }
+
+    fn message(user: &str, ts: &str, text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "message", "channel": "C1", "user": user, "ts": ts, "text": text,
+            "user_profile": {"display_name": format!("name-{user}")}
+        })
+    }
+
+    /// Item: a Slack sender the allow-list turns away used to leave no trace —
+    /// `handle_event` returned before the bridge, so the Settings "turned
+    /// away" list stayed empty and a workflow trigger they aimed at never
+    /// said why it did nothing. Driven through the listener's real per-event
+    /// handler and its busy path: the stranger is listed and the trigger
+    /// note fires exactly once, their text is never acted on, and an
+    /// admitted sender still flows through to the trigger.
+    #[tokio::test]
+    async fn a_turned_away_slack_sender_is_recorded_by_the_listener_and_never_acted_on() {
+        let dir = std::env::temp_dir().join(format!("otto-slack-rejected-{}", otto_core::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = otto_state::db::open(&dir.join("state.sqlite"))
+            .await
+            .unwrap();
+        let owner = otto_state::UsersRepo::new(pool.clone())
+            .create("owner", "", "Owner", true)
+            .await
+            .unwrap();
+        let ws = otto_state::WorkspacesRepo::new(pool.clone())
+            .create("WS", "/tmp", &owner.id)
+            .await
+            .unwrap();
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let manager = Arc::new(otto_sessions::SessionManager::new(
+            otto_state::SessionsRepo::new(pool.clone()),
+            events,
+            otto_sessions::providers::ProviderRegistry::new(None),
+        ));
+        let seen = Arc::new(Seen::default());
+        let bridge = Bridge::new_with_workflow_trigger(
+            manager.clone(),
+            otto_state::WorkspacesRepo::new(pool.clone()),
+            otto_state::SettingsRepo::new(pool.clone()),
+            crate::mirror::Mirror::new(manager.clone()),
+            "root".into(),
+            Some(Arc::new(Trigger(seen.clone()))),
+            crate::admission::InboundAdmission::default(),
+        );
+        let integ: Integration = serde_json::from_value(serde_json::json!({
+            "workspace_id": ws.id, "channel": "slack", "enabled": true,
+            "allowed_users": "U1", "open_to_all": false, "agent_reply": false,
+            "reply_instructions": "", "channel_id": "C1", "preferred_cli": "claude",
+            "has_bot_token": true, "has_app_token": true, "updated_at": "2026-11-13T00:00:00Z"
+        }))
+        .unwrap();
+        let health = crate::health::Health::begin(&ws.id, Channel::Slack);
+        health.connected();
+        let adapter = || Arc::new(Counting(seen.clone())) as Arc<dyn Adapter>;
+        let permit = |ts: &str| match bridge.admission.admit("slack:t", "C1", Some(ts)) {
+            crate::admission::Admission::Work(p) => p,
+            _ => panic!("capacity available"),
+        };
+        let listed = |user: &str| {
+            crate::health::snapshot(&ws.id)
+                .iter()
+                .flat_map(|s| s.rejected_senders.clone())
+                .find(|r| r.user == user)
+        };
+
+        // A stranger's trigger, as Slack puts it on the wire.
+        let stranger = message("U2", "1.1", "<@UBOT> run PR Reviewer: R&amp;D &lt;now&gt;");
+        handle_event(
+            &stranger,
+            &integ,
+            "xoxb-test",
+            adapter(),
+            bridge.clone(),
+            permit("1.1"),
+        )
+        .await;
+        let row = listed("U2").expect("the stranger is listed as turned away");
+        assert_eq!(row.name.as_deref(), Some("name-U2"));
+        assert_eq!(
+            *seen.noted.lock().unwrap(),
+            [("U2".to_string(), "run PR Reviewer: R&D <now>".to_string())],
+            "the trigger note fires once, with the decoded text"
+        );
+        assert!(seen.started.lock().unwrap().is_empty(), "never acted on");
+        assert_eq!(
+            seen.sent.load(Ordering::SeqCst),
+            0,
+            "a stranger gets no reply"
+        );
+        assert!(manager.list_by_workspace(&ws.id).await.unwrap().is_empty());
+
+        // The busy path records a stranger too — still without a reply.
+        settle_busy(
+            &message("U3", "1.2", "hello"),
+            &integ,
+            &bridge,
+            &Counting(seen.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(listed("U3").is_some());
+        assert_eq!(seen.noted.lock().unwrap().len(), 2);
+        assert_eq!(seen.sent.load(Ordering::SeqCst), 0);
+        // …while an admitted sender is told to resend, and noted nowhere.
+        settle_busy(
+            &message("U1", "1.3", "hello"),
+            &integ,
+            &bridge,
+            &Counting(seen.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(seen.sent.load(Ordering::SeqCst), 1);
+        assert_eq!(seen.noted.lock().unwrap().len(), 2);
+
+        // An admitted sender's trigger flows through to the workflow side.
+        let owner_msg = message("U1", "1.4", "<@UBOT> run PR Reviewer: go");
+        handle_event(
+            &owner_msg,
+            &integ,
+            "xoxb-test",
+            adapter(),
+            bridge.clone(),
+            permit("1.4"),
+        )
+        .await;
+        assert_eq!(*seen.started.lock().unwrap(), ["run PR Reviewer: go"]);
+        assert_eq!(seen.noted.lock().unwrap().len(), 2, "no note for the owner");
+        assert!(listed("U1").is_none());
+
+        crate::health::remove(&ws.id, Channel::Slack);
+        drop((bridge, manager, pool));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

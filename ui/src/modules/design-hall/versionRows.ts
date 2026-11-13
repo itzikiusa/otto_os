@@ -40,6 +40,25 @@ export function versionRows(
   return out;
 }
 
+/**
+ * The version a save conflict is resolved against: the design's REAL head
+ * (`artifact.head_version_id`), never merely the newest number — side
+ * versions (variants, a source sync on an adopted design) are numbered too
+ * but never move the head, so a save based on one is refused forever.
+ * `recent` (newest first or not) is the fallback when the detail carries no
+ * head row: the head among them, else the newest version on `main`.
+ */
+export function conflictHead(
+  d: { artifact: Pick<DesignArtifact, 'head_version_id'>; head: DesignVersion | null },
+  recent: readonly DesignVersion[] = [],
+): DesignVersion | null {
+  const headId = d.artifact.head_version_id;
+  if (d.head && (!headId || d.head.id === headId)) return d.head;
+  const byId = headId ? recent.find((v) => v.id === headId) : undefined;
+  if (byId) return byId;
+  return [...recent].filter((v) => v.branch === 'main').sort((a, b) => b.seq - a.seq)[0] ?? null;
+}
+
 /** "Named", "Autosave", "Otto", "Restore", "Sync", "Import" — the row's kind word. */
 export function versionKindLabel(kind: string): string {
   switch (kind) {

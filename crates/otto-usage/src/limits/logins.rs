@@ -7,7 +7,9 @@
 //! key/value store the usage config and budgets use; no secret is stored.
 //! A row key a caller cannot see (another user's profile, a machine login for
 //! a non-root user) is refused, so the switch can only be flipped by the
-//! login's owner.
+//! login's owner — and only by that person's own credential, never an agent
+//! session's token (`person_only`). Turning it off also drops the numbers
+//! the check left behind (`claude::forget_check`).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -201,6 +203,22 @@ async fn login_for(
         .ok_or_else(|| Error::NotFound("no Claude login with that key is visible to you".into()))
 }
 
+/// Only a person's own credential may flip the switch or start a check: it
+/// runs that person's `claude` CLI against their Anthropic account, so an
+/// agent session's token (which acts AS its owner, often root) is refused.
+/// Answers whether root authority holds for this request (the machine logins
+/// are root's), like `otto_core::auth::root_authority`.
+fn person_only(is_root: bool) -> otto_core::Result<bool> {
+    if otto_core::auth::request_is_agent() {
+        return Err(Error::Forbidden(
+            "an agent session cannot change or run Check with Anthropic — \
+             a person signed in to Otto must do this"
+                .into(),
+        ));
+    }
+    Ok(is_root && !otto_core::auth::request_credential().root_withheld)
+}
+
 /// Turn "Check with Anthropic" on or off for one login; answers the page.
 pub async fn set_claude_check(
     pool: &DbPool,
@@ -209,17 +227,22 @@ pub async fn set_claude_check(
     data_dir: &Path,
     req: &ClaudeCheckReq,
 ) -> otto_core::Result<LimitsResp> {
+    let is_root = person_only(is_root)?;
     let env = RootsEnv::from_process();
-    let login = login_for(
-        pool,
-        user_id,
-        is_root,
-        data_dir,
-        &env,
-        &home_dir(),
-        &req.key,
-    )
-    .await?;
+    set_with(pool, user_id, is_root, data_dir, (&env, &home_dir()), req).await?;
+    super::remaining_limits(pool, user_id, is_root, data_dir).await
+}
+
+async fn set_with(
+    pool: &DbPool,
+    user_id: &Id,
+    is_root: bool,
+    data_dir: &Path,
+    (env, home): (&RootsEnv, &Path),
+    req: &ClaudeCheckReq,
+) -> otto_core::Result<()> {
+    let is_root = person_only(is_root)?;
+    let login = login_for(pool, user_id, is_root, data_dir, env, home, &req.key).await?;
     let repo = SettingsRepo::new(pool.clone());
     let mut map = repo
         .get(CHECKS_KEY)
@@ -233,7 +256,11 @@ pub async fn set_claude_check(
     }
     repo.put(CHECKS_KEY, &serde_json::Value::Object(map))
         .await?;
-    super::remaining_limits(pool, user_id, is_root, data_dir).await
+    if !req.enabled {
+        // Off means off: the row stops showing the check's last numbers.
+        claude::forget_check(&login.dir);
+    }
+    Ok(())
 }
 
 /// Run the check for one login now (cached 5 min, one at a time). Refused
@@ -248,6 +275,7 @@ pub async fn run_claude_check(
     key: &str,
     program: Option<String>,
 ) -> otto_core::Result<LimitsResp> {
+    let is_root = person_only(is_root)?;
     run_with(
         pool,
         user_id,
@@ -273,6 +301,7 @@ async fn run_with(
     program: Option<String>,
     timeout: Duration,
 ) -> otto_core::Result<()> {
+    let is_root = person_only(is_root)?;
     let login = login_for(pool, user_id, is_root, data_dir, env, home, key).await?;
     if !load_checks(pool).await.contains(&login.key) {
         return Err(Error::Invalid(
@@ -293,7 +322,19 @@ async fn run_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use otto_core::auth::{with_request_credential, RequestCredential};
     use std::os::unix::fs::PermissionsExt;
+
+    /// Run `f` as a person's own request (the gate refuses everything else,
+    /// including no request at all).
+    async fn person<F: std::future::Future>(f: F) -> F::Output {
+        with_request_credential(RequestCredential::default(), f).await
+    }
+
+    const AGENT: RequestCredential = RequestCredential {
+        agent: true,
+        root_withheld: true,
+    };
 
     struct Fixture {
         _dir: tempfile::TempDir,
@@ -344,7 +385,7 @@ mod tests {
         let program = marker_cli(&f.root);
         let user: Id = "root".into();
         let key = format!("claude:{}", f.root.join("claude-home").display());
-        let err = run_with(
+        let err = person(run_with(
             &f.pool,
             &user,
             true,
@@ -353,13 +394,13 @@ mod tests {
             &key,
             Some(program),
             Duration::from_secs(2),
-        )
+        ))
         .await
         .expect_err("refused while off");
         assert!(err.to_string().contains("Turn on Check with Anthropic"));
         assert!(!f.root.join("ran").exists(), "the CLI was started");
         // A key the caller cannot see is a 404, also without a spawn.
-        let err = run_with(
+        let err = person(run_with(
             &f.pool,
             &user,
             false,
@@ -368,7 +409,7 @@ mod tests {
             &key,
             Some(marker_cli(&f.root)),
             Duration::from_secs(2),
-        )
+        ))
         .await
         .expect_err("not visible to a non-root caller");
         assert!(matches!(err, Error::NotFound(_)));
@@ -390,7 +431,7 @@ mod tests {
             .unwrap();
         assert!(load_checks(&f.pool).await.contains(&key));
         // The marker CLI exits without answering: a failure, not a number.
-        run_with(
+        person(run_with(
             &f.pool,
             &user,
             true,
@@ -399,7 +440,7 @@ mod tests {
             &key,
             Some(marker_cli(&f.root)),
             Duration::from_secs(5),
-        )
+        ))
         .await
         .unwrap();
         assert!(f.root.join("ran").exists());
@@ -421,6 +462,151 @@ mod tests {
         let off = claude_row(&login, false, Utc::now());
         assert_eq!(off.reason.as_deref(), Some(CLAUDE_REASON));
         assert_eq!(off.check.unwrap().error, None);
+    }
+
+    /// The machine login's row key and switch request.
+    fn req(f: &Fixture, enabled: bool) -> ClaudeCheckReq {
+        ClaudeCheckReq {
+            key: format!("claude:{}", f.root.join("claude-home").display()),
+            enabled,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_agent_credential_cannot_flip_the_switch_or_run_a_check() {
+        let f = fixture().await;
+        let user: Id = "root".into();
+        let home = Path::new("/nonexistent-home");
+        for cred in [AGENT, otto_core::auth::OUTSIDE_REQUEST] {
+            let err = with_request_credential(
+                cred,
+                set_with(
+                    &f.pool,
+                    &user,
+                    true,
+                    &f.root,
+                    (&f.env, home),
+                    &req(&f, true),
+                ),
+            )
+            .await
+            .expect_err("an agent may not opt a login in");
+            assert!(matches!(err, Error::Forbidden(_)), "{err}");
+            // The public entry point refuses before it looks anything up.
+            let err = with_request_credential(
+                cred,
+                set_claude_check(&f.pool, &user, true, &f.root, &req(&f, true)),
+            )
+            .await
+            .expect_err("refused at the entry point too");
+            assert!(matches!(err, Error::Forbidden(_)), "{err}");
+        }
+        assert!(
+            load_checks(&f.pool).await.is_empty(),
+            "the switch stayed off"
+        );
+        // Opted in by the person, an agent still cannot start the CLI.
+        person(set_with(
+            &f.pool,
+            &user,
+            true,
+            &f.root,
+            (&f.env, home),
+            &req(&f, true),
+        ))
+        .await
+        .unwrap();
+        assert!(load_checks(&f.pool).await.contains(&req(&f, true).key));
+        let err = with_request_credential(
+            AGENT,
+            run_with(
+                &f.pool,
+                &user,
+                true,
+                &f.root,
+                (&f.env, home),
+                &req(&f, true).key,
+                Some(marker_cli(&f.root)),
+                Duration::from_secs(2),
+            ),
+        )
+        .await
+        .expect_err("an agent may not run the check");
+        assert!(matches!(err, Error::Forbidden(_)), "{err}");
+        assert!(!f.root.join("ran").exists(), "the CLI was started");
+        // Nor can it turn the switch off on the person's behalf.
+        let err = with_request_credential(
+            AGENT,
+            set_with(
+                &f.pool,
+                &user,
+                true,
+                &f.root,
+                (&f.env, home),
+                &req(&f, false),
+            ),
+        )
+        .await
+        .expect_err("an agent may not opt a login out");
+        assert!(matches!(err, Error::Forbidden(_)));
+        assert!(load_checks(&f.pool).await.contains(&req(&f, true).key));
+    }
+
+    #[tokio::test]
+    async fn turning_the_check_off_drops_its_numbers() {
+        let f = fixture().await;
+        let user: Id = "root".into();
+        let home = Path::new("/nonexistent-home");
+        person(set_with(
+            &f.pool,
+            &user,
+            true,
+            &f.root,
+            (&f.env, home),
+            &req(&f, true),
+        ))
+        .await
+        .unwrap();
+        let login = claude_logins(&[], true, &f.root, home, &f.env)
+            .into_iter()
+            .find(|l| l.key == req(&f, true).key)
+            .unwrap();
+        // What a successful check leaves behind (cli::check stamps every
+        // window with its own checked_at).
+        let at = Utc::now();
+        let resp = serde_json::json!({"subscription_type":"max","rate_limits_available":true,
+            "rate_limits":{"seven_day":{"utilization":40.0,"resets_at":"2099-01-05T00:00:00Z"}}});
+        let Some(claude::UsageAnswer::Windows { plan, windows, .. }) =
+            claude::parse_get_usage(&resp, at)
+        else {
+            panic!("expected windows");
+        };
+        claude::update(&login.dir, |e| {
+            e.checked_at = Some(at);
+            e.plan = plan;
+            e.windows = windows;
+        });
+        let on = claude_row(&login, true, Utc::now());
+        assert_eq!(on.status, super::super::LimitStatus::Ok);
+        assert_eq!(on.plan.as_deref(), Some("max"));
+
+        person(set_with(
+            &f.pool,
+            &user,
+            true,
+            &f.root,
+            (&f.env, home),
+            &req(&f, false),
+        ))
+        .await
+        .unwrap();
+        assert!(load_checks(&f.pool).await.is_empty());
+        let off = claude_row(&login, false, Utc::now());
+        assert_eq!(off.status, super::super::LimitStatus::Unknown);
+        assert!(off.windows.is_empty(), "the check's weekly is not shown");
+        assert_eq!(off.plan, None);
+        assert_eq!(off.reason.as_deref(), Some(CLAUDE_REASON));
+        assert_eq!(off.check.unwrap().checked_at, None);
     }
 
     #[test]

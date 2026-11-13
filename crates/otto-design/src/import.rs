@@ -149,6 +149,72 @@ async fn stamp_source(
     Ok(())
 }
 
+/// `meta` key of a mirror that is BEHIND its source: `{reason, at}`.
+pub const SYNC_ERROR_KEY: &str = "sync_error";
+
+/// The source changed but could not be copied into its EXISTING mirror (too
+/// large with its images, an image missing, a read or commit error): write
+/// `meta.sync_error {reason, at}` so the Hall says the copy is behind
+/// (MirrorBanner) instead of showing old content as current. Written once
+/// per reason (`at` = when it first fell behind); cleared by the next
+/// successful sync ([`clear_behind`]). A failed read never archives — only a
+/// source ROW that is gone does ([`archive_vanished`]). No mirror yet: the
+/// error is only reported (the Canvas route then opens the old editor).
+async fn flag_behind(
+    svc: &DesignService,
+    mirror: Option<&DesignArtifact>,
+    reason: String,
+    report: &mut ImportReport,
+) {
+    let Some(m) = mirror else {
+        return;
+    };
+    let current = match svc.store().require_artifact(&m.id).await {
+        Ok(a) => a,
+        Err(e) => {
+            push_err(report, format!("design {}: {e}", m.id));
+            return;
+        }
+    };
+    if current.meta[SYNC_ERROR_KEY]["reason"].as_str() == Some(reason.as_str()) {
+        return;
+    }
+    let patch = json!({ "sync_error": { "reason": reason, "at": Utc::now().to_rfc3339() } });
+    let req = UpdateArtifactReq {
+        meta: Some(patch),
+        ..Default::default()
+    };
+    if let Err(e) = svc.update_meta(&m.id, req, &Author::system("import")).await {
+        push_err(report, format!("design {}: flag as behind: {e}", m.id));
+    }
+}
+
+/// The mirror is in step again: drop a `meta.sync_error` left by an earlier
+/// failed sync (emits `design_artifact_updated {change: "meta"}`).
+async fn clear_behind(svc: &DesignService, mirror_id: &str) -> Result<()> {
+    let a = svc.store().require_artifact(mirror_id).await?;
+    if a.meta.get(SYNC_ERROR_KEY).is_none() {
+        return Ok(());
+    }
+    let req = UpdateArtifactReq {
+        meta: Some(json!({ "sync_error": null })),
+        ..Default::default()
+    };
+    svc.update_meta(mirror_id, req, &Author::system("import"))
+        .await?;
+    Ok(())
+}
+
+/// `reason` of a scene whose self-contained copy is over the design cap.
+fn over_cap_reason(len: usize) -> String {
+    const MB: usize = 1024 * 1024;
+    format!(
+        "with its images it is {} MB, over the {} MB a design can hold",
+        len.div_ceil(MB),
+        format::MAX_CONTENT_BYTES / MB
+    )
+}
+
 /// A changed source reached an existing mirror: a `sync` head for a mirror
 /// (guarded on the head it has — nothing can have edited it, the write
 /// routes refuse mirrors), a side version `variant/sync-<ts>/1` for an
@@ -193,6 +259,8 @@ async fn sync_existing(
                 report,
                 format!("{source_kind} {source_id}: sync failed: {e}"),
             );
+            let reason = format!("its latest change couldn't be copied here ({e})");
+            flag_behind(svc, Some(&a), reason, report).await;
             return Ok(());
         }
         report.side_versions += 1;
@@ -218,12 +286,15 @@ async fn sync_existing(
                 report,
                 format!("{source_kind} {source_id}: sync failed: {e}"),
             );
+            let reason = format!("its latest change couldn't be copied here ({e})");
+            flag_behind(svc, Some(&a), reason, report).await;
             return Ok(());
         }
         report.synced += 1;
     }
     let fresh = svc.store().require_artifact(&a.id).await?;
-    stamp_source(svc, &fresh, updated_at, sha).await
+    stamp_source(svc, &fresh, updated_at, sha).await?;
+    clear_behind(svc, &a.id).await
 }
 
 /// The source row is gone: archive its mirror (never delete it) and flag
@@ -425,6 +496,8 @@ async fn sync_attachment(
         Err(e) => {
             push_err(report, format!("attachment {id}: {e}"));
             report.skipped += 1;
+            let reason = format!("its file couldn't be read ({e})");
+            flag_behind(svc, existing, reason, report).await;
             return Ok(());
         }
     };
@@ -603,6 +676,12 @@ async fn sync_scene(
         Ok(None) => return Ok(()),
         Err(e) => {
             push_err(report, format!("canvas scene {id}: {e}"));
+            report.skipped += 1;
+            let reason = match e {
+                Error::NotFound(_) => "one of its images is missing".to_string(),
+                e => format!("it couldn't be read ({e})"),
+            };
+            flag_behind(svc, existing, reason, report).await;
             return Ok(());
         }
     };
@@ -615,6 +694,7 @@ async fn sync_scene(
             format!("canvas scene {id}: document over the design cap"),
         );
         report.skipped += 1;
+        flag_behind(svc, existing, over_cap_reason(bytes.len()), report).await;
         return Ok(());
     }
     let sha = blobs::sha256_hex(&bytes);
@@ -1300,5 +1380,163 @@ mod tests {
         assert_ne!(fresh.status, "archived");
         assert_eq!(fresh.meta["source_missing"], true);
         assert_eq!(fresh.meta["adopted"], true);
+    }
+
+    /// An Excalidraw board whose one image ref has no `canvas_files` row
+    /// (its portable copy cannot be built).
+    fn missing_image_doc() -> String {
+        let inner = json!({"type":"excalidraw", "elements":[], "files": {"img": {
+            "id":"img", "mimeType":"image/png",
+            "dataURL": format!("{}{}", otto_state::canvas::FILE_REF_PREFIX, "a".repeat(64))
+        }}});
+        json!({"type":"otto-canvas", "version":1, "format":"excalidraw", "source":inner.to_string()})
+            .to_string()
+    }
+
+    async fn set_scene_doc(pool: &otto_state::DbPool, id: &str, doc: &str) {
+        sqlx::query("UPDATE canvas_scenes SET doc_json = ?, updated_at = ? WHERE id = ?")
+            .bind(doc)
+            .bind(Utc::now().to_rfc3339())
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn mirror_of(svc: &DesignService, kind: &str, id: &str) -> DesignArtifact {
+        svc.store()
+            .find_by_source(kind, id)
+            .await
+            .unwrap()
+            .expect("mirrored")
+    }
+
+    #[tokio::test]
+    async fn an_oversize_scene_flags_its_mirror_instead_of_staying_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::db::test_pool().await;
+        let svc = DesignService::new(pool.clone(), dir.path(), None);
+        seed_scene(&pool, "sc1", None, &scene_doc("flowchart TD\n A --> B\n")).await;
+        let src = SourceRef::Scene("sc1".into());
+        assert_eq!(sync_one(&svc, &src).await.unwrap().created, 1);
+        let before = mirror_of(&svc, SOURCE_SCENE, "sc1").await;
+        // The board grows past the cap (a stored board keeps image refs; the
+        // copy inlines them, so only the copy is over).
+        touch_scene(&pool, "sc1", &"x".repeat(format::MAX_CONTENT_BYTES)).await;
+        let r = sync_one(&svc, &src).await.unwrap();
+        assert_eq!((r.synced, r.skipped), (0, 1), "{r:?}");
+        let fresh = svc.store().require_artifact(&before.id).await.unwrap();
+        let reason = fresh.meta["sync_error"]["reason"]
+            .as_str()
+            .expect("flagged");
+        assert!(reason.contains("25 MB"), "{reason}");
+        assert!(fresh.meta["sync_error"]["at"].is_string());
+        assert_eq!(
+            fresh.head_version_id, before.head_version_id,
+            "the last good copy is kept"
+        );
+        assert_ne!(fresh.status, "archived");
+        // The same failure again writes nothing new (`at` = first fell behind).
+        sync_one(&svc, &src).await.unwrap();
+        let again = svc.store().require_artifact(&before.id).await.unwrap();
+        assert_eq!(again.meta["sync_error"], fresh.meta["sync_error"]);
+    }
+
+    #[tokio::test]
+    async fn a_sync_error_is_cleared_by_the_next_successful_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::db::test_pool().await;
+        let svc = DesignService::new(pool.clone(), dir.path(), None);
+        seed_scene(&pool, "sc1", None, &scene_doc("flowchart TD\n A --> B\n")).await;
+        let src = SourceRef::Scene("sc1".into());
+        sync_one(&svc, &src).await.unwrap();
+        let a = mirror_of(&svc, SOURCE_SCENE, "sc1").await;
+        set_scene_doc(&pool, "sc1", &missing_image_doc()).await;
+        sync_one(&svc, &src).await.unwrap();
+        let behind = svc.store().require_artifact(&a.id).await.unwrap();
+        assert_eq!(
+            behind.meta["sync_error"]["reason"],
+            "one of its images is missing"
+        );
+        // Fixed at the source → synced, and the flag is gone.
+        touch_scene(&pool, "sc1", "flowchart TD\n A --> C\n").await;
+        assert_eq!(sync_one(&svc, &src).await.unwrap().synced, 1);
+        let ok = svc.store().require_artifact(&a.id).await.unwrap();
+        assert!(ok.meta.get("sync_error").is_none(), "{}", ok.meta);
+        // Adopted: the same holds for side versions.
+        svc.adopt(&a.id, &Author::user("u1")).await.unwrap();
+        set_scene_doc(&pool, "sc1", &missing_image_doc()).await;
+        sync_one(&svc, &src).await.unwrap();
+        let behind = svc.store().require_artifact(&a.id).await.unwrap();
+        assert!(behind.meta["sync_error"]["reason"].is_string());
+        assert_eq!(behind.meta["adopted"], true);
+        touch_scene(&pool, "sc1", "flowchart TD\n A --> D\n").await;
+        assert_eq!(sync_one(&svc, &src).await.unwrap().side_versions, 1);
+        let ok = svc.store().require_artifact(&a.id).await.unwrap();
+        assert!(ok.meta.get("sync_error").is_none(), "{}", ok.meta);
+        assert_eq!(ok.meta["adopted"], true);
+    }
+
+    #[tokio::test]
+    async fn a_scene_with_no_mirror_stays_listed_as_unmirrored() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::db::test_pool().await;
+        let svc = DesignService::new(pool.clone(), dir.path(), None);
+        seed_scene(&pool, "sc1", None, &missing_image_doc()).await;
+        for _ in 0..2 {
+            let r = run(&svc).await.unwrap();
+            assert_eq!((r.created, r.skipped, r.archived), (0, 1, 0), "{r:?}");
+            assert!(r.errors.iter().any(|e| e.contains("sc1")), "{r:?}");
+        }
+        let r = sync_one(&svc, &SourceRef::Scene("sc1".into()))
+            .await
+            .unwrap();
+        assert_eq!(r.created, 0, "{r:?}");
+        // No Hall copy: the Canvas route opens the board in the old editor.
+        assert!(svc
+            .store()
+            .find_by_source(SOURCE_SCENE, "sc1")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_source_file_flags_its_mirror_and_never_archives_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::db::test_pool().await;
+        let svc = DesignService::new(pool.clone(), dir.path(), None);
+        seed_story(&pool, "st1", "w1").await;
+        seed_attachment(
+            &pool,
+            dir.path(),
+            "att1",
+            "st1",
+            "mockup",
+            "text/html",
+            b"<h1>One</h1>",
+            None,
+        )
+        .await;
+        run(&svc).await.unwrap();
+        let a = mirror_of(&svc, SOURCE_ATTACHMENT, "att1").await;
+        // The file is unavailable (a disk not mounted) while its row stays.
+        std::fs::remove_file(dir.path().join(format!("{ATTACH_ROOT}/st1/att1.bin"))).unwrap();
+        sqlx::query("UPDATE product_attachments SET updated_at = ? WHERE id = 'att1'")
+            .bind(Utc::now().to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let src = SourceRef::Attachment("att1".into());
+        assert_eq!(sync_one(&svc, &src).await.unwrap().archived, 0);
+        assert_eq!(run(&svc).await.unwrap().archived, 0);
+        let fresh = svc.store().require_artifact(&a.id).await.unwrap();
+        assert_ne!(fresh.status, "archived");
+        assert!(fresh.meta.get("source_missing").is_none());
+        let reason = fresh.meta["sync_error"]["reason"]
+            .as_str()
+            .expect("flagged");
+        assert!(reason.starts_with("its file couldn't be read"), "{reason}");
+        assert_eq!(fresh.head_version_id, a.head_version_id);
     }
 }

@@ -24,6 +24,14 @@
 //!    workflow to a channel/chat(/thread), so any message there starts it
 //!    without a keyword ([`binding_matches`]).
 //!
+//! Every parser here reads PLAIN text — what the person typed. Slack's wire
+//! encoding (`&amp;`, `<@U…>`, `<url|label>`) is decoded once, by the Slack
+//! listener (`otto_channels::slack::decode_slack_text`), before the bridge
+//! hands the message on; Telegram and webhook text never carried it. So no
+//! entity decoding and no `<…>` stripping happens here: a second pass mangled
+//! what the person wrote (`Name: A <B>` → `A B`, `x < 5 and y > 3` →
+//! `x  5 and y  3`, a typed `&lt;` → `<`).
+//!
 //! All three are pure-parsed + unit-tested; [`WorkflowChatTriggerImpl::try_start`]
 //! resolves in that order and starts a run whose input carries the parsed
 //! fields (so the first node — e.g. a "prepare relevant info" agent — can
@@ -271,12 +279,12 @@ note in the thread saying so.\n\
 context for all agents; also how the PR is found when `PR:` is omitted.\n\
 • *Msg / Goals* — free-text instructions and goal list; agents read them verbatim.";
 
-/// Parse a short chat message into a control command. Slack tokens are stripped,
-/// whitespace normalized, and only SHORT (≤ 48 char) command-like messages match
-/// — a synonym as the whole message or its leading word — so ordinary thread
+/// Parse a short chat message into a control command. Whitespace is
+/// normalized, and only SHORT (≤ 48 char) command-like messages match — a
+/// synonym as the whole message or its leading word — so ordinary thread
 /// chatter is ignored. `None` ⇒ not a control command.
 pub fn parse_wf_control(text: &str) -> Option<WfControl> {
-    let norm = strip_slack_tokens(text).to_lowercase();
+    let norm = text.to_lowercase();
     let norm = norm.split_whitespace().collect::<Vec<_>>().join(" ");
     if norm.is_empty() || norm.chars().count() > 48 {
         return None;
@@ -366,25 +374,20 @@ pub struct WorkflowCommand {
 
 /// Resolve `Jira ticket:` to an issue KEY.
 ///
-/// Slack rewrites a pasted link as `<url|title>`, and token-stripping keeps the
-/// human-readable label — so `Jira ticket: https://…/browse/GS-123` arrived as
-/// the page's TITLE. That was then used as the key: the fetch 404'd and the run
-/// continued with no ticket at all, silently. The key is still in the original
-/// message, so look for one in the stripped value first, then in the raw text
-/// (`/browse/KEY`, or a bare `KEY` token). Only when nothing looks like a key is
-/// the value passed through unchanged.
+/// Slack rewrites a pasted link as `<url|title>`, which the listener decodes
+/// to `title (url)` — the page TITLE first. Taking the title as the key made
+/// the fetch 404 and the run continue with no ticket at all, silently; taking
+/// the first key-shaped word of it picks `COVID-19` out of "Fix COVID-19
+/// banner". So the key in a `/browse/KEY` URL in the value wins, then a bare
+/// `KEY` token in the value, then a `/browse/KEY` anywhere in the message.
+/// Only when nothing looks like a key is the value passed through unchanged.
 fn resolve_jira_key(value: Option<String>, raw: &str) -> Option<String> {
     let value = value?;
-    if let Some(k) = find_jira_key(&value) {
-        return Some(k);
-    }
-    // The label lost it; the raw message still has `<https://…/browse/KEY|…>`.
-    if let Some(rest) = raw.split("/browse/").nth(1) {
-        if let Some(k) = find_jira_key(rest) {
-            return Some(k);
-        }
-    }
-    Some(value)
+    let browsed = |s: &str| s.split("/browse/").nth(1).and_then(find_jira_key);
+    let key = browsed(value.as_str())
+        .or_else(|| find_jira_key(&value))
+        .or_else(|| browsed(raw));
+    Some(key.unwrap_or(value))
 }
 
 /// First `ABC-123`-shaped token in `s`: uppercase letters, `-`, then digits.
@@ -451,92 +454,32 @@ fn split_branch_fields(
     (None, Some(b), Some(note))
 }
 
-/// Strip Slack entity tokens, then decode Slack's HTML escapes, so the
-/// structured parser sees the text the user actually typed: `<@U…>` mentions,
-/// `<#C…>` channel refs and `<!here>` are removed; `<url|label>` links keep
-/// their label; `&amp;`/`&lt;`/`&gt;` become `&`/`<`/`>`.
-///
-/// The ORDER matters and is the whole point of doing both here. Slack escapes
-/// `&`, `<` and `>` in message text, so a `<` that survives to the token scan
-/// can only be a real Slack token — a literal one the user typed arrives as
-/// `&lt;`. Stripping first and decoding after therefore can't turn a user's
-/// `<foo>` into a token, and can't leave an entity inside a link label.
-///
-/// Without the decode, `&` in a workflow name was fatal: `Name: A &amp; B` never
-/// matched the workflow actually called `A & B` (the lookup is an exact
-/// `name = ? COLLATE NOCASE`), so `try_start` returned `None` and the message
-/// fell through to a plain chat session with no error anywhere.
-pub(crate) fn strip_slack_tokens(text: &str) -> String {
-    decode_html_entities(&strip_entity_tokens(text))
-}
-
-/// Slack's `&amp;` / `&lt;` / `&gt;` → `&` / `<` / `>`. Single left-to-right
-/// pass, so `&amp;lt;` decodes to the literal `&lt;` rather than to `<`.
-/// Slack escapes exactly these three characters and nothing else, so this
-/// deliberately does NOT implement general HTML entity decoding — inventing
-/// extra entities would corrupt text Slack never escaped.
-fn decode_html_entities(text: &str) -> String {
-    const ENTITIES: &[(&str, char)] = &[("&amp;", '&'), ("&lt;", '<'), ("&gt;", '>')];
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = rest.find('&') {
-        out.push_str(&rest[..at]);
-        let tail = &rest[at..];
-        match ENTITIES.iter().find(|(pat, _)| tail.starts_with(pat)) {
-            Some((pat, ch)) => {
-                out.push(*ch);
-                rest = &tail[pat.len()..];
-            }
-            None => {
-                out.push('&');
-                rest = &tail[1..];
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-/// The token pass of [`strip_slack_tokens`] — see there for why it runs first.
-fn strip_entity_tokens(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut i = 0;
-    let bytes = text.as_bytes();
-    while i < text.len() {
-        if bytes[i] == b'<' {
-            if let Some(rel) = text[i..].find('>') {
-                let inner = &text[i + 1..i + rel];
-                if inner.starts_with('@') || inner.starts_with('#') || inner.starts_with('!') {
-                    // mention / channel / special command → drop entirely
-                } else if let Some(pipe) = inner.find('|') {
-                    out.push_str(&inner[pipe + 1..]); // <url|label> → label
-                } else {
-                    out.push_str(inner); // <url> → url
-                }
-                i += rel + 1;
-                continue;
-            }
-        }
-        let ch = text[i..].chars().next().unwrap();
-        out.push(ch);
-        i += ch.len_utf8();
-    }
-    out
+/// Whether plain message text @-mentions someone (`@dana`, `@here`) — what a
+/// `mention_only` binding asks for. Slack mentions reach this decoded
+/// (`<@U1|dana>` → `@dana`); the old `contains("<@")` test therefore never
+/// matched after the listener started decoding. An e-mail address
+/// (`a@b.co`) is not a mention.
+pub(crate) fn mentions_someone(text: &str) -> bool {
+    text.split_whitespace().any(|word| {
+        word.strip_prefix('@')
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(char::is_alphanumeric)
+    })
 }
 
 /// Parse a structured workflow command. Returns `None` unless the text declares
-/// `Action: Workflow` and carries a non-empty `Name:`. Tolerant of a leading
-/// Slack `@bot` mention.
+/// `Action: Workflow` and carries a non-empty `Name:`. Tolerant of an `@bot`
+/// line above the fields (the Slack listener already strips a leading bot
+/// mention).
 pub fn parse_workflow_command(text: &str) -> Option<WorkflowCommand> {
-    let cleaned = strip_slack_tokens(text);
-    if !cleaned.to_lowercase().contains("action:") {
+    if !text.to_lowercase().contains("action:") {
         return None;
     }
     let mut fields: HashMap<String, String> = HashMap::new();
     let mut goals: Vec<String> = vec![];
     let mut current_label: Option<String> = None;
 
-    for raw_line in cleaned.lines() {
+    for raw_line in text.lines() {
         let line = raw_line.trim();
         // Bullet line under the Goals label → a goal item.
         let bullet = line
@@ -643,7 +586,7 @@ const RUN_KEYWORDS: &[(&str, bool)] = &[("run workflow", true), ("workflow", tru
 
 /// Parse the simplified `run <name>: <prompt>` / `workflow <name>: …` /
 /// `run workflow <name>: …` command. Keywords are matched case-insensitively
-/// at the start of the (mention-stripped) text and must be followed by
+/// at the start of the text and must be followed by
 /// whitespace. `name` is the text up to the first `:` on that same line;
 /// `prompt` is the remainder of that line plus all following lines. Returns
 /// `None` when no keyword matches or the first line carries no `:`.
@@ -653,8 +596,7 @@ const RUN_KEYWORDS: &[(&str, bool)] = &[("run workflow", true), ("workflow", tru
 /// gets a friendly "no such workflow" reply (explicit) or silently falls
 /// through to normal chat (bare `run`, which is also a common English word).
 pub fn parse_run_command(text: &str) -> Option<(String, String, bool)> {
-    let cleaned = strip_slack_tokens(text);
-    let trimmed = cleaned.trim_start();
+    let trimmed = text.trim_start();
     let lower = trimmed.to_lowercase();
 
     for &(kw, explicit) in RUN_KEYWORDS {
@@ -1128,12 +1070,11 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
         if is_own_ack(text) {
             return None;
         }
-        let stripped = strip_slack_tokens(text);
-        let stripped = stripped.trim();
+        let stripped = text.trim();
         if stripped.is_empty() {
             return None;
         }
-        let has_mention = text.contains("<@");
+        let has_mention = mentions_someone(text);
         let triggers_repo = TriggersRepo::new(self.ctx.pool().clone());
         let triggers = match triggers_repo.list_enabled_by_kind("chat").await {
             Ok(t) => t,
@@ -1530,15 +1471,23 @@ mod tests {
 
     #[test]
     fn jira_ticket_survives_a_slack_link_unfurl() {
-        // What Slack actually delivered: the pasted Jira URL rewritten as
-        // `<url|title>`. Keeping the label made the "key" the page title, the
-        // fetch 404'd, and the run reviewed with no ticket.
+        // A pasted Jira URL that Slack rewrote as `<url|title>`, as the
+        // listener delivers it: `title (url)`. Keeping only the title made the
+        // "key" the page title, the fetch 404'd, and the run reviewed with no
+        // ticket.
         let text = "Action: Workflow\nName: PR Reviewer\n\
-                    Jira ticket: <https://acme.atlassian.net/browse/GS-16578|TMX Update on ABC \
-                    (Imperial wins) - Org Separation, Affiliate ID, DOB Format>\n\
+                    Jira ticket: TMX Update on ABC (Imperial wins) - Org Separation, Affiliate \
+                    ID, DOB Format (https://acme.atlassian.net/browse/GS-16578)\n\
                     Working Directory: /r\n";
         let cmd = parse_workflow_command(text).expect("should parse");
         assert_eq!(cmd.jira_ticket.as_deref(), Some("GS-16578"));
+        // A key-shaped word in the title never beats the key in the URL.
+        let titled = parse_workflow_command(
+            "Action: Workflow\nName: X\n\
+             Jira ticket: Fix COVID-19 banner (https://acme.atlassian.net/browse/GS-7)\n",
+        )
+        .unwrap();
+        assert_eq!(titled.jira_ticket.as_deref(), Some("GS-7"));
 
         // A bare key, a bare URL, and a key with surrounding words all resolve.
         for (input, want) in [
@@ -1608,7 +1557,10 @@ mod tests {
             "re-review",
             "rereview",
             "review again",
-            "<@U1> re-review please",
+            // The Slack listener has already stripped the leading bot mention
+            // and decoded any other one to `@name`.
+            "re-review please",
+            "re-review @dana",
         ] {
             assert_eq!(parse_wf_control(s), Some(ReReview), "{s}");
         }
@@ -1656,48 +1608,69 @@ mod tests {
     }
 
     #[test]
-    fn tolerates_leading_slack_mention() {
-        // Slack prefixes the message with `<@Ubot>` — on the same line as the
-        // first field. This previously broke parsing (the run went to a chat
-        // session instead of the workflow).
-        let inline = "<@U08ABCDEF> Action: Workflow\nName: Write tests for a story\nMsg: go\n";
-        let cmd = parse_workflow_command(inline).expect("inline mention should parse");
-        assert_eq!(cmd.name, "Write tests for a story");
-
-        let own_line = "<@U08ABCDEF>\nAction: Workflow\nName: Write tests for a story\n";
+    fn tolerates_a_bot_mention_line_above_the_fields() {
+        // The Slack listener strips a LEADING `<@Ubot>` before the bridge
+        // (an inline one used to send the run to a chat session); a mention
+        // on its own line above the fields is not a label and is skipped.
+        let own_line = "@otto\nAction: Workflow\nName: Write tests for a story\n";
         assert_eq!(
             parse_workflow_command(own_line).unwrap().name,
             "Write tests for a story"
         );
     }
 
+    /// The parsers read the text as the person typed it — what the Slack
+    /// listener delivers after its one decode, and what Telegram / webhooks
+    /// send as is. A second decode-and-strip pass here used to drop any
+    /// `<…>` and decode entities again.
     #[test]
-    fn slack_html_escapes_are_decoded_in_field_values() {
-        // Slack escapes `&`, `<` and `>` in message text, so a workflow whose
-        // name contains an ampersand arrived as `A &amp; B` and never matched
-        // the row named `A & B` (an exact `name = ? COLLATE NOCASE` lookup) —
-        // try_start returned None and the trigger silently became a chat
-        // session. Every `… fetch &amp; review` workflow was unreachable from
-        // Slack because of this.
-        let text =
-            "Action: Workflow\nName: Game Attributes &amp; Games Update\nMsg: a &lt;b&gt; c\n";
-        let cmd = parse_workflow_command(text).unwrap();
-        assert_eq!(cmd.name, "Game Attributes & Games Update");
-        assert_eq!(cmd.msg, "a <b> c");
+    fn plain_text_is_never_decoded_or_stripped_again() {
+        let msg = |line: &str| {
+            parse_workflow_command(&format!("Action: Workflow\nName: X\n{line}\n"))
+                .unwrap_or_else(|| panic!("{line} should parse"))
+                .msg
+        };
+        let wf = |text: &str| parse_workflow_command(text).unwrap();
+
+        // Angle brackets in a name: `A <B>` used to become `A B`, the lookup
+        // missed and the trigger fell through to a plain chat.
+        assert_eq!(wf("Action: Workflow\nName: A <B>\n").name, "A <B>");
+        // An ampersand in a name — the known past bug (`R&amp;D` never
+        // matched the row `R&D`): the listener decodes it, nothing re-decodes.
+        assert_eq!(wf("Action: Workflow\nName: R&D\n").name, "R&D");
+        assert_eq!(
+            wf("Action: Workflow\nName: Game Attributes & Games Update\n").name,
+            "Game Attributes & Games Update"
+        );
+        // Comparisons and generics in Msg survive byte for byte.
+        assert_eq!(msg("Msg: x < 5 and y > 3"), "x < 5 and y > 3");
+        assert_eq!(msg("Msg: return Vec<String>"), "return Vec<String>");
+        // A literal `&lt;` the person typed stays `&lt;`.
+        assert_eq!(msg("Msg: write &lt; here"), "write &lt; here");
+        // A Slack mention / link inside a trigger, as the listener decodes
+        // them (`<@U1|dana>` → `@dana`, `<url|the PR>` → `the PR (url)`).
+        assert_eq!(
+            msg("Msg: ask @dana about the PR (https://x.io/pr/7)"),
+            "ask @dana about the PR (https://x.io/pr/7)"
+        );
+
+        // Telegram text was never Slack-escaped and goes through the same
+        // parsers: brackets in a run command reach the workflow as typed.
+        let (n, p, _) =
+            parse_run_command("run PR Reviewer: check a < b && c > d in <Foo>").unwrap();
+        assert_eq!(n, "PR Reviewer");
+        assert_eq!(p, "check a < b && c > d in <Foo>");
+        // A control word followed by brackets is still the control.
+        assert_eq!(parse_wf_control("status <now>"), Some(WfControl::Status));
     }
 
     #[test]
-    fn entity_decode_runs_after_token_stripping() {
-        // A `<` the user actually typed reaches us as `&lt;`, so it must never
-        // be re-scanned as a Slack token: decoding strictly after the token
-        // pass is what guarantees that. `&amp;lt;` is a literal `&lt;`, not `<`.
-        assert_eq!(decode_html_entities("&amp;lt;"), "&lt;");
-        assert_eq!(strip_slack_tokens("&lt;@U123&gt;"), "<@U123>");
-        assert_eq!(strip_slack_tokens("<@U123> hi"), " hi");
-        // A bare `&` (Slack does escape it, but be forgiving) survives intact.
-        assert_eq!(strip_slack_tokens("A & B &nbsp; C"), "A & B &nbsp; C");
-        // Entities inside a `<url|label>` label are decoded too.
-        assert_eq!(strip_slack_tokens("<https://x/y|A &amp; B>"), "A & B");
+    fn a_mention_is_an_at_word_not_an_email() {
+        assert!(mentions_someone("hey @otto review this"));
+        assert!(mentions_someone("@here deploy"));
+        assert!(!mentions_someone("mail a@b.co about it"));
+        assert!(!mentions_someone("no mention <@U1> raw"));
+        assert!(!mentions_someone("a lone @ sign"));
     }
 
     #[test]
@@ -1730,7 +1703,8 @@ mod tests {
             parse_run_command("Action: Workflow\nName: x").is_none(),
             "legacy handled elsewhere; 'action' is not a run keyword"
         );
-        let (n, _, _) = parse_run_command("<@U08AB> run Tests: go").unwrap(); // mention stripped
+        // Leading whitespace (left by the listener's mention strip) is fine.
+        let (n, _, _) = parse_run_command("  run Tests: go").unwrap();
         assert_eq!(n, "Tests");
     }
 

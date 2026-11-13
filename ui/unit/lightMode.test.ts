@@ -116,6 +116,22 @@ test('set() remembers the choice on this device and leaves a hidden page for Thr
   setModuleScope(null);
 });
 
+test('openFullOnce: a terminal-session link opens in the full app for that visit only, and the choice is kept', () => {
+  const f = loadLight({ stored: '1', route: ['agents', 's1'] });
+  assert.equal(f.light.lightMode.active, true);
+  f.light.lightMode.openFullOnce('agents/s1');
+  assert.equal(f.light.lightMode.active, false, 'the session shows');
+  assert.equal(f.store.get('otto_phone_light'), '1', 'the device choice is unchanged');
+  f.router.parts = ['threads'];
+  assert.equal(f.light.lightMode.active, true, 'light is back once they move on');
+  f.router.parts = ['agents', 's2'];
+  assert.equal(f.light.lightMode.active, true, 'another session is still gated');
+  f.router.parts = ['agents', 's1'];
+  f.light.lightMode.set(true);
+  assert.equal(f.light.lightMode.active, true, 'switching clears the visit');
+  setModuleScope(null);
+});
+
 test('a stored choice from an earlier visit is read at boot', () => {
   assert.equal(loadLight({ stored: '1' }).light.lightMode.chosen, true);
   assert.equal(loadLight({ stored: '0' }).light.lightMode.chosen, false);

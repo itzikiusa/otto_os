@@ -27,6 +27,7 @@ use otto_state::WorkspacesRepo;
 use serde::{Deserialize, Serialize};
 
 use crate::library::Library;
+use crate::user_skills::KeptCopy;
 use crate::{config, materialize};
 
 /// Dependencies the context router needs from the host application state.
@@ -181,7 +182,7 @@ async fn put_skill<C: ContextCtx>(
     Extension(user): Extension<AuthUser>,
     Path(name): Path<String>,
     Json(req): Json<UpsertLibraryEntryReq>,
-) -> ApiResult<Json<LibrarySkill>> {
+) -> ApiResult<Json<WithKept<LibrarySkill>>> {
     require_root(&user)?;
     // `write_atomic` fsyncs (F_FULLFSYNC on macOS) twice: off the runtime.
     let library = s.library().clone();
@@ -189,10 +190,11 @@ async fn put_skill<C: ContextCtx>(
         library
             .put_skill(&name, &req.body)
             .map_err(|e| Error::Invalid(format!("put skill: {e}")))?;
-        refresh_provider_copies(&library, &name);
-        library
+        let kept_copies = refresh_provider_copies(&library, &name);
+        let inner = library
             .get_skill(&name)
-            .ok_or_else(|| Error::Internal("skill not found after put".into()))
+            .ok_or_else(|| Error::Internal("skill not found after put".into()))?;
+        Ok::<_, Error>(WithKept { inner, kept_copies })
     })
     .await??;
     Ok(Json(entry))
@@ -202,21 +204,47 @@ async fn delete_skill<C: ContextCtx>(
     State(s): State<C>,
     Extension(user): Extension<AuthUser>,
     Path(name): Path<String>,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<Response> {
     require_root(&user)?;
     // The tree is moved into `<library>/skills-backup/`, not destroyed.
     let library = s.library().clone();
-    let target = name.clone();
-    off_runtime(move || library.delete_skill(&target))
-        .await?
-        .map_err(|e| Error::Invalid(format!("delete skill: {e}")))?;
-    // Also remove the user-level provider copies Otto owns (per-dir manifest);
-    // a user-authored skill of the same name is left untouched. Best-effort: the
-    // library delete already succeeded, so a provider-dir hiccup only warns.
-    if let Err(e) = crate::user_skills::uninstall(&name) {
-        tracing::warn!(skill = %name, error = %e, "remove user-level skill copies failed");
+    let kept = off_runtime(move || {
+        library
+            .delete_skill(&name)
+            .map_err(|e| Error::Invalid(format!("delete skill: {e}")))?;
+        // Also remove the user-level provider copies Otto owns (per-dir
+        // manifest); a user-authored skill of the same name is left untouched
+        // and an edited owned copy is moved to `provider-skills-backup/`.
+        // Best-effort: the library delete already succeeded, so a
+        // provider-dir hiccup only warns.
+        Ok::<_, Error>(
+            crate::user_skills::uninstall(&library.root, &name).unwrap_or_else(|e| {
+                tracing::warn!(skill = %name, error = %e, "remove user-level skill copies failed");
+                Vec::new()
+            }),
+        )
+    })
+    .await??;
+    Ok(kept_reply(kept))
+}
+
+/// A reply plus `kept_copies`: the hand-edited provider copies the write moved
+/// to `<library>/provider-skills-backup/` (omitted when there are none).
+#[derive(Serialize)]
+struct WithKept<T: Serialize> {
+    #[serde(flatten)]
+    inner: T,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    kept_copies: Vec<KeptCopy>,
+}
+
+/// 204 as before, or 200 `{ "kept_copies": [...] }` when a hand-edited
+/// provider copy was moved aside.
+fn kept_reply(kept_copies: Vec<KeptCopy>) -> Response {
+    if kept_copies.is_empty() {
+        return StatusCode::NO_CONTENT.into_response();
     }
-    Ok(StatusCode::NO_CONTENT)
+    Json(serde_json::json!({ "kept_copies": kept_copies })).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -313,18 +341,27 @@ struct WriteSkillFileBody {
     /// `current_hash` (`null` when the file is gone).
     #[serde(default)]
     if_hash: Option<String>,
+    /// Reply `{ files, kept_copies? }` instead of the bare file list, so the
+    /// editor can say where a hand-edited provider copy was kept.
+    #[serde(default)]
+    report: bool,
 }
 
 /// After a Library edit, re-copy the skill into the provider skill folders
 /// whose manifest says Otto owns that copy (`~/.claude/skills`, …), so the
-/// CLIs run what the person just saved. Best effort: the Library write already
-/// succeeded, so a provider-dir hiccup only warns.
-fn refresh_provider_copies(lib: &Library, name: &str) {
+/// CLIs run what the person just saved. Returns the hand-edited copies that
+/// were moved aside first. Best effort: the Library write already succeeded,
+/// so a provider-dir hiccup only warns.
+fn refresh_provider_copies(lib: &Library, name: &str) -> Vec<KeptCopy> {
     let Some(src) = lib.skill_dir(name).filter(|d| d.is_dir()) else {
-        return;
+        return Vec::new();
     };
-    if let Err(e) = crate::user_skills::refresh_owned(name, &src) {
-        tracing::warn!(skill = %name, error = %e, "refresh user-level skill copies failed");
+    match crate::user_skills::refresh_owned(&lib.root, name, &src) {
+        Ok(report) => report.kept,
+        Err(e) => {
+            tracing::warn!(skill = %name, error = %e, "refresh user-level skill copies failed");
+            Vec::new()
+        }
     }
 }
 
@@ -339,6 +376,7 @@ async fn put_skill_file<C: ContextCtx>(
         return Err(Error::NotFound(format!("skill '{name}'")).into());
     }
     let lib = s.library().clone();
+    let report = req.report;
     let written = off_runtime(move || {
         let written = match (req.create_only, req.if_hash.as_deref()) {
             (true, _) => lib.create_skill_file(&name, &req.path, &req.content),
@@ -354,12 +392,17 @@ async fn put_skill_file<C: ContextCtx>(
             }
         };
         written.map_err(|e| map_io("write skill file", e))?;
-        refresh_provider_copies(&lib, &name);
-        Ok(Ok(lib.list_skill_files(&name)))
+        let kept = refresh_provider_copies(&lib, &name);
+        Ok(Ok((lib.list_skill_files(&name), kept)))
     })
     .await??;
     match written {
-        Ok(files) => Ok(Json(files).into_response()),
+        Ok((files, kept_copies)) if report => Ok(Json(serde_json::json!({
+            "files": files,
+            "kept_copies": kept_copies,
+        }))
+        .into_response()),
+        Ok((files, _)) => Ok(Json(files).into_response()),
         Err(stale) => Ok(stale_file_response(stale.current)),
     }
 }
@@ -381,17 +424,16 @@ async fn delete_skill_file<C: ContextCtx>(
     Extension(user): Extension<AuthUser>,
     Path(name): Path<String>,
     Query(q): Query<FileQuery>,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<Response> {
     require_root(&user)?;
     let lib = s.library().clone();
-    off_runtime(move || {
+    let kept = off_runtime(move || {
         lib.delete_skill_file(&name, &q.path)
             .map_err(|e| map_io("delete skill file", e))?;
-        refresh_provider_copies(&lib, &name);
-        Ok::<_, Error>(())
+        Ok::<_, Error>(refresh_provider_copies(&lib, &name))
     })
     .await??;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(kept_reply(kept))
 }
 
 async fn create_skill<C: ContextCtx>(
@@ -421,7 +463,7 @@ async fn import_skill<C: ContextCtx>(
     Extension(user): Extension<AuthUser>,
     Query(q): Query<ImportQuery>,
     body: Bytes,
-) -> ApiResult<Json<LibrarySkill>> {
+) -> ApiResult<Json<WithKept<LibrarySkill>>> {
     require_root(&user)?;
     if body.is_empty() {
         return Err(Error::Invalid("empty upload".into()).into());
@@ -431,10 +473,11 @@ async fn import_skill<C: ContextCtx>(
         let name = library
             .import_zip(&body, q.name.as_deref())
             .map_err(|e| map_io("import skill", e))?;
-        refresh_provider_copies(&library, &name);
-        library
+        let kept_copies = refresh_provider_copies(&library, &name);
+        let inner = library
             .get_skill(&name)
-            .ok_or_else(|| Error::Internal("skill not found after import".into()))
+            .ok_or_else(|| Error::Internal("skill not found after import".into()))?;
+        Ok::<_, Error>(WithKept { inner, kept_copies })
     })
     .await??;
     Ok(Json(skill))

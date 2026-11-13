@@ -425,7 +425,9 @@ fn extra_daemon_ports() -> &'static std::sync::Mutex<Vec<u16>> {
 }
 
 /// Record another port this daemon listens on (the opt-in network listener
-/// may use its own port), so allow-local fetches refuse it too.
+/// may use its own port) — or one of its own loopback services listens on
+/// (the embedded ClickHouse HTTP port, a plugin sidecar) — so allow-local
+/// fetches refuse it too.
 pub fn register_daemon_port(port: u16) {
     let mut ports = extra_daemon_ports()
         .lock()
@@ -458,6 +460,27 @@ fn is_metadata_v4(v4: Ipv4Addr) -> bool {
         || v4 == Ipv4Addr::new(100, 100, 100, 200)
         // Oracle Cloud classic metadata.
         || v4 == Ipv4Addr::new(192, 0, 0, 192)
+}
+
+/// Well-known names of cloud-metadata services. Locally they resolve to an
+/// address [`is_metadata_ip`] refuses; through a tunnel the FAR end resolves
+/// them, so a tunnelled fetch refuses the name itself ([`metadata_refusal`]).
+pub const METADATA_HOSTNAMES: &[&str] = &[
+    "metadata.google.internal",
+    "metadata.goog",
+    "metadata",
+    "instance-data",
+    "instance-data.ec2.internal",
+    "metadata.tencentyun.com",
+];
+
+/// True when `host` (bare, any case, a trailing dot allowed) is one of
+/// [`METADATA_HOSTNAMES`].
+pub fn is_metadata_hostname(host: &str) -> bool {
+    let host = host.trim_end_matches('.');
+    METADATA_HOSTNAMES
+        .iter()
+        .any(|name| host.eq_ignore_ascii_case(name))
 }
 
 /// True for a cloud-metadata (or link-local) address, in any IPv6 form that
@@ -626,11 +649,86 @@ pub fn allow_local_client_builder() -> reqwest::ClientBuilder {
         .redirect(allow_local_redirect_policy())
 }
 
+/// A client builder for ONE credential-carrying fetch of `url` (an OAuth
+/// token endpoint) under the workspace's rule: the host is resolved and
+/// vetted ONCE ([`resolve_checked_for`]) and exactly those addresses are
+/// pinned, on top of the matching guarded resolver and redirect policy — so
+/// neither a second DNS answer nor a redirect hop reaches cloud metadata,
+/// Otto's own daemon or (strict mode) a private address. The caller may still
+/// replace the redirect policy with a stricter one.
+pub async fn pinned_client_builder_for(
+    url: &str,
+    allow_local: bool,
+) -> Result<reqwest::ClientBuilder, String> {
+    let (host, addrs) = resolve_checked_for(url, allow_local).await?;
+    let builder = if allow_local {
+        allow_local_client_builder()
+    } else {
+        guarded_client_builder()
+    };
+    // An IP literal is dialled as written (no resolver involved).
+    Ok(if host.parse::<IpAddr>().is_ok() {
+        builder
+    } else {
+        builder.resolve_to_addrs(&host, &addrs)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Tunnelled mode: the request rides an SSH / SOCKS tunnel and the bastion
+// resolves and dials. Private addresses behind it are what the tunnel is for,
+// but the bastion's own instance credentials must not be one GET away: a
+// metadata address literal or a well-known metadata name is still refused. (A
+// custom name the bastion resolves to a metadata address can't be seen here.)
+// ---------------------------------------------------------------------------
+
+/// Why a tunnelled fetch of `url` is refused, `None` when it may go.
+pub fn metadata_refusal(url: &reqwest::Url) -> Option<String> {
+    if !scheme_allowed(url.scheme()) {
+        return Some(format!("blocked url scheme: {}", url.scheme()));
+    }
+    let Some(host) = bare_host(url).filter(|h| !h.is_empty()) else {
+        return Some("url has no host".to_string());
+    };
+    let metadata = match host.parse::<IpAddr>() {
+        Ok(ip) => is_metadata_ip(ip),
+        Err(_) => is_metadata_hostname(host),
+    };
+    metadata.then(|| {
+        format!(
+            "blocked address {host}: cloud-metadata addresses are always blocked, through a \
+             tunnel too (SSRF guard)"
+        )
+    })
+}
+
+/// The pre-send check of a tunnelled request ([`metadata_refusal`], no DNS).
+pub fn precheck_url_tunnelled(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
+    metadata_refusal(&parsed).map_or(Ok(()), Err)
+}
+
+/// Redirect policy of a tunnelled client: caps hops at [`MAX_REDIRECTS`] and
+/// refuses a hop [`metadata_refusal`] refuses.
+pub fn tunnelled_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= MAX_REDIRECTS {
+            return attempt.error("too many redirects");
+        }
+        if metadata_refusal(attempt.url()).is_none() {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
+    })
+}
+
 /// Which outbound rules a fetch runs under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Guard {
-    /// No local vetting: the fetch rides a tunnel whose FAR end resolves and
-    /// dials (the local rules would only false-block bastion-only hosts).
+    /// The fetch rides a tunnel whose FAR end resolves and dials (the local
+    /// rules would only false-block bastion-only hosts): only cloud metadata
+    /// is refused ([`metadata_refusal`]).
     Tunnelled,
     /// The full guard: public addresses only (the default).
     Strict,
@@ -653,7 +751,7 @@ impl Guard {
     /// The DNS-free per-hop check of this guard (redirect targets).
     pub fn hop_allowed(self, url: &reqwest::Url) -> bool {
         match self {
-            Guard::Tunnelled => true,
+            Guard::Tunnelled => metadata_refusal(url).is_none(),
             Guard::Strict => check_url_literal(url),
             Guard::AllowLocal => check_url_literal_allow_local(url),
         }
@@ -1013,6 +1111,70 @@ mod tests {
         assert!(!Guard::Strict.hop_allowed(&url("http://10.0.0.1/")));
         assert!(Guard::AllowLocal.hop_allowed(&url("http://10.0.0.1/")));
         assert!(!Guard::AllowLocal.hop_allowed(&url("http://169.254.169.254/")));
+    }
+
+    /// F11: through a tunnel, private targets stay reachable but cloud
+    /// metadata — by literal or by well-known name — does not, per hop too.
+    #[test]
+    fn tunnelled_fetches_still_refuse_cloud_metadata() {
+        let url = |u: &str| reqwest::Url::parse(u).unwrap();
+        for u in [
+            "http://169.254.169.254/latest/meta-data/iam/",
+            "http://[fd00:ec2::254]/latest/",
+            "http://100.100.100.200/latest/meta-data/",
+            "http://[::ffff:169.254.169.254]/",
+            "http://metadata.google.internal/computeMetadata/v1/",
+            "http://METADATA.google.internal./x",
+            "http://metadata/computeMetadata/v1/",
+            "http://instance-data/latest/",
+            "file:///etc/passwd",
+        ] {
+            assert!(precheck_url_tunnelled(u).is_err(), "{u} must be refused");
+            assert!(!Guard::Tunnelled.hop_allowed(&url(u)), "{u} hop refused");
+        }
+        let err = precheck_url_tunnelled("http://169.254.169.254/").unwrap_err();
+        assert!(err.contains("always blocked"), "{err}");
+        for u in [
+            "http://10.0.0.5:8080/api",
+            "http://127.0.0.1:7700/", // the BASTION's loopback, not this Mac's
+            "http://internal.corp/",
+            "https://example.com/",
+        ] {
+            assert!(precheck_url_tunnelled(u).is_ok(), "{u} must stay reachable");
+            assert!(Guard::Tunnelled.hop_allowed(&url(u)), "{u} hop allowed");
+        }
+    }
+
+    /// F6: the pinned builder of a credentialed fetch refuses metadata and
+    /// the daemon's port with private addresses allowed, and every private
+    /// target without.
+    #[tokio::test]
+    async fn pinned_builder_refuses_metadata_and_the_daemon_in_both_modes() {
+        for allow_local in [false, true] {
+            for u in [
+                "http://169.254.169.254/oauth/token",
+                "http://[fd00:ec2::254]/token",
+                "http://127.0.0.1:7700/api/v1/auth/tokens",
+                "http://localhost:7700/token",
+            ] {
+                let err = pinned_client_builder_for(u, allow_local)
+                    .await
+                    .expect_err("refused");
+                assert!(err.contains("SSRF guard"), "{u} ({allow_local}): {err}");
+            }
+        }
+        assert!(
+            pinned_client_builder_for("http://127.0.0.1:3000/token", false)
+                .await
+                .is_err()
+        );
+        let builder = pinned_client_builder_for("http://127.0.0.1:3000/token", true)
+            .await
+            .expect("a dev Keycloak on localhost is allowed");
+        assert!(builder.build().is_ok());
+        assert!(pinned_client_builder_for("file:///etc/passwd", true)
+            .await
+            .is_err());
     }
 
     #[test]

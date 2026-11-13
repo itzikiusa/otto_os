@@ -79,6 +79,25 @@ pub(crate) fn update(dir: &Path, f: impl FnOnce(&mut ClaudeEntry)) {
     f(map.entry(dir.to_path_buf()).or_default());
 }
 
+/// "Check with Anthropic" was turned off: drop what the check put there, so
+/// the row falls back to what passive session events alone support. A check
+/// stamps every window it wrote with its own `checked_at` (`cli::check`), so
+/// those are exactly the windows to drop; a newer passive event for the same
+/// window carries its own time and stays. The plan only ever comes from a
+/// check. Clearing `checked_at` also makes a later re-enable check at once
+/// instead of finding a "fresh" answer that is no longer shown.
+pub(crate) fn forget_check(dir: &Path) {
+    let mut map = store().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(e) = map.get_mut(dir) else {
+        return;
+    };
+    if let Some(at) = e.checked_at.take() {
+        e.windows.retain(|_, w| w.observed_at != at);
+    }
+    e.check_error = None;
+    e.plan = None;
+}
+
 /// The config dir a session ran with: its `CLAUDE_CONFIG_DIR`, else the
 /// default `~/.claude` (the key the Usage page's default Claude row reads).
 pub fn claude_config_dir(config_dir: Option<&Path>) -> PathBuf {
@@ -608,6 +627,41 @@ mod tests {
             !windows.contains_key("seven_day"),
             "a null percent is not a window"
         );
+    }
+
+    #[test]
+    fn forgetting_the_check_keeps_only_passive_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("acc");
+        let checked = at("2026-11-12T10:00:00Z");
+        let resp = json!({"subscription_type":"max","rate_limits_available":true,"rate_limits":{
+            "five_hour":{"utilization":20.0,"resets_at":"2099-01-01T00:00:00Z"},
+            "seven_day":{"utilization":40.0,"resets_at":"2099-01-05T00:00:00Z"}}});
+        let Some(UsageAnswer::Windows { plan, windows, .. }) = parse_get_usage(&resp, checked)
+        else {
+            panic!("expected windows");
+        };
+        update(&cfg, |e| {
+            e.checked_at = Some(checked);
+            e.plan = plan;
+            e.windows = windows;
+        });
+        // A session reports the 5-hour window after the check.
+        let five = json!({"rate_limit_info":{"status":"allowed","rateLimitType":"five_hour","utilization":0.3}});
+        assert!(record_claude_rate_limit(
+            Some(&cfg),
+            &five,
+            checked + chrono::Duration::minutes(1)
+        ));
+        forget_check(&cfg);
+        let e = entry(&cfg).unwrap();
+        let ids: Vec<_> = e.windows.keys().cloned().collect();
+        assert_eq!(ids, ["five_hour"], "the check's weekly is gone");
+        assert_eq!(e.windows["five_hour"].used_percent, 30.0);
+        assert_eq!((e.plan, e.checked_at, e.check_error), (None, None, None));
+        // Nothing recorded for a dir: a no-op, not an insert.
+        forget_check(&dir.path().join("never"));
+        assert!(entry(&dir.path().join("never")).is_none());
     }
 
     #[test]

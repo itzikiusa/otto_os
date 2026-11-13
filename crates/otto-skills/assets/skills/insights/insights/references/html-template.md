@@ -233,8 +233,8 @@ friction `#dc2626` · satisfaction `#eab308` · tool errors `#dc2626` · helpful
 ## Time-of-Day chart (timezone-aware, unchanged)
 
 Embed `charts.hour_counts` as a JS `rawHourCounts` object and a timezone `<select>` that
-re-renders the histogram. Default to the detected `ISRAEL_UTC_OFFSET` (set `selected` on the
-matching `<option>` and pass it to the initial `renderHourChart(ISRAEL_UTC_OFFSET)`).
+re-renders the histogram. Default to the detected `LOCAL_UTC_OFFSET` (set `selected` on the
+matching `<option>` and pass it to the initial `renderHourChart(LOCAL_UTC_OFFSET)`).
 
 ## copyText helper (unchanged)
 

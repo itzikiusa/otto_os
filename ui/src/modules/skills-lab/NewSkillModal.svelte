@@ -11,6 +11,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { skillLabApi } from '../../lib/api/skillLab';
+  import { noteKeptCopies } from './bundledActions';
   import type { BundledSkillView, LibrarySkill } from '../../lib/api/types';
 
   type Template = 'blank' | 'bundled' | 'import';
@@ -88,7 +89,9 @@
     try {
       let s: LibrarySkill;
       if (template === 'import' && file) {
-        s = await skillLabApi.importZip(file);
+        const imported = await skillLabApi.importZip(file);
+        noteKeptCopies(imported.kept_copies); // re-importing a skill Otto copied to a CLI
+        s = imported;
       } else if (template === 'bundled') {
         const src = await skillLabApi.getBundled(fromBundled);
         // Keep the method, rename it: rewrite `name:`/`description:` when present.

@@ -21,6 +21,9 @@
   // Where the gate's way out goes: the light version's home, else Agents.
   const home = $derived(lightMode.active ? LIGHT_HOME : 'agents');
   const homeLabel = $derived(`Go to ${moduleLabel(home)}`);
+  // A link to one terminal session (e.g. "Continue on phone…" from Agents):
+  // open it in the full app for this visit rather than dead-end on the gate.
+  const sessionLink = $derived(mod === 'agents' && !!router.parts[1]);
 </script>
 
 <PageHeader title={locked ? label : 'Page not found'} />
@@ -28,7 +31,20 @@
   {#if lightHidden}
     <!-- Switching light on from a hidden page navigates to Threads: while
          that page loads, stay blank rather than flash this notice. -->
-    {#if !router.pendingTarget}
+    {#if router.pendingTarget}
+      <!-- blank while the switch navigates -->
+    {:else if sessionLink}
+      <EmptyState
+        variant="page"
+        icon="terminal"
+        title="This session runs in a terminal"
+        body="The light version leaves out Agents, where terminal sessions live. Open this one in the full app just for now; the light version comes back when you move on."
+        actionLabel="Open this session"
+        onaction={() => lightMode.openFullOnce(router.parts.join('/'))}
+      >
+        <button class="btn ghost" onclick={() => router.go(LIGHT_HOME)}>Go to Threads</button>
+      </EmptyState>
+    {:else}
       <EmptyState
         variant="page"
         icon="phone"

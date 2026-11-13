@@ -208,6 +208,14 @@ fn dangerous_detail_surfaces_cadence_and_destination() {
     assert!(d.contains("every 60 min"));
     assert!(d.contains("slack"));
     assert!(d.contains("do the thing"));
+    let args = serde_json::json!({
+        "name": "Nightly",
+        "destination": {"type": "email", "to": "team@example.test"},
+        "prompt": "p".repeat(450)
+    });
+    let d = dangerous_detail("otto.update_scheduled_task", &args);
+    assert!(d.contains("destination: email (team@example.test)"), "{d}");
+    assert!(d.ends_with(" … (+50 more characters)"), "{d}");
 }
 
 // ----- All-features expansion -----------------------------------------
@@ -2579,5 +2587,320 @@ fn agent_admin_tools_route_to_the_personal_agent_routes() {
     assert_eq!(
         r("personal_agent_list", json!({"session_id":"s"})).1,
         "/api/v1/personal-agents/team?session_id=s"
+    );
+}
+
+// ----- Round 3: outward writes an agent's own token may not make -------
+
+#[test]
+fn slack_writes_as_the_person_are_person_only_per_call() {
+    for (bare, args) in [
+        ("slack_post_message", json!({"as": "user", "text": "x"})),
+        ("slack_post_message", json!({"as": " me ", "text": "x"})),
+        ("slack_react", json!({"as": "user", "name": "eyes"})),
+        // The read cursor is always the person's own.
+        ("slack_mark_unread", json!({"ts": "1.0"})),
+    ] {
+        assert!(slack_write_as_me(bare, &args), "{bare} {args}");
+        assert!(call_is_person_only(bare, &args), "{bare} {args}");
+        assert!(
+            person_only_reason(bare).contains("as you in Slack"),
+            "{bare}"
+        );
+    }
+    // As the bot it stays the ordinary approval-gated write.
+    for (bare, args) in [
+        ("slack_post_message", json!({"text": "x"})),
+        ("slack_post_message", json!({"as": "bot", "text": "x"})),
+        ("slack_react", json!({"name": "eyes"})),
+        ("slack_read_messages", json!({"as": "user"})),
+    ] {
+        assert!(!call_is_person_only(bare, &args), "{bare} {args}");
+    }
+}
+
+#[test]
+fn outward_scheduled_tasks_are_person_only_per_call() {
+    let slack = json!({"type": "slack", "channel": "#team"});
+    for bare in ["create_scheduled_task", "update_scheduled_task"] {
+        assert!(
+            call_is_person_only(bare, &json!({"destination": slack})),
+            "{bare}"
+        );
+        for quiet in [
+            json!({"destination": {"type": "none"}}),
+            json!({"destination": {"type": ""}}),
+            json!({"destination": null}),
+            json!({"prompt": "x"}),
+        ] {
+            assert!(!call_is_person_only(bare, &quiet), "{bare} {quiet}");
+        }
+        assert!(person_only_reason(bare).contains("delivers outside Otto"));
+    }
+    // An update naming no destination, against the stored one.
+    for edit in [
+        json!({"prompt": "x"}),
+        json!({"skill": null}),
+        json!({"workflow_id": "wf"}),
+    ] {
+        assert!(task_update_is_person_only(&slack, &edit), "{edit}");
+        assert!(
+            !task_update_is_person_only(&json!({"type": "none"}), &edit),
+            "{edit}"
+        );
+    }
+    assert!(!task_update_is_person_only(
+        &slack,
+        &json!({"enabled": false})
+    ));
+}
+
+#[test]
+fn a_task_write_needs_a_person_only_when_it_sets_or_changes_outward_delivery() {
+    let none = json!({"type": "none"});
+    let slack = json!({"type": "slack", "channel": "#team"});
+    let other = json!({"type": "slack", "channel": "#everyone"});
+    // Create: an outward destination, nothing else.
+    assert!(task_write_needs_person(None, Some(&slack), &[]));
+    assert!(!task_write_needs_person(None, Some(&none), &[]));
+    assert!(!task_write_needs_person(None, None, &[]));
+    // Update of a task that delivers nowhere: only making it outward.
+    assert!(task_write_needs_person(Some(&none), Some(&slack), &[]));
+    assert!(!task_write_needs_person(Some(&none), None, &["prompt"]));
+    // Update of an outward task: a new target or a new prompt / skill /
+    // workflow; a retime, a pause, a resend or turning delivery off is not.
+    assert!(task_write_needs_person(Some(&slack), Some(&other), &[]));
+    for what in ["prompt", "skill", "workflow"] {
+        assert!(
+            task_write_needs_person(Some(&slack), None, &[what]),
+            "{what}"
+        );
+    }
+    assert!(!task_write_needs_person(Some(&slack), None, &[]));
+    assert!(!task_write_needs_person(Some(&slack), Some(&slack), &[]));
+    assert!(!task_write_needs_person(
+        Some(&slack),
+        None,
+        &["model", "cwd"]
+    ));
+    assert!(!task_write_needs_person(
+        Some(&slack),
+        Some(&none),
+        &["prompt"]
+    ));
+}
+
+#[tokio::test]
+async fn the_task_routes_refuse_only_an_agent_credential_and_name_the_tool() {
+    use otto_core::auth::{with_request_credential, RequestCredential};
+    let slack = json!({"type": "slack", "channel": "#team"});
+    let agent = RequestCredential {
+        agent: true,
+        root_withheld: false,
+    };
+    let err = with_request_credential(agent, async { agent_task_write(None, Some(&slack), &[]) })
+        .await
+        .expect_err("an agent's own token");
+    let msg = err.to_string();
+    assert!(
+        matches!(err, otto_core::Error::Forbidden(_))
+            && msg.contains("outward delivery needs a person")
+            && msg.contains("Scheduled Tasks")
+            && msg.contains("`otto.create_scheduled_task`"),
+        "{msg}"
+    );
+    let err = with_request_credential(agent, async {
+        agent_task_write(Some(&slack), None, &["prompt"])
+    })
+    .await
+    .expect_err("an agent rewriting an outward task");
+    assert!(err.to_string().contains("otto.update_scheduled_task"));
+    // Outside any request the credential is not a person (fails closed).
+    assert!(agent_task_write(None, Some(&slack), &[]).is_err());
+    let person = RequestCredential::default();
+    assert!(
+        with_request_credential(person, async { agent_task_write(None, Some(&slack), &[]) })
+            .await
+            .is_ok()
+    );
+    assert!(with_request_credential(agent, async {
+        agent_task_write(None, Some(&json!({"type": "none"})), &[])
+    })
+    .await
+    .is_ok());
+}
+
+#[test]
+fn creating_an_agent_or_setting_its_note_is_person_only_only_with_owner_fields() {
+    for args in [
+        json!({"workspace_id": "w", "name": "A", "soul_md": "do x"}),
+        json!({"workspace_id": "w", "name": "A", "provider": "codex"}),
+        json!({"workspace_id": "w", "name": "A", "delivery": {"type": "slack"}}),
+        json!({"workspace_id": "w", "name": "A", "browser": true}),
+        json!({"workspace_id": "w", "name": "A", "schedules": []}),
+    ] {
+        assert!(
+            call_is_person_only("create_personal_agent", &args),
+            "{args}"
+        );
+    }
+    for args in [
+        json!({"workspace_id": "w", "name": "A"}),
+        json!({"workspace_id": "w", "template": "slack-daily-digest", "primary": true}),
+        json!({"workspace_id": "w", "name": "A", "soul_md": null}),
+    ] {
+        assert!(
+            !call_is_person_only("create_personal_agent", &args),
+            "{args}"
+        );
+    }
+    assert!(call_is_person_only(
+        "personality_set",
+        &json!({"session_id": "s", "note": "be blunt"})
+    ));
+    assert!(call_is_person_only(
+        "personality_set",
+        &json!({"session_id": "s", "note": ""})
+    ));
+    assert!(!call_is_person_only(
+        "personality_set",
+        &json!({"session_id": "s", "preset": "blunt"})
+    ));
+    assert!(person_only_reason("personality_set").contains("your words"));
+}
+
+/// An approved Kafka produce carrying the agent's `confirm` replays as the
+/// person (the broker guard refuses an agent's own confirm).
+#[test]
+fn a_confirmed_broker_produce_is_person_only() {
+    let args = |c: serde_json::Value| json!({"cluster_id": "k", "topic": "t", "confirm": c});
+    assert!(call_is_person_only(
+        "produce_broker_message",
+        &args(json!(true))
+    ));
+    for c in [json!(false), serde_json::Value::Null, json!("true")] {
+        assert!(
+            !call_is_person_only("produce_broker_message", &args(c.clone())),
+            "{c}"
+        );
+    }
+    assert!(!call_is_person_only(
+        "produce_broker_message",
+        &json!({"cluster_id": "k", "topic": "t"})
+    ));
+}
+
+#[test]
+fn previews_cut_on_characters_and_say_how_much_is_hidden() {
+    assert_eq!(preview("short", 10), "short");
+    assert_eq!(preview("exactly10!", 10), "exactly10!");
+    // Multi-byte characters are counted (and never split) as characters.
+    let p = preview("héllo wörld ✓✓✓", 5);
+    assert_eq!(p, "héllo … (+10 more characters)");
+    let long = "ü".repeat(40_005);
+    let card = dangerous_detail(
+        "otto.slack_post_message",
+        &json!({"as": "user", "team": "Acme", "channel": "#ops", "text": long}),
+    );
+    assert!(
+        card.ends_with(" … (+5 more characters)"),
+        "{} chars",
+        card.chars().count()
+    );
+    // A post up to the route's own cap is shown whole.
+    let whole = "a".repeat(3_000);
+    let card = dangerous_detail(
+        "otto.slack_post_message",
+        &json!({"channel": "#ops", "text": whole}),
+    );
+    assert!(card.ends_with(&whole) && !card.contains("more characters"));
+    // No team named: the card says the default team is used.
+    let card = dangerous_detail(
+        "otto.slack_post_message",
+        &json!({"as": "me", "channel": "#ops", "text": "hi"}),
+    );
+    assert!(
+        card.contains("AS YOU in your default Slack workspace"),
+        "{card}"
+    );
+}
+
+#[test]
+fn jira_and_confluence_cards_show_where_and_what_is_published() {
+    let d = dangerous_detail(
+        "otto.comment_issue",
+        &json!({"account_id": "work", "key": "PRJ-7", "body": "Shipped in **1.2**"}),
+    );
+    assert_eq!(
+        d,
+        "Comment on issue 'PRJ-7' (account 'work'): \"Shipped in **1.2**\""
+    );
+    let d = dangerous_detail(
+        "otto.comment_issue",
+        &json!({"key": "PRJ-7", "body": "x".repeat(700)}),
+    );
+    assert!(
+        d.contains("your only issue account") && d.contains("(+100 more characters)"),
+        "{d}"
+    );
+    let d = dangerous_detail(
+        "otto.transition_issue",
+        &json!({"key": "PRJ-7", "transition_id": "31"}),
+    );
+    assert!(d.contains("'PRJ-7' transition id 31"), "{d}");
+    let d = dangerous_detail(
+        "otto.transition_issue",
+        &json!({"key": "PRJ-7", "transition_id": "In Progress"}),
+    );
+    assert!(d.contains("'PRJ-7' to 'In Progress'"), "{d}");
+
+    let d = dangerous_detail(
+        "otto.create_confluence_page",
+        &json!({"space_key": "ENG", "title": "Runbook", "parent_id": "123",
+                "body_md": "# Steps"}),
+    );
+    for want in ["'Runbook'", "space 'ENG'", "parent page 123", "\"# Steps\""] {
+        assert!(d.contains(want), "{want}: {d}");
+    }
+    let d = dangerous_detail(
+        "otto.update_confluence_page",
+        &json!({"page_id": "456", "body_html": "<p>new</p>", "base_version": 3}),
+    );
+    for want in ["REPLACE", "page 456", "from version 3", "<p>new</p>"] {
+        assert!(d.contains(want), "{want}: {d}");
+    }
+    let d = dangerous_detail(
+        "otto.update_confluence_page",
+        &json!({"page_id": "456", "body_md": "x"}),
+    );
+    assert!(d.contains("overwrites the latest version"), "{d}");
+    let d = dangerous_detail(
+        "otto.comment_confluence_page",
+        &json!({"page_id": "456", "body_md": "LGTM"}),
+    );
+    assert_eq!(
+        d,
+        "Comment on Confluence page 456 (your only issue account): \"LGTM\""
+    );
+    for t in [
+        "comment_issue",
+        "transition_issue",
+        "create_confluence_page",
+        "update_confluence_page",
+        "comment_confluence_page",
+        "personality_set",
+    ] {
+        assert!(
+            !dangerous_detail(&format!("otto.{t}"), &json!({})).contains("dangerous tool"),
+            "{t} falls through to the generic card"
+        );
+    }
+    let d = dangerous_detail(
+        "otto.personality_set",
+        &json!({"preset": "blunt", "note": "never ask me"}),
+    );
+    assert!(
+        d.contains("preset 'blunt'") && d.contains("\"never ask me\""),
+        "{d}"
     );
 }

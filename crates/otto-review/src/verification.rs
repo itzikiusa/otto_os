@@ -115,6 +115,9 @@ pub fn settle(
     fallback_cause: Option<&str>,
 ) -> Settled {
     let total: usize = batches.iter().map(Vec::len).sum();
+    let (unreadable, parsed): (Vec<DraftComment>, Vec<DraftComment>) =
+        parsed.into_iter().partition(DraftComment::unreadable);
+    let skipped_note = unreadable_note(&unreadable, parsed.len() + unreadable.len());
     if let Some(cause) = fallback_cause {
         let why = format!("the final verifier did not run ({cause})");
         let comments: Vec<_> = parsed.into_iter().map(|c| mark(c, &why)).collect();
@@ -182,6 +185,7 @@ pub fn settle(
             }
         ));
     }
+    notes.extend(skipped_note);
     let unverified = carried.len();
     comments.extend(carried);
     Settled {
@@ -192,6 +196,33 @@ pub fn settle(
         unverified,
         incomplete: total > 0 && accounted == 0,
     }
+}
+
+/// Start of the note that counts the verifier items no reader could use.
+pub const UNREADABLE_NOTE_PREFIX: &str = "Verifier output: ";
+
+/// "Verifier output: 2 of 14 items could not be read and were skipped (item
+/// 3: not a JSON object; item 9: no text `body`); …" — `None` when every item
+/// was read.
+fn unreadable_note(unreadable: &[DraftComment], items: usize) -> Option<String> {
+    if unreadable.is_empty() {
+        return None;
+    }
+    let which: Vec<&str> = unreadable.iter().map(|c| c.body.as_str()).collect();
+    let which = otto_core::text::clip_chars(&which.join("; "), 300);
+    Some(format!(
+        "{UNREADABLE_NOTE_PREFIX}{} of {items} items could not be read and were skipped ({which}); the claims they covered are carried forward unverified.",
+        unreadable.len()
+    ))
+}
+
+/// Store a settled summary's notes on the scope plan: the scope step's own
+/// notes (how the lenses were chosen, what its answer lacked) stay, every
+/// earlier summary's notes and restart-resume marks are replaced.
+pub fn set_notes(plan: &mut otto_core::domain::ReviewScopePlan, settled: &[String]) {
+    plan.verification_notes
+        .retain(|n| n.starts_with(crate::scope::SCOPE_NOTE_PREFIX));
+    plan.verification_notes.extend_from_slice(settled);
 }
 
 fn mark(mut c: DraftComment, why: &str) -> DraftComment {
@@ -219,6 +250,9 @@ pub fn missing_lenses(reviewers: &[ReviewAgentState]) -> Vec<String> {
         .collect()
 }
 
+/// Start of the cause when no reviewer finished: no score of any kind.
+pub const NO_REVIEWER_FINISHED: &str = "no reviewer finished";
+
 /// Why a settled summary is not a verdict — `None` when it is one. The text
 /// becomes the review's error and the workflow's reason, so it says which
 /// step failed and why in plain words.
@@ -232,7 +266,13 @@ pub fn incomplete_reason(
         1 => "1 reviewer finding is stored unverified".to_string(),
         n => format!("{n} reviewer findings are stored unverified"),
     };
-    let why = if let Some(cause) = fallback_cause.filter(|_| s.incomplete) {
+    let missing = missing_lenses(reviewers);
+    let why = if !reviewers.is_empty() && missing.len() == reviewers.len() {
+        format!(
+            "{NO_REVIEWER_FINISHED}: {}; nothing was reviewed, so there is no score. Retry the failed reviewer(s) or re-run the review.",
+            missing.join(", ")
+        )
+    } else if let Some(cause) = fallback_cause.filter(|_| s.incomplete) {
         format!("the final verifier agent failed ({cause}); {stored}. Retry the summarizer to verify them.")
     } else if s.incomplete {
         format!(
@@ -242,7 +282,6 @@ pub fn incomplete_reason(
     } else if let Some(r) = resolve_blocked.filter(|r| *r != SUMMARIZER_RETRY_BLOCKER) {
         format!("the reviewed change is not fully covered ({r}); findings were verified but the result is partial. Re-run the review.")
     } else {
-        let missing = missing_lenses(reviewers);
         if missing.is_empty() {
             return None;
         }
@@ -298,7 +337,10 @@ pub fn report(review: Option<&Review>, status: &str) -> ReviewReport {
             .map(str::to_string)
     });
     // The summarizer is always the last row.
-    let missing_lenses = missing_lenses(&r.agents[..r.agents.len().saturating_sub(1)]);
+    let reviewers = &r.agents[..r.agents.len().saturating_sub(1)];
+    let missing_lenses = missing_lenses(reviewers);
+    // Not one lens finished: a "partial" score would rate an empty review.
+    let nothing_reviewed = !reviewers.is_empty() && missing_lenses.len() == reviewers.len();
     let error = r.error.as_deref().unwrap_or_default();
     let incomplete = incomplete_cause(error);
     let cause = match (status, incomplete) {
@@ -327,7 +369,7 @@ pub fn report(review: Option<&Review>, status: &str) -> ReviewReport {
         missing_lenses,
         cause,
         verifier_failed,
-        partial: incomplete.is_some() && !by_verifier,
+        partial: incomplete.is_some() && !by_verifier && !nothing_reviewed,
     }
 }
 

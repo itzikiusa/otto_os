@@ -22,6 +22,7 @@
   import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import type { InsightKind, InsightReport, InsightRunPeriod, InsightsConfig } from '../../lib/api/types';
   import { scheduleCopy } from './scheduleStatus';
+  import { runPollDelay } from './runPoll';
   import { toasts } from '../../lib/toast.svelte';
   import { router } from '../../lib/router.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -458,10 +459,8 @@
   let pollReportKey: string | null = null;
   let reportBeforeRun: string | null | undefined;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
-  // 3 s × 100 ≈ 5 min: the banner promises "a few minutes", and the old 20
-  // checks (one minute) dropped the banner silently while the agent was still
-  // writing — the report then never appeared until a manual reload.
-  const POLL_MAX = 100;
+  // Visible ticks so far: 3 s for ~5 min, then 30 s while the run is still
+  // active (runPoll.ts) — the banner never times out under a working agent.
   let pollCount = $state(0);
   /** Consecutive poll ticks the run was missing from the active-run list. */
   let pollGoneTicks = 0;
@@ -555,16 +554,12 @@
 
   function schedulePoll(): void {
     if (disposed) return;
-    if (pollCount >= POLL_MAX || !pollRunId) {
-      if (pollRunId) {
-        toasts.info('Still generating the insights report', 'It will show up in the list once the agent finishes — reopen Insights to check.');
-      }
-      pollRunId = null;
+    if (!pollRunId) {
       void load();
       return;
     }
     pollTimer = setTimeout(async () => {
-      // Hidden window: wait (the tick isn't counted against POLL_MAX).
+      // Hidden window: wait (the tick isn't counted toward slowing down).
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
         schedulePoll();
         return;
@@ -619,7 +614,7 @@
       } else {
         schedulePoll();
       }
-    }, 3_000);
+    }, runPollDelay(pollCount));
   }
 
   // ---------------------------------------------------------------------------

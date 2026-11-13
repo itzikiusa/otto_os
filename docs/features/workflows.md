@@ -716,11 +716,11 @@ disclosure.
 
 `Name:` is matched case-insensitively first (`name = ? COLLATE NOCASE`), then
 after normalising both sides (dash variants — a typed `-` finds an em dash —
-curly quotes, spacing, case). Before
-matching, `strip_slack_tokens` removes Slack's entity tokens (`<@U…>`, `<#C…>`,
-`<!here>`; `<url|label>` keeps the label) and *then* decodes Slack's HTML escapes
-(`&amp;`/`&lt;`/`&gt;`) — in that order, so a `<` the user actually typed
-(delivered as `&lt;`) can never be re-scanned as a Slack token. The decode is
+curly quotes, spacing, case). The name is read as the person typed it: the
+Slack listener decodes Slack's wire format once (`&amp;`/`&lt;`/`&gt;`,
+`<@U…>` → `@name`, `<url|label>` → `label (url)`) before the bridge, and the
+workflow parsers decode and strip nothing again (a second pass turned
+`Name: A <B>` into `A B`). The decode is
 not cosmetic: Slack escapes `&` in message text, so a workflow named
 *"Provider — games fetch & review"* arrived as `… fetch &amp; review`, matched
 nothing, and `try_start` returned `None` — the trigger became a plain chat
@@ -851,9 +851,18 @@ every message is a test-writing ask). Spec: `{channel, chat, thread?,
 mention_only?}`. `channel` + `chat` must match exactly; an absent `thread` in
 the spec matches any thread, a present one requires an exact match (a
 thread-pinned binding wins over an unpinned one when both match); `mention_only`
-(default `false`) requires the message to contain a Slack `<@…>` mention. On a
-match the run input is `{trigger:"chat", origin_workspace_id, channel, chat,
-thread, user, prompt, msg, raw}` — `prompt`/`msg` are the mention-stripped text.
+(default `false`) requires the message to @-mention someone (an `@word` —
+Slack mentions arrive decoded as `@name`; an e-mail address does not count;
+the leading bot mention is already stripped by the listener, so it alone does
+not satisfy it). On a match the run input is `{trigger:"chat",
+origin_workspace_id, channel, chat, thread, user, prompt, msg, raw}` —
+`prompt`/`msg` are the mention-stripped text.
+
+All chat trigger parsing reads the message as the person typed it: Slack's
+wire encoding is decoded once by the Slack listener, and nothing is decoded or
+stripped again here — `Name: R&D`, `Name: A <B>`, `x < 5 and y > 3` and
+`Vec<String>` reach the workflow unchanged, and a pasted Jira link (decoded to
+`title (url)`) resolves to the key in its URL.
 
 **Does a trigger work?** Every trigger row carries `last_fired_at` /
 `last_outcome` (`started` · `queued` · `rejected`) / `last_detail`, stamped
@@ -863,10 +872,12 @@ schedule whose last run is still going. The Triggers panel shows it under each
 trigger: *Last fired 2h ago · started*, *Never fired*, or *Last attempt
 rejected: <reason>*.
 
-A sender who is not on the integration's `allowed_users` list is dropped by
-the channel bridge before any routing, and gets **no reply** (answering would
-let anyone probe the bot). The bridge still hands the message to the workflow
-side, which only matches it: the chat binding it would have fired (the
+A sender who is not on the integration's `allowed_users` list is dropped
+before any routing — by the channel bridge, or already by the Slack listener
+(before it downloads attachments, and when the inbound queue is busy) — and
+gets **no reply** (answering would let anyone probe the bot). Every such drop
+still lists the sender under *Turned away* in Settings → Channels and hands the
+message to the workflow side, which only matches it: the chat binding it would have fired (the
 receiving workspace's first match, as for a real start) and/or the chat
 bindings on that chat of a workflow it names explicitly (`Action: Workflow`,
 `run <name>:` / `workflow <name>:`). Those rows read *Last attempt rejected:

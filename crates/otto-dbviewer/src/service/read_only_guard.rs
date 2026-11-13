@@ -134,6 +134,34 @@ mod tests {
         refuse_write(&prod, "DELETE FROM t").expect("prod is not refused here");
     }
 
+    /// What the classifier alone decides on a Read-only connection. Every
+    /// write it can see is refused; a write hidden inside a function it
+    /// cannot see — so the run path also executes every statement on a
+    /// Read-only connection in the engine's READ ONLY transaction
+    /// (`read_only_execution_tests`).
+    #[test]
+    fn the_classifier_refuses_hidden_writes_it_can_see() {
+        for kind in [ConnectionKind::Postgres, ConnectionKind::Mysql] {
+            let c = conn(kind, Environment::Dev, true);
+            for stmt in [
+                "WITH gone AS (DELETE FROM t RETURNING id) SELECT * FROM gone",
+                "EXPLAIN ANALYZE DELETE FROM t",
+                "SELECT * INTO new_table FROM t",
+                "SELECT 1; DELETE FROM t",
+                "SELECT pg_terminate_backend(42)",
+            ] {
+                refuse_write(&c, stmt).expect_err(&format!("{kind:?}: {stmt}"));
+            }
+        }
+        let pg = conn(ConnectionKind::Postgres, Environment::Dev, true);
+        refuse_write(&pg, "COPY t TO PROGRAM 'sh -c id'").expect_err("COPY is a write");
+        let my = conn(ConnectionKind::Mysql, Environment::Dev, true);
+        refuse_write(&my, "SELECT * FROM t INTO OUTFILE '/tmp/x'").expect_err("INTO OUTFILE");
+        // Invisible to any parser: the function body may write. The engine's
+        // read-only transaction is what refuses it.
+        refuse_write(&pg, "SELECT my_writing_function()").expect("classifies as a read");
+    }
+
     #[test]
     fn read_only_production_names_both_settings() {
         let both = conn(ConnectionKind::Mysql, Environment::Prod, true);

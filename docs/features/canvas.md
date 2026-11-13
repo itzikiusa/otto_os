@@ -6,7 +6,10 @@
 > opens) forwards to that board's mirror, and the session Canvas panel's
 > **Open in Design Hall** and a story chat's diagram card open the mirror
 > directly (`openSceneInHall`). A mirror is read-only until someone presses
-> **Edit here**, which takes the board over in the Hall. The old Canvas page
+> **Edit here**, which takes the board over in the Hall. A board the Hall could
+> not copy (too large with its images, or an image is missing) opens in the old
+> editor instead (`#/canvas/<scene id>/editor`), under a line that says why, and
+> its Hall copy, if one exists, is marked as behind. The old Canvas page
 > (`CanvasPage.svelte` and its parts) is unmounted, not deleted; pointing the
 > `canvas` loader in `ui/src/shell/pages.svelte.ts` back at it restores it. The
 > scene API, the MCP tools and the session Canvas tab below are unchanged. See
@@ -54,8 +57,8 @@ session** — attached to that session's right-panel **Canvas** tab so the agent
 | **Edit by hand too** | Excalidraw shapes are directly editable; Mermaid and D2 each have a **Code** panel to edit their source — all three autosave to the same file the agent edits. |
 | **D2-only extras** | A **Sketch** toggle (hand-drawn render style, persisted on the doc as `sketch`) and **PNG / SVG / copy-source** export buttons in the zoombar (Mermaid has the same three). |
 | **Storage** | One row per scene in SQLite (`canvas_scenes.doc_json`); the source file lives under the daemon's data dir (`<data>/canvas/<scene_id>/`). |
-| **Scope** | Scenes are created in a workspace; the Canvas page lists **every scene in every workspace you can view** — yours and your teammates' (Canvas is a workspace-independent tool). Optionally linked to a product story, or referenced by an agent session (§7a). |
-| **Where it lives** | The **Canvas** top-level nav module, and (as a reference) any agent session's right-panel **Canvas** tab. RBAC feature key `canvas` (View to read, Edit to mutate / Ask AI). |
+| **Scope** | Scenes are created in a workspace; `GET /canvas/scenes` lists **every scene in every workspace you can view** — yours and your teammates' (Canvas is a workspace-independent tool). Optionally linked to a product story, or referenced by an agent session (§7a). |
+| **Where it lives** | Design Hall: each scene is mirrored there as a Whiteboard design (`#/canvas` forwards to it; there is no Canvas page in the sidebar). Also any agent session's right-panel **Canvas** tab (as a reference), and the MCP / REST scene tools. RBAC feature key `canvas` (View to read, Edit to mutate / Ask AI). |
 | **Daemon** | `ottod` on `127.0.0.1:7700`; routes under `/api/v1`. |
 
 ### Where each piece lives
@@ -128,7 +131,12 @@ the raw API with no `doc`, `otto-canvas` stores a minimal legacy scene
 
 ## 3. Creating & managing scenes
 
-Open **Canvas** in the sidebar. The left rail (`SceneList.svelte`) lists your
+> **§3–§5 describe the retired Canvas page** (`CanvasPage.svelte`, unmounted;
+> see the banner at the top). Today a person creates and edits boards in Design
+> Hall's **Whiteboard** studio, and opens a scene through its Hall mirror. Agents
+> still create and edit scenes through the scene API and MCP tools below.
+
+On the retired page, the left rail (`SceneList.svelte`) lists your
 scenes; the right side is the board (or a "Start a new canvas" hero when nothing
 is open).
 
@@ -389,11 +397,10 @@ all three (`event.rs` remains authoritative for the payload shapes).
 
 ## 7. Discovery-Chat bridge
 
-Canvas is also reachable from the Product page's **Discovery Chat**: when that
-agent proposes a `create_canvas` action, applying it creates a scene **linked to
-the story** (`story_id`) and deep-links into Canvas (the Discovery action sets
-`canvas.pendingOpenId` and navigates; `CanvasPage` consumes it on mount and opens
-the scene).
+Canvas is also reachable from a Product story's **Chat** (Discover → Chat, which
+absorbed the Discovery Chat): when that agent proposes a `create_canvas` action, applying it creates a scene **linked to
+the story** (`story_id`); the card's **Open in Design Hall** opens the scene's
+Hall mirror.
 
 There is also a scene-less assist endpoint, `POST /api/v1/canvas/assist/preview`,
 used by the empty-canvas hero / Discovery bridge: it requires a `workspace_id` in
@@ -410,7 +417,7 @@ A scene can be **attached to an agent session** so it appears in that
 session's right-panel **Canvas** tab (`CanvasPanel.svelte`) — a compact list
 with a format chip, an expandable inline SVG preview (Mermaid/D2, rendered
 from the live source; Excalidraw rows show a static "board" card instead of
-mounting the full editor), "Open in Canvas", and "Detach". The panel's footer
+mounting the full editor), "Open in Design Hall" (the scene's mirror), and "Detach". The panel's footer
 can attach an existing scene or create a new blank Mermaid one (auto-referenced
 + opened). A session's ⋯ menu also has a **"Canvas…"** item.
 
@@ -548,8 +555,8 @@ that lists the Canvas scenes linked to a story.
   `/assets/excalidraw/fonts/` on the daemon; a 404 there means the UI was built
   without the `excalidrawFonts` copy step (rebuild the UI). CJK text uses the system
   font unless the CDN fallback is reachable.
-- **A scene I created in another workspace isn't in the list.** It is — the page
-  lists *your* scenes across all workspaces (`GET /canvas/scenes`); use search.
+- **A scene I created in another workspace isn't in the list.** `GET /canvas/scenes`
+  lists *your* scenes across all workspaces; in Design Hall, search the library.
 
 ---
 

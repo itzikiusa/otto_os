@@ -812,3 +812,61 @@ async fn mongo_verified_read_forms_execute() {
         .await
         .expect("cleanup");
 }
+
+/// Processes panel: the listing statement returns `$currentOp` rows in the
+/// panel's columns (the root fixture user sees every user's ops, so the list
+/// is not limited), and a kill with a bad opid is refused before the server.
+#[tokio::test]
+#[ignore = "requires OTTO_DBV_E2E Mongo fixture"]
+async fn mongo_process_list_lists_and_validates_kill() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    use otto_dbviewer::service::process_list::MONGO_CURRENT_OP;
+    let driver = MongoDriver::default();
+    let config = cfg();
+    let req = |statement: &str| QueryRequest {
+        statement: statement.into(),
+        max_rows: Some(500),
+        ..Default::default()
+    };
+    let res = driver
+        .run(&config, &req(MONGO_CURRENT_OP))
+        .await
+        .expect("listing");
+    let names: Vec<&str> = res.columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "opid",
+            "user",
+            "client",
+            "ns",
+            "op",
+            "secs_running",
+            "waiting_for_lock",
+            "desc",
+            "command"
+        ]
+    );
+    assert!(
+        !res.rows.is_empty(),
+        "the $currentOp aggregate itself is running"
+    );
+    assert!(
+        res.message.is_none(),
+        "root sees all users: {:?}",
+        res.message
+    );
+    let err = driver
+        .run(&config, &req(r#"{"killOp":1,"op":"1; db.dropDatabase()"}"#))
+        .await
+        .expect_err("a bad opid is refused");
+    assert!(err.to_string().contains("killOp needs the opid"), "{err}");
+    // An opid that is not running: the server accepts killOp and does nothing.
+    let gone = driver
+        .run(&config, &req(r#"{"killOp":1,"op":2147483000}"#))
+        .await
+        .expect("killOp of a finished op");
+    assert_eq!(gone.columns[0].name, "result");
+}

@@ -265,14 +265,17 @@ fn write_schedule_status(dir: &Path, word: &str, attempt: Option<ScheduleAttempt
 // ---------------------------------------------------------------------------
 
 /// The inclusive calendar range `[start, end]` that is "currently due" for
-/// `kind` at instant `now` (UTC):
+/// `kind` on the host-LOCAL calendar day `today` (see [`local_today`]):
 /// - Day   → the previous calendar day.
 /// - Week  → the previous ISO week (Monday..=Sunday).
 /// - Month → the previous calendar month.
 ///
-/// This is the `--offset 1` period the skill would generate.
-pub fn due_period(kind: Kind, now: DateTime<Utc>) -> (NaiveDate, NaiveDate) {
-    let today = now.date_naive();
+/// This is the `--offset 1` period the skill would generate for
+/// `--as-of today`: the collector builds its windows in local wall time, so
+/// the due check must use the same day. (It used the UTC date: at UTC−5 the
+/// 00:00 UTC tick is 19:00 local, so "yesterday" was today — not over yet —
+/// and scheduled keys disagreed with a manual Run's.)
+pub fn due_period(kind: Kind, today: NaiveDate) -> (NaiveDate, NaiveDate) {
     match kind {
         Kind::Day => {
             let d = today.pred_opt().unwrap_or(today); // yesterday
@@ -303,9 +306,20 @@ pub fn due_period(kind: Kind, now: DateTime<Utc>) -> (NaiveDate, NaiveDate) {
     }
 }
 
-/// Resolve the collector's host-local calendar window for a manual run. Unlike
-/// the scheduler's UTC due check, this mirrors Python `datetime.now()` and
-/// supports older offsets. The UI must not infer this in a remote browser's zone.
+/// The host-local calendar day of the instant `now` in zone `tz` — the day
+/// Python's `datetime.now()` (the collector's calendar) sees. Taking the
+/// zone as a parameter keeps the scheduler's tests independent of the
+/// machine's own timezone. A DST change never moves a calendar date, so the
+/// date is exact on 23/25-hour days; the collector's own windows run from
+/// local midnight to 23:59:59.999999 whatever the day's length.
+pub fn local_today<Tz: chrono::TimeZone>(now: DateTime<Utc>, tz: &Tz) -> NaiveDate {
+    now.with_timezone(tz).date_naive()
+}
+
+/// Resolve the collector's host-local calendar window for a run (manual or
+/// scheduled, both pass a [`local_today`] date). Mirrors Python
+/// `datetime.now()` and supports older offsets. The UI must not infer this in
+/// a remote browser's zone.
 fn requested_period(kind: Kind, offset: i64, today: NaiveDate) -> Option<(NaiveDate, NaiveDate)> {
     let offset = u64::try_from(offset).ok()?;
     match kind {
@@ -1423,7 +1437,7 @@ async fn post_run<C: InsightsCtx>(
         )))
     })?;
     let offset = req.offset.max(0);
-    let as_of = chrono::Local::now().date_naive();
+    let as_of = local_today(Utc::now(), &chrono::Local);
     let (start, end) = requested_period(kind, offset, as_of).ok_or_else(|| {
         ApiError(otto_core::Error::Invalid(
             "report offset is out of range".into(),
@@ -1532,6 +1546,36 @@ impl PeriodAttempts {
     }
 }
 
+/// The one period the hourly tick starts, if any: the first enabled cadence
+/// (cheap → expensive) whose due period on local day `today` has no report
+/// and may still be retried. Nothing at all while ANY scheduled run is in
+/// flight (`busy`) — checked before [`PeriodAttempts::admit`], so a busy tick
+/// burns no attempt and the next free tick takes the next cadence. (The
+/// in-flight set used to be keyed per cadence, so a boot catch-up — or a
+/// Monday that is the 1st — started the daily, weekly and monthly agents at
+/// once, each for up to [`RUN_HARD_CAP`].)
+fn next_scheduled(
+    dir: &Path,
+    cfg: &InsightsConfig,
+    today: NaiveDate,
+    busy: bool,
+    attempts: &mut PeriodAttempts,
+) -> Option<(Kind, NaiveDate, NaiveDate)> {
+    if busy {
+        return None;
+    }
+    Kind::ALL.into_iter().find_map(|kind| {
+        if !cfg.enabled(kind) {
+            return None;
+        }
+        let (start, end) = due_period(kind, today);
+        let key = period_key(kind, start, end);
+        // `admit` last: only a period that will really start counts a try.
+        (!period_done(dir, kind, start, end) && catch_up_allowed(dir, &key) && attempts.admit(&key))
+            .then_some((kind, start, end))
+    })
+}
+
 /// Handle that cancels the supervisor on drop.
 pub struct InsightsSchedulerHandle {
     cancel: CancelSignal,
@@ -1573,11 +1617,9 @@ impl<C: InsightsCtx> InsightsScheduler<C> {
     }
 
     async fn supervise(self, cancel: CancelSignal) {
-        // In-flight set: cadences currently running (one run at a time overall,
-        // but keyed by cadence so e.g. a slow weekly doesn't block a daily next
-        // hour). `Mutex<HashSet>` mirrors otto-improve.
-        let in_flight: Arc<Mutex<std::collections::HashSet<&'static str>>> =
-            Arc::new(Mutex::new(std::collections::HashSet::new()));
+        // One scheduled run at a time overall: set while a run's agent session
+        // is alive, cleared by that run's task (see [`next_scheduled`]).
+        let in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut attempts = PeriodAttempts::default();
 
         // Run the due-check immediately on startup (catch-up after the app was
@@ -1593,7 +1635,8 @@ impl<C: InsightsCtx> InsightsScheduler<C> {
                 .unwrap_or(true);
             if gate_open {
                 last_check = Some(std::time::Instant::now());
-                self.tick(&in_flight, &mut attempts).await;
+                let today = local_today(Utc::now(), &chrono::Local);
+                self.tick(today, &in_flight, &mut attempts).await;
             }
 
             // One timer per scan; cancel() wakes it (was 500 ms slices).
@@ -1603,117 +1646,97 @@ impl<C: InsightsCtx> InsightsScheduler<C> {
         }
     }
 
-    /// One hourly due-check: for each enabled cadence, if the most-recent missed
-    /// period isn't done and nothing's in flight for it, run it (offset 1).
+    /// One hourly due-check on the local calendar day `today`: start at most
+    /// ONE scheduled run (offset 1), for the first enabled cadence whose
+    /// most-recent period has no report — see [`next_scheduled`].
     async fn tick(
         &self,
-        in_flight: &Arc<Mutex<std::collections::HashSet<&'static str>>>,
+        today: NaiveDate,
+        in_flight: &Arc<std::sync::atomic::AtomicBool>,
         attempts: &mut PeriodAttempts,
     ) {
+        use std::sync::atomic::Ordering;
         let dir = insights_dir(&self.ctx);
         let cfg = read_config(&dir);
-        let now = Utc::now();
         let due: Vec<String> = Kind::ALL
             .into_iter()
             .map(|kind| {
-                let (start, end) = due_period(kind, now);
+                let (start, end) = due_period(kind, today);
                 period_key(kind, start, end)
             })
             .collect();
         attempts.retain_due(&due);
 
-        for kind in Kind::ALL {
-            if !cfg.enabled(kind) {
-                continue;
-            }
-            let (start, end) = due_period(kind, now);
-            if period_done(&dir, kind, start, end) {
-                continue;
-            }
-            // Skip if already running for this cadence.
-            {
-                let guard = in_flight.lock().await;
-                if guard.contains(kind.word()) {
-                    continue;
-                }
-            }
-            let key = period_key(kind, start, end);
-            if !catch_up_allowed(&dir, &key) || !attempts.admit(&key) {
-                continue;
-            }
-            in_flight.lock().await.insert(kind.word());
-            let attempt_no = attempts.count(&key);
+        let busy = in_flight.load(Ordering::SeqCst);
+        // `tick` runs on the one supervisor task and only a finished run
+        // clears the flag, so check-then-set here cannot race another start.
+        let Some((kind, start, end)) = next_scheduled(&dir, &cfg, today, busy, attempts) else {
+            return;
+        };
+        let key = period_key(kind, start, end);
+        in_flight.store(true, Ordering::SeqCst);
+        let attempt_no = attempts.count(&key);
 
-            let ctx = self.ctx.clone();
-            let flight = Arc::clone(in_flight);
-            let word = kind.word();
-            info!(kind = word, "insights: scheduled catch-up run is due");
-            tokio::spawn(async move {
-                let mut failure: Option<String> = None;
-                let session_id = match run_insights(
-                    &ctx,
-                    kind,
-                    1,
-                    now.date_naive(),
-                    RunMode::Scheduled,
-                )
-                .await
-                {
-                    Ok(Some(id)) => Some(id),
-                    Ok(None) => {
-                        // Skill not installed / no host — already logged inside.
-                        failure = Some(
+        let ctx = self.ctx.clone();
+        let flight = Arc::clone(in_flight);
+        let word = kind.word();
+        info!(kind = word, "insights: scheduled catch-up run is due");
+        tokio::spawn(async move {
+            let mut failure: Option<String> = None;
+            // `today` (local) is both the due check's day and the
+            // collector's `--as-of`, so the run's key is the due key.
+            let session_id = match run_insights(&ctx, kind, 1, today, RunMode::Scheduled).await {
+                Ok(Some(id)) => Some(id),
+                Ok(None) => {
+                    // Skill not installed / no host — already logged inside.
+                    failure = Some(
                                 "the run couldn’t start: the insights skill is missing or no workspace can host it"
                                     .into(),
                             );
-                        None
-                    }
-                    Err(e) => {
-                        warn!(kind = word, "insights: scheduled run failed: {e}");
-                        failure = Some(format!("the run couldn’t start: {e}"));
-                        None
-                    }
-                };
-                // The session runs headlessly; release the in-flight slot after a
-                // grace window so we don't re-trigger the same period mid-run
-                // (idempotency would catch it once artifacts land, but this avoids
-                // double-spawning before the index is written).
-                // Wait for the run's session to be archived by its watcher
-                // (S4-19b: liveness, not a fixed window), bounded by the cap.
-                if let Some(id) = session_id.as_ref() {
-                    wait_run_archived(&ctx, id).await;
+                    None
                 }
-                flight.lock().await.remove(word);
+                Err(e) => {
+                    warn!(kind = word, "insights: scheduled run failed: {e}");
+                    failure = Some(format!("the run couldn’t start: {e}"));
+                    None
+                }
+            };
+            // The session runs headlessly; hold the in-flight flag until
+            // its watcher archives it (S4-19b: liveness, not a fixed
+            // window), bounded by the cap, so no other scheduled run
+            // starts beside it.
+            if let Some(id) = session_id.as_ref() {
+                wait_run_archived(&ctx, id).await;
+            }
+            flight.store(false, Ordering::SeqCst);
 
-                // After the grace window, check whether the period's report landed.
-                // If so, emit `InsightReady` so the channel notifier + UI can react
-                // without polling. Best-effort: a missed send is not an error.
-                let dir = insights_dir(&ctx);
-                if period_done(&dir, kind, start, end) {
-                    let _ = ctx::blocking(move || write_schedule_status(&dir, word, None)).await;
-                    let period_label = format!("{} {}", word, start.format("%Y-%m-%d"));
-                    let _ = ctx.events().send(Event::InsightReady {
-                        period: period_label,
-                        session_id,
-                    });
-                } else {
-                    // error-handling-6-03: a scheduled run that produced no
-                    // report leaves a trace the Insights page reads.
-                    let status = ScheduleAttempt {
-                        period: key,
-                        attempts: attempt_no,
-                        last_error: Some(failure.unwrap_or_else(|| {
-                            "the run ended without writing a report (is the provider signed in?)"
-                                .into()
-                        })),
-                        gave_up: attempt_no >= MAX_PERIOD_ATTEMPTS,
-                        at: Utc::now(),
-                    };
-                    let _ = ctx::blocking(move || write_schedule_status(&dir, word, Some(status)))
-                        .await;
-                }
-            });
-        }
+            // After the grace window, check whether the period's report landed.
+            // If so, emit `InsightReady` so the channel notifier + UI can react
+            // without polling. Best-effort: a missed send is not an error.
+            let dir = insights_dir(&ctx);
+            if period_done(&dir, kind, start, end) {
+                let _ = ctx::blocking(move || write_schedule_status(&dir, word, None)).await;
+                let period_label = format!("{} {}", word, start.format("%Y-%m-%d"));
+                let _ = ctx.events().send(Event::InsightReady {
+                    period: period_label,
+                    session_id,
+                });
+            } else {
+                // error-handling-6-03: a scheduled run that produced no
+                // report leaves a trace the Insights page reads.
+                let status = ScheduleAttempt {
+                    period: key,
+                    attempts: attempt_no,
+                    last_error: Some(failure.unwrap_or_else(|| {
+                        "the run ended without writing a report (is the provider signed in?)".into()
+                    })),
+                    gave_up: attempt_no >= MAX_PERIOD_ATTEMPTS,
+                    at: Utc::now(),
+                };
+                let _ =
+                    ctx::blocking(move || write_schedule_status(&dir, word, Some(status))).await;
+            }
+        });
     }
 }
 
@@ -2057,8 +2080,141 @@ mod tests {
     }
     use chrono::TimeZone;
 
-    fn at(y: i32, m: u32, d: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(y, m, d, 12, 0, 0).unwrap()
+    fn at(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    /// The scheduler's day is the host-LOCAL date: at UTC−5 the 00:00 UTC
+    /// tick is still the previous evening, so "yesterday" is the day before
+    /// THAT (already over), not the local today the UTC date used to give.
+    #[test]
+    fn the_scheduler_day_is_the_local_calendar_day() {
+        let west = chrono::FixedOffset::west_opt(5 * 3600).unwrap();
+        let east = chrono::FixedOffset::east_opt(9 * 3600).unwrap();
+        let utc_midnight = Utc.with_ymd_and_hms(2026, 11, 13, 0, 0, 0).unwrap();
+        assert_eq!(local_today(utc_midnight, &west), at(2026, 11, 12));
+        assert_eq!(
+            due_period(Kind::Day, local_today(utc_midnight, &west)),
+            (at(2026, 11, 11), at(2026, 11, 11)),
+            "the local day 11-12 is not over at 19:00 local"
+        );
+        // Just after LOCAL midnight the finished day becomes due at once.
+        let after_local_midnight = Utc.with_ymd_and_hms(2026, 11, 13, 5, 1, 0).unwrap();
+        assert_eq!(
+            due_period(Kind::Day, local_today(after_local_midnight, &west)),
+            (at(2026, 11, 12), at(2026, 11, 12))
+        );
+        // East of UTC the local day starts before the UTC one.
+        let utc_evening = Utc.with_ymd_and_hms(2026, 11, 30, 16, 0, 0).unwrap();
+        assert_eq!(local_today(utc_evening, &east), at(2026, 12, 1));
+        assert_eq!(
+            due_period(Kind::Month, local_today(utc_evening, &east)),
+            (at(2026, 11, 1), at(2026, 11, 30))
+        );
+    }
+
+    /// The scheduled key is exactly the key a manual Run (and the run's own
+    /// `--as-of`) resolves for offset 1 on the same local day — every day of
+    /// two years, including both DST switch days, leap day and year ends.
+    #[test]
+    fn the_scheduled_key_equals_the_offset_1_requested_key() {
+        let mut day = at(2027, 1, 1);
+        while day >= at(2025, 1, 1) {
+            for kind in Kind::ALL {
+                let (s, e) = due_period(kind, day);
+                let (rs, re) = requested_period(kind, 1, day).unwrap();
+                assert_eq!(period_key(kind, s, e), period_key(kind, rs, re), "{day}");
+            }
+            day = day.pred_opt().unwrap();
+        }
+        for dst in [at(2026, 3, 8), at(2026, 3, 29), at(2026, 11, 1)] {
+            let next = dst.succ_opt().unwrap();
+            assert_eq!(due_period(Kind::Day, next), (dst, dst));
+        }
+    }
+
+    fn write_done_report(dir: &Path, kind: Kind, start: NaiveDate, end: NaiveDate) {
+        let key = period_key(kind, start, end);
+        let (base, stem) = artifact_stem(dir, &key).unwrap();
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join(format!("report-{stem}.html")), "<html>").unwrap();
+        let mut index: serde_json::Value = std::fs::read_to_string(dir.join("index.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| serde_json::json!({"series": []}));
+        index["series"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({ "period_key": key }));
+        std::fs::write(dir.join("index.json"), index.to_string()).unwrap();
+    }
+
+    /// One scheduled run at a time overall: a Monday that is the 1st has all
+    /// three cadences due, but a busy tick starts nothing and counts no
+    /// attempt; free ticks take the cadences one after another.
+    #[test]
+    fn the_scheduler_starts_one_run_at_a_time_across_cadences() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let cfg = InsightsConfig {
+            daily: true,
+            weekly: true,
+            monthly: true,
+            ..Default::default()
+        };
+        let today = at(2026, 6, 1);
+        assert_eq!(today.weekday(), chrono::Weekday::Mon);
+        let mut attempts = PeriodAttempts::default();
+        let key = |kind| {
+            let (s, e) = due_period(kind, today);
+            period_key(kind, s, e)
+        };
+
+        assert_eq!(next_scheduled(dir, &cfg, today, true, &mut attempts), None);
+        for kind in Kind::ALL {
+            assert_eq!(
+                attempts.count(&key(kind)),
+                0,
+                "a busy tick burns no attempt"
+            );
+        }
+
+        let (kind, s, e) = next_scheduled(dir, &cfg, today, false, &mut attempts).unwrap();
+        assert_eq!(kind, Kind::Day);
+        assert_eq!(attempts.count(&key(Kind::Day)), 1);
+        assert_eq!(attempts.count(&key(Kind::Week)), 0, "only one run admitted");
+        assert_eq!(next_scheduled(dir, &cfg, today, true, &mut attempts), None);
+
+        // The daily report landed: the next free tick takes the weekly.
+        write_done_report(dir, kind, s, e);
+        let (kind, s, e) = next_scheduled(dir, &cfg, today, false, &mut attempts).unwrap();
+        assert_eq!(kind, Kind::Week);
+        write_done_report(dir, kind, s, e);
+        let (kind, s, e) = next_scheduled(dir, &cfg, today, false, &mut attempts).unwrap();
+        assert_eq!(kind, Kind::Month);
+        write_done_report(dir, kind, s, e);
+        assert_eq!(next_scheduled(dir, &cfg, today, false, &mut attempts), None);
+        assert_eq!(attempts.count(&key(Kind::Month)), 1);
+    }
+
+    /// A cadence that keeps failing is retried a bounded number of times,
+    /// then the next cadence gets its turn; a disabled cadence never runs.
+    #[test]
+    fn a_failing_cadence_is_capped_then_the_next_one_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = InsightsConfig {
+            daily: true,
+            monthly: true,
+            ..Default::default()
+        };
+        let today = at(2026, 6, 1);
+        let mut attempts = PeriodAttempts::default();
+        for _ in 0..MAX_PERIOD_ATTEMPTS {
+            let got = next_scheduled(tmp.path(), &cfg, today, false, &mut attempts);
+            assert_eq!(got.map(|g| g.0), Some(Kind::Day));
+        }
+        let got = next_scheduled(tmp.path(), &cfg, today, false, &mut attempts);
+        assert_eq!(got.map(|g| g.0), Some(Kind::Month), "weekly is off");
     }
 
     #[test]

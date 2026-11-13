@@ -2,8 +2,8 @@
 // you, what is running, what is next, what you touched recently. Built from
 // data Otto already has (no new endpoints):
 //
-//   Needs you  pending MCP approvals · sessions waiting on input · unread warnings
-//   Running    working agent sessions · in-flight workflow runs
+//   Needs you  pending MCP approvals · sessions and threads waiting on input · unread warnings
+//   Running    working agent sessions and threads · in-flight workflow runs
 //   Up next    scheduled-task runs due in the next 24 h — forward-looking only.
 //              Past notices live in the bell (warnings already surface under Needs you).
 //   Recent     Design Hall artifacts
@@ -21,6 +21,8 @@ import { router } from '../../lib/router.svelte';
 import { auth } from '../../lib/stores/auth.svelte';
 import { notifications } from '../../lib/stores/notifications.svelte';
 import { ws } from '../../lib/stores/workspace.svelte';
+import { plural } from '../../lib/plural';
+import { threadRoute, threadSessions, unlistedWaiting } from './homeThreads';
 import { livePoll, type Poller } from './boxes/poll';
 
 /** One glance row. `open` runs on click; `live` pulses its dot. */
@@ -78,6 +80,9 @@ class TodayStore {
 
   /** Sessions blocked on the operator (foreground only, like the sidebar). */
   waiting = $derived(ws.foregroundActive.filter((s) => ws.needsYou[s.id] === true));
+  /** Threads-scope sessions (the Agents lists above leave them out). */
+  threads = $derived(threadSessions(ws.activeSessions, ws.sessionById));
+  waitingThreads = $derived(this.threads.filter((s) => ws.needsYou[s.id] === true));
 
   needs: TodayRow[] = $derived.by(() => {
     const rows: TodayRow[] = [];
@@ -103,7 +108,30 @@ class TodayStore {
         open: () => ws.navigateToSession(s.id),
       });
     }
-    const waitingIds = new Set(this.waiting.map((s) => s.id));
+    for (const s of this.waitingThreads) {
+      rows.push({
+        id: `thread:${s.id}`,
+        title: s.title,
+        detail: 'Thread · waiting for your input',
+        icon: 'threads',
+        tone: 'warning',
+        at: s.last_active_at,
+        open: () => router.go(threadRoute(s.id)),
+      });
+    }
+    // Runtime threads are only counted (not listed): one row opens Threads.
+    const more = unlistedWaiting(ws.threadsNeedsYouCount, this.waitingThreads.length);
+    if (more > 0) {
+      rows.push({
+        id: 'threads:waiting',
+        title: `${plural(more, 'thread')} waiting on you`,
+        detail: 'Threads',
+        icon: 'threads',
+        tone: 'warning',
+        open: () => router.go('threads'),
+      });
+    }
+    const waitingIds = new Set([...this.waiting, ...this.waitingThreads].map((s) => s.id));
     for (const n of notifications.notices) {
       if (n.read || n.severity === 'info') continue;
       const sid = sessionIdOf(n);
@@ -133,6 +161,18 @@ class TodayStore {
         at: s.last_active_at,
         open: () => ws.navigateToSession(s.id),
       }));
+    for (const s of this.threads) {
+      if (ws.statusMap[s.id] !== 'working') continue;
+      rows.push({
+        id: `thread:${s.id}`,
+        title: s.title,
+        detail: `Thread · ${s.provider}`,
+        icon: 'threads',
+        tone: 'working',
+        at: s.last_active_at,
+        open: () => router.go(threadRoute(s.id)),
+      });
+    }
     for (const r of ws.activeWorkflowRuns) {
       rows.push({
         id: `run:${r.run_id}`,

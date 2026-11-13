@@ -1,6 +1,6 @@
 {
   "title": "Otto — product tour",
-  "edition": "20261105",
+  "edition": "20261113",
   "bpm": 120,
   "fps": 30,
   "chapters": [
@@ -40,10 +40,10 @@
       "id": "agents",
       "section": "agents",
       "title": "Agents",
-      "bars": 5,
+      "bars": 3,
       "captions": [
         "Claude Code, Codex, Antigravity and shells run as real sessions.",
-        "Tile up to 15 live terminals, or broadcast one prompt to many."
+        "Tile live terminals, or broadcast one prompt to many."
       ]
     },
     {
@@ -53,14 +53,24 @@
       "bars": 6,
       "captions": [
         "Threads run your agents on the structured runtime: plans, commands and diffs stream live.",
-        "Approve right where the agent asks, and pick the thread up on your phone."
+        "Approve inline, or ask another agent from inside the thread: its answer arrives as a live card."
+      ]
+    },
+    {
+      "id": "council",
+      "section": "threads",
+      "title": "Council",
+      "bars": 4,
+      "captions": [
+        "Council sends one prompt to several agents, side by side.",
+        "Synthesize: a judge compares the answers and picks or merges."
       ]
     },
     {
       "id": "loops",
       "section": "loops",
       "title": "Goal Loops",
-      "bars": 3,
+      "bars": 4,
       "music": "verse",
       "captions": [
         "Give a goal and acceptance checks.",
@@ -84,7 +94,7 @@
       "bars": 4,
       "captions": [
         "A personal agent's Chat is a thread on the same runtime, with its tools.",
-        "A main agent delegates to its team and gets their reports back."
+        "Each agent runs its routines on a schedule and reports back."
       ]
     },
     {
@@ -104,8 +114,8 @@
       "title": "Product and Design Hall",
       "bars": 5,
       "captions": [
-        "Product unites stories, designs and learnings in one hub.",
-        "Frames, 3D, sites and brand kits live in one versioned library."
+        "A story's Design tab lists the designs that implement it.",
+        "Design Hall is the one home for designs: compare versions, restore or approve one."
       ]
     },
     {
@@ -114,8 +124,8 @@
       "title": "Vault and Skills Lab",
       "bars": 3,
       "captions": [
-        "The Vault links your markdown docs into a live knowledge graph.",
-        "Skills Lab reviews, benchmarks and sharpens your agent skills."
+        "The Vault links your markdown docs with backlinks and live context.",
+        "Skills Lab is the one home for your agent skills."
       ]
     },
     {
@@ -125,8 +135,8 @@
       "bars": 4,
       "music": "verse",
       "captions": [
-        "MySQL, Postgres, MongoDB, Redis and ClickHouse.",
-        "Build a query visually and watch agent MCP queries live."
+        "Query MySQL, Postgres, MongoDB, Redis and ClickHouse.",
+        "A read-only connection refuses writes. History spans every connection."
       ]
     },
     {
@@ -135,8 +145,8 @@
       "title": "Connections and cloud",
       "bars": 4,
       "captions": [
-        "SSH, Kafka, AWS, Kubernetes, APIs and the web.",
-        "Every agent tool call goes through the MCP control plane."
+        "SSH, AWS, Kubernetes, APIs and the web.",
+        "MCP servers run native or governed. A dangerous tool call waits for a person."
       ]
     },
     {
@@ -147,7 +157,7 @@
       "music": "breakdown",
       "captions": [
         "Insights turns your activity into key findings.",
-        "Usage tracks tokens, cost and machine load."
+        "Usage shows what is left on each plan, per login."
       ]
     },
     {
@@ -177,8 +187,8 @@
       "title": "Phone access",
       "bars": 4,
       "captions": [
-        "Phone access serves Otto to your tailnet only, through Tailscale.",
-        "Scan the code, approve the match on your Mac, and your thread continues on the phone."
+        "Continue on phone: scan, approve the match on your Mac, and the thread opens.",
+        "Or switch the phone to the light version: five tabs, one tap back."
       ]
     },
     {

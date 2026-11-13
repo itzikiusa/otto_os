@@ -11,6 +11,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { plural } from '../../lib/plural';
   import Badge from '../../lib/components/Badge.svelte';
+  import { backlinksRemaining } from './backlinkPaging';
 
   function openOrCreateOutgoing(dstPath: string | null, rawTarget: string): void {
     if (dstPath) {
@@ -36,9 +37,8 @@
     shownOutgoing = LIST_PAGE;
   });
 
-  async function showMoreBacklinks(): Promise<void> {
-    await vault.loadBacklinkContexts(vault.visibleBacklinks);
-  }
+  // Backlinks page on the server (100 at a time); "Show more" fetches the next.
+  const hiddenBacklinks = $derived(backlinksRemaining(vault.backlinks.length, vault.backlinksTotal));
 
   const props = $derived.by(() => {
     const fm = vault.note?.meta.frontmatter;
@@ -65,7 +65,7 @@
     <button class="hdr" aria-expanded={open.backlinks} onclick={() => (open.backlinks = !open.backlinks)}>
       <span class="tri" class:open={open.backlinks}><Icon name="chevronRight" noflip size={12} /></span>
       Backlinks
-      <span class="hdr-count"><Badge label={String(vault.backlinks.length)} /></span>
+      <span class="hdr-count"><Badge label={String(vault.backlinksTotal)} /></span>
     </button>
     {#if open.backlinks}
       <LoadState
@@ -77,14 +77,14 @@
         onretry={() => void vault.reloadBacklinks()}
       >
         {#snippet emptyView()}<div class="none">No linked mentions</div>{/snippet}
-        {#each vault.backlinks.slice(0, vault.visibleBacklinks) as bl (bl.path + bl.kind)}
+        {#each vault.backlinks as bl (bl.path + bl.kind)}
           <button class="item" title={bl.path} onclick={() => void vault.open(bl.path)}>
             <div class="t">{bl.title}</div>
             {#if bl.context}<div class="ctx">{bl.context}</div>{/if}
           </button>
         {/each}
-        {#if vault.backlinks.length > vault.visibleBacklinks}
-          <button class="more" disabled={vault.loadingBacklinkContexts} onclick={() => void showMoreBacklinks()}>Show more ({vault.backlinks.length - vault.visibleBacklinks} hidden)</button>
+        {#if hiddenBacklinks > 0}
+          <button class="more" disabled={vault.loadingMoreBacklinks} onclick={() => void vault.loadMoreBacklinks()}>{vault.loadingMoreBacklinks ? 'Loading more backlinks…' : `Show more (${hiddenBacklinks.toLocaleString()} more)`}</button>
         {/if}
       </LoadState>
     {/if}

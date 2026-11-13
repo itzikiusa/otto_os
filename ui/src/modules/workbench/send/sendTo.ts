@@ -2,8 +2,9 @@
 //
 // Every target only PREPARES: nothing is run, sent or executed on the user's
 // behalf. The DB Explorer opens its Run on… sheet on the setup stage; the API
-// client opens an unsaved request; a session gets the text PASTED (bracketed
-// paste, no Enter) after a confirm naming the session; a vault note is written
+// client opens an unsaved request; a session gets the text PASTED (cleaned of
+// control bytes, bracketed paste, no Enter — one line only for a connection
+// session) after a confirm naming the session; a vault note is written
 // only after a confirm (and a second one before overwriting).
 
 import { router } from '../../../lib/router.svelte';
@@ -19,8 +20,8 @@ import { listVaults, vaultNote, writeVaultNote } from '../../../lib/api/vault';
 import type { Session, WorkbenchDocFull } from '../../../lib/api/types';
 import { dbHandoff } from '../../database/handoff.svelte';
 import { fillPlaceholders } from '../lib/placeholders';
-import { plural } from '../../../lib/plural';
 import { loadErrorText } from '../../../lib/loadError';
+import { multiLineRefusal, pasteConfirmText, planPaste } from './pasteSafety';
 
 export interface SendCtx {
   ws: string;
@@ -154,30 +155,30 @@ export async function sendToApiClient(ctx: SendCtx): Promise<void> {
 
 // ── (c) Terminal / agent session — paste, never run ────────────────────────
 
-/** Sessions the text can be pasted into: this workspace's, not archived, still
- *  alive. */
-export function pasteTargets(sessions: Session[], ws: string): Session[] {
-  return sessions.filter((s) => s.workspace_id === ws && !s.archived && s.status !== 'exited');
-}
-
-/** Bracketed paste (`ESC[200~ … ESC[201~`) without a trailing newline: shells
- *  and the agent TUIs insert it as typed text and do NOT execute it. */
-export function bracketedPaste(text: string): string {
-  return `\u001b[200~${text.replace(/\r?\n$/, '')}\u001b[201~`;
-}
+// The rules (control-byte cleaning, one line for connection sessions) live in
+// pasteSafety.ts, which the picker and the unit tests load directly.
 
 export async function pasteIntoSession(ctx: SendCtx, session: Session): Promise<boolean> {
   const text = filled(ctx);
-  const lines = text.split('\n').length;
-  const ok = await confirmer.ask(
-    `Paste ${plural(lines, 'line')} from “${ctx.doc.name}” into “${session.title || session.id}”? ` +
-      'It is pasted only — nothing runs until you press Enter in that session.',
-    { title: 'Paste into session', confirmLabel: 'Paste' },
-  );
+  const plan = planPaste(text, session);
+  if (!plan.ok) {
+    if (plan.reason === 'empty') {
+      toasts.error('Nothing to paste', 'After removing control characters the file has no text left.');
+    } else {
+      toasts.push('error', 'Not pasted — connection sessions take one line', multiLineRefusal(plan.lines), 12000, {
+        action: { label: 'Copy', run: () => void copyFilled(ctx) },
+      });
+    }
+    return false;
+  }
+  const ok = await confirmer.ask(pasteConfirmText(plan, ctx.doc.name, session), {
+    title: plan.multiLine ? 'Paste into session' : 'Type into session',
+    confirmLabel: plan.multiLine ? 'Paste' : 'Type it',
+  });
   if (!ok) return false;
   try {
-    await wsStore.sendInput(session.id, bracketedPaste(text), false);
-    toasts.push('success', 'Pasted into the session', 'Review it there and press Enter to run.', 6000, {
+    await wsStore.sendInput(session.id, plan.payload, false);
+    toasts.push('success', plan.multiLine ? 'Pasted into the session' : 'Typed into the session', 'Review it there and press Enter to run.', 6000, {
       action: { label: 'Open session', run: () => wsStore.navigateToSession(session.id) },
     });
     return true;

@@ -278,3 +278,65 @@ async fn legacy_duplicate_roots_share_compare_and_set_lock() {
     assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
     assert!(matches!(a, Err(Error::Conflict(_))) || matches!(b, Err(Error::Conflict(_))));
 }
+
+/// An external editor (Obsidian) that saves after the hash check but before
+/// Otto's rename wins: the save is a "changed on disk" conflict and the
+/// editor's bytes stay. Without the re-check the rename overwrote them.
+#[tokio::test]
+async fn an_external_save_during_a_write_is_a_conflict_not_overwritten() {
+    let (e, dir, id) = fixture().await;
+    std::fs::write(dir.path().join("race-edit.md"), "# Mine").unwrap();
+    e.scan(id).await.unwrap();
+    let seen = e.note("ws", id, "race-edit.md").await.unwrap();
+    let target = dir.path().join("race-edit.md");
+    let editor = target.clone();
+    SAVE_RACE_HOOKS.lock().unwrap().push((
+        "race-edit.md".into(),
+        Box::new(move || std::fs::write(editor, "# Obsidian's save").unwrap()),
+    ));
+    let err = e
+        .write_note("ws", id, "race-edit.md", "# Otto", Some(&seen.meta.hash))
+        .await
+        .expect_err("the external save must win");
+    assert!(
+        matches!(&err, Error::Conflict(m) if m.contains("changed on disk")),
+        "{err:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "# Obsidian's save"
+    );
+    // No temp file is left behind for the watcher or the scanner.
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|d| d.ok())
+        .filter(|d| d.file_name().to_string_lossy().contains("otto-tmp"))
+        .collect();
+    assert!(leftovers.is_empty());
+    // The person can merge: a read returns the editor's bytes and its hash
+    // is what the next save must name.
+    let now = e.note("ws", id, "race-edit.md").await.unwrap();
+    assert_eq!(now.raw, "# Obsidian's save");
+    e.write_note("ws", id, "race-edit.md", "# Merged", Some(&now.meta.hash))
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "# Merged");
+}
+
+/// Creating a note (expected absent) races an editor creating the same file.
+#[tokio::test]
+async fn an_external_create_during_a_new_note_write_is_a_conflict() {
+    let (e, dir, id) = fixture().await;
+    let target = dir.path().join("race-new.md");
+    let editor = target.clone();
+    SAVE_RACE_HOOKS.lock().unwrap().push((
+        "race-new.md".into(),
+        Box::new(move || std::fs::write(editor, "# Theirs").unwrap()),
+    ));
+    let err = e
+        .write_note("ws", id, "race-new.md", "# Ours", Some(""))
+        .await
+        .expect_err("the external create must win");
+    assert!(matches!(err, Error::Conflict(_)), "{err:?}");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "# Theirs");
+}

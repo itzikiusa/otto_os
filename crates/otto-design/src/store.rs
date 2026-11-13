@@ -959,7 +959,7 @@ impl Store {
     }
 
     /// HARD delete (workspace-admin only, explicit `?hard=true`): the row, its
-    /// versions, its outgoing links and its search row. Incoming links are kept
+    /// versions, its outgoing links, its review comments and its search row. Incoming links are kept
     /// and flagged `broken` (consumers show a badge). Returns the DISTINCT
     /// blobs the deleted rows referenced (version contents + thumbnail) — GC
     /// CANDIDATES the caller re-checks with [`Self::blob_in_use`] under the
@@ -995,6 +995,12 @@ impl Store {
             .execute(&mut *tx)
             .await
             .map_err(dberr("design.artifact.delete.links"))?;
+        // Review comments go with the design (archiving keeps them).
+        sqlx::query("DELETE FROM design_comments WHERE artifact_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("design.artifact.delete.comments"))?;
         sqlx::query(
             "UPDATE design_links SET broken = 1 WHERE dst_kind = 'artifact' AND dst_id = ?",
         )

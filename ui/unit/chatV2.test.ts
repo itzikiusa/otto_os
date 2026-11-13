@@ -130,6 +130,9 @@ test('file references: code spans, prose paths and locations', () => {
   assert.deepEqual(chat.codeSpanFile('crates/otto-net/src/retry.rs:7'), { path: 'crates/otto-net/src/retry.rs', line: 7, col: null });
   assert.deepEqual(chat.codeSpanFile('retry.rs'), { path: 'retry.rs', line: null, col: null });
   assert.deepEqual(chat.codeSpanFile('Cargo.toml'), { path: 'Cargo.toml', line: null, col: null });
+  // A folder with its trailing slash is a reference too (resolved on click); a version is not.
+  assert.deepEqual(chat.codeSpanFile('marketing/videos/tour/'), { path: 'marketing/videos/tour/', line: null, col: null });
+  assert.equal(chat.codeSpanFile('v0.2.2/'), null);
   for (const notAFile of ['v0.4.1', 'self.x', 'otto-net', 'a b.rs', 'std::env', 'x.min(max)', 'attempt = 12']) {
     assert.equal(chat.codeSpanFile(notAFile), null, notAFile);
   }

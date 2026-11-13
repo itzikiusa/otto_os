@@ -26,7 +26,8 @@ pub async fn prepare_stream<C: ApiClientCtx>(
     // Same secret ↔ host binding as ad-hoc execute. The stream socket only
     // admits Editor credentials that are not MCP-restricted; a managed agent
     // still can't self-confirm (checked by the caller's token at upgrade).
-    if let Some(unbound) = find_unbound_secret(
+    if let Some(unbound) = find_unbound_secret_as(
+        !confirm_allowed,
         &repo,
         Some(ctx.secrets()),
         wid,
@@ -129,13 +130,14 @@ pub async fn prepare_request_with(
     // and RFC1918 targets the tunnel exists to reach; or (b) the workspace has
     // explicitly opted in to local/private targets (dev servers on localhost
     // are the #1 thing an API client is pointed at) — then the allow-local
-    // rules still refuse cloud metadata and the daemon's own listener.
+    // rules still refuse cloud metadata and the daemon's own listener. A
+    // tunnelled request still never reaches the BASTION's cloud metadata.
     match otto_netguard::Guard::for_fetch(proxy.is_some(), allow_local) {
         otto_netguard::Guard::Strict => otto_netguard::check_url(&url).await?,
         // No DNS while preparing: the allow-local client's resolver vets the
         // addresses it dials; literals and the daemon's port are checked here.
         otto_netguard::Guard::AllowLocal => otto_netguard::precheck_url_allow_local(&url)?,
-        otto_netguard::Guard::Tunnelled => {}
+        otto_netguard::Guard::Tunnelled => otto_netguard::precheck_url_tunnelled(&url)?,
     }
     let method = reqwest::Method::from_bytes(req.method.to_uppercase().as_bytes())
         .map_err(|_| format!("invalid HTTP method '{}'", req.method))?;

@@ -564,10 +564,13 @@ impl ConnectionsService {
                 "connection kind cannot be changed — create a new connection".into(),
             ));
         }
+        crate::access::refuse_agent_unprotect(&existing, req.environment, req.read_only)?;
         let actor = otto_state::UsersRepo::new(self.repo.pool())
             .get(user_id)
             .await?;
-        if self.is_enforced(id).await? && !actor.is_root {
+        // The request's real root authority: an agent token of a root user
+        // has root withheld on this write, so it is limited like a delegate.
+        if self.is_enforced(id).await? && !otto_core::auth::root_authority(&actor) {
             // Full-form clients preserve a stored secret by omitting it.
             // Never turn a limited configuration update into a secret oracle.
             let replacing_secret = req.secret.is_some();
@@ -667,6 +670,7 @@ impl ConnectionsService {
         spawner: &dyn Spawner,
     ) -> Result<Session> {
         self.authorize(&conn.id, user_id, "shell").await?;
+        crate::access::refuse_agent_guarded_terminal(conn)?;
         let actor = otto_state::UsersRepo::new(self.repo.pool())
             .get(user_id)
             .await?;
@@ -1015,6 +1019,8 @@ fn needs_credential_migration(conn: &Connection) -> bool {
 #[allow(clippy::disallowed_methods)] // tests: plain sync fs / secret store is fine
 mod tests {
     use super::*;
+    use otto_core::auth::{with_request_credential, RequestCredential};
+    use otto_core::domain::Environment;
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -1389,5 +1395,211 @@ mod tests {
             .expect("a migrated row reads without the lock")
             .unwrap();
         assert_eq!(again.secret_ref.as_deref(), Some(key.as_str()));
+    }
+
+    fn edit(name: &str) -> UpsertConnectionReq {
+        UpsertConnectionReq {
+            name: name.into(),
+            kind: ConnectionKind::Mysql,
+            params: serde_json::json!({"host":"localhost"}),
+            secret: None,
+            first_command: None,
+            section_id: None,
+            environment: None,
+            read_only: None,
+        }
+    }
+
+    /// A Legacy profile (a pre-0119 row: no access policy) marked Read-only
+    /// AND Production. The insert trigger enforces every new row, so drop the
+    /// policy it wrote.
+    async fn guarded_legacy_conn(f: &Fixture) -> Id {
+        let id = f
+            .repo
+            .create(NewConnection {
+                workspace_id: None,
+                name: "ro".into(),
+                kind: ConnectionKind::Mysql,
+                params: serde_json::json!({"host":"localhost"}),
+                secret_ref: None,
+                first_command: None,
+                section_id: None,
+                environment: Environment::Prod,
+                read_only: true,
+                created_by: f.root.clone(),
+            })
+            .await
+            .unwrap()
+            .id;
+        sqlx::query(
+            "DELETE FROM resource_access_policies WHERE resource_kind='connection' AND resource_id=?",
+        )
+        .bind(&id)
+        .execute(&f.repo.pool())
+        .await
+        .unwrap();
+        id
+    }
+
+    const AGENT: RequestCredential = RequestCredential {
+        agent: true,
+        root_withheld: true,
+    };
+
+    /// F8: the DB Explorer's read-only guard says the one way to write is to
+    /// turn the setting off — so an agent's own credential may not turn it
+    /// (or Production) off, even on a Legacy profile with no access policy.
+    #[tokio::test]
+    async fn an_agent_cannot_unlock_a_legacy_connection_but_a_person_can() {
+        let f = fixture().await;
+        let id = guarded_legacy_conn(&f).await;
+        assert!(!f.svc.is_enforced(&id).await.unwrap());
+        for (field, req) in [
+            (
+                "read_only",
+                UpsertConnectionReq {
+                    read_only: Some(false),
+                    ..edit("ro")
+                },
+            ),
+            (
+                "environment",
+                UpsertConnectionReq {
+                    environment: Some(Environment::Dev),
+                    ..edit("ro")
+                },
+            ),
+        ] {
+            match with_request_credential(AGENT, f.svc.update(&id, &f.root, req)).await {
+                Err(Error::Forbidden(msg)) => assert!(
+                    msg.contains("a person must change it in Connections"),
+                    "{field}: {msg}"
+                ),
+                other => panic!("{field}: an agent loosened a guard: {other:?}"),
+            }
+        }
+        let stored = f.repo.get(&id).await.unwrap();
+        assert!(stored.read_only);
+        assert_eq!(stored.environment, Environment::Prod);
+        // Unrelated edits (and restating the guards) stay open to an agent.
+        let renamed = with_request_credential(
+            AGENT,
+            f.svc.update(
+                &id,
+                &f.root,
+                UpsertConnectionReq {
+                    environment: Some(Environment::Prod),
+                    read_only: Some(true),
+                    ..edit("renamed")
+                },
+            ),
+        )
+        .await
+        .expect("a rename is not a protection change");
+        assert_eq!(renamed.name, "renamed");
+        assert!(renamed.read_only);
+        // A person turns both off.
+        let unlocked = with_request_credential(
+            RequestCredential::default(),
+            f.svc.update(
+                &id,
+                &f.root,
+                UpsertConnectionReq {
+                    environment: Some(Environment::Dev),
+                    read_only: Some(false),
+                    ..edit("renamed")
+                },
+            ),
+        )
+        .await
+        .expect("a person may change the protections");
+        assert!(!unlocked.read_only);
+        assert_eq!(unlocked.environment, Environment::Dev);
+        // Tightening again is open to an agent: it removes no guard.
+        let locked = with_request_credential(
+            AGENT,
+            f.svc.update(
+                &id,
+                &f.root,
+                UpsertConnectionReq {
+                    read_only: Some(true),
+                    ..edit("renamed")
+                },
+            ),
+        )
+        .await
+        .expect("an agent may lock a profile");
+        assert!(locked.read_only);
+    }
+
+    /// F8: on an Enforced profile the identity check uses the request's real
+    /// root authority, so a root user's agent token is limited like a
+    /// delegate (it used to pass on the stored `is_root`).
+    #[tokio::test]
+    async fn a_root_users_agent_token_is_limited_on_an_enforced_connection() {
+        let f = fixture().await;
+        let req = UpsertConnectionReq {
+            environment: Some(Environment::Prod),
+            read_only: Some(true),
+            ..edit("gov")
+        };
+        let conn = f.svc.create(None, &f.root, req.clone()).await.unwrap();
+        assert!(f.svc.is_enforced(&conn.id).await.unwrap());
+        let unlock = UpsertConnectionReq {
+            read_only: Some(false),
+            ..req.clone()
+        };
+        let refused =
+            with_request_credential(AGENT, f.svc.update(&conn.id, &f.root, unlock.clone())).await;
+        assert!(matches!(refused, Err(Error::Forbidden(_))), "{refused:?}");
+        let rebind = UpsertConnectionReq {
+            params: serde_json::json!({"host":"elsewhere"}),
+            ..req.clone()
+        };
+        let refused = with_request_credential(AGENT, f.svc.update(&conn.id, &f.root, rebind)).await;
+        assert!(
+            matches!(refused, Err(Error::Forbidden(_))),
+            "root is withheld from the agent: {refused:?}"
+        );
+        let rename = UpsertConnectionReq {
+            name: "renamed".into(),
+            ..req.clone()
+        };
+        let renamed = with_request_credential(AGENT, f.svc.update(&conn.id, &f.root, rename))
+            .await
+            .expect("a rename is open");
+        assert_eq!(renamed.name, "renamed");
+        let person = with_request_credential(
+            RequestCredential::default(),
+            f.svc.update(&conn.id, &f.root, unlock),
+        )
+        .await
+        .expect("root, as a person, unlocks it");
+        assert!(!person.read_only);
+    }
+
+    /// A terminal runs the native client with the stored credentials, past
+    /// the DB Explorer's read-only refusal and production confirmation.
+    #[tokio::test]
+    async fn an_agent_cannot_open_a_terminal_on_a_guarded_db_profile() {
+        let f = fixture().await;
+        let id = guarded_legacy_conn(&f).await;
+        let conn = f.svc.get(&id).await.unwrap();
+        let spawn = RecordingSpawner(Mutex::new(Vec::new()));
+        let refused = with_request_credential(
+            AGENT,
+            f.svc
+                .open(&conn, &"workspace".into(), &f.root, None, &spawn),
+        )
+        .await;
+        assert!(matches!(refused, Err(Error::Forbidden(_))), "{refused:?}");
+        assert!(spawn.0.lock().unwrap().is_empty(), "nothing was spawned");
+        let opened = with_request_credential(
+            RequestCredential::default(),
+            f.svc
+                .open(&conn, &"workspace".into(), &f.root, None, &spawn),
+        )
+        .await;
+        assert!(matches!(opened, Err(Error::Internal(ref msg)) if msg == "recorded spawn"));
     }
 }

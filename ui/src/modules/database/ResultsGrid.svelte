@@ -71,7 +71,7 @@
   import { exactIntTie } from './sort-keys';
   import SortChip from './SortChip.svelte';
   import { serverSortSql } from './server-sort';
-  import { carryPending, parkOpenEditors, restorePending } from './pending-carry';
+  import { carryOrDrop, carryScope, parkOpenEditors, restorePending } from './pending-carry';
   import { hiddenCols } from './hidden-cols.svelte';
   import { binaryFilterOff } from '../../lib/database/binary-cells';
   import {
@@ -321,7 +321,7 @@
   let prevTabKey: string | null = null;
   // The result the live view state was built on (non-reactive): on a tab
   // switch `resultProp` is already the INCOMING tab's when the effect runs.
-  let shownResult: unknown = null;
+  let shownResult: unknown = null, shownScope: string | null = null; // + what produced it (carryScope)
   /** The live view state, to park under the tab it belongs to. */
   function currentGridState(): GridTabState<RowPatch> {
     return {
@@ -341,7 +341,7 @@
   });
   $effect(() => {
     // Rows always re-seed (edits re-query, not patch in place); a new result of the SAME tab + shape carries its drafts by key (pending-carry.ts).
-    const carry = (tabKey ?? null) === prevTabKey && colKey === prevColKey && resultProp !== shownResult ? untrack(() => carryPending(flow, liveRows)) : null;
+    const scope = untrack(() => carryScope(statement, ranNode, connectionId)), moved = (tabKey ?? null) === prevTabKey && resultProp !== shownResult ? untrack(() => carryOrDrop(flow, liveRows, colKey === prevColKey && scope === shownScope)) : null;
     liveRows = result ? (mini ? result.rows.slice(0, MINI_MAX) : result.rows) : [];
     // A different query tab: park the outgoing tab's sort/search/filters and
     // un-applied edits, and bring back the incoming tab's (when its result is
@@ -363,7 +363,7 @@
         flow.resetForResult();
         if (saved.result === resultProp && saved.pending.size > 0) flow.pending = saved.pending;
         compare = null;
-        shownResult = resultProp;
+        shownResult = resultProp; shownScope = scope;
         return;
       }
       // No parked state for this tab: start it clean (the shape check below
@@ -383,8 +383,8 @@
     }
     // A new result clears the selection and the (index-keyed) drafts; the carried ones come back on their rows.
     flow.resetForResult();
-    if (carry && untrack(() => restorePending(flow, carry, liveRows)) > 0) toasts.info('Some un-applied changes were dropped', 'Their rows are no longer in the result.');
-    compare = null; shownResult = resultProp;
+    if (moved && moved.dropped + (moved.carry ? untrack(() => restorePending(flow, moved.carry!, liveRows)) : 0) > 0) toasts.info('Some un-applied changes were dropped', moved.carry ? 'Their rows are no longer in the result.' : 'The query, its database or its connection changed, so they were not moved onto the new result.');
+    compare = null; shownResult = resultProp; shownScope = scope;
   });
 
   // Tell the store how many un-applied edits the active tab holds (a tab

@@ -655,14 +655,22 @@ async fn s3_upload<S: AwsCtx>(
     s3::validate_key(&q.key)?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
-    if !q.overwrite.unwrap_or(false)
-        && s3::object_exists(&svc, &a, &bucket, &q.key, q.region.as_deref()).await?
-    {
-        return Err(Error::Conflict(format!(
-            "s3://{bucket}/{} already exists — confirm to replace it",
-            q.key
-        ))
-        .into());
+    let overwrite = q.overwrite.unwrap_or(false);
+    // HEAD only when the answer matters: a plain upload refuses an existing
+    // key, and an agent replacing one on a production account needs a person.
+    if s3::upload_needs_existence_check(a.environment, overwrite) {
+        let exists = s3::object_exists(&svc, &a, &bucket, &q.key, q.region.as_deref()).await;
+        if !overwrite {
+            if exists? {
+                return Err(Error::Conflict(format!(
+                    "s3://{bucket}/{} already exists — confirm to replace it",
+                    q.key
+                ))
+                .into());
+            }
+        } else {
+            s3::check_overwrite_confirm(a.environment, overwrite, exists)?;
+        }
     }
     let content_type = headers
         .get(header::CONTENT_TYPE)
@@ -713,7 +721,7 @@ async fn s3_upload<S: AwsCtx>(
         &user.id,
         "aws.s3.upload",
         format!("s3://{bucket}/{}", q.key),
-        serde_json::json!({ "account_id": id, "bytes": size, "overwrite": q.overwrite.unwrap_or(false) }),
+        serde_json::json!({ "account_id": id, "bytes": size, "overwrite": overwrite }),
     )
     .await;
     Ok((

@@ -5,7 +5,7 @@
 import { api } from '../../../lib/api/client';
 import { formatEffortShort, formatModelLabel } from '../../../lib/providerModels';
 import { harnessLabel } from '../../../lib/providers';
-import type { CouncilResp, CreateCouncilReq, RuntimeProvider, RuntimeSession, SynthesizeCouncilReq } from '../../../lib/api/types';
+import type { CouncilFollowUpReq, CouncilResp, CouncilRoundsResp, CreateCouncilReq, RuntimeProvider, RuntimeSession, SynthesizeCouncilReq } from '../../../lib/api/types';
 import { threads } from '../threadsStore.svelte';
 import { COUNCIL_MAX_SEATS, COUNCIL_MIN_SEATS, councilChipLabel, councilMembers, councilOf, toggleSeat, type CouncilSeat } from './council';
 import { isRuntimeProvider, runtimeThreads } from './runtimeThreads.svelte';
@@ -19,6 +19,8 @@ class CouncilStore {
   expanded = $state<Record<string, true>>({});
   /** Council threads continued as a plain thread ("Continue here"), by id. */
   continued = $state<Record<string, true>>({});
+  /** Each council's rounds (`GET …/council/rounds`), by council id. */
+  rounds = $state<Record<string, CouncilRoundsResp>>({});
   /** ⌘ / Shift was held on the last click in the model picker. */
   private multi = false;
   /** The stage's pick when the picker opened (a ⌘-click adds to it). */
@@ -96,6 +98,21 @@ class CouncilStore {
     const judge = await api.post<RuntimeSession>(`/runtime-sessions/${id}/council/synthesize`, req);
     runtimeThreads.byId[judge.id] = judge;
     return judge;
+  }
+
+  /** Load the rounds of the council `id` sits on. */
+  async loadRounds(councilId: string, id: string): Promise<CouncilRoundsResp> {
+    const r = await api.get<CouncilRoundsResp>(`/runtime-sessions/${id}/council/rounds`);
+    this.rounds = { ...this.rounds, [councilId]: r };
+    return r;
+  }
+
+  /** A follow-up round (every seat when `seats` is empty); a seat still
+   *  working queues it. Sent only from a click: nothing re-asks by itself. */
+  async followUp(councilId: string, id: string, req: CouncilFollowUpReq): Promise<CouncilRoundsResp> {
+    const r = await api.post<CouncilRoundsResp>(`/runtime-sessions/${id}/council/rounds`, req);
+    this.rounds = { ...this.rounds, [councilId]: r };
+    return r;
   }
 
   /** Threads shows `id` as a council (not a plain thread). */

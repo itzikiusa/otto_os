@@ -1,0 +1,117 @@
+[
+ {
+  "path": "internal/promotions/service.go",
+  "line": 1,
+  "severity": "warn",
+  "body": "verified claim",
+  "evidence": "service.go:1 traced to handler.go:40",
+  "disposition": "verified",
+  "source_ids": [
+   "batch:1:claim:1",
+   "batch:4:claim:1"
+  ]
+ },
+ {
+  "path": "internal/promotions/service.go",
+  "line": 1,
+  "severity": "warn",
+  "body": "verified claim",
+  "evidence": "service.go:1 traced to handler.go:40",
+  "disposition": "verified",
+  "source_ids": [
+   "batch:6:claim:1"
+  ]
+ },
+ {
+  "path": "internal/promotions/service.go",
+  "line": 1,
+  "severity": "warn",
+  "body": "verified claim",
+  "evidence": "service.go:1 traced to handler.go:40",
+  "disposition": "verified",
+  "source_ids": [
+   "batch:5:claim:1"
+  ]
+ },
+ {
+  "path": "internal/promotions/service.go",
+  "line": 1,
+  "severity": "warn",
+  "body": "verified claim",
+  "evidence": "service.go:1 traced to handler.go:40",
+  "disposition": "verified",
+  "source_ids": [
+   "batch:5:claim:2"
+  ]
+ },
+ {
+  "path": "internal/promotions/service.go",
+  "line": 1,
+  "severity": "warn",
+  "body": "verified claim",
+  "evidence": "service.go:1 traced to handler.go:40",
+  "disposition": "verified",
+  "source_ids": [
+   "batch:7:claim:2"
+  ]
+ },
+ {
+  "path": "internal/promotions/service.go",
+  "line": 1,
+  "severity": "warn",
+  "body": "verified claim",
+  "evidence": "service.go:1 traced to handler.go:40",
+  "disposition": "verified",
+  "source_ids": [
+   "batch:7:claim:4"
+  ]
+ },
+ {
+  "path": "internal/promotions/service.go",
+  "line": 1,
+  "severity": "warn",
+  "body": "verified claim",
+  "evidence": "service.go:1 traced to handler.go:40",
+  "disposition": "verified",
+  "source_ids": [
+   "batch:7:claim:3"
+  ]
+ },
+ {
+  "path": "internal/promotions/service.go",
+  "line": 1,
+  "severity": "warn",
+  "body": "Claim batch:7:claim:1 (race on the cache map)",
+  "evidence": "No reachable concurrent caller found; cache.go:20 is only called from init",
+  "disposition": "unverified",
+  "source_ids": [
+   "batch:7:claim:1"
+  ]
+ },
+ {
+  "path": "internal/promotions/service.go",
+  "line": 1,
+  "severity": "warn",
+  "body": "verified claim",
+  "evidence": "service.go:1 traced to handler.go:40",
+  "disposition": "not_relevant",
+  "source_ids": [
+   "batch:5:claim:3"
+  ]
+ },
+ {
+  "path": "internal/promotions/service.go",
+  "line": 1,
+  "severity": "warn",
+  "body": "verified claim",
+  "evidence": "service.go:1 traced to handler.go:40",
+  "disposition": "not_relevant",
+  "source_ids": [
+   "batch:8:claim:1"
+  ]
+ },
+ {
+  "lens_score": 7,
+  "score_reason": "should-fix only"
+ }
+]

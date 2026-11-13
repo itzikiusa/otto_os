@@ -58,7 +58,8 @@ fn split(library_root: &Path, target: &Path) -> Option<LibrarySkillFile> {
 /// absent) to `new` (`None` = removed) through the Library. `Ok(false)` = the
 /// file is no longer `expected` (conflict): nothing was written. A replaced or
 /// removed file is first saved as a hidden `.<file>.bak-<ts>` sibling, the
-/// engine's usual rollback trail.
+/// engine's usual rollback trail (the newest [`BAKS_KEPT`] per file are kept;
+/// provider copies never receive them).
 pub(crate) async fn apply(
     target: LibrarySkillFile,
     expected: Option<String>,
@@ -113,17 +114,35 @@ fn apply_blocking(
     };
     if written {
         if let Some(src) = lib.skill_dir(&t.name).filter(|d| d.is_dir()) {
-            let refreshed =
-                otto_context::user_skills::refresh_owned_in_dirs(provider_dirs, &t.name, &src);
-            if let Err(e) = refreshed {
-                tracing::warn!(skill = %t.name, error = %e, "refresh user-level skill copies failed");
+            // A provider copy the person edited is moved to
+            // `<library>/provider-skills-backup/` before it is replaced.
+            let refreshed = otto_context::user_skills::refresh_owned_in_dirs(
+                provider_dirs,
+                &lib.root,
+                &t.name,
+                &src,
+            );
+            match refreshed {
+                Ok(report) => {
+                    for kept in report.kept {
+                        tracing::info!(skill = %t.name, copy = %kept.copy, kept_at = %kept.kept_at, "improvement edit kept a hand-edited provider copy");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(skill = %t.name, error = %e, "refresh user-level skill copies failed")
+                }
             }
         }
     }
     Ok(written)
 }
 
-/// The engine's `.bak` trail, written next to the Library file.
+/// `.bak` files kept per Library file; the edit log in the database is the
+/// real rollback source, these are the on-disk safety net.
+const BAKS_KEPT: usize = 5;
+
+/// The engine's `.bak` trail, written next to the Library file, then pruned
+/// to the newest [`BAKS_KEPT`] for that file.
 fn backup(t: &LibrarySkillFile, prev: &str) -> io::Result<()> {
     let Some(path) = t.library.skill_dir(&t.name).map(|d| d.join(&t.rel)) else {
         return Ok(());
@@ -131,12 +150,42 @@ fn backup(t: &LibrarySkillFile, prev: &str) -> io::Result<()> {
     let (Some(parent), Some(file)) = (path.parent(), path.file_name()) else {
         return Ok(());
     };
+    let file = file.to_string_lossy();
     let bak = parent.join(format!(
-        ".{}.bak-{}",
-        file.to_string_lossy(),
+        ".{file}.bak-{}",
         Utc::now().format("%Y%m%dT%H%M%S%.6f")
     ));
-    std::fs::write(bak, prev)
+    std::fs::write(bak, prev)?;
+    prune_baks(parent, &file, BAKS_KEPT);
+    Ok(())
+}
+
+/// Remove all but the newest `keep` `.<file>.bak-<YYYYMMDDTHHMMSS.ffffff>`
+/// siblings (best effort). Only names of exactly the shape [`backup`] writes
+/// match, so nothing Otto did not create is touched; the stamp sorts by time.
+fn prune_baks(parent: &Path, file: &str, keep: usize) {
+    let Ok(rd) = std::fs::read_dir(parent) else {
+        return;
+    };
+    let prefix = format!(".{file}.bak-");
+    let mut baks: Vec<(String, std::path::PathBuf)> = rd
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let stamp = name.strip_prefix(&prefix)?;
+            let shaped = stamp.len() == 22
+                && stamp.char_indices().all(|(i, c)| match i {
+                    8 => c == 'T',
+                    15 => c == '.',
+                    _ => c.is_ascii_digit(),
+                });
+            (shaped && e.file_type().ok()?.is_file()).then(|| (stamp.to_string(), e.path()))
+        })
+        .collect();
+    baks.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in baks.into_iter().skip(keep) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 #[cfg(test)]
@@ -177,6 +226,7 @@ mod tests {
         let mine = dir.path().join("codex");
         otto_context::user_skills::install_into_dirs(
             std::slice::from_ref(&owned),
+            &root,
             "grill",
             &root.join("skills/grill"),
         )
@@ -203,6 +253,43 @@ mod tests {
             std::fs::read_to_string(mine.join("grill/SKILL.md")).unwrap(),
             "my own\n"
         );
+    }
+
+    /// Repeated edits leave at most `BAKS_KEPT` `.bak` files per file, the
+    /// newest ones; a look-alike name the engine did not write stays.
+    #[test]
+    fn bak_files_are_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("library");
+        let path = library_with_skill(&root);
+        let parent = path.parent().unwrap().to_path_buf();
+        std::fs::write(parent.join(".SKILL.md.bak-mine"), "keep").unwrap();
+        std::fs::write(parent.join(".other.md.bak-20200101T000000.000000"), "x").unwrap();
+        let t = skill_target(&root, &path).unwrap();
+        let mut prev = std::fs::read_to_string(&path).unwrap();
+        for round in 0..(BAKS_KEPT + 3) {
+            let next = format!("v{round}\n");
+            assert!(apply_blocking(&t, Some(&prev), Some(&next), &[]).unwrap());
+            prev = next;
+        }
+        let mut baks: Vec<String> = std::fs::read_dir(&parent)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".SKILL.md.bak-2"))
+            .collect();
+        baks.sort();
+        assert_eq!(baks.len(), BAKS_KEPT, "{baks:?}");
+        // The newest one holds the content the last edit replaced.
+        let newest = parent.join(baks.last().unwrap());
+        assert_eq!(
+            std::fs::read_to_string(newest).unwrap(),
+            format!("v{}\n", BAKS_KEPT + 1)
+        );
+        assert!(parent.join(".SKILL.md.bak-mine").is_file());
+        assert!(parent
+            .join(".other.md.bak-20200101T000000.000000")
+            .is_file());
     }
 
     #[test]

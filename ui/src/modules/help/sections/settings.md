@@ -8,7 +8,7 @@ summary: Every preference, account, integration and admin control in Otto, group
 ## What it's for
 
 Settings is where you shape how Otto looks and behaves on this device, connect
-the accounts Otto works with (Git, Jira, Slack, Telegram, MCP servers), tune how
+the accounts Otto works with (Git, Jira, Linear, Slack, Telegram), tune how
 agents are launched and what context they get, and — if you administer Otto —
 run the daemon, manage people and access, read logs and take backups.
 
@@ -165,21 +165,17 @@ can open: admin-only panes are hidden rather than shown disabled.
   the provider that writes them. Missed runs catch up. Needs the `insights`
   skill.
 
-**Skills** — needs Settings admin
-- Browse the skills that ship with Otto by category; install, update or remove
-  one, or install a whole category. Installing adds the skill to Claude, Codex
-  and agy, and backs up your edited copy first.
-
-**Skills Evaluator** — needs Settings admin
-- Defaults for the Skills Lab start form: iterations (1–10), validation passes
-  (1–3), improver agent and model, and the default validations with the CLIs
-  each runs on.
+**Skills** and **Skills Evaluator** — moved to [Skills Lab](#/walkthroughs/skills-eval)
+- The skills that ship with Otto are under **Skills Lab → Skills**, **Bundled**
+  filter; **Install all bundled skills…** is in the page ⋯ (Settings admins).
+- Evaluator defaults are under **Skills Lab → Evaluator**, page ⋯ →
+  **Evaluator defaults…**. The old Settings links open them there.
 
 **Context Library** — needs Settings admin
 - Edit the Otto-owned library of skills, souls and context snippets that is
   written into each workspace's CLIs, and set the global default soul.
 
-### System — all need Settings admin
+### System — all need the root account
 
 **Daemon**
 - Network listener: bind `0.0.0.0` on a chosen port so other devices can reach
@@ -187,6 +183,9 @@ can open: admin-only panes are hidden rather than shown disabled.
 - Process sandbox: confine agent sessions with macOS Seatbelt so they can only
   write to the workspace, its git folder, CLI caches and temp. Network: Full,
   Loopback only or No network.
+- Machine resources: queue background agents while the Mac is busy, how many
+  run at once, lower priority, build workers per agent session, and the low
+  disk warning (10 GB free by default; 0 turns it off).
 - The log file location and a link to the log viewer.
 
 **Plugins** — see [Plugins](#/walkthroughs/plugins)
@@ -253,12 +252,12 @@ Global shortcuts are listed in [Keyboard shortcuts](#/walkthroughs/keyboard-shor
 - **Per device vs shared.** Appearance (theme, backdrop, floating bar, sidebar,
   auto-vertical, session isolation, close-tab choice) is saved on this device
   only. Accounts, providers, context and admin settings live on the daemon.
-- **Roles.** Providers, Skills, Skills Evaluator, Context Library and every
-  System pane need Settings admin. Users and Sessions need Users admin. Groups &
+- **Roles.** Providers, Context Library and every System pane need Settings
+  admin. Users and Sessions need Users admin. Groups &
   Access and the channel notification switches need root. Opening a pane you
   can't use shows Appearance instead.
-- **Workspace panes.** Workspace context, Self-Improvement, Channels and MCP
-  Servers apply to the workspace selected in the sidebar. The old Projects page
+- **Workspace panes.** Workspace context, Self-Improvement and Channels apply
+  to the workspace selected in the sidebar. The old Projects page
   (`#/projects`) now opens Workspace context, as does **Workspace context** in a
   workspace's menu in the sidebar.
 - **Secrets stay in the Keychain.** Git, Jira, channel and email-sender tokens

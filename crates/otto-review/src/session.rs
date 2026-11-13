@@ -300,12 +300,33 @@ pub fn parse_findings(text: &str) -> Vec<ReviewFinding> {
 /// reviewer idling at its prompt until the stuck trip killed and respawned it,
 /// three times over.
 pub fn parse_findings_array(text: &str) -> Option<Vec<ReviewFinding>> {
+    read_findings(text).map(|(findings, _)| findings)
+}
+
+/// [`parse_findings_array`] plus how many elements could not be read as a
+/// finding at all (not an object, or unreadable after coercion) — the row's
+/// note reports them instead of the findings silently shrinking.
+pub fn read_findings(text: &str) -> Option<(Vec<ReviewFinding>, usize)> {
     let stripped = text
         .trim()
         .trim_start_matches("```json")
         .trim_start_matches("```")
         .trim_end_matches("```")
         .trim();
+    // A scope plan written as the bare object, without its one-element
+    // transport array: carried as that one element. Read naively, the first
+    // `[` is the plan's own `lenses` array and every lens became a husk.
+    if let Some(plan) = bare_scope_plan(stripped) {
+        let body = ReviewFinding {
+            path: None,
+            line: None,
+            line_end: None,
+            severity: default_severity(),
+            body: plan,
+            lens: None,
+        };
+        return Some((vec![body], 0));
+    }
     let start = stripped.find('[')?;
     let end = stripped.rfind(']').map(|i| i + 1)?;
     if start >= end {
@@ -316,21 +337,50 @@ pub fn parse_findings_array(text: &str) -> Option<Vec<ReviewFinding>> {
     // finding the reviewer wrote. Only an element that cannot be read as a
     // finding object at all is skipped.
     let items = serde_json::from_str::<Vec<serde_json::Value>>(&stripped[start..end]).ok()?;
-    Some(
-        items
-            .into_iter()
-            .filter_map(|v| {
-                // The lens's own score rides in the same array; it is not a finding.
-                if v.get(LENS_SCORE_KEY).is_some() {
-                    return None;
-                }
-                let v = coerce_finding_value(v)?;
-                serde_json::from_value::<RawFinding>(v)
-                    .ok()
-                    .map(RawFinding::into_finding)
-            })
-            .collect(),
-    )
+    let mut unreadable = 0;
+    let findings = items
+        .into_iter()
+        .filter_map(|v| {
+            // The lens's own score rides in the same array; it is not a finding.
+            if v.get(LENS_SCORE_KEY).is_some() {
+                return None;
+            }
+            let read = coerce_finding_value(v)
+                .and_then(|v| serde_json::from_value::<RawFinding>(v).ok())
+                .map(RawFinding::into_finding);
+            unreadable += usize::from(read.is_none());
+            read
+        })
+        .collect();
+    Some((findings, unreadable))
+}
+
+/// Key only a scope plan carries (see [`crate::contract::SCOPE_PLAN_EXAMPLE`]).
+const SCOPE_PLAN_KEY: &str = "lenses";
+
+/// `text` as one compact JSON scope-plan object, when that is what it is: an
+/// object (after any leading prose) holding a `lenses` array.
+fn bare_scope_plan(text: &str) -> Option<String> {
+    let open = text.find('{')?;
+    if text.find('[').is_some_and(|bracket| bracket < open) {
+        return None;
+    }
+    let close = text.rfind('}')?;
+    let value: serde_json::Value = serde_json::from_str(text.get(open..=close)?).ok()?;
+    value
+        .get(SCOPE_PLAN_KEY)
+        .is_some_and(serde_json::Value::is_array)
+        .then(|| value.to_string())
+}
+
+/// The row note once a reviewer's answer is read: the count note, plus the
+/// elements that could not be read when there were any.
+pub fn with_unreadable(note: String, unreadable: usize) -> String {
+    match unreadable {
+        0 => note,
+        1 => format!("{note} · 1 item could not be read"),
+        n => format!("{note} · {n} items could not be read"),
+    }
 }
 
 /// Key of the one array element carrying the lens's 0–10 score:
@@ -382,6 +432,12 @@ fn coerce_finding_value(v: serde_json::Value) -> Option<serde_json::Value> {
     let Value::Object(mut map) = v else {
         return None;
     };
+    // The scope plan object as the transport element itself, instead of its
+    // string encoding: the element's body is the plan.
+    if map.get(SCOPE_PLAN_KEY).is_some_and(Value::is_array) && !map.contains_key("body") {
+        let plan = Value::Object(map).to_string();
+        return Some(serde_json::json!({ "body": plan, "severity": "info" }));
+    }
     let as_line = |v: &Value| -> Option<u32> {
         match v {
             Value::Number(n) => n
@@ -885,7 +941,7 @@ pub async fn run_agent_session_with_recovery(
 
     // Persist terminal state ONCE (parse findings from the final raw result).
     if let Some(raw) = outcome.raw.as_deref() {
-        let mut findings = parse_findings(raw);
+        let (mut findings, unreadable) = read_findings(raw).unwrap_or_default();
         // Orchestrator: top the merged result up from the per-lens files. At
         // the hold cap the watch adopts the parent's merge while sub-agents are
         // still running, and the lens files are deleted after the summarizer —
@@ -911,7 +967,7 @@ pub async fn run_agent_session_with_recovery(
         let score = parse_lens_score(raw);
         persist_agent(states, reviews, review_id, agent_index, move |s| {
             s.status = "done".into();
-            s.note = partial_or_count_note(count, &missing);
+            s.note = with_unreadable(partial_or_count_note(count, &missing), unreadable);
             s.comment_count = count as u32;
             s.findings = persisted;
             if let Some((n, why)) = score {

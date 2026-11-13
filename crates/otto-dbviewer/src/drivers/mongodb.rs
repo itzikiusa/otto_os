@@ -595,7 +595,7 @@ impl Driver for MongoDriver {
                 statement: stmt,
                 ..req.clone()
             };
-            return self.run_one(cfg, &single, comment).await;
+            return processes::or_run_one(self, cfg, &single, comment).await;
         }
         self.run_many(cfg, req, statements, comment).await
     }
@@ -2809,9 +2809,9 @@ fn is_unauthorized(e: &impl std::fmt::Display) -> bool {
     msg.contains("Unauthorized") || msg.contains("not authorized")
 }
 
-// --- keyset pagination -------------------------------------------------------
-
+// --- submodules: keyset pagination, shorthand, TLS, the Processes panel -----
 mod keyset;
+mod processes;
 mod shorthand;
 mod tls_opts;
 #[cfg(test)]

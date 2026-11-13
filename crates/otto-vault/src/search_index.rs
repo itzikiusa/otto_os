@@ -69,7 +69,14 @@ pub(crate) struct SearchIndexes {
     /// Tests that drive the backfill by hand turn the read-path kick off.
     #[cfg(test)]
     pub(crate) no_auto_backfill: std::sync::atomic::AtomicBool,
+    /// Test-only: runs inside a rebuild between un-marking the vault and
+    /// clearing its rows (where a finishing backfill can re-mark it).
+    #[cfg(test)]
+    rebuild_race: Mutex<Option<RebuildRaceHook>>,
 }
+
+#[cfg(test)]
+type RebuildRaceHook = Box<dyn FnOnce(&SearchIndexes, i64) + Send>;
 
 #[derive(Default)]
 pub(crate) struct Progress {
@@ -511,6 +518,13 @@ impl VaultEngine {
                 // (e.g. the quick verification pass after start) used to turn
                 // the request into a silent no-op.
                 self.search_index.verified.lock().unwrap().remove(&id);
+                #[cfg(test)]
+                {
+                    let hook = self.search_index.rebuild_race.lock().unwrap().take();
+                    if let Some(hook) = hook {
+                        hook(&self.search_index, id);
+                    }
+                }
                 self.store()
                     .fts_clear_vault(id)
                     .await
@@ -518,6 +532,12 @@ impl VaultEngine {
                 tracing::info!(vault = id, "vault search index: rebuild requested");
                 let queued = {
                     let running = self.search_index.running.lock().unwrap();
+                    // A backfill that finished between the un-mark above and
+                    // the clear marked the vault complete again: un-mark it
+                    // under `running` (the lock that task decides under), or
+                    // the kick below is a no-op and the emptied index stays
+                    // empty while status reports it ready.
+                    self.search_index.verified.lock().unwrap().remove(&id);
                     let busy = running.contains_key(&id);
                     if busy {
                         self.search_index.rerun.lock().unwrap().insert(id);
@@ -830,6 +850,36 @@ mod tests {
             (0, NOTES.len() as i64),
             "the rows were cleared, not left as they were"
         );
+    }
+
+    /// A backfill that finishes (marking the vault complete) after a rebuild
+    /// un-marked the vault but before it cleared the rows must not turn the
+    /// rebuild into a no-op: the rows are refilled, not left empty.
+    #[tokio::test]
+    async fn rebuild_racing_a_finishing_backfill_still_refills() {
+        let (e, _dir, id) = fixture().await;
+        // No backfill may be running: its rerun would mask the race.
+        loop {
+            let busy = e.search_index.running.lock().unwrap().contains_key(&id);
+            if !busy {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        *e.search_index.rebuild_race.lock().unwrap() =
+            Some(Box::new(|ix: &SearchIndexes, id: i64| {
+                ix.verified.lock().unwrap().insert(id);
+            }));
+        e.search_index_action("ws", id, "rebuild").await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while e.store().fts_counts(id).await.unwrap()
+                != (NOTES.len() as i64, NOTES.len() as i64)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the cleared index is refilled");
     }
 
     /// A note whose file vanished before the backfill read it is left to

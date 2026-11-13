@@ -164,9 +164,18 @@ export async function startStack({ bin, dist, log, prepare }) {
   // A structured-runtime codex (`codex … app-server`: Threads, Personal
   // Agents) gets the scripted demo app-server instead (lib/demo-codex.mjs).
   const demoCodex = join(dirname(fileURLToPath(import.meta.url)), 'demo-codex.mjs');
+  // A structured-runtime claude (`--input-format stream-json`: Council seats,
+  // child threads) gets the scripted lib/demo-claude.mjs; a PTY claude keeps
+  // the agent-sim transcript.
+  const demoClaude = join(dirname(fileURLToPath(import.meta.url)), 'demo-claude.mjs');
   for (const cli of ['claude', 'codex', 'agy', 'gemini', 'grok']) {
     const shim = join(fakeBin, cli);
-    const runtime = cli === 'codex' ? `for a in "$@"; do [ "$a" = app-server ] && exec "${process.execPath}" "${demoCodex}"; done\n` : '';
+    const runtime =
+      cli === 'codex'
+        ? `for a in "$@"; do [ "$a" = app-server ] && exec "${process.execPath}" "${demoCodex}"; done\n`
+        : cli === 'claude'
+          ? `for a in "$@"; do [ "$a" = stream-json ] && exec "${process.execPath}" "${demoClaude}" "$@"; done\n`
+          : '';
     writeFileSync(shim, `#!/bin/sh\n${runtime}exec "${join(fakeBin, 'agent-sim')}" ${cli}\n`);
     chmodSync(shim, 0o755);
   }

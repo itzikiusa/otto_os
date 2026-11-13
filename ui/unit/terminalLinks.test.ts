@@ -3,13 +3,15 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { scanTerminalLinks, resolveTerminalFile, oscTerminalLink, terminalLinksForRow } from '../src/lib/components/terminalLinks.ts';
+import { scanTerminalLinks, oscTerminalLink, terminalLinksForRow } from '../src/lib/components/terminalLinks.ts';
+import { joinRoot, candidatePaths } from '../src/lib/pathLinks/resolve.ts';
 
 test('relative paths, source basenames and locations from actual CLI output', () => {
   const hits = scanTerminalLinks('Read materialize.rs and ui/src/App.svelte:42:3 then ../Cargo.toml#L8');
   assert.deepEqual(hits.map(h => [h.path, h.line, h.col]), [['materialize.rs', undefined, undefined], ['ui/src/App.svelte', 42, 3], ['../Cargo.toml', 8, undefined]]);
-  assert.equal(resolveTerminalFile('../Cargo.toml', '/work/ui'), '/work/ui/../Cargo.toml');
-  assert.equal(resolveTerminalFile('app.ts', ''), null);
+  // Printed paths stay as printed: the session's folders are tried on click.
+  assert.deepEqual(candidatePaths('../Cargo.toml', ['/work/ui']), ['/work/ui/../Cargo.toml']);
+  assert.deepEqual(candidatePaths('app.ts', ['']), []);
 });
 
 test('quoted and markdown paths with spaces retain full destinations', () => {
@@ -24,11 +26,16 @@ test('URL overlap, punctuation, task names, hosts and command schemes', () => {
 });
 
 test('OSC8 dispatch permits only HTTP(S) and local file targets', () => {
-  assert.equal(oscTerminalLink('file:///tmp/Application%20Support/readme.md#L3', '/work', true)?.path, '/tmp/Application Support/readme.md');
-  assert.equal(oscTerminalLink('file://remote/tmp/a.ts', '/work', true), null);
-  assert.equal(oscTerminalLink('javascript:alert(1)', '/work', true), null);
-  assert.equal(oscTerminalLink('file:///tmp/a.ts', '/work', false), null);
-  assert.equal(oscTerminalLink('https://example.com', '/work', false)?.kind, 'url');
+  assert.equal(oscTerminalLink('file:///tmp/Application%20Support/readme.md#L3', true)?.path, '/tmp/Application Support/readme.md');
+  assert.equal(oscTerminalLink('file://remote/tmp/a.ts', true), null);
+  assert.equal(oscTerminalLink('javascript:alert(1)', true), null);
+  assert.equal(oscTerminalLink('file:///tmp/a.ts', false), null);
+  assert.equal(oscTerminalLink('https://example.com', false)?.kind, 'url');
+  // An explicit OSC8 target may be a folder or an extension-less file; a
+  // relative one is kept relative (resolved on click, not joined to a guess).
+  assert.equal(oscTerminalLink('file:///Users/me/My Project/', true)?.path, '/Users/me/My Project/');
+  assert.equal(oscTerminalLink('file:///Users/me/bin/run', true)?.path, '/Users/me/bin/run');
+  assert.equal(oscTerminalLink('ui/src/App.svelte', true)?.path, 'ui/src/App.svelte');
 });
 
 function buffer(rows: { text: string; wrapped?: boolean; color?: number; bold?: boolean }[], cols: number) {
@@ -63,12 +70,12 @@ test('dot segments preserve filesystem symlink semantics until daemon canonicali
     mkdirSync(join(root, 'real', 'deep'), { recursive: true });
     writeFileSync(join(root, 'real', 'target.ts'), 'synthetic fixture');
     symlinkSync(join(root, 'real', 'deep'), join(root, 'link'));
-    const requested = resolveTerminalFile('link/../target.ts', root)!;
+    const requested = joinRoot(root, 'link/../target.ts');
     assert.equal(readFileSync(requested, 'utf8'), 'synthetic fixture');
-    const osc = oscTerminalLink(`file://${root}/link/../target.ts`, root, true)!;
+    const osc = oscTerminalLink(`file://${root}/link/../target.ts`, true)!;
     assert.equal(readFileSync(osc.path!, 'utf8'), 'synthetic fixture');
     const absolute = join(root, 'link') + '/../target.ts';
-    assert.equal(resolveTerminalFile(absolute, '/unrelated'), absolute);
+    assert.deepEqual(candidatePaths(absolute, ['/unrelated']), [absolute]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -138,4 +145,15 @@ test('painted trailing spaces do not make an incomplete path edge-filled', () =>
   const text = 'Read /tmp/incomplete-' + ' '.repeat(40);
   const hits = terminalLinksForRow(buffer([{text, color:6}, {text:'  folder/report.md',color:6}], text.length), 2, true);
   assert.deepEqual(hits.map(h => h.path), ['folder/report.md']);
+});
+
+test('folders printed with a trailing slash are links; version tags and fractions are not', () => {
+  const hits = scanTerminalLinks('Saved to marketing/videos/tour/ for v0.2.2 (1.2.3, 1/2, and/or, a/b) see `./out/`.');
+  assert.deepEqual(hits.map(h => h.path), ['marketing/videos/tour/', './out/']);
+  assert.deepEqual(scanTerminalLinks('tagged v0.2.2 and 1.2.3 at example.com/docs/a.html').map(h => h.path), []);
+  assert.deepEqual(scanTerminalLinks('Read marketing/videos/tour.').map(h => h.path), []);
+  // A path that wrapped right after a slash is not mistaken for a complete folder.
+  const first = 'Referenced file /tmp/incomplete/';
+  const hits2 = terminalLinksForRow(buffer([{ text: first, color: 6 }, { text: '  folder/report.md', color: 6 }], first.length), 2, true);
+  assert.ok(hits2.some(h => h.path === '/tmp/incomplete/folder/report.md'));
 });

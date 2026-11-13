@@ -41,6 +41,7 @@
   import { runCodeAction, type CodeActionHost } from './codeBlocks';
   import { splitLocation } from './chatMarkdown';
   import { resolvePath } from './format';
+  import { activatePathLink, showPathLinkMenu, PATH_LINK_CTX, type PathLinkTarget } from '../../../lib/pathLinks/open';
   import Lightbox from './Lightbox.svelte';
   import { CONV_CTX, type ConvContext } from './context';
   import { ui } from '../../../lib/stores/ui.svelte';
@@ -52,6 +53,15 @@
   }
   let { md, small = false }: Props = $props();
   const ctx = getContext<ConvContext | undefined>(CONV_CTX);
+  // File references resolve against the session's folders (lib/pathLinks): the
+  // conversation view's session, or the Threads runtime thread hosting us.
+  const linkHost = getContext<(() => PathLinkTarget) | undefined>(PATH_LINK_CTX);
+  const linkTarget = (): PathLinkTarget => linkHost?.() ?? { sessionId: ctx?.sessionId, cwd: ctx?.cwd };
+  const linkOpts = { openFile: ctx?.openPreview ? (path: string, line?: number) => ctx?.openPreview?.({ kind: 'file', path, line: line ?? null }) : undefined };
+  const fileRef = (a: HTMLAnchorElement) => {
+    const loc = a.dataset.anchor ? splitLocation(`x:${a.dataset.anchor}`) : null;
+    return { path: a.dataset.path ?? '', line: loc?.line ?? undefined, col: loc?.col ?? undefined };
+  };
   /** Hosts without the conversation view's link handling still open links. */
   const openUrl = (url: string, inApp = false): void => {
     if (ctx?.openUrl) ctx.openUrl(url, inApp);
@@ -154,9 +164,7 @@
   /** A file reference, an issue chip or an external link — what it opens. */
   function activate(a: HTMLAnchorElement, alt: boolean): boolean {
     if (a.classList.contains('file-ref')) {
-      const path = a.dataset.path ?? '';
-      const loc = a.dataset.anchor ? splitLocation(`x:${a.dataset.anchor}`) : null;
-      if (path) ctx?.openPreview?.({ kind: 'file', path, line: loc?.line ?? null });
+      if (a.dataset.path) void activatePathLink(fileRef(a), linkTarget(), linkOpts);
       return true;
     }
     if (a.classList.contains('ref-chip') && a.dataset.raw) {
@@ -205,12 +213,7 @@
     const a = e.target instanceof Element ? e.target.closest('a') : null;
     if (!a) return;
     if (a.classList.contains('file-ref')) {
-      const path = a.dataset.path ?? '';
-      e.preventDefault();
-      ctxMenu.show(e, [
-        { label: 'Preview', icon: 'eye', action: () => activate(a, false) },
-        { label: 'Copy path', icon: 'copy', action: () => copy(path, path) },
-      ]);
+      showPathLinkMenu(e, fileRef(a), linkTarget(), linkOpts, a);
       return;
     }
     const href = a.getAttribute('href') ?? (a.dataset.raw ? ctx?.issueUrl?.(Number(a.dataset.raw)) : null) ?? '';

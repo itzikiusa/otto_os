@@ -44,7 +44,9 @@ task per integration:
 Every listener reports its live state to an in-memory health registry
 (`crates/otto-channels/src/health.rs`): connecting, connected, reconnecting
 (with the reason), failing (the platform rejected the token or config), waiting
-for a token, or conflict (another workspace already listens with the token).
+for a token, conflict (another workspace already listens with the token), or busy
+(connected, but Otto's inbound queue is full — Slack keeps redelivering the
+unacknowledged messages until there is room; it clears on the next message taken in).
 **Settings → Slack, Telegram & webhooks** polls it (`GET /workspaces/{id}/integrations/status`)
 and shows a badge on each enabled Slack/Telegram card — so a bot that is
 silently reconnecting, or whose `xapp-` token was revoked, is visible without
@@ -119,11 +121,22 @@ What actually crosses the bridge — derived directly from `bridge.rs` and
 `mirror.rs`:
 
 1. **Inbound message arrives** (Slack `message`/`app_mention`, or a Telegram text
-   message). A leading bot `<@U…>` mention is stripped on Slack.
+   message). A leading bot `<@U…>` mention is stripped on Slack, and the text is
+   decoded from Slack's wire format **once, in the listener**
+   (`slack.rs::decode_slack_text`): `&amp;`/`&lt;`/`&gt;` become `&`/`<`/`>`,
+   `<@U1|dana>` → `@dana`, `<#C1|ops>` → `#ops`, `<!here>` → `@here`, a link
+   `<url|label>` → `label (url)` (an auto-link → the url). Everything downstream —
+   the agent, quick commands, workflow triggers — reads that plain text and
+   decodes nothing again, so `Name: R&D`, `x < 5` or `Vec<String>` arrive as typed.
 2. **Allowed-users gate.** If `allowed_users` is set and the sender's id isn't in
    it, the message is silently dropped. Ids are trimmed and compared
    case-insensitively; a message with no sender id never passes a non-blank list.
-   On Slack the gate runs **before** attachments are downloaded. A blank list
+   On Slack the gate runs **before** attachments are downloaded. The sender gets no
+   reply, but every drop is recorded — at the bridge, at Slack's pre-download gate,
+   on the busy path, and for a Telegram file with no caption: the sender is listed
+   under **Turned away** on the card (with an **Allow** button), and a workflow
+   trigger the message was aimed at reads *Last attempt rejected* (see
+   [workflows](./workflows.md)). A blank list
    admits **nobody** (fail closed) — unless the integration is explicitly opened
    to everyone (`open_to_all`, a confirmed opt-in in the editor; integrations
    that predate the flag with a blank list were migrated to it). An open
@@ -790,7 +803,10 @@ reason: *Waiting for token* (not saved, or the Keychain isn't readable yet —
 retried every ~15 s), *Reconnecting* (the network or Slack dropped the
 connection; self-healing), *Not connected* (the token or app config was
 rejected — fix it, the listener keeps retrying every 60 s), *Token in use*
-(another enabled workspace already uses this app/bot token).
+(another enabled workspace already uses this app/bot token), *Busy, retrying
+messages* (the connection is fine but Otto's inbound queue is full; Slack
+redelivers the waiting messages, and the badge returns to *Connected* on the next
+one taken in).
 
 **403 "only the owner can configure a channel bridge".** Saving a Slack/Telegram
 card or seeding from `.loom.env` needs root as well as workspace Editor: the bridge

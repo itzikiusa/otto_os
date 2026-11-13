@@ -708,6 +708,9 @@ async fn spawn_server(
     let mut log_from = None;
     for attempt in 0..3 {
         let port = free_loopback_port().map_err(|e| Error::Internal(format!("pick port: {e}")))?;
+        // The API client's allow-local mode must not reach the usage store
+        // (Otto's own client above is a plain loopback client, not the guard).
+        otto_netguard::register_daemon_port(port);
         let cfg = write_server_config(data_dir, port)?;
         let base_url = format!("http://127.0.0.1:{port}");
         tracing::info!(

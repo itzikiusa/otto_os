@@ -124,6 +124,34 @@ and the review verdict until someone triages it.
 
 Unverified findings are never posted by a workflow as verified: an incomplete
 review fails its `review_run` step before any downstream posting step runs.
+When no reviewer finished at all, the message starts `no reviewer finished`, and
+neither a score nor a partial score is reported (the verifier's own rating is
+left out too, since it had nothing to rate).
+
+### Output formats
+
+Every agent in a review answers in a fixed JSON shape: reviewer findings with a
+`lens_score` element, the scope plan inside its one-element transport array, and
+the verifier's comments, notes and overall score. Each shape has one canonical
+example in `crates/otto-review/src/contract.rs` (`REVIEWER_OUTPUT_EXAMPLE`,
+`LENS_FILE_EXAMPLE`, `SCOPE_PLAN_EXAMPLE`, `VERIFIER_OUTPUT_EXAMPLE`). The
+prompt embeds that example, and `contract_tests.rs` runs it through the reader
+the daemon uses. The allowed severities and dispositions a prompt lists are
+rendered from the lists the checker uses (`FINDING_SEVERITIES`,
+`verifier_dispositions()`, `PRIOR_SCOPE_DISPOSITIONS`). When you edit a prompt
+or a reader, change the example in `contract.rs` and run those tests.
+
+Readers take an answer element by element. An element they cannot use is
+skipped and counted, and the rest are kept. A reviewer's card shows
+`· N items could not be read`. The scope notes say `Scope assessment: N lens
+entries skipped (…)`, and the verification notes say
+`Verifier output: N of M items could not be read and were skipped (…)`. The
+claims a skipped verifier item covered are carried forward unverified. Fenced
+JSON, a sentence before the JSON, numbers given as strings for lines, a listed
+disposition in another case or spelling (`Verified`, `not-relevant`), and a
+scope plan sent without its transport array are all accepted. An answer that
+is not JSON at all fails with a message naming the expected shape. A scope plan
+that cannot be used still never stops the review: every configured lens runs.
 
 ### Re-review
 

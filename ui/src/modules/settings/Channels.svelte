@@ -461,8 +461,8 @@
     if (!st) return { tone: 'neutral', label: 'Starting…' };
     const base = { since: st.since, lastEvent: st.last_event_at };
     switch (st.state) {
-      case 'connected':
-        return { ...base, tone: 'success', label: 'Connected' };
+      case 'connected': return { ...base, tone: 'success', label: 'Connected' };
+      case 'busy': return { ...base, tone: 'warning', label: 'Busy, retrying messages', detail: st.detail };
       case 'connecting':
         return { ...base, tone: 'info', label: 'Connecting…' };
       case 'reconnecting':

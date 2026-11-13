@@ -39,8 +39,8 @@ export function mockMachineStatus(m: string = mode()): MachineStatus {
           { source: 'workflow', waiting_secs: 40, reason: 'waiting behind other background agents' },
         ]
       : [],
-    disk_free_bytes: m === 'low-disk' ? 12 * GIB : 142 * GIB,
-    low_disk_gb: 30,
+    disk_free_bytes: m === 'low-disk' ? 6 * GIB : 142 * GIB,
+    low_disk_gb: 10,
     low_disk: m === 'low-disk',
   };
 }

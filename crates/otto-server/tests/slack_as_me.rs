@@ -325,3 +325,112 @@ async fn posting_as_the_person_waits_for_an_approval() {
         "{card}"
     );
 }
+
+/// An agent's own token never writes AS THE PERSON over REST — post, react
+/// and mark are refused before Slack is asked, naming the governed tool. As
+/// the bot it reaches the bot path as before (here: no bot token, 400).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agent_token_cannot_write_as_the_person_over_rest() {
+    let d = boot().await;
+    let terminal = d.agent_session(json!({})).await;
+    let base = "/workspaces/ws1/integrations/slack";
+    for (path, body, tool) in [
+        (
+            "messages",
+            json!({"as": "user", "team": "T1", "channel": "C0123ABCD", "text": "hi"}),
+            "otto.slack_post_message",
+        ),
+        (
+            "messages",
+            json!({"as": "me", "team": "T1", "channel": "C0123ABCD", "text": "hi"}),
+            "otto.slack_post_message",
+        ),
+        (
+            "reactions",
+            json!({"as": "user", "team": "T1", "channel": "C0123ABCD",
+                   "ts": "1730800000.000200", "name": "eyes"}),
+            "otto.slack_react",
+        ),
+        (
+            "mark",
+            json!({"team": "T1", "channel": "C0123ABCD", "ts": "1730800000.000200"}),
+            "otto.slack_mark_unread",
+        ),
+    ] {
+        let (st, resp) = d
+            .send(
+                "POST",
+                &terminal,
+                &format!("{base}/{path}"),
+                Some(body.clone()),
+            )
+            .await;
+        assert_eq!(st, 403, "{path} {body}: {resp}");
+        assert!(
+            resp["message"].as_str().unwrap_or_default().contains(tool),
+            "{resp}"
+        );
+    }
+    let (st, resp) = d
+        .send(
+            "POST",
+            &terminal,
+            &format!("{base}/messages"),
+            Some(json!({"channel": "C0123ABCD", "text": "hi"})),
+        )
+        .await;
+    assert_eq!(st, 400, "as the bot: {resp}");
+    assert!(
+        resp["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("bot token"),
+        "{resp}"
+    );
+}
+
+/// The approved governed post replays AS THE PERSON (every team), so the
+/// requesting personal agent's own grant is checked BEFORE the card is
+/// filed: a team it was not allowed, or none named, is refused outright.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_governed_post_as_the_person_honours_the_agents_team_grant() {
+    let d = boot().await;
+    let repo = PersonalAgentsRepo::new(d.pool.clone());
+    let mut new = NewPersonalAgent::defaults("ws1".into(), "Digest".into());
+    new.created_by = Some("alice".into());
+    let agent = repo.create(new).await.unwrap().id;
+    let mut cfg = repo.autonomy(&agent).await.unwrap();
+    cfg.slack_as_me_teams = vec!["T2".into()];
+    repo.save_autonomy(&agent, &cfg).await.unwrap();
+    let agent_tok = d.agent_session(json!({"personal_agent": agent})).await;
+    let post = |team: Option<&str>| {
+        let mut a = json!({"workspace_id": "ws1", "as": "user", "channel": "#daily",
+                           "text": "Today: 3 PRs to review"});
+        if let Some(t) = team {
+            a["team"] = json!(t);
+        }
+        a
+    };
+    for team in [Some("Acme"), Some("T1"), None] {
+        let env = d.invoke(&agent_tok, "slack_post_message", post(team)).await;
+        assert_eq!(env["decision"], "denied", "{team:?}: {env}");
+        assert_eq!(env["executed"], false, "{env}");
+    }
+    let (_, pending) = d
+        .send("GET", &d.human, "/mcp/approvals?status=pending", None)
+        .await;
+    assert_eq!(pending.as_array().map(Vec::len), Some(0), "{pending}");
+
+    let env = d
+        .invoke(&agent_tok, "slack_post_message", post(Some("Globex")))
+        .await;
+    assert_eq!(env["decision"], "pending_approval", "{env}");
+    let (_, pending) = d
+        .send("GET", &d.human, "/mcp/approvals?status=pending", None)
+        .await;
+    let card = pending.to_string();
+    assert!(
+        card.contains("Globex") && card.contains("#daily") && card.contains("Today: 3 PRs"),
+        "{card}"
+    );
+}
