@@ -45,7 +45,7 @@
 
   // Adopt any existing live `ide_terminal` shell in this workspace on reload.
   $effect(() => {
-    if (!ws.listSettled || isSshTarget || !ide.target.root) return;
+    if (!ws.listSettled || spawning || isSshTarget || !ide.target.root) return;
     const known = new Set(savedTabs.map((t) => t.id));
     for (const s of ws.sessions) {
       if (s.archived || known.has(s.id)) continue;
@@ -112,7 +112,7 @@
           targetKey,
           cwd: ide.target.root,
         };
-        savedTabs = [...savedTabs, entry];
+        savedTabs = [...savedTabs.filter((t) => t.id !== s.id), entry];
         savedActiveId = s.id;
       } else {
         const s = await ws.createSessionQuiet(
@@ -132,7 +132,7 @@
           targetKey,
           cwd: ide.target.root,
         };
-        savedTabs = [...savedTabs, entry];
+        savedTabs = [...savedTabs.filter((t) => t.id !== s.id), entry];
         savedActiveId = s.id;
       }
     } catch (e) {

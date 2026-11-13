@@ -1,18 +1,10 @@
 //! Stateful DAP session lifecycle manager (`DapManager`).
-//!
 //! Drives Debug Adapter Protocol sessions over stdio, loopback TCP, SSH tunnels,
-//! and in-memory bridges (`tokio::io::duplex`), handling:
-//! - `initialize` -> `launch`/`attach` -> `initialized` -> `setBreakpoints` -> `configurationDone`
-//! - Live breakpoint & exception-breakpoint updates
-//! - Execution controls (`continue`, `pause`, `step_over`, `step_into`, `step_out`,
-//!   `run_to_cursor`, `select_frame`, `restart`, `stop`)
-//! - Automatic `stopped` inspection (`threads` -> `stackTrace` -> `scopes` -> `variables`)
-//!   + IntelliJ-style `inline_values` extraction from paused source files
-//! - Lazy child variable expansion (`variables`) and REPL/watch `evaluate`
-//! - Real-time `tokio::sync::broadcast` snapshot streaming for SSE endpoints.
+//! and in-memory bridges with bounded session & console-output retention.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -43,7 +35,8 @@ use crate::types::{
 
 pub use super::session_inspect::compute_inline_values;
 
-const MAX_OUTPUT_ENTRIES: usize = 500;
+pub(crate) const MAX_DEBUG_OUTPUT: usize = 1_000;
+pub(crate) const MAX_TERMINATED_DEBUG_SESSIONS: usize = 6;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 type BoxRead = Box<dyn AsyncRead + Send + Unpin>;
@@ -197,9 +190,11 @@ pub(super) struct ActiveConnection {
 }
 
 pub(super) struct SessionEntry {
+    pub(super) created_seq: u64,
     pub(super) orig_req: RwLock<IdeStartDebugReq>,
     pub(super) orig_ctx: RwLock<DapStartContext>,
     pub(super) snapshot: RwLock<IdeDebugSessionSnapshot>,
+    pub(super) output_buf: Mutex<VecDeque<IdeDebugOutputEntry>>,
     pub(super) configured_bp_files: Mutex<BTreeSet<String>>,
     pub(super) temp_run_to_cursor: Mutex<Option<(String, u32)>>,
     pub(super) break_on_exceptions: Mutex<bool>,
@@ -209,22 +204,117 @@ pub(super) struct SessionEntry {
 }
 
 impl SessionEntry {
-    pub(super) fn read_snapshot(&self) -> IdeDebugSessionSnapshot {
-        self.snapshot
+    fn new(
+        created_seq: u64,
+        (id, title, language, adapter): (String, String, String, String),
+        initial_output: Vec<IdeDebugOutputEntry>,
+        req: IdeStartDebugReq,
+        ctx: DapStartContext,
+    ) -> Arc<Self> {
+        let (events_tx, _) = broadcast::channel(128);
+        let mut output_buf = VecDeque::with_capacity(initial_output.len().min(MAX_DEBUG_OUTPUT));
+        for item in initial_output {
+            if output_buf.len() >= MAX_DEBUG_OUTPUT {
+                output_buf.pop_front();
+            }
+            output_buf.push_back(item);
+        }
+        let initial_snap = IdeDebugSessionSnapshot {
+            id,
+            title,
+            language,
+            adapter,
+            state: IdeDebugState::Starting,
+            stopped_reason: None,
+            active_thread_id: None,
+            active_frame_id: None,
+            paused_file: None,
+            paused_line: None,
+            threads: Vec::new(),
+            stack_frames: Vec::new(),
+            scopes: Vec::new(),
+            inline_values: Vec::new(),
+            breakpoints: req.breakpoints.clone(),
+            output: Vec::new(),
+            error: None,
+        };
+        Arc::new(Self {
+            created_seq,
+            orig_req: RwLock::new(req),
+            orig_ctx: RwLock::new(ctx),
+            snapshot: RwLock::new(initial_snap),
+            output_buf: Mutex::new(output_buf),
+            configured_bp_files: Mutex::new(BTreeSet::new()),
+            temp_run_to_cursor: Mutex::new(None),
+            break_on_exceptions: Mutex::new(false),
+            conn: RwLock::new(None),
+            events_tx,
+            initialized_notify: Arc::new(Notify::new()),
+        })
+    }
+
+    fn snapshot_output(&self) -> Vec<IdeDebugOutputEntry> {
+        self.output_buf
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    pub(super) fn is_terminal(&self) -> bool {
+        let state = self
+            .snapshot
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .state;
+        matches!(state, IdeDebugState::Terminated | IdeDebugState::Error)
+    }
+
+    pub(super) fn disconnect_and_kill(&self) {
+        if let Some(conn) = self.conn.write().unwrap_or_else(|e| e.into_inner()).take() {
+            conn.guard.kill_all();
+        }
+    }
+
+    fn mark_terminated(&self) {
+        self.mutate_and_broadcast(|snap| {
+            snap.state = IdeDebugState::Terminated;
+            snap.stopped_reason = None;
+            snap.paused_line = None;
+            snap.inline_values.clear();
+        });
+    }
+
+    fn fail_and_evict(&self, sessions: &DashMap<String, Arc<SessionEntry>>, msg: String) {
+        self.disconnect_and_kill();
+        self.mutate_and_broadcast(|snap| {
+            snap.state = IdeDebugState::Error;
+            snap.error = Some(msg);
+        });
+        evict_terminated_sessions(sessions);
+    }
+
+    pub(super) fn read_snapshot(&self) -> IdeDebugSessionSnapshot {
+        let mut snap = self
+            .snapshot
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        snap.output = self.snapshot_output();
+        snap
     }
 
     pub(super) fn mutate_and_broadcast(
         &self,
         f: impl FnOnce(&mut IdeDebugSessionSnapshot),
     ) -> IdeDebugSessionSnapshot {
-        let updated = {
+        let mut updated = {
             let mut snap = self.snapshot.write().unwrap_or_else(|e| e.into_inner());
             f(&mut snap);
             snap.clone()
         };
+        updated.output = self.snapshot_output();
         let _ = self.events_tx.send(updated.clone());
         updated
     }
@@ -233,15 +323,17 @@ impl SessionEntry {
         if text.is_empty() {
             return;
         }
-        self.mutate_and_broadcast(|snap| {
-            if snap.output.len() >= MAX_OUTPUT_ENTRIES {
-                snap.output.remove(0);
+        {
+            let mut buf = self.output_buf.lock().unwrap_or_else(|e| e.into_inner());
+            if buf.len() >= MAX_DEBUG_OUTPUT {
+                buf.pop_front();
             }
-            snap.output.push(IdeDebugOutputEntry {
+            buf.push_back(IdeDebugOutputEntry {
                 category: category.to_string(),
                 text,
             });
-        });
+        }
+        self.mutate_and_broadcast(|_| {});
     }
 
     fn active_conn(&self) -> Result<Arc<ActiveConnection>> {
@@ -257,6 +349,7 @@ impl SessionEntry {
 pub struct DapManager {
     data_dir: PathBuf,
     sessions: Arc<DashMap<String, Arc<SessionEntry>>>,
+    seq_counter: Arc<AtomicU64>,
 }
 
 impl Default for DapManager {
@@ -270,6 +363,7 @@ impl DapManager {
         Self {
             data_dir,
             sessions: Arc::new(DashMap::new()),
+            seq_counter: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -284,13 +378,16 @@ impl DapManager {
         out
     }
 
+    fn get_entry(&self, id: &str) -> Result<Arc<SessionEntry>> {
+        self.sessions
+            .get(id)
+            .map(|e| e.value().clone())
+            .ok_or_else(|| Error::NotFound(format!("debug session '{id}' not found")))
+    }
+
     /// Return the current snapshot for debug session `id`.
     pub fn get_session(&self, id: &str) -> Result<IdeDebugSessionSnapshot> {
-        let entry = self
-            .sessions
-            .get(id)
-            .ok_or_else(|| Error::NotFound(format!("debug session '{id}' not found")))?;
-        Ok(entry.value().read_snapshot())
+        Ok(self.get_entry(id)?.read_snapshot())
     }
 
     /// Subscribe to real-time [`IdeDebugSessionSnapshot`] updates for SSE streaming.
@@ -298,11 +395,28 @@ impl DapManager {
         &self,
         id: &str,
     ) -> Result<broadcast::Receiver<IdeDebugSessionSnapshot>> {
-        let entry = self
-            .sessions
-            .get(id)
-            .ok_or_else(|| Error::NotFound(format!("debug session '{id}' not found")))?;
-        Ok(entry.value().events_tx.subscribe())
+        Ok(self.get_entry(id)?.events_tx.subscribe())
+    }
+
+    fn register_entry(
+        &self,
+        req: &mut IdeStartDebugReq,
+        ctx: DapStartContext,
+        language: String,
+        adapter: String,
+        initial_output: Vec<IdeDebugOutputEntry>,
+    ) -> Arc<SessionEntry> {
+        for bp in &mut req.breakpoints {
+            bp.path = normalize_target_path(&req.target, &bp.path);
+        }
+        let id = format!("dbg_{}", new_id());
+        let title = build_session_title(req, &adapter);
+        let seq = self.seq_counter.fetch_add(1, Ordering::Relaxed);
+        let meta = (id.clone(), title, language, adapter);
+        let entry = SessionEntry::new(seq, meta, initial_output, req.clone(), ctx);
+        self.sessions.insert(id, entry.clone());
+        evict_terminated_sessions(&self.sessions);
+        entry
     }
 
     /// Resolve the language adapter, launch/attach the target, configure breakpoints,
@@ -312,52 +426,18 @@ impl DapManager {
         mut req: IdeStartDebugReq,
         ctx: DapStartContext,
     ) -> Result<IdeDebugSessionSnapshot> {
-        for bp in &mut req.breakpoints {
-            bp.path = normalize_target_path(&req.target, &bp.path);
-        }
         let resolved = resolve_dap_adapter(&self.data_dir, &req, &ctx).await?;
-        let id = format!("dbg_{}", new_id());
-        let title = build_session_title(&req, &resolved.adapter_name);
-        let (events_tx, _) = broadcast::channel(128);
-
-        let initial_snap = IdeDebugSessionSnapshot {
-            id: id.clone(),
-            title,
-            language: resolved.language.clone(),
-            adapter: resolved.adapter_name.clone(),
-            state: IdeDebugState::Starting,
-            stopped_reason: None,
-            active_thread_id: None,
-            active_frame_id: None,
-            paused_file: None,
-            paused_line: None,
-            threads: Vec::new(),
-            stack_frames: Vec::new(),
-            scopes: Vec::new(),
-            inline_values: Vec::new(),
-            breakpoints: req.breakpoints.clone(),
-            output: resolved.initial_output.clone(),
-            error: None,
-        };
-
-        let entry = Arc::new(SessionEntry {
-            orig_req: RwLock::new(req.clone()),
-            orig_ctx: RwLock::new(ctx.clone()),
-            snapshot: RwLock::new(initial_snap),
-            configured_bp_files: Mutex::new(BTreeSet::new()),
-            temp_run_to_cursor: Mutex::new(None),
-            break_on_exceptions: Mutex::new(false),
-            conn: RwLock::new(None),
-            events_tx,
-            initialized_notify: Arc::new(Notify::new()),
-        });
-        self.sessions.insert(id, entry.clone());
-
-        if let Err(err) = boot_session_connection(&entry, resolved, &req, &ctx).await {
-            entry.mutate_and_broadcast(|snap| {
-                snap.state = IdeDebugState::Error;
-                snap.error = Some(err.to_string());
-            });
+        let entry = self.register_entry(
+            &mut req,
+            ctx.clone(),
+            resolved.language.clone(),
+            resolved.adapter_name.clone(),
+            resolved.initial_output.clone(),
+        );
+        if let Err(err) =
+            boot_session_connection(&self.sessions, &entry, resolved, &req, &ctx).await
+        {
+            entry.fail_and_evict(&self.sessions, err.to_string());
             return Err(err);
         }
         Ok(entry.read_snapshot())
@@ -375,47 +455,10 @@ impl DapManager {
     where
         S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
-        for bp in &mut req.breakpoints {
-            bp.path = normalize_target_path(&req.target, &bp.path);
-        }
         let adapter_str = adapter_name.into();
-        let id = format!("dbg_{}", new_id());
-        let title = build_session_title(&req, &adapter_str);
-        let (events_tx, _) = broadcast::channel(128);
         let ctx = DapStartContext::new().with_caller_is_root(caller_is_root);
-
-        let initial_snap = IdeDebugSessionSnapshot {
-            id: id.clone(),
-            title,
-            language: req.language.clone(),
-            adapter: adapter_str.clone(),
-            state: IdeDebugState::Starting,
-            stopped_reason: None,
-            active_thread_id: None,
-            active_frame_id: None,
-            paused_file: None,
-            paused_line: None,
-            threads: Vec::new(),
-            stack_frames: Vec::new(),
-            scopes: Vec::new(),
-            inline_values: Vec::new(),
-            breakpoints: req.breakpoints.clone(),
-            output: Vec::new(),
-            error: None,
-        };
-
-        let entry = Arc::new(SessionEntry {
-            orig_req: RwLock::new(req.clone()),
-            orig_ctx: RwLock::new(ctx),
-            snapshot: RwLock::new(initial_snap),
-            configured_bp_files: Mutex::new(BTreeSet::new()),
-            temp_run_to_cursor: Mutex::new(None),
-            break_on_exceptions: Mutex::new(false),
-            conn: RwLock::new(None),
-            events_tx,
-            initialized_notify: Arc::new(Notify::new()),
-        });
-        self.sessions.insert(id, entry.clone());
+        let lang = req.language.clone();
+        let entry = self.register_entry(&mut req, ctx, lang, adapter_str.clone(), Vec::new());
 
         let (r, w) = tokio::io::split(stream);
         let launch_cmd = if req.launch.attach_port.is_some() {
@@ -434,16 +477,16 @@ impl DapManager {
             "args": req.launch.args,
             "cwd": req.launch.cwd.clone().unwrap_or_else(|| req.target.root.clone()),
         });
-        handshake_and_run(
-            &entry,
-            Box::new(r),
-            Box::new(w),
+        let io = (
+            Box::new(r) as BoxRead,
+            Box::new(w) as BoxWrite,
             BridgeGuard::new(),
-            init_args,
-            launch_cmd,
-            launch_args,
-        )
-        .await?;
+        );
+        let cmds = (init_args, launch_cmd, launch_args);
+        if let Err(err) = handshake_and_run(&self.sessions, &entry, io, cmds).await {
+            entry.fail_and_evict(&self.sessions, err.to_string());
+            return Err(err);
+        }
         Ok(entry.read_snapshot())
     }
 
@@ -453,12 +496,7 @@ impl DapManager {
         id: &str,
         mut req: IdeSetBreakpointsReq,
     ) -> Result<IdeDebugSessionSnapshot> {
-        let entry = self
-            .sessions
-            .get(id)
-            .ok_or_else(|| Error::NotFound(format!("debug session '{id}' not found")))?
-            .value()
-            .clone();
+        let entry = self.get_entry(id)?;
 
         let target = entry
             .orig_req
@@ -488,16 +526,12 @@ impl DapManager {
         id: &str,
         req: IdeDebugCommandReq,
     ) -> Result<IdeDebugSessionSnapshot> {
-        let entry = self
-            .sessions
-            .get(id)
-            .ok_or_else(|| Error::NotFound(format!("debug session '{id}' not found")))?
-            .value()
-            .clone();
+        let entry = self.get_entry(id)?;
 
         match req.action {
             IdeDebugAction::Stop => {
                 stop_entry(&entry).await;
+                evict_terminated_sessions(&self.sessions);
                 return Ok(entry.read_snapshot());
             }
             IdeDebugAction::Restart => {
@@ -530,7 +564,13 @@ impl DapManager {
                     snap.error = None;
                 });
                 let resolved = resolve_dap_adapter(&self.data_dir, &orig_req, &orig_ctx).await?;
-                boot_session_connection(&entry, resolved, &orig_req, &orig_ctx).await?;
+                if let Err(err) =
+                    boot_session_connection(&self.sessions, &entry, resolved, &orig_req, &orig_ctx)
+                        .await
+                {
+                    entry.fail_and_evict(&self.sessions, err.to_string());
+                    return Err(err);
+                }
                 return Ok(entry.read_snapshot());
             }
             IdeDebugAction::SelectFrame => {
@@ -548,35 +588,23 @@ impl DapManager {
         let snap = entry.read_snapshot();
         let thread_id = req.thread_id.or(snap.active_thread_id).unwrap_or(1);
 
+        let tid_arg = Some(json!({ "threadId": thread_id }));
         match req.action {
-            IdeDebugAction::Continue => {
+            IdeDebugAction::Continue
+            | IdeDebugAction::StepOver
+            | IdeDebugAction::StepInto
+            | IdeDebugAction::StepOut => {
+                let dap_cmd = match req.action {
+                    IdeDebugAction::Continue => "continue",
+                    IdeDebugAction::StepOver => "next",
+                    IdeDebugAction::StepInto => "stepIn",
+                    _ => "stepOut",
+                };
                 mark_resumed(&entry);
-                conn.wire
-                    .request("continue", Some(json!({ "threadId": thread_id })))
-                    .await?;
+                conn.wire.request(dap_cmd, tid_arg).await?;
             }
             IdeDebugAction::Pause => {
-                conn.wire
-                    .request("pause", Some(json!({ "threadId": thread_id })))
-                    .await?;
-            }
-            IdeDebugAction::StepOver => {
-                mark_resumed(&entry);
-                conn.wire
-                    .request("next", Some(json!({ "threadId": thread_id })))
-                    .await?;
-            }
-            IdeDebugAction::StepInto => {
-                mark_resumed(&entry);
-                conn.wire
-                    .request("stepIn", Some(json!({ "threadId": thread_id })))
-                    .await?;
-            }
-            IdeDebugAction::StepOut => {
-                mark_resumed(&entry);
-                conn.wire
-                    .request("stepOut", Some(json!({ "threadId": thread_id })))
-                    .await?;
+                conn.wire.request("pause", tid_arg).await?;
             }
             IdeDebugAction::RunToCursor => {
                 let raw_path = req
@@ -593,15 +621,12 @@ impl DapManager {
                     .unwrap_or_else(|e| e.into_inner())
                     .target
                     .clone();
-                let norm_path = normalize_target_path(&target, raw_path);
                 if let Ok(mut slot) = entry.temp_run_to_cursor.lock() {
-                    *slot = Some((norm_path, line));
+                    *slot = Some((normalize_target_path(&target, raw_path), line));
                 }
                 sync_all_breakpoints(&entry, &conn).await?;
                 mark_resumed(&entry);
-                conn.wire
-                    .request("continue", Some(json!({ "threadId": thread_id })))
-                    .await?;
+                conn.wire.request("continue", tid_arg).await?;
             }
             IdeDebugAction::SelectFrame | IdeDebugAction::Restart | IdeDebugAction::Stop => {}
         }
@@ -617,13 +642,7 @@ impl DapManager {
         if variables_reference <= 0 {
             return Ok(Vec::new());
         }
-        let entry = self
-            .sessions
-            .get(id)
-            .ok_or_else(|| Error::NotFound(format!("debug session '{id}' not found")))?
-            .value()
-            .clone();
-        let conn = entry.active_conn()?;
+        let conn = self.get_entry(id)?.active_conn()?;
         fetch_variables(&conn.wire, variables_reference).await
     }
 
@@ -636,12 +655,7 @@ impl DapManager {
         if req.expression.trim().is_empty() {
             return Err(Error::Invalid("expression must not be empty".into()));
         }
-        let entry = self
-            .sessions
-            .get(id)
-            .ok_or_else(|| Error::NotFound(format!("debug session '{id}' not found")))?
-            .value()
-            .clone();
+        let entry = self.get_entry(id)?;
         let conn = entry.active_conn()?;
         let frame_id = req
             .frame_id
@@ -714,12 +728,39 @@ async fn stop_entry(entry: &SessionEntry) {
         .await;
         conn.guard.kill_all();
     }
-    entry.mutate_and_broadcast(|snap| {
-        snap.state = IdeDebugState::Terminated;
-        snap.stopped_reason = None;
-        snap.paused_line = None;
-        snap.inline_values.clear();
+    entry.mark_terminated();
+}
+
+fn spawn_line_reader<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
+    reader: R,
+    mut on_line: impl FnMut(String) + Send + 'static,
+) {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(reader).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            on_line(line);
+        }
     });
+}
+
+async fn resolve_target_endpoint(
+    req: &IdeStartDebugReq,
+    ctx: &DapStartContext,
+    guard: &BridgeGuard,
+    host: String,
+    port: u16,
+) -> Result<(String, u16)> {
+    if req.target.kind != IdeTargetKind::Ssh {
+        return Ok((host, port));
+    }
+    let ssh = ctx
+        .ssh
+        .as_ref()
+        .ok_or_else(|| Error::Invalid("missing SSH spec".into()))?;
+    let tunnel = SshTunnel::open(&ssh_tunnel_config(ssh)?, &host, port).await?;
+    let local_port = tunnel.local_port();
+    guard.push_tunnel(tunnel);
+    Ok(("127.0.0.1".to_string(), local_port))
 }
 
 fn parse_listening_port(line: &str) -> Option<u16> {
@@ -741,25 +782,42 @@ fn parse_listening_port(line: &str) -> Option<u16> {
     None
 }
 
+fn evict_terminated_sessions(sessions: &DashMap<String, Arc<SessionEntry>>) {
+    let mut terminated: Vec<(String, u64)> = sessions
+        .iter()
+        .filter_map(|item| {
+            item.value()
+                .is_terminal()
+                .then(|| (item.key().clone(), item.value().created_seq))
+        })
+        .collect();
+    if terminated.len() <= MAX_TERMINATED_DEBUG_SESSIONS {
+        return;
+    }
+    terminated.sort_by_key(|(_, seq)| *seq);
+    let excess = terminated.len() - MAX_TERMINATED_DEBUG_SESSIONS;
+    for (id, _) in terminated.into_iter().take(excess) {
+        if let Some((_, entry)) = sessions.remove(&id) {
+            entry.disconnect_and_kill();
+        }
+    }
+}
+
 async fn boot_session_connection(
+    sessions: &Arc<DashMap<String, Arc<SessionEntry>>>,
     entry: &Arc<SessionEntry>,
     resolved: ResolvedDapAdapter,
     req: &IdeStartDebugReq,
     ctx: &DapStartContext,
 ) -> Result<()> {
-    let (read_io, write_io, guard) =
-        connect_adapter_transport(entry, &resolved.adapter_name, resolved.transport, req, ctx)
-            .await?;
-    handshake_and_run(
-        entry,
-        read_io,
-        write_io,
-        guard,
+    let io = connect_adapter_transport(entry, &resolved.adapter_name, resolved.transport, req, ctx)
+        .await?;
+    let cmds = (
         resolved.initialize_args,
-        &resolved.launch_command,
+        resolved.launch_command.as_str(),
         resolved.launch_args,
-    )
-    .await
+    );
+    handshake_and_run(sessions, entry, io, cmds).await
 }
 
 async fn connect_adapter_transport(
@@ -789,11 +847,8 @@ async fn connect_adapter_transport(
                 .ok_or_else(|| Error::Internal("missing DAP adapter stdout".into()))?;
             if let Some(stderr) = child.stderr.take() {
                 let entry_err = entry.clone();
-                tokio::spawn(async move {
-                    let mut lines = BufReader::new(stderr).lines();
-                    while let Ok(Some(l)) = lines.next_line().await {
-                        entry_err.append_output("stderr", format!("{l}\n"));
-                    }
+                spawn_line_reader(stderr, move |l| {
+                    entry_err.append_output("stderr", format!("{l}\n"));
                 });
             }
             guard.push_child(child);
@@ -805,32 +860,12 @@ async fn connect_adapter_transport(
             cwd,
             env,
         } => {
-            spawn_tcp_listen_adapter(
-                entry,
-                adapter_name,
-                &command,
-                &args,
-                &cwd,
-                &env,
-                req,
-                ctx,
-                guard,
-            )
-            .await
+            let cmd_spec = (command.as_str(), args.as_slice(), cwd.as_str(), &env);
+            spawn_tcp_listen_adapter(entry, adapter_name, cmd_spec, req, ctx, guard).await
         }
         DapAdapterTransport::DirectTcpAttach { host, port } => {
-            let (connect_host, connect_port) = if req.target.kind == IdeTargetKind::Ssh {
-                let ssh = ctx
-                    .ssh
-                    .as_ref()
-                    .ok_or_else(|| Error::Invalid("missing SSH spec".into()))?;
-                let tunnel = SshTunnel::open(&ssh_tunnel_config(ssh)?, &host, port).await?;
-                let lp = tunnel.local_port();
-                guard.push_tunnel(tunnel);
-                ("127.0.0.1".to_string(), lp)
-            } else {
-                (host, port)
-            };
+            let (connect_host, connect_port) =
+                resolve_target_endpoint(req, ctx, &guard, host, port).await?;
             let tcp = TcpStream::connect((connect_host.as_str(), connect_port))
                 .await
                 .map_err(|e| {
@@ -854,38 +889,26 @@ async fn connect_adapter_transport(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn spawn_tcp_listen_adapter(
     entry: &Arc<SessionEntry>,
     adapter_name: &str,
-    command: &str,
-    args: &[String],
-    cwd: &str,
-    env: &BTreeMap<String, String>,
+    (command, args, cwd, env): (&str, &[String], &str, &BTreeMap<String, String>),
     req: &IdeStartDebugReq,
     ctx: &DapStartContext,
     guard: Arc<BridgeGuard>,
 ) -> Result<(BoxRead, BoxWrite, Arc<BridgeGuard>)> {
     let mut child = spawn_target_process(&req.target, ctx.ssh.as_ref(), command, args, cwd, env)?;
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
     let (port_tx, mut port_rx) = mpsc::unbounded_channel::<(String, String)>();
-    if let Some(out) = stdout {
+    if let Some(out) = child.stdout.take() {
         let tx = port_tx.clone();
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(out).lines();
-            while let Ok(Some(l)) = lines.next_line().await {
-                let _ = tx.send(("stdout".into(), l));
-            }
+        spawn_line_reader(out, move |l| {
+            let _ = tx.send(("stdout".into(), l));
         });
     }
-    if let Some(err) = stderr {
+    if let Some(err) = child.stderr.take() {
         let tx = port_tx.clone();
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(err).lines();
-            while let Ok(Some(l)) = lines.next_line().await {
-                let _ = tx.send(("stderr".into(), l));
-            }
+        spawn_line_reader(err, move |l| {
+            let _ = tx.send(("stderr".into(), l));
         });
     }
     drop(port_tx);
@@ -924,38 +947,25 @@ async fn spawn_tcp_listen_adapter(
     });
     guard.push_child(child);
 
-    let connect_port = if req.target.kind == IdeTargetKind::Ssh {
-        let ssh = ctx
-            .ssh
-            .as_ref()
-            .ok_or_else(|| Error::Invalid("missing SSH spec".into()))?;
-        let tunnel = SshTunnel::open(&ssh_tunnel_config(ssh)?, "127.0.0.1", remote_port).await?;
-        let lp = tunnel.local_port();
-        guard.push_tunnel(tunnel);
-        lp
-    } else {
-        remote_port
-    };
-    let tcp = TcpStream::connect(("127.0.0.1", connect_port))
+    let (connect_host, connect_port) =
+        resolve_target_endpoint(req, ctx, &guard, "127.0.0.1".into(), remote_port).await?;
+    let tcp = TcpStream::connect((connect_host.as_str(), connect_port))
         .await
-        .map_err(|e| Error::Upstream(format!("connect DAP 127.0.0.1:{connect_port}: {e}")))?;
+        .map_err(|e| Error::Upstream(format!("connect DAP {connect_host}:{connect_port}: {e}")))?;
     let (r, w) = tcp.into_split();
     Ok((Box::new(r), Box::new(w), guard))
 }
 
 async fn handshake_and_run(
+    sessions: &Arc<DashMap<String, Arc<SessionEntry>>>,
     entry: &Arc<SessionEntry>,
-    read_io: BoxRead,
-    write_io: BoxWrite,
-    guard: Arc<BridgeGuard>,
-    initialize_args: Value,
-    launch_command: &str,
-    launch_args: Value,
+    (read_io, write_io, guard): (BoxRead, BoxWrite, Arc<BridgeGuard>),
+    (initialize_args, launch_command, launch_args): (Value, &str, Value),
 ) -> Result<()> {
     let (ev_tx, ev_rx) = mpsc::unbounded_channel();
     let wire = DapWireClient::spawn(read_io, write_io, ev_tx);
 
-    spawn_event_driver(entry.clone(), ev_rx);
+    spawn_event_driver(Arc::clone(sessions), entry.clone(), ev_rx);
 
     let init_resp = wire.request("initialize", Some(initialize_args)).await?;
     let caps = init_resp.body.as_ref();
@@ -996,6 +1006,7 @@ async fn handshake_and_run(
         }
     });
 
+    let sessions_launch = Arc::clone(sessions);
     let entry_launch = entry.clone();
     tokio::spawn(async move {
         if let Ok(resp) = launch_rx.await {
@@ -1003,10 +1014,7 @@ async fn handshake_and_run(
                 let msg = resp
                     .message
                     .unwrap_or_else(|| "Debug target launch failed".into());
-                entry_launch.mutate_and_broadcast(|snap| {
-                    snap.state = IdeDebugState::Error;
-                    snap.error = Some(msg);
-                });
+                entry_launch.fail_and_evict(&sessions_launch, msg);
             }
         }
     });
@@ -1014,7 +1022,11 @@ async fn handshake_and_run(
     Ok(())
 }
 
-fn spawn_event_driver(entry: Arc<SessionEntry>, mut ev_rx: mpsc::UnboundedReceiver<DapEvent>) {
+fn spawn_event_driver(
+    sessions: Arc<DashMap<String, Arc<SessionEntry>>>,
+    entry: Arc<SessionEntry>,
+    mut ev_rx: mpsc::UnboundedReceiver<DapEvent>,
+) {
     tokio::spawn(async move {
         while let Some(ev) = ev_rx.recv().await {
             match ev.event.as_str() {
@@ -1057,18 +1069,11 @@ fn spawn_event_driver(entry: Arc<SessionEntry>, mut ev_rx: mpsc::UnboundedReceiv
                     }
                 }
                 "terminated" | "exited" | "__eof__" => {
-                    let should_mark = {
-                        let cur = entry.read_snapshot().state;
-                        !matches!(cur, IdeDebugState::Terminated | IdeDebugState::Error)
-                    };
-                    if should_mark {
-                        entry.mutate_and_broadcast(|snap| {
-                            snap.state = IdeDebugState::Terminated;
-                            snap.stopped_reason = None;
-                            snap.paused_line = None;
-                            snap.inline_values.clear();
-                        });
+                    entry.disconnect_and_kill();
+                    if !entry.is_terminal() {
+                        entry.mark_terminated();
                     }
+                    evict_terminated_sessions(&sessions);
                     if ev.event == "__eof__" {
                         break;
                     }
@@ -1082,3 +1087,68 @@ fn spawn_event_driver(entry: Arc<SessionEntry>, mut ev_rx: mpsc::UnboundedReceiv
 #[cfg(test)]
 #[path = "session_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    use crate::types::{IdeDebugLaunchSpec, IdeTargetSpec};
+
+    fn dummy_req() -> IdeStartDebugReq {
+        IdeStartDebugReq {
+            target: IdeTargetSpec {
+                kind: IdeTargetKind::Local,
+                root: "/tmp".into(),
+                workspace_id: None,
+                connection_id: None,
+            },
+            language: "go".into(),
+            config_id: None,
+            launch: IdeDebugLaunchSpec {
+                program: "main.go".into(),
+                ..IdeDebugLaunchSpec::default()
+            },
+            breakpoints: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn debug_output_ring_and_terminated_session_eviction_enforce_caps() {
+        let mgr = DapManager::new(PathBuf::from("/tmp/otto-dap-test"));
+        for i in 0..10u64 {
+            let id = format!("dbg_term_{i:02}");
+            let meta = (id.clone(), "Test".into(), "go".into(), "dlv".into());
+            let entry = SessionEntry::new(i, meta, Vec::new(), dummy_req(), DapStartContext::new());
+            entry.mutate_and_broadcast(|snap| snap.state = IdeDebugState::Terminated);
+            mgr.sessions.insert(id, entry);
+            evict_terminated_sessions(&mgr.sessions);
+        }
+
+        let live_meta = ("dbg_live".into(), "Live".into(), "go".into(), "dlv".into());
+        let live = SessionEntry::new(
+            99,
+            live_meta,
+            Vec::new(),
+            dummy_req(),
+            DapStartContext::new(),
+        );
+        for i in 0..(MAX_DEBUG_OUTPUT + 250) {
+            live.append_output("stdout", format!("line-{i}"));
+        }
+        mgr.sessions.insert("dbg_live".into(), Arc::clone(&live));
+        evict_terminated_sessions(&mgr.sessions);
+
+        assert_eq!(mgr.sessions.len(), MAX_TERMINATED_DEBUG_SESSIONS + 1);
+        assert!(mgr.get_session("dbg_term_00").is_err());
+        assert!(mgr.get_session("dbg_term_03").is_err());
+        assert!(mgr.get_session("dbg_term_04").is_ok());
+        assert!(mgr.get_session("dbg_term_09").is_ok());
+
+        let snap = mgr.get_session("dbg_live").unwrap();
+        assert_eq!(snap.output.len(), MAX_DEBUG_OUTPUT);
+        assert_eq!(snap.output[0].text, "line-250");
+        assert_eq!(
+            snap.output[MAX_DEBUG_OUTPUT - 1].text,
+            format!("line-{}", MAX_DEBUG_OUTPUT + 249)
+        );
+    }
+}

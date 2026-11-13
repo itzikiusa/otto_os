@@ -4,11 +4,14 @@
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { plural } from '../../lib/plural';
+  import { rowMenu } from '../../lib/rowMenu';
   import { onTabKey } from '../../lib/tabKeys';
   import {
     ide,
@@ -17,13 +20,41 @@
     type IdeOpenTab,
     type IdeSymbolNode,
   } from './ideStore.svelte';
+  import { ideAgent } from './store/ideAgentController.svelte';
 
-  let primaryEditor = $state<IdeEditorHandle | undefined>(undefined);
-  let splitEditor = $state<IdeEditorHandle | undefined>(undefined);
+  const IdeInlinePromptBarLazy = lazyComponent(() => import('./IdeInlinePromptBar.svelte'));
+
+  let primaryEditorRef = $state<IdeEditorHandle | undefined>(undefined);
+  let splitEditorRef = $state<IdeEditorHandle | undefined>(undefined);
 
   let linePrefix = $state('');
   let lineSuffix = $state('');
   let renameMode = $state<'preview' | 'apply' | null>(null);
+
+  const hasNonEmptySelection = $derived(
+    ide.cursorInfo.selections.some((s) => s.anchor !== s.head),
+  );
+
+  function toEditorHandle(ref: IdeEditorHandle): IdeEditorHandle {
+    return {
+      applyPrefixSuffix: (prefix, suffix) => ref.applyPrefixSuffix(prefix, suffix),
+      splitSelectionToLines: () => ref.splitSelectionToLines(),
+      goToLine: (line, col) => ref.goToLine(line, col),
+      focus: () => ref.focus(),
+      getSelectionRange: () => ref.getSelectionRange?.() ?? null,
+      applyAgentEdit: (nextContent, range) => ref.applyAgentEdit?.(nextContent, range) ?? false,
+    };
+  }
+
+  function focusAgentComposer(): void {
+    let tries = 0;
+    const step = (): void => {
+      const el = document.querySelector<HTMLElement>('[data-testid="ide-agent-composer"]');
+      if (el) el.focus();
+      else if (++tries < 12) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
 
   async function runRenameAction(mode: 'preview' | 'apply'): Promise<void> {
     renameMode = mode;
@@ -36,12 +67,12 @@
   }
 
   $effect(() => {
-    ide.registerEditorHandle('primary', primaryEditor ?? null);
+    ide.registerEditorHandle('primary', primaryEditorRef ? toEditorHandle(primaryEditorRef) : null);
     return () => ide.registerEditorHandle('primary', null);
   });
 
   $effect(() => {
-    ide.registerEditorHandle('split', splitEditor ?? null);
+    ide.registerEditorHandle('split', splitEditorRef ? toEditorHandle(splitEditorRef) : null);
     return () => ide.registerEditorHandle('split', null);
   });
 
@@ -67,13 +98,19 @@
   });
 
   function openTabMenu(e: MouseEvent, tab: IdeOpenTab): void {
+    const tabDirty = tab.dirty ?? (tab.content !== tab.savedContent);
     const items: MenuItem[] = [
       {
         label: 'Save',
         icon: 'download',
         hint: '⌘S',
-        disabled: tab.readOnly || tab.content === tab.savedContent,
+        disabled: tab.readOnly || !tabDirty,
         action: () => void ide.saveFile(tab.path),
+      },
+      {
+        label: 'Add to Agent context',
+        icon: 'assistant',
+        action: () => void ideAgent.attachFile(tab.path, { openPanel: true }),
       },
       { separator: true },
       { label: 'Split right', icon: 'split', action: () => ide.openInSplit(tab.path, 'right') },
@@ -169,13 +206,14 @@
     <div class="ide-tabs-row">
       <div class="ide-tabs-strip" role="toolbar" aria-label="Open files">
         {#each ide.tabs as tab (tab.path)}
-          {@const isDirty = tab.content !== tab.savedContent}
+          {@const isDirty = tab.dirty ?? (tab.content !== tab.savedContent)}
           {@const isActive = tab.path === ide.activePath}
           <div
             class="ide-tab"
             class:active={isActive}
             class:preview={tab.preview}
             oncontextmenu={(e) => openTabMenu(e, tab)}
+            use:rowMenu
             role="presentation"
           >
             <button
@@ -259,26 +297,59 @@
         {#if ide.cursorInfo.cursors > 1}
           <Badge variant="outline" tone="accent" label={plural(ide.cursorInfo.cursors, 'cursor')} />
         {/if}
-        <button
-          type="button"
-          class="btn small ghost"
-          aria-pressed={ide.prefixSuffixOpen}
-          title="Add prefix or suffix to every selected line"
-          onclick={() => (ide.prefixSuffixOpen = !ide.prefixSuffixOpen)}
-          data-testid="ide-prefix-suffix-toggle"
-        >
-          <Icon name="edit" size={12} />
-          Prefix / suffix
-        </button>
-        <button
-          type="button"
-          class="icon-btn"
-          aria-label="Split selection into lines"
-          title="Split selection into multiple cursors (⌥⇧I)"
-          onclick={() => ide.splitSelectionToLines()}
-        >
-          <Icon name="layers" size={13} />
-        </button>
+        {#if hasNonEmptySelection}
+          <div
+            class="ide-sel-bar"
+            role="group"
+            aria-label="Selection actions"
+            data-testid="ide-selection-agent-bar"
+          >
+            <button
+              type="button"
+              class="btn small ghost ide-sel-accent"
+              title="Add selection to AI Agent context (⌘L)"
+              onclick={() => {
+                ideAgent.markSelectionFromEditor({ openPanel: true });
+                focusAgentComposer();
+              }}
+              data-testid="ide-selection-add-agent"
+            >
+              <Icon name="assistant" size={12} />
+              Add to Agent ⌘L
+            </button>
+            <button
+              type="button"
+              class="btn small ghost"
+              disabled={activeTab.readOnly || !ide.canEditCollab}
+              title="Inline AI edit on selection (⌘I)"
+              onclick={() => ideAgent.openInlineEdit()}
+              data-testid="ide-selection-inline-edit"
+            >
+              <Icon name="sparkle" size={12} />
+              Edit ⌘I
+            </button>
+            <button
+              type="button"
+              class="btn small ghost"
+              aria-pressed={ide.prefixSuffixOpen}
+              title="Add prefix or suffix to every selected line"
+              onclick={() => (ide.prefixSuffixOpen = true)}
+              data-testid="ide-prefix-suffix-toggle"
+            >
+              <Icon name="edit" size={12} />
+              Prefix / suffix
+            </button>
+            <button
+              type="button"
+              class="icon-btn"
+              aria-label="Split selection into lines"
+              title="Split selection into multiple cursors (⌥⇧I)"
+              onclick={() => ide.splitSelectionToLines()}
+            >
+              <Icon name="layers" size={13} />
+            </button>
+          </div>
+        {/if}
         <button
           type="button"
           class="icon-btn"
@@ -301,6 +372,10 @@
         </button>
       </div>
     </div>
+
+    {#if ideAgent.inlinePrompt?.open}
+      <LazyMount lazy={IdeInlinePromptBarLazy} what="inline prompt" variant="compact" />
+    {/if}
 
     {#if ide.prefixSuffixOpen}
       <div class="ide-ps-bar" role="region" aria-label="Multi-line prefix and suffix editor">
@@ -357,9 +432,10 @@
           onretry={() => void ide.openFile(activeTab.path)}
         >
           <CodeEditor
-            bind:this={primaryEditor}
+            bind:this={primaryEditorRef}
             path={activeTab.path}
             content={activeTab.content}
+            savedContent={activeTab.savedContent}
             root={ide.target.root}
             language={activeTab.language}
             readOnly={activeTab.readOnly || !ide.canEditCollab}
@@ -397,6 +473,17 @@
               void ide.openRenameModal(activeTab.path, ctx.line, ctx.column, ctx.symbol)}
             onFormat={() => void ide.formatActiveFile()}
             onDiagnostics={(diags) => ide.setDiagnostics(activeTab.path, diags)}
+            onAgentAction={(mode, sel) => {
+              if (mode === 'inline') {
+                ideAgent.openInlineEdit({ path: activeTab.path, ...sel });
+              } else {
+                ideAgent.markSelectionFromEditor({
+                  openPanel: true,
+                  selection: { path: activeTab.path, ...sel },
+                });
+                focusAgentComposer();
+              }
+            }}
           />
         </LoadState>
       </div>
@@ -418,9 +505,10 @@
           </div>
           <div class="split-body">
             <CodeEditor
-              bind:this={splitEditor}
+              bind:this={splitEditorRef}
               path={splitTab.path}
               content={splitTab.content}
+              savedContent={splitTab.savedContent}
               root={ide.target.root}
               language={splitTab.language}
               readOnly={splitTab.readOnly || !ide.canEditCollab}
@@ -436,6 +524,17 @@
               onGutterAction={(item, mode) => ide.runFromGutter(item, mode)}
               keymapPreset={ide.keymapPreset}
               onchange={(val) => ide.updateBuffer(splitTab.path, val)}
+              onAgentAction={(mode, sel) => {
+                if (mode === 'inline') {
+                  ideAgent.openInlineEdit({ path: splitTab.path, ...sel });
+                } else {
+                  ideAgent.markSelectionFromEditor({
+                    openPanel: true,
+                    selection: { path: splitTab.path, ...sel },
+                  });
+                  focusAgentComposer();
+                }
+              }}
             />
           </div>
         </div>
@@ -576,8 +675,14 @@
   .ide-crumbs { display: flex; align-items: center; gap: 4px; min-width: 0; overflow: hidden; font-size: var(--fs-xs); color: var(--text-dim); }
   .crumb-sep { display: inline-flex; opacity: var(--disabled-opacity); }
   .crumb-seg.last { color: var(--text); font-weight: 500; }
-  .ide-subbar-tools { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+  .ide-subbar-tools { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; min-inline-size: 0; max-inline-size: 100%; }
   .ide-cursor-meta { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); padding-inline-end: 4px; }
+  .ide-sel-bar {
+    display: inline-flex; align-items: center; flex-wrap: wrap; gap: 2px; padding: 2px;
+    min-inline-size: 0; max-inline-size: 100%;
+    background: var(--surface-2); border: 1px solid var(--accent-line); border-radius: var(--radius-s);
+  }
+  .ide-sel-accent { color: var(--accent-text); }
   .ide-ps-bar {
     display: flex;
     align-items: center;

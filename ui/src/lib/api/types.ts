@@ -446,6 +446,7 @@ export interface IdeRunState {
   exit_code?: number | null;
   started_at?: string | number;
   duration_ms?: number | null;
+  output_seq?: number;
   output: string[];
   tests: IdeTestResult[];
 }

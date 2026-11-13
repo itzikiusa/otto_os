@@ -54,13 +54,16 @@ def _recv():
 
 class _OttoDapBdb(bdb.Bdb):
     def __init__(self):
-        super().__init__()
+        super().__init__(skip=['bdb', 'runpy', 'importlib*', '_frozen_importlib*'])
         self.cmd_q = queue.Queue()
         self.bps = {}
         self.frames = []
         self.refs = {}
         self.next_ref = 1000
         self.launch_cfg = {}
+        self.initial_run = True
+        self._bdb_file = os.path.realpath(bdb.__file__)
+        self._runpy_file = os.path.realpath(runpy.__file__)
 
     def _alloc_ref(self, obj):
         self.next_ref += 1
@@ -70,8 +73,19 @@ class _OttoDapBdb(bdb.Bdb):
     def _expandable(self, v):
         return isinstance(v, (dict, list, tuple, set)) or hasattr(v, '__dict__')
 
+    def _internal(self, frame):
+        co = frame.f_code
+        fn = co.co_filename
+        if not fn or fn.startswith('<'):
+            return True
+        if '_OttoDapBdb' in getattr(co, 'co_qualname', ''):
+            return True
+        return os.path.realpath(self.canonic(fn)) in (self._bdb_file, self._runpy_file)
+
     def user_line(self, frame):
-        fn = self.canonic(frame.f_code.co_filename)
+        if self._internal(frame):
+            return
+        fn = os.path.realpath(self.canonic(frame.f_code.co_filename))
         ln = frame.f_lineno
         bp_meta = self.bps.get((fn, ln))
         if bp_meta:
@@ -86,13 +100,16 @@ class _OttoDapBdb(bdb.Bdb):
             if log_msg:
                 _send({'type': 'event', 'event': 'output', 'body': {'category': 'console', 'output': str(log_msg) + '\n'}})
                 return
+        if self.initial_run and self.bps and not bp_meta:
+            return
+        self.initial_run = False
         self._pause(frame, 'breakpoint' if bp_meta else 'step')
 
     def _pause(self, frame, reason):
         self.frames = []
         cur = frame
         while cur is not None and len(self.frames) < 40:
-            if '_OttoDapBdb' not in cur.f_code.co_qualname and cur.f_code.co_filename != '<string>':
+            if not self._internal(cur):
                 self.frames.append(cur)
             cur = cur.f_back
         if not self.frames:
@@ -162,15 +179,20 @@ class _OttoDapBdb(bdb.Bdb):
                 _send({'type': 'response', 'request_seq': rseq, 'success': True, 'command': cmd, 'body': {}})
 
     def _apply_bps(self, rseq, args):
-        src = os.path.realpath((args.get('source') or {}).get('path') or '')
-        fn = self.canonic(src)
+        raw_src = (args.get('source') or {}).get('path') or ''
+        canon_src = self.canonic(raw_src)
+        fn = os.path.realpath(canon_src)
         self.clear_all_file_breaks(fn)
+        if canon_src != fn:
+            self.clear_all_file_breaks(canon_src)
         for k in [k for k in self.bps if k[0] == fn]:
             del self.bps[k]
         out = []
         for bp in (args.get('breakpoints') or []):
             ln = int(bp.get('line') or 1)
             self.set_break(fn, ln)
+            if canon_src != fn and os.path.exists(canon_src):
+                self.set_break(canon_src, ln)
             self.bps[(fn, ln)] = bp
             out.append({'verified': True, 'line': ln})
         _send({'type': 'response', 'request_seq': rseq, 'success': True, 'command': 'setBreakpoints', 'body': {'breakpoints': out}})
@@ -209,9 +231,11 @@ def _reader():
 threading.Thread(target=_reader, daemon=True).start()
 started.wait()
 prog = dbg.launch_cfg.get('program') or ''
-cwd = dbg.launch_cfg.get('cwd') or os.getcwd()
+cwd = os.path.realpath(dbg.launch_cfg.get('cwd') or os.getcwd())
 os.chdir(cwd)
 sys.path.insert(0, cwd)
+if prog:
+    prog = os.path.realpath(prog if os.path.isabs(prog) else os.path.join(cwd, prog))
 tname = dbg.launch_cfg.get('testName')
 try:
     if tname and os.path.isfile(prog):

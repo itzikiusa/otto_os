@@ -4,12 +4,14 @@
   import Badge from '../../lib/components/Badge.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { keyContext } from '../../lib/keys';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import { plural } from '../../lib/plural';
   import { router } from '../../lib/router.svelte';
@@ -19,19 +21,56 @@
   import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
   import IdeBottomDock from './IdeBottomDock.svelte';
   import IdeEditorArea from './IdeEditorArea.svelte';
-  import IdeEnvironmentsModal from './IdeEnvironmentsModal.svelte';
-  import IdePluginsModal from './IdePluginsModal.svelte';
   import IdeProjectTree from './IdeProjectTree.svelte';
-  import IdeSearchEverywhere from './IdeSearchEverywhere.svelte';
-  import IdeShareModal from './IdeShareModal.svelte';
-  import IdeSshTargetModal from './IdeSshTargetModal.svelte';
   import { ide, ideBasename } from './ideStore.svelte';
-  import IdeToolchainsModal from './IdeToolchainsModal.svelte';
+  import { ideAgent } from './store/ideAgentController.svelte';
 
+  const IdeAgentPanelLazy = lazyComponent(() => import('./IdeAgentPanel.svelte'));
+  const IdeSearchEverywhereLazy = lazyComponent(() => import('./IdeSearchEverywhere.svelte'));
+  const IdeToolchainsModalLazy = lazyComponent(() => import('./IdeToolchainsModal.svelte'));
+  const IdeEnvironmentsModalLazy = lazyComponent(() => import('./IdeEnvironmentsModal.svelte'));
+  const IdeSshTargetModalLazy = lazyComponent(() => import('./IdeSshTargetModal.svelte'));
+  const IdeShareModalLazy = lazyComponent(() => import('./IdeShareModal.svelte'));
+  const IdePluginsModalLazy = lazyComponent(() => import('./IdePluginsModal.svelte'));
   const TREE_W_KEY = 'otto.ide.treeW';
+  const AGENT_W_KEY = 'otto.ide.agentW';
   let treeW = $state(loadPaneWidth(TREE_W_KEY, 250, LIST_PANE.min, LIST_PANE.max));
+  let agentW = $state(loadPaneWidth(AGENT_W_KEY, 360, 280, 560));
   let explorerVisible = $state(true);
-  let mobileView = $state<'files' | 'editor' | 'tools'>('editor');
+  let mobileView = $state<'files' | 'editor' | 'tools' | 'agent'>('editor');
+
+  function focusAgentComposer(tries = 15): void {
+    IdeAgentPanelLazy.prefetch();
+    requestAnimationFrame(() => {
+      const el = document.querySelector<HTMLElement>('[data-testid="ide-agent-composer"]');
+      if (el) el.focus();
+      else if (tries > 0 && ideAgent.panelOpen) focusAgentComposer(tries - 1);
+    });
+  }
+
+  function triggerAgentShortcut(): void {
+    const hasSel = ide.cursorInfo.selections.some((s) => s.anchor !== s.head);
+    if (!ideAgent.panelOpen && hasSel) {
+      ideAgent.markSelectionFromEditor({ openPanel: true });
+      focusAgentComposer();
+      return;
+    }
+    ideAgent.togglePanel();
+    if (ideAgent.panelOpen) focusAgentComposer();
+  }
+
+  // Keep mobile segmented view in sync when another panel opens/closes Agent.
+  let lastAgentOpen = false;
+  $effect(() => {
+    const open = ideAgent.panelOpen;
+    if (open !== lastAgentOpen) {
+      lastAgentOpen = open;
+      if (viewport.isPhone) {
+        if (open) mobileView = 'agent';
+        else if (mobileView === 'agent') mobileView = 'editor';
+      }
+    }
+  });
 
   const isRunning = $derived(ide.activeRun?.status === 'running');
   const targetLabel = $derived.by((): string => {
@@ -102,6 +141,8 @@
       },
       { id: 'ide.run', title: 'Run configuration', group: 'IDE', shortcut: '⌃R', run: () => void ide.startRun() },
       { id: 'ide.debug', title: 'Debug configuration', group: 'IDE', shortcut: '⌃D', run: () => void ide.startDebug() },
+      { id: 'ide.toggleAgent', title: 'Toggle AI Agent', group: 'IDE', shortcut: '⌘L', keywords: 'ai assistant chat context', run: () => triggerAgentShortcut() },
+      { id: 'ide.inlineEdit', title: 'Inline AI edit…', group: 'IDE', shortcut: '⌘I', keywords: 'ai refactor rewrite selection', run: () => ideAgent.openInlineEdit() },
       { id: 'ide.toolchains', title: 'Toolchains & SDKs…', group: 'IDE', run: () => (ide.toolchainsOpen = true) },
       { id: 'ide.environments', title: 'Environments & run configurations…', group: 'IDE', run: () => (ide.environmentsOpen = true) },
       { id: 'ide.ssh', title: 'Connect remote SSH project…', group: 'IDE', run: () => (ide.sshOpen = true) },
@@ -109,6 +150,9 @@
       { id: 'ide.plugins', title: 'Manage IDE plugins…', group: 'IDE', run: () => (ide.pluginsOpen = true) },
     ]),
   );
+
+  const inXterm = (t: EventTarget | null): boolean =>
+    t instanceof Element && Boolean(t.closest('.xterm'));
 
   // Claim ⌘-chords before the global shell keymap.
   $effect(() => {
@@ -122,6 +166,11 @@
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.code === 'KeyE') {
         e.preventDefault();
         openRecentFilesMenu();
+        return true;
+      }
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.code === 'KeyI' && !(e.ctrlKey && !e.metaKey && inXterm(e.target))) {
+        e.preventDefault();
+        ideAgent.openInlineEdit();
         return true;
       }
       if ((e.metaKey || e.ctrlKey) && e.altKey && !e.shiftKey && e.code === 'KeyL') {
@@ -144,7 +193,7 @@
     };
   });
 
-  // Double-Shift (⇧⇧) Search Everywhere + function-key debug/refactor shortcuts.
+  // Double-Shift (⇧⇧) Search Everywhere + AI Agent + debug/refactor shortcuts.
   $effect(() => {
     let lastShiftUp = 0;
     let shiftDirty = false;
@@ -156,6 +205,19 @@
       }
       shiftDirty = true;
       if (ui.overlayOpen) return;
+
+      if (!e.defaultPrevented && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && !(e.ctrlKey && !e.metaKey && inXterm(e.target))) {
+        if (e.code === 'KeyL') {
+          e.preventDefault();
+          triggerAgentShortcut();
+          return;
+        }
+        if (e.code === 'KeyI') {
+          e.preventDefault();
+          ideAgent.openInlineEdit();
+          return;
+        }
+      }
 
       if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.code === 'KeyR') {
         e.preventDefault();
@@ -213,6 +275,7 @@
 
   onDestroy(() => {
     ide.disposeStreams();
+    ideAgent.dispose();
   });
 
   function openRecentFilesMenu(): void {
@@ -289,6 +352,12 @@
         label: ide.bottomDockOpen ? 'Hide bottom tool dock' : 'Show bottom tool dock',
         icon: 'terminal',
         action: () => ide.toggleBottomDock(),
+      },
+      {
+        label: ideAgent.panelOpen ? 'Hide AI Agent' : 'Show AI Agent',
+        icon: 'assistant',
+        hint: '⌘L',
+        action: () => triggerAgentShortcut(),
       },
       { separator: true },
       { label: 'Toolchains & SDKs…', icon: 'box', action: () => (ide.toolchainsOpen = true) },
@@ -415,6 +484,27 @@
         {#if !viewport.isPhone}
           <button
             type="button"
+            class="btn small ghost ide-agent-toggle"
+            data-overflow="5"
+            data-icon="assistant"
+            data-label="Toggle AI Agent"
+            aria-pressed={ideAgent.panelOpen}
+            title="Toggle AI Agent (⌘L)"
+            onclick={() => {
+              ideAgent.togglePanel();
+              if (ideAgent.panelOpen) focusAgentComposer();
+            }}
+            data-testid="ide-toggle-agent"
+          >
+            <Icon name="assistant" size={13} />
+            Agent
+            {#if ideAgent.contexts.length > 0}
+              <Badge tone="accent" label={String(ideAgent.contexts.length)} />
+            {/if}
+          </button>
+
+          <button
+            type="button"
             class="btn small ghost"
             data-overflow="2"
             data-icon="share"
@@ -466,9 +556,7 @@
       </div>
       <div class="collab-actions">
         {#if !ide.collabIsGuest}
-          <button type="button" class="btn small ghost" onclick={() => (ide.shareOpen = true)}>
-            Manage
-          </button>
+          <button type="button" class="btn small ghost" onclick={() => (ide.shareOpen = true)}>Manage</button>
         {/if}
         <button type="button" class="btn small ghost" onclick={() => void leaveOrEndCollab()}>
           {ide.collabIsGuest ? 'Leave' : 'End…'}
@@ -507,7 +595,10 @@
             class:active={mobileView === 'files'}
             aria-pressed={mobileView === 'files'}
             onkeydown={onTabKey}
-            onclick={() => (mobileView = 'files')}
+            onclick={() => {
+              mobileView = 'files';
+              if (ideAgent.panelOpen) ideAgent.togglePanel(false);
+            }}
           >
             Files
           </button>
@@ -516,7 +607,10 @@
             class:active={mobileView === 'editor'}
             aria-pressed={mobileView === 'editor'}
             onkeydown={onTabKey}
-            onclick={() => (mobileView = 'editor')}
+            onclick={() => {
+              mobileView = 'editor';
+              if (ideAgent.panelOpen) ideAgent.togglePanel(false);
+            }}
           >
             Editor
           </button>
@@ -528,9 +622,23 @@
             onclick={() => {
               mobileView = 'tools';
               ide.toggleBottomDock(true);
+              if (ideAgent.panelOpen) ideAgent.togglePanel(false);
             }}
           >
             Tools
+          </button>
+          <button
+            type="button"
+            class:active={mobileView === 'agent'}
+            aria-pressed={mobileView === 'agent'}
+            onkeydown={onTabKey}
+            onclick={() => {
+              mobileView = 'agent';
+              ideAgent.togglePanel(true);
+            }}
+            data-testid="ide-mobile-tab-agent"
+          >
+            Agent{#if ideAgent.contexts.length > 0} ({ideAgent.contexts.length}){/if}
           </button>
         </div>
       </div>
@@ -540,6 +648,8 @@
           <IdeProjectTree />
         {:else if mobileView === 'tools'}
           <IdeBottomDock />
+        {:else if mobileView === 'agent'}
+          <LazyMount lazy={IdeAgentPanelLazy} what="AI agent" variant="panel" />
         {:else}
           <IdeEditorArea />
         {/if}
@@ -562,129 +672,88 @@
           <IdeEditorArea />
           <IdeBottomDock />
         </div>
+
+        {#if ideAgent.panelOpen}
+          <PaneDivider
+            bind:width={agentW}
+            storageKey={AGENT_W_KEY}
+            min={280}
+            max={560}
+            defaultWidth={360}
+            invert
+            label="Resize AI agent dock"
+          />
+          <div class="ide-agent-wrap" style:inline-size="{agentW}px">
+            <LazyMount lazy={IdeAgentPanelLazy} what="AI agent" variant="panel" />
+          </div>
+        {/if}
       </div>
     {/if}
   </PageBody>
 
-  <IdeSearchEverywhere />
-  <IdeToolchainsModal />
-  <IdeEnvironmentsModal />
-  <IdeSshTargetModal />
-  <IdeShareModal />
-  <IdePluginsModal />
+  {#if ide.searchEverywhereOpen}
+    <LazyMount lazy={IdeSearchEverywhereLazy} what="search everywhere" quiet onerror={() => (ide.searchEverywhereOpen = false)} />
+  {/if}
+  {#if ide.toolchainsOpen}
+    <LazyMount lazy={IdeToolchainsModalLazy} what="toolchains manager" quiet onerror={() => (ide.toolchainsOpen = false)} />
+  {/if}
+  {#if ide.environmentsOpen}
+    <LazyMount lazy={IdeEnvironmentsModalLazy} what="environments" quiet onerror={() => (ide.environmentsOpen = false)} />
+  {/if}
+  {#if ide.sshOpen}
+    <LazyMount lazy={IdeSshTargetModalLazy} what="SSH target picker" quiet onerror={() => (ide.sshOpen = false)} />
+  {/if}
+  {#if ide.shareOpen}
+    <LazyMount lazy={IdeShareModalLazy} what="collaboration settings" quiet onerror={() => (ide.shareOpen = false)} />
+  {/if}
+  {#if ide.pluginsOpen}
+    <LazyMount lazy={IdePluginsModalLazy} what="extensions manager" quiet onerror={() => (ide.pluginsOpen = false)} />
+  {/if}
 </div>
 
 <style>
-  .ide-page {
-    display: flex;
-    flex-direction: column;
-    flex: 1;
-    min-width: 0;
-    min-height: 0;
-    height: 100%;
-  }
+  .ide-page { display: flex; flex-direction: column; flex: 1; min-inline-size: 0; min-block-size: 0; block-size: 100%; }
   .ide-target-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    max-width: 220px;
-    height: 24px;
-    padding-inline: 8px;
-    background: var(--surface-2);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    font-size: var(--fs-xs);
-    cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px; max-inline-size: 220px; block-size: 24px;
+    padding-inline: 8px; background: var(--surface-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--radius-s); font-size: var(--fs-xs); cursor: pointer;
   }
-  .ide-target-btn:hover {
-    border-color: var(--border-strong);
-  }
-  .ide-target-text {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
+  .ide-target-btn:hover { border-color: var(--border-strong); }
+  .ide-target-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ide-config-select {
-    max-width: 170px;
-    height: 26px;
-    padding-inline: 8px;
-    font-size: var(--fs-xs);
-    background: var(--surface-2);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
+    max-inline-size: 170px; block-size: 26px; padding-inline: 8px; font-size: var(--fs-xs);
+    background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-s);
+  }
+  .ide-agent-toggle[aria-pressed='true'] {
+    background: var(--accent-soft);
+    border-color: var(--accent-line);
+    color: var(--accent-text);
   }
   .ide-collab-banner {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 14px;
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
-    font-size: var(--fs-xs);
-    flex-wrap: wrap;
+    display: flex; align-items: center; gap: 8px; padding-block: 6px; padding-inline: 14px;
+    background: var(--surface); border-block-end: 1px solid var(--border); font-size: var(--fs-xs); flex-wrap: wrap;
   }
-  .collab-title {
-    font-weight: 500;
-    color: var(--text);
+  .collab-title { font-weight: 500; color: var(--text); }
+  .collab-count { color: var(--text-dim); }
+  .collab-peers { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+  .collab-actions { display: flex; align-items: center; gap: 4px; margin-inline-start: auto; }
+  .ide-workbench { display: flex; flex: 1; min-inline-size: 0; min-block-size: 0; }
+  .ide-rail-wrap, .ide-agent-wrap {
+    flex-shrink: 0; min-inline-size: 0; min-block-size: 0; block-size: 100%; display: flex; flex-direction: column;
   }
-  .collab-count {
-    color: var(--text-dim);
-  }
-  .collab-peers {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    flex-wrap: wrap;
-  }
-  .collab-actions {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    margin-inline-start: auto;
-  }
-  .ide-workbench {
-    display: flex;
-    flex: 1;
-    min-width: 0;
-    min-height: 0;
-  }
-  .ide-rail-wrap {
-    flex-shrink: 0;
-    min-width: 0;
-    min-height: 0;
-    height: 100%;
-  }
-  .ide-center-col {
-    flex: 1;
-    min-width: 0;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-  }
+  .ide-center-col { flex: 1; min-inline-size: 0; min-block-size: 0; display: flex; flex-direction: column; }
   .ide-mobile-bar {
-    display: flex;
-    justify-content: center;
-    padding: 6px 10px;
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
+    display: flex; justify-content: center; padding-block: 6px; padding-inline: 10px;
+    background: var(--surface); border-block-end: 1px solid var(--border);
   }
-  .ide-mobile-body {
-    flex: 1;
-    min-height: 0;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-  }
+  .ide-mobile-bar .segmented { max-inline-size: 100%; }
+  .ide-mobile-bar .segmented > button { padding-inline: 8px; }
+  .ide-mobile-body { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; flex-direction: column; }
   @media (max-width: 1024px) {
-    .ide-rail-wrap {
-      max-inline-size: 36%;
-    }
+    .ide-rail-wrap { max-inline-size: 32%; }
+    .ide-agent-wrap { max-inline-size: 38%; }
   }
   @media (max-width: 640px) {
-    .ide-target-btn {
-      max-width: 130px;
-    }
+    .ide-target-btn { max-inline-size: 130px; }
   }
 </style>

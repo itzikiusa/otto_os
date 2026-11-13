@@ -44,25 +44,19 @@
   import { toasts } from '../toast.svelte';
 
   const themeCompartment = new Compartment();
-  const lightTheme = EditorView.theme(
-    {
-      '&': { color: 'var(--text)', backgroundColor: 'transparent' },
-      '.cm-content': { caretColor: 'var(--text)' },
-      '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--text)' },
-      '.cm-selectionBackground': { backgroundColor: 'var(--accent-line)' },
-      '&.cm-focused .cm-selectionBackground': { backgroundColor: 'var(--accent-line)' },
-      '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--text-dim) 8%, transparent)' },
-      '.cm-gutters': { backgroundColor: 'transparent', color: 'var(--text-dim)', border: 'none' },
-      '.cm-activeLineGutter': { backgroundColor: 'transparent' },
-    },
-    { dark: false },
-  );
+  const lightTheme = EditorView.theme({
+    '&': { color: 'var(--text)', backgroundColor: 'transparent' },
+    '.cm-content': { caretColor: 'var(--text)' },
+    '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--text)' },
+    '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': { backgroundColor: 'var(--accent-line)' },
+    '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--text-dim) 8%, transparent)' },
+    '.cm-gutters': { backgroundColor: 'transparent', color: 'var(--text-dim)', border: 'none' },
+    '.cm-activeLineGutter': { backgroundColor: 'transparent' },
+  }, { dark: false });
   function themeExt(scheme: 'light' | 'dark', plain = false): Extension {
     if (plain) return scheme === 'dark' ? oneDarkTheme : lightTheme;
     return scheme === 'dark' ? oneDark : [lightTheme, syntaxHighlighting(defaultHighlightStyle)];
   }
-
-  // ── Props ──────────────────────────────────────────────────────────────────
 
   export interface CursorChangeInfo {
     line: number; column: number; cursorCount: number;
@@ -71,39 +65,22 @@
   }
 
   interface Props {
-    path: string;
-    content: string;
-    root: string;
-    language?: string;
-    readOnly?: boolean;
-    onchange?: (value: string) => void;
-    completionSource?: CompletionSource | null;
+    path: string; content: string; root: string; language?: string; readOnly?: boolean;
+    onchange?: (value: string) => void; completionSource?: CompletionSource | null;
     autoTriggerGate?: ((state: EditorState, pos: number) => boolean) | null;
-    minimal?: boolean;
-    onsubmit?: () => void;
-    onselect?: (s: { text: string; cursor: number }) => void;
-    gotoLine?: number | null;
-    gotoCol?: number | null;
-    findOwner?: boolean;
-    placeholder?: string;
-    wrap?: boolean;
-    keepStates?: boolean;
+    minimal?: boolean; onsubmit?: () => void; onselect?: (s: { text: string; cursor: number }) => void;
+    gotoLine?: number | null; gotoCol?: number | null; findOwner?: boolean; placeholder?: string;
+    wrap?: boolean; keepStates?: boolean;
     historyKey?: ((path: string) => { key: string; persist: boolean } | null) | null;
-    oncopy?: ((text: string) => void) | null;
-    lsp?: boolean;
-    sqlDialect?: SqlDialectName;
-    highlightLineLimit?: number;
-
+    oncopy?: ((text: string) => void) | null; lsp?: boolean; sqlDialect?: SqlDialectName; highlightLineLimit?: number;
     // Pro IDE props (all optional; cm-ide-extensions lazy-loads when active).
-    ideMode?: boolean;
-    connectionId?: string | null;
+    ideMode?: boolean; connectionId?: string | null; savedContent?: string | null;
     breakpoints?: IdeBreakpoint[];
     onToggleBreakpoint?: ((line: number) => void) | null;
     onEditBreakpoint?: ((line: number, event?: MouseEvent) => void) | null;
     gutterItems?: IdeGutterItem[];
     onGutterAction?: ((item: IdeGutterItem, mode: 'run' | 'debug') => void) | null;
-    pausedLine?: number | null;
-    inlineValues?: IdeInlineValue[];
+    pausedLine?: number | null; inlineValues?: IdeInlineValue[];
     peerCursors?: (IdePeerCursor | IdeCollabPeer)[];
     keymapPreset?: 'jetbrains' | 'standard';
     jumpToLine?: { line: number; column?: number | null; seq?: number } | number | null;
@@ -113,25 +90,19 @@
     onRenameSymbol?: ((ctx: { line: number; column: number; symbol: string }) => void) | null;
     onFormat?: (() => void) | null;
     onDiagnostics?: ((diags: IdeDiagnostic[]) => void) | null;
+    onAgentAction?: ((mode: 'chat' | 'inline', sel: CmIdeMod.IdeEditorSelectionRange) => void) | null;
   }
 
   let {
-    path, content, root, language,
-    readOnly = true, onchange, completionSource = null, autoTriggerGate = null,
-    minimal = false, onsubmit, onselect, gotoLine = null, gotoCol = null,
-    findOwner = true, placeholder = '', wrap = false, keepStates = false,
-    historyKey = null, oncopy = null, lsp = false, sqlDialect = 'standard',
-    highlightLineLimit = 0,
-    ideMode = false, connectionId = null, breakpoints = [],
-    onToggleBreakpoint = null, onEditBreakpoint = null,
-    gutterItems = [], onGutterAction = null,
-    pausedLine = null, inlineValues = [], peerCursors = [],
-    keymapPreset = 'jetbrains', jumpToLine = null,
+    path, content, root, language, readOnly = true, onchange, completionSource = null, autoTriggerGate = null,
+    minimal = false, onsubmit, onselect, gotoLine = null, gotoCol = null, findOwner = true, placeholder = '',
+    wrap = false, keepStates = false, historyKey = null, oncopy = null, lsp = false, sqlDialect = 'standard',
+    highlightLineLimit = 0, ideMode = false, connectionId = null, savedContent = null, breakpoints = [],
+    onToggleBreakpoint = null, onEditBreakpoint = null, gutterItems = [], onGutterAction = null,
+    pausedLine = null, inlineValues = [], peerCursors = [], keymapPreset = 'jetbrains', jumpToLine = null,
     onCursorChange = null, onDefinitionJump = null, onQuickFix = null,
-    onRenameSymbol = null, onFormat = null, onDiagnostics = null,
+    onRenameSymbol = null, onFormat = null, onDiagnostics = null, onAgentAction = null,
   }: Props = $props();
-
-  // ── Container & Compartments ───────────────────────────────────────────────
 
   let container: HTMLDivElement | undefined = $state();
   let view: EditorView | null = null;
@@ -146,9 +117,7 @@
   let appliedWrap = false;
 
   const wrapExt = (on: boolean): Extension => (on ? EditorView.lineWrapping : []);
-  const placeholderTheme = EditorView.theme({
-    '.cm-placeholder': { color: 'var(--text-dim)', fontStyle: 'normal' },
-  });
+  const placeholderTheme = EditorView.theme({ '.cm-placeholder': { color: 'var(--text-dim)', fontStyle: 'normal' } });
   const placeholderExt = (text: string): Extension => (text ? cmPlaceholder(text) : []);
 
   // Lazy-loaded IDE extensions module (loaded once IDE mode or an IDE helper runs).
@@ -164,46 +133,37 @@
 
   function isIdeActive(): boolean {
     return Boolean(
-      ideMode || breakpoints.length > 0 || gutterItems.length > 0 ||
+      ideMode || savedContent != null || onAgentAction || breakpoints.length > 0 || gutterItems.length > 0 ||
       pausedLine != null || inlineValues.length > 0 || peerCursors.length > 0 ||
-      onToggleBreakpoint || onGutterAction || onDefinitionJump ||
-      onQuickFix || onRenameSymbol || onFormat,
+      onToggleBreakpoint || onGutterAction || onDefinitionJump || onQuickFix || onRenameSymbol || onFormat,
     );
   }
 
   function getIdeCallbacks(): CmIdeMod.IdeEditorCallbacks {
     return {
       onToggleBreakpoint, onEditBreakpoint, onGutterAction,
-      onDefinitionJump, onQuickFix, onRenameSymbol, onFormat, onDiagnostics,
+      onDefinitionJump, onQuickFix, onRenameSymbol, onFormat, onDiagnostics, onAgentAction,
     };
   }
 
   function buildIdeExtIfLoaded(): Extension {
-    if (!ideMod || !isIdeActive()) {
-      ideMounted = false;
-      return [];
-    }
+    if (!ideMod || !isIdeActive()) { ideMounted = false; return []; }
     ideMounted = true;
     appliedKeymapPreset = keymapPreset;
     return ideMod.createIdeExtensions({
-      breakpoints, gutterItems, pausedLine, inlineValues, peerCursors,
+      breakpoints, gutterItems, pausedLine, inlineValues, peerCursors, savedContent,
       keymapPreset, getCallbacks: getIdeCallbacks,
     });
   }
 
   function mountIdeExtensions(target: EditorView): void {
     if (!isIdeActive()) return;
-    if (ideMod) {
-      if (!ideMounted && view === target) {
+    const apply = () => {
+      if (view === target && !ideMounted && isIdeActive()) {
         target.dispatch({ effects: ideCompartment.reconfigure(buildIdeExtIfLoaded()) });
       }
-      return;
-    }
-    void ensureIdeMod().then(() => {
-      if (view === target && isIdeActive()) {
-        target.dispatch({ effects: ideCompartment.reconfigure(buildIdeExtIfLoaded()) });
-      }
-    });
+    };
+    if (ideMod) apply(); else void ensureIdeMod().then(apply);
   }
 
   // ── Long-line plain mode (highlightLineLimit) ───────────────────────────────
@@ -279,20 +239,11 @@
 
   // ── Selection & Multi-Cursor State ─────────────────────────────────────────
 
-  interface Sel {
-    from: number;
-    to: number;
-    startLine: number;
-    endLine: number;
-  }
-
-  let sel: Sel | null = $state(null);
+  let sel: { from: number; to: number; startLine: number; endLine: number } | null = $state(null);
 
   function emitSelection(state: EditorState): void {
     const { from, to, head } = state.selection.main;
-    sel = from === to
-      ? null
-      : { from, to, startLine: state.doc.lineAt(from).number, endLine: state.doc.lineAt(to).number };
+    sel = from === to ? null : { from, to, startLine: state.doc.lineAt(from).number, endLine: state.doc.lineAt(to).number };
     if (onCursorChange) {
       const mainLn = state.doc.lineAt(head);
       let selLen = 0;
@@ -306,20 +257,14 @@
         for (let ln = sLn; ln <= eLn; ln++) touched.add(ln);
       }
       onCursorChange({
-        line: mainLn.number,
-        column: head - mainLn.from + 1,
-        cursorCount: state.selection.ranges.length,
-        selectedLines: touched.size,
-        selectionLength: selLen,
+        line: mainLn.number, column: head - mainLn.from + 1, cursorCount: state.selection.ranges.length,
+        selectedLines: touched.size, selectionLength: selLen,
         selections: state.selection.ranges.map((r) => ({ anchor: r.anchor, head: r.head })),
       });
     }
     if (!onselect) return;
     let text: string | undefined = from === to ? '' : undefined;
-    onselect({
-      get text() { return (text ??= state.sliceDoc(from, to)); },
-      cursor: head,
-    });
+    onselect({ get text() { return (text ??= state.sliceDoc(from, to)); }, cursor: head });
   }
 
   const selectionListener = EditorView.updateListener.of((update) => {
@@ -341,13 +286,8 @@
 
   const changeFlushHandlers = EditorView.domEventHandlers({
     blur: () => { changes.flush(); return false; },
-    keydown: (e) => {
-      if ((e.metaKey || e.ctrlKey) && changes.pending) changes.flush();
-      return false;
-    },
+    keydown: (e) => { if ((e.metaKey || e.ctrlKey) && changes.pending) changes.flush(); return false; },
   });
-
-  // ── Send-to-agent handler ─────────────────────────────────────────────────
 
   async function sendToAgent(): Promise<void> {
     if (!sel || !view) return;
@@ -381,8 +321,7 @@
   }
 
   const langExtOf = (filePath: string, hint?: string): string => extOf(filePath) || (hint ?? '');
-  const cmLangFor = (filePath: string, hint?: string): Extension | null =>
-    cmLangNow(langExtOf(filePath, hint), appliedDialect);
+  const cmLangFor = (filePath: string, hint?: string): Extension | null => cmLangNow(langExtOf(filePath, hint), appliedDialect);
 
   function ensureLang(filePath: string): void {
     if (appliedLangReady) return;
@@ -439,8 +378,7 @@
       if (!connId) {
         let caps = await getCapabilities();
         if (ideMode && caps && !caps.servers.some((s) => s.lang === lspLang && s.available)) {
-          capabilitiesCache = null;
-          capabilitiesFetching = null;
+          capabilitiesCache = null; capabilitiesFetching = null;
           caps = await getCapabilities();
         }
         if (!caps?.servers.some((s) => s.lang === lspLang && s.available)) return;
@@ -459,33 +397,24 @@
         );
         if (view !== editorView) return;
         const client = new LanguageServerClient({
-          rootUri,
-          workspaceFolders: [{ name: 'workspace', uri: rootUri }],
+          rootUri, workspaceFolders: [{ name: 'workspace', uri: rootUri }],
           transport: new WebSocketTransport(wsUri, protocols),
         });
         if (onDiagnostics) {
           client.onNotification((n) => {
             if (n.method === 'textDocument/publishDiagnostics' && n.params?.uri === documentUri) {
-              onDiagnostics(
-                (n.params.diagnostics ?? []).map((d) => ({
-                  path: filePath,
-                  line: d.range.start.line + 1,
-                  column: d.range.start.character + 1,
-                  end_line: d.range.end.line + 1,
-                  end_column: d.range.end.character + 1,
-                  severity: d.severity === 1 ? 'error' : d.severity === 2 ? 'warning' : d.severity === 4 ? 'hint' : 'info',
-                  message: typeof d.message === 'string' ? d.message : d.message.value,
-                  source: d.source ?? null,
-                  code: d.code != null ? String(d.code) : null,
-                })),
-              );
+              onDiagnostics((n.params.diagnostics ?? []).map((d) => ({
+                path: filePath, line: d.range.start.line + 1, column: d.range.start.character + 1,
+                end_line: d.range.end.line + 1, end_column: d.range.end.character + 1,
+                severity: d.severity === 1 ? 'error' : d.severity === 2 ? 'warning' : d.severity === 4 ? 'hint' : 'info',
+                message: typeof d.message === 'string' ? d.message : d.message.value,
+                source: d.source ?? null, code: d.code != null ? String(d.code) : null,
+              })));
             }
           });
         }
         const lspExtensions: Extension[] = languageServerWithClient({
-          client,
-          documentUri,
-          languageId: lspLang,
+          client, documentUri, languageId: lspLang,
           onGoToDefinition: (res) => handleLspJump(res.uri, res.range.start.line + 1, res.range.start.character + 1),
           onShowLocation: (res) => handleLspJump(res.uri, res.range.start.line + 1, res.range.start.character + 1),
         });
@@ -495,14 +424,11 @@
         if (view !== editorView) return;
         const fallbackExt = mod.createDirectLspExtension({
           wsUri, protocols, rootUri, documentUri, filePath, languageId: lspLang,
-          onLocationJump: handleLspJump,
-          onDiagnostics: onDiagnostics ?? undefined,
+          onLocationJump: handleLspJump, onDiagnostics: onDiagnostics ?? undefined,
         });
         editorView.dispatch({ effects: lspCompartment.reconfigure(fallbackExt) });
       }
-    } catch {
-      // LSP failures are silent — editor still shows highlighted code
-    }
+    } catch { /* LSP failures are silent — editor still shows highlighted code */ }
   }
 
   // ── Autocompletion & Keybindings ───────────────────────────────────────────
@@ -535,41 +461,54 @@
         });
       }
       if (fire && autoTriggerGate && !autoTriggerGate(u.state, u.state.selection.main.head)) fire = false;
-      if (fire) {
-        const v = u.view;
-        setTimeout(() => startCompletion(v), 0);
-      }
+      if (fire) { const v = u.view; setTimeout(() => startCompletion(v), 0); }
     });
   }
 
   const submitKeymap = keymap.of([{
     key: 'Mod-Enter',
-    run: () => {
-      if (!onsubmit) return false;
-      changes.flush();
-      onsubmit();
-      return true;
-    },
+    run: () => { if (!onsubmit) return false; changes.flush(); onsubmit(); return true; },
   }]);
 
-  function openEditorSearch(): void {
-    if (view) openSearchPanel(view);
-  }
+  function openEditorSearch(): void { if (view) openSearchPanel(view); }
 
   // ── Exported Component Methods ─────────────────────────────────────────────
 
-  export function openSearch(): void {
-    openEditorSearch();
-  }
-
-  export function focus(): void {
-    view?.focus();
-  }
+  export function openSearch(): void { openEditorSearch(); }
+  export function focus(): void { view?.focus(); }
+  export function goToLine(line: number, col?: number): void { revealLine(line, col); }
 
   export function insertText(text: string): void {
     if (!view || readOnly) return;
     view.dispatch(view.state.replaceSelection(text), { scrollIntoView: true, userEvent: 'input.paste' });
     view.focus();
+  }
+
+  export function getSelectionRange(): CmIdeMod.IdeEditorSelectionRange | null {
+    if (!view) return null;
+    if (ideMod) return ideMod.selectionOrCurrentLine(view.state);
+    const { doc, selection } = view.state;
+    const { from, to } = selection.main;
+    if (from === to) { const ln = doc.lineAt(from); return { from: ln.from, to: ln.to, startLine: ln.number, endLine: ln.number, text: ln.text }; }
+    const startLine = doc.lineAt(from).number;
+    const endLine = to > from && doc.lineAt(to).from === to ? doc.lineAt(to - 1).number : doc.lineAt(to).number;
+    return { from, to, startLine, endLine, text: view.state.sliceDoc(from, to) };
+  }
+
+  /** Apply an AI agent edit via a single CodeMirror transaction (`⌘Z` reverts in one undo step). */
+  export function applyAgentEdit(nextContent: string, range?: { from: number; to: number }): boolean {
+    if (!view || readOnly) return false;
+    const docLen = view.state.doc.length;
+    const from = range ? Math.max(0, Math.min(docLen, range.from)) : 0;
+    const to = range ? Math.max(from, Math.min(docLen, range.to)) : docLen;
+    view.dispatch({
+      changes: { from, to, insert: nextContent },
+      selection: EditorSelection.cursor(from + nextContent.length),
+      scrollIntoView: true,
+      userEvent: 'input.complete',
+    });
+    changes.flush();
+    return true;
   }
 
   /** Add `prefix` before and `suffix` after every selected/cursor line in one undoable step. */
@@ -581,26 +520,15 @@
       if (m.applyLinePrefixSuffix(target, prefix, suffix)) changes.flush();
       target.focus();
     };
-    if (ideMod) run(ideMod);
-    else void ensureIdeMod().then(run);
+    if (ideMod) run(ideMod); else void ensureIdeMod().then(run);
   }
 
   /** Split any multi-line selection into per-line cursors (`⌥⇧I`). */
   export function splitSelectionToLines(): void {
     if (!view) return;
     const target = view;
-    const run = (m: typeof CmIdeMod) => {
-      if (view !== target) return;
-      m.splitSelectionIntoLines(target);
-      target.focus();
-    };
-    if (ideMod) run(ideMod);
-    else void ensureIdeMod().then(run);
-  }
-
-  /** Scroll to and focus a 1-based line (and optional 1-based column). */
-  export function goToLine(line: number, col?: number): void {
-    revealLine(line, col);
+    const run = (m: typeof CmIdeMod) => { if (view === target) { m.splitSelectionIntoLines(target); target.focus(); } };
+    if (ideMod) run(ideMod); else void ensureIdeMod().then(run);
   }
 
   // ── Whole-document ⌘F provider ─────────────────────────────────────────────
@@ -644,11 +572,8 @@
   function readOnlyExt(ro: boolean, hk?: { key: string; persist: boolean } | null): Extension {
     if (ro) return EditorState.readOnly.of(true);
     return [
-      EditorState.readOnly.of(false),
-      closeBrackets(),
-      EditorState.allowMultipleSelections.of(true),
-      rectangularSelection(),
-      crosshairCursor(),
+      EditorState.readOnly.of(false), closeBrackets(), EditorState.allowMultipleSelections.of(true),
+      rectangularSelection(), crosshairCursor(),
       EditorView.clickAddsSelectionRange.of((e) => e.altKey && !e.shiftKey && !e.metaKey),
       EditorView.domEventHandlers({
         mousedown(event, v) {
@@ -662,9 +587,7 @@
         },
         keydown(e) {
           if (e.altKey && e.shiftKey && !e.metaKey && !e.ctrlKey && (e.code === 'KeyI' || e.key === 'I' || e.key === 'i')) {
-            e.preventDefault();
-            splitSelectionToLines();
-            return true;
+            e.preventDefault(); splitSelectionToLines(); return true;
           }
           return false;
         },
@@ -688,23 +611,16 @@
     const baseExtensions: Extension[] = [
       ideCompartment.of(buildIdeExtIfLoaded()),
       ...(minimal ? [] : [lineNumbers(), foldGutter()]),
-      indentOnInput(),
-      bracketMatching(),
-      lintGutter(),
-      drawSelection(),
+      indentOnInput(), bracketMatching(), lintGutter(), drawSelection(),
       readOnlyCompartment.of(readOnlyExt(readOnly, hk)),
       completionCompartment.of(completionExt()),
       placeholderCompartment.of(placeholderExt((appliedPlaceholder = placeholder))),
       wrapCompartment.of(wrapExt((appliedWrap = wrap))),
-      placeholderTheme,
-      search({ top: false }),
+      placeholderTheme, search({ top: false }),
       themeCompartment.of(themeExt(ui.resolvedScheme, appliedPlain)),
-      lspCompartment.of([]),
-      selectionListener,
-      changeListener,
+      lspCompartment.of([]), selectionListener, changeListener,
       ...(limit > 0 ? [plainWatch] : []),
-      changeFlushHandlers,
-      submitKeymap,
+      changeFlushHandlers, submitKeymap,
       ...(findOwner
         ? [EditorView.domEventHandlers({
             focus: () => { keyContext.openFind = openEditorSearch; return false; },
@@ -723,9 +639,7 @@
     if (saved && (!saved.fromDisk || saved.json.doc === fileContent)) {
       try {
         let st = EditorState.fromJSON(saved.json, { extensions: baseExtensions }, { history: historyField });
-        if (st.doc.toString() !== fileContent) {
-          st = st.update({ changes: { from: 0, to: st.doc.length, insert: fileContent } }).state;
-        }
+        if (st.doc.toString() !== fileContent) st = st.update({ changes: { from: 0, to: st.doc.length, insert: fileContent } }).state;
         pendingScrollTop = saved.scrollTop;
         return st;
       } catch { /* incompatible JSON — start fresh below */ }
@@ -743,12 +657,7 @@
     const hk = historyKey(forPath);
     if (!hk) return;
     try {
-      saveEditorState(
-        hk.key,
-        state.toJSON({ history: historyField }) as { doc: string },
-        scrollTop,
-        hk.persist && state.doc.length <= PERSIST_MAX_BYTES,
-      );
+      saveEditorState(hk.key, state.toJSON({ history: historyField }) as { doc: string }, scrollTop, hk.persist && state.doc.length <= PERSIST_MAX_BYTES);
     } catch { /* state without history field */ }
   }
   function parkLive(): void {
@@ -785,13 +694,9 @@
     parkLive();
     for (const [p, k] of keptStates) parkHistory(p, k.state, 0);
     teardownEditor();
-    lspCompartment = new Compartment();
-    ideCompartment = new Compartment();
-    readOnlyCompartment = new Compartment();
-    completionCompartment = new Compartment();
-    placeholderCompartment = new Compartment();
-    wrapCompartment = new Compartment();
-    langCompartment = new Compartment();
+    lspCompartment = new Compartment(); ideCompartment = new Compartment(); readOnlyCompartment = new Compartment();
+    completionCompartment = new Compartment(); placeholderCompartment = new Compartment();
+    wrapCompartment = new Compartment(); langCompartment = new Compartment();
     keptStates.clear();
     sel = null;
 
@@ -800,7 +705,6 @@
     applyPendingScroll();
     ensureLang(filePath);
     mountIdeExtensions(view);
-
     if (!completionSource && lsp) void attachLsp(view, filePath, rootPath, connId);
     if (gotoLine != null) revealLine(gotoLine, gotoCol);
     const built = view;
@@ -809,14 +713,10 @@
 
   // ── Kept per-path states (keepStates) ──────────────────────────────────────
 
-  const keptStates = new Map<string, {
-    state: EditorState;
-    scroll: StateEffect<unknown>;
-    dialect: SqlDialectName;
-    langReady: boolean;
-    language: string | undefined;
-  }>();
+  const keptStates = new Map<string, { state: EditorState; scroll: StateEffect<unknown>; dialect: SqlDialectName; langReady: boolean; language: string | undefined }>();
   const MAX_KEPT_STATES = 24;
+  const IDE_MAX_KEPT_STATES = 8;
+  const KEPT_STATE_MAX_CHARS = 200_000;
 
   function swapState(fromPath: string, toPath: string, toContent: string): void {
     if (!view) return;
@@ -824,14 +724,13 @@
     if (historySaveTimer !== null) clearTimeout(historySaveTimer);
     historySaveTimer = null;
     keptStates.delete(fromPath);
-    keptStates.set(fromPath, {
-      state: view.state,
-      scroll: view.scrollSnapshot(),
-      dialect: appliedDialect,
-      langReady: appliedLangReady,
-      language: appliedLanguage,
-    });
-    while (keptStates.size > MAX_KEPT_STATES) {
+    if (view.state.doc.length <= KEPT_STATE_MAX_CHARS) {
+      keptStates.set(fromPath, { state: view.state, scroll: view.scrollSnapshot(), dialect: appliedDialect, langReady: appliedLangReady, language: appliedLanguage });
+    } else {
+      parkHistory(fromPath, view.state, 0);
+    }
+    const maxKept = ideMode ? IDE_MAX_KEPT_STATES : MAX_KEPT_STATES;
+    while (keptStates.size > maxKept) {
       const oldest = keptStates.keys().next().value;
       if (oldest === undefined) break;
       const ev = keptStates.get(oldest);
@@ -860,22 +759,16 @@
         kept.scroll,
       ];
       if (ideMod && isIdeActive()) effects.push(ideCompartment.reconfigure(buildIdeExtIfLoaded()));
-      appliedDialect = kept.dialect;
-      appliedLangReady = kept.langReady;
-      appliedLanguage = kept.language;
+      appliedDialect = kept.dialect; appliedLangReady = kept.langReady; appliedLanguage = kept.language;
       if (sqlDialect !== kept.dialect || !kept.langReady || language !== kept.language) {
-        appliedDialect = sqlDialect;
-        appliedLanguage = language;
+        appliedDialect = sqlDialect; appliedLanguage = language;
         const langExt = cmLangFor(toPath, language);
         appliedLangReady = langExt != null || !cmLangPending(langExtOf(toPath, language));
         effects.push(langCompartment.reconfigure(langExt ?? []));
       }
       const doc = view.state.doc;
       const stale = doc.length !== toContent.length || doc.toString() !== toContent;
-      view.dispatch({
-        effects,
-        ...(stale ? { changes: { from: 0, to: doc.length, insert: toContent } } : {}),
-      });
+      view.dispatch({ effects, ...(stale ? { changes: { from: 0, to: doc.length, insert: toContent } } : {}) });
       ensureLang(toPath);
       mountIdeExtensions(view);
     }
@@ -892,10 +785,7 @@
     requestAnimationFrame(() => {
       if (!view) return;
       try {
-        view.dispatch({
-          selection: { anchor: pos, head: pos },
-          effects: EditorView.scrollIntoView(pos, { y: 'center' }),
-        });
+        view.dispatch({ selection: { anchor: pos, head: pos }, effects: EditorView.scrollIntoView(pos, { y: 'center' }) });
         view.focus();
       } catch { /* doc replaced mid-flight */ }
     });
@@ -919,16 +809,12 @@
     const contentEchoed = curContent === lastEmitted;
     if (view && keepStates && curPath !== prevPath && curRoot === prevRoot && curConn === prevConnId) {
       const fromPath = prevPath;
-      prevPath = curPath;
-      prevContent = curContent;
+      prevPath = curPath; prevContent = curContent;
       untrack(() => swapState(fromPath, curPath, curContent));
     } else if (!view || curPath !== prevPath || curRoot !== prevRoot || curConn !== prevConnId) {
-      prevPath = curPath;
-      prevRoot = curRoot;
-      prevConnId = curConn;
-      prevContent = curContent;
+      prevPath = curPath; prevRoot = curRoot; prevConnId = curConn; prevContent = curContent;
       buildEditor(el, curPath, curContent, curRoot, curConn);
-    } else if (curContent !== prevContent && !contentEchoed) {
+    } else if (curContent !== prevContent && !contentEchoed && !changes.pending) {
       prevContent = curContent;
       if (curContent !== view.state.doc.toString()) {
         view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: curContent } });
@@ -940,36 +826,36 @@
 
   // Live IDE StateEffect updates (zero remounts, preserves undo & multi-cursors).
   $effect(() => {
+    const sc = savedContent;
+    if (!view) return;
+    if (!ideMounted && sc != null) mountIdeExtensions(view);
+    else if (ideMod && ideMounted) view.dispatch({ effects: ideMod.setSavedContentEffect.of(sc) });
+  });
+  $effect(() => {
     const bps = breakpoints;
     if (!view) return;
     if (!ideMounted && bps.length > 0) mountIdeExtensions(view);
     else if (ideMod && ideMounted) view.dispatch({ effects: ideMod.setBreakpointsEffect.of(bps) });
   });
-
   $effect(() => {
     const items = gutterItems;
     if (!view) return;
     if (!ideMounted && items.length > 0) mountIdeExtensions(view);
     else if (ideMod && ideMounted) view.dispatch({ effects: ideMod.setGutterItemsEffect.of(items) });
   });
-
   $effect(() => {
     const pLine = pausedLine;
     const inlineVals = inlineValues;
     if (!view) return;
     if (!ideMounted && (pLine != null || inlineVals.length > 0)) mountIdeExtensions(view);
-    else if (ideMod && ideMounted) {
-      view.dispatch({ effects: ideMod.setDebugDecorationsEffect.of({ pausedLine: pLine, inlineValues: inlineVals }) });
-    }
+    else if (ideMod && ideMounted) view.dispatch({ effects: ideMod.setDebugDecorationsEffect.of({ pausedLine: pLine, inlineValues: inlineVals }) });
   });
-
   $effect(() => {
     const peers = peerCursors;
     if (!view) return;
     if (!ideMounted && peers.length > 0) mountIdeExtensions(view);
     else if (ideMod && ideMounted) view.dispatch({ effects: ideMod.setPeerCursorsEffect.of(peers) });
   });
-
   $effect(() => {
     const preset = keymapPreset;
     if (!view || !ideMod || !ideMounted || preset === appliedKeymapPreset) return;
@@ -984,7 +870,6 @@
     prevCompletion = src;
     view.dispatch({ effects: completionCompartment.reconfigure(completionExt()) });
   });
-
   $effect(() => {
     const ro = readOnly;
     if (!view || ro === appliedReadOnly) return;
@@ -992,14 +877,12 @@
     const hk = ro ? null : untrack(() => historyKey?.(livePath) ?? null);
     view.dispatch({ effects: readOnlyCompartment.reconfigure(readOnlyExt(ro, hk)) });
   });
-
   $effect(() => {
     const on = wrap;
     if (!view || on === appliedWrap) return;
     appliedWrap = on;
     view.dispatch({ effects: wrapCompartment.reconfigure(wrapExt(on)) });
   });
-
   $effect(() => {
     const d = sqlDialect;
     if (!view || d === appliedDialect) return;
@@ -1007,7 +890,6 @@
     const langExt = untrack(() => cmLangFor(path, language));
     if (langExt) view.dispatch({ effects: langCompartment.reconfigure(langExt) });
   });
-
   $effect(() => {
     const l = language;
     if (!view || l === appliedLanguage) return;
@@ -1020,14 +902,12 @@
       ensureLang(livePath);
     });
   });
-
   $effect(() => {
     const text = placeholder;
     if (!view || text === appliedPlaceholder) return;
     appliedPlaceholder = text;
     view.dispatch({ effects: placeholderCompartment.reconfigure(placeholderExt(text)) });
   });
-
   $effect(() => {
     const scheme = ui.resolvedScheme;
     if (view) view.dispatch({ effects: themeCompartment.reconfigure(themeExt(scheme, appliedPlain)) });
@@ -1050,16 +930,13 @@
     if (!view || j == null) return;
     const line = typeof j === 'number' ? j : j.line;
     const col = typeof j === 'number' ? null : (j.column ?? null);
-    const seq = typeof j === 'number' ? '' : String(j.seq ?? '');
-    const key = `${line}:${col ?? ''}:${seq}`;
+    const key = `${line}:${col ?? ''}:${typeof j === 'number' ? '' : String(j.seq ?? '')}`;
     if (key === prevJumpKey) return;
     prevJumpKey = key;
     revealLine(line, col);
   });
 
-  const unregisterParker = registerLiveParker(() => {
-    if (historySaveTimer !== null) parkLive();
-  });
+  const unregisterParker = registerLiveParker(() => { if (historySaveTimer !== null) parkLive(); });
   onDestroy(() => {
     unregisterParker();
     changes.flush();
@@ -1071,7 +948,7 @@
 
 <div class="code-editor-outer" data-lang={language ?? ''}>
   <div class="code-editor-wrap" dir="ltr" bind:this={container}></div>
-  {#if sel}<button class="send-to-agent-btn" onclick={sendToAgent} type="button">Send to agent ↗</button>{/if}
+  {#if sel && !ideMode && !onAgentAction}<button class="send-to-agent-btn" onclick={sendToAgent} type="button">Send to agent ↗</button>{/if}
 </div>
 
 <style>

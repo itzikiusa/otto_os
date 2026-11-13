@@ -24,8 +24,13 @@ import type {
 } from '../api/types';
 import { ctxMenu } from '../contextmenu.svelte';
 import { isIconName } from './Icon.svelte';
+import {
+  createIdeGitAndAgentExtensions, selectionOrCurrentLine, setSavedContentEffect,
+  type IdeEditorSelectionRange,
+} from './cm-ide-git-and-agent';
 
 export { addCursorAbove, addCursorBelow, crosshairCursor, moveLineUp, moveLineDown, rectangularSelection, selectNextOccurrence };
+export { selectionOrCurrentLine, setSavedContentEffect, type IdeEditorSelectionRange };
 export const toggleLineComment = toggleComment;
 
 // ── Identifier & Multi-Cursor Line Editing Commands ──────────────────────────
@@ -153,6 +158,7 @@ export interface IdeEditorCallbacks {
   onRenameSymbol?: ((ctx: { line: number; column: number; symbol: string }) => void) | null;
   onFormat?: (() => void) | null;
   onDiagnostics?: ((diags: IdeDiagnostic[]) => void) | null;
+  onAgentAction?: ((mode: 'chat' | 'inline', sel: IdeEditorSelectionRange) => void) | null;
 }
 
 export interface IdeDebugStatePayload {
@@ -455,6 +461,7 @@ export interface CreateIdeExtensionsOptions {
   pausedLine: number | null;
   inlineValues: IdeInlineValue[];
   peerCursors: PeerCursorInput[];
+  savedContent?: string | null;
   keymapPreset: 'jetbrains' | 'standard';
   getCallbacks: () => IdeEditorCallbacks;
 }
@@ -586,7 +593,11 @@ export function createIdeExtensions(opts: CreateIdeExtensionsOptions): Extension
     initialSpacer: () => runSpacer,
   });
 
-  return [ideEditorTheme, bpField, runField, debugField, peersField, bpGutter, runGutter, buildIdeKeymap(opts.keymapPreset, opts.getCallbacks)];
+  return [
+    ideEditorTheme, bpField, runField, debugField, peersField, bpGutter, runGutter,
+    createIdeGitAndAgentExtensions({ savedContent: opts.savedContent, wordAtCursor, getCallbacks: opts.getCallbacks }),
+    buildIdeKeymap(opts.keymapPreset, opts.getCallbacks),
+  ];
 }
 
 // ── Direct WebSocket JSON-RPC LSP Fallback (Zero Node Polyfills) ─────────────

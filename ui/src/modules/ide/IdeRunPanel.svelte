@@ -15,6 +15,7 @@
     type IdeRunState,
     type IdeTestResult,
   } from './ideStore.svelte';
+  import { ideAgent } from './store/ideAgentController.svelte';
 
   const LOG_CAP = 500;
 
@@ -334,35 +335,49 @@
                     {@const k = testKey(t, idx)}
                     {@const showMsg = !!t.message && (t.status === 'failed' || selectedTestKey === k)}
                     <div class="run-test-wrap">
-                      <button
-                        type="button"
-                        class="run-test-row"
-                        class:is-selected={selectedTestKey === k}
-                        aria-pressed={selectedTestKey === k}
-                        onclick={() => onSelectTest(t, k)}
-                      >
-                        {#if t.status === 'passed'}
-                          <span class="run-icon is-ok" aria-hidden="true"><Icon name="check" size={12} /></span>
-                        {:else if t.status === 'failed'}
-                          <span class="run-icon is-bad" aria-hidden="true"><Icon name="x" size={12} /></span>
-                        {:else if t.status === 'running'}
-                          <span class="spinner" style="--spinner-size: 12px" aria-hidden="true"></span>
-                        {:else}
-                          <span class="run-icon dim" aria-hidden="true"><Icon name="dot" size={12} /></span>
-                        {/if}
-                        <span class="run-test-name mono ellipsis" dir="ltr" title={t.name}>{t.name}</span>
-                        <span class="run-test-status" class:is-ok={t.status === 'passed'} class:is-bad={t.status === 'failed'}>
-                          {t.status}
-                        </span>
-                        {#if t.file}
-                          <span class="run-test-loc mono dim" dir="ltr" title={`${t.file}:${t.line ?? 1}`}>
-                            {ideBasename(t.file)}{t.line ? `:${t.line}` : ''}
+                      <div class="run-test-head" class:is-selected={selectedTestKey === k}>
+                        <button
+                          type="button"
+                          class="run-test-row"
+                          aria-pressed={selectedTestKey === k}
+                          onclick={() => onSelectTest(t, k)}
+                        >
+                          {#if t.status === 'passed'}
+                            <span class="run-icon is-ok" aria-hidden="true"><Icon name="check" size={12} /></span>
+                          {:else if t.status === 'failed'}
+                            <span class="run-icon is-bad" aria-hidden="true"><Icon name="x" size={12} /></span>
+                          {:else if t.status === 'running'}
+                            <span class="spinner" style="--spinner-size: 12px" aria-hidden="true"></span>
+                          {:else}
+                            <span class="run-icon dim" aria-hidden="true"><Icon name="dot" size={12} /></span>
+                          {/if}
+                          <span class="run-test-name mono ellipsis" dir="ltr" title={t.name}>{t.name}</span>
+                          <span class="run-test-status" class:is-ok={t.status === 'passed'} class:is-bad={t.status === 'failed'}>
+                            {t.status}
                           </span>
+                          {#if t.file}
+                            <span class="run-test-loc mono dim" dir="ltr" title={`${t.file}:${t.line ?? 1}`}>
+                              {ideBasename(t.file)}{t.line ? `:${t.line}` : ''}
+                            </span>
+                          {/if}
+                          {#if t.duration_ms != null}
+                            <span class="run-test-dur dim">{formatSeconds(t.duration_ms / 1000)}</span>
+                          {/if}
+                        </button>
+                        {#if t.status === 'failed'}
+                          <button
+                            type="button"
+                            class="btn small ghost run-fix-btn"
+                            aria-label="Fix with Agent"
+                            title="Fix with Agent"
+                            onclick={() => ideAgent.attachTestFailure(t, cleanLines, { openPanel: true })}
+                            data-testid="ide-test-fix-agent"
+                          >
+                            <Icon name="assistant" size={12} />
+                            <span>Fix</span>
+                          </button>
                         {/if}
-                        {#if t.duration_ms != null}
-                          <span class="run-test-dur dim">{formatSeconds(t.duration_ms / 1000)}</span>
-                        {/if}
-                      </button>
+                      </div>
                       {#if showMsg && t.message}
                         <pre class="run-test-msg mono" dir="ltr">{stripAnsi(t.message)}</pre>
                       {/if}
@@ -521,13 +536,26 @@
   .run-test-wrap {
     border-block-start: 1px solid var(--separator);
   }
+  .run-test-head {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding-inline-end: 8px;
+  }
+  .run-test-head:hover {
+    background: var(--hover);
+  }
+  .run-test-head.is-selected {
+    background: var(--accent-soft);
+  }
   .run-test-row {
     display: flex;
     align-items: center;
     gap: 6px;
-    inline-size: 100%;
+    flex: 1;
+    min-inline-size: 0;
     padding-block: 4px;
-    padding-inline: 12px;
+    padding-inline: 12px 6px;
     border: 0;
     background: transparent;
     color: var(--text);
@@ -535,11 +563,9 @@
     text-align: start;
     cursor: pointer;
   }
-  .run-test-row:hover {
-    background: var(--hover);
-  }
-  .run-test-row.is-selected {
-    background: var(--accent-soft);
+  .run-fix-btn {
+    flex-shrink: 0;
+    color: var(--accent-text);
   }
   .run-icon {
     display: inline-flex;

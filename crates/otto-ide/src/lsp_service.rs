@@ -10,11 +10,14 @@
 //! - `code_actions`: context-aware Quick Fixes & Refactorings.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
 
 use otto_core::domain::User;
 use otto_core::{Error, Result};
 use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
 
 use crate::target::ResolvedTarget;
 use crate::types::{
@@ -280,6 +283,13 @@ async fn collect_candidate_files<S: IdeCtx>(
     symbol: &str,
     origin_path: &str,
 ) -> Result<Vec<String>> {
+    if let ResolvedTarget::Local { root, is_root_user } = resolved {
+        if let Some(files) =
+            rg_local_candidate_files(root, *is_root_user, symbol, origin_path).await
+        {
+            return Ok(files);
+        }
+    }
     let mut ordered = vec![origin_path.to_string()];
     let mut seen = BTreeSet::from([origin_path.to_string()]);
     let search_req = IdeSearchReq {
@@ -297,6 +307,89 @@ async fn collect_candidate_files<S: IdeCtx>(
         }
     }
     Ok(ordered)
+}
+
+async fn rg_local_candidate_files(
+    root: &Path,
+    is_root_user: bool,
+    symbol: &str,
+    origin_path: &str,
+) -> Option<Vec<String>> {
+    let rg_bin =
+        crate::toolchains::find_executable_in(&crate::toolchains::system_search_dirs(), &["rg"])
+            .unwrap_or_else(|| PathBuf::from("rg"));
+    let mut cmd = Command::new(rg_bin);
+    cmd.args([
+        "--files-with-matches",
+        "--fixed-strings",
+        "--hidden",
+        "-g",
+        "!.git",
+        "-g",
+        "!node_modules",
+        "-g",
+        "!target",
+        "--",
+        symbol,
+    ])
+    .arg(root)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .kill_on_drop(true);
+
+    let out = tokio::time::timeout(Duration::from_secs(5), cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    match out.status.code() {
+        Some(1) => return Some(vec![origin_path.to_string()]),
+        Some(0) => {}
+        _ => return None,
+    }
+
+    let mut ordered = vec![origin_path.to_string()];
+    let origin_abs = if Path::new(origin_path).is_absolute() {
+        PathBuf::from(origin_path)
+    } else {
+        root.join(origin_path)
+    };
+    let mut seen_canon = BTreeSet::new();
+    if let Ok(c) = origin_abs.canonicalize() {
+        seen_canon.insert(c);
+    }
+    let keep_abs = origin_path.starts_with('/');
+
+    for raw in String::from_utf8_lossy(&out.stdout).lines() {
+        if ordered.len() >= 250 {
+            break;
+        }
+        let Ok(canon) = Path::new(raw.trim()).canonicalize() else {
+            continue;
+        };
+        if !canon.starts_with(root) {
+            continue;
+        }
+        if !is_root_user
+            && (otto_core::secret_paths::in_protected_dir(&canon)
+                || otto_core::secret_paths::is_denied_dir(&canon)
+                || otto_core::secret_paths::is_denied_file(&canon))
+        {
+            continue;
+        }
+        if seen_canon.insert(canon.clone()) {
+            let formatted = if keep_abs {
+                canon.to_string_lossy().into_owned()
+            } else {
+                canon
+                    .strip_prefix(root)
+                    .map(|r| r.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_else(|_| canon.to_string_lossy().into_owned())
+            };
+            ordered.push(formatted);
+        }
+    }
+    Some(ordered)
 }
 
 // ===========================================================================
@@ -1059,5 +1152,34 @@ mod tests {
         assert!(rs_actions
             .iter()
             .any(|a| a.id == "quickfix.rust.unwrap_to_question"));
+    }
+
+    #[tokio::test]
+    async fn rg_local_candidate_files_filters_ignored_and_unmatched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        std::fs::create_dir_all(root.join("target/debug")).unwrap();
+        std::fs::write(root.join("src/origin.rs"), "pub fn computeInvoice() {}\n").unwrap();
+        std::fs::write(root.join("src/caller.rs"), "fn f() { computeInvoice(); }\n").unwrap();
+        std::fs::write(root.join("src/unrelated.rs"), "fn other() {}\n").unwrap();
+        std::fs::write(
+            root.join("node_modules/pkg/index.js"),
+            "computeInvoice();\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("target/debug/out.rs"), "computeInvoice();\n").unwrap();
+
+        if let Some(files) =
+            rg_local_candidate_files(&root, false, "computeInvoice", "src/origin.rs").await
+        {
+            assert_eq!(files, vec!["src/origin.rs", "src/caller.rs"]);
+            let none_match =
+                rg_local_candidate_files(&root, false, "neverExistsAnywhere", "src/origin.rs")
+                    .await
+                    .unwrap();
+            assert_eq!(none_match, vec!["src/origin.rs"]);
+        }
     }
 }

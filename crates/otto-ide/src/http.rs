@@ -527,12 +527,22 @@ async fn start_run<S: IdeCtx>(
     Ok(Json(IdeRunResp { run }))
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct GetRunQuery {
+    #[serde(default)]
+    tail_lines: Option<usize>,
+}
+
 async fn get_run<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(_user)): Extension<AuthUser>,
     Path(run_id): Path<String>,
+    Query(q): Query<GetRunQuery>,
 ) -> ApiResult<Json<IdeRunResp>> {
-    let run = ctx.ide().environments.get_run(&run_id)?;
+    let run = ctx
+        .ide()
+        .environments
+        .get_run_with_tail(&run_id, q.tail_lines)?;
     Ok(Json(IdeRunResp { run }))
 }
 

@@ -8,6 +8,7 @@
   import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { rowMenu } from '../../lib/rowMenu';
   import type { BadgeTone } from '../../lib/status';
   import {
     ide,
@@ -16,6 +17,7 @@
     type IdeFsEntry,
     type IdeSymbolNode,
   } from './ideStore.svelte';
+  import { ideAgent } from './store/ideAgentController.svelte';
 
   type ExplorerTab = 'files' | 'structure' | 'breakpoints';
 
@@ -29,7 +31,26 @@
     depth: number;
   }
 
+  const VIRTUAL_MIN = 150;
+  const ROW_H = 26;
+  const OVERSCAN = 20;
+
   let activeTab = $state<ExplorerTab>('files');
+  let treeScrollEl = $state<HTMLDivElement | undefined>(undefined);
+  let scrollTop = $state(0);
+  let clientHeight = $state(720);
+
+  $effect(() => {
+    const el = treeScrollEl;
+    if (!el) return;
+    clientHeight = el.clientHeight || 720;
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      clientHeight = el.clientHeight || 720;
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
 
   const flatSymbols = $derived.by((): FlatSymbolNode[] => {
     const out: FlatSymbolNode[] = [];
@@ -84,6 +105,30 @@
     walk(ide.treeRootEntries, 0);
     return out;
   });
+
+  const treeWin = $derived.by(() => {
+    const total = visibleNodes.length;
+    if (total <= VIRTUAL_MIN) {
+      return { virtual: false, items: visibleNodes, topPx: 0, bottomPx: 0 };
+    }
+    const viewH = Math.max(clientHeight, 260);
+    const maxScroll = Math.max(0, total * ROW_H - viewH);
+    const top = Math.max(0, Math.min(scrollTop, maxScroll));
+    const start = Math.max(0, Math.floor(top / ROW_H) - OVERSCAN);
+    const end = Math.min(total, Math.ceil((top + viewH) / ROW_H) + OVERSCAN);
+    return {
+      virtual: true,
+      items: visibleNodes.slice(start, end),
+      topPx: start * ROW_H,
+      bottomPx: Math.max(0, (total - end) * ROW_H),
+    };
+  });
+
+  function onTreeScroll(e: Event): void {
+    const el = e.currentTarget as HTMLDivElement;
+    scrollTop = el.scrollTop;
+    clientHeight = el.clientHeight || 720;
+  }
 
   function gitTone(status: string | null | undefined): BadgeTone {
     if (status === 'A') return 'ok';
@@ -176,6 +221,11 @@
       items.push(
         { label: 'Open', icon: 'file', action: () => void ide.openFile(entry.path, { preview: false }) },
         { label: 'Split right', icon: 'split', action: () => void ide.openFile(entry.path, { preview: false, inSplit: true }) },
+        {
+          label: 'Add to Agent context',
+          icon: 'assistant',
+          action: () => void ideAgent.attachFile(entry.path, { openPanel: true }),
+        },
         { separator: true },
       );
     }
@@ -198,6 +248,19 @@
       { label: 'Delete…', icon: 'trash', danger: true, action: () => void confirmDelete(entry) },
     );
     ctxMenu.show(e, items);
+  }
+
+  function openSymbolMenu(e: MouseEvent, sym: IdeSymbolNode): void {
+    const path = ide.activePath;
+    if (!path) return;
+    ctxMenu.show(e, [
+      { label: 'Jump to symbol', icon: 'target', action: () => ide.jumpTo(path, sym.line, 1) },
+      {
+        label: 'Add to Agent context',
+        icon: 'assistant',
+        action: () => ideAgent.attachSymbol(path, sym, { openPanel: true }),
+      },
+    ]);
   }
 
   async function editBreakpointCondition(bp: IdeBreakpoint): Promise<void> {
@@ -286,7 +349,7 @@
         </button>
       </div>
 
-      <div class="tree-scroll">
+      <div class="tree-scroll" bind:this={treeScrollEl} onscroll={onTreeScroll}>
         <LoadState
           what="project files"
           variant="compact"
@@ -309,13 +372,16 @@
             />
           {/snippet}
 
-          <div class="tree-list" role="list">
-            {#each visibleNodes as node (node.entry.path)}
+          <div class="tree-list" class:is-virtual={treeWin.virtual} role="list">
+            {#if treeWin.topPx > 0}
+              <div style:block-size="{treeWin.topPx}px" aria-hidden="true"></div>
+            {/if}
+            {#each treeWin.items as node (node.entry.path)}
               <div
                 class="tree-row"
                 class:active={ide.activePath === node.entry.path}
                 role="listitem"
-                style="padding-inline-start: calc(6px + {node.depth * 13}px)"
+                style="padding-inline-start: calc(6px + {node.depth * 12}px)"
               >
                 <button
                   type="button"
@@ -326,6 +392,7 @@
                   onclick={() => onNodeClick(node.entry)}
                   ondblclick={() => onNodeDblClick(node.entry)}
                   oncontextmenu={(e) => openNodeMenu(e, node.entry)}
+                  use:rowMenu
                   title={ide.relativePath(node.entry.path)}
                 >
                   {#if node.entry.kind === 'dir'}
@@ -362,6 +429,9 @@
                 </button>
               </div>
             {/each}
+            {#if treeWin.bottomPx > 0}
+              <div style:block-size="{treeWin.bottomPx}px" aria-hidden="true"></div>
+            {/if}
           </div>
         </LoadState>
       </div>
@@ -402,19 +472,32 @@
                 {@const isCurrent =
                   ide.cursorInfo.line >= item.sym.line &&
                   ide.cursorInfo.line <= Math.max(item.sym.line, item.sym.end_line)}
-                <button
-                  type="button"
-                  class="struct-row"
-                  class:active={isCurrent}
-                  aria-current={isCurrent ? 'true' : undefined}
-                  dir="ltr"
-                  style="padding-inline-start: calc(10px + {item.depth * 12}px)"
-                  onclick={() => ide.activePath && ide.jumpTo(ide.activePath, item.sym.line, 1)}
-                >
-                  <Badge variant="outline" tone={symbolTone(item.sym.kind)} label={shortSymbolKind(item.sym.kind)} />
-                  <span class="tree-name">{item.sym.name}</span>
-                  <span class="struct-line">:{item.sym.line}</span>
-                </button>
+                <div class="struct-line-wrap" class:active={isCurrent}>
+                  <button
+                    type="button"
+                    class="struct-row"
+                    aria-current={isCurrent ? 'true' : undefined}
+                    dir="ltr"
+                    style="padding-inline-start: calc(10px + {item.depth * 12}px)"
+                    onclick={() => ide.activePath && ide.jumpTo(ide.activePath, item.sym.line, 1)}
+                    oncontextmenu={(e) => openSymbolMenu(e, item.sym)}
+                    use:rowMenu
+                  >
+                    <Badge variant="outline" tone={symbolTone(item.sym.kind)} label={shortSymbolKind(item.sym.kind)} />
+                    <span class="tree-name">{item.sym.name}</span>
+                    <span class="struct-line">:{item.sym.line}</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="icon-btn struct-agent-btn"
+                    aria-label="Add {item.sym.name} to Agent context"
+                    title="Add to Agent context"
+                    onclick={() => ide.activePath && ideAgent.attachSymbol(ide.activePath, item.sym, { openPanel: true })}
+                    data-testid="ide-symbol-add-agent"
+                  >
+                    <Icon name="assistant" size={12} />
+                  </button>
+                </div>
               {/each}
             </div>
           </LoadState>
@@ -438,7 +521,15 @@
               void ide.syncBreakpointsToSession();
             }}
           />
-          <span>Break on uncaught exceptions</span>
+          <button
+            type="button"
+            tabindex="-1"
+            class="bp-exc-label"
+            onclick={() => {
+              ide.breakOnExceptions = !ide.breakOnExceptions;
+              void ide.syncBreakpointsToSession();
+            }}
+          >Break on uncaught exceptions</button>
         </div>
       </div>
       <div class="tree-scroll">
@@ -501,169 +592,57 @@
 
 <style>
   .ide-tree {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    min-height: 0;
-    height: 100%;
-    background: var(--surface);
-    border-inline-end: 1px solid var(--border);
+    display: flex; flex-direction: column; min-inline-size: 0; min-block-size: 0; block-size: 100%;
+    background: var(--surface); border-inline-end: 1px solid var(--border);
   }
-  .tree-panel {
-    display: flex;
-    flex-direction: column;
-    flex: 1;
-    min-height: 0;
-    min-width: 0;
-  }
+  .tree-panel { display: flex; flex-direction: column; flex: 1; min-block-size: 0; min-inline-size: 0; }
   .tree-toolbar {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 6px 8px;
-    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 4px; padding-block: 6px; padding-inline: 8px;
+    border-block-end: 1px solid var(--border);
   }
   .tree-filter {
-    flex: 1;
-    min-width: 0;
-    height: 26px;
-    padding-inline: 8px;
-    font-size: var(--fs-xs);
-    background: var(--surface-2);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
+    flex: 1; min-inline-size: 0; block-size: 26px; padding-inline: 8px; font-size: var(--fs-xs);
+    background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-s);
   }
-  .tree-scroll {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    overflow-x: hidden;
-    padding-block: 4px;
-  }
-  .tree-list {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .tree-row {
-    display: flex;
-    align-items: center;
-    padding-inline-end: 4px;
-    min-width: 0;
-  }
-  .tree-row:hover,
-  .tree-row.active {
-    background: var(--surface-2);
-  }
-  .tree-row.active .tree-name {
-    color: var(--accent-text);
-    font-weight: 500;
-  }
+  .tree-scroll { flex: 1; min-block-size: 0; overflow-y: auto; overflow-x: hidden; padding-block: 4px; }
+  .tree-list { display: flex; flex-direction: column; gap: 2px; }
+  .tree-list.is-virtual { gap: 0; }
+  .tree-row { display: flex; align-items: center; padding-inline-end: 4px; min-inline-size: 0; }
+  .tree-list.is-virtual .tree-row { block-size: 26px; box-sizing: border-box; }
+  .tree-row:hover, .tree-row.active { background: var(--surface-2); }
+  .tree-row.active .tree-name { color: var(--accent-text); font-weight: 500; }
   .tree-item {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding-block: 4px;
-    padding-inline: 2px 4px;
-    background: transparent;
-    border: none;
-    color: var(--text);
-    font-size: var(--fs-xs);
-    text-align: start;
-    cursor: pointer;
+    flex: 1; min-inline-size: 0; display: flex; align-items: center; gap: 6px;
+    padding-block: 4px; padding-inline: 2px 4px; background: transparent; border: none;
+    color: var(--text); font-size: var(--fs-xs); text-align: start; cursor: pointer;
   }
-  .tree-chevron {
-    inline-size: 12px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-dim);
-    flex-shrink: 0;
-  }
-  .tree-kind {
-    display: inline-flex;
-    color: var(--text-dim);
-    flex-shrink: 0;
-  }
-  .tree-kind.is-dir {
-    color: var(--accent-text);
-  }
-  .tree-name {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .tree-more {
-    opacity: 0;
-    flex-shrink: 0;
-  }
-  .tree-row:hover .tree-more,
-  .tree-row:focus-within .tree-more {
-    opacity: 1;
-  }
+  .tree-list.is-virtual .tree-item { padding-block: 2px; }
+  .tree-chevron { inline-size: 12px; display: inline-flex; align-items: center; justify-content: center; color: var(--text-dim); flex-shrink: 0; }
+  .tree-kind { display: inline-flex; color: var(--text-dim); flex-shrink: 0; }
+  .tree-kind.is-dir { color: var(--accent-text); }
+  .tree-name { flex: 1; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tree-more, .struct-agent-btn { opacity: 0; flex-shrink: 0; }
+  .tree-row:hover .tree-more, .tree-row:focus-within .tree-more,
+  .struct-line-wrap:hover .struct-agent-btn, .struct-line-wrap:focus-within .struct-agent-btn { opacity: 1; }
+  .struct-line-wrap { display: flex; align-items: center; padding-inline-end: 4px; min-inline-size: 0; }
+  .struct-line-wrap:hover, .struct-line-wrap.active { background: var(--surface-2); }
   .struct-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    padding-block: 4px;
-    padding-inline-end: 10px;
-    background: transparent;
-    border: none;
-    color: var(--text);
-    font-size: var(--fs-xs);
-    text-align: start;
-    cursor: pointer;
+    display: flex; align-items: center; gap: 6px; flex: 1; min-inline-size: 0;
+    padding-block: 4px; padding-inline-end: 4px; background: transparent; border: none;
+    color: var(--text); font-size: var(--fs-xs); text-align: start; cursor: pointer;
   }
-  .struct-row:hover,
-  .struct-row.active {
-    background: var(--surface-2);
-  }
-  .struct-line {
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    flex-shrink: 0;
-  }
-  .bp-bar {
-    padding: 6px 10px;
-    border-bottom: 1px solid var(--border);
-  }
-  .bp-exc-toggle {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-  .bp-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 8px;
-    min-width: 0;
-  }
-  .bp-row:hover {
-    background: var(--surface-2);
-  }
+  .struct-line { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); flex-shrink: 0; }
+  .bp-bar { padding-block: 6px; padding-inline: 10px; border-block-end: 1px solid var(--border); }
+  .bp-exc-toggle { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--text-dim); }
+  .bp-exc-label { border: 0; background: transparent; padding: 0; font-size: var(--fs-xs); color: var(--text-dim); cursor: pointer; }
+  .bp-row { display: flex; align-items: center; gap: 6px; padding-block: 4px; padding-inline: 8px; min-inline-size: 0; }
+  .bp-row:hover { background: var(--surface-2); }
   .bp-jump {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    background: transparent;
-    border: none;
-    color: var(--text);
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    text-align: start;
-    cursor: pointer;
+    flex: 1; min-inline-size: 0; display: flex; align-items: center; gap: 6px;
+    background: transparent; border: none; color: var(--text);
+    font-family: var(--font-mono); font-size: var(--fs-xs); text-align: start; cursor: pointer;
+  }
+  @media (hover: none) {
+    .tree-more, .struct-agent-btn { opacity: 1; }
   }
 </style>

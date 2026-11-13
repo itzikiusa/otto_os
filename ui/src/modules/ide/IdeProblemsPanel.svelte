@@ -12,6 +12,7 @@
     ideBasename,
     type IdeDiagnostic,
   } from './ideStore.svelte';
+  import { ideAgent } from './store/ideAgentController.svelte';
 
   type SeverityFilter = 'all' | 'error' | 'warning' | 'info';
 
@@ -103,11 +104,17 @@
     fixingKey = key;
     try {
       const actions = await ide.fetchCodeActions(d.path, d.line, d.column ?? 1);
-      const items: MenuItem[] =
-        actions.length > 0
+      const items: MenuItem[] = [
+        {
+          label: 'Fix with Agent',
+          icon: 'assistant',
+          action: () => ideAgent.attachDiagnostic(d, { openPanel: true }),
+        },
+        { separator: true },
+        ...(actions.length > 0
           ? actions.map((act) => ({
               label: act.title,
-              icon: 'bulb',
+              icon: 'bulb' as const,
               hint: act.kind,
               action: () => {
                 void ide.applyCodeAction(d.path, act);
@@ -118,7 +125,8 @@
                 label: 'No quick fixes available here',
                 disabled: true,
               },
-            ];
+            ]),
+      ];
       items.push(
         { separator: true },
         {
@@ -287,6 +295,17 @@
                 </button>
                 <button
                   type="button"
+                  class="btn small ghost prob-agent-btn"
+                  aria-label="Fix with Agent"
+                  title="Fix with Agent"
+                  onclick={() => ideAgent.attachDiagnostic(d, { openPanel: true })}
+                  data-testid="ide-problem-fix-agent"
+                >
+                  <Icon name="assistant" size={12} />
+                  <span>Fix</span>
+                </button>
+                <button
+                  type="button"
                   class="btn small ghost prob-fix"
                   aria-keyshortcuts="Alt+Enter"
                   disabled={fixingKey === k}
@@ -412,8 +431,12 @@
     font-size: var(--fs-xs);
     font-variant-numeric: tabular-nums;
   }
-  .prob-fix {
+  .prob-fix,
+  .prob-agent-btn {
     flex-shrink: 0;
+  }
+  .prob-agent-btn {
+    color: var(--accent-text);
   }
   @media (max-width: 640px) {
     .prob-search {

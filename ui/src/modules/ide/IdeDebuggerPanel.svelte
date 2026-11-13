@@ -2,6 +2,7 @@
   // Full DAP Debugger panel: execution toolbar, Breakpoints/Conditions/Logpoints
   // modal, and 3-column desktop / stacked mobile inspector (Threads & Call Stack,
   // Scopes/Variables + Watches, and Debug Console + Evaluate REPL).
+  import { onMount, untrack } from 'svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -23,6 +24,7 @@
     type IdeStackFrame,
     type IdeVariable,
   } from './ideStore.svelte';
+  import { ideAgent } from './store/ideAgentController.svelte';
 
   const LOG_CAP = 500;
 
@@ -66,23 +68,33 @@
   const cleanAnsi = (raw: string): string => raw.replace(ANSI_RE, '');
   const scopeKey = (s: IdeScope): string => `${s.name}:${s.variables_reference}`;
 
-  // Sync debug sessions started via API/CLI or stepped externally while Debug tab is visible.
+  // One-shot discovery on mount if a debug session was already started via CLI/API;
+  // never polls while idle (`!dbg`).
+  onMount(() => {
+    if (ide.activeDebug) return;
+    const ctl = new AbortController();
+    void api.bg
+      .get<{ sessions: IdeDebugSessionSnapshot[] }>('/ide/debug/sessions', ctl.signal)
+      .then((list) => {
+        if (ide.activeDebug) return;
+        const sessions = list.sessions ?? [];
+        const live = sessions.find((s) => s.state !== 'terminated') ?? sessions[0] ?? null;
+        if (live) ide.applyDebugSnapshot(live);
+      })
+      .catch(() => { /* no active debug session */ });
+    return () => ctl.abort();
+  });
+
+  // Poll session state ONLY while an active (non-terminated, non-errored) session exists.
   $effect(() => {
+    if (!dbg || dbg.state === 'terminated' || dbg.state === 'error') return;
+    const sessionId = dbg.id;
     const poller = pollWhileVisible(async (signal) => {
-      const cur = ide.activeDebug;
-      if (!cur) {
-        try {
-          const list = await api.bg.get<{ sessions: IdeDebugSessionSnapshot[] }>('/ide/debug/sessions', signal);
-          const sessions = list.sessions ?? [];
-          const live = sessions.find((s) => s.state !== 'terminated') ?? sessions[0] ?? null;
-          if (live) ide.applyDebugSnapshot(live);
-        } catch { /* no active debug session */ }
-        return;
-      }
-      if (cur.state === 'terminated') return;
+      const cur = untrack(() => ide.activeDebug);
+      if (!cur || cur.id !== sessionId || cur.state === 'terminated' || cur.state === 'error') return;
       try {
         const res = await api.bg.get<{ session: IdeDebugSessionSnapshot }>(
-          `/ide/debug/sessions/${encodeURIComponent(cur.id)}`,
+          `/ide/debug/sessions/${encodeURIComponent(sessionId)}`,
           signal,
         );
         const next = res.session;
@@ -97,7 +109,7 @@
           (next.output?.length ?? 0) !== (cur.output?.length ?? 0);
         if (changed) ide.applyDebugSnapshot(next);
       } catch { /* transient or ended */ }
-    }, { ms: 900, floorMs: 500, immediate: true });
+    }, { ms: 900, floorMs: 500, immediate: false });
     return () => poller.stop();
   });
 
@@ -337,6 +349,14 @@
     <span class="grow"></span>
 
     <div class="dbg-right">
+      <button
+        type="button"
+        class="btn small ghost dbg-agent-btn"
+        disabled={!isPaused || !dbg}
+        title={isPaused ? 'Ask AI Agent about paused stack frame and variables' : 'Pause at a breakpoint to ask AI Agent'}
+        onclick={() => dbg && ideAgent.attachDebugFrame(dbg, ide.expandedVariables, { openPanel: true })}
+        data-testid="ide-debug-ask-agent"
+      ><Icon name="assistant" size={12} /><span>Ask Agent</span></button>
       <div class="dbg-exc">
         <Switch
           checked={ide.breakOnExceptions}
@@ -344,7 +364,12 @@
           label="Break on exceptions"
           title="Pause on thrown exceptions"
         />
-        <span class="dbg-exc-label">Exceptions</span>
+        <button
+          type="button"
+          tabindex="-1"
+          class="dbg-exc-label"
+          onclick={() => { ide.breakOnExceptions = !ide.breakOnExceptions; void ide.syncBreakpointsToSession(); }}
+        >Exceptions</button>
       </div>
       <button
         type="button"
@@ -598,114 +623,28 @@
 {/if}
 
 <style>
-  .dbg-root {
-    container-type: inline-size;
-    display: flex;
-    flex-direction: column;
-    block-size: 100%;
-    min-block-size: 0;
-    min-inline-size: 0;
-    background: var(--surface);
-  }
-  .dbg-bar {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-    padding: 4px 10px;
-    border-block-end: 1px solid var(--border);
-    background: var(--surface);
-    flex-shrink: 0;
-  }
-  .dbg-controls,
-  .dbg-meta,
-  .dbg-right,
-  .dbg-head-actions {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    min-inline-size: 0;
-  }
+  .dbg-root { container-type: inline-size; display: flex; flex-direction: column; block-size: 100%; min-block-size: 0; min-inline-size: 0; background: var(--surface); }
+  .dbg-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 4px 10px; border-block-end: 1px solid var(--border); background: var(--surface); flex-shrink: 0; }
+  .dbg-controls, .dbg-meta, .dbg-right, .dbg-head-actions { display: flex; align-items: center; gap: 4px; min-inline-size: 0; }
   .dbg-meta { flex-wrap: wrap; gap: 6px; }
-  .dbg-sep {
-    inline-size: 1px;
-    block-size: 14px;
-    background: var(--border);
-    margin-inline: 2px;
-  }
+  .dbg-sep { inline-size: 1px; block-size: 14px; background: var(--border); margin-inline: 2px; }
+  .dbg-agent-btn:not(:disabled) { color: var(--accent-text); }
   .dbg-exc { display: inline-flex; align-items: center; gap: 6px; padding-inline: 4px; }
-  .dbg-exc-label { font-size: var(--fs-xs); color: var(--text-dim); }
-  .dbg-empty-wrap {
-    flex: 1;
-    min-block-size: 0;
-    overflow-y: auto;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .dbg-err-banner {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 4px 12px;
-    font-size: var(--fs-xs);
-    color: var(--danger);
-    background: var(--danger-soft);
-    border-block-end: 1px solid var(--border);
-    flex-shrink: 0;
-  }
-  .dbg-grid {
-    flex: 1;
-    min-block-size: 0;
-    min-inline-size: 0;
-    display: grid;
-    grid-template-columns: minmax(180px, 0.9fr) minmax(220px, 1.25fr) minmax(220px, 1.25fr);
-  }
-  .dbg-col {
-    display: flex;
-    flex-direction: column;
-    min-block-size: 0;
-    min-inline-size: 0;
-    border-inline-end: 1px solid var(--border);
-  }
+  .dbg-exc-label { border: 0; background: transparent; padding: 0; font-size: var(--fs-xs); color: var(--text-dim); cursor: pointer; }
+  .dbg-empty-wrap { flex: 1; min-block-size: 0; overflow-y: auto; display: flex; align-items: center; justify-content: center; }
+  .dbg-err-banner { display: flex; align-items: center; gap: 8px; padding: 4px 12px; font-size: var(--fs-xs); color: var(--danger); background: var(--danger-soft); border-block-end: 1px solid var(--border); flex-shrink: 0; }
+  .dbg-grid { flex: 1; min-block-size: 0; min-inline-size: 0; display: grid; grid-template-columns: minmax(180px, 0.9fr) minmax(220px, 1.25fr) minmax(220px, 1.25fr); }
+  .dbg-col { display: flex; flex-direction: column; min-block-size: 0; min-inline-size: 0; border-inline-end: 1px solid var(--border); }
   .dbg-col:last-child { border-inline-end: 0; }
-  .dbg-col-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    min-block-size: 28px;
-    padding: 2px 10px;
-    border-block-end: 1px solid var(--border);
-    background: var(--surface-2);
-    flex-shrink: 0;
-  }
-  .dbg-col-title,
-  .dbg-subhead {
-    margin: 0;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-  }
+  .dbg-col-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-block-size: 28px; padding: 2px 10px; border-block-end: 1px solid var(--border); background: var(--surface-2); flex-shrink: 0; }
+  .dbg-col-title, .dbg-subhead { margin: 0; font-size: var(--fs-xs); font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; }
   .dbg-subhead { padding: 4px 10px; }
   .dbg-thread-select { block-size: 22px; font-size: var(--fs-xs); max-inline-size: 160px; }
   .dbg-scroll { flex: 1; min-block-size: 0; overflow-y: auto; padding-block: 4px; }
   .dbg-muted { margin: 0; padding: 12px; font-size: var(--fs-xs); color: var(--text-dim); }
   .dbg-frame {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    inline-size: 100%;
-    padding: 4px 10px;
-    border: 0;
-    background: transparent;
-    color: var(--text);
-    text-align: start;
-    cursor: pointer;
-    font-size: var(--fs-xs);
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; inline-size: 100%;
+    padding: 4px 10px; border: 0; background: transparent; color: var(--text); text-align: start; cursor: pointer; font-size: var(--fs-xs);
   }
   .dbg-frame:hover { background: var(--hover); }
   .dbg-frame.is-selected { background: var(--accent-soft); color: var(--accent-text); }
@@ -713,30 +652,12 @@
   .dbg-frame-loc { flex-shrink: 0; font-size: var(--fs-xs); color: var(--text-dim); font-variant-numeric: tabular-nums; }
   .dbg-scope { border-block-end: 1px solid var(--separator); }
   .dbg-scope-head {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    inline-size: 100%;
-    padding: 4px 8px;
-    border: 0;
-    background: transparent;
-    color: var(--text);
-    font-size: var(--fs-s);
-    font-weight: 500;
-    text-align: start;
-    cursor: pointer;
+    display: flex; align-items: center; gap: 6px; inline-size: 100%; padding: 4px 8px;
+    border: 0; background: transparent; color: var(--text); font-size: var(--fs-s); font-weight: 500; text-align: start; cursor: pointer;
   }
   .dbg-scope-head:hover { background: var(--hover); }
   .dbg-scope-name { flex: 1; }
-  .dbg-var-row {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    min-block-size: 24px;
-    padding-block: 2px;
-    padding-inline: 12px 6px;
-    font-size: var(--fs-xs);
-  }
+  .dbg-var-row { display: flex; align-items: center; gap: 4px; min-block-size: 24px; padding-block: 2px; padding-inline: 12px 6px; font-size: var(--fs-xs); }
   .dbg-var-row:hover { background: var(--hover); }
   .dbg-twisty { inline-size: 18px; block-size: 18px; }
   .dbg-twisty-spacer { inline-size: 18px; flex-shrink: 0; }
@@ -754,8 +675,7 @@
   .dbg-cap-bar { padding-block-end: 6px; }
   .dbg-tail-cta { position: absolute; inset-block-end: 8px; inset-inline-end: 12px; z-index: var(--z-sticky); }
   .dbg-out-line { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs-xs); line-height: 1.45; }
-  .dbg-out-line.is-err,
-  .dbg-repl-res.is-err { color: var(--danger); }
+  .dbg-out-line.is-err, .dbg-repl-res.is-err { color: var(--danger); }
   .dbg-repl-item { padding-block: 4px; border-block-end: 1px solid var(--separator); }
   .dbg-repl-expr { color: var(--text-dim); font-size: var(--fs-xs); overflow-wrap: anywhere; }
   .dbg-repl-res { display: flex; align-items: center; gap: 6px; color: var(--text); font-size: var(--fs-xs); overflow-wrap: anywhere; }

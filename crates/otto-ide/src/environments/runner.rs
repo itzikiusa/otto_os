@@ -2,12 +2,13 @@
 //! output parsers (`go test -v`, `cargo test`, `pytest -v` / `unittest`,
 //! `node --test` / `vitest`, and Maven Surefire / Gradle / JUnit).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use dashmap::DashMap;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::watch;
@@ -21,16 +22,120 @@ use crate::types::{
 
 use super::is_valid_env_key;
 
-const MAX_RUN_OUTPUT_LINES: usize = 2_000;
+pub(super) const MAX_FINISHED_RUNS: usize = 16;
+pub(super) const MAX_RUN_OUTPUT_LINES: usize = 2_000;
+const MAX_PARSED_TESTS: usize = 10_000;
+
+pub(super) fn evict_finished_runs(runs: &DashMap<String, Arc<ActiveRunHandle>>) {
+    let mut finished: Vec<(String, String, u64)> = runs
+        .iter()
+        .filter_map(|e| {
+            let (started_at, seq) = e.value().finished_sort_key()?;
+            Some((e.key().clone(), started_at, seq))
+        })
+        .collect();
+    if finished.len() <= MAX_FINISHED_RUNS {
+        return;
+    }
+    finished.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)));
+    let evict_count = finished.len() - MAX_FINISHED_RUNS;
+    for (id, _, _) in finished.into_iter().take(evict_count) {
+        runs.remove(&id);
+    }
+}
+
+pub(super) struct RunStateInner {
+    id: String,
+    title: String,
+    runner: IdeRunnerKind,
+    status: IdeRunStatus,
+    exit_code: Option<i32>,
+    started_at: String,
+    duration_ms: Option<u64>,
+    output_seq: u64,
+    output: VecDeque<String>,
+    parser: IncrementalTestTracker,
+}
+
+impl RunStateInner {
+    pub(super) fn new(
+        id: String,
+        title: String,
+        runner: IdeRunnerKind,
+        started_at: String,
+    ) -> Self {
+        Self {
+            id,
+            title,
+            runner,
+            status: IdeRunStatus::Running,
+            exit_code: None,
+            started_at,
+            duration_ms: None,
+            output_seq: 0,
+            output: VecDeque::new(),
+            parser: IncrementalTestTracker::default(),
+        }
+    }
+
+    fn push_line(&mut self, line: String) {
+        self.output_seq = self.output_seq.saturating_add(1);
+        self.parser.ingest_line(self.runner, &line);
+        if self.output.len() >= MAX_RUN_OUTPUT_LINES {
+            self.output.pop_front();
+        }
+        self.output.push_back(line);
+    }
+
+    fn to_snapshot(&self, tail_lines: Option<usize>) -> IdeRunState {
+        let output: Vec<String> = match tail_lines {
+            Some(0) => Vec::new(),
+            Some(n) if n < self.output.len() => {
+                let skip = self.output.len() - n;
+                self.output.iter().skip(skip).cloned().collect()
+            }
+            _ => self.output.iter().cloned().collect(),
+        };
+        IdeRunState {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            runner: self.runner,
+            status: self.status,
+            exit_code: self.exit_code,
+            started_at: self.started_at.clone(),
+            duration_ms: self.duration_ms,
+            output_seq: self.output_seq,
+            output,
+            tests: self.parser.results.clone(),
+        }
+    }
+}
 
 pub(super) struct ActiveRunHandle {
-    pub(super) state: Mutex<IdeRunState>,
+    pub(super) seq: u64,
+    pub(super) state: Mutex<RunStateInner>,
     pub(super) stop_tx: watch::Sender<bool>,
 }
 
 impl ActiveRunHandle {
     pub(super) fn snapshot(&self) -> IdeRunState {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.snapshot_with_tail(None)
+    }
+
+    pub(super) fn snapshot_with_tail(&self, tail_lines: Option<usize>) -> IdeRunState {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .to_snapshot(tail_lines)
+    }
+
+    pub(super) fn finished_sort_key(&self) -> Option<(String, u64)> {
+        let guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.status == IdeRunStatus::Running {
+            None
+        } else {
+            Some((guard.started_at.clone(), self.seq))
+        }
     }
 
     pub(super) fn stop(&self) -> IdeRunState {
@@ -38,13 +143,15 @@ impl ActiveRunHandle {
         let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if guard.status == IdeRunStatus::Running {
             guard.status = IdeRunStatus::Stopped;
-            guard.output.push("[Stopped by user]".into());
+            guard.push_line("[Stopped by user]".into());
         }
-        guard.clone()
+        guard.to_snapshot(None)
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_run_task(
+    runs: Arc<DashMap<String, Arc<ActiveRunHandle>>>,
     handle: Arc<ActiveRunHandle>,
     targets: TargetManager,
     target: IdeTargetSpec,
@@ -74,6 +181,7 @@ pub(super) async fn execute_run_task(
                 started.elapsed(),
                 Some(err),
             );
+            evict_finished_runs(&runs);
             return;
         }
     }
@@ -95,6 +203,7 @@ pub(super) async fn execute_run_task(
                 started.elapsed(),
                 Some(err),
             );
+            evict_finished_runs(&runs);
             return;
         }
     };
@@ -159,18 +268,15 @@ pub(super) async fn execute_run_task(
             );
         }
     }
+    evict_finished_runs(&runs);
 }
 
-fn append_run_line(handle: &ActiveRunHandle, line: String) {
+pub(super) fn append_run_line(handle: &ActiveRunHandle, line: String) {
     let mut guard = handle.state.lock().unwrap_or_else(|e| e.into_inner());
-    if guard.output.len() >= MAX_RUN_OUTPUT_LINES {
-        guard.output.remove(0);
-    }
-    guard.output.push(line);
-    guard.tests = parse_test_output(guard.runner, &guard.output);
+    guard.push_line(line);
 }
 
-fn finish_run(
+pub(super) fn finish_run(
     handle: &ActiveRunHandle,
     status: IdeRunStatus,
     exit_code: Option<i32>,
@@ -179,9 +285,8 @@ fn finish_run(
 ) {
     let mut guard = handle.state.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(msg) = err_msg {
-        guard.output.push(format!("ERROR: {msg}"));
+        guard.push_line(format!("ERROR: {msg}"));
     }
-    guard.tests = parse_test_output(guard.runner, &guard.output);
     if guard.status != IdeRunStatus::Stopped {
         guard.status = status;
     }
@@ -203,6 +308,8 @@ async fn run_before_launch(
                 .args(["-c", script])
                 .current_dir(cwd)
                 .envs(env_map)
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
                 .output()
                 .await
                 .map_err(|e| e.to_string())?;
@@ -526,67 +633,99 @@ pub(super) fn build_runner_command(
     }
 }
 
-/// Parse raw runner output lines into structured per-test pass/fail/duration items.
-pub fn parse_test_output(runner: IdeRunnerKind, lines: &[String]) -> Vec<IdeTestCaseResult> {
-    match runner {
-        IdeRunnerKind::GoTest => parse_go_test_lines(lines),
-        IdeRunnerKind::CargoTest => parse_cargo_test_lines(lines),
-        IdeRunnerKind::Pytest => parse_python_test_lines(lines),
-        IdeRunnerKind::Node | IdeRunnerKind::Vitest | IdeRunnerKind::Npm => {
-            parse_js_test_lines(lines)
-        }
-        IdeRunnerKind::JavaJunit | IdeRunnerKind::Maven | IdeRunnerKind::Gradle => {
-            parse_jvm_test_lines(lines)
-        }
-        _ => Vec::new(),
-    }
+/// Stateful $O(1)$-per-line test parser that retains structured test cases
+/// across an entire run even after `output` rolls past `MAX_RUN_OUTPUT_LINES`.
+#[derive(Default)]
+struct IncrementalTestTracker {
+    results: Vec<IdeTestCaseResult>,
+    go_index: HashMap<String, usize>,
+    last_go_idx: Option<usize>,
 }
 
-fn parse_go_test_lines(lines: &[String]) -> Vec<IdeTestCaseResult> {
-    let mut map: BTreeMap<String, IdeTestCaseResult> = BTreeMap::new();
-    let mut order: Vec<String> = Vec::new();
-    for line in lines {
+impl IncrementalTestTracker {
+    fn push_capped(&mut self, item: IdeTestCaseResult) {
+        if self.results.len() < MAX_PARSED_TESTS {
+            self.results.push(item);
+        }
+    }
+
+    fn ingest_line(&mut self, runner: IdeRunnerKind, line: &str) {
+        match runner {
+            IdeRunnerKind::GoTest => self.ingest_go_line(line),
+            IdeRunnerKind::CargoTest => {
+                if let Some(tc) = parse_cargo_test_line(line) {
+                    self.push_capped(tc);
+                }
+            }
+            IdeRunnerKind::Pytest => {
+                if let Some(tc) = parse_python_test_line(line) {
+                    self.push_capped(tc);
+                }
+            }
+            IdeRunnerKind::Node | IdeRunnerKind::Vitest | IdeRunnerKind::Npm => {
+                if let Some(tc) = parse_js_test_line(line) {
+                    self.push_capped(tc);
+                }
+            }
+            IdeRunnerKind::JavaJunit | IdeRunnerKind::Maven | IdeRunnerKind::Gradle => {
+                if let Some(tc) = parse_jvm_test_line(line) {
+                    self.push_capped(tc);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn ingest_go_line(&mut self, line: &str) {
         let t = line.trim();
         if let Some(name) = t
             .strip_prefix("=== RUN")
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            if !map.contains_key(name) {
-                order.push(name.to_string());
+            if let Some(&idx) = self.go_index.get(name) {
+                self.results[idx] = simple_test_case(name, IdeTestCaseStatus::Running, None);
+                self.last_go_idx = Some(idx);
+            } else if self.results.len() < MAX_PARSED_TESTS {
+                let idx = self.results.len();
+                self.results
+                    .push(simple_test_case(name, IdeTestCaseStatus::Running, None));
+                self.go_index.insert(name.to_string(), idx);
+                self.last_go_idx = Some(idx);
             }
-            map.insert(
-                name.to_string(),
-                simple_test_case(name, IdeTestCaseStatus::Running, None),
-            );
-        } else if let Some((status, rest)) = t
-            .strip_prefix("--- PASS:")
-            .map(|r| (IdeTestCaseStatus::Passed, r))
-            .or_else(|| {
-                t.strip_prefix("--- FAIL:")
-                    .map(|r| (IdeTestCaseStatus::Failed, r))
-            })
-            .or_else(|| {
-                t.strip_prefix("--- SKIP:")
-                    .map(|r| (IdeTestCaseStatus::Skipped, r))
-            })
-        {
-            let rest = rest.trim();
-            let (name, dur_ms) = match rest.split_once(' ') {
-                Some((n, tail)) => (n.trim(), parse_seconds_parens(tail)),
-                None => (rest, None),
-            };
-            if !map.contains_key(name) {
-                order.push(name.to_string());
+        } else if t.starts_with("--- ") {
+            if let Some((status, rest)) = t
+                .strip_prefix("--- PASS:")
+                .map(|r| (IdeTestCaseStatus::Passed, r))
+                .or_else(|| {
+                    t.strip_prefix("--- FAIL:")
+                        .map(|r| (IdeTestCaseStatus::Failed, r))
+                })
+                .or_else(|| {
+                    t.strip_prefix("--- SKIP:")
+                        .map(|r| (IdeTestCaseStatus::Skipped, r))
+                })
+            {
+                let rest = rest.trim();
+                let (name, dur_ms) = match rest.split_once(' ') {
+                    Some((n, tail)) => (n.trim(), parse_seconds_parens(tail)),
+                    None => (rest, None),
+                };
+                if let Some(&idx) = self.go_index.get(name) {
+                    self.results[idx].status = status;
+                    self.results[idx].duration_ms = dur_ms;
+                    self.last_go_idx = Some(idx);
+                } else if self.results.len() < MAX_PARSED_TESTS {
+                    let idx = self.results.len();
+                    self.results.push(simple_test_case(name, status, dur_ms));
+                    self.go_index.insert(name.to_string(), idx);
+                    self.last_go_idx = Some(idx);
+                }
             }
-            let entry = map
-                .entry(name.to_string())
-                .or_insert_with(|| simple_test_case(name, status, dur_ms));
-            entry.status = status;
-            entry.duration_ms = dur_ms;
-        } else if let Some((file, ln, msg)) = parse_go_diag_line(t) {
-            if let Some(last_name) = order.last() {
-                if let Some(entry) = map.get_mut(last_name) {
+        } else if t.contains(".go:") {
+            if let Some((file, ln, msg)) = parse_go_diag_line(t) {
+                if let Some(idx) = self.last_go_idx {
+                    let entry = &mut self.results[idx];
                     entry.file.get_or_insert(file);
                     entry.line.get_or_insert(ln);
                     entry.message = Some(msg);
@@ -594,7 +733,15 @@ fn parse_go_test_lines(lines: &[String]) -> Vec<IdeTestCaseResult> {
             }
         }
     }
-    order.into_iter().filter_map(|k| map.remove(&k)).collect()
+}
+
+/// Parse raw runner output lines into structured per-test pass/fail/duration items.
+pub fn parse_test_output(runner: IdeRunnerKind, lines: &[String]) -> Vec<IdeTestCaseResult> {
+    let mut tracker = IncrementalTestTracker::default();
+    for line in lines {
+        tracker.ingest_line(runner, line);
+    }
+    tracker.results
 }
 
 fn parse_go_diag_line(trimmed: &str) -> Option<(String, u32, String)> {
@@ -607,119 +754,99 @@ fn parse_go_diag_line(trimmed: &str) -> Option<(String, u32, String)> {
     Some((format!("{file_part}.go"), line_no, msg.trim().to_string()))
 }
 
-fn parse_cargo_test_lines(lines: &[String]) -> Vec<IdeTestCaseResult> {
-    let mut out = Vec::new();
-    for line in lines {
-        let Some(rest) = line.trim().strip_prefix("test ") else {
-            continue;
-        };
-        let Some((name, outcome)) = rest.rsplit_once(" ... ") else {
-            continue;
-        };
-        let status = if outcome.starts_with("ok") {
-            IdeTestCaseStatus::Passed
-        } else if outcome.starts_with("FAILED") {
-            IdeTestCaseStatus::Failed
-        } else if outcome.starts_with("ignored") {
-            IdeTestCaseStatus::Skipped
-        } else {
-            continue;
-        };
-        out.push(simple_test_case(name.trim(), status, None));
-    }
-    out
+fn parse_cargo_test_line(line: &str) -> Option<IdeTestCaseResult> {
+    let rest = line.trim().strip_prefix("test ")?;
+    let (name, outcome) = rest.rsplit_once(" ... ")?;
+    let status = if outcome.starts_with("ok") {
+        IdeTestCaseStatus::Passed
+    } else if outcome.starts_with("FAILED") {
+        IdeTestCaseStatus::Failed
+    } else if outcome.starts_with("ignored") {
+        IdeTestCaseStatus::Skipped
+    } else {
+        return None;
+    };
+    Some(simple_test_case(name.trim(), status, None))
 }
 
-fn parse_python_test_lines(lines: &[String]) -> Vec<IdeTestCaseResult> {
-    let mut out = Vec::new();
-    for line in lines {
-        let t = line.trim();
-        if t.contains("::") {
-            let parts: Vec<&str> = t.split_whitespace().collect();
-            if parts.len() >= 2 {
-                let st = match parts[1] {
-                    "PASSED" => Some(IdeTestCaseStatus::Passed),
-                    "FAILED" | "ERROR" => Some(IdeTestCaseStatus::Failed),
-                    "SKIPPED" | "XFAIL" => Some(IdeTestCaseStatus::Skipped),
-                    _ => None,
-                };
-                if let Some(status) = st {
-                    let (file, name) = parts[0].split_once("::").unwrap_or(("", parts[0]));
-                    let mut item = simple_test_case(name, status, None);
-                    if !file.is_empty() {
-                        item.suite = Some(file.to_string());
-                        item.file = Some(file.to_string());
-                    }
-                    out.push(item);
-                    continue;
-                }
-            }
-        }
-        if let Some((left, right)) = t.rsplit_once(" ... ") {
-            let st = match right.trim() {
-                "ok" => Some(IdeTestCaseStatus::Passed),
-                "FAIL" | "ERROR" => Some(IdeTestCaseStatus::Failed),
-                s if s.starts_with("skipped") => Some(IdeTestCaseStatus::Skipped),
+fn parse_python_test_line(line: &str) -> Option<IdeTestCaseResult> {
+    let t = line.trim();
+    if t.contains("::") {
+        let mut parts = t.split_whitespace();
+        if let (Some(first), Some(second)) = (parts.next(), parts.next()) {
+            let st = match second {
+                "PASSED" => Some(IdeTestCaseStatus::Passed),
+                "FAILED" | "ERROR" => Some(IdeTestCaseStatus::Failed),
+                "SKIPPED" | "XFAIL" => Some(IdeTestCaseStatus::Skipped),
                 _ => None,
             };
             if let Some(status) = st {
-                out.push(simple_test_case(left.trim(), status, None));
+                let (file, name) = first.split_once("::").unwrap_or(("", first));
+                let mut item = simple_test_case(name, status, None);
+                if !file.is_empty() {
+                    item.suite = Some(file.to_string());
+                    item.file = Some(file.to_string());
+                }
+                return Some(item);
             }
         }
     }
-    out
+    let (left, right) = t.rsplit_once(" ... ")?;
+    let status = match right.trim() {
+        "ok" => IdeTestCaseStatus::Passed,
+        "FAIL" | "ERROR" => IdeTestCaseStatus::Failed,
+        s if s.starts_with("skipped") => IdeTestCaseStatus::Skipped,
+        _ => return None,
+    };
+    Some(simple_test_case(left.trim(), status, None))
 }
 
-fn parse_js_test_lines(lines: &[String]) -> Vec<IdeTestCaseResult> {
-    let mut out = Vec::new();
-    for line in lines {
-        let t = line.trim();
-        if let Some(rest) = t
-            .strip_prefix("ok ")
-            .or_else(|| t.strip_prefix("✓ "))
-            .or_else(|| t.strip_prefix("✔ "))
-        {
-            let name = rest
-                .split_once(" - ")
-                .map(|(_, n)| n)
-                .unwrap_or(rest)
-                .trim();
-            if !name.is_empty() {
-                out.push(simple_test_case(
-                    name,
-                    IdeTestCaseStatus::Passed,
-                    parse_ms_suffix(name),
-                ));
-            }
-        } else if let Some(rest) = t
-            .strip_prefix("not ok ")
-            .or_else(|| t.strip_prefix("✖ "))
-            .or_else(|| t.strip_prefix("× "))
-        {
-            let name = rest
-                .split_once(" - ")
-                .map(|(_, n)| n)
-                .unwrap_or(rest)
-                .trim();
-            if !name.is_empty() {
-                out.push(simple_test_case(
-                    name,
-                    IdeTestCaseStatus::Failed,
-                    parse_ms_suffix(name),
-                ));
-            }
+fn parse_js_test_line(line: &str) -> Option<IdeTestCaseResult> {
+    let t = line.trim();
+    if let Some(rest) = t
+        .strip_prefix("ok ")
+        .or_else(|| t.strip_prefix("✓ "))
+        .or_else(|| t.strip_prefix("✔ "))
+    {
+        let name = rest
+            .split_once(" - ")
+            .map(|(_, n)| n)
+            .unwrap_or(rest)
+            .trim();
+        if !name.is_empty() {
+            return Some(simple_test_case(
+                name,
+                IdeTestCaseStatus::Passed,
+                parse_ms_suffix(name),
+            ));
+        }
+    } else if let Some(rest) = t
+        .strip_prefix("not ok ")
+        .or_else(|| t.strip_prefix("✖ "))
+        .or_else(|| t.strip_prefix("× "))
+    {
+        let name = rest
+            .split_once(" - ")
+            .map(|(_, n)| n)
+            .unwrap_or(rest)
+            .trim();
+        if !name.is_empty() {
+            return Some(simple_test_case(
+                name,
+                IdeTestCaseStatus::Failed,
+                parse_ms_suffix(name),
+            ));
         }
     }
-    out
+    None
 }
 
-fn parse_jvm_test_lines(lines: &[String]) -> Vec<IdeTestCaseResult> {
-    let mut out = Vec::new();
-    for line in lines {
-        let t = line
-            .trim()
-            .trim_start_matches("[INFO] ")
-            .trim_start_matches("[ERROR] ");
+fn parse_jvm_test_line(line: &str) -> Option<IdeTestCaseResult> {
+    let t = line
+        .trim()
+        .trim_start_matches("[INFO] ")
+        .trim_start_matches("[ERROR] ");
+    if t.contains(" > ") {
         if let Some((left, right)) = t.rsplit_once(' ') {
             if left.contains(" > ") {
                 let st = match right {
@@ -732,26 +859,25 @@ fn parse_jvm_test_lines(lines: &[String]) -> Vec<IdeTestCaseResult> {
                     let (suite, name) = left.split_once(" > ").unwrap_or(("", left));
                     let mut item = simple_test_case(name.trim(), status, None);
                     item.suite = Some(suite.trim().to_string());
-                    out.push(item);
-                    continue;
+                    return Some(item);
                 }
             }
         }
-        if t.starts_with("Tests run:") && t.contains("-- in ") {
-            if let Some((_, suite)) = t.split_once("-- in ") {
-                let failed = !t.contains("Failures: 0, Errors: 0");
-                let status = if failed {
-                    IdeTestCaseStatus::Failed
-                } else {
-                    IdeTestCaseStatus::Passed
-                };
-                let mut item = simple_test_case(suite.trim(), status, None);
-                item.suite = Some(suite.trim().to_string());
-                out.push(item);
-            }
+    }
+    if t.starts_with("Tests run:") && t.contains("-- in ") {
+        if let Some((_, suite)) = t.split_once("-- in ") {
+            let failed = !t.contains("Failures: 0, Errors: 0");
+            let status = if failed {
+                IdeTestCaseStatus::Failed
+            } else {
+                IdeTestCaseStatus::Passed
+            };
+            let mut item = simple_test_case(suite.trim(), status, None);
+            item.suite = Some(suite.trim().to_string());
+            return Some(item);
         }
     }
-    out
+    None
 }
 
 fn simple_test_case(
@@ -848,5 +974,62 @@ mod tests {
         );
         assert_eq!(jvm_res.len(), 1);
         assert_eq!(jvm_res[0].status, IdeTestCaseStatus::Passed);
+    }
+
+    #[test]
+    fn streaming_10k_lines_is_under_50ms_caps_output_and_preserves_tests() {
+        let (stop_tx, _stop_rx) = watch::channel(false);
+        let handle = ActiveRunHandle {
+            seq: 1,
+            state: Mutex::new(RunStateInner::new(
+                "run_perf".into(),
+                "CargoTest".into(),
+                IdeRunnerKind::CargoTest,
+                "2026-01-01T00:00:00Z".into(),
+            )),
+            stop_tx,
+        };
+
+        let lines: Vec<String> = (0..10_000)
+            .map(|i| match i {
+                0 => "test early::first_case ... ok".to_string(),
+                500 => "test early::second_case ... FAILED".to_string(),
+                9_999 => "test late::final_case ... ok".to_string(),
+                _ => format!("stdout log line {i}"),
+            })
+            .collect();
+
+        let started = Instant::now();
+        for line in lines {
+            append_run_line(&handle, line);
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "streaming 10,000 stdout lines took {elapsed:?}, expected < 50ms"
+        );
+
+        let snap = handle.snapshot();
+        assert_eq!(snap.output.len(), MAX_RUN_OUTPUT_LINES);
+        assert_eq!(snap.output_seq, 10_000);
+        assert_eq!(
+            snap.output.first().map(String::as_str),
+            Some("stdout log line 8000")
+        );
+        assert_eq!(
+            snap.output.last().map(String::as_str),
+            Some("test late::final_case ... ok")
+        );
+        assert_eq!(snap.tests.len(), 3);
+        assert_eq!(snap.tests[0].name, "early::first_case");
+        assert_eq!(snap.tests[0].status, IdeTestCaseStatus::Passed);
+        assert_eq!(snap.tests[1].name, "early::second_case");
+        assert_eq!(snap.tests[1].status, IdeTestCaseStatus::Failed);
+        assert_eq!(snap.tests[2].name, "late::final_case");
+        assert_eq!(snap.tests[2].status, IdeTestCaseStatus::Passed);
+
+        let tail = handle.snapshot_with_tail(Some(5));
+        assert_eq!(tail.output.len(), 5);
+        assert_eq!(tail.output_seq, 10_000);
     }
 }

@@ -25,7 +25,10 @@ use super::{framing, servers};
 use crate::types::IdeSshSpec;
 
 /// How long a server outlives its last socket.
-pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+/// Maximum concurrent pooled language servers per user before the
+/// least-recently-active server with `open_docs == 0` is evicted.
+pub const MAX_SERVERS_PER_OWNER: usize = 3;
 /// Queued client → server messages per pooled server (backpressure).
 const DATA_CAPACITY: usize = 1024;
 /// Bytes queued for a server's stdin before the actor stops accepting client
@@ -239,6 +242,7 @@ enum Ctl {
     Detach {
         client: u64,
     },
+    Evict,
 }
 
 struct Data {
@@ -250,6 +254,8 @@ struct Entry {
     gen: u64,
     ctl: mpsc::UnboundedSender<Ctl>,
     data: mpsc::Sender<Data>,
+    open_docs: Arc<AtomicUsize>,
+    last_active: Arc<AtomicU64>,
 }
 
 /// The pool: one entry (actor task + server) per [`PoolKey`].
@@ -261,6 +267,7 @@ pub struct LspPool {
     write_cap: usize,
     next_client: AtomicU64,
     next_gen: AtomicU64,
+    activity_seq: Arc<AtomicU64>,
 }
 
 /// One socket's attachment. Dropping it detaches the socket.
@@ -308,6 +315,7 @@ impl LspPool {
             write_cap,
             next_client: AtomicU64::new(1),
             next_gen: AtomicU64::new(1),
+            activity_seq: Arc::new(AtomicU64::new(1)),
         })
     }
 
@@ -348,6 +356,8 @@ impl LspPool {
                 })
                 .is_ok()
             {
+                let tick = self.activity_seq.fetch_add(1, Ordering::Relaxed);
+                e.last_active.store(tick, Ordering::Release);
                 return Ok(Attached {
                     client,
                     rx,
@@ -357,8 +367,26 @@ impl LspPool {
             }
             entries.remove(&key);
         }
+
+        while entries.keys().filter(|k| k.owner == key.owner).count() >= MAX_SERVERS_PER_OWNER {
+            let victim = entries
+                .iter()
+                .filter(|(k, e)| k.owner == key.owner && e.open_docs.load(Ordering::Acquire) == 0)
+                .min_by_key(|(_, e)| e.last_active.load(Ordering::Acquire))
+                .map(|(k, _)| k.clone());
+            let Some(victim_key) = victim else {
+                break;
+            };
+            if let Some(evicted) = entries.remove(&victim_key) {
+                let _ = evicted.ctl.send(Ctl::Evict);
+            }
+        }
+
         let io = (self.spawner)(&key, launch)?;
         let gen = self.next_gen.fetch_add(1, Ordering::Relaxed);
+        let init_tick = self.activity_seq.fetch_add(1, Ordering::Relaxed);
+        let open_docs = Arc::new(AtomicUsize::new(0));
+        let last_active = Arc::new(AtomicU64::new(init_tick));
         let (ctl, ctl_rx) = mpsc::unbounded_channel();
         let (data, data_rx) = mpsc::channel(DATA_CAPACITY);
         let _ = ctl.send(Ctl::Attach { client, tx: out_tx });
@@ -368,10 +396,21 @@ impl LspPool {
                 gen,
                 ctl: ctl.clone(),
                 data: data.clone(),
+                open_docs: Arc::clone(&open_docs),
+                last_active: Arc::clone(&last_active),
             },
         );
         drop(entries);
-        tokio::spawn(run_actor(Arc::clone(self), key, gen, io, ctl_rx, data_rx));
+        tokio::spawn(run_actor(
+            Arc::clone(self),
+            key,
+            gen,
+            io,
+            ctl_rx,
+            data_rx,
+            open_docs,
+            last_active,
+        ));
         Ok(Attached {
             client,
             rx,
@@ -388,6 +427,7 @@ impl LspPool {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_actor(
     pool: Arc<LspPool>,
     key: PoolKey,
@@ -395,6 +435,8 @@ async fn run_actor(
     io: ServerIo,
     mut ctl_rx: mpsc::UnboundedReceiver<Ctl>,
     mut data_rx: mpsc::Receiver<Data>,
+    open_docs: Arc<AtomicUsize>,
+    last_active: Arc<AtomicU64>,
 ) {
     let ServerIo {
         reader,
@@ -442,7 +484,13 @@ async fn run_actor(
         }
     });
 
-    let mut mux = Mux::new(w_tx, Arc::clone(&backlog));
+    let mut mux = Mux::new(
+        w_tx,
+        Arc::clone(&backlog),
+        open_docs,
+        last_active,
+        Arc::clone(&pool.activity_seq),
+    );
     let write_cap = pool.write_cap;
     let mut idle_at: Option<Instant> = None;
     loop {
@@ -452,7 +500,7 @@ async fn run_actor(
             c = ctl_rx.recv() => match c {
                 Some(Ctl::Attach { client, tx }) => mux.attach(client, tx),
                 Some(Ctl::Detach { client }) => mux.detach(client),
-                None => break,
+                Some(Ctl::Evict) | None => break,
             },
             d = data_rx.recv(), if has_room => match d {
                 Some(Data { client, text }) => mux.on_client(client, &text),
@@ -496,7 +544,12 @@ async fn run_actor(
     drop(mux);
     let _ = tokio::time::timeout(Duration::from_secs(2), writer_task).await;
     if let Some(mut child) = child {
-        let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+        if tokio::time::timeout(Duration::from_secs(1), child.wait())
+            .await
+            .is_err()
+        {
+            let _ = child.kill().await;
+        }
     }
 }
 
@@ -517,6 +570,9 @@ enum Init {
 struct Mux {
     to_server_tx: mpsc::UnboundedSender<Vec<u8>>,
     backlog: Arc<AtomicUsize>,
+    open_docs: Arc<AtomicUsize>,
+    last_active: Arc<AtomicU64>,
+    activity_seq: Arc<AtomicU64>,
     clients: BTreeMap<u64, Client>,
     pending: HashMap<u64, (u64, Value)>,
     server_reqs: HashMap<String, (u64, Value)>,
@@ -535,10 +591,19 @@ fn str_at<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
 }
 
 impl Mux {
-    fn new(to_server_tx: mpsc::UnboundedSender<Vec<u8>>, backlog: Arc<AtomicUsize>) -> Self {
+    fn new(
+        to_server_tx: mpsc::UnboundedSender<Vec<u8>>,
+        backlog: Arc<AtomicUsize>,
+        open_docs: Arc<AtomicUsize>,
+        last_active: Arc<AtomicU64>,
+        activity_seq: Arc<AtomicU64>,
+    ) -> Self {
         Self {
             to_server_tx,
             backlog,
+            open_docs,
+            last_active,
+            activity_seq,
             clients: BTreeMap::new(),
             pending: HashMap::new(),
             server_reqs: HashMap::new(),
@@ -547,6 +612,11 @@ impl Mux {
             docs: HashMap::new(),
             next_id: 1,
         }
+    }
+
+    fn touch(&self) {
+        let tick = self.activity_seq.fetch_add(1, Ordering::Relaxed);
+        self.last_active.store(tick, Ordering::Release);
     }
 
     fn alloc_id(&mut self) -> u64 {
@@ -585,6 +655,7 @@ impl Mux {
     }
 
     fn attach(&mut self, client: u64, tx: mpsc::Sender<String>) {
+        self.touch();
         self.clients.insert(
             client,
             Client {
@@ -598,6 +669,7 @@ impl Mux {
         let Some(c) = self.clients.remove(&client) else {
             return;
         };
+        self.touch();
         for uri in c.open {
             self.release_doc(&uri);
         }
@@ -636,6 +708,7 @@ impl Mux {
         *n -= 1;
         if *n == 0 {
             self.docs.remove(uri);
+            self.open_docs.store(self.docs.len(), Ordering::Release);
             self.to_server(&json!({
                 "jsonrpc": "2.0",
                 "method": "textDocument/didClose",
@@ -648,6 +721,7 @@ impl Mux {
         if !self.clients.contains_key(&client) {
             return;
         }
+        self.touch();
         let Ok(mut msg) = serde_json::from_str::<Value>(text) else {
             return;
         };
@@ -699,7 +773,9 @@ impl Mux {
                 let holders = if newly {
                     let n = self.docs.entry(uri.clone()).or_insert(0);
                     *n += 1;
-                    *n
+                    let count = *n;
+                    self.open_docs.store(self.docs.len(), Ordering::Release);
+                    count
                 } else {
                     self.docs.get(&uri).copied().unwrap_or(1)
                 };
@@ -1125,5 +1201,66 @@ mod tests {
         }
         assert!(blocked, "sends never blocked: {accepted} accepted");
         assert!(accepted <= DATA_CAPACITY + 64, "{accepted} accepted");
+    }
+
+    #[tokio::test]
+    async fn max_servers_per_owner_evicts_least_recently_active_zero_doc_server() {
+        assert_eq!(IDLE_TIMEOUT, Duration::from_secs(45));
+        assert_eq!(MAX_SERVERS_PER_OWNER, 3);
+
+        let (pool, fake) = fake_pool(IDLE_TIMEOUT);
+        let lang_key = |lang: &str| PoolKey {
+            owner: "u1".into(),
+            lang: lang.into(),
+            root: "/repo".into(),
+            ssh: None,
+        };
+
+        let mut s_rust = pool.attach(lang_key("rust"), "ra", &[]).unwrap();
+        init(&mut s_rust, 1).await;
+        // Open a document on `rust` so `open_docs == 1` (must NOT be evicted!).
+        s_rust.send(open("file:///repo/main.rs")).await;
+        let _ = recv(&mut s_rust).await;
+
+        let mut s_go = pool.attach(lang_key("go"), "gopls", &[]).unwrap();
+        init(&mut s_go, 1).await;
+
+        let mut s_py = pool.attach(lang_key("python"), "pyright", &[]).unwrap();
+        init(&mut s_py, 1).await;
+
+        assert_eq!(pool.live_servers(), 3);
+        assert_eq!(fake.spawns.load(Ordering::SeqCst), 3);
+
+        // Touch `python` so `go` is the least-recently-active server with `open_docs == 0`.
+        assert!(
+            s_py.send(
+                json!({"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{}})
+                    .to_string()
+            )
+            .await
+        );
+        let _ = recv(&mut s_py).await;
+
+        // Spawning a 4th server (`typescript`) for `u1` must evict `go` (not `rust` which has open_docs==1, not `python` which is newer).
+        let mut s_ts = pool.attach(lang_key("typescript"), "tsls", &[]).unwrap();
+        init(&mut s_ts, 1).await;
+
+        assert_eq!(pool.live_servers(), MAX_SERVERS_PER_OWNER);
+        // `s_go`'s actor exited and closed its outbound channel.
+        let go_closed = tokio::time::timeout(Duration::from_secs(1), s_go.rx.recv())
+            .await
+            .expect("evicted server channel should close promptly");
+        assert!(go_closed.is_none());
+
+        // `s_rust` (with open doc) and `s_py` remain alive.
+        assert!(
+            s_rust
+                .send(
+                    json!({"jsonrpc":"2.0","id":9,"method":"textDocument/hover","params":{}})
+                        .to_string()
+                )
+                .await
+        );
+        assert_eq!(recv(&mut s_rust).await["id"], json!(9));
     }
 }

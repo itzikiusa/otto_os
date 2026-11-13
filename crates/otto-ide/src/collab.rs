@@ -9,7 +9,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use otto_core::domain::User;
@@ -26,8 +28,13 @@ use crate::types::{
 };
 
 const BROADCAST_CAPACITY: usize = 256;
+pub(crate) const MAX_COLLAB_ROOMS: usize = 32;
+pub(crate) const ROOM_IDLE_TTL: Duration = Duration::from_secs(2 * 3600);
+pub(crate) const MAX_SHARED_BUFFERS_PER_ROOM: usize = 32;
+pub(crate) const MAX_ROOM_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SHARED_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PEERS_PER_ROOM: usize = 32;
+const MAX_SELECTIONS_PER_PEER: usize = 64;
 
 const PEER_COLORS: &[&str] = &[
     "hsl(212, 88%, 56%)",
@@ -46,17 +53,26 @@ struct PeerRecord {
     host_bound: bool,
 }
 
+struct SharedBufferRecord {
+    buf: IdeSharedBuffer,
+    clean: bool,
+    touched_seq: u64,
+}
+
 struct RoomState {
     id: String,
+    created_seq: u64,
     title: String,
     target: IdeTargetSpec,
     host_user_id: String,
     default_role: IdeCollabRole,
     invite_token_hash: [u8; 32],
     peers: Vec<PeerRecord>,
-    shared_buffers: BTreeMap<String, IdeSharedBuffer>,
+    shared_buffers: BTreeMap<String, SharedBufferRecord>,
+    buffer_seq: u64,
     active_debug: Option<IdeDebugSessionSnapshot>,
     created_at: String,
+    last_activity_at: Instant,
     events_tx: broadcast::Sender<IdeCollabEvent>,
 }
 
@@ -71,6 +87,38 @@ impl RoomState {
             peers: self.peers.iter().map(|p| p.peer.clone()).collect(),
             active_debug_id: self.active_debug.as_ref().map(|d| d.id.clone()),
             created_at: self.created_at.clone(),
+        }
+    }
+
+    fn total_buffer_bytes(&self) -> usize {
+        self.shared_buffers
+            .values()
+            .map(|r| r.buf.content.len())
+            .sum()
+    }
+
+    fn enforce_buffer_caps(&mut self, keep_path: &str) {
+        while self.shared_buffers.len() > MAX_SHARED_BUFFERS_PER_ROOM
+            || self.total_buffer_bytes() > MAX_ROOM_BUFFER_BYTES
+        {
+            let candidate = self
+                .shared_buffers
+                .iter()
+                .filter(|(p, r)| p.as_str() != keep_path && r.clean)
+                .min_by_key(|(_, r)| r.touched_seq)
+                .or_else(|| {
+                    self.shared_buffers
+                        .iter()
+                        .filter(|(p, _)| p.as_str() != keep_path)
+                        .min_by_key(|(_, r)| r.touched_seq)
+                })
+                .map(|(p, _)| p.clone());
+            match candidate {
+                Some(evict_path) => {
+                    self.shared_buffers.remove(&evict_path);
+                }
+                None => break,
+            }
         }
     }
 
@@ -114,6 +162,7 @@ impl RoomState {
 /// Central hub managing live IDE collaboration rooms, cursors, buffers, and co-debugging.
 pub struct CollabHub {
     rooms: RwLock<HashMap<String, RoomState>>,
+    room_seq: AtomicU64,
 }
 
 impl Default for CollabHub {
@@ -126,11 +175,27 @@ impl CollabHub {
     pub fn new() -> Self {
         Self {
             rooms: RwLock::new(HashMap::new()),
+            room_seq: AtomicU64::new(0),
         }
     }
 
     pub fn with_data_dir(_data_dir: PathBuf) -> Self {
         Self::new()
+    }
+
+    fn evict_expired_locked(rooms: &mut HashMap<String, RoomState>, now: Instant) {
+        let expired: Vec<String> = rooms
+            .iter()
+            .filter(|(_, r)| now.saturating_duration_since(r.last_activity_at) >= ROOM_IDLE_TTL)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in expired {
+            if let Some(removed) = rooms.remove(&id) {
+                let _ = removed
+                    .events_tx
+                    .send(IdeCollabEvent::RoomClosed { room_id: id });
+            }
+        }
     }
 
     /// Host creates a collaborative room for `req.target` and receives a 64-hex `invite_token`.
@@ -144,6 +209,8 @@ impl CollabHub {
         let invite_token = mint_hex_secret_64();
         let invite_token_hash = sha256_bytes(&invite_token);
         let now = now_rfc3339();
+        let now_inst = Instant::now();
+        let created_seq = self.room_seq.fetch_add(1, Ordering::Relaxed);
 
         let default_title = req
             .target
@@ -170,7 +237,7 @@ impl CollabHub {
         let host_peer = PeerRecord {
             peer: IdeCollabPeer {
                 peer_id: format!("peer_host_{}", &new_id().to_ascii_lowercase()[..10]),
-                display_name: host_name.clone(),
+                display_name: host_name,
                 color: PEER_COLORS[0].to_string(),
                 role: IdeCollabRole::Editor,
                 is_host: true,
@@ -186,6 +253,7 @@ impl CollabHub {
         let (events_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         let state = RoomState {
             id: room_id.clone(),
+            created_seq,
             title,
             target: req.target,
             host_user_id: host.id.clone(),
@@ -193,8 +261,10 @@ impl CollabHub {
             invite_token_hash,
             peers: vec![host_peer],
             shared_buffers: BTreeMap::new(),
+            buffer_seq: 0,
             active_debug: None,
             created_at: now,
+            last_activity_at: now_inst,
             events_tx,
         };
 
@@ -204,6 +274,21 @@ impl CollabHub {
             .rooms
             .write()
             .map_err(|_| Error::Internal("collab lock poisoned".into()))?;
+        Self::evict_expired_locked(&mut guard, now_inst);
+        while guard.len() >= MAX_COLLAB_ROOMS {
+            let Some(oldest_id) = guard
+                .iter()
+                .min_by_key(|(_, r)| (r.last_activity_at, r.created_seq))
+                .map(|(id, _)| id.clone())
+            else {
+                break;
+            };
+            if let Some(removed) = guard.remove(&oldest_id) {
+                let _ = removed
+                    .events_tx
+                    .send(IdeCollabEvent::RoomClosed { room_id: oldest_id });
+            }
+        }
         guard.insert(room_id, state);
 
         Ok(IdeCreateCollabRoomResp {
@@ -215,6 +300,24 @@ impl CollabHub {
 
     /// List active collaboration rooms visible to `user` (host's own rooms, or all for root).
     pub fn list_rooms(&self, user: &User) -> Result<Vec<IdeCollabRoom>> {
+        let now_inst = Instant::now();
+        {
+            let guard = self
+                .rooms
+                .read()
+                .map_err(|_| Error::Internal("collab lock poisoned".into()))?;
+            if guard
+                .values()
+                .any(|r| now_inst.saturating_duration_since(r.last_activity_at) >= ROOM_IDLE_TTL)
+            {
+                drop(guard);
+                let mut wguard = self
+                    .rooms
+                    .write()
+                    .map_err(|_| Error::Internal("collab lock poisoned".into()))?;
+                Self::evict_expired_locked(&mut wguard, now_inst);
+            }
+        }
         let guard = self
             .rooms
             .read()
@@ -259,6 +362,7 @@ impl CollabHub {
         }
         peer_rec.peer.role = role;
         peer_rec.peer.updated_at = now_rfc3339();
+        room.last_activity_at = Instant::now();
 
         let snapshot = room.snapshot();
         let _ = room.events_tx.send(IdeCollabEvent::RoleChanged {
@@ -303,14 +407,17 @@ impl CollabHub {
             ));
         }
 
+        let now_inst = Instant::now();
         let mut guard = self
             .rooms
             .write()
             .map_err(|_| Error::Internal("collab lock poisoned".into()))?;
+        Self::evict_expired_locked(&mut guard, now_inst);
         let room = guard
             .get_mut(room_id)
             .ok_or_else(|| Error::NotFound(format!("collab room '{room_id}' not found")))?;
         room.verify_invite_token(&req.token)?;
+        room.last_activity_at = now_inst;
 
         let peer_secret = mint_hex_secret_64();
         let secret_hash = sha256_bytes(&peer_secret);
@@ -393,9 +500,14 @@ impl CollabHub {
             .get(room_id)
             .ok_or_else(|| Error::NotFound(format!("collab room '{room_id}' not found")))?;
         room.verify_invite_token(token)?;
+        let shared_buffers = room
+            .shared_buffers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.buf.clone()))
+            .collect();
         Ok(IdeCollabStateResp {
             room: room.snapshot(),
-            shared_buffers: room.shared_buffers.clone(),
+            shared_buffers,
             active_debug: room.active_debug.clone(),
         })
     }
@@ -417,8 +529,11 @@ impl CollabHub {
         Ok((room.snapshot(), room.events_tx.subscribe()))
     }
 
-    /// Broadcast a peer's live multi-cursor & multi-selection ranges.
-    pub fn update_cursor(&self, room_id: &str, req: IdeCollabCursorReq) -> Result<()> {
+    /// Broadcast a peer's live multi-cursor & multi-selection ranges without touching `shared_buffers`.
+    pub fn update_cursor(&self, room_id: &str, mut req: IdeCollabCursorReq) -> Result<()> {
+        if req.selections.len() > MAX_SELECTIONS_PER_PEER {
+            req.selections.truncate(MAX_SELECTIONS_PER_PEER);
+        }
         let mut guard = self
             .rooms
             .write()
@@ -439,6 +554,7 @@ impl CollabHub {
                 rec.peer.color.clone(),
             )
         };
+        room.last_activity_at = Instant::now();
 
         let _ = room.events_tx.send(IdeCollabEvent::CursorMoved {
             peer_id,
@@ -474,6 +590,7 @@ impl CollabHub {
                 "viewer peers do not have permission to edit or control debugging".into(),
             ));
         }
+        room.last_activity_at = Instant::now();
         Ok((target, host_user_id))
     }
 
@@ -512,29 +629,37 @@ impl CollabHub {
             rec.peer.active_path = Some(req.path.clone());
             rec.peer.updated_at = now_rfc3339();
         }
+        room.last_activity_at = Instant::now();
 
         let next_version = match room.shared_buffers.get(&req.path) {
             Some(existing) => {
                 if let Some(expected) = req.base_version {
-                    if expected > existing.version {
+                    if expected > existing.buf.version {
                         return Err(Error::Conflict(format!(
                             "base_version {expected} is ahead of current version {}",
-                            existing.version
+                            existing.buf.version
                         )));
                     }
                 }
-                existing.version + 1
+                existing.buf.version + 1
             }
             None => 1,
         };
 
+        room.buffer_seq = room.buffer_seq.saturating_add(1);
+        let touched_seq = room.buffer_seq;
         room.shared_buffers.insert(
             req.path.clone(),
-            IdeSharedBuffer {
-                content: req.content.clone(),
-                version: next_version,
+            SharedBufferRecord {
+                buf: IdeSharedBuffer {
+                    content: req.content.clone(),
+                    version: next_version,
+                },
+                clean: saved_to_target,
+                touched_seq,
             },
         );
+        room.enforce_buffer_caps(&req.path);
 
         let _ = room.events_tx.send(IdeCollabEvent::BufferUpdated {
             peer_id: req.peer_id.clone(),
@@ -818,5 +943,137 @@ mod tests {
         assert!(hub
             .get_state(&created.room.id, &created.invite_token)
             .is_err());
+    }
+
+    #[test]
+    fn room_caps_idle_ttl_and_buffer_eviction_invariants_hold() {
+        let hub = CollabHub::new();
+        let host = test_user("u_host", "itzik", false);
+
+        // 1. Creating > MAX_COLLAB_ROOMS caps total rooms at MAX_COLLAB_ROOMS.
+        let mut first_room_id = String::new();
+        let mut latest = None;
+        for i in 0..(MAX_COLLAB_ROOMS + 5) {
+            let resp = hub
+                .create_room(
+                    &host,
+                    IdeCreateCollabRoomReq {
+                        target: IdeTargetSpec::local(format!("/tmp/repo-{i}")),
+                        title: Some(format!("Room {i}")),
+                        default_role: IdeCollabRole::Editor,
+                    },
+                )
+                .expect("create room");
+            if i == 0 {
+                first_room_id = resp.room.id.clone();
+            }
+            latest = Some(resp);
+        }
+        assert_eq!(hub.list_rooms(&host).unwrap().len(), MAX_COLLAB_ROOMS);
+        assert!(
+            !hub.list_rooms(&host)
+                .unwrap()
+                .iter()
+                .any(|r| r.id == first_room_id),
+            "oldest room should be evicted beyond MAX_COLLAB_ROOMS"
+        );
+
+        let active = latest.unwrap();
+        let host_peer_id = active.room.peers[0].peer_id.clone();
+
+        // 2. Buffer byte cap (16 MiB) evicts oldest CLEAN buffer first while keeping dirty buffer.
+        let five_mib = "a".repeat(5 * 1024 * 1024);
+        hub.apply_edit(
+            &active.room.id,
+            &IdeCollabEditReq {
+                peer_id: host_peer_id.clone(),
+                peer_secret: active.invite_token.clone(),
+                path: "dirty_older.rs".into(),
+                content: five_mib.clone(),
+                base_version: None,
+                save: false,
+            },
+            false,
+        )
+        .unwrap();
+        hub.apply_edit(
+            &active.room.id,
+            &IdeCollabEditReq {
+                peer_id: host_peer_id.clone(),
+                peer_secret: active.invite_token.clone(),
+                path: "clean_oldest.rs".into(),
+                content: five_mib.clone(),
+                base_version: None,
+                save: true,
+            },
+            true,
+        )
+        .unwrap();
+        hub.apply_edit(
+            &active.room.id,
+            &IdeCollabEditReq {
+                peer_id: host_peer_id.clone(),
+                peer_secret: active.invite_token.clone(),
+                path: "clean_newer.rs".into(),
+                content: five_mib.clone(),
+                base_version: None,
+                save: true,
+            },
+            true,
+        )
+        .unwrap();
+        // Adding a 4th 5 MiB buffer pushes total to 20 MiB > 16 MiB -> `clean_oldest.rs` must be evicted!
+        hub.apply_edit(
+            &active.room.id,
+            &IdeCollabEditReq {
+                peer_id: host_peer_id.clone(),
+                peer_secret: active.invite_token.clone(),
+                path: "fourth.rs".into(),
+                content: five_mib,
+                base_version: None,
+                save: true,
+            },
+            true,
+        )
+        .unwrap();
+
+        let st = hub
+            .get_state(&active.room.id, &active.invite_token)
+            .unwrap();
+        assert!(!st.shared_buffers.contains_key("clean_oldest.rs"));
+        assert!(st.shared_buffers.contains_key("dirty_older.rs"));
+        assert!(st.shared_buffers.contains_key("fourth.rs"));
+        let total_bytes: usize = st.shared_buffers.values().map(|b| b.content.len()).sum();
+        assert!(total_bytes <= MAX_ROOM_BUFFER_BYTES);
+
+        // 3. Buffer count cap (MAX_SHARED_BUFFERS_PER_ROOM = 32).
+        for i in 0..40 {
+            hub.apply_edit(
+                &active.room.id,
+                &IdeCollabEditReq {
+                    peer_id: host_peer_id.clone(),
+                    peer_secret: active.invite_token.clone(),
+                    path: format!("file_{i:02}.rs"),
+                    content: "fn main() {}\n".into(),
+                    base_version: None,
+                    save: true,
+                },
+                true,
+            )
+            .unwrap();
+        }
+        let st = hub
+            .get_state(&active.room.id, &active.invite_token)
+            .unwrap();
+        assert_eq!(st.shared_buffers.len(), MAX_SHARED_BUFFERS_PER_ROOM);
+
+        // 4. Lazy ROOM_IDLE_TTL eviction on list_rooms / join_room.
+        {
+            let mut guard = hub.rooms.write().unwrap();
+            let rm = guard.get_mut(&active.room.id).unwrap();
+            rm.last_activity_at = Instant::now() - ROOM_IDLE_TTL - Duration::from_secs(5);
+        }
+        let remaining = hub.list_rooms(&host).unwrap();
+        assert!(!remaining.iter().any(|r| r.id == active.room.id));
     }
 }

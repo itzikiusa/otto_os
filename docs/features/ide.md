@@ -4,10 +4,12 @@ A full multi-language development environment inside Otto (`#/ide`) uniting
 **Local** and **Remote SSH** workspaces, OS/architecture-aware **SDK &
 Toolchain installation**, per-project **Environments & Run Configurations**,
 inline **Gutter Run/Debug**, a full **Debug Adapter Protocol (DAP) debugger**,
-**LSP intelligence**, **Share with Friends** live collaborative editing, and
+**LSP intelligence**, a side-by-side **AI Coding Agent dock (`⌘L`) & Inline
+Edit (`⌘I`)**, **Share with Friends** live collaborative editing, and
 zero-rebuild **runtime IDE plugins**.
 
-- Route: `#/ide`. Sidebar entry **IDE** (Build group). ⌘K: "Go to IDE".
+- Route: `#/ide`. Sidebar entry **IDE** (Build group). ⌘K: "Go to IDE",
+  "Toggle IDE AI Agent", "IDE: Inline Edit with Agent".
 - RBAC:
   - Protected `/api/v1/ide/*` routes require **Agents: Edit** (`Require(Agents, Edit)`).
   - `/api/v1/ide/fs/*` is additionally guarded by `is_host_files_route`, so an
@@ -21,13 +23,18 @@ zero-rebuild **runtime IDE plugins**.
     chokepoint and authenticate each request with the room's capability share
     token (`viewer` vs `editor`).
 - Code:
-  - Engine & routers: `crates/otto-ide/` (`target.rs`, `toolchains_catalog.rs`,
-    `toolchains.rs`, `environments.rs`, `gutter.rs`, `dap/`, `lsp_service.rs`,
+  - Engine & routers: `crates/otto-ide/` (`target.rs`, `target/fs_ops.rs`,
+    `toolchains_catalog.rs`, `toolchains.rs`, `environments.rs`,
+    `environments/runner.rs`, `gutter.rs`, `dap/`, `lsp_service.rs`,
     `lsp_host/`, `collab.rs`, `plugins.rs`, `http.rs`).
   - Host wiring & `/ws/lsp` bridge: `crates/otto-server/src/lsp/mod.rs`,
     `crates/otto-server/src/modules/ctx_impls.rs`, `crates/otto-server/src/policy.rs`.
-  - UI: `ui/src/modules/ide/`, `ui/src/lib/components/CodeEditor.svelte`,
-    `ui/src/lib/components/cm-ide-extensions.ts`, `ui/src/lib/api/ide.ts`.
+  - UI: `ui/src/modules/ide/` (`IdePage.svelte`, `IdeAgentPanel.svelte`,
+    `IdeInlinePromptBar.svelte`, `store/ideAgentController.svelte.ts`,
+    `store/ideDiffApplier.ts`, `store/ideBufferPerf.ts`),
+    `ui/src/lib/components/CodeEditor.svelte`,
+    `ui/src/lib/components/cm-ide-extensions.ts`,
+    `ui/src/lib/components/cm-ide-git-and-agent.ts`, `ui/src/lib/api/ide.ts`.
 
 ## Walkthrough
 
@@ -185,6 +192,58 @@ Install an `otto-ide-plugin.json` extension into `<data_dir>/ide-plugins/<slug>/
   `examples/ide-plugins/makefile-docker-pack`.
 - Enable, disable (`POST /ide/plugins/{slug}/toggle`), or uninstall
   (`DELETE /ide/plugins/{slug}`) at runtime.
+
+### 10. Side-by-Side AI Coding Agent (`⌘L`) & Inline Edit (`⌘I`)
+
+`IdeAgentPanel.svelte` and `IdeInlinePromptBar.svelte` connect the IDE editor,
+explorer, diagnostics, test runner, and debugger directly to Otto's structured
+runtime sessions (`/api/v1/workspaces/{id}/runtime-sessions` across Claude,
+Codex, and Gemini):
+
+- **6-source context marking (`ideAgentController.svelte.ts`):**
+  1. **Editor selection (`⌘L` / contextual selection bar / right-click menu):**
+     attaches `@relPath:Lstart-Lend` with exact line offsets.
+  2. **Project Explorer & open tabs:** attaches full files (`@relPath`, bounded
+     per chip and capped at 12 chips / 28 KB total `<ide_context>` payload).
+  3. **Structure outline symbols:** attaches `@relPath#SymbolName` slices.
+  4. **Problems panel (`Fix with Agent`):** attaches `⚠ relPath:line` with
+     surrounding source context and pre-fills the repair prompt.
+  5. **Run & Tests panel (`Fix` on failed tests):** attaches `✗ TestName` with
+     extracted failure output.
+  6. **DAP Debugger (`Ask Agent` while paused):** attaches `⏸ func @ file:line`
+     with active stack frames and local scope variables.
+- **Proposal diff preview & native `⌘Z`-undoable apply (`ideDiffApplier.ts`):**
+  Strips echoed `<ide_context>` blocks before parsing fenced code proposals
+  (`path=...`, positional path, `title="..."`, `:Lstart-Lend`, or active-file /
+  selection fallback), renders `+added` / `-removed` unified diffs, and applies
+  accepted edits through a single CodeMirror transaction (`applyAgentEdit`) so
+  `⌘Z` or the card's **Undo** button reverts the change in one step.
+- **Inline selection edit (`⌘I`):** Opens `IdeInlinePromptBar` anchored above
+  the active editor with multi-line prompt support, compact unified diff
+  preview, **Accept** / **Discard**, and 1-click **In Chat `⌘L`** handoff.
+
+### 11. Performance, Virtualization & Memory Bounds
+
+- **Zero idle polling & zero closed-dock overhead:** `IdeAgentPanel`,
+  `IdeInlinePromptBar`, and all six IDE modals are lazy-loaded via
+  `lazyComponent` + `<LazyMount>`; runtime event subscriptions mount only while
+  the Agent dock or inline bar is open, and debugger polling runs strictly while
+  an active non-terminal session exists (`0` background `/api/` requests at idle).
+- **Virtualization & keystroke path:** `IdeProjectTree` windows visible rows
+  past `150` entries (`< 140` DOM rows on 2,500+ file trees); `ideBufferPerf.ts`
+  stores live keystrokes in a non-reactive `Map` (`250ms` debounced sync +
+  abortable `280ms` gutter/symbol loads); `CodeEditor` caps cached IDE editor
+  states (`8`, skipping docs `> 200 KB`) and renders modified-line gutter bars
+  (`cm-ide-diff-gutter`) under `3,000` lines.
+- **Bounded daemon state (`crates/otto-ide`):** Run stdout (`2,000`-line
+  `VecDeque` ring with incremental $O(1)$-per-line test tracking and optional
+  `GET /ide/runs/{run_id}?tail_lines=`), finished runs (`MAX_FINISHED_RUNS = 16`),
+  debug output (`1,000` entries) and terminated DAP sessions (`6`), collab rooms
+  (`32` rooms, `2h` idle TTL, `32` buffers / `16 MiB` per room, zero buffer
+  clones on cursor moves), and pooled LSP servers (`MAX_SERVERS_PER_OWNER = 3`,
+  `45s` idle eviction, `rg --files-with-matches` reference pre-filtering, and a
+  `2s` `otto_git_cmd::hardened_command()` git-status cache) are all strictly
+  bounded.
 
 ## API & WebSocket summary
 

@@ -423,11 +423,23 @@ async fn run_node_bridge_loop(
                 }
             }
             cdp_msg = ws.next_json() => {
-                let Some(msg) = cdp_msg? else {
+                while let Ok((cat, text)) = out_rx.try_recv() {
+                    dap_w.send_event("output", Some(json!({ "category": cat, "output": text }))).await?;
+                }
+                let should_terminate = match cdp_msg? {
+                    Some(msg) => handle_node_cdp_msg(msg, &mut st, &mut ws, &mut dap_w).await?,
+                    None => true,
+                };
+                if should_terminate {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                    while let Ok((cat, text)) = out_rx.try_recv() {
+                        let _ = dap_w
+                            .send_event("output", Some(json!({ "category": cat, "output": text })))
+                            .await;
+                    }
                     let _ = dap_w.send_event("terminated", Some(json!({}))).await;
                     break;
-                };
-                handle_node_cdp_msg(msg, &mut st, &mut ws, &mut dap_w).await?;
+                }
             }
         }
     }
@@ -820,12 +832,12 @@ async fn handle_node_cdp_msg<W: AsyncWrite + Unpin>(
     st: &mut NodeBridgeState,
     ws: &mut InspectorWs,
     dap_w: &mut DapWriter<W>,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     if let Some(id) = msg.get("id").and_then(Value::as_i64) {
         if let Some((req_seq, kind, meta)) = st.pending_cdp.remove(&id) {
             handle_node_cdp_reply(req_seq, &kind, meta, msg.get("result"), st, dap_w).await?;
         }
-        return Ok(());
+        return Ok(false);
     }
 
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
@@ -862,22 +874,41 @@ async fn handle_node_cdp_msg<W: AsyncWrite + Unpin>(
 
             if !st.initial_brk_skipped && hit_bps == 0 {
                 st.initial_brk_skipped = true;
-                let top_line = call_frames
-                    .first()
+                let top_cf = call_frames.first();
+                let resolved_url = top_cf
+                    .and_then(|cf| cf.get("url"))
+                    .and_then(Value::as_str)
+                    .filter(|u| !u.is_empty())
+                    .map(String::from)
+                    .or_else(|| {
+                        let sid = top_cf
+                            .and_then(|cf| cf.get("location"))
+                            .and_then(|l| l.get("scriptId"))
+                            .and_then(Value::as_str)?;
+                        st.script_urls.get(sid).cloned()
+                    })
+                    .unwrap_or_default();
+                let top_line = top_cf
                     .and_then(|cf| cf.get("location"))
                     .and_then(|l| l.get("lineNumber"))
                     .and_then(Value::as_u64)
                     .unwrap_or(0) as u32
                     + 1;
-                let has_bp_at_entry = st
-                    .user_bp_lines
-                    .values()
-                    .any(|lines| lines.contains(&top_line));
+                let has_bp_at_entry = file_url_to_path(&resolved_url).is_some_and(|top_path| {
+                    let top_canon = std::fs::canonicalize(&top_path).ok();
+                    st.user_bp_lines.iter().any(|(bp_file, lines)| {
+                        let same_file = bp_file == &top_path
+                            || top_canon.as_ref().is_some_and(|tc| {
+                                std::fs::canonicalize(bp_file).ok().as_ref() == Some(tc)
+                            });
+                        same_file && lines.contains(&top_line)
+                    })
+                });
                 if !has_bp_at_entry {
                     let cid = st.alloc_cdp();
                     ws.send_json(&json!({ "id": cid, "method": "Debugger.resume" }))
                         .await?;
-                    return Ok(());
+                    return Ok(false);
                 }
             }
             st.initial_brk_skipped = true;
@@ -900,12 +931,19 @@ async fn handle_node_cdp_msg<W: AsyncWrite + Unpin>(
                 )
                 .await?;
         }
-        "Inspector.detached" => {
-            dap_w.send_event("terminated", Some(json!({}))).await?;
+        "Inspector.detached"
+        | "Runtime.executionContextDestroyed"
+        | "Runtime.executionContextsCleared" => {
+            let ctx_id = params
+                .and_then(|p| p.get("executionContextId"))
+                .and_then(Value::as_i64);
+            if matches!(ctx_id, None | Some(1)) {
+                return Ok(true);
+            }
         }
         _ => {}
     }
-    Ok(())
+    Ok(false)
 }
 
 async fn handle_node_cdp_reply<W: AsyncWrite + Unpin>(

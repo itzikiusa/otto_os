@@ -33,11 +33,12 @@ use crate::types::{
 use crate::IdeCtx;
 
 use self::fs_ops::{
-    build_file_read_resp, build_remote_tree_entries, list_local_dir_sync, mutate_local_fs,
-    mutate_remote_fs, normalize_arch_name, normalize_os_name, parse_git_porcelain,
+    build_file_read_resp, build_remote_tree_entries, cached_local_git_status, list_local_dir_sync,
+    mutate_local_fs, mutate_remote_fs, normalize_arch_name, normalize_os_name, parse_git_porcelain,
     parse_uname_output, read_bounded_bytes, sha256_hex, verify_local_expected_sha,
     verify_remote_expected_sha, write_local_atomic,
 };
+pub(super) use self::fs_ops::{enforce_non_root_path, resolve_local_existing};
 use self::search::{
     build_matcher, collect_local_files, replace_local_sync, replace_remote_ssh, search_local_sync,
     search_remote_ssh,
@@ -796,7 +797,10 @@ impl TargetManager {
         Ok(sock)
     }
 
-    async fn git_status_map(&self, target: &ResolvedTarget) -> HashMap<String, String> {
+    async fn git_status_map(&self, target: &ResolvedTarget) -> Arc<HashMap<String, String>> {
+        if let ResolvedTarget::Local { root, .. } = target {
+            return cached_local_git_status(root).await;
+        }
         let args = vec![
             "status".to_string(),
             "--porcelain=v1".to_string(),
@@ -813,12 +817,12 @@ impl TargetManager {
             )
             .await
         else {
-            return HashMap::new();
+            return Arc::new(HashMap::new());
         };
         if !out.success() {
-            return HashMap::new();
+            return Arc::new(HashMap::new());
         }
-        parse_git_porcelain(&out.stdout)
+        Arc::new(parse_git_porcelain(&out.stdout))
     }
 }
 
@@ -929,54 +933,6 @@ async fn run_command_bounded(mut cmd: Command, timeout: Duration) -> Result<Exec
             timeout.as_secs()
         ))),
     }
-}
-
-pub(super) fn enforce_non_root_path(canonical: &Path) -> Result<()> {
-    use otto_core::secret_paths as sp;
-    if sp::in_protected_dir(canonical)
-        || sp::is_denied_dir(canonical)
-        || sp::is_denied_file(canonical)
-    {
-        return Err(Error::Forbidden(format!(
-            "{} holds protected credentials or Otto state; access denied",
-            canonical.display()
-        )));
-    }
-    Ok(())
-}
-
-pub(super) fn resolve_local_existing(
-    root: &Path,
-    is_root_user: bool,
-    raw: &str,
-) -> Result<PathBuf> {
-    let trimmed = raw.trim();
-    let candidate = if trimmed.is_empty() || trimmed == "." {
-        root.to_path_buf()
-    } else if trimmed.starts_with('~') {
-        otto_core::paths::expand_home_strict(trimmed).map_err(Error::Invalid)?
-    } else {
-        let p = Path::new(trimmed);
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            root.join(p)
-        }
-    };
-    let canonical = candidate
-        .canonicalize()
-        .map_err(|e| map_io_err("resolve path", &candidate, e))?;
-    if !canonical.starts_with(root) {
-        return Err(Error::Forbidden(format!(
-            "path '{}' is outside workspace root '{}'",
-            canonical.display(),
-            root.display()
-        )));
-    }
-    if !is_root_user {
-        enforce_non_root_path(&canonical)?;
-    }
-    Ok(canonical)
 }
 
 pub(super) async fn resolve_local_prospective(

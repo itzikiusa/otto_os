@@ -6774,7 +6774,7 @@ Full multi-language IDE over Local (`kind: "local"`) and Remote SSH (`kind: "ssh
 | POST /ide/run-configs | Agents: Edit | `IdeUpsertRunConfigReq` | `IdeRunConfigResp` |
 | DELETE /ide/run-configs/{id} | Agents: Edit | — | `IdeOkResp` |
 | POST /ide/runs | Agents: Edit | `IdeStartRunReq` | `IdeRunResp` |
-| GET /ide/runs/{run_id} | Agents: Edit | — | `IdeRunResp` |
+| GET /ide/runs/{run_id}?tail_lines= | Agents: Edit | query `tail_lines?` | `IdeRunResp` (`IdeRunState` incl. `output_seq`, bounded `output` ring, parsed `tests`) |
 | POST /ide/runs/{run_id}/stop | Agents: Edit | — | `IdeRunResp` |
 | GET /ide/debug/sessions | Agents: Edit | — | `IdeDebugSessionsResp` |
 | POST /ide/debug/sessions | Agents: Edit | `IdeStartDebugReq` | `IdeDebugSessionResp` |

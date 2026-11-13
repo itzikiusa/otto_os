@@ -6,6 +6,7 @@ mod runner;
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -24,13 +25,12 @@ use crate::target::TargetManager;
 use crate::toolchains::{find_executable_in, is_executable_file, read_subdirs, system_search_dirs};
 use crate::types::{
     IdeCreatePythonVenvReq, IdeCreatePythonVenvResp, IdeEnvVarEntry, IdeEnvironmentsResp,
-    IdeProjectEnvironment, IdePythonVenvInfo, IdeRunConfig, IdeRunState, IdeRunStatus,
-    IdeRunnerKind, IdeSshSpec, IdeStartRunReq, IdeTargetKind, IdeTargetSpec,
-    IdeUpdateEnvironmentReq, IdeUpsertRunConfigReq,
+    IdeProjectEnvironment, IdePythonVenvInfo, IdeRunConfig, IdeRunState, IdeRunnerKind, IdeSshSpec,
+    IdeStartRunReq, IdeTargetKind, IdeTargetSpec, IdeUpdateEnvironmentReq, IdeUpsertRunConfigReq,
 };
 
 pub use self::runner::parse_test_output;
-use self::runner::{execute_run_task, ActiveRunHandle};
+use self::runner::{evict_finished_runs, execute_run_task, ActiveRunHandle, RunStateInner};
 
 /// Uniform async secret accessor accepted by `EnvironmentManager` whether a
 /// caller holds `&Arc<dyn SecretStore>` (`ctx.secrets()`) or `&dyn SecretStore`.
@@ -102,6 +102,7 @@ struct StoredEnvVar {
 pub struct EnvironmentManager {
     data_dir: PathBuf,
     runs: Arc<DashMap<String, Arc<ActiveRunHandle>>>,
+    run_seq: Arc<AtomicU64>,
 }
 
 impl EnvironmentManager {
@@ -109,6 +110,7 @@ impl EnvironmentManager {
         Self {
             data_dir,
             runs: Arc::new(DashMap::new()),
+            run_seq: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -594,13 +596,14 @@ impl EnvironmentManager {
             if let Some(v) = py_ver.filter(|s| !s.trim().is_empty()) {
                 cmd.args(["--python", v]);
             }
-            cmd.arg(&venv_path).output().await
+            cmd.arg(&venv_path).kill_on_drop(true).output().await
         } else {
             let py = find_executable_in(&search, &["python3", "python"])
                 .ok_or_else(|| Error::Invalid("neither uv nor python3 found on host".into()))?;
             Command::new(py)
                 .args(["-m", "venv"])
                 .arg(&venv_path)
+                .kill_on_drop(true)
                 .output()
                 .await
         }
@@ -613,7 +616,12 @@ impl EnvironmentManager {
             )));
         }
         let interp = venv_path.join("bin/python");
-        let ver_out = Command::new(&interp).arg("--version").output().await.ok();
+        let ver_out = Command::new(&interp)
+            .arg("--version")
+            .kill_on_drop(true)
+            .output()
+            .await
+            .ok();
         let version = ver_out
             .map(|o| {
                 format!(
@@ -769,9 +777,17 @@ impl EnvironmentManager {
     // ── Test & Run Execution Engine (Local + Remote SSH) ─────────────────────
 
     pub fn get_run(&self, run_id: &str) -> Result<IdeRunState> {
+        self.get_run_with_tail(run_id, None)
+    }
+
+    pub fn get_run_with_tail(
+        &self,
+        run_id: &str,
+        tail_lines: Option<usize>,
+    ) -> Result<IdeRunState> {
         self.runs
             .get(run_id)
-            .map(|e| e.value().snapshot())
+            .map(|e| e.value().snapshot_with_tail(tail_lines))
             .ok_or_else(|| Error::NotFound(format!("IDE run '{run_id}'")))
     }
 
@@ -782,10 +798,13 @@ impl EnvironmentManager {
     }
 
     pub async fn stop_run(&self, run_id: &str) -> Result<IdeRunState> {
-        self.runs
+        let snap = self
+            .runs
             .get(run_id)
             .map(|e| e.value().stop())
-            .ok_or_else(|| Error::NotFound(format!("IDE run '{run_id}'")))
+            .ok_or_else(|| Error::NotFound(format!("IDE run '{run_id}'")))?;
+        evict_finished_runs(&self.runs);
+        Ok(snap)
     }
 
     pub async fn start_run<S: SecretAccess + ?Sized>(
@@ -813,32 +832,34 @@ impl EnvironmentManager {
         }
 
         let run_id = format!("run_{}", new_id());
-        let initial = IdeRunState {
-            id: run_id.clone(),
-            title: if cfg.name.trim().is_empty() {
-                format!("{:?}", cfg.runner)
-            } else {
-                cfg.name.clone()
-            },
-            runner: cfg.runner,
-            status: IdeRunStatus::Running,
-            exit_code: None,
-            started_at: Utc::now().to_rfc3339(),
-            duration_ms: None,
-            output: Vec::new(),
-            tests: Vec::new(),
+        let title = if cfg.name.trim().is_empty() {
+            format!("{:?}", cfg.runner)
+        } else {
+            cfg.name.clone()
         };
+        let started_at = Utc::now().to_rfc3339();
+        let seq = self.run_seq.fetch_add(1, Ordering::Relaxed);
         let (stop_tx, stop_rx) = watch::channel(false);
         let handle = Arc::new(ActiveRunHandle {
-            state: Mutex::new(initial.clone()),
+            seq,
+            state: Mutex::new(RunStateInner::new(
+                run_id.clone(),
+                title,
+                cfg.runner,
+                started_at,
+            )),
             stop_tx,
         });
+        let initial = handle.snapshot();
         self.runs.insert(run_id, Arc::clone(&handle));
+        evict_finished_runs(&self.runs);
 
+        let runs_clone = Arc::clone(&self.runs);
         let targets_clone = targets.clone();
         let target_spec = req.target.clone();
         tokio::spawn(async move {
             execute_run_task(
+                runs_clone,
                 handle,
                 targets_clone,
                 target_spec,
@@ -1193,5 +1214,61 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn finished_runs_evict_cleanly_past_max_finished_runs_preserving_running() {
+        use super::runner::MAX_FINISHED_RUNS;
+        use crate::types::IdeRunStatus;
+
+        let mgr = EnvironmentManager::new(PathBuf::from("/tmp/otto-ide-test"));
+        for i in 0..24u64 {
+            let (stop_tx, _) = watch::channel(false);
+            let id = format!("run_fin_{i:02}");
+            let handle = Arc::new(ActiveRunHandle {
+                seq: i,
+                state: Mutex::new(RunStateInner::new(
+                    id.clone(),
+                    "Finished".into(),
+                    IdeRunnerKind::Custom,
+                    format!("2026-01-01T00:00:{i:02}Z"),
+                )),
+                stop_tx,
+            });
+            runner::finish_run(
+                &handle,
+                IdeRunStatus::Passed,
+                Some(0),
+                Duration::from_millis(5),
+                None,
+            );
+            mgr.runs.insert(id, handle);
+            evict_finished_runs(&mgr.runs);
+        }
+
+        let (stop_tx, _) = watch::channel(false);
+        mgr.runs.insert(
+            "run_active".into(),
+            Arc::new(ActiveRunHandle {
+                seq: 100,
+                state: Mutex::new(RunStateInner::new(
+                    "run_active".into(),
+                    "Active".into(),
+                    IdeRunnerKind::Custom,
+                    "2026-01-01T00:00:00Z".into(),
+                )),
+                stop_tx,
+            }),
+        );
+        evict_finished_runs(&mgr.runs);
+
+        assert_eq!(mgr.runs.len(), MAX_FINISHED_RUNS + 1);
+        assert!(mgr.get_run("run_active").is_ok());
+        for i in 0..8 {
+            assert!(mgr.get_run(&format!("run_fin_{i:02}")).is_err());
+        }
+        for i in 8..24 {
+            assert!(mgr.get_run(&format!("run_fin_{i:02}")).is_ok());
+        }
     }
 }

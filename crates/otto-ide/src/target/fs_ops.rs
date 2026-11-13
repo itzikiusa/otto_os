@@ -2,9 +2,13 @@
 //! filesystem tree, read, atomic write, and mutation helpers for [`super::TargetManager`].
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
 
+use dashmap::DashMap;
 use otto_core::{Error, Result};
 use otto_ssh::SftpSession;
 use sha2::{Digest, Sha256};
@@ -15,10 +19,55 @@ use crate::types::{
     IdePlatformInfo,
 };
 
-use super::{
-    enforce_non_root_path, join_remote, map_io_err, resolve_local_existing,
-    resolve_local_prospective, resolve_remote_subpath,
-};
+use super::{join_remote, map_io_err, resolve_local_prospective, resolve_remote_subpath};
+
+pub(crate) fn enforce_non_root_path(canonical: &Path) -> Result<()> {
+    use otto_core::secret_paths as sp;
+    if sp::in_protected_dir(canonical)
+        || sp::is_denied_dir(canonical)
+        || sp::is_denied_file(canonical)
+    {
+        return Err(Error::Forbidden(format!(
+            "{} holds protected credentials or Otto state; access denied",
+            canonical.display()
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn resolve_local_existing(
+    root: &Path,
+    is_root_user: bool,
+    raw: &str,
+) -> Result<PathBuf> {
+    let trimmed = raw.trim();
+    let candidate = if trimmed.is_empty() || trimmed == "." {
+        root.to_path_buf()
+    } else if trimmed.starts_with('~') {
+        otto_core::paths::expand_home_strict(trimmed).map_err(Error::Invalid)?
+    } else {
+        let p = Path::new(trimmed);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            root.join(p)
+        }
+    };
+    let canonical = candidate
+        .canonicalize()
+        .map_err(|e| map_io_err("resolve path", &candidate, e))?;
+    if !canonical.starts_with(root) {
+        return Err(Error::Forbidden(format!(
+            "path '{}' is outside workspace root '{}'",
+            canonical.display(),
+            root.display()
+        )));
+    }
+    if !is_root_user {
+        enforce_non_root_path(&canonical)?;
+    }
+    Ok(canonical)
+}
 
 pub(super) fn normalize_os_name(raw: &str) -> String {
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -44,6 +93,58 @@ pub(super) fn parse_uname_output(stdout: &str) -> IdePlatformInfo {
         os: normalize_os_name(os_raw),
         arch: normalize_arch_name(arch_raw),
     }
+}
+
+const LOCAL_GIT_STATUS_TTL: Duration = Duration::from_secs(2);
+const MAX_GIT_STATUS_CACHE_ENTRIES: usize = 64;
+
+type GitStatusCacheEntry = (Instant, Arc<HashMap<String, String>>);
+
+static LOCAL_GIT_STATUS_CACHE: LazyLock<DashMap<PathBuf, GitStatusCacheEntry>> =
+    LazyLock::new(DashMap::new);
+
+/// Run `git status --porcelain=v1 -uall` via `otto_git_cmd::hardened_command()`
+/// cached per canonical local `root` for `2s` so rapid Explorer folder expands
+/// never spawn redundant `git status` subprocesses.
+pub(super) async fn cached_local_git_status(root: &Path) -> Arc<HashMap<String, String>> {
+    let now = Instant::now();
+    if let Some(entry) = LOCAL_GIT_STATUS_CACHE.get(root) {
+        let (ts, ref map) = *entry.value();
+        if now.saturating_duration_since(ts) < LOCAL_GIT_STATUS_TTL {
+            return Arc::clone(map);
+        }
+    }
+
+    let mut cmd = otto_git_cmd::hardened_command();
+    cmd.args(["status", "--porcelain=v1", "-uall"])
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+
+    let parsed = match tokio::time::timeout(Duration::from_secs(3), cmd.output()).await {
+        Ok(Ok(out)) if out.status.success() => {
+            parse_git_porcelain(&String::from_utf8_lossy(&out.stdout))
+        }
+        _ => HashMap::new(),
+    };
+    let arc_map = Arc::new(parsed);
+
+    if LOCAL_GIT_STATUS_CACHE.len() >= MAX_GIT_STATUS_CACHE_ENTRIES {
+        LOCAL_GIT_STATUS_CACHE
+            .retain(|_, (ts, _)| now.saturating_duration_since(*ts) < LOCAL_GIT_STATUS_TTL);
+        if LOCAL_GIT_STATUS_CACHE.len() >= MAX_GIT_STATUS_CACHE_ENTRIES {
+            if let Some(oldest_key) = LOCAL_GIT_STATUS_CACHE
+                .iter()
+                .min_by_key(|e| e.value().0)
+                .map(|e| e.key().clone())
+            {
+                LOCAL_GIT_STATUS_CACHE.remove(&oldest_key);
+            }
+        }
+    }
+    LOCAL_GIT_STATUS_CACHE.insert(root.to_path_buf(), (Instant::now(), Arc::clone(&arc_map)));
+    arc_map
 }
 
 pub(super) fn parse_git_porcelain(stdout: &str) -> HashMap<String, String> {
@@ -507,5 +608,34 @@ pub(super) async fn mutate_remote_fs(
                 path: dst,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cached_local_git_status_serves_2s_cache_via_hardened_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+
+        let init = otto_git_cmd::hardened_command()
+            .arg("init")
+            .current_dir(&root)
+            .output()
+            .await
+            .unwrap();
+        assert!(init.status.success());
+
+        std::fs::write(root.join("first.txt"), "hello\n").unwrap();
+        let first = cached_local_git_status(&root).await;
+        assert_eq!(first.get("first.txt").map(String::as_str), Some("?"));
+
+        // Mutate working tree immediately; within the 2s TTL the cached Arc must be returned.
+        std::fs::write(root.join("second.txt"), "world\n").unwrap();
+        let second = cached_local_git_status(&root).await;
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!second.contains_key("second.txt"));
     }
 }
