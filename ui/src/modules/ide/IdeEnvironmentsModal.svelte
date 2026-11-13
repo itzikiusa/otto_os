@@ -1,8 +1,7 @@
 <script lang="ts">
   // Environments & Run/Debug Configurations modal for the Otto Full IDE.
-  // Tab 1: Active SDKs/virtualenvs (with 1-click `.venv` creation), `.env` file, custom PATH,
-  //        and Environment Variables with macOS Keychain secret storage (never echoed).
-  // Tab 2: Saved Run/Debug Configurations across Go, Java, Rust, JS/TS, Python, and Shell.
+  // Tab 1: Login shell env (`~/.zshrc`/`~/.zshenv`), SDKs/venvs, `.env`, PATH, Keychain secrets.
+  // Tab 2: GoLand-grade Run/Debug Configurations across Go, Java, Rust, JS/TS, Python, and Shell.
   import Modal from '../../lib/components/Modal.svelte';
   import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -14,6 +13,8 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ide, type IdeEnvVar, type IdePythonVenv, type IdeRunConfig } from './ideStore.svelte';
+  import IdeRunConfigEditor, { type ConfigDraft, emptyConfigDraft } from './shell/IdeRunConfigEditor.svelte';
+  import IdeShellEnvCard from './shell/IdeShellEnvCard.svelte';
 
   interface Props {
     open?: boolean;
@@ -33,39 +34,10 @@
     replaceSecret: boolean;
   }
 
-  interface ConfigDraft {
-    id: string;
-    name: string;
-    runner: string;
-    target_path: string;
-    command: string;
-    test_filter: string;
-    argsText: string;
-    cwd: string;
-    before_launch: string;
-    overrides: { rowId: string; key: string; value: string }[];
-  }
-
-  const RUNNER_OPTIONS: readonly { value: string; label: string; short: string }[] = [
-    { value: 'go_test', label: 'Go · go test', short: 'go test' },
-    { value: 'go_run', label: 'Go · go run', short: 'go run' },
-    { value: 'java_junit', label: 'Java · JUnit', short: 'JUnit' },
-    { value: 'java_main', label: 'Java · Java Main', short: 'Java' },
-    { value: 'maven', label: 'Java · Maven', short: 'Maven' },
-    { value: 'gradle', label: 'Java · Gradle', short: 'Gradle' },
-    { value: 'cargo_test', label: 'Rust · cargo test', short: 'cargo test' },
-    { value: 'cargo_run', label: 'Rust · cargo run', short: 'cargo run' },
-    { value: 'node', label: 'JS/TS · Node file', short: 'Node' },
-    { value: 'npm', label: 'JS/TS · npm script', short: 'npm' },
-    { value: 'vitest', label: 'JS/TS · Vitest', short: 'Vitest' },
-    { value: 'pytest', label: 'Python · pytest', short: 'pytest' },
-    { value: 'python', label: 'Python · Python file', short: 'Python' },
-    { value: 'custom', label: 'Shell · Custom command', short: 'Shell' },
-  ];
-
   const isOpen = $derived(open === undefined ? ide.environmentsOpen : open);
 
   let activeTab = $state<EnvTab>('env');
+  let inheritShellEnv = $state(true);
   let javaHome = $state('');
   let goRoot = $state('');
   let rustToolchain = $state('');
@@ -84,24 +56,22 @@
   let savingCfg = $state(false);
   let hydratedSnapshot = '';
 
-  function emptyConfigDraft(): ConfigDraft {
-    return {
-      id: '', name: '', runner: 'go_test', target_path: '', command: '',
-      test_filter: '', argsText: '', cwd: '', before_launch: '', overrides: [],
-    };
-  }
-
   function configToDraft(cfg: IdeRunConfig): ConfigDraft {
     return {
-      id: cfg.id,
+      id: cfg.auto_detected ? '' : cfg.id,
       name: cfg.name,
       runner: cfg.runner || 'custom',
       target_path: cfg.target_path ?? '',
       command: cfg.command ?? '',
       test_filter: cfg.test_filter ?? '',
+      buildFlagsText: (cfg.build_flags ?? []).join(' '),
       argsText: (cfg.args ?? []).join(' '),
       cwd: cfg.cwd ?? '',
+      env_file: cfg.env_file ?? '',
+      sdk_path: cfg.sdk_path ?? '',
+      inherit_shell_env: cfg.inherit_shell_env !== false,
       before_launch: cfg.before_launch ?? '',
+      autoDetected: Boolean(cfg.auto_detected),
       overrides: Object.entries(cfg.env_overrides ?? {}).map(([key, value], idx) => ({
         rowId: `ov-${idx}-${key}`, key, value,
       })),
@@ -113,12 +83,18 @@
     onclose?.();
   }
 
+  function openToolchainsManager(): void {
+    ide.toolchainsOpen = true;
+  }
+
   $effect(() => {
     if (!isOpen) { hydratedSnapshot = ''; return; }
     activeTab = initialTab;
     if (ide.hasTarget) {
       void ide.loadEnvironments();
-      if (ide.toolchains.length === 0 && !ide.toolchainsLoading) void ide.loadToolchains();
+      if (ide.toolchains.length === 0 && !ide.toolchainsLoading) {
+        void ide.loadToolchains({ includeCatalog: false });
+      }
     }
   });
 
@@ -128,6 +104,7 @@
     if (snap === hydratedSnapshot) return;
     hydratedSnapshot = snap;
     const e = ide.projectEnv;
+    inheritShellEnv = e.inherit_shell_env !== false;
     javaHome = e.java_home ?? '';
     goRoot = e.go_root ?? '';
     rustToolchain = e.rust_toolchain ?? '';
@@ -144,8 +121,13 @@
       replaceSecret: false,
     }));
     const selected = ide.runConfigs.find((c) => c.id === ide.selectedConfigId) ?? ide.runConfigs[0] ?? null;
-    if (selected) { isNewDraft = false; cfgDraft = configToDraft(selected); }
-    else { isNewDraft = true; cfgDraft = emptyConfigDraft(); }
+    if (selected) {
+      isNewDraft = Boolean(selected.auto_detected);
+      cfgDraft = configToDraft(selected);
+    } else {
+      isNewDraft = true;
+      cfgDraft = emptyConfigDraft();
+    }
   });
 
   const modalTabs = $derived<readonly TabItem<EnvTab>[]>([
@@ -162,13 +144,24 @@
   }
 
   function venvInterpreterValue(v: IdePythonVenv): string { return v.interpreter_path || v.path; }
-  function runnerShortLabel(runner: string): string { return RUNNER_OPTIONS.find((r) => r.value === runner)?.short ?? runner; }
 
   function addEnvRow(secret: boolean): void {
-    envRows = [
-      ...envRows,
-      { rowId: `ev-new-${Date.now()}-${envRows.length}`, key: '', value: '', secret, has_secret: false, replaceSecret: secret },
-    ];
+    envRows = [...envRows, { rowId: `ev-new-${Date.now()}-${envRows.length}`, key: '', value: '', secret, has_secret: false, replaceSecret: secret }];
+  }
+
+  function importPastedEnvRows(items: { key: string; value: string }[]): void {
+    const byKey = new Map(envRows.map((r) => [r.key.trim(), r]));
+    for (let i = 0; i < items.length; i++) {
+      const { key, value } = items[i];
+      const existing = byKey.get(key);
+      if (existing) {
+        existing.value = value;
+        if (existing.secret) existing.replaceSecret = true;
+      } else {
+        byKey.set(key, { rowId: `ev-paste-${Date.now()}-${i}`, key, value, secret: false, has_secret: false, replaceSecret: false });
+      }
+    }
+    envRows = Array.from(byKey.values());
   }
 
   function removeEnvRow(rowId: string): void { envRows = envRows.filter((r) => r.rowId !== rowId); }
@@ -209,6 +202,7 @@
     savingEnv = true;
     try {
       const ok = await ide.saveEnvironment({
+        inherit_shell_env: inheritShellEnv,
         java_home: javaHome.trim() || null,
         go_root: goRoot.trim() || null,
         rust_toolchain: rustToolchain.trim() || null,
@@ -224,8 +218,8 @@
 
   function selectConfig(cfg: IdeRunConfig): void {
     cfgValidationError = '';
-    isNewDraft = false;
     ide.selectedConfigId = cfg.id;
+    isNewDraft = Boolean(cfg.auto_detected);
     cfgDraft = configToDraft(cfg);
   }
 
@@ -235,12 +229,10 @@
     cfgDraft = emptyConfigDraft();
   }
 
-  function addOverrideRow(): void {
-    cfgDraft.overrides = [...cfgDraft.overrides, { rowId: `ov-${Date.now()}-${cfgDraft.overrides.length}`, key: '', value: '' }];
-  }
-
-  function removeOverrideRow(rowId: string): void {
-    cfgDraft.overrides = cfgDraft.overrides.filter((r) => r.rowId !== rowId);
+  function duplicateConfig(): void {
+    cfgValidationError = '';
+    isNewDraft = true;
+    cfgDraft = { ...cfgDraft, id: '', name: `${cfgDraft.name || 'Configuration'} (copy)`, autoDetected: false };
   }
 
   function parseArgs(raw: string): string[] {
@@ -248,7 +240,7 @@
     return tokens.map((t) => t.replace(/^['"]|['"]$/g, ''));
   }
 
-  async function saveCurrentConfig(runAfterSave = false): Promise<void> {
+  async function saveCurrentConfig(afterAction: 'none' | 'run' | 'debug' = 'none'): Promise<void> {
     cfgValidationError = '';
     const name = cfgDraft.name.trim();
     if (!name) { cfgValidationError = 'Enter a configuration name before saving.'; return; }
@@ -264,14 +256,18 @@
     savingCfg = true;
     try {
       const saved = await ide.saveRunConfig({
-        id: isNewDraft ? undefined : cfgDraft.id || undefined,
+        id: isNewDraft || cfgDraft.autoDetected ? undefined : cfgDraft.id || undefined,
         name,
         runner: cfgDraft.runner,
         target_path: cfgDraft.target_path.trim() || null,
         command: cfgDraft.command.trim() || null,
         test_filter: cfgDraft.test_filter.trim() || null,
+        build_flags: parseArgs(cfgDraft.buildFlagsText),
         args: parseArgs(cfgDraft.argsText),
         cwd: cfgDraft.cwd.trim() || null,
+        env_file: cfgDraft.env_file.trim() || null,
+        sdk_path: cfgDraft.sdk_path.trim() || null,
+        inherit_shell_env: cfgDraft.inherit_shell_env,
         before_launch: cfgDraft.before_launch.trim() || null,
         env_overrides: overrides,
       });
@@ -279,13 +275,14 @@
         isNewDraft = false;
         cfgDraft = configToDraft(saved);
         toasts.success('Saved run configuration', saved.name);
-        if (runAfterSave) { await ide.startRun({ configId: saved.id }); close(); }
+        if (afterAction === 'run') { await ide.startRun({ configId: saved.id }); close(); }
+        else if (afterAction === 'debug') { await ide.startDebug({ configId: saved.id }); close(); }
       }
     } finally { savingCfg = false; }
   }
 
   async function confirmDeleteConfig(): Promise<void> {
-    if (!cfgDraft.id || isNewDraft) return;
+    if (!cfgDraft.id || isNewDraft || cfgDraft.autoDetected) return;
     const targetName = cfgDraft.name || cfgDraft.id;
     const confirmed = await confirmer.ask(`Delete "${targetName}" from saved run / debug configurations?`, {
       title: 'Delete run configuration?',
@@ -301,13 +298,13 @@
 </script>
 
 {#if isOpen}
-  <Modal title="Environments & run configurations" width={760} dismissable={!savingEnv && !savingCfg} onclose={close}>
+  <Modal title="Environments & run configurations" width={820} dismissable={!savingEnv && !savingCfg} onclose={close}>
     <div class="env-shell">
       {#if !ide.hasTarget}
         <EmptyState
           icon="folder"
           title="Open a workspace first"
-          body="Select a local folder or SSH target before configuring SDK paths, Keychain secrets, and run configurations."
+          body="Select a local folder or SSH target before configuring SDK paths, shell env, Keychain secrets, and run configurations."
           actionLabel="Choose target…"
           actionKind="secondary"
           onaction={() => { close(); ide.sshOpen = true; }}
@@ -318,20 +315,30 @@
         <LoadState what="project environment" loading={ide.envLoading} error={ide.envError} empty={false} onretry={() => ide.loadEnvironments()}>
           {#if activeTab === 'env'}
             <div class="env-pane" role="tabpanel" id="ide-env-panel-env" aria-labelledby="ide-env-tab-env">
-              <div class="env-sdk-grid">
-                <div class="field">
-                  <label for="env-java-home">Active JDK (JAVA_HOME)</label>
-                  <input id="env-java-home" class="input" type="text" dir="ltr" list="env-java-datalist" placeholder="System default JDK" bind:value={javaHome} />
-                  <datalist id="env-java-datalist">
-                    {#each sdkOptionsFor('java') as opt (opt.value)}<option value={opt.value}>{opt.label}</option>{/each}
-                  </datalist>
-                </div>
+              <IdeShellEnvCard {inheritShellEnv} onchangeInherit={(next) => (inheritShellEnv = next)} onpasteVars={importPastedEnvRows} />
 
+              <div class="env-sec-bar">
+                <span class="env-sec-title">SDKs &amp; language runtimes</span>
+                <button type="button" class="btn small ghost" onclick={openToolchainsManager} data-testid="ide-env-open-toolchains">
+                  <Icon name="download" size={12} />
+                  Download / Manage SDKs…
+                </button>
+              </div>
+
+              <div class="env-sdk-grid">
                 <div class="field">
                   <label for="env-go-root">Go SDK (GOROOT)</label>
                   <input id="env-go-root" class="input" type="text" dir="ltr" list="env-go-datalist" placeholder="System default go" bind:value={goRoot} />
                   <datalist id="env-go-datalist">
                     {#each sdkOptionsFor('go') as opt (opt.value)}<option value={opt.value}>{opt.label}</option>{/each}
+                  </datalist>
+                </div>
+
+                <div class="field">
+                  <label for="env-java-home">Active JDK (JAVA_HOME)</label>
+                  <input id="env-java-home" class="input" type="text" dir="ltr" list="env-java-datalist" placeholder="System default JDK" bind:value={javaHome} />
+                  <datalist id="env-java-datalist">
+                    {#each sdkOptionsFor('java') as opt (opt.value)}<option value={opt.value}>{opt.label}</option>{/each}
                   </datalist>
                 </div>
 
@@ -426,7 +433,6 @@
                     {#each envRows as row, idx (row.rowId)}
                       <div class="env-var-item">
                         <input class="input env-key-in" type="text" dir="ltr" aria-label="Environment variable name" placeholder="VARIABLE_NAME" bind:value={row.key} />
-
                         {#if row.secret && row.has_secret && !row.replaceSecret}
                           <div class="env-secret-mask">
                             <Badge tone="ok" label="Stored in Keychain" />
@@ -434,38 +440,15 @@
                             <button type="button" class="btn small ghost" onclick={() => (row.replaceSecret = true)}>Replace…</button>
                           </div>
                         {:else if row.secret}
-                          <input
-                            class="input env-val-in"
-                            type="password"
-                            dir="ltr"
-                            autocomplete="off"
-                            aria-label="Secret value for {row.key || 'variable'}"
-                            placeholder="Secret stored in macOS Keychain"
-                            bind:value={row.value}
-                          />
+                          <input class="input env-val-in" type="password" dir="ltr" autocomplete="off" aria-label="Secret value for {row.key || 'variable'}" placeholder="Secret stored in macOS Keychain" bind:value={row.value} />
                         {:else}
-                          <input
-                            class="input env-val-in"
-                            type="text"
-                            dir="ltr"
-                            aria-label="Value for {row.key || 'variable'}"
-                            placeholder="Value"
-                            bind:value={row.value}
-                          />
+                          <input class="input env-val-in" type="text" dir="ltr" aria-label="Value for {row.key || 'variable'}" placeholder="Value" bind:value={row.value} />
                         {/if}
-
                         <div class="env-secret-toggle">
                           <Switch checked={row.secret} label="Store {row.key || 'variable'} in Keychain" onchange={(next) => toggleRowSecret(idx, next)} />
                           <span class="env-sec-tag">{row.secret ? 'Keychain' : 'Plain'}</span>
                         </div>
-
-                        <button
-                          type="button"
-                          class="icon-btn"
-                          aria-label="Remove environment variable"
-                          title="Remove environment variable"
-                          onclick={() => removeEnvRow(row.rowId)}
-                        >
+                        <button type="button" class="icon-btn" aria-label="Remove environment variable" title="Remove environment variable" onclick={() => removeEnvRow(row.rowId)}>
                           <Icon name="trash" size={13} />
                         </button>
                       </div>
@@ -479,111 +462,16 @@
               </section>
             </div>
           {:else}
-            <div class="env-cfg-layout" role="tabpanel" id="ide-env-panel-configs" aria-labelledby="ide-env-tab-configs">
-              <aside class="env-cfg-rail" aria-label="Saved run configurations">
-                <div class="env-rail-head">
-                  <span class="env-sec-title">Saved ({ide.runConfigs.length})</span>
-                  <button type="button" class="btn small" onclick={startNewConfig}>
-                    <Icon name="plus" size={12} />
-                    New
-                  </button>
-                </div>
-
-                {#if ide.runConfigs.length === 0}
-                  <div class="env-empty-note">No saved configurations yet — fill in the form to create your first one.</div>
-                {:else}
-                  <div class="env-cfg-list">
-                    {#each ide.runConfigs as cfg (cfg.id)}
-                      <button
-                        type="button"
-                        class="env-cfg-item"
-                        class:is-active={!isNewDraft && cfgDraft.id === cfg.id}
-                        aria-pressed={!isNewDraft && cfgDraft.id === cfg.id}
-                        onclick={() => selectConfig(cfg)}
-                      >
-                        <span class="env-cfg-name">{cfg.name}</span>
-                        <Badge tone="neutral" variant="outline" label={runnerShortLabel(cfg.runner)} />
-                      </button>
-                    {/each}
-                  </div>
-                {/if}
-              </aside>
-
-              <div class="env-cfg-editor">
-                <div class="env-sdk-grid">
-                  <div class="field">
-                    <label for="cfg-name">Configuration name</label>
-                    <input id="cfg-name" class="input" type="text" dir="auto" placeholder="e.g. Go package tests" bind:value={cfgDraft.name} />
-                  </div>
-                  <div class="field">
-                    <label for="cfg-runner">Runner</label>
-                    <select id="cfg-runner" class="input" bind:value={cfgDraft.runner}>
-                      {#each RUNNER_OPTIONS as opt (opt.value)}<option value={opt.value}>{opt.label}</option>{/each}
-                    </select>
-                  </div>
-                </div>
-
-                <div class="env-sdk-grid">
-                  <div class="field">
-                    <label for="cfg-target">Target file / package / script</label>
-                    <input id="cfg-target" class="input" type="text" dir="ltr" placeholder="./cmd/server or src/main.py" bind:value={cfgDraft.target_path} />
-                  </div>
-                  <div class="field">
-                    <label for="cfg-filter">Test filter / pattern</label>
-                    <input id="cfg-filter" class="input" type="text" dir="ltr" placeholder="TestAdd or -k test_auth" bind:value={cfgDraft.test_filter} />
-                  </div>
-                </div>
-
-                <div class="env-sdk-grid">
-                  <div class="field">
-                    <label for="cfg-args">Arguments</label>
-                    <input id="cfg-args" class="input" type="text" dir="ltr" placeholder="--verbose --port 8080" bind:value={cfgDraft.argsText} />
-                  </div>
-                  <div class="field">
-                    <label for="cfg-cwd">Working directory</label>
-                    <input id="cfg-cwd" class="input" type="text" dir="ltr" placeholder={ide.target.root || 'Workspace root'} bind:value={cfgDraft.cwd} />
-                  </div>
-                </div>
-
-                <div class="env-sdk-grid">
-                  <div class="field">
-                    <label for="cfg-cmd">Custom command (optional)</label>
-                    <input id="cfg-cmd" class="input" type="text" dir="ltr" placeholder="make integration-test" bind:value={cfgDraft.command} />
-                  </div>
-                  <div class="field">
-                    <label for="cfg-before">Before launch command</label>
-                    <input id="cfg-before" class="input" type="text" dir="ltr" placeholder="go generate ./..." bind:value={cfgDraft.before_launch} />
-                  </div>
-                </div>
-
-                <div class="env-ovr-box">
-                  <div class="env-rail-head">
-                    <span class="env-sec-title">Environment overrides</span>
-                    <button type="button" class="btn small" onclick={addOverrideRow}>
-                      <Icon name="plus" size={12} />
-                      Add override
-                    </button>
-                  </div>
-                  {#if cfgDraft.overrides.length > 0}
-                    <div class="env-var-list">
-                      {#each cfgDraft.overrides as ov (ov.rowId)}
-                        <div class="env-ovr-row">
-                          <input class="input env-key-in" type="text" dir="ltr" aria-label="Override variable name" placeholder="KEY" bind:value={ov.key} />
-                          <input class="input env-val-in" type="text" dir="ltr" aria-label="Override value" placeholder="Value" bind:value={ov.value} />
-                          <button type="button" class="icon-btn" aria-label="Remove override" title="Remove override" onclick={() => removeOverrideRow(ov.rowId)}>
-                            <Icon name="trash" size={13} />
-                          </button>
-                        </div>
-                      {/each}
-                    </div>
-                  {/if}
-                </div>
-
-                {#if cfgValidationError}
-                  <div class="env-err" use:announceShown={{ text: cfgValidationError, assertive: true }}>{cfgValidationError}</div>
-                {/if}
-              </div>
-            </div>
+            <IdeRunConfigEditor
+              bind:cfgDraft
+              {isNewDraft}
+              {dotenvPath}
+              {cfgValidationError}
+              onselect={selectConfig}
+              onnew={startNewConfig}
+              onduplicate={duplicateConfig}
+              onopentoolchains={openToolchainsManager}
+            />
           {/if}
         </LoadState>
       {/if}
@@ -593,7 +481,7 @@
       {#if activeTab === 'configs' && ide.hasTarget}
         <div class="env-footer-bar">
           <div>
-            {#if !isNewDraft && cfgDraft.id}
+            {#if !isNewDraft && cfgDraft.id && !cfgDraft.autoDetected}
               <button type="button" class="btn danger" disabled={savingCfg} onclick={confirmDeleteConfig}>
                 <Icon name="trash" size={13} />
                 Delete…
@@ -602,11 +490,15 @@
           </div>
           <div class="env-footer-end">
             <button type="button" class="btn ghost" disabled={savingCfg} onclick={close}>Cancel</button>
-            <button type="button" class="btn" disabled={savingCfg} onclick={() => saveCurrentConfig(true)}>
+            <button type="button" class="btn" disabled={savingCfg} onclick={() => saveCurrentConfig('debug')} data-testid="ide-cfg-save-debug">
+              <Icon name="bug" size={12} />
+              Save &amp; debug
+            </button>
+            <button type="button" class="btn" disabled={savingCfg} onclick={() => saveCurrentConfig('run')}>
               <Icon name="play" size={12} />
               Save &amp; run
             </button>
-            <button type="button" class="btn primary" disabled={savingCfg} onclick={() => saveCurrentConfig(false)}>
+            <button type="button" class="btn primary" disabled={savingCfg} onclick={() => saveCurrentConfig('none')}>
               {savingCfg ? 'Saving…' : 'Save configuration'}
             </button>
           </div>
@@ -624,84 +516,39 @@
 {/if}
 
 <style>
-  .env-shell { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-  .env-pane { display: flex; flex-direction: column; gap: 4px; padding-block-start: 4px; min-width: 0; }
+  .env-shell { display: flex; flex-direction: column; gap: 12px; min-inline-size: 0; }
+  .env-pane { display: flex; flex-direction: column; gap: 8px; padding-block-start: 4px; min-inline-size: 0; }
+  .env-sec-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-block-start: 4px; }
   .env-sdk-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .env-inline-bar { display: flex; align-items: center; gap: 8px; }
-  .env-inline-bar input { flex: 1; min-width: 0; }
+  .env-inline-bar input { flex: 1; min-inline-size: 0; }
   .env-chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-block-start: 4px; }
-
-  .env-vars-box,
-  .env-ovr-box {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 12px;
-    border-radius: var(--radius-m);
-    background: var(--surface-2);
-    border: 1px solid var(--border);
+  .env-vars-box {
+    display: flex; flex-direction: column; gap: 8px; padding: 12px;
+    border-radius: var(--radius-m); background: var(--surface-2); border: 1px solid var(--border);
   }
-  .env-vars-head, .env-rail-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+  .env-vars-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
   .env-vars-btns { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
   .env-sec-title { margin: 0; font-size: var(--fs-s); font-weight: 600; color: var(--text); }
   .env-sec-sub, .env-empty-note { margin: 0; font-size: var(--fs-xs); color: var(--text-dim); }
   .env-var-list { display: flex; flex-direction: column; gap: 6px; }
-  .env-var-item, .env-ovr-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
-  .env-key-in { flex: 0 1 180px; min-width: 120px; font-family: var(--font-mono); }
-  .env-val-in { flex: 1; min-width: 0; }
-
+  .env-var-item { display: flex; align-items: center; gap: 8px; min-inline-size: 0; }
+  .env-key-in { flex: 0 1 180px; min-inline-size: 120px; font-family: var(--font-mono); }
+  .env-val-in { flex: 1; min-inline-size: 0; }
   .env-secret-mask {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex: 1;
-    min-width: 0;
-    padding-inline: 8px;
-    height: 28px;
-    border-radius: var(--radius-s);
-    background: var(--surface);
-    border: 1px solid var(--border);
+    display: flex; align-items: center; gap: 8px; flex: 1; min-inline-size: 0;
+    padding-inline: 8px; block-size: 28px; border-radius: var(--radius-s);
+    background: var(--surface); border: 1px solid var(--border);
   }
   .env-dots { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); margin-inline-end: auto; }
   .env-secret-toggle { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
   .env-sec-tag { font-size: var(--fs-xs); color: var(--text-dim); min-inline-size: 48px; }
-
-  .env-cfg-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 14px; padding-block-start: 4px; min-width: 0; }
-  .env-cfg-rail {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 10px;
-    border-radius: var(--radius-m);
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    min-width: 0;
-  }
-  .env-cfg-list { display: flex; flex-direction: column; gap: 4px; max-block-size: 320px; overflow-y: auto; }
-  .env-cfg-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-    padding: 6px 8px;
-    border-radius: var(--radius-s);
-    border: 1px solid transparent;
-    background: transparent;
-    color: var(--text);
-    text-align: start;
-    cursor: pointer;
-    transition: background var(--dur-fast) var(--ease-out);
-  }
-  .env-cfg-item:hover { background: var(--hover); }
-  .env-cfg-item.is-active { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-text); }
-  .env-cfg-name { font-size: var(--fs-s); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-  .env-cfg-editor { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .env-err { font-size: var(--fs-xs); color: var(--danger); }
   .env-footer-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; inline-size: 100%; }
-  .env-footer-end { display: flex; align-items: center; gap: 8px; }
+  .env-footer-end { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 
   @media (max-width: 640px) {
-    .env-sdk-grid, .env-cfg-layout { grid-template-columns: 1fr; }
-    .env-var-item, .env-ovr-row { flex-wrap: wrap; }
+    .env-sdk-grid { grid-template-columns: 1fr; }
+    .env-var-item { flex-wrap: wrap; }
   }
 </style>

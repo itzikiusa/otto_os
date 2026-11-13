@@ -19,6 +19,7 @@ use super::adapters_jvm_js::{resolve_java_adapter, resolve_js_ts_adapter};
 use super::java_bridge::JavaJdbBridgeSpec;
 use super::node_bridge::NodeInspectorBridgeSpec;
 use super::py_bridge::PY_STDLIB_DAP_BRIDGE;
+use super::shell_bridge::ShellBridgeSpec;
 use super::{run_target_command, DapStartContext};
 use crate::types::{
     IdeDebugOutputEntry, IdeStartDebugReq, IdeTargetKind, IdeTargetSpec, PluginDapAdapterSpec,
@@ -48,6 +49,8 @@ pub enum DapAdapterTransport {
     NodeInspectorBridge(NodeInspectorBridgeSpec),
     /// Built-in JDK `jdb` / JDWP-to-DAP bridge (`java -agentlib:jdwp=...` + `jdb`).
     JavaJdbBridge(JavaJdbBridgeSpec),
+    /// Built-in zero-install Bash `trap ... DEBUG` bridge for `.sh` / `.bash` scripts.
+    ShellBridge(ShellBridgeSpec),
 }
 
 /// Fully resolved DAP launch/attach plan ready to start a session.
@@ -64,27 +67,31 @@ pub struct ResolvedDapAdapter {
     pub initial_output: Vec<IdeDebugOutputEntry>,
 }
 
-/// Canonicalize a path on `Local` targets when it exists so macOS `/var/folders`
-/// symlinks match `/private/var/folders` DWARF compile units.
+/// Canonicalize a path on `Local` targets (even when prospective or prefixed with `file://`)
+/// so macOS `/var/folders` symlinks always match `/private/var/folders` DWARF compile units.
 pub fn normalize_target_path(target: &IdeTargetSpec, raw: &str) -> String {
     if raw.trim().is_empty() {
         return raw.to_string();
     }
+    let clean = crate::target::sdk_paths::strip_file_uri(raw.trim());
     if target.kind == IdeTargetKind::Local {
-        let candidate = if Path::new(raw).is_absolute() {
-            PathBuf::from(raw)
+        let candidate = if Path::new(&clean).is_absolute() {
+            PathBuf::from(&clean)
         } else {
-            Path::new(&target.root).join(raw)
+            Path::new(&target.root).join(&clean)
         };
         if let Ok(canon) = std::fs::canonicalize(&candidate) {
             return canon.to_string_lossy().into_owned();
         }
+        if let Some(prospective) = otto_core::secret_paths::canonicalize_prospective(&candidate) {
+            return prospective.to_string_lossy().into_owned();
+        }
     }
-    raw.to_string()
+    clean
 }
 
-/// Merge project environment SDK paths, `.env`/secret vars, run-config overrides,
-/// and launch-specific overrides into a single effective environment map.
+/// Merge user login+interactive shell env (`~/.zshenv`/`~/.zshrc`), project SDK paths,
+/// `.env`/secret vars, run-config overrides, and launch-specific overrides.
 pub fn build_effective_env(
     data_dir: &Path,
     req: &IdeStartDebugReq,
@@ -93,6 +100,26 @@ pub fn build_effective_env(
     let mut env = ctx.effective_env.clone();
 
     if req.target.kind == IdeTargetKind::Local {
+        let inherit_shell = ctx
+            .project_env
+            .as_ref()
+            .map(|p| p.inherit_shell_env)
+            .unwrap_or(true)
+            && ctx
+                .run_config
+                .as_ref()
+                .map(|r| r.inherit_shell_env)
+                .unwrap_or(true);
+        if inherit_shell {
+            for (k, v) in
+                crate::environments::cached_effective_env_for_local_root(data_dir, &req.target.root)
+            {
+                env.entry(k).or_insert(v);
+            }
+            for (k, v) in crate::environments::cached_shell_env_snapshot() {
+                env.entry(k).or_insert(v);
+            }
+        }
         for (k, v) in std::env::vars() {
             env.entry(k).or_insert(v);
         }
@@ -277,6 +304,10 @@ pub async fn resolve_dap_adapter(
             | "ts"
             | "node"
             | "java"
+            | "shell"
+            | "bash"
+            | "sh"
+            | "zsh"
     ) {
         if let Some(plugin_spec) = ctx
             .plugin_adapters
@@ -295,6 +326,7 @@ pub async fn resolve_dap_adapter(
             resolve_js_ts_adapter(data_dir, &lang, req, ctx, &cwd, env).await
         }
         "java" => resolve_java_adapter(data_dir, req, ctx, &cwd, env).await,
+        "shell" | "bash" | "sh" | "zsh" => resolve_shell_adapter(req, ctx, &cwd, env).await,
         other => {
             if let Some(plugin_spec) = ctx
                 .plugin_adapters
@@ -304,7 +336,7 @@ pub async fn resolve_dap_adapter(
                 resolve_plugin_adapter(other, plugin_spec, req, &cwd, env)
             } else {
                 Err(Error::Invalid(format!(
-                    "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, javascript, typescript, or java"
+                    "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, javascript, typescript, java, or shell"
                 )))
             }
         }
@@ -430,11 +462,23 @@ async fn resolve_go_adapter(
         normalize_target_path(&req.target, &req.launch.program)
     };
 
-    let build_flags = env
+    let mut flag_parts: Vec<String> = Vec::new();
+    if let Some(rc) = &ctx.run_config {
+        flag_parts.extend(
+            rc.build_flags
+                .iter()
+                .filter(|s| !s.trim().is_empty())
+                .cloned(),
+        );
+    }
+    if let Some(env_flags) = env
         .get("DLV_BUILD_FLAGS")
         .or_else(|| env.get("GO_BUILD_FLAGS"))
-        .cloned()
-        .unwrap_or_default();
+        .filter(|s| !s.trim().is_empty())
+    {
+        flag_parts.push(env_flags.clone());
+    }
+    let build_flags = flag_parts.join(" ");
 
     let (launch_command, launch_args) = if let Some(port) = req.launch.attach_port {
         if let Some(pid_str) = env.get("DLV_ATTACH_PID") {
@@ -486,17 +530,20 @@ async fn resolve_go_adapter(
             "program": pkg_dir,
             "cwd": cwd,
             "args": test_args,
+            "env": env,
         });
         if !build_flags.is_empty() {
             body["buildFlags"] = Value::String(build_flags);
         }
         ("launch".to_string(), body)
     } else {
+        let debug_pkg = resolve_go_debug_program(&req.target, &raw_prog, cwd);
         let mut body = json!({
             "mode": "debug",
-            "program": raw_prog,
+            "program": debug_pkg,
             "cwd": cwd,
             "args": req.launch.args,
+            "env": env,
         });
         if !build_flags.is_empty() {
             body["buildFlags"] = Value::String(build_flags);
@@ -989,6 +1036,137 @@ fn find_cargo_dir(target: &IdeTargetSpec, program: &str, fallback_cwd: &str) -> 
         }
     }
     fallback_cwd.to_string()
+}
+
+/// Resolve a Go debug target so multi-file `package main` directories (`cmd/server/main.go` +
+/// sibling `.go` files) compile as a package rather than a broken single file, and workspace-root
+/// launches on `cmd/*` microservice layouts auto-locate `package main`.
+#[allow(clippy::disallowed_methods)] // shallow 1-level Go package check during debug launch setup
+pub(crate) fn resolve_go_debug_program(
+    target: &IdeTargetSpec,
+    raw_prog: &str,
+    fallback_cwd: &str,
+) -> String {
+    if target.kind != IdeTargetKind::Local {
+        return raw_prog.to_string();
+    }
+    let prog_path = Path::new(raw_prog);
+    if raw_prog.ends_with(".go") && !raw_prog.ends_with("_test.go") {
+        if let Some(parent) = prog_path.parent() {
+            let (non_test_go_count, has_pkg_main) = inspect_go_package_dir(parent);
+            if has_pkg_main && non_test_go_count > 1 {
+                return parent.to_string_lossy().into_owned();
+            }
+        }
+        return raw_prog.to_string();
+    }
+    if prog_path.is_dir() {
+        let (_, has_pkg_main) = inspect_go_package_dir(prog_path);
+        if has_pkg_main {
+            return raw_prog.to_string();
+        }
+        // Check `cmd/<service>` layout (standard Go microservice convention, e.g. `go_admission`).
+        let cmd_dir = prog_path.join("cmd");
+        if let Ok(rd) = std::fs::read_dir(&cmd_dir) {
+            let mut main_dirs: Vec<PathBuf> = rd
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir() && inspect_go_package_dir(p).1)
+                .collect();
+            main_dirs.sort();
+            if let Some(found) = main_dirs.into_iter().next() {
+                return found.to_string_lossy().into_owned();
+            }
+        }
+        for sub in ["app", "server", "src"] {
+            let cand = prog_path.join(sub);
+            if cand.is_dir() && inspect_go_package_dir(&cand).1 {
+                return cand.to_string_lossy().into_owned();
+            }
+        }
+    }
+    if raw_prog.trim().is_empty() {
+        return fallback_cwd.to_string();
+    }
+    raw_prog.to_string()
+}
+
+#[allow(clippy::disallowed_methods)] // shallow 1-level Go package check during debug launch setup
+fn inspect_go_package_dir(dir: &Path) -> (usize, bool) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return (0, false);
+    };
+    let mut count = 0usize;
+    let mut has_main = false;
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|e| e.to_str()) != Some("go") {
+            continue;
+        }
+        if p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with("_test.go"))
+        {
+            continue;
+        }
+        count += 1;
+        if !has_main {
+            if let Ok(txt) = std::fs::read_to_string(&p) {
+                if txt
+                    .lines()
+                    .take(30)
+                    .any(|l| l.trim() == "package main" || l.trim().starts_with("package main "))
+                {
+                    has_main = true;
+                }
+            }
+        }
+    }
+    (count, has_main)
+}
+
+async fn resolve_shell_adapter(
+    req: &IdeStartDebugReq,
+    ctx: &DapStartContext,
+    cwd: &str,
+    env: BTreeMap<String, String>,
+) -> Result<ResolvedDapAdapter> {
+    let bash_candidates = vec![
+        "/opt/homebrew/bin/bash".to_string(),
+        "/usr/local/bin/bash".to_string(),
+        "bash".to_string(),
+        "/bin/bash".to_string(),
+    ];
+    let bash_bin = locate_binary(&req.target, ctx, &env, &bash_candidates)
+        .await
+        .ok_or_else(|| Error::NotFound("Bash shell ('bash') not found on target".into()))?;
+    let program = normalize_target_path(&req.target, &req.launch.program);
+    if program.trim().is_empty() {
+        return Err(Error::Invalid(
+            "program path (.sh/.bash script) is required to debug a shell script".into(),
+        ));
+    }
+    Ok(ResolvedDapAdapter {
+        adapter_name: "bash-trap-dap".into(),
+        language: "shell".into(),
+        transport: DapAdapterTransport::ShellBridge(ShellBridgeSpec {
+            bash_bin,
+            program: program.clone(),
+            args: req.launch.args.clone(),
+            cwd: cwd.to_string(),
+            env,
+        }),
+        initialize_args: json!({
+            "adapterID": "bash",
+            "linesStartAt1": true,
+            "columnsStartAt1": true,
+            "pathFormat": "path"
+        }),
+        launch_command: "launch".into(),
+        launch_args: json!({ "program": program, "cwd": cwd, "args": req.launch.args }),
+        normalized_cwd: cwd.to_string(),
+        initial_output: Vec::new(),
+    })
 }
 
 #[cfg(test)]

@@ -69,6 +69,7 @@ export interface IdeTargetSpec {
   root: string;
   connection_id?: string | null;
   connection_name?: string | null;
+  additional_roots?: string[];
 }
 
 export type IdeFsEntryKind = 'dir' | 'file' | 'symlink';
@@ -111,25 +112,12 @@ export interface IdeFileWriteReq {
   create_dirs?: boolean;
 }
 
-export interface IdeFileWriteResp {
-  path: string;
-  size: number;
-  sha256: string;
-}
+export interface IdeFileWriteResp { path: string; size: number; sha256: string; }
 
 export type IdeFsMutateOp = 'mkdir' | 'create_file' | 'rename' | 'delete' | 'duplicate';
 
-export interface IdeFsMutateReq {
-  target: IdeTargetSpec;
-  op: IdeFsMutateOp;
-  path: string;
-  dest_path?: string | null;
-}
-
-export interface IdeFsMutateResp {
-  ok: boolean;
-  path: string;
-}
+export interface IdeFsMutateReq { target: IdeTargetSpec; op: IdeFsMutateOp; path: string; dest_path?: string | null; }
+export interface IdeFsMutateResp { ok: boolean; path: string; }
 
 export type IdeSearchMode = 'files' | 'text' | 'symbols' | 'all';
 export type IdeSearchItemKind = 'file' | 'text' | 'symbol';
@@ -139,8 +127,10 @@ export interface IdeSearchReq {
   query: string;
   mode: IdeSearchMode;
   case_sensitive?: boolean;
+  whole_word?: boolean;
   regex?: boolean;
   file_glob?: string | null;
+  scope_path?: string | null;
   limit?: number;
 }
 
@@ -164,7 +154,10 @@ export interface IdeReplaceReq {
   query: string;
   replacement: string;
   case_sensitive?: boolean;
+  whole_word?: boolean;
   regex?: boolean;
+  file_glob?: string | null;
+  scope_path?: string | null;
   paths?: string[];
   dry_run?: boolean;
 }
@@ -186,6 +179,7 @@ export type IdeGutterItemKind = 'test' | 'suite' | 'main' | 'bench';
 export type IdeRunnerKind =
   | 'go_test'
   | 'go_run'
+  | 'go_build'
   | 'java_junit'
   | 'java_main'
   | 'maven'
@@ -197,6 +191,8 @@ export type IdeRunnerKind =
   | 'vitest'
   | 'pytest'
   | 'python'
+  | 'shell'
+  | 'compound'
   | 'custom';
 
 export interface IdeQuickRunSpec {
@@ -221,9 +217,7 @@ export interface IdeGutterItem {
   run_spec: IdeQuickRunSpec;
 }
 
-export interface IdeGutterResp {
-  items: IdeGutterItem[];
-}
+export interface IdeGutterResp { items: IdeGutterItem[]; }
 
 export interface IdeSymbolNode {
   name: string;
@@ -234,46 +228,14 @@ export interface IdeSymbolNode {
   children?: IdeSymbolNode[];
 }
 
-export interface IdeSymbolsResp {
-  symbols: IdeSymbolNode[];
-}
+export interface IdeSymbolsResp { symbols: IdeSymbolNode[]; }
 
-export interface IdeReferenceLocation {
-  path: string;
-  line: number;
-  column: number;
-  preview: string;
-}
-
-export interface IdeReferencesResp {
-  symbol: string;
-  locations: IdeReferenceLocation[];
-}
-
-export interface IdeRenameLinePreview {
-  line: number;
-  before: string;
-  after: string;
-}
-
-export interface IdeRenameFileEdit {
-  path: string;
-  occurrences: number;
-  preview_lines: IdeRenameLinePreview[];
-}
-
-export interface IdeRenameResp {
-  symbol: string;
-  new_name: string;
-  applied: boolean;
-  edits: IdeRenameFileEdit[];
-}
-
-export interface IdeFormatResp {
-  formatted: string;
-  changed: boolean;
-  formatter: string;
-}
+export interface IdeReferenceLocation { path: string; line: number; column: number; preview: string; }
+export interface IdeReferencesResp { symbol: string; locations: IdeReferenceLocation[]; }
+export interface IdeRenameLinePreview { line: number; before: string; after: string; }
+export interface IdeRenameFileEdit { path: string; occurrences: number; preview_lines: IdeRenameLinePreview[]; }
+export interface IdeRenameResp { symbol: string; new_name: string; applied: boolean; edits: IdeRenameFileEdit[]; }
+export interface IdeFormatResp { formatted: string; changed: boolean; formatter: string; }
 
 export interface IdeDiagnostic {
   path: string;
@@ -326,6 +288,7 @@ export interface IdeDownloadableSdk {
   arch: string;
   url: string;
   size_hint?: string | null;
+  sha256?: string | null;
 }
 
 export interface IdeToolchainEcosystem {
@@ -371,6 +334,25 @@ export interface IdeToolchainJobResp {
   job: IdeInstallJob;
 }
 
+export interface IdeToolchainLocalReq {
+  target: IdeTargetSpec;
+  ecosystem: IdeEcosystem | string;
+  path: string;
+  version?: string | null;
+}
+
+export interface IdeShellEnvResp {
+  status?: string;
+  shell: string;
+  vars: Record<string, string>;
+  env?: Record<string, string>;
+  var_count?: number;
+  count?: number;
+  loaded_at?: string;
+  duration_ms?: number;
+  error?: string | null;
+}
+
 // ── Environments, Run Configurations & Test Runner ───────────────────────────
 
 export interface IdeEnvVar {
@@ -388,6 +370,8 @@ export interface IdeProjectEnvironment {
   python_interpreter?: string | null;
   dotenv_path?: string | null;
   extra_path?: string | null;
+  inherit_shell_env?: boolean;
+  additional_roots?: string[];
   env_vars: IdeEnvVar[];
 }
 
@@ -404,8 +388,15 @@ export interface IdeRunConfig {
   runner: IdeRunnerKind | string;
   command?: string | null;
   args: string[];
+  build_flags?: string[];
   cwd?: string | null;
   env_overrides: Record<string, string>;
+  env_file?: string | null;
+  inherit_shell_env?: boolean;
+  sdk_path?: string | null;
+  toolchain_id?: string | null;
+  compound_configs?: string[];
+  auto_detected?: boolean;
   before_launch?: string | null;
   target_path?: string | null;
   test_filter?: string | null;
@@ -416,6 +407,9 @@ export interface IdeEnvironmentsResp {
   python_venvs: IdePythonVenv[];
   dotenv_files: string[];
   configs: IdeRunConfig[];
+  detected_configs?: IdeRunConfig[];
+  effective_env?: Record<string, string>;
+  shell_env?: IdeShellEnvResp | null;
 }
 
 export interface IdePythonVenvResp {
@@ -467,15 +461,20 @@ export interface IdeBreakpoint {
   hit_condition?: string | null;
   log_message?: string | null;
   verified?: boolean;
+  message?: string | null;
 }
 
 export interface IdeDebugLaunch {
   program: string;
   args?: string[];
+  build_flags?: string[];
   cwd?: string | null;
   test_name?: string | null;
   attach_port?: number | null;
   env?: Record<string, string>;
+  env_file?: string | null;
+  inherit_shell_env?: boolean;
+  sdk_path?: string | null;
 }
 
 export type IdeDebugState = 'starting' | 'running' | 'paused' | 'terminated' | 'error';
@@ -551,32 +550,15 @@ export type IdeDebugAction =
   | 'restart'
   | 'stop';
 
-export interface IdeDebugSessionResp {
-  session: IdeDebugSessionSnapshot;
-}
-
-export interface IdeDebugSessionsResp {
-  sessions: IdeDebugSessionSnapshot[];
-}
-
-export interface IdeDebugVariablesResp {
-  variables: IdeVariable[];
-}
-
-export interface IdeDebugEvaluateResp {
-  result: string;
-  var_type?: string | null;
-  variables_reference: number;
-}
+export interface IdeDebugSessionResp { session: IdeDebugSessionSnapshot; }
+export interface IdeDebugSessionsResp { sessions: IdeDebugSessionSnapshot[]; }
+export interface IdeDebugVariablesResp { variables: IdeVariable[]; }
+export interface IdeDebugEvaluateResp { result: string; var_type?: string | null; variables_reference: number; }
 
 // ── Collaborative IDE ("Share with Friends") ─────────────────────────────────
 
 export type IdeCollabRole = 'viewer' | 'editor';
-
-export interface IdeCollabSelection {
-  anchor: number;
-  head: number;
-}
+export interface IdeCollabSelection { anchor: number; head: number; }
 
 export interface IdeCollabPeer {
   peer_id: string;
@@ -612,33 +594,11 @@ export interface IdeCollabRoom {
   active_debug_id?: string | null;
 }
 
-export interface IdeCollabCreateResp {
-  room: IdeCollabRoom;
-  invite_token: string;
-  share_hash: string;
-}
-
-export interface IdeCollabRoomsResp {
-  rooms: IdeCollabRoom[];
-}
-
-export interface IdeCollabJoinResp {
-  peer_id: string;
-  peer_secret: string;
-  color: string;
-  room: IdeCollabRoom;
-}
-
-export interface IdeCollabSharedBuffer {
-  content: string;
-  version: number;
-}
-
-export interface IdeCollabStateResp {
-  room: IdeCollabRoom;
-  shared_buffers: Record<string, IdeCollabSharedBuffer>;
-  active_debug?: IdeDebugSessionSnapshot | null;
-}
+export interface IdeCollabCreateResp { room: IdeCollabRoom; invite_token: string; share_hash: string; }
+export interface IdeCollabRoomsResp { rooms: IdeCollabRoom[]; }
+export interface IdeCollabJoinResp { peer_id: string; peer_secret: string; color: string; room: IdeCollabRoom; }
+export interface IdeCollabSharedBuffer { content: string; version: number; }
+export interface IdeCollabStateResp { room: IdeCollabRoom; shared_buffers: Record<string, IdeCollabSharedBuffer>; active_debug?: IdeDebugSessionSnapshot | null; }
 
 export interface IdeCollabEvent {
   type:

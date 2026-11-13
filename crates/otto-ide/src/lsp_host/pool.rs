@@ -1,19 +1,21 @@
 //! Shared language-server pool: ONE server process per `(owner, lang, root, ssh)`,
 //! multiplexed across every `/ws/lsp` socket of that owner that asks for it.
 //!
-//! Supports both:
-//! - **Local** workspaces (`ssh: None`): spawns `cmd` directly in `key.root`
-//!   with `<data_dir>/toolchains/**/bin` prepended to `PATH` (and `JAVA_HOME`
-//!   auto-populated from `<data_dir>/toolchains` when unset).
-//! - **Remote SSH** workspaces (`ssh: Some(IdeSshSpec)`): spawns `ssh -T`
-//!   (non-interactive, hardened option checks, `--` separator) to `cd` into the
-//!   remote `root`, augment remote `$PATH` with `~/.otto/toolchains/**/bin`,
-//!   and `exec` the primary (or fallback) language server over clean 8-bit stdio.
+//! Memory, performance & process-hygiene invariants:
+//! - Zero pre-spawning: servers launch only when a document of that language opens.
+//! - Concurrent servers per owner are capped at [`MAX_SERVERS_PER_OWNER`] (`2` LRU).
+//! - Explicit child heap caps (`jdtls` `-Xmx256m`, `gopls` `GOMEMLIMIT=384MiB` +
+//!   `GOGC=75`, Node-based LSPs `--max-old-space-size=256`).
+//! - Every local server spawns in its own Unix process group (`process_group(0)`)
+//!   and is cleaned up via `shutdown` -> `exit` -> `killpg` (`-SIGTERM`/`-SIGKILL`).
+//! - Live build-manifest edits (`pom.xml`, `build.gradle*`, `go.mod`, `Cargo.toml`,
+//!   `package.json`, `pyproject.toml`) push `workspace/didChangeWatchedFiles` so
+//!   servers refresh without "Invalidate Caches".
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -24,15 +26,15 @@ use tokio::time::Instant;
 use super::{framing, servers};
 use crate::types::IdeSshSpec;
 
-/// How long a server outlives its last socket.
+/// How long an unused server outlives its last socket.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
-/// Maximum concurrent pooled language servers per user before the
-/// least-recently-active server with `open_docs == 0` is evicted.
-pub const MAX_SERVERS_PER_OWNER: usize = 3;
+/// Fast grace period after the last open document + socket of a server closes.
+const POST_DOC_IDLE_GRACE: Duration = Duration::from_secs(3);
+/// Maximum concurrent pooled language servers per user (`<= 2` LRU).
+pub const MAX_SERVERS_PER_OWNER: usize = 2;
 /// Queued client → server messages per pooled server (backpressure).
 const DATA_CAPACITY: usize = 1024;
-/// Bytes queued for a server's stdin before the actor stops accepting client
-/// messages (every `didOpen` carries a whole file; unbounded before r3-10-08).
+/// Bytes queued for a server's stdin before the actor stops accepting client messages.
 pub const WRITE_QUEUE_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// Queued server → client messages per socket before the socket is dropped.
 const CLIENT_CAPACITY: usize = 1024;
@@ -42,18 +44,13 @@ const SERVER_CAPACITY: usize = 256;
 /// Identity of a pooled server.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PoolKey {
-    /// The authenticated user the server belongs to — never shared across
-    /// users (a server request goes to one of the owner's own sockets).
     pub owner: String,
     pub lang: String,
-    /// Canonicalized local workspace root, or normalized remote path when `ssh` is `Some`.
     pub root: String,
-    /// `None` for local workspaces; `Some(spec)` for Remote SSH workspaces.
     pub ssh: Option<IdeSshSpec>,
 }
 
-/// Optional fallback command + args (used by Remote SSH spawning when the
-/// primary executable is absent on the remote host).
+/// Optional fallback command + args (used by Remote SSH spawning).
 #[derive(Clone, Debug, Default)]
 pub struct SpawnLaunch {
     pub cmd: String,
@@ -77,13 +74,75 @@ impl SpawnLaunch {
 pub struct ServerIo {
     pub reader: Box<dyn AsyncBufRead + Send + Unpin>,
     pub writer: Box<dyn AsyncWrite + Send + Unpin>,
-    /// The process (spawned `kill_on_drop`): dropped — so killed — when the
-    /// pooled entry ends. `None` for in-process test servers.
     pub child: Option<tokio::process::Child>,
 }
 
 /// Starts a server for `key` with `launch`.
 pub type Spawner = Arc<dyn Fn(&PoolKey, &SpawnLaunch) -> std::io::Result<ServerIo> + Send + Sync>;
+
+static ACTIVE_POOLS: OnceLock<Mutex<Vec<Weak<LspPool>>>> = OnceLock::new();
+
+fn register_pool(pool: &Arc<LspPool>) {
+    let reg = ACTIVE_POOLS.get_or_init(|| Mutex::new(Vec::new()));
+    let mut guard = reg.lock().unwrap_or_else(|e| e.into_inner());
+    guard.retain(|w| w.strong_count() > 0);
+    guard.push(Arc::downgrade(pool));
+}
+
+/// Notify active pooled language servers when a project build manifest changes
+/// (`1` = Created, `2` = Changed, `3` = Deleted) so `jdtls`, `gopls`,
+/// `rust-analyzer`, `pyright`, and `tsserver` refresh immediately without stale caches.
+pub fn notify_watched_file_if_build_manifest(path: &Path, change_type: u8) {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let is_manifest = matches!(
+        name,
+        "pom.xml"
+            | "build.gradle"
+            | "build.gradle.kts"
+            | "settings.gradle"
+            | "settings.gradle.kts"
+            | "gradle.properties"
+            | "go.mod"
+            | "go.sum"
+            | "go.work"
+            | "Cargo.toml"
+            | "package.json"
+            | "tsconfig.json"
+            | "jsconfig.json"
+            | "pyproject.toml"
+            | "requirements.txt"
+    );
+    if !is_manifest {
+        return;
+    }
+    let Some(reg) = ACTIVE_POOLS.get() else {
+        return;
+    };
+    let pools: Vec<Arc<LspPool>> = {
+        let mut guard = reg.lock().unwrap_or_else(|e| e.into_inner());
+        guard.retain(|w| w.strong_count() > 0);
+        guard.iter().filter_map(Weak::upgrade).collect()
+    };
+    if pools.is_empty() {
+        return;
+    }
+    let uri = path_to_file_uri(path);
+    let path_str = path.to_string_lossy();
+    for pool in pools {
+        pool.notify_watched_path(&path_str, &uri, change_type);
+    }
+}
+
+fn path_to_file_uri(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    if s.starts_with('/') {
+        format!("file://{s}")
+    } else {
+        format!("file:///{s}")
+    }
+}
 
 /// POSIX single-quote escaping (`'abc'` -> `'abc'`, `a'b` -> `'a'\''b'`).
 pub fn posix_quote(s: &str) -> String {
@@ -140,8 +199,92 @@ pub fn build_remote_lsp_script(root: &str, launch: &SpawnLaunch) -> String {
     }
 }
 
-/// Production spawner supporting both Local (with `<data_dir>/toolchains` PATH)
-/// and Remote SSH (`ssh -T`) workspaces.
+fn apply_language_memory_caps(
+    command: &mut tokio::process::Command,
+    lang: &str,
+    cmd_name: &str,
+    inherited: &BTreeMap<String, String>,
+) {
+    let norm = servers::normalize_lsp_lang(lang);
+    match norm {
+        "go" => {
+            if !inherited.contains_key("GOGC") && std::env::var_os("GOGC").is_none() {
+                command.env("GOGC", "75");
+            }
+            if !inherited.contains_key("GOMEMLIMIT") && std::env::var_os("GOMEMLIMIT").is_none() {
+                command.env("GOMEMLIMIT", "384MiB");
+            }
+        }
+        "java" => {
+            let jvm_flags = [
+                "-Xmx256m",
+                "-Xms64m",
+                "-XX:+UseG1GC",
+                "-XX:MaxGCPauseMillis=50",
+                "-XX:MinHeapFreeRatio=10",
+                "-XX:MaxHeapFreeRatio=20",
+            ];
+            for f in jvm_flags {
+                command.arg(format!("--jvm-arg={f}"));
+            }
+            if !inherited.contains_key("JAVA_TOOL_OPTIONS")
+                && std::env::var_os("JAVA_TOOL_OPTIONS").is_none()
+            {
+                command.env("JAVA_TOOL_OPTIONS", jvm_flags.join(" "));
+            }
+        }
+        "typescript" | "javascript" | "shell" | "json" | "css" | "html" => {
+            set_node_heap_cap(command, inherited);
+        }
+        "python" if cmd_name.contains("pyright") => {
+            set_node_heap_cap(command, inherited);
+        }
+        _ => {}
+    }
+}
+
+fn set_node_heap_cap(command: &mut tokio::process::Command, inherited: &BTreeMap<String, String>) {
+    let existing = inherited
+        .get("NODE_OPTIONS")
+        .cloned()
+        .or_else(|| std::env::var("NODE_OPTIONS").ok())
+        .unwrap_or_default();
+    if !existing.contains("--max-old-space-size") {
+        let merged = if existing.trim().is_empty() {
+            "--max-old-space-size=256".to_string()
+        } else {
+            format!("{} --max-old-space-size=256", existing.trim())
+        };
+        command.env("NODE_OPTIONS", merged);
+    }
+}
+
+#[cfg(unix)]
+fn terminate_process_group(pgid: u32) {
+    if pgid <= 1 {
+        return;
+    }
+    std::thread::spawn(move || {
+        let neg = format!("-{pgid}");
+        #[allow(clippy::disallowed_methods)] // dedicated cleanup OS thread
+        let _ = std::process::Command::new("/bin/kill")
+            .args(["-TERM", "--", &neg])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        #[allow(clippy::disallowed_methods)] // dedicated cleanup OS thread
+        let _ = std::process::Command::new("/bin/kill")
+            .args(["-KILL", "--", &neg])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    });
+}
+
+/// Production spawner supporting both Local (with inherited user login-shell env,
+/// SDK `PATH`, and strict child heap caps) and Remote SSH (`ssh -T`) workspaces.
 pub fn process_spawner_with_data_dir(data_dir: PathBuf) -> Spawner {
     Arc::new(move |key: &PoolKey, launch: &SpawnLaunch| {
         let mut command = if let Some(ssh) = &key.ssh {
@@ -188,17 +331,32 @@ pub fn process_spawner_with_data_dir(data_dir: PathBuf) -> Spawner {
             };
             let remote_script = build_remote_lsp_script(&key.root, launch);
             c.arg("--").arg(target).arg(remote_script);
+            #[cfg(unix)]
+            c.process_group(0);
             c
         } else {
+            let effective_env =
+                crate::environments::cached_effective_env_for_local_root(&data_dir, &key.root);
             let mut c = tokio::process::Command::new(&launch.cmd);
             c.args(&launch.args)
                 .current_dir(&key.root)
-                .env("PATH", servers::augmented_local_path(&data_dir));
-            if std::env::var_os("JAVA_HOME").is_none() {
+                .envs(&effective_env);
+
+            let aug_path = servers::augmented_local_path(&data_dir);
+            let merged_path = match effective_env.get("PATH") {
+                Some(ep) if !ep.is_empty() => format!("{ep}:{aug_path}"),
+                _ => aug_path,
+            };
+            c.env("PATH", merged_path);
+
+            if !effective_env.contains_key("JAVA_HOME") && std::env::var_os("JAVA_HOME").is_none() {
                 if let Some(java_home) = servers::detect_toolchain_java_home(&data_dir) {
                     c.env("JAVA_HOME", java_home);
                 }
             }
+            apply_language_memory_caps(&mut c, &key.lang, &launch.cmd, &effective_env);
+            #[cfg(unix)]
+            c.process_group(0);
             c
         };
 
@@ -232,8 +390,6 @@ pub fn process_spawner() -> Spawner {
     process_spawner_with_data_dir(std::env::temp_dir())
 }
 
-/// Membership changes — unbounded so `Drop` can send, and polled FIRST by the
-/// actor so an `Attach` is always seen before that socket's first message.
 enum Ctl {
     Attach {
         client: u64,
@@ -241,6 +397,10 @@ enum Ctl {
     },
     Detach {
         client: u64,
+    },
+    WatchedFile {
+        uri: String,
+        change_type: u8,
     },
     Evict,
 }
@@ -255,6 +415,7 @@ struct Entry {
     ctl: mpsc::UnboundedSender<Ctl>,
     data: mpsc::Sender<Data>,
     open_docs: Arc<AtomicUsize>,
+    active_clients: Arc<AtomicUsize>,
     last_active: Arc<AtomicU64>,
 }
 
@@ -263,7 +424,6 @@ pub struct LspPool {
     entries: Mutex<HashMap<PoolKey, Entry>>,
     spawner: Spawner,
     idle: Duration,
-    /// Per-server stdin backlog bound (bytes), [`WRITE_QUEUE_MAX_BYTES`].
     write_cap: usize,
     next_client: AtomicU64,
     next_gen: AtomicU64,
@@ -273,8 +433,6 @@ pub struct LspPool {
 /// One socket's attachment. Dropping it detaches the socket.
 pub struct Attached {
     client: u64,
-    /// Server → this socket (raw JSON-RPC text). `None` once the server is
-    /// gone or this socket was dropped for falling behind.
     pub rx: mpsc::Receiver<String>,
     ctl: mpsc::UnboundedSender<Ctl>,
     data: mpsc::Sender<Data>,
@@ -308,7 +466,7 @@ impl LspPool {
 
     /// [`Self::new`] with an explicit stdin backlog bound (tests).
     pub fn with_write_cap(spawner: Spawner, idle: Duration, write_cap: usize) -> Arc<Self> {
-        Arc::new(Self {
+        let pool = Arc::new(Self {
             entries: Mutex::new(HashMap::new()),
             spawner,
             idle,
@@ -316,7 +474,9 @@ impl LspPool {
             next_client: AtomicU64::new(1),
             next_gen: AtomicU64::new(1),
             activity_seq: Arc::new(AtomicU64::new(1)),
-        })
+        });
+        register_pool(&pool);
+        pool
     }
 
     /// Number of live pooled servers.
@@ -328,8 +488,19 @@ impl LspPool {
         self.entries.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Attach a socket to the server for `key`, starting it (with `cmd args`)
-    /// when none is running.
+    fn notify_watched_path(&self, path_str: &str, uri: &str, change_type: u8) {
+        let entries = self.lock();
+        for (k, e) in entries.iter() {
+            if k.ssh.is_none() && path_str.starts_with(k.root.as_str()) {
+                let _ = e.ctl.send(Ctl::WatchedFile {
+                    uri: uri.to_string(),
+                    change_type,
+                });
+            }
+        }
+    }
+
+    /// Attach a socket to the server for `key`, starting it when none is running.
     pub fn attach(
         self: &Arc<Self>,
         key: PoolKey,
@@ -368,12 +539,38 @@ impl LspPool {
             entries.remove(&key);
         }
 
+        // Immediately reap detached 0-doc servers from a previous workspace when switching roots.
+        let stale_other_roots: Vec<PoolKey> = entries
+            .iter()
+            .filter(|(k, e)| {
+                k.owner == key.owner
+                    && k.root != key.root
+                    && e.open_docs.load(Ordering::Acquire) == 0
+                    && e.active_clients.load(Ordering::Acquire) == 0
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        for rk in stale_other_roots {
+            if let Some(evicted) = entries.remove(&rk) {
+                let _ = evicted.ctl.send(Ctl::Evict);
+            }
+        }
+
+        // Enforce strict `<= MAX_SERVERS_PER_OWNER` (`2`) LRU cap per user:
+        // prefer evicting 0-open-doc servers first, then fallback to oldest overall.
         while entries.keys().filter(|k| k.owner == key.owner).count() >= MAX_SERVERS_PER_OWNER {
-            let victim = entries
+            let zero_doc_victim = entries
                 .iter()
                 .filter(|(k, e)| k.owner == key.owner && e.open_docs.load(Ordering::Acquire) == 0)
                 .min_by_key(|(_, e)| e.last_active.load(Ordering::Acquire))
                 .map(|(k, _)| k.clone());
+            let victim = zero_doc_victim.or_else(|| {
+                entries
+                    .iter()
+                    .filter(|(k, _)| k.owner == key.owner)
+                    .min_by_key(|(_, e)| e.last_active.load(Ordering::Acquire))
+                    .map(|(k, _)| k.clone())
+            });
             let Some(victim_key) = victim else {
                 break;
             };
@@ -386,6 +583,7 @@ impl LspPool {
         let gen = self.next_gen.fetch_add(1, Ordering::Relaxed);
         let init_tick = self.activity_seq.fetch_add(1, Ordering::Relaxed);
         let open_docs = Arc::new(AtomicUsize::new(0));
+        let active_clients = Arc::new(AtomicUsize::new(1));
         let last_active = Arc::new(AtomicU64::new(init_tick));
         let (ctl, ctl_rx) = mpsc::unbounded_channel();
         let (data, data_rx) = mpsc::channel(DATA_CAPACITY);
@@ -397,6 +595,7 @@ impl LspPool {
                 ctl: ctl.clone(),
                 data: data.clone(),
                 open_docs: Arc::clone(&open_docs),
+                active_clients: Arc::clone(&active_clients),
                 last_active: Arc::clone(&last_active),
             },
         );
@@ -409,6 +608,7 @@ impl LspPool {
             ctl_rx,
             data_rx,
             open_docs,
+            active_clients,
             last_active,
         ));
         Ok(Attached {
@@ -436,6 +636,7 @@ async fn run_actor(
     mut ctl_rx: mpsc::UnboundedReceiver<Ctl>,
     mut data_rx: mpsc::Receiver<Data>,
     open_docs: Arc<AtomicUsize>,
+    active_clients: Arc<AtomicUsize>,
     last_active: Arc<AtomicU64>,
 ) {
     let ServerIo {
@@ -443,6 +644,7 @@ async fn run_actor(
         writer,
         child,
     } = io;
+    let child_pgid = child.as_ref().and_then(tokio::process::Child::id);
 
     let (w_tx, mut w_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let backlog = Arc::new(AtomicUsize::new(0));
@@ -456,7 +658,7 @@ async fn run_actor(
                 backlog.fetch_sub(body.len(), Ordering::AcqRel);
                 drained.notify_one();
                 if let Err(e) = res {
-                    tracing::warn!("lsp: stdin write error: {e}");
+                    tracing::debug!("lsp: stdin write closed: {e}");
                     break;
                 }
             }
@@ -485,9 +687,11 @@ async fn run_actor(
     });
 
     let mut mux = Mux::new(
+        key.clone(),
         w_tx,
         Arc::clone(&backlog),
         open_docs,
+        active_clients,
         last_active,
         Arc::clone(&pool.activity_seq),
     );
@@ -500,6 +704,7 @@ async fn run_actor(
             c = ctl_rx.recv() => match c {
                 Some(Ctl::Attach { client, tx }) => mux.attach(client, tx),
                 Some(Ctl::Detach { client }) => mux.detach(client),
+                Some(Ctl::WatchedFile { uri, change_type }) => mux.on_watched_file(&uri, change_type),
                 Some(Ctl::Evict) | None => break,
             },
             d = data_rx.recv(), if has_room => match d {
@@ -530,7 +735,12 @@ async fn run_actor(
             }
         }
         if mux.clients.is_empty() {
-            idle_at.get_or_insert_with(|| Instant::now() + pool.idle);
+            let delay = if mux.ever_opened_doc && mux.docs.is_empty() {
+                pool.idle.min(POST_DOC_IDLE_GRACE)
+            } else {
+                pool.idle
+            };
+            idle_at.get_or_insert_with(|| Instant::now() + delay);
         } else {
             idle_at = None;
         }
@@ -542,13 +752,22 @@ async fn run_actor(
     mux.to_server(&json!({"jsonrpc": "2.0", "id": "otto-pool-shutdown", "method": "shutdown"}));
     mux.to_server(&json!({"jsonrpc": "2.0", "method": "exit"}));
     drop(mux);
-    let _ = tokio::time::timeout(Duration::from_secs(2), writer_task).await;
+    let _ = tokio::time::timeout(Duration::from_millis(800), writer_task).await;
     if let Some(mut child) = child {
-        if tokio::time::timeout(Duration::from_secs(1), child.wait())
+        if tokio::time::timeout(Duration::from_millis(600), child.wait())
             .await
             .is_err()
         {
+            #[cfg(unix)]
+            if let Some(pgid) = child_pgid {
+                terminate_process_group(pgid);
+            }
             let _ = child.kill().await;
+        } else {
+            #[cfg(unix)]
+            if let Some(pgid) = child_pgid {
+                terminate_process_group(pgid);
+            }
         }
     }
 }
@@ -568,9 +787,11 @@ enum Init {
 }
 
 struct Mux {
+    key: PoolKey,
     to_server_tx: mpsc::UnboundedSender<Vec<u8>>,
     backlog: Arc<AtomicUsize>,
     open_docs: Arc<AtomicUsize>,
+    active_clients: Arc<AtomicUsize>,
     last_active: Arc<AtomicU64>,
     activity_seq: Arc<AtomicU64>,
     clients: BTreeMap<u64, Client>,
@@ -579,6 +800,7 @@ struct Mux {
     init: Init,
     initialized_sent: bool,
     docs: HashMap<String, usize>,
+    ever_opened_doc: bool,
     next_id: u64,
 }
 
@@ -590,18 +812,48 @@ fn str_at<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
     cur.as_str()
 }
 
+fn default_gopls_settings() -> Value {
+    json!({
+        "directoryFilters": [
+            "-**/node_modules",
+            "-**/target",
+            "-**/.git",
+            "-**/dist",
+            "-**/build",
+            "-**/.svelte-kit",
+            "-**/__pycache__"
+        ],
+        "completeUnimported": true
+    })
+}
+
+fn detect_local_python_path(root: &str) -> Option<String> {
+    let r = Path::new(root);
+    for rel in [".venv/bin/python", "venv/bin/python", ".env/bin/python"] {
+        let p = r.join(rel);
+        if p.is_file() {
+            return Some(p.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
 impl Mux {
     fn new(
+        key: PoolKey,
         to_server_tx: mpsc::UnboundedSender<Vec<u8>>,
         backlog: Arc<AtomicUsize>,
         open_docs: Arc<AtomicUsize>,
+        active_clients: Arc<AtomicUsize>,
         last_active: Arc<AtomicU64>,
         activity_seq: Arc<AtomicU64>,
     ) -> Self {
         Self {
+            key,
             to_server_tx,
             backlog,
             open_docs,
+            active_clients,
             last_active,
             activity_seq,
             clients: BTreeMap::new(),
@@ -610,6 +862,7 @@ impl Mux {
             init: Init::NotStarted,
             initialized_sent: false,
             docs: HashMap::new(),
+            ever_opened_doc: false,
             next_id: 1,
         }
     }
@@ -663,12 +916,16 @@ impl Mux {
                 open: HashSet::new(),
             },
         );
+        self.active_clients
+            .store(self.clients.len(), Ordering::Release);
     }
 
     fn detach(&mut self, client: u64) {
         let Some(c) = self.clients.remove(&client) else {
             return;
         };
+        self.active_clients
+            .store(self.clients.len(), Ordering::Release);
         self.touch();
         for uri in c.open {
             self.release_doc(&uri);
@@ -717,6 +974,119 @@ impl Mux {
         }
     }
 
+    fn on_watched_file(&mut self, uri: &str, change_type: u8) {
+        if !matches!(self.init, Init::Done(_)) {
+            return;
+        }
+        self.to_server(&json!({
+            "jsonrpc": "2.0",
+            "method": "workspace/didChangeWatchedFiles",
+            "params": {
+                "changes": [{ "uri": uri, "type": change_type }]
+            }
+        }));
+    }
+
+    fn workspace_folders_json(&self) -> Vec<Value> {
+        let mut folders = Vec::new();
+        let primary_uri = if self.key.root.starts_with("file://") {
+            self.key.root.clone()
+        } else {
+            format!("file://{}", self.key.root)
+        };
+        let primary_name = Path::new(&self.key.root)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("workspace")
+            .to_string();
+        folders.push(json!({ "uri": primary_uri, "name": primary_name }));
+
+        if self.key.ssh.is_none() {
+            let pkey = format!("local:{}", self.key.root.trim_end_matches('/'));
+            for extra in crate::environments::cached_additional_roots(&pkey) {
+                let extra_trimmed = extra.trim();
+                if extra_trimmed.is_empty() || extra_trimmed == self.key.root {
+                    continue;
+                }
+                let name = Path::new(extra_trimmed)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("attached");
+                folders.push(json!({
+                    "uri": format!("file://{extra_trimmed}"),
+                    "name": name,
+                }));
+            }
+        }
+        folders
+    }
+
+    fn enrich_initialize_params(&self, msg: &mut Value) {
+        let Some(params) = msg.get_mut("params").and_then(Value::as_object_mut) else {
+            return;
+        };
+        let ws_folders = self.workspace_folders_json();
+        if ws_folders.len() > 1 || !params.contains_key("workspaceFolders") {
+            params.insert("workspaceFolders".into(), Value::Array(ws_folders));
+        }
+
+        let norm_lang = servers::normalize_lsp_lang(&self.key.lang);
+        if norm_lang == "go" {
+            let defaults = default_gopls_settings();
+            match params.get_mut("initializationOptions") {
+                Some(Value::Object(existing)) => {
+                    if let Value::Object(def_map) = defaults {
+                        for (k, v) in def_map {
+                            existing.entry(k).or_insert(v);
+                        }
+                    }
+                }
+                None | Some(Value::Null) => {
+                    params.insert("initializationOptions".into(), defaults);
+                }
+                _ => {}
+            }
+        } else if norm_lang == "python" && self.key.ssh.is_none() {
+            if let Some(py_path) = detect_local_python_path(&self.key.root) {
+                if params.get("initializationOptions").is_none() {
+                    params.insert(
+                        "initializationOptions".into(),
+                        json!({ "pythonPath": py_path }),
+                    );
+                }
+            }
+        }
+    }
+
+    fn build_configuration_reply(&self, msg: &Value) -> Value {
+        let items = msg
+            .pointer("/params/items")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let norm_lang = servers::normalize_lsp_lang(&self.key.lang);
+        let py_path = if norm_lang == "python" && self.key.ssh.is_none() {
+            detect_local_python_path(&self.key.root)
+        } else {
+            None
+        };
+        let replies: Vec<Value> = items
+            .iter()
+            .map(|it| {
+                let section = it.get("section").and_then(Value::as_str).unwrap_or("");
+                if section == "gopls" || (section.is_empty() && norm_lang == "go") {
+                    default_gopls_settings()
+                } else if (section == "python" || section == "python.analysis") && py_path.is_some()
+                {
+                    json!({ "pythonPath": py_path })
+                } else {
+                    Value::Null
+                }
+            })
+            .collect();
+        Value::Array(replies)
+    }
+
     fn on_client(&mut self, client: u64, text: &str) {
         if !self.clients.contains_key(&client) {
             return;
@@ -737,6 +1107,7 @@ impl Mux {
                 } else {
                     let pool_id = self.alloc_id();
                     msg["id"] = json!(pool_id);
+                    self.enrich_initialize_params(&mut msg);
                     self.init = Init::Pending {
                         pool_id,
                         waiters: vec![(client, id)],
@@ -766,6 +1137,7 @@ impl Mux {
                     return;
                 };
                 let uri = uri.to_owned();
+                self.ever_opened_doc = true;
                 let newly = self
                     .clients
                     .get_mut(&client)
@@ -838,24 +1210,34 @@ impl Mux {
         let method = msg.get("method").and_then(Value::as_str).map(str::to_owned);
         let id = msg.get("id").filter(|v| !v.is_null()).cloned();
         match (method.as_deref(), id) {
-            (Some(m), Some(id)) => match self.clients.keys().next().copied() {
-                Some(target) => {
-                    self.server_reqs.insert(id.to_string(), (target, id));
-                    self.send_client(target, text.to_owned());
+            (Some(m), Some(id)) => {
+                // Handle protocol housekeeping requests directly inside the pool host so
+                // `gopls`, `jdtls`, `pyright`, and `rust-analyzer` never block on browser tabs.
+                match m {
+                    "workspace/configuration" => {
+                        let result = self.build_configuration_reply(&msg);
+                        self.to_server(&json!({"jsonrpc": "2.0", "id": id, "result": result}));
+                    }
+                    "workspace/workspaceFolders" => {
+                        let result = Value::Array(self.workspace_folders_json());
+                        self.to_server(&json!({"jsonrpc": "2.0", "id": id, "result": result}));
+                    }
+                    "window/workDoneProgress/create"
+                    | "client/registerCapability"
+                    | "client/unregisterCapability" => {
+                        self.to_server(&json!({"jsonrpc": "2.0", "id": id, "result": null}));
+                    }
+                    _ => match self.clients.keys().next().copied() {
+                        Some(target) => {
+                            self.server_reqs.insert(id.to_string(), (target, id));
+                            self.send_client(target, text.to_owned());
+                        }
+                        None => {
+                            self.to_server(&json!({"jsonrpc": "2.0", "id": id, "result": null}));
+                        }
+                    },
                 }
-                None => {
-                    let result = if m == "workspace/configuration" {
-                        let n = msg
-                            .pointer("/params/items")
-                            .and_then(Value::as_array)
-                            .map_or(0, Vec::len);
-                        Value::Array(vec![Value::Null; n])
-                    } else {
-                        Value::Null
-                    };
-                    self.to_server(&json!({"jsonrpc": "2.0", "id": id, "result": result}));
-                }
-            },
+            }
             (Some("textDocument/publishDiagnostics"), None) => {
                 let Some(uri) = str_at(&msg, &["params", "uri"]) else {
                     return true;
@@ -964,6 +1346,13 @@ mod tests {
                                     "params":{"uri":uri,"diagnostics":[]}
                                 })
                             })
+                        }
+                        "workspace/didChangeWatchedFiles" => {
+                            let uri = msg["params"]["changes"][0]["uri"]
+                                .as_str()
+                                .unwrap_or_default();
+                            doc_log.lock().unwrap().push(format!("watched {uri}"));
+                            None
                         }
                         _ => None,
                     };
@@ -1204,63 +1593,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn max_servers_per_owner_evicts_least_recently_active_zero_doc_server() {
+    async fn max_servers_per_owner_lru_and_workspace_switch_eviction() {
         assert_eq!(IDLE_TIMEOUT, Duration::from_secs(45));
-        assert_eq!(MAX_SERVERS_PER_OWNER, 3);
+        assert_eq!(MAX_SERVERS_PER_OWNER, 2);
 
         let (pool, fake) = fake_pool(IDLE_TIMEOUT);
-        let lang_key = |lang: &str| PoolKey {
+        let lang_key = |lang: &str, root: &str| PoolKey {
             owner: "u1".into(),
             lang: lang.into(),
-            root: "/repo".into(),
+            root: root.into(),
             ssh: None,
         };
 
-        let mut s_rust = pool.attach(lang_key("rust"), "ra", &[]).unwrap();
+        let mut s_rust = pool.attach(lang_key("rust", "/repo"), "ra", &[]).unwrap();
         init(&mut s_rust, 1).await;
-        // Open a document on `rust` so `open_docs == 1` (must NOT be evicted!).
         s_rust.send(open("file:///repo/main.rs")).await;
         let _ = recv(&mut s_rust).await;
 
-        let mut s_go = pool.attach(lang_key("go"), "gopls", &[]).unwrap();
+        let mut s_go = pool.attach(lang_key("go", "/repo"), "gopls", &[]).unwrap();
         init(&mut s_go, 1).await;
 
-        let mut s_py = pool.attach(lang_key("python"), "pyright", &[]).unwrap();
-        init(&mut s_py, 1).await;
+        assert_eq!(pool.live_servers(), 2);
+        assert_eq!(fake.spawns.load(Ordering::SeqCst), 2);
 
-        assert_eq!(pool.live_servers(), 3);
-        assert_eq!(fake.spawns.load(Ordering::SeqCst), 3);
-
-        // Touch `python` so `go` is the least-recently-active server with `open_docs == 0`.
-        assert!(
-            s_py.send(
-                json!({"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{}})
-                    .to_string()
-            )
-            .await
-        );
-        let _ = recv(&mut s_py).await;
-
-        // Spawning a 4th server (`typescript`) for `u1` must evict `go` (not `rust` which has open_docs==1, not `python` which is newer).
-        let mut s_ts = pool.attach(lang_key("typescript"), "tsls", &[]).unwrap();
+        // Spawning a 3rd server (`typescript`) for `u1` must evict `go` (`open_docs == 0`) while keeping `rust` (`open_docs == 1`).
+        let mut s_ts = pool
+            .attach(lang_key("typescript", "/repo"), "tsls", &[])
+            .unwrap();
         init(&mut s_ts, 1).await;
 
         assert_eq!(pool.live_servers(), MAX_SERVERS_PER_OWNER);
-        // `s_go`'s actor exited and closed its outbound channel.
         let go_closed = tokio::time::timeout(Duration::from_secs(1), s_go.rx.recv())
             .await
             .expect("evicted server channel should close promptly");
         assert!(go_closed.is_none());
 
-        // `s_rust` (with open doc) and `s_py` remain alive.
-        assert!(
-            s_rust
-                .send(
-                    json!({"jsonrpc":"2.0","id":9,"method":"textDocument/hover","params":{}})
-                        .to_string()
-                )
-                .await
-        );
-        assert_eq!(recv(&mut s_rust).await["id"], json!(9));
+        // Manifest file notification reaches active `/repo` servers immediately:
+        notify_watched_file_if_build_manifest(Path::new("/repo/pom.xml"), 2);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(fake
+            .doc_log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l == "watched file:///repo/pom.xml"));
+
+        // Close all tabs/sockets on `/repo` and switch workspace to `/repo2`: `/repo` 0-doc servers evict immediately!
+        s_rust.send(close("file:///repo/main.rs")).await;
+        drop(s_rust);
+        drop(s_ts);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let _s_new = pool.attach(lang_key("go", "/repo2"), "gopls", &[]).unwrap();
+        assert_eq!(pool.live_servers(), 1);
     }
 }

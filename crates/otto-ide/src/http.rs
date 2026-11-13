@@ -32,13 +32,15 @@ use crate::types::{
     IdeCreateCollabRoomReq, IdeCreateCollabRoomResp, IdeCreatePythonVenvReq,
     IdeCreatePythonVenvResp, IdeDebugAction, IdeDebugCommandReq, IdeDebugEvaluateReq,
     IdeDebugEvaluateResp, IdeDebugSessionResp, IdeDebugSessionSnapshot, IdeDebugSessionsResp,
-    IdeDebugVariablesReq, IdeDebugVariablesResp, IdeEnvironmentResp, IdeEnvironmentsResp,
-    IdeFileQuery, IdeFileReadResp, IdeFileWriteReq, IdeFileWriteResp, IdeFormatReq, IdeFormatResp,
+    IdeDebugVariablesReq, IdeDebugVariablesResp, IdeDeleteLocalSdkQuery,
+    IdeDeleteProjectFolderQuery, IdeEnvironmentResp, IdeEnvironmentsResp, IdeFileQuery,
+    IdeFileReadResp, IdeFileWriteReq, IdeFileWriteResp, IdeFormatReq, IdeFormatResp,
     IdeFsEntryKind, IdeFsMutateReq, IdeFsMutateResp, IdeFsTreeQuery, IdeFsTreeResp, IdeGutterReq,
     IdeGutterResp, IdeInstallJobResp, IdeInstallPluginReq, IdeInstallToolchainReq, IdeOkResp,
-    IdePluginResp, IdePluginsResp, IdeReferencesReq, IdeReferencesResp, IdeRenameReq,
-    IdeRenameResp, IdeReplaceReq, IdeReplaceResp, IdeRunConfigResp, IdeRunResp, IdeSearchReq,
-    IdeSearchResp, IdeSetBreakpointsReq, IdeSshSpec, IdeStartDebugReq, IdeStartRunReq,
+    IdePluginResp, IdePluginsResp, IdeProjectFolderReq, IdeReferencesReq, IdeReferencesResp,
+    IdeRegisterLocalSdkReq, IdeRegisterLocalSdkResp, IdeRenameReq, IdeRenameResp, IdeReplaceReq,
+    IdeReplaceResp, IdeRunConfigResp, IdeRunResp, IdeSearchReq, IdeSearchResp,
+    IdeSetBreakpointsReq, IdeShellEnvResp, IdeSshSpec, IdeStartDebugReq, IdeStartRunReq,
     IdeSymbolsReq, IdeSymbolsResp, IdeTargetKind, IdeTargetQuery, IdeTargetSpec,
     IdeTogglePluginReq, IdeToolchainsResp, IdeUpdateEnvironmentReq, IdeUpsertRunConfigReq,
 };
@@ -92,15 +94,27 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
         .route("/ide/replace", post(replace_workspace::<S>))
         .route("/ide/gutter", post(detect_gutter::<S>))
         .route("/ide/lsp/symbols", post(lsp_symbols::<S>))
+        .route("/ide/lsp/definition", post(lsp_definition::<S>))
+        .route("/ide/lsp/implementation", post(lsp_implementation::<S>))
         .route("/ide/lsp/references", post(lsp_references::<S>))
         .route("/ide/lsp/rename", post(lsp_rename::<S>))
         .route("/ide/lsp/format", post(lsp_format::<S>))
         .route("/ide/lsp/code-actions", post(lsp_code_actions::<S>))
-        // B. OS/Arch Toolchains & SDK Downloader
+        // B. OS/Arch Toolchains, Custom Local SDKs & SDK Downloader
         .route("/ide/toolchains", get(list_toolchains::<S>))
         .route("/ide/toolchains/install", post(install_toolchain::<S>))
+        .route(
+            "/ide/toolchains/local",
+            post(register_local_sdk::<S>).delete(delete_local_sdk::<S>),
+        )
         .route("/ide/toolchains/jobs/{job_id}", get(get_toolchain_job::<S>))
-        // C. Environments, Python Venvs, Run Configurations & Test Runner
+        // C. Shell Env, Multi-Folder Projects, Environments, Python Venvs & Run Configs
+        .route("/ide/shell-env", get(get_shell_env::<S>))
+        .route("/ide/shell-env/reload", post(reload_shell_env::<S>))
+        .route(
+            "/ide/projects/folders",
+            post(add_project_folder::<S>).delete(remove_project_folder::<S>),
+        )
         .route(
             "/ide/environments",
             get(get_environments::<S>).put(put_environments::<S>),
@@ -212,7 +226,11 @@ async fn fs_tree<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<IdeFsTreeQuery>,
 ) -> ApiResult<Json<IdeFsTreeResp>> {
-    let spec = q.target_spec()?;
+    let mut spec = q.target_spec()?;
+    ctx.ide()
+        .environments
+        .enrich_target_roots(&ctx.pool(), &mut spec)
+        .await;
     let resolved = ctx.ide().targets.resolve(&ctx, &user, &spec).await?;
     let mut resp = ctx
         .ide()
@@ -234,7 +252,11 @@ async fn fs_read_file<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<IdeFileQuery>,
 ) -> ApiResult<Json<IdeFileReadResp>> {
-    let spec = q.target_spec()?;
+    let mut spec = q.target_spec()?;
+    ctx.ide()
+        .environments
+        .enrich_target_roots(&ctx.pool(), &mut spec)
+        .await;
     let resolved = ctx.ide().targets.resolve(&ctx, &user, &spec).await?;
     let mut resp = ctx.ide().targets.read_file(&resolved, &q.path).await?;
     if resp.language == "plaintext" {
@@ -248,8 +270,12 @@ async fn fs_read_file<S: IdeCtx>(
 async fn fs_write_file<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeFileWriteReq>,
+    Json(mut req): Json<IdeFileWriteReq>,
 ) -> ApiResult<Json<IdeFileWriteResp>> {
+    ctx.ide()
+        .environments
+        .enrich_target_roots(&ctx.pool(), &mut req.target)
+        .await;
     let resolved = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
     let resp = ctx
         .ide()
@@ -268,8 +294,12 @@ async fn fs_write_file<S: IdeCtx>(
 async fn fs_mutate<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeFsMutateReq>,
+    Json(mut req): Json<IdeFsMutateReq>,
 ) -> ApiResult<Json<IdeFsMutateResp>> {
+    ctx.ide()
+        .environments
+        .enrich_target_roots(&ctx.pool(), &mut req.target)
+        .await;
     let resolved = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
     let resp = ctx
         .ide()
@@ -282,8 +312,12 @@ async fn fs_mutate<S: IdeCtx>(
 async fn search_workspace<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeSearchReq>,
+    Json(mut req): Json<IdeSearchReq>,
 ) -> ApiResult<Json<IdeSearchResp>> {
+    ctx.ide()
+        .environments
+        .enrich_target_roots(&ctx.pool(), &mut req.target)
+        .await;
     let resolved = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
     let resp = ctx.ide().targets.search(&resolved, &req).await?;
     Ok(Json(resp))
@@ -292,8 +326,12 @@ async fn search_workspace<S: IdeCtx>(
 async fn replace_workspace<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeReplaceReq>,
+    Json(mut req): Json<IdeReplaceReq>,
 ) -> ApiResult<Json<IdeReplaceResp>> {
+    ctx.ide()
+        .environments
+        .enrich_target_roots(&ctx.pool(), &mut req.target)
+        .await;
     let resolved = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
     let resp = ctx.ide().targets.replace(&resolved, &req).await?;
     Ok(Json(resp))
@@ -302,12 +340,16 @@ async fn replace_workspace<S: IdeCtx>(
 async fn detect_gutter<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeGutterReq>,
+    Json(mut req): Json<IdeGutterReq>,
 ) -> ApiResult<Json<IdeGutterResp>> {
     req.target.validate()?;
     let content = match req.content {
         Some(c) => c,
         None => {
+            ctx.ide()
+                .environments
+                .enrich_target_roots(&ctx.pool(), &mut req.target)
+                .await;
             let resolved = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
             ctx.ide()
                 .targets
@@ -324,18 +366,54 @@ async fn detect_gutter<S: IdeCtx>(
 async fn lsp_symbols<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeSymbolsReq>,
+    Json(mut req): Json<IdeSymbolsReq>,
 ) -> ApiResult<Json<IdeSymbolsResp>> {
+    ctx.ide()
+        .environments
+        .enrich_target_roots(&ctx.pool(), &mut req.target)
+        .await;
     Ok(Json(
         crate::lsp_service::document_symbols(&ctx, &user, req).await?,
+    ))
+}
+
+async fn lsp_definition<S: IdeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Json(mut req): Json<IdeReferencesReq>,
+) -> ApiResult<Json<IdeReferencesResp>> {
+    ctx.ide()
+        .environments
+        .enrich_target_roots(&ctx.pool(), &mut req.target)
+        .await;
+    Ok(Json(
+        crate::lsp_service::goto_definition(&ctx, &user, req).await?,
+    ))
+}
+
+async fn lsp_implementation<S: IdeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Json(mut req): Json<IdeReferencesReq>,
+) -> ApiResult<Json<IdeReferencesResp>> {
+    ctx.ide()
+        .environments
+        .enrich_target_roots(&ctx.pool(), &mut req.target)
+        .await;
+    Ok(Json(
+        crate::lsp_service::goto_implementation(&ctx, &user, req).await?,
     ))
 }
 
 async fn lsp_references<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeReferencesReq>,
+    Json(mut req): Json<IdeReferencesReq>,
 ) -> ApiResult<Json<IdeReferencesResp>> {
+    ctx.ide()
+        .environments
+        .enrich_target_roots(&ctx.pool(), &mut req.target)
+        .await;
     Ok(Json(
         crate::lsp_service::find_references(&ctx, &user, req).await?,
     ))
@@ -344,8 +422,12 @@ async fn lsp_references<S: IdeCtx>(
 async fn lsp_rename<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeRenameReq>,
+    Json(mut req): Json<IdeRenameReq>,
 ) -> ApiResult<Json<IdeRenameResp>> {
+    ctx.ide()
+        .environments
+        .enrich_target_roots(&ctx.pool(), &mut req.target)
+        .await;
     Ok(Json(
         crate::lsp_service::rename_symbol(&ctx, &user, req).await?,
     ))
@@ -354,8 +436,12 @@ async fn lsp_rename<S: IdeCtx>(
 async fn lsp_format<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeFormatReq>,
+    Json(mut req): Json<IdeFormatReq>,
 ) -> ApiResult<Json<IdeFormatResp>> {
+    ctx.ide()
+        .environments
+        .enrich_target_roots(&ctx.pool(), &mut req.target)
+        .await;
     Ok(Json(
         crate::lsp_service::format_document(&ctx, &user, req).await?,
     ))
@@ -364,15 +450,19 @@ async fn lsp_format<S: IdeCtx>(
 async fn lsp_code_actions<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeCodeActionsReq>,
+    Json(mut req): Json<IdeCodeActionsReq>,
 ) -> ApiResult<Json<IdeCodeActionsResp>> {
+    ctx.ide()
+        .environments
+        .enrich_target_roots(&ctx.pool(), &mut req.target)
+        .await;
     Ok(Json(
         crate::lsp_service::code_actions(&ctx, &user, req).await?,
     ))
 }
 
 // ===========================================================================
-// B. OS/Arch Toolchains & SDK Downloader Handlers
+// B. OS/Arch Toolchains, Custom Local SDKs & SDK Downloader Handlers
 // ===========================================================================
 
 async fn list_toolchains<S: IdeCtx>(
@@ -380,6 +470,7 @@ async fn list_toolchains<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<IdeTargetQuery>,
 ) -> ApiResult<Json<IdeToolchainsResp>> {
+    let include_catalog = q.include_catalog;
     let target = q.into_target_spec()?;
     let _ = ctx.ide().targets.resolve(&ctx, &user, &target).await?;
     let ssh = resolve_ssh_opt(&ctx, &user, &target).await?;
@@ -392,11 +483,13 @@ async fn list_toolchains<S: IdeCtx>(
     let resp = ctx
         .ide()
         .toolchains
-        .list_toolchains(
+        .list_toolchains_with_opts(
+            Some(&ctx.pool()),
             &ctx.ide().targets,
             &target,
             ssh.as_ref(),
             active_env.as_ref(),
+            include_catalog,
         )
         .await?;
     Ok(Json(resp))
@@ -417,6 +510,51 @@ async fn install_toolchain<S: IdeCtx>(
     Ok(Json(IdeInstallJobResp { job }))
 }
 
+async fn register_local_sdk<S: IdeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Json(req): Json<IdeRegisterLocalSdkReq>,
+) -> ApiResult<Json<IdeRegisterLocalSdkResp>> {
+    let _ = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
+    let sdk = ctx
+        .ide()
+        .toolchains
+        .register_local_sdk(&ctx.pool(), req)
+        .await?;
+    Ok(Json(IdeRegisterLocalSdkResp { sdk }))
+}
+
+async fn delete_local_sdk<S: IdeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Query(q): Query<IdeDeleteLocalSdkQuery>,
+) -> ApiResult<Json<IdeOkResp>> {
+    let target = if q.root.as_deref().is_some_and(|r| !r.trim().is_empty()) {
+        let spec = IdeTargetSpec {
+            kind: q.kind.unwrap_or_default(),
+            workspace_id: q.workspace_id.clone(),
+            root: q.root.clone().unwrap_or_default(),
+            connection_id: q.connection_id.clone(),
+            additional_roots: Vec::new(),
+        };
+        let _ = ctx.ide().targets.resolve(&ctx, &user, &spec).await?;
+        spec
+    } else {
+        IdeTargetSpec {
+            kind: q.kind.unwrap_or_default(),
+            workspace_id: q.workspace_id.clone(),
+            root: "/".into(),
+            connection_id: q.connection_id.clone(),
+            additional_roots: Vec::new(),
+        }
+    };
+    ctx.ide()
+        .toolchains
+        .remove_local_sdk(&ctx.pool(), &target, q.id.as_deref(), q.path.as_deref())
+        .await?;
+    Ok(Json(IdeOkResp { ok: true }))
+}
+
 async fn get_toolchain_job<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(_user)): Extension<AuthUser>,
@@ -427,15 +565,64 @@ async fn get_toolchain_job<S: IdeCtx>(
 }
 
 // ===========================================================================
-// C. Project Environments, Python Venvs, Run Configs & Test Runner Handlers
+// C. Shell Env, Multi-Folder Projects, Environments & Run Config Handlers
 // ===========================================================================
+
+async fn get_shell_env<S: IdeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(_user)): Extension<AuthUser>,
+) -> ApiResult<Json<IdeShellEnvResp>> {
+    let resp = ctx.ide().environments.get_shell_env().await;
+    Ok(Json(resp))
+}
+
+async fn reload_shell_env<S: IdeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(_user)): Extension<AuthUser>,
+) -> ApiResult<Json<IdeShellEnvResp>> {
+    let resp = ctx.ide().environments.reload_shell_env().await;
+    Ok(Json(resp))
+}
+
+async fn add_project_folder<S: IdeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Json(req): Json<IdeProjectFolderReq>,
+) -> ApiResult<Json<IdeEnvironmentResp>> {
+    let _ = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
+    let env = ctx
+        .ide()
+        .environments
+        .add_project_folder(&ctx.pool(), &req.target, &req.folder_path)
+        .await?;
+    Ok(Json(IdeEnvironmentResp { env }))
+}
+
+async fn remove_project_folder<S: IdeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Query(q): Query<IdeDeleteProjectFolderQuery>,
+) -> ApiResult<Json<IdeEnvironmentResp>> {
+    let target = q.target_spec()?;
+    let _ = ctx.ide().targets.resolve(&ctx, &user, &target).await?;
+    let env = ctx
+        .ide()
+        .environments
+        .remove_project_folder(&ctx.pool(), &target, &q.folder_path)
+        .await?;
+    Ok(Json(IdeEnvironmentResp { env }))
+}
 
 async fn get_environments<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<IdeTargetQuery>,
 ) -> ApiResult<Json<IdeEnvironmentsResp>> {
-    let target = q.into_target_spec()?;
+    let mut target = q.into_target_spec()?;
+    ctx.ide()
+        .environments
+        .enrich_target_roots(&ctx.pool(), &mut target)
+        .await;
     let _ = ctx.ide().targets.resolve(&ctx, &user, &target).await?;
     let ssh = resolve_ssh_opt(&ctx, &user, &target).await?;
     let resp = ctx
@@ -515,8 +702,12 @@ async fn delete_run_config<S: IdeCtx>(
 async fn start_run<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeStartRunReq>,
+    Json(mut req): Json<IdeStartRunReq>,
 ) -> ApiResult<Json<IdeRunResp>> {
+    ctx.ide()
+        .environments
+        .enrich_target_roots(&ctx.pool(), &mut req.target)
+        .await;
     let _ = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
     let ssh = resolve_ssh_opt(&ctx, &user, &req.target).await?;
     let run = ctx
@@ -562,14 +753,27 @@ async fn stop_run<S: IdeCtx>(
 async fn start_debug_session<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeStartDebugReq>,
+    Json(mut req): Json<IdeStartDebugReq>,
 ) -> ApiResult<Json<IdeDebugSessionResp>> {
+    ctx.ide()
+        .environments
+        .enrich_target_roots(&ctx.pool(), &mut req.target)
+        .await;
     let _ = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
     let ssh = resolve_ssh_opt(&ctx, &user, &req.target).await?;
+    let run_config = match req.config_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(cid) => ctx
+            .ide()
+            .environments
+            .resolve_run_config_or_auto(&ctx.pool(), &req.target, cid)
+            .await
+            .ok(),
+        None => None,
+    };
     let effective_env = ctx
         .ide()
         .environments
-        .build_effective_env(&ctx.pool(), ctx.secrets(), &req.target)
+        .build_effective_env_for_run(&ctx.pool(), ctx.secrets(), &req.target, run_config.as_ref())
         .await
         .unwrap_or_default();
     let project_env = ctx
@@ -578,15 +782,6 @@ async fn start_debug_session<S: IdeCtx>(
         .get_project_env(&ctx.pool(), &req.target)
         .await
         .ok();
-    let run_config = match req.config_id.as_deref().filter(|s| !s.is_empty()) {
-        Some(cid) => ctx
-            .ide()
-            .environments
-            .get_run_config(&ctx.pool(), cid)
-            .await
-            .ok(),
-        None => None,
-    };
     let plugin_adapters = ctx.ide().plugins.active_dap_adapters();
     let start_ctx = DapStartContext::new()
         .with_ssh(ssh)

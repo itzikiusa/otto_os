@@ -22,8 +22,10 @@ use super::adapters::{
 use super::java_bridge::spawn_java_jdb_bridge;
 use super::node_bridge::spawn_node_inspector_bridge;
 use super::session_inspect::{
-    fetch_variables, handle_stopped_event, select_frame_and_refresh, sync_all_breakpoints,
+    apply_breakpoint_event, fetch_variables, handle_stopped_event, select_frame_and_refresh,
+    sync_all_breakpoints,
 };
+use super::shell_bridge::spawn_shell_dap_bridge;
 use super::wire::{DapEvent, DapMessage, DapReader, DapResponse, DapWriter};
 use super::{spawn_target_process, ssh_tunnel_config, BridgeGuard};
 use crate::types::{
@@ -35,8 +37,9 @@ use crate::types::{
 
 pub use super::session_inspect::compute_inline_values;
 
-pub(crate) const MAX_DEBUG_OUTPUT: usize = 1_000;
-pub(crate) const MAX_TERMINATED_DEBUG_SESSIONS: usize = 6;
+pub(crate) const MAX_DEBUG_OUTPUT: usize = 400;
+pub(crate) const MAX_DEBUG_OUTPUT_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_TERMINATED_DEBUG_SESSIONS: usize = 4;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 type BoxRead = Box<dyn AsyncRead + Send + Unpin>;
@@ -282,6 +285,9 @@ impl SessionEntry {
             snap.state = IdeDebugState::Terminated;
             snap.stopped_reason = None;
             snap.paused_line = None;
+            snap.threads.clear();
+            snap.stack_frames.clear();
+            snap.scopes.clear();
             snap.inline_values.clear();
         });
     }
@@ -290,6 +296,10 @@ impl SessionEntry {
         self.disconnect_and_kill();
         self.mutate_and_broadcast(|snap| {
             snap.state = IdeDebugState::Error;
+            snap.threads.clear();
+            snap.stack_frames.clear();
+            snap.scopes.clear();
+            snap.inline_values.clear();
             snap.error = Some(msg);
         });
         evict_terminated_sessions(sessions);
@@ -323,6 +333,15 @@ impl SessionEntry {
         if text.is_empty() {
             return;
         }
+        let clipped = if text.len() > 16_384 {
+            let mut end = 16_384;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}…\n", &text[..end])
+        } else {
+            text
+        };
         {
             let mut buf = self.output_buf.lock().unwrap_or_else(|e| e.into_inner());
             if buf.len() >= MAX_DEBUG_OUTPUT {
@@ -330,8 +349,14 @@ impl SessionEntry {
             }
             buf.push_back(IdeDebugOutputEntry {
                 category: category.to_string(),
-                text,
+                text: clipped,
             });
+            let mut total_bytes: usize = buf.iter().map(|e| e.text.len()).sum();
+            while total_bytes > MAX_DEBUG_OUTPUT_BYTES && buf.len() > 1 {
+                if let Some(removed) = buf.pop_front() {
+                    total_bytes = total_bytes.saturating_sub(removed.text.len());
+                }
+            }
         }
         self.mutate_and_broadcast(|_| {});
     }
@@ -574,11 +599,8 @@ impl DapManager {
                 return Ok(entry.read_snapshot());
             }
             IdeDebugAction::SelectFrame => {
-                let frame_id = req.frame_id.ok_or_else(|| {
-                    Error::Invalid("frame_id is required for 'select_frame'".into())
-                })?;
                 let conn = entry.active_conn()?;
-                select_frame_and_refresh(&entry, &conn, frame_id).await?;
+                select_frame_and_refresh(&entry, &conn, req.thread_id, req.frame_id).await?;
                 return Ok(entry.read_snapshot());
             }
             _ => {}
@@ -886,6 +908,12 @@ async fn connect_adapter_transport(
             let (r, w) = tokio::io::split(duplex);
             Ok((Box::new(r), Box::new(w), bridge_guard))
         }
+        DapAdapterTransport::ShellBridge(spec) => {
+            let (duplex, bridge_guard) =
+                spawn_shell_dap_bridge(&req.target, ctx.ssh.as_ref(), spec).await?;
+            let (r, w) = tokio::io::split(duplex);
+            Ok((Box::new(r), Box::new(w), bridge_guard))
+        }
     }
 }
 
@@ -991,14 +1019,57 @@ async fn handshake_and_run(
     });
     *entry.conn.write().unwrap_or_else(|e| e.into_inner()) = Some(active_conn.clone());
 
-    let launch_rx = wire
+    let mut launch_rx = wire
         .send_request_nowait(launch_command, Some(launch_args))
         .await?;
 
-    let _ = tokio::time::timeout(Duration::from_secs(8), entry.initialized_notify.notified()).await;
+    // Race `initialized` against `launch_rx` so immediate compile/launch failures return in <50ms
+    // instead of hanging 8 seconds waiting for an `initialized` event that will never arrive.
+    let mut launch_done = false;
+    tokio::select! {
+        _ = tokio::time::timeout(Duration::from_secs(8), entry.initialized_notify.notified()) => {}
+        launch_res = &mut launch_rx => {
+            launch_done = true;
+            match launch_res {
+                Ok(resp) if !resp.success => {
+                    let msg = resp.message.unwrap_or_else(|| "Debug target launch failed".into());
+                    return Err(Error::Invalid(msg));
+                }
+                Err(_) => {
+                    return Err(Error::Upstream(
+                        "DAP adapter closed before initialization completed".into(),
+                    ));
+                }
+                Ok(_) => {
+                    let _ = tokio::time::timeout(
+                        Duration::from_millis(200),
+                        entry.initialized_notify.notified(),
+                    )
+                    .await;
+                }
+            }
+        }
+    }
 
     sync_all_breakpoints(entry, &active_conn).await?;
     let _ = wire.request("configurationDone", Some(json!({}))).await;
+
+    if !launch_done {
+        // Catch fast post-configurationDone compile failures synchronously while keeping slow builds async.
+        if let Ok(launch_res) =
+            tokio::time::timeout(Duration::from_millis(60), &mut launch_rx).await
+        {
+            launch_done = true;
+            if let Ok(resp) = launch_res {
+                if !resp.success {
+                    let msg = resp
+                        .message
+                        .unwrap_or_else(|| "Debug target launch failed".into());
+                    return Err(Error::Invalid(msg));
+                }
+            }
+        }
+    }
 
     entry.mutate_and_broadcast(|snap| {
         if snap.state == IdeDebugState::Starting {
@@ -1006,18 +1077,20 @@ async fn handshake_and_run(
         }
     });
 
-    let sessions_launch = Arc::clone(sessions);
-    let entry_launch = entry.clone();
-    tokio::spawn(async move {
-        if let Ok(resp) = launch_rx.await {
-            if !resp.success {
-                let msg = resp
-                    .message
-                    .unwrap_or_else(|| "Debug target launch failed".into());
-                entry_launch.fail_and_evict(&sessions_launch, msg);
+    if !launch_done {
+        let sessions_launch = Arc::clone(sessions);
+        let entry_launch = entry.clone();
+        tokio::spawn(async move {
+            if let Ok(resp) = launch_rx.await {
+                if !resp.success {
+                    let msg = resp
+                        .message
+                        .unwrap_or_else(|| "Debug target launch failed".into());
+                    entry_launch.fail_and_evict(&sessions_launch, msg);
+                }
             }
-        }
-    });
+        });
+    }
 
     Ok(())
 }
@@ -1032,6 +1105,11 @@ fn spawn_event_driver(
             match ev.event.as_str() {
                 "initialized" => {
                     entry.initialized_notify.notify_one();
+                }
+                "breakpoint" => {
+                    if let Some(body) = &ev.body {
+                        apply_breakpoint_event(&entry, body);
+                    }
                 }
                 "output" => {
                     if let Some(body) = &ev.body {
@@ -1095,12 +1173,7 @@ mod retention_tests {
 
     fn dummy_req() -> IdeStartDebugReq {
         IdeStartDebugReq {
-            target: IdeTargetSpec {
-                kind: IdeTargetKind::Local,
-                root: "/tmp".into(),
-                workspace_id: None,
-                connection_id: None,
-            },
+            target: IdeTargetSpec::local("/tmp"),
             language: "go".into(),
             config_id: None,
             launch: IdeDebugLaunchSpec {
@@ -1139,8 +1212,8 @@ mod retention_tests {
 
         assert_eq!(mgr.sessions.len(), MAX_TERMINATED_DEBUG_SESSIONS + 1);
         assert!(mgr.get_session("dbg_term_00").is_err());
-        assert!(mgr.get_session("dbg_term_03").is_err());
-        assert!(mgr.get_session("dbg_term_04").is_ok());
+        assert!(mgr.get_session("dbg_term_05").is_err());
+        assert!(mgr.get_session("dbg_term_06").is_ok());
         assert!(mgr.get_session("dbg_term_09").is_ok());
 
         let snap = mgr.get_session("dbg_live").unwrap();

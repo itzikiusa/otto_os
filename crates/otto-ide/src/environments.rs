@@ -1,8 +1,11 @@
-//! Project Environments, Keychain-backed Secret Env Vars, `.env` & Python
-//! Virtualenv Manager, Run Configurations CRUD, and Multi-Language Test/Run
-//! Execution Engine (`EnvironmentManager`).
+//! Project Environments, Cached User Login+Interactive Shell Environment,
+//! Keychain-backed Secret Env Vars, Multi-Folder Project Roots, `.env` &
+//! Python Virtualenv Manager, Run Configurations CRUD + Instant Auto-Discovery,
+//! and Multi-Language Test/Run Execution Engine (`EnvironmentManager`).
 
+pub mod discovery;
 mod runner;
+pub mod shell_env;
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -25,12 +28,191 @@ use crate::target::TargetManager;
 use crate::toolchains::{find_executable_in, is_executable_file, read_subdirs, system_search_dirs};
 use crate::types::{
     IdeCreatePythonVenvReq, IdeCreatePythonVenvResp, IdeEnvVarEntry, IdeEnvironmentsResp,
-    IdeProjectEnvironment, IdePythonVenvInfo, IdeRunConfig, IdeRunState, IdeRunnerKind, IdeSshSpec,
-    IdeStartRunReq, IdeTargetKind, IdeTargetSpec, IdeUpdateEnvironmentReq, IdeUpsertRunConfigReq,
+    IdeProjectEnvironment, IdePythonVenvInfo, IdeRunConfig, IdeRunState, IdeRunnerKind,
+    IdeShellEnvResp, IdeSshSpec, IdeStartRunReq, IdeTargetKind, IdeTargetSpec,
+    IdeUpdateEnvironmentReq, IdeUpsertRunConfigReq,
 };
 
+pub use self::discovery::discover_run_configs;
 pub use self::runner::parse_test_output;
 use self::runner::{evict_finished_runs, execute_run_task, ActiveRunHandle, RunStateInner};
+pub use self::shell_env::{global_shell_env, parse_sentinel_env_zero, ShellEnvResolver};
+
+/// Kick off background warming of the user's login+interactive shell environment.
+/// Never blocks IDE startup or HTTP handlers.
+pub fn ensure_shell_env_warming() {
+    global_shell_env().ensure_warming_in_background();
+}
+
+/// Non-blocking snapshot of the cached login+interactive shell environment.
+pub fn cached_shell_env_snapshot() -> BTreeMap<String, String> {
+    global_shell_env().vars_snapshot()
+}
+
+/// Alias of [`cached_shell_env_snapshot`] for peer crates/modules (`lsp_host`, `dap`).
+pub fn cached_shell_env_vars() -> BTreeMap<String, String> {
+    global_shell_env().vars_snapshot()
+}
+
+const MAX_SYNC_PROJECT_SNAPSHOTS: usize = 16;
+
+#[derive(Clone, Default)]
+struct SyncProjectSnapshot {
+    key: String,
+    env: IdeProjectEnvironment,
+}
+
+fn sync_project_snapshots() -> &'static Mutex<Vec<SyncProjectSnapshot>> {
+    static SNAPSHOTS: std::sync::OnceLock<Mutex<Vec<SyncProjectSnapshot>>> =
+        std::sync::OnceLock::new();
+    SNAPSHOTS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn record_sync_project_snapshot(project_key: &str, env: &IdeProjectEnvironment) {
+    let mut guard = sync_project_snapshots()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(pos) = guard.iter().position(|s| s.key == project_key) {
+        guard.remove(pos);
+    }
+    guard.push(SyncProjectSnapshot {
+        key: project_key.to_string(),
+        env: IdeProjectEnvironment {
+            env_vars: Vec::new(),
+            ..env.clone()
+        },
+    });
+    if guard.len() > MAX_SYNC_PROJECT_SNAPSHOTS {
+        let excess = guard.len() - MAX_SYNC_PROJECT_SNAPSHOTS;
+        guard.drain(0..excess);
+    }
+}
+
+fn lookup_sync_project_snapshot(project_key_or_root: &str) -> Option<IdeProjectEnvironment> {
+    let trimmed = project_key_or_root.trim().trim_end_matches('/');
+    let local_key = format!("local:{trimmed}");
+    let guard = sync_project_snapshots()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    guard
+        .iter()
+        .rev()
+        .find(|s| {
+            let sk = s.key.trim_end_matches('/');
+            sk == trimmed || sk == local_key
+        })
+        .map(|s| s.env.clone())
+}
+
+/// Non-blocking accessor for attached multi-folder project roots (`additional_roots`),
+/// keyed by either `IdeTargetSpec::project_key()` (`"local:/path"`) or raw `root`.
+/// Updated in lockstep with SQLite reads/writes so synchronous `lsp_host` spawners
+/// can read multi-root workspace folders without blocking on a database pool.
+pub fn cached_additional_roots(project_key_or_root: &str) -> Vec<String> {
+    lookup_sync_project_snapshot(project_key_or_root)
+        .map(|e| e.additional_roots)
+        .unwrap_or_default()
+}
+
+/// Synchronous, zero-blocking effective environment resolver for local roots
+/// (used by synchronous spawners such as `lsp_host` `gopls` / `jdtls` / `pyright`).
+///
+/// Layers: `ottod base env` -> `cached login+interactive shell env (when inherit_shell_env)` ->
+/// `selected project SDKs (GOROOT, JAVA_HOME, SDK bin) + managed toolchains + ~/go/bin on PATH` ->
+/// `project .env`.
+pub fn cached_effective_env_for_local_root(
+    data_dir: &Path,
+    root: &str,
+) -> BTreeMap<String, String> {
+    let proj_opt = lookup_sync_project_snapshot(root);
+    let inherit_shell = proj_opt
+        .as_ref()
+        .map(|p| p.inherit_shell_env)
+        .unwrap_or(true);
+
+    let mut map = shell_env::collect_process_base_env();
+    if inherit_shell {
+        map.extend(global_shell_env().vars_snapshot());
+    }
+
+    let mut path_dirs: Vec<String> = Vec::new();
+    if let Some(proj) = &proj_opt {
+        if let Some(jh) = proj.java_home.as_deref().filter(|s| !s.is_empty()) {
+            map.insert("JAVA_HOME".into(), jh.to_string());
+            push_unique(&mut path_dirs, format!("{}/bin", jh.trim_end_matches('/')));
+        }
+        if let Some(gr) = proj.go_root.as_deref().filter(|s| !s.is_empty()) {
+            map.insert("GOROOT".into(), gr.to_string());
+            push_unique(&mut path_dirs, format!("{}/bin", gr.trim_end_matches('/')));
+        }
+        if let Some(nh) = proj.node_home.as_deref().filter(|s| !s.is_empty()) {
+            push_unique(&mut path_dirs, format!("{}/bin", nh.trim_end_matches('/')));
+        }
+        if let Some(py) = proj.python_interpreter.as_deref().filter(|s| !s.is_empty()) {
+            if let Some(bin_dir) = Path::new(py).parent() {
+                push_unique(&mut path_dirs, bin_dir.to_string_lossy().into_owned());
+            }
+        }
+        if let Some(extra) = proj.extra_path.as_deref().filter(|s| !s.is_empty()) {
+            for seg in extra.split(':').filter(|s| !s.trim().is_empty()) {
+                push_unique(&mut path_dirs, seg.trim().to_string());
+            }
+        }
+    }
+    for d in crate::toolchains::ToolchainManager::new(data_dir.to_path_buf()).extra_local_bin_dirs()
+    {
+        push_unique(&mut path_dirs, d.to_string_lossy().into_owned());
+    }
+    if !otto_core::e2e::isolated() {
+        if let Some(home) = dirs::home_dir() {
+            for rel in ["go/bin", ".cargo/bin", ".local/bin"] {
+                let p = home.join(rel);
+                if p.is_dir() {
+                    push_unique(&mut path_dirs, p.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    if let Some(gopath) = map.get("GOPATH").filter(|s| !s.trim().is_empty()) {
+        for seg in std::env::split_paths(gopath) {
+            push_unique(
+                &mut path_dirs,
+                seg.join("bin").to_string_lossy().into_owned(),
+            );
+        }
+    }
+    if let Some(existing_path) = map.get("PATH") {
+        for seg in existing_path.split(':').filter(|s| !s.is_empty()) {
+            push_unique(&mut path_dirs, seg.to_string());
+        }
+    }
+    for d in system_search_dirs() {
+        push_unique(&mut path_dirs, d.to_string_lossy().into_owned());
+    }
+    if !path_dirs.is_empty() {
+        map.insert("PATH".into(), path_dirs.join(":"));
+    }
+
+    let dotenv = proj_opt
+        .as_ref()
+        .and_then(|p| p.dotenv_path.as_deref())
+        .filter(|s| !s.trim().is_empty())
+        .map(|dp| {
+            let p = Path::new(dp);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                Path::new(root).join(p)
+            }
+        })
+        .unwrap_or_else(|| Path::new(root).join(".env"));
+    if dotenv.is_file() {
+        if let Ok(raw) = std::fs::read_to_string(&dotenv) {
+            map.extend(parse_dotenv(&raw));
+        }
+    }
+    map
+}
 
 /// Uniform async secret accessor accepted by `EnvironmentManager` whether a
 /// caller holds `&Arc<dyn SecretStore>` (`ctx.secrets()`) or `&dyn SecretStore`.
@@ -96,8 +278,9 @@ struct StoredEnvVar {
     secret_ref: Option<String>,
 }
 
-/// Manages per-project SDK/env configuration, Keychain secrets, Python venvs,
-/// saved Run Configurations, and streaming Test/Run execution.
+/// Manages per-project SDK/env configuration, cached login+interactive shell
+/// environment, multi-folder project roots, Keychain secrets, Python venvs,
+/// saved + auto-detected Run Configurations, and streaming Test/Run execution.
 #[derive(Clone)]
 pub struct EnvironmentManager {
     data_dir: PathBuf,
@@ -114,7 +297,25 @@ impl EnvironmentManager {
         }
     }
 
-    // ── SQLite Project Environment + Keychain Secret CRUD ───────────────────
+    // ── Cached Login+Interactive Shell Environment Accessors ─────────────────
+
+    pub fn cached_shell_env_snapshot(&self) -> BTreeMap<String, String> {
+        global_shell_env().vars_snapshot()
+    }
+
+    pub fn shell_env_snapshot(&self) -> IdeShellEnvResp {
+        global_shell_env().snapshot()
+    }
+
+    pub async fn get_shell_env(&self) -> IdeShellEnvResp {
+        global_shell_env().get_or_load().await
+    }
+
+    pub async fn reload_shell_env(&self) -> IdeShellEnvResp {
+        global_shell_env().reload().await
+    }
+
+    // ── SQLite Project Environment + Multi-Folder Roots + Keychain CRUD ──────
 
     pub async fn get_project_env(
         &self,
@@ -135,6 +336,61 @@ impl EnvironmentManager {
         Ok(env)
     }
 
+    /// Hydrate `target.additional_roots` with any folders persisted in SQLite for
+    /// this workspace/project (`<1ms` indexed primary-key lookup).
+    pub async fn enrich_target_roots(&self, pool: &DbPool, target: &mut IdeTargetSpec) {
+        if let Ok((proj, _)) = load_stored_project_env(pool, &target.project_key()).await {
+            for r in proj.additional_roots {
+                if !r.is_empty() && r != target.root && !target.additional_roots.contains(&r) {
+                    target.additional_roots.push(r);
+                }
+            }
+        }
+    }
+
+    /// Attach an additional project folder (`POST /ide/projects/folders`).
+    pub async fn add_project_folder(
+        &self,
+        pool: &DbPool,
+        target: &IdeTargetSpec,
+        folder_path: &str,
+    ) -> Result<IdeProjectEnvironment> {
+        target.validate()?;
+        let normalized = validate_attached_folder_path(target, folder_path)?;
+        let project_key = target.project_key();
+        let (mut proj, _) = load_stored_project_env(pool, &project_key).await?;
+        if normalized != target.root && !proj.additional_roots.contains(&normalized) {
+            proj.additional_roots.push(normalized);
+        }
+        persist_project_roots(pool, target, &proj.additional_roots).await?;
+        self.get_project_env(pool, target).await
+    }
+
+    /// Detach an attached project folder (`DELETE /ide/projects/folders`).
+    pub async fn remove_project_folder(
+        &self,
+        pool: &DbPool,
+        target: &IdeTargetSpec,
+        folder_path: &str,
+    ) -> Result<IdeProjectEnvironment> {
+        target.validate()?;
+        let raw_trimmed = folder_path.trim().trim_end_matches('/');
+        if raw_trimmed.is_empty() {
+            return Err(Error::Invalid("folder path must not be empty".into()));
+        }
+        let canon_opt = std::fs::canonicalize(raw_trimmed)
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned());
+        let project_key = target.project_key();
+        let (mut proj, _) = load_stored_project_env(pool, &project_key).await?;
+        proj.additional_roots.retain(|entry| {
+            let trimmed = entry.trim_end_matches('/');
+            trimmed != raw_trimmed && canon_opt.as_deref() != Some(entry.as_str())
+        });
+        persist_project_roots(pool, target, &proj.additional_roots).await?;
+        self.get_project_env(pool, target).await
+    }
+
     pub async fn get_environments<S: SecretAccess + ?Sized>(
         &self,
         pool: &DbPool,
@@ -144,21 +400,77 @@ impl EnvironmentManager {
         ssh: Option<&IdeSshSpec>,
     ) -> Result<IdeEnvironmentsResp> {
         target.validate()?;
-        let env = self.get_project_env(pool, target).await?;
-        let configs = self.list_run_configs(pool, target).await?;
-        let dotenv_files = self
-            .discover_dotenv_files(targets, target, ssh)
-            .await
-            .unwrap_or_default();
-        let python_venvs = self
-            .discover_python_venvs(targets, target, ssh)
-            .await
-            .unwrap_or_default();
+        let (mut env, stored_vars) = load_stored_project_env(pool, &target.project_key()).await?;
+        for extra in &target.additional_roots {
+            if !extra.is_empty() && extra != &target.root && !env.additional_roots.contains(extra) {
+                env.additional_roots.push(extra.clone());
+            }
+        }
+        env.env_vars = stored_vars
+            .iter()
+            .map(|s| IdeEnvVarEntry {
+                key: s.key.clone(),
+                value: if s.secret { None } else { s.value.clone() },
+                secret: s.secret,
+                has_secret: s.secret && s.secret_ref.is_some(),
+            })
+            .collect();
+
+        let saved_configs = self.list_run_configs(pool, target).await?;
+
+        let (dotenv_files, python_venvs, detected_configs) = match target.kind {
+            IdeTargetKind::Local => {
+                let target_clone = target.clone();
+                let extra_roots = env.additional_roots.clone();
+                let data_dir = self.data_dir.clone();
+                tokio::task::spawn_blocking(move || {
+                    let root = PathBuf::from(&target_clone.root);
+                    let dotenvs = discover_local_dotenv_files(&root);
+                    let venvs = discover_local_python_venvs(&root, &data_dir);
+                    let detected = discover_run_configs(&target_clone, &extra_roots);
+                    (dotenvs, venvs, detected)
+                })
+                .await
+                .map_err(|e| Error::Internal(format!("local environment discovery: {e}")))?
+            }
+            IdeTargetKind::Ssh => {
+                let dotenvs = self
+                    .discover_dotenv_files(targets, target, ssh)
+                    .await
+                    .unwrap_or_default();
+                let venvs = self
+                    .discover_python_venvs(targets, target, ssh)
+                    .await
+                    .unwrap_or_default();
+                (dotenvs, venvs, Vec::new())
+            }
+        };
+
+        let mut configs = saved_configs;
+        for det in &detected_configs {
+            let duplicate = configs.iter().any(|c| {
+                c.id == det.id
+                    || (c.runner == det.runner
+                        && c.name.eq_ignore_ascii_case(&det.name)
+                        && c.cwd == det.cwd)
+            });
+            if !duplicate {
+                configs.push(det.clone());
+            }
+        }
+
+        // Fast non-blocking effective_env preview (zero subprocesses, secrets redacted).
+        let effective_env = self
+            .resolve_env_layers(&env, &stored_vars, None::<&S>, target, None, false)
+            .await;
+
         Ok(IdeEnvironmentsResp {
             env,
             python_venvs,
             dotenv_files,
             configs,
+            detected_configs,
+            effective_env,
         })
     }
 
@@ -170,7 +482,7 @@ impl EnvironmentManager {
     ) -> Result<IdeProjectEnvironment> {
         req.target.validate()?;
         let project_key = req.target.project_key();
-        let (_, prev_stored) = load_stored_project_env(pool, &project_key).await?;
+        let (prev_proj, prev_stored) = load_stored_project_env(pool, &project_key).await?;
         let prev_map: BTreeMap<String, StoredEnvVar> = prev_stored
             .into_iter()
             .map(|e| (e.key.clone(), e))
@@ -232,8 +544,28 @@ impl EnvironmentManager {
             }
         }
 
+        let inherit_shell_env = req.inherit_shell_env.unwrap_or(prev_proj.inherit_shell_env);
+        let next_roots = match &req.additional_roots {
+            Some(explicit_roots) => {
+                let mut validated = Vec::new();
+                for r in explicit_roots {
+                    if r.trim().is_empty() || r.trim() == req.target.root {
+                        continue;
+                    }
+                    let norm = validate_attached_folder_path(&req.target, r)?;
+                    if norm != req.target.root && !validated.contains(&norm) {
+                        validated.push(norm);
+                    }
+                }
+                validated
+            }
+            None => prev_proj.additional_roots,
+        };
+
         let env_vars_json = serde_json::to_string(&next_stored)
             .map_err(|e| Error::Internal(format!("serialize env_vars_json: {e}")))?;
+        let roots_json = serde_json::to_string(&next_roots)
+            .map_err(|e| Error::Internal(format!("serialize additional_roots_json: {e}")))?;
         let now = Utc::now().to_rfc3339();
         let target_kind = match req.target.kind {
             IdeTargetKind::Local => "local",
@@ -244,8 +576,9 @@ impl EnvironmentManager {
             r#"INSERT INTO ide_project_environments (
                    project_key, target_kind, root_path, connection_id,
                    java_home, go_root, rust_toolchain, node_home,
-                   python_interpreter, dotenv_path, extra_path, env_vars_json, updated_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   python_interpreter, dotenv_path, extra_path, env_vars_json,
+                   additional_roots_json, inherit_shell_env, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(project_key) DO UPDATE SET
                    target_kind = excluded.target_kind,
                    root_path = excluded.root_path,
@@ -258,6 +591,8 @@ impl EnvironmentManager {
                    dotenv_path = excluded.dotenv_path,
                    extra_path = excluded.extra_path,
                    env_vars_json = excluded.env_vars_json,
+                   additional_roots_json = excluded.additional_roots_json,
+                   inherit_shell_env = excluded.inherit_shell_env,
                    updated_at = excluded.updated_at"#,
         )
         .bind(&project_key)
@@ -272,6 +607,8 @@ impl EnvironmentManager {
         .bind(clean_opt(&req.dotenv_path))
         .bind(clean_opt(&req.extra_path))
         .bind(&env_vars_json)
+        .bind(&roots_json)
+        .bind(i32::from(inherit_shell_env))
         .bind(&now)
         .execute(pool)
         .await
@@ -280,7 +617,7 @@ impl EnvironmentManager {
         self.get_project_env(pool, &req.target).await
     }
 
-    // ── Effective Environment & PATH Builder ─────────────────────────────────
+    // ── Effective Environment & PATH Builder (Strict IntelliJ Order) ─────────
 
     pub async fn effective_env<S: SecretAccess + ?Sized>(
         &self,
@@ -297,32 +634,57 @@ impl EnvironmentManager {
         secrets: &S,
         target: &IdeTargetSpec,
     ) -> Result<BTreeMap<String, String>> {
+        self.build_effective_env_for_run(pool, secrets, target, None)
+            .await
+    }
+
+    /// Resolve process environment variables in strict IntelliJ / GoLand order:
+    /// 1. `ottod` base process env (`Local`)
+    /// 2. Cached user login+interactive shell env (`$SHELL -lic`, when `inherit_shell_env = true`)
+    /// 3. Selected SDK / Toolchain env (`GOROOT`, `JAVA_HOME`, `VIRTUAL_ENV`, prepended SDK `bin` + `~/go/bin` on `PATH`)
+    /// 4. Project `.env` file + Run Configuration `env_file`
+    /// 5. Project `env_vars` (+ Keychain secrets) -> Explicit Run/Debug Config `env` (`env_overrides`)
+    pub async fn build_effective_env_for_run<S: SecretAccess + ?Sized>(
+        &self,
+        pool: &DbPool,
+        secrets: &S,
+        target: &IdeTargetSpec,
+        cfg: Option<&IdeRunConfig>,
+    ) -> Result<BTreeMap<String, String>> {
         target.validate()?;
         let (proj, stored_vars) = load_stored_project_env(pool, &target.project_key()).await?;
+        Ok(self
+            .resolve_env_layers(&proj, &stored_vars, Some(secrets), target, cfg, true)
+            .await)
+    }
+
+    async fn resolve_env_layers<S: SecretAccess + ?Sized>(
+        &self,
+        proj: &IdeProjectEnvironment,
+        stored_vars: &[StoredEnvVar],
+        secrets: Option<&S>,
+        target: &IdeTargetSpec,
+        cfg: Option<&IdeRunConfig>,
+        await_shell: bool,
+    ) -> BTreeMap<String, String> {
         let mut map = BTreeMap::new();
+        let inherit_shell =
+            proj.inherit_shell_env && cfg.map(|c| c.inherit_shell_env).unwrap_or(true);
 
+        // Layer 1 & 2: ottod base env -> cached login+interactive shell env
         if target.kind == IdeTargetKind::Local {
-            if let Some(dotenv_rel) = proj.dotenv_path.as_deref().filter(|s| !s.is_empty()) {
-                if let Some(dotenv_file) = safe_join_local_root(&target.root, dotenv_rel) {
-                    if let Ok(raw) = tokio::fs::read_to_string(&dotenv_file).await {
-                        map.extend(parse_dotenv(&raw));
-                    }
-                }
+            map.extend(shell_env::collect_process_base_env());
+            if inherit_shell {
+                let shell_vars = if await_shell {
+                    global_shell_env().vars_or_load().await
+                } else {
+                    global_shell_env().vars_snapshot()
+                };
+                map.extend(shell_vars);
             }
         }
 
-        for item in &stored_vars {
-            if item.secret {
-                if let Some(sref) = &item.secret_ref {
-                    if let Ok(Some(secret_val)) = secrets.get_secret(sref).await {
-                        map.insert(item.key.clone(), secret_val);
-                    }
-                }
-            } else if let Some(val) = &item.value {
-                map.insert(item.key.clone(), val.clone());
-            }
-        }
-
+        // Layer 3: Selected SDK / Toolchain env + prepended PATH
         let mut path_dirs: Vec<String> = Vec::new();
         if let Some(extra) = proj.extra_path.as_deref().filter(|s| !s.is_empty()) {
             path_dirs.extend(
@@ -332,29 +694,42 @@ impl EnvironmentManager {
                     .map(str::to_string),
             );
         }
+
+        // Per-Run-Config SDK override (`sdk_path`) takes precedence over project-wide SDK.
+        let cfg_sdk = cfg
+            .and_then(|c| c.sdk_path.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let (Some(c), Some(sdk_p)) = (cfg, cfg_sdk) {
+            apply_run_config_sdk_override(c.runner, sdk_p, target.kind, &mut map, &mut path_dirs);
+        }
+
         if let Some(py) = proj.python_interpreter.as_deref().filter(|s| !s.is_empty()) {
             if let Some(bin_dir) = Path::new(py).parent() {
                 push_unique(&mut path_dirs, bin_dir.to_string_lossy().into_owned());
                 if let Some(venv) = bin_dir.parent() {
                     if venv.join("pyvenv.cfg").is_file() || target.kind == IdeTargetKind::Ssh {
-                        map.insert("VIRTUAL_ENV".into(), venv.to_string_lossy().into_owned());
+                        map.entry("VIRTUAL_ENV".into())
+                            .or_insert_with(|| venv.to_string_lossy().into_owned());
                     }
                 }
             }
         }
         if let Some(jh) = proj.java_home.as_deref().filter(|s| !s.is_empty()) {
-            map.insert("JAVA_HOME".into(), jh.to_string());
+            map.entry("JAVA_HOME".into())
+                .or_insert_with(|| jh.to_string());
             push_unique(&mut path_dirs, format!("{}/bin", jh.trim_end_matches('/')));
         }
         if let Some(gr) = proj.go_root.as_deref().filter(|s| !s.is_empty()) {
-            map.insert("GOROOT".into(), gr.to_string());
+            map.entry("GOROOT".into()).or_insert_with(|| gr.to_string());
             push_unique(&mut path_dirs, format!("{}/bin", gr.trim_end_matches('/')));
         }
         if let Some(rt) = proj.rust_toolchain.as_deref().filter(|s| !s.is_empty()) {
             if rt.starts_with('/') {
                 push_unique(&mut path_dirs, format!("{}/bin", rt.trim_end_matches('/')));
             } else {
-                map.insert("RUSTUP_TOOLCHAIN".into(), rt.to_string());
+                map.entry("RUSTUP_TOOLCHAIN".into())
+                    .or_insert_with(|| rt.to_string());
             }
         }
         if let Some(nh) = proj.node_home.as_deref().filter(|s| !s.is_empty()) {
@@ -366,6 +741,30 @@ impl EnvironmentManager {
                 .extra_local_bin_dirs()
             {
                 push_unique(&mut path_dirs, d.to_string_lossy().into_owned());
+            }
+            if !otto_core::e2e::isolated() {
+                if let Some(home) = dirs::home_dir() {
+                    for rel in ["go/bin", ".cargo/bin", ".local/bin"] {
+                        let p = home.join(rel);
+                        if p.is_dir() {
+                            push_unique(&mut path_dirs, p.to_string_lossy().into_owned());
+                        }
+                    }
+                }
+            }
+            if let Some(gopath) = map.get("GOPATH").filter(|s| !s.trim().is_empty()) {
+                for seg in std::env::split_paths(gopath) {
+                    push_unique(
+                        &mut path_dirs,
+                        seg.join("bin").to_string_lossy().into_owned(),
+                    );
+                }
+            }
+            // Preserve every directory from the user's inherited login+interactive shell PATH!
+            if let Some(inherited_path) = map.get("PATH") {
+                for seg in inherited_path.split(':').filter(|s| !s.is_empty()) {
+                    push_unique(&mut path_dirs, seg.to_string());
+                }
             }
             for d in system_search_dirs() {
                 push_unique(&mut path_dirs, d.to_string_lossy().into_owned());
@@ -388,7 +787,75 @@ impl EnvironmentManager {
         if !path_dirs.is_empty() {
             map.insert("PATH".into(), path_dirs.join(":"));
         }
-        Ok(map)
+
+        // Layer 4: Project `.env` file + Run Configuration `env_file`
+        if target.kind == IdeTargetKind::Local {
+            let mut all_roots = vec![target.root.clone()];
+            for r in proj
+                .additional_roots
+                .iter()
+                .chain(target.additional_roots.iter())
+            {
+                if !r.is_empty() && !all_roots.contains(r) {
+                    all_roots.push(r.clone());
+                }
+            }
+
+            if let Some(dotenv_rel) = proj.dotenv_path.as_deref().filter(|s| !s.is_empty()) {
+                if let Some(dotenv_file) = safe_join_allowed_roots(&all_roots, dotenv_rel) {
+                    if let Ok(raw) = tokio::fs::read_to_string(&dotenv_file).await {
+                        map.extend(parse_dotenv(&raw));
+                    }
+                }
+            } else {
+                let default_dotenv = Path::new(&target.root).join(".env");
+                if default_dotenv.is_file() {
+                    if let Ok(raw) = tokio::fs::read_to_string(&default_dotenv).await {
+                        map.extend(parse_dotenv(&raw));
+                    }
+                }
+            }
+
+            if let Some(cfg_env_file) = cfg
+                .and_then(|c| c.env_file.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                if let Some(resolved_ef) = safe_join_allowed_roots(&all_roots, cfg_env_file) {
+                    if let Ok(raw) = tokio::fs::read_to_string(&resolved_ef).await {
+                        map.extend(parse_dotenv(&raw));
+                    }
+                }
+            }
+        }
+
+        // Layer 5: Project `env_vars` (+ Keychain secrets) -> Run Config `env` (`env_overrides`)
+        for item in stored_vars {
+            if item.secret {
+                if let Some(sec_store) = secrets {
+                    if let Some(sref) = &item.secret_ref {
+                        if let Ok(Some(secret_val)) = sec_store.get_secret(sref).await {
+                            map.insert(item.key.clone(), secret_val);
+                        }
+                    }
+                } else if item.secret_ref.is_some() {
+                    // Redacted placeholder in HTTP preview (`GET /ide/environments`)
+                    map.insert(item.key.clone(), "••••••••".into());
+                }
+            } else if let Some(val) = &item.value {
+                map.insert(item.key.clone(), val.clone());
+            }
+        }
+
+        if let Some(c) = cfg {
+            for (k, v) in &c.env_overrides {
+                if is_valid_env_key(k) {
+                    map.insert(k.clone(), v.clone());
+                }
+            }
+        }
+
+        map
     }
 
     // ── `.env` & Python Virtualenv Discovery + 1-Click Creation ──────────────
@@ -399,23 +866,8 @@ impl EnvironmentManager {
         target: &IdeTargetSpec,
         ssh: Option<&IdeSshSpec>,
     ) -> Result<Vec<String>> {
-        const CANDIDATES: &[&str] = &[
-            ".env",
-            ".env.local",
-            ".env.development",
-            ".env.test",
-            ".env.staging",
-            ".env.production",
-        ];
         match target.kind {
-            IdeTargetKind::Local => {
-                let root = PathBuf::from(&target.root);
-                Ok(CANDIDATES
-                    .iter()
-                    .filter(|c| root.join(c).is_file())
-                    .map(|c| (*c).to_string())
-                    .collect())
-            }
+            IdeTargetKind::Local => Ok(discover_local_dotenv_files(Path::new(&target.root))),
             IdeTargetKind::Ssh => {
                 let Some(spec) = ssh else {
                     return Ok(Vec::new());
@@ -616,25 +1068,7 @@ impl EnvironmentManager {
             )));
         }
         let interp = venv_path.join("bin/python");
-        let ver_out = Command::new(&interp)
-            .arg("--version")
-            .kill_on_drop(true)
-            .output()
-            .await
-            .ok();
-        let version = ver_out
-            .map(|o| {
-                format!(
-                    "{}{}",
-                    String::from_utf8_lossy(&o.stdout),
-                    String::from_utf8_lossy(&o.stderr)
-                )
-                .trim()
-                .trim_start_matches("Python ")
-                .to_string()
-            })
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "3".into());
+        let version = read_pyvenv_version(&venv_path).unwrap_or_else(|| "3".into());
         Ok(IdeCreatePythonVenvResp {
             path: venv_path.to_string_lossy().into_owned(),
             interpreter_path: interp.to_string_lossy().into_owned(),
@@ -642,7 +1076,7 @@ impl EnvironmentManager {
         })
     }
 
-    // ── Run Configurations SQLite CRUD (`ide_run_configs`) ───────────────────
+    // ── Run Configurations SQLite CRUD (`ide_run_configs`) + Auto Lookup ─────
 
     pub async fn list_run_configs(
         &self,
@@ -651,8 +1085,9 @@ impl EnvironmentManager {
     ) -> Result<Vec<IdeRunConfig>> {
         target.validate()?;
         let rows = sqlx::query(
-            r#"SELECT id, name, runner, command, args_json, cwd, env_overrides_json,
-                      before_launch, target_path, test_filter
+            r#"SELECT id, name, runner, command, args_json, build_flags_json, cwd,
+                      env_overrides_json, env_file, inherit_shell_env, sdk_path,
+                      toolchain_id, before_launch, target_path, test_filter, compound_ids_json
                FROM ide_run_configs
                WHERE project_key = ?
                ORDER BY created_at ASC, name ASC"#,
@@ -667,8 +1102,9 @@ impl EnvironmentManager {
 
     pub async fn get_run_config(&self, pool: &DbPool, id: &str) -> Result<IdeRunConfig> {
         let row = sqlx::query(
-            r#"SELECT id, name, runner, command, args_json, cwd, env_overrides_json,
-                      before_launch, target_path, test_filter
+            r#"SELECT id, name, runner, command, args_json, build_flags_json, cwd,
+                      env_overrides_json, env_file, inherit_shell_env, sdk_path,
+                      toolchain_id, before_launch, target_path, test_filter, compound_ids_json
                FROM ide_run_configs WHERE id = ?"#,
         )
         .bind(id)
@@ -677,6 +1113,37 @@ impl EnvironmentManager {
         .map_err(|e| Error::Internal(format!("get ide_run_config: {e}")))?
         .ok_or_else(|| Error::NotFound(format!("run config '{id}'")))?;
         Ok(row_to_run_config(&row))
+    }
+
+    /// Resolve a saved SQLite Run Configuration OR an `auto:*` live-discovered
+    /// Run Configuration for `target`.
+    pub async fn resolve_run_config_or_auto(
+        &self,
+        pool: &DbPool,
+        target: &IdeTargetSpec,
+        id: &str,
+    ) -> Result<IdeRunConfig> {
+        if let Ok(saved) = self.get_run_config(pool, id).await {
+            return Ok(saved);
+        }
+        if id.starts_with("auto:") && target.kind == IdeTargetKind::Local {
+            let mut enriched = target.clone();
+            self.enrich_target_roots(pool, &mut enriched).await;
+            let extra = enriched.additional_roots.clone();
+            let id_owned = id.to_string();
+            let found = tokio::task::spawn_blocking(move || {
+                discover_run_configs(&enriched, &extra)
+                    .into_iter()
+                    .find(|c| c.id == id_owned)
+            })
+            .await
+            .ok()
+            .flatten();
+            if let Some(cfg) = found {
+                return Ok(cfg);
+            }
+        }
+        Err(Error::NotFound(format!("run config '{id}'")))
     }
 
     pub async fn upsert_run_config(
@@ -700,9 +1167,10 @@ impl EnvironmentManager {
                 "run configuration name cannot be empty".into(),
             ));
         }
-        if cfg.id.trim().is_empty() {
+        if cfg.id.trim().is_empty() || cfg.id.starts_with("auto:") {
             cfg.id = format!("rc_{}", new_id());
         }
+        cfg.auto_detected = false;
         let target_kind = match target.kind {
             IdeTargetKind::Local => "local",
             IdeTargetKind::Ssh => "ssh",
@@ -712,17 +1180,22 @@ impl EnvironmentManager {
             .and_then(|v| v.as_str().map(str::to_string))
             .unwrap_or_else(|| "custom".into());
         let args_json = serde_json::to_string(&cfg.args).unwrap_or_else(|_| "[]".into());
+        let build_flags_json =
+            serde_json::to_string(&cfg.build_flags).unwrap_or_else(|_| "[]".into());
         let env_overrides_json =
             serde_json::to_string(&cfg.env_overrides).unwrap_or_else(|_| "{}".into());
+        let compound_ids_json =
+            serde_json::to_string(&cfg.compound_configs).unwrap_or_else(|_| "[]".into());
         let now = Utc::now().to_rfc3339();
 
         sqlx::query(
             r#"INSERT INTO ide_run_configs (
                    id, project_key, target_kind, connection_id, root_path,
-                   name, runner, command, args_json, cwd,
-                   env_overrides_json, before_launch, target_path, test_filter,
+                   name, runner, command, args_json, build_flags_json, cwd,
+                   env_overrides_json, env_file, inherit_shell_env, sdk_path,
+                   toolchain_id, before_launch, target_path, test_filter, compound_ids_json,
                    created_at, updated_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                    project_key = excluded.project_key,
                    target_kind = excluded.target_kind,
@@ -732,11 +1205,17 @@ impl EnvironmentManager {
                    runner = excluded.runner,
                    command = excluded.command,
                    args_json = excluded.args_json,
+                   build_flags_json = excluded.build_flags_json,
                    cwd = excluded.cwd,
                    env_overrides_json = excluded.env_overrides_json,
+                   env_file = excluded.env_file,
+                   inherit_shell_env = excluded.inherit_shell_env,
+                   sdk_path = excluded.sdk_path,
+                   toolchain_id = excluded.toolchain_id,
                    before_launch = excluded.before_launch,
                    target_path = excluded.target_path,
                    test_filter = excluded.test_filter,
+                   compound_ids_json = excluded.compound_ids_json,
                    updated_at = excluded.updated_at"#,
         )
         .bind(&cfg.id)
@@ -748,11 +1227,17 @@ impl EnvironmentManager {
         .bind(&runner_str)
         .bind(clean_opt(&cfg.command))
         .bind(&args_json)
+        .bind(&build_flags_json)
         .bind(clean_opt(&cfg.cwd))
         .bind(&env_overrides_json)
+        .bind(clean_opt(&cfg.env_file))
+        .bind(i32::from(cfg.inherit_shell_env))
+        .bind(clean_opt(&cfg.sdk_path))
+        .bind(clean_opt(&cfg.toolchain_id))
         .bind(clean_opt(&cfg.before_launch))
         .bind(clean_opt(&cfg.target_path))
         .bind(clean_opt(&cfg.test_filter))
+        .bind(&compound_ids_json)
         .bind(&now)
         .bind(&now)
         .execute(pool)
@@ -812,23 +1297,50 @@ impl EnvironmentManager {
         pool: &DbPool,
         secrets: &S,
         targets: &TargetManager,
-        req: IdeStartRunReq,
+        mut req: IdeStartRunReq,
         ssh: Option<IdeSshSpec>,
     ) -> Result<IdeRunState> {
         req.target.validate()?;
+        self.enrich_target_roots(pool, &mut req.target).await;
+
         let cfg = if let Some(adhoc) = req.adhoc {
             adhoc
         } else if let Some(cid) = req.config_id.as_deref().filter(|s| !s.is_empty()) {
-            self.get_run_config(pool, cid).await?
+            self.resolve_run_config_or_auto(pool, &req.target, cid)
+                .await?
         } else {
             return Err(Error::Invalid(
                 "start_run requires either config_id or adhoc configuration".into(),
             ));
         };
 
-        let mut env_map = self.build_effective_env(pool, secrets, &req.target).await?;
-        for (k, v) in &cfg.env_overrides {
-            env_map.insert(k.clone(), v.clone());
+        let mut steps: Vec<(IdeRunConfig, BTreeMap<String, String>)> = Vec::new();
+        if cfg.runner == IdeRunnerKind::Compound && !cfg.compound_configs.is_empty() {
+            for member_id in cfg.compound_configs.iter().take(12) {
+                if member_id == &cfg.id {
+                    continue;
+                }
+                let member_cfg = self
+                    .resolve_run_config_or_auto(pool, &req.target, member_id)
+                    .await?;
+                if member_cfg.runner == IdeRunnerKind::Compound {
+                    continue;
+                }
+                let member_env = self
+                    .build_effective_env_for_run(pool, secrets, &req.target, Some(&member_cfg))
+                    .await?;
+                steps.push((member_cfg, member_env));
+            }
+            if steps.is_empty() {
+                return Err(Error::Invalid(
+                    "compound run configuration contains no runnable steps".into(),
+                ));
+            }
+        } else {
+            let env_map = self
+                .build_effective_env_for_run(pool, secrets, &req.target, Some(&cfg))
+                .await?;
+            steps.push((cfg.clone(), env_map));
         }
 
         let run_id = format!("run_{}", new_id());
@@ -856,7 +1368,7 @@ impl EnvironmentManager {
 
         let runs_clone = Arc::clone(&self.runs);
         let targets_clone = targets.clone();
-        let target_spec = req.target.clone();
+        let target_spec = req.target;
         tokio::spawn(async move {
             execute_run_task(
                 runs_clone,
@@ -864,8 +1376,7 @@ impl EnvironmentManager {
                 targets_clone,
                 target_spec,
                 ssh,
-                cfg,
-                env_map,
+                steps,
                 stop_rx,
             )
             .await;
@@ -942,18 +1453,164 @@ fn push_unique(vec: &mut Vec<String>, item: String) {
     }
 }
 
-fn safe_join_local_root(root: &str, rel_or_abs: &str) -> Option<PathBuf> {
-    let root_p = Path::new(root);
-    let cand = if Path::new(rel_or_abs).is_absolute() {
-        PathBuf::from(rel_or_abs)
-    } else {
-        if rel_or_abs.contains("..") {
-            return None;
+fn apply_run_config_sdk_override(
+    runner: IdeRunnerKind,
+    sdk_path: &str,
+    target_kind: IdeTargetKind,
+    map: &mut BTreeMap<String, String>,
+    path_dirs: &mut Vec<String>,
+) {
+    let trimmed = sdk_path.trim_end_matches('/');
+    match runner {
+        IdeRunnerKind::GoRun | IdeRunnerKind::GoBuild | IdeRunnerKind::GoTest => {
+            map.insert("GOROOT".into(), trimmed.to_string());
+            push_unique(path_dirs, format!("{trimmed}/bin"));
         }
-        root_p.join(rel_or_abs)
+        IdeRunnerKind::JavaMain
+        | IdeRunnerKind::JavaJunit
+        | IdeRunnerKind::Maven
+        | IdeRunnerKind::Gradle => {
+            map.insert("JAVA_HOME".into(), trimmed.to_string());
+            push_unique(path_dirs, format!("{trimmed}/bin"));
+        }
+        IdeRunnerKind::CargoRun | IdeRunnerKind::CargoTest => {
+            if trimmed.starts_with('/') {
+                push_unique(path_dirs, format!("{trimmed}/bin"));
+            } else {
+                map.insert("RUSTUP_TOOLCHAIN".into(), trimmed.to_string());
+            }
+        }
+        IdeRunnerKind::Python | IdeRunnerKind::Pytest => {
+            let p = Path::new(trimmed);
+            if p.is_file() {
+                if let Some(bin_dir) = p.parent() {
+                    push_unique(path_dirs, bin_dir.to_string_lossy().into_owned());
+                    if let Some(venv) = bin_dir.parent() {
+                        if venv.join("pyvenv.cfg").is_file() || target_kind == IdeTargetKind::Ssh {
+                            map.insert("VIRTUAL_ENV".into(), venv.to_string_lossy().into_owned());
+                        }
+                    }
+                }
+            } else {
+                push_unique(path_dirs, format!("{trimmed}/bin"));
+            }
+        }
+        IdeRunnerKind::Node | IdeRunnerKind::Npm | IdeRunnerKind::Vitest => {
+            push_unique(path_dirs, format!("{trimmed}/bin"));
+        }
+        IdeRunnerKind::Shell | IdeRunnerKind::Compound | IdeRunnerKind::Custom => {
+            if trimmed.starts_with('/') {
+                push_unique(path_dirs, format!("{trimmed}/bin"));
+            }
+        }
+    }
+}
+
+fn validate_attached_folder_path(target: &IdeTargetSpec, raw_folder: &str) -> Result<String> {
+    let trimmed = raw_folder.trim();
+    if trimmed.is_empty() || trimmed.chars().any(char::is_control) {
+        return Err(Error::Invalid("folder path must not be empty".into()));
+    }
+    if !trimmed.starts_with('/') {
+        return Err(Error::Invalid(
+            "attached project folder must be an absolute path".into(),
+        ));
+    }
+    if target.kind == IdeTargetKind::Local {
+        let canon = std::fs::canonicalize(trimmed).map_err(|e| {
+            Error::Invalid(format!(
+                "attached project folder '{trimmed}' not found: {e}"
+            ))
+        })?;
+        if !canon.is_dir() {
+            return Err(Error::Invalid(format!(
+                "attached project folder '{}' is not a directory",
+                canon.display()
+            )));
+        }
+        let canon_str = canon.to_string_lossy().into_owned();
+        if is_forbidden_sensitive_dir(&canon_str) {
+            return Err(Error::Forbidden(
+                "refusing to attach sensitive credential directory".into(),
+            ));
+        }
+        Ok(canon_str)
+    } else {
+        Ok(trimmed.trim_end_matches('/').to_string())
+    }
+}
+
+fn is_forbidden_sensitive_dir(path: &str) -> bool {
+    if path == "/" || path == "/etc" || path == "/private/etc" {
+        return true;
+    }
+    if let Some(home) = dirs::home_dir() {
+        let hs = home.to_string_lossy();
+        for rel in [".ssh", ".aws", ".gnupg", ".kube", ".config/gcloud"] {
+            let blocked = format!("{}/{rel}", hs.trim_end_matches('/'));
+            if path == blocked || path.starts_with(&format!("{blocked}/")) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+async fn persist_project_roots(
+    pool: &DbPool,
+    target: &IdeTargetSpec,
+    roots: &[String],
+) -> Result<()> {
+    let roots_json = serde_json::to_string(roots)
+        .map_err(|e| Error::Internal(format!("serialize additional_roots_json: {e}")))?;
+    let now = Utc::now().to_rfc3339();
+    let target_kind = match target.kind {
+        IdeTargetKind::Local => "local",
+        IdeTargetKind::Ssh => "ssh",
     };
-    if let (Ok(cr), Ok(cc)) = (std::fs::canonicalize(root_p), std::fs::canonicalize(&cand)) {
-        return cc.starts_with(&cr).then_some(cc);
+    sqlx::query(
+        r#"INSERT INTO ide_project_environments (
+               project_key, target_kind, root_path, connection_id,
+               additional_roots_json, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(project_key) DO UPDATE SET
+               additional_roots_json = excluded.additional_roots_json,
+               updated_at = excluded.updated_at"#,
+    )
+    .bind(target.project_key())
+    .bind(target_kind)
+    .bind(&target.root)
+    .bind(&target.connection_id)
+    .bind(&roots_json)
+    .bind(&now)
+    .execute(pool)
+    .await
+    .map_err(|e| Error::Internal(format!("persist additional_roots_json: {e}")))?;
+    Ok(())
+}
+
+fn safe_join_allowed_roots(allowed_roots: &[String], rel_or_abs: &str) -> Option<PathBuf> {
+    if Path::new(rel_or_abs).is_absolute() {
+        let cc = std::fs::canonicalize(rel_or_abs).ok()?;
+        for root in allowed_roots {
+            if let Ok(cr) = std::fs::canonicalize(root) {
+                if cc.starts_with(&cr) {
+                    return Some(cc);
+                }
+            }
+        }
+        return None;
+    }
+    if rel_or_abs.contains("..") {
+        return None;
+    }
+    for root in allowed_roots {
+        let cand = Path::new(root).join(rel_or_abs);
+        if let (Ok(cr), Ok(cc)) = (std::fs::canonicalize(root), std::fs::canonicalize(&cand)) {
+            if cc.starts_with(&cr) {
+                return Some(cc);
+            }
+        }
     }
     None
 }
@@ -964,7 +1621,7 @@ async fn load_stored_project_env(
 ) -> Result<(IdeProjectEnvironment, Vec<StoredEnvVar>)> {
     let row = sqlx::query(
         r#"SELECT java_home, go_root, rust_toolchain, node_home, python_interpreter,
-                  dotenv_path, extra_path, env_vars_json
+                  dotenv_path, extra_path, env_vars_json, additional_roots_json, inherit_shell_env
            FROM ide_project_environments WHERE project_key = ?"#,
     )
     .bind(project_key)
@@ -977,6 +1634,12 @@ async fn load_stored_project_env(
     };
     let raw_json: String = row.try_get("env_vars_json").unwrap_or_else(|_| "[]".into());
     let stored: Vec<StoredEnvVar> = serde_json::from_str(&raw_json).unwrap_or_default();
+    let roots_json: String = row
+        .try_get("additional_roots_json")
+        .unwrap_or_else(|_| "[]".into());
+    let additional_roots: Vec<String> = serde_json::from_str(&roots_json).unwrap_or_default();
+    let inherit_shell_env = row.try_get::<i64, _>("inherit_shell_env").unwrap_or(1) != 0;
+
     let env = IdeProjectEnvironment {
         java_home: row.try_get("java_home").ok().flatten(),
         go_root: row.try_get("go_root").ok().flatten(),
@@ -985,8 +1648,11 @@ async fn load_stored_project_env(
         python_interpreter: row.try_get("python_interpreter").ok().flatten(),
         dotenv_path: row.try_get("dotenv_path").ok().flatten(),
         extra_path: row.try_get("extra_path").ok().flatten(),
+        inherit_shell_env,
+        additional_roots,
         env_vars: Vec::new(),
     };
+    record_sync_project_snapshot(project_key, &env);
     Ok((env, stored))
 }
 
@@ -995,21 +1661,52 @@ fn row_to_run_config(row: &sqlx::sqlite::SqliteRow) -> IdeRunConfig {
     let runner: IdeRunnerKind = serde_json::from_value(serde_json::Value::String(runner_s))
         .unwrap_or(IdeRunnerKind::Custom);
     let args_s: String = row.try_get("args_json").unwrap_or_else(|_| "[]".into());
+    let flags_s: String = row
+        .try_get("build_flags_json")
+        .unwrap_or_else(|_| "[]".into());
     let env_s: String = row
         .try_get("env_overrides_json")
         .unwrap_or_else(|_| "{}".into());
+    let compound_s: String = row
+        .try_get("compound_ids_json")
+        .unwrap_or_else(|_| "[]".into());
+    let inherit_shell_env = row.try_get::<i64, _>("inherit_shell_env").unwrap_or(1) != 0;
+
     IdeRunConfig {
         id: row.try_get("id").unwrap_or_default(),
         name: row.try_get("name").unwrap_or_default(),
         runner,
         command: row.try_get("command").ok().flatten(),
         args: serde_json::from_str(&args_s).unwrap_or_default(),
+        build_flags: serde_json::from_str(&flags_s).unwrap_or_default(),
         cwd: row.try_get("cwd").ok().flatten(),
         env_overrides: serde_json::from_str(&env_s).unwrap_or_default(),
+        env_file: row.try_get("env_file").ok().flatten(),
+        inherit_shell_env,
+        sdk_path: row.try_get("sdk_path").ok().flatten(),
+        toolchain_id: row.try_get("toolchain_id").ok().flatten(),
         before_launch: row.try_get("before_launch").ok().flatten(),
         target_path: row.try_get("target_path").ok().flatten(),
         test_filter: row.try_get("test_filter").ok().flatten(),
+        compound_configs: serde_json::from_str(&compound_s).unwrap_or_default(),
+        auto_detected: false,
     }
+}
+
+fn discover_local_dotenv_files(root: &Path) -> Vec<String> {
+    const CANDIDATES: &[&str] = &[
+        ".env",
+        ".env.local",
+        ".env.development",
+        ".env.test",
+        ".env.staging",
+        ".env.production",
+    ];
+    CANDIDATES
+        .iter()
+        .filter(|c| root.join(c).is_file())
+        .map(|c| (*c).to_string())
+        .collect()
 }
 
 fn discover_local_python_venvs(root: &Path, data_dir: &Path) -> Vec<IdePythonVenvInfo> {
@@ -1033,7 +1730,10 @@ fn discover_local_python_venvs(root: &Path, data_dir: &Path) -> Vec<IdePythonVen
             });
         }
     }
-    for py_dir in read_subdirs(&data_dir.join("toolchains/python/interpreters")) {
+    for py_dir in read_subdirs(&data_dir.join("toolchains/python/interpreters"))
+        .into_iter()
+        .take(16)
+    {
         if py_dir.join("bin/python3").is_file() {
             out.push(IdePythonVenvInfo {
                 version: py_dir
@@ -1054,7 +1754,7 @@ fn discover_local_python_venvs(root: &Path, data_dir: &Path) -> Vec<IdePythonVen
                 ("poetry", home.join("Library/Caches/pypoetry/virtualenvs")),
                 ("poetry", home.join(".cache/pypoetry/virtualenvs")),
             ] {
-                for d in read_subdirs(&parent) {
+                for d in read_subdirs(&parent).into_iter().take(12) {
                     if d.join("bin/python").is_file() {
                         out.push(IdePythonVenvInfo {
                             version: read_pyvenv_version(&d).unwrap_or_else(|| "3".into()),
@@ -1107,7 +1807,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sqlite_crud_redacts_secrets_and_injects_effective_env() {
+    async fn sqlite_crud_redacts_secrets_preserves_multiroot_and_layers_intellij_env_order() {
         let tmp = tempfile::tempdir().unwrap();
         let pool = otto_state::db::open(&tmp.path().join("test.db"))
             .await
@@ -1115,17 +1815,27 @@ mod tests {
         let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
         std::fs::write(
             tmp.path().join(".env"),
-            "FROM_DOTENV=\"hello\\nworld\"\nAPP_ENV=dev\n",
+            "FROM_DOTENV=\"hello\\nworld\"\nAPP_ENV=dev\nCFG_WIN=from_dotenv\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join(".env.qa"),
+            "CFG_WIN=from_cfg_env_file\nQA_ONLY=1\n",
         )
         .unwrap();
 
+        let sibling = tmp.path().join("go_casino_kit");
+        std::fs::create_dir_all(&sibling).unwrap();
+
         let mgr = EnvironmentManager::new(tmp.path().join("data"));
-        let target = IdeTargetSpec {
-            kind: IdeTargetKind::Local,
-            root: tmp.path().to_string_lossy().into_owned(),
-            workspace_id: None,
-            connection_id: None,
-        };
+        let target = IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned());
+
+        // Attach sibling folder and ensure subsequent PUT omitting additional_roots preserves it!
+        let after_attach = mgr
+            .add_project_folder(&pool, &target, &sibling.to_string_lossy())
+            .await
+            .unwrap();
+        assert_eq!(after_attach.additional_roots.len(), 1);
 
         let saved = mgr
             .update_environment(
@@ -1140,6 +1850,8 @@ mod tests {
                     python_interpreter: None,
                     dotenv_path: Some(".env".into()),
                     extra_path: Some("/custom/bin".into()),
+                    inherit_shell_env: None,
+                    additional_roots: None,
                     env_vars: vec![
                         IdeEnvVarEntry {
                             key: "APP_ENV".into(),
@@ -1159,6 +1871,8 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(saved.additional_roots.len(), 1);
+        assert!(saved.inherit_shell_env);
         let sec_entry = saved
             .env_vars
             .iter()
@@ -1173,19 +1887,9 @@ mod tests {
             .unwrap();
         assert!(!raw.contains("sk_test_super_secret"));
 
-        let eff = mgr
-            .effective_env(&pool, secrets.as_ref(), &target)
-            .await
-            .unwrap();
-        assert_eq!(eff.get("FROM_DOTENV").unwrap(), "hello\nworld");
-        assert_eq!(eff.get("APP_ENV").unwrap(), "staging");
-        assert_eq!(
-            eff.get("STRIPE_API_SECRET").unwrap(),
-            "sk_test_super_secret"
-        );
-        assert_eq!(eff.get("JAVA_HOME").unwrap(), "/opt/jdk-21");
-        assert!(eff.get("PATH").unwrap().starts_with("/custom/bin:"));
-
+        // Verify strict IntelliJ precedence with Run Config env_file + env_overrides + sdk_path:
+        let mut overrides = BTreeMap::new();
+        overrides.insert("APP_ENV".into(), "override_wins".into());
         let rc = mgr
             .upsert_run_config(
                 &pool,
@@ -1195,25 +1899,54 @@ mod tests {
                         id: "rc_1".into(),
                         name: "Go Suite".into(),
                         runner: IdeRunnerKind::GoTest,
-                        command: None,
                         args: vec!["./calc/...".into()],
-                        cwd: None,
-                        env_overrides: BTreeMap::new(),
-                        before_launch: None,
-                        target_path: None,
-                        test_filter: None,
+                        build_flags: vec!["-race".into()],
+                        env_overrides: overrides,
+                        env_file: Some(".env.qa".into()),
+                        sdk_path: Some("/opt/go-1.25".into()),
+                        ..Default::default()
                     },
                 },
             )
             .await
             .unwrap();
-        assert_eq!(mgr.list_run_configs(&pool, &target).await.unwrap().len(), 1);
+
+        let eff = mgr
+            .build_effective_env_for_run(&pool, secrets.as_ref(), &target, Some(&rc))
+            .await
+            .unwrap();
+        assert_eq!(eff.get("FROM_DOTENV").unwrap(), "hello\nworld");
+        assert_eq!(eff.get("QA_ONLY").unwrap(), "1");
+        assert_eq!(eff.get("CFG_WIN").unwrap(), "from_cfg_env_file");
+        assert_eq!(eff.get("APP_ENV").unwrap(), "override_wins");
+        assert_eq!(
+            eff.get("STRIPE_API_SECRET").unwrap(),
+            "sk_test_super_secret"
+        );
+        assert_eq!(eff.get("GOROOT").unwrap(), "/opt/go-1.25");
+        assert_eq!(eff.get("JAVA_HOME").unwrap(), "/opt/jdk-21");
+        assert!(eff
+            .get("PATH")
+            .unwrap()
+            .starts_with("/custom/bin:/opt/go-1.25/bin:"));
+
+        let loaded_rc = mgr.get_run_config(&pool, &rc.id).await.unwrap();
+        assert_eq!(loaded_rc.build_flags, vec!["-race"]);
+        assert_eq!(loaded_rc.env_file.as_deref(), Some(".env.qa"));
+        assert_eq!(loaded_rc.sdk_path.as_deref(), Some("/opt/go-1.25"));
+
         mgr.delete_run_config(&pool, &rc.id).await.unwrap();
         assert!(mgr
             .list_run_configs(&pool, &target)
             .await
             .unwrap()
             .is_empty());
+
+        let after_detach = mgr
+            .remove_project_folder(&pool, &target, &sibling.to_string_lossy())
+            .await
+            .unwrap();
+        assert!(after_detach.additional_roots.is_empty());
     }
 
     #[test]
@@ -1222,7 +1955,8 @@ mod tests {
         use crate::types::IdeRunStatus;
 
         let mgr = EnvironmentManager::new(PathBuf::from("/tmp/otto-ide-test"));
-        for i in 0..24u64 {
+        let total_finished = (MAX_FINISHED_RUNS + 8) as u64;
+        for i in 0..total_finished {
             let (stop_tx, _) = watch::channel(false);
             let id = format!("run_fin_{i:02}");
             let handle = Arc::new(ActiveRunHandle {
@@ -1267,7 +2001,7 @@ mod tests {
         for i in 0..8 {
             assert!(mgr.get_run(&format!("run_fin_{i:02}")).is_err());
         }
-        for i in 8..24 {
+        for i in 8..total_finished {
             assert!(mgr.get_run(&format!("run_fin_{i:02}")).is_ok());
         }
     }

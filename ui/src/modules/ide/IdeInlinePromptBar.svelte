@@ -1,16 +1,34 @@
 <script lang="ts">
   // Contextual inline AI edit bar (`⌘I`): anchored at the top of the active
-  // code editor for quick selection edits with an inline unified diff preview,
-  // Accept / Discard, or 1-click handoff into the side-by-side Agent panel.
+  // code editor for quick selection edits across the full Threads harness &
+  // model catalog, with inline unified diff preview, Accept / Discard, or
+  // 1-click handoff into the side-by-side Agent panel.
   import { announceShown } from '../../lib/announce.svelte';
+  import { copyWithToast } from '../../lib/clipboard';
   import Badge from '../../lib/components/Badge.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import { copyWithToast } from '../../lib/clipboard';
+  import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
   import { focusOnMount } from '../../lib/focusOnMount';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  import { formatEffortShort, formatModelLabel, normalizeEffort, supportsEffortSelection } from '../../lib/providerModels';
+  import { harnessLabel } from '../../lib/providers';
+  import { auth } from '../../lib/stores/auth.svelte';
   import { ide } from './ideStore.svelte';
   import { ideAgent } from './store/ideAgentController.svelte';
 
+  const ModelPicker = lazyComponent(() => import('../../lib/components/ModelPickerPopover.svelte'));
+
   const readOnly = $derived(!ide.canEditCollab || Boolean(ide.activeTab?.readOnly));
+  let pickerOpen = $state(false);
+  let providerBtnEl = $state<HTMLButtonElement | null>(null);
+
+  const inlineAgentLabel = $derived.by(() => {
+    const st = ideAgent.inlinePrompt;
+    if (!st) return '';
+    const base = st.model ? formatModelLabel(st.provider, st.model, auth.meta) : harnessLabel(st.provider);
+    const eff = normalizeEffort(st.effort);
+    return supportsEffortSelection(st.provider) && eff ? `${base} · ${formatEffortShort(eff)}` : base;
+  });
 
   function restoreEditorFocus(): void {
     requestAnimationFrame(() => {
@@ -19,6 +37,7 @@
   }
 
   function closeInlineBar(): void {
+    pickerOpen = false;
     ideAgent.closeInlineEdit();
     restoreEditorFocus();
   }
@@ -41,6 +60,7 @@
   }
 
   function handoffToChat(): void {
+    pickerOpen = false;
     ideAgent.handoffInlineToChat();
     let tries = 0;
     const step = (): void => {
@@ -82,6 +102,27 @@
       {/key}
 
       <div class="ip-actions">
+        <button
+          bind:this={providerBtnEl}
+          type="button"
+          class="btn small ghost ip-model-btn"
+          aria-haspopup="dialog"
+          aria-expanded={pickerOpen}
+          aria-label="Inline edit model: {inlineAgentLabel}"
+          title="Switch provider, model, and reasoning effort"
+          disabled={st.busy}
+          onpointerenter={() => ModelPicker.prefetch()}
+          onclick={() => { ModelPicker.prefetch(); pickerOpen = true; }}
+          data-testid="ide-inline-provider"
+        >
+          {#if hasProviderIcon(st.provider)}
+            <ProviderIcon provider={st.provider} size={12} />
+          {:else}
+            <Icon name="assistant" size={12} />
+          {/if}
+          <span class="ellipsis">{inlineAgentLabel}</span>
+        </button>
+
         <button
           type="button"
           class="btn small ip-cta"
@@ -182,6 +223,21 @@
       </div>
     {/if}
   </div>
+
+  {#if pickerOpen && providerBtnEl && ModelPicker.component}
+    <ModelPicker.component
+      anchor={providerBtnEl}
+      providers={ideAgent.inlineProviders}
+      provider={st.provider}
+      model={st.model}
+      effort={normalizeEffort(st.effort)}
+      mode={ideAgent.interactionMode}
+      onprovider={(p) => ideAgent.setInlineProvider(p)}
+      onmodel={(m) => ideAgent.setInlineModel(m)}
+      oneffort={supportsEffortSelection(st.provider) ? (e) => ideAgent.setInlineEffort(e) : undefined}
+      onclose={() => (pickerOpen = false)}
+    />
+  {/if}
 {/if}
 
 <style>
@@ -229,6 +285,9 @@
     gap: 4px;
     margin-inline-start: auto;
     flex-shrink: 0;
+  }
+  .ip-model-btn {
+    max-inline-size: 160px;
   }
   .ip-cta {
     background: var(--accent-soft);

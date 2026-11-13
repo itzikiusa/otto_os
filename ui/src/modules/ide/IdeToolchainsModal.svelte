@@ -1,18 +1,22 @@
 <script lang="ts">
   // SDKs, Toolchains & Debuggers Manager modal for the Otto Full IDE.
-  // Detects target machine OS + CPU architecture (Local or Remote SSH) and provides
-  // 1-click installation for SDKs, LSP servers, and DAP debug adapters across
-  // Java, Go, Rust, JavaScript/TypeScript (Node), and Python.
+  // Detects target machine OS + CPU architecture (Local or Remote SSH), browses official
+  // release versions (`include_catalog=true`), supports 1-click Download & Install with
+  // live progress for SDKs, LSP servers (`gopls`, `jdtls`, `rust-analyzer`, …), and DAP
+  // debuggers (`dlv`, `debugpy`, `codelldb`, …), plus Add Local SDK from Disk.
   import Modal from '../../lib/components/Modal.svelte';
   import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { announceShown } from '../../lib/announce.svelte';
   import { copyWithToast } from '../../lib/clipboard';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { runStatus } from '../../lib/status';
+  import { toasts } from '../../lib/toast.svelte';
   import {
     ide,
     type IdeInstalledSdk,
@@ -26,23 +30,56 @@
   }
 
   let { open, onclose }: Props = $props();
-  type EcoId = 'java' | 'go' | 'rust' | 'node' | 'python';
+
+  const BASE_ECOS: readonly { id: string; label: string }[] = [
+    { id: 'go', label: 'Go' },
+    { id: 'java', label: 'Java' },
+    { id: 'rust', label: 'Rust' },
+    { id: 'node', label: 'JavaScript / TypeScript (Node)' },
+    { id: 'python', label: 'Python' },
+  ];
 
   const isOpen = $derived(open === undefined ? ide.toolchainsOpen : open);
 
-  let activeEco = $state<EcoId>('java');
+  let activeEco = $state<string>('go');
   let selectedVersions = $state<Record<string, string>>({});
   let expandedLogs = $state<Record<string, boolean>>({});
   let busyKey = $state<string | null>(null);
+  let localSdkPickerOpen = $state(false);
+  let initializedForOpen = false;
 
   function close(): void {
     ide.toolchainsOpen = false;
     onclose?.();
   }
 
+  function defaultEcoFromWorkspace(): string {
+    const lang = ide.activeTab?.language;
+    if (lang === 'java') return 'java';
+    if (lang === 'rust') return 'rust';
+    if (lang === 'python') return 'python';
+    if (lang === 'typescript' || lang === 'javascript') return 'node';
+    if (lang === 'go') return 'go';
+    const names = new Set(ide.treeRootEntries.map((e) => e.name));
+    if (names.has('go.mod')) return 'go';
+    if (names.has('pom.xml') || names.has('build.gradle') || names.has('build.gradle.kts')) return 'java';
+    if (names.has('Cargo.toml')) return 'rust';
+    if (names.has('pyproject.toml') || names.has('requirements.txt')) return 'python';
+    if (names.has('package.json')) return 'node';
+    return 'go';
+  }
+
   $effect(() => {
-    if (!isOpen || !ide.hasTarget) return;
-    void ide.loadToolchains();
+    if (!isOpen) {
+      initializedForOpen = false;
+      return;
+    }
+    if (!initializedForOpen) {
+      initializedForOpen = true;
+      activeEco = defaultEcoFromWorkspace();
+    }
+    if (!ide.hasTarget) return;
+    void ide.loadToolchains({ includeCatalog: true });
     if (!ide.projectEnv && !ide.envLoading) {
       void ide.loadEnvironments();
     }
@@ -70,18 +107,26 @@
   );
   const platformBadgeText = $derived(`${formatOsLabel(ide.targetOs)} · ${formatArchLabel(ide.targetArch)}`);
 
-  function countInstalled(id: EcoId): number | undefined {
+  function countInstalled(id: string): number | undefined {
     const n = ide.toolchains.find((e) => e.ecosystem === id)?.installed.length ?? 0;
     return n > 0 ? n : undefined;
   }
 
-  const ecoTabs = $derived<readonly TabItem<EcoId>[]>([
-    { id: 'java', label: 'Java', count: countInstalled('java') },
-    { id: 'go', label: 'Go', count: countInstalled('go') },
-    { id: 'rust', label: 'Rust', count: countInstalled('rust') },
-    { id: 'node', label: 'JavaScript / TypeScript (Node)', count: countInstalled('node') },
-    { id: 'python', label: 'Python', count: countInstalled('python') },
-  ]);
+  const ecoTabs = $derived.by((): readonly TabItem<string>[] => {
+    const baseIds = new Set(BASE_ECOS.map((b) => b.id));
+    const tabs: TabItem<string>[] = BASE_ECOS.map((b) => ({
+      id: b.id,
+      label: b.label,
+      count: countInstalled(b.id),
+    }));
+    for (let i = 0; i < ide.toolchains.length; i++) {
+      const t = ide.toolchains[i];
+      if (!baseIds.has(t.ecosystem)) {
+        tabs.push({ id: t.ecosystem, label: t.display_name || t.ecosystem, count: countInstalled(t.ecosystem) });
+      }
+    }
+    return tabs;
+  });
 
   const currentEco = $derived<IdeToolchainEcosystem | null>(
     ide.toolchains.find((e) => e.ecosystem === activeEco) ?? ide.toolchains[0] ?? null,
@@ -112,21 +157,58 @@
     return false;
   }
 
+  async function applySdkPathInProject(ecosystem: string, pathOrVersion: string): Promise<void> {
+    const patch =
+      ecosystem === 'java'
+        ? { java_home: pathOrVersion }
+        : ecosystem === 'go'
+          ? { go_root: pathOrVersion }
+          : ecosystem === 'rust'
+            ? { rust_toolchain: pathOrVersion }
+            : ecosystem === 'node'
+              ? { node_home: pathOrVersion }
+              : ecosystem === 'python'
+                ? { python_interpreter: pathOrVersion }
+                : null;
+    if (patch) await ide.saveEnvironment(patch);
+  }
+
   async function useSdkInProject(ecosystem: string, sdk: IdeInstalledSdk): Promise<void> {
     busyKey = `use:${sdk.id}`;
     try {
-      const patch =
-        ecosystem === 'java'
-          ? { java_home: sdk.path }
-          : ecosystem === 'go'
-            ? { go_root: sdk.path }
-            : ecosystem === 'rust'
-              ? { rust_toolchain: sdk.version }
-              : ecosystem === 'node'
-                ? { node_home: sdk.path }
-                : { python_interpreter: sdk.path };
-      await ide.saveEnvironment(patch);
-      await ide.loadToolchains();
+      await applySdkPathInProject(ecosystem, ecosystem === 'rust' ? sdk.version : sdk.path);
+      await ide.loadToolchains({ includeCatalog: true });
+    } finally {
+      busyKey = null;
+    }
+  }
+
+  async function handleAddLocalSdk(): Promise<void> {
+    const eco = currentEco?.ecosystem ?? activeEco;
+    if (ide.target.kind === 'ssh') {
+      const remotePath = await confirmer.promptText(`Path to ${currentEco?.display_name ?? eco} SDK root on remote host`, {
+        title: 'Add SDK from remote path',
+        confirmLabel: 'Register SDK',
+        placeholder: '/usr/local/go',
+      });
+      if (remotePath) await registerPickedSdk(eco, remotePath.trim());
+      return;
+    }
+    localSdkPickerOpen = true;
+  }
+
+  async function registerPickedSdk(ecosystem: string, sdkPath: string): Promise<void> {
+    if (!sdkPath) return;
+    busyKey = `local:${ecosystem}`;
+    try {
+      const registered = await ide.addLocalToolchain(ecosystem, sdkPath);
+      if (registered) {
+        await applySdkPathInProject(ecosystem, ecosystem === 'rust' ? registered.version : registered.path);
+        toasts.success(`Added ${ecosystem.toUpperCase()} SDK`, registered.version || registered.path);
+      } else {
+        await applySdkPathInProject(ecosystem, sdkPath);
+      }
+      await ide.loadToolchains({ includeCatalog: true });
     } finally {
       busyKey = null;
     }
@@ -158,7 +240,7 @@
 </script>
 
 {#if isOpen}
-  <Modal title="SDKs, toolchains & debuggers" width={720} dismissable={!busyKey} onclose={close}>
+  <Modal title="SDKs, toolchains & debuggers" width={760} dismissable={!busyKey} onclose={close}>
     <div class="tc-shell">
       <div class="tc-arch-banner">
         <div class="tc-arch-main">
@@ -171,7 +253,7 @@
               <Badge tone="accent" label={platformBadgeText} />
             </div>
             <p class="tc-arch-sub">
-              Downloads, language servers, and debug adapters are matched to this machine’s OS and CPU architecture.
+              Official SDK archives, language servers, and debug adapters matched to this machine’s OS and CPU architecture.
             </p>
           </div>
         </div>
@@ -179,7 +261,7 @@
           type="button"
           class="btn small ghost"
           disabled={ide.toolchainsLoading || !ide.hasTarget}
-          onclick={() => ide.loadToolchains()}
+          onclick={() => ide.loadToolchains({ includeCatalog: true })}
         >
           <Icon name="refresh" size={12} />
           Refresh
@@ -198,10 +280,10 @@
       {:else}
         <LoadState
           what="toolchains"
-          loading={ide.toolchainsLoading}
+          loading={ide.toolchainsLoading && ide.toolchains.length === 0}
           error={ide.toolchainsError}
           empty={ide.toolchains.length === 0}
-          onretry={() => ide.loadToolchains()}
+          onretry={() => ide.loadToolchains({ includeCatalog: true })}
         >
           {#snippet emptyView()}
             <EmptyState
@@ -210,7 +292,7 @@
               body="Probe this target to inspect installed SDKs and architecture-matched downloads."
               actionLabel="Probe target"
               actionKind="secondary"
-              onaction={() => ide.loadToolchains()}
+              onaction={() => ide.loadToolchains({ includeCatalog: true })}
             />
           {/snippet}
 
@@ -220,13 +302,25 @@
             <div class="tc-panel" role="tabpanel" id="ide-tc-panel-{activeEco}" aria-labelledby="ide-tc-tab-{activeEco}">
               <section class="tc-section" aria-labelledby="tc-sdk-heading">
                 <div class="tc-sec-head">
-                  <h3 id="tc-sdk-heading" class="tc-sec-title">Installed {currentEco.display_name} SDKs</h3>
-                  <span class="tc-sec-meta">{currentEco.installed.length} detected</span>
+                  <div class="tc-sec-title-group">
+                    <h3 id="tc-sdk-heading" class="tc-sec-title">Installed {currentEco.display_name} SDKs</h3>
+                    <span class="tc-sec-meta">{currentEco.installed.length} detected</span>
+                  </div>
+                  <button
+                    type="button"
+                    class="btn small"
+                    disabled={busyKey === `local:${currentEco.ecosystem}`}
+                    onclick={() => void handleAddLocalSdk()}
+                    data-testid="ide-add-local-sdk-btn"
+                  >
+                    <Icon name="folder" size={12} />
+                    Add local SDK…
+                  </button>
                 </div>
 
                 {#if currentEco.installed.length === 0}
                   <div class="tc-empty-note">
-                    No {currentEco.display_name} SDK detected on this machine yet. Pick a version below to download and install one under Otto’s managed toolchains.
+                    No {currentEco.display_name} SDK detected yet. Download an official release below or add an existing SDK from disk.
                   </div>
                 {:else}
                   <div class="tc-sdk-list">
@@ -236,7 +330,10 @@
                         <div class="tc-sdk-info">
                           <div class="tc-sdk-top">
                             <span class="tc-sdk-ver">{sdk.version}</span>
-                            <Badge tone={sdk.source === 'otto' ? 'accent' : 'neutral'} label={sdk.source === 'otto' ? 'Otto managed' : 'System'} />
+                            <Badge
+                              tone={sdk.source === 'otto' ? 'accent' : 'neutral'}
+                              label={sdk.source === 'otto' ? 'Otto managed' : sdk.source === 'custom' ? 'Local disk' : 'System'}
+                            />
                             {#if active}<Badge tone="ok" dot label="Active" />{/if}
                           </div>
                           <div class="tc-sdk-path-row">
@@ -289,11 +386,7 @@
                       onclick={() => triggerInstall(currentEco.ecosystem, 'lsp')}
                     >
                       <Icon name="download" size={12} />
-                      {busyKey === `install:${currentEco.ecosystem}:lsp`
-                        ? 'Installing…'
-                        : currentEco.lsp_status.available
-                          ? 'Reinstall LSP'
-                          : 'Install LSP'}
+                      {busyKey === `install:${currentEco.ecosystem}:lsp` ? 'Installing…' : currentEco.lsp_status.available ? 'Reinstall LSP' : 'Install LSP'}
                     </button>
                   </div>
                 </section>
@@ -320,11 +413,7 @@
                       onclick={() => triggerInstall(currentEco.ecosystem, 'dap')}
                     >
                       <Icon name="bug" size={12} />
-                      {busyKey === `install:${currentEco.ecosystem}:dap`
-                        ? 'Installing…'
-                        : currentEco.dap_status.available
-                          ? 'Reinstall debugger'
-                          : 'Install debugger'}
+                      {busyKey === `install:${currentEco.ecosystem}:dap` ? 'Installing…' : currentEco.dap_status.available ? 'Reinstall debugger' : 'Install debugger'}
                     </button>
                   </div>
                 </section>
@@ -332,12 +421,14 @@
 
               <section class="tc-section" aria-labelledby="tc-dl-heading">
                 <div class="tc-sec-head">
-                  <h3 id="tc-dl-heading" class="tc-sec-title">Download new SDK version</h3>
-                  <Badge tone="info" variant="outline" label={`${ide.targetOs}/${ide.targetArch}`} />
+                  <h3 id="tc-dl-heading" class="tc-sec-title">Download official SDK version</h3>
+                  <Badge tone="info" variant="outline" label={`${ide.targetOs || 'macos'}/${ide.targetArch || 'arm64'}`} />
                 </div>
 
                 {#if currentEco.downloadable.length === 0}
-                  <div class="tc-empty-note">No prebuilt SDK archives listed for {ide.targetOs}/{ide.targetArch}.</div>
+                  <div class="tc-empty-note">
+                    {ide.toolchainsLoading ? 'Loading official release catalog…' : `No prebuilt SDK archives listed for ${ide.targetOs}/${ide.targetArch}.`}
+                  </div>
                 {:else}
                   <div class="tc-dl-bar">
                     <div class="tc-dl-picker">
@@ -347,6 +438,7 @@
                         class="input"
                         value={selectedDownloadVersion}
                         onchange={(e) => { selectedVersions = { ...selectedVersions, [currentEco.ecosystem]: e.currentTarget.value }; }}
+                        data-testid="ide-sdk-version-select"
                       >
                         {#each currentEco.downloadable as dl (dl.version)}
                           <option value={dl.version}>
@@ -369,6 +461,7 @@
                         class="btn primary"
                         disabled={!selectedDownloadVersion || busyKey === `install:${currentEco.ecosystem}:sdk`}
                         onclick={() => triggerInstall(currentEco.ecosystem, 'sdk', selectedDownloadVersion)}
+                        data-testid="ide-sdk-download-btn"
                       >
                         <Icon name="download" size={13} />
                         {busyKey === `install:${currentEco.ecosystem}:sdk` ? 'Downloading…' : 'Download & install'}
@@ -381,6 +474,7 @@
                       <span>{selectedDownloadItem.label}</span>
                       {#if selectedDownloadItem.lts}<Badge tone="accent" label="LTS" />{/if}
                       <Badge tone="neutral" variant="outline" label={`${selectedDownloadItem.os} · ${selectedDownloadItem.arch}`} />
+                      {#if selectedDownloadItem.sha256}<Badge tone="ok" variant="outline" label="SHA-256 verified" />{/if}
                       {#if selectedDownloadItem.size_hint}<span class="tc-dim">{selectedDownloadItem.size_hint}</span>{/if}
                       <code class="tc-mono-url" dir="ltr">{selectedDownloadItem.url}</code>
                     </div>
@@ -456,77 +550,59 @@
       <button type="button" class="btn ghost" onclick={close}>Done</button>
     {/snippet}
   </Modal>
+
+  {#if localSdkPickerOpen}
+    <FolderPicker
+      title="Select local {currentEco?.display_name ?? activeEco} SDK directory"
+      start="/opt/homebrew"
+      onpick={(picked) => {
+        localSdkPickerOpen = false;
+        void registerPickedSdk(currentEco?.ecosystem ?? activeEco, picked);
+      }}
+      onclose={() => (localSdkPickerOpen = false)}
+    />
+  {/if}
 {/if}
 
 <style>
-  .tc-shell { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  .tc-shell { display: flex; flex-direction: column; gap: 14px; min-inline-size: 0; }
   .tc-arch-banner {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 10px 12px;
-    border-radius: var(--radius-m);
-    background: var(--surface-2);
-    border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 10px 12px; border-radius: var(--radius-m); background: var(--surface-2); border: 1px solid var(--border);
   }
-  .tc-arch-main { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+  .tc-arch-main { display: flex; align-items: flex-start; gap: 10px; min-inline-size: 0; }
   .tc-arch-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 32px;
-    height: 32px;
-    border-radius: var(--radius-s);
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    flex-shrink: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    inline-size: 32px; block-size: 32px; border-radius: var(--radius-s);
+    background: var(--accent-soft); color: var(--accent-text); flex-shrink: 0;
   }
-  .tc-arch-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .tc-arch-copy { display: flex; flex-direction: column; gap: 2px; min-inline-size: 0; }
   .tc-arch-headline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
   .tc-arch-target { font-size: var(--fs-m); font-weight: 600; color: var(--text); }
   .tc-arch-sub { margin: 0; font-size: var(--fs-xs); color: var(--text-dim); }
-  .tc-panel { display: flex; flex-direction: column; gap: 12px; padding-block-start: 4px; min-width: 0; }
+  .tc-panel { display: flex; flex-direction: column; gap: 12px; padding-block-start: 4px; min-inline-size: 0; }
 
-  .tc-section,
-  .tc-tool-box {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 12px;
-    border-radius: var(--radius-m);
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    min-width: 0;
+  .tc-section, .tc-tool-box {
+    display: flex; flex-direction: column; gap: 8px; padding: 12px;
+    border-radius: var(--radius-m); background: var(--surface-2); border: 1px solid var(--border); min-inline-size: 0;
   }
-  .tc-sec-head, .tc-tool-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .tc-sec-head, .tc-tool-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+  .tc-sec-title-group { display: flex; align-items: center; gap: 8px; }
   .tc-sec-title { margin: 0; font-size: var(--fs-s); font-weight: 600; color: var(--text); }
   .tc-sec-meta, .tc-dim { font-size: var(--fs-xs); color: var(--text-dim); }
   .tc-empty-note { font-size: var(--fs-s); color: var(--text-dim); padding-block: 4px; }
   .tc-sdk-list { display: flex; flex-direction: column; gap: 6px; }
   .tc-sdk-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    padding: 8px 10px;
-    border-radius: var(--radius-s);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    min-width: 0;
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 8px 10px; border-radius: var(--radius-s); background: var(--surface); border: 1px solid var(--border); min-inline-size: 0;
   }
-  .tc-sdk-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+  .tc-sdk-info { display: flex; flex-direction: column; gap: 2px; min-inline-size: 0; flex: 1; }
   .tc-sdk-top { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
   .tc-sdk-ver { font-size: var(--fs-m); font-weight: 600; color: var(--text); }
-  .tc-sdk-path-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
+  .tc-sdk-path-row { display: flex; align-items: center; gap: 4px; min-inline-size: 0; }
   .tc-mono-path {
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
+    font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0;
   }
 
   .tc-tools-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
@@ -535,30 +611,20 @@
   .tc-tool-actions { display: flex; align-items: center; gap: 6px; margin-block-start: auto; padding-block-start: 4px; }
 
   .tc-dl-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-  .tc-dl-picker { flex: 1; min-width: 220px; }
+  .tc-dl-picker { flex: 1; min-inline-size: 220px; }
   .tc-dl-picker select { inline-size: 100%; }
   .tc-dl-btns { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-  .tc-dl-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--text-dim); min-width: 0; }
+  .tc-dl-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--text-dim); min-inline-size: 0; }
   .tc-mono-url {
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-inline-size: 100%;
+    font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-inline-size: 100%;
   }
 
   .tc-jobs { display: flex; flex-direction: column; gap: 8px; padding-block-start: 4px; border-block-start: 1px solid var(--border); }
   .tc-job-list { display: flex; flex-direction: column; gap: 8px; }
   .tc-job-item {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding: 10px 12px;
-    border-radius: var(--radius-m);
-    background: var(--surface-2);
-    border: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 6px; padding: 10px 12px;
+    border-radius: var(--radius-m); background: var(--surface-2); border: 1px solid var(--border);
   }
   .tc-job-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
   .tc-job-title, .tc-job-right { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
@@ -568,21 +634,13 @@
   .tc-prog-fill { block-size: 100%; border-radius: 999px; background: var(--accent-solid); }
   .tc-prog-fill.is-done { background: var(--success); }
   .tc-prog-fill.is-error { background: var(--danger-solid); }
-  .tc-job-path { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .tc-job-path { display: flex; align-items: center; gap: 6px; min-inline-size: 0; }
   .tc-job-err { font-size: var(--fs-xs); color: var(--danger); }
   .tc-job-log {
-    margin: 0;
-    padding: 8px 10px;
-    max-block-size: 160px;
-    overflow: auto;
-    border-radius: var(--radius-s);
-    background: var(--term-bg);
-    border: 1px solid var(--border);
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    color: var(--text);
-    white-space: pre-wrap;
-    word-break: break-word;
+    margin: 0; padding: 8px 10px; max-block-size: 160px; overflow: auto;
+    border-radius: var(--radius-s); background: var(--term-bg); border: 1px solid var(--border);
+    font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text);
+    white-space: pre-wrap; word-break: break-word;
   }
   .tc-sr-label { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 

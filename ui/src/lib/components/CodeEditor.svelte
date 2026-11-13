@@ -12,7 +12,7 @@
   } from '@codemirror/state';
   import { defaultKeymap, history, historyField, historyKeymap, selectAll } from '@codemirror/commands';
   import {
-    loadEditorState, prepareEditorHistory, registerLiveParker, saveEditorState, PERSIST_MAX_BYTES,
+    forgetEditorState, loadEditorState, prepareEditorHistory, registerLiveParker, saveEditorState, PERSIST_MAX_BYTES,
   } from '../editor-history';
   import { search, searchKeymap, openSearchPanel } from '@codemirror/search';
   import {
@@ -75,7 +75,8 @@
     oncopy?: ((text: string) => void) | null; lsp?: boolean; sqlDialect?: SqlDialectName; highlightLineLimit?: number;
     // Pro IDE props (all optional; cm-ide-extensions lazy-loads when active).
     ideMode?: boolean; connectionId?: string | null; savedContent?: string | null;
-    breakpoints?: IdeBreakpoint[];
+    breakpoints?: IdeBreakpoint[]; breakpointsMuted?: boolean;
+    blameByLine?: Record<number, string> | null;
     onToggleBreakpoint?: ((line: number) => void) | null;
     onEditBreakpoint?: ((line: number, event?: MouseEvent) => void) | null;
     gutterItems?: IdeGutterItem[];
@@ -86,9 +87,16 @@
     jumpToLine?: { line: number; column?: number | null; seq?: number } | number | null;
     onCursorChange?: ((info: CursorChangeInfo) => void) | null;
     onDefinitionJump?: ((target: { path?: string; line: number; column: number; symbol?: string }) => void) | null;
+    onImplementationJump?: ((target: { path?: string; line: number; column: number; symbol?: string }) => void) | null;
+    onFindUsages?: ((ctx: { line: number; column: number; symbol?: string }) => void) | null;
+    onFileStructure?: (() => void) | null;
+    onJumpSymbol?: ((delta: -1 | 1) => void) | null;
+    onNavigateBack?: (() => void) | null;
+    onNavigateForward?: (() => void) | null;
     onQuickFix?: ((ctx: { line: number; column: number; symbol?: string }) => void) | null;
     onRenameSymbol?: ((ctx: { line: number; column: number; symbol: string }) => void) | null;
     onFormat?: (() => void) | null;
+    onToggleBlame?: (() => void) | null;
     onDiagnostics?: ((diags: IdeDiagnostic[]) => void) | null;
     onAgentAction?: ((mode: 'chat' | 'inline', sel: CmIdeMod.IdeEditorSelectionRange) => void) | null;
   }
@@ -98,10 +106,13 @@
     minimal = false, onsubmit, onselect, gotoLine = null, gotoCol = null, findOwner = true, placeholder = '',
     wrap = false, keepStates = false, historyKey = null, oncopy = null, lsp = false, sqlDialect = 'standard',
     highlightLineLimit = 0, ideMode = false, connectionId = null, savedContent = null, breakpoints = [],
+    breakpointsMuted = false, blameByLine = null,
     onToggleBreakpoint = null, onEditBreakpoint = null, gutterItems = [], onGutterAction = null,
     pausedLine = null, inlineValues = [], peerCursors = [], keymapPreset = 'jetbrains', jumpToLine = null,
-    onCursorChange = null, onDefinitionJump = null, onQuickFix = null,
-    onRenameSymbol = null, onFormat = null, onDiagnostics = null, onAgentAction = null,
+    onCursorChange = null, onDefinitionJump = null, onImplementationJump = null,
+    onFindUsages = null, onFileStructure = null, onJumpSymbol = null, onNavigateBack = null, onNavigateForward = null,
+    onQuickFix = null, onRenameSymbol = null, onFormat = null, onToggleBlame = null,
+    onDiagnostics = null, onAgentAction = null,
   }: Props = $props();
 
   let container: HTMLDivElement | undefined = $state();
@@ -133,26 +144,30 @@
 
   function isIdeActive(): boolean {
     return Boolean(
-      ideMode || savedContent != null || onAgentAction || breakpoints.length > 0 || gutterItems.length > 0 ||
-      pausedLine != null || inlineValues.length > 0 || peerCursors.length > 0 ||
-      onToggleBreakpoint || onGutterAction || onDefinitionJump || onQuickFix || onRenameSymbol || onFormat,
+      ideMode || savedContent != null || blameByLine != null || onAgentAction || breakpoints.length > 0 ||
+      gutterItems.length > 0 || pausedLine != null || inlineValues.length > 0 || peerCursors.length > 0 ||
+      onToggleBreakpoint || onGutterAction || onDefinitionJump || onImplementationJump ||
+      onFindUsages || onFileStructure || onQuickFix || onRenameSymbol || onFormat,
     );
   }
 
   function getIdeCallbacks(): CmIdeMod.IdeEditorCallbacks {
     return {
       onToggleBreakpoint, onEditBreakpoint, onGutterAction,
-      onDefinitionJump, onQuickFix, onRenameSymbol, onFormat, onDiagnostics, onAgentAction,
+      onDefinitionJump, onImplementationJump, onFindUsages, onFileStructure,
+      onJumpSymbol, onNavigateBack, onNavigateForward,
+      onQuickFix, onRenameSymbol, onFormat, onToggleBlame, onDiagnostics, onAgentAction,
     };
   }
 
-  function buildIdeExtIfLoaded(): Extension {
+  function buildIdeExtIfLoaded(forPath?: string): Extension {
     if (!ideMod || !isIdeActive()) { ideMounted = false; return []; }
     ideMounted = true;
     appliedKeymapPreset = keymapPreset;
     return ideMod.createIdeExtensions({
-      breakpoints, gutterItems, pausedLine, inlineValues, peerCursors, savedContent,
-      keymapPreset, getCallbacks: getIdeCallbacks,
+      filePath: forPath ?? (livePath || path),
+      breakpoints, breakpointsMuted, gutterItems, pausedLine, inlineValues, peerCursors,
+      savedContent, blameByLine, keymapPreset, getCallbacks: getIdeCallbacks,
     });
   }
 
@@ -224,15 +239,20 @@
 
   const EXT_TO_LSP_LANG: Record<string, string> = {
     js: 'javascript', jsx: 'javascriptreact', ts: 'typescript', tsx: 'typescriptreact',
-    mjs: 'javascript', cjs: 'javascript', py: 'python', go: 'go', rs: 'rust',
-    json: 'json', jsonc: 'json', html: 'html', htm: 'html', css: 'css', scss: 'scss',
-    less: 'less', md: 'markdown', mdx: 'markdown', java: 'java', kt: 'kotlin', kts: 'kotlin',
-    sh: 'shellscript', bash: 'shellscript', yaml: 'yaml', yml: 'yaml',
-    graphql: 'graphql', gql: 'graphql', proto: 'protobuf',
+    mjs: 'javascript', cjs: 'javascript', mts: 'typescript', cts: 'typescript',
+    py: 'python', pyi: 'python', go: 'go', rs: 'rust',
+    json: 'json', jsonc: 'json', jsonl: 'json', ndjson: 'json',
+    html: 'html', htm: 'html', css: 'css', scss: 'scss',
+    less: 'less', md: 'markdown', mdx: 'markdown',
+    java: 'java', class: 'java', kt: 'kotlin', kts: 'kotlin',
+    sh: 'shellscript', bash: 'shellscript', zsh: 'shellscript', bats: 'shellscript',
+    yaml: 'yaml', yml: 'yaml', graphql: 'graphql', gql: 'graphql', proto: 'protobuf',
   };
 
   function extOf(p: string): string {
-    const base = p.slice(p.lastIndexOf('/') + 1);
+    if (p.startsWith('jdt://')) return 'java';
+    const clean = p.split('?')[0];
+    const base = clean.slice(clean.lastIndexOf('/') + 1);
     const dot = base.lastIndexOf('.');
     return dot < 0 ? '' : base.slice(dot + 1).toLowerCase();
   }
@@ -336,7 +356,13 @@
   }
 
   function lspLangFor(filePath: string): string | null {
-    return EXT_TO_LSP_LANG[extOf(filePath)] ?? (ideMode && language ? language : null);
+    const ext = extOf(filePath);
+    if (ext === 'csv' || ext === 'tsv') return null;
+    if (EXT_TO_LSP_LANG[ext]) return EXT_TO_LSP_LANG[ext];
+    if (!ideMode || !language || language === 'csv' || language === 'tsv' || language === 'plaintext') return null;
+    if (language === 'shell') return 'shellscript';
+    if (language === 'jsonl') return 'json';
+    return language;
   }
 
   function lspWsUrl(lang: string, rootPath: string, connId?: string | null): string {
@@ -369,7 +395,7 @@
     if (keyContext.openFind === openEditorSearch) keyContext.openFind = null;
   }
 
-  // ── Attach LSP (with native WebSocket JSON-RPC fallback) ──────────────────
+  // ── Attach Pooled LSP (with native WebSocket JSON-RPC fallback) ───────────
 
   async function attachLsp(editorView: EditorView, filePath: string, rootPath: string, connId?: string | null): Promise<void> {
     try {
@@ -383,45 +409,25 @@
         }
         if (!caps?.servers.some((s) => s.lang === lspLang && s.available)) return;
       }
-      if (view !== editorView) return;
+      if (view !== editorView || livePath !== filePath) return;
 
       const wsUri = lspWsUrl(lspLang, rootPath, connId);
       const token = getToken();
       const protocols = token ? [WS_BEARER_SUBPROTOCOL, token] : undefined;
       const rootUri = `file://${rootPath}`;
-      const documentUri = `file://${filePath}`;
+      const documentUri = filePath.includes('://') ? filePath : `file://${filePath}`;
+      const mod = await ensureIdeMod();
+      if (view !== editorView || livePath !== filePath) return;
 
       try {
-        const { languageServerWithClient, LanguageServerClient, WebSocketTransport } = await import(
-          '@marimo-team/codemirror-languageserver'
-        );
-        if (view !== editorView) return;
-        const client = new LanguageServerClient({
-          rootUri, workspaceFolders: [{ name: 'workspace', uri: rootUri }],
-          transport: new WebSocketTransport(wsUri, protocols),
+        const lspExtensions = await mod.buildPooledLspExtensions({
+          wsUri, protocols, rootPath, connId, filePath, languageId: lspLang,
+          onLocationJump: handleLspJump, onDiagnostics,
         });
-        if (onDiagnostics) {
-          client.onNotification((n) => {
-            if (n.method === 'textDocument/publishDiagnostics' && n.params?.uri === documentUri) {
-              onDiagnostics((n.params.diagnostics ?? []).map((d) => ({
-                path: filePath, line: d.range.start.line + 1, column: d.range.start.character + 1,
-                end_line: d.range.end.line + 1, end_column: d.range.end.character + 1,
-                severity: d.severity === 1 ? 'error' : d.severity === 2 ? 'warning' : d.severity === 4 ? 'hint' : 'info',
-                message: typeof d.message === 'string' ? d.message : d.message.value,
-                source: d.source ?? null, code: d.code != null ? String(d.code) : null,
-              })));
-            }
-          });
-        }
-        const lspExtensions: Extension[] = languageServerWithClient({
-          client, documentUri, languageId: lspLang,
-          onGoToDefinition: (res) => handleLspJump(res.uri, res.range.start.line + 1, res.range.start.character + 1),
-          onShowLocation: (res) => handleLspJump(res.uri, res.range.start.line + 1, res.range.start.character + 1),
-        });
+        if (view !== editorView || livePath !== filePath) return;
         editorView.dispatch({ effects: lspCompartment.reconfigure(lspExtensions) });
       } catch {
-        const mod = await ensureIdeMod();
-        if (view !== editorView) return;
+        if (view !== editorView || livePath !== filePath) return;
         const fallbackExt = mod.createDirectLspExtension({
           wsUri, protocols, rootUri, documentUri, filePath, languageId: lspLang,
           onLocationJump: handleLspJump, onDiagnostics: onDiagnostics ?? undefined,
@@ -529,6 +535,34 @@
     const target = view;
     const run = (m: typeof CmIdeMod) => { if (view === target) { m.splitSelectionIntoLines(target); target.focus(); } };
     if (ideMod) run(ideMod); else void ensureIdeMod().then(run);
+  }
+
+  /** Immediately evict cached inactive `EditorState`s and lightweight cursor metadata for closed tabs. */
+  export function evictPaths(paths: Iterable<string> | 'all'): void {
+    if (paths === 'all') {
+      if (historyKey) {
+        for (const p of keptStates.keys()) { const hk = historyKey(p); if (hk) forgetEditorState(hk.key); }
+      }
+      keptStates.clear();
+      lightTabMeta.clear();
+      ideMod?.disposePooledLspClients();
+      return;
+    }
+    for (const p of paths) {
+      keptStates.delete(p);
+      lightTabMeta.delete(p);
+      if (historyKey) { const hk = historyKey(p); if (hk) forgetEditorState(hk.key); }
+    }
+  }
+
+  /** Notify active LSP plugin that the document was saved (`didSave`). */
+  export function notifyDidSave(): void {
+    if (view && ideMod) ideMod.notifyLspDidSave(view);
+  }
+
+  /** Deterministically close pooled LSP WebSocket clients. */
+  export function disposeLspClients(rootPath?: string): void {
+    ideMod?.disposePooledLspClients({ rootPath, forceAll: true });
   }
 
   // ── Whole-document ⌘F provider ─────────────────────────────────────────────
@@ -698,6 +732,7 @@
     completionCompartment = new Compartment(); placeholderCompartment = new Compartment();
     wrapCompartment = new Compartment(); langCompartment = new Compartment();
     keptStates.clear();
+    lightTabMeta.clear();
     sel = null;
 
     view = new EditorView({ state: createState(filePath, fileContent), parent: el });
@@ -711,37 +746,82 @@
     untrack(() => emitSelection(built.state));
   }
 
-  // ── Kept per-path states (keepStates) ──────────────────────────────────────
+  // ── Kept per-path states (`<= 8` inactive tabs & `<= 8 MB` total text bytes) ──
 
-  const keptStates = new Map<string, { state: EditorState; scroll: StateEffect<unknown>; dialect: SqlDialectName; langReady: boolean; language: string | undefined }>();
+  const keptStates = new Map<string, { state: EditorState; scroll: StateEffect<unknown>; chars: number; dialect: SqlDialectName; langReady: boolean; language: string | undefined }>();
+  const lightTabMeta = new Map<string, { scrollTop: number; anchor: number; head: number }>();
   const MAX_KEPT_STATES = 24;
   const IDE_MAX_KEPT_STATES = 8;
-  const KEPT_STATE_MAX_CHARS = 200_000;
+  const KEPT_STATE_MAX_CHARS = 512_000;
+  const IDE_MAX_KEPT_TOTAL_CHARS = 8 * 1024 * 1024;
+  const MAX_LIGHT_META = 64;
+
+  function saveLightMeta(forPath: string, scrollTop: number, anchor: number, head: number): void {
+    if (!forPath) return;
+    lightTabMeta.delete(forPath);
+    lightTabMeta.set(forPath, { scrollTop, anchor, head });
+    while (lightTabMeta.size > MAX_LIGHT_META) {
+      const oldest = lightTabMeta.keys().next().value;
+      if (oldest === undefined) break;
+      lightTabMeta.delete(oldest);
+    }
+  }
+
+  function totalKeptChars(): number {
+    let sum = 0;
+    for (const k of keptStates.values()) sum += k.chars;
+    return sum;
+  }
 
   function swapState(fromPath: string, toPath: string, toContent: string): void {
     if (!view) return;
-    changes.cancel();
+    changes.flush();
     if (historySaveTimer !== null) clearTimeout(historySaveTimer);
     historySaveTimer = null;
+
+    const prevScrollTop = view.scrollDOM.scrollTop;
+    const prevSel = view.state.selection.main;
+    saveLightMeta(fromPath, prevScrollTop, prevSel.anchor, prevSel.head);
+
+    // Detach active LSP ViewPlugin before snapshotting `view.state` so `keptStates`
+    // retains zero WebSocket / LanguageServerClient closures and decrements refcount immediately.
+    view.dispatch({ effects: lspCompartment.reconfigure([]) });
+
     keptStates.delete(fromPath);
-    if (view.state.doc.length <= KEPT_STATE_MAX_CHARS) {
-      keptStates.set(fromPath, { state: view.state, scroll: view.scrollSnapshot(), dialect: appliedDialect, langReady: appliedLangReady, language: appliedLanguage });
+    const docChars = view.state.doc.length;
+    if (docChars <= KEPT_STATE_MAX_CHARS) {
+      keptStates.set(fromPath, {
+        state: view.state, scroll: view.scrollSnapshot(), chars: docChars,
+        dialect: appliedDialect, langReady: appliedLangReady, language: appliedLanguage,
+      });
     } else {
-      parkHistory(fromPath, view.state, 0);
+      parkHistory(fromPath, view.state, prevScrollTop);
     }
     const maxKept = ideMode ? IDE_MAX_KEPT_STATES : MAX_KEPT_STATES;
-    while (keptStates.size > maxKept) {
+    while (keptStates.size > maxKept || (ideMode && keptStates.size > 1 && totalKeptChars() > IDE_MAX_KEPT_TOTAL_CHARS)) {
       const oldest = keptStates.keys().next().value;
       if (oldest === undefined) break;
       const ev = keptStates.get(oldest);
       if (ev) parkHistory(oldest, ev.state, 0);
       keptStates.delete(oldest);
     }
+
     livePath = toPath;
     const kept = keptStates.get(toPath);
     keptStates.delete(toPath);
     if (!kept) {
-      view.setState(createState(toPath, toContent));
+      const st = createState(toPath, toContent);
+      const meta = lightTabMeta.get(toPath);
+      if (meta && pendingScrollTop == null) {
+        pendingScrollTop = meta.scrollTop;
+        const maxPos = st.doc.length;
+        const nextSt = st.update({
+          selection: { anchor: Math.min(maxPos, Math.max(0, meta.anchor)), head: Math.min(maxPos, Math.max(0, meta.head)) },
+        }).state;
+        view.setState(nextSt);
+      } else {
+        view.setState(st);
+      }
       applyPendingScroll();
       ensureLang(toPath);
       mountIdeExtensions(view);
@@ -758,7 +838,7 @@
         themeCompartment.reconfigure(themeExt(ui.resolvedScheme, appliedPlain)),
         kept.scroll,
       ];
-      if (ideMod && isIdeActive()) effects.push(ideCompartment.reconfigure(buildIdeExtIfLoaded()));
+      if (ideMod && isIdeActive()) effects.push(ideCompartment.reconfigure(buildIdeExtIfLoaded(toPath)));
       appliedDialect = kept.dialect; appliedLangReady = kept.langReady; appliedLanguage = kept.language;
       if (sqlDialect !== kept.dialect || !kept.langReady || language !== kept.language) {
         appliedDialect = sqlDialect; appliedLanguage = language;
@@ -832,10 +912,17 @@
     else if (ideMod && ideMounted) view.dispatch({ effects: ideMod.setSavedContentEffect.of(sc) });
   });
   $effect(() => {
+    const blame = blameByLine;
+    if (!view) return;
+    if (!ideMounted && blame != null) mountIdeExtensions(view);
+    else if (ideMod && ideMounted) view.dispatch({ effects: ideMod.setBlameLinesEffect.of(blame) });
+  });
+  $effect(() => {
     const bps = breakpoints;
+    const muted = breakpointsMuted;
     if (!view) return;
     if (!ideMounted && bps.length > 0) mountIdeExtensions(view);
-    else if (ideMod && ideMounted) view.dispatch({ effects: ideMod.setBreakpointsEffect.of(bps) });
+    else if (ideMod && ideMounted) view.dispatch({ effects: ideMod.setBreakpointsEffect.of({ breakpoints: bps, muted }) });
   });
   $effect(() => {
     const items = gutterItems;
@@ -942,6 +1029,8 @@
     changes.flush();
     parkLive();
     for (const [p, k] of keptStates) parkHistory(p, k.state, 0);
+    keptStates.clear();
+    lightTabMeta.clear();
     teardownEditor();
   });
 </script>

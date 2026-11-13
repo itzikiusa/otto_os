@@ -10,6 +10,7 @@
   let savedTabs = $state<IdeTermTab[]>([]);
   let savedActiveId = $state<string | null>(null);
   let savedSplit = $state(false);
+  let handledTerminalSeq = 0;
   const autoAttemptedTargets = new Set<string>();
 </script>
 
@@ -43,13 +44,16 @@
     ideBasename(ide.target.root) || ide.target.connection_name || 'workspace',
   );
 
-  // Adopt any existing live `ide_terminal` shell in this workspace on reload.
+  // Adopt any existing live `ide_terminal` shell in this project on reload.
   $effect(() => {
     if (!ws.listSettled || spawning || isSshTarget || !ide.target.root) return;
     const known = new Set(savedTabs.map((t) => t.id));
+    const roots = ide.projectRoots;
     for (const s of ws.sessions) {
-      if (s.archived || known.has(s.id)) continue;
-      if (s.meta?.ide_terminal === true && s.cwd === ide.target.root) {
+      if (s.archived || known.has(s.id) || s.meta?.ide_terminal !== true) continue;
+      const sCwd = s.cwd ?? '';
+      const inProject = sCwd === ide.target.root || roots.some((r) => sCwd === r.path || sCwd.startsWith(`${r.path}/`));
+      if (inProject) {
         savedTabs = [
           ...savedTabs,
           {
@@ -57,7 +61,7 @@
             label: s.title || `Shell ${savedTabs.length + 1}`,
             kind: 'local',
             targetKey,
-            cwd: s.cwd ?? ide.target.root,
+            cwd: sCwd || ide.target.root,
           },
         ];
         known.add(s.id);
@@ -83,19 +87,37 @@
     savedSplit ? (targetTabs.find((t) => t.id !== activeTab?.id) ?? null) : null,
   );
 
+  // Handle "Open in terminal" requests from the Project tree context menu.
+  $effect(() => {
+    const req = ide.pendingTerminalCwd;
+    if (!req || req.seq === handledTerminalSeq || spawning || !ide.hasTarget) return;
+    if (!isSshTarget && !ws.listSettled) return;
+    handledTerminalSeq = req.seq;
+    ide.pendingTerminalCwd = null;
+    autoAttemptedTargets.add(targetKey);
+    const existing = targetTabs.find((t) => t.cwd === req.cwd);
+    if (existing) {
+      savedActiveId = existing.id;
+      return;
+    }
+    void spawnTerminal(req.cwd);
+  });
+
   // Auto-open one shell per target when the user first visits Terminal.
   $effect(() => {
-    if (!ide.hasTarget || spawning) return;
+    if (!ide.hasTarget || spawning || ide.pendingTerminalCwd) return;
     if (!isSshTarget && !ws.listSettled) return;
     if (targetTabs.length > 0 || autoAttemptedTargets.has(targetKey)) return;
     autoAttemptedTargets.add(targetKey);
     void spawnTerminal();
   });
 
-  async function spawnTerminal(): Promise<void> {
+  async function spawnTerminal(customCwd?: string): Promise<void> {
     if (spawning || !ide.hasTarget) return;
     spawning = true;
     spawnError = null;
+    const launchCwd = customCwd || ide.target.root;
+    const dirName = ideBasename(launchCwd) || folderLabel;
     try {
       const idx = targetTabs.length + 1;
       if (isSshTarget && ide.target.connection_id) {
@@ -110,7 +132,7 @@
           label: `SSH ${idx} · ${hostName}`,
           kind: 'ssh',
           targetKey,
-          cwd: ide.target.root,
+          cwd: launchCwd,
         };
         savedTabs = [...savedTabs.filter((t) => t.id !== s.id), entry];
         savedActiveId = s.id;
@@ -119,18 +141,19 @@
           {
             kind: 'agent',
             provider: 'shell',
-            title: `IDE · ${folderLabel}`,
-            cwd: ide.target.root || null,
+            title: `IDE · ${dirName}`,
+            cwd: launchCwd || null,
             meta: { surface: 'ide', ide_terminal: true },
           },
           { scratch: ws.current === null && ws.currentId !== SCRATCH_WORKSPACE_ID },
         );
+        const sub = launchCwd && launchCwd !== ide.target.root ? ` · ${dirName}` : '';
         const entry: IdeTermTab = {
           id: s.id,
-          label: `Terminal ${idx}`,
+          label: `Terminal ${idx}${sub}`,
           kind: 'local',
           targetKey,
-          cwd: ide.target.root,
+          cwd: launchCwd,
         };
         savedTabs = [...savedTabs.filter((t) => t.id !== s.id), entry];
         savedActiveId = s.id;

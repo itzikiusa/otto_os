@@ -30,10 +30,35 @@ pub fn detect_gutter_items(
     let lang = detect_language(&normalized_path).unwrap_or("");
 
     let mut items = Vec::new();
-    if base_name == "package.json" {
-        detect_package_json_scripts(&normalized_path, &dir, content, &mut items);
-    } else {
-        match lang {
+    match base_name {
+        "package.json" => {
+            detect_package_json_scripts(&normalized_path, &dir, content, &mut items);
+        }
+        "deno.json" | "deno.jsonc" => {
+            detect_json_task_map(
+                &normalized_path,
+                &dir,
+                content,
+                "tasks",
+                IdeRunnerKind::Custom,
+                "deno",
+                &["task"],
+                &mut items,
+            );
+        }
+        "composer.json" => {
+            detect_json_task_map(
+                &normalized_path,
+                &dir,
+                content,
+                "scripts",
+                IdeRunnerKind::Custom,
+                "composer",
+                &["run-script"],
+                &mut items,
+            );
+        }
+        _ => match lang {
             "go" => detect_go(&normalized_path, &dir, content, &mut items),
             "java" => detect_java(&normalized_path, &dir, content, &mut items),
             "rust" => detect_rust(&normalized_path, &dir, content, &mut items),
@@ -41,8 +66,9 @@ pub fn detect_gutter_items(
             "javascript" | "typescript" => {
                 detect_js_ts(&normalized_path, &dir, lang, content, &mut items);
             }
+            "shell" => detect_shell(&normalized_path, &dir, base_name, content, &mut items),
             _ => {}
-        }
+        },
     }
 
     if !extra_detectors.is_empty() {
@@ -77,10 +103,14 @@ fn parent_dir(path: &str) -> String {
 fn detect_go(path: &str, dir: &str, content: &str, out: &mut Vec<IdeGutterItem>) {
     static RE_PKG: OnceLock<Regex> = OnceLock::new();
     static RE_FN: OnceLock<Regex> = OnceLock::new();
+    static RE_SUBTEST: OnceLock<Regex> = OnceLock::new();
     let re_pkg =
         RE_PKG.get_or_init(|| Regex::new(r"^\s*package\s+([A-Za-z_][A-Za-z0-9_]*)").unwrap());
     let re_fn = RE_FN
         .get_or_init(|| Regex::new(r"^\s*func\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)").unwrap());
+    let re_subtest = RE_SUBTEST.get_or_init(|| {
+        Regex::new(r#"\b[A-Za-z_][A-Za-z0-9_]*\.Run\s*\(\s*(?:"([^"\\]+)"|`([^`]+)`)"#).unwrap()
+    });
 
     let mut is_main_pkg = false;
     for line in content.lines() {
@@ -90,84 +120,141 @@ fn detect_go(path: &str, dir: &str, content: &str, out: &mut Vec<IdeGutterItem>)
         }
     }
 
+    let mut brace_depth: i32 = 0;
+    let mut active_test_fn: Option<(String, i32)> = None;
+
     for (idx, line) in content.lines().enumerate() {
         let line_no = (idx + 1) as u32;
-        let Some(cap) = re_fn.captures(line) else {
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") {
             continue;
-        };
-        let fn_name = &cap[1];
-        let params = cap[2].trim();
+        }
 
-        if fn_name == "main" && params.is_empty() && is_main_pkg {
-            out.push(IdeGutterItem {
-                line: line_no,
-                kind: IdeGutterKind::Main,
-                label: "Run main".into(),
-                language: "go".into(),
-                run_spec: IdeQuickRunSpec {
-                    runner: IdeRunnerKind::GoRun,
-                    command: Some("go".into()),
-                    args: vec!["run".into(), ".".into()],
-                    cwd: Some(dir.to_string()),
-                    target_path: Some(path.to_string()),
-                    test_filter: None,
-                    debug_program: Some(dir.to_string()),
-                    debug_test_name: None,
-                },
-            });
-        } else if (fn_name.starts_with("Test") || fn_name.starts_with("Fuzz"))
-            && (params.contains("*testing.T")
-                || params.contains("*testing.M")
-                || params.contains("*testing.F"))
-        {
-            let pattern = format!("^{fn_name}$");
-            out.push(IdeGutterItem {
-                line: line_no,
-                kind: IdeGutterKind::Test,
-                label: format!("Run {fn_name}"),
-                language: "go".into(),
-                run_spec: IdeQuickRunSpec {
-                    runner: IdeRunnerKind::GoTest,
-                    command: Some("go".into()),
-                    args: vec![
-                        "test".into(),
-                        "-v".into(),
-                        "-run".into(),
-                        pattern.clone(),
-                        ".".into(),
-                    ],
-                    cwd: Some(dir.to_string()),
-                    target_path: Some(path.to_string()),
-                    test_filter: Some(pattern.clone()),
-                    debug_program: Some(dir.to_string()),
-                    debug_test_name: Some(pattern),
-                },
-            });
-        } else if fn_name.starts_with("Benchmark") && params.contains("*testing.B") {
-            let pattern = format!("^{fn_name}$");
-            out.push(IdeGutterItem {
-                line: line_no,
-                kind: IdeGutterKind::Bench,
-                label: format!("Bench {fn_name}"),
-                language: "go".into(),
-                run_spec: IdeQuickRunSpec {
-                    runner: IdeRunnerKind::GoTest,
-                    command: Some("go".into()),
-                    args: vec![
-                        "test".into(),
-                        "-bench".into(),
-                        pattern.clone(),
-                        "-run".into(),
-                        "^$".into(),
-                        ".".into(),
-                    ],
-                    cwd: Some(dir.to_string()),
-                    target_path: Some(path.to_string()),
-                    test_filter: Some(pattern),
-                    debug_program: Some(dir.to_string()),
-                    debug_test_name: Some(fn_name.to_string()),
-                },
-            });
+        if let Some(cap) = re_fn.captures(line) {
+            let fn_name = &cap[1];
+            let params = cap[2].trim();
+
+            if fn_name == "main" && params.is_empty() && is_main_pkg {
+                out.push(IdeGutterItem {
+                    line: line_no,
+                    kind: IdeGutterKind::Main,
+                    label: "Run main".into(),
+                    language: "go".into(),
+                    run_spec: IdeQuickRunSpec {
+                        runner: IdeRunnerKind::GoRun,
+                        command: Some("go".into()),
+                        args: vec!["run".into(), ".".into()],
+                        cwd: Some(dir.to_string()),
+                        target_path: Some(path.to_string()),
+                        test_filter: None,
+                        debug_program: Some(dir.to_string()),
+                        debug_test_name: None,
+                    },
+                });
+            } else if (fn_name.starts_with("Test") || fn_name.starts_with("Fuzz"))
+                && (params.contains("*testing.T")
+                    || params.contains("*testing.M")
+                    || params.contains("*testing.F"))
+            {
+                active_test_fn = Some((fn_name.to_string(), brace_depth));
+                let pattern = format!("^{fn_name}$");
+                out.push(IdeGutterItem {
+                    line: line_no,
+                    kind: IdeGutterKind::Test,
+                    label: format!("Run {fn_name}"),
+                    language: "go".into(),
+                    run_spec: IdeQuickRunSpec {
+                        runner: IdeRunnerKind::GoTest,
+                        command: Some("go".into()),
+                        args: vec![
+                            "test".into(),
+                            "-v".into(),
+                            "-run".into(),
+                            pattern.clone(),
+                            ".".into(),
+                        ],
+                        cwd: Some(dir.to_string()),
+                        target_path: Some(path.to_string()),
+                        test_filter: Some(pattern.clone()),
+                        debug_program: Some(dir.to_string()),
+                        debug_test_name: Some(pattern),
+                    },
+                });
+            } else if fn_name.starts_with("Benchmark") && params.contains("*testing.B") {
+                let pattern = format!("^{fn_name}$");
+                out.push(IdeGutterItem {
+                    line: line_no,
+                    kind: IdeGutterKind::Bench,
+                    label: format!("Bench {fn_name}"),
+                    language: "go".into(),
+                    run_spec: IdeQuickRunSpec {
+                        runner: IdeRunnerKind::GoTest,
+                        command: Some("go".into()),
+                        args: vec![
+                            "test".into(),
+                            "-bench".into(),
+                            pattern.clone(),
+                            "-run".into(),
+                            "^$".into(),
+                            ".".into(),
+                        ],
+                        cwd: Some(dir.to_string()),
+                        target_path: Some(path.to_string()),
+                        test_filter: Some(pattern),
+                        debug_program: Some(dir.to_string()),
+                        debug_test_name: Some(fn_name.to_string()),
+                    },
+                });
+            }
+        } else if let Some((parent_fn, _)) = &active_test_fn {
+            if let Some(sub_cap) = re_subtest.captures(line) {
+                if let Some(sub_name) = sub_cap
+                    .get(1)
+                    .or_else(|| sub_cap.get(2))
+                    .map(|m| m.as_str().trim())
+                    .filter(|s| !s.is_empty())
+                {
+                    let go_sub = regex::escape(&sub_name.replace(' ', "_"));
+                    let pattern = format!("^{parent_fn}$/^{go_sub}$");
+                    out.push(IdeGutterItem {
+                        line: line_no,
+                        kind: IdeGutterKind::Test,
+                        label: format!("Run {parent_fn}/{sub_name}"),
+                        language: "go".into(),
+                        run_spec: IdeQuickRunSpec {
+                            runner: IdeRunnerKind::GoTest,
+                            command: Some("go".into()),
+                            args: vec![
+                                "test".into(),
+                                "-v".into(),
+                                "-run".into(),
+                                pattern.clone(),
+                                ".".into(),
+                            ],
+                            cwd: Some(dir.to_string()),
+                            target_path: Some(path.to_string()),
+                            test_filter: Some(pattern.clone()),
+                            debug_program: Some(dir.to_string()),
+                            debug_test_name: Some(pattern),
+                        },
+                    });
+                }
+            }
+        }
+
+        let code_only = strip_line_comment(line);
+        for ch in code_only.chars() {
+            if ch == '{' {
+                brace_depth += 1;
+            } else if ch == '}' {
+                brace_depth -= 1;
+                if active_test_fn
+                    .as_ref()
+                    .is_some_and(|(_, d)| brace_depth <= *d)
+                {
+                    active_test_fn = None;
+                }
+            }
         }
     }
 }
@@ -192,8 +279,10 @@ fn detect_java(path: &str, dir: &str, content: &str, out: &mut Vec<IdeGutterItem
         .unwrap()
     });
     let re_test_ann = RE_TEST_ANN.get_or_init(|| {
-        Regex::new(r"@(?:org\.junit\.jupiter\.api\.)?(?:Test|ParameterizedTest|RepeatedTest|TestFactory)\b")
-            .unwrap()
+        Regex::new(
+            r"@(?:org\.junit\.jupiter\.api\.|org\.junit\.jupiter\.params\.|org\.junit\.|org\.testng\.annotations\.)?(?:Test|ParameterizedTest|RepeatedTest|TestFactory)\b",
+        )
+        .unwrap()
     });
     let re_main = RE_MAIN.get_or_init(|| {
         Regex::new(
@@ -623,7 +712,7 @@ fn detect_js_ts(path: &str, dir: &str, lang: &str, content: &str, out: &mut Vec<
 
     let re_suite = RE_SUITE.get_or_init(|| {
         Regex::new(
-            r#"^\s*(?:describe|suite)(?:\.(?:only|skip|concurrent|sequential))?\s*\(\s*(?:'([^']+)'|"([^"]+)"|`([^`]+)`)"#,
+            r#"^\s*(?:(?:test\.)?describe|suite)(?:\.(?:only|skip|concurrent|sequential))?\s*\(\s*(?:'([^']+)'|"([^"]+)"|`([^`]+)`)"#,
         )
         .unwrap()
     });
@@ -719,10 +808,34 @@ fn build_js_test_item(
 }
 
 fn detect_package_json_scripts(path: &str, dir: &str, content: &str, out: &mut Vec<IdeGutterItem>) {
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) else {
+    detect_json_task_map(
+        path,
+        dir,
+        content,
+        "scripts",
+        IdeRunnerKind::Npm,
+        "npm",
+        &["run"],
+        out,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn detect_json_task_map(
+    path: &str,
+    dir: &str,
+    content: &str,
+    section_key: &str,
+    runner: IdeRunnerKind,
+    cmd_bin: &str,
+    sub_args: &[&str],
+    out: &mut Vec<IdeGutterItem>,
+) {
+    let cleaned = strip_jsonc_line_comments(content);
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&cleaned) else {
         return;
     };
-    let Some(scripts) = parsed.get("scripts").and_then(|v| v.as_object()) else {
+    let Some(scripts) = parsed.get(section_key).and_then(|v| v.as_object()) else {
         return;
     };
     if scripts.is_empty() {
@@ -730,9 +843,10 @@ fn detect_package_json_scripts(path: &str, dir: &str, content: &str, out: &mut V
     }
 
     let lines: Vec<&str> = content.lines().collect();
+    let header_needle = format!("\"{section_key}\"");
     let scripts_header_idx = lines
         .iter()
-        .position(|l| l.contains("\"scripts\""))
+        .position(|l| l.contains(&header_needle))
         .unwrap_or(0);
 
     for key in scripts.keys() {
@@ -755,15 +869,19 @@ fn detect_package_json_scripts(path: &str, dir: &str, content: &str, out: &mut V
             IdeGutterKind::Main
         };
 
+        let mut args: Vec<String> = sub_args.iter().map(|s| (*s).to_string()).collect();
+        args.push(key.clone());
+        let label_sub = sub_args.first().copied().unwrap_or("run");
+
         out.push(IdeGutterItem {
             line: found_line,
             kind,
-            label: format!("npm run {key}"),
+            label: format!("{cmd_bin} {label_sub} {key}"),
             language: "json".into(),
             run_spec: IdeQuickRunSpec {
-                runner: IdeRunnerKind::Npm,
-                command: Some("npm".into()),
-                args: vec!["run".into(), key.clone()],
+                runner,
+                command: Some(cmd_bin.to_string()),
+                args,
                 cwd: Some(dir.to_string()),
                 target_path: Some(path.to_string()),
                 test_filter: Some(key.clone()),
@@ -771,6 +889,169 @@ fn detect_package_json_scripts(path: &str, dir: &str, content: &str, out: &mut V
                 debug_test_name: Some(key.clone()),
             },
         });
+    }
+}
+
+fn strip_jsonc_line_comments(content: &str) -> String {
+    content
+        .lines()
+        .map(|l| {
+            let trimmed = l.trim_start();
+            if trimmed.starts_with("//") {
+                ""
+            } else {
+                l
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// 6. Shell (`.sh`, `.bash`, `.zsh`, `.bats` — script entrypoint, functions, Bats)
+// ---------------------------------------------------------------------------
+
+fn detect_shell(
+    path: &str,
+    dir: &str,
+    base_name: &str,
+    content: &str,
+    out: &mut Vec<IdeGutterItem>,
+) {
+    static RE_BATS: OnceLock<Regex> = OnceLock::new();
+    static RE_SH_FN: OnceLock<Regex> = OnceLock::new();
+    let re_bats =
+        RE_BATS.get_or_init(|| Regex::new(r#"^\s*@test\s+(?:"([^"]+)"|'([^']+)')\s*\{"#).unwrap());
+    let re_sh_fn = RE_SH_FN.get_or_init(|| {
+        Regex::new(
+            r"^\s*(?:function\s+([A-Za-z_][A-Za-z0-9_-]*)(?:\s*\(\s*\))?|([A-Za-z_][A-Za-z0-9_-]*)\s*\(\s*\))\s*\{?",
+        )
+        .unwrap()
+    });
+
+    if base_name.ends_with(".bats") {
+        let mut has_any = false;
+        for (idx, line) in content.lines().enumerate() {
+            let line_no = (idx + 1) as u32;
+            if let Some(cap) = re_bats.captures(line) {
+                let Some(desc) = cap.get(1).or_else(|| cap.get(2)).map(|m| m.as_str()) else {
+                    continue;
+                };
+                if !has_any {
+                    has_any = true;
+                    out.push(IdeGutterItem {
+                        line: 1,
+                        kind: IdeGutterKind::Suite,
+                        label: format!("Run {base_name}"),
+                        language: "shell".into(),
+                        run_spec: IdeQuickRunSpec {
+                            runner: IdeRunnerKind::Shell,
+                            command: Some("bats".into()),
+                            args: vec![path.to_string()],
+                            cwd: Some(dir.to_string()),
+                            target_path: Some(path.to_string()),
+                            test_filter: None,
+                            debug_program: Some(path.to_string()),
+                            debug_test_name: None,
+                        },
+                    });
+                }
+                out.push(IdeGutterItem {
+                    line: line_no,
+                    kind: IdeGutterKind::Test,
+                    label: format!("Run '{desc}'"),
+                    language: "shell".into(),
+                    run_spec: IdeQuickRunSpec {
+                        runner: IdeRunnerKind::Shell,
+                        command: Some("bats".into()),
+                        args: vec!["-f".into(), desc.to_string(), path.to_string()],
+                        cwd: Some(dir.to_string()),
+                        target_path: Some(path.to_string()),
+                        test_filter: Some(desc.to_string()),
+                        debug_program: Some(path.to_string()),
+                        debug_test_name: Some(desc.to_string()),
+                    },
+                });
+            }
+        }
+        return;
+    }
+
+    let shell_bin = infer_shell_interpreter(base_name, content);
+    let non_empty = content
+        .lines()
+        .any(|l| !l.trim().is_empty() && (!l.trim().starts_with('#') || l.starts_with("#!")));
+    if non_empty {
+        out.push(IdeGutterItem {
+            line: 1,
+            kind: IdeGutterKind::Main,
+            label: format!("Run {base_name}"),
+            language: "shell".into(),
+            run_spec: IdeQuickRunSpec {
+                runner: IdeRunnerKind::Shell,
+                command: Some(shell_bin.to_string()),
+                args: vec![path.to_string()],
+                cwd: Some(dir.to_string()),
+                target_path: Some(path.to_string()),
+                test_filter: None,
+                debug_program: Some(path.to_string()),
+                debug_test_name: None,
+            },
+        });
+    }
+
+    for (idx, line) in content.lines().enumerate() {
+        let line_no = (idx + 1) as u32;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(cap) = re_sh_fn.captures(line) {
+            let Some(fn_name) = cap.get(1).or_else(|| cap.get(2)).map(|m| m.as_str()) else {
+                continue;
+            };
+            if matches!(fn_name, "if" | "for" | "while" | "case" | "select") {
+                continue;
+            }
+            let invoke = format!(". {} && {}", shell_words::quote(path), fn_name);
+            out.push(IdeGutterItem {
+                line: line_no,
+                kind: IdeGutterKind::Main,
+                label: format!("Run {fn_name}()"),
+                language: "shell".into(),
+                run_spec: IdeQuickRunSpec {
+                    runner: IdeRunnerKind::Shell,
+                    command: Some(shell_bin.to_string()),
+                    args: vec!["-c".into(), invoke],
+                    cwd: Some(dir.to_string()),
+                    target_path: Some(path.to_string()),
+                    test_filter: Some(fn_name.to_string()),
+                    debug_program: Some(path.to_string()),
+                    debug_test_name: Some(fn_name.to_string()),
+                },
+            });
+        }
+    }
+}
+
+fn infer_shell_interpreter(base_name: &str, content: &str) -> &'static str {
+    if let Some(first) = content.lines().next() {
+        if let Some(shebang) = first.strip_prefix("#!") {
+            if shebang.contains("zsh") {
+                return "zsh";
+            }
+            if shebang.contains("bash") {
+                return "bash";
+            }
+            if shebang.contains("/sh") || shebang.ends_with(" sh") {
+                return "sh";
+            }
+        }
+    }
+    if base_name.ends_with(".zsh") || base_name.starts_with(".zsh") {
+        "zsh"
+    } else {
+        "bash"
     }
 }
 
@@ -1104,5 +1385,65 @@ describe('CartEngine', () => {
         assert_eq!(kt_items[0].line, 2);
         assert_eq!(kt_items[0].label, "Run Kotlin main");
         assert_eq!(kt_items[0].run_spec.args, vec!["/ws/src/App.kt"]);
+    }
+
+    #[test]
+    fn go_subtests_shell_functions_bats_and_deno_json_tasks_detected_instantly() {
+        let go_sub = "\
+package admission
+
+import \"testing\"
+
+func TestAdmissionService(t *testing.T) {
+    t.Run(\"allows vip player\", func(t *testing.T) {})
+    t.Run(`rejects banned ip`, func(t *testing.T) {})
+}
+";
+        let go_items = detect_gutter_items("/ws/service_test.go", go_sub, &[]);
+        assert_eq!(go_items.len(), 3);
+        assert_eq!(
+            go_items[1].run_spec.test_filter.as_deref(),
+            Some("^TestAdmissionService$/^allows_vip_player$")
+        );
+        assert_eq!(
+            go_items[2].run_spec.test_filter.as_deref(),
+            Some("^TestAdmissionService$/^rejects_banned_ip$")
+        );
+
+        let sh_src = "\
+#!/usr/bin/env bash
+set -euo pipefail
+
+deploy_staging() {
+  echo deploying
+}
+
+function rollback_release {
+  echo rolling back
+}
+";
+        let sh_items = detect_gutter_items("/ws/scripts/deploy.sh", sh_src, &[]);
+        assert_eq!(sh_items.len(), 3);
+        assert_eq!(sh_items[0].line, 1);
+        assert_eq!(sh_items[0].run_spec.runner, IdeRunnerKind::Shell);
+        assert_eq!(sh_items[1].label, "Run deploy_staging()");
+        assert_eq!(sh_items[2].label, "Run rollback_release()");
+
+        let bats_src = "\
+#!/usr/bin/env bats
+@test \"health endpoint returns 200\" {
+  [ 1 -eq 1 ]
+}
+";
+        let bats_items = detect_gutter_items("/ws/tests/smoke.bats", bats_src, &[]);
+        assert_eq!(bats_items.len(), 2);
+        assert_eq!(bats_items[0].kind, IdeGutterKind::Suite);
+        assert_eq!(bats_items[1].kind, IdeGutterKind::Test);
+
+        let deno_jsonc =
+            "// deno config\n{\n  \"tasks\": {\n    \"dev\": \"deno run -A main.ts\"\n  }\n}";
+        let deno_items = detect_gutter_items("/ws/deno.jsonc", deno_jsonc, &[]);
+        assert_eq!(deno_items.len(), 1);
+        assert_eq!(deno_items[0].label, "deno task dev");
     }
 }

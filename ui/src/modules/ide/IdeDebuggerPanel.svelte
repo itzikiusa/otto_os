@@ -25,11 +25,18 @@
     type IdeVariable,
   } from './ideStore.svelte';
   import { ideAgent } from './store/ideAgentController.svelte';
+  import {
+    areIdeBreakpointsMuted,
+    pushIdeNavLocation,
+    toggleIdeBreakpointsMuted,
+  } from './editor/ideEditorStoreBridge.svelte';
 
   const LOG_CAP = 500;
+  const VAR_CAP = 100;
 
   let openScopes = $state<Record<string, boolean>>({});
   let openRefs = $state<Record<number, boolean>>({});
+  let showAllVars = $state<Record<string, boolean>>({});
   let loadingRefs = $state<Record<number, boolean>>({});
   let watchDraft = $state('');
   let replInput = $state('');
@@ -169,7 +176,10 @@
 
   function onSelectFrame(frame: IdeStackFrame): void {
     void ide.selectFrame(frame.id, dbg?.active_thread_id ?? undefined);
-    if (frame.path) void ide.openFile(frame.path, { line: frame.line, col: frame.column ?? 1, preview: true });
+    if (frame.path) {
+      if (ide.activePath) pushIdeNavLocation(ide.activePath, ide.cursorInfo.line, ide.cursorInfo.col);
+      void ide.openFile(frame.path, { line: frame.line, col: frame.column ?? 1, preview: false });
+    }
   }
 
   function onThreadChange(e: Event): void {
@@ -242,8 +252,9 @@
     ide.updateBreakpoint(bp.path, bp.line, patch);
 </script>
 
-{#snippet variableRows(vars: IdeVariable[], depth: number)}
-  {#each vars as v (`${depth}:${v.name}:${v.variables_reference}`)}
+{#snippet variableRows(vars: IdeVariable[], depth: number, capKey: string)}
+  {@const capped = !showAllVars[capKey] && vars.length > VAR_CAP ? vars.slice(0, VAR_CAP) : vars}
+  {#each capped as v (`${depth}:${v.name}:${v.variables_reference}`)}
     {@const expandable = v.variables_reference > 0}
     {@const expanded = !!openRefs[v.variables_reference]}
     {@const children = ide.expandedVariables[v.variables_reference] ?? []}
@@ -281,10 +292,17 @@
       {:else if children.length === 0}
         <div class="dbg-var-empty dim" style:padding-inline-start={`${26 + depth * 14}px`}>Empty</div>
       {:else}
-        {@render variableRows(children, depth + 1)}
+        {@render variableRows(children, depth + 1, `ref:${v.variables_reference}`)}
       {/if}
     {/if}
   {/each}
+  {#if !showAllVars[capKey] && vars.length > VAR_CAP}
+    <div class="dbg-var-empty" style:padding-inline-start={`${12 + depth * 14}px`}>
+      <button type="button" class="btn small ghost" onclick={() => (showAllVars = { ...showAllVars, [capKey]: true })}>
+        Show all {vars.length} items ({vars.length - VAR_CAP} more)
+      </button>
+    </div>
+  {/if}
 {/snippet}
 
 <div class="dbg-root" data-testid="ide-debugger-panel">
@@ -302,30 +320,41 @@
           <Icon name="bug" size={12} /><span>{ide.debugLoading ? 'Starting…' : 'Debug'}</span>
         </button>
       {/if}
-      <button type="button" class="icon-btn" aria-label="Resume program" title="Resume program" aria-keyshortcuts="Alt+Meta+R" disabled={!isPaused} onclick={() => void ide.resumeDebug()}>
+      <button type="button" class="icon-btn" aria-label="Resume program" title="Resume program (F9)" aria-keyshortcuts="F9" disabled={!isPaused} onclick={() => void ide.resumeDebug()}>
         <Icon name="play" size={13} />
       </button>
       <button type="button" class="icon-btn" aria-label="Pause program" title="Pause program" disabled={!isRunning} onclick={() => void ide.pauseDebug()}>
         <Icon name="pause" size={13} />
       </button>
       <span class="dbg-sep" aria-hidden="true"></span>
-      <button type="button" class="icon-btn" aria-label="Step over" title="Step over" aria-keyshortcuts="F8" disabled={!isPaused} onclick={() => void ide.stepOver()}>
+      <button type="button" class="icon-btn" aria-label="Step over" title="Step over (F8)" aria-keyshortcuts="F8" disabled={!isPaused} onclick={() => void ide.stepOver()}>
         <Icon name="stepOver" size={13} />
       </button>
-      <button type="button" class="icon-btn" aria-label="Step into" title="Step into" aria-keyshortcuts="F7" disabled={!isPaused} onclick={() => void ide.stepInto()}>
+      <button type="button" class="icon-btn" aria-label="Step into" title="Step into (F7)" aria-keyshortcuts="F7" disabled={!isPaused} onclick={() => void ide.stepInto()}>
         <Icon name="stepInto" size={13} />
       </button>
-      <button type="button" class="icon-btn" aria-label="Step out" title="Step out" aria-keyshortcuts="Shift+F8" disabled={!isPaused} onclick={() => void ide.stepOut()}>
+      <button type="button" class="icon-btn" aria-label="Step out" title="Step out (⇧F8)" aria-keyshortcuts="Shift+F8" disabled={!isPaused} onclick={() => void ide.stepOut()}>
         <Icon name="stepOut" size={13} />
       </button>
-      <button type="button" class="icon-btn" aria-label="Run to cursor" title="Run to cursor" aria-keyshortcuts="Alt+F9" disabled={!isPaused || !ide.activePath} onclick={() => void ide.runToCursor()}>
+      <button type="button" class="icon-btn" aria-label="Run to cursor" title="Run to cursor (⌥F9)" aria-keyshortcuts="Alt+F9" disabled={!isPaused || !ide.activePath} onclick={() => void ide.runToCursor()}>
         <Icon name="target" size={13} />
       </button>
       <span class="dbg-sep" aria-hidden="true"></span>
+      <button
+        type="button"
+        class="icon-btn"
+        aria-label={areIdeBreakpointsMuted() ? 'Unmute breakpoints' : 'Mute all breakpoints'}
+        title={areIdeBreakpointsMuted() ? 'Unmute breakpoints' : 'Mute all breakpoints'}
+        aria-pressed={areIdeBreakpointsMuted()}
+        onclick={() => toggleIdeBreakpointsMuted()}
+        data-testid="ide-debug-mute-bps"
+      >
+        <Icon name={areIdeBreakpointsMuted() ? 'shieldOff' : 'shield'} size={13} />
+      </button>
       <button type="button" class="icon-btn" aria-label="Restart debug session" title="Restart debug session" disabled={!isLive} onclick={() => void ide.restartDebug()}>
         <Icon name="refresh" size={13} />
       </button>
-      <button type="button" class="icon-btn" aria-label="Stop debug session" title="Stop debug session" disabled={!isLive} onclick={() => void ide.stopDebug()}>
+      <button type="button" class="icon-btn" aria-label="Stop debug session" title="Stop debug session (⌘F2)" aria-keyshortcuts="Meta+F2" disabled={!isLive} onclick={() => void ide.stopDebug()}>
         <Icon name="stop" size={13} />
       </button>
     </div>
@@ -340,7 +369,7 @@
             class="btn small ghost mono"
             dir="ltr"
             title={`Jump to paused line ${dbg.paused_file}:${dbg.paused_line}`}
-            onclick={() => dbg.paused_file && dbg.paused_line && void ide.openFile(dbg.paused_file, { line: dbg.paused_line, preview: true })}
+            onclick={() => dbg.paused_file && dbg.paused_line && void ide.openFile(dbg.paused_file, { line: dbg.paused_line, preview: false })}
           >{ideBasename(dbg.paused_file)}:{dbg.paused_line}</button>
         {/if}
       </div>
@@ -469,7 +498,7 @@
                   {:else if vars.length === 0}
                     <div class="dbg-var-empty dim">No variables in {scope.name}</div>
                   {:else}
-                    {@render variableRows(vars, 0)}
+                    {@render variableRows(vars, 0, `scope:${sKey}`)}
                   {/if}
                 {/if}
               </div>
@@ -586,12 +615,16 @@
     {:else}
       <div class="dbg-bp-list">
         {#each ide.allBreakpoints as bp (`${bp.path}:${bp.line}`)}
+          {@const bpExt = bp as IdeBreakpoint & { verified?: boolean }}
           <div class="dbg-bp-card">
             <div class="dbg-bp-top">
               <Switch checked={bp.enabled} onchange={(enabled) => updateBpField(bp, { enabled })} label={`Enable breakpoint at ${ideBasename(bp.path)} line ${bp.line}`} />
-              <button type="button" class="btn small ghost mono" dir="ltr" onclick={() => { bpModalOpen = false; void ide.openFile(bp.path, { line: bp.line }); }}>
+              <button type="button" class="btn small ghost mono" dir="ltr" onclick={() => { bpModalOpen = false; void ide.openFile(bp.path, { line: bp.line, preview: false }); }}>
                 {ide.relativePath(bp.path)}:{bp.line}
               </button>
+              {#if bpExt.verified}
+                <Badge tone="ok" variant="outline" label="Verified" />
+              {/if}
               <span class="grow"></span>
               <button type="button" class="icon-btn" aria-label={`Remove breakpoint at ${ideBasename(bp.path)}:${bp.line}`} title={`Remove breakpoint at ${ideBasename(bp.path)}:${bp.line}`} onclick={() => ide.removeBreakpoint(bp.path, bp.line)}>
                 <Icon name="trash" size={13} />
