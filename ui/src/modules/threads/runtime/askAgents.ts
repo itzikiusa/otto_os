@@ -40,10 +40,12 @@ export function mentionOptions(
   modelsOf: (p: RuntimeProvider) => readonly { id: string; label: string }[],
   nameOf: (p: RuntimeProvider) => string,
   limit = 8,
+  /** The providers that can take it now (installed, registered, new enough). */
+  providers: readonly RuntimeProvider[] = ASK_PROVIDERS,
 ): AskOption[] {
   const words = query.toLowerCase().split(/[:/\s-]+/).filter(Boolean);
   const all: AskOption[] = [];
-  for (const p of ASK_PROVIDERS) {
+  for (const p of providers) {
     const name = nameOf(p);
     all.push({ provider: p, model: null, label: name, detail: 'default model' });
     for (const m of modelsOf(p)) all.push({ provider: p, model: m.id, label: m.label, detail: name });
