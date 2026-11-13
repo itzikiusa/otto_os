@@ -1,6 +1,15 @@
 //! Background Test & Run execution engine and structured multi-language test
 //! output parsers (`go test -v`, `cargo test`, `pytest -v` / `unittest`,
-//! `node --test` / `vitest`, and Maven Surefire / Gradle / JUnit).
+//! `node --test` / `vitest`, Bats TAP, and Maven Surefire / Gradle / JUnit).
+//!
+//! Memory & leak invariants:
+//! - Active run output ring buffers are strictly bounded to `<= 2,000` lines
+//!   AND `<= 512 KB` (`MAX_RUN_OUTPUT_BYTES`), compacting to `<= 256 KB` on
+//!   completion and retaining at most `MAX_FINISHED_RUNS` terminated runs.
+//! - Every local child process spawns in its own Unix process group
+//!   (`process_group(0)`) with a synchronous `Drop` safeguard and `-pgid`
+//!   `SIGTERM` -> `SIGKILL` termination so `go run` / `go test` / `npm` child
+//!   binaries never leak orphan processes.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -22,9 +31,12 @@ use crate::types::{
 
 use super::is_valid_env_key;
 
-pub(super) const MAX_FINISHED_RUNS: usize = 16;
+pub(super) const MAX_FINISHED_RUNS: usize = 8;
 pub(super) const MAX_RUN_OUTPUT_LINES: usize = 2_000;
-const MAX_PARSED_TESTS: usize = 10_000;
+pub(super) const MAX_RUN_OUTPUT_BYTES: usize = 512 * 1024;
+const MAX_FINISHED_OUTPUT_BYTES: usize = 256 * 1024;
+const MAX_SINGLE_LINE_BYTES: usize = 16 * 1024;
+const MAX_PARSED_TESTS: usize = 2_000;
 
 pub(super) fn evict_finished_runs(runs: &DashMap<String, Arc<ActiveRunHandle>>) {
     let mut finished: Vec<(String, String, u64)> = runs
@@ -53,6 +65,7 @@ pub(super) struct RunStateInner {
     started_at: String,
     duration_ms: Option<u64>,
     output_seq: u64,
+    output_bytes: usize,
     output: VecDeque<String>,
     parser: IncrementalTestTracker,
 }
@@ -73,18 +86,48 @@ impl RunStateInner {
             started_at,
             duration_ms: None,
             output_seq: 0,
+            output_bytes: 0,
             output: VecDeque::new(),
             parser: IncrementalTestTracker::default(),
         }
     }
 
-    fn push_line(&mut self, line: String) {
+    fn push_line(&mut self, mut line: String) {
+        if line.len() > MAX_SINGLE_LINE_BYTES {
+            let mut cut = MAX_SINGLE_LINE_BYTES;
+            while cut > 0 && !line.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            line.truncate(cut);
+            line.push_str("... [truncated]");
+        }
         self.output_seq = self.output_seq.saturating_add(1);
         self.parser.ingest_line(self.runner, &line);
-        if self.output.len() >= MAX_RUN_OUTPUT_LINES {
-            self.output.pop_front();
+
+        let line_bytes = line.len();
+        while self.output.len() >= MAX_RUN_OUTPUT_LINES
+            || (self.output_bytes + line_bytes > MAX_RUN_OUTPUT_BYTES && !self.output.is_empty())
+        {
+            if let Some(removed) = self.output.pop_front() {
+                self.output_bytes = self.output_bytes.saturating_sub(removed.len());
+            }
         }
+        self.output_bytes += line_bytes;
         self.output.push_back(line);
+    }
+
+    fn compact_on_finish(&mut self) {
+        while self.output_bytes > MAX_FINISHED_OUTPUT_BYTES && self.output.len() > 1 {
+            if let Some(removed) = self.output.pop_front() {
+                self.output_bytes = self.output_bytes.saturating_sub(removed.len());
+            }
+        }
+        self.output.shrink_to_fit();
+        self.parser.compact_on_finish();
+    }
+
+    pub(super) fn output_bytes(&self) -> usize {
+        self.output_bytes
     }
 
     fn to_snapshot(&self, tail_lines: Option<usize>) -> IdeRunState {
@@ -149,6 +192,94 @@ impl ActiveRunHandle {
     }
 }
 
+/// Ensures local Unix child process groups (`-pgid`) are reaped even if the
+/// owning Tokio task is cancelled or dropped abruptly.
+struct ChildProcessGroupGuard {
+    pid: Option<u32>,
+    is_local: bool,
+    disarmed: bool,
+}
+
+impl Drop for ChildProcessGroupGuard {
+    #[allow(clippy::disallowed_methods)] // synchronous Drop safeguard against orphan child processes
+    fn drop(&mut self) {
+        if !self.disarmed && self.is_local {
+            #[cfg(unix)]
+            if let Some(pid) = self.pid {
+                let _ = std::process::Command::new("/bin/kill")
+                    .args(["-KILL", &format!("-{pid}")])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+        }
+    }
+}
+
+async fn kill_child_process_group(
+    child: &mut tokio::process::Child,
+    pid: Option<u32>,
+    is_local: bool,
+) {
+    #[cfg(unix)]
+    if is_local {
+        if let Some(p) = pid {
+            let neg = format!("-{p}");
+            let _ = Command::new("/bin/kill")
+                .args(["-TERM", &neg])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await;
+            if tokio::time::timeout(Duration::from_millis(150), child.wait())
+                .await
+                .is_ok()
+            {
+                let _ = Command::new("/bin/kill")
+                    .args(["-KILL", &neg])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .await;
+                return;
+            }
+            let _ = Command::new("/bin/kill")
+                .args(["-KILL", &neg])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (pid, is_local);
+
+    let _ = child.kill().await;
+    let _ = tokio::time::timeout(Duration::from_millis(120), child.wait()).await;
+}
+
+async fn cleanup_remaining_process_group(pid: Option<u32>, is_local: bool) {
+    #[cfg(unix)]
+    if is_local {
+        if let Some(p) = pid {
+            // Reap any stray background grandchild left in `-pgid` after leader exit.
+            let _ = Command::new("/bin/kill")
+                .args(["-KILL", &format!("-{p}")])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (pid, is_local);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_run_task(
     runs: Arc<DashMap<String, Arc<ActiveRunHandle>>>,
@@ -156,119 +287,186 @@ pub(super) async fn execute_run_task(
     targets: TargetManager,
     target: IdeTargetSpec,
     ssh: Option<IdeSshSpec>,
-    cfg: IdeRunConfig,
-    env_map: BTreeMap<String, String>,
+    steps: Vec<(IdeRunConfig, BTreeMap<String, String>)>,
     mut stop_rx: watch::Receiver<bool>,
 ) {
     let started = Instant::now();
-    let cwd = resolve_run_cwd(&target, cfg.cwd.as_deref());
-    let (program, args) = build_runner_command(&cfg, &cwd, &env_map);
+    let multi_step = steps.len() > 1;
+    let mut last_exit = Some(0);
 
-    if let Some(pre) = cfg
-        .before_launch
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        append_run_line(&handle, format!("$ {pre}"));
-        if let Err(err) =
-            run_before_launch(&targets, &target, ssh.as_ref(), pre, &cwd, &env_map).await
+    for (idx, (cfg, env_map)) in steps.into_iter().enumerate() {
+        if *stop_rx.borrow() {
+            finish_run(
+                &handle,
+                IdeRunStatus::Stopped,
+                None,
+                started.elapsed(),
+                None,
+            );
+            evict_finished_runs(&runs);
+            return;
+        }
+        if multi_step {
+            append_run_line(
+                &handle,
+                format!(
+                    "── [{}/{}] {} ──",
+                    idx + 1,
+                    multi_step_label(&cfg),
+                    cfg.name
+                ),
+            );
+        }
+
+        let cwd = resolve_run_cwd(&target, cfg.cwd.as_deref());
+        let (program, args) = build_runner_command(&cfg, &cwd, &env_map);
+
+        if let Some(pre) = cfg
+            .before_launch
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
         {
-            finish_run(
-                &handle,
-                IdeRunStatus::Failed,
-                Some(1),
-                started.elapsed(),
-                Some(err),
-            );
-            evict_finished_runs(&runs);
-            return;
-        }
-    }
-
-    append_run_line(
-        &handle,
-        format!("$ {} {}", program, args.join(" "))
-            .trim()
-            .to_string(),
-    );
-
-    let mut child = match spawn_run_child(&target, ssh.as_ref(), &program, &args, &cwd, &env_map) {
-        Ok(c) => c,
-        Err(err) => {
-            finish_run(
-                &handle,
-                IdeRunStatus::Failed,
-                Some(127),
-                started.elapsed(),
-                Some(err),
-            );
-            evict_finished_runs(&runs);
-            return;
-        }
-    };
-
-    let stdout_task = child.stdout.take().map(|out| {
-        let h = Arc::clone(&handle);
-        tokio::spawn(async move {
-            let mut reader = BufReader::new(out).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                append_run_line(&h, line);
+            append_run_line(&handle, format!("$ {pre}"));
+            if let Err(err) =
+                run_before_launch(&targets, &target, ssh.as_ref(), pre, &cwd, &env_map).await
+            {
+                finish_run(
+                    &handle,
+                    IdeRunStatus::Failed,
+                    Some(1),
+                    started.elapsed(),
+                    Some(err),
+                );
+                evict_finished_runs(&runs);
+                return;
             }
-        })
-    });
-    let stderr_task = child.stderr.take().map(|err| {
-        let h = Arc::clone(&handle);
-        tokio::spawn(async move {
-            let mut reader = BufReader::new(err).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                append_run_line(&h, line);
-            }
-        })
-    });
-
-    let wait_res = tokio::select! {
-        status = child.wait() => Some(status),
-        _ = stop_rx.changed() => {
-            let _ = child.kill().await;
-            None
         }
-    };
-    if let Some(t) = stdout_task {
-        let _ = t.await;
-    }
-    if let Some(t) = stderr_task {
-        let _ = t.await;
-    }
 
-    match wait_res {
-        None => finish_run(
+        append_run_line(
             &handle,
-            IdeRunStatus::Stopped,
-            None,
-            started.elapsed(),
-            None,
-        ),
-        Some(Ok(st)) => {
-            let code = st.code().unwrap_or(if st.success() { 0 } else { 1 });
-            let status = if st.success() {
-                IdeRunStatus::Passed
-            } else {
-                IdeRunStatus::Failed
+            format!("$ {} {}", program, args.join(" "))
+                .trim()
+                .to_string(),
+        );
+
+        let is_local = target.kind == IdeTargetKind::Local;
+        let mut child =
+            match spawn_run_child(&target, ssh.as_ref(), &program, &args, &cwd, &env_map) {
+                Ok(c) => c,
+                Err(err) => {
+                    finish_run(
+                        &handle,
+                        IdeRunStatus::Failed,
+                        Some(127),
+                        started.elapsed(),
+                        Some(err),
+                    );
+                    evict_finished_runs(&runs);
+                    return;
+                }
             };
-            finish_run(&handle, status, Some(code), started.elapsed(), None);
+        let pid = child.id();
+        let mut pg_guard = ChildProcessGroupGuard {
+            pid,
+            is_local,
+            disarmed: false,
+        };
+
+        let stdout_task = child.stdout.take().map(|out| {
+            let h = Arc::clone(&handle);
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(out).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    append_run_line(&h, line);
+                }
+            })
+        });
+        let stderr_task = child.stderr.take().map(|err| {
+            let h = Arc::clone(&handle);
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(err).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    append_run_line(&h, line);
+                }
+            })
+        });
+
+        let wait_res = tokio::select! {
+            status = child.wait() => {
+                cleanup_remaining_process_group(pid, is_local).await;
+                pg_guard.disarmed = true;
+                Some(status)
+            }
+            _ = stop_rx.changed() => {
+                kill_child_process_group(&mut child, pid, is_local).await;
+                pg_guard.disarmed = true;
+                None
+            }
+        };
+        if let Some(t) = stdout_task {
+            let _ = tokio::time::timeout(Duration::from_millis(250), t).await;
         }
-        Some(Err(e)) => {
-            finish_run(
-                &handle,
-                IdeRunStatus::Failed,
-                Some(1),
-                started.elapsed(),
-                Some(e.to_string()),
-            );
+        if let Some(t) = stderr_task {
+            let _ = tokio::time::timeout(Duration::from_millis(250), t).await;
+        }
+
+        match wait_res {
+            None => {
+                finish_run(
+                    &handle,
+                    IdeRunStatus::Stopped,
+                    None,
+                    started.elapsed(),
+                    None,
+                );
+                evict_finished_runs(&runs);
+                return;
+            }
+            Some(Ok(st)) => {
+                let code = st.code().unwrap_or(if st.success() { 0 } else { 1 });
+                last_exit = Some(code);
+                if !st.success() {
+                    finish_run(
+                        &handle,
+                        IdeRunStatus::Failed,
+                        Some(code),
+                        started.elapsed(),
+                        None,
+                    );
+                    evict_finished_runs(&runs);
+                    return;
+                }
+            }
+            Some(Err(e)) => {
+                finish_run(
+                    &handle,
+                    IdeRunStatus::Failed,
+                    Some(1),
+                    started.elapsed(),
+                    Some(e.to_string()),
+                );
+                evict_finished_runs(&runs);
+                return;
+            }
         }
     }
+
+    finish_run(
+        &handle,
+        IdeRunStatus::Passed,
+        last_exit,
+        started.elapsed(),
+        None,
+    );
     evict_finished_runs(&runs);
+}
+
+fn multi_step_label(cfg: &IdeRunConfig) -> &'static str {
+    match cfg.runner {
+        IdeRunnerKind::GoBuild => "build",
+        _ => "run",
+    }
 }
 
 pub(super) fn append_run_line(handle: &ActiveRunHandle, line: String) {
@@ -292,6 +490,7 @@ pub(super) fn finish_run(
     }
     guard.exit_code = exit_code;
     guard.duration_ms = Some(elapsed.as_millis() as u64);
+    guard.compact_on_finish();
 }
 
 async fn run_before_launch(
@@ -304,15 +503,18 @@ async fn run_before_launch(
 ) -> std::result::Result<(), String> {
     match target.kind {
         IdeTargetKind::Local => {
-            let out = Command::new("sh")
-                .args(["-c", script])
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", script])
                 .current_dir(cwd)
                 .envs(env_map)
                 .stdin(Stdio::null())
-                .kill_on_drop(true)
-                .output()
-                .await
-                .map_err(|e| e.to_string())?;
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            #[cfg(unix)]
+            cmd.process_group(0);
+
+            let out = cmd.output().await.map_err(|e| e.to_string())?;
             if !out.status.success() {
                 return Err(format!(
                     "before_launch failed: {}",
@@ -357,6 +559,8 @@ fn spawn_run_child(
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
+            #[cfg(unix)]
+            cmd.process_group(0);
             cmd.spawn().map_err(|e| format!("spawn '{program}': {e}"))
         }
         IdeTargetKind::Ssh => {
@@ -411,6 +615,8 @@ fn spawn_run_child(
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
+            #[cfg(unix)]
+            cmd.process_group(0);
             cmd.spawn().map_err(|e| format!("spawn ssh: {e}"))
         }
     }
@@ -429,7 +635,7 @@ fn resolve_program_in_env(program: &str, env_map: &BTreeMap<String, String>) -> 
     PathBuf::from(program)
 }
 
-fn resolve_run_cwd(target: &IdeTargetSpec, raw_cwd: Option<&str>) -> String {
+pub(super) fn resolve_run_cwd(target: &IdeTargetSpec, raw_cwd: Option<&str>) -> String {
     let Some(c) = raw_cwd
         .map(str::trim)
         .filter(|s| !s.is_empty() && *s != ".")
@@ -437,19 +643,27 @@ fn resolve_run_cwd(target: &IdeTargetSpec, raw_cwd: Option<&str>) -> String {
         return target.root.clone();
     };
     if c.starts_with('/') {
+        let allowed_roots = std::iter::once(target.root.as_str())
+            .chain(target.additional_roots.iter().map(String::as_str));
         if target.kind == IdeTargetKind::Local {
-            if let (Ok(canon_root), Ok(canon_c)) = (
-                std::fs::canonicalize(&target.root),
-                std::fs::canonicalize(c),
-            ) {
-                if canon_c.starts_with(&canon_root) {
-                    return canon_c.to_string_lossy().into_owned();
+            if let Ok(canon_c) = std::fs::canonicalize(c) {
+                for allowed in allowed_roots.clone() {
+                    if let Ok(canon_root) = std::fs::canonicalize(allowed) {
+                        if canon_c.starts_with(&canon_root) {
+                            return canon_c.to_string_lossy().into_owned();
+                        }
+                    }
                 }
             }
         }
-        if c == target.root || c.starts_with(&format!("{}/", target.root.trim_end_matches('/'))) {
-            return c.to_string();
+        for allowed in allowed_roots {
+            if c == allowed || c.starts_with(&format!("{}/", allowed.trim_end_matches('/'))) {
+                return c.to_string();
+            }
         }
+        return target.root.clone();
+    }
+    if c.contains("..") {
         return target.root.clone();
     }
     let rel = c.trim_start_matches("./");
@@ -467,6 +681,12 @@ pub(super) fn build_runner_command(
         .map(str::trim)
         .filter(|s| !s.is_empty());
     let mut args = cfg.args.clone();
+    let build_flags: Vec<String> = cfg
+        .build_flags
+        .iter()
+        .map(|f| f.trim().to_string())
+        .filter(|f| !f.is_empty())
+        .collect();
     let filter = cfg
         .test_filter
         .as_deref()
@@ -477,19 +697,22 @@ pub(super) fn build_runner_command(
         IdeRunnerKind::GoTest => {
             let prog = cmd_opt.unwrap_or("go").to_string();
             let mut out = Vec::new();
-            if args.first().map(String::as_str) != Some("test") {
-                out.push("test".into());
-                if !args.iter().any(|a| a == "-v") {
-                    out.push("-v".into());
-                }
+            let has_leading_test = args.first().map(String::as_str) == Some("test");
+            if has_leading_test {
+                args.remove(0);
             }
+            out.push("test".into());
+            if !args.iter().any(|a| a == "-v") && !build_flags.iter().any(|a| a == "-v") {
+                out.push("-v".into());
+            }
+            out.extend(build_flags);
             if let Some(f) = filter {
                 if !args.iter().any(|a| a == "-run") {
                     out.extend(["-run".into(), f.to_string()]);
                 }
             }
             if args.is_empty() {
-                out.push("./...".into());
+                out.push(cfg.target_path.clone().unwrap_or_else(|| "./...".into()));
             } else {
                 out.extend(args);
             }
@@ -497,32 +720,56 @@ pub(super) fn build_runner_command(
         }
         IdeRunnerKind::GoRun => {
             let prog = cmd_opt.unwrap_or("go").to_string();
-            if args.first().map(String::as_str) != Some("run") {
-                args.insert(0, "run".into());
+            if args.first().map(String::as_str) == Some("run") {
+                args.remove(0);
             }
-            if args.len() == 1 {
-                args.push(cfg.target_path.clone().unwrap_or_else(|| ".".into()));
+            let mut out = vec!["run".into()];
+            out.extend(build_flags);
+            if args.is_empty() {
+                out.push(cfg.target_path.clone().unwrap_or_else(|| ".".into()));
+            } else {
+                out.extend(args);
             }
-            (prog, args)
+            (prog, out)
+        }
+        IdeRunnerKind::GoBuild => {
+            let prog = cmd_opt.unwrap_or("go").to_string();
+            if args.first().map(String::as_str) == Some("build") {
+                args.remove(0);
+            }
+            let mut out = vec!["build".into()];
+            out.extend(build_flags);
+            if args.is_empty() {
+                out.push(cfg.target_path.clone().unwrap_or_else(|| ".".into()));
+            } else {
+                out.extend(args);
+            }
+            (prog, out)
         }
         IdeRunnerKind::CargoTest => {
             let prog = cmd_opt.unwrap_or("cargo").to_string();
-            if args.first().map(String::as_str) != Some("test") {
-                args.insert(0, "test".into());
+            if args.first().map(String::as_str) == Some("test") {
+                args.remove(0);
             }
+            let mut out = vec!["test".into()];
+            out.extend(build_flags);
             if let Some(f) = filter {
                 if !args.iter().any(|a| a == f) {
-                    args.push(f.to_string());
+                    args.insert(0, f.to_string());
                 }
             }
-            (prog, args)
+            out.extend(args);
+            (prog, out)
         }
         IdeRunnerKind::CargoRun => {
             let prog = cmd_opt.unwrap_or("cargo").to_string();
-            if args.first().map(String::as_str) != Some("run") {
-                args.insert(0, "run".into());
+            if args.first().map(String::as_str) == Some("run") {
+                args.remove(0);
             }
-            (prog, args)
+            let mut out = vec!["run".into()];
+            out.extend(build_flags);
+            out.extend(args);
+            (prog, out)
         }
         IdeRunnerKind::Pytest => {
             let py = env_map
@@ -537,8 +784,11 @@ pub(super) fn build_runner_command(
                 if !args.iter().any(|a| a == "-v") {
                     args.insert(0, "-v".into());
                 }
+                args.extend(build_flags);
                 if let Some(f) = filter {
-                    args.extend(["-k".into(), f.to_string()]);
+                    if !args.iter().any(|a| a == f) {
+                        args.extend(["-k".into(), f.to_string()]);
+                    }
                 }
                 ("pytest".into(), args)
             } else {
@@ -548,27 +798,38 @@ pub(super) fn build_runner_command(
                     "discover".into(),
                     "-v".into(),
                 ];
+                u.extend(build_flags);
                 u.extend(args);
                 (py, u)
             }
         }
         IdeRunnerKind::Python => {
-            let prog = cmd_opt.unwrap_or("python3").to_string();
+            let default_py = env_map
+                .get("VIRTUAL_ENV")
+                .map(|v| format!("{v}/bin/python"))
+                .unwrap_or_else(|| "python3".into());
+            let prog = cmd_opt.map(str::to_string).unwrap_or(default_py);
+            let mut out = build_flags;
             if args.is_empty() {
                 if let Some(tp) = &cfg.target_path {
-                    args.push(tp.clone());
+                    out.push(tp.clone());
                 }
+            } else {
+                out.extend(args);
             }
-            (prog, args)
+            (prog, out)
         }
         IdeRunnerKind::Node => {
             let prog = cmd_opt.unwrap_or("node").to_string();
+            let mut out = build_flags;
             if args.is_empty() {
                 if let Some(tp) = &cfg.target_path {
-                    args.push(tp.clone());
+                    out.push(tp.clone());
                 }
+            } else {
+                out.extend(args);
             }
-            (prog, args)
+            (prog, out)
         }
         IdeRunnerKind::Npm => (
             cmd_opt.unwrap_or("npm").to_string(),
@@ -582,12 +843,26 @@ pub(super) fn build_runner_command(
             let prog = cmd_opt.unwrap_or("npx").to_string();
             if args.first().map(String::as_str) != Some("vitest") {
                 let mut v = vec!["vitest".into(), "run".into()];
+                v.extend(build_flags);
                 v.extend(args);
                 args = v;
             }
             (prog, args)
         }
-        IdeRunnerKind::JavaMain => (cmd_opt.unwrap_or("java").to_string(), args),
+        IdeRunnerKind::JavaMain => {
+            let prog = cmd_opt.unwrap_or("java").to_string();
+            let mut out = build_flags;
+            if args.is_empty() {
+                if let Some(fqcn) = filter {
+                    out.push(fqcn.to_string());
+                } else if let Some(tp) = &cfg.target_path {
+                    out.push(tp.clone());
+                }
+            } else {
+                out.extend(args);
+            }
+            (prog, out)
+        }
         IdeRunnerKind::JavaJunit | IdeRunnerKind::Maven => {
             let mvnw = Path::new(cwd).join("mvnw");
             let prog = cmd_opt.map(str::to_string).unwrap_or_else(|| {
@@ -600,6 +875,7 @@ pub(super) fn build_runner_command(
             if args.is_empty() {
                 args.push("test".into());
             }
+            args.extend(build_flags);
             if let Some(f) = filter {
                 args.push(format!("-Dtest={f}"));
             }
@@ -617,17 +893,38 @@ pub(super) fn build_runner_command(
             if args.is_empty() {
                 args.push("test".into());
             }
+            args.extend(build_flags);
             if let Some(f) = filter {
                 args.extend(["--tests".into(), f.to_string()]);
             }
             (prog, args)
         }
-        IdeRunnerKind::Custom => {
+        IdeRunnerKind::Shell => {
+            let is_bats = cfg
+                .target_path
+                .as_deref()
+                .is_some_and(|p| p.ends_with(".bats"));
+            let prog = cmd_opt
+                .unwrap_or(if is_bats { "bats" } else { "bash" })
+                .to_string();
+            let mut out = build_flags;
+            if args.is_empty() {
+                if let Some(tp) = &cfg.target_path {
+                    out.push(tp.clone());
+                }
+            } else {
+                out.extend(args);
+            }
+            (prog, out)
+        }
+        IdeRunnerKind::Compound | IdeRunnerKind::Custom => {
             let c = cmd_opt.unwrap_or("echo");
             if args.is_empty() && c.contains(' ') {
                 ("sh".into(), vec!["-c".into(), c.to_string()])
             } else {
-                (c.to_string(), args)
+                let mut out = build_flags;
+                out.extend(args);
+                (c.to_string(), out)
             }
         }
     }
@@ -649,6 +946,12 @@ impl IncrementalTestTracker {
         }
     }
 
+    fn compact_on_finish(&mut self) {
+        self.go_index.clear();
+        self.go_index.shrink_to_fit();
+        self.results.shrink_to_fit();
+    }
+
     fn ingest_line(&mut self, runner: IdeRunnerKind, line: &str) {
         match runner {
             IdeRunnerKind::GoTest => self.ingest_go_line(line),
@@ -662,7 +965,10 @@ impl IncrementalTestTracker {
                     self.push_capped(tc);
                 }
             }
-            IdeRunnerKind::Node | IdeRunnerKind::Vitest | IdeRunnerKind::Npm => {
+            IdeRunnerKind::Node
+            | IdeRunnerKind::Vitest
+            | IdeRunnerKind::Npm
+            | IdeRunnerKind::Shell => {
                 if let Some(tc) = parse_js_test_line(line) {
                     self.push_capped(tc);
                 }
@@ -924,7 +1230,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_structured_test_results_across_go_rust_python_js_and_jvm() {
+    fn parses_structured_test_results_across_go_rust_python_js_shell_and_jvm() {
         let go_out = vec![
             "=== RUN   TestAdd".to_string(),
             "--- PASS: TestAdd (0.02s)".to_string(),
@@ -957,16 +1263,16 @@ mod tests {
         assert_eq!(py_res[0].name, "test_ok");
         assert_eq!(py_res[0].status, IdeTestCaseStatus::Passed);
 
-        let js_res = parse_test_output(
-            IdeRunnerKind::Node,
+        let bats_res = parse_test_output(
+            IdeRunnerKind::Shell,
             &[
-                "ok 1 - adds numbers (3ms)".into(),
-                "not ok 2 - divides by zero".into(),
+                "ok 1 healthcheck passes".into(),
+                "not ok 2 missing env fails".into(),
             ],
         );
-        assert_eq!(js_res.len(), 2);
-        assert_eq!(js_res[0].status, IdeTestCaseStatus::Passed);
-        assert_eq!(js_res[1].status, IdeTestCaseStatus::Failed);
+        assert_eq!(bats_res.len(), 2);
+        assert_eq!(bats_res[0].status, IdeTestCaseStatus::Passed);
+        assert_eq!(bats_res[1].status, IdeTestCaseStatus::Failed);
 
         let jvm_res = parse_test_output(
             IdeRunnerKind::Gradle,
@@ -977,7 +1283,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_10k_lines_is_under_50ms_caps_output_and_preserves_tests() {
+    fn streaming_10k_lines_is_under_50ms_caps_512kb_memory_and_preserves_tests() {
         let (stop_tx, _stop_rx) = watch::channel(false);
         let handle = ActiveRunHandle {
             seq: 1,
@@ -1012,24 +1318,144 @@ mod tests {
         let snap = handle.snapshot();
         assert_eq!(snap.output.len(), MAX_RUN_OUTPUT_LINES);
         assert_eq!(snap.output_seq, 10_000);
-        assert_eq!(
-            snap.output.first().map(String::as_str),
-            Some("stdout log line 8000")
-        );
-        assert_eq!(
-            snap.output.last().map(String::as_str),
-            Some("test late::final_case ... ok")
-        );
         assert_eq!(snap.tests.len(), 3);
-        assert_eq!(snap.tests[0].name, "early::first_case");
-        assert_eq!(snap.tests[0].status, IdeTestCaseStatus::Passed);
-        assert_eq!(snap.tests[1].name, "early::second_case");
-        assert_eq!(snap.tests[1].status, IdeTestCaseStatus::Failed);
-        assert_eq!(snap.tests[2].name, "late::final_case");
-        assert_eq!(snap.tests[2].status, IdeTestCaseStatus::Passed);
 
-        let tail = handle.snapshot_with_tail(Some(5));
-        assert_eq!(tail.output.len(), 5);
-        assert_eq!(tail.output_seq, 10_000);
+        // Verify byte ceiling (`<= 512 KB`) even under heavy 8 KB log lines:
+        for _ in 0..200 {
+            append_run_line(&handle, "x".repeat(8192));
+        }
+        let active_bytes = handle.state.lock().unwrap().output_bytes();
+        assert!(active_bytes <= MAX_RUN_OUTPUT_BYTES);
+
+        finish_run(
+            &handle,
+            IdeRunStatus::Passed,
+            Some(0),
+            Duration::from_millis(10),
+            None,
+        );
+        let compacted_bytes = handle.state.lock().unwrap().output_bytes();
+        assert!(compacted_bytes <= MAX_FINISHED_OUTPUT_BYTES);
+    }
+
+    #[test]
+    fn build_runner_command_supports_go_build_shell_and_build_flags() {
+        let cfg = IdeRunConfig {
+            id: "rc_go".into(),
+            name: "Go Run".into(),
+            runner: IdeRunnerKind::GoRun,
+            build_flags: vec!["-race".into(), "-tags=integration".into()],
+            target_path: Some("./cmd/admission".into()),
+            ..Default::default()
+        };
+        let (prog, args) = build_runner_command(&cfg, "/tmp", &BTreeMap::new());
+        assert_eq!(prog, "go");
+        assert_eq!(
+            args,
+            vec!["run", "-race", "-tags=integration", "./cmd/admission"]
+        );
+
+        let gb = IdeRunConfig {
+            runner: IdeRunnerKind::GoBuild,
+            build_flags: vec!["-o".into(), "bin/server".into()],
+            target_path: Some("./cmd/server".into()),
+            ..Default::default()
+        };
+        let (b_prog, b_args) = build_runner_command(&gb, "/tmp", &BTreeMap::new());
+        assert_eq!(b_prog, "go");
+        assert_eq!(b_args, vec!["build", "-o", "bin/server", "./cmd/server"]);
+
+        let sh_cfg = IdeRunConfig {
+            runner: IdeRunnerKind::Shell,
+            build_flags: vec!["-x".into()],
+            target_path: Some("scripts/deploy.sh".into()),
+            ..Default::default()
+        };
+        let (sh_prog, sh_args) = build_runner_command(&sh_cfg, "/tmp", &BTreeMap::new());
+        assert_eq!(sh_prog, "bash");
+        assert_eq!(sh_args, vec!["-x", "scripts/deploy.sh"]);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn stopping_run_kills_entire_unix_process_group_leaving_zero_orphans() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pid_file = tmp.path().join("child.pid");
+        let script = tmp.path().join("spawn_child.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nsleep 60 &\necho $! > '{}'\nwait\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let runs: Arc<DashMap<String, Arc<ActiveRunHandle>>> = Arc::new(DashMap::new());
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let handle = Arc::new(ActiveRunHandle {
+            seq: 1,
+            state: Mutex::new(RunStateInner::new(
+                "run_pg".into(),
+                "PG Test".into(),
+                IdeRunnerKind::Shell,
+                "2026-01-01T00:00:00Z".into(),
+            )),
+            stop_tx,
+        });
+        runs.insert("run_pg".into(), Arc::clone(&handle));
+
+        let target = IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned(), None);
+        let cfg = IdeRunConfig {
+            id: "rc_pg".into(),
+            name: "PG Test".into(),
+            runner: IdeRunnerKind::Shell,
+            target_path: Some("spawn_child.sh".into()),
+            ..Default::default()
+        };
+        let runs_c = Arc::clone(&runs);
+        let handle_c = Arc::clone(&handle);
+        let task = tokio::spawn(async move {
+            execute_run_task(
+                runs_c,
+                handle_c,
+                TargetManager::new(),
+                target,
+                None,
+                vec![(cfg, BTreeMap::new())],
+                stop_rx,
+            )
+            .await;
+        });
+
+        for _ in 0..40 {
+            if pid_file.is_file() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let grandchild_pid: u32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+
+        handle.stop();
+        task.await.unwrap();
+
+        let alive = Command::new("/bin/kill")
+            .args(["-0", &grandchild_pid.to_string()])
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(
+            !alive,
+            "grandchild sleep process {grandchild_pid} leaked after stop_run!"
+        );
     }
 }

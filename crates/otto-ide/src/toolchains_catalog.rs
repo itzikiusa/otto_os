@@ -1,10 +1,12 @@
 //! Architecture-aware (`macos`/`linux` × `aarch64`/`x86_64`) SDK, LSP, and DAP
-//! version catalogs for Java, Go, Rust, Node.js (JS/TS), and Python.
+//! version catalogs for Java, Go, Rust, Node.js (JS/TS), Python, Shell, and JSON.
 //!
 //! Combines live vendor HTTPS metadata fetchers (`api.adoptium.net`,
-//! `go.dev/dl/?mode=json`, `static.rust-lang.org`, `nodejs.org/dist/index.json`,
-//! and Astral `uv` releases) with an in-memory TTL cache and resilient curated
-//! fallback catalogs for airgapped, offline, or isolated E2E runs.
+//! `go.dev/dl/?mode=json&include=all`, `static.rust-lang.org`,
+//! `nodejs.org/dist/index.json`, and Astral `uv` releases) with an in-memory
+//! TTL cache, SHA-256 archive checksums where published by upstream vendors,
+//! and zero-HTTPS `<1ms` curated catalogs for instant IDE startup and offline
+//! or isolated E2E runs.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -15,6 +17,7 @@ use serde::{Deserialize, Serialize};
 const CACHE_TTL: Duration = Duration::from_secs(900);
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_millis(1800);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_millis(2800);
+const MAX_GO_CATALOG_VERSIONS: usize = 40;
 
 pub const JDTLS_TARBALL_URL: &str =
     "https://download.eclipse.org/jdtls/milestones/1.40.0/jdt-language-server-1.40.0-202409261450.tar.gz";
@@ -26,6 +29,8 @@ pub const DLV_PKG: &str = "github.com/go-delve/delve/cmd/dlv@latest";
 pub const JS_DEBUG_TARBALL_URL: &str =
     "https://github.com/microsoft/vscode-js-debug/releases/download/v1.97.1/js-debug-dap-v1.97.1.tar.gz";
 pub const TS_LSP_NPM_PACKAGES: &[&str] = &["typescript", "typescript-language-server"];
+pub const BASH_LSP_NPM_PACKAGES: &[&str] = &["bash-language-server"];
+pub const JSON_LSP_NPM_PACKAGES: &[&str] = &["vscode-langservers-extracted"];
 pub const PYRIGHT_PKG: &str = "pyright";
 pub const DEBUGPY_PKG: &str = "debugpy";
 
@@ -186,10 +191,20 @@ pub enum EcosystemKind {
     Rust,
     Node,
     Python,
+    Shell,
+    Json,
 }
 
 impl EcosystemKind {
-    pub const ALL: [Self; 5] = [Self::Java, Self::Go, Self::Rust, Self::Node, Self::Python];
+    pub const ALL: [Self; 7] = [
+        Self::Java,
+        Self::Go,
+        Self::Rust,
+        Self::Node,
+        Self::Python,
+        Self::Shell,
+        Self::Json,
+    ];
 
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
@@ -198,6 +213,8 @@ impl EcosystemKind {
             "rust" | "cargo" => Some(Self::Rust),
             "node" | "nodejs" | "javascript" | "typescript" | "js" | "ts" => Some(Self::Node),
             "python" | "py" | "uv" => Some(Self::Python),
+            "shell" | "bash" | "sh" | "zsh" => Some(Self::Shell),
+            "json" | "jsonc" | "jsonl" => Some(Self::Json),
             _ => None,
         }
     }
@@ -209,6 +226,8 @@ impl EcosystemKind {
             Self::Rust => "rust",
             Self::Node => "node",
             Self::Python => "python",
+            Self::Shell => "shell",
+            Self::Json => "json",
         }
     }
 
@@ -219,6 +238,8 @@ impl EcosystemKind {
             Self::Rust => "Rust",
             Self::Node => "Node.js (JS / TS)",
             Self::Python => "Python (uv)",
+            Self::Shell => "Shell (Bash / Zsh)",
+            Self::Json => "JSON / JSONC / JSONL",
         }
     }
 
@@ -229,6 +250,8 @@ impl EcosystemKind {
             Self::Rust => "rust-analyzer",
             Self::Node => "typescript-language-server",
             Self::Python => "pyright",
+            Self::Shell => "bash-language-server",
+            Self::Json => "vscode-json-language-server",
         }
     }
 
@@ -239,16 +262,20 @@ impl EcosystemKind {
             Self::Rust => "codelldb",
             Self::Node => "js-debug",
             Self::Python => "debugpy",
+            Self::Shell => "bashdb",
+            Self::Json => "jq",
         }
     }
 
     pub const fn default_sdk_version(self) -> &'static str {
         match self {
             Self::Java => "21",
-            Self::Go => "1.24.1",
+            Self::Go => "1.24.2",
             Self::Rust => "stable",
             Self::Node => "22.14.0",
             Self::Python => "3.13",
+            Self::Shell => "3.10.0",
+            Self::Json => "1.7.1",
         }
     }
 }
@@ -264,6 +291,8 @@ pub struct CatalogSdkEntry {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 impl From<crate::types::IdeEcosystemKind> for EcosystemKind {
@@ -274,6 +303,8 @@ impl From<crate::types::IdeEcosystemKind> for EcosystemKind {
             crate::types::IdeEcosystemKind::Rust => Self::Rust,
             crate::types::IdeEcosystemKind::Node => Self::Node,
             crate::types::IdeEcosystemKind::Python => Self::Python,
+            crate::types::IdeEcosystemKind::Shell => Self::Shell,
+            crate::types::IdeEcosystemKind::Json => Self::Json,
         }
     }
 }
@@ -286,6 +317,8 @@ impl From<EcosystemKind> for crate::types::IdeEcosystemKind {
             EcosystemKind::Rust => Self::Rust,
             EcosystemKind::Node => Self::Node,
             EcosystemKind::Python => Self::Python,
+            EcosystemKind::Shell => Self::Shell,
+            EcosystemKind::Json => Self::Json,
         }
     }
 }
@@ -300,6 +333,7 @@ impl From<CatalogSdkEntry> for crate::types::IdeDownloadableVersion {
             arch: e.arch,
             url: e.url,
             size_hint: e.size_hint,
+            sha256: e.sha256,
         }
     }
 }
@@ -370,9 +404,34 @@ pub fn uv_tarball_url(platform: TargetPlatform) -> String {
     )
 }
 
+pub fn shfmt_binary_url(version: &str, platform: TargetPlatform) -> String {
+    let clean = version.trim().trim_start_matches('v');
+    format!(
+        "https://github.com/mvdan/sh/releases/download/v{clean}/shfmt_v{clean}_{}_{}",
+        platform.os.go_os(),
+        platform.arch.go_arch()
+    )
+}
+
+pub fn jq_binary_url(version: &str, platform: TargetPlatform) -> String {
+    let clean = version.trim().trim_start_matches("jq-");
+    let slug = match (platform.os, platform.arch) {
+        (TargetOs::Macos, TargetArch::Aarch64) => "macos-arm64",
+        (TargetOs::Macos, TargetArch::X86_64) => "macos-amd64",
+        (TargetOs::Linux, TargetArch::Aarch64) => "linux-arm64",
+        (TargetOs::Linux, TargetArch::X86_64) => "linux-amd64",
+    };
+    format!("https://github.com/jqlang/jq/releases/download/jq-{clean}/jq-{slug}")
+}
+
 fn format_mb(bytes: u64) -> String {
     let mb = (bytes as f64) / (1024.0 * 1024.0);
     format!("{mb:.0} MB")
+}
+
+fn normalize_sha256(raw: Option<&str>) -> Option<String> {
+    let s = raw?.trim();
+    (s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())).then(|| s.to_ascii_lowercase())
 }
 
 /// Curated offline/airgapped catalog tailored to `(os, arch)`.
@@ -385,6 +444,7 @@ pub fn curated_catalog(ecosystem: EcosystemKind, platform: TargetPlatform) -> Ve
             (21, true, "198 MB"),
             (17, true, "192 MB"),
             (11, true, "186 MB"),
+            (8, true, "112 MB"),
         ]
         .into_iter()
         .map(|(ver, lts, sz)| CatalogSdkEntry {
@@ -399,12 +459,16 @@ pub fn curated_catalog(ecosystem: EcosystemKind, platform: TargetPlatform) -> Ve
             arch: arch.clone(),
             url: temurin_jdk_tarball_url(ver, platform),
             size_hint: Some(sz.to_string()),
+            sha256: None,
         })
         .collect(),
         EcosystemKind::Go => [
+            ("1.24.2", true, "73 MB"),
             ("1.24.1", true, "72 MB"),
-            ("1.23.7", true, "70 MB"),
+            ("1.23.8", true, "70 MB"),
+            ("1.23.7", false, "70 MB"),
             ("1.22.12", false, "67 MB"),
+            ("1.21.13", false, "65 MB"),
         ]
         .into_iter()
         .map(|(ver, lts, sz)| CatalogSdkEntry {
@@ -415,6 +479,7 @@ pub fn curated_catalog(ecosystem: EcosystemKind, platform: TargetPlatform) -> Ve
             arch: arch.clone(),
             url: go_tarball_url(ver, platform),
             size_hint: Some(sz.to_string()),
+            sha256: None,
         })
         .collect(),
         EcosystemKind::Rust => [
@@ -431,12 +496,14 @@ pub fn curated_catalog(ecosystem: EcosystemKind, platform: TargetPlatform) -> Ve
             arch: arch.clone(),
             url: rustup_init_url(platform),
             size_hint: Some("180 MB".to_string()),
+            sha256: None,
         })
         .collect(),
         EcosystemKind::Node => [
             ("24.0.0", "Node.js 24.0.0 (Current)", false, "44 MB"),
             ("22.14.0", "Node.js 22.14.0 LTS (Jod)", true, "42 MB"),
             ("20.19.0", "Node.js 20.19.0 LTS (Iron)", true, "40 MB"),
+            ("18.20.7", "Node.js 18.20.7 LTS (Hydrogen)", true, "39 MB"),
         ]
         .into_iter()
         .map(|(ver, label, lts, sz)| CatalogSdkEntry {
@@ -447,12 +514,14 @@ pub fn curated_catalog(ecosystem: EcosystemKind, platform: TargetPlatform) -> Ve
             arch: arch.clone(),
             url: node_tarball_url(ver, platform),
             size_hint: Some(sz.to_string()),
+            sha256: None,
         })
         .collect(),
         EcosystemKind::Python => [
             ("3.13", "Python 3.13 (Astral uv managed)", true, "34 MB"),
             ("3.12", "Python 3.12 (Astral uv managed)", true, "32 MB"),
             ("3.11", "Python 3.11 (Astral uv managed)", false, "31 MB"),
+            ("3.10", "Python 3.10 (Astral uv managed)", false, "30 MB"),
         ]
         .into_iter()
         .map(|(ver, label, lts, sz)| CatalogSdkEntry {
@@ -463,8 +532,29 @@ pub fn curated_catalog(ecosystem: EcosystemKind, platform: TargetPlatform) -> Ve
             arch: arch.clone(),
             url: uv_tarball_url(platform),
             size_hint: Some(sz.to_string()),
+            sha256: None,
         })
         .collect(),
+        EcosystemKind::Shell => vec![CatalogSdkEntry {
+            version: "3.10.0".to_string(),
+            label: "shfmt 3.10.0 (Shell formatter & parser)".to_string(),
+            lts: true,
+            os,
+            arch,
+            url: shfmt_binary_url("3.10.0", platform),
+            size_hint: Some("4 MB".to_string()),
+            sha256: None,
+        }],
+        EcosystemKind::Json => vec![CatalogSdkEntry {
+            version: "1.7.1".to_string(),
+            label: "jq 1.7.1 (JSON / JSONL processor)".to_string(),
+            lts: true,
+            os,
+            arch,
+            url: jq_binary_url("1.7.1", platform),
+            size_hint: Some("3 MB".to_string()),
+            sha256: None,
+        }],
     }
 }
 
@@ -490,7 +580,7 @@ pub fn resolve_sdk_download(
     }) {
         return Ok(hit.clone());
     }
-    // Also support prefix match for major tracks like "22" -> "22.14.0" or "1.24" -> "1.24.1".
+    // Also support prefix match for major/minor tracks like "22" -> "22.14.0" or "1.24" -> "1.24.2".
     if let Some(hit) = catalog
         .iter()
         .find(|e| e.version.starts_with(&format!("{ver}.")))
@@ -511,11 +601,12 @@ pub fn resolve_sdk_download(
             Ok(CatalogSdkEntry {
                 version: feature.to_string(),
                 label: format!("Eclipse Temurin JDK {feature}"),
-                lts: matches!(feature, 11 | 17 | 21 | 25),
+                lts: matches!(feature, 8 | 11 | 17 | 21 | 25),
                 os,
                 arch,
                 url: temurin_jdk_tarball_url(feature, platform),
                 size_hint: None,
+                sha256: None,
             })
         }
         EcosystemKind::Go => {
@@ -528,6 +619,7 @@ pub fn resolve_sdk_download(
                 arch,
                 url: go_tarball_url(&clean, platform),
                 size_hint: None,
+                sha256: None,
             })
         }
         EcosystemKind::Rust => Ok(CatalogSdkEntry {
@@ -538,19 +630,22 @@ pub fn resolve_sdk_download(
             arch,
             url: rustup_init_url(platform),
             size_hint: None,
+            sha256: None,
         }),
         EcosystemKind::Node => {
             let clean = ver.trim_start_matches('v').to_string();
             Ok(CatalogSdkEntry {
                 version: clean.clone(),
                 label: format!("Node.js {clean}"),
-                lts: clean.starts_with("20.")
+                lts: clean.starts_with("18.")
+                    || clean.starts_with("20.")
                     || clean.starts_with("22.")
                     || clean.starts_with("24."),
                 os,
                 arch,
                 url: node_tarball_url(&clean, platform),
                 size_hint: None,
+                sha256: None,
             })
         }
         EcosystemKind::Python => Ok(CatalogSdkEntry {
@@ -561,7 +656,34 @@ pub fn resolve_sdk_download(
             arch,
             url: uv_tarball_url(platform),
             size_hint: None,
+            sha256: None,
         }),
+        EcosystemKind::Shell => {
+            let clean = ver.trim_start_matches('v').to_string();
+            Ok(CatalogSdkEntry {
+                version: clean.clone(),
+                label: format!("shfmt {clean}"),
+                lts: true,
+                os,
+                arch,
+                url: shfmt_binary_url(&clean, platform),
+                size_hint: Some("4 MB".to_string()),
+                sha256: None,
+            })
+        }
+        EcosystemKind::Json => {
+            let clean = ver.trim_start_matches("jq-").to_string();
+            Ok(CatalogSdkEntry {
+                version: clean.clone(),
+                label: format!("jq {clean}"),
+                lts: true,
+                os,
+                arch,
+                url: jq_binary_url(&clean, platform),
+                size_hint: Some("3 MB".to_string()),
+                sha256: None,
+            })
+        }
     }
 }
 
@@ -584,7 +706,8 @@ pub fn parse_adoptium_release_json(
         .and_then(|v| v.as_str())
         .filter(|u| u.starts_with("https://"))?;
     let size_hint = pkg.get("size").and_then(|v| v.as_u64()).map(format_mb);
-    let lts = matches!(feature_version, 11 | 17 | 21);
+    let sha256 = normalize_sha256(pkg.get("checksum").and_then(|v| v.as_str()));
+    let lts = matches!(feature_version, 8 | 11 | 17 | 21);
     Some(CatalogSdkEntry {
         version: feature_version.to_string(),
         label: if lts {
@@ -597,6 +720,7 @@ pub fn parse_adoptium_release_json(
         arch: platform.arch.as_str().to_string(),
         url: link.to_string(),
         size_hint,
+        sha256,
     })
 }
 
@@ -627,6 +751,7 @@ pub fn parse_go_dl_json(raw: &str, platform: TargetPlatform) -> Vec<CatalogSdkEn
             if matches_os && matches_arch && is_archive {
                 if let Some(filename) = f.get("filename").and_then(|v| v.as_str()) {
                     let size_hint = f.get("size").and_then(|v| v.as_u64()).map(format_mb);
+                    let sha256 = normalize_sha256(f.get("sha256").and_then(|v| v.as_str()));
                     out.push(CatalogSdkEntry {
                         version: clean_ver.to_string(),
                         label: format!("Go {clean_ver}"),
@@ -635,12 +760,13 @@ pub fn parse_go_dl_json(raw: &str, platform: TargetPlatform) -> Vec<CatalogSdkEn
                         arch: platform.arch.as_str().to_string(),
                         url: format!("https://go.dev/dl/{filename}"),
                         size_hint,
+                        sha256,
                     });
                     break;
                 }
             }
         }
-        if out.len() >= 4 {
+        if out.len() >= MAX_GO_CATALOG_VERSIONS {
             break;
         }
     }
@@ -681,7 +807,7 @@ pub fn parse_node_dist_json(raw: &str, platform: TargetPlatform) -> Vec<CatalogS
     let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(raw) else {
         return Vec::new();
     };
-    let wanted_majors = ["24", "22", "20"];
+    let wanted_majors = ["24", "22", "20", "18"];
     let file_token = platform.node_dist_file_token();
     let mut out = Vec::new();
     for major in wanted_majors {
@@ -720,6 +846,7 @@ pub fn parse_node_dist_json(raw: &str, platform: TargetPlatform) -> Vec<CatalogS
                 arch: platform.arch.as_str().to_string(),
                 url: node_tarball_url(clean, platform),
                 size_hint: Some("42 MB".to_string()),
+                sha256: None,
             });
             break;
         }
@@ -751,7 +878,7 @@ struct CachedPlatformCatalog {
 }
 
 /// Fetches live architecture-matched catalogs over HTTPS with a 15-minute
-/// per-platform cache and seamless offline/E2E fallback.
+/// per-platform cache and zero-HTTPS curated fallback for instant IDE loads.
 pub struct CatalogClient {
     http: reqwest::Client,
     cache: Mutex<HashMap<TargetPlatform, CachedPlatformCatalog>>,
@@ -784,15 +911,31 @@ impl CatalogClient {
                 .is_ok_and(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))
     }
 
+    /// Return warm cached live entries if already fetched within `CACHE_TTL`,
+    /// otherwise return the zero-HTTPS curated catalog immediately (`<0.1ms`).
+    pub fn cached_or_curated(
+        &self,
+        platform: TargetPlatform,
+    ) -> HashMap<EcosystemKind, Vec<CatalogSdkEntry>> {
+        if let Ok(guard) = self.cache.lock() {
+            if let Some(hit) = guard.get(&platform) {
+                if hit.fetched_at.elapsed() < CACHE_TTL {
+                    return hit.by_ecosystem.clone();
+                }
+            }
+        }
+        EcosystemKind::ALL
+            .into_iter()
+            .map(|eco| (eco, curated_catalog(eco, platform)))
+            .collect()
+    }
+
     pub async fn fetch_all(
         &self,
         platform: TargetPlatform,
     ) -> HashMap<EcosystemKind, Vec<CatalogSdkEntry>> {
         if Self::offline_mode() {
-            return EcosystemKind::ALL
-                .into_iter()
-                .map(|eco| (eco, curated_catalog(eco, platform)))
-                .collect();
+            return self.cached_or_curated(platform);
         }
         if let Ok(guard) = self.cache.lock() {
             if let Some(hit) = guard.get(&platform) {
@@ -809,12 +952,20 @@ impl CatalogClient {
             self.fetch_node(platform),
             self.fetch_python(platform),
         );
-        let mut map = HashMap::with_capacity(5);
+        let mut map = HashMap::with_capacity(7);
         map.insert(EcosystemKind::Java, java);
         map.insert(EcosystemKind::Go, go);
         map.insert(EcosystemKind::Rust, rust);
         map.insert(EcosystemKind::Node, node);
         map.insert(EcosystemKind::Python, python);
+        map.insert(
+            EcosystemKind::Shell,
+            curated_catalog(EcosystemKind::Shell, platform),
+        );
+        map.insert(
+            EcosystemKind::Json,
+            curated_catalog(EcosystemKind::Json, platform),
+        );
 
         if let Ok(mut guard) = self.cache.lock() {
             guard.insert(
@@ -844,16 +995,23 @@ impl CatalogClient {
                 "https://api.adoptium.net/v3/assets/feature_releases/{ver}/ga?architecture={arch}&image_type=jdk&jvm_impl=hotspot&os={os}&page_size=1&project=jdk&vendor=eclipse"
             )
         };
-        let (u25, u21, u17, u11) = (url_for(25), url_for(21), url_for(17), url_for(11));
-        let (r25, r21, r17, r11) = tokio::join!(
+        let (u25, u21, u17, u11, u8) = (
+            url_for(25),
+            url_for(21),
+            url_for(17),
+            url_for(11),
+            url_for(8),
+        );
+        let (r25, r21, r17, r11, r8) = tokio::join!(
             self.get_text(&u25),
             self.get_text(&u21),
             self.get_text(&u17),
             self.get_text(&u11),
+            self.get_text(&u8),
         );
         let fallback = curated_catalog(EcosystemKind::Java, platform);
-        let mut out = Vec::with_capacity(4);
-        for (idx, (ver, raw_opt)) in [(25, r25), (21, r21), (17, r17), (11, r11)]
+        let mut out = Vec::with_capacity(5);
+        for (idx, (ver, raw_opt)) in [(25, r25), (21, r21), (17, r17), (11, r11), (8, r8)]
             .into_iter()
             .enumerate()
         {
@@ -869,7 +1027,10 @@ impl CatalogClient {
     }
 
     async fn fetch_go(&self, platform: TargetPlatform) -> Vec<CatalogSdkEntry> {
-        if let Some(raw) = self.get_text("https://go.dev/dl/?mode=json").await {
+        if let Some(raw) = self
+            .get_text("https://go.dev/dl/?mode=json&include=all")
+            .await
+        {
             let parsed = parse_go_dl_json(&raw, platform);
             if !parsed.is_empty() {
                 return parsed;
@@ -954,7 +1115,7 @@ mod tests {
     }
 
     #[test]
-    fn curated_catalogs_cover_all_five_ecosystems_and_four_platforms() {
+    fn curated_catalogs_cover_all_seven_ecosystems_and_four_platforms() {
         for platform in ALL_PLATFORMS {
             for eco in EcosystemKind::ALL {
                 let items = curated_catalog(eco, platform);
@@ -973,7 +1134,7 @@ mod tests {
     }
 
     #[test]
-    fn live_metadata_parsers_extract_exact_os_arch_artifacts() {
+    fn live_metadata_parsers_extract_exact_os_arch_artifacts_and_sha256() {
         let mac_arm = ALL_PLATFORMS[0];
         let linux_x64 = ALL_PLATFORMS[3];
 
@@ -983,6 +1144,7 @@ mod tests {
             "binaries": [{
                 "package": {
                     "link": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.6/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.6_7.tar.gz",
+                    "checksum": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                     "size": 207618048
                 }
             }]
@@ -992,18 +1154,26 @@ mod tests {
         assert!(jdk.lts);
         assert!(jdk.label.contains("21.0.6+7"));
         assert!(jdk.url.contains("aarch64_mac"));
+        assert_eq!(
+            jdk.sha256.as_deref(),
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        );
 
         let go_json = r#"[{
             "version": "go1.24.2",
             "stable": true,
             "files": [
-                {"filename": "go1.24.2.darwin-arm64.tar.gz", "os": "darwin", "arch": "arm64", "kind": "archive", "size": 73400320},
+                {"filename": "go1.24.2.darwin-arm64.tar.gz", "os": "darwin", "arch": "arm64", "kind": "archive", "sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210", "size": 73400320},
                 {"filename": "go1.24.2.linux-amd64.tar.gz", "os": "linux", "arch": "amd64", "kind": "archive", "size": 75497472}
             ]
         }]"#;
         let go_mac = parse_go_dl_json(go_json, mac_arm);
         assert_eq!(go_mac.len(), 1);
         assert_eq!(go_mac[0].version, "1.24.2");
+        assert_eq!(
+            go_mac[0].sha256.as_deref(),
+            Some("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210")
+        );
         assert_eq!(
             go_mac[0].url,
             "https://go.dev/dl/go1.24.2.darwin-arm64.tar.gz"

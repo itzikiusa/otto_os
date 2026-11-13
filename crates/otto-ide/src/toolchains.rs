@@ -8,14 +8,17 @@
 
 mod installer;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use chrono::Utc;
 use dashmap::DashMap;
 use otto_core::domain::User;
 use otto_core::{new_id, Error, Result};
+use otto_state::DbPool;
+use sqlx::Row;
 
 use crate::target::{ResolvedTarget, TargetManager};
 use crate::toolchains_catalog::{
@@ -24,8 +27,9 @@ use crate::toolchains_catalog::{
 };
 use crate::types::{
     IdeEcosystemKind, IdeInstallComponent, IdeInstallJob, IdeInstallJobStatus,
-    IdeInstallToolchainReq, IdeInstalledSdk, IdeProjectEnvironment, IdeSshSpec, IdeTargetKind,
-    IdeTargetSpec, IdeToolBinaryStatus, IdeToolchainEcosystem, IdeToolchainsResp,
+    IdeInstallToolchainReq, IdeInstalledSdk, IdeProjectEnvironment, IdeRegisterLocalSdkReq,
+    IdeSshSpec, IdeTargetKind, IdeTargetSpec, IdeToolBinaryStatus, IdeToolchainEcosystem,
+    IdeToolchainsResp,
 };
 use crate::IdeCtx;
 
@@ -35,6 +39,7 @@ use self::installer::{
 };
 
 const MAX_JOB_LOGS: usize = 400;
+const MAX_FINISHED_JOBS: usize = 16;
 
 /// Manages SDK/LSP/DAP discovery and background installation jobs across
 /// local and remote SSH targets.
@@ -43,6 +48,7 @@ pub struct ToolchainManager {
     data_dir: PathBuf,
     catalog: Arc<CatalogClient>,
     jobs: Arc<DashMap<String, IdeInstallJob>>,
+    finished_order: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl ToolchainManager {
@@ -51,6 +57,7 @@ impl ToolchainManager {
             data_dir,
             catalog: Arc::new(CatalogClient::new()),
             jobs: Arc::new(DashMap::new()),
+            finished_order: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -112,7 +119,7 @@ impl ToolchainManager {
         roots
     }
 
-    /// Host-context helper for `GET /ide/toolchains`.
+    /// Host-context helper for `GET /ide/toolchains` (fast zero-HTTPS default).
     pub async fn list_for_ctx<C: IdeCtx>(
         &self,
         ctx: &C,
@@ -126,11 +133,13 @@ impl ToolchainManager {
             .get_project_env(&ctx.pool(), target)
             .await
             .ok();
-        self.list_toolchains(
+        self.list_toolchains_with_opts(
+            Some(&ctx.pool()),
             &ctx.ide().targets,
             target,
             ssh.as_ref(),
             active_env.as_ref(),
+            false,
         )
         .await
     }
@@ -146,7 +155,8 @@ impl ToolchainManager {
         self.start_install(&ctx.ide().targets, req, ssh).await
     }
 
-    /// Discover installed & downloadable SDKs, LSPs, and DAPs on `target`.
+    /// Discover installed & curated/cached downloadable SDKs, LSPs, and DAPs on `target`
+    /// without making outbound HTTPS catalog calls (`<5ms`).
     pub async fn list_toolchains(
         &self,
         targets: &TargetManager,
@@ -154,25 +164,153 @@ impl ToolchainManager {
         ssh: Option<&IdeSshSpec>,
         active_env: Option<&IdeProjectEnvironment>,
     ) -> Result<IdeToolchainsResp> {
+        self.list_toolchains_with_opts(None, targets, target, ssh, active_env, false)
+            .await
+    }
+
+    /// Discover installed & downloadable SDKs, LSPs, and DAPs on `target`.
+    ///
+    /// When `include_catalog == false`, returns curated + warm-cached catalog entries
+    /// immediately (`<5ms`, zero network I/O). When `include_catalog == true`, fetches
+    /// official upstream release catalogs (`go.dev/dl/?mode=json&include=all`, Temurin,
+    /// Node.js, Python, Rust) with a bounded timeout and offline fallback.
+    pub async fn list_toolchains_with_opts(
+        &self,
+        pool: Option<&DbPool>,
+        targets: &TargetManager,
+        target: &IdeTargetSpec,
+        ssh: Option<&IdeSshSpec>,
+        active_env: Option<&IdeProjectEnvironment>,
+        include_catalog: bool,
+    ) -> Result<IdeToolchainsResp> {
         target.validate()?;
+        let custom_sdks = match pool {
+            Some(db) => load_registered_local_sdks(db, &host_key_for_target(target)).await,
+            None => HashMap::new(),
+        };
         match target.kind {
-            IdeTargetKind::Local => self.list_local(active_env).await,
+            IdeTargetKind::Local => {
+                self.list_local(active_env, custom_sdks, include_catalog)
+                    .await
+            }
             IdeTargetKind::Ssh => {
                 let spec = ssh.ok_or_else(|| {
                     Error::Invalid("SSH connection spec required for remote target".into())
                 })?;
                 let resolved = targets.resolve_with_ssh(target, "ide-toolchains", spec.clone())?;
-                self.list_ssh(targets, &resolved, active_env).await
+                self.list_ssh(targets, &resolved, active_env, custom_sdks, include_catalog)
+                    .await
             }
         }
+    }
+
+    /// Register an existing SDK/toolchain directory or interpreter from disk
+    /// (`POST /ide/toolchains/local`).
+    pub async fn register_local_sdk(
+        &self,
+        pool: &DbPool,
+        req: IdeRegisterLocalSdkReq,
+    ) -> Result<IdeInstalledSdk> {
+        req.target.validate()?;
+        let eco = EcosystemKind::from(req.ecosystem);
+        let (normalized_path, version) =
+            normalize_and_validate_local_sdk(&req.target, eco, &req.path)?;
+        let host_key = host_key_for_target(&req.target);
+        let id = format!("{}-local-{}", eco.as_str(), new_id());
+        let now = Utc::now().to_rfc3339();
+
+        sqlx::query(
+            r#"INSERT INTO ide_local_sdks (id, host_key, ecosystem, version, path, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(host_key, ecosystem, path) DO UPDATE SET
+                   version = excluded.version"#,
+        )
+        .bind(&id)
+        .bind(&host_key)
+        .bind(eco.as_str())
+        .bind(&version)
+        .bind(&normalized_path)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .map_err(|e| Error::Internal(format!("persist ide_local_sdks: {e}")))?;
+
+        let saved_id: String = sqlx::query(
+            "SELECT id FROM ide_local_sdks WHERE host_key = ? AND ecosystem = ? AND path = ?",
+        )
+        .bind(&host_key)
+        .bind(eco.as_str())
+        .bind(&normalized_path)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|r| r.try_get("id").ok())
+        .unwrap_or(id);
+
+        Ok(IdeInstalledSdk {
+            id: saved_id,
+            version,
+            path: normalized_path,
+            source: "local".into(),
+            active: false,
+        })
+    }
+
+    /// Remove a user-registered local SDK (`DELETE /ide/toolchains/local`).
+    pub async fn remove_local_sdk(
+        &self,
+        pool: &DbPool,
+        target: &IdeTargetSpec,
+        id: Option<&str>,
+        path: Option<&str>,
+    ) -> Result<()> {
+        let host_key = host_key_for_target(target);
+        let id_clean = id.map(str::trim).filter(|s| !s.is_empty());
+        let path_clean = path.map(str::trim).filter(|s| !s.is_empty());
+        if id_clean.is_none() && path_clean.is_none() {
+            return Err(Error::Invalid(
+                "either 'id' or 'path' query parameter is required".into(),
+            ));
+        }
+
+        if let Some(sdk_id) = id_clean {
+            sqlx::query("DELETE FROM ide_local_sdks WHERE host_key = ? AND id = ?")
+                .bind(&host_key)
+                .bind(sdk_id)
+                .execute(pool)
+                .await
+                .map_err(|e| Error::Internal(format!("delete ide_local_sdks by id: {e}")))?;
+        }
+        if let Some(raw_path) = path_clean {
+            let trimmed = raw_path.trim_end_matches('/');
+            let canon = std::fs::canonicalize(trimmed)
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| trimmed.to_string());
+            sqlx::query("DELETE FROM ide_local_sdks WHERE host_key = ? AND (path = ? OR path = ?)")
+                .bind(&host_key)
+                .bind(trimmed)
+                .bind(&canon)
+                .execute(pool)
+                .await
+                .map_err(|e| Error::Internal(format!("delete ide_local_sdks by path: {e}")))?;
+        }
+        Ok(())
     }
 
     async fn list_local(
         &self,
         active_env: Option<&IdeProjectEnvironment>,
+        mut custom_sdks: HashMap<EcosystemKind, Vec<IdeInstalledSdk>>,
+        include_catalog: bool,
     ) -> Result<IdeToolchainsResp> {
         let platform = TargetPlatform::host();
-        let catalogs = self.catalog.fetch_all(platform).await;
+        let catalogs = if include_catalog {
+            self.catalog.fetch_all(platform).await
+        } else {
+            self.catalog.cached_or_curated(platform)
+        };
         let roots = self.local_toolchain_roots();
         let env_clone = active_env.cloned();
 
@@ -180,7 +318,14 @@ impl ToolchainManager {
             EcosystemKind::ALL
                 .into_iter()
                 .map(|eco| {
-                    let mut installed = discover_local_sdks(&roots, eco);
+                    let mut installed = custom_sdks.remove(&eco).unwrap_or_default();
+                    let mut seen: BTreeSet<String> =
+                        installed.iter().map(|s| s.path.clone()).collect();
+                    for disc in discover_local_sdks(&roots, eco) {
+                        if seen.insert(disc.path.clone()) {
+                            installed.push(disc);
+                        }
+                    }
                     mark_active_sdk(&mut installed, eco, env_clone.as_ref());
                     let downloadable = catalogs
                         .get(&eco)
@@ -216,6 +361,8 @@ impl ToolchainManager {
         targets: &TargetManager,
         resolved: &ResolvedTarget,
         active_env: Option<&IdeProjectEnvironment>,
+        mut custom_sdks: HashMap<EcosystemKind, Vec<IdeInstalledSdk>>,
+        include_catalog: bool,
     ) -> Result<IdeToolchainsResp> {
         let out = targets
             .exec_shell(
@@ -227,13 +374,23 @@ impl ToolchainManager {
             )
             .await?;
         let (platform, mut eco_map) = parse_ssh_probe_output(&out.stdout);
-        let catalogs = self.catalog.fetch_all(platform).await;
+        let catalogs = if include_catalog {
+            self.catalog.fetch_all(platform).await
+        } else {
+            self.catalog.cached_or_curated(platform)
+        };
 
         let ecosystems = EcosystemKind::ALL
             .into_iter()
             .map(|eco| {
                 let probed = eco_map.remove(&eco).unwrap_or_default();
-                let mut installed = probed.installed;
+                let mut installed = custom_sdks.remove(&eco).unwrap_or_default();
+                let mut seen: BTreeSet<String> = installed.iter().map(|s| s.path.clone()).collect();
+                for disc in probed.installed {
+                    if seen.insert(disc.path.clone()) {
+                        installed.push(disc);
+                    }
+                }
                 mark_active_sdk(&mut installed, eco, active_env);
                 IdeToolchainEcosystem {
                     ecosystem: eco.into(),
@@ -379,6 +536,23 @@ impl ToolchainManager {
                     entry.log_lines.push(format!("ERROR: {err}"));
                 }
             }
+            entry.log_lines.shrink_to_fit();
+        }
+        let mut evicted = Vec::new();
+        {
+            let mut order = self
+                .finished_order
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            order.push_back(job_id.to_string());
+            while order.len() > MAX_FINISHED_JOBS {
+                if let Some(old_id) = order.pop_front() {
+                    evicted.push(old_id);
+                }
+            }
+        }
+        for old_id in evicted {
+            self.jobs.remove(&old_id);
         }
     }
 
@@ -478,6 +652,210 @@ fn empty_tool(name: &str) -> IdeToolBinaryStatus {
     }
 }
 
+fn host_key_for_target(target: &IdeTargetSpec) -> String {
+    match target.kind {
+        IdeTargetKind::Local => "local".into(),
+        IdeTargetKind::Ssh => format!(
+            "ssh:{}",
+            target.connection_id.as_deref().unwrap_or("default")
+        ),
+    }
+}
+
+async fn load_registered_local_sdks(
+    pool: &DbPool,
+    host_key: &str,
+) -> HashMap<EcosystemKind, Vec<IdeInstalledSdk>> {
+    let rows = match sqlx::query(
+        r#"SELECT id, ecosystem, version, path
+           FROM ide_local_sdks
+           WHERE host_key = ?
+           ORDER BY created_at DESC"#,
+    )
+    .bind(host_key)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(r) => r,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut out: HashMap<EcosystemKind, Vec<IdeInstalledSdk>> = HashMap::new();
+    for row in rows {
+        let eco_s: String = row.try_get("ecosystem").unwrap_or_default();
+        let Some(eco) = EcosystemKind::parse(&eco_s) else {
+            continue;
+        };
+        let path: String = row.try_get("path").unwrap_or_default();
+        if path.is_empty() {
+            continue;
+        }
+        if host_key == "local" && !Path::new(&path).exists() {
+            continue;
+        }
+        let id: String = row.try_get("id").unwrap_or_default();
+        let version: String = row.try_get("version").unwrap_or_else(|_| "custom".into());
+        out.entry(eco).or_default().push(IdeInstalledSdk {
+            id,
+            version,
+            path,
+            source: "local".into(),
+            active: false,
+        });
+    }
+    out
+}
+
+fn normalize_and_validate_local_sdk(
+    target: &IdeTargetSpec,
+    eco: EcosystemKind,
+    raw_path: &str,
+) -> Result<(String, String)> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() || trimmed.chars().any(char::is_control) {
+        return Err(Error::Invalid("SDK path must not be empty".into()));
+    }
+    if !trimmed.starts_with('/') {
+        return Err(Error::Invalid("SDK path must be an absolute path".into()));
+    }
+
+    if target.kind == IdeTargetKind::Ssh {
+        let clean = trimmed.trim_end_matches('/').to_string();
+        let ver = dir_name_version(Path::new(&clean));
+        return Ok((clean, ver));
+    }
+
+    let canon = std::fs::canonicalize(trimmed)
+        .map_err(|e| Error::Invalid(format!("SDK path '{trimmed}' does not exist: {e}")))?;
+    let canon_str = canon.to_string_lossy();
+    if canon_str == "/" || canon_str == "/etc" || canon_str == "/private/etc" {
+        return Err(Error::Forbidden(
+            "refusing to register root or system configuration directory as SDK".into(),
+        ));
+    }
+    if let Some(home) = dirs::home_dir() {
+        let hs = home.to_string_lossy();
+        for blocked_rel in [".ssh", ".aws", ".gnupg", ".kube"] {
+            let blocked = format!("{}/{blocked_rel}", hs.trim_end_matches('/'));
+            if canon_str == blocked || canon_str.starts_with(&format!("{blocked}/")) {
+                return Err(Error::Forbidden(
+                    "refusing to register sensitive credential directory as SDK".into(),
+                ));
+            }
+        }
+    }
+
+    match eco {
+        EcosystemKind::Java => {
+            let jh = if canon.is_file() && is_executable_file(&canon) {
+                canon
+                    .parent()
+                    .and_then(|b| b.parent())
+                    .map(Path::to_path_buf)
+                    .unwrap_or(canon)
+            } else {
+                resolve_java_home_dir(&canon).ok_or_else(|| {
+                    Error::Invalid(format!(
+                        "'{}' does not contain a valid JDK (expected bin/java or Contents/Home/bin/java)",
+                        canon.display()
+                    ))
+                })?
+            };
+            let ver = read_java_release_version(&jh).unwrap_or_else(|| dir_name_version(&jh));
+            Ok((jh.to_string_lossy().into_owned(), ver))
+        }
+        EcosystemKind::Go => {
+            let gr = if canon.is_file() && is_executable_file(&canon) {
+                canon
+                    .parent()
+                    .and_then(|b| b.parent())
+                    .map(Path::to_path_buf)
+                    .unwrap_or(canon)
+            } else if canon.join("go/bin/go").is_file() {
+                canon.join("go")
+            } else {
+                canon
+            };
+            if !gr.join("bin/go").is_file() {
+                return Err(Error::Invalid(format!(
+                    "'{}' does not contain bin/go",
+                    gr.display()
+                )));
+            }
+            let ver = read_go_root_version(&gr).unwrap_or_else(|| dir_name_version(&gr));
+            Ok((gr.to_string_lossy().into_owned(), ver))
+        }
+        EcosystemKind::Rust => {
+            let root = if canon.is_file() && is_executable_file(&canon) {
+                canon
+                    .parent()
+                    .and_then(|b| b.parent())
+                    .map(Path::to_path_buf)
+                    .unwrap_or(canon)
+            } else {
+                canon
+            };
+            if !root.join("bin/rustc").is_file() && !root.join("bin/cargo").is_file() {
+                return Err(Error::Invalid(format!(
+                    "'{}' does not contain bin/rustc or bin/cargo",
+                    root.display()
+                )));
+            }
+            let ver = rust_toolchain_label(&root);
+            Ok((root.to_string_lossy().into_owned(), ver))
+        }
+        EcosystemKind::Node => {
+            let root = if canon.is_file() && is_executable_file(&canon) {
+                canon
+                    .parent()
+                    .and_then(|b| b.parent())
+                    .map(Path::to_path_buf)
+                    .unwrap_or(canon)
+            } else {
+                canon
+            };
+            if !root.join("bin/node").is_file() && !is_executable_file(&root) {
+                return Err(Error::Invalid(format!(
+                    "'{}' does not contain bin/node",
+                    root.display()
+                )));
+            }
+            let ver = dir_name_version(&root);
+            Ok((root.to_string_lossy().into_owned(), ver))
+        }
+        EcosystemKind::Python => {
+            let interp = if canon.is_file() && is_executable_file(&canon) {
+                canon
+            } else if canon.join("bin/python3").is_file() {
+                canon.join("bin/python3")
+            } else if canon.join("bin/python").is_file() {
+                canon.join("bin/python")
+            } else {
+                return Err(Error::Invalid(format!(
+                    "'{}' is neither a python executable nor a virtualenv/SDK with bin/python3",
+                    canon.display()
+                )));
+            };
+            let ver = interp
+                .parent()
+                .and_then(|b| b.parent())
+                .map(python_dir_version)
+                .unwrap_or_else(|| "custom".into());
+            Ok((interp.to_string_lossy().into_owned(), ver))
+        }
+        EcosystemKind::Shell | EcosystemKind::Json => {
+            if !canon.is_dir() && !is_executable_file(&canon) {
+                return Err(Error::Invalid(format!(
+                    "'{}' must be an executable binary or tool directory",
+                    canon.display()
+                )));
+            }
+            let ver = dir_name_version(&canon);
+            Ok((canon.to_string_lossy().into_owned(), ver))
+        }
+    }
+}
+
 // ── Local Filesystem Discovery (runs off-worker via spawn_blocking) ──────────
 
 fn collect_managed_bin_dirs(tc_root: &Path, out: &mut Vec<PathBuf>) {
@@ -497,6 +875,10 @@ fn collect_managed_bin_dirs(tc_root: &Path, out: &mut Vec<PathBuf>) {
         "python/bin",
         "python/current/bin",
         "python/dap/bin",
+        "shell/bin",
+        "shell/lsp/node_modules/.bin",
+        "json/bin",
+        "json/lsp/node_modules/.bin",
     ] {
         let c = tc_root.join(rel);
         if c.is_dir() && !out.contains(&c) {
@@ -519,6 +901,13 @@ pub(crate) fn system_search_dirs() -> Vec<PathBuf> {
     let mut dirs = std::env::var_os("PATH")
         .map(|v| std::env::split_paths(&v).collect::<Vec<_>>())
         .unwrap_or_default();
+    if let Some(shell_path) = crate::environments::cached_shell_env_snapshot().get("PATH") {
+        for p in std::env::split_paths(shell_path) {
+            if !dirs.contains(&p) {
+                dirs.push(p);
+            }
+        }
+    }
     for extra in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
         let p = PathBuf::from(extra);
         if !dirs.contains(&p) {
@@ -621,6 +1010,18 @@ fn scan_otto_sdks(
                 if py.is_file() {
                     push_sdk(out, seen, "python", &python_dir_version(&dir), &py, "otto");
                 }
+            }
+        }
+        EcosystemKind::Shell => {
+            let shfmt = root.join("shell/bin/shfmt");
+            if is_executable_file(&shfmt) {
+                push_sdk(out, seen, "shell", "3.10.0", &shfmt, "otto");
+            }
+        }
+        EcosystemKind::Json => {
+            let jq = root.join("json/bin/jq");
+            if is_executable_file(&jq) {
+                push_sdk(out, seen, "json", "1.7.1", &jq, "otto");
             }
         }
     }
@@ -730,6 +1131,16 @@ fn scan_system_sdks(
                 push_sdk(out, seen, "python", "3", &py_bin, "system");
             }
         }
+        EcosystemKind::Shell => {
+            if let Some(sh_bin) = find_executable_in(&search, &["bash", "zsh"]) {
+                push_sdk(out, seen, "shell", "system", &sh_bin, "system");
+            }
+        }
+        EcosystemKind::Json => {
+            if let Some(jq_bin) = find_executable_in(&search, &["jq"]) {
+                push_sdk(out, seen, "json", "system", &jq_bin, "system");
+            }
+        }
     }
 }
 
@@ -741,6 +1152,11 @@ fn discover_local_lsp(roots: &[PathBuf], eco: EcosystemKind) -> IdeToolBinarySta
         EcosystemKind::Rust => &["rust/bin/rust-analyzer", "rust/cargo/bin/rust-analyzer"],
         EcosystemKind::Node => &["node/lsp/node_modules/.bin/typescript-language-server"],
         EcosystemKind::Python => &["python/bin/pyright-langserver", "python/bin/pyright"],
+        EcosystemKind::Shell => &["shell/lsp/node_modules/.bin/bash-language-server"],
+        EcosystemKind::Json => &[
+            "json/lsp/node_modules/.bin/vscode-json-language-server",
+            "json/lsp/node_modules/.bin/vscode-json-languageserver",
+        ],
     };
     for cand in roots
         .iter()
@@ -760,6 +1176,8 @@ fn discover_local_lsp(roots: &[PathBuf], eco: EcosystemKind) -> IdeToolBinarySta
         EcosystemKind::Rust => &["rust-analyzer"],
         EcosystemKind::Node => &["typescript-language-server"],
         EcosystemKind::Python => &["pyright-langserver", "pyright"],
+        EcosystemKind::Shell => &["bash-language-server"],
+        EcosystemKind::Json => &["vscode-json-language-server", "vscode-json-languageserver"],
     };
     if let Some(sys) = find_executable_in(&system_search_dirs(), sys_names) {
         return IdeToolBinaryStatus {
@@ -786,13 +1204,18 @@ fn discover_local_dap(roots: &[PathBuf], eco: EcosystemKind) -> IdeToolBinarySta
             "node/js-debug/src/dapDebugServer.js",
         ],
         EcosystemKind::Python => vec!["python/dap/bin/python"],
+        EcosystemKind::Shell => vec!["shell/bin/bashdb"],
+        EcosystemKind::Json => vec!["json/bin/jq"],
     };
     for root in roots {
         for rel in &rels {
             let cand = root.join(rel);
             let ok = match eco {
                 EcosystemKind::Java | EcosystemKind::Node | EcosystemKind::Python => cand.is_file(),
-                EcosystemKind::Go | EcosystemKind::Rust => is_executable_file(&cand),
+                EcosystemKind::Go
+                | EcosystemKind::Rust
+                | EcosystemKind::Shell
+                | EcosystemKind::Json => is_executable_file(&cand),
             };
             if ok {
                 return IdeToolBinaryStatus {
@@ -809,6 +1232,8 @@ fn discover_local_dap(roots: &[PathBuf], eco: EcosystemKind) -> IdeToolBinarySta
         EcosystemKind::Rust => &["codelldb", "lldb-dap"],
         EcosystemKind::Node => &["js-debug-dap"],
         EcosystemKind::Python => &["debugpy", "debugpy-adapter"],
+        EcosystemKind::Shell => &["bashdb", "bash"],
+        EcosystemKind::Json => &["jq"],
     };
     if let Some(sys) = find_executable_in(&system_search_dirs(), sys_names) {
         return IdeToolBinaryStatus {
@@ -831,6 +1256,7 @@ fn mark_active_sdk(
         EcosystemKind::Rust => env.rust_toolchain.as_deref(),
         EcosystemKind::Node => env.node_home.as_deref(),
         EcosystemKind::Python => env.python_interpreter.as_deref(),
+        EcosystemKind::Shell | EcosystemKind::Json => None,
     });
     if let Some(sel) = chosen.filter(|s| !s.trim().is_empty()) {
         if let Some(item) = installed
@@ -935,17 +1361,19 @@ fn push_sdk(
 
 const REMOTE_PROBE_SCRIPT: &str = r#"
 echo "UNAME:$(uname -s) $(uname -m)"
-export PATH="$HOME/.otto/toolchains/go/bin:$HOME/.otto/toolchains/rust/bin:$HOME/.otto/toolchains/rust/cargo/bin:$HOME/.otto/toolchains/python/bin:$HOME/.cargo/bin:$HOME/go/bin:/opt/homebrew/bin:/usr/local/go/bin:/usr/local/bin:$PATH"
+export PATH="$HOME/.otto/toolchains/go/bin:$HOME/.otto/toolchains/rust/bin:$HOME/.otto/toolchains/rust/cargo/bin:$HOME/.otto/toolchains/python/bin:$HOME/.otto/toolchains/shell/bin:$HOME/.otto/toolchains/json/bin:$HOME/.cargo/bin:$HOME/go/bin:/opt/homebrew/bin:/usr/local/go/bin:/usr/local/bin:$PATH"
 for d in "$HOME"/.otto/toolchains/java/jdks/*; do [ -d "$d" ] && echo "SDK:java:otto:$d"; done
 for d in "$HOME"/.otto/toolchains/go/sdks/*; do [ -d "$d" ] && echo "SDK:go:otto:$d"; done
 for d in "$HOME"/.otto/toolchains/rust/rustup/toolchains/*; do [ -d "$d" ] && echo "SDK:rust:otto:$d"; done
 for d in "$HOME"/.otto/toolchains/node/sdks/*; do [ -d "$d" ] && echo "SDK:node:otto:$d"; done
 for d in "$HOME"/.otto/toolchains/python/interpreters/*; do [ -x "$d/bin/python3" ] && echo "SDK:python:otto:$d/bin/python3"; done
-for pair in "java:java" "go:go" "rust:rustc" "node:node" "python:python3"; do
+[ -x "$HOME/.otto/toolchains/shell/bin/shfmt" ] && echo "SDK:shell:otto:$HOME/.otto/toolchains/shell/bin/shfmt" || true
+[ -x "$HOME/.otto/toolchains/json/bin/jq" ] && echo "SDK:json:otto:$HOME/.otto/toolchains/json/bin/jq" || true
+for pair in "java:java" "go:go" "rust:rustc" "node:node" "python:python3" "shell:bash" "json:jq"; do
   e="${pair%%:*}"; b="${pair#*:}"
   command -v "$b" >/dev/null 2>&1 && echo "SDK:$e:system:$(command -v "$b")" || true
 done
-for pair in "java:jdtls:$HOME/.otto/toolchains/java/lsp/bin/jdtls" "go:gopls:$HOME/.otto/toolchains/go/bin/gopls" "rust:rust-analyzer:$HOME/.otto/toolchains/rust/bin/rust-analyzer" "node:typescript-language-server:$HOME/.otto/toolchains/node/lsp/node_modules/.bin/typescript-language-server" "python:pyright-langserver:$HOME/.otto/toolchains/python/bin/pyright-langserver"; do
+for pair in "java:jdtls:$HOME/.otto/toolchains/java/lsp/bin/jdtls" "go:gopls:$HOME/.otto/toolchains/go/bin/gopls" "rust:rust-analyzer:$HOME/.otto/toolchains/rust/bin/rust-analyzer" "node:typescript-language-server:$HOME/.otto/toolchains/node/lsp/node_modules/.bin/typescript-language-server" "python:pyright-langserver:$HOME/.otto/toolchains/python/bin/pyright-langserver" "shell:bash-language-server:$HOME/.otto/toolchains/shell/lsp/node_modules/.bin/bash-language-server" "json:vscode-json-language-server:$HOME/.otto/toolchains/json/lsp/node_modules/.bin/vscode-json-language-server"; do
   e="${pair%%:*}"; r="${pair#*:}"; b="${r%%:*}"; m="${r#*:}"
   if [ -x "$m" ]; then echo "LSP:$e:$m"; elif command -v "$b" >/dev/null 2>&1; then echo "LSP:$e:$(command -v "$b")"; fi
 done
@@ -954,6 +1382,8 @@ command -v dlv >/dev/null 2>&1 && echo "DAP:go:$(command -v dlv)" || true
 if [ -x "$HOME/.otto/toolchains/rust/dap/extension/adapter/codelldb" ]; then echo "DAP:rust:$HOME/.otto/toolchains/rust/dap/extension/adapter/codelldb"; elif command -v codelldb >/dev/null 2>&1; then echo "DAP:rust:$(command -v codelldb)"; fi
 [ -f "$HOME/.otto/toolchains/node/dap/js-debug/src/dapDebugServer.js" ] && echo "DAP:node:$HOME/.otto/toolchains/node/dap/js-debug/src/dapDebugServer.js" || true
 [ -x "$HOME/.otto/toolchains/python/dap/bin/python" ] && echo "DAP:python:$HOME/.otto/toolchains/python/dap/bin/python" || true
+if [ -x "$HOME/.otto/toolchains/shell/bin/bashdb" ]; then echo "DAP:shell:$HOME/.otto/toolchains/shell/bin/bashdb"; elif command -v bashdb >/dev/null 2>&1; then echo "DAP:shell:$(command -v bashdb)"; fi
+if [ -x "$HOME/.otto/toolchains/json/bin/jq" ]; then echo "DAP:json:$HOME/.otto/toolchains/json/bin/jq"; elif command -v jq >/dev/null 2>&1; then echo "DAP:json:$(command -v jq)"; fi
 "#;
 
 #[derive(Default)]
@@ -1056,6 +1486,16 @@ mod tests {
         std::fs::write(&dlv, "#!/bin/sh\n").unwrap();
         make_executable(&dlv).unwrap();
 
+        let shfmt = tc.join("shell/bin/shfmt");
+        std::fs::create_dir_all(shfmt.parent().unwrap()).unwrap();
+        std::fs::write(&shfmt, "#!/bin/sh\n").unwrap();
+        make_executable(&shfmt).unwrap();
+
+        let jq = tc.join("json/bin/jq");
+        std::fs::create_dir_all(jq.parent().unwrap()).unwrap();
+        std::fs::write(&jq, "#!/bin/sh\n").unwrap();
+        make_executable(&jq).unwrap();
+
         let roots = vec![tc];
         let mut java_sdks = discover_local_sdks(&roots, EcosystemKind::Java);
         let env = IdeProjectEnvironment {
@@ -1074,11 +1514,16 @@ mod tests {
             .iter()
             .any(|s| s.source == "otto" && s.version == "1.24.1"));
         assert!(discover_local_dap(&roots, EcosystemKind::Go).available);
+
+        let shell_sdks = discover_local_sdks(&roots, EcosystemKind::Shell);
+        assert!(shell_sdks.iter().any(|s| s.source == "otto"));
+        let json_sdks = discover_local_sdks(&roots, EcosystemKind::Json);
+        assert!(json_sdks.iter().any(|s| s.source == "otto"));
     }
 
     #[test]
     fn parses_batched_ssh_probe_for_remote_linux_aarch64() {
-        let sample = "UNAME:Linux aarch64\nSDK:go:otto:/home/dev/.otto/toolchains/go/sdks/1.24.1\nLSP:go:/home/dev/.otto/toolchains/go/bin/gopls\nDAP:go:/usr/local/bin/dlv\n";
+        let sample = "UNAME:Linux aarch64\nSDK:go:otto:/home/dev/.otto/toolchains/go/sdks/1.24.1\nLSP:go:/home/dev/.otto/toolchains/go/bin/gopls\nDAP:go:/usr/local/bin/dlv\nLSP:shell:/usr/local/bin/bash-language-server\n";
         let (platform, map) = parse_ssh_probe_output(sample);
         assert_eq!(platform.os.as_str(), "linux");
         assert_eq!(platform.arch.as_str(), "aarch64");
@@ -1086,5 +1531,106 @@ mod tests {
         assert_eq!(go.installed[0].source, "otto");
         assert!(go.lsp.as_ref().unwrap().available);
         assert!(go.dap.as_ref().unwrap().available);
+        let sh = map.get(&EcosystemKind::Shell).unwrap();
+        assert!(sh.lsp.as_ref().unwrap().available);
+    }
+
+    #[tokio::test]
+    async fn register_and_remove_local_sdk_round_trip_persists_and_surfaces_in_fast_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = otto_state::open(&tmp.path().join("ide_tc.db"))
+            .await
+            .unwrap();
+        let ws = tmp.path().join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        let custom_go = tmp.path().join("custom-go-1.23.7");
+        std::fs::create_dir_all(custom_go.join("bin")).unwrap();
+        std::fs::write(custom_go.join("bin/go"), "#!/bin/sh\n").unwrap();
+        make_executable(&custom_go.join("bin/go")).unwrap();
+        std::fs::write(custom_go.join("VERSION"), "go1.23.7\n").unwrap();
+
+        let mgr = ToolchainManager::new(tmp.path().join("data"));
+        let targets = TargetManager::new();
+        let target = IdeTargetSpec::local(ws.to_string_lossy().into_owned());
+
+        let registered = mgr
+            .register_local_sdk(
+                &db,
+                IdeRegisterLocalSdkReq {
+                    target: target.clone(),
+                    ecosystem: IdeEcosystemKind::Go,
+                    path: custom_go.to_string_lossy().into_owned(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(registered.source, "local");
+        assert_eq!(registered.version, "1.23.7");
+
+        let t0 = std::time::Instant::now();
+        let resp = mgr
+            .list_toolchains_with_opts(Some(&db), &targets, &target, None, None, false)
+            .await
+            .unwrap();
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "non-catalog list_toolchains must not make network requests (took {elapsed:?})"
+        );
+        assert_eq!(resp.ecosystems.len(), 7);
+        let go_eco = resp
+            .ecosystems
+            .iter()
+            .find(|e| e.ecosystem == IdeEcosystemKind::Go)
+            .unwrap();
+        assert!(go_eco
+            .installed
+            .iter()
+            .any(|s| s.source == "local" && s.version == "1.23.7"));
+
+        mgr.remove_local_sdk(&db, &target, None, Some(&registered.path))
+            .await
+            .unwrap();
+        let resp_after = mgr
+            .list_toolchains_with_opts(Some(&db), &targets, &target, None, None, false)
+            .await
+            .unwrap();
+        let go_after = resp_after
+            .ecosystems
+            .iter()
+            .find(|e| e.ecosystem == IdeEcosystemKind::Go)
+            .unwrap();
+        assert!(!go_after
+            .installed
+            .iter()
+            .any(|s| s.source == "local" && s.version == "1.23.7"));
+    }
+
+    #[test]
+    fn finished_install_jobs_are_bounded_to_prevent_memory_leak() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = ToolchainManager::new(tmp.path().to_path_buf());
+        for i in 0..30 {
+            let id = format!("tcjob_{i:02}");
+            mgr.jobs.insert(
+                id.clone(),
+                IdeInstallJob {
+                    id: id.clone(),
+                    ecosystem: IdeEcosystemKind::Go,
+                    component: IdeInstallComponent::Lsp,
+                    version: None,
+                    target_os: "darwin".into(),
+                    target_arch: "aarch64".into(),
+                    status: IdeInstallJobStatus::Running,
+                    progress_pct: 50,
+                    log_lines: vec!["working".into()],
+                    installed_path: None,
+                    error: None,
+                },
+            );
+            mgr.finish_job(&id, Ok("/tmp/gopls".into()));
+        }
+        assert!(mgr.jobs.len() <= MAX_FINISHED_JOBS);
     }
 }

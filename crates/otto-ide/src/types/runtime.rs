@@ -35,6 +35,25 @@ pub struct IdeBreakpoint {
     pub hit_condition: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl Default for IdeBreakpoint {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            line: 1,
+            enabled: true,
+            condition: None,
+            hit_condition: None,
+            log_message: None,
+            verified: None,
+            message: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

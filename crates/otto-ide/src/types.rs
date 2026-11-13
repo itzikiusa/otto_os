@@ -47,8 +47,12 @@ impl IdeTargetKind {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// Target workspace/host descriptor passed on IDE requests.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct IdeTargetSpec {
     #[serde(default)]
     pub kind: IdeTargetKind,
@@ -57,6 +61,8 @@ pub struct IdeTargetSpec {
     pub root: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<Id>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_roots: Vec<String>,
 }
 
 impl IdeTargetSpec {
@@ -66,6 +72,7 @@ impl IdeTargetSpec {
             workspace_id: None,
             root: root.into(),
             connection_id: None,
+            additional_roots: Vec::new(),
         }
     }
 
@@ -75,6 +82,7 @@ impl IdeTargetSpec {
             workspace_id: None,
             root: root.into(),
             connection_id: Some(connection_id),
+            additional_roots: Vec::new(),
         }
     }
 
@@ -87,6 +95,13 @@ impl IdeTargetSpec {
             return Err(Error::Invalid(
                 "target root contains control characters".into(),
             ));
+        }
+        for extra in &self.additional_roots {
+            if extra.chars().any(char::is_control) {
+                return Err(Error::Invalid(
+                    "additional_roots entry contains control characters".into(),
+                ));
+            }
         }
         if self.kind == IdeTargetKind::Ssh {
             let ok = self
@@ -136,6 +151,10 @@ pub struct IdeTargetQuery {
     pub root: Option<String>,
     #[serde(default)]
     pub connection_id: Option<Id>,
+    /// When `true` on `GET /ide/toolchains`, fetch live vendor release catalogs;
+    /// defaults to `false` so workspace open never waits on external HTTPS.
+    #[serde(default)]
+    pub include_catalog: bool,
 }
 
 impl IdeTargetQuery {
@@ -150,6 +169,7 @@ impl IdeTargetQuery {
             workspace_id: self.workspace_id,
             root,
             connection_id: self.connection_id.filter(|c| !c.trim().is_empty()),
+            additional_roots: Vec::new(),
         };
         spec.validate()?;
         Ok(spec)
@@ -191,6 +211,7 @@ impl IdeFsTreeQuery {
             workspace_id: self.workspace_id.clone(),
             root: self.root.clone(),
             connection_id: self.connection_id.clone().filter(|c| !c.trim().is_empty()),
+            additional_roots: Vec::new(),
         };
         spec.validate()?;
         Ok(spec)
@@ -245,6 +266,7 @@ impl IdeFileQuery {
             workspace_id: self.workspace_id.clone(),
             root: self.root.clone(),
             connection_id: self.connection_id.clone().filter(|c| !c.trim().is_empty()),
+            additional_roots: Vec::new(),
         };
         spec.validate()?;
         Ok(spec)
@@ -316,7 +338,7 @@ pub enum IdeSearchMode {
     All,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeSearchReq {
     pub target: IdeTargetSpec,
     pub query: String,
@@ -326,6 +348,10 @@ pub struct IdeSearchReq {
     pub case_sensitive: bool,
     #[serde(default)]
     pub regex: bool,
+    #[serde(default)]
+    pub whole_word: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_path: Option<String>,
     #[serde(default)]
     pub file_glob: Option<String>,
     #[serde(default)]
@@ -361,7 +387,7 @@ pub struct IdeSearchResp {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeReplaceReq {
     pub target: IdeTargetSpec,
     pub query: String,
@@ -370,6 +396,12 @@ pub struct IdeReplaceReq {
     pub case_sensitive: bool,
     #[serde(default)]
     pub regex: bool,
+    #[serde(default)]
+    pub whole_word: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_glob: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_path: Option<String>,
     #[serde(default)]
     pub paths: Option<Vec<String>>,
     #[serde(default)]
@@ -407,19 +439,28 @@ pub enum IdeGutterKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum IdeRunnerKind {
+    GoBuild,
     GoTest,
+    #[serde(alias = "go")]
     GoRun,
+    #[serde(alias = "junit")]
     JavaJunit,
+    #[serde(alias = "java")]
     JavaMain,
     Maven,
     Gradle,
     CargoTest,
+    #[serde(alias = "cargo")]
     CargoRun,
     Node,
+    #[serde(alias = "npm_script")]
     Npm,
     Vitest,
     Pytest,
     Python,
+    #[serde(alias = "sh", alias = "bash")]
+    Shell,
+    Compound,
     #[default]
     Custom,
 }
@@ -494,7 +535,7 @@ pub struct IdeSymbolsResp {
     pub symbols: Vec<IdeSymbolNode>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeReferencesReq {
     pub target: IdeTargetSpec,
     pub path: String,
@@ -502,6 +543,8 @@ pub struct IdeReferencesReq {
     pub column: u32,
     #[serde(default)]
     pub symbol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -617,8 +660,12 @@ pub enum IdeEcosystemKind {
     Java,
     Go,
     Rust,
+    #[serde(alias = "javascript", alias = "typescript", alias = "js", alias = "ts")]
     Node,
     Python,
+    #[serde(alias = "bash", alias = "sh", alias = "zsh")]
+    Shell,
+    Json,
 }
 
 impl IdeEcosystemKind {
@@ -629,6 +676,8 @@ impl IdeEcosystemKind {
             Self::Rust => "rust",
             Self::Node => "node",
             Self::Python => "python",
+            Self::Shell => "shell",
+            Self::Json => "json",
         }
     }
 
@@ -639,6 +688,8 @@ impl IdeEcosystemKind {
             Self::Rust => "Rust (rustup)",
             Self::Node => "Node.js / TypeScript",
             Self::Python => "Python (uv)",
+            Self::Shell => "Shell (Bash / Zsh)",
+            Self::Json => "JSON / Schema",
         }
     }
 }
@@ -658,7 +709,7 @@ pub struct IdeInstalledSdk {
     pub id: String,
     pub version: String,
     pub path: String,
-    /// `"system"` | `"otto"`.
+    /// `"system"` | `"otto"` | `"local"`.
     pub source: String,
     pub active: bool,
 }
@@ -681,6 +732,8 @@ pub struct IdeDownloadableVersion {
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -742,9 +795,55 @@ pub struct IdeInstallJobResp {
     pub job: IdeInstallJob,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeRegisterLocalSdkReq {
+    pub target: IdeTargetSpec,
+    pub ecosystem: IdeEcosystemKind,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeRegisterLocalSdkResp {
+    pub sdk: IdeInstalledSdk,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IdeDeleteLocalSdkQuery {
+    #[serde(default)]
+    pub kind: Option<IdeTargetKind>,
+    #[serde(default)]
+    pub workspace_id: Option<Id>,
+    #[serde(default)]
+    pub root: Option<String>,
+    #[serde(default)]
+    pub connection_id: Option<Id>,
+    #[serde(default)]
+    pub ecosystem: Option<IdeEcosystemKind>,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
-// C. Project Environments & Run/Debug Configurations + Test Runner
+// C. Project Environments, Shell Env, Multi-Folder Roots & Run Configurations
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeShellEnvResp {
+    /// `"ready"` | `"loading"` | `"fallback"` | `"error"`.
+    pub status: String,
+    pub shell: String,
+    pub vars: BTreeMap<String, String>,
+    pub env: BTreeMap<String, String>,
+    pub var_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loaded_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeEnvVarEntry {
@@ -757,7 +856,7 @@ pub struct IdeEnvVarEntry {
     pub has_secret: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeProjectEnvironment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub java_home: Option<String>,
@@ -773,11 +872,32 @@ pub struct IdeProjectEnvironment {
     pub dotenv_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_path: Option<String>,
+    #[serde(default = "default_true")]
+    pub inherit_shell_env: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_roots: Vec<String>,
     #[serde(default)]
     pub env_vars: Vec<IdeEnvVarEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl Default for IdeProjectEnvironment {
+    fn default() -> Self {
+        Self {
+            java_home: None,
+            go_root: None,
+            rust_toolchain: None,
+            node_home: None,
+            python_interpreter: None,
+            dotenv_path: None,
+            extra_path: None,
+            inherit_shell_env: true,
+            additional_roots: Vec::new(),
+            env_vars: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeUpdateEnvironmentReq {
     pub target: IdeTargetSpec,
     #[serde(default)]
@@ -795,7 +915,51 @@ pub struct IdeUpdateEnvironmentReq {
     #[serde(default)]
     pub extra_path: Option<String>,
     #[serde(default)]
+    pub inherit_shell_env: Option<bool>,
+    #[serde(default)]
+    pub additional_roots: Option<Vec<String>>,
+    #[serde(default)]
     pub env_vars: Vec<IdeEnvVarEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeProjectFolderReq {
+    pub target: IdeTargetSpec,
+    #[serde(alias = "path")]
+    pub folder_path: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IdeDeleteProjectFolderQuery {
+    #[serde(default)]
+    pub kind: Option<IdeTargetKind>,
+    #[serde(default)]
+    pub workspace_id: Option<Id>,
+    #[serde(default)]
+    pub root: Option<String>,
+    #[serde(default)]
+    pub connection_id: Option<Id>,
+    #[serde(alias = "path")]
+    pub folder_path: String,
+}
+
+impl IdeDeleteProjectFolderQuery {
+    pub fn target_spec(&self) -> Result<IdeTargetSpec> {
+        let root = self
+            .root
+            .clone()
+            .filter(|r| !r.trim().is_empty())
+            .ok_or_else(|| Error::Invalid("missing 'root' query parameter".into()))?;
+        let spec = IdeTargetSpec {
+            kind: self.kind.unwrap_or(IdeTargetKind::Local),
+            workspace_id: self.workspace_id.clone(),
+            root,
+            connection_id: self.connection_id.clone().filter(|c| !c.trim().is_empty()),
+            additional_roots: Vec::new(),
+        };
+        spec.validate()?;
+        Ok(spec)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -833,16 +997,58 @@ pub struct IdeRunConfig {
     pub command: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub build_flags: Vec<String>,
+    #[serde(
+        default,
+        alias = "working_dir",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cwd: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "env")]
     pub env_overrides: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_file: Option<String>,
+    #[serde(default = "default_true")]
+    pub inherit_shell_env: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sdk_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolchain_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_launch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_filter: Option<String>,
+    #[serde(default, alias = "compound_ids", skip_serializing_if = "Vec::is_empty")]
+    pub compound_configs: Vec<String>,
+    #[serde(default)]
+    pub auto_detected: bool,
+}
+
+impl Default for IdeRunConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            runner: IdeRunnerKind::Custom,
+            command: None,
+            args: Vec::new(),
+            build_flags: Vec::new(),
+            cwd: None,
+            env_overrides: BTreeMap::new(),
+            env_file: None,
+            inherit_shell_env: true,
+            sdk_path: None,
+            toolchain_id: None,
+            before_launch: None,
+            target_path: None,
+            test_filter: None,
+            compound_configs: Vec::new(),
+            auto_detected: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -863,6 +1069,10 @@ pub struct IdeEnvironmentsResp {
     pub python_venvs: Vec<IdePythonVenvInfo>,
     pub dotenv_files: Vec<String>,
     pub configs: Vec<IdeRunConfig>,
+    #[serde(default)]
+    pub detected_configs: Vec<IdeRunConfig>,
+    #[serde(default)]
+    pub effective_env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -941,10 +1151,16 @@ pub struct IdeRunResp {
 
 /// Canonical file-path to IDE language identifier mapping.
 pub fn detect_language(path: &str) -> Option<&'static str> {
-    let base = path.rsplit('/').next().unwrap_or(path);
+    let trimmed = path.trim();
+    if trimmed.len() >= 6 && trimmed[..6].eq_ignore_ascii_case("jdt://") {
+        return Some("java");
+    }
+    let clean = trimmed.split('?').next().unwrap_or(trimmed);
+    let base = clean.rsplit('/').next().unwrap_or(clean);
     match base {
         "Makefile" | "GNUmakefile" | "makefile" => return Some("makefile"),
         "Dockerfile" => return Some("dockerfile"),
+        ".bashrc" | ".bash_profile" | ".zshrc" | ".zshenv" | ".zprofile" => return Some("shell"),
         _ if base.starts_with("Dockerfile.") => return Some("dockerfile"),
         _ => {}
     }
@@ -952,7 +1168,7 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
     let lang = match ext.as_str() {
         "rs" => "rust",
         "go" => "go",
-        "java" => "java",
+        "java" | "class" => "java",
         "py" | "pyi" => "python",
         "ts" | "tsx" | "mts" | "cts" => "typescript",
         "js" | "jsx" | "mjs" | "cjs" => "javascript",
@@ -965,6 +1181,9 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "php" => "php",
         "sql" => "sql",
         "json" | "jsonc" => "json",
+        "jsonl" | "ndjson" => "jsonl",
+        "csv" => "csv",
+        "tsv" => "tsv",
         "yml" | "yaml" => "yaml",
         "toml" => "toml",
         "html" | "htm" => "html",
@@ -974,7 +1193,7 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "css" => "css",
         "scss" | "less" => "scss",
         "md" | "markdown" => "markdown",
-        "sh" | "bash" | "zsh" => "shell",
+        "sh" | "bash" | "zsh" | "ksh" | "bats" => "shell",
         "proto" => "protobuf",
         "graphql" | "gql" => "graphql",
         _ => return None,
@@ -998,6 +1217,7 @@ mod tests {
             workspace_id: None,
             root: "/srv/app".into(),
             connection_id: None,
+            additional_roots: Vec::new(),
         };
         assert!(missing_conn.validate().is_err());
 
@@ -1054,6 +1274,8 @@ mod tests {
                 condition: Some("sum > 10".into()),
                 hit_condition: None,
                 log_message: None,
+                verified: Some(true),
+                message: None,
             }],
             output: vec![IdeDebugOutputEntry {
                 category: "stdout".into(),
@@ -1075,29 +1297,45 @@ mod tests {
     }
 
     #[test]
-    fn upsert_run_config_flattens_cleanly() {
+    fn upsert_run_config_flattens_and_defaults_inherit_shell_env_true() {
         let raw = r#"{
-            "target": { "kind": "local", "root": "/repo" },
+            "target": { "kind": "local", "root": "/repo", "additional_roots": ["/lib/kit"] },
             "id": "rc_1",
             "name": "All Go Tests",
             "runner": "go_test",
-            "args": ["./..."]
+            "args": ["./..."],
+            "build_flags": ["-race"],
+            "env_file": ".env.test"
         }"#;
         let parsed: IdeUpsertRunConfigReq = serde_json::from_str(raw).unwrap();
         assert_eq!(parsed.target.root, "/repo");
+        assert_eq!(parsed.target.additional_roots, vec!["/lib/kit"]);
         assert_eq!(parsed.config.id, "rc_1");
         assert_eq!(parsed.config.runner, IdeRunnerKind::GoTest);
         assert_eq!(parsed.config.args, vec!["./..."]);
+        assert_eq!(parsed.config.build_flags, vec!["-race"]);
+        assert_eq!(parsed.config.env_file.as_deref(), Some(".env.test"));
+        assert!(parsed.config.inherit_shell_env);
     }
 
     #[test]
-    fn detect_language_covers_first_class_and_infra_files() {
+    fn detect_language_covers_all_eight_mandatory_formats_and_infra_files() {
         assert_eq!(detect_language("/a/b/Main.java"), Some("java"));
         assert_eq!(detect_language("cmd/server/main.go"), Some("go"));
         assert_eq!(detect_language("src/lib.rs"), Some("rust"));
         assert_eq!(detect_language("src/app.tsx"), Some("typescript"));
         assert_eq!(detect_language("index.mjs"), Some("javascript"));
         assert_eq!(detect_language("tests/test_api.py"), Some("python"));
+        assert_eq!(detect_language("scripts/deploy.sh"), Some("shell"));
+        assert_eq!(detect_language("/Users/dev/.zshrc"), Some("shell"));
+        assert_eq!(detect_language("schema/config.jsonc"), Some("json"));
+        assert_eq!(detect_language("events/trace.jsonl"), Some("jsonl"));
+        assert_eq!(detect_language("data/users.csv"), Some("csv"));
+        assert_eq!(detect_language("data/metrics.tsv"), Some("tsv"));
+        assert_eq!(
+            detect_language("jdt://contents/java.base/java.util/List.class?=proj"),
+            Some("java")
+        );
         assert_eq!(detect_language("Makefile"), Some("makefile"));
         assert_eq!(detect_language("Dockerfile.prod"), Some("dockerfile"));
         assert_eq!(detect_language("src/App.kt"), Some("kotlin"));

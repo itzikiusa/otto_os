@@ -59,6 +59,7 @@ pub struct IdeEngine {
 
 impl IdeEngine {
     pub fn new(data_dir: PathBuf) -> Self {
+        environments::ensure_shell_env_warming();
         Self {
             targets: target::TargetManager::new(),
             toolchains: toolchains::ToolchainManager::new(data_dir.clone()),
