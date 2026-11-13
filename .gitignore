@@ -1,6 +1,8 @@
 # --- Build artifacts ---
 /target
 **/target/
+!crates/*/src/target/
+!crates/*/src/target/**
 /dist
 **/dist/
 node_modules/

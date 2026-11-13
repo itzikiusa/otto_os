@@ -433,3 +433,91 @@ async fn plugin_host_routes_need_an_enabled_plugins_bearer_token() {
     }
     f.server.abort();
 }
+
+#[tokio::test]
+async fn ide_collab_guest_routes_require_room_tokens_and_enforce_viewer_role() {
+    use otto_ide::types::{IdeCollabRole, IdeCreateCollabRoomReq, IdeTargetSpec};
+
+    let (f, root) = fixture().await;
+    let created = f
+        .ctx
+        .ide
+        .collab
+        .create_room(
+            &root,
+            IdeCreateCollabRoomReq {
+                target: IdeTargetSpec::local(f._tmp.path().to_string_lossy()),
+                title: Some("Pair".into()),
+                default_role: IdeCollabRole::Viewer,
+            },
+        )
+        .unwrap();
+    let rid = &created.room.id;
+    let base = format!("{}/ide/collab/guest/{rid}", f.origin);
+
+    for bad in ["", "wrong-token"] {
+        let r = f
+            .client
+            .post(format!("{base}/join"))
+            .json(&json!({"display_name": "Guest", "token": bad}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 401, "join with {bad:?}");
+
+        let r = f
+            .client
+            .get(format!("{base}/state?token={bad}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 401, "state with {bad:?}");
+    }
+
+    let joined: serde_json::Value = f
+        .client
+        .post(format!("{base}/join"))
+        .json(&json!({"display_name": "Guest", "token": created.invite_token}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let peer_id = joined["peer_id"].as_str().expect("peer_id");
+    let peer_secret = joined["peer_secret"].as_str().expect("peer_secret");
+
+    let edit_status = f
+        .client
+        .post(format!("{base}/edit"))
+        .json(&json!({
+            "peer_id": peer_id,
+            "peer_secret": peer_secret,
+            "path": "main.rs",
+            "content": "fn main() {}",
+            "save": false
+        }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(edit_status, 403, "viewer peer must not edit");
+
+    let forged_status = f
+        .client
+        .post(format!("{base}/cursor"))
+        .json(&json!({
+            "peer_id": peer_id,
+            "peer_secret": "wrong-secret",
+            "path": "main.rs",
+            "selections": [],
+            "active_line": 1
+        }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(forged_status, 401, "forged peer_secret must 401");
+
+    f.server.abort();
+}

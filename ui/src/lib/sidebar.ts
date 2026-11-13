@@ -104,6 +104,7 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
     keywords: 'cron recurring job report cadence hourly daily personal agents persona soul bot channels chat schedule recap',
   },
   // ── Build ──
+  { id: 'ide', icon: 'ide', label: 'IDE', group: 'build', feature: 'agents', keywords: 'ide editor code intellij goland debug breakpoints java go rust typescript javascript python lsp ssh refactor' },
   { id: 'git', icon: 'branch', label: 'Git', group: 'build', feature: 'git', keywords: 'repos prs pull requests diff commit' },
   {
     id: 'product',
@@ -236,7 +237,7 @@ export function navIdForModule(routerModule: string): string {
  * the default ('') route; database/brokers highlight Connections.
  */
 export function activeNavId(parts: string[]): string {
-  const mod = parts[0] ?? '';
+  const mod = (parts[0] ?? '').split('?')[0] ?? '';
   if (mod === 'plugin') return `plugin/${parts[1] ?? ''}`;
   if (mod === '') return 'agents';
   return navIdForModule(mod);

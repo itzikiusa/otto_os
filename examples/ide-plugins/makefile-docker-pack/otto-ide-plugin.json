@@ -1,0 +1,81 @@
+{
+  "slug": "makefile-docker-pack",
+  "name": "Makefile, Dockerfile & Compose Pack",
+  "version": "1.0.0",
+  "description": "Makefile target gutter runners, Dockerfile & Containerfile language support, docker-langserver / autotools-language-server LSP bindings, and container snippets.",
+  "author": "Otto IDE",
+  "contributions": {
+    "languages": [
+      {
+        "id": "makefile",
+        "display_name": "Makefile",
+        "extensions": [".mk", ".mak", "Makefile", "GNUmakefile"],
+        "line_comment": "#"
+      },
+      {
+        "id": "dockerfile",
+        "display_name": "Dockerfile",
+        "extensions": [".dockerfile", "Dockerfile", "Containerfile"],
+        "line_comment": "#"
+      }
+    ],
+    "lsp_servers": [
+      {
+        "language": "dockerfile",
+        "command": "docker-langserver",
+        "args": ["--stdio"],
+        "extensions": [".dockerfile", "Dockerfile"],
+        "install_hint": "npm install -g dockerfile-language-server-nodejs"
+      },
+      {
+        "language": "makefile",
+        "command": "autotools-language-server",
+        "args": [],
+        "extensions": [".mk", ".mak", "Makefile"],
+        "install_hint": "pipx install autotools-language-server"
+      }
+    ],
+    "dap_adapters": [],
+    "gutter_detectors": [
+      {
+        "language": "makefile",
+        "extensions": [".mk", ".mak", "Makefile", "GNUmakefile"],
+        "pattern": "^([a-zA-Z][a-zA-Z0-9._-]*)\\s*:(?:[^=]|$)",
+        "kind": "main",
+        "runner": "custom",
+        "command_template": "make",
+        "args_template": ["{name}"],
+        "label_prefix": "make"
+      }
+    ],
+    "keymaps": [
+      {
+        "key": "Mod-Alt-M",
+        "action": "ide.runMakeDefault",
+        "description": "Run default make target"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "dockerfile",
+        "prefix": "ruststage",
+        "body": "FROM rust:1.85-slim AS builder\nWORKDIR /app\nCOPY . .\nRUN cargo build --release\n\nFROM debian:bookworm-slim\nCOPY --from=builder /app/target/release/app /usr/local/bin/app\nENTRYPOINT [\"/usr/local/bin/app\"]",
+        "description": "Multi-stage Rust container build"
+      },
+      {
+        "language": "makefile",
+        "prefix": "phony",
+        "body": ".PHONY: build\nbuild:\n\tcargo build",
+        "description": "Declare .PHONY target"
+      }
+    ],
+    "panels": [
+      {
+        "id": "make-targets",
+        "title": "Make Targets",
+        "icon": "terminal",
+        "command": "make -qp"
+      }
+    ]
+  }
+}

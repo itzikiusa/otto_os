@@ -6,7 +6,7 @@
 
 /** Routes the shell renders as a page (pages.svelte.ts LOADERS keys). */
 export const PAGE_ROUTES: readonly string[] = [
-  'agents', 'threads', 'home', 'git', 'database', 'vault', 'workbench', 'api', 'rooms', 'workflows',
+  'agents', 'threads', 'home', 'ide', 'git', 'database', 'vault', 'workbench', 'api', 'rooms', 'workflows',
   'scheduled-tasks', 'personal-agents', 'loops', 'product', 'design', 'canvas', 'browser', 'mcp',
   'brokers', 'kubernetes', 'aws', 'insights', 'usage', 'skills-eval', 'settings', 'walkthroughs',
   'plugin', 'snip',
@@ -38,7 +38,13 @@ export function knownHash(hash: string): boolean {
 /** One-time share / pairing / room views: never a window's last route nor a
  *  module's resume point. */
 export function ephemeralHash(hash: string): boolean {
-  return hash.startsWith('#/s/') || hash.startsWith('#/pair') || hash.startsWith('#/room/') || hash.startsWith('#/room-host/');
+  return (
+    hash.startsWith('#/s/') ||
+    hash.startsWith('#/pair') ||
+    hash.startsWith('#/room/') ||
+    hash.startsWith('#/room-host/') ||
+    (hash.startsWith('#/ide?') && hash.includes('token='))
+  );
 }
 
 /** The module resume points saved for workspace `scope` ('' = none selected)

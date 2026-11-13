@@ -1,45 +1,17 @@
-//! Shared language-server pool: ONE server process per `(owner, lang, root)`,
+//! Shared language-server pool: ONE server process per `(owner, lang, root, ssh)`,
 //! multiplexed across every `/ws/lsp` socket of that owner that asks for it.
-//! The owner (the authenticated user) is part of the key (r3-10-08): server
-//! requests (`workspace/applyEdit`, …) and broadcast notifications must never
-//! reach another user's editor.
 //!
-//! Before this, every editor socket spawned its own server (`cwd` = the
-//! workspace root) and killed it on close, so each file opened in the Files
-//! viewer started — and re-indexed the repo with — a fresh tsserver / gopls /
-//! rust-analyzer. Now sockets attach to a ref-counted entry; the child lives
-//! until the last socket detaches plus [`IDLE_TIMEOUT`] (a quick file switch
-//! reuses the warm server).
-//!
-//! The multiplexer ([`Mux`]) keeps each socket believing it owns the server:
-//! - **Request ids** are rewritten to a pool-unique number on the way in and
-//!   restored on the response, so two editors both sending `id: 1` never
-//!   collide; `$/cancelRequest` is rewritten the same way.
-//! - **`initialize`** is forwarded once; its result is cached and replayed to
-//!   every later socket (queued sockets are answered when it lands). Later
-//!   `initialized` notifications, and every client `shutdown`/`exit`, are
-//!   absorbed — the pool owns the lifecycle.
-//! - **Documents** are ref-counted by URI: the first `didOpen` is forwarded; a
-//!   second socket opening the same URI resets the server's copy to the new
-//!   text (`didClose` + `didOpen`); `didClose` is forwarded only when the last
-//!   socket holding the URI closes it (or disconnects).
-//! - **Server → client**: responses go to the socket that asked;
-//!   `publishDiagnostics` goes to sockets that have the URI open; other
-//!   notifications are broadcast; server *requests* (`workspace/configuration`,
-//!   `client/registerCapability`, …) go to the oldest socket, and are answered
-//!   with a neutral `null` if no socket is left to answer.
-//!
-//! I/O: the server's stdout is read by its own task (framing reads are not
-//! cancel-safe, so they never sit in a `select!`), stdin is written by its own
-//! task (so a server that is busy writing can never dead-lock the actor), and
-//! a slow socket whose outbound queue fills is dropped instead of stalling the
-//! other editors. The stdin queue is BOUNDED by bytes ([`WRITE_QUEUE_MAX_BYTES`]):
-//! while a busy server is not reading, the actor stops taking client messages,
-//! the per-server client queue ([`DATA_CAPACITY`]) fills, and each socket's
-//! `send().await` — so its WebSocket read loop — waits. (Server-originated
-//! writes, e.g. neutral answers, are never dropped; they are tiny.)
+//! Supports both:
+//! - **Local** workspaces (`ssh: None`): spawns `cmd` directly in `key.root`
+//!   with `<data_dir>/toolchains/**/bin` prepended to `PATH` (and `JAVA_HOME`
+//!   auto-populated from `<data_dir>/toolchains` when unset).
+//! - **Remote SSH** workspaces (`ssh: Some(IdeSshSpec)`): spawns `ssh -T`
+//!   (non-interactive, hardened option checks, `--` separator) to `cd` into the
+//!   remote `root`, augment remote `$PATH` with `~/.otto/toolchains/**/bin`,
+//!   and `exec` the primary (or fallback) language server over clean 8-bit stdio.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -49,7 +21,8 @@ use tokio::io::{AsyncBufRead, AsyncWrite, BufReader};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use super::framing;
+use super::{framing, servers};
+use crate::types::IdeSshSpec;
 
 /// How long a server outlives its last socket.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -70,8 +43,31 @@ pub struct PoolKey {
     /// users (a server request goes to one of the owner's own sockets).
     pub owner: String,
     pub lang: String,
-    /// Canonicalized workspace root (the server's `cwd`).
+    /// Canonicalized local workspace root, or normalized remote path when `ssh` is `Some`.
     pub root: String,
+    /// `None` for local workspaces; `Some(spec)` for Remote SSH workspaces.
+    pub ssh: Option<IdeSshSpec>,
+}
+
+/// Optional fallback command + args (used by Remote SSH spawning when the
+/// primary executable is absent on the remote host).
+#[derive(Clone, Debug, Default)]
+pub struct SpawnLaunch {
+    pub cmd: String,
+    pub args: Vec<String>,
+    pub fallback_cmd: Option<String>,
+    pub fallback_args: Vec<String>,
+}
+
+impl SpawnLaunch {
+    pub fn primary(cmd: impl Into<String>, args: Vec<String>) -> Self {
+        Self {
+            cmd: cmd.into(),
+            args,
+            fallback_cmd: None,
+            fallback_args: Vec::new(),
+        }
+    }
 }
 
 /// A started server's framed-stdio ends.
@@ -83,16 +79,127 @@ pub struct ServerIo {
     pub child: Option<tokio::process::Child>,
 }
 
-/// Starts a server for `key` with `(cmd, args)`.
-pub type Spawner =
-    Arc<dyn Fn(&PoolKey, &str, &[String]) -> std::io::Result<ServerIo> + Send + Sync>;
+/// Starts a server for `key` with `launch`.
+pub type Spawner = Arc<dyn Fn(&PoolKey, &SpawnLaunch) -> std::io::Result<ServerIo> + Send + Sync>;
 
-/// The production spawner: a real child process, stderr drained to debug logs.
-pub fn process_spawner() -> Spawner {
-    Arc::new(|key: &PoolKey, cmd: &str, args: &[String]| {
-        let mut child = tokio::process::Command::new(cmd)
-            .args(args)
-            .current_dir(&key.root)
+/// POSIX single-quote escaping (`'abc'` -> `'abc'`, `a'b` -> `'a'\''b'`).
+pub fn posix_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn reject_ssh_option_like(field: &str, val: &str) -> std::io::Result<()> {
+    if val.starts_with('-') || val.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("ssh {field} must not start with '-' or contain whitespace"),
+        ));
+    }
+    Ok(())
+}
+
+/// Build the remote POSIX shell script that enters `root`, augments `PATH`
+/// with `~/.otto/toolchains/**/bin` + standard SDK dirs, and `exec`s the LSP.
+pub fn build_remote_lsp_script(root: &str, launch: &SpawnLaunch) -> String {
+    let quoted_root = posix_quote(root);
+    let invoke_primary = std::iter::once(posix_quote(&launch.cmd))
+        .chain(launch.args.iter().map(|a| posix_quote(a)))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let path_setup = concat!(
+        "for d in ",
+        "\"$HOME\"/.otto/toolchains/bin ",
+        "\"$HOME\"/.otto/toolchains/*/bin ",
+        "\"$HOME\"/.otto/toolchains/*/*/bin ",
+        "\"$HOME\"/.otto/toolchains/*/*/*/bin ",
+        "\"$HOME\"/.otto/toolchains/*/*/Contents/Home/bin ",
+        "\"$HOME\"/.otto/toolchains/*/*/node_modules/.bin ",
+        "\"$HOME\"/.otto/toolchains/*/*/lib/node_modules/.bin ",
+        "\"$HOME/go/bin\" \"$HOME/.cargo/bin\" \"$HOME/.local/bin\"; ",
+        "do [ -d \"$d\" ] && PATH=\"$d:$PATH\"; done; export PATH"
+    );
+
+    if let Some(fb) = &launch.fallback_cmd {
+        let invoke_fb = std::iter::once(posix_quote(fb))
+            .chain(launch.fallback_args.iter().map(|a| posix_quote(a)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let p_check = posix_quote(&launch.cmd);
+        let fb_check = posix_quote(fb);
+        format!(
+            "cd {quoted_root} && {path_setup}; \
+             if command -v {p_check} >/dev/null 2>&1; then exec {invoke_primary}; \
+             elif command -v {fb_check} >/dev/null 2>&1; then exec {invoke_fb}; \
+             else echo 'otto-lsp: language server not found on remote host' >&2; exit 127; fi"
+        )
+    } else {
+        format!("cd {quoted_root} && {path_setup}; exec {invoke_primary}")
+    }
+}
+
+/// Production spawner supporting both Local (with `<data_dir>/toolchains` PATH)
+/// and Remote SSH (`ssh -T`) workspaces.
+pub fn process_spawner_with_data_dir(data_dir: PathBuf) -> Spawner {
+    Arc::new(move |key: &PoolKey, launch: &SpawnLaunch| {
+        let mut command = if let Some(ssh) = &key.ssh {
+            reject_ssh_option_like("host", &ssh.host)?;
+            if !ssh.user.is_empty() {
+                reject_ssh_option_like("user", &ssh.user)?;
+            }
+            if let Some(jump) = &ssh.proxy_jump {
+                reject_ssh_option_like("proxy_jump", jump)?;
+            }
+            let mut c = tokio::process::Command::new("ssh");
+            c.arg("-T")
+                .arg("-o")
+                .arg("BatchMode=yes")
+                .arg("-o")
+                .arg("StrictHostKeyChecking=accept-new")
+                .arg("-o")
+                .arg("LogLevel=ERROR")
+                .arg("-o")
+                .arg("ConnectTimeout=10")
+                .arg("-o")
+                .arg("ServerAliveInterval=15")
+                .arg("-o")
+                .arg("ServerAliveCountMax=3");
+            if ssh.port > 0 {
+                c.arg("-p").arg(ssh.port.to_string());
+            }
+            if let Some(identity) = &ssh.identity_file {
+                if !identity.is_empty() {
+                    let expanded = otto_core::paths::expand_home_strict(identity)
+                        .unwrap_or_else(|_| PathBuf::from(identity));
+                    c.arg("-i").arg(expanded);
+                }
+            }
+            if let Some(jump) = &ssh.proxy_jump {
+                if !jump.is_empty() {
+                    c.arg("-J").arg(jump);
+                }
+            }
+            let target = if ssh.user.is_empty() {
+                ssh.host.clone()
+            } else {
+                format!("{}@{}", ssh.user, ssh.host)
+            };
+            let remote_script = build_remote_lsp_script(&key.root, launch);
+            c.arg("--").arg(target).arg(remote_script);
+            c
+        } else {
+            let mut c = tokio::process::Command::new(&launch.cmd);
+            c.args(&launch.args)
+                .current_dir(&key.root)
+                .env("PATH", servers::augmented_local_path(&data_dir));
+            if std::env::var_os("JAVA_HOME").is_none() {
+                if let Some(java_home) = servers::detect_toolchain_java_home(&data_dir) {
+                    c.env("JAVA_HOME", java_home);
+                }
+            }
+            c
+        };
+
+        let mut child = command
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -115,6 +222,11 @@ pub fn process_spawner() -> Spawner {
             child: Some(child),
         })
     })
+}
+
+/// Default spawner when no explicit `data_dir` is supplied.
+pub fn process_spawner() -> Spawner {
+    process_spawner_with_data_dir(std::env::temp_dir())
 }
 
 /// Membership changes — unbounded so `Drop` can send, and polled FIRST by the
@@ -216,11 +328,17 @@ impl LspPool {
         cmd: &str,
         args: &[String],
     ) -> std::io::Result<Attached> {
+        self.attach_launch(key, &SpawnLaunch::primary(cmd, args.to_vec()))
+    }
+
+    /// Attach a socket with a [`SpawnLaunch`] (including optional remote fallback).
+    pub fn attach_launch(
+        self: &Arc<Self>,
+        key: PoolKey,
+        launch: &SpawnLaunch,
+    ) -> std::io::Result<Attached> {
         let client = self.next_client.fetch_add(1, Ordering::Relaxed);
         let (out_tx, rx) = mpsc::channel(CLIENT_CAPACITY);
-        // The Attach is sent UNDER the lock: the actor's idle reaper takes the
-        // same lock and only exits when no Attach is queued, so an attach can
-        // never land on a server that is about to be reaped.
         let mut entries = self.lock();
         if let Some(e) = entries.get(&key) {
             if e.ctl
@@ -237,10 +355,9 @@ impl LspPool {
                     data: e.data.clone(),
                 });
             }
-            // The actor already ended (server crashed) — replace it.
             entries.remove(&key);
         }
-        let io = (self.spawner)(&key, cmd, args)?;
+        let io = (self.spawner)(&key, launch)?;
         let gen = self.next_gen.fetch_add(1, Ordering::Relaxed);
         let (ctl, ctl_rx) = mpsc::unbounded_channel();
         let (data, data_rx) = mpsc::channel(DATA_CAPACITY);
@@ -285,9 +402,6 @@ async fn run_actor(
         child,
     } = io;
 
-    // The channel itself is unbounded so the (sync) Mux never blocks or drops
-    // a write; `backlog` counts its queued bytes and the actor stops taking
-    // CLIENT messages while it is over `pool.write_cap` (see module doc).
     let (w_tx, mut w_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let backlog = Arc::new(AtomicUsize::new(0));
     let drained = Arc::new(tokio::sync::Notify::new());
@@ -344,7 +458,6 @@ async fn run_actor(
                 Some(Data { client, text }) => mux.on_client(client, &text),
                 None => break,
             },
-            // Gated: wake when the writer drains so `has_room` is re-checked.
             _ = drained.notified(), if !has_room => {}
             s = r_rx.recv() => match s {
                 Some(body) => {
@@ -364,7 +477,6 @@ async fn run_actor(
                     tracing::debug!(lang = key.lang.as_str(), root = key.root.as_str(), "lsp: idle server reaped");
                     break;
                 }
-                // An Attach is queued — the next turn processes it.
                 idle_at = None;
                 continue;
             }
@@ -377,10 +489,8 @@ async fn run_actor(
     }
 
     pool.remove_if(&key, gen);
-    // Dropping the client senders ends every attached socket's `rx`.
     mux.clients.clear();
     reader_task.abort();
-    // Polite shutdown, then the process is dropped (kill_on_drop).
     mux.to_server(&json!({"jsonrpc": "2.0", "id": "otto-pool-shutdown", "method": "shutdown"}));
     mux.to_server(&json!({"jsonrpc": "2.0", "method": "exit"}));
     drop(mux);
@@ -392,13 +502,11 @@ async fn run_actor(
 
 struct Client {
     tx: mpsc::Sender<String>,
-    /// URIs this socket has open.
     open: HashSet<String>,
 }
 
 enum Init {
     NotStarted,
-    /// Forwarded once; every socket waiting on it (the initiator first).
     Pending {
         pool_id: u64,
         waiters: Vec<(u64, Value)>,
@@ -406,21 +514,14 @@ enum Init {
     Done(Value),
 }
 
-/// Pure routing state for one pooled server (no I/O besides the queues).
 struct Mux {
     to_server_tx: mpsc::UnboundedSender<Vec<u8>>,
-    /// Bytes queued on `to_server_tx` and not yet written (shared with the
-    /// writer task, which subtracts).
     backlog: Arc<AtomicUsize>,
-    /// BTreeMap: the first key is the oldest socket (server-request target).
     clients: BTreeMap<u64, Client>,
-    /// pool id → (socket, the socket's own request id).
     pending: HashMap<u64, (u64, Value)>,
-    /// Server request id (JSON text) → (socket asked, the id).
     server_reqs: HashMap<String, (u64, Value)>,
     init: Init,
     initialized_sent: bool,
-    /// URI → number of sockets holding it open.
     docs: HashMap<String, usize>,
     next_id: u64,
 }
@@ -468,14 +569,10 @@ impl Mux {
         let n = bytes.len();
         self.backlog.fetch_add(n, Ordering::AcqRel);
         if self.to_server_tx.send(bytes).is_err() {
-            // Writer gone: nothing will ever subtract these bytes.
             self.backlog.fetch_sub(n, Ordering::AcqRel);
         }
     }
 
-    /// Queue `text` for socket `client`; a socket whose queue is full is
-    /// dropped (its `rx` ends and its editor loses LSP) rather than stalling
-    /// every other editor on this server.
     fn send_client(&mut self, client: u64, text: String) {
         let full = match self.clients.get(&client) {
             Some(c) => c.tx.try_send(text).is_err(),
@@ -504,7 +601,6 @@ impl Mux {
         for uri in c.open {
             self.release_doc(&uri);
         }
-        // Server requests only this socket could answer: answer neutrally.
         let orphaned: Vec<String> = self
             .server_reqs
             .iter()
@@ -516,7 +612,6 @@ impl Mux {
                 self.to_server(&json!({"jsonrpc": "2.0", "id": id, "result": null}));
             }
         }
-        // Its in-flight requests are pointless now — cancel them.
         let stale: Vec<u64> = self
             .pending
             .iter()
@@ -534,7 +629,6 @@ impl Mux {
         }
     }
 
-    /// One socket stops holding `uri`; the server's copy closes with the last.
     fn release_doc(&mut self, uri: &str) {
         let Some(n) = self.docs.get_mut(uri) else {
             return;
@@ -576,7 +670,6 @@ impl Mux {
                     self.to_server(&msg);
                 }
             }
-            // The pool owns the server's lifecycle.
             (Some("shutdown"), Some(id)) => {
                 let reply = json!({"jsonrpc": "2.0", "id": id, "result": null});
                 self.send_client(client, reply.to_string());
@@ -613,7 +706,6 @@ impl Mux {
                 if newly && holders == 1 {
                     self.to_server_raw(text);
                 } else {
-                    // Already open on the server: reset its copy to this text.
                     self.to_server(&json!({
                         "jsonrpc": "2.0",
                         "method": "textDocument/didClose",
@@ -650,7 +742,6 @@ impl Mux {
                 }
             }
             (Some(_), None) => self.to_server_raw(text),
-            // A socket's answer to a server request (ids are the server's own).
             (None, Some(id)) => {
                 if self.server_reqs.remove(&id.to_string()).is_some() {
                     self.to_server_raw(text);
@@ -660,8 +751,6 @@ impl Mux {
         }
     }
 
-    /// Route one server message. `false` = stop the server (its
-    /// `initialize` failed, so every socket would only see errors).
     fn on_server(&mut self, body: &[u8]) -> bool {
         let Ok(text) = std::str::from_utf8(body) else {
             tracing::debug!("lsp: server sent non-UTF-8 body, dropping");
@@ -758,11 +847,9 @@ impl Mux {
 mod tests {
     use super::*;
 
-    /// An in-process fake language server over duplex pipes.
     struct Fake {
         spawns: Arc<AtomicUsize>,
         inits: Arc<AtomicUsize>,
-        /// `method uri` of every didOpen/didClose the server received.
         doc_log: Arc<Mutex<Vec<String>>>,
     }
 
@@ -771,7 +858,7 @@ mod tests {
         let inits = Arc::new(AtomicUsize::new(0));
         let doc_log = Arc::new(Mutex::new(Vec::new()));
         let (s, i, d) = (spawns.clone(), inits.clone(), doc_log.clone());
-        let spawner: Spawner = Arc::new(move |_key: &PoolKey, _cmd: &str, _args: &[String]| {
+        let spawner: Spawner = Arc::new(move |_key: &PoolKey, _launch: &SpawnLaunch| {
             s.fetch_add(1, Ordering::SeqCst);
             let (pool_side_w, server_r) = tokio::io::duplex(1 << 16);
             let (server_w, pool_side_r) = tokio::io::duplex(1 << 16);
@@ -837,6 +924,7 @@ mod tests {
             owner: owner.into(),
             lang: "typescript".into(),
             root: root.into(),
+            ssh: None,
         }
     }
 
@@ -881,19 +969,13 @@ mod tests {
         let (pool, fake) = fake_pool(IDLE_TIMEOUT);
         let mut a = pool.attach(key("/r"), "tsls", &[]).unwrap();
         let mut b = pool.attach(key("/r"), "tsls", &[]).unwrap();
-        assert_eq!(
-            fake.spawns.load(Ordering::SeqCst),
-            1,
-            "one child for two sockets"
-        );
+        assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
         assert_eq!(pool.live_servers(), 1);
 
-        // Both editors initialize with the SAME id; the server sees one.
         init(&mut a, 1).await;
         init(&mut b, 1).await;
         assert_eq!(fake.inits.load(Ordering::SeqCst), 1);
 
-        // Colliding request ids are routed back to the socket that asked.
         let hover = |id: i64| {
             json!({"jsonrpc":"2.0","id":id,"method":"textDocument/hover","params":{}}).to_string()
         };
@@ -906,10 +988,46 @@ mod tests {
         nothing(&mut a).await;
         nothing(&mut b).await;
 
-        // Another root is another server.
         let _c = pool.attach(key("/other"), "tsls", &[]).unwrap();
         assert_eq!(fake.spawns.load(Ordering::SeqCst), 2);
         assert_eq!(pool.live_servers(), 2);
+    }
+
+    #[tokio::test]
+    async fn local_and_ssh_roots_never_share_a_pooled_server() {
+        let (pool, fake) = fake_pool(IDLE_TIMEOUT);
+        let _local = pool.attach(key("/srv/app"), "gopls", &[]).unwrap();
+        let mut remote_key = key("/srv/app");
+        remote_key.ssh = Some(IdeSshSpec {
+            connection_id: "conn_1".into(),
+            name: "box".into(),
+            host: "127.0.0.1".into(),
+            port: 2222,
+            user: "dev".into(),
+            identity_file: None,
+            proxy_jump: None,
+        });
+        let _remote = pool.attach(remote_key, "gopls", &[]).unwrap();
+        assert_eq!(fake.spawns.load(Ordering::SeqCst), 2);
+        assert_eq!(pool.live_servers(), 2);
+    }
+
+    #[test]
+    fn remote_script_escapes_paths_and_refuses_option_injection() {
+        assert!(reject_ssh_option_like("host", "-oProxyCommand=evil").is_err());
+        assert!(reject_ssh_option_like("user", "dev\nroot").is_err());
+        assert!(reject_ssh_option_like("host", "dev.example.com").is_ok());
+
+        let launch = SpawnLaunch {
+            cmd: "pyright-langserver".into(),
+            args: vec!["--stdio".into()],
+            fallback_cmd: Some("pylsp".into()),
+            fallback_args: vec![],
+        };
+        let script = build_remote_lsp_script("/srv/my 'app'", &launch);
+        assert!(script.contains("cd '/srv/my '\\''app'\\'''"));
+        assert!(script.contains("exec 'pyright-langserver' '--stdio'"));
+        assert!(script.contains("elif command -v 'pylsp'"));
     }
 
     #[tokio::test]
@@ -923,15 +1041,12 @@ mod tests {
         a.send(open("file:///r/x.ts")).await;
         let diag = recv(&mut a).await;
         assert_eq!(diag["params"]["uri"], json!("file:///r/x.ts"));
-        nothing(&mut b).await; // b hasn't opened x.ts
+        nothing(&mut b).await;
 
-        // b opens the same doc: the server's copy is reset, not double-opened.
         b.send(open("file:///r/x.ts")).await;
         let _ = recv(&mut a).await;
         let _ = recv(&mut b).await;
-        // a closing keeps the doc open for b.
         a.send(close("file:///r/x.ts")).await;
-        // b disconnecting closes it on the server.
         drop(b);
         tokio::time::sleep(Duration::from_millis(100)).await;
         let log = fake.doc_log.lock().unwrap().clone();
@@ -952,14 +1067,12 @@ mod tests {
         let mut a = pool.attach(key("/r"), "tsls", &[]).unwrap();
         init(&mut a, 1).await;
         drop(a);
-        // Re-attach within the idle window: same server, cached initialize.
         tokio::time::sleep(Duration::from_millis(20)).await;
         let mut b = pool.attach(key("/r"), "tsls", &[]).unwrap();
         init(&mut b, 3).await;
         assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
         assert_eq!(fake.inits.load(Ordering::SeqCst), 1);
         drop(b);
-        // Past the idle window: reaped; the next socket starts a fresh one.
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(pool.live_servers(), 0);
         let mut c = pool.attach(key("/r"), "tsls", &[]).unwrap();
@@ -967,8 +1080,6 @@ mod tests {
         assert_eq!(fake.spawns.load(Ordering::SeqCst), 2);
     }
 
-    /// r3-10-08: two users on the same (lang, root) get separate servers, so
-    /// a server request / broadcast never reaches the other user's editor.
     #[tokio::test]
     async fn different_owners_never_share_a_server() {
         let (pool, fake) = fake_pool(IDLE_TIMEOUT);
@@ -979,12 +1090,9 @@ mod tests {
         assert_eq!(pool.live_servers(), 2);
     }
 
-    /// r3-10-08: a server that stops reading stdin must push back on the
-    /// sockets instead of queueing their messages without limit.
     #[tokio::test]
     async fn a_stalled_server_backpressures_client_sends() {
-        let spawner: Spawner = Arc::new(|_key: &PoolKey, _cmd: &str, _args: &[String]| {
-            // The "server" never reads its stdin: the pipe fills at 4 KiB.
+        let spawner: Spawner = Arc::new(|_key: &PoolKey, _launch: &SpawnLaunch| {
             let (pool_side_w, server_r) = tokio::io::duplex(4 * 1024);
             let (_server_w, pool_side_r) = tokio::io::duplex(1024);
             tokio::spawn(async move {
@@ -1016,7 +1124,6 @@ mod tests {
             }
         }
         assert!(blocked, "sends never blocked: {accepted} accepted");
-        // Bound: pipe (4 KiB) + stdin backlog cap (16 KiB) + the client queue.
         assert!(accepted <= DATA_CAPACITY + 64, "{accepted} accepted");
     }
 }

@@ -4329,6 +4329,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-ide"
+version = "0.2.2"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.23.1",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "dirs",
+ "futures",
+ "futures-util",
+ "hex",
+ "http-body-util",
+ "ignore",
+ "otto-connections",
+ "otto-core",
+ "otto-git-cmd",
+ "otto-netguard",
+ "otto-rbac",
+ "otto-ssh",
+ "otto-state",
+ "rand 0.10.3",
+ "regex",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "shell-words",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tower",
+ "tracing",
+ "ulid",
+ "uuid",
+]
+
+[[package]]
 name = "otto-improve"
 version = "0.2.2"
 dependencies = [
@@ -4668,6 +4709,7 @@ dependencies = [
  "otto-design",
  "otto-design-assist",
  "otto-git",
+ "otto-ide",
  "otto-improve",
  "otto-insights",
  "otto-issues",

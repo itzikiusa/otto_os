@@ -71,6 +71,126 @@ impl otto_phone::PhoneCtx for ServerCtx {
     }
 }
 
+fn ide_conn_param<'a>(conn: &'a Connection, key: &str) -> Option<&'a str> {
+    conn.params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+}
+
+fn reject_ide_ssh_option_like(key: &str, value: &str) -> Result<()> {
+    if value.starts_with('-') || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(Error::Invalid(format!(
+            "ssh: param '{key}' must not start with '-' or contain whitespace"
+        )));
+    }
+    Ok(())
+}
+
+impl otto_ide::IdeCtx for ServerCtx {
+    fn ide(&self) -> &Arc<otto_ide::IdeEngine> {
+        &self.ide
+    }
+    fn pool(&self) -> otto_state::DbPool {
+        self.pool.clone()
+    }
+    fn secrets(&self) -> &Arc<dyn otto_core::secrets::SecretStore> {
+        &self.secrets
+    }
+    fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+    fn roles(&self) -> &Arc<dyn RoleChecker> {
+        &self.roles
+    }
+    fn resolve_ssh_connection<'a>(
+        &'a self,
+        user: &'a User,
+        connection_id: &'a Id,
+    ) -> BoxFuture<'a, Result<otto_ide::IdeSshSpec>> {
+        Box::pin(async move {
+            let conn = self.connections.get(connection_id).await?;
+            let enforced = self.connections.is_enforced(&conn.id).await?;
+            self.connections
+                .authorize(&conn.id, &user.id, "discover")
+                .await?;
+            match &conn.workspace_id {
+                Some(ws) => {
+                    let min = if enforced {
+                        WorkspaceRole::Viewer
+                    } else {
+                        WorkspaceRole::Editor
+                    };
+                    self.roles.check(user, ws, min).await?;
+                }
+                None => {
+                    let cap = if enforced {
+                        otto_core::domain::Capability::View
+                    } else {
+                        otto_core::domain::Capability::Edit
+                    };
+                    otto_state::GrantsRepo::new(self.pool.clone())
+                        .check_global(
+                            user,
+                            otto_core::domain::Feature::Connections,
+                            cap,
+                            &format!(
+                                "global connections need the Connections '{}' grant",
+                                cap.as_str()
+                            ),
+                        )
+                        .await?;
+                }
+            }
+            if otto_connections::owner_private_enabled(self).await && !enforced {
+                otto_connections::require_conn_owner_or_root(user, &conn)?;
+            }
+            self.connections
+                .authorize(&conn.id, &user.id, "shell")
+                .await?;
+            if conn.kind != otto_core::domain::ConnectionKind::Ssh {
+                return Err(Error::Invalid(
+                    "IDE Remote SSH requires an SSH connection".into(),
+                ));
+            }
+            let host = ide_conn_param(&conn, "host")
+                .ok_or_else(|| Error::Invalid("SSH connection has no host".into()))?;
+            reject_ide_ssh_option_like("host", host)?;
+            let ssh_user = ide_conn_param(&conn, "user").unwrap_or("");
+            if !ssh_user.is_empty() {
+                reject_ide_ssh_option_like("user", ssh_user)?;
+            }
+            let proxy_jump = ide_conn_param(&conn, "jump")
+                .or_else(|| ide_conn_param(&conn, "proxy_jump"))
+                .map(str::to_string);
+            if let Some(jump) = &proxy_jump {
+                reject_ide_ssh_option_like("jump", jump)?;
+            }
+            let port = match conn.params.get("port") {
+                None | Some(serde_json::Value::Null) => 22,
+                Some(serde_json::Value::String(s)) if s.is_empty() => 22,
+                Some(v) => v
+                    .as_u64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                    .and_then(|n| u16::try_from(n).ok())
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| {
+                        Error::Invalid("SSH connection port is not a valid port number".into())
+                    })?,
+            };
+            Ok(otto_ide::IdeSshSpec {
+                connection_id: conn.id.clone(),
+                name: conn.name.clone(),
+                host: host.to_string(),
+                port,
+                user: ssh_user.to_string(),
+                identity_file: ide_conn_param(&conn, "identity_file").map(str::to_string),
+                proxy_jump,
+            })
+        })
+    }
+}
+
 impl otto_aws::AwsCtx for ServerCtx {
     fn pool(&self) -> otto_state::DbPool {
         self.pool.clone()

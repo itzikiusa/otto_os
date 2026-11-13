@@ -259,6 +259,12 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/share/extend" {
         return Exempt;
     }
+    // IDE "Share with Friends" guest collaboration routes (`/ide/collab/guest/*`).
+    // Mounted in `public_routes`; each handler verifies the room's capability
+    // share token (and viewer vs editor role) before reading or mutating files.
+    if p.starts_with("/ide/collab/guest/") {
+        return Exempt;
+    }
     // A share guest's own scope (session id + role). Authenticated; only a
     // share token gets an answer (the handler 400s a normal bearer) and a share
     // scope reaches it via `scope_allows` before this policy is consulted.
@@ -272,6 +278,13 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // Root bypasses; non-root callers additionally hit the secret deny list in
     // `routes/fs.rs` (Otto data dir, ~/.ssh & co., key files).
     if matches!(p, "/fs/browse" | "/fs/read" | "/fs/raw" | "/fs/stat") {
+        return Require(Agents, Edit);
+    }
+    // Full IDE (`/ide/*`): file tree/read/write, toolchains, environments,
+    // gutter test runner, DAP debugger, extended LSP, collab host rooms, and
+    // runtime IDE plugins. Requires Agents:Edit (guest collab routes matched
+    // Exempt above).
+    if p == "/ide" || p.starts_with("/ide/") {
         return Require(Agents, Edit);
     }
     // Agent discovery / friendly-reference resolution (`agent_refs`): GET-only
@@ -1187,101 +1200,8 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     }
 
     // ---- AWS console (`/aws/*`) -------------------------------------------
-    // Seven sibling keys, mirroring the Connections/Database split: `Aws` owns
-    // account (profile) management + the CLI install/status plumbing; each
-    // service has its own key so a role can e.g. browse S3 without touching
-    // EC2. Per-service posture (product decision, see docs/features/aws-console.md):
-    //   S3     — read-only by design: every S3 route (incl. download) is View,
-    //            EXCEPT `download-to` (+ its cancel): it writes a file onto the
-    //            daemon HOST, so it is Edit (same as SFTP download, r3-10-01).
-    //   SQS    — list/attributes are View; send/delete/purge/redrive Edit.
-    //            Peek is graded View here, but its handler requires
-    //            aws_sqs:Edit (a receive bumps the receive count, S6-12).
-    //   EC2    — describe is View; start/stop/reboot Edit.
-    //   Athena — catalog/history/results/cancel View; executing a query Edit.
-    //   EKS    — describe is View; kubeconfig import Edit.
-    //   RDS    — read-only by design: list/describe instances are View.
-    //   Metrics — `/metrics` (CloudWatch get-metric-data) is a read under the
-    //            account key; the handler additionally requires View on the
-    //            namespace's own service key (SQS/EC2/RDS), which the path
-    //            alone cannot express.
-    // "Peek" and "cancel" are POSTs that do not mutate user data, so they are
-    // explicitly graded back down to View (same trick as `/db/query-plan`).
-    // Order: the per-service sub-prefixes are matched BEFORE the generic
-    // account routes so `/aws/accounts/{id}/s3/...` never falls into `Aws`.
-    if let Some(rest) = p.strip_prefix("/aws/accounts/{id}/") {
-        if rest.starts_with("s3/") {
-            // Host-file writes: a View-only S3 user must not be able to drop a
-            // file on the daemon host (e.g. a LaunchAgent / shell rc).
-            let host_write = !get
-                && (rest.ends_with("/download-to")
-                    || (rest.starts_with("s3/download-jobs/") && rest.ends_with("/cancel")));
-            // Object writes: upload (PUT) and delete (DELETE) on `…/object`.
-            // `presign` (POST) stays View: the link carries only the read the
-            // caller already has (the handler audits it).
-            let object_write = method == Method::PUT || method == Method::DELETE;
-            return Require(
-                AwsS3,
-                if host_write || object_write {
-                    Edit
-                } else {
-                    View
-                },
-            );
-        }
-        if rest.starts_with("sqs/") {
-            // Every non-GET is Edit — `peek` included: a receive bumps each
-            // message's receive count (enough to dead-letter it). For an
-            // Enforced account the guard lowers this to View and the
-            // account's own `sqs_receive` operation decides (S6-303), so the
-            // handler adds no global-tier check of its own.
-            return Require(AwsSqs, if get { View } else { Edit });
-        }
-        if rest.starts_with("ec2/") {
-            return Require(AwsEc2, if get { View } else { Edit });
-        }
-        if rest.starts_with("athena/") {
-            let read = get || rest.ends_with("/cancel");
-            return Require(AwsAthena, if read { View } else { Edit });
-        }
-        if rest.starts_with("eks/") {
-            return Require(AwsEks, if get { View } else { Edit });
-        }
-        if rest.starts_with("rds/") {
-            return Require(AwsRds, View);
-        }
-        if rest == "metrics" {
-            return Require(Aws, View);
-        }
-        // CloudWatch Logs: every route reads (Insights start/stop POSTs run
-        // or cancel a read-only query), same key as metrics.
-        if rest.starts_with("logs/") {
-            return Require(Aws, View);
-        }
-        // Account-level probes: `test` (sts get-caller-identity), `permissions`
-        // (per-service capability probe) are reads; `login` spawns an
-        // `aws sso login` PTY session for the caller — an Edit.
-        if rest == "test" || rest == "permissions" {
-            return Require(Aws, View);
-        }
-        if rest == "login" {
-            return Require(Aws, Edit);
-        }
-    }
-    if p == "/aws/accounts" {
-        return Require(Aws, if get { View } else { Admin });
-    }
-    if p == "/aws/accounts/{id}" {
-        return Require(Aws, if get { View } else { Admin });
-    }
-    // `status` = CLI presence/version + install-job state; `discover` = the
-    // profile names found in ~/.aws/config (never secrets); `regions` = static.
-    if matches!(p, "/aws/status" | "/aws/regions") {
-        return Require(Aws, View);
-    }
-    // Installing the CLI writes to the machine — admin only.
-    if matches!(p, "/aws/install" | "/aws/discover") {
-        return Require(Aws, Admin);
+    if let Some(d) = aws_policy(p, method, get) {
+        return d;
     }
 
     // ---- Kubernetes console (`/k8s/*`) --------------------------------------
@@ -1439,6 +1359,62 @@ fn personal_agents_policy(p: &str, get: bool) -> Option<PolicyDecision> {
     None
 }
 
+/// AWS console (`/aws/*`): seven sibling feature keys (`Aws` for accounts + CLI
+/// install/status plumbing, plus `AwsS3`, `AwsSqs`, `AwsEc2`, `AwsAthena`,
+/// `AwsEks`, `AwsRds`). Extracted out of [`policy_for`] to keep the central
+/// policy match compact.
+fn aws_policy(p: &str, method: &Method, get: bool) -> Option<PolicyDecision> {
+    if let Some(rest) = p.strip_prefix("/aws/accounts/{id}/") {
+        if rest.starts_with("s3/") {
+            let host_write = !get
+                && (rest.ends_with("/download-to")
+                    || (rest.starts_with("s3/download-jobs/") && rest.ends_with("/cancel")));
+            let object_write = method == Method::PUT || method == Method::DELETE;
+            return Some(Require(
+                AwsS3,
+                if host_write || object_write {
+                    Edit
+                } else {
+                    View
+                },
+            ));
+        }
+        if rest.starts_with("sqs/") {
+            return Some(Require(AwsSqs, if get { View } else { Edit }));
+        }
+        if rest.starts_with("ec2/") {
+            return Some(Require(AwsEc2, if get { View } else { Edit }));
+        }
+        if rest.starts_with("athena/") {
+            let read = get || rest.ends_with("/cancel");
+            return Some(Require(AwsAthena, if read { View } else { Edit }));
+        }
+        if rest.starts_with("eks/") {
+            return Some(Require(AwsEks, if get { View } else { Edit }));
+        }
+        if rest.starts_with("rds/") {
+            return Some(Require(AwsRds, View));
+        }
+        if rest == "metrics" || rest.starts_with("logs/") || rest == "test" || rest == "permissions"
+        {
+            return Some(Require(Aws, View));
+        }
+        if rest == "login" {
+            return Some(Require(Aws, Edit));
+        }
+    }
+    if p == "/aws/accounts" || p == "/aws/accounts/{id}" {
+        return Some(Require(Aws, if get { View } else { Admin }));
+    }
+    if matches!(p, "/aws/status" | "/aws/regions") {
+        return Some(Require(Aws, View));
+    }
+    if matches!(p, "/aws/install" | "/aws/discover") {
+        return Some(Require(Aws, Admin));
+    }
+    None
+}
+
 /// The credential class of `(method, matched_path)`, or `None` for an
 /// ordinary route. `matched_path` is the same `/api/v1`-prefixed template
 /// [`policy_for`] takes. Reads stay untagged unless they return secrets.
@@ -1461,12 +1437,14 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
         return Some(S);
     }
     // Minting: a PAT (a laundered human credential), MCP tokens, share links
-    // (a share token passes `agent_attach_rule` on /ws/term — S1-02).
+    // (a share token passes `agent_attach_rule` on /ws/term — S1-02; an IDE
+    // collab room share token grants guest read/write on the workspace root).
     if write
         && (p == "/auth/tokens"
             || p == "/mcp/tokens"
             || p.starts_with("/mcp/tokens/")
-            || p == "/sessions/{id}/share")
+            || p == "/sessions/{id}/share"
+            || p == "/ide/collab/rooms")
     {
         return Some(S);
     }
@@ -1482,6 +1460,8 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
             || (p.starts_with("/admin/") && p != "/admin/impersonate/stop")
             || p == "/plugin-admin"
             || p.starts_with("/plugin-admin/")
+            || p == "/ide/plugins"
+            || p.starts_with("/ide/plugins/")
             || matches!(
                 p,
                 "/settings"
@@ -1509,6 +1489,8 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
                     | "/k8s/install"
                     | "/browser/live/install"
                     | "/browser/live/settings"
+                    | "/ide/toolchains/install"
+                    | "/ide/toolchains/uninstall"
                     // MCP governance + the servers it spawns (`command`/`args`).
                     | "/mcp/otto-server"
                     | "/mcp/auto-approve"
@@ -3271,5 +3253,38 @@ mod tests {
             pol(Method::POST, "/api/v1/workspaces/{wid}/browser/login"),
             Require(Browser, Edit)
         );
+    }
+
+    #[test]
+    fn ide_routes_require_agents_edit_except_guest_collab_and_person_only_admin() {
+        assert_eq!(
+            pol(Method::POST, "/api/v1/ide/fs/tree"),
+            Require(Agents, Edit)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/ide/toolchains"),
+            Require(Agents, Edit)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/ide/collab/guest/{room_id}"),
+            Exempt
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/ide/collab/guest/{room_id}/edit"),
+            Exempt
+        );
+        assert_eq!(
+            route_class(&Method::POST, "/api/v1/ide/collab/rooms"),
+            Some(RouteClass::Secret)
+        );
+        assert_eq!(
+            route_class(&Method::POST, "/api/v1/ide/toolchains/install"),
+            Some(RouteClass::Admin)
+        );
+        assert_eq!(
+            route_class(&Method::POST, "/api/v1/ide/plugins/install"),
+            Some(RouteClass::Admin)
+        );
+        assert_eq!(route_class(&Method::GET, "/api/v1/ide/plugins"), None);
     }
 }

@@ -25,6 +25,13 @@
     designHall: 'M8 1.8 14.2 8 8 14.2 1.8 8 8 1.8Zm0 3.4L10.8 8 8 10.8 5.2 8 8 5.2Z',
     // Workbench (module): a page with a code bracket pair — scratch scripts
     workbench: 'M3.5 2.5h6l3 3v8h-9v-11Zm6 0v3h3M6.5 8 5 9.5 6.5 11M9.5 8 11 9.5 9.5 11',
+    // IDE (module): window with project rail + </> code glyph
+    ide: 'M2 3.5a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-9Zm3.2-1v11M8.2 6.5 6.7 8l1.5 1.5M11.3 6.5 12.8 8l-1.5 1.5',
+    // Debugger controls: bug, step over, step into, step out
+    bug: 'M6 5.5a2 2 0 1 1 4 0M5 6h6v3.5a3 3 0 0 1-6 0V6Zm-2.5 1.5H5m6 0h2.5M2 9.5h3m6 0h3M3 12l2.2-1m7.8 1-2.2-1M5.2 3.2l1.1 1.1m4.5-1.1L9.7 4.3',
+    stepOver: 'M3 9.5a5 5 0 0 1 10 0M10.5 7.5 13 9.8l.5-3.2M8 12a1 1 0 1 1 0 .01',
+    stepInto: 'M8 2.5v7M5.2 6.8 8 9.6l2.8-2.8M4.5 13h7',
+    stepOut: 'M8 10.5v-8M5.2 5.2 8 2.4l2.8 2.8M4.5 13h7',
     // Design Hall studios + learning (in-page glyphs, not sidebar modules)
     frame: 'M5.5 2.5v11M10.5 2.5v11M2.5 5.5h11M2.5 10.5h11',
     layout: 'M3 2.5h10a.5.5 0 0 1 .5.5v10a.5.5 0 0 1-.5.5H3a.5.5 0 0 1-.5-.5V3a.5.5 0 0 1 .5-.5Zm-.5 3.5h11M7 6v7.5',

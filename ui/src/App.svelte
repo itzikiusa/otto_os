@@ -16,6 +16,7 @@
   import './lib/components/StatusDot.svelte';
   import './lib/components/Badge.svelte';
   import './lib/components/LoadState.svelte';
+  import { getToken } from './lib/api/client';
   import { auth } from './lib/stores/auth.svelte';
   import { appLive } from './lib/live';
   import { router } from './lib/router.svelte';
@@ -44,6 +45,11 @@
   let hostRoomChunk: Promise<typeof import('./modules/rooms/RoomHost.svelte')> | null = null;
   let shareChunk: Promise<typeof import('./modules/share/SharePage.svelte')> | null = null;
   let pairChunk: Promise<typeof import('./modules/phone/PairPage.svelte')> | null = null;
+  let ideGuestChunk: Promise<[
+    typeof import('./modules/ide/IdePage.svelte'),
+    typeof import('./lib/components/ContextMenu.svelte'),
+    typeof import('./lib/components/ConfirmDialog.svelte'),
+  ]> | null = null;
   let barChunk: Promise<typeof import('./modules/desktop/BarHost.svelte')> | null = null;
   let trayChunk: Promise<typeof import('./modules/desktop/TrayPage.svelte')> | null = null;
   // The shell resolves together with the page its route shows (each page is
@@ -58,17 +64,39 @@
   const hostRoom = () => (hostRoomChunk ??= import('./modules/rooms/RoomHost.svelte'));
   const share = () => (shareChunk ??= import('./modules/share/SharePage.svelte'));
   const pair = () => (pairChunk ??= import('./modules/phone/PairPage.svelte'));
+  const ideGuest = () =>
+    (ideGuestChunk ??= Promise.all([
+      import('./modules/ide/IdePage.svelte'),
+      import('./lib/components/ContextMenu.svelte'),
+      import('./lib/components/ConfirmDialog.svelte'),
+    ]));
   const barHost = () => (barChunk ??= import('./modules/desktop/BarHost.svelte'));
   const trayPage = () => (trayChunk ??= import('./modules/desktop/TrayPage.svelte'));
+
+  // Capability-token IDE guest link (`#/ide?collab=<roomId>&token=<inviteToken>`):
+  // invited teammates have no owner account, so bypass login/onboarding and
+  // keep guest mode active even after IdePage strips the token query via replaceState.
+  function hasIdeCollabInviteHash(): boolean {
+    if (typeof window === 'undefined') return false;
+    const h = window.location.hash;
+    if (!h.startsWith('#/ide?')) return false;
+    const q = new URLSearchParams(h.slice('#/ide?'.length));
+    return Boolean(q.get('collab') && q.get('token'));
+  }
+  const initialIdeGuest = !getToken() && hasIdeCollabInviteHash();
+  let ideCollabGuest = $state(initialIdeGuest);
+
   // The main window fetches the shell chunk while /meta is still in flight.
-  if (!['bar', 'tray', 's', 'room', 'room-host', 'pair'].includes(router.module)) void shell().catch(() => {});
+  if (!['bar', 'tray', 's', 'room', 'room-host', 'pair'].includes(router.module) && !initialIdeGuest) {
+    void shell().catch(() => {});
+  }
 
   // Boot once per entry into an authenticated route, not per navigation:
   // reading `router.module` inside the effect re-ran boot() on every sidebar
   // switch, which reset the phase to 'loading' and remounted the whole shell.
   // The phone pairing page (`#/pair`) is pre-auth too: it signs the phone in
   // itself and reloads into the normal boot once approved.
-  const needsAuth = $derived(router.module !== 'room' && router.module !== 'pair');
+  const needsAuth = $derived(router.module !== 'room' && router.module !== 'pair' && !ideCollabGuest);
   $effect(() => {
     if (needsAuth) untrack(() => void auth.boot());
   });
@@ -129,7 +157,14 @@
   let daemonReport = $state<DaemonReport | null>(null);
   const daemonDetail = $derived(offlineDetail(daemonReport));
   onMount(() => {
-    if (!isTauri || ['bar', 'tray', 's', 'room'].includes(untrack(() => router.module))) return;
+    const syncIdeGuest = () => {
+      if (!getToken() && hasIdeCollabInviteHash()) ideCollabGuest = true;
+      else if (!router.module.startsWith('ide')) ideCollabGuest = false;
+    };
+    window.addEventListener('hashchange', syncIdeGuest);
+    if (!isTauri || ['bar', 'tray', 's', 'room'].includes(untrack(() => router.module)) || untrack(() => ideCollabGuest)) {
+      return () => window.removeEventListener('hashchange', syncIdeGuest);
+    }
     let disposed = false;
     let stop: () => void = () => {};
     void daemonSupervisor
@@ -145,6 +180,7 @@
       })
       .catch(() => {});
     return () => {
+      window.removeEventListener('hashchange', syncIdeGuest);
       disposed = true;
       stop();
     };
@@ -194,6 +230,8 @@
        route must bypass the login/onboarding gate entirely and render the
        single-session SharePage using the token captured from the URL fragment. -->
   {#await share() then m}<m.default sessionId={router.parts[1] ?? ''} />{:catch}{@render chunkError()}{/await}
+{:else if ideCollabGuest}
+  {#await ideGuest()}{@render chunkWait()}{:then [ideMod, menuMod, confirmMod]}<ideMod.default /><menuMod.default /><confirmMod.default />{:catch}{@render chunkError()}{/await}
 {:else if router.module === 'pair'}
   <!-- Phone pairing (pre-auth): the one-time code from the QR is the only
        credential until the person on the Mac approves this phone. -->

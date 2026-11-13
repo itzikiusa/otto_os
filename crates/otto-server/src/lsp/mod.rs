@@ -1,18 +1,16 @@
 //! LSP backend: server registry, capabilities detection, WebSocket↔stdio
-//! bridge, and language-server install helper.
+//! bridge (Local + Remote SSH), and language-server install helper.
+//!
+//! Pure framing, registry (with `<data_dir>/toolchains/**/bin` and runtime IDE
+//! plugin discovery), and the multiplexed server pool live in
+//! [`otto_ide::lsp_host`] and are re-exported here.
 //!
 //! Routes exposed:
-//!   GET  /api/v1/lsp/capabilities              → LspCapabilities (authed)
-//!   POST /api/v1/workspaces/{id}/lsp/install   → Session (Editor role)
-//!   GET  /ws/lsp?lang=&root=                   → WebSocket bridge (`otto-bearer` subprotocol auth)
-//!
-//! The bridge does NOT spawn a server per socket: sockets attach to the shared
-//! [`pool::LspPool`] (one process per `(lang, root)`, ref-counted, reaped
-//! [`pool::IDLE_TIMEOUT`] after its last socket leaves).
+//!   GET  /api/v1/lsp/capabilities                     → LspCapabilities (authed)
+//!   POST /api/v1/workspaces/{id}/lsp/install          → Session (Editor role)
+//!   GET  /ws/lsp?lang=&root=&connection_id=           → WebSocket bridge (`otto-bearer` subprotocol auth)
 
-pub mod framing;
-pub mod pool;
-pub mod servers;
+pub use otto_ide::lsp_host::{framing, pool, servers};
 
 use std::sync::Arc;
 
@@ -58,11 +56,12 @@ pub struct LspCapabilities {
 // ---------------------------------------------------------------------------
 
 /// `GET /api/v1/lsp/capabilities` — available to any authenticated user.
+/// Includes binaries under `<data_dir>/toolchains/**/bin` and active IDE plugins.
 async fn capabilities(
-    State(_ctx): State<ServerCtx>,
+    State(ctx): State<ServerCtx>,
     CurrentUser(_user): CurrentUser,
 ) -> ApiResult<Json<LspCapabilities>> {
-    let resolved = servers::detect_all();
+    let resolved = servers::detect_all_with_ide(&ctx.data_dir, &ctx.ide.plugins);
     let servers = resolved
         .into_iter()
         .map(|r| LspServerStatus {
@@ -89,9 +88,6 @@ pub struct InstallLspReq {
 }
 
 /// `POST /api/v1/workspaces/{id}/lsp/install` — Editor role required.
-///
-/// Spawns ONE shell agent session that runs all requested install commands
-/// sequentially, mirroring the `providers/update` handler pattern exactly.
 async fn install_servers(
     Path(ws_id): Path<Id>,
     State(ctx): State<ServerCtx>,
@@ -101,12 +97,9 @@ async fn install_servers(
     crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
 
     let req_langs = body.and_then(|b| b.0.langs);
-
-    // Collect (lang, install_command) pairs.
-    let resolved = servers::detect_all();
+    let resolved = servers::detect_all_with_ide(&ctx.data_dir, &ctx.ide.plugins);
     let pairs: Vec<String> = match req_langs {
         Some(ref langs) => {
-            // Caller specified which langs to install.
             let mut cmds = Vec::new();
             for lang in langs {
                 let entry = resolved.iter().find(|r| &r.lang == lang);
@@ -128,14 +121,11 @@ async fn install_servers(
             }
             cmds
         }
-        None => {
-            // Install all unavailable languages that have an install command.
-            resolved
-                .iter()
-                .filter(|r| !r.available)
-                .filter_map(|r| r.install_command.clone())
-                .collect()
-        }
+        None => resolved
+            .iter()
+            .filter(|r| !r.available)
+            .filter_map(|r| r.install_command.clone())
+            .collect(),
     };
 
     if pairs.is_empty() {
@@ -144,19 +134,14 @@ async fn install_servers(
         )));
     }
 
-    // Deduplicate: same install command can cover multiple langs (e.g.
-    // vscode-langservers-extracted covers css, html, json).
     let mut seen = std::collections::HashSet::new();
     let unique: Vec<String> = pairs
         .into_iter()
         .filter(|cmd| seen.insert(cmd.clone()))
         .collect();
-
-    // Build the compound shell command, mirroring providers/update exactly.
     let compound = unique.join("; echo; ");
 
     let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
-
     let session_req = CreateSessionReq {
         kind: SessionKind::Agent,
         provider: Some("shell".to_string()),
@@ -173,8 +158,6 @@ async fn install_servers(
         .await
         .map_err(ApiError)?;
 
-    // Write the compound command into the PTY ~800 ms after spawn, exactly as
-    // the providers/update handler does.
     let manager = Arc::clone(&ctx.manager);
     let session_id = session.id.clone();
     tokio::spawn(async move {
@@ -194,12 +177,11 @@ async fn install_servers(
 // WebSocket bridge
 // ---------------------------------------------------------------------------
 
-/// State carried into the WS upgrade handler (owns the token authenticator).
 #[derive(Clone)]
 struct LspWsState {
     auth: Arc<dyn TokenAuthenticator>,
     ctx: ServerCtx,
-    /// Shared servers, one per `(user, lang, root)`.
+    /// Shared servers, one per `(user, lang, root, ssh)`.
     pool: Arc<pool::LspPool>,
 }
 
@@ -207,6 +189,9 @@ struct LspWsState {
 struct LspWsQuery {
     lang: Option<String>,
     root: Option<String>,
+    /// Optional SSH connection ID when editing a Remote SSH workspace.
+    #[serde(default)]
+    connection_id: Option<String>,
 }
 
 fn ws_problem(status: StatusCode, code: &str, message: &str) -> Response {
@@ -217,17 +202,14 @@ fn ws_problem(status: StatusCode, code: &str, message: &str) -> Response {
     (status, Json(body)).into_response()
 }
 
-/// `GET /ws/lsp?lang=<lang>&root=<path>` (bearer in `Sec-WebSocket-Protocol`)
+/// `GET /ws/lsp?lang=<lang>&root=<path>[&connection_id=<ssh_conn_id>]`
+/// (bearer in `Sec-WebSocket-Protocol`)
 async fn lsp_ws(
     ws: WebSocketUpgrade,
     Query(q): Query<LspWsQuery>,
     State(st): State<LspWsState>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    // 1. Token auth before upgrade (mirrors term_ws). The bearer travels only
-    //    in the `otto-bearer` subprotocol — never the URL, which lands in
-    //    trace spans and tunnel/proxy access logs (S11-11); the legacy
-    //    `?token=` fallback is gone (S11-312).
     let ws = ws.protocols([crate::ws_events::BEARER_SUBPROTOCOL]);
     let token = match crate::ws_events::token_from_subprotocol(&headers) {
         Some(t) => t,
@@ -241,9 +223,6 @@ async fn lsp_ws(
             return ws_problem(StatusCode::UNAUTHORIZED, "unauthorized", "invalid token");
         }
     };
-    // Same credential rules as the Files routes (`/fs/read`, `/fs/browse`):
-    // share-link (scoped), MCP-restricted and agent-session tokens never reach
-    // host files (an unconfined language server reads the whole root).
     if crate::feature_guard::root_route_gate(
         crate::feature_guard::RootRoute::Lsp,
         &auth,
@@ -260,7 +239,6 @@ async fn lsp_ws(
     }
     let user = auth.effective_user.clone();
 
-    // 2. Validate lang parameter.
     let lang = match q.lang {
         Some(l) if !l.is_empty() => l,
         _ => {
@@ -272,7 +250,6 @@ async fn lsp_ws(
         }
     };
 
-    // 3. Validate and canonicalize root directory.
     let root = match q.root {
         Some(r) if !r.is_empty() => r,
         _ => {
@@ -283,106 +260,161 @@ async fn lsp_ws(
             );
         }
     };
-    let root_path = std::path::Path::new(&root);
-    if !root_path.exists() || !root_path.is_dir() {
+    if root.chars().any(char::is_control) {
         return ws_problem(
             StatusCode::BAD_REQUEST,
             "bad_request",
-            &format!("root does not exist or is not a directory: {root}"),
+            "root contains invalid control characters",
         );
     }
 
-    // One pooled server per (user, lang, canonical root): `/a/../a` and `/a`
-    // share; two users never do (r3-10-08).
-    let root = std::fs::canonicalize(root_path)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or(root);
-    // 4. The caller must be able to see a workspace — or a repo registered in
-    //    one — containing `root` (the server indexes, and answers queries
-    //    about, everything under it). Root users own the host, like the Files
-    //    routes. A non-root root may never sit in Otto's data dir or a
-    //    credential dir, whatever workspace contains it (the `/fs/*` deny).
-    //    The one data-dir exception (PC-1): an agent work area that is — or
-    //    is under — the cwd of a session the caller may open (owner or ws
-    //    Admin) whose cwd is itself one work dir inside an area, so a non-root owner's workflow / persona / goal-loop session
-    //    gets its editor's language server.
-    if !user.is_root {
-        let root_ref = std::path::Path::new(&root);
-        let visible = if crate::routes::session_files::lsp_root_in_own_session(
-            &st.ctx, &user, root_ref,
-        )
-        .await
-        {
-            Ok(true)
-        } else if let Some(why) = secret_root_denial(root_ref) {
-            return ws_problem(StatusCode::FORBIDDEN, "forbidden", &why);
-        } else {
-            root_visible_to(&st.ctx, &user, root_ref).await
-        };
-        match visible {
-            Ok(true) => {}
-            Ok(false) => {
-                return ws_problem(
-                    StatusCode::FORBIDDEN,
-                    "forbidden",
-                    "root is not inside a workspace you can access",
-                );
-            }
-            Err(e) => {
-                tracing::warn!("lsp: workspace lookup failed: {e}");
-                return ws_problem(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal",
-                    "workspace lookup failed",
-                );
-            }
-        }
-    }
-    // 5. Resolve the language server (after the access check, so a refused
-    //    root answers 403 whether or not the server is installed).
-    let resolved = match servers::resolve_lang(&lang) {
-        Some(r) => r,
-        None => {
+    let ssh_conn_id = q
+        .connection_id
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty());
+
+    let (key, launch) = if let Some(conn_id) = ssh_conn_id {
+        if !root.starts_with('/') {
             return ws_problem(
                 StatusCode::BAD_REQUEST,
                 "bad_request",
-                &format!("unknown language: '{lang}'"),
+                "remote SSH root must be an absolute path",
             );
         }
-    };
-    if !resolved.available {
-        return ws_problem(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "server_unavailable",
-            &format!(
-                "no language server found for '{lang}' ('{}')",
-                resolved.command
-            ),
-        );
-    }
+        let ssh_spec =
+            match otto_ide::IdeCtx::resolve_ssh_connection(&st.ctx, &user, &conn_id).await {
+                Ok(spec) => spec,
+                Err(Error::NotFound(m)) => {
+                    return ws_problem(StatusCode::NOT_FOUND, "not_found", &m);
+                }
+                Err(Error::Forbidden(m)) => {
+                    return ws_problem(StatusCode::FORBIDDEN, "forbidden", &m);
+                }
+                Err(Error::Invalid(m)) => {
+                    return ws_problem(StatusCode::BAD_REQUEST, "bad_request", &m);
+                }
+                Err(e) => {
+                    tracing::warn!(connection_id = %conn_id, "lsp ssh lookup failed: {e}");
+                    return ws_problem(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal",
+                        "SSH connection lookup failed",
+                    );
+                }
+            };
+        let remote = match servers::resolve_remote_lang(&lang, &st.ctx.ide.plugins) {
+            Some(r) => r,
+            None => {
+                return ws_problem(
+                    StatusCode::BAD_REQUEST,
+                    "bad_request",
+                    &format!("unknown language: '{lang}'"),
+                );
+            }
+        };
+        let norm_root = {
+            let trimmed = root.trim_end_matches('/');
+            if trimmed.is_empty() {
+                "/".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        };
+        let key = pool::PoolKey {
+            owner: user.id.to_string(),
+            lang,
+            root: norm_root,
+            ssh: Some(ssh_spec),
+        };
+        let launch = pool::SpawnLaunch {
+            cmd: remote.primary_cmd,
+            args: remote.primary_args,
+            fallback_cmd: remote.fallback_cmd,
+            fallback_args: remote.fallback_args,
+        };
+        (key, launch)
+    } else {
+        let root_path = std::path::Path::new(&root);
+        if !root_path.exists() || !root_path.is_dir() {
+            return ws_problem(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                &format!("root does not exist or is not a directory: {root}"),
+            );
+        }
+        let root = std::fs::canonicalize(root_path)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or(root);
 
-    let key = pool::PoolKey {
-        owner: user.id.to_string(),
-        lang,
-        root,
+        if !user.is_root {
+            let root_ref = std::path::Path::new(&root);
+            let visible =
+                if crate::routes::session_files::lsp_root_in_own_session(&st.ctx, &user, root_ref)
+                    .await
+                {
+                    Ok(true)
+                } else if let Some(why) = secret_root_denial(root_ref) {
+                    return ws_problem(StatusCode::FORBIDDEN, "forbidden", &why);
+                } else {
+                    root_visible_to(&st.ctx, &user, root_ref).await
+                };
+            match visible {
+                Ok(true) => {}
+                Ok(false) => {
+                    return ws_problem(
+                        StatusCode::FORBIDDEN,
+                        "forbidden",
+                        "root is not inside a workspace you can access",
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("lsp: workspace lookup failed: {e}");
+                    return ws_problem(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal",
+                        "workspace lookup failed",
+                    );
+                }
+            }
+        }
+
+        let resolved =
+            match servers::resolve_lang_with_ide(&lang, &st.ctx.data_dir, &st.ctx.ide.plugins) {
+                Some(r) => r,
+                None => {
+                    return ws_problem(
+                        StatusCode::BAD_REQUEST,
+                        "bad_request",
+                        &format!("unknown language: '{lang}'"),
+                    );
+                }
+            };
+        if !resolved.available {
+            return ws_problem(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_unavailable",
+                &format!(
+                    "no language server found for '{lang}' ('{}')",
+                    resolved.command
+                ),
+            );
+        }
+        let key = pool::PoolKey {
+            owner: user.id.to_string(),
+            lang,
+            root,
+            ssh: None,
+        };
+        let launch = pool::SpawnLaunch::primary(resolved.command, resolved.args);
+        (key, launch)
     };
-    let cmd = resolved.command.clone();
-    let args = resolved.args.clone();
+
     let pool = Arc::clone(&st.pool);
-
     ws.on_upgrade(move |socket| async move {
-        serve_lsp(socket, pool, key, cmd, args).await;
+        serve_lsp(socket, pool, key, launch).await;
     })
 }
 
-/// Is canonical `root` equal to — or inside — the canonical root of a
-/// workspace `user` is a member of, or of a repo registered in one? A
-/// registered repo may live outside its workspace root (the agent-cwd check,
-/// `SessionManager::check_agent_cwd`, accepts it for the same reason: a person
-/// chose it for this workspace, and `/fs/read` already serves its files to
-/// this user). The scratch workspace (every user is an implicit Editor; its
-/// root is the daemon user's HOME) matches only EXACTLY, so it cannot turn
-/// into "anything under ~".
 async fn root_visible_to(
     ctx: &ServerCtx,
     user: &otto_core::domain::User,
@@ -413,9 +445,6 @@ async fn root_visible_to(
     .map_err(|e| otto_core::Error::Internal(format!("lsp root check: {e}")))
 }
 
-/// The non-root secret deny of `/fs/*` (`non_root_canonical_denied`), applied
-/// to a canonical LSP root: Otto's data dir, the credential dirs (`~/.ssh`, …)
-/// and key-like file names. `None` = allowed.
 fn secret_root_denial(canonical: &std::path::Path) -> Option<String> {
     use otto_core::secret_paths as sp;
     (sp::in_protected_dir(canonical) || sp::is_denied_file(canonical)).then(|| {
@@ -438,8 +467,6 @@ fn canonical_eq(root: &std::path::Path, other: &str) -> bool {
     canonical_of(other).is_some_and(|c| root == c)
 }
 
-/// Containment check: canonicalizes each workspace root (a symlinked
-/// workspace path still matches). Empty roots never match.
 fn root_under_any(root: &std::path::Path, workspace_roots: &[String]) -> bool {
     workspace_roots
         .iter()
@@ -452,15 +479,14 @@ async fn serve_lsp(
     mut socket: WebSocket,
     pool: Arc<pool::LspPool>,
     key: pool::PoolKey,
-    cmd: String,
-    args: Vec<String>,
+    launch: pool::SpawnLaunch,
 ) {
-    let mut attached = match pool.attach(key.clone(), &cmd, &args) {
+    let mut attached = match pool.attach_launch(key.clone(), &launch) {
         Ok(a) => a,
         Err(e) => {
             tracing::error!(
                 lang = key.lang.as_str(),
-                cmd,
+                cmd = launch.cmd.as_str(),
                 "failed to spawn language server: {e}"
             );
             let err = serde_json::json!({
@@ -475,14 +501,12 @@ async fn serve_lsp(
 
     loop {
         tokio::select! {
-            // Pooled server → this socket (already routed + id-restored).
             out = attached.rx.recv() => {
                 let Some(text) = out else { break };
                 if socket.send(Message::Text(text.into())).await.is_err() {
                     break;
                 }
             }
-            // This socket → pooled server.
             ws_msg = socket.recv() => {
                 let Some(Ok(ws_msg)) = ws_msg else {
                     break;
@@ -494,14 +518,11 @@ async fn serve_lsp(
                         }
                     }
                     Message::Close(_) => break,
-                    // Ping/pong/binary: silently ignore.
                     _ => {}
                 }
             }
         }
     }
-    // Dropping `attached` detaches: its docs close, and the server is reaped
-    // once no socket is left for IDLE_TIMEOUT.
 }
 
 // ---------------------------------------------------------------------------
@@ -517,12 +538,13 @@ pub fn api_router() -> Router<ServerCtx> {
 
 /// Root-level WS router (self-authenticates via the `otto-bearer` subprotocol).
 pub fn ws_router(authenticator: Arc<dyn TokenAuthenticator>, ctx: ServerCtx) -> Router {
+    let spawner = pool::process_spawner_with_data_dir(ctx.data_dir.clone());
     Router::new()
         .route("/ws/lsp", get(lsp_ws))
         .with_state(LspWsState {
             auth: authenticator,
             ctx,
-            pool: pool::LspPool::new(pool::process_spawner(), pool::IDLE_TIMEOUT),
+            pool: pool::LspPool::new(spawner, pool::IDLE_TIMEOUT),
         })
 }
 
@@ -546,13 +568,9 @@ mod root_tests {
             !root_under_any(&canon(d.path()), &roots),
             "a parent is not inside"
         );
-        // `repo-evil` shares a string prefix with `repo` but is not inside it.
         let evil = d.path().join("repo-evil");
         std::fs::create_dir_all(&evil).unwrap();
         assert!(!root_under_any(&canon(&evil), &roots));
-        // A repo registered in a member workspace but OUTSIDE its root is
-        // listed alongside the roots, so it (and its subtree) opens; a path in
-        // neither stays refused.
         let repo = d.path().join("outside-repo");
         std::fs::create_dir_all(repo.join("src")).unwrap();
         let with_repo = vec![
@@ -563,7 +581,6 @@ mod root_tests {
         assert!(root_under_any(&canon(&repo), &with_repo));
         assert!(root_under_any(&canon(&repo.join("src")), &with_repo));
         assert!(!root_under_any(&canon(&other), &with_repo));
-        // Scratch (HOME) matches exactly, never its subtree.
         let home = d.path().to_string_lossy().into_owned();
         assert!(canonical_eq(&canon(d.path()), &home));
         assert!(!canonical_eq(&canon(&other), &home));

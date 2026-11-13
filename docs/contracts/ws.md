@@ -431,6 +431,39 @@ a client that never acks gets one frame and then nothing.
   `take_over` first). The first input while `controller == "none"` makes this
   viewer's user the driver.
 
+## 1c. LSP WebSocket bridge — `WS /ws/lsp?lang=&root=&connection_id=`
+
+Auth: `Sec-WebSocket-Protocol: otto-bearer, <token>` (echoed as `otto-bearer`;
+`?token=` → 401). Scoped share tokens, MCP-only tokens and agent-session
+credentials are refused with 403 (`RootRoute::Lsp`).
+
+- **Local target (`connection_id` omitted or empty):** `root` must be an
+  existing directory inside a workspace or repository the caller can access (or
+  an authorized agent worktree under `AGENT_DATA_SUBDIRS`), never Otto's data
+  dir or a secret directory (`~/.ssh`, key files). Binary discovery checks
+  `<data_dir>/toolchains/**/bin` first (prepend to `PATH`, plus managed JDK
+  `JAVA_HOME`), then standard developer bin directories (`~/.cargo/bin`,
+  `~/go/bin`, `~/.local/bin`, Homebrew, …), and includes both the 10 built-in
+  language servers and any enabled runtime IDE plugin language servers
+  (`IdePluginRegistry`). Missing binary → HTTP 503 `server_unavailable`.
+- **Remote SSH target (`connection_id` set):** Resolves the saved SSH
+  `Connection` (`ConnectionKind::Ssh`) through the caller's workspace/global
+  `Connections` grants and resource access (`discover` + `shell`, plus
+  `owner_private_enabled` and SSH option-injection checks). `root` must be a
+  non-empty absolute POSIX path on the remote host (`400` otherwise). The
+  language server is spawned over `ssh -T` (`BatchMode=yes`, optional key /
+  port / ProxyJump) inside `cd <root>` with remote toolchain `PATH` discovery
+  (`~/.otto/toolchains/**/bin`, `~/.cargo/bin`, `~/go/bin`,
+  `~/.local/bin`, …).
+- **Multiplexing & back-pressure:** Sockets share one language-server process
+  per `(user_id, lang, root, ssh_target)` — never across users — reaped 60 s
+  after the last socket closes. JSON-RPC text frames carry bare LSP messages
+  (the daemon adds `Content-Length` stdio framing on the child pipe, caps
+  inbound headers at 8 KiB / body at 16 MiB, bounds stdin backlog at 8 MiB,
+  rewrites client request IDs per socket, caches the first `initialize` result,
+  ref-counts `textDocument/didOpen` + `didClose` per URI, and routes
+  `textDocument/publishDiagnostics` to sockets holding that URI).
+
 ## 2. Event stream — `WS /ws/events`
 
 Server → client only. Each message is one JSON-serialized `otto_core::event::Event`

@@ -3357,7 +3357,7 @@ artifacts. The final manifest is published by atomic rename as the last action.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /lsp/capabilities | member | — | supported languages/servers |
+| GET /lsp/capabilities | member | — | supported languages/servers (built-in + `<data_dir>/toolchains/**/bin` + active runtime IDE plugin LSP servers) |
 | POST /workspaces/{id}/lsp/install | ws editor | optional `InstallLspReq {langs?: string[]}` (absent → every unavailable server that has an install command) | `Session` — one shell session running the install commands in sequence |
 
 ## Provider registry update
@@ -3437,7 +3437,7 @@ These self-authenticate (WS: the `otto-bearer` subprotocol; `/browser/proxy`: a 
 |---|---|---|
 | GET /ws/term/{session_id} | `otto-bearer` subprotocol only (`?token=` → 401); ws viewer attach, editor input | terminal stream (see ws.md) |
 | GET /ws/events | `Sec-WebSocket-Protocol: otto-bearer, <token>` only — keeps the token out of the URL (`?token=` → 401); member | daemon event stream (see ws.md) |
-| GET /ws/lsp?lang=&root= | `otto-bearer` subprotocol only (echoed; `?token=` → 401); root, or a member (**any role**, Viewer included) of a workspace whose root — or a repo registered in it — contains `root`; share / MCP-only / agent-session tokens → 403 | LSP WebSocket bridge. Share-link (scoped) and MCP-restricted tokens → 403 (same as `/fs/*`); an agent-session credential → 403 "an agent session credential cannot open a language server". A non-root caller's canonical `root` must be inside a member workspace's root, inside a repo registered in a member workspace (even one outside the workspace root — the same rule as an agent's cwd), or exactly the scratch workspace root → else 403 "root is not inside a workspace you can access"; it may never be in Otto's data dir or a credential dir (`~/.ssh`, …) or a key-like file (the `/fs/*` non-root deny → 403) — except (PC-1) a `root` inside an agent work area of the data dir (`AGENT_DATA_SUBDIRS`) that equals or lies under the canonical cwd of a session the caller may open (owner or ws admin) whose cwd is itself strictly inside a work area, e.g. their workflow worktree or persona folder. The access check runs before the language lookup, so a refused root is 403 whatever `lang` is. `400` for a missing/unknown `lang` or a `root` that is missing or not a directory; `503` `server_unavailable` when no language-server binary is found. Sockets share ONE server process per `(user, lang, canonical root)` — never across users (ref-counted; reaped 60 s after the last socket leaves): request ids are rewritten per socket, `initialize` is answered from the first result, `didOpen`/`didClose` are ref-counted per URI, `publishDiagnostics` goes to sockets holding the URI. Language-server stdout frames are limited to 8 KiB of headers and 16 MiB of body; oversized or malformed framing closes the shared server transport. The server's stdin backlog is bounded (8 MiB); past it client messages are back-pressured (the socket stops being read) instead of queued. |
+| GET /ws/lsp?lang=&root=&connection_id= | `otto-bearer` subprotocol only (echoed; `?token=` → 401); local: root, or a member (**any role**, Viewer included) of a workspace whose root — or a repo registered in it — contains `root`; remote (`?connection_id=`): authorized SSH connection (`discover` + `shell`); share / MCP-only / agent-session tokens → 403 | LSP WebSocket bridge (`ws.md` §1c). Discovers binaries in `<data_dir>/toolchains/**/bin`, developer PATH dirs, and enabled runtime IDE plugin LSP servers (`IdePluginRegistry`). When `connection_id` is omitted, a non-root caller's canonical `root` must be inside a member workspace's root, inside a repo registered in a member workspace, or the scratch workspace root (or an authorized agent work area under `AGENT_DATA_SUBDIRS`) and never inside Otto's data dir or a credential dir (`~/.ssh`, key files); `400` for missing/unknown `lang` or missing/non-directory `root`, `503` `server_unavailable` when no local binary is found. When `connection_id` names an authorized SSH connection, `root` must be a non-empty absolute remote path (`400` otherwise) and the server spawns over `ssh -T` in `root`. Sockets share ONE server process per `(user, lang, root, ssh_target)` — never across users (ref-counted; reaped 60 s after the last socket leaves): request ids are rewritten per socket, `initialize` is answered from the first result, `didOpen`/`didClose` are ref-counted per URI, `publishDiagnostics` goes to sockets holding the URI; stdout frames are capped at 8 KiB headers / 16 MiB body and stdin backlog at 8 MiB. |
 | GET /ws/api-client/stream?workspace_id= | `otto-bearer` subprotocol only (echoed; `?token=` → 401); ws editor + API Client Edit (else 403 "API Client edit access is required in this workspace") | API-client streaming-response bridge; `?workspace_id=` is required (400 without). Same route as the API-client row above |
 | GET /browser/proxy?url=&ticket= | single-use `?ticket=` (from `POST /api/v1/browser/proxy-ticket`, bound to `url`, 60 s TTL; `?token=` is NOT accepted) | in-app browser "Take over" HTTP proxy. Every response (HTML, pass-through bytes, errors) carries `Content-Security-Policy: sandbox allow-scripts` (opaque origin — never same-origin with the daemon), `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`. HTML gets an HTML-escaped `<base href>` + the element-picker script (posts `otto-element` to `parent`) |
 
@@ -6746,3 +6746,56 @@ Goal Loop change events. Agent prose alone cannot mark a task complete.
 
 Per-executor Retry returns 409 for graph loops: use Resume so prerequisite
 evidence is reverified before another task attempt. Legacy executor Retry is unchanged.
+
+## IDE (`crates/otto-ide`)
+
+Full multi-language IDE over Local (`kind: "local"`) and Remote SSH (`kind: "ssh"`, `connection_id`) targets. Protected routes require `Agents: Edit` (`is_host_files_route` additionally blocks agent-session credentials from `/api/v1/ide/fs/*`; toolchain installation and plugin mutations carry `RouteClass::Admin`, and collab room creation carries `RouteClass::Secret`). Guest collaboration routes (`/api/v1/ide/collab/guest/*`) are mounted in `public_routes` and authenticate via the room's capability token (`X-Ide-Collab-Token`, `Authorization: Bearer <token>`, `?token=`, or JSON body `token` / `peer_secret`). Canonical DTOs live in `crates/otto-ide/src/types.rs` and `ui/src/lib/api/types.ts`.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /ide/fs/tree?kind=&root=&connection_id=&path=&show_hidden= | Agents: Edit | query `IdeFsTreeQuery` | `IdeFsTreeResp` (directory entries, git status, target OS/arch) |
+| GET /ide/fs/file?kind=&root=&connection_id=&path= | Agents: Edit | query `IdeFileQuery` | `IdeFileReadResp` (`content`, `sha256`, `language`, `line_count`) |
+| PUT /ide/fs/file | Agents: Edit | `IdeFileWriteReq` (`expected_sha256?` → 409 on mismatch) | `IdeFileWriteResp` |
+| POST /ide/fs/mutate | Agents: Edit | `IdeFsMutateReq` (`mkdir` \| `create_file` \| `rename` \| `delete` \| `duplicate`) | `IdeFsMutateResp` |
+| POST /ide/search | Agents: Edit | `IdeSearchReq` (`files` \| `text` \| `symbols` \| `all`) | `IdeSearchResp` |
+| POST /ide/replace | Agents: Edit | `IdeReplaceReq` (`dry_run?` preview or atomic apply) | `IdeReplaceResp` |
+| POST /ide/gutter | Agents: Edit | `IdeGutterReq` | `IdeGutterResp` (runnable tests, benchmarks, `main` entry points + plugin detectors) |
+| POST /ide/lsp/symbols | Agents: Edit | `IdeSymbolsReq` | `IdeSymbolsResp` (hierarchical file structure outline) |
+| POST /ide/lsp/references | Agents: Edit | `IdeReferencesReq` | `IdeReferencesResp` (workspace usages) |
+| POST /ide/lsp/rename | Agents: Edit | `IdeRenameReq` (`apply: false` preview \| `true` write) | `IdeRenameResp` |
+| POST /ide/lsp/format | Agents: Edit | `IdeFormatReq` | `IdeFormatResp` |
+| POST /ide/lsp/code-actions | Agents: Edit | `IdeCodeActionsReq` | `IdeCodeActionsResp` |
+| GET /ide/toolchains?kind=&root=&connection_id= | Agents: Edit | query `IdeTargetQuery` | `IdeToolchainsResp` (OS/arch SDKs, LSP/DAP binaries, downloadable catalog, active jobs) |
+| POST /ide/toolchains/install | human + Agents: Edit | `IdeInstallToolchainReq` | `IdeInstallJobResp` |
+| GET /ide/toolchains/jobs/{job_id} | Agents: Edit | — | `IdeInstallJobResp` |
+| GET /ide/environments?kind=&root=&connection_id= | Agents: Edit | query `IdeTargetQuery` | `IdeEnvironmentsResp` (project SDK overrides, Python venvs, `.env` files, run configs) |
+| PUT /ide/environments | Agents: Edit | `IdeUpdateEnvironmentReq` (secrets stored in Keychain) | `IdeEnvironmentResp` |
+| POST /ide/environments/python-venv | Agents: Edit | `IdeCreatePythonVenvReq` | `IdeCreatePythonVenvResp` |
+| POST /ide/run-configs | Agents: Edit | `IdeUpsertRunConfigReq` | `IdeRunConfigResp` |
+| DELETE /ide/run-configs/{id} | Agents: Edit | — | `IdeOkResp` |
+| POST /ide/runs | Agents: Edit | `IdeStartRunReq` | `IdeRunResp` |
+| GET /ide/runs/{run_id} | Agents: Edit | — | `IdeRunResp` |
+| POST /ide/runs/{run_id}/stop | Agents: Edit | — | `IdeRunResp` |
+| GET /ide/debug/sessions | Agents: Edit | — | `IdeDebugSessionsResp` |
+| POST /ide/debug/sessions | Agents: Edit | `IdeStartDebugReq` | `IdeDebugSessionResp` |
+| GET /ide/debug/sessions/{id} | Agents: Edit | — | `IdeDebugSessionResp` |
+| GET /ide/debug/sessions/{id}/events | Agents: Edit | — | `text/event-stream` (`IdeDebugSessionSnapshot` SSE frames) |
+| PUT /ide/debug/sessions/{id}/breakpoints | Agents: Edit | `IdeSetBreakpointsReq` | `IdeDebugSessionResp` |
+| POST /ide/debug/sessions/{id}/command | Agents: Edit | `IdeDebugCommandReq` (`continue`, `pause`, `step_over`, `step_into`, `step_out`, `run_to_cursor`, `select_frame`, `restart`, `stop`) | `IdeDebugSessionResp` |
+| POST /ide/debug/sessions/{id}/variables | Agents: Edit | `IdeDebugVariablesReq` | `IdeDebugVariablesResp` |
+| POST /ide/debug/sessions/{id}/evaluate | Agents: Edit | `IdeDebugEvaluateReq` | `IdeDebugEvaluateResp` |
+| GET /ide/collab/rooms | Agents: Edit | — | `IdeCollabRoomsResp` |
+| POST /ide/collab/rooms | human + Agents: Edit | `IdeCreateCollabRoomReq` | `IdeCreateCollabRoomResp` (`room`, `invite_token`, `share_hash`) |
+| POST /ide/collab/rooms/{room_id}/role | Agents: Edit | `IdeCollabRoleReq` (`viewer` \| `editor`) | `IdeCollabRoomResp` |
+| DELETE /ide/collab/rooms/{room_id} | Agents: Edit | — | `IdeOkResp` |
+| POST /ide/collab/guest/{room_id}/join | collab invite token | `IdeCollabJoinReq` | `IdeCollabJoinResp` (`peer_id`, `peer_secret`, `color`, `room`) |
+| GET /ide/collab/guest/{room_id}/state?token= | collab invite token | query `token` (or `X-Ide-Collab-Token`) | `IdeCollabStateResp` |
+| GET /ide/collab/guest/{room_id}/events?token=&peer_id= | collab invite token | query `token`, `peer_id?` | `text/event-stream` (`IdeCollabEvent` SSE frames) |
+| POST /ide/collab/guest/{room_id}/cursor | collab peer secret | `IdeCollabCursorReq` | `IdeOkResp` |
+| POST /ide/collab/guest/{room_id}/edit | collab editor peer secret | `IdeCollabEditReq` (`viewer` → 403) | `IdeCollabEditResp` |
+| POST /ide/collab/guest/{room_id}/debug-action | collab editor peer secret | `IdeCollabDebugActionReq` (`viewer` → 403) | `IdeDebugSessionResp` |
+| GET /ide/plugins | Agents: Edit | — | `IdePluginsResp` (installed + curated catalog) |
+| POST /ide/plugins/install | human + Agents: Edit | `IdeInstallPluginReq` | `IdePluginResp` |
+| POST /ide/plugins/{slug}/toggle | human + Agents: Edit | `IdeTogglePluginReq` | `IdePluginResp` |
+| DELETE /ide/plugins/{slug} | human + Agents: Edit | — | `IdeOkResp` |
+

@@ -58,6 +58,7 @@ otto-agent-protocol.workspace = true
 otto-aws.workspace = true
 otto-k8s.workspace = true
 otto-ssh.workspace = true
+otto-ide.workspace = true
 otto-dbviewer.workspace = true
 otto-brokers.workspace = true
 otto-mcp.workspace = true

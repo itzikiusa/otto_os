@@ -47,6 +47,7 @@ members = [
     "crates/otto-review",
     "crates/otto-rooms",
     "crates/otto-phone",
+    "crates/otto-ide",
 ]
 # Custom plugins are out-of-process sidecars installed at RUNTIME under
 # ~/otto-plugins (not workspace members, not compiled into the app). See
@@ -103,6 +104,7 @@ otto-browser = { path = "crates/otto-browser" }
 otto-transcript = { path = "crates/otto-transcript" }
 otto-workflows = { path = "crates/otto-workflows" }
 otto-rooms = { path = "crates/otto-rooms" }
+otto-ide = { path = "crates/otto-ide" }
 
 # Tree-sitter repo map (otto-context). A coherent grammar set pinned to one
 # tree-sitter ABI; `ignore` walks the repo honoring .gitignore.
