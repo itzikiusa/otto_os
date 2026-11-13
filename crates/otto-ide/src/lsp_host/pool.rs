@@ -1512,18 +1512,23 @@ mod tests {
         let _ = recv(&mut a).await;
         let _ = recv(&mut b).await;
         a.send(close("file:///r/x.ts")).await;
+        tokio::task::yield_now().await;
         drop(b);
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let log = fake.doc_log.lock().unwrap().clone();
-        assert_eq!(
-            log,
-            vec![
-                "textDocument/didOpen file:///r/x.ts",
-                "textDocument/didClose file:///r/x.ts",
-                "textDocument/didOpen file:///r/x.ts",
-                "textDocument/didClose file:///r/x.ts",
-            ]
-        );
+        let expected = vec![
+            "textDocument/didOpen file:///r/x.ts".to_string(),
+            "textDocument/didClose file:///r/x.ts".to_string(),
+            "textDocument/didOpen file:///r/x.ts".to_string(),
+            "textDocument/didClose file:///r/x.ts".to_string(),
+        ];
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let log = fake.doc_log.lock().unwrap().clone();
+            if log.len() >= expected.len() || tokio::time::Instant::now() >= deadline {
+                assert_eq!(log, expected);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     #[tokio::test]

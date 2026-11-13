@@ -126,6 +126,7 @@ impl RunStateInner {
         self.parser.compact_on_finish();
     }
 
+    #[cfg(test)]
     pub(super) fn output_bytes(&self) -> usize {
         self.output_bytes
     }

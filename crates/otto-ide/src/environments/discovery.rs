@@ -98,6 +98,7 @@ fn scan_project_folder(root: &Path, root_badge: Option<&str>, out: &mut Vec<IdeR
     discover_shell(root, root_badge, &cwd_override, out);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn make_auto_config(
     root_badge: Option<&str>,
     runner: IdeRunnerKind,
