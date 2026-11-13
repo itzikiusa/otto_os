@@ -741,31 +741,41 @@ fn extract_go_interface_methods(content: &str, iface_name: &str) -> Vec<String> 
 // Helpers: Qualifier extraction, JSON keys, CSV columns, JS/Python/Rust/Shell imports
 // ---------------------------------------------------------------------------
 
-fn extract_symbol_and_qualifier(
+pub(super) fn extract_symbol_and_qualifier(
     explicit: Option<&str>,
     lang: &str,
     content: &str,
     line: u32,
     column: u32,
 ) -> Option<(String, Option<String>)> {
-    if let Some(s) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
+    let explicit_clean = explicit.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(s) = explicit_clean {
         if let Some((q, sym)) = s.rsplit_once("::").or_else(|| s.rsplit_once('.')) {
             return Some((sym.to_string(), Some(q.to_string())));
         }
-        return Some((s.to_string(), None));
     }
-    let sym = if lang == "shell" {
-        extract_shell_ident_at(content, line, column)
-    } else {
-        extract_identifier_at(content, line, column)
-    }?;
-    let line_str = content.lines().nth(line.saturating_sub(1) as usize)?;
+    let sym = match explicit_clean {
+        Some(s) => s.to_string(),
+        None => {
+            if lang == "shell" {
+                extract_shell_ident_at(content, line, column)?
+            } else {
+                extract_identifier_at(content, line, column)?
+            }
+        }
+    };
+    let Some(line_str) = content.lines().nth(line.saturating_sub(1) as usize) else {
+        return Some((sym, None));
+    };
     let chars: Vec<char> = line_str.chars().collect();
+    if chars.is_empty() {
+        return Some((sym, None));
+    }
     let mut pos = (column.saturating_sub(1) as usize).min(chars.len().saturating_sub(1));
     while pos > 0 && (is_ident_char(chars[pos - 1]) || (lang == "shell" && chars[pos - 1] == '-')) {
         pos -= 1;
     }
-    // Inspect `.` or `::` immediately preceding `sym`.
+    // Inspect `.` or `::` immediately preceding `sym` at `(line, column)`.
     let qual_end = if pos >= 1 && chars[pos - 1] == '.' {
         Some(pos - 1)
     } else if pos >= 2 && chars[pos - 2] == ':' && chars[pos - 1] == ':' {
@@ -773,7 +783,7 @@ fn extract_symbol_and_qualifier(
     } else {
         None
     };
-    let qualifier = qual_end.and_then(|qe| {
+    let mut qualifier = qual_end.and_then(|qe| {
         if qe == 0 {
             return None;
         }
@@ -783,6 +793,40 @@ fn extract_symbol_and_qualifier(
         }
         (qs < qe).then(|| chars[qs..qe].iter().collect::<String>())
     });
+
+    // Fallback when caller supplied `explicit` (`symbol = Some("Printf")`) with a column not
+    // positioned inside `Printf` (e.g. `column = 1` or on `fmt`): scan `line_str` for `<qual>.<sym>` / `<qual>::<sym>`.
+    if qualifier.is_none() && explicit_clean.is_some() {
+        for sep in ["::", "."] {
+            let needle = format!("{sep}{sym}");
+            let mut search_from = 0usize;
+            while let Some(rel_idx) = line_str[search_from..].find(&needle) {
+                let sep_byte = search_from + rel_idx;
+                let after_byte = sep_byte + needle.len();
+                let boundary_ok = line_str[after_byte..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !is_ident_char(c));
+                if boundary_ok && sep_byte > 0 {
+                    let prefix_chars: Vec<char> = line_str[..sep_byte].chars().collect();
+                    let qe = prefix_chars.len();
+                    let mut qs = qe;
+                    while qs > 0 && is_ident_char(prefix_chars[qs - 1]) {
+                        qs -= 1;
+                    }
+                    if qs < qe {
+                        qualifier = Some(prefix_chars[qs..qe].iter().collect());
+                        break;
+                    }
+                }
+                search_from = after_byte;
+            }
+            if qualifier.is_some() {
+                break;
+            }
+        }
+    }
+
     Some((sym, qualifier))
 }
 

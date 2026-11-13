@@ -79,6 +79,7 @@
   $effect(() => {
     void ws.currentId;
     void ws.workspaces.length;
+    void ws.listSettled;
     untrack(() => ide.attachDefaultWorkspace());
   });
 
@@ -690,9 +691,6 @@
   {#if ide.searchEverywhereOpen}
     <LazyMount lazy={IdeSearchEverywhereLazy} what="search everywhere" quiet onerror={() => (ide.searchEverywhereOpen = false)} />
   {/if}
-  {#if ide.toolchainsOpen}
-    <LazyMount lazy={IdeToolchainsModalLazy} what="toolchains manager" quiet onerror={() => (ide.toolchainsOpen = false)} />
-  {/if}
   {#if ide.environmentsOpen}
     <LazyMount
       lazy={IdeEnvironmentsModalLazy}
@@ -701,6 +699,9 @@
       quiet
       onerror={() => (ide.environmentsOpen = false)}
     />
+  {/if}
+  {#if ide.toolchainsOpen}
+    <LazyMount lazy={IdeToolchainsModalLazy} what="toolchains manager" quiet onerror={() => (ide.toolchainsOpen = false)} />
   {/if}
   {#if ide.sshOpen}
     <LazyMount lazy={IdeSshTargetModalLazy} what="SSH target picker" quiet onerror={() => (ide.sshOpen = false)} />

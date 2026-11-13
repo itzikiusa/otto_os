@@ -263,13 +263,55 @@ pub(super) fn resolve_go_package_dirs(
     // 2. `$GOROOT/src/<import_path>` (standard library, e.g. `fmt`, `net/http`, `context`).
     let mut goroot_src_dirs = Vec::new();
     if let Some(gr) = env_map.get("GOROOT").filter(|s| !s.is_empty()) {
-        goroot_src_dirs.push(PathBuf::from(gr).join("src"));
+        let gp = PathBuf::from(gr);
+        goroot_src_dirs.push(gp.join("src"));
+        if gp.join("libexec/src/runtime").is_dir() {
+            goroot_src_dirs.push(gp.join("libexec/src"));
+        }
+    }
+    // Zero-subprocess `PATH` `go` binary canonicalization (resolves macOS Homebrew
+    // `/opt/homebrew/bin/go` -> `.../Cellar/go/<ver>/libexec/bin/go` -> `.../libexec/src`
+    // and `/usr/local/go/bin/go` -> `/usr/local/go/src` when `GOROOT` is unset).
+    let path_str = env_map
+        .get("PATH")
+        .cloned()
+        .or_else(|| std::env::var("PATH").ok())
+        .unwrap_or_default();
+    for seg in path_str.split(':').filter(|s| !s.is_empty()) {
+        let go_bin = Path::new(seg).join("go");
+        if go_bin.is_file() {
+            if let Ok(canon_go) = go_bin.canonicalize() {
+                if let Some(go_home) = canon_go.parent().and_then(Path::parent) {
+                    if go_home.join("src/runtime").is_dir() {
+                        goroot_src_dirs.push(go_home.join("src"));
+                    }
+                    if go_home.join("libexec/src/runtime").is_dir() {
+                        goroot_src_dirs.push(go_home.join("libexec/src"));
+                    }
+                }
+            }
+        }
     }
     for rr in readonly_roots {
         if rr.join("src/runtime").is_dir() {
             goroot_src_dirs.push(rr.join("src"));
+        } else if rr.join("libexec/src/runtime").is_dir() {
+            goroot_src_dirs.push(rr.join("libexec/src"));
         } else if rr.ends_with("src") && rr.join("runtime").is_dir() {
             goroot_src_dirs.push(rr.clone());
+        } else if rr.ends_with("Cellar/go") {
+            if let Ok(rd) = std::fs::read_dir(rr) {
+                for entry in rd.flatten() {
+                    let libexec_src = entry.path().join("libexec/src");
+                    if libexec_src.join("runtime").is_dir() {
+                        goroot_src_dirs.push(libexec_src);
+                    }
+                    let direct_src = entry.path().join("src");
+                    if direct_src.join("runtime").is_dir() {
+                        goroot_src_dirs.push(direct_src);
+                    }
+                }
+            }
         } else if rr.file_name().and_then(|n| n.to_str()) == Some("toolchains") {
             let go_tc = rr.join("go");
             if let Ok(rd) = std::fs::read_dir(go_tc) {

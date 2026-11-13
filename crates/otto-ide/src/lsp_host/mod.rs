@@ -4,3 +4,5 @@
 pub mod framing;
 pub mod pool;
 pub mod servers;
+
+pub use pool::evict_detached_other_roots;

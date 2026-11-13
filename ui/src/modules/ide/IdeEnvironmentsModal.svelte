@@ -2,6 +2,7 @@
   // Environments & Run/Debug Configurations modal for the Otto Full IDE.
   // Tab 1: Login shell env (`~/.zshrc`/`~/.zshenv`), SDKs/venvs, `.env`, PATH, Keychain secrets.
   // Tab 2: GoLand-grade Run/Debug Configurations across Go, Java, Rust, JS/TS, Python, and Shell.
+  import { untrack } from 'svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -90,12 +91,14 @@
   $effect(() => {
     if (!isOpen) { hydratedSnapshot = ''; return; }
     activeTab = initialTab;
-    if (ide.hasTarget) {
-      void ide.loadEnvironments();
-      if (ide.toolchains.length === 0 && !ide.toolchainsLoading) {
-        void ide.loadToolchains({ includeCatalog: false });
+    untrack(() => {
+      if (ide.hasTarget) {
+        void ide.loadEnvironments();
+        if (ide.toolchains.length === 0 && !ide.toolchainsLoading) {
+          void ide.loadToolchains({ includeCatalog: false });
+        }
       }
-    }
+    });
   });
 
   $effect(() => {

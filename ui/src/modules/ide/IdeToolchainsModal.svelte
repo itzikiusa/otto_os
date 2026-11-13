@@ -4,6 +4,7 @@
   // release versions (`include_catalog=true`), supports 1-click Download & Install with
   // live progress for SDKs, LSP servers (`gopls`, `jdtls`, `rust-analyzer`, …), and DAP
   // debuggers (`dlv`, `debugpy`, `codelldb`, …), plus Add Local SDK from Disk.
+  import { untrack } from 'svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -74,15 +75,18 @@
       initializedForOpen = false;
       return;
     }
-    if (!initializedForOpen) {
-      initializedForOpen = true;
-      activeEco = defaultEcoFromWorkspace();
-    }
-    if (!ide.hasTarget) return;
-    void ide.loadToolchains({ includeCatalog: true });
-    if (!ide.projectEnv && !ide.envLoading) {
-      void ide.loadEnvironments();
-    }
+    const hasTarget = ide.hasTarget;
+    untrack(() => {
+      if (!initializedForOpen) {
+        initializedForOpen = true;
+        activeEco = defaultEcoFromWorkspace();
+      }
+      if (!hasTarget) return;
+      void ide.loadToolchains({ includeCatalog: true });
+      if (!ide.projectEnv && !ide.envLoading) {
+        void ide.loadEnvironments();
+      }
+    });
   });
 
   function formatOsLabel(raw: string): string {

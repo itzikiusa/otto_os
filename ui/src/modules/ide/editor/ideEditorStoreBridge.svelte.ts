@@ -260,24 +260,43 @@ export function classifyIdeFile(tab: IdeOpenTab, rootPath: string, additionalRoo
 
 // ── Full Go-to-Definition & Go-to-Implementation Dive-In ────────────────────
 
+function stripMacPrivatePrefix(p: string): string {
+  return p.startsWith('/private/var/') || p.startsWith('/private/tmp/') ? p.slice('/private'.length) : p;
+}
+
+function isImportBindingLine(lineText: string): boolean {
+  return /^\s*(?:import\b|(?:const|let|var)\s+.*=\s*require\()/.test(lineText);
+}
+
 export async function performIdeDive(
   mode: 'definition' | 'implementation',
   fromPath: string,
-  target: { path?: string; line: number; column: number; symbol?: string },
+  target: { path?: string; line: number; column: number; symbol?: string; originLine?: number; originColumn?: number },
   content: string,
 ): Promise<void> {
-  pushIdeNavLocation(fromPath, ide.cursorInfo.line || target.line, ide.cursorInfo.col || target.column);
+  const originLine = target.originLine ?? (ide.cursorInfo.line || target.line);
+  const originCol = target.originColumn ?? (ide.cursorInfo.col || target.column);
+  pushIdeNavLocation(fromPath, originLine, originCol);
 
-  // 1. Direct path already resolved by live LSP client.
+  // 1. Direct path already resolved by live LSP client — except when TS/JS LSP resolves
+  // a symbol to a same-file `import` / `require(` binding line instead of `node_modules` `.d.ts`.
+  let sameFileImportFallback: { path: string; line: number; column: number } | null = null;
   if (target.path) {
-    await ide.openFile(target.path, { line: target.line, col: target.column, preview: false });
-    pushIdeNavLocation(target.path, target.line, target.column);
-    return;
+    const sameFile =
+      stripMacPrivatePrefix(ide.resolvePath(target.path)) === stripMacPrivatePrefix(ide.resolvePath(fromPath));
+    const destLineText = sameFile ? (content.split(/\r?\n/)[target.line - 1] ?? '') : '';
+    if (mode === 'definition' && sameFile && isImportBindingLine(destLineText)) {
+      sameFileImportFallback = { path: target.path, line: target.line, column: target.column };
+    } else {
+      await ide.openFile(target.path, { line: target.line, col: target.column, preview: false });
+      pushIdeNavLocation(target.path, target.line, target.column);
+      return;
+    }
   }
 
   // 2. Instant <1ms local resolver for Shell functions/source, JSON $ref, and relative file paths.
   if (mode === 'definition') {
-    const localHit = resolveLocalFastDive(fromPath, ide.target.root, content, target.line, target.symbol);
+    const localHit = resolveLocalFastDive(fromPath, ide.target.root, content, originLine, target.symbol);
     if (localHit) {
       await ide.openFile(localHit.path, { line: localHit.line, col: localHit.column, preview: false });
       pushIdeNavLocation(localHit.path, localHit.line, localHit.column);
@@ -291,8 +310,8 @@ export async function performIdeDive(
     const resp = await api.post<{ symbol: string; locations: IdeReferenceLocation[] }>(endpoint, {
       target: ide.targetPayload,
       path: fromPath,
-      line: target.line,
-      column: target.column,
+      line: originLine,
+      column: originCol,
       symbol: target.symbol,
       content,
     });
@@ -319,11 +338,21 @@ export async function performIdeDive(
       return;
     }
   } catch {
-    /* Fall back to workspace usages search below */
+    /* Fall back below */
+  }
+
+  if (sameFileImportFallback) {
+    await ide.openFile(sameFileImportFallback.path, {
+      line: sameFileImportFallback.line,
+      col: sameFileImportFallback.column,
+      preview: false,
+    });
+    pushIdeNavLocation(sameFileImportFallback.path, sameFileImportFallback.line, sameFileImportFallback.column);
+    return;
   }
 
   // 4. Final fallback: Find Usages dock.
-  await ide.findReferences(fromPath, target.line, target.column, target.symbol);
+  await ide.findReferences(fromPath, originLine, originCol, target.symbol);
 }
 
 // ── On-Demand Git Blame Fetcher (Zero Retained Cache When Off) ───────────────

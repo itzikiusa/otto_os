@@ -86,8 +86,8 @@
     keymapPreset?: 'jetbrains' | 'standard';
     jumpToLine?: { line: number; column?: number | null; seq?: number } | number | null;
     onCursorChange?: ((info: CursorChangeInfo) => void) | null;
-    onDefinitionJump?: ((target: { path?: string; line: number; column: number; symbol?: string }) => void) | null;
-    onImplementationJump?: ((target: { path?: string; line: number; column: number; symbol?: string }) => void) | null;
+    onDefinitionJump?: ((target: { path?: string; line: number; column: number; symbol?: string; originLine?: number; originColumn?: number }) => void) | null;
+    onImplementationJump?: ((target: { path?: string; line: number; column: number; symbol?: string; originLine?: number; originColumn?: number }) => void) | null;
     onFindUsages?: ((ctx: { line: number; column: number; symbol?: string }) => void) | null;
     onFileStructure?: (() => void) | null;
     onJumpSymbol?: ((delta: -1 | 1) => void) | null;
@@ -545,7 +545,7 @@
       }
       keptStates.clear();
       lightTabMeta.clear();
-      ideMod?.disposePooledLspClients();
+      ideMod?.disposePooledLspClients({ forceAll: true });
       return;
     }
     for (const p of paths) {
