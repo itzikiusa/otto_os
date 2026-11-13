@@ -5,7 +5,7 @@
   import { getContext } from 'svelte';
   import { authedBlobUrl } from '../../../lib/api/client';
   import Icon from '../../../lib/components/Icon.svelte';
-  import Lightbox from './Lightbox.svelte';
+  import Lightbox from '../../../lib/components/Lightbox.svelte';
   import { fetchImageUrl } from './api';
   import { CONV_CTX, type ConvContext } from './context';
 

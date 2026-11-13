@@ -42,7 +42,7 @@
   import { splitLocation } from './chatMarkdown';
   import { resolvePath } from './format';
   import { activatePathLink, showPathLinkMenu, PATH_LINK_CTX, type PathLinkTarget } from '../../../lib/pathLinks/open';
-  import Lightbox from './Lightbox.svelte';
+  import Lightbox from '../../../lib/components/Lightbox.svelte';
   import { CONV_CTX, type ConvContext } from './context';
   import { ui } from '../../../lib/stores/ui.svelte';
 

@@ -1,5 +1,7 @@
 <script lang="ts">
-  import Modal from '../../../lib/components/Modal.svelte';
+  // Images a tool returned (screenshots, renders): readable previews with the
+  // aspect kept; a click opens the shared Lightbox (fit / 1:1).
+  import Lightbox from '../../../lib/components/Lightbox.svelte';
   import type { ToolOutputImage } from '../../../lib/api/types';
   import { toolImageSources } from './toolImages';
 
@@ -24,16 +26,15 @@
 {/if}
 
 {#if selected}
-  <Modal title="Tool image" width={1000} onclose={() => (selected = null)}>
-    <img class="enlarged" src={selected} alt="Enlarged tool result" data-testid="runtime-tool-image-enlarged" />
-  </Modal>
+  <Lightbox src={selected} alt="Tool image" testid="runtime-tool-image-enlarged" onclose={() => (selected = null)} />
 {/if}
 
 <style>
   .tool-images { display: flex; flex-wrap: wrap; gap: 8px; min-inline-size: 0; }
-  .thumbnail { display: flex; align-items: center; justify-content: center; max-inline-size: 100%; inline-size: 160px; block-size: 112px; padding: 4px; border: 1px solid var(--border); border-radius: var(--radius-m); background: var(--surface-2); cursor: zoom-in; }
+  .thumbnail { display: grid; place-items: center; min-inline-size: 64px; min-block-size: 64px; max-inline-size: 100%; padding: 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-m); background: var(--surface-2); cursor: zoom-in; }
   .thumbnail:hover { border-color: var(--accent-text); }
-  .thumbnail img { max-inline-size: 100%; max-block-size: 100%; object-fit: contain; }
-  .enlarged { display: block; inline-size: 100%; max-block-size: 75dvh; object-fit: contain; }
+  .thumbnail:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
+  /* A fixed readable height, width from the aspect (capped), never cropped. */
+  .thumbnail img { display: block; block-size: 160px; inline-size: auto; min-inline-size: 64px; max-inline-size: min(240px, 100%); object-fit: contain; }
   .image-error { margin: 0; color: var(--text-dim); font-size: var(--fs-xs); }
 </style>
