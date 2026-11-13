@@ -51,6 +51,8 @@
   import { isRuntimeProvider, runtimeThreads } from './runtime/runtimeThreads.svelte';
   import { council, councilAgentLabel } from './runtime/councilStore.svelte';
   import CouncilStagePicker from './runtime/CouncilStagePicker.svelte';
+  import StageAttach from './runtime/StageAttach.svelte';
+  import { StageAttachments } from './runtime/stageAttachments.svelte';
 
   interface Props {
     /** Float the project card top-right (wide screen, right panel closed). */
@@ -84,9 +86,8 @@
   const homePath = $derived(ws.scratch?.root_path ?? '~');
   const scratchActive = $derived(useScratch || ws.current === null);
   const targetWs = $derived(scratchActive ? SCRATCH_WORKSPACE_ID : (ws.currentId ?? SCRATCH_WORKSPACE_ID));
-  // Claude / Codex / Gemini / Grok threads run on the structured runtime:
-  // they always ask before acting (no access-mode switch).
   const runtime = $derived(isRuntimeProvider(provider));
+  const files = new StageAttachments(() => provider, () => runtime && !council.on);
   const modeSupported = $derived(supportsInteractionMode(provider) && !runtime);
   const cleanCwd = $derived(cwd.trim().replace(/\/+$/, ''));
   const onWorktree = $derived(worktree !== null && worktree.path.replace(/\/+$/, '') === cleanCwd);
@@ -259,7 +260,7 @@
       }
     }
     const firstMsg = rawPrompt.trim();
-    if (withPrompt && !firstMsg) {
+    if (withPrompt && !firstMsg && files.list.length === 0) {
       composerEl?.focus();
       return;
     }
@@ -289,13 +290,14 @@
         ? (await council.start(targetWs, { prompt: firstMsg, title, cwd: dir || null }))[0]
         : runtime && isRuntimeProvider(provider)
         ? await runtimeThreads.start(targetWs, {
-            provider, title, cwd: dir || null, model: selectedModel, effort: selectedEffort ?? undefined, prompt: firstMsg,
+            provider, title, cwd: dir || null, model: selectedModel, effort: selectedEffort ?? undefined, prompt: firstMsg, attachments: withPrompt ? files.list : [],
           })
         : firstMsg
           ? await ws.openSessionWithPrompt({ provider, title, cwd: dir || null, prompt: firstMsg, meta }, opts)
           : await ws.createSessionQuiet({ kind: 'agent', provider, title, cwd: dir || null, meta }, opts);
       if (firstMsg && !runtime && !asCouncil) transcript.recordOptimisticPrompt(created.id, firstMsg);
       prompt = '';
+      files.picked = [];
       threads.draftCwd = null;
       threads.rememberProject(dir || null);
       if (openInBeside && threads.paneIds.length > 0) threads.openBeside(created.id);
@@ -442,7 +444,9 @@
         disabled={busy}
         oninput={(e) => autoGrow(e.currentTarget)}
         onkeydown={onComposerKeydown}
+        onpaste={(e) => files.paste(e)}
       ></textarea>
+      <StageAttach part="list" {files} />
 
       {#if cwdError}
         <p class="nt-error" use:announceShown={{ text: cwdError, assertive: true }}>{cwdError}</p>
@@ -461,6 +465,7 @@
         >
           <Icon name="link" size={16} />
         </button>
+        <StageAttach part="button" {files} disabled={busy} />
         <span class="nt-spacer"></span>
         <CouncilStagePicker part="toggle" {provider} model={selectedModel} effort={selectedEffort} disabled={busy} />
         <button

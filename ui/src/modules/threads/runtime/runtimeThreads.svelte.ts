@@ -256,7 +256,16 @@ class RuntimeThreads {
    *  the opening prompt, if any. */
   async start(
     workspaceId: string,
-    req: { provider: RuntimeProvider; cwd: string | null; title: string; model: string | null; effort?: string; prompt: string },
+    req: {
+      provider: RuntimeProvider;
+      cwd: string | null;
+      title: string;
+      model: string | null;
+      effort?: string;
+      prompt: string;
+      /** Images / PDFs for the first message. */
+      attachments?: readonly { name: string; mime: string; data_base64: string }[];
+    },
   ): Promise<RuntimeSession> {
     const created = await api.post<RuntimeSession>(`/workspaces/${workspaceId}/runtime-sessions`, {
       provider: req.provider,
@@ -268,7 +277,16 @@ class RuntimeThreads {
       // rule terminal sessions follow), else Approval required.
     });
     this.byId[created.id] = created;
-    if (req.prompt) await this.prompt(created.id, { text: req.prompt, ...(req.effort ? { effort: req.effort } : {}) });
+    const pics = (req.attachments ?? []).filter((f) => f.mime.startsWith('image/'));
+    const docs = (req.attachments ?? []).filter((f) => !f.mime.startsWith('image/'));
+    if (req.prompt || pics.length || docs.length) {
+      await this.prompt(created.id, {
+        text: req.prompt,
+        ...(req.effort ? { effort: req.effort } : {}),
+        ...(pics.length ? { images: pics.map(({ mime, data_base64 }) => ({ mime, data_base64 })) } : {}),
+        ...(docs.length ? { files: docs.map((d) => ({ ...d })) } : {}),
+      });
+    }
     return created;
   }
 
