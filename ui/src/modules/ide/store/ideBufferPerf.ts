@@ -15,6 +15,32 @@ const BUFFER_SYNC_DEBOUNCE_MS = 250;
 const BG_ANALYZE_DEBOUNCE_MS = 280;
 interface PendingJob { timer: ReturnType<typeof setTimeout> | null; ctl: AbortController | null; seq: number; resolve: () => void }
 
+type EvictionListener = (paths: ReadonlySet<string> | 'all') => void;
+type FileSavedListener = (path: string, content: string) => void;
+
+const evictionListeners = new Set<EvictionListener>();
+const fileSavedListeners = new Set<FileSavedListener>();
+
+/** Subscribe to tab/buffer evictions so `CodeEditor` can drop cached `EditorState`s immediately. */
+export function subscribeIdeBufferEvictions(fn: EvictionListener): () => void {
+  evictionListeners.add(fn);
+  return () => evictionListeners.delete(fn);
+}
+
+/** Subscribe to completed disk/collab saves so LSP `didSave` and post-save hooks fire reliably. */
+export function subscribeIdeFileSaved(fn: FileSavedListener): () => void {
+  fileSavedListeners.add(fn);
+  return () => fileSavedListeners.delete(fn);
+}
+
+function notifyEvicted(paths: ReadonlySet<string> | 'all'): void {
+  for (const fn of evictionListeners) fn(paths);
+}
+
+function notifySaved(path: string, content: string): void {
+  for (const fn of fileSavedListeners) fn(path, content);
+}
+
 export interface IdeBufferHost {
   target: IdeTargetSpec; readonly targetPayload: IdeTargetSpec; tabs: IdeOpenTab[]; hasClosedAllTabs: boolean;
   activePath: string | null; splitPath: string | null; readonly activeTab: IdeOpenTab | null;
@@ -101,6 +127,7 @@ export class IdeBufferPerfController {
     if (Object.keys(host.gutterByPath).some((k) => closed.has(k))) host.gutterByPath = Object.fromEntries(Object.entries(host.gutterByPath).filter(([k]) => !closed.has(k)));
     if (Object.keys(host.symbolsByPath).some((k) => closed.has(k))) host.symbolsByPath = Object.fromEntries(Object.entries(host.symbolsByPath).filter(([k]) => !closed.has(k)));
     if (clearProblems && host.problems.some((d) => closed.has(d.path))) host.problems = host.problems.filter((d) => !closed.has(d.path));
+    notifyEvicted(closed);
   }
   resetAll(host: IdeBufferHost): void {
     for (const t of this.syncTimers.values()) clearTimeout(t);
@@ -108,6 +135,7 @@ export class IdeBufferPerfController {
     for (const p of [...this.gutterJobs.keys()]) this.cancelJob(this.gutterJobs, p);
     for (const p of [...this.symbolJobs.keys()]) this.cancelJob(this.symbolJobs, p);
     this.activeSymbolLoads = 0; host.symbolsLoading = false;
+    notifyEvicted('all');
   }
   private runDebouncedJob<T>(
     host: IdeBufferHost, map: Map<string, PendingJob>, path: string,
@@ -172,6 +200,7 @@ export async function performSaveFile(host: IdeBufferHost, perf: IdeBufferPerfCo
   if (host.collabIsGuest) {
     await host.sendCollabEdit(targetPath, contentToSave, true);
     tab.savedContent = contentToSave; tab.dirty = perf.getBuffer(host, targetPath) !== contentToSave;
+    notifySaved(targetPath, contentToSave);
     toasts.success('Saved to shared session', tab.name);
     return true;
   }
@@ -183,6 +212,7 @@ export async function performSaveFile(host: IdeBufferHost, perf: IdeBufferPerfCo
     tab.savedContent = contentToSave; tab.sha256 = resp.sha256;
     const latest = perf.getBuffer(host, targetPath);
     tab.dirty = latest !== tab.savedContent;
+    notifySaved(targetPath, contentToSave);
     void host.loadGutter(targetPath, latest); void host.loadSymbols(targetPath, latest);
     return true;
   } catch (e) {

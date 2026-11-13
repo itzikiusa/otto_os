@@ -13,14 +13,18 @@
     type IdeDiagnostic,
   } from './ideStore.svelte';
   import { ideAgent } from './store/ideAgentController.svelte';
+  import { pushIdeNavLocation } from './editor/ideEditorStoreBridge.svelte';
 
+  const GROUP_ITEM_CAP = 100;
   type SeverityFilter = 'all' | 'error' | 'warning' | 'info';
 
   let severityFilter = $state<SeverityFilter>('all');
   let currentFileOnly = $state(false);
   let query = $state('');
   let collapsedFiles = $state<Record<string, boolean>>({});
+  let showAllGroups = $state<Record<string, boolean>>({});
   let fixingKey = $state<string | null>(null);
+  let navProblemIdx = $state(-1);
 
   const scopedProblems = $derived(
     currentFileOnly && ide.activePath
@@ -90,7 +94,14 @@
   }
 
   function jumpToProblem(d: IdeDiagnostic): void {
-    void ide.openFile(d.path, { line: d.line, col: d.column ?? 1 });
+    if (ide.activePath) pushIdeNavLocation(ide.activePath, ide.cursorInfo.line, ide.cursorInfo.col);
+    void ide.openFile(d.path, { line: d.line, col: d.column ?? 1, preview: false });
+  }
+
+  function stepProblem(delta: -1 | 1): void {
+    if (filteredProblems.length === 0) return;
+    navProblemIdx = (navProblemIdx + delta + filteredProblems.length) % filteredProblems.length;
+    jumpToProblem(filteredProblems[navProblemIdx]);
   }
 
   function resetFilters(): void {
@@ -209,6 +220,26 @@
     <button
       type="button"
       class="icon-btn"
+      aria-label="Previous problem"
+      title="Previous problem (⇧F2)"
+      disabled={filteredProblems.length === 0}
+      onclick={() => stepProblem(-1)}
+    >
+      <Icon name="arrowUp" size={13} />
+    </button>
+    <button
+      type="button"
+      class="icon-btn"
+      aria-label="Next problem"
+      title="Next problem (F2)"
+      disabled={filteredProblems.length === 0}
+      onclick={() => stepProblem(1)}
+    >
+      <Icon name="arrowDown" size={13} />
+    </button>
+    <button
+      type="button"
+      class="icon-btn"
       aria-label="Clear diagnostics"
       title="Clear diagnostics"
       disabled={ide.problems.length === 0}
@@ -259,7 +290,8 @@
           </button>
 
           {#if !collapsed}
-            {#each group.items as d, idx (diagKey(d, idx))}
+            {@const groupItems = !showAllGroups[group.path] && group.items.length > GROUP_ITEM_CAP ? group.items.slice(0, GROUP_ITEM_CAP) : group.items}
+            {#each groupItems as d, idx (diagKey(d, idx))}
               {@const k = diagKey(d, idx)}
               <div class="prob-row reveal-host">
                 <button type="button" class="prob-jump" onclick={() => jumpToProblem(d)}>
@@ -316,6 +348,13 @@
                 </button>
               </div>
             {/each}
+            {#if !showAllGroups[group.path] && group.items.length > GROUP_ITEM_CAP}
+              <div class="prob-row">
+                <button type="button" class="btn small ghost" onclick={() => (showAllGroups = { ...showAllGroups, [group.path]: true })}>
+                  Show all {group.items.length} diagnostics in {group.relPath}
+                </button>
+              </div>
+            {/if}
           {/if}
         </section>
       {/each}

@@ -1,11 +1,11 @@
 // Pro IDE extensions for CodeEditor (JetBrains / GoLand parity):
 // Multi-cursor, Option+drag column selection, simultaneous line prefix/suffix,
-// breakpoint & test-runner gutters, paused-line + inline ghost debug values,
-// collaborative peer cursors, JetBrains/Standard keymaps, and direct WS LSP fallback.
+// interactive hover-preview breakpoint & runnable gutters, paused-line + inline
+// ghost debug values, peer cursors, CSV rainbow & Shell var highlights, and GoLand keymaps.
 
 import {
   Decoration, EditorView, GutterMarker, ViewPlugin, WidgetType,
-  crosshairCursor, gutter, hoverTooltip, keymap, rectangularSelection,
+  crosshairCursor, gutter, keymap, rectangularSelection,
   type DecorationSet, type KeyBinding, type ViewUpdate,
 } from '@codemirror/view';
 import {
@@ -16,21 +16,30 @@ import {
   addCursorAbove, addCursorBelow, copyLineDown, deleteLine,
   moveLineDown, moveLineUp, toggleComment,
 } from '@codemirror/commands';
-import { selectNextOccurrence, selectSelectionMatches } from '@codemirror/search';
-import type { Completion, CompletionContext, CompletionResult } from '@codemirror/autocomplete';
-import { setDiagnostics, type Diagnostic } from '@codemirror/lint';
+import { openSearchPanel, selectNextOccurrence, selectSelectionMatches } from '@codemirror/search';
 import type {
   IdeBreakpoint, IdeCollabPeer, IdeDiagnostic, IdeGutterItem, IdeInlineValue, IdePeerCursor,
 } from '../api/types';
 import { ctxMenu } from '../contextmenu.svelte';
 import { isIconName } from './Icon.svelte';
+import { createIdeCsvExtension } from './cm-ide-csv';
 import {
-  createIdeGitAndAgentExtensions, selectionOrCurrentLine, setSavedContentEffect,
+  createIdeGitAndAgentExtensions, selectionOrCurrentLine, setBlameLinesEffect, setSavedContentEffect,
   type IdeEditorSelectionRange,
 } from './cm-ide-git-and-agent';
+import {
+  buildPooledLspExtensions, createCmdHoverDiveExtension, createDirectLspExtension,
+  disposePooledLspClients, lspUriToPath, notifyLspDidSave, requestIdeDiveAtPos,
+  type AttachPooledLspOptions, type DirectLspOptions,
+} from './cm-ide-lsp';
 
-export { addCursorAbove, addCursorBelow, crosshairCursor, moveLineUp, moveLineDown, rectangularSelection, selectNextOccurrence };
-export { selectionOrCurrentLine, setSavedContentEffect, type IdeEditorSelectionRange };
+export {
+  addCursorAbove, addCursorBelow, buildPooledLspExtensions, createDirectLspExtension,
+  crosshairCursor, disposePooledLspClients, lspUriToPath, moveLineDown, moveLineUp, notifyLspDidSave,
+  rectangularSelection, requestIdeDiveAtPos, selectNextOccurrence,
+  selectionOrCurrentLine, setBlameLinesEffect, setSavedContentEffect,
+  type AttachPooledLspOptions, type DirectLspOptions, type IdeEditorSelectionRange,
+};
 export const toggleLineComment = toggleComment;
 
 // ── Identifier & Multi-Cursor Line Editing Commands ──────────────────────────
@@ -92,10 +101,7 @@ export function splitSelectionIntoLines(view: EditorView): boolean {
   return true;
 }
 
-/**
- * Add `prefix` before and `suffix` after every selected / cursor line in a
- * single undoable transaction, preserving multi-cursors across all modified lines.
- */
+/** Add `prefix` before and `suffix` after every selected/cursor line in one undoable transaction. */
 export function applyLinePrefixSuffix(view: EditorView, prefix: string, suffix: string): boolean {
   if ((!prefix && !suffix) || view.state.readOnly) return false;
   const { doc, selection } = view.state;
@@ -147,6 +153,16 @@ export function duplicateLineOrSelection(view: EditorView): boolean {
   return true;
 }
 
+export function openReplaceInFile(view: EditorView): boolean {
+  openSearchPanel(view);
+  requestAnimationFrame(() => {
+    const rep = view.dom.querySelector<HTMLInputElement>('.cm-search input[name="replace"]');
+    rep?.focus();
+    rep?.select();
+  });
+  return true;
+}
+
 // ── State Effects & Callbacks ────────────────────────────────────────────────
 
 export interface IdeEditorCallbacks {
@@ -154,9 +170,16 @@ export interface IdeEditorCallbacks {
   onEditBreakpoint?: ((line: number, event?: MouseEvent) => void) | null;
   onGutterAction?: ((item: IdeGutterItem, mode: 'run' | 'debug') => void) | null;
   onDefinitionJump?: ((target: { path?: string; line: number; column: number; symbol?: string }) => void) | null;
+  onImplementationJump?: ((target: { path?: string; line: number; column: number; symbol?: string }) => void) | null;
+  onFindUsages?: ((ctx: { line: number; column: number; symbol?: string }) => void) | null;
+  onFileStructure?: (() => void) | null;
+  onJumpSymbol?: ((delta: -1 | 1) => void) | null;
+  onNavigateBack?: (() => void) | null;
+  onNavigateForward?: (() => void) | null;
   onQuickFix?: ((ctx: { line: number; column: number; symbol?: string }) => void) | null;
   onRenameSymbol?: ((ctx: { line: number; column: number; symbol: string }) => void) | null;
   onFormat?: (() => void) | null;
+  onToggleBlame?: (() => void) | null;
   onDiagnostics?: ((diags: IdeDiagnostic[]) => void) | null;
   onAgentAction?: ((mode: 'chat' | 'inline', sel: IdeEditorSelectionRange) => void) | null;
 }
@@ -166,24 +189,38 @@ export interface IdeDebugStatePayload {
   inlineValues: IdeInlineValue[];
 }
 
+export type BreakpointsEffectPayload = IdeBreakpoint[] | { breakpoints: IdeBreakpoint[]; muted?: boolean };
 export type PeerCursorInput = IdePeerCursor | IdeCollabPeer;
 
-export const setBreakpointsEffect = StateEffect.define<IdeBreakpoint[]>();
+export const setBreakpointsEffect = StateEffect.define<BreakpointsEffectPayload>();
 export const setGutterItemsEffect = StateEffect.define<IdeGutterItem[]>();
 export const setDebugDecorationsEffect = StateEffect.define<IdeDebugStatePayload>();
 export const setPeerCursorsEffect = StateEffect.define<PeerCursorInput[]>();
+const setHoverBpLineEffect = StateEffect.define<number | null>();
 
 // ── Gutter Markers & Decorations ─────────────────────────────────────────────
 
+type BpVisualKind = 'enabled' | 'disabled' | 'muted' | 'conditional' | 'logpoint' | 'paused' | 'preview';
+
 const SVG_NS = 'http://www.w3.org/2000/svg';
-function gutterSvg(shape: 'enabled' | 'disabled' | 'diamond' | 'play'): SVGSVGElement {
+function gutterSvg(shape: 'enabled' | 'hollow' | 'diamond' | 'play', verified = false): SVGSVGElement {
   const svg = document.createElementNS(SVG_NS, 'svg');
   for (const [k, v] of [['width', '12'], ['height', '12'], ['viewBox', '0 0 16 16'], ['aria-hidden', 'true']]) svg.setAttribute(k, v);
-  if (shape === 'enabled' || shape === 'disabled') {
+  if (shape === 'enabled' || shape === 'hollow') {
     const c = document.createElementNS(SVG_NS, 'circle');
-    for (const [k, v] of [['cx', '8'], ['cy', '8'], ['r', shape === 'disabled' ? '4.5' : '5'], ['fill', shape === 'disabled' ? 'none' : 'currentColor']]) c.setAttribute(k, v);
-    if (shape === 'disabled') { c.setAttribute('stroke', 'currentColor'); c.setAttribute('stroke-width', '1.5'); }
+    for (const [k, v] of [['cx', '8'], ['cy', '8'], ['r', shape === 'hollow' ? '4.5' : '5'], ['fill', shape === 'hollow' ? 'none' : 'currentColor']]) c.setAttribute(k, v);
+    if (shape === 'hollow') { c.setAttribute('stroke', 'currentColor'); c.setAttribute('stroke-width', '1.5'); }
     svg.appendChild(c);
+    if (verified && shape === 'enabled') {
+      const check = document.createElementNS(SVG_NS, 'path');
+      check.setAttribute('d', 'M5.4 8.2 7.2 10 10.8 6.2');
+      check.setAttribute('fill', 'none');
+      check.setAttribute('stroke', 'var(--bg)');
+      check.setAttribute('stroke-width', '1.6');
+      check.setAttribute('stroke-linecap', 'round');
+      check.setAttribute('stroke-linejoin', 'round');
+      svg.appendChild(check);
+    }
   } else {
     const p = document.createElementNS(SVG_NS, 'path');
     p.setAttribute('d', shape === 'diamond' ? 'M8 2.5L13.5 8L8 13.5L2.5 8Z' : 'M5 3.5l7 4.5-7 4.5v-9Z');
@@ -195,21 +232,33 @@ function gutterSvg(shape: 'enabled' | 'disabled' | 'diamond' | 'play'): SVGSVGEl
 
 class BreakpointMarker extends GutterMarker {
   constructor(
-    readonly kind: 'enabled' | 'disabled' | 'conditional' | 'logpoint' | 'paused',
+    readonly kind: BpVisualKind,
     readonly tooltip: string,
     readonly alsoPaused: boolean,
+    readonly verified: boolean,
   ) { super(); }
   eq(o: BreakpointMarker): boolean {
-    return this.kind === o.kind && this.tooltip === o.tooltip && this.alsoPaused === o.alsoPaused;
+    return this.kind === o.kind && this.tooltip === o.tooltip && this.alsoPaused === o.alsoPaused && this.verified === o.verified;
   }
   toDOM(): HTMLElement {
     const el = document.createElement('span');
-    el.className = `cm-ide-bp-marker cm-ide-bp-${this.kind}${this.alsoPaused ? ' is-paused' : ''}`;
+    el.className = `cm-ide-bp-marker cm-ide-bp-${this.kind}${this.alsoPaused ? ' is-paused' : ''}${this.verified ? ' is-verified' : ''}`;
     el.dataset.bpKind = this.kind;
-    el.title = this.tooltip;
-    el.setAttribute('role', 'img');
-    el.setAttribute('aria-label', this.tooltip);
-    el.appendChild(gutterSvg(this.kind === 'paused' ? 'play' : (this.kind === 'conditional' || this.kind === 'logpoint') ? 'diamond' : this.kind));
+    if (this.kind !== 'preview') {
+      el.title = this.tooltip;
+      el.setAttribute('role', 'img');
+      el.setAttribute('aria-label', this.tooltip);
+    } else {
+      el.setAttribute('aria-hidden', 'true');
+    }
+    const shape = this.kind === 'paused'
+      ? 'play'
+      : (this.kind === 'conditional' || this.kind === 'logpoint')
+        ? 'diamond'
+        : (this.kind === 'disabled' || this.kind === 'muted')
+          ? 'hollow'
+          : 'enabled';
+    el.appendChild(gutterSvg(shape, this.verified));
     return el;
   }
 }
@@ -286,7 +335,7 @@ function computeDebugDecorations(doc: EditorState['doc'], payload: IdeDebugState
       if (iv.line < 1 || iv.line > doc.lines) continue;
       let m = byLine.get(iv.line);
       if (!m) { m = new Map(); byLine.set(iv.line, m); }
-      m.set(iv.name, iv.value.length > 72 ? `${iv.value.slice(0, 69)}…` : iv.value);
+      m.set(iv.name, iv.value.length > 80 ? `${iv.value.slice(0, 77)}…` : iv.value);
     }
     for (const [lineNo, vars] of byLine) {
       const summary = [...vars.entries()].map(([k, v]) => `${k} = ${v}`).join(', ');
@@ -362,6 +411,41 @@ function computePeerDecorations(doc: EditorState['doc'], peers: PeerCursorInput[
   return ranges.length > 0 ? Decoration.set(ranges, true) : Decoration.none;
 }
 
+// ── Shell `$VAR` Viewport Occurrence Highlighter (`.sh` / `.bash` / `.zsh`) ──
+
+const shellVarMark = Decoration.mark({ class: 'cm-ide-shell-var-hit' });
+
+function createShellVarHighlightExtension(): Extension {
+  return ViewPlugin.fromClass(
+    class {
+      decorations: DecorationSet = Decoration.none;
+      constructor(view: EditorView) { this.decorations = this.compute(view); }
+      update(u: ViewUpdate) {
+        if (u.docChanged || u.selectionSet || u.viewportChanged) this.decorations = this.compute(u.view);
+      }
+      compute(view: EditorView): DecorationSet {
+        const sym = wordAtCursor(view.state).word.replace(/^\$/, '');
+        if (!sym || sym.length < 2 || !/^[A-Za-z_]\w*$/.test(sym)) return Decoration.none;
+        const lnText = view.state.doc.lineAt(view.state.selection.main.head).text;
+        if (!lnText.includes(`$${sym}`) && !lnText.includes(`\${${sym}`) && !new RegExp(`\\b${sym}=`).test(lnText)) {
+          return Decoration.none;
+        }
+        const re = new RegExp(`(?:\\$\\{?${sym}\\}?|\\b${sym}(?==))`, 'g');
+        const ranges: Range<Decoration>[] = [];
+        for (const { from, to } of view.visibleRanges) {
+          const text = view.state.sliceDoc(from, to);
+          let m: RegExpExecArray | null;
+          while ((m = re.exec(text)) !== null) {
+            ranges.push(shellVarMark.range(from + m.index, from + m.index + m[0].length));
+          }
+        }
+        return ranges.length > 1 ? Decoration.set(ranges, true) : Decoration.none;
+      }
+    },
+    { decorations: (v) => v.decorations },
+  );
+}
+
 // ── Theme (100% Otto Design Tokens — zero hex/px/z-index literals) ───────────
 
 const ideEditorTheme = EditorView.baseTheme({
@@ -372,11 +456,13 @@ const ideEditorTheme = EditorView.baseTheme({
   '.cm-ide-peer-slot-3': { '--ide-peer-color': 'var(--cat-4)' },
   '.cm-ide-peer-slot-4': { '--ide-peer-color': 'var(--cat-5)' },
   '.cm-ide-peer-slot-5': { '--ide-peer-color': 'var(--cat-6)' },
-  '.cm-ide-bp-gutter': { width: '16px', cursor: 'pointer', userSelect: 'none' },
+  '.cm-ide-bp-gutter, .cm-lineNumbers': { cursor: 'pointer', userSelect: 'none' },
+  '.cm-ide-bp-gutter': { width: '16px' },
   '.cm-ide-bp-gutter .cm-gutterElement': { display: 'flex', alignItems: 'center', justifyContent: 'center', paddingInline: '2px' },
   '.cm-ide-bp-spacer, .cm-ide-run-spacer': { visibility: 'hidden', display: 'inline-flex' },
   '.cm-ide-bp-marker': { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', lineHeight: '1', color: 'var(--danger)' },
-  '.cm-ide-bp-marker.cm-ide-bp-disabled': { color: 'var(--text-dim)' },
+  '.cm-ide-bp-marker.cm-ide-bp-preview': { opacity: '0.42', color: 'var(--danger)' },
+  '.cm-ide-bp-marker.cm-ide-bp-disabled, .cm-ide-bp-marker.cm-ide-bp-muted': { color: 'var(--text-dim)' },
   '.cm-ide-bp-marker.cm-ide-bp-logpoint, .cm-ide-bp-marker.cm-ide-bp-paused': { color: 'var(--warning)' },
   '.cm-ide-bp-marker.is-paused': { boxShadow: '0 0 0 1px var(--warning)', borderRadius: 'var(--radius-s)' },
   '.cm-ide-run-gutter': { width: '18px', userSelect: 'none' },
@@ -393,6 +479,7 @@ const ideEditorTheme = EditorView.baseTheme({
     color: 'var(--text-dim)', fontStyle: 'italic', fontFamily: 'var(--font-mono)',
     fontSize: 'var(--fs-xs)', userSelect: 'none', pointerEvents: 'none', whiteSpace: 'pre',
   },
+  '.cm-ide-shell-var-hit': { backgroundColor: 'var(--accent-soft)', borderRadius: '2px' },
   '.cm-ide-peer-sel': { backgroundColor: 'color-mix(in srgb, var(--ide-peer-color) 22%, transparent)', borderRadius: '2px' },
   '.cm-ide-peer-caret, .cm-ide-peer-eol': {
     position: 'relative', display: 'inline-block', width: '0', height: '1.15em',
@@ -420,25 +507,41 @@ const ideEditorTheme = EditorView.baseTheme({
 
 export function buildIdeKeymap(preset: 'jetbrains' | 'standard', getCallbacks: () => IdeEditorCallbacks): Extension {
   const bindings: KeyBinding[] = [
-    { key: 'Alt-Shift-ArrowUp', run: addCursorAbove },
-    { key: 'Alt-Shift-ArrowDown', run: addCursorBelow },
     { key: 'Mod-Alt-ArrowUp', run: addCursorAbove },
     { key: 'Mod-Alt-ArrowDown', run: addCursorBelow },
+    { key: 'Alt-Shift-ArrowUp', run: moveLineUp },
+    { key: 'Alt-Shift-ArrowDown', run: moveLineDown },
+    { key: 'Alt-ArrowUp', run: (v) => { const cb = getCallbacks().onJumpSymbol; if (cb) { cb(-1); return true; } return moveLineUp(v); } },
+    { key: 'Alt-ArrowDown', run: (v) => { const cb = getCallbacks().onJumpSymbol; if (cb) { cb(1); return true; } return moveLineDown(v); } },
     { key: 'Ctrl-g', run: selectNextOccurrence },
     { key: 'Ctrl-Mod-g', run: selectAllOccurrences },
     { key: 'Alt-Shift-i', run: splitSelectionIntoLines },
     { key: 'Alt-Shift-I', run: splitSelectionIntoLines },
-    { key: 'Alt-ArrowUp', run: moveLineUp },
-    { key: 'Alt-ArrowDown', run: moveLineDown },
     { key: 'Mod-/', run: toggleLineComment },
-    { key: 'Mod-b', run: (v) => { const cb = getCallbacks().onDefinitionJump; if (!cb) return false; const i = wordAtCursor(v.state); cb({ line: i.line, column: i.column, symbol: i.word || undefined }); return true; } },
+    { key: 'Mod-r', run: openReplaceInFile },
+    { key: 'F12', run: (v) => { const cbs = getCallbacks(); if (!cbs.onDefinitionJump) return false; void requestIdeDiveAtPos(v, v.state.selection.main.head, 'definition', cbs); return true; } },
+    { key: 'Mod-b', run: (v) => { const cbs = getCallbacks(); if (!cbs.onDefinitionJump) return false; void requestIdeDiveAtPos(v, v.state.selection.main.head, 'definition', cbs); return true; } },
+    { key: 'Mod-Alt-b', run: (v) => { const cbs = getCallbacks(); if (!cbs.onImplementationJump && !cbs.onDefinitionJump) return false; void requestIdeDiveAtPos(v, v.state.selection.main.head, 'implementation', cbs); return true; } },
+    { key: 'Alt-F7', run: (v) => { const cb = getCallbacks().onFindUsages; if (!cb) return false; const i = wordAtCursor(v.state); cb({ line: i.line, column: i.column, symbol: i.word || undefined }); return true; } },
+    { key: 'Mod-F12', run: () => { const cb = getCallbacks().onFileStructure; if (!cb) return false; cb(); return true; } },
+    { key: 'Mod-Alt-ArrowLeft', run: () => { const cb = getCallbacks().onNavigateBack; if (!cb) return false; cb(); return true; } },
+    { key: 'Mod-Alt-ArrowRight', run: () => { const cb = getCallbacks().onNavigateForward; if (!cb) return false; cb(); return true; } },
     { key: 'Alt-Enter', run: (v) => { const cb = getCallbacks().onQuickFix; if (!cb) return false; const i = wordAtCursor(v.state); cb({ line: i.line, column: i.column, symbol: i.word || undefined }); return true; } },
     { key: 'Shift-F6', run: (v) => { const cb = getCallbacks().onRenameSymbol; if (!cb) return false; const i = wordAtCursor(v.state); cb({ line: i.line, column: i.column, symbol: i.word }); return true; } },
     { key: 'Mod-Alt-l', run: () => { const cb = getCallbacks().onFormat; if (!cb) return false; cb(); return true; } },
     { key: 'Mod-F8', run: (v) => { const cb = getCallbacks().onToggleBreakpoint; if (!cb) return false; cb(v.state.doc.lineAt(v.state.selection.main.head).number); return true; } },
     ...(preset === 'jetbrains'
-      ? [{ key: 'Mod-d', run: duplicateLineOrSelection }, { key: 'Mod-Backspace', run: deleteLine }]
-      : [{ key: 'Mod-d', run: selectNextOccurrence }, { key: 'Shift-Mod-d', run: duplicateLineOrSelection }, { key: 'Shift-Mod-k', run: deleteLine }]),
+      ? [
+          { key: 'Mod-[', run: () => { const cb = getCallbacks().onNavigateBack; if (!cb) return false; cb(); return true; } },
+          { key: 'Mod-]', run: () => { const cb = getCallbacks().onNavigateForward; if (!cb) return false; cb(); return true; } },
+          { key: 'Mod-d', run: duplicateLineOrSelection },
+          { key: 'Mod-Backspace', run: deleteLine },
+        ]
+      : [
+          { key: 'Mod-d', run: selectNextOccurrence },
+          { key: 'Shift-Mod-d', run: duplicateLineOrSelection },
+          { key: 'Shift-Mod-k', run: deleteLine },
+        ]),
   ];
   const altShiftIHandler = Prec.high(EditorView.domEventHandlers({
     keydown(e, view) {
@@ -456,32 +559,51 @@ export function buildIdeKeymap(preset: 'jetbrains' | 'standard', getCallbacks: (
 // ── Full IDE Suite Builder ───────────────────────────────────────────────────
 
 export interface CreateIdeExtensionsOptions {
+  filePath?: string;
   breakpoints: IdeBreakpoint[];
+  breakpointsMuted?: boolean;
   gutterItems: IdeGutterItem[];
   pausedLine: number | null;
   inlineValues: IdeInlineValue[];
   peerCursors: PeerCursorInput[];
   savedContent?: string | null;
+  blameByLine?: Record<number, string> | null;
   keymapPreset: 'jetbrains' | 'standard';
   getCallbacks: () => IdeEditorCallbacks;
 }
 
+function isBpTargetGutter(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  if (target.closest('.cm-ide-run-gutter, .cm-foldGutter, .cm-ide-diff-gutter')) return false;
+  return Boolean(target.closest('.cm-ide-bp-gutter, .cm-lineNumbers'));
+}
+
 export function createIdeExtensions(opts: CreateIdeExtensionsOptions): Extension {
-  const bpField = StateField.define<{ map: Map<number, IdeBreakpoint>; pausedLine: number | null }>({
+  const bpField = StateField.define<{ map: Map<number, IdeBreakpoint>; muted: boolean; pausedLine: number | null; hoverLine: number | null }>({
     create() {
       const map = new Map<number, IdeBreakpoint>();
       for (const bp of opts.breakpoints) map.set(bp.line, bp);
-      return { map, pausedLine: opts.pausedLine };
+      return { map, muted: Boolean(opts.breakpointsMuted), pausedLine: opts.pausedLine, hoverLine: null };
     },
     update(val, tr) {
-      let { map, pausedLine } = val;
+      let { map, muted, pausedLine, hoverLine } = val;
       for (const ef of tr.effects) {
         if (ef.is(setBreakpointsEffect)) {
+          const raw = ef.value;
+          const list = Array.isArray(raw) ? raw : raw.breakpoints;
+          if (!Array.isArray(raw) && raw.muted !== undefined) muted = raw.muted;
           map = new Map();
-          for (const bp of ef.value) map.set(bp.line, bp);
-        } else if (ef.is(setDebugDecorationsEffect)) pausedLine = ef.value.pausedLine;
+          for (const bp of list) map.set(bp.line, bp);
+        } else if (ef.is(setDebugDecorationsEffect)) {
+          pausedLine = ef.value.pausedLine;
+        } else if (ef.is(setHoverBpLineEffect)) {
+          hoverLine = ef.value;
+        }
       }
-      return map === val.map && pausedLine === val.pausedLine ? val : { map, pausedLine };
+      if (tr.docChanged && hoverLine != null && hoverLine > tr.state.doc.lines) hoverLine = null;
+      return map === val.map && muted === val.muted && pausedLine === val.pausedLine && hoverLine === val.hoverLine
+        ? val
+        : { map, muted, pausedLine, hoverLine };
     },
   });
 
@@ -530,52 +652,81 @@ export function createIdeExtensions(opts: CreateIdeExtensionsOptions): Extension
     provide: (f) => EditorView.decorations.from(f, (v) => v.decos),
   });
 
+  const handleBpClick = (_view: EditorView, ln: number, me: MouseEvent): boolean => {
+    const cbs = opts.getCallbacks();
+    if (me.shiftKey && cbs.onEditBreakpoint) { me.preventDefault(); cbs.onEditBreakpoint(ln, me); return true; }
+    if (cbs.onToggleBreakpoint) { me.preventDefault(); cbs.onToggleBreakpoint(ln); return true; }
+    return false;
+  };
+  const handleBpContextMenu = (view: EditorView, ln: number, me: MouseEvent): boolean => {
+    const cbs = opts.getCallbacks();
+    if (!cbs.onToggleBreakpoint && !cbs.onEditBreakpoint) return false;
+    me.preventDefault(); me.stopPropagation();
+    if (cbs.onEditBreakpoint) { cbs.onEditBreakpoint(ln, me); return true; }
+    const bp = view.state.field(bpField).map.get(ln);
+    ctxMenu.show(me, [{ label: bp ? 'Remove breakpoint' : 'Add breakpoint', icon: bp ? 'trash' : 'plus', action: () => cbs.onToggleBreakpoint?.(ln) }]);
+    return true;
+  };
+
   const bpGutter = gutter({
     class: 'cm-ide-bp-gutter',
     markers(view) {
-      const { map, pausedLine } = view.state.field(bpField);
-      if (map.size === 0 && pausedLine == null) return RangeSet.empty;
+      const { map, muted, pausedLine, hoverLine } = view.state.field(bpField);
+      if (map.size === 0 && pausedLine == null && hoverLine == null) return RangeSet.empty;
       const markers: Range<GutterMarker>[] = [];
       const lines = new Set<number>(map.keys());
       if (pausedLine != null) lines.add(pausedLine);
+      if (hoverLine != null) lines.add(hoverLine);
       for (const ln of [...lines].sort((a, b) => a - b)) {
         if (ln < 1 || ln > view.state.doc.lines) continue;
         const pos = view.state.doc.line(ln).from;
-        const bp = map.get(ln);
+        const bp = map.get(ln) as (IdeBreakpoint & { verified?: boolean }) | undefined;
         const isPaused = pausedLine === ln;
         if (bp) {
-          const kind = !bp.enabled ? 'disabled' : bp.log_message ? 'logpoint' : (bp.condition || bp.hit_condition) ? 'conditional' : 'enabled';
-          const tip = bp.log_message ? `Logpoint at line ${ln}: ${bp.log_message}` : bp.condition ? `Conditional breakpoint at line ${ln}: ${bp.condition}` : !bp.enabled ? `Disabled breakpoint at line ${ln}` : `Breakpoint at line ${ln}`;
-          markers.push(new BreakpointMarker(kind, tip, isPaused).range(pos));
-        } else if (isPaused) {
-          markers.push(new BreakpointMarker('paused', `Paused at line ${ln}`, false).range(pos));
-        }
+          const kind: BpVisualKind = muted ? 'muted' : !bp.enabled ? 'disabled' : bp.log_message ? 'logpoint' : (bp.condition || bp.hit_condition) ? 'conditional' : 'enabled';
+          const tip = muted ? `Muted breakpoint at line ${ln}` : bp.log_message ? `Logpoint at line ${ln}: ${bp.log_message}`
+            : bp.condition ? `Conditional breakpoint at line ${ln}: ${bp.condition}` : !bp.enabled ? `Disabled breakpoint at line ${ln}`
+            : `${bp.verified ? 'Verified b' : 'B'}reakpoint at line ${ln} (right-click for condition/logpoint)`;
+          markers.push(new BreakpointMarker(kind, tip, isPaused, Boolean(bp.verified && !muted && bp.enabled)).range(pos));
+        } else if (isPaused) markers.push(new BreakpointMarker('paused', `Paused at line ${ln}`, false, false).range(pos));
+        else if (hoverLine === ln) markers.push(new BreakpointMarker('preview', '', false, false).range(pos));
       }
       return RangeSet.of(markers, true);
     },
     initialSpacer: () => bpSpacer,
     domEventHandlers: {
-      mousedown(view, line, event) {
-        const me = event as MouseEvent;
-        if (me.button !== 0) return false;
-        const ln = view.state.doc.lineAt(line.from).number;
-        const cbs = opts.getCallbacks();
-        if (me.shiftKey && cbs.onEditBreakpoint) { me.preventDefault(); cbs.onEditBreakpoint(ln, me); return true; }
-        if (cbs.onToggleBreakpoint) { me.preventDefault(); cbs.onToggleBreakpoint(ln); return true; }
+      mousedown: (v, line, ev) => (ev as MouseEvent).button === 0 && handleBpClick(v, v.state.doc.lineAt(line.from).number, ev as MouseEvent),
+      contextmenu: (v, line, ev) => handleBpContextMenu(v, v.state.doc.lineAt(line.from).number, ev as MouseEvent),
+    },
+  });
+
+  // Track hover preview + click/right-click across BOTH the breakpoint strip AND line numbers!
+  const gutterInteractionHandlers = EditorView.domEventHandlers({
+    mousemove(event, view) {
+      if (!opts.getCallbacks().onToggleBreakpoint || !isBpTargetGutter(event.target)) {
+        if (view.state.field(bpField).hoverLine !== null) view.dispatch({ effects: setHoverBpLineEffect.of(null) });
         return false;
-      },
-      contextmenu(view, line, event) {
-        const me = event as MouseEvent;
-        const ln = view.state.doc.lineAt(line.from).number;
-        const cbs = opts.getCallbacks();
-        if (!cbs.onToggleBreakpoint && !cbs.onEditBreakpoint) return false;
-        const bp = view.state.field(bpField).map.get(ln);
-        ctxMenu.show(me, [
-          { label: bp ? 'Remove breakpoint' : 'Add breakpoint', icon: bp ? 'trash' : 'plus', action: () => cbs.onToggleBreakpoint?.(ln) },
-          ...(cbs.onEditBreakpoint ? [{ label: 'Edit condition / logpoint…', icon: 'edit', action: () => cbs.onEditBreakpoint?.(ln, me) }] : []),
-        ]);
-        return true;
-      },
+      }
+      const block = view.lineBlockAtHeight(event.clientY - view.documentTop);
+      const ln = view.state.doc.lineAt(block.from).number;
+      if (view.state.field(bpField).hoverLine !== ln) view.dispatch({ effects: setHoverBpLineEffect.of(ln) });
+      return false;
+    },
+    mouseleave(_event, view) {
+      if (view.state.field(bpField).hoverLine !== null) view.dispatch({ effects: setHoverBpLineEffect.of(null) });
+      return false;
+    },
+    mousedown(event, view) {
+      if (event.button !== 0 || !(event.target instanceof Element)) return false;
+      // `.cm-ide-bp-gutter` already handles its own mousedown; wire `.cm-lineNumbers` too!
+      if (!event.target.closest('.cm-lineNumbers') || event.metaKey || event.ctrlKey) return false;
+      const block = view.lineBlockAtHeight(event.clientY - view.documentTop);
+      return handleBpClick(view, view.state.doc.lineAt(block.from).number, event);
+    },
+    contextmenu(event, view) {
+      if (!(event.target instanceof Element) || !event.target.closest('.cm-lineNumbers')) return false;
+      const block = view.lineBlockAtHeight(event.clientY - view.documentTop);
+      return handleBpContextMenu(view, view.state.doc.lineAt(block.from).number, event);
     },
   });
 
@@ -593,189 +744,21 @@ export function createIdeExtensions(opts: CreateIdeExtensionsOptions): Extension
     initialSpacer: () => runSpacer,
   });
 
+  const fPath = (opts.filePath ?? '').toLowerCase().split('?')[0];
+  const isCsv = fPath.endsWith('.csv') || fPath.endsWith('.tsv');
+  const isShell = fPath.endsWith('.sh') || fPath.endsWith('.bash') || fPath.endsWith('.zsh');
+
   return [
-    ideEditorTheme, bpField, runField, debugField, peersField, bpGutter, runGutter,
-    createIdeGitAndAgentExtensions({ savedContent: opts.savedContent, wordAtCursor, getCallbacks: opts.getCallbacks }),
+    ideEditorTheme, bpField, runField, debugField, peersField, bpGutter, gutterInteractionHandlers, runGutter,
+    createCmdHoverDiveExtension(opts.getCallbacks),
+    createIdeGitAndAgentExtensions({
+      savedContent: opts.savedContent,
+      blameByLine: opts.blameByLine,
+      wordAtCursor,
+      getCallbacks: opts.getCallbacks,
+    }),
+    ...(isCsv ? [createIdeCsvExtension(opts.filePath ?? '')] : []),
+    ...(isShell ? [createShellVarHighlightExtension()] : []),
     buildIdeKeymap(opts.keymapPreset, opts.getCallbacks),
   ];
-}
-
-// ── Direct WebSocket JSON-RPC LSP Fallback (Zero Node Polyfills) ─────────────
-
-export interface DirectLspOptions {
-  wsUri: string;
-  protocols?: string[];
-  rootUri: string;
-  documentUri: string;
-  filePath: string;
-  languageId: string;
-  onLocationJump?: (uri: string, line: number, column: number) => void;
-  onDiagnostics?: (diags: IdeDiagnostic[]) => void;
-}
-
-export function createDirectLspExtension(opts: DirectLspOptions): Extension {
-  let socket: WebSocket | null = null;
-  let nextId = 1;
-  let version = 1;
-  let ready = false;
-  let closed = false;
-  let liveView: EditorView | null = null;
-  const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
-
-  const send = (p: Record<string, unknown>) => {
-    if (!closed && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(p));
-  };
-  const request = <T = unknown>(method: string, params: unknown): Promise<T> =>
-    new Promise<T>((resolve, reject) => {
-      if (!ready || socket?.readyState !== WebSocket.OPEN) return reject(new Error('LSP unavailable'));
-      const id = nextId++;
-      pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
-      send({ jsonrpc: '2.0', id, method, params });
-      setTimeout(() => { if (pending.delete(id)) reject(new Error('LSP timeout')); }, 6000);
-    });
-
-  const posToLsp = (doc: EditorState['doc'], pos: number) => {
-    const ln = doc.lineAt(pos);
-    return { line: ln.number - 1, character: pos - ln.from };
-  };
-  const lspToPos = (doc: EditorState['doc'], p: { line: number; character: number }) => {
-    const ln = doc.line(Math.max(1, Math.min(doc.lines, p.line + 1)));
-    return Math.min(ln.to, ln.from + Math.max(0, p.character));
-  };
-
-  const plugin = ViewPlugin.fromClass(class {
-    constructor(view: EditorView) {
-      liveView = view;
-      try { socket = new WebSocket(opts.wsUri, opts.protocols); } catch { return; }
-      socket.addEventListener('open', () => {
-        if (closed || !socket) return;
-        const initId = nextId++;
-        pending.set(initId, {
-          resolve: () => {
-            ready = true;
-            send({ jsonrpc: '2.0', method: 'initialized', params: {} });
-            send({ jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri: opts.documentUri, languageId: opts.languageId, version, text: view.state.doc.toString() } } });
-          },
-          reject: () => {},
-        });
-        send({
-          jsonrpc: '2.0', id: initId, method: 'initialize',
-          params: {
-            processId: null, rootUri: opts.rootUri, workspaceFolders: [{ uri: opts.rootUri, name: 'workspace' }],
-            capabilities: { textDocument: { hover: { contentFormat: ['plaintext', 'markdown'] }, completion: { completionItem: { snippetSupport: false } }, definition: { linkSupport: true }, publishDiagnostics: { relatedInformation: true } } },
-          },
-        });
-      });
-      socket.addEventListener('message', (ev) => {
-        if (closed || typeof ev.data !== 'string') return;
-        let msg: Record<string, unknown>;
-        try { msg = JSON.parse(ev.data) as Record<string, unknown>; } catch { return; }
-        if (typeof msg.id === 'number' && !msg.method) {
-          const p = pending.get(msg.id);
-          if (p) { pending.delete(msg.id); if (msg.error) p.reject(new Error('LSP error')); else p.resolve(msg.result); }
-          return;
-        }
-        if (typeof msg.id === 'number' && typeof msg.method === 'string') {
-          send({ jsonrpc: '2.0', id: msg.id, result: null });
-          return;
-        }
-        if (msg.method === 'textDocument/publishDiagnostics' && liveView) {
-          const params = msg.params as { uri?: string; diagnostics?: Array<{ range: { start: { line: number; character: number }; end: { line: number; character: number } }; severity?: number; message: string; source?: string; code?: string | number }> };
-          if (params?.uri && params.uri !== opts.documentUri) return;
-          const raw = params?.diagnostics ?? [];
-          const doc = liveView.state.doc;
-          const cmDiags: Diagnostic[] = raw.map((d) => ({
-            from: lspToPos(doc, d.range.start),
-            to: Math.max(lspToPos(doc, d.range.start), lspToPos(doc, d.range.end)),
-            severity: d.severity === 1 ? 'error' : d.severity === 2 ? 'warning' : 'info',
-            message: d.message, source: d.source,
-          }));
-          liveView.dispatch(setDiagnostics(liveView.state, cmDiags));
-          opts.onDiagnostics?.(raw.map((d) => ({
-            path: opts.filePath,
-            line: d.range.start.line + 1, column: d.range.start.character + 1,
-            end_line: d.range.end.line + 1, end_column: d.range.end.character + 1,
-            severity: d.severity === 1 ? 'error' : d.severity === 2 ? 'warning' : d.severity === 4 ? 'hint' : 'info',
-            message: d.message, source: d.source ?? null, code: d.code != null ? String(d.code) : null,
-          })));
-        }
-      });
-    }
-    update(u: ViewUpdate) {
-      if (u.docChanged && ready) {
-        version++;
-        send({ jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: opts.documentUri, version }, contentChanges: [{ text: u.state.doc.toString() }] } });
-      }
-    }
-    destroy() {
-      closed = true;
-      if (ready && socket?.readyState === WebSocket.OPEN) {
-        try { socket.send(JSON.stringify({ jsonrpc: '2.0', method: 'textDocument/didClose', params: { textDocument: { uri: opts.documentUri } } })); } catch { /* ignore */ }
-      }
-      for (const [, p] of pending) p.reject(new Error('LSP closed'));
-      pending.clear();
-      socket?.close();
-      socket = null;
-      liveView = null;
-    }
-  });
-
-  const hover = hoverTooltip(async (view, pos) => {
-    if (!ready) return null;
-    try {
-      const res = await request<{ contents?: string | { value?: string } | Array<string | { value?: string }> } | null>('textDocument/hover', {
-        textDocument: { uri: opts.documentUri }, position: posToLsp(view.state.doc, pos),
-      });
-      if (!res?.contents) return null;
-      const parts = Array.isArray(res.contents) ? res.contents : [res.contents];
-      const text = parts.map((p) => (typeof p === 'string' ? p : (p?.value ?? ''))).filter(Boolean).join('\n\n').trim();
-      if (!text) return null;
-      return {
-        pos,
-        create() {
-          const dom = document.createElement('div');
-          const maxH = typeof window !== 'undefined' ? Math.min(260, Math.max(120, window.innerHeight - 80)) : 260;
-          dom.style.cssText = `padding:var(--sp-2) var(--sp-3);font-family:var(--font-mono);font-size:var(--fs-xs);max-width:min(480px, calc(100vw - 24px));max-height:${maxH}px;overflow:auto;white-space:pre-wrap`;
-          dom.textContent = text;
-          return { dom };
-        },
-      };
-    } catch { return null; }
-  });
-
-  const completion = EditorState.languageData.of(() => [{
-    autocomplete: async (ctx: CompletionContext): Promise<CompletionResult | null> => {
-      if (!ready) return null;
-      const word = ctx.matchBefore(/[\w$]+/);
-      if (!word && !ctx.explicit) return null;
-      try {
-        const res = await request<Array<{ label: string; detail?: string; insertText?: string }> | { items?: Array<{ label: string; detail?: string; insertText?: string }> } | null>('textDocument/completion', {
-          textDocument: { uri: opts.documentUri }, position: posToLsp(ctx.state.doc, ctx.pos),
-        });
-        const items = Array.isArray(res) ? res : (res?.items ?? []);
-        if (!items.length) return null;
-        const options: Completion[] = items.slice(0, 120).map((it) => ({ label: it.label, detail: it.detail, apply: it.insertText || it.label }));
-        return { from: word ? word.from : ctx.pos, options };
-      } catch { return null; }
-    },
-  }]);
-
-  const cmdClickDef = EditorView.domEventHandlers({
-    mousedown(event, view) {
-      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.button !== 0 || !ready) return false;
-      const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
-      if (pos == null) return false;
-      type Loc = { uri?: string; targetUri?: string; range?: { start: { line: number; character: number } }; targetSelectionRange?: { start: { line: number; character: number } } };
-      void request<Loc | Loc[] | null>('textDocument/definition', { textDocument: { uri: opts.documentUri }, position: posToLsp(view.state.doc, pos) })
-        .then((res) => {
-          const first = Array.isArray(res) ? res[0] : res;
-          const uri = first?.targetUri ?? first?.uri;
-          const start = first?.targetSelectionRange?.start ?? first?.range?.start;
-          if (uri && start) opts.onLocationJump?.(uri, start.line + 1, start.character + 1);
-        }).catch(() => {});
-      return false;
-    },
-  });
-
-  return [plugin, hover, completion, cmdClickDef];
 }
