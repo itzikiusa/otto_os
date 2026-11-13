@@ -4,14 +4,17 @@
   import { scrollBehavior } from '../../lib/motion';
   import Badge from '../../lib/components/Badge.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Switch from '../../lib/components/Switch.svelte';
   import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { rowMenu } from '../../lib/rowMenu';
+
+  const FolderPickerLazy = lazyComponent(() => import('../../lib/components/FolderPicker.svelte'));
   import type { BadgeTone } from '../../lib/status';
   import {
     ide,
@@ -593,14 +596,20 @@
 </aside>
 
 {#if addFolderPickerOpen}
-  <FolderPicker
-    title="Add folder to project"
-    start={ide.target.kind === 'local' ? ide.target.root : ''}
-    onpick={(picked) => {
-      addFolderPickerOpen = false;
-      void ide.addProjectFolder(picked);
+  <LazyMount
+    lazy={FolderPickerLazy}
+    what="folder picker"
+    quiet
+    props={{
+      title: 'Add folder to project',
+      start: ide.target.kind === 'local' ? ide.target.root : '',
+      onpick: (picked: string) => {
+        addFolderPickerOpen = false;
+        void ide.addProjectFolder(picked);
+      },
+      onclose: () => (addFolderPickerOpen = false),
     }}
-    onclose={() => (addFolderPickerOpen = false)}
+    onerror={() => (addFolderPickerOpen = false)}
   />
 {/if}
 
