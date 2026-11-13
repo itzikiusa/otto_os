@@ -93,6 +93,11 @@ export function resolveIdeProjectCwd(): string | null {
   return ide.target.kind === 'local' && ide.target.root && ide.target.root !== '~' ? ide.target.root : null;
 }
 
+export function currentIdeTargetKey(): string {
+  const r = (ide.target.root ?? '').trim().replace(/\/+$/, '');
+  return r ? `${ide.target.kind}:${r}` : '';
+}
+
 export function upsertIdeContextChip(
   contexts: readonly IdeContextChip[],
   draft: Omit<IdeContextChip, 'id'> & { id?: string },

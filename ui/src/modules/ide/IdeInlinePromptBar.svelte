@@ -227,7 +227,7 @@
   {#if pickerOpen && providerBtnEl && ModelPicker.component}
     <ModelPicker.component
       anchor={providerBtnEl}
-      providers={ideAgent.availableProviders}
+      providers={ideAgent.inlineProviders}
       provider={st.provider}
       model={st.model}
       effort={normalizeEffort(st.effort)}

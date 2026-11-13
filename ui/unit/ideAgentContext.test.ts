@@ -16,6 +16,7 @@ import {
   parseFenceInfo,
   parseIdeContextChipsFromPrompt,
   resolveIdeHarnesses,
+  resolveIdeInlineProviders,
   spliceCodeRange,
   stripIdeContextBlocks,
   truncateSnippet,
@@ -365,17 +366,36 @@ test('matchesIdeProjectThread matches primary root, attached multi-folder roots,
     false,
   );
 
+  // Stale `activeSessionId` from a different folder on disk must NOT leak across workspace switches.
   assert.equal(
     matchesIdeProjectThread({
-      sessionId: 's-pinned',
-      activeSessionId: 's-pinned',
+      sessionId: 's-stale-project-a',
+      activeSessionId: 's-stale-project-a',
       workspaceId: 'ws-other',
       targetWorkspaceId: 'ws-1',
       cwd: '/Users/dev/unrelated-repo',
       projectRoots: roots,
     }),
+    false,
+  );
+
+  // When `projectRoots` is empty (e.g. SSH target), `activeSessionId` stays visible.
+  assert.equal(
+    matchesIdeProjectThread({
+      sessionId: 's-ssh-active',
+      activeSessionId: 's-ssh-active',
+      workspaceId: 'ws-ssh',
+      targetWorkspaceId: 'ws-1',
+      cwd: '/home/ubuntu/app',
+      projectRoots: [],
+    }),
     true,
   );
+
+  // `resolveIdeInlineProviders` restricts `⌘I` inline edit to structured runtime providers.
+  const inline = resolveIdeInlineProviders(['claude', 'aider-custom', 'agy', 'grok', 'shell', 'opencode', 'codex']);
+  assert.deepEqual(inline, ['claude', 'agy', 'grok', 'opencode', 'codex']);
+  assert.deepEqual(resolveIdeInlineProviders(['aider-custom', 'shell']), [...IDE_RUNTIME_PROVIDERS]);
 
   assert.equal(
     matchesIdeProjectThread({

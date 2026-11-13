@@ -6,13 +6,10 @@
 export * from './ideDiffApplier';
 export type { IdeThreadEntry } from '../agent/ideContextBuilders';
 
-import { api } from '../../../lib/api/client';
-import type { ApprovalDecision, RuntimeAccessMode, RuntimeSession } from '../../../lib/api/types';
+import type { ApprovalDecision, RuntimeAccessMode, RuntimeProvider, RuntimeSession } from '../../../lib/api/types';
 import { loadErrorText } from '../../../lib/loadError';
 import { normalizeEffort, supportsEffortSelection, type EffortLevel, type InteractionMode } from '../../../lib/providerModels';
 import { agentProviders, defaultAgentProvider } from '../../../lib/providers';
-import { router } from '../../../lib/router.svelte';
-import { openInThreads } from '../../../lib/runtimeThreadPort';
 import { lsGet, lsSet } from '../../../lib/storage';
 import type { ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
 import { ws } from '../../../lib/stores/workspace.svelte';
@@ -21,7 +18,6 @@ import type { RuntimeProjection } from '../../threads/runtime/projection'; // ui
 import { readAttachments } from '../../threads/runtime/runtimeComposer'; // ui-guards: allow — IDE agent dock shares image/PDF attachment reader
 import { isRuntimeProvider, runtimeThreads } from '../../threads/runtime/runtimeThreads.svelte'; // ui-guards: allow — IDE agent dock drives real Otto Threads
 import { runtimeViews } from '../../threads/runtime/runtimeView.svelte'; // ui-guards: allow — IDE agent dock streams structured runtime views
-import { threads } from '../../threads/threadsStore.svelte'; // ui-guards: allow — IDE agent dock syncs shared thread focus and project drafts
 import {
   applyIdeCodeProposal,
   computeProposalsMap,
@@ -31,8 +27,11 @@ import {
 import {
   executeIdeInlineEdit,
   executeIdePromptSend,
+  interruptIdeSessionTurn,
   isIdeSessionWorking,
+  loadIdeWorkspaceSessions,
   loadSelectedIdeSessionMeta,
+  openIdeThreadInThreadsView,
 } from '../agent/ideAgentTurnRunner.svelte';
 import {
   buildDebugFrameDraftChip,
@@ -45,6 +44,7 @@ import {
   buildTestFailureDraftChip,
   collectIdeProjectRoots,
   collectIdeThreadEntries,
+  currentIdeTargetKey,
   resolveIdeProjectCwd,
   resolveIdeWorkspaceId,
   upsertIdeContextChip,
@@ -64,6 +64,7 @@ import {
   buildIdeAgentPrompt,
   matchesIdeProjectThread,
   resolveIdeHarnesses,
+  resolveIdeInlineProviders,
   type IdeCodeProposal,
   type IdeContextChip,
   type IdeInlinePromptState,
@@ -102,15 +103,15 @@ class IdeAgentController {
   private subscribedSessionId: string | null = null;
   private stopViewOpen: (() => void) | null = null;
   private stopThreadWatch: (() => void) | null = null;
+  private stopTargetWatch: (() => void) | null = null;
+  private lastTargetKey = '';
   private chipSeq = 0;
   private inlineReqSeq = 0;
   private inflightWsLoads = new Map<string, Promise<void>>();
   private appliedPathByProposalId = new Map<string, string>();
   private proposalCache = new Map<string, { sig: string; proposals: IdeCodeProposal[] }>();
 
-  get panelOpen(): boolean {
-    return this.#panelOpen;
-  }
+  get panelOpen(): boolean { return this.#panelOpen; }
   set panelOpen(next: boolean) {
     if (this.#panelOpen === next) return;
     this.#panelOpen = next;
@@ -119,9 +120,7 @@ class IdeAgentController {
     if (next) void this.refreshWorkspaceSessions();
   }
 
-  get sessionId(): string | null {
-    return this.#sessionId;
-  }
+  get sessionId(): string | null { return this.#sessionId; }
   set sessionId(next: string | null) {
     if (this.#sessionId === next) return;
     this.#sessionId = next;
@@ -130,17 +129,13 @@ class IdeAgentController {
     this.syncSubscriptions();
   }
 
-  get inlinePrompt(): IdeInlinePromptState | null {
-    return this.#inlinePrompt;
-  }
+  get inlinePrompt(): IdeInlinePromptState | null { return this.#inlinePrompt; }
   set inlinePrompt(next: IdeInlinePromptState | null) {
     this.#inlinePrompt = next;
     this.syncSubscriptions();
   }
 
-  get provider(): string {
-    return this.#provider;
-  }
+  get provider(): string { return this.#provider; }
   set provider(next: string) {
     const clean = next.trim();
     if (!clean || clean === 'shell' || this.#provider === clean) return;
@@ -148,9 +143,7 @@ class IdeAgentController {
     lsSet(AGENT_PROVIDER_KEY, clean);
   }
 
-  get model(): string | null {
-    return this.#model;
-  }
+  get model(): string | null { return this.#model; }
   set model(next: string | null) {
     const clean = (next ?? '').trim() || null;
     if (this.#model === clean) return;
@@ -158,9 +151,7 @@ class IdeAgentController {
     lsSet(AGENT_MODEL_KEY, clean ?? '');
   }
 
-  get effort(): EffortLevel | null {
-    return this.#effort;
-  }
+  get effort(): EffortLevel | null { return this.#effort; }
   set effort(next: EffortLevel | null) {
     if (this.#effort === next) return;
     this.#effort = next;
@@ -245,6 +236,8 @@ class IdeAgentController {
     resolveIdeHarnesses(agentProviders(), [this.#provider, ...this.threads.map((t) => t.provider)]),
   );
 
+  readonly inlineProviders = $derived.by((): RuntimeProvider[] => resolveIdeInlineProviders(this.availableProviders));
+
   readonly effectiveModel = $derived<string | null>(
     this.#model ?? this.activeRuntimeSession?.model ?? this.activeThread?.model ?? null,
   );
@@ -273,15 +266,34 @@ class IdeAgentController {
     }),
   );
 
-  resolveWorkspaceId(): string {
-    return resolveIdeWorkspaceId();
-  }
+  resolveWorkspaceId(): string { return resolveIdeWorkspaceId(); }
+  resolveProjectCwd(): string | null { return resolveIdeProjectCwd(); }
 
-  resolveProjectCwd(): string | null {
-    return resolveIdeProjectCwd();
+  syncTargetRoot(nextKey = currentIdeTargetKey()): void {
+    if (this.lastTargetKey && this.lastTargetKey !== nextKey) {
+      this.#sessionId = null;
+      this.freshContext = false;
+      this.contexts = [];
+      this.attachments = [];
+      this.inlineReqSeq++;
+      this.#inlinePrompt = null;
+      this.error = null;
+      this.proposalCache.clear();
+      this.appliedPathByProposalId.clear();
+      this.appliedUndoByProposalId = {};
+      this.lastTargetKey = nextKey;
+      this.syncSubscriptions();
+      if (nextKey && this.#panelOpen) void this.refreshWorkspaceSessions();
+      return;
+    }
+    if (!this.lastTargetKey && nextKey) {
+      this.lastTargetKey = nextKey;
+      if (this.#panelOpen) void this.refreshWorkspaceSessions();
+    }
   }
 
   ensureMounted(): () => void {
+    this.syncTargetRoot();
     this.syncSubscriptions();
     void this.refreshWorkspaceSessions();
     return () => {
@@ -290,22 +302,30 @@ class IdeAgentController {
   }
 
   async refreshWorkspaceSessions(): Promise<void> {
-    const wsId = resolveIdeWorkspaceId();
-    if (!wsId) return;
-    const key = `${wsId}:all`;
-    let pending = this.inflightWsLoads.get(key);
-    if (!pending) {
-      pending = Promise.allSettled([runtimeThreads.load(wsId), runtimeThreads.loadAll()])
-        .then(() => undefined)
-        .finally(() => {
-          this.inflightWsLoads.delete(key);
-        });
-      this.inflightWsLoads.set(key, pending);
-    }
-    await pending;
+    await loadIdeWorkspaceSessions(resolveIdeWorkspaceId(), this.inflightWsLoads);
   }
 
   private syncSubscriptions(forceRelease = false): void {
+    const watchNeeded =
+      !forceRelease &&
+      (this.#panelOpen ||
+        Boolean(this.#inlinePrompt?.open) ||
+        this.#sessionId !== null ||
+        this.contexts.length > 0 ||
+        this.attachments.length > 0);
+    if (watchNeeded && !this.stopTargetWatch) {
+      this.lastTargetKey = currentIdeTargetKey();
+      this.stopTargetWatch = $effect.root(() => {
+        $effect(() => {
+          this.syncTargetRoot(currentIdeTargetKey());
+        });
+      });
+    } else if (!watchNeeded && this.stopTargetWatch) {
+      this.stopTargetWatch();
+      this.stopTargetWatch = null;
+      if (forceRelease) this.lastTargetKey = '';
+    }
+
     const active = !forceRelease && (this.#panelOpen || Boolean(this.#inlinePrompt?.open));
     if (!active) {
       this.stopViewOpen?.();
@@ -341,12 +361,11 @@ class IdeAgentController {
   private upsertContext(draft: Omit<IdeContextChip, 'id'> & { id?: string }): IdeContextChip {
     const { chip, next } = upsertIdeContextChip(this.contexts, draft, () => `ctx-${++this.chipSeq}`);
     this.contexts = next;
+    this.syncSubscriptions();
     return chip;
   }
 
-  togglePanel(open?: boolean): void {
-    this.panelOpen = open ?? !this.#panelOpen;
-  }
+  togglePanel(open?: boolean): void { this.panelOpen = open ?? !this.#panelOpen; }
 
   setProvider(next: string): void {
     const clean = next.trim();
@@ -362,13 +381,10 @@ class IdeAgentController {
 
   cycleProvider(): void {
     const list = this.availableProviders;
-    if (list.length === 0) return;
-    this.setProvider(list[(list.indexOf(this.#provider) + 1) % list.length]);
+    if (list.length > 0) this.setProvider(list[(list.indexOf(this.#provider) + 1) % list.length]);
   }
 
-  setAccessMode(mode: 'default' | 'plan' | 'full'): void {
-    this.accessMode = mode;
-  }
+  setAccessMode(mode: 'default' | 'plan' | 'full'): void { this.accessMode = mode; }
 
   startNewChat(): void {
     this.error = null;
@@ -379,10 +395,12 @@ class IdeAgentController {
 
   removeContext(id: string): void {
     this.contexts = this.contexts.filter((c) => c.id !== id);
+    this.syncSubscriptions();
   }
 
   clearContexts(): void {
     this.contexts = [];
+    this.syncSubscriptions();
   }
 
   async addAttachments(files: Iterable<File>): Promise<void> {
@@ -392,22 +410,19 @@ class IdeAgentController {
       files,
       (f) => f.type.startsWith('image/') || (allowPdf && f.type === 'application/pdf'),
     );
-    if (read.length > 0) this.attachments = [...this.attachments, ...read];
+    if (read.length > 0) {
+      this.attachments = [...this.attachments, ...read];
+      this.syncSubscriptions();
+    }
   }
 
   removeAttachment(index: number): void {
     this.attachments = this.attachments.filter((_, i) => i !== index);
+    this.syncSubscriptions();
   }
 
   openActiveInThreads(targetId?: string | null): void {
-    const id = targetId ?? this.#sessionId;
-    if (id) {
-      threads.selectThread(id, { syncRoute: false });
-      openInThreads(id);
-      return;
-    }
-    threads.startNewThread({ workspaceId: resolveIdeWorkspaceId(), cwd: resolveIdeProjectCwd() });
-    router.go('threads/new');
+    openIdeThreadInThreadsView(targetId ?? this.#sessionId, resolveIdeWorkspaceId(), resolveIdeProjectCwd());
   }
 
   async reopenActiveSession(): Promise<boolean> {
@@ -465,6 +480,7 @@ class IdeAgentController {
   toggleProblemsPill(): void {
     if (this.contexts.some((c) => c.kind === 'diagnostic')) {
       this.contexts = this.contexts.filter((c) => c.kind !== 'diagnostic');
+      this.syncSubscriptions();
       return;
     }
     for (const diag of ide.problems.slice(0, 3)) {
@@ -475,6 +491,7 @@ class IdeAgentController {
   toggleDebugPill(): void {
     if (this.contexts.some((c) => c.kind === 'debug_frame')) {
       this.contexts = this.contexts.filter((c) => c.kind !== 'debug_frame');
+      this.syncSubscriptions();
       return;
     }
     if (ide.activeDebug?.state === 'paused') {
@@ -485,6 +502,7 @@ class IdeAgentController {
   toggleFailedRunPill(): void {
     if (this.contexts.some((c) => c.kind === 'test_failure' || c.kind === 'run_output')) {
       this.contexts = this.contexts.filter((c) => c.kind !== 'test_failure' && c.kind !== 'run_output');
+      this.syncSubscriptions();
       return;
     }
     const run = ide.activeRun;
@@ -516,10 +534,11 @@ class IdeAgentController {
 
   setInlineProvider(next: string): void {
     const st = this.#inlinePrompt;
-    if (!st || !next || next === 'shell' || st.provider === next) return;
-    st.provider = next;
+    const clean = next.trim();
+    if (!st || !isRuntimeProvider(clean) || st.provider === clean) return;
+    st.provider = clean;
     st.model = null;
-    if (!supportsEffortSelection(next)) st.effort = null;
+    if (!supportsEffortSelection(clean)) st.effort = null;
   }
 
   setInlineModel(next: string | null): void {
@@ -725,8 +744,7 @@ class IdeAgentController {
   async stopTurn(): Promise<void> {
     if (!this.#sessionId) return;
     try {
-      if (runtimeThreads.byId[this.#sessionId]) await runtimeThreads.interrupt(this.#sessionId);
-      else await api.post<void>(`/sessions/${encodeURIComponent(this.#sessionId)}/input`, { text: '\u001b', submit: false });
+      await interruptIdeSessionTurn(this.#sessionId);
     } catch (e) {
       this.error = loadErrorText(e);
     }

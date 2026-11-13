@@ -15,7 +15,7 @@
   import { harnessLabel } from '../../lib/providers';
   import { runtimeViews } from '../threads/runtime/runtimeView.svelte'; // ui-guards: allow — shared runtime view load/stale error state
   import IdeAgentComposer from './agent/IdeAgentComposer.svelte';
-  import { showIdeSessionMenu } from './agent/IdeContextBar.svelte';
+  import IdeContextBar, { showIdeSessionMenu } from './agent/IdeContextBar.svelte';
   import IdeRuntimeTimeline from './agent/IdeRuntimeTimeline.svelte';
   import { ide } from './ideStore.svelte';
   import { ideAgent } from './store/ideAgentController.svelte';
@@ -26,6 +26,11 @@
   let stickToBottom = $state(true);
 
   onMount(() => ideAgent.ensureMounted());
+
+  $effect(() => {
+    const r = (ide.target.root ?? '').trim().replace(/\/+$/, '');
+    ideAgent.syncTargetRoot(r ? `${ide.target.kind}:${r}` : '');
+  });
 
   const activeThread = $derived(ideAgent.activeThread);
   const sessionTitle = $derived(activeThread?.title?.trim() || 'New thread');
@@ -155,6 +160,25 @@
         />
       {/key}
     </div>
+    <footer class="ia-pty-foot">
+      <IdeContextBar />
+      {#if ideAgent.contexts.length > 0}
+        <div class="ia-pty-send-row">
+          <span class="ia-pty-send-hint">
+            {ideAgent.contexts.length} {ideAgent.contexts.length === 1 ? 'context item' : 'context items'} attached
+          </span>
+          <button
+            type="button"
+            class="btn small ia-pty-cta"
+            disabled={ideAgent.sending}
+            onclick={() => void ideAgent.sendPrompt()}
+            data-testid="ide-agent-pty-send-context"
+          >
+            <Icon name="send" size={12} /> Send context to thread
+          </button>
+        </div>
+      {/if}
+    </footer>
   {:else}
     <div class="ia-stream scroll-thin" bind:this={messagesEl} onscroll={onStreamScroll} data-testid="ide-agent-messages">
       <LoadState
@@ -330,6 +354,38 @@
     min-inline-size: 0;
     display: flex;
     flex-direction: column;
+  }
+  .ia-pty-foot {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    border-block-start: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+  .ia-pty-send-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
+  .ia-pty-send-hint {
+    min-inline-size: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ia-pty-cta {
+    background: var(--accent-soft);
+    border-color: var(--accent-line);
+    color: var(--accent-text);
+    flex-shrink: 0;
+  }
+  .ia-pty-cta:hover:not(:disabled) {
+    background: var(--accent-soft-strong);
   }
   .ia-stream {
     flex: 1;

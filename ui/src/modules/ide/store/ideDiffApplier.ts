@@ -58,6 +58,7 @@ export const MAX_IDE_CONTEXT_PAYLOAD_CHARS = 28_000;
 export const IDE_PROPOSAL_INSTRUCTION =
   'When proposing code changes for a file, wrap the updated file or selection in a fenced block like ```<lang> path=<relative-path>\n...\n```.';
 export const IDE_RUNTIME_PROVIDERS = ['claude', 'codex', 'gemini', 'agy', 'grok', 'opencode', 'pi'] as const;
+export type IdeRuntimeProvider = (typeof IDE_RUNTIME_PROVIDERS)[number];
 
 const NON_CODE_FENCE_LANGS = new Set(['sh', 'bash', 'zsh', 'shell', 'console', 'mermaid', 'diff', 'patch']);
 const EXT_LANG_MAP: Record<string, string> = {
@@ -98,9 +99,21 @@ export function resolveIdeHarnesses(
   return merged;
 }
 
+/** Filter available harnesses down to structured `/runtime-sessions` providers for `⌘I` inline edit. */
+export function resolveIdeInlineProviders(availableProviders: readonly string[]): IdeRuntimeProvider[] {
+  const runtimeSet = new Set<string>(IDE_RUNTIME_PROVIDERS);
+  const filtered: IdeRuntimeProvider[] = [];
+  for (let i = 0; i < availableProviders.length; i++) {
+    const p = availableProviders[i]?.trim() ?? '';
+    if (runtimeSet.has(p) && !filtered.includes(p as IdeRuntimeProvider)) {
+      filtered.push(p as IdeRuntimeProvider);
+    }
+  }
+  return filtered.length > 0 ? filtered : [...IDE_RUNTIME_PROVIDERS];
+}
+
 /** Match any structured runtime or PTY thread belonging to the current IDE workspace or any attached project folder. */
 export function matchesIdeProjectThread(input: MatchIdeThreadInput): boolean {
-  if (input.activeSessionId && input.sessionId === input.activeSessionId) return true;
   const roots = (input.projectRoots ?? []).map(normPath).filter(Boolean);
   const cwd = normPath(input.cwd);
   if (roots.length > 0 && cwd) {
@@ -110,6 +123,7 @@ export function matchesIdeProjectThread(input: MatchIdeThreadInput): boolean {
     }
     return false;
   }
+  if (input.activeSessionId && input.sessionId === input.activeSessionId) return true;
   return Boolean(input.targetWorkspaceId) && input.workspaceId === input.targetWorkspaceId;
 }
 

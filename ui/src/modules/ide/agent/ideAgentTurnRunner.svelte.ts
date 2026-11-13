@@ -6,6 +6,8 @@ import { api } from '../../../lib/api/client';
 import type { PromptImage, RuntimeAccessMode, RuntimeProvider } from '../../../lib/api/types';
 import { normalizeEffort, type EffortLevel, type InteractionMode } from '../../../lib/providerModels';
 import { harnessLabel } from '../../../lib/providers';
+import { router } from '../../../lib/router.svelte';
+import { openInThreads } from '../../../lib/runtimeThreadPort';
 import type { ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
 import { transcript } from '../../../lib/stores/transcript.svelte';
 import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
@@ -34,6 +36,36 @@ export function summarizeIdeThreadTitle(text: string, provider = 'Agent'): strin
       .find((l) => l.trim().length > 0)
       ?.trim() ?? `${harnessLabel(provider)} thread`;
   return first.length > 64 ? `${first.slice(0, 61)}…` : first;
+}
+
+export function openIdeThreadInThreadsView(id: string | null, workspaceId: string, cwd: string | null): void {
+  if (id) {
+    threads.selectThread(id, { syncRoute: false });
+    openInThreads(id);
+    return;
+  }
+  threads.startNewThread({ workspaceId, cwd });
+  router.go('threads/new');
+}
+
+export async function interruptIdeSessionTurn(sessionId: string): Promise<void> {
+  if (runtimeThreads.byId[sessionId]) await runtimeThreads.interrupt(sessionId);
+  else await api.post<void>(`/sessions/${encodeURIComponent(sessionId)}/input`, { text: '\u001b', submit: false });
+}
+
+export async function loadIdeWorkspaceSessions(wsId: string, inflight: Map<string, Promise<void>>): Promise<void> {
+  if (!wsId) return;
+  const key = `${wsId}:all`;
+  let pending = inflight.get(key);
+  if (!pending) {
+    pending = Promise.allSettled([runtimeThreads.load(wsId), runtimeThreads.loadAll()])
+      .then(() => undefined)
+      .finally(() => {
+        inflight.delete(key);
+      });
+    inflight.set(key, pending);
+  }
+  await pending;
 }
 
 export function isIdeSessionWorking(sending: boolean, sid: string | null): boolean {
