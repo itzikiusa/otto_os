@@ -241,16 +241,19 @@ export function classifyIdeFile(tab: IdeOpenTab, rootPath: string, additionalRoo
   sdkLabel: string | null;
 } {
   const p = tab.path;
+  const allRoots = [rootPath, ...additionalRoots].map((r) => r.replace(/\/+$/, '')).filter(Boolean);
+  const inWorkspace = allRoots.some((r) => p === r || p.startsWith(`${r}/`));
+
   if (p.startsWith('jdt://') || p.startsWith('jar:')) return { external: true, sdkLabel: 'JDK / JAR' };
   if (p.includes('/pkg/mod/') || p.includes('/go/pkg/mod/')) return { external: true, sdkLabel: 'Go module' };
-  if (/\/go(?:\d[\w.]*)?\/(?:libexec\/)?src\//.test(p) || p.includes('/goroot/')) return { external: true, sdkLabel: 'Go SDK' };
+  if (!inWorkspace && (/\/go(?:@[\w.-]+)?(?:\/[\w.-]+|\d[\w.-]*)?\/(?:libexec\/)?src\//.test(p) || p.includes('/goroot/'))) {
+    return { external: true, sdkLabel: 'Go SDK' };
+  }
   if (p.includes('/node_modules/')) return { external: true, sdkLabel: 'node_modules' };
   if (p.includes('/.cargo/registry/') || p.includes('/rustlib/src/')) return { external: true, sdkLabel: 'Rust crate' };
   if (p.includes('/site-packages/') || p.includes('/dist-packages/')) return { external: true, sdkLabel: 'Python pkg' };
   if (p.includes('/.otto/toolchains/')) return { external: true, sdkLabel: 'SDK' };
 
-  const allRoots = [rootPath, ...additionalRoots].map((r) => r.replace(/\/+$/, '')).filter(Boolean);
-  const inWorkspace = allRoots.some((r) => p === r || p.startsWith(`${r}/`));
   const tabExt = (tab as IdeOpenTab & { external?: boolean }).external;
   if (tabExt || (!inWorkspace && allRoots.length > 0)) {
     return { external: true, sdkLabel: 'External' };
