@@ -153,6 +153,20 @@ test('a thread deep link from another workspace opens the thread at phone width'
     await composer.press('Enter');
     await expect(thread.getByText(`echo: long ${i} `).first()).toBeVisible({ timeout: 20_000 });
   }
+  // A markdown table at phone width: a short column keeps its words whole
+  // (it used to break letter by letter) and the table scrolls inside itself.
+  await composer.fill('t\n\n| Agent | Status |\n|---|---|\n| tma-acp | ' + 'working on the Antigravity driver and the timeline '.repeat(4) + '|');
+  await composer.press('Enter');
+  const cell = thread.locator('.md td', { hasText: /^tma-acp$/ }).last();
+  await expect(cell).toBeVisible({ timeout: 20_000 });
+  // Its narrowest line holds a whole word part ("tma-"), never one letter.
+  const lineWidths = await cell.evaluate((el) => {
+    const r = document.createRange();
+    r.selectNodeContents(el);
+    return [...r.getClientRects()].map((b) => b.width / parseFloat(getComputedStyle(el).fontSize));
+  });
+  expect(Math.min(...lineWidths), 'short table cell keeps its words whole').toBeGreaterThan(1.5);
+  await expectNoHorizontalOverflow(page);
   for (const to of [0, 1e7]) {
     await page.evaluate((y) => {
       for (const el of document.querySelectorAll<HTMLElement>('[data-testid="threads-page"] *')) {
