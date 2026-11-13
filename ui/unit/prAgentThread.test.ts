@@ -61,9 +61,10 @@ test('provider: the default when it can run a thread, else the first ready one, 
   const { mod } = load(() => null);
   const ready = (p: string) => p !== 'codex';
   assert.equal(mod.pickRuntimeProvider('claude', ['agy', 'claude', 'codex'], ready), 'claude');
-  assert.equal(mod.pickRuntimeProvider('agy', ['agy', 'claude'], ready), 'claude'); // agy is terminal-only
+  assert.equal(mod.pickRuntimeProvider('agy', ['agy', 'claude'], ready), 'agy'); // agy runs on ACP
+  assert.equal(mod.pickRuntimeProvider('shell', ['shell', 'claude'], ready), 'claude'); // terminal-only
   assert.equal(mod.pickRuntimeProvider('codex', ['codex', 'gemini'], ready), 'gemini');
-  assert.equal(mod.pickRuntimeProvider('claude', ['agy', 'shell'], ready), null);
+  assert.equal(mod.pickRuntimeProvider('claude', ['my-cli', 'shell'], ready), null);
 });
 
 test('find asks the daemon for this PR only, and falls back to the remembered id', async () => {

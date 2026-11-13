@@ -117,6 +117,21 @@ export function ciOf(pr: PrSummary): CiFilter | null {
   return null;
 }
 
+/** The row's review chip: approved (with the count), changes requested, or
+ *  waiting on a reviewer; `null` when the provider says nothing. */
+export function reviewChip(pr: PrSummary): { tone: 'ok' | 'bad' | 'warn'; text: string; label: string } | null {
+  const r = pr.review;
+  // A merged or declined PR is past review: only open rows say where it stands.
+  if (!r || pr.state !== 'open') return null;
+  if (r.status === 'changes_requested') return { tone: 'bad', text: 'Changes requested', label: 'Changes requested' };
+  if (r.status === 'approved') {
+    const text = `${r.approvals} ${r.approvals === 1 ? 'approval' : 'approvals'}`;
+    return { tone: 'ok', text, label: `Approved — ${text}` };
+  }
+  if (r.status === 'waiting') return { tone: 'warn', text: 'Awaiting review', label: 'Awaiting review' };
+  return null;
+}
+
 /** Authored by the forge account in use: the daemon's `is_mine` (a stable-id
  *  match — a Bitbucket author is a display name, the username an email, so a
  *  name match misses), else — older daemon, or an identity it couldn't look

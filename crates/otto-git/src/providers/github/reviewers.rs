@@ -9,19 +9,35 @@
 //! `Link: rel="next"`. GitHub drops a reviewer from `requested_reviewers` once
 //! they review, so this is exactly "still waiting on you".
 
-use otto_core::api::PrSummary;
+use otto_core::api::{PrReviewSummary, PrState, PrSummary};
 use otto_core::{Error, Result};
 use serde_json::{json, Value};
 
 use super::{summary_for, user_keys, Github};
+use crate::providers::client::{memo_read, memo_store, write_generation};
 use crate::providers::identity::Me;
-use crate::providers::{varr, PrPage, RemoteRef};
+use crate::providers::{varr, vstr, PrPage, RemoteRef};
 
 /// The PR row asks `me` for a review (stable ids, never a display name).
 pub(crate) fn requested_from(pr: &Value, me: &Me) -> bool {
     varr(pr, &["requested_reviewers"])
         .iter()
         .any(|u| me.owns(&user_keys(u)))
+}
+
+/// One PR's verdict from its `reviewDecision` and latest opinionated reviews
+/// (one per reviewer). `requested`: the REST row still asks someone.
+fn review_of(pr: &Value, requested: bool) -> Option<PrReviewSummary> {
+    let decision = vstr(pr, &["reviewDecision"]);
+    let states: Vec<String> = varr(pr, &["latestOpinionatedReviews", "nodes"])
+        .iter()
+        .map(|n| vstr(n, &["state"]))
+        .collect();
+    PrReviewSummary::from_counts(
+        decision == "CHANGES_REQUESTED" || states.iter().any(|s| s == "CHANGES_REQUESTED"),
+        states.iter().filter(|s| *s == "APPROVED").count() as u32,
+        requested || decision == "REVIEW_REQUIRED",
+    )
 }
 
 /// The bodies of the two reviewer writes: `POST` (add) and `DELETE` (remove)
@@ -64,15 +80,74 @@ impl Github {
         let (body, next) = listed?;
         let v: Value = serde_json::from_str(&body)
             .map_err(|e| Error::Upstream(format!("github: bad json: {e}")))?;
-        let items: Vec<PrSummary> = varr(&v, &[])
+        let mut items: Vec<PrSummary> = varr(&v, &[])
             .iter()
             .filter(|p| requested_from(p, &me))
             .map(|p| summary_for(p, Some(&me)))
             .collect();
+        self.overlay_reviews(r, &mut items).await;
         Ok(PrPage {
             items,
             has_more: next.is_some(),
         })
+    }
+
+    /// The verdicts of a page's open PRs in ONE GraphQL read (the REST list
+    /// carries none), memoised like the review threads: a write to the repo
+    /// drops it. Best-effort — on failure a row keeps its REST "waiting" hint.
+    pub(crate) async fn overlay_reviews(&self, r: &RemoteRef, items: &mut [PrSummary]) {
+        let open: Vec<u64> = items
+            .iter()
+            .filter(|p| p.state == PrState::Open)
+            .map(|p| p.number)
+            .collect();
+        if open.is_empty() {
+            return;
+        }
+        let fields: String = open
+            .iter()
+            .map(|n| {
+                format!(
+                    "p{n}:pullRequest(number:{n}){{reviewDecision \
+                     latestOpinionatedReviews(first:100){{nodes{{state}}}}}}"
+                )
+            })
+            .collect();
+        let q = format!(
+            "query($owner:String!,$name:String!){{repository(owner:$owner,name:$name){{{fields}}}}}"
+        );
+        let numbers: Vec<String> = open.iter().map(u64::to_string).collect();
+        let memo_url = format!(
+            "{}/repos/{}/{}/pulls#reviews={}",
+            self.base,
+            r.owner,
+            r.repo,
+            numbers.join(",")
+        );
+        let auth = format!("Bearer {}", self.token);
+        let repo = match memo_read(&memo_url, &auth).and_then(|b| serde_json::from_str(&b).ok()) {
+            Some(repo) => repo,
+            None => {
+                let generation = write_generation(&memo_url);
+                let vars = json!({ "owner": r.owner, "name": r.repo });
+                match self.graphql(&q, vars).await {
+                    Ok(v) => {
+                        let repo = v["data"]["repository"].clone();
+                        memo_store(&memo_url, &auth, repo.to_string(), generation);
+                        repo
+                    }
+                    Err(e) => {
+                        tracing::debug!("github: PR review verdicts unavailable: {e}");
+                        return;
+                    }
+                }
+            }
+        };
+        for p in items.iter_mut() {
+            if let Some(pr) = repo.get(format!("p{}", p.number)) {
+                p.review = review_of(pr, p.review.is_some());
+            }
+        }
     }
 
     /// Request (`add`) and un-request (`remove`) reviewers by login. A login

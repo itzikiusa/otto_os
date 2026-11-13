@@ -39,6 +39,7 @@
   // one — before first paint. Load it on demand from the page registry, which
   // shares the chunk with the Database route (never fetched twice).
   import { loadPage, loadedPage } from '../../shell/pages.svelte';
+  import { reloadForStaleChunk } from '../../lib/staleChunk';
   import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -62,6 +63,13 @@
   /** Bumped by the Database pane's Retry: re-keys the `{#await}` so a fresh
    *  `loadPage('database')` runs (a failed load is forgotten there). */
   let dbLoad = $state(0);
+  /** The Database pane's chunk; a failure reloads once (a deploy since this tab opened). */
+  function loadDbPane() {
+    return loadPage('database').catch((e: unknown) => {
+      reloadForStaleChunk();
+      throw e;
+    });
+  }
 
   // ── split: gutter drag + keyboard resize ─────────────────────────────────
   let el = $state<HTMLDivElement | null>(null);
@@ -218,7 +226,7 @@
                promise): Retry asks `loadPage` again (it forgets the failure),
                Reload Otto picks up the new build — the UsagePage pattern. -->
           {#key dbLoad}
-            {#await loadPage('database')}
+            {#await loadDbPane()}
               <div class="db-pane-loading"><Skeleton rows={3} label="the Database pane" /></div>
             {:catch}
               <div class="db-pane-loading">

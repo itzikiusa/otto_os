@@ -59,7 +59,7 @@
   import {
     pageKeyOf,
     loadedPage,
-    loadPage,
+    loadPage, showPage,
     pageError,
     prepareRoute,
     prefetchPagesWhenIdle,
@@ -146,7 +146,7 @@
   $effect(() => {
     // The first page normally arrives with the shell (the root App preloads
     // it); a deep link to a page whose load failed retries from here.
-    if (!untrack(() => loadedPage(pageKey))) void loadPage(pageKey).catch(() => {});
+    if (!untrack(() => loadedPage(pageKey))) void showPage(pageKey);
   });
   $effect(() => installNavPrefetch());
   // Boot timing marks (perf F1: e2e/desktop-boot-perf.spec.ts budgets them).

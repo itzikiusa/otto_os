@@ -15,10 +15,9 @@
 //! the design doc for the file-by-file mapping. Drivers: [`claude`] (the
 //! Agent SDK's stream-json control protocol against `claude`), [`codex`]
 //! (`codex app-server`) and [`acp`] (Gemini `gemini --acp`, Grok `grok …
-//! agent stdio`) and [`agy`] (Antigravity's print-mode stream-json).
+//! agent stdio`, Antigravity `agy acp`, opencode `opencode acp`).
 
 pub mod acp;
-pub mod agy;
 pub mod claude;
 pub mod codex;
 pub mod driver;
@@ -61,8 +60,8 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
 
 /// The production driver set — the providers T3 Code drives over a
 /// structured protocol: Claude (Agent SDK transport), Codex (app-server),
-/// Gemini, Grok and opencode (ACP), pi (its RPC mode) — plus Antigravity
-/// (`agy`'s own stream-json, where T3 Code needs an npm ACP adapter). A missing CLI fails the spawn, not the create.
+/// Gemini, Grok, Antigravity (`agy acp`) and opencode (ACP), pi (its RPC
+/// mode). A missing CLI fails the spawn, not the create.
 pub fn default_drivers() -> Arc<dyn DriverFactory> {
     use otto_core::agent_runtime::RuntimeProvider;
     Arc::new(
@@ -72,7 +71,7 @@ pub fn default_drivers() -> Arc<dyn DriverFactory> {
                 RuntimeProvider::Codex => Box::new(codex::CodexDriver::with_program("codex")),
                 RuntimeProvider::Gemini => Box::new(acp::AcpDriver::gemini("gemini")),
                 RuntimeProvider::Grok => Box::new(acp::AcpDriver::grok()),
-                RuntimeProvider::Agy => Box::new(agy::AgyDriver::with_program("agy")),
+                RuntimeProvider::Agy => Box::new(acp::AcpDriver::agy("agy")),
                 RuntimeProvider::Opencode => Box::new(acp::AcpDriver::opencode()),
                 RuntimeProvider::Pi => Box::new(pi::PiDriver::with_program("pi")),
             })

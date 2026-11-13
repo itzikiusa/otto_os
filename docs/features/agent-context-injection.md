@@ -49,10 +49,18 @@ SessionManager.create()                      crates/otto-sessions/src/manager.rs
 | Provider | Context delivery | Context file in bundle | Skills dir in bundle | Activity hooks | Launch flags Otto adds |
 |---|---|---|---|---|---|
 | **claude** (2.1.x) | `--append-system-prompt-file` (— `--add-dir` does **not** load `CLAUDE.md`) | `CONTEXT.md` | `.claude/skills/<name>/SKILL.md` (first-class, auto-loaded by `--add-dir`) | `settings.json` via `--settings` | `--add-dir=<b>` `--append-system-prompt-file=<b>/CONTEXT.md` `--settings=<b>/settings.json` |
-| **agy** (Antigravity Gemini 1.0.x) | `--add-dir` **auto-loads `AGENTS.md`** | `AGENTS.md` | `.agents/skills/<name>/SKILL.md` (first-class) | none | `--add-dir=<b>` |
+| **agy** (1.5.8) | **no launch flag** (see the note below): the structured runtime's `agy acp` driver sends `AGENTS.md` + a skills index as `session/new` `_meta.antigravity.systemPrompt.append`; a PTY agy runs without the bundle | `AGENTS.md` | `.agents/skills/<name>/SKILL.md` (read on demand via the index) | none | env `OTTO_AGY_CONTEXT_DIR=<b>` (read by the ACP driver, stripped from the child's env) |
 | **codex** (OpenAI 0.142.x) | `-c developer_instructions=<text>` (**no** flag loads an out-of-tree instructions *file*) | `CONTEXT.md` (carries a skills **index**) | `skills/<name>/SKILL.md` (read **on demand** via the index) | none | `--add-dir=<b>` `-c developer_instructions=<CONTEXT.md text>` |
 
 Notes that bit us, so you don't have to rediscover them:
+- agy runs every shell command in its **alphabetically-first workspace root**,
+  not the session cwd (verified 2026-11-13 on agy 1.5.8: PTY, print mode and
+  `agy acp`; `--add-dir` order and ACP `additionalDirectories` make no
+  difference). `--add-dir=~/.otto/context/agy/<cwd>` sorts before most repos,
+  so agy edited files inside the bundle. Otto therefore never adds the bundle
+  as a workspace root: a PTY agy trades Otto's context for the right cwd (its
+  own `~/.gemini` rules and skills still load); Threads / personal agents on
+  `agy acp` get the bundle through the system-prompt append.
 - claude's `--help` *claims* `--add-dir` loads "CLAUDE.md dirs" — it does **not**.
   Use `--append-system-prompt-file` (the *append* form, so Claude's own default
   system prompt survives).

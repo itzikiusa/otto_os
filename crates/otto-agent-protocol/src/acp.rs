@@ -56,7 +56,7 @@ use agent_client_protocol::v1::schema::{
 use otto_core::agent_runtime::{
     ApprovalDecision, ApprovalOption, PlanStep, PlanStepStatus, ProviderFailure, RequestKind,
     RuntimeAccessMode, RuntimePromptReq, RuntimeProvider, TurnItem, TurnItemKind, TurnItemStatus,
-    TurnTerminalStatus,
+    TurnTerminalStatus, TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
@@ -78,6 +78,7 @@ const M_SESSION_CANCEL: &str = "session/cancel";
 const M_SESSION_UPDATE: &str = "session/update";
 const M_REQUEST_PERMISSION: &str = "session/request_permission";
 const M_SESSION_SET_MODE: &str = "session/set_mode";
+const M_SESSION_SET_MODEL: &str = "session/set_model";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -110,14 +111,23 @@ pub struct AcpFlavor {
     pub cancel_meta: Option<Value>,
     /// Extra argv per access mode.
     pub access_args: Option<AccessArgs>,
-    /// The `session/set_mode` id of each access mode (live switching).
-    pub mode_id: Option<fn(RuntimeAccessMode) -> &'static str>,
+    /// The `session/set_mode` id of each access mode (live switching); `None`
+    /// for a mode only a launch flag gives (agy's full access), which the
+    /// runtime enters and leaves by respawning.
+    pub mode_id: Option<fn(RuntimeAccessMode) -> Option<&'static str>>,
     /// Environment per access mode (opencode's `OPENCODE_PERMISSION`).
     pub access_env: Option<AccessEnv>,
     /// When the agent takes its model as a session config option instead of
     /// a launch flag (opencode: `session/set_config_option {configId:
     /// "model"}`), that option's id; `model_flag` is then unused.
     pub model_config_id: Option<&'static str>,
+    /// The model goes as `session/set_model {modelId}` once ready (agy:
+    /// `gemini-4-argon-high` — the config option would drop the effort).
+    pub set_model: bool,
+    /// The env var naming an Otto context bundle (`AGENTS.md` +
+    /// `.agents/skills`) to send as `_meta.antigravity.systemPrompt.append`
+    /// instead of a workspace root (otto-context `AGY_BUNDLE_ENV`).
+    pub bundle_env: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,7 +207,8 @@ pub struct AcpDriver {
     /// Handed over in `session/new|load` (Otto's `otto` tools + the user's
     /// enabled servers — the set a terminal session gets).
     mcp_servers: Vec<McpServerDef>,
-    /// The model to apply through `flavor.model_config_id` once ready.
+    /// The model to apply through `flavor.model_config_id` / `set_model`
+    /// once ready.
     model: Option<String>,
     config_req: Option<u64>,
     /// The model write failed for a reason other than a refusal: written
@@ -219,6 +230,8 @@ pub struct AcpDriver {
     modes: Vec<String>,
     access: RuntimeAccessMode,
     mode_req: Option<u64>,
+    /// The bundle text for `_meta.antigravity.systemPrompt.append`.
+    system_append: Option<String>,
     queued: Option<(String, RuntimePromptReq)>,
     prompt_id: Option<u64>,
     turn_id: Option<String>,
@@ -270,6 +283,7 @@ impl AcpDriver {
             modes: Vec::new(),
             access: RuntimeAccessMode::default(),
             mode_req: None,
+            system_append: None,
             queued: None,
             prompt_id: None,
             turn_id: None,
@@ -295,12 +309,49 @@ impl AcpDriver {
             };
             (vec!["--approval-mode".into(), mode.into()], Vec::new())
         });
-        d.flavor.mode_id = Some(|m| match m {
-            RuntimeAccessMode::ApprovalRequired => "default",
-            RuntimeAccessMode::AutoAcceptEdits => "autoEdit",
-            RuntimeAccessMode::FullAccess => "yolo",
+        d.flavor.mode_id = Some(|m| {
+            Some(match m {
+                RuntimeAccessMode::ApprovalRequired => "default",
+                RuntimeAccessMode::AutoAcceptEdits => "autoEdit",
+                RuntimeAccessMode::FullAccess => "yolo",
+            })
         });
         d
+    }
+
+    /// Antigravity over its own ACP server (`agy acp`; verified live against
+    /// 1.5.8). `session/new|load` advertise the modes `default`,
+    /// `accept-edits`, `auto` and `plan`: approval-required and
+    /// auto-accept-edits are `session/set_mode` (also right after the session
+    /// opens, `agy acp` has no mode flag); full access is the launch flag
+    /// `--dangerously-skip-permissions` (`auto` still asks before commands
+    /// that leave its sandbox), so entering or leaving it respawns. The model
+    /// is `session/set_model` with a `modelId` such as
+    /// `gemini-4-argon-high` (`agy acp` takes no `--model`). Otto's context
+    /// bundle goes as the session's system-prompt append, not `--add-dir`:
+    /// agy runs commands in the alphabetically-first workspace root.
+    pub fn agy(program: &str) -> Self {
+        Self::with_flavor(
+            RuntimeProvider::Agy,
+            AcpFlavor {
+                program: program.into(),
+                head_args: vec!["acp".into()],
+                access_args: Some(|m| match m {
+                    RuntimeAccessMode::FullAccess => {
+                        (vec!["--dangerously-skip-permissions".into()], Vec::new())
+                    }
+                    _ => (Vec::new(), Vec::new()),
+                }),
+                mode_id: Some(|m| match m {
+                    RuntimeAccessMode::ApprovalRequired => Some("default"),
+                    RuntimeAccessMode::AutoAcceptEdits => Some("accept-edits"),
+                    RuntimeAccessMode::FullAccess => None,
+                }),
+                set_model: true,
+                bundle_env: Some("OTTO_AGY_CONTEXT_DIR"),
+                ..AcpFlavor::default()
+            },
+        )
     }
 
     /// Grok over ACP, as T3 Code launches it (`grokAcpSpawnArgs`,
@@ -403,19 +454,18 @@ impl AcpDriver {
     fn create_session(&mut self, step: &mut DriverStep, load: bool) {
         let line = match (&self.resume, load) {
             (Some(sid), true) => {
-                let (id, l) = self.request(
-                    M_SESSION_LOAD,
-                    LoadSessionRequest::new(sid.clone(), self.cwd.clone())
-                        .mcp_servers(self.acp_mcp_servers()),
-                );
+                let mut req = LoadSessionRequest::new(sid.clone(), self.cwd.clone())
+                    .mcp_servers(self.acp_mcp_servers());
+                req.meta = self.session_meta();
+                let (id, l) = self.request(M_SESSION_LOAD, req);
                 self.create_id = id;
                 l
             }
             _ => {
-                let (id, l) = self.request(
-                    M_SESSION_NEW,
-                    NewSessionRequest::new(self.cwd.clone()).mcp_servers(self.acp_mcp_servers()),
-                );
+                let mut req =
+                    NewSessionRequest::new(self.cwd.clone()).mcp_servers(self.acp_mcp_servers());
+                req.meta = self.session_meta();
+                let (id, l) = self.request(M_SESSION_NEW, req);
                 self.create_id = id;
                 l
             }
@@ -424,9 +474,27 @@ impl AcpDriver {
         step.write(line);
     }
 
-    /// The model as a session config option (`flavor.model_config_id`).
+    fn session_meta(&self) -> Option<serde_json::Map<String, Value>> {
+        let text = self.system_append.as_ref()?;
+        let meta = json!({"antigravity": {"systemPrompt": {"append": text}}});
+        meta.as_object().cloned()
+    }
+
+    /// The model as a session config option (`flavor.model_config_id`) or
+    /// `session/set_model` (`flavor.set_model`).
     fn write_model_config(&mut self, step: &mut DriverStep) {
-        if let (Some(config_id), Some(model), Some(sid)) = (
+        if let (true, Some(model), Some(sid)) = (
+            self.flavor.set_model,
+            self.model.clone(),
+            self.session_id.clone(),
+        ) {
+            let (id, line) = self.request(
+                M_SESSION_SET_MODEL,
+                json!({"sessionId": sid, "modelId": model}),
+            );
+            self.config_req = Some(id);
+            step.write(line);
+        } else if let (Some(config_id), Some(model), Some(sid)) = (
             self.flavor.model_config_id,
             self.model.clone(),
             self.session_id.clone(),
@@ -462,14 +530,7 @@ impl AcpDriver {
         }
         if let Some(mode) = req.access_mode.filter(|m| *m != self.access) {
             self.access = mode;
-            if let Some(f) = self.flavor.mode_id {
-                let (id, line) = self.request(
-                    M_SESSION_SET_MODE,
-                    SetSessionModeRequest::new(sid.clone(), f(mode)),
-                );
-                self.mode_req = Some(id);
-                step.write(line);
-            }
+            self.write_mode(step, &sid, mode);
         }
         let (id, line) = self.request(M_SESSION_PROMPT, PromptRequest::new(sid, blocks));
         self.prompt_id = Some(id);
@@ -477,6 +538,17 @@ impl AcpDriver {
         self.segments = 0;
         self.closed_named.clear();
         step.write(line);
+    }
+
+    fn write_mode(&mut self, step: &mut DriverStep, sid: &str, mode: RuntimeAccessMode) {
+        if let Some(mode_id) = self.flavor.mode_id.and_then(|f| f(mode)) {
+            let (id, line) = self.request(
+                M_SESSION_SET_MODE,
+                SetSessionModeRequest::new(sid.to_string(), mode_id),
+            );
+            self.mode_req = Some(id);
+            step.write(line);
+        }
     }
 
     /// T3 Code's choice (`AcpSessionRuntime.ts:1065-1074`): a preferred
@@ -893,6 +965,11 @@ impl AcpDriver {
                         .collect()
                 })
                 .unwrap_or_default();
+            let current_mode = result
+                .as_ref()
+                .and_then(|r| r.pointer("/modes/currentModeId"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
             self.session_id = if loading {
                 self.resume.clone()
             } else {
@@ -906,6 +983,13 @@ impl AcpDriver {
                 model: None,
             });
             self.write_model_config(step);
+            // A mode no launch flag gave (agy has none): set it now.
+            if let Some(want) = self.flavor.mode_id.and_then(|f| f(self.access)) {
+                if current_mode.as_deref() != Some(want) && self.modes.iter().any(|m| m == want) {
+                    let sid = self.session_id.clone().unwrap_or_default();
+                    self.write_mode(step, &sid, self.access);
+                }
+            }
             // A prompt queued before `initialize` answered goes as is; the
             // agent refuses images it cannot take.
             if let Some((turn, req)) = self.queued.take() {
@@ -937,6 +1021,17 @@ impl AcpDriver {
                     reason: None,
                 },
                 (Some(r), None) => {
+                    // The draft `usage` of a prompt response (agy, gemini):
+                    // input excludes the cache reads.
+                    if let Some(u) = r.get("usage").filter(|u| u.is_object()) {
+                        let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+                        step.push(DriverEvent::Usage(TurnTokenUsage {
+                            input_tokens: n("inputTokens") + n("cachedReadTokens"),
+                            output_tokens: n("outputTokens"),
+                            cached_input_tokens: Some(n("cachedReadTokens")),
+                            reasoning_tokens: Some(n("thoughtTokens")),
+                        }));
+                    }
                     let stop = serde_json::from_value::<PromptResponse>(r)
                         .map(|p| p.stop_reason)
                         .unwrap_or(StopReason::EndTurn);
@@ -969,6 +1064,54 @@ impl AcpDriver {
     }
 }
 
+/// An Otto context bundle as system-prompt text: its `AGENTS.md`, then an
+/// index of its `.agents/skills` (name, description, absolute `SKILL.md`)
+/// for the agent to read on demand. `None` when both are empty. Blocking:
+/// [`StructuredDriver::adopt_spec`] runs off the async runtime.
+#[allow(clippy::disallowed_methods)]
+fn bundle_prompt(dir: &std::path::Path) -> Option<String> {
+    let mut out = std::fs::read_to_string(dir.join("AGENTS.md"))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let mut skills: Vec<String> = std::fs::read_dir(dir.join(".agents/skills"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let md = e.path().join("SKILL.md");
+            let body = std::fs::read_to_string(&md).ok()?;
+            let mut lines = body.lines().map(str::trim);
+            let mut desc = lines
+                .find_map(|l| l.strip_prefix("description:"))
+                .unwrap_or_default()
+                .trim();
+            // A folded / literal YAML block: its first line.
+            if matches!(desc, ">" | "|" | ">-" | "|-") {
+                desc = lines.next().unwrap_or_default();
+            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            Some(format!(
+                "- {name}: {} ({})",
+                desc.trim_matches('"'),
+                md.display()
+            ))
+        })
+        .collect();
+    if !skills.is_empty() {
+        skills.sort();
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(
+            "## Skills\n\nRead a skill's SKILL.md before you use it; its folder may hold \
+             more files it refers to.\n\n",
+        );
+        out.push_str(&skills.join("\n"));
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// `raw_input.command` as a display string (a string or an argv array).
 fn command_text(raw: Option<&Value>) -> Option<String> {
     match raw?.get("command")? {
@@ -999,7 +1142,7 @@ impl StructuredDriver for AcpDriver {
         if let Some(m) = ctx
             .model
             .as_ref()
-            .filter(|_| self.flavor.model_config_id.is_none())
+            .filter(|_| self.flavor.model_config_id.is_none() && !self.flavor.set_model)
         {
             args.extend([self.flavor.model_flag.clone(), m.clone()]);
         }
@@ -1068,11 +1211,22 @@ impl StructuredDriver for AcpDriver {
         Ok(step)
     }
 
-    /// Live only through an advertised `session/set_mode`.
+    /// Live only through an advertised `session/set_mode`, between modes
+    /// that both have one.
     fn switches_access_live(&self, to: RuntimeAccessMode) -> bool {
-        self.flavor
-            .mode_id
-            .is_some_and(|f| self.modes.iter().any(|m| m == f(to)))
+        self.flavor.mode_id.is_some_and(|f| {
+            f(self.access).is_some() && f(to).is_some_and(|id| self.modes.iter().any(|m| m == id))
+        })
+    }
+
+    fn adopt_spec(&mut self, spec: &mut LaunchSpec) {
+        let Some(var) = self.flavor.bundle_env else {
+            return;
+        };
+        if let Some(i) = spec.env.iter().position(|(k, _)| k == var) {
+            let (_, dir) = spec.env.remove(i);
+            self.system_append = bundle_prompt(std::path::Path::new(&dir));
+        }
     }
 
     fn interrupt(&mut self) -> DriverStep {
@@ -1312,6 +1466,54 @@ mod tests {
 
     fn sent(step: &DriverStep, i: usize) -> Value {
         serde_json::from_str(&step.writes[i]).unwrap()
+    }
+
+    /// agy: full access is a launch flag, so only the asking modes switch
+    /// live; the session opens in the mode no flag gave and carries the
+    /// bundle's system-prompt append (the env var is consumed).
+    #[test]
+    fn agy_full_access_respawns_and_the_bundle_rides_session_new() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "Rules.").unwrap();
+        let mut d = AcpDriver::agy("agy");
+        let full = LaunchContext {
+            access_mode: RuntimeAccessMode::FullAccess,
+            ..ctx(None)
+        };
+        let mut spec = d.launch(&full);
+        assert_eq!(spec.args, ["acp", "--dangerously-skip-permissions"]);
+        spec.env.push((
+            "OTTO_AGY_CONTEXT_DIR".into(),
+            dir.path().display().to_string(),
+        ));
+        d.adopt_spec(&mut spec);
+        assert!(spec.env.is_empty());
+        d.start(&full);
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        assert_eq!(
+            sent(&s, 0)["params"]["_meta"]["antigravity"]["systemPrompt"]["append"],
+            "Rules."
+        );
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1","modes":{"currentModeId":"default","availableModes":[{"id":"default"},{"id":"accept-edits"},{"id":"auto"}]}}}"#);
+        assert!(s.writes.is_empty(), "full access has no mode to set");
+        assert!(!d.switches_access_live(RuntimeAccessMode::ApprovalRequired));
+
+        let mut d = AcpDriver::agy("agy");
+        let edits = LaunchContext {
+            access_mode: RuntimeAccessMode::AutoAcceptEdits,
+            model: Some("gemini-4-argon-high".into()),
+            ..ctx(None)
+        };
+        assert_eq!(d.launch(&edits).args, ["acp"]);
+        d.start(&edits);
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1","modes":{"currentModeId":"default","availableModes":[{"id":"default"},{"id":"accept-edits"}]}}}"#);
+        assert_eq!(sent(&s, 0)["method"], "session/set_model");
+        assert_eq!(sent(&s, 0)["params"]["modelId"], "gemini-4-argon-high");
+        assert_eq!(sent(&s, 1)["method"], "session/set_mode");
+        assert_eq!(sent(&s, 1)["params"]["modeId"], "accept-edits");
+        assert!(d.switches_access_live(RuntimeAccessMode::ApprovalRequired));
+        assert!(!d.switches_access_live(RuntimeAccessMode::FullAccess));
     }
 
     /// The host's MCP servers (Otto's `otto` tools + the user's) ride

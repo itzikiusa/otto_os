@@ -19,10 +19,10 @@
 //!
 //! Answers are cached for [`CHECK_TTL`] and one check per login runs at a time.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex, OnceLock};
+
+use otto_core::keyed_lock::KeyedLocks;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -165,22 +165,11 @@ async fn await_response(
 
 /// One lock per login: a second caller waits for the first check, then finds
 /// its answer cached instead of starting another CLI.
-fn flight(dir: &Path) -> Arc<tokio::sync::Mutex<()>> {
-    static FLIGHTS: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
-        OnceLock::new();
-    let mut map = FLIGHTS
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if map.len() > 256 {
-        map.retain(|_, m| Arc::strong_count(m) > 1);
-    }
-    map.entry(dir.to_path_buf()).or_default().clone()
-}
+static FLIGHTS: KeyedLocks<PathBuf> = KeyedLocks::new();
 
 /// Whether a check for `dir` is running now.
 pub(crate) fn in_flight(dir: &Path) -> bool {
-    flight(dir).try_lock().is_err()
+    FLIGHTS.try_lock(dir).is_none()
 }
 
 /// Check `dir` unless an answer younger than [`CHECK_TTL`] exists; record the
@@ -193,8 +182,7 @@ pub(crate) async fn check(
     timeout: Duration,
     now: impl Fn() -> DateTime<Utc>,
 ) {
-    let lock = flight(dir);
-    let _held = lock.lock().await;
+    let _held = FLIGHTS.lock(dir).await;
     let fresh = claude::entry(dir)
         .and_then(|e| e.checked_at)
         .is_some_and(|at| (now() - at).to_std().is_ok_and(|age| age < CHECK_TTL));

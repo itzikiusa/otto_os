@@ -7,7 +7,7 @@
   // composer: the pill floats over the scroller's bottom edge.
   import { tick, untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
-  import { followPillText, unreadSince } from './follow';
+  import { END_BAND, followAfterScroll, followPillText, unreadSince } from './follow';
 
   interface Props {
     scroller: HTMLDivElement | null;
@@ -18,6 +18,7 @@
   }
   let { scroller, seq, messageIds }: Props = $props();
 
+  /** Pinned to the end. Only the reader's own scroll lets go (follow.ts). */
   let atBottom = $state(true);
   /** Scrolled up by more than a screen: the pill offers the way back even with nothing new. */
   let farUp = $state(false);
@@ -30,29 +31,66 @@
   const unread = $derived(atBottom ? 0 : unreadSince(messageIds, lastSeenId));
   const text = $derived(atBottom ? null : followPillText(unread, unseen, farUp));
 
+  function pin(): void {
+    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+  }
+
   $effect(() => {
     const el = scroller;
     if (!el) return;
+    // The reader's input; a scroll within this window of it is theirs
+    // (iOS momentum keeps scrolling after the finger lifts).
+    let gestureAt = -Infinity;
+    const gesture = (): void => {
+      gestureAt = performance.now();
+    };
+    let lastTop = el.scrollTop;
     const onScroll = (): void => {
       const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
-      atBottom = gap < 40;
+      const up = el.scrollTop < lastTop;
+      lastTop = el.scrollTop;
+      atBottom = followAfterScroll(atBottom, gap, performance.now() - gestureAt < 600, up);
       farUp = gap > el.clientHeight;
-      if (atBottom) unseen = 0;
+      if (gap < END_BAND) unseen = 0;
     };
-    el.addEventListener('scroll', onScroll, { passive: true });
-    return () => el.removeEventListener('scroll', onScroll);
+    // Content that grows on its own (a diagram or an image finishing)
+    // keeps the end in view while following, not only on the next event.
+    // Growth the reader caused (opening a fold) moves the end away instead
+    // of dragging what they opened out of view.
+    const grown = new ResizeObserver(() => {
+      if (performance.now() - gestureAt < 600) onScroll();
+      else if (untrack(() => atBottom)) pin();
+    });
+    for (const child of el.children) grown.observe(child);
+    const keys = (e: KeyboardEvent): void => {
+      if (['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp', 'ArrowDown', ' '].includes(e.key)) gesture();
+    };
+    const opts = { passive: true } as const;
+    el.addEventListener('scroll', onScroll, opts);
+    el.addEventListener('wheel', gesture, opts);
+    el.addEventListener('touchmove', gesture, opts);
+    el.addEventListener('pointerdown', gesture, opts);
+    el.addEventListener('keydown', keys);
+    return () => {
+      grown.disconnect();
+      el.removeEventListener('scroll', onScroll);
+      el.removeEventListener('wheel', gesture);
+      el.removeEventListener('touchmove', gesture);
+      el.removeEventListener('pointerdown', gesture);
+      el.removeEventListener('keydown', keys);
+    };
   });
 
-  // New events: follow when at the bottom, else count them for the pill
+  // New events: follow when pinned, else count them for the pill
   // (read untracked — `unseen += 1` here would re-trigger this effect).
   $effect(() => {
     void seq;
-    if (untrack(() => atBottom)) void tick().then(() => scroller?.scrollTo({ top: scroller.scrollHeight }));
+    if (untrack(() => atBottom)) void tick().then(pin);
     else unseen = untrack(() => unseen) + 1;
   });
 
   function jump(): void {
-    scroller?.scrollTo({ top: scroller.scrollHeight });
+    pin();
     atBottom = true;
     farUp = false;
     unseen = 0;

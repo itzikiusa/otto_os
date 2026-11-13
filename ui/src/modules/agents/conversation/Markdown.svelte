@@ -537,6 +537,12 @@
     padding: 4px 10px;
     text-align: start;
     vertical-align: top;
+    /* Not the prose's `anywhere`: it makes every column's minimum one letter,
+       so on a phone a short column broke letter by letter while a long one
+       took the width. Cells wrap between words; a table wider than the
+       message scrolls inside itself (display: block + overflow-x above). */
+    overflow-wrap: normal;
+    word-break: normal;
   }
   .md :global(tr > :last-child) {
     border-inline-end: 0;

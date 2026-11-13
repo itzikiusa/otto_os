@@ -293,6 +293,8 @@ fn summary_from(v: &Value) -> PrSummary {
         created_at: super::ts_opt(&vstr(v, &["created_at"])),
         reviewer_warnings: Vec::new(),
         head_sha: super::vstr_opt(v, &["sha"]),
+        // GitLab's approvals are a separate read per MR; the list shows none.
+        review: None,
         draft: Some(draft),
         ci_status: None,
         labels: v

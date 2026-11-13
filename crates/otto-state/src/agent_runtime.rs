@@ -175,6 +175,24 @@ impl AgentRuntimeRepo {
         rows.iter().map(row_to_session).collect()
     }
 
+    /// Sessions of every workspace, newest activity first; `owner` narrows to
+    /// one creator. The cross-workspace Threads list (`GET /runtime-sessions`):
+    /// the caller drops the rows of workspaces it may not view.
+    pub async fn list_all(&self, owner: Option<&Id>) -> Result<Vec<RuntimeSessionRecord>> {
+        let rows = sqlx::query(concat!(
+            "SELECT ",
+            session_cols!(),
+            " FROM agent_runtime_sessions WHERE (? IS NULL OR created_by = ?) \
+             ORDER BY last_active_at DESC LIMIT 500"
+        ))
+        .bind(owner)
+        .bind(owner)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list runtime sessions"))?;
+        rows.iter().map(row_to_session).collect()
+    }
+
     /// [`Self::list`] narrowed to the threads whose `meta.source` and/or
     /// `meta.origin.id` equal the given values (an embedded page finding its
     /// thread again) — closed ones included, newest activity first. With a

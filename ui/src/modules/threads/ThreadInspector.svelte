@@ -17,6 +17,7 @@
   import { loadBrowserView } from '../../lib/browserPort';
   import { ws } from '../../lib/stores/workspace.svelte';
   import ThreadProjectCard from './ThreadProjectCard.svelte';
+  import ThreadAgentsTasks from './runtime/ThreadAgentsTasks.svelte';
   import { PrSurfaceView, SideChatView } from './threadLazy.svelte';
   import { threadPrs } from './threadPrs.svelte';
   import { threadRepos } from './threadRepos.svelte';
@@ -160,6 +161,7 @@
   {#if showCard && contextCwd}
     <div class="ti-card"><ThreadProjectCard cwd={contextCwd} /></div>
   {/if}
+  {#if contextThreadId}<ThreadAgentsTasks sessionId={contextThreadId} />{/if}
   <header class="ti-head">
     {#if tabs.length > 0}
       <div class="ti-tabs">

@@ -70,6 +70,9 @@ type ApiResult<T> = std::result::Result<T, ApiErr>;
 /// REST routes; the server nests this under `/api/v1` and supplies the state.
 pub fn api_router<S: RuntimeCtx>() -> Router<S> {
     Router::new()
+        // The caller's threads across every workspace (a thread started on
+        // another device lands in whatever workspace that device had open).
+        .route("/runtime-sessions", get(list_all::<S>))
         .route(
             "/workspaces/{id}/runtime-sessions",
             get(list::<S>).post(create::<S>),
@@ -316,6 +319,36 @@ async fn list<S: RuntimeCtx>(
             .list_filtered(&ws, owner, source, origin_id)
             .await?,
     ))
+}
+
+/// GET /runtime-sessions — the caller's own sessions in every workspace they
+/// can view (root: everyone's), newest activity first, max 500.
+async fn list_all<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+) -> ApiResult<Json<Vec<RuntimeSession>>> {
+    let owner = (!user.is_root).then_some(&user.id);
+    let rows = ctx.agent_runtime().list_all(owner).await?;
+    let mut viewable = std::collections::HashMap::<Id, bool>::new();
+    let mut out = Vec::with_capacity(rows.len());
+    for s in rows {
+        let ok = match viewable.get(&s.workspace_id) {
+            Some(&ok) => ok,
+            None => {
+                let ok = ctx
+                    .roles()
+                    .check(&user, &s.workspace_id, WorkspaceRole::Viewer)
+                    .await
+                    .is_ok();
+                viewable.insert(s.workspace_id.clone(), ok);
+                ok
+            }
+        };
+        if ok {
+            out.push(s);
+        }
+    }
+    Ok(Json(out))
 }
 
 /// POST /workspaces/{id}/runtime-sessions — create + spawn (editor+). The

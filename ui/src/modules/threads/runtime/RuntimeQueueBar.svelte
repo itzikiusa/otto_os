@@ -5,13 +5,17 @@
   // (stop the turn and send it), Edit, Remove — and, on a closed thread, the
   // "Revive" line for a closed or dormant agent.
   import Icon from '../../../lib/components/Icon.svelte';
-  import type { BackgroundTask, PromptDelivery, QueuedPrompt } from '../../../lib/api/types';
+  import type { PromptDelivery, QueuedPrompt } from '../../../lib/api/types';
+  import { backgroundStripText, type AgentTask } from './agentTasks';
   import { toastError } from '../../../lib/toastError';
   import { runtimeThreads } from './runtimeThreads.svelte';
 
   interface Props {
     sessionId: string;
-    background: BackgroundTask[];
+    /** Running background work (agentTasks.ts), oldest first. */
+    background: AgentTask[];
+    /** Show every task (Threads: Thread details' Agents & tasks). */
+    onshowtasks?: () => void;
     queued: QueuedPrompt[];
     running: boolean;
     canSteer: boolean;
@@ -22,7 +26,9 @@
     /** Put a queued message back in the composer. */
     onedit: (text: string) => void;
   }
-  let { sessionId, background, queued, running, canSteer, closed, dormant, reopening, onreopen, onedit }: Props = $props();
+  let { sessionId, background, onshowtasks, queued, running, canSteer, closed, dormant, reopening, onreopen, onedit }: Props = $props();
+  const bgText = $derived(backgroundStripText(background));
+  const bgTitle = $derived(background.map((b) => b.label).join('\n'));
 
   async function deliver(q: QueuedPrompt, delivery: PromptDelivery): Promise<void> {
     try {
@@ -49,13 +55,18 @@
 </script>
 
 {#if background.length > 0 && !closed}
-  <div class="qb" data-testid="runtime-background">
-    <span class="spinner" aria-hidden="true"></span>
-    <span class="ellipsis" dir="auto">
-      {background.length === 1 ? 'Running in the background' : `${background.length} tasks running in the background`}:
-      {background.map((b) => b.label).join(' · ')}
-    </span>
-  </div>
+  {#if onshowtasks}
+    <button type="button" class="qb qb-btn" data-testid="runtime-background" data-count={background.length} title={bgTitle} aria-label="{bgText} — show agents and tasks" onclick={onshowtasks}>
+      <span class="spinner" aria-hidden="true"></span>
+      <span class="ellipsis" dir="auto">{bgText}</span>
+      <Icon name="chevronRight" size={12} />
+    </button>
+  {:else}
+    <div class="qb" data-testid="runtime-background" data-count={background.length} title={bgTitle}>
+      <span class="spinner" aria-hidden="true"></span>
+      <span class="ellipsis" dir="auto">{bgText}</span>
+    </div>
+  {/if}
 {/if}
 {#each queued as q (q.id)}
   <div class="qb" data-testid="runtime-queued">
@@ -91,6 +102,21 @@
     background: var(--surface-2);
     color: var(--text-dim);
     font-size: var(--fs-s);
+  }
+  .qb-btn {
+    inline-size: 100%;
+    border: none;
+    text-align: start;
+    font: inherit;
+    cursor: pointer;
+  }
+  .qb-btn:hover {
+    color: var(--text);
+    background: var(--hover);
+  }
+  .qb-btn:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: -2px;
   }
   .qb .ellipsis {
     flex: 1;

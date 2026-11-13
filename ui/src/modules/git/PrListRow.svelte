@@ -6,7 +6,7 @@
   import type { PrState, PrSummary } from '../../lib/api/types';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { rel } from '../../lib/stores/now.svelte';
-  import { ciOf } from './pr-query';
+  import { ciOf, reviewChip } from './pr-query';
   import type { PrStat } from './pr-stats.svelte';
 
   interface Props {
@@ -34,6 +34,8 @@
     if (c === 'pending') return { icon: 'clock', cls: 'warn', label: 'CI running' };
     return null;
   });
+  const review = $derived(reviewChip(pr));
+  const REVIEW_ICON: Record<'ok' | 'bad' | 'warn', IconName> = { ok: 'userCheck', bad: 'edit', warn: 'eye' };
   const isDraft = $derived(!!pr.draft && pr.state === 'open');
   const tone = $derived(isDraft ? 'draft' : pr.state === 'merged' ? 'merged' : pr.state === 'declined' ? 'declined' : 'open');
   const toneLabel = $derived(isDraft ? 'Draft' : (STATE_LABEL[pr.state] ?? pr.state));
@@ -97,6 +99,11 @@
           <span class="pr-label">{l}</span>
         {/each}
         {#if labels.length > 2}<span class="pr-label" title={labels.slice(2).join(', ')}>+{labels.length - 2}</span>{/if}
+        {#if review}
+          <span class="review-chip {review.tone}" title={review.label} role="img" aria-label={review.label} data-testid="pr-review"
+            ><Icon name={REVIEW_ICON[review.tone]} size={12} /><span class="review-text">{review.text}</span></span
+          >
+        {/if}
         {#if ci}
           <span class="ci-chip {ci.cls}" title={ci.label} role="img" aria-label={ci.label}><Icon name={ci.icon} size={12} /></span>
         {/if}
@@ -279,18 +286,26 @@
     flex: none;
     white-space: nowrap;
   }
-  .ci-chip {
+  .ci-chip,
+  .review-chip {
     flex: none;
     display: inline-flex;
     align-items: center;
   }
-  .ci-chip.ok {
+  .review-chip {
+    gap: 4px;
+    white-space: nowrap;
+  }
+  .ci-chip.ok,
+  .review-chip.ok {
     color: var(--success);
   }
-  .ci-chip.bad {
+  .ci-chip.bad,
+  .review-chip.bad {
     color: var(--danger);
   }
-  .ci-chip.warn {
+  .ci-chip.warn,
+  .review-chip.warn {
     color: var(--warning);
   }
   /* source→target separator mirrors in place under RTL. */

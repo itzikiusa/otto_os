@@ -91,7 +91,9 @@ test('age, tone, plan, provider and credits labels', () => {
   assert.equal(planLabel(null), '');
   assert.equal(providerName('codex'), 'Codex');
   assert.equal(providerName('agy'), 'Antigravity');
-  assert.equal(providerName('grok'), 'grok');
+  assert.equal(providerName('grok'), 'Grok');
+  assert.equal(providerName('opencode'), 'opencode');
+  assert.equal(planLabel('SuperGrok Heavy'), 'SuperGrok Heavy');
   assert.equal(creditsText({ has_credits: true, unlimited: false, balance: '62500.0' }), 'Credits: 62,500');
   assert.equal(creditsText({ has_credits: false, unlimited: false, balance: '0' }), '');
   assert.equal(creditsText({ has_credits: false, unlimited: true, balance: null }), 'Credits: unlimited');

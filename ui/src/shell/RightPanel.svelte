@@ -40,6 +40,7 @@
         () => {
           inflight.delete(key); // let Retry re-import
           failedPanels.add(key);
+          reloadForStaleChunk();
         },
       );
       inflight.set(key, p);
@@ -87,6 +88,7 @@
   import { ctxMenu, type MenuItem } from '../lib/contextmenu.svelte';
   import { loadErrorText } from '../lib/loadError';
   import { onDestroy, untrack } from 'svelte';
+  import { reloadForStaleChunk } from '../lib/staleChunk';
 
   // `forceOpen` is set when the panel is hosted inside the mobile right drawer:
   // it then always shows content, fills the drawer width (no fixed width), and

@@ -632,7 +632,11 @@ The sheet also carries:
   Bitbucket) come back as `reviewer_warnings` on the response and show as a
   warning toast — they never fail the PR creation.
 
-**After creation**, the PR appears in the **Pull Requests** list. From PR detail
+**After creation**, the PR appears in the **Pull Requests** list. Each open row
+shows where its review stands — **N approvals** (green), **Changes requested**
+(red) or **Awaiting review** (amber) — read from the list call itself
+(Bitbucket `fields=+values.participants`; GitHub one GraphQL read per page;
+GitLab rows show none). From PR detail
 you can read the diff, comments (inline + general, threaded), reviewers/approvals,
 CI status, and mergeability; comment; approve; request changes; merge; or decline.
 

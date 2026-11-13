@@ -2,7 +2,7 @@
 // that must never overwrite what the person is typing.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { followPillText, unreadSince } from '../src/modules/threads/runtime/follow.ts';
+import { followAfterScroll, followPillText, unreadSince } from '../src/modules/threads/runtime/follow.ts';
 import { loadSource } from './sourceHarness.ts';
 
 test('unread counts messages after the last one seen at the bottom', () => {
@@ -18,6 +18,20 @@ test('the pill names new messages first, then activity, then the way back', () =
   assert.equal(followPillText(0, 2, false), 'New activity');
   assert.equal(followPillText(0, 0, true), 'Jump to latest');
   assert.equal(followPillText(0, 0, false), null);
+});
+
+test('only the reader lets go of the end; reaching it again re-arms following', () => {
+  // A small drag up while streaming releases (it used to snap back inside the 40 px band).
+  assert.equal(followAfterScroll(true, 20, true, true), false);
+  assert.equal(followAfterScroll(true, 60, true, false), false);
+  // Content shrinking / scroll anchoring moves scrollTop without the reader: still pinned.
+  assert.equal(followAfterScroll(true, 600, false, true), true);
+  // The reader's tap collapsed something at the end: clamped to the end, still pinned.
+  assert.equal(followAfterScroll(true, 0, true, true), true);
+  // Scrolled up stays scrolled up until the reader is back in the end band.
+  assert.equal(followAfterScroll(false, 600, false, false), false);
+  assert.equal(followAfterScroll(false, 10, true, false), true);
+  assert.equal(followAfterScroll(false, 10, false, false), true);
 });
 
 const { mergeQueuedEdit } = loadSource(new URL('../src/modules/threads/runtime/runtimeComposer.ts', import.meta.url), {

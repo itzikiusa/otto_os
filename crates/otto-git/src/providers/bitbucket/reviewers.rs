@@ -90,8 +90,9 @@ impl Bitbucket {
         let q = review_query(&me)
             .ok_or_else(|| Error::Conflict("this Bitbucket account has no user id".into()))?;
         let path = format!(
-            "{}?pagelen={per_page}&page={page}&q={}",
+            "{}?pagelen={per_page}&page={page}&{}&q={}",
             Self::pr_path(r, ""),
+            super::LIST_FIELDS,
             urlencoding::encode(&q)
         );
         let v = self.get_json_cached(&path).await?;

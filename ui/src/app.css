@@ -40,7 +40,9 @@ body {
 }
 
 #app {
-  height: 100%;
+  /* Touch devices: the visible viewport's height (lib/viewportFit.ts), so the
+     on-screen keyboard never pans the page's top off screen. */
+  height: var(--app-h, 100%);
 }
 
 input,

@@ -124,6 +124,12 @@ class ThreadsStore {
   }
 
   inspectorTab = $state<ThreadsInspectorTab>('changes');
+  /** Bumped to bring Thread details' "Agents & tasks" into view. */
+  agentsTasksReveal = $state(0);
+  showAgentsTasks(): void {
+    this.setInspectorOpen(true);
+    this.agentsTasksReveal += 1;
+  }
   collapseNav = $state(true);
   openFilesByWorkspace = $state<Record<string, WorkspaceFileTabs>>({});
   /** Sidebar project filter — several at once (T3 0.1.6); empty = all projects. */

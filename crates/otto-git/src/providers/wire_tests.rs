@@ -430,8 +430,72 @@ mod github {
         assert!(!p2.has_more, "no Link header ⇒ last page");
         assert_eq!(p2.items.len(), 1);
         assert_eq!(p2.items[0].number, 3);
-        // One request per page — no hidden 20-page sweep.
-        assert_eq!(forge_requests(&server).await.len(), 2);
+        // One list request per page — no hidden 20-page sweep — plus the
+        // page's one GraphQL read of review verdicts (unmocked here: 404).
+        let reqs = forge_requests(&server).await;
+        let gets = reqs.iter().filter(|r| r.method.as_str() == "GET").count();
+        assert_eq!((gets, reqs.len()), (2, 4));
+        assert!(p1.items.iter().all(|p| p.review.is_none()));
+    }
+
+    /// The row's verdict: one GraphQL read for the whole page (never one per
+    /// PR); changes requested beats approvals; a pending request is
+    /// `waiting`; a failed read leaves the REST hint.
+    #[tokio::test]
+    async fn list_prs_reads_every_verdict_in_one_graphql_call() {
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        let mut asked = pr(3);
+        asked["requested_reviewers"] = json!([{ "login": "rev", "id": 9 }]);
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                pr(1),
+                pr(2),
+                asked,
+                pr(4)
+            ])))
+            .mount(&server)
+            .await;
+        let node = |states: &[&str], decision: Option<&str>| {
+            json!({
+                "reviewDecision": decision,
+                "latestOpinionatedReviews": {
+                    "nodes": states.iter().map(|s| json!({ "state": s })).collect::<Vec<_>>()
+                }
+            })
+        };
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({ "data": { "repository": {
+                    "p1": node(&["APPROVED", "APPROVED"], Some("APPROVED")),
+                    "p2": node(&["APPROVED", "CHANGES_REQUESTED"], Some("CHANGES_REQUESTED")),
+                    "p3": node(&[], Some("REVIEW_REQUIRED")),
+                    "p4": node(&["COMMENTED"], None),
+                }}}),
+            ))
+            .mount(&server)
+            .await;
+        let page = gh.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
+        let verdict = |i: usize| {
+            page.items[i]
+                .review
+                .as_ref()
+                .map(|r| (r.status.as_str(), r.approvals))
+        };
+        assert_eq!(verdict(0), Some(("approved", 2)));
+        assert_eq!(verdict(1), Some(("changes_requested", 1)));
+        assert_eq!(verdict(2), Some(("waiting", 0)));
+        assert_eq!(verdict(3), None);
+        let posts: Vec<_> = forge_requests(&server)
+            .await
+            .into_iter()
+            .filter(|r| r.method.as_str() == "POST")
+            .collect();
+        assert_eq!(posts.len(), 1, "one GraphQL read per page");
+        let body = String::from_utf8_lossy(&posts[0].body);
+        assert!(body.contains("p4:pullRequest(number:4)"), "{body}");
     }
 
     #[tokio::test]
@@ -520,8 +584,9 @@ mod github {
 
         let page = gh.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
         assert_eq!(page.items.len(), 1);
+        let gets = forge_requests(&server).await;
         assert_eq!(
-            forge_requests(&server).await.len(),
+            gets.iter().filter(|r| r.method.as_str() == "GET").count(),
             2,
             "a short rate limit is slept off and retried exactly once"
         );
@@ -973,6 +1038,51 @@ mod bitbucket {
         let p2 = bb.list_prs(&rr(), PrState::Open, 2, 50).await.unwrap();
         assert!(!p2.has_more, "no `next` ⇒ last page");
         assert_eq!(p2.items[0].number, 2);
+    }
+
+    /// The list asks for `participants` in the same call (`fields=+…`), and
+    /// each row's verdict comes from them.
+    #[tokio::test]
+    async fn list_prs_reads_the_verdict_from_participants() {
+        let server = MockServer::start().await;
+        let bb = Bitbucket::with_base("user".into(), "tok".into(), server.uri());
+        let who = |role: &str, approved: bool, state: Option<&str>| json!({ "role": role, "approved": approved, "state": state, "user": { "display_name": "R" } });
+        let mut approved = pr(1);
+        approved["participants"] = json!([
+            who("REVIEWER", true, Some("approved")),
+            who("PARTICIPANT", true, Some("approved")),
+            who("REVIEWER", false, None),
+        ]);
+        let mut changes = pr(2);
+        changes["participants"] = json!([
+            who("REVIEWER", true, Some("approved")),
+            who("REVIEWER", false, Some("changes_requested")),
+        ]);
+        let mut waiting = pr(3);
+        waiting["participants"] = json!([
+            who("REVIEWER", false, None),
+            who("PARTICIPANT", false, None)
+        ]);
+        Mock::given(method("GET"))
+            .and(path("/repositories/acme/app/pullrequests"))
+            .and(query_param("fields", "+values.participants"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "values": [approved, changes, waiting, pr(4)],
+            })))
+            .mount(&server)
+            .await;
+        let page = bb.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
+        let verdict = |i: usize| {
+            page.items[i]
+                .review
+                .as_ref()
+                .map(|r| (r.status.as_str(), r.approvals))
+        };
+        assert_eq!(verdict(0), Some(("approved", 2)));
+        assert_eq!(verdict(1), Some(("changes_requested", 1)));
+        assert_eq!(verdict(2), Some(("waiting", 0)));
+        assert_eq!(verdict(3), None, "no reviewers: no verdict");
+        assert_eq!(forge_requests(&server).await.len(), 1, "no per-PR read");
     }
 
     /// A diffstat `next` on another origin is never followed with the
@@ -1500,7 +1610,8 @@ mod cached_reads {
         let c = gh.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
         assert_eq!(c.items.len(), 2, "the 304 serves the cached body");
         let reqs = forge_requests(&server).await;
-        let last = reqs.last().unwrap();
+        // (The page's GraphQL verdict read follows it; look at the list GET.)
+        let last = reqs.iter().rfind(|r| r.method.as_str() == "GET").unwrap();
         assert_eq!(
             last.headers
                 .get("if-none-match")

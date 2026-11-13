@@ -13,6 +13,7 @@ export const threadsHostCommands: RuntimeHostCommands = {
   openTerminal: (id) => threads.toggleTerminal(id),
   newThread: (id, beside) => void newThread(id, beside),
   sideChat: (id, question) => threads.openSideChat(id, question),
+  showTasks: () => threads.showAgentsTasks(),
 };
 
 async function newThread(id: string, beside: boolean): Promise<void> {

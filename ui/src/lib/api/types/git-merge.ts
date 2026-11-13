@@ -118,6 +118,16 @@ export interface PrSummary {
    *  Optional: an older daemon omits it — read as `?? false`, then fall back
    *  to matching `author` against the account handles. */
   is_mine?: boolean;
+  /** The review verdict (omitted when nobody is asked and nobody reviewed;
+   *  GitLab and older daemons omit it). */
+  review?: PrReviewSummary | null;
+}
+
+/** Changes requested beats approvals, approvals beat a pending request. */
+export interface PrReviewSummary {
+  status: 'approved' | 'changes_requested' | 'waiting';
+  /** Reviewers whose latest verdict approves. */
+  approvals: number;
 }
 
 /** `GET /repos/{id}/prs?state=&page=&per_page=[&review=me]` — one page.

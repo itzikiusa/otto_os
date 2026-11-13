@@ -414,6 +414,10 @@ pub async fn limits(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<otto_usage::limits::LimitsResp>> {
+    if user.is_root {
+        let program = |p| ctx.manager.provider_program(p);
+        otto_usage::limits::refresh_cli_limits(program("agy"), program("grok")).await;
+    }
     let l = otto_usage::limits::remaining_limits(&ctx.pool, &user.id, user.is_root, &ctx.data_dir);
     Ok(Json(l.await.map_err(ApiError)?))
 }

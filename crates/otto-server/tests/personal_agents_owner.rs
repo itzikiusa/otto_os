@@ -411,11 +411,11 @@ async fn the_main_agent_lists_creates_and_delegates_as_its_session() {
         body["message"].as_str().unwrap_or("").contains("Builder"),
         "{body}"
     );
-    let mut agy = NewPersonalAgent::defaults("ws1".into(), "Old CLI".into());
-    agy.provider = "agy".into();
-    agy.created_by = Some("alice".into());
+    let mut custom = NewPersonalAgent::defaults("ws1".into(), "Old CLI".into());
+    custom.provider = "my-cli".into();
+    custom.created_by = Some("alice".into());
     PersonalAgentsRepo::new(d.pool.clone())
-        .create(agy)
+        .create(custom)
         .await
         .unwrap();
     let (st, body) = d.send("POST", &d.alice, delegate, del("old cli")).await;

@@ -39,6 +39,10 @@ const CONTEXT_FILE: &str = "CONTEXT.md";
 /// The claude activity-hooks settings file, loaded out-of-tree via `--settings`.
 const SETTINGS_FILE: &str = "settings.json";
 
+/// The env var that names agy's bundle dir (no `--add-dir`, see
+/// [`injection_for_home`]); `otto-agent-protocol`'s ACP agy driver reads it.
+pub const AGY_BUNDLE_ENV: &str = "OTTO_AGY_CONTEXT_DIR";
+
 /// The opencode config the bundle carries: its `instructions` names the
 /// bundle's context file, and `OPENCODE_CONFIG` points opencode at it (merged
 /// between the user's global and project configs, `instructions` arrays
@@ -67,8 +71,8 @@ const CODEX_SHADOW_HOME: &str = "codex-home";
 /// uncapped (the CLIs still read it as project docs).
 const MAX_CONTEXT_LINES: usize = 1000;
 
-/// The bundle's context-file name for `provider`. Agy auto-loads `AGENTS.md`
-/// from an `--add-dir` directory (verified), so it gets that name; claude/codex
+/// The bundle's context-file name for `provider`. Agy keeps its native
+/// `AGENTS.md` name (the ACP driver sends it, see [`injection_for_home`]); claude/codex
 /// receive the context another way and use the neutral [`CONTEXT_FILE`].
 fn context_file_name(provider: &str) -> &'static str {
     match provider {
@@ -242,7 +246,13 @@ pub fn resume_injection_with_home(
 /// - **claude** — `--add-dir` loads skills from `<dir>/.claude/skills`; the
 ///   context is appended to the system prompt (claude does NOT load `CLAUDE.md`
 ///   from an added dir); activity hooks come via `--settings`.
-/// - **agy** — `--add-dir` auto-loads `<dir>/AGENTS.md` AND `<dir>/.agents/skills`.
+/// - **agy** — NO launch flag: agy (1.5.8, PTY, print mode and `agy acp`) runs
+///   shell commands in the alphabetically-first workspace root, so an
+///   `--add-dir=<bundle>` (`~/.otto/…` sorts before most repos) made it edit
+///   files inside the bundle. A PTY agy therefore runs without Otto's bundle
+///   (its own `~/.gemini` rules and skills still load); the structured
+///   runtime's ACP driver reads the bundle from [`AGY_BUNDLE_ENV`] and sends
+///   `AGENTS.md` + a skill index as the session's system-prompt append.
 /// - **codex** — `CODEX_HOME` points at the bundle's shadow home, whose
 ///   `skills/` is Otto-owned and whose other entries link back to the real
 ///   Codex home; context stays inline via `developer_instructions`.
@@ -270,8 +280,8 @@ fn injection_for_home(provider: &str, dir: &Path, provider_home: Option<&Path>) 
             }
         }
         "agy" => SpawnInjection {
-            args: vec![format!("--add-dir={d}")],
-            env: Vec::new(),
+            args: Vec::new(),
+            env: vec![(AGY_BUNDLE_ENV.to_string(), d)],
         },
         "codex" => {
             // Named accounts keep their native home stable so login, token
@@ -658,7 +668,7 @@ fn build_skill_artifacts(
 /// - **claude** — `CONTEXT.md` (appended to the system prompt) + `.claude/skills`
 ///   (first-class via `--add-dir`) + `settings.json` (activity hooks via
 ///   `--settings`).
-/// - **agy** — `AGENTS.md` (auto-loaded via `--add-dir`) + `.agents/skills`.
+/// - **agy** — `AGENTS.md` + `.agents/skills` (sent by the ACP driver).
 /// - **codex** — `CONTEXT.md` (passed inline via `-c developer_instructions`,
 ///   carrying a skills index) + a session-local shadow CODEX_HOME whose
 ///   `skills/` root is native-discoverable.
@@ -1222,7 +1232,7 @@ mod tests {
             ..Default::default()
         };
 
-        for provider in ["claude", "codex", "agy"] {
+        for provider in ["claude", "codex"] {
             let (res, inj) = provision(&lib, &cfg, &cwd_path, provider, root.path());
             assert!(!res.skipped, "{provider} should not skip");
             // Nothing in the repo cwd, ever.
@@ -1318,14 +1328,19 @@ mod tests {
         let (_res, inj) = provision(&lib, &cfg, &cwd_path, "agy", root.path());
         let bundle = bundle_of(&root, "agy", &cwd_path);
 
-        // agy auto-loads AGENTS.md from --add-dir and scans .agents/skills.
+        // The bundle keeps AGENTS.md + .agents/skills for the ACP driver.
         assert!(bundle.join("AGENTS.md").is_file());
         assert!(fs::read_to_string(bundle.join("AGENTS.md"))
             .unwrap()
             .contains("Gemini persona."));
         assert!(bundle.join(".agents/skills/triage/SKILL.md").is_file());
-        // Only --add-dir is needed (no system-prompt flag).
-        assert_eq!(inj.args, vec![format!("--add-dir={}", bundle.display())]);
+        // No workspace root (agy would run commands in it): only the env
+        // var naming the bundle.
+        assert!(inj.args.is_empty(), "{:?}", inj.args);
+        assert_eq!(
+            inj.env,
+            vec![(AGY_BUNDLE_ENV.to_string(), bundle.display().to_string())]
+        );
     }
 
     #[test]

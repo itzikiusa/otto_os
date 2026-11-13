@@ -231,9 +231,9 @@ test('custom sidebar auto-discovers Threads, stage pickers + slash menu work, an
   await expect(page.getByTestId('threads-breadcrumb')).toContainText('New thread');
   await expect(stage.locator('h1')).toContainText(/What should we (build|work on)/);
 
-  // One agent chip holds harness · model · effort; access mode sits in the meta row.
-  // Claude runs on the structured runtime (always asks first), so the access
-  // mode is shown for a PTY harness (Antigravity).
+  // One agent chip holds harness · model · effort. Claude, Codex and
+  // Antigravity all run on the structured runtime, whose access mode lives in
+  // the thread's composer — the stage's PTY mode button never shows for them.
   const agentBtn = stage.getByTestId('picker-agent');
   const modeBtn = stage.getByTestId('picker-mode');
   await expect(agentBtn).toBeVisible();
@@ -246,17 +246,13 @@ test('custom sidebar auto-discovers Threads, stage pickers + slash menu work, an
   await expect(picker.getByTestId('model-picker-provider-claude')).toBeVisible();
   await expect(picker.getByTestId('model-picker-search')).toBeFocused();
   await picker.getByTestId('model-picker-provider-agy').click();
-  await expect(modeBtn).toContainText('Full access');
+  await expect(modeBtn).toHaveCount(0);
   await picker.getByTestId('picker-effort').getByRole('button', { name: 'High', exact: true }).click();
   await page.keyboard.press('Escape');
   await expect(picker).toHaveCount(0);
   await expect(agentBtn).toContainText('High');
 
-  // ⇧⇥ inside the composer toggles Plan mode.
   const input = stage.getByTestId('new-thread-input');
-  await input.focus();
-  await page.keyboard.press('Shift+Tab');
-  await expect(modeBtn).toContainText('Plan');
 
   // Typing `/` opens the interactive slash-command popup.
   await input.fill('/');

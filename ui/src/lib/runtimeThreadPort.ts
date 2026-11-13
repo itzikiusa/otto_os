@@ -45,6 +45,9 @@ export interface RuntimeHostCommands {
   newThread?: (sessionId: string, beside: boolean) => void;
   /** `/btw <question>` — a side question that does not interrupt the turn. */
   sideChat?: (sessionId: string, question: string) => void;
+  /** Not a slash command: the background strip's tap — show every subagent
+   *  and background task (Threads: Thread details' Agents & tasks). */
+  showTasks?: (sessionId: string) => void;
 }
 
 /** An embedded thread's state as its host sees it (`onstatus`). */

@@ -213,8 +213,8 @@ failure on a read returns an error (500) — never a 200 with zero totals.
 - GET /usage/limits → LimitsResp `{accounts: AccountLimits[], generated_at, stale_after_secs}`
   (`otto_usage::limits`) — remaining subscription allowance, one row per provider login: root
   also sees the machine's default CLI homes (`~/.codex` / `$CODEX_HOME`, `~/.claude`, every
-  `~/.claude-*`, Antigravity), everyone sees their own subscription profiles
-  (`/auth/provider-accounts`). `AccountLimits{key, provider: "codex"|"claude"|"agy", account_id?,
+  `~/.claude-*`, Antigravity, Grok), everyone sees their own subscription profiles
+  (`/auth/provider-accounts`). `AccountLimits{key, provider: "codex"|"claude"|"agy"|"grok", account_id?,
   label, source: "default"|"config_dir"|"account", status: "ok"|"stale"|"unknown", reason?,
   plan?, taken_at?, windows: WindowLimit[], credits?: {has_credits, unlimited, balance?},
   limit_reached?, check?: ClaudeCheck}`; `WindowLimit{id, name, window_minutes?, used_percent?,
@@ -228,7 +228,13 @@ failure on a read returns an error (500) — never a 200 with zero totals.
   `seven_day_<model>` (from the old keys or, on newer CLIs, `rate_limits.limits[]`: `weekly_all`
   IS `seven_day`, a model-scoped entry is `Weekly · <display_name>`, an unknown group/kind is
   shown by its group and scope; null windows are left out); a Claude row's `taken_at` is its OLDEST window's reading. Nothing is
-  persisted and no login token is read. Antigravity rows are `unknown` with `reason`. `stale` = the snapshot is older than
+  persisted and no login token is read. Antigravity (root, when an agy home exists): the
+  installed CLI answers `agy -p /usage --output-format json` (no turn, no quota) — one window per
+  `command.data.groups[].buckets[]` (`<group> · 5-hour|Weekly`, id = bucket id). Grok (root, when
+  a `grok` provider is set up): `grok agent stdio` answers the ACP `_x.ai/billing` request after
+  `initialize` — one `subscription` window (`Weekly`/`Monthly` from `config.currentPeriod`),
+  `plan` = `subscription_tier`. Both answers (or failures, as `unknown` + `reason`) are cached
+  5 min per CLI, refreshed in the background once expired; the first request waits (≤ 15 s). `stale` = the snapshot is older than
   `stale_after_secs` (1800); a window whose `resets_at` passed after the snapshot has
   `reset_since_snapshot: true` and null percents — an old percent is never served as current.
 - PUT /usage/limits/claude-check `{key, enabled}` → LimitsResp — turn "Check with Anthropic" on/off
@@ -876,10 +882,10 @@ profile is refused (400) rather than bypassed. Drivers (what T3 Code runs,
 see the design doc's provider table): `claude` — the Agent SDK's stream-json
 control protocol against the `claude` CLI; `codex` — `codex app-server`;
 `gemini` — ACP via `gemini --acp`; `grok` — ACP via `grok … agent stdio`;
-`agy` — Antigravity's print-mode stream-json (`agy --print= --input-format
-stream-json --output-format stream-json`). Headless `agy` cannot ask: a
-tool it needs approval for is denied (a `system_notice` item names it) unless
-the user's own agy `permissions.allow` rules or its `--mode` cover it.
+`agy` — ACP via `agy acp` (approvals reach a person like any ACP agent;
+Otto's context bundle rides `session/new|load`
+`_meta.antigravity.systemPrompt.append`, never `--add-dir`, because agy runs
+commands in the alphabetically-first workspace root).
 
 **Access mode** (T3 Code's `RuntimeMode`): `RuntimeAccessMode` ∈
 `approval-required` (default: every tool approval reaches a person) |
@@ -892,10 +898,12 @@ the user's own agy `permissions.allow` rules or its `--mode` cover it.
 | codex | `approvalPolicy: untrusted`, `sandboxPolicy: readOnly` | `on-request`, `workspaceWrite` | `never`, `dangerFullAccess` | per `turn/start`; under Otto's Seatbelt the sandbox is always `externalSandbox` |
 | gemini | `--approval-mode default` | `auto_edit` | `yolo` | live `session/set_mode` (`default` / `autoEdit` / `yolo`) when advertised, else respawn + `session/load` |
 | grok | `--permission-mode default agent stdio` | same as approval-required (grok has no such mode) | `agent --always-approve stdio` | respawn + `session/load` |
-| agy | (no flag) | `--mode accept-edits` | `--mode auto` | respawn + `--conversation` |
+| agy | `session/set_mode default` | `session/set_mode accept-edits` | `--dangerously-skip-permissions` (launch only) | live `session/set_mode` between the first two; into / out of full access respawn + `session/load` |
 
 Otto's Seatbelt sandbox, folder trust and prompt guard apply in every mode;
-`--dangerously-skip-permissions` is never passed.
+`--dangerously-skip-permissions` is passed only for agy's full access (`agy
+acp` has no other way to stop asking; its `auto` mode still asks before
+commands that leave its sandbox).
 Streaming upserts of one item are coalesced to at most one per **50 ms**
 (the latest text always follows; nothing is dropped).
 
@@ -986,6 +994,7 @@ attachments.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
+| GET /runtime-sessions | authenticated (Agents View) | — | `RuntimeSession[]` across **every** workspace, newest activity first, max 500: the caller's own threads (root: everyone's), minus those of a workspace the caller cannot view (viewer+; scratch counts). Threads merges it into its list so a thread started on another device (the phone keeps its own selected workspace) shows on every device of that user |
 | GET /workspaces/{id}/runtime-sessions | ws viewer | optional query `source`, `origin_id` | `RuntimeSession[]`, newest activity first (own; all for admin/root), max 500. With `source` and/or `origin_id`, only the rows whose `meta.source` / `meta.origin.id` equal them (both may be combined; an empty value counts as absent) — **closed threads included** (their `status` tells): how an embedded page finds the thread it opened for this PR or connection. The owner scope is unchanged — a non-admin's filter only narrows their own threads |
 | POST /workspaces/{id}/runtime-sessions | ws editor, person | `{provider, cwd?, title?, model?, access_mode?, source?, origin?}` (`cwd` absolute, default the workspace root; `access_mode` default `full-access` while Settings › Providers skips permission prompts — the `agent_skip_permissions` setting, on by default, the rule terminal sessions follow — else `approval-required`). `provider` ∈ `claude \| codex \| gemini \| grok \| agy \| opencode \| pi`. **Embedded threads:** `source` ∈ `pr-agent \| connection-diagnose` and `origin: {kind: "pr" \| "connection", id, label?}` (`kind` pairs with the source — `pr-agent` ↔ `pr`, `connection-diagnose` ↔ `connection`; `id` 1–200 characters, `label` ≤ 200, a blank label is dropped) are copied into the server-owned `meta` as `meta.source` / `meta.origin`; nothing else in the body reaches `meta`. **400** for any other `source`, an `origin` without `source`, a kind that does not match, an empty / over-long `id` or an over-long `label`. An embedded thread is **closed** (as by `…/close`: kept in History, reopenable, never deleted) once open, with no turn, background work or pending approval / question, and idle for the daemon setting `embedded_thread_auto_close_hours` (integer, default `12`, `0` = never; checked shortly after boot, then hourly, at most 50 per pass). A thread opened from one (`…/peers`) inherits its `meta.source` / `meta.origin` | **201** `RuntimeSession` (with `meta.source` / `meta.origin` when given — also on get and list). The child is spawned (and its handshake started) before the response: a refused folder, a missing CLI or a provider without a driver fails the create (**400**) and leaves no row |
 | GET /runtime-sessions/{id} | ws viewer + owner-or-admin | — | `RuntimeSession` with its live `status` |
@@ -3323,7 +3332,7 @@ Workspace-independent: one Mac, one daemon. `busy` = a background agent arriving
 | GET /usage/report | Usage:View (non-root: own sessions) | `sessions_limit` (1–1000, default 100), `include=daily_models` | UsageReport (daily/monthly/model/session tables; `daily_models` only when included) |
 | POST /usage/ccusage-check | root | `{days?}` | CcusageCheck (opt-in `npx ccusage` cross-check) |
 | GET /usage/metrics | root | — | system CPU/RAM metrics |
-| GET /usage/limits | Usage:View (non-root: own subscription profiles only) | — | LimitsResp — remaining allowance per provider login (Codex from local rollouts; Claude from session events or the opt-in check; Antigravity `unknown` with a reason); see the Usage bullets above |
+| GET /usage/limits | Usage:View (non-root: own subscription profiles only) | — | LimitsResp — remaining allowance per provider login (Codex from local rollouts; Claude from session events or the opt-in check; Antigravity and Grok asked of their CLIs, cached 5 min); see the Usage bullets above |
 | PUT /usage/limits/claude-check | Usage:View + the caller sees that login | `{key, enabled}` | LimitsResp (opt-in switch, off by default) |
 | POST /usage/limits/claude-check/run | Usage:View + the caller sees that login | `{key}` | LimitsResp (runs the login's own `claude` CLI `get_usage`; 400 while the switch is off; 10 s timeout, 5 min cache, single flight) |
 | PUT /usage/config | root | UsageConfig | config |
@@ -3424,6 +3433,7 @@ Filesystem paths are on the **daemon host**, including when the caller uses a re
 - `ci_status?: string | null` — simplified CI status: `"passing" | "failing" | "pending" | "unknown"`.
 - `labels?: string[]` — PR label names.
 - `head_sha?: string | null` — the source branch's head commit as the provider reports it (GitHub `head.sha`, GitLab `sha`, Bitbucket `source.commit.hash` — abbreviated there). Opaque: clients pass it back as the PR diff's `rev=` so a push re-keys every diff cache.
+- `review?: {status: "approved" | "changes_requested" | "waiting", approvals: number}` — the row's review verdict (omitted when nobody is asked and nobody reviewed): changes requested beats approvals, approvals beat a pending request; `approvals` = reviewers whose latest verdict approves. Read without a per-PR call: Bitbucket asks the list for `fields=+values.participants` (`state` / `approved` / `role: REVIEWER`); GitHub makes ONE GraphQL read per list page for its open rows (`reviewDecision` + `latestOpinionatedReviews`, memoised like the review threads; on failure a row keeps `waiting` from the REST `requested_reviewers`/`requested_teams`); GitLab omits it.
 
 **`review_findings` table (migration 0049):** fingerprinted persistent finding identity across runs; `review_merge_readiness` view aggregates blocker counts per (repo_id, pr_number). No new HTTP routes — queried internally by the summarizer and surfaced via the `Review` DTO fields above.
 

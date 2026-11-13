@@ -287,6 +287,8 @@ class WorkspaceStore {
    *  RBAC holds — each per-workspace list is the same one the user would see
    *  after switching there. */
   otherWsSessions: Session[] = $state.raw([]);
+  /** Open views needing them whatever the toggle says (Threads: same threads on desktop and phone). */
+  otherWsWanted = 0;
 
   /** The all-workspaces view, grouped: every OTHER workspace that has at least
    *  one foreground agent session, with its sessions newest-first. The current
@@ -303,14 +305,11 @@ class WorkspaceStore {
       .filter((g) => g.sessions.length > 0),
   );
 
-  /** Load sessions of every non-current workspace (for the grouped sidebar
-   *  view) in ONE cross-workspace call (`GET /sessions`, live rows only —
-   *  the daemon owner-scopes each workspace). It used to fan
-   *  `/workspaces/{id}/sessions` out per workspace, each decoding that
-   *  workspace's whole archived history. A failure is silent and keeps the
-   *  previous groups. */
+  /** Load sessions of every non-current workspace (the grouped sidebar view,
+   *  Threads) in ONE call (`GET /sessions`, live rows only, owner-scoped per
+   *  workspace) — not a per-workspace fan-out. A failure keeps the old groups. */
   async refreshOtherSessions(): Promise<void> {
-    if (!this.allWorkspaces) return;
+    if (!this.allWorkspaces && !this.otherWsWanted) return;
     const token = getToken();
     const selection = this.selectionGeneration;
     const others = new Set(this.workspaces.filter((w) => w.id !== this.currentId).map((w) => w.id));
@@ -322,7 +321,7 @@ class WorkspaceStore {
     } catch {
       return;
     }
-    if (token !== getToken() || selection !== this.selectionGeneration || !this.allWorkspaces) return;
+    if (token !== getToken() || selection !== this.selectionGeneration || (!this.allWorkspaces && !this.otherWsWanted)) return;
     const flat = rows.filter((s) => others.has(s.workspace_id) && !s.archived && visibleOnThisDevice(s));
     this.otherWsSessions = flat;
     // Seed statuses without clobbering fresher event-fed values.

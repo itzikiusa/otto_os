@@ -30,7 +30,7 @@ export function prAgentOriginLabel(repoName: string, n: number, title: string): 
 
 /** Providers a thread can run on (the structured runtime's drivers; the
  *  rest are terminal-only). Mirrors isRuntimeProvider in the Threads module. */
-const RUNTIME_PROVIDERS: readonly string[] = ['claude', 'codex', 'gemini', 'grok', 'opencode', 'pi'];
+const RUNTIME_PROVIDERS: readonly string[] = ['claude', 'codex', 'gemini', 'grok', 'agy', 'opencode', 'pi'];
 
 /** The provider a new PR thread runs on: the person's default when it can
  *  run a thread and is installed, else the first that can — null when none

@@ -739,6 +739,40 @@ pub struct PrSummary {
     /// when that identity could not be looked up.
     #[serde(default)]
     pub is_mine: bool,
+    /// The review verdict, from what the provider's list call returns
+    /// (GitHub: one GraphQL read per page). Absent when nobody reviews it or
+    /// the provider says nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<PrReviewSummary>,
+}
+
+/// A PR row's review verdict: changes requested beats approvals, approvals
+/// beat a pending request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrReviewSummary {
+    /// `approved` | `changes_requested` | `waiting`.
+    pub status: String,
+    /// Reviewers whose latest verdict is an approval.
+    pub approvals: u32,
+}
+
+impl PrReviewSummary {
+    /// `None` when there is no verdict and no reviewer is waited on.
+    pub fn from_counts(changes_requested: bool, approvals: u32, waiting: bool) -> Option<Self> {
+        let status = if changes_requested {
+            "changes_requested"
+        } else if approvals > 0 {
+            "approved"
+        } else if waiting {
+            "waiting"
+        } else {
+            return None;
+        };
+        Some(Self {
+            status: status.into(),
+            approvals,
+        })
+    }
 }
 
 /// One page of `GET /repos/{id}/prs`. `has_more` is the provider's own
