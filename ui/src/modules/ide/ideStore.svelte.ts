@@ -248,6 +248,7 @@ class IdeStore {
 
   attachDefaultWorkspace(): void {
     if (this.target.root || this.collabIsGuest) return;
+    if (!ws.current && !ws.listSettled) return;
     const cur = ws.current ?? ws.workspaces.find((w) => w.id !== SCRATCH_WORKSPACE_ID && w.root_path) ?? ws.workspaces[0];
     if (cur?.root_path) void this.setLocalTarget(cur.root_path, cur.id);
   }
