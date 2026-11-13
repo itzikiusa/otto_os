@@ -169,20 +169,19 @@ impl ShellEnvResolver {
                 }
                 guard.status.clone()
             };
-            if status == "cold" {
-                if self
+            if status == "cold"
+                && self
                     .warming
                     .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                     .is_ok()
+            {
                 {
-                    {
-                        let mut guard = self.state.write().unwrap_or_else(|e| e.into_inner());
-                        guard.status = "warming".to_string();
-                    }
-                    self.refresh_inner().await;
-                    let guard = self.state.read().unwrap_or_else(|e| e.into_inner());
-                    return state_to_resp(&guard);
+                    let mut guard = self.state.write().unwrap_or_else(|e| e.into_inner());
+                    guard.status = "warming".to_string();
                 }
+                self.refresh_inner().await;
+                let guard = self.state.read().unwrap_or_else(|e| e.into_inner());
+                return state_to_resp(&guard);
             }
             if tokio::time::timeout(Duration::from_millis(3600), notified)
                 .await
