@@ -7,12 +7,15 @@ import {
   detectProposalLanguage,
   extractCodeProposals,
   IDE_PROPOSAL_INSTRUCTION,
+  IDE_RUNTIME_PROVIDERS,
   lineRangeFromOffsets,
+  matchesIdeProjectThread,
   MAX_CHIP_SNIPPET_CHARS,
   MAX_CONTEXT_CHIPS,
   offsetsForLineRange,
   parseFenceInfo,
   parseIdeContextChipsFromPrompt,
+  resolveIdeHarnesses,
   spliceCodeRange,
   stripIdeContextBlocks,
   truncateSnippet,
@@ -309,4 +312,132 @@ test('offsetsForLineRange, lineRangeFromOffsets, and spliceCodeRange preserve su
   const expected = SAMPLE_GO.replace('\treturn a + b', '\treturn a + b + 1');
   assert.equal(splicedByOffsets, expected);
   assert.equal(splicedByLines, expected);
+});
+
+test('resolveIdeHarnesses supports all Threads providers + custom CLIs without shell or 3-provider cap', () => {
+  const harnesses = resolveIdeHarnesses(
+    ['claude', 'codex', 'agy', 'grok', 'custom-qwen', 'shell'],
+    ['custom-deepseek', 'shell', null, '  '],
+  );
+
+  for (const runtimeProv of IDE_RUNTIME_PROVIDERS) {
+    assert.ok(harnesses.includes(runtimeProv), `expected ${runtimeProv} in IDE harnesses`);
+  }
+  assert.ok(harnesses.includes('custom-qwen'));
+  assert.ok(harnesses.includes('custom-deepseek'));
+  assert.ok(!harnesses.includes('shell'));
+  assert.equal(new Set(harnesses).size, harnesses.length);
+});
+
+test('matchesIdeProjectThread matches primary root, attached multi-folder roots, macOS /private/var symlinks, and workspace fallback', () => {
+  const roots = ['/var/folders/ab/proj-main', '/Users/dev/shared-lib'];
+
+  assert.equal(
+    matchesIdeProjectThread({
+      sessionId: 's-exact',
+      workspaceId: 'scratch',
+      targetWorkspaceId: 'ws-1',
+      cwd: '/private/var/folders/ab/proj-main/pkg/sub',
+      projectRoots: roots,
+    }),
+    true,
+  );
+
+  assert.equal(
+    matchesIdeProjectThread({
+      sessionId: 's-attached',
+      workspaceId: 'ws-other',
+      targetWorkspaceId: 'ws-1',
+      cwd: '/Users/dev/shared-lib',
+      projectRoots: roots,
+    }),
+    true,
+  );
+
+  assert.equal(
+    matchesIdeProjectThread({
+      sessionId: 's-unrelated',
+      workspaceId: 'ws-1',
+      targetWorkspaceId: 'ws-1',
+      cwd: '/Users/dev/unrelated-repo',
+      projectRoots: roots,
+    }),
+    false,
+  );
+
+  assert.equal(
+    matchesIdeProjectThread({
+      sessionId: 's-pinned',
+      activeSessionId: 's-pinned',
+      workspaceId: 'ws-other',
+      targetWorkspaceId: 'ws-1',
+      cwd: '/Users/dev/unrelated-repo',
+      projectRoots: roots,
+    }),
+    true,
+  );
+
+  assert.equal(
+    matchesIdeProjectThread({
+      sessionId: 's-ws-only',
+      workspaceId: 'ws-1',
+      targetWorkspaceId: 'ws-1',
+      cwd: null,
+      projectRoots: roots,
+    }),
+    true,
+  );
+});
+
+test('buildIdeAgentPrompt omits empty wrapper when omitWhenEmpty is set and supports run_output & all 8 languages', () => {
+  assert.equal(
+    buildIdeAgentPrompt('Explain this module', [], {
+      workspaceRoot: '/ws/demo',
+      activePath: 'main.go',
+      planMode: false,
+      omitWhenEmpty: true,
+    }),
+    'Explain this module',
+  );
+
+  // Plan mode still includes `<ide_context>` instructions even with 0 context chips.
+  const planOnly = buildIdeAgentPrompt('Design refactor plan', [], {
+    workspaceRoot: '/ws/demo',
+    planMode: true,
+    omitWhenEmpty: true,
+  });
+  assert.ok(planOnly.startsWith('<ide_context>\n'));
+  assert.ok(planOnly.includes('Plan mode:'));
+
+  // `run_output` chip round-trips cleanly.
+  const runChip = makeChip({
+    id: 'ctx-run',
+    key: 'run:r1',
+    kind: 'run_output',
+    label: '✗ go test ./...',
+    path: undefined,
+    startLine: undefined,
+    endLine: undefined,
+    language: undefined,
+    snippet: 'Run: go test ./... (failed, exit 1)\n\nFAIL calc/calc_test.go:14',
+  });
+  const withRun = buildIdeAgentPrompt('Fix failing run', [runChip], { omitWhenEmpty: true });
+  const parsedRun = parseIdeContextChipsFromPrompt(withRun);
+  assert.equal(parsedRun.length, 1);
+  assert.equal(parsedRun[0].kind, 'run_output');
+  assert.equal(parsedRun[0].label, '✗ go test ./...');
+
+  // All 8 required languages/formats detect accurately.
+  assert.equal(detectProposalLanguage('src/index.mts'), 'typescript');
+  assert.equal(detectProposalLanguage('src/legacy.cjs'), 'javascript');
+  assert.equal(detectProposalLanguage('cmd/server/main.go'), 'go');
+  assert.equal(detectProposalLanguage('jdt://contents/java.base/java.util/List.class?foo=1'), 'java');
+  assert.equal(detectProposalLanguage('crates/core/src/lib.rs'), 'rust');
+  assert.equal(detectProposalLanguage('typings/app.pyi'), 'python');
+  assert.equal(detectProposalLanguage('scripts/deploy.zsh'), 'shell');
+  assert.equal(detectProposalLanguage('/Users/dev/.zshrc'), 'shell');
+  assert.equal(detectProposalLanguage('config/tsconfig.jsonc'), 'json');
+  assert.equal(detectProposalLanguage('events/trace.jsonl'), 'jsonl');
+  assert.equal(detectProposalLanguage('data/metrics.csv'), 'csv');
+  assert.equal(detectProposalLanguage('data/metrics.tsv'), 'tsv');
 });

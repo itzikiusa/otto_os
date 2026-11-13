@@ -1,10 +1,17 @@
 // Pure, zero-DOM helpers and shared types for IDE Agent context assembly,
-// fenced code proposal extraction (`otto-fake-claude` safe), range splicing,
-// and sub-2ms line diffing.
+// multi-harness Threads resolution, fenced code proposal extraction
+// (`otto-fake-claude` safe), range splicing, and sub-2ms line diffing.
 
 import { escapeHtml, unescapeHtml } from '../../../lib/html.ts';
 
-export type IdeContextKind = 'selection' | 'file' | 'symbol' | 'diagnostic' | 'test_failure' | 'debug_frame';
+export type IdeContextKind =
+  | 'selection'
+  | 'file'
+  | 'symbol'
+  | 'diagnostic'
+  | 'test_failure'
+  | 'debug_frame'
+  | 'run_output';
 
 export interface IdeContextChip {
   id: string; key: string; kind: IdeContextKind; label: string; sublabel?: string;
@@ -21,6 +28,7 @@ export interface IdeCodeProposal {
 export interface IdeInlinePromptState {
   open: boolean; path: string; relPath: string; language: string; from: number; to: number;
   startLine: number; endLine: number; selectedText: string; query: string;
+  provider: string; model: string | null; effort: string | null;
   busy: boolean; error: string | null; proposal: IdeCodeProposal | null;
 }
 export interface ParsedPromptContextSummary {
@@ -35,22 +43,75 @@ export interface ExtractProposalsOptions {
   preferRange?: boolean; resolvePath?: (rawPath: string) => string; relativePath?: (fullPath: string) => string;
   getFileContent?: (fullPath: string) => string; appliedIds?: Readonly<Record<string, string>>;
 }
+export interface MatchIdeThreadInput {
+  sessionId: string;
+  activeSessionId?: string | null;
+  workspaceId: string;
+  targetWorkspaceId: string;
+  cwd?: string | null;
+  projectRoots?: readonly (string | null | undefined)[];
+}
 
 export const MAX_CONTEXT_CHIPS = 12;
 export const MAX_CHIP_SNIPPET_CHARS = 8_000;
 export const MAX_IDE_CONTEXT_PAYLOAD_CHARS = 28_000;
 export const IDE_PROPOSAL_INSTRUCTION =
   'When proposing code changes for a file, wrap the updated file or selection in a fenced block like ```<lang> path=<relative-path>\n...\n```.';
+export const IDE_RUNTIME_PROVIDERS = ['claude', 'codex', 'gemini', 'agy', 'grok', 'opencode', 'pi'] as const;
 
 const NON_CODE_FENCE_LANGS = new Set(['sh', 'bash', 'zsh', 'shell', 'console', 'mermaid', 'diff', 'patch']);
 const EXT_LANG_MAP: Record<string, string> = {
-  go: 'go', java: 'java', rs: 'rust', py: 'python', ts: 'typescript', tsx: 'tsx',
-  js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'jsx', json: 'json',
-  yaml: 'yaml', yml: 'yaml', md: 'markdown', sql: 'sql', sh: 'shell', bash: 'shell',
-  zsh: 'shell', html: 'html', css: 'css', svelte: 'svelte', toml: 'toml',
+  go: 'go', java: 'java', class: 'java', rs: 'rust',
+  py: 'python', pyi: 'python', pyw: 'python',
+  ts: 'typescript', tsx: 'tsx', mts: 'typescript', cts: 'typescript',
+  js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'jsx',
+  json: 'json', jsonc: 'json', jsonl: 'jsonl', ndjson: 'jsonl',
+  csv: 'csv', tsv: 'tsv',
+  sh: 'shell', bash: 'shell', zsh: 'shell', bats: 'shell', bashrc: 'shell', zshrc: 'shell',
+  yaml: 'yaml', yml: 'yaml', md: 'markdown', sql: 'sql',
+  html: 'html', css: 'css', svelte: 'svelte', toml: 'toml',
 };
 
 const sanitizeContextBody = (t: string): string => t.replace(/<\/ide_context>/gi, '<\\/ide_context>');
+const normPath = (p: string | null | undefined): string => {
+  const clean = (p ?? '').trim().replace(/\/+$/, '').replace(/^\/private\/(var|tmp)(?=\/|$)/, '/$1');
+  return clean === '~' ? '' : clean;
+};
+
+/** Build the unified Threads harness list (`claude`, `codex`, `agy`, `gemini`, `grok`, `opencode`, `pi`, + custom CLI harnesses), never hardcoding a 3-provider subset. */
+export function resolveIdeHarnesses(
+  registeredProviders: readonly string[],
+  extraProviders: readonly (string | null | undefined)[] = [],
+): string[] {
+  const merged: string[] = [];
+  const push = (raw: string | null | undefined): void => {
+    const clean = (raw ?? '').trim();
+    if (clean && clean !== 'shell' && !merged.includes(clean)) merged.push(clean);
+  };
+  for (let i = 0; i < IDE_RUNTIME_PROVIDERS.length; i++) {
+    const base = IDE_RUNTIME_PROVIDERS[i];
+    if (base === 'claude' || base === 'codex' || base === 'agy' || registeredProviders.includes(base)) push(base);
+  }
+  for (let i = 0; i < registeredProviders.length; i++) push(registeredProviders[i]);
+  for (let i = 0; i < IDE_RUNTIME_PROVIDERS.length; i++) push(IDE_RUNTIME_PROVIDERS[i]);
+  for (let i = 0; i < extraProviders.length; i++) push(extraProviders[i]);
+  return merged;
+}
+
+/** Match any structured runtime or PTY thread belonging to the current IDE workspace or any attached project folder. */
+export function matchesIdeProjectThread(input: MatchIdeThreadInput): boolean {
+  if (input.activeSessionId && input.sessionId === input.activeSessionId) return true;
+  const roots = (input.projectRoots ?? []).map(normPath).filter(Boolean);
+  const cwd = normPath(input.cwd);
+  if (roots.length > 0 && cwd) {
+    for (let i = 0; i < roots.length; i++) {
+      const r = roots[i];
+      if (cwd === r || cwd.startsWith(`${r}/`) || r.startsWith(`${cwd}/`)) return true;
+    }
+    return false;
+  }
+  return Boolean(input.targetWorkspaceId) && input.workspaceId === input.targetWorkspaceId;
+}
 
 export function truncateSnippet(text: string, maxChars = MAX_CHIP_SNIPPET_CHARS): string {
   const cap = Math.max(0, maxChars);
@@ -63,7 +124,11 @@ export function truncateSnippet(text: string, maxChars = MAX_CHIP_SNIPPET_CHARS)
 export function detectProposalLanguage(path: string, explicitLang = ''): string {
   const clean = explicitLang.trim().toLowerCase();
   if (clean && !clean.includes('/') && !clean.includes('.')) return clean;
-  const base = path.split(/[\\/]/).pop() ?? path;
+  if (/^(?:jdt:\/\/|jar:)/i.test(path.trim())) return 'java';
+  const noQuery = path.split(/[?#]/)[0] ?? path;
+  const base = noQuery.split(/[\\/]/).pop() ?? noQuery;
+  const lowerBase = base.toLowerCase();
+  if (lowerBase === '.bashrc' || lowerBase === '.zshrc' || lowerBase === '.bash_profile' || lowerBase === '.zprofile') return 'shell';
   const ext = base.includes('.') ? (base.split('.').pop()?.toLowerCase() ?? '') : '';
   return EXT_LANG_MAP[ext] ?? (clean || 'txt');
 }
@@ -92,8 +157,13 @@ export function parseIdeContextChipsFromPrompt(text: string): ParsedPromptContex
 
 export function buildIdeAgentPrompt(
   userPrompt: string, contexts: readonly IdeContextChip[] = [],
-  opts: { workspaceRoot?: string; activePath?: string | null; planMode?: boolean; maxContextChars?: number } = {},
+  opts: {
+    workspaceRoot?: string; activePath?: string | null; planMode?: boolean;
+    maxContextChars?: number; omitWhenEmpty?: boolean;
+  } = {},
 ): string {
+  const cleanUser = userPrompt.trim();
+  if (opts.omitWhenEmpty && contexts.length === 0 && !opts.planMode) return cleanUser;
   const maxChars = Math.max(512, opts.maxContextChars ?? MAX_IDE_CONTEXT_PAYLOAD_CHARS);
   const openTag = '<ide_context>\n', closeTag = '\n</ide_context>';
   const planNote = opts.planMode ? '\nPlan mode: analyze, explain, and propose code blocks only; do not modify files on disk directly.' : '';
@@ -113,7 +183,6 @@ export function buildIdeAgentPrompt(
     remaining -= entry.length;
   }
   const contextXml = `${openTag}${wsHeader}${entries.join('')}${instructions}${closeTag}`;
-  const cleanUser = userPrompt.trim();
   return cleanUser ? `${contextXml}\n\n${cleanUser}` : contextXml;
 }
 
