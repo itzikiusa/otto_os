@@ -2,10 +2,19 @@
 //! (`otto-agent-protocol`; design `docs/features/threads-structured-runtime.md`
 //! §Safety). Same helpers, same order as [`SessionManager::create`]: folder
 //! refusal, trust pre-seed, context provisioning, then the Seatbelt wrap as the
-//! very last step over the fully-built spec. What the runtime cannot honour
-//! yet (named provider accounts, network profiles) is REFUSED, never skipped.
+//! very last step over the fully-built spec. A named provider account
+//! (`meta.account_id`) and a network profile (`meta.network_profile_id`)
+//! apply exactly as for a terminal session: the account's home and
+//! credentials, the profile's SSH tunnels and proxy env (kept up until the
+//! child is retired).
 
 use super::*;
+
+/// The exit signal of each structured child's active network profile: its
+/// tunnels stop when the child is retired (or respawned).
+static RUNTIME_NETWORK_EXITS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<Id, tokio::sync::watch::Sender<Option<i32>>>>,
+> = std::sync::LazyLock::new(Default::default);
 
 /// How a structured driver hands MCP servers to its agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,10 +127,11 @@ impl SessionManager {
     /// driver's handshake.
     ///
     /// Errors: the cwd is refused (`/`, `$HOME` while confined, the data dir —
-    /// [`Self::check_session_cwd`]); the daemon is shutting down; the session
-    /// asks for a named provider account or the workspace selects a network
-    /// profile (not supported by the runtime yet — refused so traffic and
-    /// credentials never silently take a different path than a PTY session's).
+    /// [`Self::check_session_cwd`]); the daemon is shutting down; the named
+    /// account is unknown, someone else's or another provider's; the network
+    /// profile is not usable (another workspace's, archived, its connection
+    /// refused) — never a silent fallback to the default account or a direct
+    /// connection.
     pub async fn prepare_runtime_spawn(
         &self,
         ws: &Workspace,
@@ -134,23 +144,18 @@ impl SessionManager {
         if session.kind != SessionKind::Agent {
             return Err(Error::Invalid("runtime sessions are agent sessions".into()));
         }
-        if session.meta.get("account_id").is_some_and(|v| !v.is_null()) {
-            return Err(Error::Invalid(
-                "named provider accounts are not supported for structured sessions yet".into(),
-            ));
-        }
-        if self.networks.prepare(session).await?.is_some() {
-            return Err(Error::Invalid(
-                "this workspace routes agents through a network profile, which structured \
-                 sessions do not support yet — use a terminal session"
-                    .into(),
-            ));
-        }
+        let account = self
+            .resolve_account(&session.created_by, &session.provider, &session.meta)
+            .await?;
+        let network = self.networks.prepare(session).await?;
         let read_only = session.meta.get("read_only").and_then(|v| v.as_bool()) == Some(true);
         let unconfined = !read_only && !self.process_sandbox_enabled().await;
         self.check_session_cwd(ws, &session.cwd, unconfined)?;
         let _ = std::fs::create_dir_all(&session.cwd);
-        crate::trust::ensure_trusted_async(&session.provider, &session.cwd).await;
+        // A named account's CLI keeps trust in its own home (as `create`).
+        if account.is_none() {
+            crate::trust::ensure_trusted_async(&session.provider, &session.cwd).await;
+        }
         // MCP before the context hook — the PTY spawn's order.
         let _mcp_activation = crate::mcp::activation_gate().read().await;
         let protocol_mcp = match delivery {
@@ -166,8 +171,17 @@ impl SessionManager {
             let cwd = session.cwd.clone();
             let prov = session.provider.clone();
             let persona = carries_persona(&session.meta);
-            let injection = tokio::task::spawn_blocking(move || {
-                context_injection(hook.as_ref(), &ws_owned, &cwd, &prov, persona)
+            // A named account gets its bundle scoped to its home (`create`).
+            let context = account
+                .as_ref()
+                .map(|(_, home)| otto_core::hooks::SessionSpawnContext {
+                    namespace: session.id.clone(),
+                    provider_home: Some(home.clone()),
+                    extra_context_md: String::new(),
+                });
+            let injection = tokio::task::spawn_blocking(move || match context {
+                Some(context) => hook.before_spawn_session(&ws_owned, &cwd, &prov, &context),
+                None => context_injection(hook.as_ref(), &ws_owned, &cwd, &prov, persona),
             })
             .await
             .unwrap_or_default();
@@ -184,6 +198,23 @@ impl SessionManager {
         // The PTY spawn's build budget (`manager/resources.rs`); priority and
         // admission stay with the runtime, which spawns the child itself.
         self.apply_machine_budget(session, spec).await;
+        if let Some((account, home)) = &account {
+            crate::accounts::apply_account(spec, account, home)?;
+        }
+        if let Some(network) = &network {
+            spec.env
+                .retain(|(key, _)| !network.env.iter().any(|(mapped, _)| mapped == key));
+            spec.env.extend(network.env.clone());
+        }
+        // The profile's tunnels live until this child is retired.
+        let (exit_tx, exit_rx) = tokio::sync::watch::channel(None);
+        if network.is_some() {
+            RUNTIME_NETWORK_EXITS
+                .lock()
+                .unwrap()
+                .insert(session.id.clone(), exit_tx);
+        }
+        self.networks.activate(session.id.clone(), network, exit_rx);
         // Last, over the fully-built spec — as `create` does.
         self.apply_sandbox(spec, session).await;
         Ok(protocol_mcp)
@@ -267,6 +298,9 @@ impl SessionManager {
     /// MCP credential and remove its per-session MCP files, as a PTY session's
     /// retirement does. Every respawn mints a fresh one. Best-effort.
     pub async fn retire_runtime_credentials(&self, session: &Session) {
+        if let Some(exit) = RUNTIME_NETWORK_EXITS.lock().unwrap().remove(&session.id) {
+            let _ = exit.send(Some(0));
+        }
         self.retire_credentials(session).await;
         let _ = tokio::fs::remove_file(claude_mcp_config_path(&session.id)).await;
     }
