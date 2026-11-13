@@ -55,8 +55,8 @@ use agent_client_protocol::v1::schema::{
 };
 use otto_core::agent_runtime::{
     ApprovalDecision, ApprovalOption, PlanStep, PlanStepStatus, ProviderFailure, RequestKind,
-    RuntimeAccessMode, RuntimePromptReq, RuntimeProvider, TurnItem, TurnItemKind, TurnItemStatus,
-    TurnTerminalStatus, TurnTokenUsage,
+    RuntimeAccessMode, RuntimeCapabilities, RuntimePromptReq, RuntimeProvider, TurnItem,
+    TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
@@ -244,6 +244,14 @@ pub struct AcpDriver {
     tools: HashMap<String, Tool>,
     pending: HashMap<String, Pending>,
     questions: HashMap<String, (Value, Vec<otto_core::agent_runtime::RuntimeQuestion>)>,
+    /// The session's reasoning-effort config option (agy `thought_level`,
+    /// grok `reasoning_effort`): `(configId, values low → high)`.
+    effort_option: Option<(String, Vec<String>)>,
+    /// The effort value last written to it.
+    effort: Option<String>,
+    effort_req: Option<u64>,
+    /// agy swarm members this session added, by member name.
+    swarm: HashMap<String, TurnItem>,
 }
 
 impl AcpDriver {
@@ -293,6 +301,10 @@ impl AcpDriver {
             tools: HashMap::new(),
             pending: HashMap::new(),
             questions: HashMap::new(),
+            effort_option: None,
+            effort: None,
+            effort_req: None,
+            swarm: HashMap::new(),
         }
     }
 
@@ -532,6 +544,21 @@ impl AcpDriver {
             self.access = mode;
             self.write_mode(step, &sid, mode);
         }
+        // The effort as the session's own config option (T3 Code:
+        // `antigravityThinkingConfig`, grok's `reasoning_effort`).
+        let effort = req.effort.as_deref().and_then(|e| {
+            let (config, levels) = self.effort_option.as_ref()?;
+            Some((config.clone(), effort_value(levels, e)?))
+        });
+        if let Some((config, value)) = effort.filter(|(_, v)| self.effort.as_ref() != Some(v)) {
+            let (id, line) = self.request(
+                M_SET_CONFIG_OPTION,
+                json!({"sessionId": sid, "configId": config, "value": value}),
+            );
+            self.effort_req = Some(id);
+            self.effort = Some(value);
+            step.write(line);
+        }
         let (id, line) = self.request(M_SESSION_PROMPT, PromptRequest::new(sid, blocks));
         self.prompt_id = Some(id);
         self.turn_id = Some(turn_id);
@@ -749,7 +776,110 @@ impl AcpDriver {
         Self::merge_content(&mut t, &call.content);
         Self::merge_raw_images(&mut t, call.raw_output.as_ref());
         step.push(DriverEvent::TurnItem(self.tool_item(&id, &t)));
+        self.swarm_members(step, &t);
         self.tools.insert(id, t);
+    }
+
+    /// agy's native swarm (`swarm{action: add|kill, name, brief, n?,
+    /// tasks?}`; verified live against 1.5.8): agy reports each call as a
+    /// plain `kind: other` tool titled "Run swarm" with its args as
+    /// `rawInput` and NO result, sends nothing while the workers run (they
+    /// run on their own in agy's backend), and keeps the swarm on disk under
+    /// `brain/<session>/.system_generated/swarm` (read by `native_work.rs`).
+    /// An `add` is one background subagent card per member (`name`, or
+    /// `name-1..k` for `n` / `tasks`), open until a `kill` names it or the
+    /// process ends.
+    fn swarm_members(&mut self, step: &mut DriverStep, t: &Tool) {
+        if self.provider != RuntimeProvider::Agy
+            || t.title != "Run swarm"
+            || t.status != ToolCallStatus::Completed
+        {
+            return;
+        }
+        let Some(input) = t.raw_input.as_ref() else {
+            return;
+        };
+        let s = |k: &str| input.get(k).and_then(Value::as_str);
+        let Some(name) = s("name").filter(|n| !n.is_empty()) else {
+            return;
+        };
+        match s("action") {
+            Some("add") => {
+                let brief = s("brief").unwrap_or_default();
+                let tasks: Vec<&str> = input
+                    .get("tasks")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+                let n = input.get("n").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let members: Vec<(String, String)> = if !tasks.is_empty() {
+                    tasks
+                        .iter()
+                        .enumerate()
+                        .map(|(i, task)| {
+                            let prompt = format!("{brief}\n\n{task}").trim().to_string();
+                            (format!("{name}-{}", i + 1), prompt)
+                        })
+                        .collect()
+                } else if n > 1 {
+                    (1..=n.min(32))
+                        .map(|i| (format!("{name}-{i}"), brief.to_string()))
+                        .collect()
+                } else {
+                    vec![(name.to_string(), brief.to_string())]
+                };
+                for (member, prompt) in members {
+                    if self.swarm.contains_key(&member) {
+                        continue;
+                    }
+                    let mut it = item(
+                        format!("{}:swarm:{member}", self.turn()),
+                        TurnItemStatus::Running,
+                        Some(member.clone()),
+                        TurnItemKind::Subagent {
+                            tool_name: "swarm".into(),
+                            description: Some(member.clone()),
+                            subagent_type: Some("Swarm worker".into()),
+                            prompt: (!prompt.is_empty()).then_some(prompt),
+                            output: None,
+                            background: true,
+                            last_tool: None,
+                            tool_uses: 0,
+                        },
+                    );
+                    // Its card stays in the turn that added it.
+                    it.turn_id = self.turn_id.clone();
+                    step.push(DriverEvent::TurnItem(it.clone()));
+                    self.swarm.insert(member, it);
+                }
+            }
+            // `kill{name}` also takes a whole `name-1..k` group.
+            Some("kill") => {
+                let gone: Vec<String> = self
+                    .swarm
+                    .keys()
+                    .filter(|m| {
+                        *m == name
+                            || m.strip_prefix(name)
+                                .and_then(|r| r.strip_prefix('-'))
+                                .is_some_and(|r| {
+                                    !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit())
+                                })
+                    })
+                    .cloned()
+                    .collect();
+                for m in gone {
+                    if let Some(mut it) = self.swarm.remove(&m) {
+                        let now = chrono::Utc::now();
+                        it.status = TurnItemStatus::Interrupted;
+                        it.completed_at = Some(now);
+                        it.updated_at = now;
+                        step.push(DriverEvent::TurnItem(it));
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn on_tool_update(&mut self, step: &mut DriverStep, up: ToolCallUpdate) {
@@ -788,6 +918,7 @@ impl AcpDriver {
         }
         Self::merge_raw_images(&mut t, f.raw_output.as_ref());
         step.push(DriverEvent::TurnItem(self.tool_item(&id, &t)));
+        self.swarm_members(step, &t);
         self.tools.insert(id, t);
     }
 
@@ -965,6 +1096,20 @@ impl AcpDriver {
                         .collect()
                 })
                 .unwrap_or_default();
+            if let Some(opts) = result
+                .as_ref()
+                .and_then(|r| r.get("configOptions"))
+                .and_then(Value::as_array)
+            {
+                self.effort_option = opts.iter().find_map(effort_config);
+                self.effort = self.effort_option.as_ref().and_then(|(id, _)| {
+                    opts.iter()
+                        .find(|o| o.get("id").and_then(Value::as_str) == Some(id.as_str()))
+                        .and_then(|o| o.get("currentValue"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                });
+            }
             let current_mode = result
                 .as_ref()
                 .and_then(|r| r.pointer("/modes/currentModeId"))
@@ -1001,6 +1146,12 @@ impl AcpDriver {
                 // -32602: the agent refused the value; anything else (an
                 // internal error, a dropped request) was not applied.
                 self.config_retry = e.get("code").and_then(Value::as_i64) != Some(-32602);
+                step.push(DriverEvent::Error(rpc_failure("provider_error", &e)));
+            }
+        } else if Some(id) == self.effort_req {
+            self.effort_req = None;
+            if let Some(e) = error {
+                self.effort = None;
                 step.push(DriverEvent::Error(rpc_failure("provider_error", &e)));
             }
         } else if Some(id) == self.mode_req {
@@ -1061,6 +1212,43 @@ impl AcpDriver {
             step.push(ev);
             self.turn_id = None;
         }
+    }
+}
+
+/// A `select` config option that sets reasoning effort — agy's
+/// `thought_level` (category `thought_level`), grok's `reasoning_effort` —
+/// as `(configId, values)`.
+fn effort_config(o: &Value) -> Option<(String, Vec<String>)> {
+    let id = o.get("id")?.as_str()?;
+    let category = o.get("category").and_then(Value::as_str);
+    if !(matches!(id, "thought_level" | "reasoning_effort") || category == Some("thought_level"))
+        || o.get("type").and_then(Value::as_str) != Some("select")
+    {
+        return None;
+    }
+    // Options may come grouped (`{group, options: […]}`).
+    let mut values = Vec::new();
+    for entry in o.get("options")?.as_array()? {
+        let nested = entry.get("options").and_then(Value::as_array);
+        for v in nested.map_or_else(|| vec![entry], |n| n.iter().collect()) {
+            if let Some(v) = v.get("value").and_then(Value::as_str) {
+                values.push(v.to_string());
+            }
+        }
+    }
+    (!values.is_empty()).then(|| (id.to_string(), values))
+}
+
+/// Otto's effort name as one of the agent's `levels`: the same name, else
+/// the lowest for `minimal` / the highest for `xhigh` / `max`.
+fn effort_value(levels: &[String], want: &str) -> Option<String> {
+    if levels.iter().any(|l| l == want) {
+        return Some(want.to_string());
+    }
+    match want {
+        "minimal" => levels.first().cloned(),
+        "xhigh" | "max" => levels.last().cloned(),
+        _ => None,
     }
 }
 
@@ -1131,6 +1319,22 @@ impl StructuredDriver for AcpDriver {
         self.provider
     }
 
+    /// The provider baseline, then what `initialize` / `session/new|load`
+    /// advertised: `promptCapabilities` and the effort config option.
+    fn capabilities(&self) -> RuntimeCapabilities {
+        let mut c = RuntimeCapabilities::for_provider(self.provider);
+        if self.phase == Phase::Ready {
+            c.images = self.images;
+            c.files = self.embedded;
+            c.efforts = self
+                .effort_option
+                .as_ref()
+                .map(|(_, l)| l.clone())
+                .unwrap_or_default();
+        }
+        c
+    }
+
     fn launch(&self, ctx: &LaunchContext) -> LaunchSpec {
         let mut args = self.flavor.head_args.clone();
         let mut tail_args = self.flavor.tail_args.clone();
@@ -1187,12 +1391,18 @@ impl StructuredDriver for AcpDriver {
             return Err(DriverError("a prompt is already running".into()));
         }
         let name = self.provider.as_str();
-        if req.effort.is_some() {
-            return Err(DriverError(format!(
-                "{name} does not take a reasoning effort"
-            )));
-        }
         let ready = self.phase == Phase::Ready;
+        if let Some(e) = &req.effort {
+            let takes = self
+                .effort_option
+                .as_ref()
+                .is_some_and(|(_, levels)| effort_value(levels, e).is_some());
+            if ready && !takes {
+                return Err(DriverError(format!(
+                    "{name} does not take reasoning effort {e}"
+                )));
+            }
+        }
         if ready && !req.images.is_empty() && !self.images {
             return Err(DriverError(format!("{name} does not accept images")));
         }
@@ -1514,6 +1724,125 @@ mod tests {
         assert_eq!(sent(&s, 1)["params"]["modeId"], "accept-edits");
         assert!(d.switches_access_live(RuntimeAccessMode::ApprovalRequired));
         assert!(!d.switches_access_live(RuntimeAccessMode::FullAccess));
+    }
+
+    /// agy 1.5.8 / grok advertise effort as a `select` config option; a
+    /// prompt's effort writes it (clamped) before the prompt, once.
+    #[test]
+    fn effort_rides_the_agents_thought_level_option() {
+        let mut d = AcpDriver::agy("agy");
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"promptCapabilities":{"image":true}}}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1","configOptions":[{"id":"model","type":"select","currentValue":"gemini-4-carbon","options":[{"value":"gemini-4-carbon"}]},{"id":"thought_level","category":"thought_level","type":"select","currentValue":"medium","options":[{"value":"low"},{"value":"medium"},{"value":"high"}]}]}}"#);
+        let caps = d.capabilities();
+        assert_eq!(caps.efforts, ["low", "medium", "high"]);
+        assert!(caps.images && !caps.files && !caps.steer);
+        let mut req = RuntimePromptReq::of("go");
+        req.effort = Some("xhigh".into());
+        let s = d.prompt("t1", &req).unwrap();
+        let w: Vec<Value> = (0..s.writes.len()).map(|i| sent(&s, i)).collect();
+        assert_eq!(w[0]["method"], "session/set_config_option");
+        assert_eq!(
+            (
+                w[0]["params"]["configId"].as_str(),
+                w[0]["params"]["value"].as_str()
+            ),
+            (Some("thought_level"), Some("high"))
+        );
+        assert_eq!(w[1]["method"], "session/prompt");
+        // The current value is not written again; an unknown level is refused.
+        let mut d2 = AcpDriver::gemini("gemini");
+        d2.start(&ctx(None));
+        d2.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d2.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#);
+        assert!(d2.prompt("t1", &req).is_err(), "no effort option");
+        assert!(d2.capabilities().efforts.is_empty());
+    }
+
+    /// agy's swarm (live 1.5.8 frames): each `swarm add` is a background
+    /// subagent card that a `swarm kill` stops; other actions stay tool rows.
+    #[test]
+    fn agy_swarm_members_are_background_subagents() {
+        let mut d = AcpDriver::agy("agy");
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#);
+        d.prompt("t1", &RuntimePromptReq::of("swarm it")).unwrap();
+        let upd = |id: &str, input: &str, status: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"tool_call_update","toolCallId":"{id}","name":"swarm","status":"{status}","kind":"other","title":"Run swarm","rawInput":{input}}}}}}}"#
+            )
+        };
+        let s = d.on_line(&upd(
+            "c1",
+            r#"{"action":"add","name":"echoer","brief":"echo hi"}"#,
+            "completed",
+        ));
+        let card = s.events.iter().find_map(|e| match e {
+            DriverEvent::TurnItem(i) if matches!(i.kind, TurnItemKind::Subagent { .. }) => {
+                Some(i.clone())
+            }
+            _ => None,
+        });
+        let card = card.expect("a subagent card");
+        assert!(card.is_background_open());
+        assert_eq!(card.turn_id.as_deref(), Some("t1"));
+        assert!(
+            matches!(&card.kind, TurnItemKind::Subagent { description: Some(n), prompt: Some(p), .. } if n == "echoer" && p == "echo hi")
+        );
+        let s = d.on_line(&upd(
+            "c2",
+            r#"{"action":"add","name":"shard","brief":"b","n":2}"#,
+            "completed",
+        ));
+        let names: Vec<String> = s
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                DriverEvent::TurnItem(TurnItem {
+                    kind:
+                        TurnItemKind::Subagent {
+                            description: Some(n),
+                            ..
+                        },
+                    ..
+                }) => Some(n.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["shard-1", "shard-2"]);
+        let s = d.on_line(&upd("c3", r#"{"action":"status"}"#, "completed"));
+        assert_eq!(s.events.len(), 1, "status is just its tool row");
+        let s = d.on_line(&upd(
+            "c4",
+            r#"{"action":"kill","name":"shard"}"#,
+            "completed",
+        ));
+        let stopped: Vec<&TurnItem> = s
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                DriverEvent::TurnItem(i) if i.status == TurnItemStatus::Interrupted => Some(i),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stopped.len(), 2);
+        // Only agy: the same frames from another ACP agent stay tool rows.
+        let mut g = AcpDriver::gemini("gemini");
+        g.start(&ctx(None));
+        g.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        g.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#);
+        g.prompt("t1", &RuntimePromptReq::of("x")).unwrap();
+        assert_eq!(
+            g.on_line(&upd(
+                "c1",
+                r#"{"action":"add","name":"e","brief":"b"}"#,
+                "completed"
+            ))
+            .events
+            .len(),
+            1
+        );
     }
 
     /// The host's MCP servers (Otto's `otto` tools + the user's) ride

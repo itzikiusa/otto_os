@@ -121,6 +121,12 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
             "/runtime-sessions/{id}/attachments/{attachment_id}",
             get(attachment::<S>),
         )
+        // Work the agent runs off its protocol stream (Agents & tasks).
+        .route(
+            "/runtime-sessions/{id}/tasks/{task_id}/output",
+            get(task_output::<S>),
+        )
+        .route("/runtime-sessions/{id}/swarm", get(swarm::<S>))
         .route(
             "/runtime-sessions/{id}/peers",
             get(peers::<S>).post(open_peer::<S>),
@@ -602,6 +608,65 @@ async fn attachment<S: RuntimeCtx>(
         (header::X_CONTENT_TYPE_OPTIONS, "nosniff".into()),
     ];
     Ok((headers, bytes).into_response())
+}
+
+/// GET /runtime-sessions/{id}/tasks/{task_id}/output — a Claude background
+/// command's output so far (`{text, truncated}`); 404 for other agents, an
+/// unknown task, or output Claude no longer keeps.
+async fn task_output<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path((id, task_id)): Path<(Id, String)>,
+) -> ApiResult<Json<crate::native_work::TaskOutput>> {
+    let session = authorized(&ctx, &user, &id).await?;
+    let gone = || ApiErr(Error::NotFound("no output for that task".into()));
+    let native = session
+        .native_thread_id
+        .filter(|_| session.provider == otto_core::agent_runtime::RuntimeProvider::Claude)
+        .ok_or_else(gone)?;
+    let tmp = std::env::var_os("CLAUDE_CODE_TMPDIR")
+        .map_or_else(|| "/tmp".into(), std::path::PathBuf::from);
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    tokio::task::spawn_blocking(move || {
+        crate::native_work::claude_task_output(&tmp, uid, &native, &task_id)
+    })
+    .await
+    .ok()
+    .flatten()
+    .map(Json)
+    .ok_or_else(gone)
+}
+
+#[derive(Deserialize)]
+struct SwarmQuery {
+    member: Option<String>,
+}
+
+/// GET /runtime-sessions/{id}/swarm?member= — an Antigravity thread's swarm
+/// (members, their board posts, `member`'s own steps); 404 without one.
+async fn swarm<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Query(q): Query<SwarmQuery>,
+) -> ApiResult<Json<crate::native_work::Swarm>> {
+    let session = authorized(&ctx, &user, &id).await?;
+    let gone = || ApiErr(Error::NotFound("this thread has no swarm".into()));
+    let native = session
+        .native_thread_id
+        .filter(|_| session.provider == otto_core::agent_runtime::RuntimeProvider::Agy)
+        .ok_or_else(gone)?;
+    let home = std::env::var_os("HOME").ok_or_else(gone)?;
+    let brain = std::path::PathBuf::from(home).join(".gemini/antigravity-cli/brain");
+    tokio::task::spawn_blocking(move || {
+        crate::native_work::agy_swarm(&brain, &native, q.member.as_deref())
+    })
+    .await
+    .ok()
+    .flatten()
+    .map(Json)
+    .ok_or_else(gone)
 }
 
 #[derive(Deserialize)]

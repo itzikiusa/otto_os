@@ -23,6 +23,7 @@ pub mod codex;
 pub mod driver;
 pub mod host;
 mod http;
+mod native_work;
 pub mod pi;
 pub mod process;
 mod questions;
