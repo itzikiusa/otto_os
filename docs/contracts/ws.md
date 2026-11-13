@@ -1592,7 +1592,9 @@ published on the streaming path, never through the internal bus.
   `parent_item_id` (the card). `provider_turn.origin: "agent"` marks a turn
   the agent started on its own; `provider_session.background_tasks` lists
   pending background work (api.md "Background work and the agent's own
-  turns"). Streaming upserts of one item arrive at most once
+  turns"); `provider_session.capabilities` (`{steer, images, files,
+  efforts?}`) is what the running driver reported after its handshake
+  (api.md `RuntimeSession.capabilities`). Streaming upserts of one item arrive at most once
   per 50 ms (always the latest text). A failed tool item
   (`command_execution`, `dynamic_tool`, `web_search`, `file_change`) carries
   `error` — the tool's error text, ≤ ~2 KB. A `user_message` lists its
