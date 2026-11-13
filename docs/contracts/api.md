@@ -3431,6 +3431,7 @@ Filesystem paths are on the **daemon host**, including when the caller uses a re
 - `ci_status?: string | null` — simplified CI status: `"passing" | "failing" | "pending" | "unknown"`.
 - `labels?: string[]` — PR label names.
 - `head_sha?: string | null` — the source branch's head commit as the provider reports it (GitHub `head.sha`, GitLab `sha`, Bitbucket `source.commit.hash` — abbreviated there). Opaque: clients pass it back as the PR diff's `rev=` so a push re-keys every diff cache.
+- `review?: {status: "approved" | "changes_requested" | "waiting", approvals: number}` — the row's review verdict (omitted when nobody is asked and nobody reviewed): changes requested beats approvals, approvals beat a pending request; `approvals` = reviewers whose latest verdict approves. Read without a per-PR call: Bitbucket asks the list for `fields=+values.participants` (`state` / `approved` / `role: REVIEWER`); GitHub makes ONE GraphQL read per list page for its open rows (`reviewDecision` + `latestOpinionatedReviews`, memoised like the review threads; on failure a row keeps `waiting` from the REST `requested_reviewers`/`requested_teams`); GitLab omits it.
 
 **`review_findings` table (migration 0049):** fingerprinted persistent finding identity across runs; `review_merge_readiness` view aggregates blocker counts per (repo_id, pr_number). No new HTTP routes — queried internally by the summarizer and surfaced via the `Review` DTO fields above.
 

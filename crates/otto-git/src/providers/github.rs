@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use otto_core::api::{
     CreatePrReq, DiffResp, MergeStrategy, NewPrCommentReq, PrComment, PrCommentSide, PrCommit,
-    PrDetail, PrReviewer, PrState, PrSummary, UpdatePrReq,
+    PrDetail, PrReviewSummary, PrReviewer, PrState, PrSummary, UpdatePrReq,
 };
 use otto_core::{Error, Result};
 use serde_json::{json, Value};
@@ -778,6 +778,14 @@ fn summary_from(v: &Value) -> PrSummary {
             })
             .unwrap_or_default(),
         is_mine: false,
+        // The REST row names who is still asked; the verdict itself comes
+        // from `overlay_reviews` (one GraphQL read per page).
+        review: PrReviewSummary::from_counts(
+            false,
+            0,
+            !varr(v, &["requested_reviewers"]).is_empty()
+                || !varr(v, &["requested_teams"]).is_empty(),
+        ),
     }
 }
 
@@ -953,6 +961,7 @@ impl super::GitProvider for Github {
         if matches!(state, PrState::Merged | PrState::Declined) {
             items.retain(|p| p.state == state);
         }
+        self.overlay_reviews(r, &mut items).await;
         Ok(super::PrPage { items, has_more })
     }
 
