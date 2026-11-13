@@ -6,6 +6,7 @@ import { loadErrorText } from '../../../lib/loadError';
 import { pollWhileVisible, type Poller } from '../../../lib/poll';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
+import { canonicalizeLocalProjectPath } from '../shell/ideProjectHelpers';
 import {
   collabGuestPost,
   defaultRunnerForLanguage,
@@ -20,6 +21,7 @@ import {
   type IdeInstallJob,
   type IdeOpenTab,
   type IdeProjectEnvironment,
+  type IdeProjectRoot,
   type IdePythonVenv,
   type IdeReplEntry,
   type IdeRunConfig,
@@ -487,21 +489,86 @@ export async function removeSavedRunConfig(
 }
 
 export function normalizeIncomingDebugSnapshot(
-  host: { target: IdeTargetSpec; resolvePath(p: string): string },
+  host: { target: IdeTargetSpec; readonly projectRoots: IdeProjectRoot[]; resolvePath(p: string): string },
   raw: IdeDebugSessionSnapshot,
 ): { snap: IdeDebugSessionSnapshot; paused: string | null } {
-  let snap = raw;
-  const stripPrivate = (p: string) => p.replace(/^\/private(?=\/(?:var|tmp)(?:\/|$))/, '');
-  const root = host.target.root.replace(/\/+$/, '');
-  let paused = snap.paused_file ? host.resolvePath(snap.paused_file) : null;
-  if (paused && host.target.kind === 'local' && root) {
-    const cRoot = stripPrivate(root);
-    const cPaused = stripPrivate(paused);
-    if (cPaused === cRoot || cPaused.startsWith(`${cRoot}/`)) {
-      paused = `${root}${cPaused.slice(cRoot.length)}`;
-      snap = { ...snap, paused_file: paused };
-    }
-  }
-  if (snap.output?.length > 1000) snap = { ...snap, output: snap.output.slice(-1000) };
+  const normPath = (p?: string | null): string | null => {
+    if (!p) return null;
+    const resolved = host.resolvePath(p);
+    return host.target.kind === 'local'
+      ? canonicalizeLocalProjectPath(resolved, host.projectRoots)
+      : resolved;
+  };
+  const paused = normPath(raw.paused_file);
+  const stack_frames = (raw.stack_frames ?? []).map((f) =>
+    f.path ? { ...f, path: normPath(f.path) } : f,
+  );
+  const breakpoints = (raw.breakpoints ?? []).map((bp) =>
+    bp.path ? { ...bp, path: normPath(bp.path) ?? bp.path } : bp,
+  );
+  const output = raw.output?.length > 1000 ? raw.output.slice(-1000) : (raw.output ?? []);
+  const snap: IdeDebugSessionSnapshot = {
+    ...raw,
+    paused_file: paused,
+    stack_frames,
+    breakpoints,
+    output,
+  };
   return { snap, paused };
+}
+
+export function syncSnapshotBreakpointsToStore(
+  host: { breakpointsByPath: Record<string, IdeBreakpoint[]> },
+  snap: IdeDebugSessionSnapshot,
+): void {
+  if (snap.state === 'terminated' || snap.state === 'error') {
+    let changed = false;
+    const cleared: Record<string, IdeBreakpoint[]> = {};
+    for (const [p, list] of Object.entries(host.breakpointsByPath)) {
+      cleared[p] = list.map((bp) => {
+        if (bp.verified !== undefined || bp.message !== undefined) {
+          changed = true;
+          const { verified: _v, message: _m, ...rest } = bp;
+          return rest;
+        }
+        return bp;
+      });
+    }
+    if (changed) host.breakpointsByPath = cleared;
+    return;
+  }
+
+  if (!snap.breakpoints || snap.breakpoints.length === 0) return;
+  const incomingByPath = new Map<string, IdeBreakpoint[]>();
+  for (let i = 0; i < snap.breakpoints.length; i++) {
+    const bp = snap.breakpoints[i];
+    if (!bp.path) continue;
+    const arr = incomingByPath.get(bp.path);
+    if (arr) arr.push(bp);
+    else incomingByPath.set(bp.path, [bp]);
+  }
+  if (incomingByPath.size === 0) return;
+
+  let changed = false;
+  const nextMap: Record<string, IdeBreakpoint[]> = { ...host.breakpointsByPath };
+  for (const [path, incoming] of incomingByPath.entries()) {
+    const existing = nextMap[path];
+    if (!existing || existing.length === 0) continue;
+    const updated = existing.map((ubp, idx) => {
+      const match =
+        incoming.find((abp) => abp.line === ubp.line) ??
+        (incoming.length === existing.length ? incoming[idx] : undefined);
+      if (!match) return ubp;
+      const nextVerified = typeof match.verified === 'boolean' ? match.verified : ubp.verified;
+      const nextMsg = match.message !== undefined ? match.message : ubp.message;
+      const nextLine = match.line > 0 ? match.line : ubp.line;
+      if (nextVerified !== ubp.verified || nextMsg !== ubp.message || nextLine !== ubp.line) {
+        changed = true;
+        return { ...ubp, line: nextLine, verified: nextVerified, message: nextMsg };
+      }
+      return ubp;
+    });
+    nextMap[path] = updated;
+  }
+  if (changed) host.breakpointsByPath = nextMap;
 }

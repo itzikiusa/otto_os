@@ -2,6 +2,7 @@
 // and instant zero-wait runner seeding for `IdeStore`.
 
 import { api } from '../../../lib/api/client';
+import { confirmer } from '../../../lib/confirm.svelte';
 import { lsGet, lsSet } from '../../../lib/storage';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
@@ -42,6 +43,64 @@ export function normalizeRootPath(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed || trimmed === '/') return trimmed;
   return trimmed.replace(/\/+$/, '');
+}
+
+const PRIVATE_SYMLINK_RE = /^\/private(?=\/(?:var|tmp)(?:\/|$))/;
+
+export function canonicalizeLocalProjectPath(
+  fullPath: string,
+  roots: readonly IdeProjectRoot[],
+): string {
+  if (!fullPath || !fullPath.startsWith('/') || roots.length === 0) return fullPath;
+  const cPath = fullPath.replace(PRIVATE_SYMLINK_RE, '');
+  for (let i = 0; i < roots.length; i++) {
+    const root = normalizeRootPath(roots[i].path);
+    if (!root) continue;
+    const cRoot = root.replace(PRIVATE_SYMLINK_RE, '');
+    if (cPath === cRoot || cPath.startsWith(`${cRoot}/`)) {
+      return `${root}${cPath.slice(cRoot.length)}`;
+    }
+  }
+  return fullPath;
+}
+
+export async function performCloseAllTabs(
+  host: {
+    tabs: IdeOpenTab[];
+    hasClosedAllTabs: boolean;
+    activePath: string | null;
+    closeSplit(): void;
+  },
+  bufPerf: { flushAll(h: { tabs: IdeOpenTab[] }): void; isTabDirty(t: IdeOpenTab): boolean },
+  evict: (paths: string[]) => void,
+  opts: { force?: boolean } = {},
+): Promise<void> {
+  if (host.tabs.length === 0) {
+    host.hasClosedAllTabs = true;
+    host.activePath = null;
+    host.closeSplit();
+    return;
+  }
+  bufPerf.flushAll(host);
+  const dirtyTabs = host.tabs.filter((t) => bufPerf.isTabDirty(t));
+  if (!opts.force && dirtyTabs.length > 0) {
+    const promptMsg =
+      dirtyTabs.length === 1
+        ? `“${dirtyTabs[0].name}” has unsaved changes. Discard changes and close all tabs?`
+        : `${dirtyTabs.length} tabs have unsaved changes. Discard changes and close all tabs?`;
+    const ok = await confirmer.ask(promptMsg, {
+      title: 'Close all tabs?',
+      confirmLabel: 'Discard & close all',
+      danger: true,
+    });
+    if (!ok) return;
+  }
+  const allPaths = host.tabs.map((t) => t.path);
+  host.tabs = [];
+  evict(allPaths);
+  host.hasClosedAllTabs = true;
+  host.activePath = null;
+  host.closeSplit();
 }
 
 export function projectStorageKey(target: IdeTargetSpec): string {
@@ -91,7 +150,9 @@ export function saveBreakpointsLocal(target: IdeTargetSpec, map: Record<string, 
   try {
     const compact: Record<string, IdeBreakpoint[]> = {};
     for (const [k, v] of Object.entries(map)) {
-      if (Array.isArray(v) && v.length > 0) compact[k] = v;
+      if (Array.isArray(v) && v.length > 0) {
+        compact[k] = v.map(({ verified: _v, message: _m, ...rest }) => rest);
+      }
     }
     lsSet(`otto.ide.bps:${key}`, JSON.stringify(compact));
   } catch { /* quota */ }

@@ -16,10 +16,10 @@ import {
   runSearchWorkspace, runSendCollabEdit, runSendCursorUpdate, runSetCollabPeerRole, runTogglePlugin,
 } from './shell/ideLspAndSearchHelpers';
 import {
-  attachProjectFolder, createTemplatedFile, detachProjectFolder, detectFastRunConfigs,
-  findContainingRoot, formatRelativeToRoots, isPathExternal, loadAttachedRootEntries,
-  loadSavedAdditionalRoots, loadSavedBreakpoints, normalizeRootPath, pushNavigationHistory,
-  revealPathInTree, saveAdditionalRootsLocal, saveBreakpointsLocal,
+  attachProjectFolder, canonicalizeLocalProjectPath, createTemplatedFile, detachProjectFolder,
+  detectFastRunConfigs, findContainingRoot, formatRelativeToRoots, isPathExternal,
+  loadAttachedRootEntries, loadSavedAdditionalRoots, loadSavedBreakpoints, normalizeRootPath,
+  performCloseAllTabs, pushNavigationHistory, revealPathInTree, saveAdditionalRootsLocal, saveBreakpointsLocal,
 } from './shell/ideProjectHelpers';
 import {
   applyFallbackPrefixSuffix, computeFallbackSelection, IdeBufferPerfController,
@@ -32,7 +32,7 @@ import {
   createProjectPythonVenv, fetchEnvironments, fetchShellEnv, fetchToolchains, installToolchainJob,
   launchDebugSession, launchGutterAction, launchIdeRun, mergeRunConfigs, normalizeIncomingDebugSnapshot,
   persistEnvironment, refreshWatchValues, registerLocalToolchain, removeSavedRunConfig,
-  sendDebugAction, startJobsPoller, upsertRunConfig,
+  sendDebugAction, startJobsPoller, syncSnapshotBreakpointsToStore, upsertRunConfig,
 } from './store/ideDebugAndEnvController';
 import {
   autoOpenInitialEntry, detectIdeLanguage, ideBasename,
@@ -234,17 +234,17 @@ class IdeStore {
   resolvePath(p: string): string {
     if (!p) return this.target.root;
     if (/^(?:jdt|jar):/i.test(p)) return p;
+    let resolved = p;
     if (p.startsWith('file://')) {
-      try { return decodeURIComponent(p.replace(/^file:\/\/(?:localhost)?/, '')); } catch { return p.slice(7); }
+      try { resolved = decodeURIComponent(p.replace(/^file:\/\/(?:localhost)?/, '')); } catch { resolved = p.slice(7); }
+    } else if (!p.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(p)) {
+      const base = this.target.root.replace(/\/+$/, '');
+      resolved = base ? `${base}/${p.replace(/^\/+/, '')}` : p;
     }
-    if (p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p)) return p;
-    const base = this.target.root.replace(/\/+$/, '');
-    return base ? `${base}/${p.replace(/^\/+/, '')}` : p;
+    return this.target.kind === 'local' ? canonicalizeLocalProjectPath(resolved, this.projectRoots) : resolved;
   }
 
-  relativePath(p: string): string {
-    return formatRelativeToRoots(p, this.target.root, this.projectRoots);
-  }
+  relativePath(p: string): string { return formatRelativeToRoots(p, this.target.root, this.projectRoots); }
 
   attachDefaultWorkspace(): void {
     if (this.target.root || this.collabIsGuest) return;
@@ -559,13 +559,8 @@ class IdeStore {
     else if (!this.tabs.some((t) => t.path === this._activePath)) this.activePath = this.tabs[0].path;
   }
 
-  closeAllTabs(): void {
-    this.bufPerf.flushAll(this);
-    const closing = this.tabs.filter((t) => !t.pinned && !this.bufPerf.isTabDirty(t)).map((t) => t.path);
-    this.tabs = this.tabs.filter((t) => t.pinned || this.bufPerf.isTabDirty(t));
-    this.evictClosedMetadata(closing);
-    if (this.tabs.length === 0) { this.hasClosedAllTabs = true; this.activePath = null; this.closeSplit(); }
-    else if (!this.tabs.some((t) => t.path === this._activePath)) this.activePath = this.tabs[0].path;
+  closeAllTabs(opts?: { force?: boolean }): Promise<void> {
+    return performCloseAllTabs(this, this.bufPerf, (paths) => this.evictClosedMetadata(paths), opts);
   }
 
   getBuffer(path?: string): string {
@@ -703,6 +698,7 @@ class IdeStore {
     const prevPaused = `${this.activeDebug?.paused_file ?? ''}:${this.activeDebug?.paused_line ?? 0}`;
     const { snap, paused } = normalizeIncomingDebugSnapshot(this, raw);
     this.activeDebug = snap;
+    syncSnapshotBreakpointsToStore(this, snap);
     if (snap.state === 'paused' && paused && snap.paused_line) {
       if (`${paused}:${snap.paused_line}` !== prevPaused) void this.openFile(paused, { line: snap.paused_line, preview: false });
       void this.refreshWatches();
