@@ -162,10 +162,10 @@ pub(super) fn parse_go_imports(content: &str) -> BTreeMap<String, String> {
         if let Some(rest) = line.strip_prefix("import ") {
             insert_go_import_spec(rest.trim(), &mut map);
         }
-        if line.starts_with("func ") || line.starts_with("type ") || line.starts_with("var ") {
-            if !in_block {
-                break;
-            }
+        if !in_block
+            && (line.starts_with("func ") || line.starts_with("type ") || line.starts_with("var "))
+        {
+            break;
         }
     }
     map
