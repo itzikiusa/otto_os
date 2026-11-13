@@ -162,9 +162,12 @@ URL/auth/request-scoped elicitations and secret questions are refused explicitly
 The pi and Antigravity adapters do not provide typed question forms.
 
 Several questions can remain open and be answered independently. A provider
-withdrawal, Stop, close, or daemon restart makes the affected requests no longer
-answerable. After a restart, the agent must ask again; an old card cannot answer
-a new process's request.
+withdrawal, Stop or close makes the affected requests no longer answerable. A
+daemon restart does not: with session persistence on (the default) the agent
+keeps running and its open questions and approvals stay answerable
+([how](threads-structured-runtime.md#4-history-replay-and-restarts)). Only an
+agent that did not survive the restart must ask again; an old card cannot
+answer a new process's request.
 
 ## Start fresh in the same thread
 

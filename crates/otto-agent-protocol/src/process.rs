@@ -6,10 +6,18 @@
 //! then exactly one [`ChildMsg::Exited`] (after stdout drained, so no line
 //! ever arrives after the exit). Stderr is never parsed; its tail rides the
 //! exit message for diagnostics.
+//!
+//! A child can also run inside a detached stdio holder
+//! ([`otto_pty::stdio_holder`], [`spawn_held_child`]) so it survives a daemon
+//! restart; [`adopt_held_child`] re-attaches to it. Its lines then carry the
+//! holder's sequence number, which the runtime acknowledges once it has
+//! checkpointed past them ([`HeldLink::ack`]).
 
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
+use otto_pty::stdio_holder::{self, HeldStdio, StdioControl, StdioEvent};
+use otto_pty::HolderConfig;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -44,11 +52,111 @@ pub enum ChildMsg {
 }
 
 /// The live child. Dropping the stdin sender closes the child's stdin (EOF),
-/// which every supported CLI treats as "exit".
+/// which every supported CLI treats as "exit" — for a held child once the
+/// [`HeldLink`] is dropped too, unless it was [`HeldLink::detach`]ed.
 pub struct ChildHandle {
     pub pid: u32,
     pub stdin: mpsc::UnboundedSender<String>,
-    pub messages: mpsc::Receiver<ChildMsg>,
+    /// `(seq, message)`: `seq` is the holder's line number (0 = not held).
+    pub messages: mpsc::Receiver<(u64, ChildMsg)>,
+    pub held: Option<HeldLink>,
+}
+
+/// The daemon's end of a held child.
+pub struct HeldLink {
+    pub socket: std::path::PathBuf,
+    control: mpsc::UnboundedSender<StdioControl>,
+}
+
+impl HeldLink {
+    /// Lines up to `seq` are durable here: the holder may drop them.
+    pub fn ack(&self, seq: u64) {
+        let _ = self.control.send(StdioControl::Ack(seq));
+    }
+
+    /// Leave the child (and its holder) running for the next daemon.
+    pub fn detach(&self) {
+        let _ = self.control.send(StdioControl::Detach);
+    }
+
+    /// A sender that acks on this link (for the persister).
+    pub fn acker(&self) -> Acker {
+        Acker(self.control.clone())
+    }
+}
+
+/// [`HeldLink::ack`] detached from the link.
+#[derive(Clone)]
+pub struct Acker(mpsc::UnboundedSender<StdioControl>);
+
+impl Acker {
+    pub fn ack(&self, seq: u64) {
+        let _ = self.0.send(StdioControl::Ack(seq));
+    }
+}
+
+/// Start `cmd` inside a new stdio holder (it survives a daemon restart).
+pub async fn spawn_held_child(
+    config: &HolderConfig,
+    cmd: &ChildCommand,
+    meta: serde_json::Value,
+) -> otto_core::Result<ChildHandle> {
+    let spec = otto_pty::CommandSpec {
+        program: cmd.program.clone(),
+        args: cmd.args.clone(),
+        cwd: Some(cmd.cwd.clone()),
+        env: cmd.env.clone(),
+    };
+    Ok(from_held(stdio_holder::spawn(config, &spec, meta).await?))
+}
+
+/// Re-attach to a held child, replaying its lines after `after`.
+pub async fn adopt_held_child(
+    socket: &std::path::Path,
+    after: u64,
+) -> Result<ChildHandle, otto_pty::AdoptError> {
+    Ok(from_held(stdio_holder::attach(socket, after).await?))
+}
+
+fn from_held(h: HeldStdio) -> ChildHandle {
+    let HeldStdio {
+        socket,
+        info,
+        mut events,
+        control,
+    } = h;
+    let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<String>();
+    let lines = control.clone();
+    tokio::spawn(async move {
+        while let Some(line) = stdin_rx.recv().await {
+            if lines.send(StdioControl::Line(line)).is_err() {
+                break;
+            }
+        }
+    });
+    let (tx, rx) = mpsc::channel(CHANNEL_DEPTH);
+    tokio::spawn(async move {
+        while let Some(ev) = events.recv().await {
+            let msg = match ev {
+                StdioEvent::Line { seq, text } => (seq, ChildMsg::Line(text)),
+                StdioEvent::Overlong { seq, len } => (seq, ChildMsg::Overlong(len)),
+                StdioEvent::Exited {
+                    seq,
+                    code,
+                    stderr_tail,
+                } => (seq, ChildMsg::Exited { code, stderr_tail }),
+            };
+            if tx.send(msg).await.is_err() {
+                break;
+            }
+        }
+    });
+    ChildHandle {
+        pid: info.child_pid.unwrap_or(0),
+        stdin: stdin_tx,
+        messages: rx,
+        held: Some(HeldLink { socket, control }),
+    }
 }
 
 /// Signal the child's whole process group (its tools included).
@@ -111,11 +219,21 @@ pub fn spawn_child(cmd: &ChildCommand) -> std::io::Result<ChildHandle> {
         };
         let _ = tx.send(ChildMsg::Exited { code, stderr_tail }).await;
     });
+    let (seq_tx, seq_rx) = mpsc::channel(CHANNEL_DEPTH);
+    tokio::spawn(async move {
+        let mut rx = rx;
+        while let Some(m) = rx.recv().await {
+            if seq_tx.send((0, m)).await.is_err() {
+                break;
+            }
+        }
+    });
 
     Ok(ChildHandle {
         pid,
         stdin: stdin_tx,
-        messages: rx,
+        messages: seq_rx,
+        held: None,
     })
 }
 

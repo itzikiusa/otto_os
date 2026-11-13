@@ -304,6 +304,19 @@ pub trait StructuredDriver: Send + 'static {
 
     fn on_line(&mut self, line: &str) -> DriverStep;
 
+    /// This driver's whole protocol state (session / request ids, open
+    /// items and requests, text so far), so a NEW daemon can carry on with a
+    /// child that outlived the old one (`runtime/held.rs`). `None` = it
+    /// cannot be restored, and its child is never held.
+    fn export_state(&self) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// Restore [`Self::export_state`] onto a driver fresh from the factory.
+    fn import_state(&mut self, _state: serde_json::Value) -> Result<(), DriverError> {
+        Err(DriverError("this driver cannot be restored".into()))
+    }
+
     fn on_exit(&mut self, _code: Option<i32>) -> DriverStep {
         DriverStep::default()
     }

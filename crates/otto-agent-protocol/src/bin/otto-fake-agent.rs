@@ -262,6 +262,17 @@ fn main() {
                         chunk(&sid, "agent_message_chunk", &format!("fs refused {code}"));
                         done("end_turn");
                     }
+                    // `stream:<n>:<ms>`: `c0 `…`c<n-1> `, one chunk per <ms>.
+                    t if t.starts_with("stream:") => {
+                        let mut f = t[7..].split(':');
+                        let n: usize = f.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                        let ms: u64 = f.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                        for i in 0..n {
+                            chunk(&sid, "agent_message_chunk", &format!("c{i} "));
+                            std::thread::sleep(std::time::Duration::from_millis(ms));
+                        }
+                        done("end_turn");
+                    }
                     t if t.starts_with("big:") => {
                         let n: usize = t[4..].parse().unwrap_or(0);
                         for _ in 0..n {

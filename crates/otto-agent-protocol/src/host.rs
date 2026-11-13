@@ -47,6 +47,19 @@ pub trait RuntimeHost: Send + Sync + 'static {
 
     /// Deliver one event to WebSocket clients (owner / admin / root).
     fn publish(&self, session: &RuntimeSession, event: Arc<RuntimeEvent>);
+
+    /// Where structured children run detached ([`otto_pty::stdio_holder`])
+    /// so they outlive a daemon restart. `None` = plain children of the
+    /// daemon.
+    fn stdio_holders(&self) -> Option<otto_pty::HolderConfig> {
+        None
+    }
+
+    /// Whether children should survive the next restart (spawned held,
+    /// detached on shutdown) — Settings › session persistence.
+    async fn keep_children(&self) -> bool {
+        self.stdio_holders().is_some()
+    }
 }
 
 /// The synthetic PTY-shaped [`Session`] the safety helpers read (never
@@ -88,6 +101,9 @@ pub struct SessionManagerHost {
     pub workspaces: WorkspacesRepo,
     /// Publishes on the WS streaming path (otto-server's `publish_stream`).
     pub publish: Box<dyn Fn(Event) + Send + Sync>,
+    /// `<data_dir>/rt-holders`, started like the PTY holders
+    /// (`ottod pty-holder`); `None` when the daemon has none.
+    pub holders: Option<otto_pty::HolderConfig>,
 }
 
 #[async_trait::async_trait]
@@ -154,6 +170,15 @@ impl RuntimeHost for SessionManagerHost {
         } else {
             RuntimeAccessMode::ApprovalRequired
         }
+    }
+
+    fn stdio_holders(&self) -> Option<otto_pty::HolderConfig> {
+        self.holders.clone()
+    }
+
+    /// The setting that keeps terminal sessions alive keeps threads too.
+    async fn keep_children(&self) -> bool {
+        self.holders.is_some() && self.manager.persistence_enabled().await
     }
 
     fn publish(&self, session: &RuntimeSession, event: Arc<RuntimeEvent>) {

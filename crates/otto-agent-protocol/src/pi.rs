@@ -70,11 +70,13 @@ fn thinking_level(effort: &str) -> Option<&'static str> {
     })
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Tool {
     name: String,
     args: Value,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PiDriver {
     program: String,
     next_id: u64,
@@ -396,6 +398,15 @@ impl PiDriver {
 }
 
 impl StructuredDriver for PiDriver {
+    fn export_state(&self) -> Option<Value> {
+        serde_json::to_value(self).ok()
+    }
+
+    fn import_state(&mut self, state: Value) -> Result<(), DriverError> {
+        *self = serde_json::from_value(state).map_err(|e| DriverError(e.to_string()))?;
+        Ok(())
+    }
+
     fn provider(&self) -> RuntimeProvider {
         RuntimeProvider::Pi
     }

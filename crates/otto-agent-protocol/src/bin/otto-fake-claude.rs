@@ -12,6 +12,9 @@
 //! * `slow <secs>` — "Working…", then waits `<secs>`; a user message arriving
 //!   meanwhile (a steer) is answered in the same turn: "steered: <text>".
 //! * `silent`      — emits nothing until interrupted.
+//! * `stream <n> <ms>` — `c0 `…`c<n-1> ` as text deltas, one per `<ms>`.
+//! * `ask`         — a `can_use_tool` request for Bash `ls`; the answer
+//!   decides: "allowed" or "denied", then `result`.
 //! * `escape`      — starts `sleep 600` in a process group of its own (as
 //!   Claude Code does with some jobs), writes its pid to
 //!   `.fake-claude/escaped.pid`, then answers like `echo`.
@@ -134,6 +137,8 @@ fn main() {
     let mut n = 0u32;
     // A turn that waits: (until, steerable) — `None` until = until interrupted.
     let mut waiting: Option<(Option<Instant>, bool)> = None;
+    // The `can_use_tool` request an `ask` turn waits on.
+    let mut asking: Option<String> = None;
     loop {
         let next_due = dues.iter().map(|d| d.at).min();
         let wake = [next_due, waiting.and_then(|w| w.0)]
@@ -188,6 +193,20 @@ fn main() {
             In::Eof => return,
         };
         match msg.get("type").and_then(Value::as_str) {
+            Some("control_response")
+                if asking.is_some()
+                    && msg.pointer("/response/request_id").and_then(Value::as_str)
+                        == asking.as_deref() =>
+            {
+                asking = None;
+                let allow = msg
+                    .pointer("/response/response/behavior")
+                    .and_then(Value::as_str)
+                    == Some("allow");
+                n += 1;
+                text_message(&format!("m{n}"), if allow { "allowed" } else { "denied" });
+                result_ok();
+            }
             Some("control_request") => {
                 let rid = msg.get("request_id").cloned().unwrap_or(Value::Null);
                 let sub = msg.pointer("/request/subtype").and_then(Value::as_str);
@@ -266,6 +285,39 @@ fn main() {
                             tool_use_id: tu,
                             agent: true,
                         });
+                    }
+                    "stream" => {
+                        let count: usize = secs as usize;
+                        let ms: u64 = words.next().and_then(|w| w.parse().ok()).unwrap_or(0);
+                        out(
+                            json!({"type":"stream_event","event":{"type":"message_start","message":{"id":mid}},"parent_tool_use_id":null}),
+                        );
+                        out(
+                            json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"parent_tool_use_id":null}),
+                        );
+                        let mut all = String::new();
+                        for i in 0..count {
+                            let d = format!("c{i} ");
+                            all.push_str(&d);
+                            out(
+                                json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":d}},"parent_tool_use_id":null}),
+                            );
+                            std::thread::sleep(Duration::from_millis(ms));
+                        }
+                        out(
+                            json!({"type":"stream_event","event":{"type":"content_block_stop","index":0},"parent_tool_use_id":null}),
+                        );
+                        out(
+                            json!({"type":"assistant","message":{"id":mid,"content":[{"type":"text","text":all}]},"parent_tool_use_id":null}),
+                        );
+                        result_ok();
+                    }
+                    "ask" => {
+                        let rid = format!("perm-{n}");
+                        out(
+                            json!({"type":"control_request","request_id":rid,"request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"tool_use_id":format!("tu{n}")}}),
+                        );
+                        asking = Some(rid);
                     }
                     "slow" => {
                         text_message(&mid, "Working…");

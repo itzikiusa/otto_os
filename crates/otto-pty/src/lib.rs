@@ -10,6 +10,7 @@ mod echo;
 pub use echo::EchoStats;
 mod held;
 pub mod holder;
+pub mod stdio_holder;
 pub use holder::{AdoptError, HolderConfig, HolderInfo, HolderLauncher};
 
 use std::io::Read;
