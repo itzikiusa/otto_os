@@ -1,16 +1,28 @@
-// What a runtime thread's agent takes besides text (no imports: unit tests load it).
+// What a runtime thread's agent takes besides text, from the capabilities the
+// daemon reports (`RuntimeSession.capabilities`, or `MetaResp
+// .runtime_capabilities[provider]` before a thread exists) — never from the
+// provider's name. No imports: unit tests load it.
 
-/** What a runtime thread's agent takes besides text. Claude: images + PDFs
- *  (content/document blocks); Codex and pi: images; the ACP agents
- *  (Antigravity, Gemini, Grok, OpenCode): images + PDFs, and the driver
- *  refuses with a clear message if that agent did not advertise them. */
-export function attachmentSupport(provider: string): { images: boolean; files: boolean } {
-  const files = provider === 'claude' || provider === 'agy' || provider === 'gemini' || provider === 'grok' || provider === 'opencode';
-  return { images: files || provider === 'codex' || provider === 'pi', files };
+export interface TakesCaps {
+  images: boolean;
+  files: boolean;
+  steer?: boolean;
+  efforts?: string[];
 }
 
-/** Whether `f` is an attachment `provider` takes. */
-export function takesFile(provider: string, f: Pick<File, 'type'>): boolean {
-  const can = attachmentSupport(provider);
-  return (can.images && f.type.startsWith('image/')) || (can.files && f.type === 'application/pdf');
+const NONE: TakesCaps = { images: false, files: false, steer: false, efforts: [] };
+
+/** The capabilities to gate on: a session's own, else the provider baseline, else nothing. */
+export function capsOf(session: TakesCaps | null | undefined, baseline?: TakesCaps | null): TakesCaps {
+  return session ?? baseline ?? NONE;
+}
+
+/** Images / PDFs the agent takes. */
+export function attachmentSupport(caps: TakesCaps | null | undefined): { images: boolean; files: boolean } {
+  return { images: !!caps?.images, files: !!caps?.files };
+}
+
+/** Whether `f` is an attachment the agent takes. */
+export function takesFile(caps: TakesCaps | null | undefined, f: Pick<File, 'type'>): boolean {
+  return (!!caps?.images && f.type.startsWith('image/')) || (!!caps?.files && f.type === 'application/pdf');
 }

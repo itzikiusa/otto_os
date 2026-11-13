@@ -1,16 +1,26 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { attachmentSupport, takesFile } from '../src/modules/threads/runtime/attachmentSupport.ts';
+import { attachmentSupport, capsOf, takesFile } from '../src/modules/threads/runtime/attachmentSupport.ts';
 
-test('every structured runtime agent takes images; PDFs go to Claude and the ACP agents', () => {
-  for (const p of ['claude', 'agy', 'gemini', 'grok', 'opencode']) assert.deepEqual(attachmentSupport(p), { images: true, files: true }, p);
-  for (const p of ['codex', 'pi']) assert.deepEqual(attachmentSupport(p), { images: true, files: false }, p);
-  assert.deepEqual(attachmentSupport('shell'), { images: false, files: false });
+const acp = { images: true, files: true, steer: false };
+const codex = { images: true, files: false, steer: true };
+
+test('attachments follow the reported capabilities, not the provider name', () => {
+  assert.deepEqual(attachmentSupport(acp), { images: true, files: true });
+  assert.deepEqual(attachmentSupport(codex), { images: true, files: false });
+  assert.deepEqual(attachmentSupport(null), { images: false, files: false });
 });
 
-test('takesFile follows the provider: a PDF to Antigravity yes, to Codex no; text never', () => {
-  assert.equal(takesFile('agy', { type: 'image/png' }), true);
-  assert.equal(takesFile('agy', { type: 'application/pdf' }), true);
-  assert.equal(takesFile('codex', { type: 'application/pdf' }), false);
-  assert.equal(takesFile('claude', { type: 'text/plain' }), false);
+test('takesFile: a PDF only where files are taken; text never', () => {
+  assert.equal(takesFile(acp, { type: 'image/png' }), true);
+  assert.equal(takesFile(acp, { type: 'application/pdf' }), true);
+  assert.equal(takesFile(codex, { type: 'application/pdf' }), false);
+  assert.equal(takesFile(acp, { type: 'text/plain' }), false);
+});
+
+test("capsOf prefers the session's own report over the provider baseline", () => {
+  const live = { images: false, files: false, steer: false };
+  assert.equal(capsOf(live, acp), live);
+  assert.equal(capsOf(undefined, codex), codex);
+  assert.deepEqual(capsOf(null, null), { images: false, files: false, steer: false, efforts: [] });
 });

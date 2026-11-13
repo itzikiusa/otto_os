@@ -517,6 +517,7 @@ mod tests {
             parent_id: Some("root".into()),
             ui_control: None,
             background_tasks: Vec::new(),
+            capabilities: Default::default(),
             meta: Some(child_meta(&"lead".into(), ChildOpener::Agent)),
         }
     }

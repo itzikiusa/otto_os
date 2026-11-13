@@ -25,6 +25,46 @@ export interface ProviderSession {
   /** Background work the agent started that has not finished (absent = none).
    *  The thread is busy while any is pending, even between turns. */
   background_tasks?: BackgroundTask[];
+  /** What the running driver reported it takes (after its handshake). */
+  capabilities?: RuntimeCapabilities;
+}
+
+/** What a thread's agent takes besides plain text — the provider baseline
+ *  until a running driver reports its own. Gate Send now (steer),
+ *  attachments and effort on this, never on the provider's name. */
+export interface RuntimeCapabilities {
+  /** A message can join the RUNNING turn (`delivery: steer`); else it queues. */
+  steer: boolean;
+  images: boolean;
+  /** PDFs. */
+  files: boolean;
+  /** Effort levels a prompt may carry; absent / empty = none. */
+  efforts?: string[];
+}
+
+/** `GET /runtime-sessions/{id}/tasks/{task_id}/output` — a Claude background
+ *  command's output so far (the tail). */
+export interface RuntimeTaskOutput {
+  text: string;
+  truncated: boolean;
+}
+
+/** `GET /runtime-sessions/{id}/swarm?member=` — an Antigravity swarm. */
+export interface RuntimeSwarm {
+  title?: string;
+  members: RuntimeSwarmMember[];
+}
+export interface RuntimeSwarmMember {
+  name: string;
+  role: string;
+  phase?: string;
+  killed: boolean;
+  model?: string;
+  workspace?: string;
+  posts: { seq: number; agent: string; text: string; time?: string }[];
+  /** Only for the member asked for. */
+  steps?: { index: number; type: string; status?: string; text?: string; tools?: string[] }[];
+  truncated: boolean;
 }
 
 /** One piece of background work (a `run_in_background` command, a
@@ -318,6 +358,8 @@ export interface RuntimeSession {
   meta?: (Record<string, unknown> & { source?: string; origin?: EmbeddedOrigin; council?: CouncilMeta }) | null;
   /** Background work still pending (live; absent = none). */
   background_tasks?: BackgroundTask[];
+  /** What its agent takes (see `ProviderSession.capabilities` for the live value). */
+  capabilities: RuntimeCapabilities;
 }
 
 /** Body of `POST /runtime-sessions/{id}/peers` — open a linked thread. */

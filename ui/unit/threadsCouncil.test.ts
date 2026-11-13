@@ -20,7 +20,8 @@ const seat = (provider: string, model: string | null = null, effort: string | nu
 function row(id: string, extra: Partial<RuntimeSession> = {}): RuntimeSession {
   return {
     id, workspace_id: 'w', provider: 'claude', title: id, cwd: '/w', status: 'idle', access_mode: 'approval-required',
-    created_by: 'u', created_at: '2026-11-12T10:00:00Z', last_active_at: '2026-11-12T10:00:00Z', last_sequence: 0, ...extra,
+    created_by: 'u', created_at: '2026-11-12T10:00:00Z', last_active_at: '2026-11-12T10:00:00Z', last_sequence: 0,
+    capabilities: { steer: true, images: true, files: true }, ...extra,
   };
 }
 const cmeta = (seatNo: number, role: 'seat' | 'synthesis' = 'seat', id = 'c1') => ({ council: { id, seat: seatNo, role } });

@@ -204,16 +204,6 @@ impl PiDriver {
         }
     }
 
-    fn result_text(result: &Value) -> Option<String> {
-        let text: Vec<&str> = result
-            .get("content")
-            .and_then(Value::as_array)?
-            .iter()
-            .filter_map(|c| c.get("text").and_then(Value::as_str))
-            .collect();
-        (!text.is_empty()).then(|| text.join("\n"))
-    }
-
     /// An `agent_end`'s outcome, from its last message's `stopReason`.
     fn run_outcome(v: &Value) -> (TurnTerminalStatus, Option<ProviderFailure>) {
         let last = v
@@ -286,8 +276,14 @@ impl PiDriver {
                         .into(),
                     args: v.get("args").cloned().unwrap_or(Value::Null),
                 });
-                let output = Self::result_text(&v["result"]);
+                // pi's `read` of an image file returns `{type: image, data, mimeType}`.
+                let media = crate::tool_images::extract(Some(&v["result"]));
+                let output = (!media.text.is_empty()).then_some(media.text);
                 let failed = v.get("isError").and_then(Value::as_bool) == Some(true);
+                let mut kind = Self::tool_kind(&tool.name, &tool.args, output.clone());
+                if let TurnItemKind::DynamicTool { images, .. } = &mut kind {
+                    *images = media.images;
+                }
                 let mut it = item(
                     format!("{}:tool:{call}", self.turn()),
                     if failed {
@@ -296,7 +292,7 @@ impl PiDriver {
                         TurnItemStatus::Completed
                     },
                     Some(tool.name.clone()),
-                    Self::tool_kind(&tool.name, &tool.args, output.clone()),
+                    kind,
                 );
                 if failed {
                     it.error = output.as_deref().and_then(tool_error);
@@ -391,6 +387,22 @@ impl PiDriver {
             } else if v.pointer("/data/disposition").and_then(Value::as_str) == Some("handled") {
                 self.finish(step, TurnTerminalStatus::Completed, None);
             }
+        } else if !ok
+            && v.get("command").and_then(Value::as_str) == Some("steer")
+            && self.turn_id.is_some()
+        {
+            let why = v
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("pi refused it");
+            step.push(DriverEvent::TurnItem(item(
+                format!("{}:steer-failed:{}", self.turn(), id.unwrap_or_default()),
+                TurnItemStatus::Failed,
+                Some("pi did not take the message".into()),
+                TurnItemKind::SystemNotice {
+                    message: format!("pi did not take the message: {why}"),
+                },
+            )));
         }
     }
 }
@@ -459,6 +471,31 @@ impl StructuredDriver for PiDriver {
         }
         let id = self.command(&mut step, cmd);
         self.prompt_req = Some(id);
+        Ok(step)
+    }
+
+    /// pi's RPC `steer {message, images?}`: delivered after the current
+    /// assistant turn's tool calls, before its next model call.
+    fn steer(&mut self, req: &RuntimePromptReq) -> Result<DriverStep, DriverError> {
+        if self.turn_id.is_none() {
+            return Err(DriverError("no turn is running".into()));
+        }
+        if !req.files.is_empty() {
+            return Err(DriverError(
+                "pi takes text and images only (no files)".into(),
+            ));
+        }
+        let mut cmd = json!({"type": "steer", "message": req.text});
+        if !req.images.is_empty() {
+            cmd["images"] = Value::Array(
+                req.images
+                    .iter()
+                    .map(|i| json!({"type": "image", "data": i.data_base64, "mimeType": i.mime}))
+                    .collect(),
+            );
+        }
+        let mut step = DriverStep::default();
+        self.command(&mut step, cmd);
         Ok(step)
     }
 
@@ -665,5 +702,40 @@ mod tests {
             (r["type"].as_str(), r["cancelled"].as_bool()),
             (Some("extension_ui_response"), Some(true))
         );
+    }
+
+    #[test]
+    fn a_read_image_result_keeps_its_image() {
+        let mut d = PiDriver::with_program("pi");
+        d.start(&ctx(None, RuntimeAccessMode::FullAccess));
+        d.prompt("t1", &RuntimePromptReq::of("look")).unwrap();
+        d.on_line(r#"{"type":"tool_execution_start","toolCallId":"r1","toolName":"read","args":{"path":"a.png"}}"#);
+        let s = d.on_line(r#"{"type":"tool_execution_end","toolCallId":"r1","toolName":"read","result":{"content":[{"type":"text","text":"Read image file [image/png]"},{"type":"image","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5V8AAAAASUVORK5CYII=","mimeType":"image/png"}]},"isError":false}"#);
+        assert!(matches!(
+            &s.events[0],
+            DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::DynamicTool { images, output: Some(o), .. } if images.len() == 1 && o == "Read image file [image/png]")
+        ));
+    }
+
+    #[test]
+    fn steer_sends_pis_steer_command_mid_turn_only() {
+        let mut d = PiDriver::with_program("pi");
+        d.start(&ctx(None, RuntimeAccessMode::FullAccess));
+        assert!(d.steer(&RuntimePromptReq::of("more")).is_err(), "idle");
+        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+        let s = d.steer(&RuntimePromptReq::of("look at b")).unwrap();
+        let c = sent(&s, 0);
+        assert_eq!(
+            (c["type"].as_str(), c["message"].as_str()),
+            (Some("steer"), Some("look at b"))
+        );
+        let s = d.on_line(&format!(
+            r#"{{"id":"{}","type":"response","command":"steer","success":false,"error":"busy"}}"#,
+            c["id"].as_str().unwrap()
+        ));
+        assert!(matches!(
+            &s.events[0],
+            DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::SystemNotice { message } if message.ends_with("busy"))
+        ));
     }
 }

@@ -87,7 +87,7 @@
   const scratchActive = $derived(useScratch || ws.current === null);
   const targetWs = $derived(scratchActive ? SCRATCH_WORKSPACE_ID : (ws.currentId ?? SCRATCH_WORKSPACE_ID));
   const runtime = $derived(isRuntimeProvider(provider));
-  const files = new StageAttachments(() => provider, () => runtime && !council.on);
+  const files = new StageAttachments(() => auth.meta?.runtime_capabilities?.[provider], () => runtime && !council.on);
   const modeSupported = $derived(supportsInteractionMode(provider) && !runtime);
   const cleanCwd = $derived(cwd.trim().replace(/\/+$/, ''));
   const onWorktree = $derived(worktree !== null && worktree.path.replace(/\/+$/, '') === cleanCwd);

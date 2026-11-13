@@ -111,6 +111,8 @@ pub struct CodexDriver {
     failure: Option<ProviderFailure>,
     /// MCP servers that failed to start and are not shown yet: (name, error).
     mcp_failures: Vec<(String, String)>,
+    /// `turn/steer` requests in flight.
+    steers: Vec<u64>,
 }
 
 impl CodexDriver {
@@ -136,6 +138,7 @@ impl CodexDriver {
             pending: HashMap::new(),
             failure: None,
             mcp_failures: Vec::new(),
+            steers: Vec::new(),
         }
     }
 
@@ -202,9 +205,8 @@ impl CodexDriver {
         step.write(line);
     }
 
-    /// `model` / `effort` / `access_mode` apply to this turn and the ones after it.
-    fn send_turn(&mut self, step: &mut DriverStep, req: &RuntimePromptReq) {
-        self.access = req.access_mode.unwrap_or(self.access);
+    /// A prompt's images then text as Codex `UserInput`s.
+    fn input(req: &RuntimePromptReq) -> Vec<Value> {
         let mut input: Vec<Value> = req
             .images
             .iter()
@@ -213,9 +215,15 @@ impl CodexDriver {
         if !req.text.is_empty() {
             input.push(json!({"type": "text", "text": req.text}));
         }
+        input
+    }
+
+    /// `model` / `effort` / `access_mode` apply to this turn and the ones after it.
+    fn send_turn(&mut self, step: &mut DriverStep, req: &RuntimePromptReq) {
+        self.access = req.access_mode.unwrap_or(self.access);
         let mut params = json!({
             "threadId": self.thread_id,
-            "input": input,
+            "input": Self::input(req),
             "approvalPolicy": self.approval_policy(),
             "approvalsReviewer": "user",
             "sandboxPolicy": self.sandbox_policy(),
@@ -749,6 +757,23 @@ impl CodexDriver {
             if let Some(req) = self.queued.take() {
                 self.send_turn(step, &req);
             }
+        } else if let Some(n) = self.steers.iter().position(|s| *s == id) {
+            self.steers.remove(n);
+            // The turn ended (or moved on) before Codex took it.
+            if let (Some(e), Some(_)) = (error, &self.turn_id) {
+                let msg = e
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Codex refused it");
+                step.push(DriverEvent::TurnItem(item(
+                    format!("{}:steer-failed:{id}", self.turn()),
+                    TurnItemStatus::Failed,
+                    Some("Codex did not take the message".to_string()),
+                    TurnItemKind::SystemNotice {
+                        message: format!("Codex did not take the message: {msg}"),
+                    },
+                )));
+            }
         } else if Some(id) == self.turn_req {
             if let Some(e) = error {
                 self.turn_req = None;
@@ -850,6 +875,29 @@ impl StructuredDriver for CodexDriver {
         } else {
             self.queued = Some(req.clone());
         }
+        Ok(step)
+    }
+
+    /// `turn/steer {threadId, expectedTurnId, input}` (app-server v2): the
+    /// input joins the running turn at its next step. Only once Codex named
+    /// the turn (`turn/start`'s answer or `turn/started`); before that the
+    /// message stays queued.
+    fn steer(&mut self, req: &RuntimePromptReq) -> Result<DriverStep, DriverError> {
+        let (Some(_), Some(thread), Some(turn)) =
+            (&self.turn_id, &self.thread_id, &self.codex_turn)
+        else {
+            return Err(DriverError("no Codex turn is running yet".into()));
+        };
+        if !req.files.is_empty() {
+            return Err(DriverError(
+                "Codex does not accept file attachments (only images)".into(),
+            ));
+        }
+        let params = json!({"threadId": thread, "expectedTurnId": turn, "input": Self::input(req)});
+        let (id, line) = self.request("turn/steer", params);
+        self.steers.push(id);
+        let mut step = DriverStep::default();
+        step.write(line);
         Ok(step)
     }
 
@@ -1228,6 +1276,41 @@ mod tests {
                 status: TurnTerminalStatus::Completed,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn steer_joins_the_running_codex_turn_once_it_has_an_id() {
+        let mut d = CodexDriver::with_program("codex");
+        ready(&mut d, false);
+        assert!(d.steer(&RuntimePromptReq::of("more")).is_err(), "idle");
+        let s = d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+        let turn_req = parse(&s.writes[0]);
+        assert!(
+            d.steer(&RuntimePromptReq::of("more")).is_err(),
+            "turn not named yet"
+        );
+        feed(
+            &mut d,
+            json!({"id": turn_req["id"], "result": {"turn": {"id": "ct9", "items": [], "status": "inProgress"}}}),
+        );
+        let s = d.steer(&RuntimePromptReq::of("also b")).unwrap();
+        let st = parse(&s.writes[0]);
+        assert_eq!(st["method"], "turn/steer");
+        assert_eq!(st["params"]["threadId"], "th1");
+        assert_eq!(st["params"]["expectedTurnId"], "ct9");
+        assert_eq!(
+            st["params"]["input"],
+            json!([{"type": "text", "text": "also b"}])
+        );
+        // A refused steer (the turn moved on) shows instead of vanishing.
+        let s = feed(
+            &mut d,
+            json!({"id": st["id"], "error": {"code": -32600, "message": "no active turn"}}),
+        );
+        assert!(matches!(
+            &s.events[0],
+            DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::SystemNotice { message } if message.contains("no active turn"))
         ));
     }
 

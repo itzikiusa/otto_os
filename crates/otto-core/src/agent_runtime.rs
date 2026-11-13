@@ -48,6 +48,16 @@ pub enum RuntimeProvider {
 }
 
 impl RuntimeProvider {
+    pub const ALL: [Self; 7] = [
+        Self::Claude,
+        Self::Codex,
+        Self::Gemini,
+        Self::Grok,
+        Self::Agy,
+        Self::Opencode,
+        Self::Pi,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Claude => "claude",
@@ -101,6 +111,9 @@ pub struct ProviderSession {
     /// is busy while any is pending, even between turns.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub background_tasks: Vec<BackgroundTask>,
+    /// What the running driver reported it takes (after its handshake).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<RuntimeCapabilities>,
 }
 
 /// One piece of background work an agent started (Claude Code's
@@ -639,6 +652,73 @@ pub enum RuntimeReplay {
     },
 }
 
+/// What a thread's agent can take besides a plain text prompt (T3 Code's
+/// `ServerProvider` snapshot). A provider baseline ([`Self::for_provider`])
+/// that the running driver refines after its handshake (an ACP agent's
+/// `promptCapabilities`). The UI gates Send now, attachments and effort on
+/// it instead of on the provider's name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RuntimeCapabilities {
+    /// A message can join the RUNNING turn (`delivery: steer`). Otherwise it
+    /// waits in the queue until the turn ends.
+    #[serde(default)]
+    pub steer: bool,
+    #[serde(default)]
+    pub images: bool,
+    /// PDFs (document / embedded-resource blocks).
+    #[serde(default)]
+    pub files: bool,
+    /// Reasoning-effort levels a prompt's `effort` may carry; empty = none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<String>,
+}
+
+impl RuntimeCapabilities {
+    /// What each driver takes before it reports more (or less) itself.
+    pub fn for_provider(p: RuntimeProvider) -> Self {
+        let levels = |l: &[&str]| l.iter().map(|s| s.to_string()).collect();
+        match p {
+            RuntimeProvider::Claude => Self {
+                steer: true,
+                images: true,
+                files: true,
+                efforts: levels(&["low", "medium", "high", "xhigh", "max"]),
+            },
+            RuntimeProvider::Codex => Self {
+                steer: true,
+                images: true,
+                files: false,
+                efforts: levels(&["minimal", "low", "medium", "high", "xhigh"]),
+            },
+            RuntimeProvider::Pi => Self {
+                steer: true,
+                images: true,
+                files: false,
+                efforts: levels(&["minimal", "low", "medium", "high", "xhigh"]),
+            },
+            // ACP v1 has no way into a running prompt.
+            RuntimeProvider::Agy => Self {
+                steer: false,
+                images: true,
+                files: true,
+                efforts: levels(&["low", "medium", "high"]),
+            },
+            RuntimeProvider::Grok => Self {
+                steer: false,
+                images: true,
+                files: true,
+                efforts: levels(&["low", "medium", "high"]),
+            },
+            RuntimeProvider::Gemini | RuntimeProvider::Opencode => Self {
+                steer: false,
+                images: true,
+                files: true,
+                efforts: Vec::new(),
+            },
+        }
+    }
+}
+
 // ---- sessions + REST DTOs ---------------------------------------------------
 
 /// Otto's summary status of a runtime session.
@@ -692,6 +772,10 @@ pub struct RuntimeSession {
     /// never by a client. `None` = a plain thread.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<serde_json::Value>,
+    /// What its agent takes (the provider baseline until a running driver
+    /// reports its own; see [`ProviderSession::capabilities`]).
+    #[serde(default)]
+    pub capabilities: RuntimeCapabilities,
 }
 
 impl RuntimeSession {
@@ -1339,6 +1423,7 @@ mod tests {
                         started_at: ts(),
                         item_id: None,
                     }],
+                    capabilities: None,
                 },
             },
             RuntimeEventBody::ProviderThreadUpdated {

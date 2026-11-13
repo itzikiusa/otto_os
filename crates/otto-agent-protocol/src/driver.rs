@@ -14,8 +14,9 @@
 
 use otto_core::agent_runtime::{
     ApprovalDecision, ApprovalOption, BackgroundTask, PlanStep, ProviderFailure, RequestKind,
-    RuntimeAccessMode, RuntimePromptReq, RuntimeProvider, RuntimeRequestStatus, ThreadTokenUsage,
-    TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
+    RuntimeAccessMode, RuntimeCapabilities, RuntimePromptReq, RuntimeProvider,
+    RuntimeRequestStatus, ThreadTokenUsage, TurnItem, TurnItemKind, TurnItemStatus,
+    TurnTerminalStatus, TurnTokenUsage,
 };
 
 #[derive(Debug, Clone)]
@@ -260,6 +261,13 @@ pub trait StructuredDriver: Send + 'static {
     /// new mode, resuming its thread.
     fn switches_access_live(&self, _to: RuntimeAccessMode) -> bool {
         false
+    }
+
+    /// What this agent takes (steer, images, PDFs, efforts): the provider
+    /// baseline, refined by a driver that learns it in its handshake. Read
+    /// by the runtime when the driver reports `Ready`.
+    fn capabilities(&self) -> RuntimeCapabilities {
+        RuntimeCapabilities::for_provider(self.provider())
     }
 
     /// Add a person's message to the RUNNING turn (steering): the agent

@@ -2261,9 +2261,13 @@ fn set_session_status(
     let model = st.session.model.clone();
     let cwd = st.session.cwd.clone();
     let background_tasks = st.session.background_tasks.clone();
+    let capabilities = Some(st.session.capabilities.clone());
     let prev = st.proj.session.as_ref();
     if prev.is_some_and(|p| {
-        p.status == status && p.last_error == last_error && p.background_tasks == background_tasks
+        p.status == status
+            && p.last_error == last_error
+            && p.background_tasks == background_tasks
+            && p.capabilities == capabilities
     }) {
         return;
     }
@@ -2274,6 +2278,7 @@ fn set_session_status(
         updated_at: Utc::now(),
         last_error,
         background_tasks,
+        capabilities,
     };
     emit(
         inner,
@@ -2549,6 +2554,10 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                 }
                 if model.is_some() && st.session.model.is_none() {
                     st.session.model = model;
+                }
+                // What the agent reported it takes in its handshake.
+                if let Some(p) = st.proc.as_ref() {
+                    st.session.capabilities = p.driver.capabilities();
                 }
                 let provider_thread = ProviderThread {
                     native_thread_id: st.session.native_thread_id.clone(),

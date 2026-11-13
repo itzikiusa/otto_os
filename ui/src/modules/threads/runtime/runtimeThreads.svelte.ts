@@ -247,7 +247,7 @@ class RuntimeThreads {
     if (row && row.status !== 'closed' && (ev.type === 'provider_session.updated' || ev.type === 'provider_turn.updated')) {
       if (ev.type === 'provider_session.updated') {
         const ps = ev.provider_session;
-        this.byId[ev.session_id] = { ...row, status: SESSION_STATUS[ps.status], background_tasks: ps.background_tasks ?? [], last_active_at: ev.ts };
+        this.byId[ev.session_id] = { ...row, status: SESSION_STATUS[ps.status], background_tasks: ps.background_tasks ?? [], capabilities: ps.capabilities ?? row.capabilities, last_active_at: ev.ts };
       } else this.byId[ev.session_id] = { ...row, last_active_at: ev.ts };
     }
   }

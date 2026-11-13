@@ -64,7 +64,7 @@ connection library unusable for every non-root account.)
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
 | 1 | GET /api/v1/health | public | — | `{"ok":true}` |
-| 2 | GET /api/v1/meta | public | — | MetaResp (incl. `provider_models` and `alt_loopback_base`, see "Transport lanes"). Without a valid full-account bearer — a share link (verified or OTP-pending) and an MCP token do not count (S8-308) — (once onboarding is done) only `version`, `api_version`, `needs_onboarding` are filled — `tools`/`providers`/`model_flags`/`provider_models` empty, `default_provider`/`alt_loopback_base` null, `network_listener` false. Tool probes and live model catalogs are cached 60 s (single-flight); for 24 h after that the last result for the same specs is served while one background refresh replaces it (a tool probe that found no agent CLI is re-run inline instead, so a first-run "Re-check" sees a fresh install). |
+| 2 | GET /api/v1/meta | public | — | MetaResp (incl. `provider_models`, `runtime_capabilities` — per runtime provider the `RuntimeCapabilities` baseline a thread starts with — and `alt_loopback_base`, see "Transport lanes"). Without a valid full-account bearer — a share link (verified or OTP-pending) and an MCP token do not count (S8-308) — (once onboarding is done) only `version`, `api_version`, `needs_onboarding` are filled — `tools`/`providers`/`model_flags`/`provider_models` empty, `default_provider`/`alt_loopback_base` null, `network_listener` false. Tool probes and live model catalogs are cached 60 s (single-flight); for 24 h after that the last result for the same specs is served while one background refresh replaces it (a tool probe that found no agent CLI is re-run inline instead, so a first-run "Re-check" sees a fresh install). |
 | 3 | POST /api/v1/onboarding/root | public, only while 0 users exist (else 409) | OnboardRootReq | LoginResp |
 | 4 | POST /api/v1/auth/login | public | LoginReq | LoginResp (401 on bad creds/disabled; 429 + `Retry-After` when the client (`ip\|user`, or `ip:<ip or IPv6 /64>` across all usernames — 20 failures) or the username is locked, or when the throttle map is saturated and the attempt can't be tracked (fail closed; never the desktop); 503 `busy` + `Retry-After: 1` when the bounded argon2 verifier (4 concurrent, off the async workers) stays saturated for 2 s) |
 | 5 | POST /api/v1/auth/logout | member | — | 204 |
@@ -916,8 +916,16 @@ request answer is also an `Admin`-class approval gate (above).
 
 `RuntimeSession`: `{id, workspace_id, provider: "claude"|"codex"|"gemini"|"grok"|"agy",
 title, cwd, model?, native_thread_id?, status, access_mode, created_by, created_at,
-last_active_at, last_sequence, parent_id?, ui_control?, meta?, background_tasks?}`
-(`background_tasks`: live, see below; absent = none) (`meta`: the
+last_active_at, last_sequence, parent_id?, ui_control?, meta?, background_tasks?,
+capabilities}` (`background_tasks`: live, see below; absent = none)
+(`capabilities`: `{steer, images, files, efforts?: string[]}` — what the
+thread's agent takes: the provider's baseline until a running driver reports
+its own after the handshake, which `provider_session.capabilities` carries
+live — an ACP agent's `promptCapabilities` and its effort config option
+(agy `thought_level`, grok `reasoning_effort`). `steer`: Claude (stdin),
+Codex (`turn/steer`), pi (RPC `steer`); never an ACP agent (ACP v1 has no
+way into a running prompt, so a message for it waits in the queue). The UI
+gates Send now, attachments and effort on it) (`meta`: the
 server-owned meta a personal agent's run / chat thread runs under, migration
 0201 — see "Personal Agents"; absent on a plain thread, never settable by a
 request); `status` ∈ `starting | idle | working |
@@ -944,14 +952,20 @@ tool_uses}`); its own messages and tool calls are items with
 `parent_item_id` = the card, in the card's turn (their approvals reach a
 person like the root's). A background card stays `running` past its turn
 until its task ends; when the process exits or the session closes, open
-cards settle `interrupted` and the list empties.
+cards settle `interrupted` and the list empties. Antigravity's native swarm
+(`swarm{action: add|kill}` tool calls; agy sends nothing else about it) is one
+background `subagent` card per member (`tool_name: "swarm"`,
+`subagent_type: "Swarm worker"`, `description` = the member's name, `prompt`
+= its brief), open until a `kill` names it or the process ends.
 
 **Queue and steer.** A prompt sent while a turn runs is refused (409) unless
 it says `delivery`: `queue` — it waits in the session's **queue** (persisted
 with the projection: it survives a daemon restart, after which it is sent)
 and goes out when the turn ends, one per turn, oldest first; `steer` — into
-the running turn now (Claude reads it at its next step; it is a
-`user_message` of that turn) — a provider that cannot steer queues it
+the running turn now (Claude reads it at its next step, Codex takes it as
+`turn/steer`, pi as its RPC `steer`; it is a `user_message` of that turn; a
+steer the agent then refuses shows as a failed `system_notice`) — a provider
+that cannot steer (`capabilities.steer` false: the ACP agents) queues it
 instead; `interrupt` — first in the queue, then the running turn is stopped
 ("Stop & send now"). The queue is `queued_prompts: [{id, text, attachments,
 created_at}]` on the snapshot and `queue.updated` events.
@@ -1009,6 +1023,8 @@ attachments.
 | POST /runtime-sessions/{id}/close | owner-or-admin, person | — | `RuntimeSession` (`status: closed`). Pending requests → `cancelled` (`cancel_reason: "closed"`). Ends a running turn `interrupted`, closes the child's stdin (SIGTERM / SIGKILL to its group after 3 s each). Idempotent; later prompts **409** (reopen first) |
 | POST /runtime-sessions/{id}/reopen | owner-or-admin, person | — | `RuntimeSession` — revives a `closed` or `dormant` session without sending a prompt: its agent respawns now, resuming `native_thread_id` (a refused resume → a fresh conversation + `system_notice`). Its `meta` is kept. No-op while the agent process is live. Spawn failures as for create (**400**; the session stays open, the next prompt retries) |
 | DELETE /runtime-sessions/{id} | owner-or-admin, person | — | **204** — closes the session (as above), then removes its row, projection and attachments. Not undoable |
+| GET /runtime-sessions/{id}/tasks/{task_id}/output | ws viewer + owner-or-admin | — | `{text, truncated}`: the tail (64 KiB) of a Claude background command's output so far, from the file Claude writes it to (`<tmp>/claude-<uid>/…/<native_thread_id>/tasks/<task_id>.output`). **404** for another provider, an unknown task, or output Claude no longer keeps |
+| GET /runtime-sessions/{id}/swarm?member= | ws viewer + owner-or-admin | — | An Antigravity thread's swarm, read from agy's own files (`~/.gemini/antigravity-cli/brain/<native_thread_id>/.system_generated/swarm`): `{title?, members: [{name, role, phase?, killed, model?, workspace?, posts: [{seq, agent, text, time?}], steps: [{index, type, status?, text?, tools: string[]}], truncated}]}` — `posts` are the board posts by or naming the member (last 40); `steps` (the member's own transcript tail, last 80) only for `member`. **404** for another provider or a thread without a swarm |
 | GET /runtime-sessions/{id}/attachments/{attachment_id} | ws viewer + owner-or-admin | — | the raw bytes, `Content-Type: <mime>` (`Content-Security-Policy: sandbox`, `nosniff`). **404** an id that is not one of the session's `user_message` attachments |
 | GET /runtime-sessions/{id}/events?after_sequence= | ws viewer + owner-or-admin | `after_sequence` (default 0) | `RuntimeReplay` — `{kind:"events", events, last_sequence}` or `{kind:"snapshot", snapshot_sequence, snapshot}` |
 | GET /runtime-sessions/{id}/peers | ws editor + owner-or-admin; a person or **that thread's own agent** (its session-bound credential) | — | `PeerInfo[] {id, provider, title, status, is_self}` — the thread's linked group: the root (the thread with no `parent_id`) plus every open thread whose `parent_id` is it, same owner |

@@ -8,7 +8,7 @@ mod drafts;
 
 use chrono::{DateTime, Utc};
 use otto_core::agent_runtime::{
-    RuntimeAccessMode, RuntimeProvider, RuntimeSession, RuntimeSessionStatus,
+    RuntimeAccessMode, RuntimeCapabilities, RuntimeProvider, RuntimeSession, RuntimeSessionStatus,
 };
 use otto_core::{Error, Id, Result};
 use sqlx::Row;
@@ -101,6 +101,7 @@ fn row_to_session(r: &sqlx::sqlite::SqliteRow) -> Result<RuntimeSessionRecord> {
                 .get::<Option<String>, _>("ui_control")
                 .and_then(|j| serde_json::from_str(&j).ok()),
             background_tasks: Vec::new(),
+            capabilities: RuntimeCapabilities::for_provider(provider),
             meta: r
                 .get::<Option<String>, _>("meta")
                 .and_then(|j| serde_json::from_str(&j).ok()),
