@@ -1239,15 +1239,31 @@ fn effort_config(o: &Value) -> Option<(String, Vec<String>)> {
     (!values.is_empty()).then(|| (id.to_string(), values))
 }
 
+/// Effort names low → high (agents list theirs in either order: grok
+/// advertises `xhigh, high, medium, low`).
+const EFFORT_RANK: [&str; 6] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+
+fn effort_rank(l: &str) -> usize {
+    EFFORT_RANK.iter().position(|r| *r == l).unwrap_or(2)
+}
+
+/// The agent's levels low → high (what the effort picker lists).
+fn effort_levels(levels: &[String]) -> Vec<String> {
+    let mut out = levels.to_vec();
+    out.sort_by_key(|l| effort_rank(l));
+    out
+}
+
 /// Otto's effort name as one of the agent's `levels`: the same name, else
-/// the lowest for `minimal` / the highest for `xhigh` / `max`.
+/// its lowest for `minimal` / its highest for `xhigh` / `max`.
 fn effort_value(levels: &[String], want: &str) -> Option<String> {
     if levels.iter().any(|l| l == want) {
         return Some(want.to_string());
     }
+    let sorted = effort_levels(levels);
     match want {
-        "minimal" => levels.first().cloned(),
-        "xhigh" | "max" => levels.last().cloned(),
+        "minimal" => sorted.first().cloned(),
+        "xhigh" | "max" => sorted.last().cloned(),
         _ => None,
     }
 }
@@ -1329,7 +1345,7 @@ impl StructuredDriver for AcpDriver {
             c.efforts = self
                 .effort_option
                 .as_ref()
-                .map(|(_, l)| l.clone())
+                .map(|(_, l)| effort_levels(l))
                 .unwrap_or_default();
         }
         c
@@ -1750,6 +1766,15 @@ mod tests {
             (Some("thought_level"), Some("high"))
         );
         assert_eq!(w[1]["method"], "session/prompt");
+        // grok lists high → low; `max` is its top level, the picker sorts low → high.
+        assert_eq!(
+            effort_value(&["xhigh".into(), "high".into(), "low".into()], "max").as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            effort_levels(&["xhigh".into(), "high".into(), "low".into()]),
+            ["low", "high", "xhigh"]
+        );
         // The current value is not written again; an unknown level is refused.
         let mut d2 = AcpDriver::gemini("gemini");
         d2.start(&ctx(None));
