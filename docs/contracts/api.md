@@ -956,7 +956,13 @@ cards settle `interrupted` and the list empties. Antigravity's native swarm
 (`swarm{action: add|kill}` tool calls; agy sends nothing else about it) is one
 background `subagent` card per member (`tool_name: "swarm"`,
 `subagent_type: "Swarm worker"`, `description` = the member's name, `prompt`
-= its brief), open until a `kill` names it or the process ends.
+= its brief), open until a `kill` names it or the process ends. Codex
+sub-agents (`multi_agent`) run in their own Codex threads: a `spawnAgent`
+collab call is one background card (`tool_name: "spawnAgent"`, `prompt`,
+`subagent_type` = its model); that thread's items are the card's activity
+(`parent_item_id`), its turns and the collab calls' `agentsStates` move the
+card's status (`output` = the state's message), and its turn never ends the
+root's.
 
 **Queue and steer.** A prompt sent while a turn runs is refused (409) unless
 it says `delivery`: `queue` — it waits in the session's **queue** (persisted

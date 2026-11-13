@@ -113,6 +113,8 @@ pub struct CodexDriver {
     mcp_failures: Vec<(String, String)>,
     /// `turn/steer` requests in flight.
     steers: Vec<u64>,
+    /// Sub-agent cards by the sub-agent's own Codex thread id.
+    agents: HashMap<String, TurnItem>,
 }
 
 impl CodexDriver {
@@ -139,6 +141,7 @@ impl CodexDriver {
             failure: None,
             mcp_failures: Vec::new(),
             steers: Vec::new(),
+            agents: HashMap::new(),
         }
     }
 
@@ -281,6 +284,288 @@ impl CodexDriver {
 
     fn item_id(&self, codex_id: &str) -> String {
         format!("{}:codex:{codex_id}", self.turn())
+    }
+
+    /// Codex sub-agents (`multi_agent`, on by default in 0.167): each runs
+    /// in its own Codex thread. A `collabAgentToolCall` `spawnAgent` is one
+    /// background subagent card for its receiver thread(s); later collab
+    /// calls (`wait`, `sendInput`, `closeAgent`, …) and `subAgentActivity`
+    /// only move the card's status (`agentsStates[thread]`); they are not
+    /// rows of their own (T3 Code `CodexAdapterV2` `registerSubagentThreads`
+    /// / `updateSubagentStates`).
+    fn on_collab(&mut self, step: &mut DriverStep, it: &Value) {
+        let s = |k: &str| it.get(k).and_then(Value::as_str).map(str::to_string);
+        let ty = s("type").unwrap_or_default();
+        if ty == "collabAgentToolCall" && s("tool").as_deref() == Some("spawnAgent") {
+            let receivers: Vec<String> = it
+                .get("receiverThreadIds")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let prompt = s("prompt").filter(|p| !p.trim().is_empty());
+            let name = prompt
+                .as_deref()
+                .and_then(|p| p.lines().find(|l| !l.trim().is_empty()))
+                .map(|l| {
+                    let l = l.trim();
+                    match l.char_indices().nth(60) {
+                        Some((i, _)) => format!("{}…", &l[..i]),
+                        None => l.to_string(),
+                    }
+                })
+                .unwrap_or_else(|| "Sub-agent".into());
+            let cid = s("id").unwrap_or_default();
+            let card_id = self.item_id(&cid);
+            let mut card = self
+                .agents
+                .values()
+                .find(|c| c.id == card_id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    let mut c = item(
+                        card_id.clone(),
+                        TurnItemStatus::Running,
+                        Some(name.clone()),
+                        TurnItemKind::Subagent {
+                            tool_name: "spawnAgent".into(),
+                            description: Some(name.clone()),
+                            subagent_type: s("model"),
+                            prompt: prompt.clone(),
+                            output: None,
+                            background: true,
+                            last_tool: None,
+                            tool_uses: 0,
+                        },
+                    );
+                    c.turn_id = self.turn_id.clone();
+                    c
+                });
+            if s("status").as_deref() == Some("failed") && receivers.is_empty() {
+                card.status = TurnItemStatus::Failed;
+            }
+            for r in &receivers {
+                self.agents.insert(r.clone(), card.clone());
+            }
+            if receivers.is_empty() {
+                step.push(DriverEvent::TurnItem(card));
+                return;
+            }
+        }
+        if ty == "subAgentActivity" {
+            if let Some(thread) = s("agentThreadId") {
+                let status = match s("kind").as_deref() {
+                    Some("completed") => TurnItemStatus::Completed,
+                    Some("interrupted") => TurnItemStatus::Interrupted,
+                    _ => TurnItemStatus::Running,
+                };
+                let name = s("agentPath").unwrap_or_else(|| "Sub-agent".into());
+                self.child_card(&thread, &name);
+                self.set_agent(step, &thread, status, None);
+            }
+            return;
+        }
+        if let Some(states) = it.get("agentsStates").and_then(Value::as_object) {
+            for (thread, st) in states {
+                let status = match st.get("status").and_then(Value::as_str) {
+                    Some("completed") => TurnItemStatus::Completed,
+                    Some("errored") => TurnItemStatus::Failed,
+                    Some("interrupted" | "shutdown" | "notFound") => TurnItemStatus::Interrupted,
+                    _ => TurnItemStatus::Running,
+                };
+                let message = st
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                self.set_agent(step, thread, status, message);
+            }
+        }
+        // A spawn whose receivers carry no state yet: shown running.
+        for r in it
+            .get("receiverThreadIds")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            if it.pointer(&format!("/agentsStates/{r}")).is_none() {
+                if let Some(c) = self.agents.get(r).cloned() {
+                    step.push(DriverEvent::TurnItem(c));
+                }
+            }
+        }
+    }
+
+    fn on_output_delta(&mut self, step: &mut DriverStep, params: &Value) {
+        if let (Some(cid), Some(d)) = (
+            params.get("itemId").and_then(Value::as_str),
+            params.get("delta").and_then(Value::as_str),
+        ) {
+            self.items
+                .entry(cid.to_string())
+                .or_default()
+                .output
+                .push_str(d);
+            step.push(DriverEvent::CommandOutput {
+                item_id: self.item_id(cid),
+                chunk: d.to_string(),
+            });
+        }
+    }
+
+    /// A notification of a sub-agent's own thread: its turns move its card,
+    /// its items become the card's activity (`parent_item_id`), in the
+    /// card's turn. A thread with no card yet (no spawn seen) gets one.
+    fn on_child(&mut self, step: &mut DriverStep, thread: &str, m: &str, params: &Value) {
+        if !self.agents.contains_key(thread) {
+            if self.turn_id.is_none() || !(m.starts_with("item/") || m == "turn/started") {
+                return;
+            }
+            self.child_card(thread, "Sub-agent");
+        }
+        let (card_id, card_turn) = {
+            let c = &self.agents[thread];
+            (c.id.clone(), c.turn_id.clone())
+        };
+        match m {
+            "turn/started" => self.set_agent(step, thread, TurnItemStatus::Running, None),
+            "turn/completed" => {
+                let turn = &params["turn"];
+                let status = match turn.get("status").and_then(Value::as_str) {
+                    Some("completed") => TurnItemStatus::Completed,
+                    Some("failed") => TurnItemStatus::Failed,
+                    Some("interrupted") => TurnItemStatus::Interrupted,
+                    _ => return,
+                };
+                let error = turn
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                self.set_agent(step, thread, status, error);
+            }
+            _ => {
+                let saved = std::mem::replace(&mut self.turn_id, card_turn.clone());
+                let mut sub = DriverStep::default();
+                match m {
+                    "item/started" | "item/completed" => {
+                        if let Some(it) = params.get("item") {
+                            let ty = it.get("type").and_then(Value::as_str).unwrap_or_default();
+                            if matches!(ty, "collabAgentToolCall" | "subAgentActivity") {
+                                self.on_collab(&mut sub, it);
+                            } else if let Some(i) = self.project(it, m == "item/completed") {
+                                if m == "item/started"
+                                    && !matches!(ty, "agentMessage" | "reasoning")
+                                {
+                                    if let Some(c) = self.agent_step(thread, i.title.clone()) {
+                                        sub.push(DriverEvent::TurnItem(c));
+                                    }
+                                }
+                                sub.push(DriverEvent::TurnItem(i));
+                            }
+                        }
+                    }
+                    "item/agentMessage/delta" => self.on_text_delta(&mut sub, params, false),
+                    "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
+                        self.on_text_delta(&mut sub, params, true)
+                    }
+                    "item/commandExecution/outputDelta" => self.on_output_delta(&mut sub, params),
+                    _ => {}
+                }
+                self.turn_id = saved;
+                for mut ev in sub.events {
+                    if let DriverEvent::TurnItem(i) = &mut ev {
+                        if i.id != card_id && i.parent_item_id.is_none() {
+                            i.parent_item_id = Some(card_id.clone());
+                        }
+                        if i.turn_id.is_none() {
+                            i.turn_id = card_turn.clone();
+                        }
+                    }
+                    step.push(ev);
+                }
+            }
+        }
+    }
+
+    /// The card of a sub-agent thread, made on first sight.
+    fn child_card(&mut self, thread: &str, name: &str) -> String {
+        if let Some(c) = self.agents.get(thread) {
+            return c.id.clone();
+        }
+        let mut c = item(
+            format!("{}:codex-agent:{thread}", self.turn()),
+            TurnItemStatus::Running,
+            Some(name.to_string()),
+            TurnItemKind::Subagent {
+                tool_name: "spawnAgent".into(),
+                description: Some(name.to_string()),
+                subagent_type: None,
+                prompt: None,
+                output: None,
+                background: true,
+                last_tool: None,
+                tool_uses: 0,
+            },
+        );
+        c.turn_id = self.turn_id.clone();
+        let id = c.id.clone();
+        self.agents.insert(thread.to_string(), c);
+        id
+    }
+
+    /// Move a sub-agent card (every thread sharing it) and re-emit it.
+    fn set_agent(
+        &mut self,
+        step: &mut DriverStep,
+        thread: &str,
+        status: TurnItemStatus,
+        message: Option<String>,
+    ) {
+        let Some(card) = self.agents.get(thread) else {
+            return;
+        };
+        let id = card.id.clone();
+        let now = chrono::Utc::now();
+        let mut out = None;
+        for c in self.agents.values_mut().filter(|c| c.id == id) {
+            c.status = status;
+            c.updated_at = now;
+            c.completed_at = (!status.is_open()).then_some(now);
+            if let (TurnItemKind::Subagent { output, .. }, Some(m)) = (&mut c.kind, &message) {
+                *output = Some(m.clone());
+            }
+            if status == TurnItemStatus::Failed {
+                c.error = message.as_deref().and_then(tool_error);
+            }
+            out = Some(c.clone());
+        }
+        if let Some(c) = out {
+            step.push(DriverEvent::TurnItem(c));
+        }
+    }
+
+    /// A sub-agent thread's own step: one more on its card.
+    fn agent_step(&mut self, thread: &str, title: Option<String>) -> Option<TurnItem> {
+        let id = self.agents.get(thread)?.id.clone();
+        let mut out = None;
+        for c in self.agents.values_mut().filter(|c| c.id == id) {
+            if let TurnItemKind::Subagent {
+                last_tool,
+                tool_uses,
+                ..
+            } = &mut c.kind
+            {
+                *tool_uses += 1;
+                *last_tool = title.clone();
+            }
+            c.updated_at = chrono::Utc::now();
+            out = Some(c.clone());
+        }
+        out
     }
 
     /// A Codex `ThreadItem` → an Otto item (`None` = not projected).
@@ -1021,6 +1306,17 @@ impl StructuredDriver for CodexDriver {
                     self.on_response(&mut step, n, result, error);
                 }
             }
+            // A sub-agent's own thread: its items are its card's activity,
+            // its turns move the card — never this thread's turn.
+            (Some(m), None)
+                if params
+                    .get("threadId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|t| self.thread_id.as_deref().is_some_and(|me| me != t)) =>
+            {
+                let thread = params["threadId"].as_str().unwrap_or_default().to_string();
+                self.on_child(&mut step, &thread, &m, &params);
+            }
             (Some(m), None) => match m.as_str() {
                 "turn/started" => {
                     if let Some(t) = params.pointer("/turn/id").and_then(Value::as_str) {
@@ -1030,7 +1326,12 @@ impl StructuredDriver for CodexDriver {
                 }
                 "item/started" | "item/completed" if self.turn_id.is_some() => {
                     if let Some(item) = params.get("item") {
-                        if let Some(i) = self.project(item, m == "item/completed") {
+                        if matches!(
+                            item.get("type").and_then(Value::as_str),
+                            Some("collabAgentToolCall" | "subAgentActivity")
+                        ) {
+                            self.on_collab(&mut step, item);
+                        } else if let Some(i) = self.project(item, m == "item/completed") {
                             step.push(DriverEvent::TurnItem(i));
                         }
                     }
@@ -1044,20 +1345,7 @@ impl StructuredDriver for CodexDriver {
                     self.on_text_delta(&mut step, &params, true)
                 }
                 "item/commandExecution/outputDelta" if self.turn_id.is_some() => {
-                    if let (Some(cid), Some(d)) = (
-                        params.get("itemId").and_then(Value::as_str),
-                        params.get("delta").and_then(Value::as_str),
-                    ) {
-                        self.items
-                            .entry(cid.to_string())
-                            .or_default()
-                            .output
-                            .push_str(d);
-                        step.push(DriverEvent::CommandOutput {
-                            item_id: self.item_id(cid),
-                            chunk: d.to_string(),
-                        });
-                    }
+                    self.on_output_delta(&mut step, &params)
                 }
                 "turn/plan/updated" if self.turn_id.is_some() => self.on_plan(&mut step, &params),
                 "thread/tokenUsage/updated" => self.on_usage(&mut step, &params),
@@ -1091,6 +1379,7 @@ impl StructuredDriver for CodexDriver {
     }
 
     fn on_exit(&mut self, _code: Option<i32>) -> DriverStep {
+        self.agents.clear();
         self.pending.clear();
         self.items.clear();
         DriverStep::default()
@@ -1312,6 +1601,75 @@ mod tests {
             &s.events[0],
             DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::SystemNotice { message } if message.contains("no active turn"))
         ));
+    }
+
+    /// Codex 0.167 `multi_agent` (app-server schema v2): a spawn is a
+    /// background card; the child thread's items are its activity and its
+    /// turn never ends ours; `wait`'s `agentsStates` settle it.
+    #[test]
+    fn sub_agents_are_cards_with_their_threads_work() {
+        let mut d = CodexDriver::with_program("codex");
+        ready(&mut d, false);
+        let s = d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+        let tr = parse(&s.writes[0]);
+        feed(
+            &mut d,
+            json!({"id": tr["id"], "result": {"turn": {"id": "ct1", "status": "inProgress"}}}),
+        );
+        let s = feed(
+            &mut d,
+            json!({"method": "item/completed", "params": {"threadId": "th1", "turnId": "ct1", "item": {"type": "collabAgentToolCall", "id": "sp1", "tool": "spawnAgent", "status": "completed", "senderThreadId": "th1", "receiverThreadIds": ["kid1"], "prompt": "Run echo sub-hello\nand report", "model": "gpt-5.5", "agentsStates": {"kid1": {"status": "running"}}}}}),
+        );
+        let card = match &s.events[0] {
+            DriverEvent::TurnItem(i) => i.clone(),
+            e => panic!("{e:?}"),
+        };
+        assert!(card.is_background_open());
+        assert!(
+            matches!(&card.kind, TurnItemKind::Subagent { description: Some(n), prompt: Some(p), .. } if n == "Run echo sub-hello" && p.ends_with("report"))
+        );
+        let s = feed(
+            &mut d,
+            json!({"method": "turn/started", "params": {"threadId": "kid1", "turn": {"id": "kt1", "status": "inProgress"}}}),
+        );
+        assert!(s
+            .events
+            .iter()
+            .all(|e| matches!(e, DriverEvent::TurnItem(i) if i.id == card.id)));
+        let s = feed(
+            &mut d,
+            json!({"method": "item/started", "params": {"threadId": "kid1", "turnId": "kt1", "item": {"type": "commandExecution", "id": "c9", "command": "echo sub-hello", "status": "inProgress"}}}),
+        );
+        let kid = s
+            .events
+            .iter()
+            .find_map(|e| match e {
+                DriverEvent::TurnItem(i) if i.id != card.id => Some(i.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(kid.parent_item_id.as_ref(), Some(&card.id));
+        assert!(s.events.iter().any(|e| matches!(e, DriverEvent::TurnItem(i) if i.id == card.id && matches!(i.kind, TurnItemKind::Subagent { tool_uses: 1, .. }))));
+        // The child's turn ends: its card, not our turn.
+        let s = feed(
+            &mut d,
+            json!({"method": "turn/completed", "params": {"threadId": "kid1", "turn": {"id": "kt1", "status": "completed"}}}),
+        );
+        assert!(!s
+            .events
+            .iter()
+            .any(|e| matches!(e, DriverEvent::Terminal { .. })));
+        assert!(
+            matches!(&s.events[0], DriverEvent::TurnItem(i) if i.id == card.id && i.status == TurnItemStatus::Completed)
+        );
+        let s = feed(
+            &mut d,
+            json!({"method": "item/completed", "params": {"threadId": "th1", "turnId": "ct1", "item": {"type": "collabAgentToolCall", "id": "w1", "tool": "wait", "status": "completed", "senderThreadId": "th1", "receiverThreadIds": ["kid1"], "agentsStates": {"kid1": {"status": "completed", "message": "sub-hello"}}}}}),
+        );
+        assert!(
+            matches!(&s.events[0], DriverEvent::TurnItem(i) if i.id == card.id && matches!(&i.kind, TurnItemKind::Subagent { output: Some(o), .. } if o == "sub-hello"))
+        );
+        assert!(d.turn_id.is_some(), "our turn still runs");
     }
 
     #[test]
