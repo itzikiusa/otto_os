@@ -882,10 +882,10 @@ profile is refused (400) rather than bypassed. Drivers (what T3 Code runs,
 see the design doc's provider table): `claude` — the Agent SDK's stream-json
 control protocol against the `claude` CLI; `codex` — `codex app-server`;
 `gemini` — ACP via `gemini --acp`; `grok` — ACP via `grok … agent stdio`;
-`agy` — Antigravity's print-mode stream-json (`agy --print= --input-format
-stream-json --output-format stream-json`). Headless `agy` cannot ask: a
-tool it needs approval for is denied (a `system_notice` item names it) unless
-the user's own agy `permissions.allow` rules or its `--mode` cover it.
+`agy` — ACP via `agy acp` (approvals reach a person like any ACP agent;
+Otto's context bundle rides `session/new|load`
+`_meta.antigravity.systemPrompt.append`, never `--add-dir`, because agy runs
+commands in the alphabetically-first workspace root).
 
 **Access mode** (T3 Code's `RuntimeMode`): `RuntimeAccessMode` ∈
 `approval-required` (default: every tool approval reaches a person) |
@@ -898,10 +898,12 @@ the user's own agy `permissions.allow` rules or its `--mode` cover it.
 | codex | `approvalPolicy: untrusted`, `sandboxPolicy: readOnly` | `on-request`, `workspaceWrite` | `never`, `dangerFullAccess` | per `turn/start`; under Otto's Seatbelt the sandbox is always `externalSandbox` |
 | gemini | `--approval-mode default` | `auto_edit` | `yolo` | live `session/set_mode` (`default` / `autoEdit` / `yolo`) when advertised, else respawn + `session/load` |
 | grok | `--permission-mode default agent stdio` | same as approval-required (grok has no such mode) | `agent --always-approve stdio` | respawn + `session/load` |
-| agy | (no flag) | `--mode accept-edits` | `--mode auto` | respawn + `--conversation` |
+| agy | `session/set_mode default` | `session/set_mode accept-edits` | `--dangerously-skip-permissions` (launch only) | live `session/set_mode` between the first two; into / out of full access respawn + `session/load` |
 
 Otto's Seatbelt sandbox, folder trust and prompt guard apply in every mode;
-`--dangerously-skip-permissions` is never passed.
+`--dangerously-skip-permissions` is passed only for agy's full access (`agy
+acp` has no other way to stop asking; its `auto` mode still asks before
+commands that leave its sandbox).
 Streaming upserts of one item are coalesced to at most one per **50 ms**
 (the latest text always follows; nothing is dropped).
 

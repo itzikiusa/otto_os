@@ -236,6 +236,11 @@ pub trait StructuredDriver: Send + 'static {
         McpDelivery::Launcher
     }
 
+    /// The host finished `launch`'s spec (context injection, MCP, sandbox):
+    /// a driver may take what it delivers over the protocol out of it. Runs
+    /// on a blocking thread, so it may read files.
+    fn adopt_spec(&mut self, _spec: &mut LaunchSpec) {}
+
     /// Called once right after spawn: the handshake lines.
     fn start(&mut self, ctx: &LaunchContext) -> DriverStep;
 

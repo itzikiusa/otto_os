@@ -29,7 +29,7 @@ import type {
 } from '../../../lib/api/types';
 import { threads } from '../threadsStore.svelte';
 
-const RUNTIME_PROVIDERS: readonly string[] = ['claude', 'codex', 'gemini', 'grok', 'opencode', 'pi'];
+const RUNTIME_PROVIDERS: readonly string[] = ['claude', 'codex', 'gemini', 'grok', 'agy', 'opencode', 'pi'];
 
 /** Providers a new thread runs on the structured runtime (the rest stay PTY). */
 export function isRuntimeProvider(provider: string): provider is RuntimeProvider {

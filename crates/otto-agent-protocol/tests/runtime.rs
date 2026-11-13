@@ -1,14 +1,13 @@
 //! End to end: the real `AgentRuntime` + the real drivers over stdio — the
 //! ACP driver against `otto-fake-agent`, the Codex driver against
-//! `otto-fake-codex` (a fake `codex app-server`), the agy driver against
-//! `otto-fake-agy` — with a real (in-memory) SQLite store.
+//! `otto-fake-codex` (a fake `codex app-server`) — with a real (in-memory)
+//! SQLite store.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::Utc;
 use otto_agent_protocol::acp::AcpDriver;
-use otto_agent_protocol::agy::AgyDriver;
 use otto_agent_protocol::claude::ClaudeDriver;
 use otto_agent_protocol::codex::CodexDriver;
 use otto_agent_protocol::ring::RingLimits;
@@ -77,6 +76,13 @@ impl RuntimeHost for TestHost {
         }
         // Prove the runtime spawns the PREPARED spec (the safety pipeline's).
         spec.env.push(("OTTO_PREPARED".into(), "1".into()));
+        // otto-context's agy bundle (env, not `--add-dir`).
+        if s.provider == RuntimeProvider::Agy {
+            spec.env.push((
+                "OTTO_AGY_CONTEXT_DIR".into(),
+                format!("{}/bundle", self.root),
+            ));
+        }
         self.prepared.lock().unwrap().push(spec.clone());
         Ok(Vec::new())
     }
@@ -147,7 +153,7 @@ fn drivers() -> Arc<dyn DriverFactory> {
             RuntimeProvider::Codex => {
                 Box::new(CodexDriver::with_program(fake_bin!("otto-fake-codex")))
             }
-            RuntimeProvider::Agy => Box::new(AgyDriver::with_program(&fake_bin!("otto-fake-agy"))),
+            RuntimeProvider::Agy => Box::new(AcpDriver::agy(&fake_bin!("otto-fake-agent"))),
             RuntimeProvider::Gemini => Box::new(AcpDriver::gemini(&fake_bin!("otto-fake-agent"))),
             // A signed-out ACP agent.
             RuntimeProvider::Grok => Box::new(AcpDriver::new(
@@ -757,67 +763,94 @@ async fn acp_model_switch_respawns_and_resumes_and_unsupported_input_is_refused(
     rt.close(&s.id).await.unwrap();
 }
 
-// ---- Antigravity (fake agy) ------------------------------------------
+// ---- Antigravity (`agy acp`, fake ACP agent) -------------------------
 
 #[tokio::test]
-async fn agy_streams_reports_denials_and_resumes_after_an_interrupt() {
+async fn agy_runs_on_acp_with_its_modes_model_and_context_bundle() {
     let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_str().unwrap();
+    let skill = dir.path().join("bundle/.agents/skills/triage");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(dir.path().join("bundle/AGENTS.md"), "Be terse.\n").unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: triage\ndescription: Sort bugs\n---\nbody",
+    )
+    .unwrap();
     let pool = pool().await;
-    let host = TestHost::new(dir.path().to_str().unwrap(), false);
+    let host = TestHost::new(root, false);
     let rt = runtime(&pool, &host, RuntimeConfig::default());
-    let s = create_as(&rt, dir.path().to_str().unwrap(), RuntimeProvider::Agy).await;
-
-    rt.prompt(&s.id, "hello").await.unwrap();
-    let fin = host.wait(is_terminal).await;
-    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Completed));
-    assert!(host.items().iter().any(|i| matches!(&i.kind,
-        TurnItemKind::AssistantMessage { text, streaming: false, .. } if text == "echo: hello")));
+    let s = rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            CreateRuntimeSessionReq {
+                provider: Some(RuntimeProvider::Agy),
+                cwd: Some(root.into()),
+                model: Some("gemini-4-argon-high".into()),
+                access_mode: Some(RuntimeAccessMode::AutoAcceptEdits),
+                ..CreateRuntimeSessionReq::default()
+            },
+        )
+        .await
+        .unwrap();
+    let say = |text: &str, n: usize| {
+        let (rt, host, id, text) = (&rt, &host, s.id.clone(), text.to_string());
+        async move {
+            rt.prompt(&id, &text).await.unwrap();
+            host.wait_n(is_terminal, n).await;
+            last_assistant_text(host)
+        }
+    };
+    // `agy acp`, no mode / model flag: both go over the protocol.
+    assert_eq!(say("mode", 1).await, "mode: accept-edits");
+    let spawn = host.prepared.lock().unwrap()[0].clone();
+    assert_eq!(spawn.args, ["acp"]);
+    assert_eq!(say("model", 2).await, "model: gemini-4-argon-high");
     assert!(host.all().iter().any(|e| matches!(&e.body,
         RuntimeEventBody::ProviderTurnUpdated { provider_turn }
-            if provider_turn.turn_token_usage.as_ref().is_some_and(|u| u.input_tokens == 5))));
-    let native = rt.get(&s.id).await.unwrap().native_thread_id.unwrap();
-    assert!(native.starts_with("fake-conv-"), "{native}");
+            if provider_turn.turn_token_usage.as_ref().is_some_and(|u| u.input_tokens == 7
+                && u.output_tokens == 3))));
+    // The bundle rides the system-prompt append, not a workspace root.
+    let system = say("system", 3).await;
+    assert!(system.contains("Be terse."), "{system}");
+    assert!(
+        system.contains(&format!(
+            "- triage: Sort bugs ({}/SKILL.md)",
+            skill.display()
+        )),
+        "{system}"
+    );
 
-    // headless agy denies what needs approval: the tool + a notice, no request
-    rt.prompt(&s.id, "deny").await.unwrap();
-    let fin = host.wait_n(is_terminal, 2).await;
-    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Completed));
-    let items = host.items();
-    assert!(items.iter().any(|i| matches!(&i.kind,
-        TurnItemKind::CommandExecution { input, .. } if input == "echo hi > x.txt")));
-    assert!(items.iter().any(|i| matches!(&i.kind,
-        TurnItemKind::SystemNotice { message } if message.contains("RunCommand"))));
-    assert!(!host.all().iter().any(is_type("runtime_request.updated")));
+    // Full access is a launch flag: entering and leaving it respawns and
+    // loads the session (which re-sends the bundle).
+    let full = RuntimePromptReq {
+        access_mode: Some(RuntimeAccessMode::FullAccess),
+        ..RuntimePromptReq::of("system")
+    };
+    rt.prompt_with(&s.id, &full).await.unwrap();
+    host.wait_n(is_terminal, 4).await;
+    assert!(last_assistant_text(&host).contains("Be terse."));
+    let spawns = host.prepared.lock().unwrap().clone();
+    assert_eq!(spawns.len(), 2);
+    assert_eq!(spawns[1].args, ["acp", "--dangerously-skip-permissions"]);
+    let back = RuntimePromptReq {
+        access_mode: Some(RuntimeAccessMode::ApprovalRequired),
+        ..RuntimePromptReq::of("mode")
+    };
+    rt.prompt_with(&s.id, &back).await.unwrap();
+    host.wait_n(is_terminal, 5).await;
+    assert_eq!(last_assistant_text(&host), "mode: default");
+    let spawns = host.prepared.lock().unwrap().clone();
+    assert_eq!(spawns.len(), 3);
+    assert_eq!(spawns[2].args, ["acp"]);
 
-    rt.prompt(&s.id, "fail").await.unwrap();
-    let fin = host.wait_n(is_terminal, 3).await;
-    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Failed));
-
-    // SIGINT ends the turn interrupted and agy exits; the next prompt
-    // respawns it on the same conversation.
-    rt.prompt(&s.id, "hang").await.unwrap();
-    host.wait(|e| {
-        matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
-        if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, .. } if text == "1\n"))
-    })
-    .await;
+    // A tool that needs approval asks (agy acp can), and cancel interrupts.
+    rt.prompt(&s.id, "ask").await.unwrap();
+    host.wait(is_type("runtime_request.updated")).await;
     assert!(rt.interrupt(&s.id).await.unwrap());
-    let fin = host.wait_n(is_terminal, 4).await;
+    let fin = host.wait_n(is_terminal, 6).await;
     assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Interrupted));
-    host.wait(|e| {
-        matches!(&e.body, RuntimeEventBody::ProviderSessionUpdated { provider_session }
-        if provider_session.status == ProviderSessionStatus::Stopped)
-    })
-    .await;
-    rt.prompt(&s.id, "again").await.unwrap();
-    let fin = host.wait_n(is_terminal, 5).await;
-    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Completed));
-    let respawn = host.prepared.lock().unwrap()[1].clone();
-    assert!(respawn
-        .args
-        .windows(2)
-        .any(|w| w == ["--conversation", native.as_str()]));
-    assert_eq!(rt.get(&s.id).await.unwrap().native_thread_id, Some(native));
     rt.close(&s.id).await.unwrap();
 }
 
@@ -1214,28 +1247,6 @@ async fn access_mode_sticks_and_switches_live_or_by_respawn() {
         .unwrap();
     assert_eq!(row.session.access_mode, RuntimeAccessMode::FullAccess);
     rt.close(&s.id).await.unwrap();
-
-    // Created in a mode: agy launches with its `--mode`.
-    let agy = rt
-        .create(
-            &"u1".into(),
-            &"w1".into(),
-            CreateRuntimeSessionReq {
-                provider: Some(RuntimeProvider::Agy),
-                cwd: Some(dir.path().to_str().unwrap().into()),
-                access_mode: Some(RuntimeAccessMode::AutoAcceptEdits),
-                ..CreateRuntimeSessionReq::default()
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(agy.access_mode, RuntimeAccessMode::AutoAcceptEdits);
-    let spawn = host.prepared.lock().unwrap().last().unwrap().clone();
-    assert!(spawn
-        .args
-        .windows(2)
-        .any(|w| w == ["--mode", "accept-edits"]));
-    rt.close(&agy.id).await.unwrap();
 }
 
 #[tokio::test]

@@ -1018,6 +1018,13 @@ impl AgentRuntime {
             .host
             .prepare_spawn(&ws, &session, &mut spec, driver.mcp_delivery())
             .await?;
+        // Off the runtime: a driver may read files the spec names.
+        let (mut driver, mut spec) = tokio::task::spawn_blocking(move || {
+            driver.adopt_spec(&mut spec);
+            (driver, spec)
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("spawn preparation failed: {e}")))?;
         // A host that left the tail in place (tests) still gets it last.
         let mut args = spec.args;
         args.append(&mut spec.tail_args);
