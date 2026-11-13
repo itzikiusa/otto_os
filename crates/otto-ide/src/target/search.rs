@@ -449,13 +449,17 @@ pub(super) async fn search_remote_ssh(
             if !f.starts_with(&search_root) {
                 continue;
             }
-            let rel = f.strip_prefix(root).unwrap_or(&f).trim_start_matches('/');
+            let rel = f
+                .strip_prefix(root)
+                .unwrap_or(&f)
+                .trim_start_matches('/')
+                .to_string();
             let matched = if req.case_sensitive {
                 rel.contains(&req.query)
             } else {
                 rel.to_ascii_lowercase().contains(&q_lower)
             };
-            if matched && glob_matches(req.file_glob.as_deref(), rel) {
+            if matched && glob_matches(req.file_glob.as_deref(), &rel) {
                 if items.len() >= limit {
                     truncated = true;
                     break;
@@ -465,7 +469,7 @@ pub(super) async fn search_remote_ssh(
                     path: f,
                     line: None,
                     column: None,
-                    preview: rel.to_string(),
+                    preview: rel,
                     symbol_kind: None,
                     container: None,
                 });

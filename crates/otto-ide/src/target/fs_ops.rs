@@ -79,14 +79,6 @@ pub(crate) fn resolve_local_existing_in_roots(
     Ok((canonical, matched_root.to_path_buf()))
 }
 
-pub(crate) fn resolve_local_existing(
-    root: &Path,
-    is_root_user: bool,
-    raw: &str,
-) -> Result<PathBuf> {
-    resolve_local_existing_in_roots(root, &[], is_root_user, raw).map(|(c, _)| c)
-}
-
 pub(super) fn normalize_os_name(raw: &str) -> String {
     match raw.trim().to_ascii_lowercase().as_str() {
         "macos" | "darwin" => "macos".into(),

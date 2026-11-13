@@ -85,11 +85,7 @@ pub async fn goto_definition<S: IdeCtx>(
         ..
     } = &resolved
     {
-        let project_roots: Vec<PathBuf> = resolved
-            .local_project_roots()
-            .into_iter()
-            .map(Path::to_path_buf)
-            .collect();
+        let project_roots = resolved.local_project_roots();
         let origin_abs = resolve_origin_abs(&req.path, &project_roots, root);
         let env_map = build_formatter_env(ctx, user, &resolved, &req.target).await;
 
@@ -129,11 +125,7 @@ pub async fn goto_definition<S: IdeCtx>(
 
     // 5. Same-package (Go) & workspace multi-root definitions.
     if let ResolvedTarget::Local { root, .. } = &resolved {
-        let project_roots: Vec<PathBuf> = resolved
-            .local_project_roots()
-            .into_iter()
-            .map(Path::to_path_buf)
-            .collect();
+        let project_roots = resolved.local_project_roots();
         let origin_abs = resolve_origin_abs(&req.path, &project_roots, root);
         if lang == "go" {
             if let Some(pkg_dir) = origin_abs.parent().map(Path::to_path_buf) {
@@ -187,11 +179,7 @@ pub async fn goto_definition<S: IdeCtx>(
         } = &resolved
         {
             let env_map = build_formatter_env(ctx, user, &resolved, &req.target).await;
-            let project_roots: Vec<PathBuf> = resolved
-                .local_project_roots()
-                .into_iter()
-                .map(Path::to_path_buf)
-                .collect();
+            let project_roots = resolved.local_project_roots();
             let origin_abs = resolve_origin_abs(&req.path, &project_roots, root);
             let lang_c = lang.clone();
             let content_c = content.clone();
@@ -353,11 +341,7 @@ async fn try_path_or_ref_navigation<S: IdeCtx>(
                     });
                 }
             } else if let ResolvedTarget::Local { root, .. } = resolved {
-                let roots: Vec<PathBuf> = resolved
-                    .local_project_roots()
-                    .into_iter()
-                    .map(Path::to_path_buf)
-                    .collect();
+                let roots = resolved.local_project_roots();
                 let origin_abs = resolve_origin_abs(origin_path, &roots, root);
                 if let Some(target_abs) = origin_abs
                     .parent()
@@ -403,11 +387,7 @@ async fn try_path_or_ref_navigation<S: IdeCtx>(
             .or_else(|| trimmed.strip_prefix(". "))
         {
             if let ResolvedTarget::Local { root, .. } = resolved {
-                let roots: Vec<PathBuf> = resolved
-                    .local_project_roots()
-                    .into_iter()
-                    .map(Path::to_path_buf)
-                    .collect();
+                let roots = resolved.local_project_roots();
                 let origin_abs = resolve_origin_abs(origin_path, &roots, root);
                 if let Some(target_abs) = resolve_shell_source_target(rest, &origin_abs, &roots) {
                     let target_str =
@@ -436,11 +416,7 @@ async fn try_path_or_ref_navigation<S: IdeCtx>(
     {
         if let Some(spec) = extract_quoted_string_at(line_str, column) {
             if let ResolvedTarget::Local { root, .. } = resolved {
-                let roots: Vec<PathBuf> = resolved
-                    .local_project_roots()
-                    .into_iter()
-                    .map(Path::to_path_buf)
-                    .collect();
+                let roots = resolved.local_project_roots();
                 let origin_abs = resolve_origin_abs(origin_path, &roots, root);
                 let files = resolve_js_ts_module_files(&spec, &origin_abs, &roots);
                 if let Some(first) = files.first() {

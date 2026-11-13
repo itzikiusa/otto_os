@@ -33,13 +33,13 @@ use crate::types::{
 };
 use crate::IdeCtx;
 
+pub(super) use self::fs_ops::enforce_non_root_path;
 use self::fs_ops::{
     build_file_read_resp, build_remote_tree_entries, list_local_dir_sync, mutate_local_fs_in_roots,
     mutate_remote_fs, normalize_arch_name, normalize_os_name, parse_uname_output,
     read_bounded_bytes, resolve_local_existing_in_roots, sha256_hex, verify_local_expected_sha,
     verify_remote_expected_sha, write_local_atomic,
 };
-pub(super) use self::fs_ops::{enforce_non_root_path, resolve_local_existing};
 use self::sdk_paths::{
     collect_readonly_sdk_roots, is_virtual_archive_uri, read_virtual_java_archive,
     resolve_local_readable, strip_file_uri,
@@ -260,9 +260,9 @@ impl TargetManager {
                         }
                     }
                     for sdk_opt in [
-                        proj_env.goroot,
+                        proj_env.go_root,
                         proj_env.java_home,
-                        proj_env.python_venv,
+                        proj_env.python_interpreter,
                         proj_env.node_home,
                     ] {
                         if let Some(p) = sdk_opt.filter(|s| !s.trim().is_empty()) {

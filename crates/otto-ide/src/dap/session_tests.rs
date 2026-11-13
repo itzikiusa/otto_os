@@ -524,7 +524,7 @@ fn symlink_breakpoint_normalization_and_go_package_resolution_work() {
         .to_string_lossy()
         .into_owned();
     assert_eq!(
-        super::adapters::resolve_go_debug_program(&target, &canon_main, &canon_pkg),
+        crate::dap::adapters::resolve_go_debug_program(&target, &canon_main, &canon_pkg),
         canon_pkg
     );
     // Workspace root with `cmd/go_admission` auto-discovers `cmd/go_admission`!
@@ -534,7 +534,7 @@ fn symlink_breakpoint_normalization_and_go_package_resolution_work() {
         .to_string_lossy()
         .into_owned();
     assert_eq!(
-        super::adapters::resolve_go_debug_program(&target, &canon_root, &canon_root),
+        crate::dap::adapters::resolve_go_debug_program(&target, &canon_root, &canon_root),
         canon_pkg
     );
 }

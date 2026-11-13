@@ -83,7 +83,7 @@ pub fn normalize_target_path(target: &IdeTargetSpec, raw: &str) -> String {
         if let Ok(canon) = std::fs::canonicalize(&candidate) {
             return canon.to_string_lossy().into_owned();
         }
-        if let Ok(prospective) = otto_core::secret_paths::canonicalize_prospective(&candidate) {
+        if let Some(prospective) = otto_core::secret_paths::canonicalize_prospective(&candidate) {
             return prospective.to_string_lossy().into_owned();
         }
     }
