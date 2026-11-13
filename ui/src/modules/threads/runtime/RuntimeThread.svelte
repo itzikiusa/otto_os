@@ -50,6 +50,7 @@
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
   import { approvalOutcome, errorText, isRunHandoff, isRunning, latestTurn, messageAttribution, pendingApprovals, subagentChildren, timelineRows, turnOutcome, type WorkEntry } from './timeline';
   import { mergeQueuedEdit, readAttachments, runViewSlash } from './runtimeComposer';
+  import { attachmentSupport, takesFile } from './attachmentSupport';
   import { availableSlash } from './hostCommands';
   import type { RuntimeHostCommands } from '../../../lib/runtimeThreadPort';
   import RuntimeComposerImages from './RuntimeComposerImages.svelte';
@@ -183,11 +184,9 @@
   const accessMode = $derived(draft.pickedMode ?? session?.access_mode ?? 'approval-required');
 
   // ── Images and PDFs (paste or attach; sent with the next message) ─────
-  // The drivers that take image input (Claude content blocks, Codex image
-  // items); PDFs go to Claude only (document blocks).
-  const canImages = $derived(provider === 'claude' || provider === 'codex');
-  const canFiles = $derived(provider === 'claude');
-  const takes = (f: File): boolean => f.type.startsWith('image/') || (canFiles && f.type === 'application/pdf');
+  const canImages = $derived(attachmentSupport(provider).images);
+  const canFiles = $derived(attachmentSupport(provider).files);
+  const takes = (f: File): boolean => takesFile(provider, f);
   let fileEl = $state<HTMLInputElement | null>(null);
   async function addImages(files: Iterable<File>): Promise<void> {
     const read = await readAttachments(files, takes);

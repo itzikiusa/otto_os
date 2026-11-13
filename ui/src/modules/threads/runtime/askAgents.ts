@@ -8,7 +8,7 @@
 import type { AskChildTarget, RuntimeProvider } from '../../../lib/api/types';
 
 /** The runtime providers a child thread can run on. */
-export const ASK_PROVIDERS: readonly RuntimeProvider[] = ['claude', 'codex', 'gemini', 'grok', 'opencode', 'pi'];
+export const ASK_PROVIDERS: readonly RuntimeProvider[] = ['claude', 'codex', 'agy', 'gemini', 'grok', 'opencode', 'pi'];
 /** Agents one ask reaches (the daemon's ASK_CHILD_MAX_TARGETS). */
 export const ASK_MAX_TARGETS = 4;
 
