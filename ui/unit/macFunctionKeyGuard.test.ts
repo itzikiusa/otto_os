@@ -88,3 +88,19 @@ test('applyMacFunctionKeyFallback moves caret for Left/Right/Up/Down/Home/End an
   );
   assert.equal(f5, null);
 });
+
+test('Fn+←/→ (Home/End) move to the line start/end and Fn+↑/↓ (PageUp/PageDown) to the text start/end', () => {
+  const value = 'first line\nsecond line\nthird';
+  const at = (n: number) => ({ value, selectionStart: n, selectionEnd: n });
+  const home = String.fromCharCode(0xf729);
+  const end = String.fromCharCode(0xf72b);
+  // Home/End: the current line; ⌘ for the whole text; ⇧ extends.
+  assert.equal(applyMacFunctionKeyFallback(at(15), home)?.next.selectionStart, 11);
+  assert.equal(applyMacFunctionKeyFallback(at(15), end)?.next.selectionStart, 22);
+  assert.equal(applyMacFunctionKeyFallback(at(15), home, { metaKey: true })?.next.selectionStart, 0);
+  const sel = applyMacFunctionKeyFallback(at(15), end, { shiftKey: true })?.next;
+  assert.deepEqual([sel?.selectionStart, sel?.selectionEnd], [15, 22]);
+  // PageUp/PageDown map to ⌘↑/⌘↓: the text's start/end.
+  assert.equal(applyMacFunctionKeyFallback(at(15), String.fromCharCode(0xf700), { metaKey: true })?.next.selectionStart, 0);
+  assert.equal(applyMacFunctionKeyFallback(at(15), String.fromCharCode(0xf701), { metaKey: true })?.next.selectionStart, value.length);
+});

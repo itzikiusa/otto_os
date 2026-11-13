@@ -238,6 +238,9 @@ const NAVIGATION_KEYS = new Set([
   'Delete',
 ]);
 
+/** Keys WKWebView never moves the caret for, mapped to their NSEvent code. */
+const PAGE_KEYS: Record<string, number> = { Home: NS_HOME, End: NS_END, PageUp: NS_UP_ARROW, PageDown: NS_DOWN_ARROW };
+
 function isSelectableTextControl(
   el: EventTarget | null,
 ): el is HTMLTextAreaElement | HTMLInputElement {
@@ -258,6 +261,35 @@ export function installMacFunctionKeyGuard(doc: Document = document): () => void
     // xterm's hidden helper textarea already translated the keydown into VT
     // escape sequences; never synthesize DOM text edits on its buffer.
     if (el.classList?.contains('xterm-helper-textarea')) return;
+    // Fn+←/→ (Home/End) and Fn+↑/↓ (PageUp/PageDown): WKWebView only scrolls
+    // for these — or leaks a U+F729/F72B box into the text. Move the caret
+    // here, before AppKit sees the key: Home/End to the line's start/end
+    // (⌘ for the whole text), PageUp/PageDown to the text's start/end; ⇧
+    // extends the selection.
+    const navCode = PAGE_KEYS[e.key];
+    if (navCode !== undefined && !e.defaultPrevented && !e.altKey && !e.ctrlKey && !e.isComposing) {
+      let start: number;
+      let end: number;
+      try {
+        start = el.selectionStart ?? 0;
+        end = el.selectionEnd ?? 0;
+      } catch {
+        return;
+      }
+      const multiline = typeof HTMLTextAreaElement !== 'undefined' && el instanceof HTMLTextAreaElement;
+      const dir = (el.selectionDirection as 'forward' | 'backward' | 'none' | null) ?? 'none';
+      const applied = applyMacFunctionKeyFallback(
+        { value: el.value, selectionStart: start, selectionEnd: end, selectionDirection: dir },
+        String.fromCharCode(navCode),
+        { shiftKey: e.shiftKey, metaKey: e.metaKey || e.key === 'PageUp' || e.key === 'PageDown' },
+        multiline,
+      );
+      if (applied) {
+        e.preventDefault();
+        el.setSelectionRange(applied.next.selectionStart, applied.next.selectionEnd, applied.next.selectionDirection ?? 'none');
+      }
+      return;
+    }
     try {
       snapshots.set(el, {
         key: e.key,
