@@ -3,9 +3,62 @@
 // Powers instant Cmd+F12 File Structure, Prev/Next Function, JSONPath breadcrumbs,
 // JSON Pretty/Minify/Sort transforms, and instant local Shell/JSON/$ref dive-in.
 
-import { detectCsvDelimiter, parseCsvLine } from '../../../lib/components/cm-ide-csv';
 import { loadErrorText } from '../../../lib/loadError';
 import type { IdeSymbolNode } from '../store/ideTypes';
+
+type OutlineCsvDelim = ',' | '\t' | ';' | '|';
+const OUTLINE_CSV_DELIMS: readonly OutlineCsvDelim[] = [',', '\t', ';', '|'];
+
+function splitOutlineCsvCells(lineText: string, delimiter: OutlineCsvDelim): Array<{ from: number; value: string }> {
+  const cells: Array<{ from: number; value: string }> = [];
+  const n = lineText.length;
+  let i = 0;
+  while (i <= n) {
+    if (i === n) {
+      if (cells.length > 0 && lineText[n - 1] === delimiter) cells.push({ from: n, value: '' });
+      break;
+    }
+    const cellStart = i;
+    if (lineText[i] === '"') {
+      i++;
+      let val = '';
+      while (i < n) {
+        if (lineText[i] === '"') {
+          if (i + 1 < n && lineText[i + 1] === '"') { val += '"'; i += 2; }
+          else { i++; break; }
+        } else { val += lineText[i]; i++; }
+      }
+      while (i < n && lineText[i] !== delimiter) i++;
+      cells.push({ from: cellStart, value: val });
+      if (i < n && lineText[i] === delimiter) i++;
+      else break;
+    } else {
+      let end = i;
+      while (end < n && lineText[end] !== delimiter) end++;
+      cells.push({ from: cellStart, value: lineText.slice(cellStart, end) });
+      if (end < n && lineText[end] === delimiter) i = end + 1;
+      else break;
+    }
+  }
+  return cells;
+}
+
+function detectOutlineCsvDelim(sampleText: string, filePath: string): OutlineCsvDelim {
+  if (filePath.toLowerCase().endsWith('.tsv')) return '\t';
+  const lines = sampleText.split(/\r?\n/).filter((ln) => ln.trim().length > 0).slice(0, 8);
+  if (lines.length === 0) return ',';
+  let bestDelim: OutlineCsvDelim = ',';
+  let bestScore = -1;
+  for (const delim of OUTLINE_CSV_DELIMS) {
+    const counts = lines.map((ln) => splitOutlineCsvCells(ln, delim).length);
+    const minCols = Math.min(...counts);
+    const maxCols = Math.max(...counts);
+    if (minCols <= 1) continue;
+    const score = (minCols === maxCols ? 100 : 0) + minCols * 4 - (maxCols - minCols);
+    if (score > bestScore) { bestScore = score; bestDelim = delim; }
+  }
+  return bestDelim;
+}
 
 export type IdeOutlineNode = IdeSymbolNode & { column?: number };
 
@@ -58,8 +111,8 @@ export function extractInstantSymbols(filePath: string, language: string | undef
     const nl = content.indexOf('\n');
     const first = (nl >= 0 ? content.slice(0, nl) : content).replace(/\r$/, '');
     if (!first.trim()) return [];
-    const delim = detectCsvDelimiter(content.slice(0, 4096), filePath);
-    const cols = parseCsvLine(first, delim);
+    const delim = detectOutlineCsvDelim(content.slice(0, 4096), filePath);
+    const cols = splitOutlineCsvCells(first, delim);
     return cols.slice(0, MAX_OUTLINE_ITEMS).map((c, idx) => ({
       name: `Col ${idx + 1}: ${c.value.trim() || `(column ${idx + 1})`}`,
       kind: 'field',
