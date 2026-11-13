@@ -48,7 +48,7 @@
         regex?: boolean;
         wholeWord?: boolean;
         fileGlob?: string;
-        scopePath?: string;
+        scopePath?: string | null;
       },
     ) => Promise<void>;
     replaceInWorkspace: (
@@ -60,7 +60,8 @@
         regex?: boolean;
         wholeWord?: boolean;
         fileGlob?: string;
-        scopePath?: string;
+        scopePath?: string | null;
+        paths?: string[];
       },
     ) => Promise<{ files_changed: number; replacements: number; previews: Array<{ path: string; count: number; sample_before: string; sample_after: string }> } | null>;
   }
@@ -198,21 +199,12 @@
       if (!neg) hasPositive = true;
       const escaped = clean.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
       const re = new RegExp(`^${escaped}$`, 'i');
-      const target = clean.includes('/') ? ide.relativePath(filePath) : base;
+      const target = clean.includes('/') ? ide.relativePath(ide.resolvePath(filePath)) : base;
       const ok = re.test(target);
       if (neg && ok) return false;
       if (!neg && ok) included = true;
     }
     return !hasPositive || included;
-  }
-
-  function matchesWholeWordClient(item: IdeSearchItem): boolean {
-    if (!wholeWord || regex || item.kind !== 'text') return true;
-    const q = query.trim();
-    if (!q) return true;
-    const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const re = new RegExp(`\\b${escaped}\\b`, caseSensitive ? '' : 'i');
-    return re.test(item.preview);
   }
 
   const filteredActions = $derived.by((): IdeQuickAction[] => {
@@ -232,13 +224,10 @@
       for (let i = 0; i < filteredActions.length; i++) out.push({ kind: 'action', action: filteredActions[i] });
       return out;
     }
-    const scope = effectiveScopePath?.replace(/\/+$/, '');
     let prevPath = '';
     for (let i = 0; i < ide.searchResults.length; i++) {
       const item = ide.searchResults[i];
-      if (scope && item.path !== scope && !item.path.startsWith(`${scope}/`)) continue;
       if (!matchesGlobMask(item.path, fileGlob)) continue;
-      if (!matchesWholeWordClient(item)) continue;
       const groupStart = tab === 'text' && item.path !== prevPath;
       prevPath = item.path;
       out.push({ kind: 'hit', item, groupStart });
@@ -251,19 +240,21 @@
 
   const visibleRows = $derived(!showAllRows && rows.length > ROW_CAP ? rows.slice(0, ROW_CAP) : rows);
 
-  function buildSearchOpts(overrideGlob?: string) {
+  function buildSearchOpts() {
+    extSearch().searchScopePath = effectiveScopePath ?? null;
     return {
       caseSensitive,
       regex,
       wholeWord,
-      fileGlob: (overrideGlob ?? fileGlob).trim() || undefined,
-      scopePath: effectiveScopePath,
+      fileGlob: fileGlob.trim() || undefined,
+      scopePath: effectiveScopePath ?? null,
     };
   }
 
   function close(): void {
     if (debounceTimer) clearTimeout(debounceTimer);
     extSearch().searchReplaceMode = false;
+    extSearch().searchScopePath = null;
     ide.searchEverywhereOpen = false;
   }
 
@@ -340,8 +331,10 @@
     replaceMode = 'apply';
     try {
       await extSearch().replaceInWorkspace(query, replacement, false, {
-        ...buildSearchOpts(ide.relativePath(filePath)),
-        scopePath: filePath,
+        caseSensitive,
+        regex,
+        wholeWord,
+        paths: [filePath],
       });
       await previewReplace();
       triggerSearch(0);
@@ -533,7 +526,7 @@
             {#each ide.replacePreview.previews.slice(0, 12) as p (p.path)}
               <div class="se-preview-item" dir="ltr">
                 <div class="se-preview-top">
-                  <span class="se-preview-file">{ide.relativePath(p.path)} ({plural(p.count, 'match')})</span>
+                  <span class="se-preview-file">{ide.relativePath(ide.resolvePath(p.path))} ({plural(p.count, 'match')})</span>
                   <button
                     type="button"
                     class="btn small ghost"

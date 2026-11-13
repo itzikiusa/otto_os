@@ -229,9 +229,29 @@ export async function performSaveFile(host: IdeBufferHost, perf: IdeBufferPerfCo
   }
 }
 
+function stripMacPrivatePrefix(p: string): string {
+  return p.startsWith('/private/var/') || p.startsWith('/private/tmp/') ? p.slice('/private'.length) : p;
+}
+
 export async function reloadTabsFromDisk(host: IdeBufferHost, perf: IdeBufferPerfController, paths: Set<string>): Promise<void> {
+  const normalized = new Set<string>();
+  for (const p of paths) {
+    normalized.add(p);
+    normalized.add(stripMacPrivatePrefix(p));
+    const resolved = host.resolvePath(p);
+    normalized.add(resolved);
+    normalized.add(stripMacPrivatePrefix(resolved));
+  }
   for (const tab of host.tabs) {
-    if (paths.has(tab.path)) { const fresh = await api.get<IdeFileReadResp>(`/ide/fs/file?${host.targetQuery({ path: tab.path })}`); perf.markClean(tab, fresh.content, fresh.sha256); }
+    if (normalized.has(tab.path) || normalized.has(stripMacPrivatePrefix(tab.path))) {
+      const fresh = await api.get<IdeFileReadResp>(`/ide/fs/file?${host.targetQuery({ path: tab.path })}`);
+      perf.markClean(tab, fresh.content, fresh.sha256);
+      notifySaved(tab.path, fresh.content);
+      if (tab.path === host.activePath || tab.path === host.splitPath) {
+        void host.loadGutter(tab.path, fresh.content);
+        void host.loadSymbols(tab.path, fresh.content);
+      }
+    }
   }
 }
 
