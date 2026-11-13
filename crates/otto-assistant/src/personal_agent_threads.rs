@@ -84,13 +84,6 @@ pub fn run_meta(agent: &PersonalAgent, run_id: &str, plan: &RunPlan) -> Value {
     })
 }
 
-/// A refusal `prepare_runtime_spawn` gives for what structured sessions do
-/// not support yet (a workspace network profile, a named provider account):
-/// the caller falls back to a terminal session.
-fn runtime_unsupported(e: &Error) -> bool {
-    matches!(e, Error::Invalid(m) if m.contains("structured sessions"))
-}
-
 fn model_of(agent: &PersonalAgent) -> Option<String> {
     Some(agent.model.trim().to_string()).filter(|m| !m.is_empty())
 }
@@ -138,6 +131,7 @@ async fn run_thread<C: AssistantCtx>(
     let _ = std::fs::remove_file(&out_path);
     let augmented = C::augment_report_prompt(prompt, &out_path.to_string_lossy());
     let req = CreateRuntimeSessionReq {
+        title_auto: false,
         provider: Some(provider),
         cwd: Some(cwd.to_string()),
         title: Some(format!("Agent: {}", agent.name)),
@@ -178,20 +172,6 @@ async fn run_thread<C: AssistantCtx>(
         .unwrap_or_else(|e| Err(Error::Internal(e.to_string())))
     {
         Ok(s) => s,
-        // What the runtime cannot honour yet (a network profile, a named
-        // provider account) runs as a terminal session instead.
-        Err(e) if runtime_unsupported(&e) && !cancel.is_cancelled() => {
-            let run = AgentSessionRun {
-                agent,
-                run_id,
-                owner,
-                cwd,
-                prompt,
-                plan,
-                cancel,
-            };
-            return crate::personal_agent_session::run_pty_session(ctx, run).await;
-        }
         Err(e) => {
             warn!(agent = %agent.id, "personal agent: create thread ({}): {e}", agent.provider);
             return Ok(failed(None, format!("create-failed: {e}")));
@@ -444,6 +424,7 @@ pub async fn chat_thread<C: AssistantCtx>(
             &user_id.to_string(),
             &agent.workspace_id,
             CreateRuntimeSessionReq {
+                title_auto: false,
                 provider: Some(provider),
                 cwd: Some(cwd),
                 title: Some(format!("Chat: {}", agent.name)),
@@ -461,11 +442,7 @@ pub async fn chat_thread<C: AssistantCtx>(
             },
         )
         .await;
-    let thread = match created {
-        Ok(t) => t,
-        Err(e) if runtime_unsupported(&e) => return Ok(None),
-        Err(e) => return Err(e),
-    };
+    let thread = created?;
     if !user_context.trim().is_empty() {
         let initial = pa_engine::with_user_context(
             "Use this context for our conversation. Briefly acknowledge that you are ready, then wait for my request.",
@@ -640,24 +617,6 @@ mod tests {
             .await
             .unwrap_err()
             .contains("no report"));
-    }
-
-    #[test]
-    fn only_structured_refusals_fall_back_to_a_terminal() {
-        assert!(runtime_unsupported(&Error::Invalid(
-            "this workspace routes agents through a network profile, which structured \
-             sessions do not support yet — use a terminal session"
-                .into()
-        )));
-        assert!(runtime_unsupported(&Error::Invalid(
-            "named provider accounts are not supported for structured sessions yet".into()
-        )));
-        assert!(!runtime_unsupported(&Error::Invalid(
-            "cwd must be an absolute path".into()
-        )));
-        assert!(!runtime_unsupported(&Error::Internal(
-            "structured sessions".into()
-        )));
     }
 
     #[test]

@@ -1,19 +1,21 @@
 <script lang="ts">
   // Modal image lightbox for transcript, inbox, and workspace images:
   // shared Modal chrome, 1:1 / Fit zoom toggle, and path caption with copy.
-  import Modal from '../../../lib/components/Modal.svelte';
-  import Icon from '../../../lib/components/Icon.svelte';
-  import { copyTextOrThrow } from '../../../lib/clipboard';
-  import { toasts } from '../../../lib/toast.svelte';
-  import { toastError } from '../../../lib/toastError';
+  import Modal from './Modal.svelte';
+  import Icon from './Icon.svelte';
+  import { copyTextOrThrow } from '../clipboard';
+  import { toasts } from '../toast.svelte';
+  import { toastError } from '../toastError';
 
   interface Props {
     src: string;
     alt: string;
     path?: string | null;
+    /** data-testid on the full image (e2e). */
+    testid?: string;
     onclose: () => void;
   }
-  let { src, alt, path = null, onclose }: Props = $props();
+  let { src, alt, path = null, testid = 'image-lightbox', onclose }: Props = $props();
   let zoomed = $state(false);
 
   const title = $derived(
@@ -45,7 +47,7 @@
       aria-label={zoomed ? 'Fit image to window' : 'Zoom image to actual size'}
       title={zoomed ? 'Click to fit to window' : 'Click to zoom (1:1)'}
     >
-      <img {src} alt={alt || 'Image'} />
+      <img {src} alt={alt || 'Image'} data-testid={testid} />
     </button>
   </div>
 

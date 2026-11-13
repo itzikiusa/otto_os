@@ -3,7 +3,8 @@
 //! the frame shapes of Claude Code 2.1.318. Behaviour by prompt text:
 //!
 //! * `bg <secs>`   — a `run_in_background` Bash (`task_started`, the launch
-//!   tool result), "Waiting for it." and `result`; `<secs>` later the task's
+//!   tool result naming a real output file, "tick 1\ntick 2"), "Waiting
+//!   for it." and `result`; `<secs>` later the task's
 //!   `task_notification`, then a turn of its own (lasting ~0.8 s):
 //!   "Background done: ok".
 //! * `agent <secs>` — a background `Agent` call: its `subagent` frames (a
@@ -12,6 +13,9 @@
 //! * `slow <secs>` — "Working…", then waits `<secs>`; a user message arriving
 //!   meanwhile (a steer) is answered in the same turn: "steered: <text>".
 //! * `silent`      — emits nothing until interrupted.
+//! * `stream <n> <ms>` — `c0 `…`c<n-1> ` as text deltas, one per `<ms>`.
+//! * `ask`         — a `can_use_tool` request for Bash `ls`; the answer
+//!   decides: "allowed" or "denied", then `result`.
 //! * `escape`      — starts `sleep 600` in a process group of its own (as
 //!   Claude Code does with some jobs), writes its pid to
 //!   `.fake-claude/escaped.pid`, then answers like `echo`.
@@ -29,6 +33,19 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+
+/// `<tmp>/claude-<uid>/otto-fake/<session>/tasks/<task>.output` with two
+/// lines of output, as Claude Code lays out a background command's output.
+fn task_output_file(session: &str, task: &str) -> std::path::PathBuf {
+    let tmp = std::env::var_os("CLAUDE_CODE_TMPDIR")
+        .map_or_else(|| "/tmp".into(), std::path::PathBuf::from);
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let dir = tmp.join(format!("claude-{uid}/otto-fake/{session}/tasks"));
+    let file = dir.join(format!("{task}.output"));
+    let _ = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&file, "tick 1\ntick 2\n"));
+    file
+}
 
 fn out(v: Value) {
     let mut o = std::io::stdout().lock();
@@ -100,6 +117,8 @@ fn arg_after(args: &[String], flag: &str) -> Option<String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let mut mode = arg_after(&args, "--permission-mode").unwrap_or_default();
+    let mut cost = 0.0f64;
     let store = std::path::Path::new(".fake-claude");
     let session = match arg_after(&args, "--resume") {
         Some(id) => {
@@ -134,6 +153,8 @@ fn main() {
     let mut n = 0u32;
     // A turn that waits: (until, steerable) — `None` until = until interrupted.
     let mut waiting: Option<(Option<Instant>, bool)> = None;
+    // The `can_use_tool` request an `ask` turn waits on.
+    let mut asking: Option<String> = None;
     loop {
         let next_due = dues.iter().map(|d| d.at).min();
         let wake = [next_due, waiting.and_then(|w| w.0)]
@@ -188,11 +209,41 @@ fn main() {
             In::Eof => return,
         };
         match msg.get("type").and_then(Value::as_str) {
+            Some("control_response")
+                if asking.is_some()
+                    && msg.pointer("/response/request_id").and_then(Value::as_str)
+                        == asking.as_deref() =>
+            {
+                asking = None;
+                let allow = msg
+                    .pointer("/response/response/behavior")
+                    .and_then(Value::as_str)
+                    == Some("allow");
+                n += 1;
+                text_message(&format!("m{n}"), if allow { "allowed" } else { "denied" });
+                result_ok();
+            }
             Some("control_request") => {
                 let rid = msg.get("request_id").cloned().unwrap_or(Value::Null);
                 let sub = msg.pointer("/request/subtype").and_then(Value::as_str);
+                if sub == Some("set_permission_mode") {
+                    mode = msg
+                        .pointer("/request/mode")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                }
+                // `initialize` lists its slash commands, as Claude Code does.
+                let body = if sub == Some("initialize") {
+                    json!({"commands": [
+                        {"name": "review", "description": "Review the current changes", "argumentHint": "[focus]"},
+                        {"name": "compact", "description": "Clear history but keep a summary", "argumentHint": ""}
+                    ]})
+                } else {
+                    json!({})
+                };
                 out(
-                    json!({"type":"control_response","response":{"subtype":"success","request_id":rid,"response":{}}}),
+                    json!({"type":"control_response","response":{"subtype":"success","request_id":rid,"response":body}}),
                 );
                 if sub == Some("initialize") {
                     out(
@@ -226,8 +277,10 @@ fn main() {
                         out(
                             json!({"type":"system","subtype":"task_started","task_id":task,"tool_use_id":tu,"description":"sleep 300","task_type":"local_bash"}),
                         );
+                        // Where Claude Code writes it (the daemon reads it back).
+                        let file = task_output_file(&session, &task);
                         out(
-                            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":tu,"content":format!("Command running in background with ID: {task}. Output is being written to: /tmp/{task}.out")}]},"parent_tool_use_id":null}),
+                            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":tu,"content":format!("Command running in background with ID: {task}. Output is being written to: {}", file.display())}]},"parent_tool_use_id":null}),
                         );
                         text_message(&format!("{mid}b"), "Waiting for it.");
                         result_ok();
@@ -267,6 +320,39 @@ fn main() {
                             agent: true,
                         });
                     }
+                    "stream" => {
+                        let count: usize = secs as usize;
+                        let ms: u64 = words.next().and_then(|w| w.parse().ok()).unwrap_or(0);
+                        out(
+                            json!({"type":"stream_event","event":{"type":"message_start","message":{"id":mid}},"parent_tool_use_id":null}),
+                        );
+                        out(
+                            json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"parent_tool_use_id":null}),
+                        );
+                        let mut all = String::new();
+                        for i in 0..count {
+                            let d = format!("c{i} ");
+                            all.push_str(&d);
+                            out(
+                                json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":d}},"parent_tool_use_id":null}),
+                            );
+                            std::thread::sleep(Duration::from_millis(ms));
+                        }
+                        out(
+                            json!({"type":"stream_event","event":{"type":"content_block_stop","index":0},"parent_tool_use_id":null}),
+                        );
+                        out(
+                            json!({"type":"assistant","message":{"id":mid,"content":[{"type":"text","text":all}]},"parent_tool_use_id":null}),
+                        );
+                        result_ok();
+                    }
+                    "ask" => {
+                        let rid = format!("perm-{n}");
+                        out(
+                            json!({"type":"control_request","request_id":rid,"request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"tool_use_id":format!("tu{n}")}}),
+                        );
+                        asking = Some(rid);
+                    }
                     "slow" => {
                         text_message(&mid, "Working…");
                         waiting = Some((Some(later), true));
@@ -290,9 +376,18 @@ fn main() {
                         text_message(&mid, &format!("echo: {text}"));
                         result_ok();
                     }
+                    // `mode`: the permission mode it runs in (plan, default…).
+                    "mode" => {
+                        text_message(&mid, &format!("mode: {mode}"));
+                        result_ok();
+                    }
                     _ => {
                         text_message(&mid, &format!("echo: {text}"));
-                        result_ok();
+                        // Claude Code sums the process's cost on every result.
+                        cost += 0.0125;
+                        out(
+                            json!({"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1},"total_cost_usd":cost}),
+                        );
                     }
                 }
             }

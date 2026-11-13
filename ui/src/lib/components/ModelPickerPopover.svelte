@@ -12,6 +12,7 @@
     formatEffortLabel,
     INTERACTION_MODES,
     modelsForProvider,
+    normalizeEffort,
     supportsEffortSelection,
     supportsInteractionMode,
     supportsModelSelection,
@@ -37,6 +38,9 @@
     onmodel: (m: string | null) => void;
     /** Omitted: the target takes no effort / access mode (no control shown). */
     oneffort?: (e: EffortLevel | null) => void;
+    /** The levels the target's agent reports it takes (a runtime thread's
+     *  `capabilities.efforts`); given, they bound the list. */
+    effortLevels?: readonly string[];
     onmode?: (m: InteractionMode) => void;
     onclose: () => void;
   }
@@ -52,6 +56,7 @@
     onprovider,
     onmodel,
     oneffort,
+    effortLevels,
     onmode,
     onclose,
   }: Props = $props();
@@ -101,7 +106,14 @@
     return q ? list.filter(({ m }) => `${m.label} ${m.id}`.toLowerCase().includes(q)) : list;
   });
   const shown = $derived(showAll || query.trim() ? rows : rows.slice(0, PAGE));
-  const efforts = $derived(oneffort && supportsEffortSelection(provider) ? effortsForModel(provider, current, meta) : []);
+  const efforts = $derived.by((): EffortLevel[] => {
+    if (!oneffort) return [];
+    if (!effortLevels) return supportsEffortSelection(provider) ? effortsForModel(provider, current, meta) : [];
+    const reported = effortLevels.map(normalizeEffort).filter((e): e is EffortLevel => e !== null);
+    // The model's own levels, bounded by what the agent takes.
+    const model = supportsEffortSelection(provider) ? effortsForModel(provider, current, meta).filter((e) => reported.includes(e)) : [];
+    return model.length ? model : reported;
+  });
 
   function pickable(p: string): boolean {
     return providerReadiness(p).available && (!lockProvider || p === provider);

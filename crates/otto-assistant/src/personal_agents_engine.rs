@@ -507,7 +507,7 @@ pub fn persona_provider(provider: &str) -> Result<&str> {
         return Ok(p);
     }
     Err(Error::Invalid(format!(
-        "{p} can't load a persona for one launch — pick Claude, Codex, agy, Grok or opencode"
+        "{p} can't load a persona for one launch — pick Claude, Codex, agy, Grok, opencode or pi"
     )))
 }
 
@@ -1901,10 +1901,10 @@ mod cwd_tests {
     fn a_persona_needs_a_provider_that_loads_one_per_launch() {
         assert_eq!(persona_provider("").unwrap(), "claude");
         assert_eq!(persona_provider("  ").unwrap(), "claude");
-        for p in ["claude", "codex", "agy", "grok", "opencode"] {
+        for p in ["claude", "codex", "agy", "grok", "opencode", "pi"] {
             assert_eq!(persona_provider(p).unwrap(), p);
         }
-        for p in ["gemini", "pi", "my-cli"] {
+        for p in ["gemini", "my-cli"] {
             match persona_provider(p) {
                 Err(Error::Invalid(m)) => {
                     assert!(m.starts_with(p) && m.contains("pick Claude"), "{m}")

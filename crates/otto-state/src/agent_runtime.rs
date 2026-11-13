@@ -8,7 +8,7 @@ mod drafts;
 
 use chrono::{DateTime, Utc};
 use otto_core::agent_runtime::{
-    RuntimeAccessMode, RuntimeProvider, RuntimeSession, RuntimeSessionStatus,
+    RuntimeAccessMode, RuntimeCapabilities, RuntimeProvider, RuntimeSession, RuntimeSessionStatus,
 };
 use otto_core::{Error, Id, Result};
 use sqlx::Row;
@@ -59,7 +59,8 @@ pub struct RuntimeEntityRow {
 macro_rules! session_cols {
     () => {
         "id, workspace_id, provider, title, cwd, model, native_thread_id, closed, \
-         created_by, created_at, last_active_at, last_seq, seq_reserved, access_mode, parent_id, ui_control, meta"
+         created_by, created_at, last_active_at, last_seq, seq_reserved, access_mode, parent_id, ui_control, meta, \
+         title_auto"
     };
 }
 
@@ -101,6 +102,8 @@ fn row_to_session(r: &sqlx::sqlite::SqliteRow) -> Result<RuntimeSessionRecord> {
                 .get::<Option<String>, _>("ui_control")
                 .and_then(|j| serde_json::from_str(&j).ok()),
             background_tasks: Vec::new(),
+            capabilities: RuntimeCapabilities::for_provider(provider),
+            title_auto: r.get::<i64, _>("title_auto") != 0,
             meta: r
                 .get::<Option<String>, _>("meta")
                 .and_then(|j| serde_json::from_str(&j).ok()),
@@ -298,9 +301,12 @@ impl AgentRuntimeRepo {
         Ok(())
     }
 
-    pub async fn set_title(&self, id: &Id, title: &str) -> Result<()> {
-        sqlx::query("UPDATE agent_runtime_sessions SET title = ? WHERE id = ?")
+    /// `auto`: the title is still Otto's placeholder (the agent's own name
+    /// for the conversation may replace it); a person's rename is not.
+    pub async fn set_title(&self, id: &Id, title: &str, auto: bool) -> Result<()> {
+        sqlx::query("UPDATE agent_runtime_sessions SET title = ?, title_auto = ? WHERE id = ?")
             .bind(title)
+            .bind(auto)
             .bind(id)
             .execute(&self.pool)
             .await
@@ -436,6 +442,26 @@ impl AgentRuntimeRepo {
         .await
         .map_err(dberr("upsert entities"))?;
         tx.commit().await.map_err(dberr("upsert entities"))?;
+        Ok(())
+    }
+
+    /// Upsert one bookkeeping entity (the runtime's process checkpoint)
+    /// without touching the session row: it is not activity, and its
+    /// sequence is not one a client saw.
+    pub async fn put_entity(&self, session_id: &Id, r: &RuntimeEntityRow) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO agent_runtime_entities (session_id, kind, entity_id, sequence, \
+             payload_json) VALUES (?, ?, ?, ?, ?) ON CONFLICT (session_id, kind, entity_id) \
+             DO UPDATE SET sequence = excluded.sequence, payload_json = excluded.payload_json",
+        )
+        .bind(session_id)
+        .bind(&r.kind)
+        .bind(&r.entity_id)
+        .bind(i(r.sequence))
+        .bind(r.payload.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("put runtime entity"))?;
         Ok(())
     }
 

@@ -19,6 +19,7 @@ mod children;
 pub mod council;
 mod descendants;
 mod fresh;
+mod held;
 mod request_ids;
 use request_ids::RequestIds;
 
@@ -31,12 +32,12 @@ use chrono::Utc;
 use dashmap::DashMap;
 use otto_core::agent_runtime::{
     ApprovalDecision, Attachment, AttachmentKind, CancelReason, CreateRuntimeSessionReq,
-    OpenPeerReq, PeerInfo, PeerReply, PlanArtifact, PromptDelivery, ProviderFailure,
-    ProviderSession, ProviderSessionStatus, ProviderThread, ProviderTurn, ProviderTurnStatus,
-    QueuedPrompt, ResponseCapability, RuntimeEvent, RuntimeEventBody, RuntimePromptReq,
-    RuntimePromptResp, RuntimeReplay, RuntimeRequest, RuntimeRequestStatus, RuntimeSession,
-    RuntimeSessionStatus, RuntimeSnapshot, TurnItem, TurnItemKind, TurnItemStatus, TurnOrigin,
-    TurnTerminalStatus,
+    OpenPeerReq, PeerInfo, PeerReply, PlanArtifact, PromptDelivery, ProviderCommand,
+    ProviderFailure, ProviderSession, ProviderSessionStatus, ProviderThread, ProviderTurn,
+    ProviderTurnStatus, QueuedPrompt, ResponseCapability, RuntimeEvent, RuntimeEventBody,
+    RuntimePromptReq, RuntimePromptResp, RuntimeReplay, RuntimeRequest, RuntimeRequestStatus,
+    RuntimeSession, RuntimeSessionStatus, RuntimeSnapshot, TurnItem, TurnItemKind, TurnItemStatus,
+    TurnOrigin, TurnTerminalStatus, TurnTokenUsage,
 };
 use otto_core::{new_id, Error, Id, Result};
 use otto_state::{AgentRuntimeRepo, NewRuntimeSession, RuntimeEntityRow};
@@ -46,7 +47,9 @@ use crate::driver::{
     item, ChildSignal, DriverEvent, DriverFactory, DriverStep, LaunchContext, StructuredDriver,
 };
 use crate::host::RuntimeHost;
-use crate::process::{signal_group, spawn_child, ChildCommand, ChildMsg};
+use crate::process::{
+    signal_group, spawn_child, spawn_held_child, Acker, ChildCommand, ChildMsg, HeldLink,
+};
 use crate::ring::{EventRing, RingLimits};
 
 /// T3 Code `THREAD_RESUME_MAX_REPLAY_EVENTS` / `…_ENCODED_BYTES`.
@@ -108,6 +111,7 @@ const K_ITEM: &str = "turn_item";
 const K_REQUEST: &str = "runtime_request";
 const K_PLAN: &str = "plan";
 const K_QUEUE: &str = "queue";
+const K_COMMANDS: &str = "commands";
 
 /// A queued message as persisted: the whole prompt (its images / files
 /// too), so it goes out unchanged after a restart.
@@ -137,10 +141,14 @@ enum PersistOp {
     Upsert(Vec<RuntimeEntityRow>),
     Reserve(u64),
     NativeThreadId(String),
+    /// The agent's own name for the conversation (the title stays auto).
+    Title(String),
     ClearNativeThreadId,
     Closed,
     Opened,
     Flush(oneshot::Sender<()>),
+    /// The process checkpoint (`held.rs`); once durable, ack its line.
+    Checkpoint(RuntimeEntityRow, Acker, u64),
 }
 
 /// Every entity's latest state (+ the sequence that set it).
@@ -156,6 +164,8 @@ struct Projection {
     plans: HashMap<String, PlanArtifact>,
     /// Messages waiting for the running turn to end, oldest first.
     queue: Vec<QueuedRecord>,
+    /// The agent's own slash commands.
+    commands: Vec<ProviderCommand>,
     next_item_ordinal: u32,
     next_turn_ordinal: u32,
 }
@@ -196,6 +206,9 @@ impl Projection {
                 K_QUEUE => {
                     p.queue = serde_json::from_value(v).unwrap_or_default();
                 }
+                K_COMMANDS => {
+                    p.commands = serde_json::from_value(v).unwrap_or_default();
+                }
                 _ => {}
             }
         }
@@ -219,6 +232,7 @@ impl Projection {
             runtime_requests,
             plans,
             queued_prompts: self.queue.iter().map(QueuedRecord::public).collect(),
+            commands: self.commands.clone(),
         }
     }
 
@@ -264,6 +278,10 @@ impl Projection {
                 self.plans.insert(plan.id.clone(), plan.clone());
                 Some(row(K_PLAN, &plan.id, json(plan)))
             }
+            RuntimeEventBody::CommandsUpdated { commands } => {
+                self.commands = commands.clone();
+                Some(row(K_COMMANDS, "commands", json(commands)))
+            }
             // The queue's row (the whole prompts) is written by `emit_queue`.
             RuntimeEventBody::CommandOutputDelta { .. }
             | RuntimeEventBody::TurnTerminal { .. }
@@ -290,6 +308,14 @@ struct Proc {
     pid: u32,
     stdin: mpsc::UnboundedSender<String>,
     driver: Box<dyn StructuredDriver>,
+    /// The child runs in a stdio holder and survives a restart (`held.rs`).
+    held: Option<HeldLink>,
+    /// The last holder line the driver processed.
+    line_seq: u64,
+    /// Lines were processed since the last checkpoint.
+    dirty: bool,
+    checkpointed_at: Instant,
+    claude_login: Option<Option<PathBuf>>,
 }
 
 struct ActiveTurn {
@@ -321,6 +347,8 @@ struct State {
     /// once it runs (T3 Code #34912) instead of finding nothing to stop.
     starting: u32,
     stop_requested: bool,
+    /// Shutdown left the child running for the next daemon.
+    detached: bool,
 }
 
 impl State {
@@ -407,12 +435,51 @@ impl AgentRuntime {
         let mut touched = 0;
         let mut queued = Vec::new();
         let mut cut_children = Vec::new();
+        let mut adopted = std::collections::HashSet::new();
         for sid in self.inner.repo.session_ids().await? {
             let rec = self.inner.repo.get(&sid).await?;
             let mut seq = rec.seq_reserved.max(rec.session.last_sequence);
             let now = Utc::now();
             let mut rows = Vec::new();
             let entities = self.inner.repo.entities(&sid).await?;
+            // A child the last daemon left running carries on (`held.rs`);
+            // one that cannot is ended and recovered the old way below.
+            let checkpoint = entities
+                .iter()
+                .find(|e| e.kind == held::K_PROCESS && !e.payload.is_null())
+                .map(|e| serde_json::from_value::<held::Checkpoint>(e.payload.clone()));
+            if let Some(cp) = checkpoint {
+                if let Ok(cp) = cp {
+                    let socket = cp.socket.clone();
+                    let res = if rec.closed {
+                        Err(Error::Conflict("the session is closed".into()))
+                    } else {
+                        self.adopt(&sid, cp).await
+                    };
+                    match res {
+                        Ok(()) => {
+                            adopted.insert(socket);
+                            if entities
+                                .iter()
+                                .any(|e| e.kind == K_QUEUE && has_person_entry(e))
+                            {
+                                queued.push(sid.clone());
+                            }
+                            touched += 1;
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::warn!(session = %sid, "could not re-adopt the agent process: {e}");
+                            held::terminate(socket).await;
+                        }
+                    }
+                }
+                // Spent: not activity, so not through the timeline rows.
+                self.inner
+                    .repo
+                    .put_entity(&sid, &held::row(seq, serde_json::Value::Null))
+                    .await?;
+            }
             // Messages a PERSON queued before the restart go out now (which
             // respawns the agent). A queue holding only child threads'
             // replies waits for the person instead (children.rs).
@@ -487,6 +554,15 @@ impl AgentRuntime {
                 cut_children.push((rec.session, turn));
             }
         }
+        // Holders no checkpoint leads to (spawned, then the daemon died
+        // before its first checkpoint; a deleted session's) end now.
+        if let Some(cfg) = self.inner.host.stdio_holders() {
+            for socket in cfg.sockets() {
+                if !adopted.contains(&socket) {
+                    held::terminate(socket).await;
+                }
+            }
+        }
         // After every session's own settling, so each parent loads its
         // recovered state before the notice lands in it.
         self.report_restart_cut(cut_children).await;
@@ -515,8 +591,23 @@ impl AgentRuntime {
             .iter()
             .map(|e| Arc::clone(e.value()))
             .collect();
+        let keep = self.inner.host.keep_children().await;
         for live in &lives {
-            if let Some(p) = live.lock().proc.take() {
+            let mut st = live.lock();
+            if keep && st.proc.as_ref().is_some_and(|p| p.held.is_some()) {
+                // Detach: the child keeps running in its holder; the next
+                // daemon adopts it from its latest checkpoint (`held.rs`) —
+                // written now when lines came in since.
+                if st.proc.as_ref().is_some_and(|p| p.dirty) {
+                    held::checkpoint(live, &mut st);
+                }
+                st.detached = true;
+                if let Some(p) = st.proc.take() {
+                    if let Some(link) = &p.held {
+                        link.detach();
+                    }
+                }
+            } else if let Some(p) = st.proc.take() {
                 let pid = p.pid;
                 drop(p);
                 signal_group(pid, libc::SIGTERM);
@@ -595,6 +686,12 @@ impl AgentRuntime {
             })
             .await?;
         let id = rec.session.id.clone();
+        if req.title_auto {
+            self.inner
+                .repo
+                .set_title(&id, &rec.session.title, true)
+                .await?;
+        }
         // Spawn now so a refused folder / missing CLI fails the create.
         let live = self.live(&id).await?;
         if let Err(e) = self.ensure_process(&live).await {
@@ -723,6 +820,7 @@ impl AgentRuntime {
                 &c.created_by,
                 &c.workspace_id,
                 CreateRuntimeSessionReq {
+                    title_auto: false,
                     provider: Some(req.provider),
                     cwd: Some(req.cwd.unwrap_or_else(|| c.cwd.clone())),
                     title: req.title,
@@ -938,9 +1036,12 @@ impl AgentRuntime {
             return Err(Error::Invalid("title is empty".into()));
         }
         let live = self.live(id).await?;
-        self.inner.repo.set_title(id, title).await?;
+        self.inner.repo.set_title(id, title, false).await?;
         let mut st = live.lock();
         st.session.title = title.to_string();
+        st.session.title_auto = false;
+        let (status, last_error) = current_status(&st);
+        set_session_status(&self.inner, &live, &mut st, status, last_error);
         Ok(st.session.clone())
     }
 
@@ -974,6 +1075,7 @@ impl AgentRuntime {
                 last_activity: Instant::now(),
                 starting: 0,
                 stop_requested: false,
+                detached: false,
             }),
             persist: tx,
         });
@@ -1037,19 +1139,47 @@ impl AgentRuntime {
                     .find(|(k, _)| k == "CLAUDE_CONFIG_DIR")
                     .map(|(_, v)| PathBuf::from(v))
             });
-        let child = spawn_child(&ChildCommand {
+        let cmd = ChildCommand {
             program: spec.program.clone(),
             args,
             cwd: session.cwd.clone(),
             env: spec.env,
-        })
-        .map_err(|e| {
-            Error::Invalid(format!(
-                "could not start {} ({}): {e}",
-                session.provider.as_str(),
-                spec.program
-            ))
-        })?;
+        };
+        // A child that can be restored runs in a stdio holder, so a daemon
+        // restart does not end it (`held.rs`).
+        let holders = match self.inner.host.stdio_holders() {
+            Some(cfg)
+                if driver.export_state().is_some() && self.inner.host.keep_children().await =>
+            {
+                Some(cfg)
+            }
+            _ => None,
+        };
+        let held = match holders {
+            Some(cfg) => {
+                let meta = serde_json::json!({
+                    "runtime_session": session.id,
+                    "provider": session.provider.as_str(),
+                });
+                spawn_held_child(&cfg, &cmd, meta)
+                    .await
+                    .inspect_err(|e| {
+                        tracing::warn!(session = %session.id, "stdio holder unavailable, running the agent unheld: {e}")
+                    })
+                    .ok()
+            }
+            None => None,
+        };
+        let child = match held {
+            Some(c) => c,
+            None => spawn_child(&cmd).map_err(|e| {
+                Error::Invalid(format!(
+                    "could not start {} ({}): {e}",
+                    session.provider.as_str(),
+                    spec.program
+                ))
+            })?,
+        };
         let cli_pid = child.pid;
         let (epoch, flushed) = {
             let mut st = live.lock();
@@ -1062,6 +1192,11 @@ impl AgentRuntime {
                 pid: child.pid,
                 stdin: child.stdin,
                 driver,
+                held: child.held,
+                line_seq: 0,
+                dirty: false,
+                checkpointed_at: Instant::now(),
+                claude_login: claude_login.clone(),
             });
             st.reserved = st.next_seq + self.inner.config.seq_reserve;
             let _ = live.persist.send(PersistOp::Reserve(st.reserved));
@@ -1200,6 +1335,7 @@ impl AgentRuntime {
             ));
         }
         let attachments = self.store_attachments(id, req).await?;
+        let req = &self.with_paths(id, req, &attachments);
         let res = self.start_turn(&live, req, attachments.clone());
         if res.is_err() {
             for a in &attachments {
@@ -1303,7 +1439,8 @@ impl AgentRuntime {
     ) -> Result<RuntimePromptResp> {
         if delivery == PromptDelivery::Steer {
             let attachments = self.store_attachments(id, req).await?;
-            if let Some(resp) = steer_turn(&self.inner, live, req, attachments.clone()) {
+            let stored = self.with_paths(id, req, &attachments);
+            if let Some(resp) = steer_turn(&self.inner, live, &stored, attachments.clone()) {
                 return Ok(resp);
             }
             for a in &attachments {
@@ -1459,7 +1596,30 @@ impl AgentRuntime {
         self.inner.config.attachments_dir.join(id)
     }
 
-    /// Write the prompt's images and files under the session's folder.
+    /// `req` with each file's stored path (in order), for an agent that
+    /// takes a file only as a path to read.
+    fn with_paths(
+        &self,
+        id: &Id,
+        req: &RuntimePromptReq,
+        stored: &[Attachment],
+    ) -> RuntimePromptReq {
+        let mut req = req.clone();
+        let files = stored.iter().filter(|a| a.kind == AttachmentKind::File);
+        for (f, a) in req.files.iter_mut().zip(files) {
+            f.path = Some(
+                self.attachments(id)
+                    .join(&a.id)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        req
+    }
+
+    /// Write the prompt's images and files under the session's folder. A
+    /// file keeps its extension, so an agent that reads it from disk sees
+    /// what it is.
     async fn store_attachments(&self, id: &Id, req: &RuntimePromptReq) -> Result<Vec<Attachment>> {
         use base64::Engine;
         let images = req
@@ -1475,8 +1635,12 @@ impl AgentRuntime {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(data)
                 .map_err(|e| Error::Invalid(format!("an attachment is not valid base64: {e}")))?;
+            let ext = match (kind, mime.as_str()) {
+                (AttachmentKind::File, "application/pdf") => ".pdf",
+                _ => "",
+            };
             let a = Attachment {
-                id: new_id(),
+                id: format!("{}{ext}", new_id()),
                 kind,
                 mime: mime.clone(),
                 name: name.cloned(),
@@ -1506,6 +1670,32 @@ impl AgentRuntime {
             .await
             .map_err(|_| Error::NotFound("the attachment is gone".into()))?;
         Ok((mime, bytes))
+    }
+
+    /// Image `n` a tool of item `item_id` left on disk (Codex `imageView` /
+    /// `imageGeneration`): its mime type and bytes. Only a PNG, JPEG, GIF or
+    /// WebP file (by its bytes) of at most 25 MB is served — the path comes
+    /// from the agent, so nothing else on disk is.
+    pub async fn tool_image(&self, id: &Id, item_id: &str, n: usize) -> Result<(String, Vec<u8>)> {
+        let live = self.live(id).await?;
+        let path = live
+            .lock()
+            .proj
+            .items
+            .get(item_id)
+            .and_then(|i| match &i.kind {
+                TurnItemKind::DynamicTool { image_files, .. } => image_files.get(n).cloned(),
+                _ => None,
+            })
+            .ok_or_else(|| Error::NotFound("no such image".into()))?;
+        let gone = || Error::NotFound("the image is gone".into());
+        let meta = tokio::fs::metadata(&path).await.map_err(|_| gone())?;
+        if !meta.is_file() || meta.len() > 25 * 1024 * 1024 {
+            return Err(gone());
+        }
+        let bytes = tokio::fs::read(&path).await.map_err(|_| gone())?;
+        let mime = image_mime(&bytes).ok_or_else(gone)?;
+        Ok((mime.to_string(), bytes))
     }
 
     /// Interrupt the running turn. `false` when no turn was running.
@@ -2037,6 +2227,108 @@ fn kick_queue(inner: &Inner, id: &Id) {
     }
 }
 
+/// The agent's own name for the conversation replaces the placeholder title
+/// (one line, at most 120 characters); a person's rename is never replaced.
+fn adopt_title(inner: &Inner, live: &Live, st: &mut State, title: &str) {
+    let title: String = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title: String = title.chars().take(120).collect();
+    if st.session.title_auto && !title.is_empty() && title != st.session.title {
+        st.session.title = title.clone();
+        let _ = live.persist.send(PersistOp::Title(title));
+        let (status, last_error) = current_status(st);
+        set_session_status(inner, live, st, status, last_error);
+    }
+}
+
+/// Read the title the agent wrote into its transcript (off the runtime) and
+/// adopt it.
+fn probe_title(inner: &Inner, id: &Id, path: PathBuf) {
+    let Some(me) = inner.me.upgrade() else {
+        return;
+    };
+    let rt = AgentRuntime { inner: me };
+    let id = id.clone();
+    tokio::spawn(async move {
+        let Ok(Some(title)) = tokio::task::spawn_blocking(move || transcript_title(&path)).await
+        else {
+            return;
+        };
+        if let Ok(live) = rt.live(&id).await {
+            let mut st = live.lock();
+            adopt_title(&rt.inner, &live, &mut st, &title);
+        }
+    });
+}
+
+/// The last `{"type":"ai-title","aiTitle":…}` line of a Claude Code
+/// transcript, from its last 64 KB (it re-writes the line as it goes), else
+/// its first 64 KB.
+fn transcript_title(path: &std::path::Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const WINDOW: u64 = 64 * 1024;
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let find = |buf: &[u8]| {
+        String::from_utf8_lossy(buf)
+            .lines()
+            .filter(|l| l.contains("\"ai-title\""))
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| v.get("aiTitle")?.as_str().map(str::to_string))
+            .rfind(|t| !t.trim().is_empty())
+    };
+    let mut tail = Vec::new();
+    f.seek(SeekFrom::Start(len.saturating_sub(WINDOW))).ok()?;
+    f.read_to_end(&mut tail).ok()?;
+    if let Some(t) = find(&tail) {
+        return Some(t);
+    }
+    if len <= WINDOW {
+        return None;
+    }
+    let mut head = vec![0; WINDOW as usize];
+    f.seek(SeekFrom::Start(0)).ok()?;
+    f.read_exact(&mut head).ok()?;
+    find(&head)
+}
+
+/// A raster image's mime type by its first bytes.
+fn image_mime(b: &[u8]) -> Option<&'static str> {
+    if b.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if b.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if b.len() > 12 && b.starts_with(b"RIFF") && &b[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+/// An agent's command list as the session keeps it: at most 400 commands,
+/// unique by name, each description one line of at most 160 characters
+/// (Claude Code lists every skill with its whole description).
+fn bounded_commands(list: Vec<ProviderCommand>) -> Vec<ProviderCommand> {
+    let mut seen = std::collections::HashSet::new();
+    list.into_iter()
+        .filter(|c| !c.name.trim().is_empty() && seen.insert(c.name.clone()))
+        .take(400)
+        .map(|mut c| {
+            let line = c
+                .description
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            c.description = match line.char_indices().nth(160) {
+                Some((i, _)) => format!("{}…", line[..i].trim_end()),
+                None => line,
+            };
+            c
+        })
+        .collect()
+}
+
 /// Persist and publish the queue (`queue.updated`). Returns its sequence.
 fn emit_queue(inner: &Inner, live: &Live, st: &mut State) -> u64 {
     let queued_prompts = st.proj.queue.iter().map(QueuedRecord::public).collect();
@@ -2238,6 +2530,19 @@ fn emit(inner: &Inner, live: &Live, st: &mut State, body: RuntimeEventBody) -> u
     seq
 }
 
+/// Otto's session status for a provider session status.
+fn session_status(status: ProviderSessionStatus) -> RuntimeSessionStatus {
+    match status {
+        ProviderSessionStatus::Starting => RuntimeSessionStatus::Starting,
+        ProviderSessionStatus::Ready => RuntimeSessionStatus::Idle,
+        ProviderSessionStatus::Running => RuntimeSessionStatus::Working,
+        ProviderSessionStatus::Waiting => RuntimeSessionStatus::AwaitingPermission,
+        ProviderSessionStatus::Stopped | ProviderSessionStatus::Error => {
+            RuntimeSessionStatus::Dormant
+        }
+    }
+}
+
 /// Map the provider session status onto Otto's session status and emit
 /// `provider_session.updated` when it changed.
 fn set_session_status(
@@ -2248,22 +2553,20 @@ fn set_session_status(
     last_error: Option<String>,
 ) {
     if st.session.status != RuntimeSessionStatus::Closed {
-        st.session.status = match status {
-            ProviderSessionStatus::Starting => RuntimeSessionStatus::Starting,
-            ProviderSessionStatus::Ready => RuntimeSessionStatus::Idle,
-            ProviderSessionStatus::Running => RuntimeSessionStatus::Working,
-            ProviderSessionStatus::Waiting => RuntimeSessionStatus::AwaitingPermission,
-            ProviderSessionStatus::Stopped | ProviderSessionStatus::Error => {
-                RuntimeSessionStatus::Dormant
-            }
-        };
+        st.session.status = session_status(status);
     }
     let model = st.session.model.clone();
     let cwd = st.session.cwd.clone();
     let background_tasks = st.session.background_tasks.clone();
+    let capabilities = Some(st.session.capabilities.clone());
+    let title = Some(st.session.title.clone());
     let prev = st.proj.session.as_ref();
     if prev.is_some_and(|p| {
-        p.status == status && p.last_error == last_error && p.background_tasks == background_tasks
+        p.status == status
+            && p.last_error == last_error
+            && p.background_tasks == background_tasks
+            && p.capabilities == capabilities
+            && (p.title.is_none() || p.title == title)
     }) {
         return;
     }
@@ -2274,6 +2577,8 @@ fn set_session_status(
         updated_at: Utc::now(),
         last_error,
         background_tasks,
+        capabilities,
+        title,
     };
     emit(
         inner,
@@ -2550,6 +2855,10 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                 if model.is_some() && st.session.model.is_none() {
                     st.session.model = model;
                 }
+                // What the agent reported it takes in its handshake.
+                if let Some(p) = st.proc.as_ref() {
+                    st.session.capabilities = p.driver.capabilities();
+                }
                 let provider_thread = ProviderThread {
                     native_thread_id: st.session.native_thread_id.clone(),
                     context_usage: st
@@ -2716,6 +3025,32 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                     .and_then(|t| st.proj.turns.get(&t.id))
                     .cloned();
                 if let Some(mut turn) = turn {
+                    let cost = usage
+                        .cost_usd
+                        .or_else(|| turn.turn_token_usage.as_ref().and_then(|u| u.cost_usd));
+                    turn.turn_token_usage = Some(TurnTokenUsage {
+                        cost_usd: cost,
+                        ..usage
+                    });
+                    emit(
+                        inner,
+                        live,
+                        st,
+                        RuntimeEventBody::ProviderTurnUpdated {
+                            provider_turn: turn,
+                        },
+                    );
+                }
+            }
+            DriverEvent::TurnCost(cost) => {
+                let turn = st
+                    .turn
+                    .as_ref()
+                    .and_then(|t| st.proj.turns.get(&t.id))
+                    .cloned();
+                if let Some(mut turn) = turn.filter(|_| cost.is_finite() && cost >= 0.0) {
+                    let mut usage = turn.turn_token_usage.take().unwrap_or_default();
+                    usage.cost_usd = Some(cost);
                     turn.turn_token_usage = Some(usage);
                     emit(
                         inner,
@@ -2727,6 +3062,25 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                     );
                 }
             }
+            DriverEvent::Commands(list) => {
+                let commands = bounded_commands(list);
+                if commands != st.proj.commands {
+                    emit(
+                        inner,
+                        live,
+                        st,
+                        RuntimeEventBody::CommandsUpdated { commands },
+                    );
+                }
+            }
+            DriverEvent::Title(title) => adopt_title(inner, live, st, &title),
+            DriverEvent::ContextUsage(usage)
+                if st
+                    .proj
+                    .thread
+                    .as_ref()
+                    .and_then(|t| t.context_usage.as_ref())
+                    == Some(&usage) => {}
             DriverEvent::ContextUsage(usage) => {
                 let provider_thread = ProviderThread {
                     native_thread_id: st.session.native_thread_id.clone(),
@@ -2765,6 +3119,11 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                     status
                 };
                 finish_turn(inner, live, st, status, failure, reason);
+                if st.session.title_auto {
+                    if let Some(path) = st.proc.as_ref().and_then(|p| p.driver.title_transcript()) {
+                        probe_title(inner, &st.session.id, path);
+                    }
+                }
             }
             DriverEvent::Fatal(failure) => {
                 if st.turn.is_some() {
@@ -2800,6 +3159,11 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
             }
         }
     }
+    if !step.writes.is_empty() {
+        // The stored driver state must know every request the child may
+        // answer before the child sees it (`held.rs`).
+        held::checkpoint(live, st);
+    }
     if let Some(p) = st.proc.as_ref() {
         for line in step.writes {
             let _ = p.stdin.send(line);
@@ -2815,7 +3179,7 @@ async fn pump(
     inner: Arc<Inner>,
     live: Arc<Live>,
     epoch: u64,
-    mut rx: mpsc::Receiver<ChildMsg>,
+    mut rx: mpsc::Receiver<(u64, ChildMsg)>,
     claude_login: Option<Option<PathBuf>>,
 ) {
     let window = inner.config.stream_coalesce;
@@ -2832,7 +3196,8 @@ async fn pump(
             }
             let held = st.held_deadline(window);
             let stall = stall_deadline(&st, &inner.config);
-            held.into_iter().chain(stall).min()
+            let checkpoint = held::due(&st);
+            held.into_iter().chain(stall).chain(checkpoint).min()
         };
         let msg = tokio::select! {
             _ = &mut changed => continue,
@@ -2848,6 +3213,9 @@ async fn pump(
                     return; // closed or superseded
                 }
                 flush_held(&inner, &live, &mut st);
+                if held::due(&st).is_some_and(|at| at <= Instant::now()) {
+                    held::checkpoint(&live, &mut st);
+                }
                 let stalled =
                     stall_deadline(&st, &inner.config).is_some_and(|at| at <= Instant::now());
                 if stalled {
@@ -2861,7 +3229,7 @@ async fn pump(
                 continue;
             }
         };
-        let Some(msg) = msg else { break };
+        let Some((line_seq, msg)) = msg else { break };
         // Claude's plan limits ride `rate_limit_event` frames: recorded
         // passively, outside the session lock (a substring test skips the rest).
         if let (Some(dir), ChildMsg::Line(line)) = (&claude_login, &msg) {
@@ -2873,15 +3241,20 @@ async fn pump(
         }
         match msg {
             ChildMsg::Line(line) => {
-                let step = st
-                    .proc
-                    .as_mut()
-                    .expect("checked above")
-                    .driver
-                    .on_line(&line);
+                let p = st.proc.as_mut().expect("checked above");
+                let step = p.driver.on_line(&line);
+                p.line_seq = line_seq;
+                p.dirty = true;
                 apply_step(&inner, &live, &mut st, step);
+                if held::due(&st).is_some_and(|at| at <= Instant::now()) {
+                    held::checkpoint(&live, &mut st);
+                }
             }
             ChildMsg::Overlong(n) => {
+                if let Some(p) = st.proc.as_mut() {
+                    p.line_seq = line_seq;
+                    p.dirty = true;
+                }
                 let step = DriverStep {
                     events: vec![DriverEvent::Error(ProviderFailure {
                         class: "protocol_error".into(),
@@ -2947,12 +3320,20 @@ async fn persister(repo: AgentRuntimeRepo, id: Id, mut rx: mpsc::UnboundedReceiv
             PersistOp::Upsert(rows) => repo.upsert_entities(&id, &rows).await,
             PersistOp::Reserve(upto) => repo.reserve_seq(&id, upto).await,
             PersistOp::NativeThreadId(n) => repo.set_native_thread_id(&id, &n).await,
+            PersistOp::Title(t) => repo.set_title(&id, &t, true).await,
             PersistOp::ClearNativeThreadId => repo.clear_native_thread_id(&id).await,
             PersistOp::Closed => repo.set_closed(&id).await,
             PersistOp::Opened => repo.set_open(&id).await,
             PersistOp::Flush(done) => {
                 let _ = done.send(());
                 Ok(())
+            }
+            PersistOp::Checkpoint(row, acker, line) => {
+                let res = repo.put_entity(&id, &row).await;
+                if res.is_ok() {
+                    acker.ack(line);
+                }
+                res
             }
         };
         if let Err(e) = res {

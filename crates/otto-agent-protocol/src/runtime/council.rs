@@ -238,6 +238,7 @@ impl AgentRuntime {
             let label = seat_label(seat);
             let effort = seat.effort.clone().filter(|e| !e.trim().is_empty());
             let create = CreateRuntimeSessionReq {
+                title_auto: false,
                 provider: Some(seat.provider),
                 cwd: req.cwd.clone(),
                 title: Some(format!("{base} · {label}")),

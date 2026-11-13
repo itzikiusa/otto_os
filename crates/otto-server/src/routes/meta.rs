@@ -75,6 +75,7 @@ pub async fn meta(
             default_provider: None,
             model_flags: Default::default(),
             provider_models: Default::default(),
+            runtime_capabilities: Default::default(),
             alt_loopback_base: None,
         }));
     }
@@ -151,6 +152,13 @@ pub async fn meta(
         default_provider,
         model_flags,
         provider_models,
+        runtime_capabilities: otto_core::agent_runtime::RuntimeProvider::ALL
+            .into_iter()
+            .map(|p| {
+                let caps = otto_core::agent_runtime::RuntimeCapabilities::for_provider(p);
+                (p.as_str().to_string(), caps)
+            })
+            .collect(),
         alt_loopback_base: crate::transport::alt_loopback_base(),
     }))
 }

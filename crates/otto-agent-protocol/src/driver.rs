@@ -14,8 +14,9 @@
 
 use otto_core::agent_runtime::{
     ApprovalDecision, ApprovalOption, BackgroundTask, PlanStep, ProviderFailure, RequestKind,
-    RuntimeAccessMode, RuntimePromptReq, RuntimeProvider, RuntimeRequestStatus, ThreadTokenUsage,
-    TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
+    RuntimeAccessMode, RuntimeCapabilities, RuntimePromptReq, RuntimeProvider,
+    RuntimeRequestStatus, ThreadTokenUsage, TurnItem, TurnItemKind, TurnItemStatus,
+    TurnTerminalStatus, TurnTokenUsage,
 };
 
 #[derive(Debug, Clone)]
@@ -118,7 +119,15 @@ pub enum DriverEvent {
         status: RuntimeRequestStatus,
     },
     Usage(TurnTokenUsage),
+    /// What the running turn cost in US dollars (merged into its usage).
+    TurnCost(f64),
     ContextUsage(ThreadTokenUsage),
+    /// The agent's own slash commands, whole (`commands.updated`).
+    Commands(Vec<otto_core::agent_runtime::ProviderCommand>),
+    /// The agent named the conversation (Codex `thread/name/updated`, an
+    /// ACP `session_info_update`). Adopted while the thread still has the
+    /// title Otto gave it.
+    Title(String),
     /// The agent started a turn on its own (no prompt of ours is running —
     /// Claude Code continues when background work it started finishes).
     /// `turn_id` is the driver's; the runtime opens it as an `agent` turn
@@ -194,6 +203,30 @@ pub fn tool_error(text: &str) -> Option<String> {
     (!t.is_empty()).then(|| t[..end].to_string())
 }
 
+/// `text` with a line per attached file the agent must read from disk (an
+/// agent whose input has no document type): T3 Code's
+/// `providerMessageTextWithAttachmentPaths`.
+pub fn with_file_paths(text: &str, files: &[otto_core::agent_runtime::PromptFile]) -> String {
+    let mut out = text.to_string();
+    for f in files {
+        let line = match &f.path {
+            Some(p) => format!(
+                "[Attached file \"{}\" ({}) is saved at: {p}]",
+                f.name, f.mime
+            ),
+            None => format!(
+                "[Attached file \"{}\" is unavailable: it was not saved]",
+                f.name
+            ),
+        };
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(&line);
+    }
+    out
+}
+
 /// A JSON-RPC id as a map key.
 pub fn rpc_key(id: &serde_json::Value) -> String {
     match id {
@@ -262,6 +295,20 @@ pub trait StructuredDriver: Send + 'static {
         false
     }
 
+    /// What this agent takes (steer, images, PDFs, efforts): the provider
+    /// baseline, refined by a driver that learns it in its handshake. Read
+    /// by the runtime when the driver reports `Ready`.
+    fn capabilities(&self) -> RuntimeCapabilities {
+        RuntimeCapabilities::for_provider(self.provider())
+    }
+
+    /// A transcript the agent writes its own title for the conversation
+    /// into (Claude Code's `ai-title` lines): the host reads it after a turn
+    /// while the thread's title is still Otto's placeholder.
+    fn title_transcript(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+
     /// Add a person's message to the RUNNING turn (steering): the agent
     /// reads it at its next step. A driver that cannot refuses, and the
     /// runtime queues the message for after the turn instead.
@@ -303,6 +350,19 @@ pub trait StructuredDriver: Send + 'static {
     }
 
     fn on_line(&mut self, line: &str) -> DriverStep;
+
+    /// This driver's whole protocol state (session / request ids, open
+    /// items and requests, text so far), so a NEW daemon can carry on with a
+    /// child that outlived the old one (`runtime/held.rs`). `None` = it
+    /// cannot be restored, and its child is never held.
+    fn export_state(&self) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// Restore [`Self::export_state`] onto a driver fresh from the factory.
+    fn import_state(&mut self, _state: serde_json::Value) -> Result<(), DriverError> {
+        Err(DriverError("this driver cannot be restored".into()))
+    }
 
     fn on_exit(&mut self, _code: Option<i32>) -> DriverStep {
         DriverStep::default()

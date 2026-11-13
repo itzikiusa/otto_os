@@ -1,8 +1,8 @@
 <script lang="ts">
   // Above a runtime thread's composer: background work the agent started that
   // is still running, the messages waiting in the thread's (durable,
-  // server-side) queue — Steer (into the running turn; Claude), Send now
-  // (stop the turn and send it), Edit, Remove — and, on a closed thread, the
+  // server-side) queue — Send now (into the running turn, where the agent
+  // takes it; it never stops the turn), Edit, Remove — and, on a closed thread, the
   // "Revive" line for a closed or dormant agent.
   import Icon from '../../../lib/components/Icon.svelte';
   import type { PromptDelivery, QueuedPrompt } from '../../../lib/api/types';
@@ -71,11 +71,9 @@
 {#each queued as q (q.id)}
   <div class="qb" data-testid="runtime-queued">
     <span class="ellipsis" dir="auto">Queued: {q.text}{q.attachments ? ` (+${q.attachments})` : ''}</span>
+    <!-- Send now steers into the running turn; it never stops it (Stop does that). -->
     {#if running && canSteer}
-      <button type="button" class="btn small" title="Send it into the running turn — the agent reads it at its next step" onclick={() => void deliver(q, 'steer')}>Steer</button>
-    {/if}
-    {#if running}
-      <button type="button" class="btn small" title="Stop the running turn and send this now" onclick={() => void deliver(q, 'interrupt')}>Send now</button>
+      <button type="button" class="btn small" title="Send it into the running turn — the agent reads it at its next step" onclick={() => void deliver(q, 'steer')}>Send now</button>
     {/if}
     <button type="button" class="btn small" onclick={() => void edit(q)}>Edit</button>
     <button type="button" class="icon-btn" aria-label="Remove queued message" title="Remove" onclick={() => void remove(q)}>

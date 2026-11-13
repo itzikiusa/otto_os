@@ -47,3 +47,34 @@ test('elapsed reads seconds, minutes and hours, live while running', () => {
   assert.equal(taskElapsed({ startedAt: '2026-11-13T08:00:00Z', endedAt: '2026-11-13T09:05:00Z' }, now), '1h 5m');
   assert.equal(taskElapsed({ startedAt: null, endedAt: null }, now), null);
 });
+
+test('a background command opens its launch call and output, running or finished', () => {
+  const launch = {
+    ...base, id: 't1:tool:L', ordinal: 2, status: 'completed', started_at: '2026-11-13T10:00:00Z', type: 'command_execution',
+    input: 'for i in 1 2 3; do echo tick $i; sleep 2; done',
+    output: 'Command running in background with ID: bbplg7ake. Output is being written to: /private/tmp/claude-501/x/s/tasks/bbplg7ake.output.',
+  } as never;
+  const running = agentTasks([launch], [{ id: 'bbplg7ake', kind: 'command', label: 'Run three-tick loop', started_at: '2026-11-13T10:00:00Z' }]);
+  assert.deepEqual(
+    [running.running[0].itemId, running.running[0].taskId, running.running[0].command],
+    ['t1:tool:L', 'bbplg7ake', 'for i in 1 2 3; do echo tick $i; sleep 2; done'],
+  );
+  const notice = { ...base, id: 'bg:bbplg7ake', ordinal: 3, status: 'completed', started_at: null, type: 'system_notice', message: 'Background command finished: Run three-tick loop' } as never;
+  const done = agentTasks([launch, notice], []).finished[0];
+  assert.deepEqual([done.label, done.itemId, done.taskId, done.startedAt], ['Run three-tick loop', 't1:tool:L', 'bbplg7ake', '2026-11-13T10:00:00Z']);
+  // A subagent opens its own card; it has no output file.
+  const sub = agentTasks([card('t1:tool:a', 'alpha', 'running', '2026-11-13T10:00:00Z')], []).running[0];
+  assert.deepEqual([sub.itemId, sub.taskId], ['t1:tool:a', null]);
+});
+
+test('swarm members without a card join the list; carded ones are not repeated', async () => {
+  const { withSwarm } = await import('../src/modules/threads/runtime/agentTasks.ts');
+  const carded = card('t1:swarm:echoer', 'echoer', 'running', '2026-11-13T10:00:00Z', { tool_name: 'swarm' });
+  const t = withSwarm(agentTasks([carded], []), [
+    { name: 'echoer', killed: false },
+    { name: 'dap-lsp', killed: false, phase: 'RUNNING' },
+    { name: 'monitor', killed: true },
+  ], [carded]);
+  assert.deepEqual(t.running.map((r) => r.label), ['echoer', 'dap-lsp']);
+  assert.deepEqual(t.finished.map((r) => [r.label, r.status, r.id]), [['monitor', 'stopped', 'swarm:monitor']]);
+});

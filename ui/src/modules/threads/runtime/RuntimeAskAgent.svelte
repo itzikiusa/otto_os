@@ -14,8 +14,8 @@
   import ProviderIcon, { hasProviderIcon } from '../../../lib/components/ProviderIcon.svelte';
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import type { RuntimeAccessMode } from '../../../lib/api/types';
-  import { formatEffortShort, formatModelLabel, modelsForProvider, supportsEffortSelection, type EffortLevel } from '../../../lib/providerModels';
-  import { harnessLabel } from '../../../lib/providers';
+  import { formatEffortShort, formatModelLabel, modelsForProvider, type EffortLevel } from '../../../lib/providerModels';
+  import { harnessLabel, providerReadiness } from '../../../lib/providers';
   import { auth } from '../../../lib/stores/auth.svelte';
   import { ASK_MAX_TARGETS, ASK_PROVIDERS, dropMention, mentionAt, mentionOptions, type AskOption } from './askAgents';
   import { askTargets } from './askTargets.svelte';
@@ -38,6 +38,10 @@
   let btn = $state<HTMLButtonElement | null>(null);
   let open = $state(false);
   let pickProvider = $state<string>('');
+  /** What the picked agent takes (the daemon's per-provider baseline). */
+  /** Agents an ask can start now; the picker shows the rest disabled, with why. */
+  const ready = $derived(ASK_PROVIDERS.filter((p) => providerReadiness(p).available));
+  const pickEfforts = $derived(auth.meta?.runtime_capabilities?.[pickProvider]?.efforts ?? []);
   let pickEffort = $state<EffortLevel | null>(null);
   const targets = $derived(askTargets.for(sessionId));
   const full = $derived(targets.length >= ASK_MAX_TARGETS);
@@ -55,7 +59,7 @@
   const accessText = $derived(readOnly ? 'read-only, like this thread' : `${ACCESS[access]}, like this thread`);
 
   function openMenu(): void {
-    pickProvider = ASK_PROVIDERS.find((p) => p !== provider) ?? 'claude';
+    pickProvider = ready.find((p) => p !== provider) ?? ready[0] ?? 'claude';
     pickEffort = null;
     open = true;
   }
@@ -66,7 +70,7 @@
   let active = $state(0);
   const options = $derived.by((): AskOption[] => {
     if (!mention || dismissed === text) return [];
-    return mentionOptions(mention.query, (p) => modelsForProvider(p, auth.meta), (p) => harnessLabel(p));
+    return mentionOptions(mention.query, (p) => modelsForProvider(p, auth.meta), (p) => harnessLabel(p), 8, ready);
   });
   $effect(() => {
     void options.length;
@@ -163,7 +167,8 @@
       askTargets.add(sessionId, { provider: pickProvider as (typeof ASK_PROVIDERS)[number], ...(m ? { model: m } : {}), ...(pickEffort ? { effort: pickEffort } : {}) });
       open = false;
     }}
-    oneffort={supportsEffortSelection(pickProvider) ? (e: EffortLevel | null) => (pickEffort = e) : undefined}
+    oneffort={pickEfforts.length ? (e: EffortLevel | null) => (pickEffort = e) : undefined}
+    effortLevels={pickEfforts}
     onclose={() => (open = false)}
   />
 {/if}

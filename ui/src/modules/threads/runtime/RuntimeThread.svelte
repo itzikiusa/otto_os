@@ -19,7 +19,7 @@
   // commands act on the view; any other `/command` goes to the agent as typed.
   // The access chip beside the model is T3's runtime mode (runtimeModeConfig.ts:
   // labels, icons, descriptions); it rides the next prompt and sticks. PDFs go
-  // as file chips to the providers that take them (Claude).
+  // as file chips to the agents whose capabilities say they take them.
   import { enterSends } from '../../../lib/enterSends';
   import { snapshotDraft, acknowledgeComposer } from '../../../lib/stores/runtimeDraftPersistence';
   import RuntimeDraftStatus from './RuntimeDraftStatus.svelte';
@@ -36,7 +36,7 @@
   import ProviderIcon, { hasProviderIcon } from '../../../lib/components/ProviderIcon.svelte';
   import { harnessLabel } from '../../../lib/providers';
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
-  import { formatEffortShort, formatModelLabel, supportsEffortSelection } from '../../../lib/providerModels';
+  import { formatEffortShort, formatModelLabel } from '../../../lib/providerModels';
   import { auth } from '../../../lib/stores/auth.svelte';
   import type { ApprovalDecision, PromptDelivery, RuntimeDraftContent } from '../../../lib/api/types';
   import { INTERACTIVE_SLASH_COMMANDS, isImmediateSlashCommand, parseInteractiveSlashInput, type ComposerSlashCommand } from '../../../lib/slashActions';
@@ -50,6 +50,7 @@
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
   import { approvalOutcome, errorText, isRunHandoff, isRunning, latestTurn, messageAttribution, pendingApprovals, subagentChildren, timelineRows, turnOutcome, type WorkEntry } from './timeline';
   import { mergeQueuedEdit, readAttachments, runViewSlash } from './runtimeComposer';
+  import { attachmentSupport, capsOf, takesFile } from './attachmentSupport';
   import { availableSlash } from './hostCommands';
   import type { RuntimeHostCommands } from '../../../lib/runtimeThreadPort';
   import RuntimeComposerImages from './RuntimeComposerImages.svelte';
@@ -183,11 +184,11 @@
   const accessMode = $derived(draft.pickedMode ?? session?.access_mode ?? 'approval-required');
 
   // ── Images and PDFs (paste or attach; sent with the next message) ─────
-  // The drivers that take image input (Claude content blocks, Codex image
-  // items); PDFs go to Claude only (document blocks).
-  const canImages = $derived(provider === 'claude' || provider === 'codex');
-  const canFiles = $derived(provider === 'claude');
-  const takes = (f: File): boolean => f.type.startsWith('image/') || (canFiles && f.type === 'application/pdf');
+  // What the agent takes, as the daemon reports it (live first).
+  const caps = $derived(capsOf(p?.session?.capabilities ?? session?.capabilities, auth.meta?.runtime_capabilities?.[provider]));
+  const canImages = $derived(attachmentSupport(caps).images);
+  const canFiles = $derived(attachmentSupport(caps).files);
+  const takes = (f: File): boolean => takesFile(caps, f);
   let fileEl = $state<HTMLInputElement | null>(null);
   async function addImages(files: Iterable<File>): Promise<void> {
     const read = await readAttachments(files, takes);
@@ -350,7 +351,7 @@
   {@const pending = item.type === 'approval_request' ? approvals.get(item.request_id) : undefined}
   {@const call = item.type === 'dynamic_tool' && !item.error && !approval ? threadCall(item) : null}
   {#if item.type === 'subagent'}
-    <RuntimeSubagentCard {item} activity={children.get(item.id) ?? []} output={p?.output} />
+    <RuntimeSubagentCard {item} activity={children.get(item.id) ?? []} output={p?.output} {sessionId} />
   {:else if call}
     <RuntimeThreadCallRow {item} {call} />
   {:else if pending}
@@ -444,7 +445,7 @@
             onshowtasks={hostCommands?.showTasks ? () => hostCommands.showTasks!(sessionId) : undefined}
             queued={p?.queued ?? []}
             {running}
-            canSteer={provider === 'claude'}
+            canSteer={!!caps.steer}
             {closed}
             {dormant}
             reopening={draft.reopening}
@@ -590,7 +591,8 @@
     effort={draft.effort}
     mode="full"
     onmodel={(m) => (draft.model = m)}
-    oneffort={supportsEffortSelection(provider) ? (e) => (draft.effort = e) : undefined}
+    oneffort={caps.efforts?.length ? (e) => (draft.effort = e) : undefined}
+    effortLevels={caps.efforts ?? []}
     onclose={() => (pickerOpen = false)}
   />
 {/if}

@@ -42,9 +42,27 @@ export function agentProviders(): string[] {
 
 /** Shared launch readiness. Older daemons may not probe custom executables;
  *  keep those launchable but say the check is unknown instead of claiming it passed. */
+/** The oldest CLI version Otto's driver for that agent speaks (pi.rs: RPC
+ *  mode as of 0.75). */
+const MIN_VERSION: Record<string, string> = { pi: '0.75.0' };
+
+/** `a` < `b` for dotted versions (the first `x.y.z` in each); unknown = false. */
+export function versionBelow(a: string | null | undefined, b: string): boolean {
+  const parse = (v: string): number[] | null => /(\d+)\.(\d+)(?:\.(\d+))?/.exec(v)?.slice(1).map((n) => Number(n ?? 0)) ?? null;
+  const x = a ? parse(a) : null;
+  const y = parse(b);
+  if (!x || !y) return false;
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i];
+  return false;
+}
+
 export function providerReadiness(provider: string): { available: boolean; checked: boolean; message: string; version?: string } {
   if (!allProviders().includes(provider)) return { available: false, checked: true, message: 'Provider is not registered. Configure it in Settings → Providers.' };
   const tool = auth.meta?.tools?.find((t) => t.name === provider);
+  const floor = MIN_VERSION[provider];
+  if (tool?.found && floor && versionBelow(tool.version, floor)) {
+    return { available: false, checked: true, message: `Version ${tool.version} is older than ${floor}, the oldest Otto can drive. Update the CLI.`, version: tool.version ?? undefined };
+  }
   if (tool) return {
     available: tool.found,
     checked: true,

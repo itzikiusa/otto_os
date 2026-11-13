@@ -23,6 +23,7 @@ pub mod codex;
 pub mod driver;
 pub mod host;
 mod http;
+mod native_work;
 pub mod pi;
 pub mod process;
 mod questions;
@@ -88,10 +89,24 @@ pub fn daemon_runtime(
     data_dir: &std::path::Path,
     publish: impl Fn(otto_core::event::Event) + Send + Sync + 'static,
 ) -> AgentRuntime {
+    // Structured children survive a restart in stdio holders: the PTY
+    // holders' launcher, their own directory.
+    let holders = manager.pty_holders().and_then(|pty| {
+        let mut cfg = otto_pty::HolderConfig::for_data_dir_named(
+            data_dir,
+            "rt-holders",
+            "otto-rth",
+            pty.launcher.clone(),
+        )?;
+        cfg.orphan_ttl = pty.orphan_ttl;
+        cfg.exit_linger = pty.exit_linger;
+        Some(cfg)
+    });
     let host = SessionManagerHost {
         manager,
         workspaces: otto_state::WorkspacesRepo::new(pool.clone()),
         publish: Box::new(publish),
+        holders,
     };
     AgentRuntime::new(
         otto_state::AgentRuntimeRepo::new(pool),

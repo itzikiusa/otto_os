@@ -2,12 +2,13 @@
 // main thread answered in its own session, so the main turn is never
 // interrupted. The side session is an ordinary agent session tagged
 // `meta.side_of = <main id>` — hidden from the thread lists (isThreadSession)
-// until promoted, which just clears the tag. Plan mode by default: it reads,
-// it doesn't edit the files the main thread is working on.
+// until promoted, which just clears the tag. Always plan mode: it reads, it
+// doesn't edit the files the main thread is working on — an agent without a
+// plan mode (grok, opencode, pi) hands the side chat to one that has.
 import { api } from '../../lib/api/client';
 import type { Session, Transcript, Turn } from '../../lib/api/types';
 import { resolveSessionThreadConfig, supportsInteractionMode } from '../../lib/providerModels';
-import { defaultAgentProvider } from '../../lib/providers';
+import { defaultAgentProvider, providerReadiness } from '../../lib/providers';
 import { git } from '../../lib/stores/git.svelte';
 import { transcript } from '../../lib/stores/transcript.svelte';
 import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
@@ -52,17 +53,27 @@ async function mainContext(main: Session): Promise<Parameters<typeof buildSideCh
   };
 }
 
+/** The agent a side chat runs on: the main thread's when it has a plan
+ *  (read-only) mode, else the default agent — or the first ready one — that
+ *  has. grok, opencode and pi have none, and a side chat must never edit the
+ *  files the main thread is working on. */
+export function sideChatProvider(main: Pick<Session, 'provider'> & Partial<Session>): string {
+  if (!isPlainShellSession(main as Session) && supportsInteractionMode(main.provider)) return main.provider;
+  const fallback = [defaultAgentProvider(), 'claude', 'codex', 'agy'];
+  return fallback.find((p) => supportsInteractionMode(p) && providerReadiness(p).available) ?? 'claude';
+}
+
 /** Start `main`'s side chat with `question`; returns the new session. */
 export async function startSideChat(main: Session, question: string): Promise<Session | null> {
   const q = question.trim();
   if (!q) return null;
   try {
-    const provider = isPlainShellSession(main) ? defaultAgentProvider() : main.provider;
+    const provider = sideChatProvider(main);
     const cfg = resolveSessionThreadConfig(main, null);
     const meta: Record<string, unknown> = {
       surface: 'threads',
       side_of: main.id,
-      ...(supportsInteractionMode(provider) ? { interaction_mode: 'plan' } : {}),
+      interaction_mode: 'plan',
       ...(provider === main.provider && cfg.pinnedModel ? { model: cfg.pinnedModel } : {}),
       ...(provider === main.provider && cfg.effort ? { effort: cfg.effort } : {}),
     };

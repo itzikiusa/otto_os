@@ -123,11 +123,55 @@ fn main() {
                     .to_string();
                 // `model` / `effort` / image inputs are echoed back.
                 let images = input.iter().filter(|i| i["type"] == "image").count();
-                let extras = match (params["model"].as_str(), params["effort"].as_str()) {
+                let mut extras = match (params["model"].as_str(), params["effort"].as_str()) {
                     (None, None) if images == 0 => String::new(),
                     (m, e) => format!(" [{} {} {images}]", m.unwrap_or("-"), e.unwrap_or("-")),
                 };
+                // A collaboration mode and a skill input are echoed too.
+                if let Some(m) = params
+                    .pointer("/collaborationMode/mode")
+                    .and_then(Value::as_str)
+                {
+                    extras.push_str(&format!(" (mode {m})"));
+                }
+                if let Some(skill) = input.iter().find(|i| i["type"] == "skill") {
+                    extras.push_str(&format!(
+                        " (skill {})",
+                        skill["name"].as_str().unwrap_or("?")
+                    ));
+                }
                 match text.as_str() {
+                    // `stream:<n>:<ms>`: `c0 `…`c<n-1> `, one delta per <ms>.
+                    t if t.starts_with("stream:") => {
+                        let mut f = t[7..].split(':');
+                        let n: usize = f.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                        let ms: u64 = f.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                        notify(
+                            "item/started",
+                            json!({"threadId": thread, "turnId": tid, "startedAtMs": 0,
+                                   "item": {"type": "agentMessage", "id": "msg-s", "text": ""}}),
+                        );
+                        let mut all = String::new();
+                        for i in 0..n {
+                            let d = format!("c{i} ");
+                            all.push_str(&d);
+                            notify(
+                                "item/agentMessage/delta",
+                                json!({"threadId": thread, "turnId": tid, "itemId": "msg-s", "delta": d}),
+                            );
+                            std::thread::sleep(std::time::Duration::from_millis(ms));
+                        }
+                        notify(
+                            "item/completed",
+                            json!({"threadId": thread, "turnId": tid, "completedAtMs": 0,
+                                   "item": {"type": "agentMessage", "id": "msg-s", "text": all}}),
+                        );
+                        notify(
+                            "turn/completed",
+                            json!({"threadId": thread, "turn": turn(&tid, "completed")}),
+                        );
+                        current = None;
+                    }
                     "tool image" => {
                         let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5V8AAAAASUVORK5CYII=";
                         notify(
@@ -144,6 +188,41 @@ fn main() {
                         notify(
                             "turn/completed",
                             json!({"threadId":thread,"turn":turn(&tid,"completed")}),
+                        );
+                        current = None;
+                    }
+                    // `name me`: Codex names the thread.
+                    "name me" => {
+                        notify(
+                            "thread/name/updated",
+                            json!({"threadId": thread, "threadName": "Named by Codex"}),
+                        );
+                        agent_message(&thread, &tid, "msg-n", &["named"]);
+                        notify(
+                            "turn/completed",
+                            json!({"threadId": thread, "turn": turn(&tid, "completed")}),
+                        );
+                        current = None;
+                    }
+                    // `make image`: an image it generated, as a file on disk.
+                    "make image" => {
+                        use base64::Engine;
+                        let png = base64::engine::general_purpose::STANDARD
+                            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5V8AAAAASUVORK5CYII=")
+                            .unwrap_or_default();
+                        let path = std::env::temp_dir()
+                            .join(format!("fake-codex-{}-{tid}.png", std::process::id()));
+                        let _ = std::fs::write(&path, png);
+                        notify(
+                            "item/completed",
+                            json!({"threadId": thread, "turnId": tid, "item": {"type": "imageGeneration",
+                                "id": "ig-1", "status": "completed", "revisedPrompt": "a red dot",
+                                "savedPath": path, "inputImages": []}}),
+                        );
+                        agent_message(&thread, &tid, "msg-i", &["made it"]);
+                        notify(
+                            "turn/completed",
+                            json!({"threadId": thread, "turn": turn(&tid, "completed")}),
                         );
                         current = None;
                     }
@@ -211,6 +290,12 @@ fn main() {
                     }
                 }
             }
+            "skills/list" => out(
+                json!({"id": id, "result": {"data": [{"cwd": "/", "errors": [], "skills": [
+                    {"name": "review", "description": "Review a diff thoroughly", "enabled": true,
+                     "path": "/fake/skills/review/SKILL.md", "scope": "user"}
+                ]}]}}),
+            ),
             "turn/interrupt" => {
                 out(json!({"id": id, "result": {}}));
                 if let Some((rid, _)) = question.take() {

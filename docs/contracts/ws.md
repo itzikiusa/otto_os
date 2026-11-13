@@ -1578,7 +1578,11 @@ published on the streaming path, never through the internal bus.
   `provider_thread.updated {provider_thread}`, `provider_turn.updated
   {provider_turn}`, `turn_item.updated {turn_item}`,
   `runtime_request.updated {runtime_request}`, `plan.updated {plan}`,
-  `queue.updated {queued_prompts}`, `command_output.delta {item_id, chunk}`,
+  `queue.updated {queued_prompts}`, `commands.updated {commands: [{name,
+  description?, hint?}]}` (the agent's own slash commands, whole: Claude
+  `initialize.commands`, ACP `available_commands_update`, pi `get_commands`,
+  Codex `skills/list`; descriptions one line ≤ 160 chars, ≤ 400 commands;
+  also `RuntimeSnapshot.commands`), `command_output.delta {item_id, chunk}`,
   `turn.terminal {turn_id, status: completed|interrupted|cancelled|failed,
   failure?, reason?}` (`reason: "stalled"` = the stall watchdog stopped it).
   Entities are sent WHOLE (replace by id); `turn_item.type` ∈ `user_message |
@@ -1592,7 +1596,19 @@ published on the streaming path, never through the internal bus.
   `parent_item_id` (the card). `provider_turn.origin: "agent"` marks a turn
   the agent started on its own; `provider_session.background_tasks` lists
   pending background work (api.md "Background work and the agent's own
-  turns"). Streaming upserts of one item arrive at most once
+  turns"); `provider_session.capabilities` (`{steer, images, files,
+  efforts?, plan}`) is what the running driver reported after its handshake
+  (api.md `RuntimeSession.capabilities`); `provider_session.title` is the
+  thread's title (a rename, or the agent's own name for it while
+  `title_auto`). `provider_thread.context_usage {used_tokens, max_tokens?,
+  …}` is the context window the conversation fills (Claude's last message vs
+  `modelUsage.contextWindow`, Codex `thread/tokenUsage/updated`, ACP
+  `usage_update {used, size}`, pi's last message usage vs the model's
+  `contextWindow`); `provider_turn.turn_token_usage.cost_usd` what the turn
+  cost where the provider says (Claude `total_cost_usd`, ACP
+  `usage_update.cost`, pi `usage.cost.total` — each the difference of a
+  running total). A `dynamic_tool` item may list `image_files` (paths served
+  by api.md `GET …/items/{item_id}/images/{n}`). Streaming upserts of one item arrive at most once
   per 50 ms (always the latest text). A failed tool item
   (`command_execution`, `dynamic_tool`, `web_search`, `file_change`) carries
   `error` — the tool's error text, ≤ ~2 KB. A `user_message` lists its

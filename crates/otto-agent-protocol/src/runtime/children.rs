@@ -501,6 +501,7 @@ mod tests {
 
     fn session(provider: RuntimeProvider) -> RuntimeSession {
         RuntimeSession {
+            title_auto: false,
             id: "kid".into(),
             workspace_id: "w".into(),
             provider,
@@ -517,6 +518,7 @@ mod tests {
             parent_id: Some("root".into()),
             ui_control: None,
             background_tasks: Vec::new(),
+            capabilities: Default::default(),
             meta: Some(child_meta(&"lead".into(), ChildOpener::Agent)),
         }
     }

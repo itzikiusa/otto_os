@@ -48,6 +48,16 @@ pub enum RuntimeProvider {
 }
 
 impl RuntimeProvider {
+    pub const ALL: [Self; 7] = [
+        Self::Claude,
+        Self::Codex,
+        Self::Gemini,
+        Self::Grok,
+        Self::Agy,
+        Self::Opencode,
+        Self::Pi,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Claude => "claude",
@@ -101,6 +111,13 @@ pub struct ProviderSession {
     /// is busy while any is pending, even between turns.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub background_tasks: Vec<BackgroundTask>,
+    /// What the running driver reported it takes (after its handshake).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<RuntimeCapabilities>,
+    /// The thread's title, so every client sees a rename or the agent's own
+    /// name for the conversation as it lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// One piece of background work an agent started (Claude Code's
@@ -179,7 +196,7 @@ impl ProviderTurnStatus {
 }
 
 /// `TurnTokenUsage` (the turn's own usage; input includes cache reads).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TurnTokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -187,6 +204,11 @@ pub struct TurnTokenUsage {
     pub cached_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
+    /// What the turn cost in US dollars, when the provider reports it
+    /// (Claude `total_cost_usd`, an ACP agent's `usage_update.cost`, pi's
+    /// session stats): the difference between its running totals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
 }
 
 /// One prompt → response cycle (`OrchestrationV2ProviderTurn`).
@@ -338,6 +360,11 @@ pub enum TurnItemKind {
         output: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ToolOutputImage>,
+        /// Images the tool left on disk (Codex `imageView` /
+        /// `imageGeneration`): absolute paths, served read-only by
+        /// `GET /runtime-sessions/{id}/items/{item_id}/images/{n}`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        image_files: Vec<String>,
     },
     /// Web search / fetch tools (Claude `WebSearch` / `WebFetch`, Codex
     /// `webSearch`); `patterns` are the queries or URLs.
@@ -567,6 +594,9 @@ pub enum RuntimeEventBody {
     /// they survive a daemon restart and go out one per turn, oldest first).
     #[serde(rename = "queue.updated")]
     QueueUpdated { queued_prompts: Vec<QueuedPrompt> },
+    /// The agent's own slash commands, whole (replaces the last list).
+    #[serde(rename = "commands.updated")]
+    CommandsUpdated { commands: Vec<ProviderCommand> },
     /// Live command output (never persisted; the item's `output` holds the total).
     #[serde(rename = "command_output.delta")]
     CommandOutputDelta { item_id: Id, chunk: String },
@@ -591,6 +621,7 @@ impl RuntimeEventBody {
             Self::RuntimeRequestUpdated { .. } => "runtime_request.updated",
             Self::PlanUpdated { .. } => "plan.updated",
             Self::QueueUpdated { .. } => "queue.updated",
+            Self::CommandsUpdated { .. } => "commands.updated",
             Self::CommandOutputDelta { .. } => "command_output.delta",
             Self::TurnTerminal { .. } => "turn.terminal",
         }
@@ -621,6 +652,9 @@ pub struct RuntimeSnapshot {
     /// Messages queued behind the running turn, oldest first.
     #[serde(default)]
     pub queued_prompts: Vec<QueuedPrompt>,
+    /// The agent's own slash commands (`commands.updated`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<ProviderCommand>,
 }
 
 /// `GET /runtime-sessions/{id}/events` (T3 Code `subscribeThread` items).
@@ -637,6 +671,110 @@ pub enum RuntimeReplay {
         snapshot_sequence: u64,
         snapshot: Box<RuntimeSnapshot>,
     },
+}
+
+/// What a thread's agent can take besides a plain text prompt (T3 Code's
+/// `ServerProvider` snapshot). A provider baseline ([`Self::for_provider`])
+/// that the running driver refines after its handshake (an ACP agent's
+/// `promptCapabilities`). The UI gates Send now, attachments and effort on
+/// it instead of on the provider's name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RuntimeCapabilities {
+    /// A message can join the RUNNING turn (`delivery: steer`). Otherwise it
+    /// waits in the queue until the turn ends.
+    #[serde(default)]
+    pub steer: bool,
+    #[serde(default)]
+    pub images: bool,
+    /// PDFs (document / embedded-resource blocks).
+    #[serde(default)]
+    pub files: bool,
+    /// Reasoning-effort levels a prompt's `effort` may carry; empty = none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<String>,
+    /// A prompt may ask for plan mode (`plan: true`): the agent researches
+    /// and proposes, and changes nothing until a later turn leaves it.
+    #[serde(default)]
+    pub plan: bool,
+}
+
+/// One slash command an agent offers (`/name`): its skills, prompt
+/// templates and built-ins, as it lists them (`commands.updated`). A prompt
+/// starting with `/name` runs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderCommand {
+    /// Without the leading `/`.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// What to type after it (ACP `input.hint`), when it takes input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+impl ProviderCommand {
+    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            name: name.into().trim_start_matches('/').to_string(),
+            description: description.into(),
+            hint: None,
+        }
+    }
+}
+
+impl RuntimeCapabilities {
+    /// What each driver takes before it reports more (or less) itself.
+    pub fn for_provider(p: RuntimeProvider) -> Self {
+        let levels = |l: &[&str]| l.iter().map(|s| s.to_string()).collect();
+        match p {
+            RuntimeProvider::Claude => Self {
+                steer: true,
+                images: true,
+                files: true,
+                efforts: levels(&["low", "medium", "high", "xhigh", "max"]),
+                plan: true,
+            },
+            // PDFs go as a saved file the agent reads (its input has no
+            // document type).
+            RuntimeProvider::Codex => Self {
+                steer: true,
+                images: true,
+                files: true,
+                efforts: levels(&["minimal", "low", "medium", "high", "xhigh"]),
+                plan: true,
+            },
+            RuntimeProvider::Pi => Self {
+                steer: true,
+                images: true,
+                files: true,
+                efforts: levels(&["minimal", "low", "medium", "high", "xhigh"]),
+                plan: false,
+            },
+            // ACP v1 has no way into a running prompt. Plan mode is a
+            // session mode the agent advertises (agy's `plan`).
+            RuntimeProvider::Agy => Self {
+                steer: false,
+                images: true,
+                files: true,
+                efforts: levels(&["low", "medium", "high"]),
+                plan: true,
+            },
+            RuntimeProvider::Grok => Self {
+                steer: false,
+                images: true,
+                files: true,
+                efforts: levels(&["low", "medium", "high"]),
+                plan: false,
+            },
+            RuntimeProvider::Gemini | RuntimeProvider::Opencode => Self {
+                steer: false,
+                images: true,
+                files: true,
+                efforts: Vec::new(),
+                plan: false,
+            },
+        }
+    }
 }
 
 // ---- sessions + REST DTOs ---------------------------------------------------
@@ -692,6 +830,14 @@ pub struct RuntimeSession {
     /// never by a client. `None` = a plain thread.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<serde_json::Value>,
+    /// What its agent takes (the provider baseline until a running driver
+    /// reports its own; see [`ProviderSession::capabilities`]).
+    #[serde(default)]
+    pub capabilities: RuntimeCapabilities,
+    /// The title is still the placeholder it was created with: the agent's
+    /// own name for the conversation replaces it. A rename clears it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub title_auto: bool,
 }
 
 impl RuntimeSession {
@@ -749,6 +895,10 @@ pub struct CreateRuntimeSessionReq {
     pub model: Option<String>,
     #[serde(default)]
     pub access_mode: Option<RuntimeAccessMode>,
+    /// `title` is a placeholder (the opening message's first words): the
+    /// agent's own name for the conversation may replace it.
+    #[serde(default)]
+    pub title_auto: bool,
     /// Server-owned [`RuntimeSession::meta`]. Never read from a request body
     /// (`serde(skip)`): only the daemon's own callers set it.
     #[serde(skip)]
@@ -790,7 +940,8 @@ pub struct EmbeddedOrigin {
 }
 
 /// `POST /workspaces/{id}/runtime-sessions` body: the create fields plus the
-/// two a client may set on the server-owned meta. Nothing else in the body
+/// four a client may set on the server-owned meta (`source`, `origin`,
+/// `account_id`, `network_profile_id`). Nothing else in the body
 /// reaches `meta` (`CreateRuntimeSessionReq::meta` stays `serde(skip)`).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct CreateRuntimeSessionBody {
@@ -800,6 +951,14 @@ pub struct CreateRuntimeSessionBody {
     pub source: Option<String>,
     #[serde(default)]
     pub origin: Option<EmbeddedOrigin>,
+    /// A named provider account (Settings › Accounts) the agent signs in
+    /// with, as a terminal session's `meta.account_id`; checked at spawn.
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// A network profile of the workspace the agent's traffic goes
+    /// through (`meta.network_profile_id`); checked at spawn.
+    #[serde(default)]
+    pub network_profile_id: Option<String>,
 }
 
 impl CreateRuntimeSessionBody {
@@ -811,6 +970,17 @@ impl CreateRuntimeSessionBody {
     pub fn into_req(self) -> crate::Result<CreateRuntimeSessionReq> {
         let mut req = self.req;
         req.meta = embedded_meta(self.source.as_deref(), self.origin)?;
+        for (key, v) in [
+            ("account_id", self.account_id),
+            ("network_profile_id", self.network_profile_id),
+        ] {
+            if let Some(v) = v.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+                let meta = req
+                    .meta
+                    .get_or_insert_with(|| Value::Object(Default::default()));
+                meta[key] = Value::String(v);
+            }
+        }
         Ok(req)
     }
 }
@@ -1152,6 +1322,10 @@ pub struct RuntimePromptReq {
     pub files: Vec<PromptFile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_mode: Option<RuntimeAccessMode>,
+    /// Run this turn in plan mode (only where `capabilities.plan`): the
+    /// agent plans and changes nothing. A later turn without it leaves.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plan: bool,
     /// What to do when a turn is already running. Omitted = refuse (409).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<PromptDelivery>,
@@ -1164,7 +1338,7 @@ pub enum PromptDelivery {
     /// Wait in the session's queue; sent when the turn ends.
     Queue,
     /// Into the running turn now (the agent reads it at its next step) —
-    /// Claude only; elsewhere it is queued.
+    /// where `capabilities.steer`; elsewhere it is queued.
     Steer,
     /// Stop the running turn and send this next.
     Interrupt,
@@ -1220,6 +1394,10 @@ pub struct PromptFile {
     pub mime: String,
     pub name: String,
     pub data_base64: String,
+    /// Where the runtime stored it (absolute), for an agent that takes a
+    /// file only as a path to read. Set by the runtime, never by a client.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1339,6 +1517,8 @@ mod tests {
                         started_at: ts(),
                         item_id: None,
                     }],
+                    capabilities: None,
+                    title: None,
                 },
             },
             RuntimeEventBody::ProviderThreadUpdated {

@@ -33,6 +33,12 @@ pub struct MetaResp {
     /// curated fallbacks). Empty when unauthenticated after onboarding.
     #[serde(default)]
     pub provider_models: std::collections::HashMap<String, Vec<ProviderModelOption>>,
+    /// Per runtime provider: what a new thread's agent takes (steer, images,
+    /// PDFs, efforts) before a session reports its own — the composer of a
+    /// thread not started yet gates on it.
+    #[serde(default)]
+    pub runtime_capabilities:
+        std::collections::HashMap<String, crate::agent_runtime::RuntimeCapabilities>,
     /// A second LOOPBACK base for the same daemon (`http://localhost:<port>`
     /// — `ottod` holds both `127.0.0.1` and `[::1]` on the port), or `null`
     /// when it could not bind `[::1]` (IPv6 off / port taken). Browsers pool

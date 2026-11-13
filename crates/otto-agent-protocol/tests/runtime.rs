@@ -223,6 +223,7 @@ async fn create_as(rt: &AgentRuntime, cwd: &str, provider: RuntimeProvider) -> R
         &"u1".into(),
         &"w1".into(),
         CreateRuntimeSessionReq {
+            title_auto: false,
             provider: Some(provider),
             cwd: Some(cwd.into()),
             title: None,
@@ -1261,6 +1262,7 @@ async fn attachments_are_stored_served_and_refused_where_unsupported() {
         data_base64: "iVBORw0KGgo=".into(),
     };
     let pdf = PromptFile {
+        path: None,
         mime: "application/pdf".into(),
         name: "spec.pdf".into(),
         data_base64: "JVBERi0=".into(),
@@ -1339,7 +1341,7 @@ async fn attachments_are_stored_served_and_refused_where_unsupported() {
     ));
     rt.close(&g.id).await.unwrap();
 
-    // Codex: an image is served back for its thumbnail; a PDF is refused;
+    // Codex: an image is served back for its thumbnail; a PDF goes as a path;
     // a failed command carries its output as the error.
     let c = create_as(&rt, dir.path().to_str().unwrap(), RuntimeProvider::Codex).await;
     rt.prompt_with(&c.id, &refused).await.unwrap();
@@ -1348,12 +1350,15 @@ async fn attachments_are_stored_served_and_refused_where_unsupported() {
     assert_eq!(a[0].kind, AttachmentKind::Image);
     let (mime, bytes) = rt.attachment(&c.id, &a[0].id).await.unwrap();
     assert_eq!((mime.as_str(), &bytes[..4]), ("image/png", &b"\x89PNG"[..]));
-    match rt.prompt_with(&c.id, &with_pdf).await {
-        Err(Error::Invalid(m)) => assert!(m.contains("Codex"), "{m}"),
-        other => panic!("{other:?}"),
-    }
-    rt.prompt(&c.id, "fail").await.unwrap();
+    // A PDF goes as the path it was saved at (Codex has no document input),
+    // stored with its extension so the agent sees what it reads.
+    rt.prompt_with(&c.id, &with_pdf).await.unwrap();
     host.wait_n(is_terminal, 3).await;
+    let a = user_attachments(&host);
+    assert!(a[0].id.ends_with(".pdf"), "{}", a[0].id);
+    assert!(store.join(&c.id).join(&a[0].id).is_file());
+    rt.prompt(&c.id, "fail").await.unwrap();
+    host.wait_n(is_terminal, 4).await;
     assert!(host
         .items()
         .iter()
@@ -2767,17 +2772,17 @@ async fn rejected_fresh_prompt_preserves_old_native_identity_without_a_boundary(
     let pool = pool().await;
     let host = TestHost::new(cwd, false);
     let rt = runtime(&pool, &host, RuntimeConfig::default());
-    let s = create_as(&rt, cwd, RuntimeProvider::Codex).await;
+    let s = create_as(&rt, cwd, RuntimeProvider::Gemini).await;
     rt.prompt(&s.id, "before").await.unwrap();
     host.wait(is_terminal).await;
     let old = rt.get(&s.id).await.unwrap().native_thread_id;
     let rejected = RuntimePromptReq {
-        text: "unsupported file".into(),
+        text: "unsupported image".into(),
         fresh_context: true,
-        files: vec![PromptFile {
-            mime: "application/pdf".into(),
-            name: "test.pdf".into(),
-            data_base64: "YQ==".into(),
+        // The fake Gemini takes no images.
+        images: vec![PromptImage {
+            mime: "image/png".into(),
+            data_base64: "iVBORw0KGgo=".into(),
         }],
         ..Default::default()
     };
@@ -3841,4 +3846,224 @@ async fn council_rounds_survive_a_restart_and_a_cut_round_can_be_asked_again() {
     ] {
         assert!(verdict.text.contains(want), "{want}: {}", verdict.text);
     }
+}
+
+// ---- provider parity: commands, titles, cost, plan mode, tool images ----
+
+fn assistant_texts(host: &TestHost) -> Vec<String> {
+    host.items()
+        .into_iter()
+        .filter_map(|i| match i.kind {
+            TurnItemKind::AssistantMessage { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn create_titled(rt: &AgentRuntime, cwd: &str, provider: RuntimeProvider) -> RuntimeSession {
+    rt.create(
+        &"u1".into(),
+        &"w1".into(),
+        CreateRuntimeSessionReq {
+            title_auto: true,
+            provider: Some(provider),
+            cwd: Some(cwd.into()),
+            title: Some("fix the login bug please".into()),
+            model: None,
+            access_mode: None,
+            meta: None,
+        },
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn the_agents_own_commands_title_and_cost_reach_the_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let commands = |h: &TestHost| -> Vec<String> {
+        h.all()
+            .into_iter()
+            .rev()
+            .find_map(|e| match e.body {
+                RuntimeEventBody::CommandsUpdated { commands } => {
+                    Some(commands.into_iter().map(|c| c.name).collect())
+                }
+                _ => None,
+            })
+            .unwrap_or_default()
+    };
+
+    // ACP: `available_commands_update`, `usage_update` (context + cost) and
+    // `session_info_update` (the title, adopted while it is a placeholder).
+    let g = create_titled(&rt, cwd, RuntimeProvider::Gemini).await;
+    rt.prompt(&g.id, "usage").await.unwrap();
+    host.wait(is_terminal).await;
+    assert_eq!(commands(&host), ["compact", "review"]);
+    let turn = host
+        .all()
+        .into_iter()
+        .rev()
+        .find_map(|e| match e.body {
+            RuntimeEventBody::ProviderTurnUpdated { provider_turn } => Some(provider_turn),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(turn.turn_token_usage.and_then(|u| u.cost_usd), Some(0.25));
+    let ctx = host
+        .all()
+        .into_iter()
+        .rev()
+        .find_map(|e| match e.body {
+            RuntimeEventBody::ProviderThreadUpdated { provider_thread } => {
+                provider_thread.context_usage
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!((ctx.used_tokens, ctx.max_tokens), (1200, Some(1048576)));
+    assert_eq!(rt.get(&g.id).await.unwrap().title, "Named by the agent");
+    // The snapshot (a reconnecting client) carries the commands too.
+    match rt.replay(&g.id, 0).await.unwrap() {
+        RuntimeReplay::Snapshot { snapshot, .. } => assert_eq!(snapshot.commands.len(), 2),
+        RuntimeReplay::Events { events, .. } => assert!(events
+            .iter()
+            .any(|e| matches!(&e.body, RuntimeEventBody::CommandsUpdated { commands } if commands.len() == 2))),
+    }
+    // A person's rename is never replaced.
+    rt.rename(&g.id, "Mine").await.unwrap();
+    rt.prompt(&g.id, "usage").await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    assert_eq!(rt.get(&g.id).await.unwrap().title, "Mine");
+    rt.close(&g.id).await.unwrap();
+
+    // Codex: its skills are its commands; `thread/name/updated` names it.
+    let c = create_titled(&rt, cwd, RuntimeProvider::Codex).await;
+    rt.prompt(&c.id, "name me").await.unwrap();
+    host.wait_n(is_terminal, 3).await;
+    assert_eq!(commands(&host), ["review"]);
+    assert_eq!(rt.get(&c.id).await.unwrap().title, "Named by Codex");
+    rt.prompt(&c.id, "/review the diff").await.unwrap();
+    host.wait_n(is_terminal, 4).await;
+    assert!(assistant_texts(&host)
+        .iter()
+        .any(|t| t.contains("echo: the diff (skill review)")));
+    rt.close(&c.id).await.unwrap();
+
+    // Claude: `initialize` lists its commands; each result's running
+    // `total_cost_usd` gives the turn's own cost.
+    let k = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    rt.prompt(&k.id, "one").await.unwrap();
+    host.wait_n(is_terminal, 5).await;
+    rt.prompt(&k.id, "two").await.unwrap();
+    host.wait_n(is_terminal, 6).await;
+    assert_eq!(commands(&host), ["review", "compact"]);
+    let costs: Vec<f64> = rt
+        .replay(&k.id, 0)
+        .await
+        .map(|r| match r {
+            RuntimeReplay::Snapshot { snapshot, .. } => snapshot
+                .turns
+                .into_iter()
+                .filter_map(|t| t.turn_token_usage.and_then(|u| u.cost_usd))
+                .collect(),
+            RuntimeReplay::Events { events, .. } => {
+                let mut by = std::collections::BTreeMap::new();
+                for e in events {
+                    if let RuntimeEventBody::ProviderTurnUpdated { provider_turn } = e.body {
+                        by.insert(provider_turn.ordinal, provider_turn);
+                    }
+                }
+                by.into_values()
+                    .filter_map(|t| t.turn_token_usage.and_then(|u| u.cost_usd))
+                    .collect()
+            }
+        })
+        .unwrap();
+    assert_eq!(costs.len(), 2);
+    assert!(costs.iter().all(|c| (c - 0.0125).abs() < 1e-9), "{costs:?}");
+    rt.close(&k.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn plan_mode_rides_each_provider_and_leaving_it_restores_the_access_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let plan = |t: &str| RuntimePromptReq {
+        plan: true,
+        ..RuntimePromptReq::of(t)
+    };
+
+    // Claude: permission mode `plan`, then back to the access mode's own.
+    let k = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    assert!(k.capabilities.plan);
+    rt.prompt_with(&k.id, &plan("mode")).await.unwrap();
+    host.wait_n(is_terminal, 1).await;
+    rt.prompt(&k.id, "mode").await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    let texts = assistant_texts(&host);
+    assert!(texts.contains(&"mode: plan".to_string()), "{texts:?}");
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.starts_with("mode: ") && t != "mode: plan"),
+        "{texts:?}"
+    );
+    rt.close(&k.id).await.unwrap();
+
+    // ACP (the fake advertises a `plan` mode): `session/set_mode plan`.
+    let g = create(&rt, cwd).await;
+    rt.prompt_with(&g.id, &plan("mode")).await.unwrap();
+    host.wait_n(is_terminal, 3).await;
+    rt.prompt(&g.id, "mode").await.unwrap();
+    host.wait_n(is_terminal, 4).await;
+    assert!(rt.get(&g.id).await.unwrap().capabilities.plan);
+    let texts = assistant_texts(&host);
+    assert!(texts.contains(&"mode: plan".to_string()), "{texts:?}");
+    assert!(texts.contains(&"mode: default".to_string()), "{texts:?}");
+    rt.close(&g.id).await.unwrap();
+
+    // Codex: the turn's collaboration mode.
+    let c = create_as(&rt, cwd, RuntimeProvider::Codex).await;
+    rt.prompt_with(&c.id, &plan("think")).await.unwrap();
+    host.wait_n(is_terminal, 5).await;
+    assert!(assistant_texts(&host)
+        .iter()
+        .any(|t| t.contains("echo: think (mode plan)")));
+    rt.close(&c.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_codex_generated_image_is_served_from_disk_and_nothing_else_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let c = create_as(&rt, cwd, RuntimeProvider::Codex).await;
+    rt.prompt(&c.id, "make image").await.unwrap();
+    host.wait(is_terminal).await;
+    let item = host
+        .items()
+        .into_iter()
+        .find(|i| matches!(&i.kind, TurnItemKind::DynamicTool { image_files, .. } if !image_files.is_empty()))
+        .expect("an image item");
+    let (mime, bytes) = rt.tool_image(&c.id, &item.id, 0).await.unwrap();
+    assert_eq!((mime.as_str(), &bytes[..4]), ("image/png", &b"\x89PNG"[..]));
+    assert!(matches!(
+        rt.tool_image(&c.id, &item.id, 1).await,
+        Err(Error::NotFound(_))
+    ));
+    assert!(matches!(
+        rt.tool_image(&c.id, "nope", 0).await,
+        Err(Error::NotFound(_))
+    ));
+    rt.close(&c.id).await.unwrap();
 }

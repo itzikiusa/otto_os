@@ -659,6 +659,10 @@ How it works (`crates/otto-pty/src/holder.rs`, `held.rs`):
   upgrade. HELLO, HELLO_ACK, KILL and RELEASE are frozen forever, so any daemon
   can always end any holder.
 
+Structured **Threads** (`/runtime-sessions`) are kept by the same setting,
+through stdio holders in `<data dir>/rt-holders/` — see
+[threads-structured-runtime.md §4](threads-structured-runtime.md#4-history-replay-and-restarts).
+
 What is **not** kept: engine-owned sessions (workflow steps, reviews, channel
 threads, swarm agents, …) — their driving engine dies with the daemon and
 recovers its own way, so their processes still restart as before; connection

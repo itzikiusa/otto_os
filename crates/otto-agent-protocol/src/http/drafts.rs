@@ -124,6 +124,7 @@ mod tests {
     fn drafts_reject_malformed_and_mislabeled_attachments() {
         let mut draft = RuntimeDraftContent::default();
         draft.images.push(PromptFile {
+            path: None,
             name: "a.png".into(),
             mime: "image/png".into(),
             data_base64: "not base64!".into(),

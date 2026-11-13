@@ -9,6 +9,7 @@
   // follows the bottom while you do). An approval that gated the call folds
   // into its row: Approve / Decline inline while pending, the outcome after
   // (ComposerPendingApprovalActions.tsx).
+  import { untrack } from 'svelte';
   import Icon, { type IconName } from '../../../lib/components/Icon.svelte';
   import type { ApprovalDecision, TurnItem } from '../../../lib/api/types';
   import InlineDiff from '../../agents/conversation/InlineDiff.svelte'; // ui-guards: allow — shared chat diff
@@ -39,13 +40,15 @@
     agentId?: string | null;
     /** The thread's folder: paths and `cd <it> &&` drop out of the label. */
     cwd?: string | null;
+    /** Opened from the start (Agents & tasks' drill-in). */
+    startOpen?: boolean;
   }
-  let { item, output = '', pending, note = null, onrespond, agentId = null, cwd = null }: Props = $props();
+  let { item, output = '', pending, note = null, onrespond, agentId = null, cwd = null, startOpen = false }: Props = $props();
   const runNotice = $derived(item.type === 'system_notice' ? runNoticeOf(item.message) : null);
   /** Threads opened from this one: their live cards / "finished" line. */
   const childNotice = $derived(item.type === 'system_notice' ? threadNoticeOf(item.message) : null);
 
-  let open = $state(false);
+  let open = $state(untrack(() => startOpen));
   let outEl = $state<HTMLPreElement | null>(null);
   let follow = true;
 

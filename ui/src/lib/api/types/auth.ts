@@ -4,6 +4,7 @@
 import type {
   Id, User, Workspace, WorkspaceRole,
 } from './core';
+import type { RuntimeCapabilities } from './agent-runtime';
 
 // ---------------------------------------------------------------------------
 // RBAC — features + capabilities
@@ -159,6 +160,9 @@ export interface MetaResp {
   model_flags: Record<string, boolean>;
   /** Per-provider catalog of selectable models + supported effort levels. */
   provider_models: Record<string, ProviderModelOption[]>;
+  /** Per runtime provider: what a new thread's agent takes before its
+   *  session reports its own (`RuntimeSession.capabilities`). */
+  runtime_capabilities?: Record<string, RuntimeCapabilities>;
   /** Second LOOPBACK base for the same daemon (`http://localhost:<port>`; the
    *  daemon holds both 127.0.0.1 and [::1]) — a separate browser socket pool
    *  for background/slow calls. `null`/absent → single-host transport. */

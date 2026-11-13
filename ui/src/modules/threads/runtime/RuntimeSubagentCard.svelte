@@ -6,11 +6,13 @@
   // (the items whose `parent_item_id` is this card) plus its final answer.
   // A background subagent keeps running after its turn ended; the card says
   // so until its task finishes.
+  import { untrack } from 'svelte';
   import type { TurnItem } from '../../../lib/api/types';
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
   import { now } from '../../../lib/stores/now.svelte';
   import RuntimeAgentRow from './RuntimeAgentRow.svelte';
   import RuntimeWorkRow from './RuntimeWorkRow.svelte';
+  import RuntimeSwarmWork from './RuntimeSwarmWork.svelte';
 
   type SubagentItem = Extract<TurnItem, { type: 'subagent' }>;
   interface Props {
@@ -19,10 +21,18 @@
     activity: TurnItem[];
     /** Live `command_output.delta` text by item id. */
     output?: Record<string, string>;
+    /** Its thread (an Antigravity swarm member's work is read from the daemon). */
+    sessionId?: string | null;
+    /** Given: the row opens it elsewhere (Agents & tasks' drill-in) instead of expanding. */
+    onopen?: () => void;
+    /** Expanded from the start (the drill-in). */
+    startOpen?: boolean;
   }
-  let { item, activity, output = {} }: Props = $props();
+  let { item, activity, output = {}, sessionId = null, onopen, startOpen = false }: Props = $props();
 
-  let open = $state(false);
+  let open = $state(untrack(() => startOpen));
+  /** agy's swarm member: its work is on disk, not in the item stream. */
+  const swarm = $derived(item.tool_name === 'swarm' && !!sessionId);
   const running = $derived(item.status === 'running' || item.status === 'pending' || item.status === 'waiting');
   const statusText = $derived(
     running ? 'Running' : item.status === 'completed' ? 'Done' : item.status === 'failed' ? 'Failed' : 'Stopped',
@@ -51,14 +61,16 @@
 </script>
 
 <div class="sa" class:failed={item.status === 'failed'} data-testid="runtime-subagent-{item.id}" data-status={item.status}>
-  <RuntimeAgentRow {name} {sub} {tone} status={statusText} {elapsed} {result} expanded={open} ontoggle={() => (open = !open)} />
-  {#if open}
+  <RuntimeAgentRow {name} {sub} {tone} status={statusText} {elapsed} {result} expanded={open} ontoggle={onopen ?? (() => (open = !open))} />
+  {#if open && !onopen}
     <div class="sa-body">
       {#if item.prompt}
         <p class="sa-label">Task</p>
         <p class="sa-prompt" dir="auto">{item.prompt}</p>
       {/if}
-      {#if activity.length > 0}
+      {#if swarm && sessionId}
+        <RuntimeSwarmWork {sessionId} member={item.description ?? name} live={running} />
+      {:else if activity.length > 0}
         <p class="sa-label">Activity</p>
         <div class="sa-activity">
           {#each activity as a (a.id)}

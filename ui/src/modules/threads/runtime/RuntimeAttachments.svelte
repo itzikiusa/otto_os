@@ -1,6 +1,7 @@
 <script lang="ts">
   // What a sent message carried: image thumbnails and file chips, fetched
-  // only once they scroll into view; a click opens the full file in a sheet.
+  // only once they scroll into view — readable size, aspect kept, never
+  // cropped; a click opens the full image (Lightbox: fit / 1:1) or file.
   // Ported from T3 Code (MIT, Copyright (c) 2026 T3 Tools Inc.):
   // apps/web/src/components/chat/TimelineUserMessageRow.tsx (attachments over
   // the bubble) and ExpandedImageDialog.tsx (click to open full).
@@ -9,6 +10,7 @@
   import type { MessageAttachment } from '../../../lib/api/types';
   import Icon from '../../../lib/components/Icon.svelte';
   import Modal from '../../../lib/components/Modal.svelte';
+  import Lightbox from '../../../lib/components/Lightbox.svelte';
   import { toastError } from '../../../lib/toastError';
 
   interface Props {
@@ -67,7 +69,7 @@
 <div class="ratt" data-testid="runtime-attachments">
   {#each attachments as a (a.id)}
     {#if a.kind === 'image'}
-      <button type="button" class="ratt-thumb" use:lazy={a} aria-label="Open {a.name ?? 'image'}" title={a.name ?? 'Image'} onclick={() => void open(a)}>
+      <button type="button" class="ratt-thumb" class:loading={!urls[a.id]} use:lazy={a} aria-label="Open {a.name ?? 'image'}" title={a.name ?? 'Image'} onclick={() => void open(a)}>
         {#if urls[a.id]}<img src={urls[a.id]} alt={a.name ?? ''} />{:else}<Icon name="image" size={16} />{/if}
       </button>
     {:else}
@@ -78,13 +80,11 @@
   {/each}
 </div>
 
-{#if opened && urls[opened.id]}
-  <Modal title={opened.name ?? (opened.kind === 'image' ? 'Image' : 'File')} width={900} onclose={() => (opened = null)}>
-    {#if opened.kind === 'image'}
-      <img class="ratt-full" src={urls[opened.id]} alt={opened.name ?? ''} />
-    {:else}
-      <iframe class="ratt-doc" src={urls[opened.id]} title={opened.name ?? 'File'}></iframe>
-    {/if}
+{#if opened && urls[opened.id] && opened.kind === 'image'}
+  <Lightbox src={urls[opened.id]} alt={opened.name ?? 'Image'} testid="runtime-attachment-full" onclose={() => (opened = null)} />
+{:else if opened && urls[opened.id]}
+  <Modal title={opened.name ?? 'File'} width={900} onclose={() => (opened = null)}>
+    <iframe class="ratt-doc" src={urls[opened.id]} title={opened.name ?? 'File'}></iframe>
   </Modal>
 {/if}
 
@@ -96,11 +96,14 @@
     gap: 6px;
     max-inline-size: 80%;
   }
+  /* Readable, uncropped: 160px tall, width from the aspect (64–240px);
+     a placeholder box until the bytes load. */
   .ratt-thumb {
     display: grid;
     place-items: center;
-    inline-size: 64px;
-    block-size: 64px;
+    min-inline-size: 64px;
+    min-block-size: 64px;
+    max-inline-size: 100%;
     padding: 0;
     overflow: hidden;
     border: 1px solid var(--border);
@@ -109,10 +112,21 @@
     color: var(--text-dim);
     cursor: zoom-in;
   }
+  .ratt-thumb.loading {
+    inline-size: 160px;
+    block-size: 160px;
+  }
   .ratt-thumb img {
-    inline-size: 100%;
-    block-size: 100%;
-    object-fit: cover;
+    display: block;
+    block-size: 160px;
+    inline-size: auto;
+    min-inline-size: 64px;
+    max-inline-size: min(240px, 100%);
+    object-fit: contain;
+  }
+  .ratt-thumb:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: 2px;
   }
   .ratt-file {
     display: inline-flex;
@@ -128,13 +142,6 @@
     font: inherit;
     font-size: var(--fs-s);
     cursor: pointer;
-  }
-  .ratt-full {
-    display: block;
-    max-inline-size: 100%;
-    max-block-size: 70vh;
-    margin-inline: auto;
-    object-fit: contain;
   }
   .ratt-doc {
     inline-size: 100%;

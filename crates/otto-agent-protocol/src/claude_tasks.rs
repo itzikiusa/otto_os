@@ -39,6 +39,7 @@ use serde_json::Value;
 use super::{classify, ClaudeDriver, Tool, ToolType};
 use crate::driver::{item, tool_error, DriverEvent, DriverStep};
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct Task {
     kind: String,
     label: String,
@@ -48,6 +49,7 @@ pub(super) struct Task {
     background: bool,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct Agent {
     item_id: String,
     turn_id: String,
@@ -64,6 +66,7 @@ pub(super) struct Agent {
 }
 
 /// A subagent's own tool call.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct SubTool {
     tool: Tool,
     parent: String,

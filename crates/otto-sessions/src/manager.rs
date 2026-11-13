@@ -1524,6 +1524,11 @@ impl SessionManager {
         self
     }
 
+    /// The PTY holder config (`None` = no holders this run).
+    pub fn pty_holders(&self) -> Option<&otto_pty::HolderConfig> {
+        self.holders.as_ref()
+    }
+
     /// Is session persistence active right now? Needs a holder config AND the
     /// [`SESSION_PERSISTENCE_SETTING`] (default on).
     pub async fn persistence_enabled(&self) -> bool {
