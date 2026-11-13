@@ -12,8 +12,10 @@ import { mockEnabled } from './lib/api/mockGate';
 import { setToken, getToken, baseUrl } from './lib/api/client';
 import { isEmbedded } from './lib/desktop';
 import { installMacFunctionKeyGuard } from './lib/macFunctionKeyGuard';
+import { fitToVisualViewport } from './lib/viewportFit';
 
 installMacFunctionKeyGuard(document);
+if (window.matchMedia('(pointer: coarse)').matches) fitToVisualViewport(window, document.documentElement);
 
 if (mockEnabled()) {
   // The fixtures load only in mock mode — and before `mount`, below.

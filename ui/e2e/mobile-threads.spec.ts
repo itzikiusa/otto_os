@@ -121,16 +121,47 @@ test('a thread deep link from another workspace opens the thread at phone width'
   await page.getByRole('button', { name: 'Close Thread details', exact: true }).click();
   await expect(thread).toBeVisible();
 
+  // The thread's header (toolbar) stays fully on screen: on open, with the
+  // composer focused and blurred, and after a long conversation scrolled to
+  // its start and back (the top used to end up cut off).
+  const header = page.getByTestId('threads-page').getByTestId('page-header').first();
+  await expectFullyInViewport(page, header, 'thread header on open');
+  const composer = thread.getByTestId('runtime-composer');
+  // ≥16px, or iOS zooms the page into the field on focus and stays zoomed.
+  const composerPx = await composer.evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+  expect(composerPx, 'composer font ≥16px (no iOS zoom-on-focus)').toBeGreaterThanOrEqual(16);
+  await composer.click();
+  await expectFullyInViewport(page, header, 'thread header with the composer focused');
+
   // The composer stays in view with the on-screen keyboard up (a shorter
   // visual viewport); typing and sending works.
-  const composer = thread.getByTestId('runtime-composer');
-  await composer.click();
   await page.setViewportSize({ width: 430, height: 520 });
   await expectFullyInViewport(page, composer, 'composer with the keyboard up');
+  await expectFullyInViewport(page, header, 'thread header with the keyboard up');
+  // #app follows the visible viewport (lib/viewportFit.ts) on a touch device.
+  expect(await page.evaluate(() => document.getElementById('app')!.getBoundingClientRect().height)).toBe(520);
   await composer.fill('hello from the phone');
   await composer.press('Enter');
   await expect(thread.getByText('echo: hello from the phone')).toBeVisible({ timeout: 20_000 });
   await page.setViewportSize({ width: 430, height: 932 });
+  await composer.blur();
+  await expectFullyInViewport(page, header, 'thread header after the composer blurs');
+
+  // A long conversation: scroll every scroller to its start, then its end.
+  for (let i = 0; i < 6; i++) {
+    await composer.fill(`long ${i} ` + 'a long line of text '.repeat(30));
+    await composer.press('Enter');
+    await expect(thread.getByText(`echo: long ${i} `).first()).toBeVisible({ timeout: 20_000 });
+  }
+  for (const to of [0, 1e7]) {
+    await page.evaluate((y) => {
+      for (const el of document.querySelectorAll<HTMLElement>('[data-testid="threads-page"] *')) {
+        if (el.scrollHeight > el.clientHeight + 4 && /auto|scroll/.test(getComputedStyle(el).overflowY)) el.scrollTop = y;
+      }
+    }, to);
+    await expectFullyInViewport(page, header, `thread header after scrolling the conversation to ${to ? 'its end' : 'its start'}`);
+  }
+  expect(await page.evaluate(() => window.scrollY + document.scrollingElement!.scrollTop)).toBe(0);
 
   // An inline approval: its buttons are real tap targets.
   await composer.fill('ask');

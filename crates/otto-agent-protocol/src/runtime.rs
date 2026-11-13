@@ -899,6 +899,12 @@ impl AgentRuntime {
         Ok(self.with_live(recs))
     }
 
+    /// Every workspace's sessions (`owner` = one creator's), live state applied.
+    pub async fn list_all(&self, owner: Option<&Id>) -> Result<Vec<RuntimeSession>> {
+        let recs = self.inner.repo.list_all(owner).await?;
+        Ok(self.with_live(recs))
+    }
+
     /// Stored rows with each live session's in-memory state in their place.
     fn with_live(&self, recs: Vec<otto_state::RuntimeSessionRecord>) -> Vec<RuntimeSession> {
         recs.into_iter()

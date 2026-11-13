@@ -1327,3 +1327,61 @@ async fn runtime_drafts_are_human_only_person_scoped_and_revision_checked() {
     assert_eq!(own["draft"]["text"], "private unsent");
     assert_eq!(own["revision"], 1);
 }
+
+/// `GET /runtime-sessions` lists the caller's threads of EVERY workspace (a
+/// thread started on the phone lands in whatever workspace the phone had
+/// open, and the desktop's Threads list must still show it): root sees all,
+/// anyone else only their own, and never in a workspace they cannot view.
+#[tokio::test]
+async fn runtime_threads_list_across_workspaces() {
+    let d = boot().await;
+    let pool = file_pool(d._tmp.path()).await;
+    seed_workspace(&pool, "ws2", "bob").await;
+    sqlx::query(
+        "INSERT INTO user_feature_grants (user_id, feature, capability) VALUES ('bob', 'agents', 'view')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let repo = otto_state::AgentRuntimeRepo::new(pool.clone());
+    for (id, ws, owner) in [
+        ("t-alice", "ws1", "alice"),
+        ("t-bob-own", "ws2", "bob"),
+        ("t-bob-gone", "ws1", "bob"), // bob is no member of ws1
+    ] {
+        repo.create(otto_state::NewRuntimeSession {
+            id: id.into(),
+            workspace_id: ws.into(),
+            provider: otto_core::agent_runtime::RuntimeProvider::Claude,
+            title: id.into(),
+            cwd: "/tmp".into(),
+            model: None,
+            access_mode: Default::default(),
+            created_by: owner.into(),
+            parent_id: None,
+            meta: None,
+        })
+        .await
+        .unwrap();
+    }
+    let ids = |token: String| {
+        let http = d.http.clone();
+        let url = format!("{}/api/v1/runtime-sessions", d.base);
+        async move {
+            let res = http.get(url).bearer_auth(token).send().await.unwrap();
+            assert_eq!(res.status(), 200);
+            let rows: Vec<Value> = res.json().await.unwrap();
+            let mut ids: Vec<String> = rows
+                .iter()
+                .map(|r| r["id"].as_str().unwrap().to_string())
+                .collect();
+            ids.sort();
+            ids
+        }
+    };
+    assert_eq!(
+        ids(d.human.clone()).await,
+        ["t-alice", "t-bob-gone", "t-bob-own"]
+    );
+    assert_eq!(ids(d.bob.clone()).await, ["t-bob-own"]);
+}

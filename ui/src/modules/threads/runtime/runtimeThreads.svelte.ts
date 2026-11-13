@@ -145,6 +145,20 @@ class RuntimeThreads {
     }
   }
 
+  /** Add the caller's threads of EVERY workspace (`GET /runtime-sessions`):
+   *  a thread started on another device lives in whatever workspace that
+   *  device had open, and must still show here. Merges — the per-workspace
+   *  {@link load} stays the authority for its own workspace. */
+  async loadAll(): Promise<void> {
+    const rows = await api.get<RuntimeSession[]>('/runtime-sessions');
+    const next = { ...this.byId };
+    for (const r of rows) {
+      next[r.id] = r;
+      noteRuntimeWaiting(r.id, r.status === 'awaiting_permission');
+    }
+    this.byId = next;
+  }
+
   /** Read one thread's row: an embed needs only its own, never the
    *  workspace's whole list. */
   async loadOne(id: string): Promise<RuntimeSession> {

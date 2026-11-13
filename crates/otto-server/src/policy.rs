@@ -588,7 +588,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Agents, if get { View } else { Edit });
     }
     // Structured agent runtime (+ council): the handlers add owner-or-admin + person-only writes.
-    if p.starts_with("/workspaces/{id}/runtime-sessions") || p.starts_with("/runtime-sessions/") {
+    if p.starts_with("/workspaces/{id}/runtime-sessions") || p.starts_with("/runtime-sessions") {
         return Require(Agents, if get { View } else { Edit });
     }
     if p == "/sessions" {

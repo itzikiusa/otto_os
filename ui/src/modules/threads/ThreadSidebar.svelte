@@ -196,6 +196,7 @@
       threadRepos.reset();
       await ws.refreshSessions();
       if (ws.currentId) await runtimeThreads.load(ws.currentId);
+      await runtimeThreads.loadAll();
       if (ws.currentId) await git.loadRepos(ws.currentId, true);
       for (const id of Object.keys(git.statusById)) void git.refreshStatus(id);
     } catch (e) {

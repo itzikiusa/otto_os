@@ -90,6 +90,9 @@
     for (const wid of new Set([ws.currentId, ws.scratch ? SCRATCH_WORKSPACE_ID : null])) {
       if (wid) untrack(() => runtimeThreads.load(wid)).catch(() => {});
     }
+    // …and the user's threads of every other workspace (one started on the
+    // phone lands in whatever workspace the phone had open).
+    untrack(() => runtimeThreads.loadAll()).catch(() => {});
   });
 
   // Like T3, no side-panel rail and no status bar while Threads is open (the
@@ -645,5 +648,12 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+  }
+  /* iOS zooms the page into any text field under 16px on focus and stays
+     zoomed after blur — the Threads header ended up cut off at the top. */
+  @media (pointer: coarse) {
+    .th-page :global(:is(textarea, select, input:not([type='checkbox'], [type='radio'], [type='range'], [type='file']))) {
+      font-size: 16px !important; /* ui-guards: allow — 16px stops iOS zoom-on-focus */
+    }
   }
 </style>
