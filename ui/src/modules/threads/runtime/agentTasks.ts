@@ -17,6 +17,12 @@ export interface AgentTask {
   background: boolean;
   startedAt: string | null;
   endedAt: string | null;
+  /** The turn item to open: the subagent card, or the command's launch call. */
+  itemId: string | null;
+  /** The provider's task id (a Claude background command's output file). */
+  taskId: string | null;
+  /** The raw command, shown under its description. */
+  command: string | null;
 }
 
 export interface AgentTasks {
@@ -36,16 +42,36 @@ function statusOf(s: TurnItemStatus): AgentTaskStatus {
 /** claude_tasks.rs `task_finished`: "Background command finished: npm test". */
 const COMMAND_NOTICE = /^Background command (?:finished|failed|stopped): (.+)$/s;
 
+/** Claude's launch result: "Command running in background with ID: <task>. …". */
+const LAUNCHED = /background with ID: ([A-Za-z0-9_-]+)/;
+
+function commandOf(i: TurnItem | undefined): string | null {
+  return i?.type === 'command_execution' ? i.input || null : null;
+}
+
 export function agentTasks(items: readonly TurnItem[], background: readonly BackgroundTask[]): AgentTasks {
-  const rows: AgentTask[] = background.map((b) => ({
-    id: b.id,
-    kind: b.kind,
-    label: b.label,
-    status: 'running',
-    background: true,
-    startedAt: b.started_at,
-    endedAt: null,
-  }));
+  const byId = new Map(items.map((i) => [i.id, i] as const));
+  /** A background command's launch call, by the task id its result names. */
+  const launches = new Map<string, TurnItem>();
+  for (const i of items) {
+    const m = i.type === 'command_execution' && i.output ? LAUNCHED.exec(i.output) : null;
+    if (m) launches.set(m[1], i);
+  }
+  const rows: AgentTask[] = background.map((b) => {
+    const launch = (b.item_id ? byId.get(b.item_id) : undefined) ?? launches.get(b.id);
+    return {
+      id: b.id,
+      kind: b.kind,
+      label: b.label,
+      status: 'running',
+      background: true,
+      startedAt: b.started_at,
+      endedAt: null,
+      itemId: launch?.id ?? b.item_id ?? null,
+      taskId: b.kind === 'agent' ? null : b.id,
+      command: commandOf(launch),
+    };
+  });
   const listed = new Set(background.flatMap((b) => (b.item_id ? [b.item_id] : [])));
   for (const i of items) {
     if (i.type === 'subagent' && !listed.has(i.id)) {
@@ -57,10 +83,28 @@ export function agentTasks(items: readonly TurnItem[], background: readonly Back
         background: i.background,
         startedAt: i.started_at,
         endedAt: i.completed_at ?? (statusOf(i.status) === 'running' ? null : i.updated_at),
+        itemId: i.id,
+        taskId: null,
+        command: null,
       });
     } else if (i.type === 'system_notice') {
       const m = COMMAND_NOTICE.exec(i.message);
-      if (m) rows.push({ id: i.id, kind: 'command', label: m[1], status: statusOf(i.status), background: true, startedAt: null, endedAt: i.updated_at });
+      if (!m) continue;
+      // claude_tasks.rs ids the notice `bg:<task id>`.
+      const taskId = i.id.startsWith('bg:') ? i.id.slice(3) : null;
+      const launch = taskId ? launches.get(taskId) : undefined;
+      rows.push({
+        id: i.id,
+        kind: 'command',
+        label: m[1],
+        status: statusOf(i.status),
+        background: true,
+        startedAt: launch?.started_at ?? null,
+        endedAt: i.updated_at,
+        itemId: launch?.id ?? null,
+        taskId,
+        command: commandOf(launch),
+      });
     }
   }
   const at = (iso: string | null): number => (iso ? Date.parse(iso) : 0);
