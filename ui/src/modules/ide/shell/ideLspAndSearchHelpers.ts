@@ -6,14 +6,17 @@ import { loadErrorText } from '../../../lib/loadError';
 import { plural } from '../../../lib/plural';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
-import { type IdeBufferPerfController, reloadTabsFromDisk } from '../store/ideBufferPerf';
+import {
+  type IdeBufferHost,
+  type IdeBufferPerfController,
+  reloadTabsFromDisk,
+} from '../store/ideBufferPerf';
 import {
   collabGuestPost,
   type IdeCodeAction,
   type IdeCollabRole,
   type IdeCollabRoom,
   type IdeDebugSessionSnapshot,
-  type IdeOpenTab,
   type IdePluginInfo,
   type IdeReferenceLocation,
   type IdeRenameEdit,
@@ -21,16 +24,10 @@ import {
   type IdeReplEntry,
   type IdeSearchItem,
   type IdeSearchMode,
-  type IdeTargetSpec,
   type IdeVariable,
 } from '../store/ideTypes';
 
-export interface IdeLspSearchHost {
-  target: IdeTargetSpec;
-  readonly targetPayload: IdeTargetSpec;
-  targetQuery(extra?: Record<string, string | boolean | null | undefined>): string;
-  tabs: IdeOpenTab[];
-  readonly activeTab: IdeOpenTab | null;
+export interface IdeLspSearchHost extends IdeBufferHost {
   usages: IdeReferenceLocation[];
   usagesSymbol: string;
   usagesLoading: boolean;
@@ -57,11 +54,9 @@ export interface IdeLspSearchHost {
   replEntries: IdeReplEntry[];
   collabRoom: IdeCollabRoom | null;
   collabRooms: IdeCollabRoom[];
-  collabIsGuest: boolean;
   collabPeerId: string | null;
   collabPeerSecret: string | null;
   collabGuestToken: string | null;
-  readonly canEditCollab: boolean;
   sharedBuffers: Record<string, { content: string; version: number }>;
   plugins: IdePluginInfo[];
   getBuffer(path?: string): string;
