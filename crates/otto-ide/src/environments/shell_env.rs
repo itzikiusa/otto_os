@@ -103,6 +103,22 @@ impl ShellEnvResolver {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_seeded_vars(vars: BTreeMap<String, String>) -> Arc<Self> {
+        Arc::new(Self {
+            state: RwLock::new(ShellEnvState {
+                status: "ready".to_string(),
+                shell: "/bin/zsh".to_string(),
+                vars,
+                loaded_at: Some("2026-01-01T00:00:00Z".to_string()),
+                duration_ms: Some(1),
+                error: None,
+            }),
+            warming: AtomicBool::new(false),
+            notify: Notify::new(),
+        })
+    }
+
     /// Kick off background warming on the active Tokio runtime if still cold.
     /// Never blocks the caller (`<1us` on the HTTP hot path).
     pub fn ensure_warming_in_background(self: &Arc<Self>) {

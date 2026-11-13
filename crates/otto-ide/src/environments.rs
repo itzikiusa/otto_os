@@ -286,6 +286,7 @@ pub struct EnvironmentManager {
     data_dir: PathBuf,
     runs: Arc<DashMap<String, Arc<ActiveRunHandle>>>,
     run_seq: Arc<AtomicU64>,
+    shell_env: Arc<ShellEnvResolver>,
 }
 
 impl EnvironmentManager {
@@ -294,25 +295,36 @@ impl EnvironmentManager {
             data_dir,
             runs: Arc::new(DashMap::new()),
             run_seq: Arc::new(AtomicU64::new(0)),
+            shell_env: Arc::clone(global_shell_env()),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_shell_env(data_dir: PathBuf, shell_env: Arc<ShellEnvResolver>) -> Self {
+        Self {
+            data_dir,
+            runs: Arc::new(DashMap::new()),
+            run_seq: Arc::new(AtomicU64::new(0)),
+            shell_env,
         }
     }
 
     // ── Cached Login+Interactive Shell Environment Accessors ─────────────────
 
     pub fn cached_shell_env_snapshot(&self) -> BTreeMap<String, String> {
-        global_shell_env().vars_snapshot()
+        self.shell_env.vars_snapshot()
     }
 
     pub fn shell_env_snapshot(&self) -> IdeShellEnvResp {
-        global_shell_env().snapshot()
+        self.shell_env.snapshot()
     }
 
     pub async fn get_shell_env(&self) -> IdeShellEnvResp {
-        global_shell_env().get_or_load().await
+        self.shell_env.get_or_load().await
     }
 
     pub async fn reload_shell_env(&self) -> IdeShellEnvResp {
-        global_shell_env().reload().await
+        self.shell_env.reload().await
     }
 
     // ── SQLite Project Environment + Multi-Folder Roots + Keychain CRUD ──────
@@ -676,15 +688,16 @@ impl EnvironmentManager {
             map.extend(shell_env::collect_process_base_env());
             if inherit_shell {
                 let shell_vars = if await_shell {
-                    global_shell_env().vars_or_load().await
+                    self.shell_env.vars_or_load().await
                 } else {
-                    global_shell_env().vars_snapshot()
+                    self.shell_env.vars_snapshot()
                 };
                 map.extend(shell_vars);
             }
         }
 
         // Layer 3: Selected SDK / Toolchain env + prepended PATH
+        // Precedence: ottod base + shell env < Project SDK (`proj.*`) < Run-Config SDK (`cfg.sdk_path`).
         let mut path_dirs: Vec<String> = Vec::new();
         if let Some(extra) = proj.extra_path.as_deref().filter(|s| !s.is_empty()) {
             path_dirs.extend(
@@ -695,7 +708,50 @@ impl EnvironmentManager {
             );
         }
 
-        // Per-Run-Config SDK override (`sdk_path`) takes precedence over project-wide SDK.
+        let mut proj_path_dirs: Vec<String> = Vec::new();
+        if let Some(py) = proj.python_interpreter.as_deref().filter(|s| !s.is_empty()) {
+            if let Some(bin_dir) = Path::new(py).parent() {
+                push_unique(&mut proj_path_dirs, bin_dir.to_string_lossy().into_owned());
+                if let Some(venv) = bin_dir.parent() {
+                    if venv.join("pyvenv.cfg").is_file() || target.kind == IdeTargetKind::Ssh {
+                        map.insert("VIRTUAL_ENV".into(), venv.to_string_lossy().into_owned());
+                    }
+                }
+            }
+        }
+        if let Some(jh) = proj.java_home.as_deref().filter(|s| !s.is_empty()) {
+            map.insert("JAVA_HOME".into(), jh.to_string());
+            push_unique(
+                &mut proj_path_dirs,
+                format!("{}/bin", jh.trim_end_matches('/')),
+            );
+        }
+        if let Some(gr) = proj.go_root.as_deref().filter(|s| !s.is_empty()) {
+            map.insert("GOROOT".into(), gr.to_string());
+            push_unique(
+                &mut proj_path_dirs,
+                format!("{}/bin", gr.trim_end_matches('/')),
+            );
+        }
+        if let Some(rt) = proj.rust_toolchain.as_deref().filter(|s| !s.is_empty()) {
+            if rt.starts_with('/') {
+                push_unique(
+                    &mut proj_path_dirs,
+                    format!("{}/bin", rt.trim_end_matches('/')),
+                );
+            } else {
+                map.insert("RUSTUP_TOOLCHAIN".into(), rt.to_string());
+            }
+        }
+        if let Some(nh) = proj.node_home.as_deref().filter(|s| !s.is_empty()) {
+            push_unique(
+                &mut proj_path_dirs,
+                format!("{}/bin", nh.trim_end_matches('/')),
+            );
+        }
+
+        // Per-Run-Config SDK override (`sdk_path`) overrides Project SDK in `map`
+        // AND prepends its `bin` directory ahead of `proj_path_dirs` on `PATH`.
         let cfg_sdk = cfg
             .and_then(|c| c.sdk_path.as_deref())
             .map(str::trim)
@@ -703,37 +759,8 @@ impl EnvironmentManager {
         if let (Some(c), Some(sdk_p)) = (cfg, cfg_sdk) {
             apply_run_config_sdk_override(c.runner, sdk_p, target.kind, &mut map, &mut path_dirs);
         }
-
-        if let Some(py) = proj.python_interpreter.as_deref().filter(|s| !s.is_empty()) {
-            if let Some(bin_dir) = Path::new(py).parent() {
-                push_unique(&mut path_dirs, bin_dir.to_string_lossy().into_owned());
-                if let Some(venv) = bin_dir.parent() {
-                    if venv.join("pyvenv.cfg").is_file() || target.kind == IdeTargetKind::Ssh {
-                        map.entry("VIRTUAL_ENV".into())
-                            .or_insert_with(|| venv.to_string_lossy().into_owned());
-                    }
-                }
-            }
-        }
-        if let Some(jh) = proj.java_home.as_deref().filter(|s| !s.is_empty()) {
-            map.entry("JAVA_HOME".into())
-                .or_insert_with(|| jh.to_string());
-            push_unique(&mut path_dirs, format!("{}/bin", jh.trim_end_matches('/')));
-        }
-        if let Some(gr) = proj.go_root.as_deref().filter(|s| !s.is_empty()) {
-            map.entry("GOROOT".into()).or_insert_with(|| gr.to_string());
-            push_unique(&mut path_dirs, format!("{}/bin", gr.trim_end_matches('/')));
-        }
-        if let Some(rt) = proj.rust_toolchain.as_deref().filter(|s| !s.is_empty()) {
-            if rt.starts_with('/') {
-                push_unique(&mut path_dirs, format!("{}/bin", rt.trim_end_matches('/')));
-            } else {
-                map.entry("RUSTUP_TOOLCHAIN".into())
-                    .or_insert_with(|| rt.to_string());
-            }
-        }
-        if let Some(nh) = proj.node_home.as_deref().filter(|s| !s.is_empty()) {
-            push_unique(&mut path_dirs, format!("{}/bin", nh.trim_end_matches('/')));
+        for d in proj_path_dirs {
+            push_unique(&mut path_dirs, d);
         }
 
         if target.kind == IdeTargetKind::Local {
@@ -1827,7 +1854,15 @@ mod tests {
         let sibling = tmp.path().join("go_casino_kit");
         std::fs::create_dir_all(&sibling).unwrap();
 
-        let mgr = EnvironmentManager::new(tmp.path().join("data"));
+        let mut seeded_shell = BTreeMap::new();
+        seeded_shell.insert("JAVA_HOME".into(), "/shell/java".into());
+        seeded_shell.insert("GOROOT".into(), "/shell/go".into());
+        seeded_shell.insert("RUSTUP_TOOLCHAIN".into(), "nightly".into());
+        seeded_shell.insert("GO_DEBUGGING_PRODAMS".into(), "from_zshrc_sentinel".into());
+        let mgr = EnvironmentManager::with_shell_env(
+            tmp.path().join("data"),
+            ShellEnvResolver::with_seeded_vars(seeded_shell),
+        );
         let target = IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned());
 
         // Attach sibling folder and ensure subsequent PUT omitting additional_roots preserves it!
@@ -1923,12 +1958,24 @@ mod tests {
             eff.get("STRIPE_API_SECRET").unwrap(),
             "sk_test_super_secret"
         );
+        assert_eq!(
+            eff.get("GO_DEBUGGING_PRODAMS").unwrap(),
+            "from_zshrc_sentinel"
+        );
+        assert_eq!(eff.get("RUSTUP_TOOLCHAIN").unwrap(), "stable");
         assert_eq!(eff.get("GOROOT").unwrap(), "/opt/go-1.25");
         assert_eq!(eff.get("JAVA_HOME").unwrap(), "/opt/jdk-21");
         assert!(eff
             .get("PATH")
             .unwrap()
-            .starts_with("/custom/bin:/opt/go-1.25/bin:"));
+            .starts_with("/custom/bin:/opt/go-1.25/bin:/opt/jdk-21/bin:/opt/go-1.24/bin:"));
+
+        let eff_proj = mgr
+            .build_effective_env(&pool, secrets.as_ref(), &target)
+            .await
+            .unwrap();
+        assert_eq!(eff_proj.get("GOROOT").unwrap(), "/opt/go-1.24");
+        assert_eq!(eff_proj.get("JAVA_HOME").unwrap(), "/opt/jdk-21");
 
         let loaded_rc = mgr.get_run_config(&pool, &rc.id).await.unwrap();
         assert_eq!(loaded_rc.build_flags, vec!["-race"]);
