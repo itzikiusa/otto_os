@@ -51,11 +51,15 @@ const OPENCODE_CONFIG_FILE: &str = "opencode.json";
 
 /// Whether Otto can hand `provider`'s CLI a context file for one launch
 /// without touching the working tree. `gemini` (only a system-prompt
-/// REPLACEMENT via `GEMINI_SYSTEM_MD`, or `GEMINI.md` in the tree) and `pi`
-/// (`AGENTS.md` in the tree) have no such mechanism, so a caller whose
-/// session must carry a persona refuses them instead of running without it.
+/// REPLACEMENT via `GEMINI_SYSTEM_MD`, or `GEMINI.md` in the tree) has no
+/// such mechanism, so a caller whose session must carry a persona refuses
+/// it instead of running without it. pi takes `--append-system-prompt
+/// <file>` and `--skill <dir>`.
 pub fn delivers_context(provider: &str) -> bool {
-    matches!(provider, "claude" | "codex" | "agy" | "grok" | "opencode")
+    matches!(
+        provider,
+        "claude" | "codex" | "agy" | "grok" | "opencode" | "pi"
+    )
 }
 
 /// A session-local Codex home whose `skills/` is owned by Otto. Other entries
@@ -317,6 +321,19 @@ fn injection_for_home(provider: &str, dir: &Path, provider_home: Option<&Path>) 
             env: Vec::new(),
         },
         "opencode" if ctx.is_file() => opencode_injection(dir, &ctx),
+        // pi appends the file's contents to its system prompt and loads the
+        // bundle's skills as its own (this launch only).
+        "pi" if ctx.is_file() => {
+            let mut args = vec!["--append-system-prompt".into(), ctx.display().to_string()];
+            let skills = dir.join(skills_subdir(provider));
+            if skills.is_dir() {
+                args.extend(["--skill".into(), skills.display().to_string()]);
+            }
+            SpawnInjection {
+                args,
+                env: Vec::new(),
+            }
+        }
         _ => SpawnInjection::default(),
     }
 }
@@ -1439,6 +1456,37 @@ mod tests {
     }
 
     #[test]
+    fn pi_appends_the_context_and_loads_the_skills_for_one_launch() {
+        let (_l, cwd, root, lib) = setup();
+        let cwd_path = cwd.path().to_string_lossy().into_owned();
+        lib.put_skill(
+            "triage",
+            "---\ndescription: Triage incoming tickets\n---\nSKILL BODY ALPHA",
+        )
+        .unwrap();
+        let (res, inj) = provision(
+            &lib,
+            &WorkspaceContextConfig::default(),
+            &cwd_path,
+            "pi",
+            root.path(),
+        );
+        assert!(!res.skipped);
+        let bundle = bundle_of(&root, "pi", &cwd_path);
+        assert!(bundle.join("skills/triage/SKILL.md").is_file());
+        assert_eq!(
+            inj.args,
+            vec![
+                "--append-system-prompt".to_string(),
+                bundle.join("CONTEXT.md").display().to_string(),
+                "--skill".to_string(),
+                bundle.join("skills").display().to_string(),
+            ]
+        );
+        assert_clean_cwd(cwd.path());
+    }
+
+    #[test]
     fn codex_resume_migrates_the_legacy_skills_directory() {
         let (_l, cwd, root, _lib) = setup();
         let cwd_path = cwd.path().to_string_lossy().into_owned();
@@ -1630,25 +1678,23 @@ mod tests {
 
     #[test]
     fn providers_without_a_per_launch_context_mechanism_are_named() {
-        for p in ["claude", "codex", "agy", "grok", "opencode"] {
+        for p in ["claude", "codex", "agy", "grok", "opencode", "pi"] {
             assert!(delivers_context(p), "{p}");
         }
-        for p in ["gemini", "pi", "shell", "my-cli", ""] {
+        for p in ["gemini", "shell", "my-cli", ""] {
             assert!(!delivers_context(p), "{p}");
         }
         let (_l, cwd, root, lib) = setup();
         let cwd_path = cwd.path().to_string_lossy().into_owned();
-        for p in ["gemini", "pi"] {
-            let (res, inj) = provision(
-                &lib,
-                &WorkspaceContextConfig::default(),
-                &cwd_path,
-                p,
-                root.path(),
-            );
-            assert!(res.skipped, "{p}");
-            assert!(inj.args.is_empty() && inj.env.is_empty(), "{p}");
-        }
+        let (res, inj) = provision(
+            &lib,
+            &WorkspaceContextConfig::default(),
+            &cwd_path,
+            "gemini",
+            root.path(),
+        );
+        assert!(res.skipped);
+        assert!(inj.args.is_empty() && inj.env.is_empty());
     }
 
     #[test]

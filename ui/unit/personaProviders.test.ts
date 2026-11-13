@@ -10,11 +10,11 @@ const m = loadSource(new URL('../src/modules/personal-agents/personaProviders.ts
 
 test('a personal agent is offered only the CLIs that can load its persona', () => {
   const registered = ['agy', 'claude', 'codex', 'gemini', 'grok', 'opencode', 'pi', 'my-cli'];
-  assert.deepEqual(JSON.parse(JSON.stringify(m.personaProviders(registered))), ['agy', 'claude', 'codex', 'grok', 'opencode']);
+  assert.deepEqual(JSON.parse(JSON.stringify(m.personaProviders(registered))), ['agy', 'claude', 'codex', 'grok', 'opencode', 'pi']);
   // Empty is the daemon's default, Claude.
   assert.equal(m.canCarryPersona(''), true);
   assert.equal(m.canCarryPersona(undefined), true);
-  for (const p of ['gemini', 'pi', 'my-cli']) assert.equal(m.canCarryPersona(p), false, p);
+  for (const p of ['gemini', 'my-cli']) assert.equal(m.canCarryPersona(p), false, p);
 });
 
 test('a new agent never starts on a provider the daemon would refuse', () => {
@@ -25,5 +25,5 @@ test('a new agent never starts on a provider the daemon would refuse', () => {
 test('the refusal names the provider and what to pick instead', () => {
   const why = m.personaRefusal('gemini');
   assert.match(why, /^Gemini can’t load a persona/);
-  assert.match(why, /Claude Code, Codex, Antigravity, Grok, Opencode/);
+  assert.match(why, /Claude Code, Codex, Antigravity, Grok, Opencode, Pi/);
 });
