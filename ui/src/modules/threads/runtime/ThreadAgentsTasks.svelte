@@ -38,9 +38,11 @@
   // The shared 1 s clock, read only while something runs.
   const nowMs = $derived(tasks.running.length ? now() : Date.now());
 
-  /** The task opened, by id (it may move from running to finished meanwhile). */
+  /** The task opened, by its item when it has one: a running background
+   *  task's row becomes its card's (or notice's) row when it finishes. */
   let openId = $state<string | null>(null);
-  const opened = $derived(openId ? ([...tasks.running, ...tasks.finished].find((t) => t.id === openId) ?? null) : null);
+  const keyOf = (t: AgentTask): string => t.itemId ?? t.taskId ?? t.id;
+  const opened = $derived(openId ? ([...tasks.running, ...tasks.finished].find((t) => keyOf(t) === openId) ?? null) : null);
   // Another thread: back to its list.
   $effect(() => {
     void sessionId;
@@ -76,12 +78,12 @@
   {@const card = cardOf(t)}
   {#if card}
     <li class="tat-card" data-testid="agents-tasks-row" data-status={t.status}>
-      <RuntimeSubagentCard item={card} activity={children.get(card.id) ?? []} output={p?.output} {sessionId} onopen={() => (openId = t.id)} />
+      <RuntimeSubagentCard item={card} activity={children.get(card.id) ?? []} output={p?.output} {sessionId} onopen={() => (openId = keyOf(t))} />
     </li>
   {:else}
     {@const e = taskElapsed(t, nowMs)}
     <li data-testid="agents-tasks-row" data-status={t.status}>
-      <button type="button" class="tat-row" class:failed={t.status === 'failed'} onclick={() => (openId = t.id)}>
+      <button type="button" class="tat-row" class:failed={t.status === 'failed'} onclick={() => (openId = keyOf(t))}>
         {#if t.status === 'running'}
           <span class="spinner" aria-hidden="true"></span>
         {:else}
@@ -108,7 +110,7 @@
     {@const e = taskElapsed(t, nowMs)}
     <div class="tat-cmd-detail">
       <p class="tat-meta">{STATUS[t.status].label}{t.background ? ' · background' : ''}{e ? ` · ${e}` : ''}</p>
-      {#if t.command}<pre class="tat-command mono" dir="ltr">{t.command}</pre>{/if}
+      {#if t.command && t.command !== t.label}<pre class="tat-command mono" dir="ltr">{t.command}</pre>{/if}
       {#if launch}<RuntimeWorkRow item={launch} output={p?.output?.[launch.id]} cwd={runtimeThreads.get(sessionId)?.cwd ?? null} startOpen={!t.taskId} />{/if}
       {#if t.taskId}
         <RuntimeTaskOutput {sessionId} taskId={t.taskId} live={t.status === 'running'} />

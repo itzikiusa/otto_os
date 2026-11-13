@@ -3,7 +3,8 @@
 //! the frame shapes of Claude Code 2.1.318. Behaviour by prompt text:
 //!
 //! * `bg <secs>`   — a `run_in_background` Bash (`task_started`, the launch
-//!   tool result), "Waiting for it." and `result`; `<secs>` later the task's
+//!   tool result naming a real output file, "tick 1\ntick 2"), "Waiting
+//!   for it." and `result`; `<secs>` later the task's
 //!   `task_notification`, then a turn of its own (lasting ~0.8 s):
 //!   "Background done: ok".
 //! * `agent <secs>` — a background `Agent` call: its `subagent` frames (a
@@ -29,6 +30,19 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+
+/// `<tmp>/claude-<uid>/otto-fake/<session>/tasks/<task>.output` with two
+/// lines of output, as Claude Code lays out a background command's output.
+fn task_output_file(session: &str, task: &str) -> std::path::PathBuf {
+    let tmp = std::env::var_os("CLAUDE_CODE_TMPDIR")
+        .map_or_else(|| "/tmp".into(), std::path::PathBuf::from);
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let dir = tmp.join(format!("claude-{uid}/otto-fake/{session}/tasks"));
+    let file = dir.join(format!("{task}.output"));
+    let _ = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&file, "tick 1\ntick 2\n"));
+    file
+}
 
 fn out(v: Value) {
     let mut o = std::io::stdout().lock();
@@ -226,8 +240,10 @@ fn main() {
                         out(
                             json!({"type":"system","subtype":"task_started","task_id":task,"tool_use_id":tu,"description":"sleep 300","task_type":"local_bash"}),
                         );
+                        // Where Claude Code writes it (the daemon reads it back).
+                        let file = task_output_file(&session, &task);
                         out(
-                            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":tu,"content":format!("Command running in background with ID: {task}. Output is being written to: /tmp/{task}.out")}]},"parent_tool_use_id":null}),
+                            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":tu,"content":format!("Command running in background with ID: {task}. Output is being written to: {}", file.display())}]},"parent_tool_use_id":null}),
                         );
                         text_message(&format!("{mid}b"), "Waiting for it.");
                         result_ok();
