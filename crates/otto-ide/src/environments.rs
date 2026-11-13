@@ -1828,7 +1828,7 @@ mod tests {
         std::fs::create_dir_all(&sibling).unwrap();
 
         let mgr = EnvironmentManager::new(tmp.path().join("data"));
-        let target = IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned(), None);
+        let target = IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned());
 
         // Attach sibling folder and ensure subsequent PUT omitting additional_roots preserves it!
         let after_attach = mgr

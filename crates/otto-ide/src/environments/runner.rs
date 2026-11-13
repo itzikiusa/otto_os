@@ -1409,7 +1409,7 @@ mod tests {
         });
         runs.insert("run_pg".into(), Arc::clone(&handle));
 
-        let target = IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned(), None);
+        let target = IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned());
         let cfg = IdeRunConfig {
             id: "rc_pg".into(),
             name: "PG Test".into(),

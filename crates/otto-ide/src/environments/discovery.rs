@@ -751,15 +751,18 @@ fn discover_shell(
     }
 
     for rel in shell_files {
+        let label = format!("Shell {rel}");
+        let args = vec![rel.clone()];
+        let target_path = Some(rel.clone());
         out.push(make_auto_config(
             root_badge,
             IdeRunnerKind::Shell,
             &rel,
-            format!("Shell {rel}"),
+            label,
             Some("bash"),
-            vec![rel.clone()],
+            args,
             cwd.clone(),
-            Some(rel),
+            target_path,
         ));
     }
 }
@@ -870,7 +873,7 @@ mod tests {
         .unwrap();
         std::fs::write(ts_extra.join("scripts/smoke.sh"), "#!/usr/bin/env bash\n").unwrap();
 
-        let target = IdeTargetSpec::local(go_root.to_string_lossy().into_owned(), None);
+        let target = IdeTargetSpec::local(go_root.to_string_lossy().into_owned());
         let additional = vec![
             rust_extra.to_string_lossy().into_owned(),
             ts_extra.to_string_lossy().into_owned(),
