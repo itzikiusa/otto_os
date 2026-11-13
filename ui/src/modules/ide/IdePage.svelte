@@ -3,7 +3,6 @@
   import { registry } from '../../lib/commands.svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -20,7 +19,6 @@
   import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import IdeBottomDock from './IdeBottomDock.svelte';
   import IdeEditorArea from './IdeEditorArea.svelte';
   import IdeProjectTree from './IdeProjectTree.svelte';
   import { ide, ideBasename } from './ideStore.svelte';
@@ -28,6 +26,8 @@
   import IdeWorkspaceSwitcher from './shell/IdeWorkspaceSwitcher.svelte';
   import { ideAgent } from './store/ideAgentController.svelte';
 
+  const FolderPickerLazy = lazyComponent(() => import('../../lib/components/FolderPicker.svelte'));
+  const IdeBottomDockLazy = lazyComponent(() => import('./IdeBottomDock.svelte'));
   const IdeAgentPanelLazy = lazyComponent(() => import('./IdeAgentPanel.svelte'));
   const IdeSearchEverywhereLazy = lazyComponent(() => import('./IdeSearchEverywhere.svelte'));
   const IdeToolchainsModalLazy = lazyComponent(() => import('./IdeToolchainsModal.svelte'));
@@ -635,7 +635,7 @@
         {#if mobileView === 'files'}
           <IdeProjectTree />
         {:else if mobileView === 'tools'}
-          <IdeBottomDock />
+          <LazyMount lazy={IdeBottomDockLazy} what="bottom tool dock" variant="panel" />
         {:else if mobileView === 'agent'}
           <LazyMount lazy={IdeAgentPanelLazy} what="AI agent" variant="panel" />
         {:else}
@@ -658,7 +658,7 @@
 
         <div class="ide-center-col">
           <IdeEditorArea />
-          <IdeBottomDock />
+          <LazyMount lazy={IdeBottomDockLazy} what="bottom tool dock" quiet />
         </div>
 
         {#if ideAgent.panelOpen}
@@ -680,11 +680,17 @@
   </PageBody>
 
   {#if folderPickerMode}
-    <FolderPicker
-      title={folderPickerMode === 'attach' ? 'Add folder to project' : 'Open project folder'}
-      start={ide.target.kind === 'local' ? ide.target.root : ''}
-      onpick={(p) => void handlePickedFolder(p)}
-      onclose={() => (folderPickerMode = null)}
+    <LazyMount
+      lazy={FolderPickerLazy}
+      what="folder picker"
+      quiet
+      props={{
+        title: folderPickerMode === 'attach' ? 'Add folder to project' : 'Open project folder',
+        start: ide.target.kind === 'local' ? ide.target.root : '',
+        onpick: (p: string) => void handlePickedFolder(p),
+        onclose: () => (folderPickerMode = null),
+      }}
+      onerror={() => (folderPickerMode = null)}
     />
   {/if}
 

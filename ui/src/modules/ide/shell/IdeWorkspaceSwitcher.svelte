@@ -4,10 +4,13 @@
   // a searchable switcher with 1-click folder picker & "Add Folder to Project…".
   import { tick } from 'svelte';
   import Badge from '../../../lib/components/Badge.svelte';
-  import FolderPicker from '../../../lib/components/FolderPicker.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import LazyMount from '../../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
   import { ide, ideBasename } from '../ideStore.svelte';
+
+  const FolderPickerLazy = lazyComponent(() => import('../../../lib/components/FolderPicker.svelte'));
 
   let menuOpen = $state(false);
   let query = $state('');
@@ -273,11 +276,17 @@
 {/if}
 
 {#if folderPickerMode}
-  <FolderPicker
-    title={folderPickerMode === 'attach' ? 'Add folder to project' : 'Open project folder'}
-    start={ide.target.kind === 'local' ? ide.target.root : ''}
-    onpick={(p) => void handlePickedFolder(p)}
-    onclose={() => (folderPickerMode = null)}
+  <LazyMount
+    lazy={FolderPickerLazy}
+    what="folder picker"
+    quiet
+    props={{
+      title: folderPickerMode === 'attach' ? 'Add folder to project' : 'Open project folder',
+      start: ide.target.kind === 'local' ? ide.target.root : '',
+      onpick: (p: string) => void handlePickedFolder(p),
+      onclose: () => (folderPickerMode = null),
+    }}
+    onerror={() => (folderPickerMode = null)}
   />
 {/if}
 
