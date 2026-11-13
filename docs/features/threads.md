@@ -74,6 +74,12 @@ carry into another conversation.
      permission docks, and **Steer** (interrupt/nudge immediately) vs **Queue**
      (hold until the active turn finishes).
 4. **Workspace Inspector (`ThreadInspector`):**
+   - **Agents & tasks** (structured threads, hidden when there are none):
+     every subagent and background task — running first with its elapsed
+     time, the last five finished under one "N finished" line
+     (`runtime/agentTasks.ts`, `ThreadAgentsTasks.svelte`). The strip above
+     the composer names one background task or counts several ("2 running in
+     the background"); tapping it opens this section.
    - **Files:** Workspace file tree + multi-tab file viewer (`Preview | Source`
      for Markdown and images, line-numbered code viewer, `file:line` jump).
    - **Changes:** Working-tree staged/unstaged status + Unified/Split git diff
