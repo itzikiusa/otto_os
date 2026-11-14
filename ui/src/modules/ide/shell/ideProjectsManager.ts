@@ -431,12 +431,22 @@ export async function probeWorkspaceBuildTool(host: {
   const startRoot = host.target.root;
   if (!startRoot) return;
   try {
-    const resp = await api.bg.post<{ tool?: 'maven' | 'gradle' | null; modules?: { tool: 'maven' | 'gradle' }[] }>(
+    const resp = await api.bg.post<{
+      has_maven?: boolean;
+      has_gradle?: boolean;
+      tool?: 'maven' | 'gradle' | null;
+      projects?: { tool?: 'maven' | 'gradle'; kind?: 'maven' | 'gradle' }[];
+      modules?: { tool?: 'maven' | 'gradle'; kind?: 'maven' | 'gradle' }[];
+    }>(
       '/ide/build-tools/model',
       { target: host.targetPayload, roots: host.projectRoots.map((r) => r.path) },
     );
     if (host.target.root !== startRoot) return;
-    const detected = resp.modules?.[0]?.tool ?? resp.tool ?? null;
+    const detected = resp.has_maven
+      ? 'maven'
+      : resp.has_gradle
+        ? 'gradle'
+        : (resp.projects?.[0]?.tool ?? resp.projects?.[0]?.kind ?? resp.modules?.[0]?.tool ?? resp.modules?.[0]?.kind ?? resp.tool ?? null);
     if (detected === 'maven' || detected === 'gradle') {
       host.detectedBuildToolOverride = detected;
       return;

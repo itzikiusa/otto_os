@@ -61,8 +61,8 @@
   const resolvedIdeScheme = $derived(
     quickPrefs.colorScheme === 'auto'
       ? ui.resolvedScheme === 'light'
-        ? 'jetbrains-islands-light'
-        : 'jetbrains-islands-dark'
+        ? quickPrefs.preferredLightScheme
+        : quickPrefs.preferredDarkScheme
       : quickPrefs.colorScheme,
   );
 

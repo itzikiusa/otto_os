@@ -134,7 +134,7 @@
           onblur={() => { if (hoveredMod?.root_dir === mod.root_dir) hoveredMod = null; }}
           onclick={() => toggleNode(modKey)}
           ondblclick={() => void ide.openFile(mod.manifest_path, { preview: false })}
-          title={`Project: ${[mod.group_id, mod.artifact_id].filter(Boolean).join(':') || mod.name}\nLocation: ${formatHomeShortPath(mod.root_dir)}`}
+          title={`Project: ${mod.project_coord || [mod.group_id, mod.artifact_id].filter(Boolean).join(':') || mod.name}\nLocation: ${mod.location_display || formatHomeShortPath(mod.root_dir)}`}
         >
           <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} noflip />
           <span class="bt-mark">{mod.tool === 'gradle' ? 'G' : 'm'}</span>
@@ -243,13 +243,13 @@
               <span class="bt-folder-lbl">Repositories</span>
             </button>
             {#if expanded[repKey]}
-              {#each mod.repositories as rep (rep)}
-                <div class="bt-leaf" dir="ltr">{rep}</div>
+              {#each mod.repositories as rep (`${rep.id}:${rep.url}`)}
+                <div class="bt-leaf" dir="ltr" title={rep.url}>{rep.url && rep.url !== rep.id ? `${rep.id} (${rep.url})` : rep.id}</div>
               {/each}
             {/if}
           {/if}
 
-          {#each mod.modules ?? [] as child (child.root_dir)}
+          {#each mod.modules ?? mod.children ?? [] as child (child.root_dir)}
             {@render moduleTree(child, depth + 1)}
           {/each}
         </div>
@@ -309,8 +309,8 @@
 
   {#if hoveredMod}
     <div class="bt-hover-card" data-testid="ide-bt-module-card">
-      <div class="bt-hc-line"><strong>Project:</strong> <span dir="ltr">{[hoveredMod.group_id, hoveredMod.artifact_id].filter(Boolean).join(':') || hoveredMod.name}</span></div>
-      <div class="bt-hc-line"><strong>Location:</strong> <span dir="ltr">{formatHomeShortPath(hoveredMod.root_dir)}</span></div>
+      <div class="bt-hc-line"><strong>Project:</strong> <span dir="ltr">{hoveredMod.project_coord || [hoveredMod.group_id, hoveredMod.artifact_id].filter(Boolean).join(':') || hoveredMod.name}</span></div>
+      <div class="bt-hc-line"><strong>Location:</strong> <span dir="ltr">{hoveredMod.location_display || formatHomeShortPath(hoveredMod.root_dir)}</span></div>
     </div>
   {/if}
 

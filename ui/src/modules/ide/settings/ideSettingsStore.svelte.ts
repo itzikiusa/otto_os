@@ -258,6 +258,7 @@ const SECTION_ALIASES: Record<string, string> = {
   node: 'lang.node',
   env: 'build.env',
   environment: 'build.env',
+  'build.shell': 'build.env',
   ssh: 'build.ssh',
   debugger: 'build.debugger',
   history: 'vcs.history',

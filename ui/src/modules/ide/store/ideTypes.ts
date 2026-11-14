@@ -161,7 +161,13 @@ export interface IdeBuildToolProfile {
   name?: string;
   kind?: 'maven' | 'gradle' | 'spring' | string;
   source?: string | null;
+  source_project?: string | null;
   active_by_default?: boolean;
+}
+
+export interface IdeBuildToolRepo {
+  id: string;
+  url: string;
 }
 
 export interface IdeBuildToolModule {
@@ -169,14 +175,19 @@ export interface IdeBuildToolModule {
   group_id?: string | null;
   artifact_id?: string | null;
   version?: string | null;
+  project_coord?: string | null;
   tool: 'maven' | 'gradle';
+  kind?: 'maven' | 'gradle';
   root_dir: string;
+  root?: string;
+  location_display?: string | null;
   manifest_path: string;
   lifecycle?: string[];
   plugins?: { name: string; goals?: string[] }[];
   dependencies?: string[];
-  repositories?: string[];
+  repositories?: IdeBuildToolRepo[];
   modules?: IdeBuildToolModule[];
+  children?: IdeBuildToolModule[];
 }
 
 export interface IdeRunConfig {

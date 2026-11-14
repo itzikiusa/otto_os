@@ -304,9 +304,23 @@ export async function upsertRunConfig(host: DebugAndEnvHost, cfg: Partial<IdeRun
   } catch (e) { toastError('Couldn’t save run configuration', e); return null; }
 }
 
+function readPrefsModuleSdkMap(): Record<string, string> {
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem('otto.ide.preferences.v1') : null;
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as { moduleSdkMap?: Record<string, string> };
+    return parsed.moduleSdkMap && typeof parsed.moduleSdkMap === 'object' ? parsed.moduleSdkMap : {};
+  } catch {
+    return {};
+  }
+}
+
 function resolveModuleSdkOverride(host: DebugAndEnvHost, candidatePath?: string | null): string | null {
-  const map = host.projectEnv?.module_sdks;
-  if (!map || !candidatePath) return null;
+  if (!candidatePath) return null;
+  const envMap = host.projectEnv?.module_sdks;
+  const map = envMap && Object.keys(envMap).length > 0
+    ? { ...readPrefsModuleSdkMap(), ...envMap }
+    : readPrefsModuleSdkMap();
   let bestLen = 0;
   let bestSdk: string | null = null;
   for (const [modRoot, sdkPath] of Object.entries(map)) {
@@ -540,15 +554,34 @@ export async function createProjectPythonVenv(
   host: DebugAndEnvHost & { loadEnvironments(): Promise<void>; saveEnvironment(p: Partial<IdeProjectEnvironment>): Promise<boolean> },
   venvDir = '.venv',
   pythonVersion?: string,
+  moduleRoot?: string,
 ): Promise<{ path: string; interpreter_path: string; version: string } | null> {
+  const effectiveRoot = (moduleRoot || host.target.root).replace(/\/+$/, '');
   try {
-    const resp = await api.long.post<{ path: string; interpreter_path: string; version: string }>(
-      '/ide/environments/python-venv',
-      { target: host.targetPayload, venv_dir: venvDir, python_version: pythonVersion || undefined },
-    );
+    type RawVenvPayload = { path?: string; interpreter_path?: string; python_path?: string; version?: string };
+    let raw: { venv?: RawVenvPayload } & RawVenvPayload;
+    try {
+      raw = await api.long.post<{ venv?: RawVenvPayload } & RawVenvPayload>(
+        '/ide/toolchains/python-venv',
+        { target: host.targetPayload, root: effectiveRoot, path: venvDir, base_python: pythonVersion || undefined },
+      );
+    } catch {
+      raw = await api.long.post<{ venv?: RawVenvPayload } & RawVenvPayload>(
+        '/ide/environments/python-venv',
+        { target: host.targetPayload, root: effectiveRoot, venv_dir: venvDir, python_version: pythonVersion || undefined },
+      );
+    }
+    const v = raw.venv ?? raw;
+    const normPath = v.path || `${effectiveRoot}/${venvDir.replace(/^\.\//, '')}`;
+    const interp = v.interpreter_path || v.python_path || `${normPath}/bin/python`;
+    const normalized = { path: normPath, interpreter_path: interp, version: v.version || '' };
     await host.loadEnvironments();
-    await host.saveEnvironment({ python_interpreter: resp.interpreter_path });
-    return resp;
+    if (moduleRoot) {
+      await host.saveEnvironment({ module_sdks: { ...(host.projectEnv?.module_sdks ?? {}), [moduleRoot]: interp } });
+    } else {
+      await host.saveEnvironment({ python_interpreter: interp });
+    }
+    return normalized;
   } catch (e) {
     toastError('Couldn’t create Python virtual environment', e);
     return null;

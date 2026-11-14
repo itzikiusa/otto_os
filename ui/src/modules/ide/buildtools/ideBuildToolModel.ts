@@ -145,14 +145,21 @@ async function parseMavenModuleRecursive(
     group_id: groupId,
     artifact_id: artifactId,
     version,
+    project_coord: [groupId, artifactId].filter(Boolean).join(':') || displayName,
     tool: 'maven',
+    kind: 'maven',
     root_dir: cleanDir,
+    root: cleanDir,
+    location_display: formatHomeShortPath(cleanDir),
     manifest_path: pomPath,
     lifecycle: MAVEN_LIFECYCLE,
     plugins: parsePomPlugins(xml),
     dependencies: parsePomDeps(xml),
-    repositories: repoIds.length > 0 ? repoIds : ['central (https://repo.maven.apache.org/maven2)'],
+    repositories: repoIds.length > 0
+      ? repoIds.map((id) => ({ id, url: id }))
+      : [{ id: 'central', url: 'https://repo.maven.apache.org/maven2' }],
     modules: childModules,
+    children: childModules,
   };
 }
 
@@ -181,19 +188,25 @@ async function parseGradleModule(repoRoot: string, springSet: Set<string>): Prom
   const subMods: IdeBuildToolModule[] = includes.slice(0, 25).map((inc) => {
     const rel = inc.replace(/:/g, '/');
     const subRoot = `${cleanDir}/${rel}`;
+    const art = ideBasename(rel);
     return {
       name: inc,
       group_id: group,
-      artifact_id: ideBasename(rel),
+      artifact_id: art,
       version,
+      project_coord: [group, art].filter(Boolean).join(':') || inc,
       tool: 'gradle',
+      kind: 'gradle',
       root_dir: subRoot,
+      root: subRoot,
+      location_display: formatHomeShortPath(subRoot),
       manifest_path: `${subRoot}/build.gradle`,
       lifecycle: GRADLE_LIFECYCLE,
       plugins: [{ name: 'verification', goals: ['test', 'check'] }],
       dependencies: [],
-      repositories: ['mavenCentral()'],
+      repositories: [{ id: 'mavenCentral()', url: 'https://repo.maven.apache.org/maven2' }],
       modules: [],
+      children: [],
     };
   });
 
@@ -202,8 +215,12 @@ async function parseGradleModule(repoRoot: string, springSet: Set<string>): Prom
     group_id: group,
     artifact_id: rootName,
     version,
+    project_coord: [group, rootName].filter(Boolean).join(':') || rootName,
     tool: 'gradle',
+    kind: 'gradle',
     root_dir: cleanDir,
+    root: cleanDir,
+    location_display: formatHomeShortPath(cleanDir),
     manifest_path: manifestPath,
     lifecycle: GRADLE_LIFECYCLE,
     plugins: [
@@ -212,8 +229,101 @@ async function parseGradleModule(repoRoot: string, springSet: Set<string>): Prom
       { name: 'help', goals: ['dependencies', 'projects', 'tasks'] },
     ],
     dependencies: deps,
-    repositories: ['mavenCentral()'],
+    repositories: [{ id: 'mavenCentral()', url: 'https://repo.maven.apache.org/maven2' }],
     modules: subMods,
+    children: subMods,
+  };
+}
+
+interface RawBuildToolProject {
+  name: string;
+  group_id?: string | null;
+  artifact_id?: string | null;
+  version?: string | null;
+  tool?: 'maven' | 'gradle';
+  kind?: 'maven' | 'gradle';
+  project_coord?: string | null;
+  root_dir?: string;
+  root?: string;
+  location_display?: string | null;
+  manifest_path: string;
+  lifecycle?: string[];
+  plugins?: (string | { name: string; goals?: string[] })[];
+  dependencies?: string[];
+  repositories?: (string | { id: string; url?: string })[];
+  modules?: RawBuildToolProject[];
+  children?: RawBuildToolProject[];
+}
+
+function normalizePluginList(
+  raw: (string | { name: string; goals?: string[] })[] | undefined,
+  tool: 'maven' | 'gradle',
+): { name: string; goals: string[] }[] {
+  const byName = new Map<string, string[]>();
+  const addGoal = (plug: string, goal: string): void => {
+    const cur = byName.get(plug) ?? [];
+    if (goal && !cur.includes(goal)) cur.push(goal);
+    byName.set(plug, cur);
+  };
+  for (const item of raw ?? []) {
+    if (typeof item !== 'string') {
+      const cur = byName.get(item.name) ?? [];
+      for (const g of item.goals ?? []) if (!cur.includes(g)) cur.push(g);
+      byName.set(item.name, cur);
+      continue;
+    }
+    const s = item.trim();
+    if (!s) continue;
+    const parts = s.split(':');
+    if (parts.length === 2 && !parts[0].includes('.')) {
+      addGoal(parts[0], s);
+    } else if (parts.length >= 2) {
+      const short = parts[1].replace(/^maven-|-plugin$/g, '') || parts[1];
+      const goals = short === 'spring-boot'
+        ? ['spring-boot:run', 'spring-boot:repackage']
+        : [`${short}:help`, `${short}:run`];
+      for (const g of goals) addGoal(short, g);
+    } else {
+      const short = s.replace(/^maven-|-plugin$/g, '');
+      addGoal(short, tool === 'gradle' && short.includes('spring') ? 'bootRun' : short);
+    }
+  }
+  return [...byName.entries()].map(([name, goals]) => ({ name, goals }));
+}
+
+function normalizeRepoList(raw: (string | { id: string; url?: string })[] | undefined): { id: string; url: string }[] {
+  return (raw ?? []).map((r) => {
+    if (typeof r !== 'string') return { id: r.id, url: r.url || r.id };
+    const paren = r.match(/^([^\s(]+)\s*\(([^)]+)\)$/);
+    if (paren) return { id: paren[1], url: paren[2] };
+    const kv = r.match(/^([^=:]+?)\s*[=:]\s*(https?:\/\/.+)$/);
+    if (kv) return { id: kv[1].trim(), url: kv[2].trim() };
+    return { id: r, url: r };
+  });
+}
+
+function normalizeRawProject(p: RawBuildToolProject, fallbackTool: 'maven' | 'gradle'): IdeBuildToolModule {
+  const tool = p.tool ?? p.kind ?? fallbackTool;
+  const rootDir = normalizeRootPath(p.root_dir ?? p.root ?? '');
+  const children = (p.modules ?? p.children ?? []).map((c) => normalizeRawProject(c, tool));
+  return {
+    name: p.name,
+    group_id: p.group_id ?? null,
+    artifact_id: p.artifact_id ?? null,
+    version: p.version ?? null,
+    project_coord: p.project_coord ?? ([p.group_id, p.artifact_id].filter(Boolean).join(':') || p.name),
+    tool,
+    kind: tool,
+    root_dir: rootDir,
+    root: rootDir,
+    location_display: p.location_display ?? formatHomeShortPath(rootDir),
+    manifest_path: p.manifest_path,
+    lifecycle: p.lifecycle && p.lifecycle.length > 0 ? p.lifecycle : (tool === 'gradle' ? GRADLE_LIFECYCLE : MAVEN_LIFECYCLE),
+    plugins: normalizePluginList(p.plugins, tool),
+    dependencies: p.dependencies ?? [],
+    repositories: normalizeRepoList(p.repositories),
+    modules: children,
+    children,
   };
 }
 
@@ -221,20 +331,39 @@ export async function loadBuildToolWorkspaceModel(): Promise<LoadedBuildToolWork
   const roots = ide.projectRoots.map((r) => r.path);
   try {
     const resp = await api.post<{
+      has_maven?: boolean;
+      has_gradle?: boolean;
       tool?: 'maven' | 'gradle' | null;
       profiles?: IdeBuildToolProfile[];
       spring_profiles?: string[];
-      modules?: IdeBuildToolModule[];
+      projects?: RawBuildToolProject[];
+      modules?: RawBuildToolProject[];
     }>('/ide/build-tools/model', { target: ide.targetPayload, roots });
-    if (resp.modules && resp.modules.length > 0) {
-      const tool = resp.modules[0].tool ?? resp.tool ?? 'maven';
-      ide.detectedBuildToolOverride = tool;
-      return {
-        tool,
-        profiles: resp.profiles ?? [],
-        springProfiles: resp.spring_profiles ?? [],
-        modules: resp.modules,
-      };
+    const rawList = resp.projects ?? resp.modules ?? [];
+    if (rawList.length > 0 || resp.has_maven || resp.has_gradle) {
+      const fallbackTool: 'maven' | 'gradle' = resp.has_maven ? 'maven' : resp.has_gradle ? 'gradle' : (resp.tool ?? 'maven');
+      const modules = rawList.map((p) => normalizeRawProject(p, fallbackTool));
+      const tool: 'maven' | 'gradle' = resp.has_maven ? 'maven' : resp.has_gradle ? 'gradle' : (modules[0]?.tool ?? fallbackTool);
+      const buildProfiles: IdeBuildToolProfile[] = [];
+      const springSet = new Set<string>(resp.spring_profiles ?? []);
+      for (const prof of resp.profiles ?? []) {
+        if (prof.kind === 'spring') {
+          if (prof.id) springSet.add(prof.id);
+        } else if (prof.id) {
+          buildProfiles.push({
+            id: prof.id,
+            name: prof.name ?? prof.id,
+            kind: prof.kind ?? tool,
+            source: prof.source_project ?? prof.source ?? null,
+            source_project: prof.source_project ?? prof.source ?? null,
+            active_by_default: prof.active_by_default,
+          });
+        }
+      }
+      if (modules.length > 0 || resp.has_maven || resp.has_gradle) {
+        ide.detectedBuildToolOverride = tool;
+        return { tool, profiles: buildProfiles, springProfiles: [...springSet], modules };
+      }
     }
   } catch { /* fallback to manifest parser */ }
 

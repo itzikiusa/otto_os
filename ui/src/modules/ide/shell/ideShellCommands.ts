@@ -17,6 +17,16 @@ export type IdeQuickSchemeId =
   | 'vscode-dark-modern'
   | 'vscode-light-modern';
 
+export type IdeDarkSchemeId = 'jetbrains-islands-dark' | 'jetbrains-darcula' | 'vscode-dark-modern';
+export type IdeLightSchemeId = 'jetbrains-islands-light' | 'vscode-light-modern';
+
+export interface QuickSchemePrefs {
+  colorScheme: IdeQuickSchemeId;
+  preferredDarkScheme: IdeDarkSchemeId;
+  preferredLightScheme: IdeLightSchemeId;
+  rainbowBrackets: boolean;
+}
+
 export const QUICK_SCHEME_ITEMS: readonly { id: IdeQuickSchemeId; label: string }[] = [
   { id: 'auto', label: 'Follow Otto (Auto)' },
   { id: 'jetbrains-islands-dark', label: 'JetBrains Islands Dark' },
@@ -26,18 +36,29 @@ export const QUICK_SCHEME_ITEMS: readonly { id: IdeQuickSchemeId; label: string 
   { id: 'vscode-light-modern', label: 'VS Code Light Modern' },
 ];
 
-export function readQuickSchemePrefs(): { colorScheme: IdeQuickSchemeId; rainbowBrackets: boolean } {
+export function readQuickSchemePrefs(): QuickSchemePrefs {
+  const defaults: QuickSchemePrefs = {
+    colorScheme: 'auto',
+    preferredDarkScheme: 'jetbrains-islands-dark',
+    preferredLightScheme: 'jetbrains-islands-light',
+    rainbowBrackets: true,
+  };
   try {
     const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(IDE_PREFS_KEY) : null;
-    if (!raw) return { colorScheme: 'auto', rainbowBrackets: true };
-    const parsed = JSON.parse(raw) as { colorScheme?: IdeQuickSchemeId; rainbowBrackets?: boolean };
-    return { colorScheme: parsed.colorScheme ?? 'auto', rainbowBrackets: parsed.rainbowBrackets ?? true };
+    if (!raw) return defaults;
+    const parsed = JSON.parse(raw) as Partial<QuickSchemePrefs>;
+    return {
+      colorScheme: parsed.colorScheme ?? defaults.colorScheme,
+      preferredDarkScheme: parsed.preferredDarkScheme ?? defaults.preferredDarkScheme,
+      preferredLightScheme: parsed.preferredLightScheme ?? defaults.preferredLightScheme,
+      rainbowBrackets: parsed.rainbowBrackets ?? defaults.rainbowBrackets,
+    };
   } catch {
-    return { colorScheme: 'auto', rainbowBrackets: true };
+    return defaults;
   }
 }
 
-export function writeQuickSchemePref(patch: { colorScheme?: IdeQuickSchemeId; rainbowBrackets?: boolean }): { colorScheme: IdeQuickSchemeId; rainbowBrackets: boolean } {
+export function writeQuickSchemePref(patch: { colorScheme?: IdeQuickSchemeId; rainbowBrackets?: boolean }): QuickSchemePrefs {
   try {
     const raw = localStorage.getItem(IDE_PREFS_KEY);
     const base = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
@@ -50,8 +71,8 @@ export function writeQuickSchemePref(patch: { colorScheme?: IdeQuickSchemeId; ra
 
 export function showIdeSchemeMenu(
   e: MouseEvent,
-  cur: { colorScheme: IdeQuickSchemeId; rainbowBrackets: boolean },
-  onChange: (next: { colorScheme: IdeQuickSchemeId; rainbowBrackets: boolean }) => void,
+  cur: QuickSchemePrefs,
+  onChange: (next: QuickSchemePrefs) => void,
 ): void {
   const items: MenuItem[] = [
     ...QUICK_SCHEME_ITEMS.map((s) => ({
@@ -130,7 +151,7 @@ export function buildIdePaletteCommands(opts: {
     { id: 'ide.toggleAgent', title: 'Toggle AI Agent', group: 'IDE', shortcut: '⌘L', keywords: 'ai assistant chat context', run: opts.onTriggerAgent },
     { id: 'ide.inlineEdit', title: 'Inline AI edit…', group: 'IDE', shortcut: '⌘I', keywords: 'ai refactor rewrite selection', run: () => ideAgent.openInlineEdit() },
     { id: 'ide.toolchains', title: 'Project SDKs & Toolchains…', group: 'IDE', run: () => ide.openSettings('project.sdks') },
-    { id: 'ide.environments', title: 'Shell environment & variables…', group: 'IDE', run: () => ide.openSettings('build.shell') },
+    { id: 'ide.environments', title: 'Shell environment & variables…', group: 'IDE', run: () => ide.openSettings('build.env') },
     { id: 'ide.ssh', title: 'Connect remote SSH project…', group: 'IDE', run: () => ide.openSettings('build.ssh') },
     { id: 'ide.share', title: 'Share live IDE session…', group: 'IDE', run: () => (ide.shareOpen = true) },
     { id: 'ide.plugins', title: 'Manage IDE plugins & language servers…', group: 'IDE', run: () => ide.openSettings('plugins') },

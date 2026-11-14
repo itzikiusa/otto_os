@@ -27,6 +27,20 @@
   let folderPickAction = $state<'module' | 'sdk' | null>(null);
   let sdkPickEco = $state('go');
   let busyInstall = $state<string | null>(null);
+  let venvCreatingFor = $state<string | null>(null);
+
+  async function createModuleVenv(modPath: string): Promise<void> {
+    venvCreatingFor = modPath;
+    try {
+      const res = await ide.createPythonVenv('.venv', undefined, modPath);
+      if (res?.interpreter_path) {
+        ideSettings.draft.moduleSdkMap = { ...ideSettings.draft.moduleSdkMap, [modPath]: res.interpreter_path };
+        toasts.success(`Python .venv ready: ${res.interpreter_path}`);
+      }
+    } finally {
+      venvCreatingFor = null;
+    }
+  }
 
   const platformBadge = $derived(`${ide.targetOs || 'macOS'} · ${ide.targetArch || 'arm64'}${ide.target.kind === 'ssh' ? ` (${ide.target.connection_name || 'SSH'})` : ''}`);
   const allInstalledSdks = $derived(
@@ -183,6 +197,7 @@
 
     <div class="mod-list" data-testid="ide-settings-modules-list">
       {#each ide.projectFolders as mod (mod.path)}
+        {@const curModSdk = ideSettings.draft.moduleSdkMap[mod.path] ?? ''}
         <div class="mod-row">
           <Icon name="folder" size={14} />
           <div class="mod-copy">
@@ -196,14 +211,27 @@
           <select
             class="input mod-sdk-sel"
             aria-label={`SDK for module ${mod.name}`}
-            value={ideSettings.draft.moduleSdkMap[mod.path] ?? ''}
+            value={curModSdk}
             onchange={(e) => { ideSettings.draft.moduleSdkMap = { ...ideSettings.draft.moduleSdkMap, [mod.path]: (e.currentTarget as HTMLSelectElement).value }; }}
           >
             <option value="">Project SDK</option>
+            {#if curModSdk && !allInstalledSdks.some((s) => s.sdk.path === curModSdk) && !ide.pythonVenvs.some((pv) => (pv.interpreter_path || pv.path) === curModSdk) && !ide.detectedSdks.some((det) => (det.home_path || det.path) === curModSdk)}
+              <option value={curModSdk}>{curModSdk}</option>
+            {/if}
             {#each allInstalledSdks as s (`${s.eco}:${s.sdk.path}`)}<option value={s.sdk.path}>{s.ecoName} {s.sdk.version}</option>{/each}
             {#each ide.pythonVenvs as pv (`venv:${pv.interpreter_path || pv.path}`)}<option value={pv.interpreter_path || pv.path}>Python {pv.kind} {pv.version} ({pv.path})</option>{/each}
             {#each ide.detectedSdks as det (`det:${det.ecosystem}:${det.home_path || det.path}`)}<option value={det.home_path || det.path}>{det.label || `${det.ecosystem.toUpperCase()} ${det.version}`}</option>{/each}
           </select>
+          <button
+            type="button"
+            class="btn small ghost"
+            disabled={venvCreatingFor === mod.path}
+            title={`Create Python .venv in ${mod.name}`}
+            onclick={() => void createModuleVenv(mod.path)}
+            data-testid="ide-module-create-venv"
+          >
+            {venvCreatingFor === mod.path ? 'Creating…' : '+ .venv'}
+          </button>
           {#if !mod.isPrimary}
             <button type="button" class="btn small ghost" onclick={() => void ide.removeProjectFolder(mod.path)}>Remove</button>
           {/if}

@@ -275,7 +275,7 @@
       <button
         type="button"
         class="run-foot-btn"
-        onclick={() => { closeMenu(); ide.openSettings('build.shell'); }}
+        onclick={() => { closeMenu(); ide.openSettings('build.env'); }}
       >
         <Icon name="terminal" size={12} />
         <span>Shell env &amp; vars…</span>

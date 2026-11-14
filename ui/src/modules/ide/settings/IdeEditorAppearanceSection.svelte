@@ -62,11 +62,17 @@
     );
   });
 
-  const previewIsDark = $derived.by(() => {
-    const c = ideSettings.draft.colorScheme;
-    if (c === 'auto') return ui.resolvedScheme === 'dark';
-    return c === 'jetbrains-islands-dark' || c === 'jetbrains-darcula' || c === 'vscode-dark-modern';
-  });
+  const previewScheme = $derived(
+    ideSettings.draft.colorScheme === 'auto'
+      ? ui.resolvedScheme === 'light'
+        ? ideSettings.draft.preferredLightScheme
+        : ideSettings.draft.preferredDarkScheme
+      : ideSettings.draft.colorScheme,
+  );
+
+  const previewIsDark = $derived(
+    previewScheme === 'jetbrains-islands-dark' || previewScheme === 'jetbrains-darcula' || previewScheme === 'vscode-dark-modern',
+  );
 
   function openProjectLocalHistory(): void {
     ide.settingsOpen = false;
@@ -235,7 +241,7 @@
   </div>
 
 {:else if section === 'editor.colors' || section === 'editor.rainbow'}
-  <div class="ea-sec" data-testid="ide-settings-colors">
+  <div class="ea-sec" data-testid="ide-settings-colors" data-preview-scheme={previewScheme}>
     <div class="ea-card">
       <label class="ea-lbl" for="ea-color-scheme">Scheme:</label>
       <select id="ea-color-scheme" class="input" bind:value={ideSettings.draft.colorScheme}>
@@ -254,16 +260,16 @@
       </div>
     </div>
 
-    <div class="code-preview" class:otto-force-dark={previewIsDark} dir="ltr" data-testid="ide-color-scheme-preview">
+    <div class="code-preview" class:otto-force-dark={previewIsDark} data-ide-scheme={previewScheme} dir="ltr" data-testid="ide-color-scheme-preview">
       <div class="cp-head">
         <span>Go &amp; Java Live Token Preview ({EDITOR_SCHEMES.find((s) => s.id === ideSettings.draft.colorScheme)?.label})</span>
         <Badge tone="accent" variant="outline" label={ideSettings.draft.rainbowBrackets ? 'Rainbow On' : 'Standard Brackets'} />
       </div>
-      <pre class="cp-code"><span class="tok-kw">package</span> service
+      <pre class="cp-code"><span class="kw">package</span> service
 
-<span class="tok-kw">func</span> <span class="tok-fn">LoadPromotion</span><span class:rb1={ideSettings.draft.rainbowBrackets}>(</span>ctx Context, id <span class="tok-ty">int64</span><span class:rb1={ideSettings.draft.rainbowBrackets}>)</span> <span class:rb1={ideSettings.draft.rainbowBrackets}>&#123;</span>
-    cfg := map<span class:rb2={ideSettings.draft.rainbowBrackets}>[</span><span class="tok-ty">string</span><span class:rb2={ideSettings.draft.rainbowBrackets}>]</span><span class="tok-ty">any</span><span class:rb2={ideSettings.draft.rainbowBrackets}>&#123;</span><span class="tok-str">"limit"</span>: <span class="tok-num">100</span>, <span class="tok-str">"nested"</span>: <span class:rb3={ideSettings.draft.rainbowBrackets}>[</span><span class:rb4={ideSettings.draft.rainbowBrackets}>(</span><span class="tok-num">42</span><span class:rb4={ideSettings.draft.rainbowBrackets}>)</span><span class:rb3={ideSettings.draft.rainbowBrackets}>]</span><span class:rb2={ideSettings.draft.rainbowBrackets}>&#125;</span>
-    logger.<span class="tok-fn">InfoF</span><span class:rb2={ideSettings.draft.rainbowBrackets}>(</span>ctx, <span class="tok-str">"loaded %v"</span>, cfg<span class:rb2={ideSettings.draft.rainbowBrackets}>)</span>
+<span class="kw">func</span> <span class="fn">LoadPromotion</span><span class:rb1={ideSettings.draft.rainbowBrackets}>(</span>ctx Context, id <span class="ty">int64</span><span class:rb1={ideSettings.draft.rainbowBrackets}>)</span> <span class:rb1={ideSettings.draft.rainbowBrackets}>&#123;</span>
+    cfg := map<span class:rb2={ideSettings.draft.rainbowBrackets}>[</span><span class="ty">string</span><span class:rb2={ideSettings.draft.rainbowBrackets}>]</span><span class="ty">any</span><span class:rb2={ideSettings.draft.rainbowBrackets}>&#123;</span><span class="str">"limit"</span>: <span class="num">100</span>, <span class="str">"nested"</span>: <span class:rb3={ideSettings.draft.rainbowBrackets}>[</span><span class:rb4={ideSettings.draft.rainbowBrackets}>(</span><span class="num">42</span><span class:rb4={ideSettings.draft.rainbowBrackets}>)</span><span class:rb3={ideSettings.draft.rainbowBrackets}>]</span><span class:rb2={ideSettings.draft.rainbowBrackets}>&#125;</span>
+    logger.<span class="fn">InfoF</span><span class:rb2={ideSettings.draft.rainbowBrackets}>(</span>ctx, <span class="str">"loaded %v"</span>, cfg<span class:rb2={ideSettings.draft.rainbowBrackets}>)</span>
 <span class:rb1={ideSettings.draft.rainbowBrackets}>&#125;</span></pre>
     </div>
   </div>
@@ -368,16 +374,20 @@
   .km-act { font-weight: 500; }
   .km-kbd { font-family: var(--font-mono); padding: 2px 6px; border-radius: var(--radius-s); background: var(--surface-2); border: 1px solid var(--border); color: var(--text-dim); }
   .km-kbd.is-selected { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-text); font-weight: 600; }
-  .code-preview { border: 1px solid var(--border-strong); border-radius: var(--radius-s); background: var(--term-bg); color: var(--text); overflow: hidden; }
+  .ea-sec[data-preview-scheme] { --syn-bg: var(--term-bg); --syn-fg: var(--text); --syn-keyword: var(--code-keyword); --syn-func-decl: var(--accent-text); --syn-string: var(--code-string); --syn-type: var(--info); --syn-number: var(--warning); --syn-rb-1: var(--warning); --syn-rb-2: var(--accent-text); --syn-rb-3: var(--info); --syn-rb-4: var(--success); }
+  .ea-sec[data-preview-scheme='jetbrains-darcula'] { --syn-bg: var(--surface); --syn-keyword: var(--warning); --syn-func-decl: var(--cat-2); --syn-string: var(--cat-3); --syn-type: var(--cat-4); --syn-number: var(--cat-1); }
+  .ea-sec[data-preview-scheme='vscode-dark-modern'] { --syn-bg: var(--term-bg); --syn-keyword: var(--cat-1); --syn-func-decl: var(--cat-2); --syn-string: var(--code-number); --syn-type: var(--cat-6); --syn-number: var(--cat-3); }
+  .ea-sec[data-preview-scheme='jetbrains-islands-light'], .ea-sec[data-preview-scheme='vscode-light-modern'] { --syn-bg: var(--surface); --syn-fg: var(--text); --syn-keyword: var(--cat-4); --syn-func-decl: var(--cat-1); --syn-string: var(--cat-3); --syn-type: var(--cat-6); }
+  .code-preview { border: 1px solid var(--border-strong); border-radius: var(--radius-s); background: var(--syn-bg, var(--term-bg)); color: var(--syn-fg, var(--text)); overflow: hidden; }
   .cp-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; background: var(--surface-2); border-block-end: 1px solid var(--border); font-size: var(--fs-xs); font-weight: 600; }
   .cp-code { margin: 0; padding: 12px; font-family: var(--font-mono); font-size: var(--fs-xs); line-height: 1.6; overflow-x: auto; }
-  .tok-kw { color: var(--code-keyword); font-weight: 600; }
-  .tok-fn { color: var(--accent-text); }
-  .tok-ty { color: var(--code-builtin); }
-  .tok-str { color: var(--code-string); }
-  .tok-num { color: var(--code-number); }
-  .rb1 { color: var(--warning); font-weight: 600; }
-  .rb2 { color: var(--cat-3); font-weight: 600; }
-  .rb3 { color: var(--info); font-weight: 600; }
-  .rb4 { color: var(--success); font-weight: 600; }
+  .kw { color: var(--syn-keyword, var(--code-keyword)); font-weight: 600; }
+  .fn { color: var(--syn-func-decl, var(--accent-text)); }
+  .ty { color: var(--syn-type, var(--info)); }
+  .str { color: var(--syn-string, var(--code-string)); }
+  .num { color: var(--syn-number, var(--warning)); }
+  .rb1 { color: var(--syn-rb-1, var(--warning)); font-weight: 600; }
+  .rb2 { color: var(--syn-rb-2, var(--accent-text)); font-weight: 600; }
+  .rb3 { color: var(--syn-rb-3, var(--info)); font-weight: 600; }
+  .rb4 { color: var(--syn-rb-4, var(--success)); font-weight: 600; }
 </style>

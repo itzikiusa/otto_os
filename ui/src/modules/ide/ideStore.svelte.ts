@@ -662,8 +662,8 @@ class IdeStore {
   installToolchain(ecosystem: string, component: 'sdk' | 'lsp' | 'dap' | 'all', version?: string): Promise<IdeInstallJob | null> {
     return installToolchainJob(this, ecosystem, component, version, () => this.ensureJobsPoller());
   }
-  createPythonVenv(venvDir = '.venv', pythonVersion?: string): Promise<{ path: string; interpreter_path: string; version: string } | null> {
-    return createProjectPythonVenv(this, venvDir, pythonVersion);
+  createPythonVenv(venvDir = '.venv', pythonVersion?: string, moduleRoot?: string): Promise<{ path: string; interpreter_path: string; version: string } | null> {
+    return createProjectPythonVenv(this, venvDir, pythonVersion, moduleRoot);
   }
   deleteRunConfig(id: string): Promise<void> { return removeSavedRunConfig(this, id); }
   async stopRun(runId?: string): Promise<void> {
