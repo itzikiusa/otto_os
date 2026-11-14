@@ -12,15 +12,16 @@ import type { MenuItem } from '../contextmenu.svelte.ts';
 import { buildIdeVcsContextRows } from './cm-ide-history.ts';
 
 export type ManifestEcosystem = 'go' | 'maven' | 'gradle' | 'npm' | 'cargo' | 'pypi';
-export interface IdeDepVuln { id: string; severity: 'critical' | 'high' | 'medium' | 'low' | string; summary: string; fixed_version?: string | null; }
+export interface IdeDepVuln { id: string; cve?: string | null; severity: 'critical' | 'high' | 'medium' | 'low' | string; summary: string; fixed_version?: string | null; }
 export interface IdeDepManagedLoc { path: string; line: number; }
 export interface IdeDepItem {
-  name: string; current_version: string; latest_version?: string | null;
+  name: string; current_version: string; latest_version?: string | null; latest_patch?: string | null;
   indirect?: boolean; deprecated?: boolean; deprecation_note?: string | null;
-  vulnerabilities?: IdeDepVuln[]; managed_in?: IdeDepManagedLoc | null;
-  line: number; end_line?: number; scope?: string | null;
+  vulnerabilities?: IdeDepVuln[]; managed_in?: IdeDepManagedLoc | null; property_name?: string | null;
+  line: number; end_line?: number; block_start_line?: number; block_end_line?: number; scope?: string | null;
 }
-export interface IdeDepsInspectResponse { ecosystem: string; manifest_path: string; items?: IdeDepItem[]; dependencies?: IdeDepItem[]; actions?: string[]; }
+export type RawRemoteDepItem = Omit<IdeDepItem, 'deprecated'> & { deprecated?: boolean | string | null };
+export interface IdeDepsInspectResponse { ecosystem: string; manifest_path?: string; items?: RawRemoteDepItem[]; dependencies?: RawRemoteDepItem[]; actions?: string[]; }
 
 const MANIFEST_NAMES = new Set(['go.mod', 'pom.xml', 'package.json', 'cargo.toml', 'requirements.txt', 'pyproject.toml', 'build.gradle', 'build.gradle.kts']);
 
@@ -139,19 +140,24 @@ export function parseManifestDependencies(filePath: string, content: string): Id
   return items;
 }
 
-function mergeDepItems(local: IdeDepItem[], remote: IdeDepItem[]): IdeDepItem[] {
-  if (!remote.length) return local;
-  const byKey = new Map(remote.map((r) => [`${r.name}@${r.line}`, r] as const));
-  const byPkg = new Map<string, IdeDepItem>();
+export function normalizeRemoteDepItem(r: RawRemoteDepItem): IdeDepItem {
+  const depMsg = typeof r.deprecated === 'string' ? (r.deprecated.trim() || null) : (r.deprecation_note ?? null);
+  const startLine = r.block_start_line ?? r.line, endLine = r.end_line ?? r.block_end_line ?? r.line;
+  return { ...r, line: r.line >= 1 ? r.line : startLine, block_start_line: startLine, block_end_line: endLine, end_line: endLine, latest_patch: r.latest_patch ?? null, deprecated: Boolean(r.deprecated), deprecation_note: depMsg, vulnerabilities: r.vulnerabilities ?? [], managed_in: r.managed_in ?? null };
+}
+export function mergeDepItems(local: IdeDepItem[], rawRemote: RawRemoteDepItem[]): IdeDepItem[] {
+  if (!rawRemote.length) return local;
+  const remote = rawRemote.map(normalizeRemoteDepItem), byKey = new Map(remote.map((r) => [`${r.name}@${r.line}`, r] as const)), byPkg = new Map<string, IdeDepItem>();
   for (const r of remote) if (!byPkg.has(r.name)) byPkg.set(r.name, r);
   const merged = local.map((loc) => {
     const hit = byKey.get(`${loc.name}@${loc.line}`) ?? byPkg.get(loc.name);
-    return hit ? { ...loc, ...hit, line: hit.line >= 1 ? hit.line : loc.line, end_line: hit.end_line ?? loc.end_line ?? loc.line, deprecated: Boolean(hit.deprecated ?? loc.deprecated), deprecation_note: hit.deprecation_note ?? loc.deprecation_note ?? null, vulnerabilities: hit.vulnerabilities ?? loc.vulnerabilities ?? [], managed_in: hit.managed_in ?? loc.managed_in ?? null } : loc;
+    if (!hit) return loc;
+    const blockStart = hit.block_start_line ?? loc.block_start_line ?? loc.line, blockEnd = Math.max(hit.end_line ?? hit.line, loc.end_line ?? loc.line);
+    return { ...loc, ...hit, line: hit.line >= 1 ? hit.line : loc.line, block_start_line: blockStart, block_end_line: blockEnd, end_line: blockEnd, latest_patch: hit.latest_patch ?? loc.latest_patch ?? null, deprecated: Boolean(hit.deprecated || loc.deprecated), deprecation_note: hit.deprecation_note ?? loc.deprecation_note ?? null, vulnerabilities: hit.vulnerabilities?.length ? hit.vulnerabilities : (loc.vulnerabilities ?? []), managed_in: hit.managed_in ?? loc.managed_in ?? null };
   });
-  for (const r of remote) if (!merged.some((m) => m.name === r.name && m.line === r.line)) merged.push(r);
+  for (const r of remote) if (!merged.some((m) => m.name === r.name && (m.line === r.line || (m.block_start_line ?? m.line) === (r.block_start_line ?? r.line)))) merged.push(r);
   return merged;
 }
-
 export async function inspectIdeDependencies(opts: { root: string; connectionId?: string | null; projectFolders?: string[]; path: string; content: string; signal?: AbortSignal }): Promise<IdeDepItem[]> {
   const local = parseManifestDependencies(opts.path, opts.content);
   if (!opts.root) return local;
@@ -161,33 +167,59 @@ export async function inspectIdeDependencies(opts: { root: string; connectionId?
     return mergeDepItems(local, resp.items ?? resp.dependencies ?? []);
   } catch { return local; }
 }
-
+export function normalizeIdeDepAction(action: string, eco?: ManifestEcosystem | null): string {
+  if (action === 'update_single' || action === 'upgrade') return 'update_one';
+  if (action === 'update_all') return 'update_all_latest';
+  if (action === 'update_direct') return 'update_direct_latest';
+  return action === 'sync' && eco === 'maven' ? 'maven_sync' : action === 'sync' && eco === 'gradle' ? 'gradle_sync' : action;
+}
 export function applyFallbackManifestVersionUpdate(content: string, dep: IdeDepItem, nextVersion: string): string {
-  const lines = content.split('\n'), s = Math.max(0, dep.line - 1), e = Math.min(lines.length - 1, Math.max(s, (dep.end_line ?? dep.line) - 1));
-  for (let i = s; i <= e; i++) {
-    if (dep.current_version && dep.current_version !== 'managed' && lines[i].includes(dep.current_version)) {
-      lines[i] = lines[i].replace(dep.current_version, nextVersion);
-      return lines.join('\n');
-    }
+  if (dep.property_name) {
+    const esc = dep.property_name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), propRe = new RegExp(`(<${esc}>)([^<]+)(</${esc}>)`);
+    if (propRe.test(content)) return content.replace(propRe, `$1${nextVersion}$3`);
   }
+  const lines = content.split('\n'), s = Math.max(0, (dep.block_start_line ?? dep.line) - 1), e = Math.min(lines.length - 1, Math.max(s, (dep.end_line ?? dep.block_end_line ?? dep.line) - 1));
+  for (let i = s; i <= e; i++) if (dep.current_version && dep.current_version !== 'managed' && lines[i].includes(dep.current_version)) { lines[i] = lines[i].replace(dep.current_version, nextVersion); return lines.join('\n'); }
   return content;
 }
-
-export async function executeIdeDepAction(opts: { root: string; connectionId?: string | null; projectFolders?: string[]; path: string; content: string; action: string; dep?: IdeDepItem | null; version?: string | null }): Promise<{ ok: boolean; updated_content?: string; output?: string }> {
+export function applyBatchFallbackManifestUpdates(content: string, deps: IdeDepItem[], mode: string): { updated: string; count: number } {
+  const directOnly = mode.includes('direct'), patchOnly = mode.includes('patch');
+  let cur = content, count = 0;
+  for (const d of [...deps].sort((a, b) => b.line - a.line)) {
+    if (directOnly && d.indirect) continue;
+    const fixedVer = d.vulnerabilities?.find((v) => v.fixed_version)?.fixed_version ?? null;
+    const target = patchOnly ? (d.latest_patch ?? fixedVer) : (d.latest_version ?? d.latest_patch ?? fixedVer);
+    if (!target || !isVersionOutdated(d.current_version, target)) continue;
+    const next = applyFallbackManifestVersionUpdate(cur, d, target);
+    if (next !== cur) { cur = next; count++; }
+  }
+  return { updated: cur, count };
+}
+export async function executeIdeDepAction(opts: { root: string; connectionId?: string | null; projectFolders?: string[]; path: string; content: string; action: string; dep?: IdeDepItem | null; version?: string | null; deps?: IdeDepItem[] }): Promise<{ ok: boolean; updated_content?: string; output?: string; items?: IdeDepItem[] }> {
   const [{ api }, { toasts }] = await Promise.all([import('../api/client.ts'), import('../toast.svelte.ts')]);
+  const eco = detectManifestEcosystem(opts.path);
+  if (opts.action === 'vuln_scan') {
+    const items = await inspectIdeDependencies({ root: opts.root, connectionId: opts.connectionId, projectFolders: opts.projectFolders, path: opts.path, content: opts.content });
+    const cveCount = items.reduce((sum, d) => sum + (d.vulnerabilities?.length ?? 0), 0);
+    if (cveCount > 0) toasts.error('Vulnerability scan complete', `${cveCount} security advisories found in manifest.`);
+    else toasts.success('Vulnerability scan complete', '0 known CVEs found in manifest dependencies.');
+    return { ok: true, items, output: `${cveCount} vulnerabilities` };
+  }
+  const normAction = normalizeIdeDepAction(opts.action, eco);
   try {
-    const resp = await api.post<{ ok?: boolean; updated_content?: string; content?: string; output?: string; stdout?: string }>('/ide/deps/action', { target: { kind: opts.connectionId ? 'ssh' : 'local', root: opts.root, connection_id: opts.connectionId ?? null, additional_roots: opts.projectFolders }, path: opts.path, action: opts.action, module: opts.dep?.name ?? null, package: opts.dep?.name ?? null, dependency: opts.dep?.name ?? null, version: opts.version ?? null, content: opts.content });
-    const ok = resp.ok !== false;
-    const out = resp.output ?? resp.stdout;
-    const updated_content = resp.updated_content ?? resp.content;
-    if (ok) toasts.success('Dependency action complete', out?.slice(0, 120) || opts.action);
+    const resp = await api.post<{ ok?: boolean; updated_content?: string; content?: string; output?: string; stdout?: string }>('/ide/deps/action', { target: { kind: opts.connectionId ? 'ssh' : 'local', root: opts.root, connection_id: opts.connectionId ?? null, additional_roots: opts.projectFolders }, path: opts.path, action: normAction, module: opts.dep?.name ?? undefined, version: opts.version ?? undefined, content: opts.content });
+    const ok = resp.ok !== false, out = resp.output ?? resp.stdout, updated_content = resp.updated_content ?? resp.content;
+    if (ok) { if (normAction === 'why') toasts.info(`go mod why ${opts.dep?.name ?? ''}`.trim(), (out ?? '').trim().slice(0, 220) || 'Module is required by build graph.'); else toasts.success('Dependency action complete', out?.slice(0, 120) || normAction); }
     return { ok, updated_content, output: out };
   } catch {
-    if ((opts.action === 'update_one' || opts.action === 'upgrade') && opts.dep && opts.version) {
+    if (normAction === 'update_one' && opts.dep && opts.version) {
       const updated = applyFallbackManifestVersionUpdate(opts.content, opts.dep, opts.version);
       if (updated !== opts.content) { toasts.success(`Updated ${opts.dep.name}`, `${opts.dep.current_version} → ${opts.version}`); return { ok: true, updated_content: updated }; }
+    } else if (normAction === 'update_all_latest' || normAction === 'update_all_patch' || normAction === 'update_direct_latest' || normAction === 'update_direct_patch') {
+      const { updated, count } = applyBatchFallbackManifestUpdates(opts.content, opts.deps?.length ? opts.deps : parseManifestDependencies(opts.path, opts.content), normAction);
+      if (count > 0 && updated !== opts.content) { toasts.success(`Updated ${count} dependencies`, normAction); return { ok: true, updated_content: updated }; }
     }
-    toasts.info('Dependency action queued', `Run ${opts.action} when toolchain is ready.`);
+    toasts.info('Dependency action queued', `Run ${normAction} when toolchain is ready.`);
     return { ok: false };
   }
 }
@@ -195,7 +227,7 @@ export async function executeIdeDepAction(opts: { root: string; connectionId?: s
 const setManifestDepsEffect = StateEffect.define<IdeDepItem[]>();
 const manifestDepsField = StateField.define<IdeDepItem[]>({ create: () => [], update: (v, tr) => { for (const e of tr.effects) if (e.is(setManifestDepsEffect)) return e.value; return v; } });
 export const getManifestAllDeps = (state: EditorState): IdeDepItem[] => state.field(manifestDepsField, false) ?? [];
-export const getManifestDepAtLine = (state: EditorState, line: number): IdeDepItem | null => getManifestAllDeps(state).find((d) => line >= d.line && line <= (d.end_line ?? d.line)) ?? null;
+export const getManifestDepAtLine = (state: EditorState, line: number): IdeDepItem | null => getManifestAllDeps(state).find((d) => line >= (d.block_start_line ?? d.line) && line <= (d.end_line ?? d.block_end_line ?? d.line)) ?? null;
 
 class ManifestCodeVisionWidget extends WidgetType {
   actions: Array<{ label: string; action: string }>; onRun: (action: string) => void;
@@ -252,7 +284,8 @@ export function createIdeDepsExtension(opts: CreateIdeDepsExtensionOptions): Ext
   const eco = detectManifestEcosystem(opts.filePath);
   if (!eco) return [];
   const triggerAction = (view: EditorView, action: string, dep?: IdeDepItem | null, version?: string | null) => {
-    void executeIdeDepAction({ root: opts.root, connectionId: opts.connectionId, projectFolders: opts.projectFolders, path: opts.filePath, content: view.state.doc.toString(), action, dep, version }).then((res) => {
+    void executeIdeDepAction({ root: opts.root, connectionId: opts.connectionId, projectFolders: opts.projectFolders, path: opts.filePath, content: view.state.doc.toString(), action, dep, version, deps: getManifestAllDeps(view.state) }).then((res) => {
+      if (res.items && view.dom.isConnected) { view.dispatch({ effects: setManifestDepsEffect.of(res.items) }); opts.onDepsUpdated?.(res.items); }
       if (res.updated_content && res.updated_content !== view.state.doc.toString()) opts.onApplyContent(res.updated_content);
     });
   };
@@ -305,7 +338,7 @@ export function createIdeDepsExtension(opts: CreateIdeDepsExtensionOptions): Ext
       for (let ln = 1; ln <= Math.min(doc.lines, 80); ln++) {
         const lineObj = doc.line(ln), t = lineObj.text.trim();
         if (eco === 'go' && (/^require\s*\(/.test(t) || /^require\s+\S+/.test(t))) {
-          ranges.push(Decoration.widget({ widget: new ManifestCodeVisionWidget([{ label: '↻ Update all dependencies', action: 'update_all' }, { label: '↻ Update direct dependencies', action: 'update_direct' }, { label: '🧹 Go Mod Tidy', action: 'tidy' }], (act) => triggerAction(view, act)), side: 1 }).range(lineObj.to)); break;
+          ranges.push(Decoration.widget({ widget: new ManifestCodeVisionWidget([{ label: '↻ Update all dependencies', action: 'update_all_latest' }, { label: '↻ Update direct dependencies', action: 'update_direct_latest' }, { label: '🧹 Go Mod Tidy', action: 'tidy' }], (act) => triggerAction(view, act)), side: 1 }).range(lineObj.to)); break;
         }
         if (eco === 'maven' && t === '<dependencies>') {
           ranges.push(Decoration.widget({ widget: new ManifestCodeVisionWidget([{ label: '↻ Sync Maven', action: 'maven_sync' }, { label: '🛡 Vulnerability Scan', action: 'vuln_scan' }], (act) => triggerAction(view, act)), side: 1 }).range(lineObj.to)); break;
@@ -314,19 +347,26 @@ export function createIdeDepsExtension(opts: CreateIdeDepsExtensionOptions): Ext
           ranges.push(Decoration.widget({ widget: new ManifestCodeVisionWidget([{ label: '↻ Sync Gradle', action: 'gradle_sync' }, { label: '🛡 Vulnerability Scan', action: 'vuln_scan' }], (act) => triggerAction(view, act)), side: 1 }).range(lineObj.to)); break;
         }
         if ((eco === 'npm' && /^"dependencies"\s*:/.test(t)) || (eco === 'cargo' && t === '[dependencies]') || (eco === 'pypi' && (ln === 1 || /^dependencies\s*=/.test(t) || /^\[tool\.poetry\.dependencies\]/.test(t)))) {
-          ranges.push(Decoration.widget({ widget: new ManifestCodeVisionWidget([{ label: '↻ Update dependencies', action: 'update_all' }, { label: '🛡 Vulnerability Scan', action: 'vuln_scan' }], (act) => triggerAction(view, act)), side: 1 }).range(lineObj.to)); break;
+          ranges.push(Decoration.widget({ widget: new ManifestCodeVisionWidget([{ label: '↻ Update dependencies', action: 'update_all_latest' }, { label: '🛡 Vulnerability Scan', action: 'vuln_scan' }], (act) => triggerAction(view, act)), side: 1 }).range(lineObj.to)); break;
         }
       }
       for (const d of deps) {
+        const blkStart = Math.max(1, Math.min(doc.lines, d.block_start_line ?? d.line));
+        const blkEnd = Math.min(doc.lines, Math.max(blkStart, d.end_line ?? d.block_end_line ?? d.line));
         if (d.line < 1 || d.line > doc.lines) continue;
-        const startLn = doc.line(d.line), endLn = doc.line(Math.min(doc.lines, Math.max(d.line, d.end_line ?? d.line)));
+        const startLn = doc.line(blkStart), endLn = doc.line(blkEnd);
         if (d.deprecated) {
-          const artifact = d.name.includes(':') ? d.name.split(':')[1] : d.name, idx = startLn.text.indexOf(artifact);
-          const f = idx >= 0 ? startLn.from + idx : startLn.from + (startLn.text.length - startLn.text.trimStart().length), t = idx >= 0 ? f + artifact.length : startLn.to;
-          if (t > f) ranges.push(Decoration.mark({ class: 'cm-ide-dep-deprecated', attributes: { 'data-testid': 'ide-dep-deprecated' } }).range(f, t));
+          const artifact = d.name.includes(':') ? d.name.split(':')[1] : d.name;
+          let depFrom = -1, depTo = -1;
+          for (let l = blkStart; l <= blkEnd; l++) {
+            const lo = doc.line(l), idx = lo.text.indexOf(artifact);
+            if (idx >= 0) { depFrom = lo.from + idx; depTo = depFrom + artifact.length; break; }
+          }
+          if (depFrom < 0) { const anch = doc.line(d.line); depFrom = anch.from + (anch.text.length - anch.text.trimStart().length); depTo = anch.to; }
+          if (depTo > depFrom) ranges.push(Decoration.mark({ class: 'cm-ide-dep-deprecated', attributes: { 'data-testid': 'ide-dep-deprecated' } }).range(depFrom, depTo));
         }
         if (isVersionOutdated(d.current_version, d.latest_version)) {
-          for (let l = d.line; l <= endLn.number; l++) {
+          for (let l = blkStart; l <= blkEnd; l++) {
             const lo = doc.line(l), vIdx = lo.text.indexOf(d.current_version);
             if (vIdx >= 0) { ranges.push(Decoration.mark({ class: 'cm-ide-dep-outdated', attributes: { 'data-testid': 'ide-dep-outdated' } }).range(lo.from + vIdx, lo.from + vIdx + d.current_version.length)); break; }
           }
@@ -361,7 +401,7 @@ export function createIdeDepsExtension(opts: CreateIdeDepsExtensionOptions): Ext
           b.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); fn(); }); foot.appendChild(b);
         };
         if (targetVer && targetVer !== dep.current_version) mkBtn(`Update to ${targetVer}`, () => triggerAction(view, 'update_one', dep, targetVer));
-        mkBtn('Update dependencies... ⌥⇧⏎', () => triggerAction(view, 'update_all', dep));
+        mkBtn('Update dependencies... ⌥⇧⏎', () => triggerAction(view, 'update_all_latest', dep));
         mkBtn('More actions... ⌥⏎', () => opts.onOpenIntentionMenu?.(dep.line, dep));
         dom.appendChild(foot);
         return { dom };
@@ -394,7 +434,7 @@ export function createIdeDepsExtension(opts: CreateIdeDepsExtensionOptions): Ext
             { label: 'Dependency Tree', icon: 'layers', action: () => opts.onOpenDepAnalyzer?.() },
           );
         } else {
-          items.push({ label: 'Update Dependencies', icon: 'refresh', action: () => triggerAction(view, 'update_all') }, { label: 'Dependency Analyzer', icon: 'layers', action: () => opts.onOpenDepAnalyzer?.() });
+          items.push({ label: 'Update Dependencies', icon: 'refresh', action: () => triggerAction(view, 'update_all_latest') }, { label: 'Dependency Analyzer', icon: 'layers', action: () => opts.onOpenDepAnalyzer?.() });
         }
         const syn = new MouseEvent('contextmenu', { clientX: e.clientX, clientY: e.clientY, bubbles: true });
         void import('../contextmenu.svelte.ts').then(({ ctxMenu }) => ctxMenu.show(syn, items));

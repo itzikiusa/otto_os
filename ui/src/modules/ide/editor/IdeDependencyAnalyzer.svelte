@@ -73,7 +73,7 @@
   async function runAction(action: string, dep?: IdeDepItem | null, version?: string | null): Promise<void> {
     busyAction = action;
     try {
-      const res = await executeIdeDepAction({ root, connectionId, projectFolders, path: filePath, content, action, dep, version });
+      const res = await executeIdeDepAction({ root, connectionId, projectFolders, path: filePath, content, action, dep, version, deps: items });
       if (res.updated_content && res.updated_content !== content) onapplycontent(res.updated_content);
       await refreshDeps();
     } finally {
@@ -103,13 +103,13 @@
       <button type="button" class="btn small ghost" disabled={loading || Boolean(busyAction)} onclick={() => void refreshDeps()}>
         <Icon name="refresh" size={12} />Refresh
       </button>
-      <button type="button" class="btn small ghost" disabled={readOnly || Boolean(busyAction)} onclick={() => void runAction('update_all')} data-testid="ide-dep-update-all-btn">
+      <button type="button" class="btn small ghost" disabled={readOnly || Boolean(busyAction)} onclick={() => void runAction('update_all_latest')} data-testid="ide-dep-update-all-btn">
         Upgrade all
       </button>
       {#if eco === 'go'}
         <button type="button" class="btn small ghost" disabled={readOnly || Boolean(busyAction)} onclick={() => void runAction('tidy')}>Go Mod Tidy</button>
       {:else}
-        <button type="button" class="btn small ghost" disabled={readOnly || Boolean(busyAction)} onclick={() => void runAction('sync')}>Sync</button>
+        <button type="button" class="btn small ghost" disabled={readOnly || Boolean(busyAction)} onclick={() => void runAction(eco === 'maven' ? 'maven_sync' : eco === 'gradle' ? 'gradle_sync' : 'sync')}>Sync</button>
       {/if}
     </div>
   </div>
@@ -151,6 +151,7 @@
           </div>
           <div class="ide-da-meta" dir="ltr">
             <span>Current: <strong>{selectedDep.current_version || 'managed'}</strong></span>
+            {#if selectedDep.latest_patch}<span>Patch: <strong>{selectedDep.latest_patch}</strong></span>{/if}
             {#if selectedDep.latest_version}<span>Latest: <strong>{selectedDep.latest_version}</strong></span>{/if}
             {#if selectedDep.scope}<span>Scope: {selectedDep.scope}</span>{/if}
           </div>
@@ -184,17 +185,29 @@
             </div>
           {/if}
 
-          {#if selectedDep.latest_version && selectedDep.latest_version !== selectedDep.current_version}
-            <div>
-              <button
-                type="button"
-                class="btn small primary"
-                disabled={readOnly || Boolean(busyAction)}
-                onclick={() => void runAction('update_single', selectedDep, selectedDep.latest_version)}
-                data-testid="ide-dep-upgrade-single-btn"
-              >
-                Upgrade to {selectedDep.latest_version}
-              </button>
+          {#if (selectedDep.latest_version && selectedDep.latest_version !== selectedDep.current_version) || (selectedDep.latest_patch && selectedDep.latest_patch !== selectedDep.current_version)}
+            <div class="ide-da-actions">
+              {#if selectedDep.latest_version && selectedDep.latest_version !== selectedDep.current_version}
+                <button
+                  type="button"
+                  class="btn small primary"
+                  disabled={readOnly || Boolean(busyAction)}
+                  onclick={() => void runAction('update_one', selectedDep, selectedDep.latest_version)}
+                  data-testid="ide-dep-upgrade-single-btn"
+                >
+                  Upgrade to {selectedDep.latest_version}
+                </button>
+              {/if}
+              {#if selectedDep.latest_patch && selectedDep.latest_patch !== selectedDep.current_version && selectedDep.latest_patch !== selectedDep.latest_version}
+                <button
+                  type="button"
+                  class="btn small ghost"
+                  disabled={readOnly || Boolean(busyAction)}
+                  onclick={() => void runAction('update_one', selectedDep, selectedDep.latest_patch)}
+                >
+                  Upgrade to patch {selectedDep.latest_patch}
+                </button>
+              {/if}
             </div>
           {/if}
         </div>

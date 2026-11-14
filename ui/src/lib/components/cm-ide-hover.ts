@@ -7,6 +7,7 @@ import type { Extension } from '@codemirror/state';
 import { EditorView, hoverTooltip } from '@codemirror/view';
 import { applyConcreteEditsToView, computeDeterministicQuickFixes } from './cm-ide-quickfix.ts';
 import { applyClientQuickFix, classifySemanticTokens, detectSemanticLang, getIdeQuickFixesAtLine, type SemanticLangKind } from './cm-ide-semantic.ts';
+import { readIdeEditorPreferences, type IdeEditorPreferences } from './cm-ide-theme.ts';
 
 export interface ParsedQuickDoc {
   symbol: string; kind: string; packageName: string | null; signature: string; summary: string;
@@ -46,6 +47,7 @@ export function sanitizeAndSplitHoverDoc(input: {
   rawDoc?: string | null;
   fullDoc?: string | null;
   definedIn?: { path: string; line: number } | null;
+  compact?: boolean;
 }): ParsedQuickDoc | null {
   let sig = (input.signature ?? '').trim();
   const combinedRaw = [input.fullDoc ?? '', input.rawDoc ?? ''].find((s) => s.trim().length > 0) ?? '';
@@ -92,8 +94,8 @@ export function sanitizeAndSplitHoverDoc(input: {
   let summary = rawParagraphs[0] ?? '';
   const moreParagraphs = rawParagraphs.slice(1);
 
-  // Cap summary to 2-3 concise sentences (<= 240 chars); push overflow to `moreParagraphs`.
-  if (summary.length > 240) {
+  // Cap summary to 2-3 concise sentences (<= 240 chars) in compact mode; push overflow to `moreParagraphs`.
+  if (input.compact !== false && summary.length > 240) {
     const sentences = summary.match(/[^.!?]+[.!?]+(?:\s+|$)|[^.!?]+$/g) ?? [summary];
     let acc = '';
     let restStart = 0;
@@ -138,6 +140,7 @@ export function extractCleanSymbolHoverFromSource(
   docText: string,
   symbol: string,
   lang: SemanticLangKind,
+  compact = true,
 ): ParsedQuickDoc | null {
   if (!docText || !symbol) return null;
   const lines = docText.split(/\r?\n/);
@@ -229,6 +232,7 @@ export function extractCleanSymbolHoverFromSource(
     packageName: pkgName,
     signature: sig,
     rawDoc: docLines.filter(Boolean).join('\n'),
+    compact,
   });
 }
 
@@ -299,6 +303,7 @@ const quickDocTheme = EditorView.baseTheme({
 
 export interface CreateIdeHoverOptions {
   filePath: string; language?: string; root?: string; connectionId?: string | null; projectFolders?: string[];
+  getPreferences?: () => Pick<IdeEditorPreferences, 'compactHover'>;
   onDefinitionJump?: ((target: { path?: string; line: number; column: number; symbol?: string; originLine?: number; originColumn?: number }) => void) | null;
   onFindUsages?: ((ctx: { line: number; column: number; symbol?: string }) => void) | null;
   onQuickFix?: ((ctx: { line: number; column: number; symbol?: string }) => void) | null;
@@ -313,6 +318,7 @@ export function createIdeHoverExtension(opts: CreateIdeHoverOptions): Extension 
   const lang = detectSemanticLang(opts.filePath, opts.language);
   const tip = hoverTooltip(async (view, pos) => {
     if (isDepManifestPath(opts.filePath)) return null;
+    const isCompact = (opts.getPreferences ? opts.getPreferences() : readIdeEditorPreferences()).compactHover !== false;
     const { queryPooledLspHoverMarkdown, tokenSpanAtPos } = await import('./cm-ide-lsp.ts');
     const ln = view.state.doc.lineAt(pos), lineNo = ln.number, char0 = pos - ln.from, docText = view.state.doc.toString();
     const span = tokenSpanAtPos(view.state, pos);
@@ -331,15 +337,15 @@ export function createIdeHoverExtension(opts: CreateIdeHoverOptions): Extension 
           path: opts.filePath, content: docText, line: lineNo, character: char0, column: char0 + 1, symbol: word, project_folders: opts.projectFolders,
         });
         if (resp?.found && (resp.signature || resp.summary || resp.full_doc)) {
-          parsed = sanitizeAndSplitHoverDoc({ symbol: resp.symbol || word, kind: resp.kind, packageName: resp.package_name, signature: resp.signature, rawDoc: resp.summary, fullDoc: resp.full_doc, definedIn: resp.defined_in });
+          parsed = sanitizeAndSplitHoverDoc({ symbol: resp.symbol || word, kind: resp.kind, packageName: resp.package_name, signature: resp.signature, rawDoc: resp.summary, fullDoc: resp.full_doc, definedIn: resp.defined_in, compact: isCompact });
         }
       } catch { /* fall through */ }
     }
     if (!parsed && word) {
       const pooledMd = await queryPooledLspHoverMarkdown(view, pos);
-      if (pooledMd) parsed = sanitizeAndSplitHoverDoc({ symbol: word, rawDoc: pooledMd });
+      if (pooledMd) parsed = sanitizeAndSplitHoverDoc({ symbol: word, rawDoc: pooledMd, compact: isCompact });
     }
-    if (!parsed && word) parsed = extractCleanSymbolHoverFromSource(docText, word, lang);
+    if (!parsed && word) parsed = extractCleanSymbolHoverFromSource(docText, word, lang, isCompact);
     if (!parsed && (primaryLineFix || primaryDetFix)) {
       parsed = { symbol: word || `Line ${lineNo}`, kind: 'inspection', packageName: null, signature: ln.text.trim(), summary: `Quick Fix available: ${(primaryLineFix ?? primaryDetFix)!.title}`, moreParagraphs: [], externalLinks: [], definedIn: null };
     }
@@ -357,15 +363,15 @@ export function createIdeHoverExtension(opts: CreateIdeHoverOptions): Extension 
         dom.appendChild(renderColoredSignature(doc.signature, lang));
 
         if (doc.summary || doc.moreParagraphs.length > 0) {
-          const body = document.createElement('div'); body.className = 'cm-ide-qdoc-body';
+          const body = document.createElement('div'); body.className = `cm-ide-qdoc-body${!isCompact ? ' is-expanded' : ''}`;
           if (doc.summary) {
             const p = document.createElement('p'); p.className = 'cm-ide-qdoc-p'; p.dataset.testid = 'ide-quick-doc-summary';
             appendInlineMarkdown(p, doc.summary); body.appendChild(p);
           }
           if (doc.moreParagraphs.length > 0) {
-            const extraWrap = document.createElement('div'); extraWrap.hidden = true;
+            const extraWrap = document.createElement('div'); extraWrap.hidden = isCompact;
             for (const mp of doc.moreParagraphs) { const p = document.createElement('p'); p.className = 'cm-ide-qdoc-p'; appendInlineMarkdown(p, mp); extraWrap.appendChild(p); }
-            const moreBtn = document.createElement('button'); moreBtn.type = 'button'; moreBtn.className = 'cm-ide-qdoc-act'; moreBtn.dataset.testid = 'ide-hover-expand-btn'; moreBtn.textContent = 'Show full documentation';
+            const moreBtn = document.createElement('button'); moreBtn.type = 'button'; moreBtn.className = 'cm-ide-qdoc-act'; moreBtn.dataset.testid = 'ide-hover-expand-btn'; moreBtn.textContent = isCompact ? 'Show full documentation' : 'Show less';
             moreBtn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); extraWrap.hidden = !extraWrap.hidden; body.classList.toggle('is-expanded', !extraWrap.hidden); moreBtn.textContent = extraWrap.hidden ? 'Show full documentation' : 'Show less'; });
             body.append(extraWrap, moreBtn);
           }

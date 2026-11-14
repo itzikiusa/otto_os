@@ -55,6 +55,10 @@ export interface IdeEditorPreferences {
   rainbowBrackets: boolean;
   showBreadcrumbs: boolean;
   autoFoldImports: boolean;
+  compactHover: boolean;
+  javaUnresolvedImports: boolean;
+  lombokSupport: boolean;
+  unusedImports: boolean;
   formatOnSave: boolean;
   keymapPreset: 'jetbrains' | 'standard';
 }
@@ -72,6 +76,10 @@ export const DEFAULT_IDE_PREFERENCES: IdeEditorPreferences = {
   rainbowBrackets: true,
   showBreadcrumbs: true,
   autoFoldImports: true,
+  compactHover: true,
+  javaUnresolvedImports: true,
+  lombokSupport: true,
+  unusedImports: true,
   formatOnSave: false,
   keymapPreset: 'jetbrains',
 };
@@ -124,8 +132,12 @@ export function readIdeEditorPreferences(): IdeEditorPreferences {
       inlayHints: asBool(p.inlayHints ?? p.showInlayHints ?? p.parameterHints, DEFAULT_IDE_PREFERENCES.inlayHints),
       codeVision: asBool(p.codeVision ?? p.showCodeVision, DEFAULT_IDE_PREFERENCES.codeVision),
       rainbowBrackets: asBool(p.rainbowBrackets, DEFAULT_IDE_PREFERENCES.rainbowBrackets),
-      showBreadcrumbs: asBool(p.showBreadcrumbs ?? p.breadcrumbs, DEFAULT_IDE_PREFERENCES.showBreadcrumbs),
+      showBreadcrumbs: asBool(p.breadcrumbs ?? p.showBreadcrumbs, DEFAULT_IDE_PREFERENCES.showBreadcrumbs),
       autoFoldImports: asBool(p.autoFoldImports ?? p.foldImports, DEFAULT_IDE_PREFERENCES.autoFoldImports),
+      compactHover: asBool(p.compactHover, DEFAULT_IDE_PREFERENCES.compactHover),
+      javaUnresolvedImports: asBool(p.javaUnresolvedImports, DEFAULT_IDE_PREFERENCES.javaUnresolvedImports),
+      lombokSupport: asBool(p.lombokSupport, DEFAULT_IDE_PREFERENCES.lombokSupport),
+      unusedImports: asBool(p.unusedImports, DEFAULT_IDE_PREFERENCES.unusedImports),
       formatOnSave: asBool(p.formatOnSave, legacyFmt),
       keymapPreset: keymapRaw === 'standard' || keymapRaw === 'vscode' ? 'standard' : 'jetbrains',
     };
@@ -145,6 +157,12 @@ export function writeIdeEditorPreferences(patch: Partial<IdeEditorPreferences>):
         ...merged,
         scheme: merged.colorScheme,
         editorScheme: merged.colorScheme,
+        breadcrumbs: merged.showBreadcrumbs,
+        showBreadcrumbs: merged.showBreadcrumbs,
+        preferredDarkScheme: merged.darkColorScheme,
+        darkColorScheme: merged.darkColorScheme,
+        preferredLightScheme: merged.lightColorScheme,
+        lightColorScheme: merged.lightColorScheme,
       };
       localStorage.setItem(IDE_PREFS_STORAGE_KEY, JSON.stringify(next));
       localStorage.setItem('otto.ide.formatOnSave', merged.formatOnSave ? '1' : '0');

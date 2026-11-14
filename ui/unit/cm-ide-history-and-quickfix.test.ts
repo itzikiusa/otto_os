@@ -15,6 +15,20 @@ import {
   computeDeterministicQuickFixes,
   previewConcreteEdits,
 } from '../src/lib/components/cm-ide-quickfix.ts';
+import {
+  applyBatchFallbackManifestUpdates,
+  mergeDepItems,
+  normalizeIdeDepAction,
+  normalizeRemoteDepItem,
+  parseManifestDependencies,
+} from '../src/lib/components/cm-ide-deps.ts';
+import { sanitizeAndSplitHoverDoc } from '../src/lib/components/cm-ide-hover.ts';
+import { analyzeJavaDiagnostics } from '../src/lib/components/cm-ide-semantic.ts';
+import {
+  IDE_PREFS_STORAGE_KEY,
+  readIdeEditorPreferences,
+  writeIdeEditorPreferences,
+} from '../src/lib/components/cm-ide-theme.ts';
 
 function createMemoryStorage(): Storage {
   const map = new Map<string, string>();
@@ -166,4 +180,115 @@ test('Deterministic Quick Fixes generate concrete text edits and live diff previ
   const shFix = computeDeterministicQuickFixes(shDoc, '/ws/run.sh', 'shell', 2).find((f) => f.id.startsWith('sh-quote'));
   assert.ok(shFix);
   assert.ok(previewConcreteEdits(shDoc, shFix.edits).nextText.includes('"$TARGET_DIR"'));
+});
+
+test('Manifest dependency wire contract normalizes string deprecated note, latest_patch, block_end_line, and canonical action IDs', () => {
+  const pom = [
+    '<project>',
+    '  <properties>',
+    '    <jackson.version>2.14.0</jackson.version>',
+    '  </properties>',
+    '  <dependencies>',
+    '    <dependency>',
+    '      <groupId>com.fasterxml.jackson.core</groupId>',
+    '      <artifactId>jackson-databind</artifactId>',
+    '      <version>${jackson.version}</version>',
+    '    </dependency>',
+    '  </dependencies>',
+    '</project>',
+  ].join('\n');
+
+  const local = parseManifestDependencies('/ws/pom.xml', pom);
+  const merged = mergeDepItems(local, [
+    {
+      name: 'com.fasterxml.jackson.core:jackson-databind',
+      current_version: '2.14.0',
+      latest_version: '2.18.2',
+      latest_patch: '2.14.3',
+      deprecated: 'Replaced by faster streaming module',
+      line: 8,
+      block_start_line: 6,
+      block_end_line: 10,
+      property_name: 'jackson.version',
+      vulnerabilities: [{ id: 'GHSA-1234', severity: 'HIGH', summary: 'Deser issue', fixed_version: '2.14.3' }],
+    },
+    normalizeRemoteDepItem({
+      name: 'org.legacy:unmatched-lib',
+      current_version: '1.0.0',
+      latest_version: '2.0.0',
+      latest_patch: '1.0.4',
+      deprecated: 'End of life library',
+      line: 11,
+      block_start_line: 11,
+      block_end_line: 15,
+    }),
+  ]);
+
+  const jackson = merged.find((d) => d.name.endsWith('jackson-databind'))!;
+  assert.equal(jackson.deprecated, true);
+  assert.equal(jackson.deprecation_note, 'Replaced by faster streaming module');
+  assert.equal(jackson.latest_patch, '2.14.3');
+  assert.equal(jackson.block_start_line, 6);
+  assert.equal(jackson.end_line, 10);
+
+  const unmatched = merged.find((d) => d.name === 'org.legacy:unmatched-lib')!;
+  assert.equal(unmatched.deprecated, true);
+  assert.equal(unmatched.deprecation_note, 'End of life library');
+  assert.equal(unmatched.end_line, 15);
+
+  const patchUpdate = applyBatchFallbackManifestUpdates(pom, [jackson], 'update_direct_patch');
+  assert.equal(patchUpdate.count, 1);
+  assert.ok(patchUpdate.updated.includes('<jackson.version>2.14.3</jackson.version>'));
+
+  assert.equal(normalizeIdeDepAction('update_single', 'go'), 'update_one');
+  assert.equal(normalizeIdeDepAction('upgrade', 'npm'), 'update_one');
+  assert.equal(normalizeIdeDepAction('update_all', 'go'), 'update_all_latest');
+  assert.equal(normalizeIdeDepAction('update_direct', 'go'), 'update_direct_latest');
+  assert.equal(normalizeIdeDepAction('sync', 'maven'), 'maven_sync');
+  assert.equal(normalizeIdeDepAction('sync', 'gradle'), 'gradle_sync');
+});
+
+test('Preferences round-trip stays in lockstep with IdeSettingsModal keys and honors hover/Java inspection toggles', () => {
+  const prevStorage = (globalThis as Record<string, unknown>).localStorage;
+  const mem = createMemoryStorage();
+  (globalThis as Record<string, unknown>).localStorage = mem;
+  try {
+    writeIdeEditorPreferences({
+      showBreadcrumbs: true,
+      darkColorScheme: 'jetbrains-darcula',
+      lightColorScheme: 'vscode-light-modern',
+    });
+    const rawAfterSubbar = JSON.parse(mem.getItem(IDE_PREFS_STORAGE_KEY)!) as Record<string, unknown>;
+    assert.equal(rawAfterSubbar.breadcrumbs, true);
+    assert.equal(rawAfterSubbar.preferredDarkScheme, 'jetbrains-darcula');
+    assert.equal(rawAfterSubbar.preferredLightScheme, 'vscode-light-modern');
+
+    // Simulate IdeSettingsModal unchecking Breadcrumbs (`breadcrumbs: false`) and Java inspections
+    mem.setItem(
+      IDE_PREFS_STORAGE_KEY,
+      JSON.stringify({
+        ...rawAfterSubbar,
+        breadcrumbs: false,
+        compactHover: false,
+        javaUnresolvedImports: false,
+        lombokSupport: false,
+        unusedImports: false,
+      }),
+    );
+    const synced = readIdeEditorPreferences();
+    assert.equal(synced.showBreadcrumbs, false, 'IdeSettingsModal breadcrumbs=false must win over stale showBreadcrumbs=true');
+    assert.equal(synced.compactHover, false);
+    assert.equal(synced.javaUnresolvedImports, false);
+    assert.equal(synced.lombokSupport, false);
+    assert.equal(synced.unusedImports, false);
+
+    const javaSrc = 'package demo;\nimport bogus.Nope;\nimport java.util.List;\npublic class Demo {}\n';
+    assert.equal(analyzeJavaDiagnostics(javaSrc, { javaUnresolvedImports: false, unusedImports: false }).diagnostics.length, 0);
+
+    const longDoc = `${'Detailed Go documentation sentence explaining context cancellation semantics cleanly. '.repeat(5)}\n\nSecond paragraph.`;
+    const expandedHover = sanitizeAndSplitHoverDoc({ symbol: 'Run', signature: 'func Run()', rawDoc: longDoc, compact: false })!;
+    assert.ok(expandedHover.summary.length > 240, 'compact=false preserves full first paragraph without 240-char truncation');
+  } finally {
+    (globalThis as Record<string, unknown>).localStorage = prevStorage;
+  }
 });

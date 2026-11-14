@@ -224,6 +224,11 @@
   }
   .crumb-sym-btn:hover { background: var(--accent-soft); }
   .ide-subbar-tools { display: flex; align-items: center; gap: var(--sp-1); flex-wrap: nowrap; flex-shrink: 0; min-inline-size: 0; }
+  .ide-subbar-tools :global(.btn.small) {
+    block-size: 22px;
+    min-block-size: 22px;
+    padding-block: 0;
+  }
   .ide-cursor-meta { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); padding-inline: var(--sp-1); white-space: nowrap; }
   .ide-inspect-btn {
     display: inline-flex; align-items: center; gap: var(--sp-2); block-size: 22px; padding-inline: var(--sp-2);

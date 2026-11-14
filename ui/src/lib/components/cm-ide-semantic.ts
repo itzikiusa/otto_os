@@ -15,8 +15,7 @@ export interface ClientIdeDiagnostic { line: number; column: number; endLine: nu
 
 export function detectSemanticLang(filePath: string, language?: string): SemanticLangKind {
   if (filePath.startsWith('jdt://')) return 'java';
-  const clean = filePath.split('?')[0].toLowerCase();
-  const ext = clean.slice(Math.max(0, clean.lastIndexOf('/'))).split('.').pop() ?? '';
+  const clean = filePath.split('?')[0].toLowerCase(), ext = clean.slice(Math.max(0, clean.lastIndexOf('/'))).split('.').pop() ?? '';
   if (ext === 'go' || language === 'go') return 'go';
   if (ext === 'java' || ext === 'class' || language === 'java') return 'java';
   if (['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'mts', 'cts'].includes(ext) || language === 'typescript' || language === 'javascript') return 'ts';
@@ -26,43 +25,33 @@ export function detectSemanticLang(filePath: string, language?: string): Semanti
   if (['json', 'jsonc', 'jsonl', 'ndjson'].includes(ext) || language === 'json' || language === 'jsonl') return 'json';
   return ext === 'csv' || ext === 'tsv' || language === 'csv' || language === 'tsv' ? 'csv' : 'other';
 }
-
 const CONTROL_KW = new Set('if else for range return switch case default select defer go break continue fallthrough try catch finally throw throws while do match loop await async yield elif except raise with'.split(' '));
 const GENERAL_KW = new Set(('package import func var const type struct interface map chan string int int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 uintptr float32 float64 bool byte rune error any comparable true false nil iota public private protected static final abstract synchronized volatile transient native sealed non-sealed permits class enum record extends implements new instanceof void boolean short long double float char null this super export from let function typeof keyof readonly as in of undefined fn mut pub impl trait mod use where crate self Self unsafe dyn move ref def None True False and or not is lambda pass global nonlocal fi then done esac').split(' '));
 const BOGUS_JAVA_PREFIXES = ['com.nonexistent.', 'org.nonexistent.', 'net.nonexistent.', 'invalid.', 'bogus.', 'fake.', 'unknown.', 'does.not.exist.', 'nonexistent.'];
-
 interface FileSymbolModel {
   pkgVars: Set<string>; typeNames: Set<string>; funcParams: Map<string, string[]>;
   funcDecls: Array<{ name: string; line: number; nameFrom: number; nameTo: number; lineEnd: number }>;
   paramScopes: Array<{ from: number; to: number; params: Set<string> }>; unresolvedIdents: Set<string>;
 }
-
 function splitParamNames(rawParams: string, lang: SemanticLangKind): string[] {
   const names: string[] = [];
   for (const part of rawParams.split(',')) {
     const clean = part.replace(/\/\*[\s\S]*?\*\//g, '').replace(/=[^,]+$/, '').trim();
     if (!clean || clean === 'self' || clean === '&self' || clean === '&mut self' || clean === 'this') continue;
-    const m = lang === 'go' ? /^([A-Za-z_]\w*)(?:\s+(?:\.\.\.)?[*[\]\w.]+)?$/.exec(clean)
-      : lang === 'java' ? /(?:final\s+|@\w+(?:\([^)]*\))?\s+)*[\w<>[\],.?]+\s*(?:\.\.\.)?\s+([A-Za-z_$][\w$]*)$/.exec(clean)
-      : /^(?:pub\s+|private\s+|readonly\s+|mut\s+|\*\*{0,2})?([A-Za-z_$][\w$]*)\s*(?:\??\s*:|$)/.exec(clean);
+    const m = lang === 'go' ? /^([A-Za-z_]\w*)(?:\s+(?:\.\.\.)?[*[\]\w.]+)?$/.exec(clean) : lang === 'java' ? /(?:final\s+|@\w+(?:\([^)]*\))?\s+)*[\w<>[\],.?]+\s*(?:\.\.\.)?\s+([A-Za-z_$][\w$]*)$/.exec(clean) : /^(?:pub\s+|private\s+|readonly\s+|mut\s+|\*\*{0,2})?([A-Za-z_$][\w$]*)\s*(?:\??\s*:|$)/.exec(clean);
     if (m && !GENERAL_KW.has(m[1])) names.push(m[1]);
   }
   return names;
 }
-
-function buildSymbolModel(docText: string, lang: SemanticLangKind, extraUnresolved?: ReadonlySet<string>): FileSymbolModel {
+export interface JavaDiagPrefs { javaUnresolvedImports?: boolean; lombokSupport?: boolean; unusedImports?: boolean; }
+function buildSymbolModel(docText: string, lang: SemanticLangKind, extraUnresolved?: ReadonlySet<string>, jPrefs?: JavaDiagPrefs): FileSymbolModel {
   const sample = docText.length > 65536 ? docText.slice(0, 65536) : docText;
-  const pkgVars = new Set<string>(), typeNames = new Set<string>();
-  const funcParams = new Map<string, string[]>();
-  const funcDecls: FileSymbolModel['funcDecls'] = [];
-  const paramScopes: FileSymbolModel['paramScopes'] = [];
-  const unresolvedIdents = new Set<string>(extraUnresolved);
-
+  const pkgVars = new Set<string>(), typeNames = new Set<string>(), funcParams = new Map<string, string[]>();
+  const funcDecls: FileSymbolModel['funcDecls'] = [], paramScopes: FileSymbolModel['paramScopes'] = [], unresolvedIdents = new Set<string>(extraUnresolved);
   if (lang === 'java') {
-    for (const id of analyzeJavaDiagnostics(sample).unresolvedIdents) unresolvedIdents.add(id);
-    if (/@(?:Slf4j|Log4j2|Log|CommonsLog|JBossLog|Flogger)\b/.test(sample)) pkgVars.add('log');
+    for (const id of analyzeJavaDiagnostics(sample, jPrefs).unresolvedIdents) unresolvedIdents.add(id);
+    if ((jPrefs?.lombokSupport ?? true) && /@(?:Slf4j|Log4j2|Log|CommonsLog|JBossLog|Flogger)\b/.test(sample)) pkgVars.add('log');
   }
-
   const lines = sample.split('\n');
   let offset = 0, inGoVarBlock = false;
   for (let i = 0; i < lines.length; i++) {
@@ -130,10 +119,10 @@ function classifyDocComment(text: string, baseFrom: number, out: SemanticTokenSp
 }
 
 export function classifySemanticTokens(
-  docText: string, lang: SemanticLangKind, visibleRanges?: readonly { from: number; to: number }[], extraUnresolved?: ReadonlySet<string>,
+  docText: string, lang: SemanticLangKind, visibleRanges?: readonly { from: number; to: number }[], extraUnresolved?: ReadonlySet<string>, jPrefs?: JavaDiagPrefs,
 ): SemanticTokenSpan[] {
   if (!docText || lang === 'csv' || lang === 'other') return [];
-  const ranges = visibleRanges ?? [{ from: 0, to: docText.length }], model = buildSymbolModel(docText, lang, extraUnresolved);
+  const ranges = visibleRanges ?? [{ from: 0, to: docText.length }], model = buildSymbolModel(docText, lang, extraUnresolved, jPrefs);
   const declStarts = new Set(model.funcDecls.map((d) => d.nameFrom)), out: SemanticTokenSpan[] = [];
   const paramsAt = (pos: number): Set<string> | null => {
     for (let i = model.paramScopes.length - 1; i >= 0; i--) if (pos >= model.paramScopes[i].from && pos <= model.paramScopes[i].to) return model.paramScopes[i].params;
@@ -261,7 +250,8 @@ export function computeRainbowBrackets(docText: string, visibleRanges?: readonly
   return out.sort((a, b) => a.from - b.from);
 }
 
-export function analyzeJavaDiagnostics(docText: string): { diagnostics: ClientIdeDiagnostic[]; unresolvedIdents: Set<string> } {
+export function analyzeJavaDiagnostics(docText: string, prefs?: JavaDiagPrefs): { diagnostics: ClientIdeDiagnostic[]; unresolvedIdents: Set<string> } {
+  const checkUnres = prefs?.javaUnresolvedImports !== false, checkUnused = prefs?.unusedImports !== false, lombok = prefs?.lombokSupport !== false;
   const lines = docText.split(/\r?\n/), diagnostics: ClientIdeDiagnostic[] = [], unresolvedIdents = new Set<string>();
   const seenImports = new Set<string>(), bodyChunks: string[] = [];
   const importEntries: Array<{ line: number; col: number; endCol: number; path: string; ident: string }> = [];
@@ -272,9 +262,11 @@ export function analyzeJavaDiagnostics(docText: string): { diagnostics: ClientId
     if (mImp) {
       const impPath = mImp[1], col = raw.indexOf('import') + 1, endCol = raw.length + 1;
       const segs = impPath.split('.'), lastSeg = segs[segs.length - 1] ?? '';
-      if (segs.length < 2 || BOGUS_JAVA_PREFIXES.some((p) => impPath.startsWith(p))) {
-        if (lastSeg && lastSeg !== '*') unresolvedIdents.add(lastSeg);
-        diagnostics.push({ line: ln, column: col, endLine: ln, endColumn: endCol, severity: 'error', source: 'java-imports', code: 'unresolved-import', message: `Unresolved import '${impPath}'`, quickFixes: [{ title: `Remove unresolved import '${impPath}'`, line: ln, endLine: ln, deleteLine: true }] });
+      if (segs.length < 2 || BOGUS_JAVA_PREFIXES.some((p) => impPath.startsWith(p)) || (!lombok && impPath.startsWith('lombok.'))) {
+        if (checkUnres) {
+          if (lastSeg && lastSeg !== '*') unresolvedIdents.add(lastSeg);
+          diagnostics.push({ line: ln, column: col, endLine: ln, endColumn: endCol, severity: 'error', source: 'java-imports', code: 'unresolved-import', message: `Unresolved import '${impPath}'`, quickFixes: [{ title: `Remove unresolved import '${impPath}'`, line: ln, endLine: ln, deleteLine: true }] });
+        }
         continue;
       }
       if (seenImports.has(impPath)) {
@@ -287,10 +279,12 @@ export function analyzeJavaDiagnostics(docText: string): { diagnostics: ClientId
     }
     bodyChunks.push(raw);
   }
-  const bodyText = bodyChunks.join('\n');
-  for (const imp of importEntries) {
-    if (!new RegExp(`\\b${imp.ident.replace(/\$/g, '\\$')}\\b`).test(bodyText)) {
-      diagnostics.push({ line: imp.line, column: imp.col, endLine: imp.line, endColumn: imp.endCol, severity: 'warning', source: 'java-imports', code: 'unused-import', message: `Unused import '${imp.path}'`, quickFixes: [{ title: `Remove unused import '${imp.path}'`, line: imp.line, endLine: imp.line, deleteLine: true }] });
+  if (checkUnused) {
+    const bodyText = bodyChunks.join('\n');
+    for (const imp of importEntries) {
+      if (!new RegExp(`\\b${imp.ident.replace(/\$/g, '\\$')}\\b`).test(bodyText)) {
+        diagnostics.push({ line: imp.line, column: imp.col, endLine: imp.line, endColumn: imp.endCol, severity: 'warning', source: 'java-imports', code: 'unused-import', message: `Unused import '${imp.path}'`, quickFixes: [{ title: `Remove unused import '${imp.path}'`, line: imp.line, endLine: imp.line, deleteLine: true }] });
+      }
     }
   }
   return { diagnostics, unresolvedIdents };
@@ -380,10 +374,11 @@ export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Ext
     }
     destroy() { if (this.timer) clearTimeout(this.timer); this.abort?.abort(); }
     maybeAutoFoldImports(view: EditorView) {
-      if (this.didAutoFold || !opts.getPreferences().autoFoldImports) return;
+      const prefs = opts.getPreferences();
+      if (this.didAutoFold || !prefs.autoFoldImports) return;
       this.didAutoFold = true;
       const docText = view.state.doc.toString();
-      const errLines = new Set<number>(lang === 'java' ? analyzeJavaDiagnostics(docText).diagnostics.filter((d) => d.severity === 'error').map((d) => d.line) : []);
+      const errLines = new Set<number>(lang === 'java' ? analyzeJavaDiagnostics(docText, prefs).diagnostics.filter((d) => d.severity === 'error').map((d) => d.line) : []);
       const r = computeImportFoldRange(docText, lang, errLines);
       if (r && r.to <= view.state.doc.length) view.dispatch({ effects: foldEffect.of({ from: r.from, to: r.to }) });
     }
@@ -394,7 +389,7 @@ export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Ext
     }
     async runDiagnostics(view: EditorView) {
       if (!view.dom.isConnected) return;
-      const docText = view.state.doc.toString(), jRes = lang === 'java' ? analyzeJavaDiagnostics(docText) : null;
+      const prefs = opts.getPreferences(), docText = view.state.doc.toString(), jRes = lang === 'java' ? analyzeJavaDiagnostics(docText, prefs) : null;
       const clientDiags: ClientIdeDiagnostic[] = jRes ? [...jRes.diagnostics] : [];
       const unresolved = new Set<string>(jRes ? jRes.unresolvedIdents : []);
       if (opts.root && (lang === 'java' || lang === 'go' || lang === 'python' || lang === 'shell' || lang === 'json')) {
@@ -404,10 +399,13 @@ export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Ext
           type RawDiag = { line: number; col?: number; column?: number; end_line?: number; end_col?: number; severity?: string; code?: string; source?: string; message: string; quick_fixes?: Array<{ title: string; line: number; end_line?: number; replacement?: string; delete_line?: boolean; edits?: ClientDiagQuickFix['edits'] }> };
           const resp = await api.post<{ diagnostics?: RawDiag[] }>('/ide/lsp/diagnostics', { target: { kind: opts.connectionId ? 'ssh' : 'local', root: opts.root, connection_id: opts.connectionId ?? null, additional_roots: opts.projectFolders }, path: opts.filePath, content: docText, language: lang, project_folders: opts.projectFolders }, ctrl.signal);
           for (const sd of resp.diagnostics ?? []) {
+            if (prefs.unusedImports === false && (sd.code === 'unused-import' || /unused import/i.test(sd.message))) continue;
+            if (lang === 'java' && prefs.javaUnresolvedImports === false && (sd.code === 'unresolved-import' || /unresolved import|package .* does not exist/i.test(sd.message))) continue;
+            if (lang === 'java' && prefs.lombokSupport !== false && /package lombok\b.*does not exist|cannot find symbol.*\bvariable log\b/i.test(sd.message)) continue;
             if (!clientDiags.some((c) => c.line === sd.line && c.message === sd.message)) {
               clientDiags.push({ line: sd.line, column: sd.col ?? sd.column ?? 1, endLine: sd.end_line ?? sd.line, endColumn: sd.end_col ?? 200, severity: sd.severity === 'error' ? 'error' : sd.severity === 'warning' ? 'warning' : 'info', message: sd.message, source: sd.source ?? 'lsp', code: sd.code, quickFixes: (sd.quick_fixes ?? []).map((qf) => ({ title: qf.title, line: qf.line, endLine: qf.end_line ?? qf.line, replacement: qf.replacement, deleteLine: qf.delete_line, edits: qf.edits })) });
             }
-            if (sd.severity === 'error' && sd.line >= 1 && sd.line <= view.state.doc.lines) {
+            if (sd.severity === 'error' && (lang !== 'java' || prefs.javaUnresolvedImports !== false) && sd.line >= 1 && sd.line <= view.state.doc.lines) {
               const mImp = /^\s*import\s+(?:static\s+)?[\w.$]*\.([A-Za-z_$][\w$]*)\s*;/.exec(view.state.doc.line(sd.line).text);
               if (mImp) unresolved.add(mImp[1]);
             }
@@ -433,10 +431,10 @@ export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Ext
     }
     compute(view: EditorView): DecorationSet {
       const prefs = opts.getPreferences(), docText = view.state.doc.toString(), vis = view.visibleRanges, items: Range<Decoration>[] = [], extraUnres = view.state.field(serverUnresolvedField, false);
-      for (const tok of classifySemanticTokens(docText, lang, vis, extraUnres)) if (tok.to > tok.from) items.push(Decoration.mark({ class: `cm-syn-${tok.role}` }).range(tok.from, tok.to));
+      for (const tok of classifySemanticTokens(docText, lang, vis, extraUnres, prefs)) if (tok.to > tok.from) items.push(Decoration.mark({ class: `cm-syn-${tok.role}` }).range(tok.from, tok.to));
       if (prefs.rainbowBrackets && lang !== 'csv') for (const rb of computeRainbowBrackets(docText, vis, view.state.selection.main.head)) items.push(Decoration.mark({ class: rb.level === 'unmatched' ? 'cm-syn-rb-unmatched' : `cm-syn-rb-${rb.level}${rb.active ? ' cm-syn-rb-active' : ''}` }).range(rb.from, rb.to));
       if ((prefs.inlayHints || prefs.codeVision) && docText.length <= 131072 && lang !== 'csv' && lang !== 'json') {
-        const model = buildSymbolModel(docText, lang, extraUnres);
+        const model = buildSymbolModel(docText, lang, extraUnres, prefs);
         if (prefs.inlayHints && model.funcParams.size) {
           let hintCount = 0;
           for (const { from, to } of vis) {

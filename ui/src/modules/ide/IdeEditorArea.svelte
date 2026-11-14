@@ -278,7 +278,7 @@
     const rect = document.querySelector<HTMLElement>('[data-testid="ide-quickfix-btn"]')?.getBoundingClientRect();
     const x = opts?.x ?? (rect ? rect.left - 180 : 280);
     const y = opts?.y ?? (rect ? rect.bottom + 6 : 160);
-    const dep = opts?.manifestDep ?? (manifestDepsByPath[filePath] ?? []).find((d) => d.line === line) ?? null;
+    const dep = opts?.manifestDep ?? (manifestDepsByPath[filePath] ?? []).find((d) => line >= (d.block_start_line ?? d.line) && line <= (d.end_line ?? d.block_end_line ?? d.line)) ?? null;
     intentionState = { path: filePath, line, col, x, y, symbol: opts?.symbol, manifestDep: dep, serverActions: [] };
     void ide.fetchCodeActions(filePath, line, col).then((acts) => {
       if (intentionState?.path === filePath && intentionState.line === line) intentionState = { ...intentionState, serverActions: acts };
@@ -515,6 +515,7 @@
       readOnly: Boolean(ide.activeTab?.readOnly || !ide.canEditCollab),
       clientFixes: qfBundle.clientFixes, deterministicFixes: qfBundle.deterministicFixes,
       serverActions: intentionState.serverActions, manifestDep: intentionState.manifestDep,
+      allManifestDeps: manifestDepsByPath[intentionState.path] ?? [],
       onapplyclientfix: (fix: CmIdeMod.ClientDiagQuickFix) => { primaryEditorRef?.applyClientDiagFix?.(fix); },
       onapplyedits: (edits: CmIdeMod.IdeConcreteTextEdit[]) => { primaryEditorRef?.applyQuickFixEdits?.(edits); },
       onapplycontent: (nextContent: string) => { if (!primaryEditorRef?.applyAgentEdit?.(nextContent) && intentionState) ide.updateBuffer(intentionState.path, nextContent); },

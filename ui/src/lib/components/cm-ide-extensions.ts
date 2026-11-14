@@ -611,7 +611,7 @@ export function createIdeExtensions(opts: CreateIdeExtensionsOptions): Extension
   return [
     ideEditorTheme, debugField, peersField, fullContextMenu,
     createIdeSemanticExtensions({ filePath: fPath, language: opts.language, root: opts.root, connectionId: opts.connectionId, projectFolders: opts.projectFolders, getPreferences: () => readIdeEditorPreferences(), onDiagnostics: (diags) => opts.getCallbacks().onDiagnostics?.(diags), onFindUsages: (ctx) => opts.getCallbacks().onFindUsages?.(ctx) }),
-    createIdeHoverExtension({ filePath: fPath, language: opts.language, root: opts.root, connectionId: opts.connectionId, projectFolders: opts.projectFolders, onDefinitionJump: (t) => opts.getCallbacks().onDefinitionJump?.(t), onFindUsages: (ctx) => opts.getCallbacks().onFindUsages?.(ctx), onQuickFix: (ctx) => opts.getCallbacks().onQuickFix?.(ctx) }),
+    createIdeHoverExtension({ filePath: fPath, language: opts.language, root: opts.root, connectionId: opts.connectionId, projectFolders: opts.projectFolders, getPreferences: () => readIdeEditorPreferences(), onDefinitionJump: (t) => opts.getCallbacks().onDefinitionJump?.(t), onFindUsages: (ctx) => opts.getCallbacks().onFindUsages?.(ctx), onQuickFix: (ctx) => opts.getCallbacks().onQuickFix?.(ctx) }),
     createCmdHoverDiveExtension(opts.getCallbacks),
     createIdeGitAndAgentExtensions({ savedContent: opts.savedContent, blameByLine: opts.blameByLine, wordAtCursor, getCallbacks: opts.getCallbacks }),
     ...(isCsv ? [createIdeCsvExtension(fPath)] : []),

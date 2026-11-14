@@ -23,6 +23,7 @@
     deterministicFixes: IdeQuickFixAction[];
     serverActions: IdeCodeAction[];
     manifestDep?: IdeDepItem | null;
+    allManifestDeps?: IdeDepItem[];
     onapplyclientfix: (fix: ClientDiagQuickFix) => void;
     onapplyedits: (edits: IdeConcreteTextEdit[]) => void;
     onapplycontent: (nextContent: string) => void;
@@ -36,7 +37,7 @@
 
   let {
     filePath, root, connectionId = null, projectFolders = [], docText, line, anchorX, anchorY, readOnly,
-    clientFixes, deterministicFixes, serverActions, manifestDep = null,
+    clientFixes, deterministicFixes, serverActions, manifestDep = null, allManifestDeps = [],
     onapplyclientfix, onapplyedits, onapplycontent, onapplyserveraction,
     onrename, onfindusages, onformat, onaskagent, onclose,
   }: Props = $props();
@@ -75,7 +76,7 @@
 
   function runDepAction(action: string, dep?: IdeDepItem | null, version?: string | null): void {
     onclose();
-    void executeIdeDepAction({ root, connectionId, projectFolders, path: filePath, content: docText, action, dep, version }).then((res) => {
+    void executeIdeDepAction({ root, connectionId, projectFolders, path: filePath, content: docText, action, dep, version, deps: allManifestDeps }).then((res) => {
       if (res.updated_content && res.updated_content !== docText) onapplycontent(res.updated_content);
     });
   }
@@ -83,58 +84,108 @@
   const rows = $derived.by((): IntentionRow[] => {
     const out: IntentionRow[] = [];
     if (eco) {
-      if (manifestDep?.latest_version && manifestDep.latest_version !== manifestDep.current_version) {
+      if (manifestDep) {
         const d = manifestDep;
-        out.push({
-          id: `dep-up-${d.name}`,
-          label: `Upgrade ${d.name} to ${d.latest_version}`,
-          hint: 'Quick Fix',
+        const patchVer = d.vulnerabilities?.find((v) => v.fixed_version)?.fixed_version ?? d.latest_patch ?? null;
+        if (patchVer && patchVer !== d.current_version && patchVer !== d.latest_version) {
+          out.push({
+            id: `dep-patch-${d.name}`,
+            label: `Update ${d.name} to patched version ${patchVer}`,
+            hint: 'Patch',
+            kind: 'dep',
+            disabled: readOnly,
+            previewMinus: [`${d.name} ${d.current_version}`],
+            previewPlus: [`${d.name} ${patchVer}`],
+            previewNote: d.vulnerabilities?.length ? `Fixes ${d.vulnerabilities[0].id}: ${d.vulnerabilities[0].summary}` : `Safe patch upgrade in ${filePath.split('/').pop()}`,
+            run: () => runDepAction('update_one', d, patchVer),
+          });
+        }
+        if (d.latest_version && d.latest_version !== d.current_version) {
+          out.push({
+            id: `dep-up-${d.name}`,
+            label: `Update ${d.name} to latest version ${d.latest_version}`,
+            hint: 'Quick Fix',
+            kind: 'dep',
+            disabled: readOnly,
+            previewMinus: [`${d.name} ${d.current_version}`],
+            previewPlus: [`${d.name} ${d.latest_version}`],
+            previewNote: d.vulnerabilities?.length ? `Fixes ${d.vulnerabilities[0].id}: ${d.vulnerabilities[0].summary}` : `Updates single dependency in ${filePath.split('/').pop()}`,
+            run: () => runDepAction('update_one', d, d.latest_version),
+          });
+        }
+      }
+      out.push(
+        {
+          id: 'dep-update-direct-latest',
+          label: 'Update direct dependencies to latest versions',
           kind: 'dep',
           disabled: readOnly,
-          previewMinus: [`${d.name} ${d.current_version}`],
-          previewPlus: [`${d.name} ${d.latest_version}`],
-          previewNote: d.vulnerabilities?.length ? `Fixes ${d.vulnerabilities[0].id}: ${d.vulnerabilities[0].summary}` : `Updates single dependency in ${filePath.split('/').pop()}`,
-          run: () => runDepAction('update_single', d, d.latest_version),
+          previewMinus: ['# Direct dependencies (current versions)'],
+          previewPlus: [eco === 'go' ? 'go get <direct>@latest && go mod tidy' : 'Upgrade direct dependencies to latest minor/major releases'],
+          previewNote: 'Mode 1/4: Upgrades direct dependencies to latest versions',
+          run: () => runDepAction('update_direct_latest'),
+        },
+        {
+          id: 'dep-update-direct-patch',
+          label: 'Update direct dependencies to patched versions',
+          kind: 'dep',
+          disabled: readOnly,
+          previewMinus: ['# Direct dependencies (current patch)'],
+          previewPlus: [eco === 'go' ? 'go get -u=patch <direct> && go mod tidy' : 'Upgrade direct dependencies to latest patch releases only'],
+          previewNote: 'Mode 2/4: Conservative patch-only bump for direct dependencies',
+          run: () => runDepAction('update_direct_patch'),
+        },
+        {
+          id: 'dep-update-all-latest',
+          label: 'Update all dependencies to latest versions',
+          kind: 'dep',
+          disabled: readOnly,
+          previewMinus: ['# All direct & indirect dependency pins'],
+          previewPlus: [eco === 'go' ? 'go get -u ./... && go mod tidy' : eco === 'maven' ? 'mvn versions:use-latest-releases' : 'Upgrade all dependencies to latest compatible releases'],
+          previewNote: 'Mode 3/4: Upgrades every dependency in this manifest to latest',
+          run: () => runDepAction('update_all_latest'),
+        },
+        {
+          id: 'dep-update-all-patch',
+          label: 'Update all dependencies to patched versions',
+          kind: 'dep',
+          disabled: readOnly,
+          previewMinus: ['# All direct & indirect dependency pins (patch)'],
+          previewPlus: [eco === 'go' ? 'go get -u=patch ./... && go mod tidy' : 'Upgrade all dependencies to latest patch versions'],
+          previewNote: 'Mode 4/4: Conservative patch-only bump across entire manifest',
+          run: () => runDepAction('update_all_patch'),
+        },
+      );
+      if (eco === 'go' && manifestDep) {
+        const d = manifestDep;
+        out.push({
+          id: `dep-why-${d.name}`,
+          label: `go mod why -m ${d.name}`,
+          kind: 'dep',
+          previewMinus: [],
+          previewPlus: [`go mod why -m ${d.name}`],
+          previewNote: 'Explains shortest import chain requiring this Go module',
+          run: () => runDepAction('why', d),
         });
       }
       out.push(
         {
-          id: 'dep-update-all',
-          label: 'Update all dependencies',
-          kind: 'dep',
-          disabled: readOnly,
-          previewMinus: ['# Current pinned dependency versions'],
-          previewPlus: [eco === 'go' ? 'go get -u ./... && go mod tidy' : eco === 'maven' ? 'mvn versions:use-latest-releases' : 'Upgrade all direct & transitive packages to latest compatible releases'],
-          previewNote: 'Mode 1/4: Upgrades every dependency in this manifest',
-          run: () => runDepAction('update_all'),
-        },
-        {
-          id: 'dep-update-direct',
-          label: 'Update direct dependencies only',
-          kind: 'dep',
-          disabled: readOnly,
-          previewMinus: ['# Direct dependencies only (keeps indirect untouched)'],
-          previewPlus: [eco === 'go' ? 'go list -f "{{if not .Indirect}}{{.Path}}@latest{{end}}" -m all | xargs go get' : 'Upgrade direct dependencies only'],
-          previewNote: 'Mode 2/4: Upgrades direct dependencies without bumping indirect pins',
-          run: () => runDepAction('update_direct'),
-        },
-        {
           id: 'dep-tidy-sync',
-          label: eco === 'go' ? 'Run go mod tidy' : eco === 'maven' ? 'Sync / Reload Maven Project' : 'Sync Project Dependencies',
+          label: eco === 'go' ? 'Run go mod tidy' : eco === 'maven' ? 'Sync / Reload Maven Project' : eco === 'gradle' ? 'Sync Gradle Project' : 'Sync Project Dependencies',
           kind: 'dep',
           disabled: readOnly,
           previewMinus: ['# Unsynced / unused module graph entries'],
           previewPlus: [eco === 'go' ? 'go mod tidy (prunes unused & adds missing sums)' : 'Re-resolves lockfile and workspace classpath'],
-          previewNote: 'Mode 3/4: Synchronizes dependency graph and lockfile',
-          run: () => runDepAction(eco === 'go' ? 'tidy' : 'sync'),
+          previewNote: 'Synchronizes dependency graph and lockfile',
+          run: () => runDepAction(eco === 'go' ? 'tidy' : eco === 'maven' ? 'maven_sync' : eco === 'gradle' ? 'gradle_sync' : 'sync'),
         },
         {
           id: 'dep-vuln-check',
           label: 'Scan manifest for known CVEs',
           kind: 'dep',
           previewMinus: [],
-          previewPlus: [eco === 'go' ? 'govulncheck ./...' : 'Advisory & OSV vulnerability check across pinned versions'],
-          previewNote: 'Mode 4/4: Audits dependencies against security advisories',
+          previewPlus: ['OSV advisory & vulnerability inspection across pinned versions'],
+          previewNote: 'Audits dependencies against security advisories via /ide/deps/inspect',
           run: () => runDepAction('vuln_scan'),
         },
       );
