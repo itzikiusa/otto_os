@@ -23,7 +23,17 @@ export const SHELL_PROVIDER = 'shell';
 
 /** Built-in fallback used only before `/meta` has loaded (meta is normally
  *  present by the time any picker renders). */
-const FALLBACK: readonly string[] = ['claude', 'codex', 'agy', 'shell'];
+const FALLBACK: readonly string[] = ['claude', 'codex', 'agy', 'opencode', 'pi', 'shell'];
+
+const PREFERRED_THREAD_HARNESSES: readonly string[] = [
+  'claude',
+  'codex',
+  'agy',
+  'opencode',
+  'pi',
+  'gemini',
+  'grok',
+];
 
 /** All registered provider names (built-ins + custom), INCLUDING `shell`.
  *  Already sorted by the daemon. Use for surfaces where a shell is valid
@@ -82,11 +92,31 @@ export function defaultAgentProvider(): string {
 /** Whether `provider` accepts a model flag — its daemon spec carries a
  *  `model_args` template (`/meta.model_flags`). Surfaces hide their model
  *  control when false, so a picked model is never silently dropped. Falls back
- *  to the built-in trio before `/meta` has loaded (or on an older daemon). */
+ *  to the built-in CLI harnesses before `/meta` has loaded (or on an older daemon). */
 export function providerSupportsModel(provider: string): boolean {
   const flags = auth.meta?.model_flags;
   if (flags && provider in flags) return flags[provider];
-  return provider === 'claude' || provider === 'codex' || provider === 'agy';
+  return (
+    provider === 'claude' ||
+    provider === 'codex' ||
+    provider === 'agy' ||
+    provider === 'opencode' ||
+    provider === 'pi'
+  );
+}
+
+/** Order enabled agent providers for Threads/stage pickers without ever
+ *  re-introducing a provider hidden via `disabled_providers`. */
+export function orderThreadHarnesses(registered: readonly string[]): string[] {
+  const enabled = registered.map((p) => p.trim()).filter((p) => p && p !== SHELL_PROVIDER);
+  const ordered: string[] = [];
+  for (const preferred of PREFERRED_THREAD_HARNESSES) {
+    if (enabled.includes(preferred)) ordered.push(preferred);
+  }
+  for (const p of enabled) {
+    if (!ordered.includes(p)) ordered.push(p);
+  }
+  return ordered;
 }
 
 /** Harness display name for pickers, cards and badges. */
@@ -98,9 +128,41 @@ export function harnessLabel(provider: string): string {
       return 'Codex';
     case 'agy':
       return 'Antigravity';
+    case 'opencode':
+      return 'OpenCode';
+    case 'pi':
+      return 'Pi';
+    case 'gemini':
+      return 'Gemini';
+    case 'grok':
+      return 'Grok';
     case 'shell':
       return 'Shell';
     default:
       return provider.charAt(0).toUpperCase() + provider.slice(1);
+  }
+}
+
+/** Short CLI subtitle for New Session, Handover, and provider cards. */
+export function providerSubtitle(provider: string): string {
+  switch (provider) {
+    case 'claude':
+      return 'Claude Code CLI';
+    case 'codex':
+      return 'Codex CLI';
+    case 'agy':
+      return 'Antigravity CLI';
+    case 'opencode':
+      return 'OpenCode CLI';
+    case 'pi':
+      return 'Pi CLI';
+    case 'gemini':
+      return 'Gemini CLI';
+    case 'grok':
+      return 'Grok CLI';
+    case 'shell':
+      return 'Plain shell';
+    default:
+      return 'Custom provider';
   }
 }

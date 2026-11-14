@@ -38,7 +38,7 @@ use crate::state::ServerCtx;
 
 /// Providers the refresher knows how to source. Custom providers can still get
 /// rows via the manual-add repo path; they just have no automatic source.
-const KNOWN_PROVIDERS: [&str; 3] = ["claude", "codex", "agy"];
+const KNOWN_PROVIDERS: [&str; 5] = ["claude", "codex", "agy", "opencode", "pi"];
 
 /// Outbound fetch budget per source attempt.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
@@ -228,6 +228,33 @@ pub fn parse_agy_models_output(stdout: &str) -> Vec<(String, String)> {
 /// Shape (verified at impl time): `{ "<provider>": { "models": { "<id>":
 /// { "id", "name", … } } } }` — parsed defensively, unknown shapes yield [].
 pub fn parse_models_dev(json: &Value, provider: &str) -> Vec<(String, String)> {
+    if matches!(provider, "opencode" | "pi") {
+        let mut out: Vec<(String, String)> = Vec::new();
+        for (vendor, family) in [
+            ("anthropic", "claude-"),
+            ("openai", "gpt-"),
+            ("google", "gemini-"),
+        ] {
+            let Some(models) = json
+                .get(vendor)
+                .and_then(|p| p.get("models"))
+                .and_then(Value::as_object)
+            else {
+                continue;
+            };
+            for (id, m) in models.iter().filter(|(id, _)| id.starts_with(family)) {
+                let full_id = format!("{vendor}/{id}");
+                let label = m
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&full_id)
+                    .to_string();
+                out.push((full_id, label));
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        return out;
+    }
     let (key, family) = match provider {
         "claude" => ("anthropic", "claude-"),
         "codex" => ("openai", "gpt-"),
@@ -277,17 +304,28 @@ async fn guarded_fetch_text(url: &str) -> Result<String, String> {
     resp.text().await.map_err(|e| e.to_string())
 }
 
-/// Source 1 — CLI probe. Only `agy` can list models non-interactively
-/// (`agy models`); `claude`/`codex` have no such subcommand (checked at impl
-/// time), so they return None and the chain moves on. Never launches a TUI:
-/// stdin is null and the process is hard-capped at the fetch budget.
-async fn cli_probe(provider: &str) -> Option<Result<Vec<(String, String)>, String>> {
-    if provider != "agy" {
-        return None;
-    }
+/// Source 1 — CLI probe (`agy models`, `opencode models`, `pi --offline
+/// --list-models`). `claude`/`codex` have no non-interactive model-listing
+/// subcommand, so they return None and the chain moves on. Never launches a
+/// TUI: stdin is null and the process is hard-capped at the fetch budget.
+async fn cli_probe(
+    ctx: &ServerCtx,
+    provider: &str,
+) -> Option<Result<Vec<(String, String)>, String>> {
+    let args: &[&str] = match provider {
+        "agy" | "opencode" => &["models"],
+        "pi" => &["--offline", "--list-models"],
+        _ => return None,
+    };
+    let program = ctx
+        .manager
+        .providers()
+        .program_for(provider)
+        .unwrap_or_else(|| provider.to_string());
+    let cmd_label = format!("{provider} {}", args.join(" "));
     let run = async {
-        let out = tokio::process::Command::new("agy")
-            .arg("models")
+        let out = tokio::process::Command::new(&program)
+            .args(args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -295,13 +333,31 @@ async fn cli_probe(provider: &str) -> Option<Result<Vec<(String, String)>, Strin
             .kill_on_drop(true)
             .output();
         match tokio::time::timeout(FETCH_TIMEOUT, out).await {
-            Err(_) => Err("agy models: timed out".to_string()),
-            Ok(Err(e)) => Err(format!("agy models: {e}")),
-            Ok(Ok(o)) if !o.status.success() => Err(format!("agy models: exit {}", o.status)),
+            Err(_) => Err(format!("{cmd_label}: timed out")),
+            Ok(Err(e)) => Err(format!("{cmd_label}: {e}")),
+            Ok(Ok(o)) if !o.status.success() => Err(format!("{cmd_label}: exit {}", o.status)),
             Ok(Ok(o)) => {
-                let models = parse_agy_models_output(&String::from_utf8_lossy(&o.stdout));
+                let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
+                if provider != "agy" {
+                    text.push('\n');
+                    text.push_str(&String::from_utf8_lossy(&o.stderr));
+                }
+                let models: Vec<(String, String)> = match provider {
+                    "agy" => parse_agy_models_output(&text),
+                    "opencode" => {
+                        otto_sessions::provider_models::parse_opencode_models_output(&text)
+                            .into_iter()
+                            .map(|m| (m.id, m.label))
+                            .collect()
+                    }
+                    "pi" => otto_sessions::provider_models::parse_pi_models_output(&text)
+                        .into_iter()
+                        .map(|m| (m.id, m.label))
+                        .collect(),
+                    _ => Vec::new(),
+                };
                 if models.is_empty() {
-                    Err("agy models: no ids in output".to_string())
+                    Err(format!("{cmd_label}: no ids in output"))
                 } else {
                     Ok(models)
                 }
@@ -359,7 +415,7 @@ pub async fn refresh_provider(ctx: &ServerCtx, provider: &str) {
     // Lazily walk the chain so a CLI hit skips the network sources entirely.
     for source in ["cli", "scrape", "catalog"] {
         let attempt = match source {
-            "cli" => cli_probe(provider).await,
+            "cli" => cli_probe(ctx, provider).await,
             "scrape" => docs_scrape(provider).await,
             _ => Some(catalog_fallback(provider).await),
         };
@@ -391,10 +447,13 @@ pub async fn refresh_provider(ctx: &ServerCtx, provider: &str) {
     set_status(provider, Some(joined));
 }
 
-/// Refresh every known provider (sequentially — three cheap fetches).
+/// Refresh every enabled known provider sequentially.
 pub async fn refresh_all(ctx: &ServerCtx) {
+    let enabled = ctx.manager.providers().names();
     for p in KNOWN_PROVIDERS {
-        refresh_provider(ctx, p).await;
+        if enabled.iter().any(|e| e == p) {
+            refresh_provider(ctx, p).await;
+        }
     }
 }
 
@@ -443,10 +502,14 @@ pub struct RefreshReq {
     pub provider: Option<String>,
 }
 
-fn group(rows: Vec<ProviderModel>) -> HashMap<String, ProviderCatalog> {
+fn group(rows: Vec<ProviderModel>, enabled: &[String]) -> HashMap<String, ProviderCatalog> {
+    let is_enabled = |name: &str| enabled.iter().any(|e| e == name);
     let mut providers: HashMap<String, ProviderCatalog> = HashMap::new();
-    // Known providers always appear (even empty) so the UI can show status.
+    // Enabled known providers always appear (even empty) so the UI can show status.
     for p in KNOWN_PROVIDERS {
+        if !is_enabled(p) {
+            continue;
+        }
         providers.insert(
             p.to_string(),
             ProviderCatalog {
@@ -458,6 +521,9 @@ fn group(rows: Vec<ProviderModel>) -> HashMap<String, ProviderCatalog> {
         );
     }
     for row in rows {
+        if !is_enabled(&row.provider) {
+            continue;
+        }
         let entry = providers
             .entry(row.provider.clone())
             .or_insert_with(|| ProviderCatalog {
@@ -496,8 +562,9 @@ fn group(rows: Vec<ProviderModel>) -> HashMap<String, ProviderCatalog> {
 
 async fn payload(ctx: &ServerCtx) -> ApiResult<ModelsResp> {
     let rows = ProviderModelsRepo::new(ctx.pool.clone()).list_all().await?;
+    let enabled = ctx.manager.providers().names();
     Ok(ModelsResp {
-        providers: group(rows),
+        providers: group(rows, &enabled),
     })
 }
 
@@ -628,8 +695,49 @@ mod tests {
             "{agy:?}"
         );
         assert!(!agy.is_empty());
+        let opencode = parse_models_dev(&json, "opencode");
+        assert!(!opencode.is_empty());
+        assert!(opencode
+            .iter()
+            .any(|(id, _)| id.starts_with("anthropic/claude-")));
+        assert!(opencode.iter().any(|(id, _)| id.starts_with("openai/gpt-")));
+        assert!(opencode
+            .iter()
+            .any(|(id, _)| id.starts_with("google/gemini-")));
+        assert_eq!(opencode, parse_models_dev(&json, "pi"));
         assert!(parse_models_dev(&json, "unknown").is_empty());
         // Defensive: garbage shape → empty, not panic.
         assert!(parse_models_dev(&Value::Null, "claude").is_empty());
+    }
+
+    #[test]
+    fn group_excludes_disabled_providers_and_includes_enabled_builtins() {
+        let rows = vec![
+            ProviderModel {
+                provider: "claude".into(),
+                model_id: "claude-sonnet-5".into(),
+                label: "Sonnet 5".into(),
+                source: "scrape".into(),
+                fetched_at: Utc::now().to_rfc3339(),
+                notes: String::new(),
+            },
+            ProviderModel {
+                provider: "opencode".into(),
+                model_id: "openai/gpt-5".into(),
+                label: "GPT-5".into(),
+                source: "cli".into(),
+                fetched_at: Utc::now().to_rfc3339(),
+                notes: String::new(),
+            },
+        ];
+        let enabled = vec!["claude".to_string(), "pi".to_string()];
+        let grouped = group(rows, &enabled);
+        assert!(grouped.contains_key("claude"));
+        assert!(grouped.contains_key("pi"));
+        assert!(
+            !grouped.contains_key("opencode"),
+            "disabled provider filtered"
+        );
+        assert!(!grouped.contains_key("codex"), "disabled builtin filtered");
     }
 }

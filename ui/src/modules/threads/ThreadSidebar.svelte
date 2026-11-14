@@ -3,15 +3,16 @@
   // pinned threads, then projects → their threads (needs-you first, workers
   // nested under their lead), History folded at the bottom, and a quiet footer
   // (Settings · Git · Usage · Sync).
-  import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import { confirmer } from '../../lib/confirm.svelte';
-  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toastError } from '../../lib/toastError';
   import type { Session } from '../../lib/api/types';
   import { personalAgentName } from '../../lib/personalAgentBadges';
+  import { canonicalIdePath, groupThreadsByIdeProject } from './ideProjectModel';
+  import { ideProjects, openProjectInIde } from './ideProjects.svelte';
+  import ThreadIdeProjectsSection, { type OrderedIdeProjectGroup } from './ThreadIdeProjectsSection.svelte';
   import ThreadSidebarRow from './ThreadSidebarRow.svelte';
   import ThreadOriginGroups from './ThreadOriginGroups.svelte';
   import { originGroups, threadOrigin } from './threadOrigins';
@@ -23,14 +24,13 @@
     sessionBranch,
   } from './threadsHelpers';
   import { threadRepos } from './threadRepos.svelte';
-  import { FilterPopover, PullRequestsView, SettingsView, UsageView } from './threadLazy.svelte';
+  import { FilterPopover, FolderPickerModal, PullRequestsView, SettingsView, UsageView } from './threadLazy.svelte';
   import { threadsChrome } from './threadsChrome.svelte';
-  import { legacyReviveItem, reviveLegacyThread } from './threadMenu';
+  import { buildSidebarLegacyThreadMenu, reviveLegacyThread } from './threadMenu';
   import { promptNewScript } from './threadGitMenus';
   import { reopenThread, runtimeThreadMenu } from './runtime/runtimeMenu';
   import { isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
   import { threads } from './threadsStore.svelte';
-  import { messageThread } from './relatedMessage';
 
   interface Props {
     onselect?: () => void;
@@ -138,10 +138,41 @@
   let foldedFamilies = $state<Record<string, boolean>>({});
   const score = (s: Session): number => (ws.needsYou[s.id] ? 0 : ['working', 'running'].includes(ws.statusMap[s.id] ?? s.status) ? 1 : 2);
 
-  // Projects → their unsettled threads. Projects added from "Add project"
-  // show even before their first thread.
+  const unsettledLive = $derived(filteredLive.filter((s) => !threads.isSettled(s.id)));
+  const ideDiscoveredProjects = $derived(ideProjects.projectsFor(allLiveThreads));
+  const ideGrouping = $derived(groupThreadsByIdeProject(ideDiscoveredProjects, unsettledLive));
+
+  const ideProjectGroups = $derived.by((): OrderedIdeProjectGroup[] => {
+    const q = search.trim().toLowerCase();
+    return ideGrouping.groups
+      .filter((grp) => {
+        if (
+          threads.projectFilters.length > 0 &&
+          grp.items.length === 0 &&
+          !grp.project.folders.some((f) => threads.inProjectFilter(f))
+        ) {
+          return false;
+        }
+        if (q && grp.items.length === 0) {
+          return (
+            grp.project.name.toLowerCase().includes(q) ||
+            grp.project.primaryRoot.toLowerCase().includes(q)
+          );
+        }
+        return true;
+      })
+      .map((grp) => ({
+        ...grp,
+        ordered: inboxOrder(grp.items, score, delegatedParentId, (id) => foldedFamilies[id] === true),
+      }));
+  });
+
+  // Projects → their unsettled threads (excluding threads already grouped under IDE Projects).
   const projectGroups = $derived.by(() => {
     const groups = new Map<string, { key: string; label: string; cwd: string; items: Session[] }>();
+    const claimedIdeFolders = new Set(
+      ideDiscoveredProjects.flatMap((p) => p.folders.map((f) => canonicalIdePath(f))),
+    );
     const ensure = (cwd: string) => {
       let g = groups.get(cwd);
       if (!g) {
@@ -150,12 +181,13 @@
       }
       return g;
     };
-    for (const s of filteredLive) {
-      if (threads.isSettled(s.id)) continue;
+    for (const s of unsettledLive) {
+      if (ideGrouping.matchedSessionIds.has(s.id)) continue;
       ensure((s.cwd ?? ws.current?.root_path ?? '~').replace(/\/+$/, '') || '~').items.push(s);
     }
     if (!search.trim()) {
       for (const p of threads.extraProjects) {
+        if (claimedIdeFolders.has(canonicalIdePath(p))) continue;
         if (threads.inProjectFilter(p)) ensure(p);
       }
     }
@@ -213,6 +245,9 @@
     e.preventDefault();
     const added = threads.extraProjects.includes(grp.key);
     ctxMenu.show(e, [
+      ...(grp.cwd && grp.cwd !== '~'
+        ? [{ label: 'Open in IDE', icon: 'ide' as const, action: () => openProjectInIde(grp.cwd, null) }]
+        : []),
       { label: 'New thread here', icon: 'edit', action: () => newThreadIn(grp.cwd) },
       {
         label: threads.isProjectPinned(grp.key) ? 'Unpin project' : 'Pin project',
@@ -232,21 +267,6 @@
   function newThreadIn(cwd: string | null): void {
     threads.startNewThread({ workspaceId: ws.currentId, cwd });
     onselect?.();
-  }
-
-  async function renameThread(s: Session): Promise<void> {
-    const next = await confirmer.promptText('Enter a title for this thread.', {
-      title: 'Rename thread',
-      confirmLabel: 'Rename',
-      initial: s.title,
-      placeholder: 'Thread title',
-    });
-    if (!next || next === s.title) return;
-    try {
-      await ws.renameSession(s.id, next);
-    } catch (e) {
-      toastError('Couldn’t rename thread', e);
-    }
   }
 
   async function reopenArchived(s: Session, beside = false): Promise<void> {
@@ -269,90 +289,14 @@
       ctxMenu.show(e, runtimeThreadMenu(s.id));
       return;
     }
-    const pinned = threads.isPinned(s.id);
-    const settled = threads.isSettled(s.id);
-    const canSendFromFocused =
-      !!threads.focusedSessionId && threads.focusedSessionId !== s.id && !s.archived;
-    const items: MenuItem[] = [
-      {
-        label: pinned ? 'Unpin thread' : 'Pin thread',
-        icon: 'star',
-        action: () => threads.togglePin(s.id),
-      },
-      {
-        label: 'Open beside in Split',
-        icon: 'split',
-        action: () => {
-          if (s.archived) void reopenArchived(s, true);
-          else {
-            threads.openBeside(s.id);
-            onselect?.();
-          }
-        },
-      },
-      ...(canSendFromFocused
-        ? [
-            {
-              label: 'Send message from active thread…',
-              icon: 'send',
-              action: () => void messageThread(threads.focusedSessionId, s.id),
-            },
-          ]
-        : []),
-      ...(!s.archived ? legacyReviveItem(s) : []),
-      ...(!s.archived
-        ? [
-            {
-              label: 'Open Room…',
-              icon: 'people',
-              action: () => onstartroom(s.id),
-            },
-            {
-              label: settled ? 'Move back to Active' : 'Settle to History',
-              icon: 'check',
-              action: () => threads.toggleSettle(s.id),
-            },
-          ]
-        : [
-            {
-              label: 'Revive thread',
-              icon: 'refresh',
-              action: () => void reopenArchived(s, false),
-            },
-          ]),
-      { separator: true },
-      {
-        label: 'Rename…',
-        icon: 'edit',
-        action: () => void renameThread(s),
-      },
-      ...(!s.archived
-        ? [
-            {
-              label: 'Archive',
-              icon: 'archive',
-              action: () => {
-                void ws.requestArchive(s.id).then((ok) => {
-                  if (ok && threads.paneIds.includes(s.id)) threads.closePane(s.id);
-                });
-              },
-            },
-          ]
-        : []),
-      {
-        label: 'Delete…',
-        icon: 'trash',
-        danger: true,
-        action: () => {
-          void ws.requestDeleteSession(s.id).then(() => {
-            if (!ws.getSession(s.id) && threads.paneIds.includes(s.id)) {
-              threads.closePane(s.id);
-            }
-          });
-        },
-      },
-    ];
-    ctxMenu.show(e, items);
+    ctxMenu.show(
+      e,
+      buildSidebarLegacyThreadMenu(s, {
+        onreopen: (sess, beside) => void reopenArchived(sess, beside),
+        onstartroom,
+        onselect,
+      }),
+    );
   }
 
   function handleRowClick(e: MouseEvent, s: Session): void {
@@ -450,10 +394,20 @@
       </section>
     {/if}
 
-    {#if projectGroups.length === 0}
+    {#if ideProjectGroups.length === 0 && projectGroups.length === 0}
       <p class="th-empty">{search.trim() ? 'No threads match' : 'No threads yet'}</p>
     {:else}
       <div data-testid="threads-active-list">
+        <ThreadIdeProjectsSection
+          groups={ideProjectGroups}
+          {foldedFamilies}
+          ontogglefamily={(id) => (foldedFamilies = { ...foldedFamilies, [id]: !foldedFamilies[id] })}
+          onnewthread={(cwd) => newThreadIn(cwd)}
+          onrowclick={handleRowClick}
+          onreopen={(sess, beside) => void reopenArchived(sess, beside)}
+          onmenu={showThreadMenu}
+          {onselect}
+        />
         {#each projectGroups as grp (grp.key)}
           {@const open = !closedFolders[grp.key]}
           <section class="th-group" aria-label="Project {grp.label}">
@@ -617,8 +571,8 @@
   />
 {/if}
 
-{#if addingProject}
-  <FolderPicker
+{#if addingProject && FolderPickerModal.component}
+  <FolderPickerModal.component
     title="Add project"
     start={ws.current?.root_path ?? homePath ?? ''}
     onpick={(picked) => {

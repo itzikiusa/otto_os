@@ -54,9 +54,9 @@ use agent_client_protocol::v1::schema::{
     StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 use otto_core::agent_runtime::{
-    ApprovalDecision, ApprovalOption, PlanStep, PlanStepStatus, ProviderFailure, RequestKind,
-    RuntimeAccessMode, RuntimePromptReq, RuntimeProvider, TurnItem, TurnItemKind, TurnItemStatus,
-    TurnTerminalStatus, TurnTokenUsage,
+    ApprovalDecision, ApprovalOption, BackgroundTask, PlanStep, PlanStepStatus, ProviderFailure,
+    RequestKind, RuntimeAccessMode, RuntimePromptReq, RuntimeProvider, ThreadTokenUsage, TurnItem,
+    TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
@@ -235,6 +235,8 @@ pub struct AcpDriver {
     queued: Option<(String, RuntimePromptReq)>,
     prompt_id: Option<u64>,
     turn_id: Option<String>,
+    autonomous: bool,
+    auto_turns: u64,
     segment: Option<Segment>,
     segments: u32,
     /// This turn's closed named segments by `messageId`: a message that
@@ -242,6 +244,7 @@ pub struct AcpDriver {
     /// place (T3 Code #33604).
     closed_named: HashMap<String, Segment>,
     tools: HashMap<String, Tool>,
+    bg_tasks: Vec<BackgroundTask>,
     pending: HashMap<String, Pending>,
     questions: HashMap<String, (Value, Vec<otto_core::agent_runtime::RuntimeQuestion>)>,
 }
@@ -287,10 +290,13 @@ impl AcpDriver {
             queued: None,
             prompt_id: None,
             turn_id: None,
+            autonomous: false,
+            auto_turns: 0,
             segment: None,
             segments: 0,
             closed_named: HashMap::new(),
             tools: HashMap::new(),
+            bg_tasks: Vec::new(),
             pending: HashMap::new(),
             questions: HashMap::new(),
         }
@@ -533,8 +539,10 @@ impl AcpDriver {
             self.write_mode(step, &sid, mode);
         }
         let (id, line) = self.request(M_SESSION_PROMPT, PromptRequest::new(sid, blocks));
+        self.clear_bg_tasks(step);
         self.prompt_id = Some(id);
         self.turn_id = Some(turn_id);
+        self.autonomous = false;
         self.segments = 0;
         self.closed_named.clear();
         step.write(line);
@@ -571,6 +579,140 @@ impl AcpDriver {
 
     fn turn(&self) -> String {
         self.turn_id.clone().unwrap_or_default()
+    }
+
+    fn clear_bg_tasks(&mut self, step: &mut DriverStep) {
+        if !self.bg_tasks.is_empty() {
+            self.bg_tasks.clear();
+            step.push(DriverEvent::BackgroundTasks(Vec::new()));
+        }
+    }
+
+    /// Open a fresh agent-initiated (`origin: agent`) turn when substantive
+    /// ACP notifications/requests arrive outside an active `session/prompt`
+    /// RPC (e.g. `agy` waking from `schedule`, background `run_command`,
+    /// subagents, or `swarm_wait`).
+    fn ensure_autonomous_turn(&mut self, step: &mut DriverStep) {
+        if self.phase != Phase::Ready
+            || self.turn_id.is_some()
+            || self.prompt_id.is_some()
+            || self.queued.is_some()
+        {
+            return;
+        }
+        self.clear_bg_tasks(step);
+        self.auto_turns += 1;
+        let id = format!("auto-{}", self.auto_turns);
+        self.turn_id = Some(id.clone());
+        self.autonomous = true;
+        self.segments = 0;
+        self.closed_named.clear();
+        self.tools.clear();
+        step.push(DriverEvent::TurnStarted { turn_id: id });
+    }
+
+    fn note_tool_background(&mut self, step: &mut DriverStep, call_id: &str, t: &Tool) {
+        if t.status != ToolCallStatus::Completed {
+            return;
+        }
+        let lower = t.title.trim().to_ascii_lowercase();
+        let item_id = Some(format!("{}:tool:{call_id}", self.turn()));
+        let mut changed = false;
+
+        if lower.contains("manage_task") {
+            let kill = t
+                .raw_input
+                .as_ref()
+                .and_then(|v| v.get("Action").and_then(Value::as_str))
+                == Some("kill");
+            if let (true, Some(tid)) = (
+                kill,
+                t.raw_input
+                    .as_ref()
+                    .and_then(|v| v.get("TaskId").and_then(Value::as_str)),
+            ) {
+                let before = self.bg_tasks.len();
+                self.bg_tasks.retain(|b| b.id != tid);
+                changed |= self.bg_tasks.len() != before;
+            }
+        }
+
+        if let Some((_, rest)) = t.output.split_once("background task with task id:") {
+            if let Some(tid) = rest
+                .split_whitespace()
+                .next()
+                .map(|s| {
+                    s.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+                })
+                .filter(|s| !s.is_empty())
+            {
+                let label = command_text(t.raw_input.as_ref()).unwrap_or_else(|| t.title.clone());
+                changed |= upsert_bg_task(
+                    &mut self.bg_tasks,
+                    BackgroundTask {
+                        id: tid.to_string(),
+                        kind: "command".into(),
+                        label,
+                        started_at: chrono::Utc::now(),
+                        item_id: item_id.clone(),
+                    },
+                );
+            }
+        } else if lower == "schedule"
+            || t.raw_input.as_ref().is_some_and(|v| {
+                v.get("DurationSeconds").is_some() || v.get("CronExpression").is_some()
+            })
+        {
+            let label = schedule_label(t.raw_input.as_ref(), &t.title);
+            changed |= upsert_bg_task(
+                &mut self.bg_tasks,
+                BackgroundTask {
+                    id: format!("schedule:{call_id}"),
+                    kind: "schedule".into(),
+                    label,
+                    started_at: chrono::Utc::now(),
+                    item_id: item_id.clone(),
+                },
+            );
+        } else if lower.contains("swarm_wait") {
+            changed |= upsert_bg_task(
+                &mut self.bg_tasks,
+                BackgroundTask {
+                    id: "swarm_wait".into(),
+                    kind: "swarm".into(),
+                    label: "Waiting for swarm messages".into(),
+                    started_at: chrono::Utc::now(),
+                    item_id,
+                },
+            );
+        } else if lower.contains("invoke_subagent") || lower.contains("run_workflow") {
+            let label = t
+                .raw_input
+                .as_ref()
+                .and_then(|v| {
+                    v.get("Description")
+                        .or_else(|| v.get("AgentName"))
+                        .or_else(|| v.get("name"))
+                        .and_then(Value::as_str)
+                })
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| t.title.clone());
+            changed |= upsert_bg_task(
+                &mut self.bg_tasks,
+                BackgroundTask {
+                    id: format!("subagent:{call_id}"),
+                    kind: "agent".into(),
+                    label,
+                    started_at: chrono::Utc::now(),
+                    item_id,
+                },
+            );
+        }
+
+        if changed {
+            step.push(DriverEvent::BackgroundTasks(self.bg_tasks.clone()));
+        }
     }
 
     fn segment_item(&self, seg: &Segment, streaming: bool) -> TurnItem {
@@ -749,6 +891,7 @@ impl AcpDriver {
         Self::merge_content(&mut t, &call.content);
         Self::merge_raw_images(&mut t, call.raw_output.as_ref());
         step.push(DriverEvent::TurnItem(self.tool_item(&id, &t)));
+        self.note_tool_background(step, &id, &t);
         self.tools.insert(id, t);
     }
 
@@ -788,6 +931,7 @@ impl AcpDriver {
         }
         Self::merge_raw_images(&mut t, f.raw_output.as_ref());
         step.push(DriverEvent::TurnItem(self.tool_item(&id, &t)));
+        self.note_tool_background(step, &id, &t);
         self.tools.insert(id, t);
     }
 
@@ -820,19 +964,99 @@ impl AcpDriver {
         match n.update {
             SessionUpdate::AgentMessageChunk(c) => {
                 if let ContentBlock::Text(t) = c.content {
-                    let mid = c.message_id.map(|m| m.0.to_string());
-                    self.append_text(step, SegmentKind::Message, &t.text, mid);
+                    if !t.text.is_empty() {
+                        self.ensure_autonomous_turn(step);
+                        let mid = c.message_id.map(|m| m.0.to_string());
+                        self.append_text(step, SegmentKind::Message, &t.text, mid);
+                    }
                 }
             }
             SessionUpdate::AgentThoughtChunk(c) => {
                 if let ContentBlock::Text(t) = c.content {
-                    self.append_text(step, SegmentKind::Thought, &t.text, None);
+                    if !t.text.is_empty() {
+                        self.ensure_autonomous_turn(step);
+                        self.append_text(step, SegmentKind::Thought, &t.text, None);
+                    }
                 }
             }
-            SessionUpdate::ToolCall(call) => self.on_tool_call(step, call),
-            SessionUpdate::ToolCallUpdate(up) => self.on_tool_update(step, up),
-            SessionUpdate::Plan(plan) => self.on_plan(step, plan),
+            SessionUpdate::ToolCall(call) => {
+                self.ensure_autonomous_turn(step);
+                self.on_tool_call(step, call);
+            }
+            SessionUpdate::ToolCallUpdate(up) => {
+                self.ensure_autonomous_turn(step);
+                self.on_tool_update(step, up);
+            }
+            SessionUpdate::Plan(plan) => {
+                self.ensure_autonomous_turn(step);
+                self.on_plan(step, plan);
+            }
+            SessionUpdate::UsageUpdate(u) => {
+                step.push(DriverEvent::ContextUsage(ThreadTokenUsage {
+                    used_tokens: u.used,
+                    max_tokens: (u.size > 0).then_some(u.size),
+                    input_tokens: None,
+                    cached_input_tokens: None,
+                    output_tokens: None,
+                }));
+            }
             _ => {}
+        }
+    }
+
+    /// Fallback when `SessionNotification` fails strict v1 schema parsing (e.g.
+    /// ACP v2 `agent_message` / `agent_thought` or an experimental vendor
+    /// `sessionUpdate` tag) so text chunks are never silently dropped.
+    fn on_raw_update(&mut self, step: &mut DriverStep, params: &Value) {
+        if matches!(self.phase, Phase::Creating { loading: true }) {
+            return;
+        }
+        let Some(up) = params.get("update") else {
+            return;
+        };
+        let Some(tag) = up.get("sessionUpdate").and_then(Value::as_str) else {
+            return;
+        };
+        match tag {
+            "agent_message_chunk" | "agent_message" => {
+                if let Some(text) = raw_update_text(up) {
+                    if !text.is_empty() {
+                        self.ensure_autonomous_turn(step);
+                        let mid = up
+                            .get("messageId")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                        self.append_text(step, SegmentKind::Message, &text, mid);
+                    }
+                }
+            }
+            "agent_thought_chunk" | "agent_thought" => {
+                if let Some(text) = raw_update_text(up) {
+                    if !text.is_empty() {
+                        self.ensure_autonomous_turn(step);
+                        self.append_text(step, SegmentKind::Thought, &text, None);
+                    }
+                }
+            }
+            "usage_update" => {
+                if let Some(used) = up.get("used").and_then(Value::as_u64) {
+                    let size = up.get("size").and_then(Value::as_u64).unwrap_or(0);
+                    step.push(DriverEvent::ContextUsage(ThreadTokenUsage {
+                        used_tokens: used,
+                        max_tokens: (size > 0).then_some(size),
+                        input_tokens: None,
+                        cached_input_tokens: None,
+                        output_tokens: None,
+                    }));
+                }
+            }
+            other => {
+                tracing::debug!(
+                    provider = self.provider.as_str(),
+                    session_update = other,
+                    "ignoring unrecognized ACP session/update variant"
+                );
+            }
         }
     }
 
@@ -842,6 +1066,7 @@ impl AcpDriver {
         rpc_id: Value,
         req: RequestPermissionRequest,
     ) {
+        self.ensure_autonomous_turn(step);
         self.close_segment(step);
         let request_id = format!("acp-{}", rpc_key(&rpc_id));
         let kind = match req.tool_call.fields.kind {
@@ -1059,9 +1284,74 @@ impl AcpDriver {
                 },
             };
             step.push(ev);
+            self.autonomous = false;
             self.turn_id = None;
         }
     }
+}
+
+fn upsert_bg_task(list: &mut Vec<BackgroundTask>, task: BackgroundTask) -> bool {
+    if let Some(existing) = list.iter_mut().find(|t| t.id == task.id) {
+        if existing.label == task.label && existing.kind == task.kind {
+            return false;
+        }
+        *existing = task;
+        return true;
+    }
+    list.push(task);
+    true
+}
+
+fn schedule_label(raw: Option<&Value>, fallback: &str) -> String {
+    if let Some(v) = raw {
+        let detail = v
+            .get("Prompt")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let Some(secs) = v.get("DurationSeconds").and_then(Value::as_u64) {
+            return match detail {
+                Some(p) => format!("Timer ({secs}s): {}", truncate_chars(p, 72)),
+                None => format!("Scheduled timer ({secs}s)"),
+            };
+        }
+        if let Some(cron) = v.get("CronExpression").and_then(Value::as_str) {
+            return match detail {
+                Some(p) => format!("Schedule ({cron}): {}", truncate_chars(p, 72)),
+                None => format!("Recurring schedule ({cron})"),
+            };
+        }
+    }
+    fallback.to_string()
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    let mut chars = s.chars();
+    let head: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
+fn raw_update_text(up: &Value) -> Option<String> {
+    if let Some(c) = up.get("content") {
+        if let Some(t) = c.get("text").and_then(Value::as_str) {
+            return Some(t.to_string());
+        }
+        if let Some(arr) = c.as_array() {
+            let joined: String = arr
+                .iter()
+                .filter_map(|b| b.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("");
+            if !joined.is_empty() {
+                return Some(joined);
+            }
+        }
+    }
+    up.get("text").and_then(Value::as_str).map(str::to_string)
 }
 
 /// An Otto context bundle as system-prompt text: its `AGENTS.md`, then an
@@ -1183,7 +1473,7 @@ impl StructuredDriver for AcpDriver {
     }
 
     fn prompt(&mut self, turn_id: &str, req: &RuntimePromptReq) -> Result<DriverStep, DriverError> {
-        if self.prompt_id.is_some() || self.queued.is_some() {
+        if self.prompt_id.is_some() || self.queued.is_some() || self.turn_id.is_some() {
             return Err(DriverError("a prompt is already running".into()));
         }
         let name = self.provider.as_str();
@@ -1244,6 +1534,8 @@ impl StructuredDriver for AcpDriver {
             step.write(json!({"jsonrpc":"2.0","id":p.rpc_id,"result":resp}).to_string());
         }
         if self.queued.take().is_some() {
+            self.autonomous = false;
+            self.turn_id = None;
             step.push(DriverEvent::Terminal {
                 status: TurnTerminalStatus::Interrupted,
                 failure: None,
@@ -1255,6 +1547,17 @@ impl StructuredDriver for AcpDriver {
                 n.meta = Some(meta.clone());
             }
             step.write(json!({"jsonrpc":"2.0","method":M_SESSION_CANCEL,"params":n}).to_string());
+            if self.autonomous && self.prompt_id.is_none() && self.turn_id.is_some() {
+                self.close_segment(&mut step);
+                self.tools.clear();
+                self.autonomous = false;
+                self.turn_id = None;
+                step.push(DriverEvent::Terminal {
+                    status: TurnTerminalStatus::Interrupted,
+                    failure: None,
+                    reason: None,
+                });
+            }
         }
         step
     }
@@ -1374,8 +1677,9 @@ impl StructuredDriver for AcpDriver {
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
         match (method, id) {
             (Some(m), None) if m == M_SESSION_UPDATE => {
-                if let Ok(n) = serde_json::from_value::<SessionNotification>(params) {
-                    self.on_update(&mut step, n);
+                match serde_json::from_value::<SessionNotification>(params.clone()) {
+                    Ok(n) => self.on_update(&mut step, n),
+                    Err(_) => self.on_raw_update(&mut step, &params),
                 }
             }
             (Some(_), None) => {} // unknown notification
@@ -1391,6 +1695,8 @@ impl StructuredDriver for AcpDriver {
                 };
                 match parsed {
                     Ok(questions) => {
+                        self.ensure_autonomous_turn(&mut step);
+                        self.close_segment(&mut step);
                         let request_id = format!("acp-question-{}", rpc_key(&id));
                         self.questions
                             .insert(request_id.clone(), (id, questions.clone()));
@@ -1442,9 +1748,43 @@ impl StructuredDriver for AcpDriver {
         self.pending.clear();
         self.questions.clear();
         self.tools.clear();
+        self.bg_tasks.clear();
+        self.autonomous = false;
         self.segment = None;
         self.closed_named.clear();
         DriverStep::default()
+    }
+
+    fn needs_idle_turn_settle(&self) -> bool {
+        self.autonomous
+            && self.turn_id.is_some()
+            && self.prompt_id.is_none()
+            && self.pending.is_empty()
+            && self.questions.is_empty()
+            && !self.tools.values().any(|t| {
+                matches!(
+                    t.status,
+                    ToolCallStatus::Pending | ToolCallStatus::InProgress
+                )
+            })
+    }
+
+    fn on_idle_settle(&mut self) -> DriverStep {
+        let mut step = DriverStep::default();
+        if !self.needs_idle_turn_settle() {
+            return step;
+        }
+        self.close_segment(&mut step);
+        self.turn_id = None;
+        self.autonomous = false;
+        self.closed_named.clear();
+        self.tools.clear();
+        step.push(DriverEvent::Terminal {
+            status: TurnTerminalStatus::Completed,
+            failure: None,
+            reason: None,
+        });
+        step
     }
 }
 
@@ -2099,5 +2439,139 @@ mod tests {
         d.on_line(&update("agent_thought_chunk", "hm", None));
         let y = last_item(&d.on_line(&update("agent_message_chunk", "y", None)));
         assert_ne!(x.id, y.id);
+    }
+
+    #[test]
+    fn autonomous_wakeup_turns_track_background_tasks_and_idle_settle_cleanly() {
+        let mut d = AcpDriver::agy("agy");
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#);
+
+        // Turn 1 schedules a timer + spawns a background command, then finishes.
+        let p1 = d.prompt("t1", &RuntimePromptReq::of("monitor")).unwrap();
+        let pid = sent(&p1, 0)["id"].clone();
+        d.on_line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{
+                "sessionUpdate":"tool_call","toolCallId":"sc1","title":"schedule","kind":"other","status":"pending",
+                "rawInput":{"DurationSeconds":30,"Prompt":"check deploy"}
+            }}})
+            .to_string(),
+        );
+        let bg = d.on_line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{
+                "sessionUpdate":"tool_call_update","toolCallId":"sc1","status":"completed"
+            }}})
+            .to_string(),
+        );
+        assert!(bg.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::BackgroundTasks(tasks)
+                if tasks.len() == 1 && tasks[0].kind == "schedule" && tasks[0].label.contains("check deploy")
+        )));
+        d.on_line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{
+                "sessionUpdate":"tool_call","toolCallId":"cmd1","title":"run_command","kind":"execute","status":"pending",
+                "rawInput":{"CommandLine":"npm test"}
+            }}})
+            .to_string(),
+        );
+        let bg2 = d.on_line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{
+                "sessionUpdate":"tool_call_update","toolCallId":"cmd1","status":"completed",
+                "content":[{"type":"content","content":{"type":"text","text":"Command is running in background task with task id: task_42."}}]
+            }}})
+            .to_string(),
+        );
+        assert!(bg2.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::BackgroundTasks(tasks) if tasks.len() == 2 && tasks.iter().any(|t| t.id == "task_42")
+        )));
+        d.on_line(
+            &json!({"jsonrpc":"2.0","id":pid,"result":{"stopReason":"end_turn"}}).to_string(),
+        );
+        assert!(!d.needs_idle_turn_settle());
+
+        // Autonomous wakeup #1 arrives with no session/prompt RPC.
+        let w1 = d.on_line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{
+                "sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"Timer fired"}
+            }}})
+            .to_string(),
+        );
+        assert!(w1
+            .events
+            .iter()
+            .any(|e| matches!(e, DriverEvent::BackgroundTasks(tasks) if tasks.is_empty())));
+        assert!(w1
+            .events
+            .iter()
+            .any(|e| matches!(e, DriverEvent::TurnStarted { turn_id } if turn_id == "auto-1")));
+        assert!(d.needs_idle_turn_settle());
+
+        // While a tool call is pending in the autonomous turn, do NOT idle-settle early.
+        d.on_line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{
+                "sessionUpdate":"tool_call","toolCallId":"t_auto","title":"ls","kind":"execute","status":"in_progress"
+            }}})
+            .to_string(),
+        );
+        assert!(!d.needs_idle_turn_settle());
+        d.on_line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{
+                "sessionUpdate":"tool_call_update","toolCallId":"t_auto","status":"completed"
+            }}})
+            .to_string(),
+        );
+        // Raw ACP v2 message variant + unrecognized experimental variant are handled safely.
+        let msg = d.on_line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{
+                "sessionUpdate":"agent_message","content":[{"type":"text","text":"Deploy healthy!"}]
+            }}})
+            .to_string(),
+        );
+        assert!(msg.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::TurnItem(i)
+                if i.id.starts_with("auto-1:")
+                    && matches!(&i.kind, TurnItemKind::AssistantMessage { text, streaming: true, .. } if text == "Deploy healthy!")
+        )));
+        assert!(d
+            .on_line(
+                &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{
+                    "sessionUpdate":"experimental_heartbeat","seq":1
+                }}})
+                .to_string(),
+            )
+            .events
+            .is_empty());
+
+        assert!(d.needs_idle_turn_settle());
+        let settled = d.on_idle_settle();
+        assert!(settled.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::TurnItem(i)
+                if matches!(&i.kind, TurnItemKind::AssistantMessage { text, streaming: false, .. } if text == "Deploy healthy!")
+        )));
+        assert!(settled.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::Terminal {
+                status: TurnTerminalStatus::Completed,
+                ..
+            }
+        )));
+        assert!(!d.needs_idle_turn_settle());
+
+        // Second autonomous wakeup 20 minutes later opens auto-2 cleanly.
+        let w2 = d.on_line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{
+                "sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Wakeup 2"}
+            }}})
+            .to_string(),
+        );
+        assert!(w2
+            .events
+            .iter()
+            .any(|e| matches!(e, DriverEvent::TurnStarted { turn_id } if turn_id == "auto-2")));
     }
 }

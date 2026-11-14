@@ -79,7 +79,7 @@ const normPath = (p: string | null | undefined): string => {
   return clean === '~' ? '' : clean;
 };
 
-/** Build the unified Threads harness list (`claude`, `codex`, `agy`, `gemini`, `grok`, `opencode`, `pi`, + custom CLI harnesses), never hardcoding a 3-provider subset. */
+/** Build the unified Threads harness list from enabled `/meta.providers` (`claude`, `codex`, `agy`, `gemini`, `grok`, `opencode`, `pi`, + custom CLI harnesses), never re-adding providers hidden via `disabled_providers`. */
 export function resolveIdeHarnesses(
   registeredProviders: readonly string[],
   extraProviders: readonly (string | null | undefined)[] = [],
@@ -89,27 +89,36 @@ export function resolveIdeHarnesses(
     const clean = (raw ?? '').trim();
     if (clean && clean !== 'shell' && !merged.includes(clean)) merged.push(clean);
   };
-  for (let i = 0; i < IDE_RUNTIME_PROVIDERS.length; i++) {
-    const base = IDE_RUNTIME_PROVIDERS[i];
-    if (base === 'claude' || base === 'codex' || base === 'agy' || registeredProviders.includes(base)) push(base);
+  const enabled = registeredProviders.map((p) => p.trim()).filter((p) => p && p !== 'shell');
+  if (enabled.length > 0) {
+    for (let i = 0; i < IDE_RUNTIME_PROVIDERS.length; i++) {
+      if (enabled.includes(IDE_RUNTIME_PROVIDERS[i])) push(IDE_RUNTIME_PROVIDERS[i]);
+    }
+    for (let i = 0; i < enabled.length; i++) push(enabled[i]);
+  } else {
+    for (let i = 0; i < IDE_RUNTIME_PROVIDERS.length; i++) push(IDE_RUNTIME_PROVIDERS[i]);
   }
-  for (let i = 0; i < registeredProviders.length; i++) push(registeredProviders[i]);
-  for (let i = 0; i < IDE_RUNTIME_PROVIDERS.length; i++) push(IDE_RUNTIME_PROVIDERS[i]);
   for (let i = 0; i < extraProviders.length; i++) push(extraProviders[i]);
   return merged;
 }
 
-/** Filter available harnesses down to structured `/runtime-sessions` providers for `⌘I` inline edit. */
-export function resolveIdeInlineProviders(availableProviders: readonly string[]): IdeRuntimeProvider[] {
+/** Filter available harnesses down to enabled structured `/runtime-sessions` providers for `⌘I` inline edit. */
+export function resolveIdeInlineProviders(
+  availableProviders: readonly string[],
+  registeredProviders?: readonly string[],
+): IdeRuntimeProvider[] {
   const runtimeSet = new Set<string>(IDE_RUNTIME_PROVIDERS);
+  const enabledReg = (registeredProviders ?? []).map((p) => p.trim()).filter((p) => p && p !== 'shell');
+  const regSet = enabledReg.length > 0 ? new Set<string>(enabledReg) : null;
   const filtered: IdeRuntimeProvider[] = [];
   for (let i = 0; i < availableProviders.length; i++) {
     const p = availableProviders[i]?.trim() ?? '';
-    if (runtimeSet.has(p) && !filtered.includes(p as IdeRuntimeProvider)) {
+    if (runtimeSet.has(p) && (!regSet || regSet.has(p)) && !filtered.includes(p as IdeRuntimeProvider)) {
       filtered.push(p as IdeRuntimeProvider);
     }
   }
-  return filtered.length > 0 ? filtered : [...IDE_RUNTIME_PROVIDERS];
+  if (filtered.length > 0) return filtered;
+  return regSet ? [] : [...IDE_RUNTIME_PROVIDERS];
 }
 
 /** Match any structured runtime or PTY thread belonging to the current IDE workspace or any attached project folder. */

@@ -80,9 +80,13 @@ pub struct PiDriver {
     next_id: u64,
     state_req: Option<String>,
     prompt_req: Option<String>,
+    ready: bool,
     turn_id: Option<String>,
+    auto_turns: u64,
     /// The streaming assistant message: its item id and text so far.
     message: Option<(String, String)>,
+    /// The streaming thinking/reasoning block: its item id and text so far.
+    thought: Option<(String, String)>,
     messages: u32,
     tools: HashMap<String, Tool>,
     /// This pi sends `agent_settled` (1.x): a turn ends there, and a
@@ -98,8 +102,11 @@ impl PiDriver {
             next_id: 0,
             state_req: None,
             prompt_req: None,
+            ready: false,
             turn_id: None,
+            auto_turns: 0,
             message: None,
+            thought: None,
             messages: 0,
             tools: HashMap::new(),
             settles: false,
@@ -119,6 +126,19 @@ impl PiDriver {
         self.turn_id.as_deref().unwrap_or_default()
     }
 
+    fn ensure_autonomous_turn(&mut self, step: &mut DriverStep) {
+        if !self.ready || self.turn_id.is_some() {
+            return;
+        }
+        self.auto_turns += 1;
+        let id = format!("auto-{}", self.auto_turns);
+        self.turn_id = Some(id.clone());
+        self.messages = 0;
+        self.ended = None;
+        self.tools.clear();
+        step.push(DriverEvent::TurnStarted { turn_id: id });
+    }
+
     fn finish(
         &mut self,
         step: &mut DriverStep,
@@ -128,6 +148,7 @@ impl PiDriver {
         if self.turn_id.is_none() {
             return;
         }
+        self.close_thought(step);
         self.close_message(step);
         self.turn_id = None;
         self.prompt_req = None;
@@ -138,6 +159,22 @@ impl PiDriver {
             failure,
             reason: None,
         });
+    }
+
+    fn close_thought(&mut self, step: &mut DriverStep) {
+        if let Some((id, text)) = self.thought.take() {
+            if !text.is_empty() {
+                step.push(DriverEvent::TurnItem(item(
+                    id,
+                    TurnItemStatus::Completed,
+                    None,
+                    TurnItemKind::Reasoning {
+                        text,
+                        streaming: false,
+                    },
+                )));
+            }
+        }
     }
 
     fn close_message(&mut self, step: &mut DriverStep) {
@@ -157,7 +194,36 @@ impl PiDriver {
         }
     }
 
+    fn on_thought(&mut self, step: &mut DriverStep, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        self.close_message(step);
+        if self.thought.is_none() {
+            self.messages += 1;
+            self.thought = Some((
+                format!("{}:thought:{}", self.turn(), self.messages),
+                String::new(),
+            ));
+        }
+        let (id, text) = self.thought.as_mut().expect("set above");
+        text.push_str(delta);
+        step.push(DriverEvent::TurnItem(item(
+            id.clone(),
+            TurnItemStatus::Running,
+            None,
+            TurnItemKind::Reasoning {
+                text: text.clone(),
+                streaming: true,
+            },
+        )));
+    }
+
     fn on_text(&mut self, step: &mut DriverStep, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        self.close_thought(step);
         if self.message.is_none() {
             self.messages += 1;
             self.message = Some((
@@ -244,15 +310,43 @@ impl PiDriver {
 
     fn on_event(&mut self, step: &mut DriverStep, v: &Value) {
         match v.get("type").and_then(Value::as_str) {
+            Some("agent_start" | "message_start") => {
+                self.ensure_autonomous_turn(step);
+            }
             Some("message_update") => {
                 let ev = &v["assistantMessageEvent"];
-                if ev.get("type").and_then(Value::as_str) == Some("text_delta") {
-                    let delta = ev.get("delta").and_then(Value::as_str).unwrap_or("");
-                    self.on_text(step, delta);
+                match ev.get("type").and_then(Value::as_str) {
+                    Some("text_delta") => {
+                        let delta = ev.get("delta").and_then(Value::as_str).unwrap_or("");
+                        if !delta.is_empty() {
+                            self.ensure_autonomous_turn(step);
+                            if self.turn_id.is_some() {
+                                self.on_text(step, delta);
+                            }
+                        }
+                    }
+                    Some("thinking_delta") => {
+                        let delta = ev.get("delta").and_then(Value::as_str).unwrap_or("");
+                        if !delta.is_empty() {
+                            self.ensure_autonomous_turn(step);
+                            if self.turn_id.is_some() {
+                                self.on_thought(step, delta);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
-            Some("message_end") => self.close_message(step),
+            Some("message_end") if self.turn_id.is_some() => {
+                self.close_thought(step);
+                self.close_message(step);
+            }
             Some("tool_execution_start") => {
+                self.ensure_autonomous_turn(step);
+                if self.turn_id.is_none() {
+                    return;
+                }
+                self.close_thought(step);
                 self.close_message(step);
                 let call = v
                     .get("toolCallId")
@@ -347,6 +441,7 @@ impl PiDriver {
         if id.is_some() && id == self.state_req.as_deref() {
             self.state_req = None;
             if ok {
+                self.ready = true;
                 step.push(DriverEvent::Ready {
                     native_thread_id: v
                         .pointer("/data/sessionId")
@@ -488,6 +583,7 @@ impl StructuredDriver for PiDriver {
         if v.get("type").and_then(Value::as_str) == Some("response") {
             self.on_response(&mut step, &v);
         } else if self.turn_id.is_some()
+            || self.ready
             || v.get("type").and_then(Value::as_str) == Some("extension_ui_request")
         {
             self.on_event(&mut step, &v);
@@ -665,5 +761,36 @@ mod tests {
             (r["type"].as_str(), r["cancelled"].as_bool()),
             (Some("extension_ui_response"), Some(true))
         );
+    }
+
+    #[test]
+    fn autonomous_agent_start_after_ready_emits_turn_started_and_streams_thinking_and_text() {
+        let mut d = PiDriver::with_program("pi");
+        let st = sent(&d.start(&ctx(None, RuntimeAccessMode::FullAccess)), 0);
+        d.on_line(&format!(
+            r#"{{"id":"{}","type":"response","command":"get_state","success":true,"data":{{"sessionId":"sess-1"}}}}"#,
+            st["id"].as_str().unwrap()
+        ));
+        let s = d.on_line(r#"{"type":"agent_start"}"#);
+        assert!(
+            matches!(&s.events[0], DriverEvent::TurnStarted { turn_id } if turn_id == "auto-1")
+        );
+        let th = d.on_line(r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"pondering"}}"#);
+        assert!(
+            matches!(&th.events[0], DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::Reasoning { text, streaming: true } if text == "pondering"))
+        );
+        let tx = d.on_line(r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"autonomous answer"}}"#);
+        assert!(
+            matches!(&tx.events[1], DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::AssistantMessage { text, streaming: true, .. } if text == "autonomous answer"))
+        );
+        d.on_line(r#"{"type":"message_end","message":{"role":"assistant","stopReason":"stop"}}"#);
+        let fin = d.on_line(r#"{"type":"agent_end","messages":[{"role":"assistant","stopReason":"stop"}],"willRetry":false}"#);
+        assert!(fin.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::Terminal {
+                status: TurnTerminalStatus::Completed,
+                ..
+            }
+        )));
     }
 }

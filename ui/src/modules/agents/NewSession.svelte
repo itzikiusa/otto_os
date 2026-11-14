@@ -20,7 +20,7 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import { allProviders, providerReadiness } from '../../lib/providers';
+  import { allProviders, providerReadiness, providerSubtitle } from '../../lib/providers';
 
   /** Per-provider ceiling on one batch — a typo in the stepper shouldn't be able
    *  to fork 200 agent processes at once. */
@@ -512,7 +512,7 @@
               {#if p === defaultProvider}<span class="default-badge">default</span>{/if}
             </span>
             <span class="provider-desc">
-              {p === 'claude' ? 'Claude Code CLI' : p === 'codex' ? 'Codex CLI' : p === 'shell' ? 'Plain shell' : 'Custom provider'}
+              {providerSubtitle(p)}
             </span>
           </button>
           <div class="count-ctl" role="group" id={`ns-steppers-${i}`} aria-label={`${p} sessions`}>

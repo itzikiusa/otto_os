@@ -5,7 +5,7 @@
 import type { RuntimeAccessMode } from '../../../lib/api/types';
 import type { EffortLevel } from '../../../lib/providerModels';
 import { defaultAgentProvider } from '../../../lib/providers';
-import { lsGet, lsSet } from '../../../lib/storage';
+import { lsGet, lsRemove, lsSet } from '../../../lib/storage';
 import type { ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
 import { ide, ideBasename } from '../ideStore.svelte';
 import {
@@ -25,6 +25,9 @@ export const AGENT_OPEN_KEY = 'otto.ide.agentOpen';
 export const AGENT_PROVIDER_KEY = 'otto.ide.agent.provider';
 export const AGENT_MODEL_KEY = 'otto.ide.agent.model';
 export const AGENT_EFFORT_KEY = 'otto.ide.agent.effort';
+export const IDE_LAST_ROOT_KEY = 'otto.ide.lastRoot';
+export const IDE_OPEN_HANDOFF_KEY = 'otto.ide.openThreadHandoff';
+export const IDE_OPEN_THREAD_EVENT = 'otto:ide-open-thread';
 
 const EFFORT_LEVELS = new Set<string>(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 const RUNTIME_SET = new Set<string>(IDE_RUNTIME_PROVIDERS);
@@ -38,10 +41,16 @@ export interface IdeShellSelectionInput {
   text: string;
 }
 
+export interface IdeThreadHandoff {
+  root: string;
+  sessionId: string | null;
+}
+
 export interface IdeAgentEngineBridge {
   syncSubscriptions(forceRelease?: boolean): void;
   refreshWorkspaceSessions(): Promise<void>;
   syncInlineOpen(): void;
+  applyPendingHandoff?(): void;
   dispose(): void;
 }
 
@@ -53,6 +62,22 @@ function initialProvider(): string {
 function initialEffort(): EffortLevel | null {
   const raw = (lsGet(AGENT_EFFORT_KEY) ?? '').trim().toLowerCase();
   return EFFORT_LEVELS.has(raw) ? (raw as EffortLevel) : null;
+}
+
+function consumeStoredHandoff(): IdeThreadHandoff | null {
+  const raw = lsGet(IDE_OPEN_HANDOFF_KEY);
+  if (!raw) return null;
+  lsRemove(IDE_OPEN_HANDOFF_KEY);
+  try {
+    const parsed = JSON.parse(raw) as { root?: unknown; sessionId?: unknown; ts?: unknown };
+    const ts = typeof parsed.ts === 'number' ? parsed.ts : 0;
+    if (Date.now() - ts > 30_000) return null;
+    const root = typeof parsed.root === 'string' ? parsed.root.trim() : '';
+    const sessionId = typeof parsed.sessionId === 'string' && parsed.sessionId.trim() ? parsed.sessionId.trim() : null;
+    return root ? { root, sessionId } : null;
+  } catch {
+    return null;
+  }
 }
 
 export function readIdeBufferLite(fullPath: string): string {
@@ -108,9 +133,37 @@ class IdeAgentSharedState {
 
   chipSeq = 0;
   inlineReqSeq = 0;
+  pendingHandoff: IdeThreadHandoff | null = consumeStoredHandoff();
   appliedPathByProposalId = new Map<string, string>();
   proposalCache = new Map<string, { sig: string; proposals: IdeCodeProposal[] }>();
   engine: IdeAgentEngineBridge | null = null;
+
+  constructor() {
+    if (this.pendingHandoff?.sessionId) {
+      this.setPanelOpen(true);
+      this.sessionId = this.pendingHandoff.sessionId;
+    }
+    if (typeof window !== 'undefined') {
+      window.addEventListener(IDE_OPEN_THREAD_EVENT, (ev: Event) => {
+        const detail = (ev as CustomEvent<{ root?: string; sessionId?: string | null }>).detail;
+        lsRemove(IDE_OPEN_HANDOFF_KEY);
+        const root = (detail?.root ?? '').trim();
+        const sid = typeof detail?.sessionId === 'string' && detail.sessionId.trim() ? detail.sessionId.trim() : null;
+        this.pendingHandoff = root ? { root, sessionId: sid } : null;
+        if (sid !== null) {
+          this.setPanelOpen(true);
+          this.sessionId = sid;
+        }
+        this.engine?.applyPendingHandoff?.();
+      });
+    }
+  }
+
+  takePendingHandoff(): IdeThreadHandoff | null {
+    const h = this.pendingHandoff ?? consumeStoredHandoff();
+    this.pendingHandoff = null;
+    return h;
+  }
 
   setPanelOpen(next: boolean): boolean {
     if (this.panelOpen === next) return false;
@@ -166,7 +219,7 @@ class IdeAgentSharedState {
     return this.upsertContext({
       key: `selection:${fullPath}:${startLine}-${endLine}`,
       kind: 'selection',
-      label: `@${relPath}:L${startLine}-L${endLine}`,
+      label: `@${relPath}:L${startLine}-${endLine}`,
       sublabel: `${lineCount} ${lineCount === 1 ? 'line' : 'lines'}`,
       path: fullPath,
       startLine,
@@ -207,7 +260,8 @@ class IdeAgentSharedState {
   }
 
   resetTargetState(): void {
-    this.sessionId = null;
+    const handoffSid = this.pendingHandoff?.sessionId ?? null;
+    this.sessionId = handoffSid;
     this.freshContext = false;
     this.contexts = [];
     this.attachments = [];

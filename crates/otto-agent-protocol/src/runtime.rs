@@ -71,6 +71,10 @@ pub struct RuntimeConfig {
     /// chunk goes out at once; the latest text of a held item is flushed
     /// when the window ends or before any other event. Zero disables.
     pub stream_coalesce: Duration,
+    /// Quiet period after which an idle agent-initiated turn (`origin: agent`)
+    /// whose driver lacks a protocol turn-end frame (ACP `session/update`)
+    /// settles cleanly to `Completed` and persists its items. Zero disables.
+    pub autonomous_settle: Duration,
     /// Prompt attachments, one folder per session (`<dir>/<session>/<id>`).
     pub attachments_dir: PathBuf,
     /// How long a reopen waits for the resumed agent to get ready before
@@ -93,6 +97,7 @@ impl Default for RuntimeConfig {
             interrupt_grace: Duration::from_secs(10),
             close_grace: Duration::from_secs(3),
             stream_coalesce: Duration::from_millis(50),
+            autonomous_settle: Duration::from_millis(1500),
             attachments_dir: std::env::temp_dir().join("otto-runtime-attachments"),
             start_wait: Duration::from_secs(20),
             stall_after: Duration::from_secs(15 * 60),
@@ -294,6 +299,7 @@ struct Proc {
 
 struct ActiveTurn {
     id: Id,
+    origin: TurnOrigin,
     interrupting: bool,
     /// Stopped by the stall watchdog.
     stalled: bool,
@@ -1247,6 +1253,7 @@ impl AgentRuntime {
         };
         st.turn = Some(ActiveTurn {
             id: turn_id.clone(),
+            origin: TurnOrigin::User,
             interrupting: false,
             stalled: false,
         });
@@ -1822,7 +1829,8 @@ impl AgentRuntime {
     /// longer holds them or they exceed T3 Code's replay limits.
     pub async fn replay(&self, id: &Id, after_sequence: u64) -> Result<RuntimeReplay> {
         let live = self.live(id).await?;
-        let st = live.lock();
+        let mut st = live.lock();
+        flush_held(&self.inner, &live, &mut st);
         let last_sequence = st.next_seq - 1;
         if after_sequence >= last_sequence {
             return Ok(RuntimeReplay::Events {
@@ -2082,6 +2090,35 @@ fn stall_deadline(st: &State, cfg: &RuntimeConfig) -> Option<Instant> {
     Some(st.last_activity + allowance)
 }
 
+/// When an agent-initiated (`origin: agent`) turn whose driver has no protocol
+/// turn-end frame (ACP `session/update`) settles after quiet stdout.
+fn idle_settle_deadline(st: &State, cfg: &RuntimeConfig) -> Option<Instant> {
+    let turn = st
+        .turn
+        .as_ref()
+        .filter(|t| t.origin == TurnOrigin::Agent && !t.interrupting)?;
+    if cfg.autonomous_settle.is_zero() || has_pending(st) {
+        return None;
+    }
+    let proc = st.proc.as_ref()?;
+    if !proc.driver.needs_idle_turn_settle() {
+        return None;
+    }
+    let tool_running = st.proj.items.values().any(|i| {
+        i.turn_id.as_deref() == Some(turn.id.as_str())
+            && i.status.is_open()
+            && matches!(
+                i.kind,
+                TurnItemKind::CommandExecution { .. }
+                    | TurnItemKind::DynamicTool { .. }
+                    | TurnItemKind::WebSearch { .. }
+                    | TurnItemKind::FileChange { .. }
+                    | TurnItemKind::Subagent { .. }
+            )
+    });
+    (!tool_running).then(|| st.last_activity + cfg.autonomous_settle)
+}
+
 /// Working: a turn (the person's or the agent's own) or background work.
 fn is_busy(st: &State) -> bool {
     st.turn.is_some() || !st.session.background_tasks.is_empty()
@@ -2127,6 +2164,7 @@ fn open_agent_turn(inner: &Inner, live: &Live, st: &mut State, turn_id: String) 
     };
     st.turn = Some(ActiveTurn {
         id: turn_id,
+        origin: TurnOrigin::Agent,
         interrupting: false,
         stalled: false,
     });
@@ -2449,7 +2487,7 @@ fn finish_turn(
         .items
         .values()
         .filter(|i| {
-            i.turn_id.as_deref() == Some(active.id.as_str())
+            (i.turn_id.as_deref() == Some(active.id.as_str()) || i.turn_id.is_none())
                 && (i.status.is_open() || i.is_streaming())
                 && !i.is_background_open()
         })
@@ -2831,8 +2869,9 @@ async fn pump(
                 return; // closed or superseded
             }
             let held = st.held_deadline(window);
+            let settle = idle_settle_deadline(&st, &inner.config);
             let stall = stall_deadline(&st, &inner.config);
-            held.into_iter().chain(stall).min()
+            held.into_iter().chain(settle).chain(stall).min()
         };
         let msg = tokio::select! {
             _ = &mut changed => continue,
@@ -2848,6 +2887,15 @@ async fn pump(
                     return; // closed or superseded
                 }
                 flush_held(&inner, &live, &mut st);
+                let settled = idle_settle_deadline(&st, &inner.config)
+                    .is_some_and(|at| at <= Instant::now());
+                if settled {
+                    if let Some(proc) = st.proc.as_mut() {
+                        let step = proc.driver.on_idle_settle();
+                        apply_step(&inner, &live, &mut st, step);
+                    }
+                    continue;
+                }
                 let stalled =
                     stall_deadline(&st, &inner.config).is_some_and(|at| at <= Instant::now());
                 if stalled {

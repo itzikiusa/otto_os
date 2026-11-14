@@ -94,6 +94,7 @@
         ? favs.flatMap((key) => {
             const i = key.indexOf(':');
             const p = key.slice(0, i);
+            if (!providers.includes(p)) return [];
             const m = modelsForProvider(p, meta).find((x) => x.id === key.slice(i + 1));
             return m ? [{ p, m }] : [];
           })

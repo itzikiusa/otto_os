@@ -15,7 +15,7 @@
   import { toastError } from '../../lib/toastError';
   import ConversationView from '../agents/conversation/ConversationView.svelte'; // ui-guards: allow — experimental threads embeds shared ConversationView
   import { buildThreadMenu, relatedThreadsItem } from './threadMenu';
-  import ThreadTerminalDrawer from './ThreadTerminalDrawer.svelte';
+  import { TerminalDrawerView } from './threadLazy.svelte';
   import { harnessLabel, isPlainShellSession, sessionBranch } from './threadsHelpers';
   import { threadRepos } from './threadRepos.svelte';
   import { threads } from './threadsStore.svelte';
@@ -296,10 +296,10 @@
     {/if}
   </div>
 
-  {#if showTerminal && runtime}
-    {#if runtimeShell}<ThreadTerminalDrawer sessionId={runtimeShell.id} title={runtime.title} onclose={toggleTerminal} />{/if}
-  {:else if showTerminal && session && !isPlainShellSession(session)}
-    <ThreadTerminalDrawer
+  {#if showTerminal && runtime && TerminalDrawerView.component}
+    {#if runtimeShell}<TerminalDrawerView.component sessionId={runtimeShell.id} title={runtime.title} onclose={toggleTerminal} />{/if}
+  {:else if showTerminal && session && !isPlainShellSession(session) && TerminalDrawerView.component}
+    <TerminalDrawerView.component
       sessionId={paneId}
       title={session.title}
       onclose={toggleTerminal}

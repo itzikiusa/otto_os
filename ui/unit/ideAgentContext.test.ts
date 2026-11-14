@@ -315,9 +315,9 @@ test('offsetsForLineRange, lineRangeFromOffsets, and spliceCodeRange preserve su
   assert.equal(splicedByLines, expected);
 });
 
-test('resolveIdeHarnesses supports all Threads providers + custom CLIs without shell or 3-provider cap', () => {
+test('resolveIdeHarnesses supports all enabled Threads providers + custom CLIs while respecting disabled_providers', () => {
   const harnesses = resolveIdeHarnesses(
-    ['claude', 'codex', 'agy', 'grok', 'custom-qwen', 'shell'],
+    ['claude', 'codex', 'agy', 'gemini', 'grok', 'opencode', 'pi', 'custom-qwen', 'shell'],
     ['custom-deepseek', 'shell', null, '  '],
   );
 
@@ -328,6 +328,12 @@ test('resolveIdeHarnesses supports all Threads providers + custom CLIs without s
   assert.ok(harnesses.includes('custom-deepseek'));
   assert.ok(!harnesses.includes('shell'));
   assert.equal(new Set(harnesses).size, harnesses.length);
+
+  // Disabled built-ins (omitted from `/meta.providers`) must NOT sneak back in.
+  const subset = resolveIdeHarnesses(['codex', 'opencode', 'custom-kilo', 'shell']);
+  assert.deepEqual(subset, ['codex', 'opencode', 'custom-kilo']);
+  assert.deepEqual(resolveIdeInlineProviders(subset, ['codex', 'opencode', 'custom-kilo']), ['codex', 'opencode']);
+  assert.deepEqual(resolveIdeInlineProviders(['custom-kilo'], ['custom-kilo']), []);
 });
 
 test('matchesIdeProjectThread matches primary root, attached multi-folder roots, macOS /private/var symlinks, and workspace fallback', () => {

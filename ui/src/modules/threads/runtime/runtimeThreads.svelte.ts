@@ -105,8 +105,29 @@ class RuntimeThreads {
   unread = $state<Record<string, true>>({});
   /** Threads shown by an embed outside Threads (a turn ending there is seen). */
   private embedded = new Map<string, number>();
+  private seqListeners = new Set<(id: string, seq: number | null | undefined) => void>();
   private liveRefs = 0;
   private stopLive: (() => void) | null = null;
+
+  onSequence(fn: (id: string, seq: number | null | undefined) => void): () => void {
+    this.seqListeners.add(fn);
+    return () => this.seqListeners.delete(fn);
+  }
+
+  private emitSequence(id: string, seq: number | null | undefined): void {
+    for (const fn of this.seqListeners) fn(id, seq);
+  }
+
+  isActiveOrWaiting(id: string): boolean {
+    const s = this.byId[id];
+    if (!s || s.status === 'closed') return false;
+    return (
+      s.status === 'working' ||
+      s.status === 'starting' ||
+      s.status === 'awaiting_permission' ||
+      (s.background_tasks?.length ?? 0) > 0
+    );
+  }
 
   get(id: string | null | undefined): RuntimeSession | null {
     return id ? (this.byId[id] ?? null) : null;
@@ -134,6 +155,7 @@ class RuntimeThreads {
       for (const r of rows) {
         next[r.id] = r;
         noteRuntimeWaiting(r.id, r.status === 'awaiting_permission');
+        this.emitSequence(r.id, r.last_sequence);
       }
       this.byId = next;
       delete this.loadErrors[workspaceId];
@@ -155,6 +177,7 @@ class RuntimeThreads {
     for (const r of rows) {
       next[r.id] = r;
       noteRuntimeWaiting(r.id, r.status === 'awaiting_permission');
+      this.emitSequence(r.id, r.last_sequence);
     }
     this.byId = next;
   }
@@ -165,6 +188,7 @@ class RuntimeThreads {
     const r = await api.get<RuntimeSession>(`/runtime-sessions/${id}`);
     this.byId[r.id] = r;
     noteRuntimeWaiting(r.id, r.status === 'awaiting_permission');
+    this.emitSequence(r.id, r.last_sequence);
     return r;
   }
 
@@ -218,6 +242,7 @@ class RuntimeThreads {
       .get<RuntimeSession>(`/runtime-sessions/${id}`)
       .then((r) => {
         this.byId[r.id] = r;
+        this.emitSequence(r.id, r.last_sequence);
       })
       .catch(() => {
         /* not ours to see (another user's thread) */
@@ -277,6 +302,7 @@ class RuntimeThreads {
       // rule terminal sessions follow), else Approval required.
     });
     this.byId[created.id] = created;
+    this.emitSequence(created.id, created.last_sequence);
     const pics = (req.attachments ?? []).filter((f) => f.mime.startsWith('image/'));
     const docs = (req.attachments ?? []).filter((f) => !f.mime.startsWith('image/'));
     if (req.prompt || pics.length || docs.length) {
@@ -294,12 +320,16 @@ class RuntimeThreads {
    *  each sent `req.prompt`; all or none. Their rows land before this resolves. */
   async askChildren(parentId: string, req: AskChildReq): Promise<RuntimeSession[]> {
     const { children } = await api.post<AskChildResp>(`/runtime-sessions/${parentId}/children`, req);
-    for (const c of children) this.byId[c.id] = c;
+    for (const c of children) {
+      this.byId[c.id] = c;
+      this.emitSequence(c.id, c.last_sequence);
+    }
     return children;
   }
 
   async prompt(id: string, req: RuntimePromptReq): Promise<RuntimePromptResp> {
     const resp = await api.post<RuntimePromptResp>(`/runtime-sessions/${id}/prompt`, req);
+    this.emitSequence(id, resp.sequence);
     const mode = req.access_mode;
     if (mode) {
       // Sticky on the session (new threads start in the daemon default).
@@ -337,6 +367,7 @@ class RuntimeThreads {
   async reopen(id: string): Promise<RuntimeSession> {
     const r = await api.post<RuntimeSession>(`/runtime-sessions/${id}/reopen`);
     this.byId[id] = r;
+    this.emitSequence(id, r.last_sequence);
     return r;
   }
 

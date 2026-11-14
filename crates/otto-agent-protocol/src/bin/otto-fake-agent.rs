@@ -244,6 +244,37 @@ fn main() {
                             }
                         }
                     }
+                    "hold-chunk" => {
+                        chunk(&sid, "agent_message_chunk", "part1");
+                        chunk(&sid, "agent_message_chunk", "part2");
+                        loop {
+                            let Some(m) = next(&mut lines) else { return };
+                            if method(&m) == "session/cancel" {
+                                done("cancelled");
+                                break;
+                            }
+                        }
+                    }
+                    "schedule" => {
+                        update(
+                            &sid,
+                            json!({"sessionUpdate":"tool_call","toolCallId":"sc1","title":"schedule","kind":"other","status":"pending","rawInput":{"DurationSeconds":10,"Prompt":"check status"}}),
+                        );
+                        update(
+                            &sid,
+                            json!({"sessionUpdate":"tool_call_update","toolCallId":"sc1","status":"completed"}),
+                        );
+                        chunk(&sid, "agent_message_chunk", "scheduled");
+                        done("end_turn");
+                        let bg_sid = sid.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(40));
+                            chunk(&bg_sid, "agent_thought_chunk", "timer fired");
+                            chunk(&bg_sid, "agent_message_chunk", "autonomous report 1");
+                            std::thread::sleep(std::time::Duration::from_millis(180));
+                            chunk(&bg_sid, "agent_message_chunk", "autonomous report 2");
+                        });
+                    }
                     "plan" => {
                         update(
                             &sid,
