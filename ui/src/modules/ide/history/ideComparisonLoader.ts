@@ -57,8 +57,9 @@ export async function readCurrentDiskOrTab(
     return { content: ide.getBuffer(clean), exists: true };
   }
   try {
+    const root = ideGit.rootContainingPath(clean)?.path || ide.target.root;
     const res = await api.get<IdeFileReadResp>(
-      `/ide/fs/file?${ide.targetQuery({ path: clean })}`,
+      `/ide/fs/file?${ide.targetQuery({ root, path: clean })}`,
       signal,
     );
     return { content: res.content, exists: true };
@@ -73,9 +74,10 @@ export async function writeCurrentAndSyncIde(
   wasMissing = false,
 ): Promise<boolean> {
   const clean = ide.resolvePath(absPath);
+  const root = ideGit.rootContainingPath(clean)?.path || ide.target.root;
   try {
     const resp = await api.put<{ path: string; size: number; sha256: string }>('/ide/fs/file', {
-      target: ide.targetPayload,
+      target: { ...ide.targetPayload, root },
       path: clean,
       content: nextContent,
     });
@@ -184,7 +186,7 @@ export async function promptPutLocalHistoryLabel(
       root,
       path: cleanTarget,
       label: label.trim(),
-      content: cur.exists ? cur.content : undefined,
+      content: cur.exists ? cur.content : '',
     });
     toasts.success('Saved Local History label', label.trim());
     return true;

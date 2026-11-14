@@ -398,7 +398,10 @@ class IdeGitController {
     const existing = ide.tabs.find((t) => normSlash(t.path) === clean);
     if (!existing) return;
     try {
-      const fresh = await api.get<IdeFileReadResp>(`/ide/fs/file?${ide.targetQuery({ path: clean })}`);
+      const root = this.rootContainingPath(clean)?.path || ide.target.root;
+      const fresh = await api.get<IdeFileReadResp>(
+        `/ide/fs/file?${ide.targetQuery({ root, path: clean })}`,
+      );
       if (ide.activePath === existing.path) {
         await ide.applyAgentEdit(existing.path, fresh.content);
       } else {

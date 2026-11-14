@@ -20,10 +20,12 @@ export async function runManifestDepsAction(
   action: string,
   label: string,
   onTreeOutput?: (title: string, output: string) => void,
+  showModalOutput = action === 'maven_tree',
 ): Promise<void> {
+  const root = ideGit.rootContainingPath(filePath)?.path || ide.target.root;
   try {
     const res = await api.post<DepsActionResp>('/ide/deps/action', {
-      target: ide.target,
+      target: { ...ide.targetPayload, root },
       path: filePath,
       action,
     });
@@ -36,7 +38,7 @@ export async function runManifestDepsAction(
     void ideGit.refreshActive();
 
     const out = (res.output ?? '').trim();
-    if (action === 'maven_tree' && out && onTreeOutput) {
+    if (showModalOutput && out && onTreeOutput) {
       onTreeOutput(`${label} — ${ideBasename(filePath)}`, out);
     } else {
       toasts.success(label, out ? out.split('\n')[0].slice(0, 140) : ideBasename(filePath));
@@ -57,44 +59,51 @@ export function buildManifestMenuItems(
       {
         label: 'Go Mod Tidy',
         icon: 'format',
-        action: () => void runManifestDepsAction(filePath, 'tidy', 'Go Mod Tidy', onTreeOutput),
+        action: () => void runManifestDepsAction(filePath, 'tidy', 'Go Mod Tidy', onTreeOutput, false),
       },
       {
         label: 'Go Mod Vendor',
         icon: 'box',
-        action: () => void runManifestDepsAction(filePath, 'vendor', 'Go Mod Vendor', onTreeOutput),
+        action: () => void runManifestDepsAction(filePath, 'vendor', 'Go Mod Vendor', onTreeOutput, false),
       },
       {
         label: 'Sync Go Module',
         icon: 'refresh',
-        action: () => void runManifestDepsAction(filePath, 'sync', 'Sync Go Module', onTreeOutput),
+        action: () => void runManifestDepsAction(filePath, 'sync', 'Sync Go Module', onTreeOutput, false),
       },
     ];
   }
-  if (fileName === 'pom.xml' || /^build\.gradle(?:\.kts)?$/.test(fileName)) {
+  if (fileName === 'pom.xml') {
     return [
       { separator: true },
       {
-        label: 'Reload Maven/Gradle Project',
+        label: 'Reload Maven Project',
         icon: 'refresh',
         action: () =>
-          void runManifestDepsAction(
-            filePath,
-            'maven_sync',
-            'Reload Maven/Gradle Project',
-            onTreeOutput,
-          ),
+          void runManifestDepsAction(filePath, 'maven_sync', 'Reload Maven Project', onTreeOutput, false),
       },
       {
         label: 'Show Dependency Tree',
         icon: 'layers',
         action: () =>
-          void runManifestDepsAction(
-            filePath,
-            'maven_tree',
-            'Dependency Tree',
-            onTreeOutput,
-          ),
+          void runManifestDepsAction(filePath, 'maven_tree', 'Dependency Tree', onTreeOutput, true),
+      },
+    ];
+  }
+  if (/^build\.gradle(?:\.kts)?$/.test(fileName)) {
+    return [
+      { separator: true },
+      {
+        label: 'Reload Gradle Project',
+        icon: 'refresh',
+        action: () =>
+          void runManifestDepsAction(filePath, 'gradle_sync', 'Reload Gradle Project', onTreeOutput, false),
+      },
+      {
+        label: 'Show Dependency Tree',
+        icon: 'layers',
+        action: () =>
+          void runManifestDepsAction(filePath, 'gradle_sync', 'Dependency Tree', onTreeOutput, true),
       },
     ];
   }
