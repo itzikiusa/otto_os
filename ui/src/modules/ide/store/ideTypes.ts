@@ -5,7 +5,8 @@ import { getToken, laneFetch } from '../../../lib/api/client';
 
 export type IdeTargetKind = 'local' | 'ssh';
 export type IdeKeymapPreset = 'jetbrains' | 'standard';
-export type IdeBottomTab = 'debug' | 'run' | 'problems' | 'usages' | 'terminal';
+export type IdeBottomTab = 'debug' | 'run' | 'git' | 'problems' | 'usages' | 'terminal';
+export type BottomTab = IdeBottomTab;
 export type IdeSearchMode = 'files' | 'text' | 'symbols' | 'all';
 export type IdeCollabRole = 'viewer' | 'editor';
 
@@ -13,6 +14,16 @@ export interface IdeTargetSpec {
   kind: IdeTargetKind; workspace_id?: string | null; root: string;
   connection_id?: string | null; connection_name?: string | null;
   additional_roots?: string[];
+  project_folders?: string[];
+}
+
+export interface IdeNamedProject {
+  id: string;
+  name: string;
+  primary_root: string;
+  folders: string[];
+  pinned: boolean;
+  updated_at?: number;
 }
 
 export interface IdeProjectRoot {
@@ -73,21 +84,52 @@ export interface IdeSymbolNode {
   line: number; end_line: number; children?: IdeSymbolNode[];
 }
 
+export interface IdeTextEdit {
+  path: string;
+  start_line: number;
+  start_col: number;
+  end_line: number;
+  end_col: number;
+  new_text: string;
+}
+
+export interface IdeCodeAction {
+  id: string;
+  title: string;
+  kind?: string;
+  is_preferred?: boolean;
+  edits?: IdeTextEdit[];
+  command?: string | null;
+  edit_preview?: string;
+  replacement_content?: string;
+}
+
 export interface IdeDiagnostic {
   path: string; line: number; column?: number; end_line?: number; end_column?: number;
   severity: 'error' | 'warning' | 'info' | 'hint'; message: string; source?: string | null; code?: string | null;
+  quick_fixes?: IdeCodeAction[];
 }
 
 export interface IdeReferenceLocation { path: string; line: number; column: number; preview: string }
 export interface IdeRenameEdit { path: string; occurrences: number; preview_lines: { line: number; before: string; after: string }[] }
-export interface IdeCodeAction { id: string; title: string; kind?: string; edit_preview?: string; replacement_content?: string }
-export interface IdeInstalledSdk { id: string; version: string; path: string; source: 'system' | 'otto' | 'local' | string; active: boolean }
-export interface IdeToolStatus { name: string; available: boolean; path?: string | null }
+export interface IdeInstalledSdk {
+  id: string; version: string; path: string; source: 'system' | 'otto' | 'local' | string;
+  active: boolean; valid?: boolean; broken?: boolean; label?: string;
+}
+export interface IdeDetectedSdk {
+  ecosystem: 'java' | 'go' | 'rust' | 'node' | 'python' | 'shell' | string;
+  name: string; label?: string; version: string; path: string; home_path?: string;
+  bin_path?: string | null; source: string; arch?: string | null; valid?: boolean; broken?: boolean;
+}
+export interface IdeToolStatus { name: string; available: boolean; installed?: boolean; path?: string | null }
 export interface IdeDownloadableSdk { version: string; label: string; lts: boolean; os: string; arch: string; url: string; size_hint?: string | null; sha256?: string | null }
 
 export interface IdeToolchainEcosystem {
   ecosystem: 'java' | 'go' | 'rust' | 'node' | 'python' | string; display_name: string;
-  installed: IdeInstalledSdk[]; lsp_status: IdeToolStatus; dap_status: IdeToolStatus; downloadable: IdeDownloadableSdk[];
+  installed: IdeInstalledSdk[]; detected?: IdeDetectedSdk[];
+  lsp_status: IdeToolStatus; dap_status: IdeToolStatus;
+  lsp?: IdeToolStatus | null; dap?: IdeToolStatus | null;
+  downloadable: IdeDownloadableSdk[];
 }
 
 export interface IdeInstallJob {
@@ -108,10 +150,34 @@ export interface IdeProjectEnvironment {
   node_home?: string | null; python_interpreter?: string | null;
   dotenv_path?: string | null; extra_path?: string | null;
   inherit_shell_env?: boolean; additional_roots?: string[];
+  module_sdks?: Record<string, string>;
   env_vars: IdeEnvVar[];
 }
 
-export interface IdePythonVenv { path: string; interpreter_path?: string; version: string; kind: 'venv' | 'conda' | 'poetry' | 'uv' | string }
+export interface IdePythonVenv { path: string; interpreter_path?: string; name?: string; version: string; kind: 'venv' | 'conda' | 'poetry' | 'uv' | string }
+
+export interface IdeBuildToolProfile {
+  id: string;
+  name?: string;
+  kind?: 'maven' | 'gradle' | 'spring' | string;
+  source?: string | null;
+  active_by_default?: boolean;
+}
+
+export interface IdeBuildToolModule {
+  name: string;
+  group_id?: string | null;
+  artifact_id?: string | null;
+  version?: string | null;
+  tool: 'maven' | 'gradle';
+  root_dir: string;
+  manifest_path: string;
+  lifecycle?: string[];
+  plugins?: { name: string; goals?: string[] }[];
+  dependencies?: string[];
+  repositories?: string[];
+  modules?: IdeBuildToolModule[];
+}
 
 export interface IdeRunConfig {
   id: string; name: string; runner: string; command?: string | null; args: string[];
@@ -149,6 +215,7 @@ export interface IdeDebugSessionSnapshot {
   state: 'starting' | 'running' | 'paused' | 'terminated' | 'error'; stopped_reason?: string | null;
   active_thread_id?: number | null; active_frame_id?: number | null;
   paused_file?: string | null; paused_line?: number | null;
+  stopped_file?: string | null; stopped_line?: number | null;
   threads: IdeThread[]; stack_frames: IdeStackFrame[]; scopes: IdeScope[];
   inline_values: IdeInlineValue[]; breakpoints: IdeBreakpoint[]; output: IdeDebugOutputEntry[]; error?: string | null;
 }
@@ -196,6 +263,18 @@ export interface IdeEditorHandle {
   focus: () => void;
   getSelectionRange?: () => IdeEditorSelectionRange | null;
   applyAgentEdit?: (nextContent: string, range?: { from: number; to: number }) => boolean;
+}
+
+export function isReadOnlySdkOrCachePath(p: string): boolean {
+  if (!p) return false;
+  if (/^(?:jdt|jar):/i.test(p)) return true;
+  if (p.includes('/pkg/mod/') || p.includes('/go/pkg/mod/')) return true;
+  if (/\/toolchain@v[\w.-]+\/src\//.test(p) || /\/go(?:@[\w.-]+)?\/(?:[\w.-]+\/)?libexec\/src\//.test(p) || p.startsWith('/usr/local/go/src/')) return true;
+  if (p.includes('/.m2/repository/') || p.includes('/.gradle/caches/')) return true;
+  if (p.includes('/.cargo/registry/') || p.includes('/rustlib/src/')) return true;
+  if (p.includes('/node_modules/') || p.includes('/site-packages/') || p.includes('/dist-packages/')) return true;
+  if (p.includes('/.otto/toolchains/')) return true;
+  return false;
 }
 
 export function ideBasename(p: string): string {

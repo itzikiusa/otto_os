@@ -7,9 +7,11 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { copyWithToast } from '../../lib/clipboard';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { toasts } from '../../lib/toast.svelte';
   import {
     ide,
     ideBasename,
+    type IdeCodeAction,
     type IdeDiagnostic,
   } from './ideStore.svelte';
   import { ideAgent } from './store/ideAgentController.svelte';
@@ -110,34 +112,61 @@
     query = '';
   }
 
-  async function openQuickFixes(e: MouseEvent, d: IdeDiagnostic, key: string): Promise<void> {
+  function hasConcreteEdit(act: IdeCodeAction): boolean {
+    return Boolean((act.edits && act.edits.length > 0) || typeof act.replacement_content === 'string');
+  }
+
+  async function applyPreferredQuickFix(e: MouseEvent, d: IdeDiagnostic, key: string): Promise<void> {
+    if (d.quick_fixes && d.quick_fixes.length > 0 && hasConcreteEdit(d.quick_fixes[0])) {
+      await ide.applyCodeAction(d.path, d.quick_fixes[0]);
+      return;
+    }
     const anchor = e.currentTarget as HTMLElement | null;
     fixingKey = key;
     try {
       const actions = await ide.fetchCodeActions(d.path, d.line, d.column ?? 1);
-      const items: MenuItem[] = [
-        {
-          label: 'Fix with Agent',
-          icon: 'assistant',
-          action: () => ideAgent.attachDiagnostic(d, { openPanel: true }),
-        },
-        { separator: true },
-        ...(actions.length > 0
+      const concrete = actions.filter(hasConcreteEdit);
+      if (concrete.length === 1 || concrete.some((a) => a.is_preferred)) {
+        const chosen = concrete.find((a) => a.is_preferred) ?? concrete[0];
+        await ide.applyCodeAction(d.path, chosen);
+        return;
+      }
+      if (concrete.length > 1) {
+        ctxMenu.showAt(
+          anchor,
+          concrete.map((act) => ({
+            label: act.title,
+            icon: 'bulb' as const,
+            hint: act.kind,
+            action: () => void ide.applyCodeAction(d.path, act),
+          })),
+          { align: 'end' },
+        );
+        return;
+      }
+      toasts.info('No automatic quick fix available for this diagnostic');
+    } finally {
+      fixingKey = null;
+    }
+  }
+
+  async function openQuickFixes(e: MouseEvent, d: IdeDiagnostic, key: string): Promise<void> {
+    const anchor = e.currentTarget as HTMLElement | null;
+    fixingKey = key;
+    try {
+      const fetched = await ide.fetchCodeActions(d.path, d.line, d.column ?? 1);
+      const actions = fetched.length > 0 ? fetched : (d.quick_fixes ?? []);
+      const items: MenuItem[] =
+        actions.length > 0
           ? actions.map((act) => ({
               label: act.title,
               icon: 'bulb' as const,
-              hint: act.kind,
+              hint: act.kind || '⌥⏎',
               action: () => {
                 void ide.applyCodeAction(d.path, act);
               },
             }))
-          : [
-              {
-                label: 'No quick fixes available here',
-                disabled: true,
-              },
-            ]),
-      ];
+          : [{ label: 'No automatic quick fixes here', disabled: true }];
       items.push(
         { separator: true },
         {
@@ -148,9 +177,13 @@
         {
           label: 'Copy diagnostic message',
           icon: 'copy',
-          action: () => {
-            void copyWithToast(d.message, 'diagnostic');
-          },
+          action: () => void copyWithToast(d.message, 'diagnostic'),
+        },
+        { separator: true },
+        {
+          label: 'Ask Agent to fix…',
+          icon: 'assistant',
+          action: () => ideAgent.attachDiagnostic(d, { openPanel: true }),
         },
       );
       ctxMenu.showAt(anchor, items, { align: 'end' });
@@ -327,24 +360,36 @@
                 </button>
                 <button
                   type="button"
+                  class="btn small prob-fix"
+                  aria-keyshortcuts="Alt+Enter"
+                  disabled={fixingKey === k}
+                  title={d.quick_fixes?.[0]?.title ? `Apply Quick Fix: ${d.quick_fixes[0].title} (⌥⏎)` : 'Apply automatic Quick Fix (⌥⏎)'}
+                  onclick={(e) => void applyPreferredQuickFix(e, d, k)}
+                  data-testid="ide-problem-apply-quickfix"
+                >
+                  <Icon name="bulb" size={12} />
+                  <span>{fixingKey === k ? 'Applying…' : (d.quick_fixes?.[0]?.title || 'Apply Quick Fix')}</span>
+                </button>
+                <button
+                  type="button"
+                  class="icon-btn"
+                  aria-label="More quick fix options"
+                  title="More quick fix options…"
+                  disabled={fixingKey === k}
+                  onclick={(e) => void openQuickFixes(e, d, k)}
+                >
+                  <Icon name="more" size={12} />
+                </button>
+                <button
+                  type="button"
                   class="btn small ghost prob-agent-btn"
-                  aria-label="Fix with Agent"
-                  title="Fix with Agent"
+                  aria-label="Ask Agent to fix"
+                  title="Ask Agent to fix"
                   onclick={() => ideAgent.attachDiagnostic(d, { openPanel: true })}
                   data-testid="ide-problem-fix-agent"
                 >
                   <Icon name="assistant" size={12} />
-                  <span>Fix</span>
-                </button>
-                <button
-                  type="button"
-                  class="btn small ghost prob-fix"
-                  aria-keyshortcuts="Alt+Enter"
-                  disabled={fixingKey === k}
-                  onclick={(e) => void openQuickFixes(e, d, k)}
-                >
-                  <Icon name="bulb" size={12} />
-                  <span>{fixingKey === k ? 'Checking…' : 'Quick fix…'}</span>
+                  <span>Ask Agent</span>
                 </button>
               </div>
             {/each}

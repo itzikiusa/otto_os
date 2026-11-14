@@ -275,7 +275,7 @@
       <button
         type="button"
         class="run-foot-btn"
-        onclick={() => { closeMenu(); ide.openEnvironmentsModal('env'); }}
+        onclick={() => { closeMenu(); ide.openSettings('build.shell'); }}
       >
         <Icon name="terminal" size={12} />
         <span>Shell env &amp; vars…</span>
@@ -283,7 +283,7 @@
       <button
         type="button"
         class="run-foot-btn"
-        onclick={() => { closeMenu(); ide.toolchainsOpen = true; }}
+        onclick={() => { closeMenu(); ide.openSettings('project.sdks'); }}
       >
         <Icon name="box" size={12} />
         <span>SDKs…</span>
