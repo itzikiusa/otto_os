@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import {
+  supportsEffortSelection,
+  supportsModelSelection,
+} from '../src/lib/providerModels.ts';
 import { attachmentSupport, takesFile } from '../src/modules/threads/runtime/attachmentSupport.ts';
 import {
   providerSupportsSteer,
@@ -37,5 +41,18 @@ test('attachment parity across all 7 runtime providers matches driver capabiliti
     const expectsPdf = p !== 'codex' && p !== 'pi';
     assert.equal(attachmentSupport(p).files, expectsPdf, `${p} PDF support`);
     assert.equal(takesFile(p, { type: 'application/pdf' }), expectsPdf, `${p} application/pdf`);
+  }
+});
+
+test('model and reasoning effort selection parity includes opencode and pi', () => {
+  for (const p of ['claude', 'codex', 'agy', 'opencode', 'pi'] as const) {
+    assert.equal(supportsModelSelection(p, null), true, `${p} supports model selection fallback`);
+  }
+  assert.equal(supportsModelSelection('shell', null), false);
+  for (const p of ['claude', 'codex', 'agy', 'pi'] as const) {
+    assert.equal(supportsEffortSelection(p), true, `${p} supports reasoning effort selection`);
+  }
+  for (const p of ['gemini', 'grok', 'opencode', 'shell'] as const) {
+    assert.equal(supportsEffortSelection(p), false, `${p} does not expose effort selection`);
   }
 });

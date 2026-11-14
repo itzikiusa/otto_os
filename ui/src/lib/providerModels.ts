@@ -110,11 +110,22 @@ export function supportsModelSelection(
   if (meta?.model_flags && provider in meta.model_flags) {
     return meta.model_flags[provider] === true;
   }
-  return provider === 'claude' || provider === 'codex' || provider === 'agy';
+  return (
+    provider === 'claude' ||
+    provider === 'codex' ||
+    provider === 'agy' ||
+    provider === 'opencode' ||
+    provider === 'pi'
+  );
 }
 
 export function supportsEffortSelection(provider: string): boolean {
-  return provider === 'claude' || provider === 'codex' || provider === 'agy';
+  return (
+    provider === 'claude' ||
+    provider === 'codex' ||
+    provider === 'agy' ||
+    provider === 'pi'
+  );
 }
 
 export function supportsInteractionMode(provider: string): boolean {
