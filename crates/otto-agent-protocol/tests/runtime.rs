@@ -3972,3 +3972,256 @@ async fn replay_flushes_held_coalesced_chunks_immediately() {
     host.wait(is_terminal).await;
     rt.close(&s.id).await.unwrap();
 }
+
+#[tokio::test]
+async fn codex_steer_lands_in_the_running_turn_without_cancelling_it() {
+    use otto_core::agent_runtime::PromptDelivery;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Codex).await;
+    let first = rt.prompt(&s.id, "slow 4").await.unwrap();
+    host.wait(|e| {
+        matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+            if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, streaming: false, .. } if text == "Working…"))
+    })
+    .await;
+
+    let steer_req = RuntimePromptReq {
+        text: "more".into(),
+        delivery: Some(PromptDelivery::Steer),
+        images: vec![PromptImage {
+            mime: "image/png".into(),
+            data_base64: "iVBORw0KGgo=".into(),
+        }],
+        ..Default::default()
+    };
+    let r = rt.prompt_with(&s.id, &steer_req).await.unwrap();
+    assert!(r.steered);
+    assert_eq!(r.turn_id, first.turn_id);
+
+    host.wait(|e| {
+        matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+            if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, .. } if text == "steered: more [1]"))
+    })
+    .await;
+
+    let steered_user = host
+        .items()
+        .into_iter()
+        .find(|i| matches!(&i.kind, TurnItemKind::UserMessage { text, .. } if text == "more"))
+        .unwrap();
+    assert_eq!(steered_user.turn_id.as_ref(), Some(&first.turn_id));
+    if let TurnItemKind::UserMessage { attachments, .. } = &steered_user.kind {
+        assert_eq!(attachments.len(), 1);
+        let (mime, bytes) = rt.attachment(&s.id, &attachments[0].id).await.unwrap();
+        assert_eq!((mime.as_str(), &bytes[..4]), ("image/png", &b"\x89PNG"[..]));
+    } else {
+        unreachable!();
+    }
+
+    // Send now cancels the running turn and runs next.
+    let next = rt
+        .prompt_with(&s.id, &queued(PromptDelivery::Interrupt, "next"))
+        .await
+        .unwrap();
+    assert!(next.queued_id.is_some());
+    let stopped = host.wait(is_terminal).await;
+    assert_eq!(terminal(&stopped), Some(TurnTerminalStatus::Interrupted));
+    let done = host.wait_n(is_terminal, 2).await;
+    assert_eq!(terminal(&done), Some(TurnTerminalStatus::Completed));
+    assert_eq!(last_assistant_text(&host), "echo: next");
+    assert_eq!(turns(&host).len(), 2, "steer stayed inside the first turn");
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn pi_steer_lands_in_the_running_turn_and_settles_same_turn() {
+    use otto_agent_protocol::pi::PiDriver;
+    use otto_core::agent_runtime::PromptDelivery;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let fake_pi = dir.path().join("fake-pi.py");
+    std::fs::write(
+        &fake_pi,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+thinking = "default"
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw:
+        continue
+    cmd = json.loads(raw)
+    cid = cmd.get("id")
+    ty = cmd.get("type")
+    if ty == "get_state":
+        emit({
+            "id": cid,
+            "type": "response",
+            "command": "get_state",
+            "success": True,
+            "data": {"sessionId": "pi-sess-1", "model": {"provider": "anthropic", "id": "claude-sonnet"}},
+        })
+    elif ty == "set_thinking_level":
+        thinking = cmd.get("level", "default")
+        emit({"id": cid, "type": "response", "command": "set_thinking_level", "success": True})
+    elif ty == "prompt":
+        emit({"id": cid, "type": "response", "command": "prompt", "success": True, "data": {"disposition": "started"}})
+        emit({"type": "agent_start"})
+        emit({"type": "message_start"})
+        emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "Working…"}})
+        emit({"type": "message_end", "message": {"role": "assistant", "stopReason": "toolUse"}})
+    elif ty == "steer":
+        emit({"id": cid, "type": "response", "command": "steer", "success": True})
+        imgs = len(cmd.get("images") or [])
+        emit({"type": "message_start"})
+        emit({
+            "type": "message_update",
+            "assistantMessageEvent": {
+                "type": "text_delta",
+                "delta": f"steered: {cmd.get('message', '')} ({thinking}, imgs={imgs})",
+            },
+        })
+        emit({"type": "message_end", "message": {"role": "assistant", "stopReason": "stop"}})
+        emit({"type": "agent_end", "messages": [{"role": "assistant", "stopReason": "stop"}], "willRetry": False})
+        emit({"type": "agent_settled", "aborted": False})
+    elif ty == "abort":
+        emit({"id": cid, "type": "response", "command": "abort", "success": True})
+        emit({"type": "agent_end", "messages": [{"role": "assistant", "stopReason": "aborted"}], "willRetry": False})
+        emit({"type": "agent_settled", "aborted": True})
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_pi, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let pi_prog = fake_pi.to_str().unwrap().to_string();
+    let factory: Arc<dyn DriverFactory> = Arc::new(
+        move |p: RuntimeProvider| -> Option<Box<dyn StructuredDriver>> {
+            match p {
+                RuntimeProvider::Pi => Some(Box::new(PiDriver::with_program(&pi_prog))),
+                _ => drivers().create(p),
+            }
+        },
+    );
+    let rt = AgentRuntime::new(
+        AgentRuntimeRepo::new(pool.clone()),
+        Arc::clone(&host) as Arc<dyn RuntimeHost>,
+        factory,
+        RuntimeConfig {
+            attachments_dir: dir.path().join("attachments"),
+            ..RuntimeConfig::default()
+        },
+    );
+
+    let s = create_as(&rt, cwd, RuntimeProvider::Pi).await;
+    let first = rt.prompt(&s.id, "slow").await.unwrap();
+    host.wait(|e| {
+        matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+            if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, streaming: false, .. } if text == "Working…"))
+    })
+    .await;
+
+    let steer_req = RuntimePromptReq {
+        text: "check null".into(),
+        effort: Some("high".into()),
+        delivery: Some(PromptDelivery::Steer),
+        images: vec![PromptImage {
+            mime: "image/png".into(),
+            data_base64: "iVBORw0KGgo=".into(),
+        }],
+        ..Default::default()
+    };
+    let r = rt.prompt_with(&s.id, &steer_req).await.unwrap();
+    assert!(r.steered);
+    assert_eq!(r.turn_id, first.turn_id);
+
+    let done = host.wait(is_terminal).await;
+    assert_eq!(terminal(&done), Some(TurnTerminalStatus::Completed));
+    assert_eq!(
+        last_assistant_text(&host),
+        "steered: check null (high, imgs=1)"
+    );
+    assert_eq!(turns(&host).len(), 1, "steer settled inside the same turn");
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn agy_switches_model_and_effort_live_while_acp_steer_falls_back_to_queue() {
+    use otto_core::agent_runtime::PromptDelivery;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            CreateRuntimeSessionReq {
+                provider: Some(RuntimeProvider::Agy),
+                cwd: Some(cwd.into()),
+                model: Some("gemini-4-argon-medium".into()),
+                ..CreateRuntimeSessionReq::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    rt.prompt(&s.id, "model").await.unwrap();
+    host.wait(is_terminal).await;
+    assert_eq!(last_assistant_text(&host), "model: gemini-4-argon-medium");
+    assert_eq!(host.prepared.lock().unwrap().len(), 1);
+
+    let switched = RuntimePromptReq {
+        model: Some("gemini-4-argon-high".into()),
+        effort: Some("high".into()),
+        ..RuntimePromptReq::of("model")
+    };
+    rt.prompt_with(&s.id, &switched).await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    assert_eq!(last_assistant_text(&host), "model: gemini-4-argon-high");
+    assert_eq!(
+        host.prepared.lock().unwrap().len(),
+        1,
+        "agy model switch uses session/set_model without respawning"
+    );
+
+    rt.prompt(&s.id, "effort").await.unwrap();
+    host.wait_n(is_terminal, 3).await;
+    assert_eq!(last_assistant_text(&host), "effort: high");
+
+    // ACP v1 has no mid-turn steer RPC: `PromptDelivery::Steer` falls back to
+    // queueing instead of failing or corrupting the active turn.
+    rt.prompt(&s.id, "hang").await.unwrap();
+    host.wait(|e| {
+        matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+            if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, .. } if text == "working"))
+    })
+    .await;
+    let r = rt
+        .prompt_with(&s.id, &queued(PromptDelivery::Steer, "after hang"))
+        .await
+        .unwrap();
+    assert!(!r.steered);
+    assert!(r.queued_id.is_some());
+    rt.interrupt(&s.id).await.unwrap();
+    let stopped = host.wait_n(is_terminal, 4).await;
+    assert_eq!(terminal(&stopped), Some(TurnTerminalStatus::Interrupted));
+    let drained = host.wait_n(is_terminal, 5).await;
+    assert_eq!(terminal(&drained), Some(TurnTerminalStatus::Completed));
+    assert_eq!(last_assistant_text(&host), "echo: after hang");
+    rt.close(&s.id).await.unwrap();
+}

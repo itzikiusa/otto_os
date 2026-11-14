@@ -83,6 +83,7 @@ fn main() {
         {"id": "default", "name": "Default"}, {"id": "autoEdit", "name": "Auto edit"},
         {"id": "accept-edits", "name": "Accept edits"}]});
     let mut model = "none".to_string();
+    let mut effort = "none".to_string();
     let mut system = "none".to_string();
     let system_of = |p: &Value| {
         p.pointer("/_meta/antigravity/systemPrompt/append")
@@ -111,6 +112,15 @@ fn main() {
             }
             "session/set_model" => {
                 model = params["modelId"].as_str().unwrap_or_default().to_string();
+                reply(&id, json!({}));
+            }
+            "session/set_config_option" => {
+                let value = params["value"].as_str().unwrap_or_default().to_string();
+                match params["configId"].as_str() {
+                    Some("model") => model = value,
+                    Some("thought_level") => effort = value,
+                    _ => {}
+                }
                 reply(&id, json!({}));
             }
             "session/set_mode" => {
@@ -190,6 +200,10 @@ fn main() {
                             json!({"stopReason":"end_turn","usage":{"inputTokens":5,
                                 "cachedReadTokens":2,"outputTokens":3,"thoughtTokens":1}}),
                         );
+                    }
+                    "effort" => {
+                        chunk(&sid, "agent_message_chunk", &format!("effort: {effort}"));
+                        done("end_turn");
                     }
                     "system" => {
                         chunk(&sid, "agent_message_chunk", &format!("system: {system}"));

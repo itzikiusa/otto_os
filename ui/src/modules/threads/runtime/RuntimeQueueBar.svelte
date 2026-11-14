@@ -1,9 +1,9 @@
 <script lang="ts">
   // Above a runtime thread's composer: background work the agent started that
   // is still running, the messages waiting in the thread's (durable,
-  // server-side) queue — Steer (into the running turn; Claude), Send now
-  // (stop the turn and send it), Edit, Remove — and, on a closed thread, the
-  // "Revive" line for a closed or dormant agent.
+  // server-side) queue — Steer (into the running turn; Claude, Codex, pi),
+  // Send now (stop the turn and send it), Edit, Remove — and, on a closed
+  // thread, the "Revive" line for a closed or dormant agent.
   import Icon from '../../../lib/components/Icon.svelte';
   import type { PromptDelivery, QueuedPrompt } from '../../../lib/api/types';
   import { backgroundStripText, type AgentTask } from './agentTasks';
