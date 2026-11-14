@@ -2,7 +2,7 @@
 // Signature Help, Auto-Imports (`additionalTextEdits`), and Direct JSON-RPC WS Fallback.
 
 import {
-  Decoration, EditorView, ViewPlugin, hoverTooltip,
+  Decoration, EditorView, ViewPlugin,
   type DecorationSet, type ViewUpdate,
 } from '@codemirror/view';
 import {
@@ -292,6 +292,7 @@ export async function buildPooledLspExtensions(opts: AttachPooledLspOptions): Pr
     client: pooled.client,
     documentUri,
     languageId: opts.languageId,
+    hoverEnabled: false,
     signatureHelpEnabled: true,
     signatureActivateOnTyping: true,
     useSnippetOnCompletion: true,
@@ -308,6 +309,29 @@ export async function buildPooledLspExtensions(opts: AttachPooledLspOptions): Pr
   });
 
   return [lspTooltipTheme, lifecycleCleanup, ...exts];
+}
+
+/** Query raw hover markdown from an active pooled LSP client if available, for `cm-ide-hover.ts`. */
+export async function queryPooledLspHoverMarkdown(view: EditorView, pos: number): Promise<string | null> {
+  if (!marimoCache) return null;
+  const plugin = marimoCache.getLanguageServerPlugin(view);
+  if (!plugin || !plugin.client.ready || !plugin.client.hasCapability('textDocument/hover')) return null;
+  try {
+    const res = await plugin.client.textDocumentHover({
+      textDocument: { uri: plugin.documentUri },
+      position: posToLsp(view.state.doc, pos),
+    });
+    if (!res?.contents) return null;
+    const parts = Array.isArray(res.contents) ? res.contents : [res.contents];
+    const text = parts
+      .map((p) => (typeof p === 'string' ? p : ('value' in p && typeof p.value === 'string' ? p.value : '')))
+      .filter(Boolean)
+      .join('\n\n')
+      .trim();
+    return text || null;
+  } catch {
+    return null;
+  }
 }
 
 /** Notify the active LSP plugin on `view` that the buffer was saved (`willSave` / `didSave`). */
@@ -679,29 +703,6 @@ export function createDirectLspExtension(opts: DirectLspOptions): Extension {
     }
   });
 
-  const hover = hoverTooltip(async (view, pos) => {
-    if (!ready) return null;
-    try {
-      const res = await request<{ contents?: string | { value?: string } | Array<string | { value?: string }> } | null>('textDocument/hover', {
-        textDocument: { uri: opts.documentUri }, position: posToLsp(view.state.doc, pos),
-      });
-      if (!res?.contents) return null;
-      const parts = Array.isArray(res.contents) ? res.contents : [res.contents];
-      const text = parts.map((p) => (typeof p === 'string' ? p : (p?.value ?? ''))).filter(Boolean).join('\n\n').trim();
-      if (!text) return null;
-      return {
-        pos,
-        create() {
-          const dom = document.createElement('div');
-          dom.className = 'cm-lsp-hover-tooltip';
-          dom.style.whiteSpace = 'pre-wrap';
-          dom.textContent = text;
-          return { dom };
-        },
-      };
-    } catch { return null; }
-  });
-
   type RawCompItem = { label: string; detail?: string; insertText?: string; additionalTextEdits?: Array<{ range: LspRange; newText: string }> };
   const completion = EditorState.languageData.of(() => [{
     autocomplete: async (ctx: CompletionContext): Promise<CompletionResult | null> => {
@@ -732,5 +733,5 @@ export function createDirectLspExtension(opts: DirectLspOptions): Extension {
     },
   }]);
 
-  return [lspTooltipTheme, plugin, hover, completion];
+  return [lspTooltipTheme, plugin, completion];
 }
