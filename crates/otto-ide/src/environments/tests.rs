@@ -13,8 +13,8 @@ use tokio::sync::watch;
 
 use crate::target::TargetManager;
 use crate::types::{
-    IdeEnvVarEntry, IdeRunConfig, IdeRunStatus, IdeRunnerKind, IdeTargetSpec,
-    IdeUpdateEnvironmentReq, IdeUpsertRunConfigReq,
+    IdeCreatePythonVenvReq, IdeEnvVarEntry, IdeRunConfig, IdeRunStatus, IdeRunnerKind,
+    IdeTargetSpec, IdeUpdateEnvironmentReq, IdeUpsertRunConfigReq,
 };
 
 use super::runner::{
@@ -374,4 +374,130 @@ async fn stopping_run_kills_entire_unix_process_group_leaving_zero_orphans() {
         !alive,
         "grandchild sleep process {grandchild_pid} leaked after stop_run!"
     );
+}
+
+#[tokio::test]
+async fn create_python_venv_rejects_out_of_root_sensitive_and_traversal_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+
+    let pool = otto_state::db::open(&tmp.path().join("venv_sec.db"))
+        .await
+        .unwrap();
+    let mgr = EnvironmentManager::new(tmp.path().join("data"));
+    let targets = TargetManager::new();
+    let target = IdeTargetSpec::local(ws.to_string_lossy().into_owned());
+
+    // 1. Absolute `venv_dir` outside `effective_root` must NOT rewrite `effective_root`:
+    let err_out = mgr
+        .create_python_venv(
+            &pool,
+            &targets,
+            IdeCreatePythonVenvReq {
+                target: target.clone(),
+                root: None,
+                venv_dir: Some(outside.join("evil-venv").to_string_lossy().into_owned()),
+                python_version: None,
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err_out, otto_core::Error::Invalid(_)),
+        "expected Invalid for out-of-root absolute venv_dir, got: {err_out:?}"
+    );
+    assert!(!outside.join("evil-venv").exists());
+
+    // 2. Sensitive directory (`~/.ssh` or `/etc`) rejected in both `venv_dir` and `root`:
+    if let Some(home) = dirs::home_dir() {
+        let ssh_evil = home.join(".ssh/evil-venv");
+        let err_ssh_venv = mgr
+            .create_python_venv(
+                &pool,
+                &targets,
+                IdeCreatePythonVenvReq {
+                    target: target.clone(),
+                    root: None,
+                    venv_dir: Some(ssh_evil.to_string_lossy().into_owned()),
+                    python_version: None,
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err_ssh_venv,
+            otto_core::Error::Invalid(_) | otto_core::Error::Forbidden(_)
+        ));
+    }
+    let err_etc_root = mgr
+        .create_python_venv(
+            &pool,
+            &targets,
+            IdeCreatePythonVenvReq {
+                target: target.clone(),
+                root: Some("/etc".into()),
+                venv_dir: Some(".venv".into()),
+                python_version: None,
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err_etc_root, otto_core::Error::Forbidden(_)),
+        "expected Forbidden for sensitive root /etc, got: {err_etc_root:?}"
+    );
+
+    // 3. Symlink inside workspace escaping outside workspace is rejected:
+    #[cfg(unix)]
+    {
+        let link = ws.join("escape_link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let err_sym = mgr
+            .create_python_venv(
+                &pool,
+                &targets,
+                IdeCreatePythonVenvReq {
+                    target: target.clone(),
+                    root: None,
+                    venv_dir: Some("escape_link/.venv".into()),
+                    python_version: None,
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err_sym, otto_core::Error::Forbidden(_)),
+            "expected Forbidden for symlink escape venv_dir, got: {err_sym:?}"
+        );
+    }
+
+    // 4. SSH `root` traversal (`..`) and relative SSH `root` rejected before SSH exec:
+    let ssh_target = IdeTargetSpec::ssh("conn_1".to_string(), "/home/dev/app");
+    for bad_root in ["/home/dev/app/../../etc", "relative/sub"] {
+        let err_ssh = mgr
+            .create_python_venv(
+                &pool,
+                &targets,
+                IdeCreatePythonVenvReq {
+                    target: ssh_target.clone(),
+                    root: Some(bad_root.into()),
+                    venv_dir: Some(".venv".into()),
+                    python_version: None,
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err_ssh, otto_core::Error::Invalid(_)),
+            "expected Invalid for SSH root '{bad_root}', got: {err_ssh:?}"
+        );
+    }
 }

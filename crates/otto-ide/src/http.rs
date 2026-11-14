@@ -527,10 +527,12 @@ async fn toolchain_python_venv<S: IdeCtx>(
         .to_string();
     if FsPath::new(&venv_dir).is_absolute() {
         let vp = FsPath::new(&venv_dir);
-        if let Ok(rel) = vp.strip_prefix(&target.root) {
-            let rel_s = rel.to_string_lossy().into_owned();
-            if !rel_s.is_empty() {
-                venv_dir = rel_s;
+        if !target.root.trim().is_empty() {
+            if let Ok(rel) = vp.strip_prefix(&target.root) {
+                let rel_s = rel.to_string_lossy().into_owned();
+                if !rel_s.is_empty() {
+                    venv_dir = rel_s;
+                }
             }
         } else if let (Some(parent), Some(fname)) =
             (vp.parent(), vp.file_name().and_then(|n| n.to_str()))

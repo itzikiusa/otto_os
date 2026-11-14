@@ -13,7 +13,7 @@ use tokio::process::Command;
 use super::db_store::{
     apply_run_config_sdk_override, discover_local_dotenv_files, discover_local_python_venvs,
     is_valid_env_key, load_stored_project_env, parse_dotenv, push_unique, read_pyvenv_version,
-    safe_join_allowed_roots, StoredEnvVar,
+    safe_join_allowed_roots, validate_attached_folder_path, StoredEnvVar,
 };
 use super::{shell_env, EnvironmentManager, SecretAccess};
 use crate::target::TargetManager;
@@ -318,13 +318,22 @@ impl EnvironmentManager {
         ssh: Option<&IdeSshSpec>,
     ) -> Result<IdeCreatePythonVenvResp> {
         req.target.validate()?;
-        let mut effective_root = req
+        let raw_root = req
             .root
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or(req.target.root.as_str())
             .to_string();
+        if raw_root.contains("..") {
+            return Err(Error::Invalid("root must not contain '..'".into()));
+        }
+        let effective_root =
+            if raw_root != req.target.root || req.target.kind == IdeTargetKind::Local {
+                validate_attached_folder_path(&req.target, &raw_root)?
+            } else {
+                raw_root.clone()
+            };
         let mut rel_dir = req
             .venv_dir
             .as_deref()
@@ -333,24 +342,37 @@ impl EnvironmentManager {
             .unwrap_or(".venv")
             .to_string();
 
-        if req.target.kind == IdeTargetKind::Local && Path::new(&rel_dir).is_absolute() {
-            let vp = Path::new(&rel_dir).to_path_buf();
-            if let Ok(rel) = vp.strip_prefix(&effective_root) {
+        if Path::new(&rel_dir).is_absolute() && !rel_dir.contains("..") {
+            let vp = Path::new(&rel_dir);
+            if req.target.kind == IdeTargetKind::Local {
+                let prospective = otto_core::secret_paths::canonicalize_prospective(vp)
+                    .ok_or_else(|| Error::Invalid("invalid venv_dir path".into()))?;
+                if let Ok(rel) = prospective.strip_prefix(&effective_root) {
+                    let rel_s = rel.to_string_lossy().into_owned();
+                    if !rel_s.is_empty() {
+                        rel_dir = rel_s;
+                    }
+                }
+            } else if let Ok(rel) = vp.strip_prefix(&effective_root) {
                 let rel_s = rel.to_string_lossy().into_owned();
                 if !rel_s.is_empty() {
                     rel_dir = rel_s;
                 }
-            } else if let (Some(parent), Some(fname)) =
-                (vp.parent(), vp.file_name().and_then(|n| n.to_str()))
-            {
-                effective_root = parent.to_string_lossy().into_owned();
-                rel_dir = fname.to_string();
             }
         }
         if rel_dir.contains("..") || rel_dir.starts_with('/') {
             return Err(Error::Invalid(
                 "venv_dir must be a safe workspace-relative directory".into(),
             ));
+        }
+        if req.target.kind == IdeTargetKind::Local {
+            let full = Path::new(&effective_root).join(&rel_dir);
+            let prospective = otto_core::secret_paths::canonicalize_prospective(&full)
+                .ok_or_else(|| Error::Invalid("invalid venv_dir path".into()))?;
+            if !prospective.starts_with(&effective_root) {
+                return Err(Error::Forbidden("venv_dir escapes workspace root".into()));
+            }
+            crate::target::enforce_non_root_path(&prospective)?;
         }
 
         let resp = match req.target.kind {
@@ -403,10 +425,11 @@ impl EnvironmentManager {
             }
         };
 
+        let is_primary_root = raw_root.trim_end_matches('/')
+            == req.target.root.trim_end_matches('/')
+            || effective_root.trim_end_matches('/') == req.target.root.trim_end_matches('/');
         let (existing, _) = load_stored_project_env(pool, &req.target.project_key()).await?;
-        if existing.python_interpreter.is_none()
-            && effective_root.trim_end_matches('/') == req.target.root.trim_end_matches('/')
-        {
+        if existing.python_interpreter.is_none() && is_primary_root {
             let now = Utc::now().to_rfc3339();
             let _ = sqlx::query(
                 r#"INSERT INTO ide_project_environments (project_key, root_path, python_interpreter, updated_at)

@@ -74,16 +74,15 @@ pub(super) async fn create_python_venv<S: IdeCtx>(
         .enrich_target_roots(&ctx.pool(), &mut req.target)
         .await;
     let _ = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
-    if req.target.kind == crate::types::IdeTargetKind::Local {
-        if let Some(explicit_root) = req
-            .root
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty() && *s != req.target.root)
-        {
-            let sub_target = crate::types::IdeTargetSpec::local(explicit_root.to_string());
-            let _ = ctx.ide().targets.resolve(&ctx, &user, &sub_target).await?;
-        }
+    if let Some(explicit_root) = req
+        .root
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != req.target.root)
+    {
+        let mut sub_target = req.target.clone();
+        sub_target.root = explicit_root.to_string();
+        let _ = ctx.ide().targets.resolve(&ctx, &user, &sub_target).await?;
     }
     let ssh = resolve_ssh_opt(&ctx, &user, &req.target).await?;
     let resp = ctx

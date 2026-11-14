@@ -167,6 +167,9 @@ pub(super) fn validate_attached_folder_path(
     if trimmed.is_empty() || trimmed.chars().any(char::is_control) {
         return Err(Error::Invalid("folder path must not be empty".into()));
     }
+    if trimmed.contains("..") {
+        return Err(Error::Invalid("folder path must not contain '..'".into()));
+    }
     if !trimmed.starts_with('/') {
         return Err(Error::Invalid(
             "attached project folder must be an absolute path".into(),
@@ -190,6 +193,7 @@ pub(super) fn validate_attached_folder_path(
                 "refusing to attach sensitive credential directory".into(),
             ));
         }
+        crate::target::enforce_non_root_path(&canon)?;
         Ok(canon_str)
     } else {
         Ok(trimmed.trim_end_matches('/').to_string())

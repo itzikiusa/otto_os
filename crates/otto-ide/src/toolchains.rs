@@ -350,13 +350,22 @@ impl ToolchainManager {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or(".venv");
-        let venv_dir = if std::path::Path::new(rel_or_abs).is_absolute() {
+        if rel_or_abs.contains("..") {
+            return Err(Error::Invalid("venv path must not contain '..'".into()));
+        }
+        let raw_venv_dir = if std::path::Path::new(rel_or_abs).is_absolute() {
             PathBuf::from(rel_or_abs)
         } else {
             canon_root.join(rel_or_abs)
         };
+        let venv_dir = otto_core::secret_paths::canonicalize_prospective(&raw_venv_dir)
+            .ok_or_else(|| Error::Invalid("invalid venv path".into()))?;
+        if !venv_dir.starts_with(&canon_root) {
+            return Err(Error::Invalid("venv path must stay within root".into()));
+        }
         if !is_root_user {
             crate::target::enforce_non_root_path(&canon_root)?;
+            crate::target::enforce_non_root_path(&venv_dir)?;
         }
         let base_py = req
             .base_python
