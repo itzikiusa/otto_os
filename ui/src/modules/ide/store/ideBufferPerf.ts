@@ -4,16 +4,82 @@
 import { tick } from 'svelte';
 import { api, ApiError } from '../../../lib/api/client';
 import { confirmer } from '../../../lib/confirm.svelte';
+import { loadErrorText } from '../../../lib/loadError';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
-import type {
-  IdeDiagnostic, IdeEditorHandle, IdeEditorSelectionRange, IdeFileReadResp,
-  IdeGutterItem, IdeOpenTab, IdeSymbolNode, IdeTargetSpec,
+import { isPathExternal } from '../shell/ideProjectHelpers';
+import {
+  detectIdeLanguage, ideBasename, isReadOnlySdkOrCachePath,
+  type IdeDiagnostic, type IdeEditorHandle, type IdeEditorSelectionRange, type IdeFileReadResp,
+  type IdeGutterItem, type IdeOpenTab, type IdeProjectRoot, type IdeSymbolNode, type IdeTargetSpec,
 } from './ideTypes';
 
 const BUFFER_SYNC_DEBOUNCE_MS = 250;
 const BG_ANALYZE_DEBOUNCE_MS = 280;
+const HISTORY_SNAPSHOT_IDLE_MS = 4000;
+const UNDO_JOURNAL_KEY = 'otto.ide.undoJournal.v1';
+const OPEN_TABS_KEY_PREFIX = 'otto.ide.openTabs.v1:';
 interface PendingJob { timer: ReturnType<typeof setTimeout> | null; ctl: AbortController | null; seq: number; resolve: () => void }
+
+interface PersistedDraftEntry {
+  savedContent?: string;
+  draftContent?: string;
+  updatedAt?: number;
+  [k: string]: unknown;
+}
+
+function readUndoJournalMap(): Record<string, PersistedDraftEntry> {
+  try {
+    if (typeof localStorage === 'undefined') return {};
+    const raw = localStorage.getItem(UNDO_JOURNAL_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, PersistedDraftEntry>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeUndoDraftEntry(fullPath: string, savedContent: string, draftContent: string): void {
+  if (savedContent.length > 160_000 || draftContent.length > 160_000) return;
+  try {
+    if (typeof localStorage === 'undefined') return;
+    const all = readUndoJournalMap();
+    const prev = all[fullPath] ?? {};
+    all[fullPath] = { ...prev, savedContent, draftContent, updatedAt: Date.now() };
+    const entries = Object.entries(all);
+    if (entries.length > 24) {
+      entries.sort((a, b) => Number(b[1]?.updatedAt ?? 0) - Number(a[1]?.updatedAt ?? 0));
+      const trimmed = Object.fromEntries(entries.slice(0, 24));
+      localStorage.setItem(UNDO_JOURNAL_KEY, JSON.stringify(trimmed));
+    } else {
+      localStorage.setItem(UNDO_JOURNAL_KEY, JSON.stringify(all));
+    }
+  } catch { /* ignore quota */ }
+}
+
+export function saveWorkspaceOpenTabs(root: string, paths: string[], activePath: string | null, splitPath: string | null): void {
+  if (!root) return;
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(
+      `${OPEN_TABS_KEY_PREFIX}${root}`,
+      JSON.stringify({ paths: paths.slice(0, 20), activePath, splitPath }),
+    );
+  } catch { /* ignore */ }
+}
+
+export function loadWorkspaceOpenTabs(root: string): { paths: string[]; activePath: string | null; splitPath: string | null } | null {
+  if (!root) return null;
+  try {
+    if (typeof localStorage === 'undefined') return null;
+    const raw = localStorage.getItem(`${OPEN_TABS_KEY_PREFIX}${root}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { paths?: string[]; activePath?: string | null; splitPath?: string | null };
+    if (!Array.isArray(parsed.paths) || parsed.paths.length === 0) return null;
+    return { paths: parsed.paths, activePath: parsed.activePath ?? null, splitPath: parsed.splitPath ?? null };
+  } catch {
+    return null;
+  }
+}
 
 type EvictionListener = (paths: ReadonlySet<string> | 'all') => void;
 type FileSavedListener = (path: string, content: string) => void;
@@ -57,15 +123,24 @@ export interface IdeBufferHost {
 export class IdeBufferPerfController {
   readonly liveBuffers = new Map<string, string>();
   private syncTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private historyTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private lastSnapshotted = new Map<string, string>();
   private gutterJobs = new Map<string, PendingJob>();
   private symbolJobs = new Map<string, PendingJob>();
   private activeSymbolLoads = 0;
 
   private clearSync(p: string): void { const t = this.syncTimers.get(p); if (t) { clearTimeout(t); this.syncTimers.delete(p); } }
+  private clearHistoryTimer(p: string): void { const t = this.historyTimers.get(p); if (t) { clearTimeout(t); this.historyTimers.delete(p); } }
+  private pushHistorySnapshot(host: IdeBufferHost, fullPath: string, content: string): void {
+    if (host.collabIsGuest || !host.target.root || this.lastSnapshotted.get(fullPath) === content) return;
+    this.lastSnapshotted.set(fullPath, content);
+    void api.post('/ide/history/snapshot', { target: host.targetPayload, path: fullPath, content, label: 'Change' }).catch(() => {});
+  }
   private syncTab(tab: IdeOpenTab, text: string): void {
     if (tab.content !== text) tab.content = text;
     const d = text !== tab.savedContent;
     if (tab.dirty !== d) tab.dirty = d;
+    writeUndoDraftEntry(tab.path, tab.savedContent, text);
   }
   isTabDirty(tab: IdeOpenTab): boolean { return (this.liveBuffers.get(tab.path) ?? tab.content) !== tab.savedContent; }
   getBuffer(host: IdeBufferHost, fullPath: string): string {
@@ -87,6 +162,11 @@ export class IdeBufferPerfController {
       const cur = host.tabs.find((t) => t.path === fullPath);
       if (cur) this.syncTab(cur, latest);
     }, BUFFER_SYNC_DEBOUNCE_MS));
+    this.clearHistoryTimer(fullPath);
+    this.historyTimers.set(fullPath, setTimeout(() => {
+      this.historyTimers.delete(fullPath);
+      this.pushHistorySnapshot(host, fullPath, this.getBuffer(host, fullPath));
+    }, HISTORY_SNAPSHOT_IDLE_MS));
     return true;
   }
   flush(host: IdeBufferHost, path?: string | null): string {
@@ -101,9 +181,26 @@ export class IdeBufferPerfController {
     return tab.content;
   }
   flushAll(host: IdeBufferHost): void { for (const p of [...this.liveBuffers.keys()]) this.flush(host, p); }
+  flushAndSnapshotAll(host: IdeBufferHost): void {
+    this.flushAll(host);
+    for (const p of [...this.historyTimers.keys()]) {
+      this.clearHistoryTimer(p);
+      const tab = host.tabs.find((t) => t.path === p);
+      if (tab && tab.dirty) this.pushHistorySnapshot(host, p, tab.content);
+    }
+    for (let i = 0; i < host.tabs.length; i++) {
+      const t = host.tabs[i];
+      writeUndoDraftEntry(t.path, t.savedContent, t.content);
+    }
+    if (host.target.root) {
+      saveWorkspaceOpenTabs(host.target.root, host.tabs.map((t) => t.path), host.activePath, host.splitPath);
+    }
+  }
   markClean(tab: IdeOpenTab, content: string, sha256?: string): void {
     this.clearSync(tab.path); this.liveBuffers.delete(tab.path);
     tab.content = content; tab.savedContent = content; tab.dirty = false;
+    this.lastSnapshotted.set(tab.path, content);
+    writeUndoDraftEntry(tab.path, content, content);
     if (sha256 !== undefined) tab.sha256 = sha256;
   }
   private cancelJob(map: Map<string, PendingJob>, path: string): number {
@@ -123,15 +220,17 @@ export class IdeBufferPerfController {
   evictPaths(host: IdeBufferHost, paths: Iterable<string>, clearProblems = true): void {
     const closed = new Set<string>(paths);
     if (closed.size === 0) return;
-    for (const p of closed) { this.clearSync(p); this.liveBuffers.delete(p); this.cancelJob(this.gutterJobs, p); this.cancelJob(this.symbolJobs, p); }
+    for (const p of closed) { this.clearSync(p); this.clearHistoryTimer(p); this.liveBuffers.delete(p); this.cancelJob(this.gutterJobs, p); this.cancelJob(this.symbolJobs, p); }
     if (Object.keys(host.gutterByPath).some((k) => closed.has(k))) host.gutterByPath = Object.fromEntries(Object.entries(host.gutterByPath).filter(([k]) => !closed.has(k)));
     if (Object.keys(host.symbolsByPath).some((k) => closed.has(k))) host.symbolsByPath = Object.fromEntries(Object.entries(host.symbolsByPath).filter(([k]) => !closed.has(k)));
     if (clearProblems && host.problems.some((d) => closed.has(d.path))) host.problems = host.problems.filter((d) => !closed.has(d.path));
     notifyEvicted(closed);
   }
   resetAll(host: IdeBufferHost): void {
+    this.flushAndSnapshotAll(host);
     for (const t of this.syncTimers.values()) clearTimeout(t);
-    this.syncTimers.clear(); this.liveBuffers.clear();
+    for (const t of this.historyTimers.values()) clearTimeout(t);
+    this.syncTimers.clear(); this.historyTimers.clear(); this.liveBuffers.clear(); this.lastSnapshotted.clear();
     for (const p of [...this.gutterJobs.keys()]) this.cancelJob(this.gutterJobs, p);
     for (const p of [...this.symbolJobs.keys()]) this.cancelJob(this.symbolJobs, p);
     this.activeSymbolLoads = 0; host.symbolsLoading = false;
@@ -192,6 +291,96 @@ export async function performCloseTab(host: IdeBufferHost, perf: IdeBufferPerfCo
   if (host.splitPath === path) host.closeSplit();
 }
 
+export async function performOpenFile(
+  host: IdeBufferHost & {
+    readonly projectRoots: IdeProjectRoot[];
+    recentPaths: string[];
+    splitDirection: 'right' | 'down' | null;
+    sharedBuffers: Record<string, { content: string; version: number }>;
+    openInSplit(path: string, dir: 'right' | 'down'): void;
+    jumpTo(path: string, line: number, col?: number): void;
+    pushNavLocation(path: string, line: number, col?: number): void;
+  },
+  perf: IdeBufferPerfController,
+  isNavigatingHistory: boolean,
+  rawPath: string,
+  opts: { line?: number; col?: number; preview?: boolean; inSplit?: boolean; reload?: boolean } = {},
+): Promise<void> {
+  const fullPath = host.resolvePath(rawPath);
+  if (!isNavigatingHistory && host.activePath) host.pushNavLocation(host.activePath, host.cursorInfo.line, host.cursorInfo.col);
+  host.recentPaths = [fullPath, ...host.recentPaths.filter((p) => p !== fullPath)].slice(0, 20);
+  const isGuest = host.collabIsGuest;
+  const external = isPathExternal(fullPath, host.projectRoots);
+  const sdkReadOnly = isReadOnlySdkOrCachePath(fullPath);
+  const parentDir = fullPath.lastIndexOf('/') > 0 ? fullPath.slice(0, fullPath.lastIndexOf('/')) : host.target.root;
+  const readFileUrl = () => {
+    if (external && !sdkReadOnly && host.target.kind === 'local' && fullPath.startsWith('/')) {
+      return `/ide/fs/file?${new URLSearchParams({ kind: 'local', root: parentDir, path: fullPath }).toString()}`;
+    }
+    return `/ide/fs/file?${host.targetQuery({ path: fullPath })}`;
+  };
+  const existing = host.tabs.find((t) => t.path === fullPath);
+  if (existing) {
+    existing.preview = false;
+    if (opts.inSplit) host.openInSplit(fullPath, host.splitDirection ?? 'right'); else host.activePath = fullPath;
+    if ((existing.error || opts.reload) && !isGuest) {
+      existing.error = null; existing.loading = true;
+      try {
+        const res = await api.get<IdeFileReadResp>(readFileUrl());
+        perf.markClean(existing, res.content, res.sha256);
+        existing.language = res.language || detectIdeLanguage(fullPath);
+        existing.readOnly = Boolean(res.read_only) || sdkReadOnly; existing.truncated = res.truncated; existing.loading = false;
+      } catch (e) { existing.loading = false; existing.error = loadErrorText(e); }
+    }
+    if (opts.line) host.jumpTo(fullPath, opts.line, opts.col ?? 1);
+    if (!isNavigatingHistory) host.pushNavLocation(fullPath, opts.line ?? 1, opts.col ?? 1);
+    return;
+  }
+  const buf = host.sharedBuffers[fullPath]?.content ?? '';
+  const placeholder: IdeOpenTab = {
+    path: fullPath, name: ideBasename(fullPath), content: buf, savedContent: buf, dirty: false, sha256: '',
+    language: detectIdeLanguage(fullPath), readOnly: sdkReadOnly, truncated: false, loading: !isGuest, error: null,
+    preview: false, pinned: false, external,
+  };
+  host.tabs = [...host.tabs, placeholder];
+  if (opts.inSplit) host.openInSplit(fullPath, host.splitDirection ?? 'right'); else host.activePath = fullPath;
+  if (!isNavigatingHistory) host.pushNavLocation(fullPath, opts.line ?? 1, opts.col ?? 1);
+  if (isGuest) { if (opts.line) host.jumpTo(fullPath, opts.line, opts.col ?? 1); return; }
+  try {
+    const res = await api.get<IdeFileReadResp>(readFileUrl());
+    const tab = host.tabs.find((t) => t.path === fullPath);
+    if (tab) {
+      const persisted = !opts.reload ? readUndoJournalMap()[fullPath] : undefined;
+      if (
+        persisted &&
+        typeof persisted.draftContent === 'string' &&
+        persisted.savedContent === res.content &&
+        persisted.draftContent !== res.content &&
+        !Boolean(res.read_only) &&
+        !sdkReadOnly
+      ) {
+        tab.savedContent = res.content;
+        tab.content = persisted.draftContent;
+        tab.dirty = true;
+        tab.sha256 = res.sha256;
+      } else {
+        perf.markClean(tab, res.content, res.sha256);
+      }
+      tab.language = res.language || detectIdeLanguage(fullPath);
+      tab.readOnly = Boolean(res.read_only) || sdkReadOnly; tab.truncated = res.truncated; tab.loading = false;
+      if (host.target.root) saveWorkspaceOpenTabs(host.target.root, host.tabs.map((t) => t.path), host.activePath, host.splitPath);
+    }
+    if (opts.line) host.jumpTo(fullPath, opts.line, opts.col ?? 1);
+    if (host.activePath === fullPath || host.splitPath === fullPath) {
+      void host.loadGutter(fullPath, res.content);
+      void host.loadSymbols(fullPath, res.content);
+    }
+  } catch (e) {
+    const tab = host.tabs.find((t) => t.path === fullPath);
+    if (tab) { tab.loading = false; tab.error = loadErrorText(e); }
+  }
+}
+
 export async function performSaveFile(host: IdeBufferHost, perf: IdeBufferPerfController, path?: string, forceOverwrite = false): Promise<boolean> {
   const targetPath = path ? host.resolvePath(path) : host.activePath;
   const contentToSave = perf.flush(host, targetPath);
@@ -205,8 +394,14 @@ export async function performSaveFile(host: IdeBufferHost, perf: IdeBufferPerfCo
     return true;
   }
   try {
+    const folders = host.targetPayload.project_folders ?? [];
+    const inProject = folders.some((r) => targetPath === r || targetPath.startsWith(`${r}/`));
+    const parentDir = targetPath.lastIndexOf('/') > 0 ? targetPath.slice(0, targetPath.lastIndexOf('/')) : host.target.root;
+    const saveTarget = !inProject && host.target.kind === 'local'
+      ? { ...host.targetPayload, additional_roots: [...(host.targetPayload.additional_roots ?? []), parentDir] }
+      : host.targetPayload;
     const resp = await api.put<{ path: string; size: number; sha256: string }>('/ide/fs/file', {
-      target: host.targetPayload, path: targetPath, content: contentToSave,
+      target: saveTarget, path: targetPath, content: contentToSave,
       expected_sha256: forceOverwrite || !tab.sha256 ? undefined : tab.sha256,
     });
     tab.savedContent = contentToSave; tab.sha256 = resp.sha256;

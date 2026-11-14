@@ -144,6 +144,28 @@ export function loadSavedBreakpoints(target: IdeTargetSpec): Record<string, IdeB
   }
 }
 
+export function normalizeBreakpointsMap(
+  raw: Record<string, IdeBreakpoint[]>,
+  resolvePath: (p: string) => string,
+): Record<string, IdeBreakpoint[]> {
+  const out: Record<string, IdeBreakpoint[]> = {};
+  for (const [rawKey, list] of Object.entries(raw)) {
+    if (!Array.isArray(list) || list.length === 0) continue;
+    const normPath = resolvePath(rawKey);
+    const merged = [...(out[normPath] ?? [])];
+    for (let i = 0; i < list.length; i++) {
+      const bp = list[i];
+      if (!bp || typeof bp.line !== 'number') continue;
+      const line = Math.max(1, Math.floor(bp.line));
+      if (!merged.some((x) => x.line === line)) {
+        merged.push({ ...bp, path: normPath, line, enabled: bp.enabled !== false });
+      }
+    }
+    if (merged.length > 0) out[normPath] = merged.sort((a, b) => a.line - b.line);
+  }
+  return out;
+}
+
 export function saveBreakpointsLocal(target: IdeTargetSpec, map: Record<string, IdeBreakpoint[]>): void {
   const key = projectStorageKey(target);
   if (!key) return;
@@ -156,6 +178,30 @@ export function saveBreakpointsLocal(target: IdeTargetSpec, map: Record<string, 
     }
     lsSet(`otto.ide.bps:${key}`, JSON.stringify(compact));
   } catch { /* quota */ }
+}
+
+export function mutatePathBreakpoints(
+  host: {
+    target: IdeTargetSpec;
+    breakpointsByPath: Record<string, IdeBreakpoint[]>;
+    resolvePath(p: string): string;
+    syncBreakpointsToSession(): Promise<void>;
+  },
+  rawPath: string,
+  compute: (normPath: string, current: IdeBreakpoint[]) => IdeBreakpoint[],
+): void {
+  const path = host.resolvePath(rawPath);
+  const current = host.breakpointsByPath[path] ?? [];
+  const clean = compute(path, current)
+    .map((b) => ({ ...b, path, line: Math.max(1, Math.floor(b.line)) }))
+    .sort((a, b) => a.line - b.line);
+  const nextMap: Record<string, IdeBreakpoint[]> = { ...host.breakpointsByPath };
+  if (clean.length > 0) nextMap[path] = clean;
+  else delete nextMap[path];
+  if (rawPath !== path) delete nextMap[rawPath];
+  host.breakpointsByPath = nextMap;
+  saveBreakpointsLocal(host.target, nextMap);
+  void host.syncBreakpointsToSession();
 }
 
 export function isPathExternal(fullPath: string, roots: IdeProjectRoot[]): boolean {

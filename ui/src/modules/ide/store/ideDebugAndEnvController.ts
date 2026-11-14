@@ -15,6 +15,7 @@ import {
   type IdeBreakpoint,
   type IdeCollabRoom,
   type IdeDebugSessionSnapshot,
+  type IdeDetectedSdk,
   type IdeEnvVar,
   type IdeGutterItem,
   type IdeInstalledSdk,
@@ -36,11 +37,13 @@ import {
 export interface DebugAndEnvHost {
   target: IdeTargetSpec;
   readonly targetPayload: IdeTargetSpec;
+  readonly projectRoots: IdeProjectRoot[];
   targetOs: string;
   targetArch: string;
   activePath: string | null;
   readonly activeTab: IdeOpenTab | null;
   toolchains: IdeToolchainEcosystem[];
+  detectedSdks: IdeDetectedSdk[];
   toolchainsLoading: boolean;
   toolchainsError: string | null;
   installJobs: IdeInstallJob[];
@@ -65,6 +68,10 @@ export interface DebugAndEnvHost {
   watches: IdeWatch[];
   replEntries: IdeReplEntry[];
   debugLoading: boolean;
+  activeMavenProfiles: string[];
+  activeSpringProfiles: string[];
+  buildSkipTests: boolean;
+  buildOffline: boolean;
   collabIsGuest: boolean;
   collabRoom: IdeCollabRoom | null;
   collabPeerId: string | null;
@@ -114,11 +121,36 @@ export async function fetchToolchains(
   try {
     const q = host.targetQuery({ include_catalog: opts.includeCatalog ? 'true' : undefined });
     const resp = await api.long.get<{
-      target_os: string; target_arch: string; ecosystems: IdeToolchainEcosystem[]; jobs: IdeInstallJob[];
+      target_os: string; target_arch: string; ecosystems: IdeToolchainEcosystem[];
+      detected?: IdeDetectedSdk[]; jobs: IdeInstallJob[];
     }>(`/ide/toolchains?${q}`);
     if (resp.target_os) host.targetOs = resp.target_os;
     if (resp.target_arch) host.targetArch = resp.target_arch;
-    host.toolchains = resp.ecosystems ?? [];
+    const ecosystems = resp.ecosystems ?? [];
+    host.toolchains = ecosystems;
+    const rawDetected: IdeDetectedSdk[] = [
+      ...(resp.detected ?? []),
+      ...ecosystems.flatMap((eco) =>
+        (eco.detected ?? []).map((d) => ({ ...d, ecosystem: d.ecosystem || eco.ecosystem })),
+      ),
+    ];
+    const seen = new Set<string>();
+    const normalizedDetected: IdeDetectedSdk[] = [];
+    for (let i = 0; i < rawDetected.length; i++) {
+      const d = rawDetected[i];
+      const p = (d.path || d.home_path || '').trim();
+      if (!p) continue;
+      const key = `${d.ecosystem}:${p}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      normalizedDetected.push({
+        ...d,
+        name: d.name || d.label || `${d.ecosystem.toUpperCase()} ${d.version || ''}`.trim(),
+        path: p,
+        home_path: d.home_path || p,
+      });
+    }
+    host.detectedSdks = normalizedDetected;
     host.installJobs = resp.jobs ?? [];
     onEnsureJobs();
   } catch (e) { host.toolchainsError = loadErrorText(e); }
@@ -272,6 +304,34 @@ export async function upsertRunConfig(host: DebugAndEnvHost, cfg: Partial<IdeRun
   } catch (e) { toastError('Couldn’t save run configuration', e); return null; }
 }
 
+function readPrefsModuleSdkMap(): Record<string, string> {
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem('otto.ide.preferences.v1') : null;
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as { moduleSdkMap?: Record<string, string> };
+    return parsed.moduleSdkMap && typeof parsed.moduleSdkMap === 'object' ? parsed.moduleSdkMap : {};
+  } catch {
+    return {};
+  }
+}
+
+function resolveModuleSdkOverride(host: DebugAndEnvHost, candidatePath?: string | null): string | null {
+  if (!candidatePath) return null;
+  const envMap = host.projectEnv?.module_sdks;
+  const map = envMap && Object.keys(envMap).length > 0
+    ? { ...readPrefsModuleSdkMap(), ...envMap }
+    : readPrefsModuleSdkMap();
+  let bestLen = 0;
+  let bestSdk: string | null = null;
+  for (const [modRoot, sdkPath] of Object.entries(map)) {
+    if (sdkPath && (candidatePath === modRoot || candidatePath.startsWith(`${modRoot}/`)) && modRoot.length > bestLen) {
+      bestLen = modRoot.length;
+      bestSdk = sdkPath;
+    }
+  }
+  return bestSdk;
+}
+
 export async function launchIdeRun(
   host: DebugAndEnvHost,
   opts: { configId?: string; adhoc?: Partial<IdeRunConfig> },
@@ -282,13 +342,33 @@ export async function launchIdeRun(
   const selectedCfg = rawId ? host.runConfigs.find((c) => c.id === rawId) : undefined;
   const isClientAuto = Boolean(rawId?.startsWith('auto:') || selectedCfg?.auto_detected);
   const cfgId = isClientAuto ? undefined : rawId;
-  const adhoc = opts.adhoc ?? (isClientAuto && selectedCfg ? selectedCfg : (!cfgId && host.activeTab ? {
+  const rawAdhoc = opts.adhoc ?? (isClientAuto && selectedCfg ? selectedCfg : (!cfgId && host.activeTab ? {
     id: 'adhoc', name: `Run ${host.activeTab.name}`, runner: defaultRunnerForLanguage(host.activeTab.language),
     args: [], env_overrides: {}, inherit_shell_env: host.projectEnv?.inherit_shell_env ?? true, target_path: host.activeTab.path,
   } : undefined));
+  const modSdk = resolveModuleSdkOverride(host, rawAdhoc?.target_path || rawAdhoc?.cwd || host.activePath);
+  const springEnv: Record<string, string> = host.activeSpringProfiles.length > 0
+    ? { SPRING_PROFILES_ACTIVE: host.activeSpringProfiles.join(',') }
+    : {};
+  const adhoc = rawAdhoc
+    ? {
+        ...rawAdhoc,
+        sdk_path: rawAdhoc.sdk_path ?? modSdk ?? null,
+        env_overrides: { ...springEnv, ...(rawAdhoc.env_overrides ?? {}) },
+      }
+    : undefined;
   try {
     host.openBottomTab('run');
-    const resp = await api.post<{ run: IdeRunState }>('/ide/runs', { target: host.targetPayload, config_id: cfgId, adhoc });
+    const resp = await api.post<{ run: IdeRunState }>('/ide/runs', {
+      target: host.targetPayload,
+      project_folders: host.projectRoots.map((r) => r.path),
+      config_id: cfgId,
+      adhoc,
+      maven_profiles: host.activeMavenProfiles,
+      spring_profiles: host.activeSpringProfiles,
+      skip_tests: host.buildSkipTests,
+      offline: host.buildOffline,
+    });
     host.activeRun = resp.run;
     prevPoller?.stop();
     const poller = pollWhileVisible(async (signal) => {
@@ -356,21 +436,35 @@ export async function launchDebugSession(
   host.debugLoading = true;
   host.openBottomTab('debug');
   try {
+    const modSdk = resolveModuleSdkOverride(host, program);
+    const springEnv: Record<string, string> = host.activeSpringProfiles.length > 0
+      ? { SPRING_PROFILES_ACTIVE: host.activeSpringProfiles.join(',') }
+      : {};
+    const baseLaunch = opts.launch ?? {
+      program,
+      args: cfg?.args ?? [],
+      build_flags: cfg?.build_flags ?? [],
+      cwd: cfg?.cwd || host.target.root,
+      test_name: cfg?.test_filter || undefined,
+      env: cfg?.env_overrides ?? {},
+      env_file: cfg?.env_file ?? null,
+      inherit_shell_env: cfg?.inherit_shell_env ?? host.projectEnv?.inherit_shell_env ?? true,
+      sdk_path: cfg?.sdk_path ?? modSdk ?? null,
+    };
     const resp = await api.post<{ session: IdeDebugSessionSnapshot }>('/ide/debug/sessions', {
       target: host.targetPayload,
+      project_folders: host.projectRoots.map((r) => r.path),
       language,
       config_id: persistedConfigId,
-      launch: opts.launch ?? {
-        program,
-        args: cfg?.args ?? [],
-        build_flags: cfg?.build_flags ?? [],
-        cwd: cfg?.cwd || host.target.root,
-        test_name: cfg?.test_filter || undefined,
-        env: cfg?.env_overrides ?? {},
-        env_file: cfg?.env_file ?? null,
-        inherit_shell_env: cfg?.inherit_shell_env ?? host.projectEnv?.inherit_shell_env ?? true,
-        sdk_path: cfg?.sdk_path ?? null,
+      launch: {
+        ...baseLaunch,
+        sdk_path: baseLaunch.sdk_path ?? modSdk ?? null,
+        env: { ...springEnv, ...(baseLaunch.env ?? {}) },
       },
+      maven_profiles: host.activeMavenProfiles,
+      spring_profiles: host.activeSpringProfiles,
+      skip_tests: host.buildSkipTests,
+      offline: host.buildOffline,
       breakpoints: host.effectiveBreakpoints,
     });
     host.expandedVariables = {};
@@ -460,15 +554,34 @@ export async function createProjectPythonVenv(
   host: DebugAndEnvHost & { loadEnvironments(): Promise<void>; saveEnvironment(p: Partial<IdeProjectEnvironment>): Promise<boolean> },
   venvDir = '.venv',
   pythonVersion?: string,
+  moduleRoot?: string,
 ): Promise<{ path: string; interpreter_path: string; version: string } | null> {
+  const effectiveRoot = (moduleRoot || host.target.root).replace(/\/+$/, '');
   try {
-    const resp = await api.long.post<{ path: string; interpreter_path: string; version: string }>(
-      '/ide/environments/python-venv',
-      { target: host.targetPayload, venv_dir: venvDir, python_version: pythonVersion || undefined },
-    );
+    type RawVenvPayload = { path?: string; interpreter_path?: string; python_path?: string; version?: string };
+    let raw: { venv?: RawVenvPayload } & RawVenvPayload;
+    try {
+      raw = await api.long.post<{ venv?: RawVenvPayload } & RawVenvPayload>(
+        '/ide/toolchains/python-venv',
+        { target: host.targetPayload, root: effectiveRoot, path: venvDir, base_python: pythonVersion || undefined },
+      );
+    } catch {
+      raw = await api.long.post<{ venv?: RawVenvPayload } & RawVenvPayload>(
+        '/ide/environments/python-venv',
+        { target: host.targetPayload, root: effectiveRoot, venv_dir: venvDir, python_version: pythonVersion || undefined },
+      );
+    }
+    const v = raw.venv ?? raw;
+    const normPath = v.path || `${effectiveRoot}/${venvDir.replace(/^\.\//, '')}`;
+    const interp = v.interpreter_path || v.python_path || `${normPath}/bin/python`;
+    const normalized = { path: normPath, interpreter_path: interp, version: v.version || '' };
     await host.loadEnvironments();
-    await host.saveEnvironment({ python_interpreter: resp.interpreter_path });
-    return resp;
+    if (moduleRoot) {
+      await host.saveEnvironment({ module_sdks: { ...(host.projectEnv?.module_sdks ?? {}), [moduleRoot]: interp } });
+    } else {
+      await host.saveEnvironment({ python_interpreter: interp });
+    }
+    return normalized;
   } catch (e) {
     toastError('Couldn’t create Python virtual environment', e);
     return null;
@@ -499,10 +612,12 @@ export function normalizeIncomingDebugSnapshot(
       ? canonicalizeLocalProjectPath(resolved, host.projectRoots)
       : resolved;
   };
-  const paused = normPath(raw.paused_file);
   const stack_frames = (raw.stack_frames ?? []).map((f) =>
     f.path ? { ...f, path: normPath(f.path) } : f,
   );
+  const rawPaused = raw.paused_file || raw.stopped_file || (raw.state === 'paused' ? stack_frames[0]?.path : null);
+  const paused = normPath(rawPaused);
+  const pausedLine = raw.paused_line || raw.stopped_line || (raw.state === 'paused' ? (stack_frames[0]?.line ?? null) : null);
   const breakpoints = (raw.breakpoints ?? []).map((bp) =>
     bp.path ? { ...bp, path: normPath(bp.path) ?? bp.path } : bp,
   );
@@ -510,6 +625,7 @@ export function normalizeIncomingDebugSnapshot(
   const snap: IdeDebugSessionSnapshot = {
     ...raw,
     paused_file: paused,
+    paused_line: pausedLine,
     stack_frames,
     breakpoints,
     output,
@@ -518,7 +634,7 @@ export function normalizeIncomingDebugSnapshot(
 }
 
 export function syncSnapshotBreakpointsToStore(
-  host: { breakpointsByPath: Record<string, IdeBreakpoint[]> },
+  host: { breakpointsByPath: Record<string, IdeBreakpoint[]>; resolvePath?(p: string): string },
   snap: IdeDebugSessionSnapshot,
 ): void {
   if (snap.state === 'terminated' || snap.state === 'error') {
@@ -543,9 +659,10 @@ export function syncSnapshotBreakpointsToStore(
   for (let i = 0; i < snap.breakpoints.length; i++) {
     const bp = snap.breakpoints[i];
     if (!bp.path) continue;
-    const arr = incomingByPath.get(bp.path);
+    const key = host.resolvePath ? host.resolvePath(bp.path) : bp.path;
+    const arr = incomingByPath.get(key);
     if (arr) arr.push(bp);
-    else incomingByPath.set(bp.path, [bp]);
+    else incomingByPath.set(key, [bp]);
   }
   if (incomingByPath.size === 0) return;
 

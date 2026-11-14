@@ -7,23 +7,28 @@ import { api } from '../../lib/api/client';
 import { loadErrorText } from '../../lib/loadError';
 import { type Poller } from '../../lib/poll';
 import { lsGet, lsSet } from '../../lib/storage';
-import { toasts } from '../../lib/toast.svelte';
 import { toastError } from '../../lib/toastError';
 import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
 import {
-  runApplyRename, runEvaluateDebug, runExpandVariables, runFetchCodeActions, runFindReferences,
-  runFormatActiveFile, runPreviewRename, runRemovePlugin, runReplaceInWorkspace,
-  runSearchWorkspace, runSendCollabEdit, runSendCursorUpdate, runSetCollabPeerRole, runTogglePlugin,
+  runApplyCodeAction, runApplyQuickFixEdits, runApplyRename, runEvaluateDebug, runExpandVariables,
+  runFetchCodeActions, runFindReferences, runFormatActiveFile, runPreviewRename, runRemovePlugin,
+  runReplaceInWorkspace, runSearchWorkspace, runSendCollabEdit, runSendCursorUpdate, runSetCollabPeerRole, runTogglePlugin,
 } from './shell/ideLspAndSearchHelpers';
 import {
   attachProjectFolder, canonicalizeLocalProjectPath, createTemplatedFile, detachProjectFolder,
-  detectFastRunConfigs, findContainingRoot, formatRelativeToRoots, isPathExternal,
-  loadAttachedRootEntries, loadSavedAdditionalRoots, loadSavedBreakpoints, normalizeRootPath,
-  performCloseAllTabs, pushNavigationHistory, revealPathInTree, saveAdditionalRootsLocal, saveBreakpointsLocal,
+  detectFastRunConfigs, findContainingRoot, formatRelativeToRoots, loadAttachedRootEntries,
+  loadSavedAdditionalRoots, loadSavedBreakpoints, mutatePathBreakpoints, normalizeBreakpointsMap,
+  normalizeRootPath, performCloseAllTabs, pushNavigationHistory, revealPathInTree, saveAdditionalRootsLocal,
 } from './shell/ideProjectHelpers';
 import {
+  activateNamedProject, attachProjectFoldersBatch, detectBuildToolFromState, loadActiveProjectIdLocal,
+  loadBuildToolPrefsLocal, loadNamedProjectsLocal, performMutateFs, probeWorkspaceBuildTool,
+  removeNamedProject, restoreWorkspaceTabsOrInitial, saveActiveProjectIdLocal, saveBuildToolPrefsLocal,
+  saveLastIdeRoot, syncCurrentProjectFolders, syncNamedProjectsFromBackend, upsertNamedProject,
+} from './shell/ideProjectsManager';
+import {
   applyFallbackPrefixSuffix, computeFallbackSelection, IdeBufferPerfController,
-  performAgentEdit, performCloseTab, performSaveFile,
+  performAgentEdit, performCloseTab, performOpenFile, performSaveFile, saveWorkspaceOpenTabs,
 } from './store/ideBufferPerf';
 import {
   followCollabPeer, installIdePlugin, joinCollabSession, loadIdePlugins, startCollabSession,
@@ -35,15 +40,14 @@ import {
   sendDebugAction, startJobsPoller, syncSnapshotBreakpointsToStore, upsertRunConfig,
 } from './store/ideDebugAndEnvController';
 import {
-  autoOpenInitialEntry, detectIdeLanguage, ideBasename,
-  type IdeBottomTab, type IdeBreakpoint, type IdeCodeAction, type IdeCollabRole, type IdeCollabRoom,
-  type IdeDebugSessionSnapshot, type IdeDiagnostic, type IdeEditorHandle, type IdeEditorSelectionRange,
-  type IdeEnvVar, type IdeFileReadResp, type IdeFsEntry, type IdeFsTreeResp, type IdeGutterItem,
-  type IdeInstalledSdk, type IdeInstallJob, type IdeKeymapPreset, type IdeNavLocation, type IdeOpenTab,
+  ideBasename, type IdeBottomTab, type IdeBreakpoint, type IdeCodeAction, type IdeCollabRole, type IdeCollabRoom,
+  type IdeDebugSessionSnapshot, type IdeDetectedSdk, type IdeDiagnostic, type IdeEditorHandle, type IdeEditorSelectionRange,
+  type IdeEnvVar, type IdeFsEntry, type IdeFsTreeResp, type IdeGutterItem,
+  type IdeInstalledSdk, type IdeInstallJob, type IdeKeymapPreset, type IdeNamedProject, type IdeNavLocation, type IdeOpenTab,
   type IdePeerCursor, type IdePluginCatalogEntry, type IdePluginInfo, type IdeProjectEnvironment,
   type IdeProjectRoot, type IdePythonVenv, type IdeReferenceLocation, type IdeRenameEdit,
   type IdeReplaceResp, type IdeReplEntry, type IdeRunConfig, type IdeRunState, type IdeSearchItem,
-  type IdeSearchMode, type IdeShellEnvResp, type IdeSymbolNode, type IdeTargetSpec,
+  type IdeSearchMode, type IdeShellEnvResp, type IdeSymbolNode, type IdeTargetSpec, type IdeTextEdit,
   type IdeToolchainEcosystem, type IdeVariable, type IdeWatch,
 } from './store/ideTypes';
 
@@ -55,6 +59,9 @@ const DOCK_TAB_KEY = 'otto.ide.dockTab';
 class IdeStore {
   target = $state<IdeTargetSpec>({ kind: 'local', workspace_id: null, root: '', connection_id: null, connection_name: null });
   additionalRoots = $state<string[]>([]);
+  namedProjects = $state<IdeNamedProject[]>(loadNamedProjectsLocal());
+  activeProjectId = $state<string | null>(loadActiveProjectIdLocal());
+  bulkRepoPickerMode = $state<'create' | 'attach' | null>(null);
   targetOs = $state('');
   targetArch = $state('');
   treeRootEntries = $state<IdeFsEntry[]>([]);
@@ -98,6 +105,7 @@ class IdeStore {
   replaceLoading = $state(false);
 
   toolchains = $state<IdeToolchainEcosystem[]>([]);
+  detectedSdks = $state<IdeDetectedSdk[]>([]);
   toolchainsLoading = $state(false);
   toolchainsError = $state<string | null>(null);
   installJobs = $state<IdeInstallJob[]>([]);
@@ -145,6 +153,15 @@ class IdeStore {
 
   keymapPreset = $state<IdeKeymapPreset>(lsGet(KEYMAP_STORAGE_KEY) === 'standard' ? 'standard' : 'jetbrains');
   formatOnSave = $state<boolean>(lsGet(FORMAT_ON_SAVE_KEY) === '1');
+  settingsOpen = $state(false);
+  settingsSection = $state<string>('project.project');
+  buildToolOpen = $state(false);
+  detectedBuildToolOverride = $state<'maven' | 'gradle' | null>(null);
+  activeMavenProfiles = $state<string[]>([]);
+  activeSpringProfiles = $state<string[]>([]);
+  buildSkipTests = $state(false);
+  buildOffline = $state(false);
+  closedTabPaths = $state<string[]>([]);
   toolchainsOpen = $state(false);
   environmentsOpen = $state(false);
   environmentsInitialTab = $state<'env' | 'configs'>('env');
@@ -157,10 +174,14 @@ class IdeStore {
   pendingTerminalCwd = $state<{ cwd: string; seq: number } | null>(null);
   bottomDockOpen = $state(lsGet(DOCK_OPEN_KEY) === '1');
   activeBottomTab = $state<IdeBottomTab>(
-    (['debug', 'run', 'problems', 'usages', 'terminal'].includes(lsGet(DOCK_TAB_KEY) ?? '') ? lsGet(DOCK_TAB_KEY) : 'run') as IdeBottomTab,
+    (['debug', 'run', 'git', 'problems', 'usages', 'terminal'].includes(lsGet(DOCK_TAB_KEY) ?? '') ? lsGet(DOCK_TAB_KEY) : 'run') as IdeBottomTab,
   );
 
   readonly hasTarget = $derived(Boolean(this.target.root));
+  readonly buildToolKind = $derived(detectBuildToolFromState(this.detectedBuildToolOverride, this.treeRootEntries, this.childrenByDir, this.tabs, this.runConfigs));
+  readonly activeProject = $derived<IdeNamedProject | null>(
+    this.activeProjectId ? (this.namedProjects.find((p) => p.id === this.activeProjectId) ?? null) : null,
+  );
   readonly projectRoots = $derived.by((): IdeProjectRoot[] => {
     if (!this.target.root) return [];
     const primary = normalizeRootPath(this.target.root);
@@ -177,6 +198,7 @@ class IdeStore {
   readonly splitTab = $derived(this.splitPath ? (this.tabs.find((t) => t.path === this.splitPath) ?? null) : null);
   readonly activeSymbols = $derived(this._activePath ? (this.symbolsByPath[this._activePath] ?? []) : []);
   readonly allBreakpoints = $derived(Object.values(this.breakpointsByPath).flat());
+  readonly breakpoints = $derived(this.allBreakpoints);
   readonly effectiveBreakpoints = $derived(this.breakpointsMuted ? [] : this.allBreakpoints);
   readonly canNavigateBack = $derived(this.navIndex > 0);
   readonly canNavigateForward = $derived(this.navIndex >= 0 && this.navIndex < this.navHistory.length - 1);
@@ -214,12 +236,14 @@ class IdeStore {
   }
 
   get targetPayload(): IdeTargetSpec {
+    const folders = this.projectRoots.map((r) => r.path);
     return {
       kind: this.target.kind,
       workspace_id: this.target.workspace_id ?? null,
       root: this.target.root,
       connection_id: this.target.kind === 'ssh' ? (this.target.connection_id ?? null) : null,
       additional_roots: this.additionalRoots.length > 0 ? this.additionalRoots : undefined,
+      project_folders: folders,
     };
   }
 
@@ -248,18 +272,35 @@ class IdeStore {
 
   attachDefaultWorkspace(): void {
     if (this.target.root || this.collabIsGuest) return;
+    void syncNamedProjectsFromBackend(this);
+    if (this.activeProjectId) {
+      const savedProj = this.namedProjects.find((p) => p.id === this.activeProjectId);
+      if (savedProj) { void activateNamedProject(this, savedProj.id); return; }
+    }
     if (!ws.current && !ws.listSettled) return;
     const cur = ws.current ?? ws.workspaces.find((w) => w.id !== SCRATCH_WORKSPACE_ID && w.root_path) ?? ws.workspaces[0];
     if (cur?.root_path) void this.setLocalTarget(cur.root_path, cur.id);
   }
 
   // Zero-wait cold open: ONLY awaits the shallow 1-level `/ide/fs/tree` (<10ms).
-  // Environments load non-blockingly in the background; remote toolchains load only on modal open.
-  async setLocalTarget(root: string, workspaceId: string | null = null): Promise<void> {
+  async setLocalTarget(
+    root: string,
+    workspaceId: string | null = null,
+    opts: { additionalRoots?: string[]; projectId?: string | null; skipAutoOpen?: boolean } = {},
+  ): Promise<void> {
     const clean = normalizeRootPath(root);
-    if (!clean || (this.target.kind === 'local' && normalizeRootPath(this.target.root) === clean)) return;
-    this.resetTargetState({ kind: 'local', workspace_id: workspaceId, root: clean, connection_id: null, connection_name: null });
+    if (!clean) return;
+    if (opts.projectId === undefined && this.target.kind === 'local' && normalizeRootPath(this.target.root) === clean && !opts.additionalRoots) return;
+    const matchedProj = opts.projectId !== undefined
+      ? opts.projectId
+      : (this.namedProjects.find((p) => p.primary_root === clean)?.id ?? null);
+    this.activeProjectId = matchedProj;
+    saveLastIdeRoot(clean);
+    saveActiveProjectIdLocal(matchedProj, this.namedProjects, clean);
+    this.resetTargetState({ kind: 'local', workspace_id: workspaceId, root: clean, connection_id: null, connection_name: null }, opts.additionalRoots);
+    if (opts.skipAutoOpen) this.hasClosedAllTabs = true;
     await this.loadTree();
+    if (opts.skipAutoOpen) this.hasClosedAllTabs = false;
     void this.loadEnvironments();
   }
 
@@ -274,22 +315,40 @@ class IdeStore {
     this.resetTargetState({ kind: 'local', workspace_id: null, root: '', connection_id: null, connection_name: null });
   }
 
-  private resetTargetState(next: IdeTargetSpec): void {
+  private resetTargetState(next: IdeTargetSpec, overrideAdditionalRoots?: string[]): void {
     this.disposeStreams();
     this.target = next;
-    const savedRoots = next.root ? loadSavedAdditionalRoots(next) : [];
+    const savedRoots = overrideAdditionalRoots
+      ? overrideAdditionalRoots.map((r) => normalizeRootPath(r)).filter((r) => r && r !== normalizeRootPath(next.root))
+      : (next.root ? loadSavedAdditionalRoots(next) : []);
     this.additionalRoots = savedRoots;
-    this.breakpointsByPath = next.root ? loadSavedBreakpoints(next) : {};
+    if (overrideAdditionalRoots && next.root) saveAdditionalRootsLocal(next, savedRoots);
+    this.breakpointsByPath = next.root ? normalizeBreakpointsMap(loadSavedBreakpoints(next), (p) => this.resolvePath(p)) : {};
     const initialExpanded: Record<string, boolean> = {};
     if (next.root) initialExpanded[normalizeRootPath(next.root)] = true;
-    for (let i = 0; i < savedRoots.length; i++) initialExpanded[savedRoots[i]] = true;
+    // Scale discipline (#71): keep 30+ secondary repo roots collapsed on cold open (<80ms, <30MB RAM)!
+    if (savedRoots.length <= 2) {
+      for (let i = 0; i < savedRoots.length; i++) initialExpanded[savedRoots[i]] = true;
+    }
     this.treeRootEntries = []; this.childrenByDir = {}; this.expandedDirs = initialExpanded; this.treeError = null;
-    this.tabs = []; this.hasClosedAllTabs = false; this._activePath = null; this.splitPath = null; this.splitDirection = null;
+    this.tabs = []; this.closedTabPaths = []; this.hasClosedAllTabs = false; this._activePath = null; this.splitPath = null; this.splitDirection = null;
     this.gutterByPath = {}; this.symbolsByPath = {}; this.problems = []; this.usages = [];
     this.searchResults = []; this.replacePreview = null; this.navHistory = []; this.navIndex = -1;
     this.projectEnv = null; this.effectiveEnv = {}; this.runConfigs = []; this.detectedConfigs = []; this.selectedConfigId = null;
     this.activeRun = null; this.runsHistory = []; this.activeDebug = null; this.expandedVariables = {}; this.replEntries = [];
+    const bt = loadBuildToolPrefsLocal(next.root);
+    this.buildToolOpen = bt.open; this.detectedBuildToolOverride = null; this.activeMavenProfiles = bt.mavenProfiles;
+    this.activeSpringProfiles = bt.springProfiles; this.buildSkipTests = bt.skipTests; this.buildOffline = bt.offline;
   }
+
+  private persistBuildToolPrefs(): void {
+    saveBuildToolPrefsLocal(this.target.root, { open: this.buildToolOpen, mavenProfiles: this.activeMavenProfiles, springProfiles: this.activeSpringProfiles, skipTests: this.buildSkipTests, offline: this.buildOffline });
+  }
+  toggleBuildTool(open?: boolean): void { this.buildToolOpen = open ?? !this.buildToolOpen; this.persistBuildToolPrefs(); }
+  toggleMavenProfile(id: string): void { this.activeMavenProfiles = this.activeMavenProfiles.includes(id) ? this.activeMavenProfiles.filter((x) => x !== id) : [...this.activeMavenProfiles, id]; this.persistBuildToolPrefs(); }
+  toggleSpringProfile(id: string): void { this.activeSpringProfiles = this.activeSpringProfiles.includes(id) ? this.activeSpringProfiles.filter((x) => x !== id) : [...this.activeSpringProfiles, id]; this.persistBuildToolPrefs(); }
+  setBuildSkipTests(v: boolean): void { this.buildSkipTests = v; this.persistBuildToolPrefs(); }
+  setBuildOffline(v: boolean): void { this.buildOffline = v; this.persistBuildToolPrefs(); }
 
   syncAdditionalRootsFromEnv(envRoots: string[]): void {
     const primary = normalizeRootPath(this.target.root);
@@ -297,22 +356,28 @@ class IdeStore {
     let changed = false;
     for (let i = 0; i < envRoots.length; i++) {
       const clean = normalizeRootPath(envRoots[i]);
-      if (clean && clean !== primary && !merged.includes(clean)) {
-        merged.push(clean);
-        changed = true;
-      }
+      if (clean && clean !== primary && !merged.includes(clean)) { merged.push(clean); changed = true; }
     }
     if (!changed) return;
     this.additionalRoots = merged;
     saveAdditionalRootsLocal(this.target, merged);
-    const nextExp = { ...this.expandedDirs };
-    for (let i = 0; i < merged.length; i++) {
-      if (nextExp[merged[i]] === undefined) nextExp[merged[i]] = true;
-      if (!this.childrenByDir[merged[i]]) void loadAttachedRootEntries(this, merged[i]);
+    if (merged.length <= 2) {
+      const nextExp = { ...this.expandedDirs };
+      for (let i = 0; i < merged.length; i++) {
+        if (nextExp[merged[i]] === undefined) nextExp[merged[i]] = true;
+        if (nextExp[merged[i]] && !this.childrenByDir[merged[i]]) void loadAttachedRootEntries(this, merged[i]);
+      }
+      this.expandedDirs = nextExp;
     }
-    this.expandedDirs = nextExp;
+    syncCurrentProjectFolders(this);
   }
 
+  get bottomTab(): IdeBottomTab { return this.activeBottomTab; }
+  set bottomTab(tab: IdeBottomTab) { this.openBottomTab(tab); }
+  get projectFolders(): IdeProjectRoot[] { return this.projectRoots; }
+  get workspaceRoot(): string { return this.target.root; }
+  refreshTree(dirPath?: string): Promise<void> { return this.loadTree(dirPath); }
+  openSettings(section?: string): void { if (section) this.settingsSection = section; this.settingsOpen = true; }
   setKeymapPreset(preset: IdeKeymapPreset): void { this.keymapPreset = preset; lsSet(KEYMAP_STORAGE_KEY, preset); }
   setFormatOnSave(next: boolean): void { this.formatOnSave = next; lsSet(FORMAT_ON_SAVE_KEY, next ? '1' : '0'); }
   openEnvironmentsModal(tab: 'env' | 'configs' = 'env'): void { this.environmentsInitialTab = tab; this.environmentsOpen = true; }
@@ -366,9 +431,11 @@ class IdeStore {
           if (!this.selectedConfigId && this.runConfigs.length > 0) this.selectedConfigId = this.runConfigs[0].id;
         }
         for (let i = 0; i < this.additionalRoots.length; i++) {
-          void loadAttachedRootEntries(this, this.additionalRoots[i]);
+          const ar = this.additionalRoots[i];
+          if (this.expandedDirs[ar]) void loadAttachedRootEntries(this, ar);
         }
-        void autoOpenInitialEntry(this);
+        void probeWorkspaceBuildTool(this);
+        void restoreWorkspaceTabsOrInitial(this);
       } else if (normDir) {
         this.childrenByDir = { ...this.childrenByDir, [normDir]: resp.entries ?? [] };
       }
@@ -388,12 +455,27 @@ class IdeStore {
 
   collapseAllDirs(): void {
     const rootsOnly: Record<string, boolean> = {};
-    for (let i = 0; i < this.projectRoots.length; i++) rootsOnly[this.projectRoots[i].path] = true;
+    const primary = normalizeRootPath(this.target.root);
+    if (primary) rootsOnly[primary] = true;
     this.expandedDirs = rootsOnly;
   }
 
-  addProjectFolder(folderPath: string): Promise<boolean> { return attachProjectFolder(this, folderPath); }
-  removeProjectFolder(folderPath: string): Promise<boolean> { return detachProjectFolder(this, folderPath); }
+  async addProjectFolder(folderPath: string): Promise<boolean> {
+    const ok = await attachProjectFolder(this, folderPath);
+    if (ok) syncCurrentProjectFolders(this);
+    return ok;
+  }
+  attachProjectFolders(paths: string[]): Promise<number> { return attachProjectFoldersBatch(this, paths); }
+  async removeProjectFolder(folderPath: string): Promise<boolean> {
+    const ok = await detachProjectFolder(this, folderPath);
+    if (ok) syncCurrentProjectFolders(this);
+    return ok;
+  }
+  activateProject(projectId: string): Promise<void> { return activateNamedProject(this, projectId); }
+  saveNamedProject(spec: { id?: string; name: string; primary_root: string; folders: string[]; pinned?: boolean }): Promise<IdeNamedProject | null> {
+    return upsertNamedProject(this, spec);
+  }
+  deleteNamedProject(projectId: string): Promise<void> { return removeNamedProject(this, projectId); }
   createFileWithTemplate(fullPath: string): Promise<boolean> {
     return createTemplatedFile(this, fullPath, (op, p) => this.mutateFs(op, p));
   }
@@ -404,142 +486,64 @@ class IdeStore {
     return revealPathInTree(this, target, this.revealSeq);
   }
 
-  async mutateFs(op: 'mkdir' | 'create_file' | 'rename' | 'delete' | 'duplicate', path: string, destPath?: string): Promise<boolean> {
-    try {
-      const containing = findContainingRoot(path, this.projectRoots);
-      const targetSpec = containing && !containing.isPrimary && this.target.kind === 'local'
-        ? { ...this.targetPayload, root: containing.path }
-        : this.targetPayload;
-      const resp = await api.post<{ ok: boolean; path: string }>('/ide/fs/mutate', { target: targetSpec, op, path, dest_path: destPath });
-      const parentOf = (p: string) => (p.lastIndexOf('/') > 0 ? p.slice(0, p.lastIndexOf('/')) : (containing?.path ?? this.target.root));
-      await this.loadTree(containing && !containing.isPrimary ? containing.path : undefined);
-      for (const dir of Object.keys(this.expandedDirs)) {
-        if (this.expandedDirs[dir] && (dir === parentOf(path) || (destPath && dir === parentOf(destPath)))) await this.loadTree(dir);
-      }
-      if (op === 'delete') {
-        const deleted = this.tabs.filter((t) => t.path === path || t.path.startsWith(`${path}/`)).map((t) => t.path);
-        this.tabs = this.tabs.filter((t) => t.path !== path && !t.path.startsWith(`${path}/`));
-        this.evictClosedMetadata(deleted);
-        if (this.activePath && deleted.includes(this.activePath)) this.activePath = this.tabs[0]?.path ?? null;
-        if (this.splitPath && deleted.includes(this.splitPath)) this.closeSplit();
-      } else if (op === 'rename' && destPath) {
-        this.bufPerf.flush(this, path);
-        this.evictClosedMetadata([path], false);
-        this.tabs = this.tabs.map((t) => (t.path === path ? { ...t, path: destPath, name: ideBasename(destPath) } : t));
-        if (this._activePath === path) this._activePath = destPath;
-        if (this.splitPath === path) this.splitPath = destPath;
-      } else if ((op === 'create_file' || op === 'duplicate') && resp.path) {
-        await this.openFile(resp.path, { preview: false });
-      }
-      return true;
-    } catch (e) { toastError(`Couldn’t ${op.replace('_', ' ')}`, e); return false; }
+  mutateFs(op: 'mkdir' | 'create_file' | 'rename' | 'delete' | 'duplicate', path: string, destPath?: string): Promise<boolean> {
+    return performMutateFs(this, (p) => this.bufPerf.flush(this, p), (ps, cd) => this.evictClosedMetadata(ps, cd), (p) => { this._activePath = p; }, op, path, destPath);
   }
 
   private evictClosedMetadata(paths: string[], clearDirty = true): void {
     if (paths.length === 0) return;
     this.bufPerf.evictPaths(this, paths, clearDirty);
-    const set = new Set(paths);
-    const nextGutter: Record<string, IdeGutterItem[]> = {};
-    for (const [k, v] of Object.entries(this.gutterByPath)) if (!set.has(k)) nextGutter[k] = v;
-    this.gutterByPath = nextGutter;
-    const nextSymbols: Record<string, IdeSymbolNode[]> = {};
-    for (const [k, v] of Object.entries(this.symbolsByPath)) if (!set.has(k)) nextSymbols[k] = v;
-    this.symbolsByPath = nextSymbols;
     if (!this.collabRoom) {
-      const nextShared: Record<string, { content: string; version: number }> = {};
-      for (const [k, v] of Object.entries(this.sharedBuffers)) if (!set.has(k)) nextShared[k] = v;
-      this.sharedBuffers = nextShared;
+      const set = new Set(paths);
+      this.sharedBuffers = Object.fromEntries(Object.entries(this.sharedBuffers).filter(([k]) => !set.has(k)));
     }
-    this.problems = this.problems.filter((d) => !set.has(d.path));
   }
 
-  // Persistent Multi-Tab open: NEVER overwrites or evicts an existing tab!
-  async openFile(rawPath: string, opts: { line?: number; col?: number; preview?: boolean; inSplit?: boolean } = {}): Promise<void> {
-    const fullPath = this.resolvePath(rawPath);
-    if (!this.isNavigatingHistory && this._activePath) {
-      this.pushNavLocation(this._activePath, this.cursorInfo.line, this.cursorInfo.col);
-    }
-    this.recentPaths = [fullPath, ...this.recentPaths.filter((p) => p !== fullPath)].slice(0, 20);
-    const existing = this.tabs.find((t) => t.path === fullPath);
-    if (existing) {
-      existing.preview = false;
-      if (opts.inSplit) this.openInSplit(fullPath, this.splitDirection ?? 'right'); else this.activePath = fullPath;
-      if (opts.line) this.jumpTo(fullPath, opts.line, opts.col ?? 1);
-      if (!this.isNavigatingHistory) this.pushNavLocation(fullPath, opts.line ?? 1, opts.col ?? 1);
-      return;
-    }
-    const buf = this.sharedBuffers[fullPath]?.content ?? '';
-    const isGuest = this.collabIsGuest;
-    const external = isPathExternal(fullPath, this.projectRoots);
-    const placeholder: IdeOpenTab = {
-      path: fullPath, name: ideBasename(fullPath), content: buf, savedContent: buf, dirty: false, sha256: '',
-      language: detectIdeLanguage(fullPath), readOnly: external, truncated: false, loading: !isGuest, error: null,
-      preview: false, pinned: false, external,
-    };
-    this.tabs = [...this.tabs, placeholder];
-    if (opts.inSplit) this.openInSplit(fullPath, this.splitDirection ?? 'right'); else this.activePath = fullPath;
-    if (!this.isNavigatingHistory) this.pushNavLocation(fullPath, opts.line ?? 1, opts.col ?? 1);
-    if (isGuest) { if (opts.line) this.jumpTo(fullPath, opts.line, opts.col ?? 1); return; }
-    try {
-      const res = await api.get<IdeFileReadResp>(`/ide/fs/file?${this.targetQuery({ path: fullPath })}`);
-      const tab = this.tabs.find((t) => t.path === fullPath);
-      if (tab) {
-        this.bufPerf.markClean(tab, res.content, res.sha256);
-        tab.language = res.language || detectIdeLanguage(fullPath);
-        tab.readOnly = res.read_only || external; tab.truncated = res.truncated; tab.loading = false;
-      }
-      if (opts.line) this.jumpTo(fullPath, opts.line, opts.col ?? 1);
-      if (this._activePath === fullPath || this.splitPath === fullPath) {
-        void this.loadGutter(fullPath, res.content);
-        void this.loadSymbols(fullPath, res.content);
-      }
-    } catch (e) {
-      const tab = this.tabs.find((t) => t.path === fullPath);
-      if (tab) { tab.loading = false; tab.error = loadErrorText(e); }
-    }
+  async openFile(rawPath: string, opts: { line?: number; col?: number; preview?: boolean; inSplit?: boolean; reload?: boolean } = {}): Promise<void> {
+    await performOpenFile(this, this.bufPerf, this.isNavigatingHistory, rawPath, opts);
+    saveWorkspaceOpenTabs(this.target.root, this.tabs.map((t) => t.path), this._activePath, this.splitPath);
   }
 
   pushNavLocation(path: string, line: number, col = 1): void {
     const res = pushNavigationHistory(this.navHistory, this.navIndex, { path, line, col });
-    this.navHistory = res.history;
-    this.navIndex = res.index;
+    this.navHistory = res.history; this.navIndex = res.index;
   }
 
   async navigateBack(): Promise<void> {
     if (!this.canNavigateBack) return;
-    this.navIndex -= 1;
-    const loc = this.navHistory[this.navIndex];
+    const loc = this.navHistory[(this.navIndex -= 1)];
     if (!loc) return;
     this.isNavigatingHistory = true;
-    try { await this.openFile(loc.path, { line: loc.line, col: loc.col }); }
-    finally { this.isNavigatingHistory = false; }
+    try { await this.openFile(loc.path, { line: loc.line, col: loc.col }); } finally { this.isNavigatingHistory = false; }
   }
 
   async navigateForward(): Promise<void> {
     if (!this.canNavigateForward) return;
-    this.navIndex += 1;
-    const loc = this.navHistory[this.navIndex];
+    const loc = this.navHistory[(this.navIndex += 1)];
     if (!loc) return;
     this.isNavigatingHistory = true;
-    try { await this.openFile(loc.path, { line: loc.line, col: loc.col }); }
-    finally { this.isNavigatingHistory = false; }
+    try { await this.openFile(loc.path, { line: loc.line, col: loc.col }); } finally { this.isNavigatingHistory = false; }
   }
 
-  pinTab(path: string): void {
-    const tab = this.tabs.find((t) => t.path === path);
-    if (tab) { tab.preview = false; tab.pinned = true; }
-  }
-  togglePinTab(path: string): void {
-    const tab = this.tabs.find((t) => t.path === path);
-    if (tab) { tab.preview = false; tab.pinned = !tab.pinned; }
-  }
+  pinTab(path: string): void { const tab = this.tabs.find((t) => t.path === path); if (tab) { tab.preview = false; tab.pinned = true; } }
+  togglePinTab(path: string): void { const tab = this.tabs.find((t) => t.path === path); if (tab) { tab.preview = false; tab.pinned = !tab.pinned; } }
   openInSplit(path: string, dir: 'right' | 'down' = 'right'): void { this.bufPerf.flushAll(this); this.splitPath = path; this.splitDirection = dir; }
   closeSplit(): void { this.bufPerf.flushAll(this); this.splitPath = null; this.splitDirection = null; this.bufPerf.cancelHiddenLoads(this); }
   jumpTo(path: string, line: number, col = 1): void { this.jumpSeq += 1; this.jumpRequest = { path, line, col, seq: this.jumpSeq }; }
 
   async closeTab(path: string): Promise<void> {
     await performCloseTab(this, this.bufPerf, path);
-    if (!this.tabs.some((t) => t.path === path)) this.evictClosedMetadata([path]);
+    if (!this.tabs.some((t) => t.path === path)) {
+      this.closedTabPaths = [path, ...this.closedTabPaths.filter((p) => p !== path)].slice(0, 20);
+      this.evictClosedMetadata([path]);
+      saveWorkspaceOpenTabs(this.target.root, this.tabs.map((t) => t.path), this._activePath, this.splitPath);
+    }
+  }
+  async reopenClosedTab(): Promise<void> {
+    const next = this.closedTabPaths[0];
+    if (!next) return;
+    this.closedTabPaths = this.closedTabPaths.slice(1);
+    await this.openFile(next, { preview: false });
   }
 
   closeOtherTabs(keepPath: string): void {
@@ -549,6 +553,7 @@ class IdeStore {
     this.evictClosedMetadata(closing);
     this.activePath = keepPath;
     if (this.splitPath && !this.tabs.some((t) => t.path === this.splitPath)) this.closeSplit();
+    saveWorkspaceOpenTabs(this.target.root, this.tabs.map((t) => t.path), this._activePath, this.splitPath);
   }
 
   closeUnmodifiedTabs(): void {
@@ -558,10 +563,12 @@ class IdeStore {
     this.evictClosedMetadata(closing);
     if (this.tabs.length === 0) { this.hasClosedAllTabs = true; this.activePath = null; this.closeSplit(); }
     else if (!this.tabs.some((t) => t.path === this._activePath)) this.activePath = this.tabs[0].path;
+    saveWorkspaceOpenTabs(this.target.root, this.tabs.map((t) => t.path), this._activePath, this.splitPath);
   }
 
-  closeAllTabs(opts?: { force?: boolean }): Promise<void> {
-    return performCloseAllTabs(this, this.bufPerf, (paths) => this.evictClosedMetadata(paths), opts);
+  async closeAllTabs(opts?: { force?: boolean }): Promise<void> {
+    await performCloseAllTabs(this, this.bufPerf, (paths) => this.evictClosedMetadata(paths), opts);
+    saveWorkspaceOpenTabs(this.target.root, this.tabs.map((t) => t.path), this._activePath, this.splitPath);
   }
 
   getBuffer(path?: string): string {
@@ -630,9 +637,8 @@ class IdeStore {
   applyRename(): Promise<boolean> { return runApplyRename(this, this.bufPerf); }
   formatActiveFile(): Promise<void> { return runFormatActiveFile(this, this.bufPerf); }
   fetchCodeActions(path: string, line: number, column: number): Promise<IdeCodeAction[]> { return runFetchCodeActions(this, this.bufPerf, path, line, column); }
-  applyCodeAction(path: string, action: IdeCodeAction): void {
-    if (typeof action.replacement_content === 'string') { void this.applyAgentEdit(path, action.replacement_content); toasts.info(action.title); }
-  }
+  applyCodeAction(path: string, action: IdeCodeAction): Promise<boolean> { return runApplyCodeAction(this, this.bufPerf, path, action); }
+  applyQuickFixEdits(edits: IdeTextEdit[], title?: string): Promise<boolean> { return runApplyQuickFixEdits(this, this.bufPerf, edits, title); }
   searchWorkspace(query: string, mode: IdeSearchMode = 'all', opts: { caseSensitive?: boolean; wholeWord?: boolean; regex?: boolean; fileGlob?: string; scopePath?: string | null; limit?: number } = {}): Promise<void> {
     return runSearchWorkspace(this, query, mode, opts);
   }
@@ -656,8 +662,8 @@ class IdeStore {
   installToolchain(ecosystem: string, component: 'sdk' | 'lsp' | 'dap' | 'all', version?: string): Promise<IdeInstallJob | null> {
     return installToolchainJob(this, ecosystem, component, version, () => this.ensureJobsPoller());
   }
-  createPythonVenv(venvDir = '.venv', pythonVersion?: string): Promise<{ path: string; interpreter_path: string; version: string } | null> {
-    return createProjectPythonVenv(this, venvDir, pythonVersion);
+  createPythonVenv(venvDir = '.venv', pythonVersion?: string, moduleRoot?: string): Promise<{ path: string; interpreter_path: string; version: string } | null> {
+    return createProjectPythonVenv(this, venvDir, pythonVersion, moduleRoot);
   }
   deleteRunConfig(id: string): Promise<void> { return removeSavedRunConfig(this, id); }
   async stopRun(runId?: string): Promise<void> {
@@ -670,20 +676,22 @@ class IdeStore {
     if (this.activeRun?.status === 'running') await this.stopRun();
     if (this.activeDebug && this.activeDebug.state !== 'terminated') await this.stopDebug();
   }
-  private setPathBreakpoints(path: string, next: IdeBreakpoint[]): void {
-    this.breakpointsByPath = { ...this.breakpointsByPath, [path]: next };
-    saveBreakpointsLocal(this.target, this.breakpointsByPath);
-    void this.syncBreakpointsToSession();
+  toggleBreakpoint(rawPath: string, rawLine: number): void {
+    const line = Math.max(1, Math.floor(rawLine));
+    mutatePathBreakpoints(this, rawPath, (path, list) =>
+      list.some((b) => b.line === line) ? list.filter((b) => b.line !== line) : [...list, { path, line, enabled: true }],
+    );
   }
-  toggleBreakpoint(path: string, line: number): void {
-    const list = this.breakpointsByPath[path] ?? [];
-    this.setPathBreakpoints(path, list.some((b) => b.line === line) ? list.filter((b) => b.line !== line) : [...list, { path, line, enabled: true }].sort((a, b) => a.line - b.line));
+  updateBreakpoint(rawPath: string, rawLine: number, patch: Partial<IdeBreakpoint>): void {
+    const line = Math.max(1, Math.floor(rawLine));
+    mutatePathBreakpoints(this, rawPath, (path, list) =>
+      list.some((b) => b.line === line) ? list.map((b) => (b.line === line ? { ...b, ...patch } : b)) : [...list, { path, line, enabled: true, ...patch }],
+    );
   }
-  updateBreakpoint(path: string, line: number, patch: Partial<IdeBreakpoint>): void {
-    const list = this.breakpointsByPath[path] ?? [];
-    this.setPathBreakpoints(path, list.some((b) => b.line === line) ? list.map((b) => (b.line === line ? { ...b, ...patch } : b)) : [...list, { path, line, enabled: true, ...patch }].sort((a, b) => a.line - b.line));
+  removeBreakpoint(rawPath: string, rawLine: number): void {
+    const line = Math.max(1, Math.floor(rawLine));
+    mutatePathBreakpoints(this, rawPath, (_path, list) => list.filter((b) => b.line !== line));
   }
-  removeBreakpoint(path: string, line: number): void { this.setPathBreakpoints(path, (this.breakpointsByPath[path] ?? []).filter((b) => b.line !== line)); }
   toggleMuteBreakpoints(): void { this.breakpointsMuted = !this.breakpointsMuted; void this.syncBreakpointsToSession(); }
   async syncBreakpointsToSession(): Promise<void> {
     if (!this.activeDebug || this.activeDebug.state === 'terminated') return;
@@ -738,9 +746,7 @@ class IdeStore {
   async refreshWatches(): Promise<void> { await refreshWatchValues(this); }
 
   async loadCollabRooms(): Promise<void> {
-    if (!this.collabIsGuest) {
-      try { this.collabRooms = (await api.get<{ rooms: IdeCollabRoom[] }>('/ide/collab/rooms')).rooms ?? []; } catch { /* ignore */ }
-    }
+    if (!this.collabIsGuest) try { this.collabRooms = (await api.get<{ rooms: IdeCollabRoom[] }>('/ide/collab/rooms')).rooms ?? []; } catch { /* ignore */ }
   }
   async startCollabRoom(defaultRole: IdeCollabRole = 'editor', title?: string): Promise<void> {
     this.bufPerf.flushAll(this);
@@ -765,26 +771,21 @@ class IdeStore {
     this.collabSseCtl = await joinCollabSession(this, roomId, token, displayName, this.collabSseCtl);
   }
   followPeer(peerId: string | null): void { followCollabPeer(this, peerId); }
-  sendCursorUpdate(path: string, selections: { anchor: number; head: number }[], activeLine: number): Promise<void> {
-    return runSendCursorUpdate(this, path, selections, activeLine);
-  }
-  sendCollabEdit(path: string, content: string, save = false): Promise<void> {
-    return runSendCollabEdit(this, this.bufPerf, path, content, save);
-  }
+  sendCursorUpdate(path: string, selections: { anchor: number; head: number }[], activeLine: number): Promise<void> { return runSendCursorUpdate(this, path, selections, activeLine); }
+  sendCollabEdit(path: string, content: string, save = false): Promise<void> { return runSendCollabEdit(this, this.bufPerf, path, content, save); }
   async loadPlugins(): Promise<void> { await loadIdePlugins(this); }
   async installPlugin(source: string): Promise<boolean> { return installIdePlugin(this, source); }
   togglePlugin(slug: string, enabled: boolean): Promise<void> { return runTogglePlugin(this, slug, enabled); }
   removePlugin(slug: string): Promise<void> { return runRemovePlugin(this, slug); }
 
+  suspendOnPageLeave(): void { this.bufPerf.flushAndSnapshotAll(this); }
   disposeStreams(): void {
     this.bufPerf.resetAll(this);
     if (this.cursorSendTimer) clearTimeout(this.cursorSendTimer);
     if (this.collabEditTimer) clearTimeout(this.collabEditTimer);
     this.cursorSendTimer = null; this.collabEditTimer = null;
-    this.runPoller?.stop(); this.runPoller = null;
-    this.jobsPoller?.stop(); this.jobsPoller = null;
-    this.debugSseCtl?.abort(); this.debugSseCtl = null;
-    this.collabSseCtl?.abort(); this.collabSseCtl = null;
+    this.runPoller?.stop(); this.runPoller = null; this.jobsPoller?.stop(); this.jobsPoller = null;
+    this.debugSseCtl?.abort(); this.debugSseCtl = null; this.collabSseCtl?.abort(); this.collabSseCtl = null;
   }
 }
 
