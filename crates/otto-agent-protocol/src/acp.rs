@@ -124,6 +124,10 @@ pub struct AcpFlavor {
     /// The model goes as `session/set_model {modelId}` once ready (agy:
     /// `gemini-4-argon-high` — the config option would drop the effort).
     pub set_model: bool,
+    /// When the agent exposes reasoning effort as a session config option
+    /// (agy: `session/set_config_option {configId: "thought_level"}`), that
+    /// option's id.
+    pub effort_config_id: Option<&'static str>,
     /// The env var naming an Otto context bundle (`AGENTS.md` +
     /// `.agents/skills`) to send as `_meta.antigravity.systemPrompt.append`
     /// instead of a workspace root (otto-context `AGY_BUNDLE_ENV`).
@@ -228,8 +232,11 @@ pub struct AcpDriver {
     embedded: bool,
     /// `modes.availableModes[].id` from `session/new|load`.
     modes: Vec<String>,
+    /// Offered `thought_level` values from `configOptions`, when advertised.
+    effort_options: Vec<String>,
     access: RuntimeAccessMode,
     mode_req: Option<u64>,
+    effort_req: Option<u64>,
     /// The bundle text for `_meta.antigravity.systemPrompt.append`.
     system_append: Option<String>,
     queued: Option<(String, RuntimePromptReq)>,
@@ -284,8 +291,10 @@ impl AcpDriver {
             images: false,
             embedded: false,
             modes: Vec::new(),
+            effort_options: Vec::new(),
             access: RuntimeAccessMode::default(),
             mode_req: None,
+            effort_req: None,
             system_append: None,
             queued: None,
             prompt_id: None,
@@ -354,6 +363,7 @@ impl AcpDriver {
                     RuntimeAccessMode::FullAccess => None,
                 }),
                 set_model: true,
+                effort_config_id: Some("thought_level"),
                 bundle_env: Some("OTTO_AGY_CONTEXT_DIR"),
                 ..AcpFlavor::default()
             },
@@ -514,11 +524,87 @@ impl AcpDriver {
         }
     }
 
+    fn update_effort_options(&mut self, root: &Value) {
+        let Some(config_id) = self.flavor.effort_config_id else {
+            return;
+        };
+        let Some(opts) = root
+            .get("configOptions")
+            .and_then(Value::as_array)
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|c| c.get("id").and_then(Value::as_str) == Some(config_id))
+            })
+            .and_then(|c| c.get("options"))
+            .and_then(Value::as_array)
+        else {
+            return;
+        };
+        let vals: Vec<String> = opts
+            .iter()
+            .filter_map(|o| o.get("value").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        if !vals.is_empty() {
+            self.effort_options = vals;
+        }
+    }
+
+    fn resolve_effort(&self, raw: &str) -> Result<String, DriverError> {
+        let name = self.provider.as_str();
+        if self.flavor.effort_config_id.is_none() {
+            return Err(DriverError(format!(
+                "{name} does not take a reasoning effort"
+            )));
+        }
+        let rank = match raw.trim().to_ascii_lowercase().as_str() {
+            "minimal" | "low" => 0,
+            "medium" => 1,
+            "high" => 2,
+            "xhigh" => 3,
+            "max" | "ultra" => 4,
+            other => {
+                return Err(DriverError(format!(
+                    "{name} has no '{other}' reasoning effort"
+                )))
+            }
+        };
+        const LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+        let wanted = LEVELS[rank];
+        if self.effort_options.is_empty() || self.effort_options.iter().any(|o| o == wanted) {
+            return Ok(wanted.to_string());
+        }
+        for candidate in LEVELS[..=rank].iter().rev() {
+            if self.effort_options.iter().any(|o| o == candidate) {
+                return Ok((*candidate).to_string());
+            }
+        }
+        Ok(self.effort_options[0].clone())
+    }
+
     fn send_prompt(&mut self, step: &mut DriverStep, turn_id: String, req: &RuntimePromptReq) {
-        if std::mem::take(&mut self.config_retry) {
+        let model_changed = req
+            .model
+            .as_ref()
+            .is_some_and(|m| self.model.as_ref() != Some(m));
+        if let Some(m) = req.model.as_ref().filter(|_| model_changed) {
+            self.model = Some(m.clone());
+        }
+        if std::mem::take(&mut self.config_retry) || model_changed {
             self.write_model_config(step);
         }
         let sid = self.session_id.clone().unwrap_or_default();
+        if let Some(raw) = req.effort.as_deref().filter(|e| !e.trim().is_empty()) {
+            if let (Some(config_id), Ok(val)) =
+                (self.flavor.effort_config_id, self.resolve_effort(raw))
+            {
+                let (id, line) = self.request(
+                    M_SET_CONFIG_OPTION,
+                    json!({"sessionId": sid, "configId": config_id, "value": val}),
+                );
+                self.effort_req = Some(id);
+                step.write(line);
+            }
+        }
         let mut blocks: Vec<ContentBlock> = req
             .images
             .iter()
@@ -1050,6 +1136,7 @@ impl AcpDriver {
                     }));
                 }
             }
+            "config_option_update" => {}
             other => {
                 tracing::debug!(
                     provider = self.provider.as_str(),
@@ -1180,6 +1267,9 @@ impl AcpDriver {
                 step.push(DriverEvent::Fatal(rpc_failure("handshake_error", &e)));
                 return;
             }
+            if let Some(r) = &result {
+                self.update_effort_options(r);
+            }
             self.modes = result
                 .as_ref()
                 .and_then(|r| r.pointer("/modes/availableModes"))
@@ -1222,10 +1312,21 @@ impl AcpDriver {
             }
         } else if Some(id) == self.config_req {
             self.config_req = None;
+            if let Some(r) = &result {
+                self.update_effort_options(r);
+            }
             if let Some(e) = error {
                 // -32602: the agent refused the value; anything else (an
                 // internal error, a dropped request) was not applied.
                 self.config_retry = e.get("code").and_then(Value::as_i64) != Some(-32602);
+                step.push(DriverEvent::Error(rpc_failure("provider_error", &e)));
+            }
+        } else if Some(id) == self.effort_req {
+            self.effort_req = None;
+            if let Some(r) = &result {
+                self.update_effort_options(r);
+            }
+            if let Some(e) = error {
                 step.push(DriverEvent::Error(rpc_failure("provider_error", &e)));
             }
         } else if Some(id) == self.mode_req {
@@ -1477,10 +1578,8 @@ impl StructuredDriver for AcpDriver {
             return Err(DriverError("a prompt is already running".into()));
         }
         let name = self.provider.as_str();
-        if req.effort.is_some() {
-            return Err(DriverError(format!(
-                "{name} does not take a reasoning effort"
-            )));
+        if let Some(raw) = req.effort.as_deref().filter(|e| !e.trim().is_empty()) {
+            self.resolve_effort(raw)?;
         }
         let ready = self.phase == Phase::Ready;
         if ready && !req.images.is_empty() && !self.images {
@@ -1495,10 +1594,19 @@ impl StructuredDriver for AcpDriver {
         if ready {
             self.send_prompt(&mut step, turn_id.to_string(), req);
         } else {
+            if self.switches_model_live() {
+                if let Some(m) = &req.model {
+                    self.model = Some(m.clone());
+                }
+            }
             self.turn_id = Some(turn_id.to_string());
             self.queued = Some((turn_id.to_string(), req.clone()));
         }
         Ok(step)
+    }
+
+    fn switches_model_live(&self) -> bool {
+        self.flavor.set_model || self.flavor.model_config_id.is_some()
     }
 
     /// Live only through an advertised `session/set_mode`, between modes
@@ -1677,6 +1785,9 @@ impl StructuredDriver for AcpDriver {
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
         match (method, id) {
             (Some(m), None) if m == M_SESSION_UPDATE => {
+                if let Some(up) = params.get("update") {
+                    self.update_effort_options(up);
+                }
                 match serde_json::from_value::<SessionNotification>(params.clone()) {
                     Ok(n) => self.on_update(&mut step, n),
                     Err(_) => self.on_raw_update(&mut step, &params),
@@ -2573,5 +2684,55 @@ mod tests {
             .events
             .iter()
             .any(|e| matches!(e, DriverEvent::TurnStarted { turn_id } if turn_id == "auto-2")));
+    }
+
+    #[test]
+    fn agy_switches_model_live_and_clamps_thought_level_effort_to_advertised_options() {
+        let mut d = AcpDriver::agy("agy");
+        assert!(d.switches_model_live());
+        assert!(!AcpDriver::gemini("gemini").switches_model_live());
+        assert!(!AcpDriver::grok().switches_model_live());
+        assert!(AcpDriver::opencode().switches_model_live());
+
+        let c = LaunchContext {
+            mcp_servers: Vec::new(),
+            session_id: "s".into(),
+            cwd: "/w".into(),
+            model: Some("gemini-4-argon-medium".into()),
+            resume: None,
+            sandboxed: false,
+            access_mode: RuntimeAccessMode::ApprovalRequired,
+        };
+        d.start(&c);
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {
+                    "sessionId": "s1",
+                    "modes": {"currentModeId": "default", "availableModes": [{"id": "default"}]},
+                    "configOptions": [{
+                        "id": "thought_level",
+                        "options": [{"value": "low"}, {"value": "medium"}, {"value": "high"}]
+                    }]
+                }
+            })
+            .to_string(),
+        );
+
+        let req = RuntimePromptReq {
+            model: Some("gemini-4-argon-high".into()),
+            effort: Some("max".into()),
+            ..RuntimePromptReq::of("think")
+        };
+        let s = d.prompt("t1", &req).unwrap();
+        assert_eq!(s.writes.len(), 3);
+        assert_eq!(sent(&s, 0)["method"], "session/set_model");
+        assert_eq!(sent(&s, 0)["params"]["modelId"], "gemini-4-argon-high");
+        assert_eq!(sent(&s, 1)["method"], "session/set_config_option");
+        assert_eq!(sent(&s, 1)["params"]["configId"], "thought_level");
+        assert_eq!(sent(&s, 1)["params"]["value"], "high");
+        assert_eq!(sent(&s, 2)["method"], "session/prompt");
     }
 }

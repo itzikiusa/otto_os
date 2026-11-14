@@ -38,6 +38,7 @@
   import { askFromComposer, askTargets } from './askTargets.svelte';
   import { attachmentSupport, takesFile } from './attachmentSupport';
   import type { BannerBlock } from './banners';
+  import { providerSupportsSteer } from './capabilities';
   import { addComposerContext, assembleComposerMessage } from './composerContext';
   import { availableSlash } from './hostCommands';
   import RuntimeAccessChip from './RuntimeAccessChip.svelte';
@@ -417,7 +418,7 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
             onshowtasks={hostCommands?.showTasks ? () => hostCommands.showTasks!(sessionId) : undefined}
             queued={p?.queued ?? []}
             {running}
-            canSteer={provider === 'claude'}
+            canSteer={providerSupportsSteer(provider)}
             {closed}
             {dormant}
             reopening={draft.reopening}

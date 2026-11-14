@@ -20,7 +20,8 @@
 //!   id, `thread/resume {threadId, excludeTurns: true, …}` (`:7061-7108`); a
 //!   failed resume starts a fresh thread.
 //! * `turn/start {threadId, input: [{type: text}], approvalPolicy,
-//!   sandboxPolicy}` (`buildCodexTurnStartParams`, `:744-818`) and
+//!   sandboxPolicy}` (`buildCodexTurnStartParams`, `:744-818`),
+//!   `turn/steer {threadId, input, expectedTurnId}` mid-turn, and
 //!   `turn/interrupt {threadId, turnId}` (`:7567`).
 //! * access mode, per turn (`codexRuntimeModeTurnDefaults`, `:703-742`):
 //!   approval-required → `approvalPolicy: "untrusted"` + `sandboxPolicy:
@@ -95,6 +96,7 @@ pub struct CodexDriver {
     init_id: u64,
     thread_req: Option<(u64, bool)>,
     turn_req: Option<u64>,
+    steer_reqs: Vec<u64>,
     ready: bool,
     cwd: String,
     model: Option<String>,
@@ -122,6 +124,7 @@ impl CodexDriver {
             init_id: 0,
             thread_req: None,
             turn_req: None,
+            steer_reqs: Vec::new(),
             ready: false,
             cwd: String::new(),
             model: None,
@@ -220,17 +223,32 @@ impl CodexDriver {
         step.write(line);
     }
 
-    /// `model` / `effort` / `access_mode` apply to this turn and the ones after it.
-    fn send_turn(&mut self, step: &mut DriverStep, req: &RuntimePromptReq) {
-        self.access = req.access_mode.unwrap_or(self.access);
+    fn user_input(req: &RuntimePromptReq) -> Result<Vec<Value>, DriverError> {
+        if !req.files.is_empty() {
+            return Err(DriverError(
+                "Codex does not accept file attachments (only images)".into(),
+            ));
+        }
         let mut input: Vec<Value> = req
             .images
             .iter()
-            .map(|i| json!({"type": "image", "url": format!("data:{};base64,{}", i.mime, i.data_base64)}))
+            .map(|i| {
+                json!({
+                    "type": "image",
+                    "url": format!("data:{};base64,{}", i.mime, i.data_base64),
+                })
+            })
             .collect();
         if !req.text.is_empty() {
             input.push(json!({"type": "text", "text": req.text}));
         }
+        Ok(input)
+    }
+
+    /// `model` / `effort` / `access_mode` apply to this turn and the ones after it.
+    fn send_turn(&mut self, step: &mut DriverStep, req: &RuntimePromptReq) {
+        self.access = req.access_mode.unwrap_or(self.access);
+        let input = Self::user_input(req).unwrap_or_default();
         let mut params = json!({
             "threadId": self.thread_id,
             "input": input,
@@ -582,6 +600,7 @@ impl CodexDriver {
         self.turn_id = None;
         self.codex_turn = None;
         self.turn_req = None;
+        self.steer_reqs.clear();
         self.interrupt_when_started = false;
         self.failure = None;
         self.items.clear();
@@ -786,6 +805,11 @@ impl CodexDriver {
                 self.codex_turn = Some(t.to_string());
             }
             self.maybe_interrupt(step);
+        } else if let Some(pos) = self.steer_reqs.iter().position(|r| *r == id) {
+            self.steer_reqs.swap_remove(pos);
+            if let Some(e) = error {
+                step.push(DriverEvent::Error(rpc_failure("provider_error", &e)));
+            }
         }
     }
 
@@ -854,11 +878,7 @@ impl StructuredDriver for CodexDriver {
         if self.turn_id.is_some() {
             return Err(DriverError("a prompt is already running".into()));
         }
-        if !req.files.is_empty() {
-            return Err(DriverError(
-                "Codex does not accept file attachments (only images)".into(),
-            ));
-        }
+        Self::user_input(req)?;
         self.turn_id = Some(turn_id.to_string());
         self.failure = None;
         let mut step = DriverStep::default();
@@ -868,6 +888,35 @@ impl StructuredDriver for CodexDriver {
         } else {
             self.queued = Some(req.clone());
         }
+        Ok(step)
+    }
+
+    fn steer(&mut self, req: &RuntimePromptReq) -> Result<DriverStep, DriverError> {
+        if !self.ready || self.turn_id.is_none() || self.interrupt_when_started {
+            return Err(DriverError("no turn is running".into()));
+        }
+        let Some(thread_id) = self.thread_id.clone() else {
+            return Err(DriverError("no thread is open".into()));
+        };
+        let Some(expected_turn_id) = self.codex_turn.clone() else {
+            return Err(DriverError("turn has not started on the server yet".into()));
+        };
+        let input = Self::user_input(req)?;
+        if input.is_empty() {
+            return Err(DriverError("empty steer input".into()));
+        }
+        self.access = req.access_mode.unwrap_or(self.access);
+        let mut step = DriverStep::default();
+        let (id, line) = self.request(
+            "turn/steer",
+            json!({
+                "threadId": thread_id,
+                "input": input,
+                "expectedTurnId": expected_turn_id,
+            }),
+        );
+        self.steer_reqs.push(id);
+        step.write(line);
         Ok(step)
     }
 
@@ -1081,6 +1130,7 @@ impl StructuredDriver for CodexDriver {
     }
 
     fn on_exit(&mut self, _code: Option<i32>) -> DriverStep {
+        self.steer_reqs.clear();
         self.pending.clear();
         self.items.clear();
         DriverStep::default()
@@ -1487,6 +1537,99 @@ mod tests {
         let done = feed(
             &mut d,
             json!({"method":"turn/completed","params":{"turn":{"id":"bg-turn-1","status":"completed"}}}),
+        );
+        assert!(done.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::Terminal {
+                status: TurnTerminalStatus::Completed,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn steer_sends_turn_steer_with_expected_turn_id_and_keeps_turn_open_on_rpc_error() {
+        use otto_core::agent_runtime::{PromptFile, PromptImage};
+
+        let mut d = CodexDriver::with_program("codex");
+        ready(&mut d, false);
+        assert!(
+            d.steer(&RuntimePromptReq::of("too early")).is_err(),
+            "idle driver cannot steer"
+        );
+
+        let start = d.prompt("t1", &RuntimePromptReq::of("work")).unwrap();
+        let start_rpc = parse(&start.writes[0]);
+        assert!(
+            d.steer(&RuntimePromptReq::of("before server turn id"))
+                .is_err(),
+            "must wait until expectedTurnId is known"
+        );
+
+        feed(
+            &mut d,
+            json!({"id": start_rpc["id"], "result": {"turn": {"id": "ct-1", "items": [], "status": "inProgress"}}}),
+        );
+        assert!(
+            d.steer(&RuntimePromptReq::default()).is_err(),
+            "empty steer is refused"
+        );
+        let with_pdf = RuntimePromptReq {
+            files: vec![PromptFile {
+                mime: "application/pdf".into(),
+                name: "spec.pdf".into(),
+                data_base64: "JVBERi0=".into(),
+            }],
+            ..RuntimePromptReq::of("read")
+        };
+        assert!(d.steer(&with_pdf).is_err(), "PDFs are refused on steer too");
+
+        let steer_req = RuntimePromptReq {
+            images: vec![PromptImage {
+                mime: "image/png".into(),
+                data_base64: "iVBORw0KGgo=".into(),
+            }],
+            ..RuntimePromptReq::of("focus on tests")
+        };
+        let s = d.steer(&steer_req).unwrap();
+        let msg = parse(&s.writes[0]);
+        assert_eq!(msg["method"], "turn/steer");
+        assert!(msg.get("jsonrpc").is_none());
+        assert_eq!(msg["params"]["threadId"], "th1");
+        assert_eq!(msg["params"]["expectedTurnId"], "ct-1");
+        assert_eq!(
+            msg["params"]["input"],
+            json!([
+                {"type": "image", "url": "data:image/png;base64,iVBORw0KGgo="},
+                {"type": "text", "text": "focus on tests"},
+            ])
+        );
+
+        // An RPC error on `turn/steer` surfaces `DriverEvent::Error` without
+        // ending the active turn.
+        let err_step = feed(
+            &mut d,
+            json!({"id": msg["id"], "error": {"code": -32600, "message": "turn busy"}}),
+        );
+        assert!(
+            err_step
+                .events
+                .iter()
+                .any(|e| matches!(e, DriverEvent::Error(f) if f.message.contains("turn busy"))),
+            "{:?}",
+            err_step.events
+        );
+        assert!(
+            !err_step
+                .events
+                .iter()
+                .any(|e| matches!(e, DriverEvent::Terminal { .. })),
+            "active turn must remain running"
+        );
+
+        let done = feed(
+            &mut d,
+            json!({"method": "turn/completed", "params": {"turn": {"id": "ct-1", "status": "completed"}}}),
         );
         assert!(done.events.iter().any(|e| matches!(
             e,

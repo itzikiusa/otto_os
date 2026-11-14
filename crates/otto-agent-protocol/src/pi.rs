@@ -9,7 +9,8 @@
 //!   [--tools … --exclude-tools mcp__*]`. `--session` takes the id
 //!   `get_state` reported (`data.sessionId`, a UUID), which is the resume key.
 //! * stdin — strict JSONL commands with an optional `id`: `get_state`,
-//!   `prompt {message, images?}`, `set_thinking_level {level}`, `abort`.
+//!   `prompt {message, images?}`, `steer {message, images?}`,
+//!   `set_thinking_level {level}`, `abort`.
 //! * stdout — `response {id, command, success, data|error}` per command, and
 //!   session events: `message_update {assistantMessageEvent: {type:
 //!   text_delta|thinking_delta|toolcall_*, delta}}`, `message_end`,
@@ -80,6 +81,7 @@ pub struct PiDriver {
     next_id: u64,
     state_req: Option<String>,
     prompt_req: Option<String>,
+    steer_reqs: Vec<String>,
     ready: bool,
     turn_id: Option<String>,
     auto_turns: u64,
@@ -102,6 +104,7 @@ impl PiDriver {
             next_id: 0,
             state_req: None,
             prompt_req: None,
+            steer_reqs: Vec::new(),
             ready: false,
             turn_id: None,
             auto_turns: 0,
@@ -152,6 +155,7 @@ impl PiDriver {
         self.close_message(step);
         self.turn_id = None;
         self.prompt_req = None;
+        self.steer_reqs.clear();
         self.ended = None;
         self.tools.clear();
         step.push(DriverEvent::Terminal {
@@ -310,8 +314,15 @@ impl PiDriver {
 
     fn on_event(&mut self, step: &mut DriverStep, v: &Value) {
         match v.get("type").and_then(Value::as_str) {
-            Some("agent_start" | "message_start") => {
+            Some("agent_start") => {
                 self.ensure_autonomous_turn(step);
+            }
+            Some("message_start") => {
+                self.ensure_autonomous_turn(step);
+                if self.turn_id.is_some() {
+                    self.close_thought(step);
+                    self.close_message(step);
+                }
             }
             Some("message_update") => {
                 let ev = &v["assistantMessageEvent"];
@@ -486,7 +497,33 @@ impl PiDriver {
             } else if v.pointer("/data/disposition").and_then(Value::as_str) == Some("handled") {
                 self.finish(step, TurnTerminalStatus::Completed, None);
             }
+        } else if let Some(pos) = id.and_then(|id| self.steer_reqs.iter().position(|r| r == id)) {
+            self.steer_reqs.swap_remove(pos);
+            if !ok {
+                let message = v
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("pi refused the steer")
+                    .to_string();
+                step.push(DriverEvent::Error(ProviderFailure {
+                    class: "provider_error".into(),
+                    message,
+                    code: None,
+                    retryable: None,
+                }));
+            }
         }
+    }
+
+    fn prompt_images(req: &RuntimePromptReq) -> Option<Value> {
+        (!req.images.is_empty()).then(|| {
+            Value::Array(
+                req.images
+                    .iter()
+                    .map(|i| json!({"type": "image", "data": i.data_base64, "mimeType": i.mime}))
+                    .collect(),
+            )
+        })
     }
 }
 
@@ -544,16 +581,46 @@ impl StructuredDriver for PiDriver {
         self.turn_id = Some(turn_id.to_string());
         self.messages = 0;
         let mut cmd = json!({"type": "prompt", "message": req.text});
-        if !req.images.is_empty() {
-            cmd["images"] = Value::Array(
-                req.images
-                    .iter()
-                    .map(|i| json!({"type": "image", "data": i.data_base64, "mimeType": i.mime}))
-                    .collect(),
-            );
+        if let Some(images) = Self::prompt_images(req) {
+            cmd["images"] = images;
         }
         let id = self.command(&mut step, cmd);
         self.prompt_req = Some(id);
+        Ok(step)
+    }
+
+    fn steer(&mut self, req: &RuntimePromptReq) -> Result<DriverStep, DriverError> {
+        if !self.ready || self.turn_id.is_none() {
+            return Err(DriverError("no prompt is running".into()));
+        }
+        if !req.files.is_empty() {
+            return Err(DriverError(
+                "pi takes text and images only (no files)".into(),
+            ));
+        }
+        if req.text.is_empty() && req.images.is_empty() {
+            return Err(DriverError("empty steer input".into()));
+        }
+        let level = match req.effort.as_deref().filter(|e| !e.trim().is_empty()) {
+            Some(e) => Some(
+                thinking_level(e)
+                    .ok_or_else(|| DriverError(format!("pi has no '{e}' thinking level")))?,
+            ),
+            None => None,
+        };
+        let mut step = DriverStep::default();
+        if let Some(level) = level {
+            self.command(
+                &mut step,
+                json!({"type": "set_thinking_level", "level": level}),
+            );
+        }
+        let mut cmd = json!({"type": "steer", "message": req.text});
+        if let Some(images) = Self::prompt_images(req) {
+            cmd["images"] = images;
+        }
+        let id = self.command(&mut step, cmd);
+        self.steer_reqs.push(id);
         Ok(step)
     }
 
@@ -590,207 +657,13 @@ impl StructuredDriver for PiDriver {
         }
         step
     }
+
+    fn on_exit(&mut self, _code: Option<i32>) -> DriverStep {
+        self.steer_reqs.clear();
+        DriverStep::default()
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn ctx(resume: Option<&str>, access_mode: RuntimeAccessMode) -> LaunchContext {
-        LaunchContext {
-            mcp_servers: Vec::new(),
-            session_id: "s".into(),
-            cwd: "/w".into(),
-            model: Some("openai-codex/gpt-5.5".into()),
-            resume: resume.map(str::to_string),
-            sandboxed: false,
-            access_mode,
-        }
-    }
-
-    fn sent(step: &DriverStep, i: usize) -> Value {
-        serde_json::from_str(&step.writes[i]).unwrap()
-    }
-
-    #[test]
-    fn launch_maps_resume_model_and_access_to_tools() {
-        let d = PiDriver::with_program("pi");
-        let a = d
-            .launch(&ctx(Some("abc"), RuntimeAccessMode::ApprovalRequired))
-            .args;
-        assert_eq!(
-            a,
-            [
-                "--mode",
-                "rpc",
-                "--session",
-                "abc",
-                "--model",
-                "openai-codex/gpt-5.5",
-                "--tools",
-                "read,grep,find,ls",
-                "--exclude-tools",
-                "mcp__*"
-            ]
-        );
-        let full = d.launch(&ctx(None, RuntimeAccessMode::FullAccess)).args;
-        assert!(!full.iter().any(|a| a == "--tools" || a == "--session"));
-    }
-
-    #[test]
-    fn handshake_turn_tools_and_settle() {
-        let mut d = PiDriver::with_program("pi");
-        let s = d.start(&ctx(None, RuntimeAccessMode::FullAccess));
-        let st = sent(&s, 0);
-        assert_eq!(st["type"], "get_state");
-        let s = d.on_line(&format!(
-            r#"{{"id":"{}","type":"response","command":"get_state","success":true,"data":{{"sessionId":"sess-1","model":{{"id":"gpt-5.5","provider":"openai-codex"}}}}}}"#,
-            st["id"].as_str().unwrap()
-        ));
-        assert!(
-            matches!(&s.events[0], DriverEvent::Ready { native_thread_id: Some(t), model: Some(m) } if t == "sess-1" && m == "openai-codex/gpt-5.5")
-        );
-
-        let mut req = RuntimePromptReq::of("hi");
-        req.effort = Some("max".into());
-        let s = d.prompt("t1", &req).unwrap();
-        assert_eq!(sent(&s, 0)["level"], "max");
-        let p = sent(&s, 1);
-        assert_eq!(
-            (p["type"].as_str(), p["message"].as_str()),
-            (Some("prompt"), Some("hi"))
-        );
-        d.on_line(&format!(
-            r#"{{"id":"{}","type":"response","command":"prompt","success":true,"data":{{"disposition":"started"}}}}"#,
-            p["id"].as_str().unwrap()
-        ));
-        let s = d.on_line(r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Hel"}}"#);
-        assert!(
-            matches!(&s.events[0], DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::AssistantMessage { text, streaming: true, .. } if text == "Hel"))
-        );
-        d.on_line(r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"lo"}}"#);
-        let s = d.on_line(r#"{"type":"tool_execution_start","toolCallId":"c1","toolName":"bash","args":{"command":"ls"}}"#);
-        assert!(
-            matches!(&s.events[0], DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::AssistantMessage { text, streaming: false, .. } if text == "Hello"))
-        );
-        assert!(
-            matches!(&s.events[1], DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::CommandExecution { input, .. } if input == "ls"))
-        );
-        let s = d.on_line(r#"{"type":"tool_execution_end","toolCallId":"c1","toolName":"bash","result":{"content":[{"type":"text","text":"a.rs"}]},"isError":false}"#);
-        assert!(
-            matches!(&s.events[0], DriverEvent::TurnItem(i) if i.status == TurnItemStatus::Completed && matches!(&i.kind, TurnItemKind::CommandExecution { output: Some(o), .. } if o == "a.rs"))
-        );
-        let s = d.on_line(r#"{"type":"agent_end","messages":[{"role":"assistant","stopReason":"stop"}],"willRetry":false}"#);
-        assert!(matches!(
-            &s.events[0],
-            DriverEvent::Terminal {
-                status: TurnTerminalStatus::Completed,
-                ..
-            }
-        ));
-        // A later agent_settled finds no open turn.
-        assert!(d
-            .on_line(r#"{"type":"agent_settled","aborted":false}"#)
-            .events
-            .is_empty());
-    }
-
-    /// Once pi has sent `agent_settled` (1.x), `agent_end` no longer ends the
-    /// turn — `agent_settled` does, with the stashed outcome. The lines are
-    /// pi 1.5.0's for a provider whose OAuth refresh fails (trimmed).
-    #[test]
-    fn a_settling_pi_ends_turns_at_agent_settled_with_the_runs_outcome() {
-        let mut d = PiDriver::with_program("pi");
-        d.start(&ctx(None, RuntimeAccessMode::FullAccess));
-        d.prompt("t1", &RuntimePromptReq::of("hi")).unwrap();
-        let s = d.on_line(r#"{"type":"agent_end","messages":[{"role":"assistant","stopReason":"stop"}],"willRetry":false}"#);
-        assert!(matches!(
-            &s.events[0],
-            DriverEvent::Terminal {
-                status: TurnTerminalStatus::Completed,
-                ..
-            }
-        ));
-        // Learns that this pi settles; nothing is open any more.
-        assert!(d
-            .on_line(r#"{"type":"agent_settled","aborted":false}"#)
-            .events
-            .is_empty());
-
-        d.prompt("t2", &RuntimePromptReq::of("again")).unwrap();
-        let s = d.on_line(r#"{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"OAuth refresh failed for openai-codex"}}"#);
-        assert!(s.events.is_empty());
-        let s = d.on_line(r#"{"type":"agent_end","messages":[{"role":"system","content":""},{"role":"user","content":[]},{"role":"assistant","content":[],"stopReason":"error","errorMessage":"OAuth refresh failed for openai-codex"}],"willRetry":false}"#);
-        assert!(s.events.is_empty(), "agent_end must wait for agent_settled");
-        let s = d.on_line(r#"{"type":"agent_settled","aborted":false}"#);
-        assert!(
-            matches!(&s.events[0], DriverEvent::Terminal { status: TurnTerminalStatus::Failed, failure: Some(f), .. } if f.message == "OAuth refresh failed for openai-codex")
-        );
-
-        // An abort wins over the stashed outcome.
-        d.prompt("t3", &RuntimePromptReq::of("go")).unwrap();
-        d.on_line(r#"{"type":"agent_end","messages":[{"role":"assistant","stopReason":"stop"}],"willRetry":false}"#);
-        let s = d.on_line(r#"{"type":"agent_settled","aborted":true}"#);
-        assert!(matches!(
-            &s.events[0],
-            DriverEvent::Terminal {
-                status: TurnTerminalStatus::Interrupted,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn a_refused_prompt_fails_and_dialogs_are_cancelled() {
-        let mut d = PiDriver::with_program("pi");
-        d.start(&ctx(None, RuntimeAccessMode::FullAccess));
-        let s = d.prompt("t1", &RuntimePromptReq::of("hi")).unwrap();
-        let p = sent(&s, 0);
-        let s = d.on_line(&format!(
-            r#"{{"id":"{}","type":"response","command":"prompt","success":false,"error":"No model"}}"#,
-            p["id"].as_str().unwrap()
-        ));
-        assert!(
-            matches!(&s.events[0], DriverEvent::Terminal { status: TurnTerminalStatus::Failed, failure: Some(f), .. } if f.message == "No model")
-        );
-        let s = d.on_line(
-            r#"{"type":"extension_ui_request","id":"u1","method":"confirm","title":"Sure?"}"#,
-        );
-        let r = sent(&s, 0);
-        assert_eq!(
-            (r["type"].as_str(), r["cancelled"].as_bool()),
-            (Some("extension_ui_response"), Some(true))
-        );
-    }
-
-    #[test]
-    fn autonomous_agent_start_after_ready_emits_turn_started_and_streams_thinking_and_text() {
-        let mut d = PiDriver::with_program("pi");
-        let st = sent(&d.start(&ctx(None, RuntimeAccessMode::FullAccess)), 0);
-        d.on_line(&format!(
-            r#"{{"id":"{}","type":"response","command":"get_state","success":true,"data":{{"sessionId":"sess-1"}}}}"#,
-            st["id"].as_str().unwrap()
-        ));
-        let s = d.on_line(r#"{"type":"agent_start"}"#);
-        assert!(
-            matches!(&s.events[0], DriverEvent::TurnStarted { turn_id } if turn_id == "auto-1")
-        );
-        let th = d.on_line(r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"pondering"}}"#);
-        assert!(
-            matches!(&th.events[0], DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::Reasoning { text, streaming: true } if text == "pondering"))
-        );
-        let tx = d.on_line(r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"autonomous answer"}}"#);
-        assert!(
-            matches!(&tx.events[1], DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::AssistantMessage { text, streaming: true, .. } if text == "autonomous answer"))
-        );
-        d.on_line(r#"{"type":"message_end","message":{"role":"assistant","stopReason":"stop"}}"#);
-        let fin = d.on_line(r#"{"type":"agent_end","messages":[{"role":"assistant","stopReason":"stop"}],"willRetry":false}"#);
-        assert!(fin.events.iter().any(|e| matches!(
-            e,
-            DriverEvent::Terminal {
-                status: TurnTerminalStatus::Completed,
-                ..
-            }
-        )));
-    }
-}
+#[path = "pi_tests.rs"]
+mod tests;
