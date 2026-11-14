@@ -1,0 +1,354 @@
+// Durable IDE Editor History:
+// 1. Module-singleton `EditorState` cache (0ms `IDE -> Git -> Threads -> IDE` round-trips).
+// 2. Persistent Undo/Redo step journal + unsaved draft buffer (`localStorage['otto.ide.undoJournal.v1']`)
+//    so `⌘Z` / `⌘⇧Z` undoes prior edits even after a full page reload or Otto.app restart.
+// 3. Persistent 30-item Clipboard Ring (`localStorage['otto.ide.clipboardHistory.v1']`) for `⌘⇧V`
+//    ("Paste from History…") and "Compare with Clipboard".
+// 4. Shared JetBrains `Git ▸`, `Local History ▸`, and `Compare with Clipboard` context submenus.
+
+import { historyField } from '@codemirror/commands';
+import { EditorState, type Extension, type StateEffect } from '@codemirror/state';
+import type { MenuItem } from '../contextmenu.svelte.ts';
+
+/** Returns true when a `.cm-gutters` target should toggle/preview a breakpoint (all gutter cells except ▶, 💡, 🎯↑, fold chevron, or diff bar). */
+export function isBpTargetGutterElement(target: EventTarget | null): boolean {
+  if (!(target instanceof Element) || !target.closest('.cm-gutters')) return false;
+  return !target.closest('.cm-ide-run-btn, .cm-ide-gutter-run-btn, .cm-ide-lightbulb-btn, .cm-ide-dep-gutter-btn, .cm-fold-marker, .cm-ide-diff-bar');
+}
+
+export const IDE_UNDO_JOURNAL_KEY = 'otto.ide.undoJournal.v1';
+export const IDE_CLIPBOARD_HISTORY_KEY = 'otto.ide.clipboardHistory.v1';
+
+const MAX_SINGLETON_STATES = 24;
+const MAX_JOURNAL_FILES = 24;
+const MAX_JOURNAL_ENTRY_CHARS = 160_000;
+const MAX_CLIPBOARD_ITEMS = 30;
+const MAX_CLIPBOARD_ITEM_CHARS = 32_000;
+
+export interface SingletonIdeTabState {
+  state: EditorState;
+  scroll: StateEffect<unknown> | null;
+  scrollTop: number;
+  chars: number;
+  langReady: boolean;
+  language: string | undefined;
+  updatedAt: number;
+}
+
+/** Module-singleton map surviving `CodeEditor.svelte` unmount/remount across Otto modules! */
+const singletonIdeStates = new Map<string, SingletonIdeTabState>();
+
+export function getSingletonIdeState(filePath: string): SingletonIdeTabState | undefined {
+  const hit = singletonIdeStates.get(filePath);
+  if (hit) {
+    singletonIdeStates.delete(filePath);
+    singletonIdeStates.set(filePath, hit);
+  }
+  return hit;
+}
+
+export function setSingletonIdeState(filePath: string, entry: SingletonIdeTabState): void {
+  if (!filePath || entry.chars > 512_000) return;
+  singletonIdeStates.delete(filePath);
+  singletonIdeStates.set(filePath, entry);
+  while (singletonIdeStates.size > MAX_SINGLETON_STATES) {
+    const oldest = singletonIdeStates.keys().next().value;
+    if (oldest === undefined) break;
+    singletonIdeStates.delete(oldest);
+  }
+}
+
+export function evictSingletonIdeState(paths: Iterable<string> | 'all'): void {
+  if (paths === 'all') { singletonIdeStates.clear(); return; }
+  for (const p of paths) singletonIdeStates.delete(p);
+}
+
+// ── Durable Undo/Redo Step Journal (`localStorage['otto.ide.undoJournal.v1']`) ──
+
+export interface IdeUndoJournalEntry {
+  stateJson: { doc: string; [k: string]: unknown };
+  baseSavedContent: string | null;
+  unsaved: boolean;
+  scrollTop: number;
+  updatedAt: number;
+}
+
+type UndoJournalMap = Record<string, IdeUndoJournalEntry>;
+
+function readJournalMap(storage?: Pick<Storage, 'getItem'> | null): UndoJournalMap {
+  const store = storage ?? (typeof localStorage !== 'undefined' ? localStorage : null);
+  if (!store) return {};
+  try {
+    const raw = store.getItem(IDE_UNDO_JOURNAL_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === 'object' ? (parsed as UndoJournalMap) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeJournalMap(map: UndoJournalMap, storage?: Pick<Storage, 'setItem'> | null): void {
+  const store = storage ?? (typeof localStorage !== 'undefined' ? localStorage : null);
+  if (!store) return;
+  const entries = Object.entries(map).sort((a, b) => (b[1]?.updatedAt ?? 0) - (a[1]?.updatedAt ?? 0)).slice(0, MAX_JOURNAL_FILES);
+  const trimmed: UndoJournalMap = {};
+  for (const [k, v] of entries) trimmed[k] = v;
+  try {
+    store.setItem(IDE_UNDO_JOURNAL_KEY, JSON.stringify(trimmed));
+  } catch {
+    // Quota tight: keep newest 8 entries.
+    const compact: UndoJournalMap = {};
+    for (const [k, v] of entries.slice(0, 8)) compact[k] = v;
+    try { store.setItem(IDE_UNDO_JOURNAL_KEY, JSON.stringify(compact)); } catch { /* ignore */ }
+  }
+}
+
+export function persistIdeUndoJournal(
+  filePath: string,
+  state: EditorState,
+  savedContent: string | null | undefined,
+  scrollTop = 0,
+  storage?: Pick<Storage, 'getItem' | 'setItem'> | null,
+): void {
+  if (!filePath || state.doc.length > MAX_JOURNAL_ENTRY_CHARS) return;
+  try {
+    const stateJson = state.toJSON({ history: historyField }) as { doc: string; history?: unknown };
+    const serialized = JSON.stringify(stateJson);
+    if (serialized.length > MAX_JOURNAL_ENTRY_CHARS) return;
+    const docStr = stateJson.doc;
+    const unsaved = savedContent != null ? docStr !== savedContent : false;
+    const map = readJournalMap(storage);
+    map[filePath] = {
+      stateJson,
+      baseSavedContent: savedContent ?? docStr,
+      unsaved,
+      scrollTop,
+      updatedAt: Date.now(),
+    };
+    writeJournalMap(map, storage);
+  } catch { /* state without historyField */ }
+}
+
+export function restoreIdeStateFromJournal(
+  filePath: string,
+  diskContent: string,
+  extensions: Extension[],
+  storage?: Pick<Storage, 'getItem'> | null,
+): { state: EditorState; scrollTop: number; restoredDraft: string | null } | null {
+  if (!filePath) return null;
+  const entry = readJournalMap(storage)[filePath];
+  if (!entry?.stateJson || typeof entry.stateJson.doc !== 'string') return null;
+  try {
+    let st = EditorState.fromJSON(entry.stateJson, { extensions }, { history: historyField });
+    let restoredDraft: string | null = null;
+    if (entry.stateJson.doc === diskContent) {
+      // Saved before restart: `doc` matches disk AND full `historyField` undo stack is intact!
+    } else if (entry.unsaved && entry.baseSavedContent === diskContent) {
+      // Unsaved draft before restart and disk base hasn't diverged: keep unsaved draft + undo stack!
+      restoredDraft = entry.stateJson.doc;
+    } else {
+      // File changed externally on disk while closed: append external change on top so history stays valid.
+      st = st.update({ changes: { from: 0, to: st.doc.length, insert: diskContent } }).state;
+    }
+    return { state: st, scrollTop: entry.scrollTop ?? 0, restoredDraft };
+  } catch {
+    return null;
+  }
+}
+
+export function forgetIdeUndoJournal(filePath: string, storage?: Pick<Storage, 'getItem' | 'setItem'> | null): void {
+  const map = readJournalMap(storage);
+  if (filePath in map) {
+    delete map[filePath];
+    writeJournalMap(map, storage);
+  }
+}
+
+export function restoreDurableIdeState(
+  filePath: string,
+  diskContent: string,
+  savedContent: string | null | undefined,
+  extensions: Extension[],
+): { state: EditorState; scrollTop: number; restoredDraft: string | null } | null {
+  const mem = getSingletonIdeState(filePath);
+  if (mem) {
+    try {
+      const json = mem.state.toJSON({ history: historyField }) as { doc: string };
+      let st = EditorState.fromJSON(json, { extensions }, { history: historyField });
+      let restoredDraft: string | null = null;
+      if (st.doc.toString() !== diskContent) {
+        if (savedContent != null && savedContent === diskContent) restoredDraft = st.doc.toString();
+        else st = st.update({ changes: { from: 0, to: st.doc.length, insert: diskContent } }).state;
+      }
+      return { state: st, scrollTop: mem.scrollTop, restoredDraft };
+    } catch { /* fall through */ }
+  }
+  return restoreIdeStateFromJournal(filePath, diskContent, extensions);
+}
+
+// ── Persistent 30-Item Clipboard Ring (`localStorage['otto.ide.clipboardHistory.v1']`) ──
+
+export interface IdeClipboardEntry {
+  id: string;
+  text: string;
+  preview: string;
+  lineCount: number;
+  filePath?: string;
+  copiedAt: number;
+}
+
+export function readIdeClipboardHistory(storage?: Pick<Storage, 'getItem'> | null): IdeClipboardEntry[] {
+  const store = storage ?? (typeof localStorage !== 'undefined' ? localStorage : null);
+  if (!store) return [];
+  try {
+    const raw = store.getItem(IDE_CLIPBOARD_HISTORY_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw) as unknown;
+    return Array.isArray(arr) ? (arr.filter((x) => x && typeof x.text === 'string') as IdeClipboardEntry[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function recordIdeClipboardEntry(
+  text: string,
+  filePath?: string,
+  storage?: Pick<Storage, 'getItem' | 'setItem'> | null,
+): IdeClipboardEntry[] {
+  const clean = text.slice(0, MAX_CLIPBOARD_ITEM_CHARS);
+  if (!clean.trim()) return readIdeClipboardHistory(storage);
+  const prev = readIdeClipboardHistory(storage).filter((it) => it.text !== clean);
+  const lines = clean.split('\n');
+  const entry: IdeClipboardEntry = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    text: clean,
+    preview: lines.slice(0, 2).map((l) => l.trim()).filter(Boolean).join(' ↵ ').slice(0, 96) || clean.slice(0, 96),
+    lineCount: lines.length,
+    filePath,
+    copiedAt: Date.now(),
+  };
+  const next = [entry, ...prev].slice(0, MAX_CLIPBOARD_ITEMS);
+  const store = storage ?? (typeof localStorage !== 'undefined' ? localStorage : null);
+  try { store?.setItem(IDE_CLIPBOARD_HISTORY_KEY, JSON.stringify(next)); } catch { /* ignore */ }
+  return next;
+}
+
+export function clearIdeClipboardHistory(storage?: Pick<Storage, 'removeItem'> | null): void {
+  const store = storage ?? (typeof localStorage !== 'undefined' ? localStorage : null);
+  try { store?.removeItem(IDE_CLIPBOARD_HISTORY_KEY); } catch { /* ignore */ }
+}
+
+export async function getLatestClipboardForCompare(storage?: Pick<Storage, 'getItem'> | null): Promise<string> {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
+      const sys = await navigator.clipboard.readText();
+      if (sys) return sys;
+    }
+  } catch { /* permission / headless fallback to ring */ }
+  return readIdeClipboardHistory(storage)[0]?.text ?? '';
+}
+
+// ── Shared `Git ▸`, `Local History ▸` & `Compare with Clipboard` Submenus ────
+
+export interface IdeVcsMenuHooks {
+  filePath: string;
+  readOnly?: boolean;
+  onToggleBlame?: (() => void) | null;
+  onPasteFromHistory?: (() => void) | null;
+}
+
+export function dispatchIdeCompareEvent(detail: {
+  mode: 'local-history' | 'git-revision' | 'git-branch' | 'clipboard' | 'file';
+  path: string;
+  clipboardText?: string;
+  leftContent?: string;
+  leftLabel?: string;
+}): void {
+  if (typeof window === 'undefined') return;
+  if (detail.mode === 'local-history') {
+    window.dispatchEvent(new CustomEvent('otto:ide-open-local-history', { detail: { path: detail.path } }));
+  } else {
+    window.dispatchEvent(new CustomEvent('otto:ide-open-compare', { detail }));
+  }
+}
+
+export function dispatchIdeGitMenuAction(action: string, path: string): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent('otto:ide-git-action', { detail: { action, path } }));
+}
+
+export function buildIdeVcsContextRows(
+  event: MouseEvent,
+  reopenMain: () => void,
+  hooks: IdeVcsMenuHooks,
+): MenuItem[] {
+  const reopenSub = (subItems: MenuItem[]) => {
+    const synthetic = new MouseEvent('contextmenu', { clientX: event.clientX, clientY: event.clientY, bubbles: true });
+    void import('../contextmenu.svelte.ts').then(({ ctxMenu }) => {
+      ctxMenu.show(synthetic, [
+        { label: '← Back', icon: 'chevronLeft', pinned: true, action: reopenMain },
+        { separator: true },
+        ...subItems,
+      ]);
+    });
+  };
+
+  const gitSubmenu: MenuItem[] = [
+    { label: 'Commit File…', icon: 'commit', hint: '⌘K', action: () => dispatchIdeGitMenuAction('commit', hooks.filePath) },
+    { label: 'Add / Stage', icon: 'plus', hint: '⌥⌘A', action: () => dispatchIdeGitMenuAction('stage', hooks.filePath) },
+    { label: 'Annotate with Git Blame', icon: 'commit', action: () => hooks.onToggleBlame?.() },
+    { label: 'Show Diff', icon: 'split', hint: '⌘D', action: () => dispatchIdeGitMenuAction('diff', hooks.filePath) },
+    { label: 'Compare with Revision…', icon: 'clock', action: () => dispatchIdeCompareEvent({ mode: 'git-revision', path: hooks.filePath }) },
+    { label: 'Compare with Branch or Tag…', icon: 'branch', action: () => dispatchIdeCompareEvent({ mode: 'git-branch', path: hooks.filePath }) },
+    { label: 'Show History', icon: 'clock', action: () => dispatchIdeGitMenuAction('history', hooks.filePath) },
+    { label: 'Rollback…', icon: 'undo', hint: '⌥⌘Z', action: () => dispatchIdeGitMenuAction('rollback', hooks.filePath) },
+    { separator: true },
+    { label: 'Push…', icon: 'arrowUp', hint: '⇧⌘K', action: () => dispatchIdeGitMenuAction('push', hooks.filePath) },
+    { label: 'Pull…', icon: 'arrowDown', action: () => dispatchIdeGitMenuAction('pull', hooks.filePath) },
+    { label: 'Fetch', icon: 'refresh', action: () => dispatchIdeGitMenuAction('fetch', hooks.filePath) },
+    { separator: true },
+    { label: 'Branches…', icon: 'branch', action: () => dispatchIdeGitMenuAction('branches', hooks.filePath) },
+    { label: 'New Branch…', icon: 'plus', action: () => dispatchIdeGitMenuAction('new-branch', hooks.filePath) },
+    { label: 'Stash Changes…', icon: 'stash', action: () => dispatchIdeGitMenuAction('stash', hooks.filePath) },
+    { label: 'Unstash Changes…', icon: 'stash', action: () => dispatchIdeGitMenuAction('unstash', hooks.filePath) },
+  ];
+
+  const localHistorySubmenu: MenuItem[] = [
+    { label: 'Show History…', icon: 'clock', action: () => dispatchIdeCompareEvent({ mode: 'local-history', path: hooks.filePath }) },
+    {
+      label: 'Put Label…',
+      icon: 'tag',
+      action: () => {
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('otto:ide-put-history-label', { detail: { path: hooks.filePath } }));
+        }
+      },
+    },
+  ];
+
+  return [
+    {
+      label: 'Paste from History…',
+      icon: 'copy',
+      hint: '⇧⌘V',
+      disabled: hooks.readOnly,
+      action: () => {
+        if (hooks.onPasteFromHistory) hooks.onPasteFromHistory();
+        else if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('otto:ide-paste-history'));
+      },
+    },
+    { separator: true },
+    { label: 'Local History', icon: 'clock', hint: '▸', action: () => reopenSub(localHistorySubmenu) },
+    { label: 'Git', icon: 'branch', hint: '▸', action: () => reopenSub(gitSubmenu) },
+    {
+      label: 'Compare with Clipboard',
+      icon: 'split',
+      action: () => {
+        void getLatestClipboardForCompare().then((clip) => {
+          dispatchIdeCompareEvent({ mode: 'clipboard', path: hooks.filePath, clipboardText: clip, leftContent: clip, leftLabel: 'Clipboard' });
+        });
+      },
+    },
+  ];
+}

@@ -1,7 +1,7 @@
 <script lang="ts">
-  // GoLand-style Multi-Tab Bar: Back/Forward cursor history, persistent file tabs
-  // with dirty dot / pin / read-only lock / middle-click close / right-click context menu,
-  // overflow tabs picker, and Split Right / Split Down / Close Split controls.
+  // GoLand-style Multi-Tab Bar (locked 34px height, CLS = 0): Back/Forward cursor history,
+  // smart middle-ellipsis + parent-folder disambiguation, dirty dot / pin / read-only lock,
+  // Local History / Git context items, overflow tabs picker, and Split Right / Down controls.
   import { copyWithToast } from '../../../lib/clipboard';
   import Icon from '../../../lib/components/Icon.svelte';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
@@ -14,11 +14,14 @@
     canIdeNavigateForward,
     closeAllIdeTabs,
     closeUnmodifiedIdeTabs,
+    flushAutoLocalHistorySnapshot,
+    formatIdeTabDisplayName,
     isIdeTabPinned,
     navigateIdeBack,
     navigateIdeForward,
     openIdeTerminalForPath,
     pushIdeNavLocation,
+    putIdeLocalHistoryLabel,
     revealInIdeProjectTree,
     toggleIdeTabPinned,
   } from './ideEditorStoreBridge.svelte';
@@ -58,6 +61,20 @@
       { label: 'Close unmodified', action: () => void closeUnmodifiedIdeTabs() },
       { label: 'Close all', action: () => void closeAllIdeTabs() },
       { separator: true },
+      {
+        label: 'Local History: Show History…',
+        icon: 'clock',
+        action: () => {
+          flushAutoLocalHistorySnapshot(tab.path);
+          window.dispatchEvent(new CustomEvent('otto:ide-open-local-history', { detail: { path: tab.path } }));
+        },
+      },
+      {
+        label: 'Local History: Put Label…',
+        icon: 'tag',
+        action: () => void putIdeLocalHistoryLabel(tab.path, tab.content),
+      },
+      { separator: true },
       { label: 'Copy path', icon: 'copy', action: () => void copyWithToast(tab.path, 'file path') },
       {
         label: 'Copy relative path',
@@ -76,10 +93,13 @@
     const items: MenuItem[] = ide.tabs.map((t) => {
       const dirty = t.dirty ?? (t.content !== t.savedContent);
       return {
-        label: `${t.name}${dirty ? ' •' : ''}`,
+        label: `${formatIdeTabDisplayName(t, ide.tabs, 34)}${dirty ? ' •' : ''}`,
         icon: t.path === ide.activePath ? 'check' : isIdeTabPinned(t) ? 'pin' : t.readOnly ? 'lock' : 'file',
         hint: ide.relativePath(t.path),
-        action: () => { ide.activePath = t.path; },
+        action: () => {
+          if (ide.activePath && ide.activePath !== t.path) flushAutoLocalHistorySnapshot(ide.activePath);
+          ide.activePath = t.path;
+        },
       };
     });
     items.push(
@@ -122,6 +142,7 @@
       {@const isDirty = tab.dirty ?? (tab.content !== tab.savedContent)}
       {@const isActive = tab.path === ide.activePath}
       {@const isPinned = isIdeTabPinned(tab)}
+      {@const displayLabel = formatIdeTabDisplayName(tab, ide.tabs)}
       <div
         class="ide-tab"
         class:active={isActive}
@@ -144,6 +165,7 @@
           onkeydown={onTabKey}
           onclick={() => {
             if (ide.activePath && ide.activePath !== tab.path) {
+              flushAutoLocalHistorySnapshot(ide.activePath);
               pushIdeNavLocation(ide.activePath, ide.cursorInfo.line, ide.cursorInfo.col);
             }
             ide.activePath = tab.path;
@@ -152,7 +174,7 @@
           title={`${ide.relativePath(tab.path)}${tab.readOnly ? ' (read-only)' : ''}${isDirty ? ' (unsaved)' : ''}`}
         >
           <Icon name={isPinned ? 'pin' : tab.readOnly ? 'lock' : 'file'} size={12} />
-          <span class="ide-tab-label" dir="ltr">{tab.name}</span>
+          <span class="ide-tab-label" dir="ltr">{displayLabel}</span>
           {#if isDirty}
             <span class="ide-dirty-dot" aria-hidden="true"></span>
           {/if}
@@ -218,18 +240,21 @@
 </div>
 
 <style>
-  .ide-tabs-row { display: flex; align-items: center; background: var(--surface); border-block-end: 1px solid var(--border); min-inline-size: 0; }
+  .ide-tabs-row {
+    display: flex; align-items: stretch; block-size: 34px; flex-shrink: 0;
+    background: var(--surface); border-block-end: 1px solid var(--border); min-inline-size: 0; overflow: hidden;
+  }
   .ide-nav-btns { display: inline-flex; align-items: center; gap: var(--sp-1); padding-inline: var(--sp-2); border-inline-end: 1px solid var(--border); flex-shrink: 0; }
   .ide-tabs-strip { flex: 1; min-inline-size: 0; display: flex; align-items: stretch; overflow-x: auto; scrollbar-width: none; }
   .ide-tabs-strip::-webkit-scrollbar { display: none; }
   .ide-tab {
     display: inline-flex; align-items: center; padding-inline-end: var(--sp-2);
-    border-inline-end: 1px solid var(--border); background: var(--surface); flex-shrink: 0; max-inline-size: 220px;
+    border-inline-end: 1px solid var(--border); background: var(--surface); flex-shrink: 0; max-inline-size: 240px;
   }
   .ide-tab.active { background: var(--bg); box-shadow: inset 0 -2px 0 var(--accent-solid); }
   .ide-tab.preview .ide-tab-label { font-style: italic; }
   .ide-tab-btn {
-    display: inline-flex; align-items: center; gap: var(--sp-3); padding-block: var(--sp-3); padding-inline: 10px var(--sp-3);
+    display: inline-flex; align-items: center; gap: var(--sp-2); block-size: 100%; padding-inline: 10px var(--sp-2);
     background: transparent; border: none; color: var(--text-dim); font-size: var(--fs-xs); cursor: pointer; min-inline-size: 0;
   }
   .ide-tab.active .ide-tab-btn { color: var(--text); font-weight: 500; }

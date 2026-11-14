@@ -183,6 +183,38 @@
   --code-find-current: #ff9800;
   --code-find-text: #1a1a1a;
 
+  /* Pro IDE syntax + semantic tokens (default dark: JetBrains Islands Dark). */
+  --syn-bg: #191a1c;
+  --syn-gutter-bg: #191a1c;
+  --syn-gutter-border: rgba(255, 255, 255, 0.06);
+  --syn-active-line: rgba(255, 255, 255, 0.045);
+  --syn-selection: rgba(33, 66, 131, 0.65);
+  --syn-fg: #bcbec4;
+  --syn-keyword: #cf8e6d;
+  --syn-control-keyword: #cf8e6d;
+  --syn-func-decl: #56a8f5;
+  --syn-func-call: #39cc9b;
+  --syn-field: #c77dbb;
+  --syn-type: #6fafbd;
+  --syn-annotation: #bbb529;
+  --syn-string: #6aab73;
+  --syn-escape: #cf8e6d;
+  --syn-number: #2aacb8;
+  --syn-param: #d5b778;
+  --syn-comment: #7a7e85;
+  --syn-doc-comment: #5f826b;
+  --syn-doc-tag: #629755;
+  --syn-doc-param: #b3ae60;
+  --syn-punct: #bcbec4;
+  --syn-operator: #bcbec4;
+  --syn-unresolved: #f75464;
+  --syn-inlay-bg: rgba(188, 190, 196, 0.12);
+  --syn-inlay-fg: #868a91;
+  --syn-rb-1: #e6b450;
+  --syn-rb-2: #c77dbb;
+  --syn-rb-3: #56a8f5;
+  --syn-rb-4: #39cc9b;
+
   /* Native form controls (checkboxes, radios, scrollbars, date pickers,
      select popups) follow the scheme and tint with the theme accent, so a
      dark page never shows a white system checkbox. */
@@ -215,6 +247,36 @@ html[data-scheme='light']:not([data-theme='pro-dark']) {
   --code-string: #166b2c;
   --code-number: #a8470c;
   --code-builtin: #0b6e6e;
+  --syn-bg: #ffffff;
+  --syn-gutter-bg: #f7f8fa;
+  --syn-gutter-border: rgba(0, 0, 0, 0.08);
+  --syn-active-line: rgba(0, 0, 0, 0.04);
+  --syn-selection: rgba(166, 210, 255, 0.6);
+  --syn-fg: #080808;
+  --syn-keyword: #0033b3;
+  --syn-control-keyword: #0033b3;
+  --syn-func-decl: #00627a;
+  --syn-func-call: #066d68;
+  --syn-field: #871094;
+  --syn-type: #007080;
+  --syn-annotation: #9e880d;
+  --syn-string: #067d17;
+  --syn-escape: #0037a6;
+  --syn-number: #1750eb;
+  --syn-param: #7a5200;
+  --syn-comment: #8c8c8c;
+  --syn-doc-comment: #4c7d4c;
+  --syn-doc-tag: #3d663d;
+  --syn-doc-param: #6b5800;
+  --syn-punct: #080808;
+  --syn-operator: #080808;
+  --syn-unresolved: #d92626;
+  --syn-inlay-bg: rgba(8, 8, 8, 0.07);
+  --syn-inlay-fg: #6c707e;
+  --syn-rb-1: #a66f00;
+  --syn-rb-2: #871094;
+  --syn-rb-3: #0451a5;
+  --syn-rb-4: #098658;
 }
 
 /* ---------- Native theme (default) ---------- */
@@ -432,6 +494,36 @@ html[data-scheme='light']:not([data-theme='pro-dark']) .otto-force-dark {
     0 0 0 0.5px rgba(0, 0, 0, 0.5),
     0 12px 40px rgba(0, 0, 0, 0.5);
   --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --syn-bg: #191a1c;
+  --syn-gutter-bg: #191a1c;
+  --syn-gutter-border: rgba(255, 255, 255, 0.06);
+  --syn-active-line: rgba(255, 255, 255, 0.045);
+  --syn-selection: rgba(33, 66, 131, 0.65);
+  --syn-fg: #bcbec4;
+  --syn-keyword: #cf8e6d;
+  --syn-control-keyword: #cf8e6d;
+  --syn-func-decl: #56a8f5;
+  --syn-func-call: #39cc9b;
+  --syn-field: #c77dbb;
+  --syn-type: #6fafbd;
+  --syn-annotation: #bbb529;
+  --syn-string: #6aab73;
+  --syn-escape: #cf8e6d;
+  --syn-number: #2aacb8;
+  --syn-param: #d5b778;
+  --syn-comment: #7a7e85;
+  --syn-doc-comment: #5f826b;
+  --syn-doc-tag: #629755;
+  --syn-doc-param: #b3ae60;
+  --syn-punct: #bcbec4;
+  --syn-operator: #bcbec4;
+  --syn-unresolved: #f75464;
+  --syn-inlay-bg: rgba(188, 190, 196, 0.12);
+  --syn-inlay-fg: #868a91;
+  --syn-rb-1: #e6b450;
+  --syn-rb-2: #c77dbb;
+  --syn-rb-3: #56a8f5;
+  --syn-rb-4: #39cc9b;
   color: var(--text);
 }
 
@@ -493,4 +585,176 @@ html.otto-vibrant .sidebar-material {
   -webkit-backdrop-filter: var(--glass-blur-raised);
   border: 1px solid var(--glass-border);
   box-shadow: var(--glass-shadow);
+}
+
+/* ---------- Curated IDE Editor Color Schemes (JetBrains & VS Code) ---------- */
+
+[data-ide-scheme='jetbrains-islands-dark'] {
+  color-scheme: dark;
+  --syn-bg: #191a1c;
+  --syn-gutter-bg: #191a1c;
+  --syn-gutter-border: rgba(255, 255, 255, 0.06);
+  --syn-active-line: rgba(255, 255, 255, 0.045);
+  --syn-selection: rgba(33, 66, 131, 0.65);
+  --syn-fg: #bcbec4;
+  --syn-keyword: #cf8e6d;
+  --syn-control-keyword: #cf8e6d;
+  --syn-func-decl: #56a8f5;
+  --syn-func-call: #39cc9b;
+  --syn-field: #c77dbb;
+  --syn-type: #6fafbd;
+  --syn-annotation: #bbb529;
+  --syn-string: #6aab73;
+  --syn-escape: #cf8e6d;
+  --syn-number: #2aacb8;
+  --syn-param: #d5b778;
+  --syn-comment: #7a7e85;
+  --syn-doc-comment: #5f826b;
+  --syn-doc-tag: #629755;
+  --syn-doc-param: #b3ae60;
+  --syn-punct: #bcbec4;
+  --syn-operator: #bcbec4;
+  --syn-unresolved: #f75464;
+  --syn-inlay-bg: rgba(188, 190, 196, 0.12);
+  --syn-inlay-fg: #868a91;
+  --syn-rb-1: #e6b450;
+  --syn-rb-2: #c77dbb;
+  --syn-rb-3: #56a8f5;
+  --syn-rb-4: #39cc9b;
+}
+
+[data-ide-scheme='jetbrains-darcula'] {
+  color-scheme: dark;
+  --syn-bg: #2b2b2b;
+  --syn-gutter-bg: #313335;
+  --syn-gutter-border: rgba(255, 255, 255, 0.08);
+  --syn-active-line: rgba(255, 255, 255, 0.05);
+  --syn-selection: rgba(33, 66, 131, 0.72);
+  --syn-fg: #a9b7c6;
+  --syn-keyword: #cc7832;
+  --syn-control-keyword: #cc7832;
+  --syn-func-decl: #ffc66d;
+  --syn-func-call: #4eb89d;
+  --syn-field: #9876aa;
+  --syn-type: #6fafbd;
+  --syn-annotation: #bbb529;
+  --syn-string: #6a8759;
+  --syn-escape: #cc7832;
+  --syn-number: #6897bb;
+  --syn-param: #d0b078;
+  --syn-comment: #808080;
+  --syn-doc-comment: #629755;
+  --syn-doc-tag: #629755;
+  --syn-doc-param: #8a653b;
+  --syn-punct: #a9b7c6;
+  --syn-operator: #a9b7c6;
+  --syn-unresolved: #bc3f3c;
+  --syn-inlay-bg: rgba(169, 183, 198, 0.12);
+  --syn-inlay-fg: #787878;
+  --syn-rb-1: #ffc66d;
+  --syn-rb-2: #9876aa;
+  --syn-rb-3: #6897bb;
+  --syn-rb-4: #6a8759;
+}
+
+[data-ide-scheme='jetbrains-islands-light'] {
+  color-scheme: light;
+  --syn-bg: #ffffff;
+  --syn-gutter-bg: #f7f8fa;
+  --syn-gutter-border: rgba(0, 0, 0, 0.08);
+  --syn-active-line: rgba(0, 0, 0, 0.04);
+  --syn-selection: rgba(166, 210, 255, 0.6);
+  --syn-fg: #080808;
+  --syn-keyword: #0033b3;
+  --syn-control-keyword: #0033b3;
+  --syn-func-decl: #00627a;
+  --syn-func-call: #066d68;
+  --syn-field: #871094;
+  --syn-type: #007080;
+  --syn-annotation: #9e880d;
+  --syn-string: #067d17;
+  --syn-escape: #0037a6;
+  --syn-number: #1750eb;
+  --syn-param: #7a5200;
+  --syn-comment: #8c8c8c;
+  --syn-doc-comment: #4c7d4c;
+  --syn-doc-tag: #3d663d;
+  --syn-doc-param: #6b5800;
+  --syn-punct: #080808;
+  --syn-operator: #080808;
+  --syn-unresolved: #d92626;
+  --syn-inlay-bg: rgba(8, 8, 8, 0.07);
+  --syn-inlay-fg: #6c707e;
+  --syn-rb-1: #a66f00;
+  --syn-rb-2: #871094;
+  --syn-rb-3: #0451a5;
+  --syn-rb-4: #098658;
+}
+
+[data-ide-scheme='vscode-dark-modern'] {
+  color-scheme: dark;
+  --syn-bg: #1f1f1f;
+  --syn-gutter-bg: #1f1f1f;
+  --syn-gutter-border: rgba(255, 255, 255, 0.07);
+  --syn-active-line: rgba(255, 255, 255, 0.045);
+  --syn-selection: rgba(38, 79, 120, 0.72);
+  --syn-fg: #d4d4d4;
+  --syn-keyword: #569cd6;
+  --syn-control-keyword: #c586c0;
+  --syn-func-decl: #dcdcaa;
+  --syn-func-call: #d7ba7d;
+  --syn-field: #9cdcfe;
+  --syn-type: #4ec9b0;
+  --syn-annotation: #dcdcaa;
+  --syn-string: #ce9178;
+  --syn-escape: #d7ba7d;
+  --syn-number: #b5cea8;
+  --syn-param: #9cdcfe;
+  --syn-comment: #6a9955;
+  --syn-doc-comment: #608b4e;
+  --syn-doc-tag: #569cd6;
+  --syn-doc-param: #9cdcfe;
+  --syn-punct: #d4d4d4;
+  --syn-operator: #d4d4d4;
+  --syn-unresolved: #f14c4c;
+  --syn-inlay-bg: rgba(212, 212, 212, 0.1);
+  --syn-inlay-fg: #858585;
+  --syn-rb-1: #ffd700;
+  --syn-rb-2: #da70d6;
+  --syn-rb-3: #179fff;
+  --syn-rb-4: #4ec9b0;
+}
+
+[data-ide-scheme='vscode-light-modern'] {
+  color-scheme: light;
+  --syn-bg: #ffffff;
+  --syn-gutter-bg: #f8f8f8;
+  --syn-gutter-border: rgba(0, 0, 0, 0.08);
+  --syn-active-line: rgba(0, 0, 0, 0.035);
+  --syn-selection: rgba(173, 214, 255, 0.65);
+  --syn-fg: #1f1f1f;
+  --syn-keyword: #0000ff;
+  --syn-control-keyword: #af00db;
+  --syn-func-decl: #795e26;
+  --syn-func-call: #5e491d;
+  --syn-field: #001080;
+  --syn-type: #267f99;
+  --syn-annotation: #795e26;
+  --syn-string: #a31515;
+  --syn-escape: #ee0000;
+  --syn-number: #098658;
+  --syn-param: #001080;
+  --syn-comment: #008000;
+  --syn-doc-comment: #008000;
+  --syn-doc-tag: #0000ff;
+  --syn-doc-param: #001080;
+  --syn-punct: #1f1f1f;
+  --syn-operator: #1f1f1f;
+  --syn-unresolved: #e51400;
+  --syn-inlay-bg: rgba(31, 31, 31, 0.07);
+  --syn-inlay-fg: #6e7681;
+  --syn-rb-1: #0431fa;
+  --syn-rb-2: #319331;
+  --syn-rb-3: #7b3814;
+  --syn-rb-4: #af00db;
 }
