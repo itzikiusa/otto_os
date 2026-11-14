@@ -1,14 +1,21 @@
 <script lang="ts">
-  // Structured Test Runner & Streaming Output panel: left test tree with suite
-  // grouping, status icons, durations, "Failed only" filter, and click-to-jump
-  // to file:line; right ANSI-cleaned streaming output with tail follow & copy.
+  // Structured Test Runner & Streaming Output panel: resizable left test tree
+  // with suite grouping + Fix with Agent, and right `IdeConsoleView` with
+  // structured JSON log formatting, clickable file:line links, wrap, and filter.
   import Badge from '../../lib/components/Badge.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import { copyWithToast } from '../../lib/clipboard';
+  import { startMouseDrag } from '../../lib/dragCursor';
   import { formatSeconds } from '../../lib/metric-format';
-  import { scrollBehavior } from '../../lib/motion';
+  import {
+    loadPaneWidth,
+    paneResizer,
+    pxWide,
+    RESIZE_TITLE,
+    savePaneWidth,
+  } from '../../lib/paneResizer';
   import type { BadgeTone } from '../../lib/status';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import {
     ide,
     ideBasename,
@@ -16,27 +23,25 @@
     type IdeTestResult,
   } from './ideStore.svelte';
   import { ideAgent } from './store/ideAgentController.svelte';
+  import IdeConsoleView, { type ConsoleLineInput } from './debug/IdeConsoleView.svelte';
+  import { stripAnsiCodes } from './debug/ideLogParser';
 
-  const LOG_CAP = 500;
+  const LS_RUN_TREE_W = 'otto.ide.runTreeW';
 
   let selectedRunId = $state<string | null>(null);
   let filterMode = $state<'all' | 'failed'>('all');
   let query = $state('');
   let collapsedSuites = $state<Record<string, boolean>>({});
   let selectedTestKey = $state<string | null>(null);
-  let showAllOutput = $state(false);
-  let logEl = $state<HTMLDivElement>();
-  let stickTail = $state(true);
+  let showTestsPane = $state(true);
+  let treeW = $state(loadPaneWidth(LS_RUN_TREE_W, 320, 200, 620));
 
-  // Follow the newest activeRun automatically when it starts.
   let lastActiveId = '';
   $effect(() => {
     const id = ide.activeRun?.id ?? '';
     if (id && id !== lastActiveId) {
       lastActiveId = id;
       selectedRunId = id;
-      showAllOutput = false;
-      stickTail = true;
     }
   });
 
@@ -54,24 +59,14 @@
 
   const runBadge = $derived.by((): { label: string; tone: BadgeTone; live: boolean; dot: boolean } => {
     if (!shownRun) return { label: 'Idle', tone: 'neutral', live: false, dot: false };
-    if (shownRun.status === 'running') {
-      return { label: 'Running', tone: 'info', live: true, dot: true };
-    }
-    if (shownRun.status === 'passed') {
-      return { label: 'Passed', tone: 'ok', live: false, dot: true };
-    }
+    if (shownRun.status === 'running') return { label: 'Running', tone: 'info', live: true, dot: true };
+    if (shownRun.status === 'passed') return { label: 'Passed', tone: 'ok', live: false, dot: true };
     if (shownRun.status === 'failed') {
       const code = shownRun.exit_code != null ? ` (exit ${shownRun.exit_code})` : '';
       return { label: `Failed${code}`, tone: 'bad', live: false, dot: true };
     }
     return { label: 'Stopped', tone: 'neutral', live: false, dot: false };
   });
-
-  // eslint-disable-next-line no-control-regex
-  const ANSI_RE = /\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07/g;
-  function stripAnsi(raw: string): string {
-    return raw.replace(ANSI_RE, '');
-  }
 
   const tests = $derived(shownRun?.tests ?? []);
   const passedCount = $derived(tests.filter((t) => t.status === 'passed').length);
@@ -100,7 +95,8 @@
 
   const suiteGroups = $derived.by((): SuiteGroup[] => {
     const map = new Map<string, IdeTestResult[]>();
-    for (const t of filteredTests) {
+    for (let i = 0; i < filteredTests.length; i++) {
+      const t = filteredTests[i];
       const key = t.suite?.trim() || 'Test suite';
       const arr = map.get(key);
       if (arr) arr.push(t);
@@ -118,35 +114,24 @@
     return out;
   });
 
-  const cleanLines = $derived((shownRun?.output ?? []).map((line) => stripAnsi(line)));
-  const hiddenLineCount = $derived(
-    !showAllOutput && cleanLines.length > LOG_CAP ? cleanLines.length - LOG_CAP : 0,
-  );
-  const visibleLines = $derived(
-    hiddenLineCount > 0 ? cleanLines.slice(-LOG_CAP) : cleanLines,
+  const cleanLines = $derived((shownRun?.output ?? []).map((line) => stripAnsiCodes(line)));
+  const consoleLines = $derived<readonly ConsoleLineInput[]>(
+    (shownRun?.output ?? []).map((text) => ({ text })),
   );
 
-  // Auto-follow streaming output while near bottom.
-  $effect(() => {
-    void cleanLines.length;
-    const el = logEl;
-    if (!el || !stickTail) return;
-    queueMicrotask(() => {
-      el.scrollTop = el.scrollHeight;
-    });
-  });
-
-  function onLogScroll(): void {
-    const el = logEl;
-    if (!el) return;
-    stickTail = el.scrollHeight - el.scrollTop - el.clientHeight < 28;
+  function setTreeW(v: number): void {
+    treeW = Math.max(200, Math.min(620, Math.round(v)));
+    savePaneWidth(LS_RUN_TREE_W, treeW);
   }
-
-  function jumpToTail(): void {
-    const el = logEl;
-    if (!el) return;
-    stickTail = true;
-    el.scrollTo({ top: el.scrollHeight, behavior: scrollBehavior() });
+  function resetTreeW(): void { setTreeW(320); }
+  function dragTreeW(e: MouseEvent): void {
+    const startX = e.clientX;
+    const startW = treeW;
+    startMouseDrag(e, {
+      cursor: 'col-resize',
+      onMove: (ev) => { treeW = Math.max(200, Math.min(620, Math.round(startW + (ev.clientX - startX)))); },
+      onEnd: () => savePaneWidth(LS_RUN_TREE_W, treeW),
+    });
   }
 
   function testKey(t: IdeTestResult, idx: number): string {
@@ -155,22 +140,11 @@
 
   function onSelectTest(t: IdeTestResult, key: string): void {
     selectedTestKey = selectedTestKey === key ? null : key;
-    if (t.file) {
-      void ide.openFile(t.file, { line: t.line ?? 1 });
-    }
+    if (t.file) void ide.openFile(t.file, { line: t.line ?? 1 });
   }
 
   function toggleSuite(suite: string): void {
     collapsedSuites = { ...collapsedSuites, [suite]: !collapsedSuites[suite] };
-  }
-
-  function copyOutput(): void {
-    const text = cleanLines.join('\n').trim();
-    if (text) void copyWithToast(text, 'run output');
-  }
-
-  function isErrorLine(line: string): boolean {
-    return /^\s*(FAIL|---\s*FAIL:|Error:|panic:|E\s+|error\[)/i.test(line);
   }
 </script>
 
@@ -206,24 +180,14 @@
         <span class="run-title ellipsis" title={shownRun.title}>{shownRun.title}</span>
       {/if}
 
-      <Badge
-        tone={runBadge.tone}
-        label={runBadge.label}
-        dot={runBadge.dot}
-        live={runBadge.live}
-        status={shownRun.status}
-      />
+      <Badge tone={runBadge.tone} label={runBadge.label} dot={runBadge.dot} live={runBadge.live} status={shownRun.status} />
       <Badge tone="neutral" variant="outline" label={shownRun.runner} />
 
       {#if tests.length > 0}
         <span class="run-counts">
           <span class="run-cnt-ok">{passedCount} passed</span>
-          {#if failedCount > 0}
-            <span class="run-cnt-bad">· {failedCount} failed</span>
-          {/if}
-          {#if skippedCount > 0}
-            <span class="dim">· {skippedCount} skipped</span>
-          {/if}
+          {#if failedCount > 0}<span class="run-cnt-bad">· {failedCount} failed</span>{/if}
+          {#if skippedCount > 0}<span class="dim">· {skippedCount} skipped</span>{/if}
         </span>
       {/if}
 
@@ -234,38 +198,29 @@
       <span class="grow"></span>
 
       {#if tests.length > 0}
-        <div class="segmented" role="group" aria-label="Filter tests by status">
-          <button
-            type="button"
-            aria-pressed={filterMode === 'all'}
-            onclick={() => (filterMode = 'all')}
-          >
-            All ({tests.length})
-          </button>
-          <button
-            type="button"
-            aria-pressed={filterMode === 'failed'}
-            onclick={() => (filterMode = 'failed')}
-          >
-            Failed ({failedCount})
-          </button>
-        </div>
-
-        <div class="input-group run-filter">
-          <Icon name="search" size={12} />
-          <input
-            type="search"
-            dir="ltr"
-            aria-label="Filter tests by name"
-            placeholder="Filter tests…"
-            bind:value={query}
-          />
-        </div>
+        <button
+          type="button"
+          class="run-pane-toggle"
+          class:is-on={showTestsPane}
+          aria-pressed={showTestsPane}
+          title={showTestsPane ? 'Hide test tree column' : 'Show test tree column'}
+          onclick={() => (showTestsPane = !showTestsPane)}
+        >Tests ({tests.length})</button>
+        {#if showTestsPane}
+          <div class="segmented run-seg" role="group" aria-label="Filter tests by status">
+            <button type="button" aria-pressed={filterMode === 'all'} onclick={() => (filterMode = 'all')}>All</button>
+            <button type="button" aria-pressed={filterMode === 'failed'} onclick={() => (filterMode = 'failed')}>Failed ({failedCount})</button>
+          </div>
+          <div class="input-group run-filter">
+            <Icon name="search" size={12} />
+            <input type="search" dir="ltr" aria-label="Filter tests by name" placeholder="Filter tests…" bind:value={query} />
+          </div>
+        {/if}
       {/if}
 
       <button
         type="button"
-        class="btn small"
+        class="btn small run-compact-btn"
         disabled={!ide.hasTarget || isRunning}
         title={!ide.hasTarget ? 'Select a workspace target to run' : isRunning ? 'A run is currently in progress' : 'Re-run'}
         onclick={() => void ide.startRun()}
@@ -283,21 +238,15 @@
       >
         <Icon name="stop" size={13} />
       </button>
-      <button
-        type="button"
-        class="icon-btn"
-        aria-label="Copy output"
-        title="Copy output"
-        disabled={cleanLines.length === 0}
-        onclick={copyOutput}
-      >
-        <Icon name="copy" size={13} />
-      </button>
     </header>
 
-    <div class="run-split" class:no-tests={tests.length === 0}>
-      {#if tests.length > 0}
-        <section class="run-tree" aria-label="Structured test results">
+    <div class="run-flex">
+      {#if tests.length > 0 && showTestsPane}
+        <section
+          class="run-tree"
+          style:inline-size={!viewport.isPhone ? `${treeW}px` : undefined}
+          aria-label="Structured test results"
+        >
           {#if filteredTests.length === 0}
             <div class="run-filter-empty">
               <p class="dim">No matching tests.</p>
@@ -308,13 +257,11 @@
                   filterMode = 'all';
                   query = '';
                 }}
-              >
-                Show all tests
-              </button>
+              >Show all tests</button>
             </div>
           {:else}
             {#each suiteGroups as group (group.suite)}
-              {@const collapsed = !!collapsedSuites[group.suite]}
+              {@const collapsed = Boolean(collapsedSuites[group.suite])}
               <div class="run-suite">
                 <button
                   type="button"
@@ -333,7 +280,7 @@
                 {#if !collapsed}
                   {#each group.items as t, idx (testKey(t, idx))}
                     {@const k = testKey(t, idx)}
-                    {@const showMsg = !!t.message && (t.status === 'failed' || selectedTestKey === k)}
+                    {@const showMsg = Boolean(t.message) && (t.status === 'failed' || selectedTestKey === k)}
                     <div class="run-test-wrap">
                       <div class="run-test-head" class:is-selected={selectedTestKey === k}>
                         <button
@@ -352,9 +299,7 @@
                             <span class="run-icon dim" aria-hidden="true"><Icon name="dot" size={12} /></span>
                           {/if}
                           <span class="run-test-name mono ellipsis" dir="ltr" title={t.name}>{t.name}</span>
-                          <span class="run-test-status" class:is-ok={t.status === 'passed'} class:is-bad={t.status === 'failed'}>
-                            {t.status}
-                          </span>
+                          <span class="run-test-status" class:is-ok={t.status === 'passed'} class:is-bad={t.status === 'failed'}>{t.status}</span>
                           {#if t.file}
                             <span class="run-test-loc mono dim" dir="ltr" title={`${t.file}:${t.line ?? 1}`}>
                               {ideBasename(t.file)}{t.line ? `:${t.line}` : ''}
@@ -379,7 +324,7 @@
                         {/if}
                       </div>
                       {#if showMsg && t.message}
-                        <pre class="run-test-msg mono" dir="ltr">{stripAnsi(t.message)}</pre>
+                        <pre class="run-test-msg mono" dir="ltr">{stripAnsiCodes(t.message)}</pre>
                       {/if}
                     </div>
                   {/each}
@@ -388,288 +333,84 @@
             {/each}
           {/if}
         </section>
+
+        {#if !viewport.isPhone}
+          <div
+            class="run-col-resizer"
+            aria-label="Resize test results tree"
+            title={RESIZE_TITLE}
+            use:paneResizer={{
+              value: treeW, min: 200, max: 620, text: pxWide,
+              onChange: setTreeW, onReset: resetTreeW, onDragStart: dragTreeW,
+            }}
+          ></div>
+        {/if}
       {/if}
 
       <section class="run-log-pane" aria-label="Console output">
-        <div class="run-log" dir="ltr" bind:this={logEl} onscroll={onLogScroll}>
-          {#if cleanLines.length === 0}
-            <p class="run-log-placeholder dim">
-              {isRunning ? 'Waiting for process output…' : 'Process finished with no console output.'}
-            </p>
-          {:else}
-            {#if hiddenLineCount > 0}
-              <div class="run-cap-bar">
-                <button type="button" class="btn small ghost" onclick={() => (showAllOutput = true)}>
-                  Show all {cleanLines.length} lines ({hiddenLineCount} earlier hidden)
-                </button>
-              </div>
-            {/if}
-            {#each visibleLines as line, idx (`ln-${hiddenLineCount + idx}`)}
-              <div class="run-line mono" class:is-err={isErrorLine(line)}>{line || '\u00a0'}</div>
-            {/each}
-          {/if}
-        </div>
-        {#if !stickTail && cleanLines.length > 0}
-          <div class="run-tail-cta">
-            <button type="button" class="btn small" onclick={jumpToTail}>
-              <Icon name="arrowDown" size={12} />
-              <span>Follow output</span>
-            </button>
-          </div>
-        {/if}
+        <IdeConsoleView
+          sessionKey={shownRun.id}
+          lines={consoleLines}
+          emptyText={isRunning ? 'Waiting for process output…' : 'Process finished with no console output.'}
+        />
       </section>
     </div>
   {/if}
 </div>
 
 <style>
-  .run-root {
-    container-type: inline-size;
-    display: flex;
-    flex-direction: column;
-    block-size: 100%;
-    min-block-size: 0;
-    min-inline-size: 0;
-    background: var(--surface);
-  }
-  .run-empty {
-    flex: 1;
-    min-block-size: 0;
-    overflow-y: auto;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
+  .run-root { container-type: inline-size; display: flex; flex-direction: column; block-size: 100%; min-block-size: 0; min-inline-size: 0; background: var(--surface); }
+  .run-empty { flex: 1; min-block-size: 0; overflow-y: auto; display: flex; align-items: center; justify-content: center; }
   .run-bar {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-    padding-block: 4px;
-    padding-inline: 10px;
-    border-block-end: 1px solid var(--border);
-    background: var(--surface);
-    flex-shrink: 0;
+    display: flex; align-items: center; gap: 6px;
+    block-size: 32px; min-block-size: 32px; max-block-size: 32px;
+    padding-inline: 8px; border-block-end: 1px solid var(--border);
+    background: var(--surface); flex-shrink: 0; overflow-x: auto; overflow-y: hidden;
   }
-  .run-picker {
-    block-size: 24px;
-    font-size: var(--fs-xs);
-    max-inline-size: 240px;
+  .run-picker { block-size: 22px; font-size: var(--fs-xs); max-inline-size: 220px; flex-shrink: 0; }
+  .run-title { font-size: var(--fs-s); font-weight: 600; max-inline-size: 220px; flex-shrink: 0; }
+  .run-counts { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-xs); font-variant-numeric: tabular-nums; white-space: nowrap; flex-shrink: 0; }
+  .run-cnt-ok { color: var(--success); font-weight: 500; }
+  .run-cnt-bad { color: var(--danger); font-weight: 500; }
+  .run-dur { font-size: var(--fs-xs); font-variant-numeric: tabular-nums; white-space: nowrap; flex-shrink: 0; }
+  .run-pane-toggle {
+    display: inline-flex; align-items: center; block-size: 22px; padding-inline: 6px;
+    border: 1px solid var(--border); border-radius: var(--radius-s);
+    background: var(--surface-2); color: var(--text-dim); font-size: var(--fs-xs); white-space: nowrap; cursor: pointer; flex-shrink: 0;
   }
-  .run-title {
-    font-size: var(--fs-s);
-    font-weight: 600;
-    max-inline-size: 240px;
-  }
-  .run-counts {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: var(--fs-xs);
-    font-variant-numeric: tabular-nums;
-  }
-  .run-cnt-ok {
-    color: var(--success);
-    font-weight: 500;
-  }
-  .run-cnt-bad {
-    color: var(--danger);
-    font-weight: 500;
-  }
-  .run-dur {
-    font-size: var(--fs-xs);
-    font-variant-numeric: tabular-nums;
-  }
-  .run-filter {
-    block-size: 24px;
-    inline-size: 160px;
-    font-size: var(--fs-xs);
-  }
-  .run-split {
-    flex: 1;
-    min-block-size: 0;
-    min-inline-size: 0;
-    display: grid;
-    grid-template-columns: minmax(240px, 0.95fr) minmax(260px, 1.35fr);
-  }
-  .run-split.no-tests {
-    grid-template-columns: 1fr;
-  }
-  .run-tree {
-    min-block-size: 0;
-    min-inline-size: 0;
-    overflow-y: auto;
-    border-inline-end: 1px solid var(--border);
-  }
-  .run-filter-empty {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
-    padding: 20px 12px;
-    font-size: var(--fs-xs);
-  }
-  .run-suite {
-    border-block-end: 1px solid var(--separator);
-  }
-  .run-suite-head {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    inline-size: 100%;
-    padding-block: 6px;
-    padding-inline: 10px;
-    border: 0;
-    background: var(--surface-2);
-    color: var(--text);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-align: start;
-    cursor: pointer;
-  }
-  .run-suite-head:hover {
-    background: var(--hover);
-  }
-  .run-suite-name {
-    flex: 1;
-  }
-  .run-test-wrap {
-    border-block-start: 1px solid var(--separator);
-  }
-  .run-test-head {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding-inline-end: 8px;
-  }
-  .run-test-head:hover {
-    background: var(--hover);
-  }
-  .run-test-head.is-selected {
-    background: var(--accent-soft);
-  }
-  .run-test-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex: 1;
-    min-inline-size: 0;
-    padding-block: 4px;
-    padding-inline: 12px 6px;
-    border: 0;
-    background: transparent;
-    color: var(--text);
-    font-size: var(--fs-xs);
-    text-align: start;
-    cursor: pointer;
-  }
-  .run-fix-btn {
-    flex-shrink: 0;
-    color: var(--accent-text);
-  }
-  .run-icon {
-    display: inline-flex;
-    align-items: center;
-    flex-shrink: 0;
-  }
-  .run-icon.is-ok,
-  .run-test-status.is-ok {
-    color: var(--success);
-  }
-  .run-icon.is-bad,
-  .run-test-status.is-bad {
-    color: var(--danger);
-  }
-  .run-test-name {
-    flex: 1;
-    font-size: var(--fs-xs);
-  }
-  .run-test-status {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    flex-shrink: 0;
-  }
-  .run-test-loc {
-    font-size: var(--fs-xs);
-    flex-shrink: 0;
-    font-variant-numeric: tabular-nums;
-  }
-  .run-test-dur {
-    font-size: var(--fs-xs);
-    flex-shrink: 0;
-    font-variant-numeric: tabular-nums;
-  }
-  .run-test-msg {
-    margin: 0;
-    padding-block: 6px;
-    padding-inline: 28px 12px;
-    background: var(--danger-soft);
-    color: var(--danger);
-    font-size: var(--fs-xs);
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-  }
-  .run-log-pane {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    min-block-size: 0;
-    min-inline-size: 0;
-    background: var(--term-bg);
-  }
-  .run-log {
-    flex: 1;
-    min-block-size: 0;
-    overflow-y: auto;
-    padding: 8px 12px;
-    background: var(--term-bg);
-  }
-  .run-cap-bar {
-    padding-block-end: 6px;
-  }
-  .run-log-placeholder {
-    margin: 0;
-    font-size: var(--fs-xs);
-  }
-  .run-line {
-    font-size: var(--fs-xs);
-    line-height: 1.45;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    color: var(--text);
-  }
-  .run-line.is-err {
-    color: var(--danger);
-  }
-  .run-tail-cta {
-    position: absolute;
-    inset-block-end: 10px;
-    inset-inline-end: 14px;
-    z-index: var(--z-sticky);
-  }
+  .run-pane-toggle:hover { background: var(--hover); color: var(--text); }
+  .run-pane-toggle.is-on { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent-text); }
+  .run-seg { block-size: 22px; flex-shrink: 0; }
+  .run-seg button { padding-block: 0; padding-inline: 8px; font-size: var(--fs-xs); }
+  .run-filter { block-size: 22px; inline-size: 148px; font-size: var(--fs-xs); flex-shrink: 0; }
+  .run-compact-btn { block-size: 22px; padding-block: 0; flex-shrink: 0; }
+  .run-flex { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; overflow: hidden; }
+  .run-tree { flex-shrink: 0; min-block-size: 0; min-inline-size: 200px; overflow-y: auto; border-inline-end: 1px solid var(--border); }
+  .run-col-resizer { position: relative; inline-size: 4px; margin-inline: -2px; flex-shrink: 0; cursor: col-resize; z-index: var(--z-sticky); }
+  .run-col-resizer::after { content: ''; position: absolute; inset-block: 0; inset-inline-start: 1px; inline-size: 2px; background: transparent; transition: background var(--dur-fast) ease-out; }
+  .run-col-resizer:hover::after, .run-col-resizer:focus-visible::after { background: var(--accent-text); }
+  .run-filter-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 20px 12px; font-size: var(--fs-xs); }
+  .run-suite { border-block-end: 1px solid var(--separator); }
+  .run-suite-head { display: flex; align-items: center; gap: 6px; inline-size: 100%; padding-block: 6px; padding-inline: 10px; border: 0; background: var(--surface-2); color: var(--text); font-size: var(--fs-xs); font-weight: 600; text-align: start; cursor: pointer; }
+  .run-suite-head:hover { background: var(--hover); }
+  .run-suite-name { flex: 1; }
+  .run-test-wrap { border-block-start: 1px solid var(--separator); }
+  .run-test-head { display: flex; align-items: center; gap: 4px; padding-inline-end: 8px; }
+  .run-test-head:hover { background: var(--hover); }
+  .run-test-head.is-selected { background: var(--accent-soft); }
+  .run-test-row { display: flex; align-items: center; gap: 6px; flex: 1; min-inline-size: 0; padding-block: 4px; padding-inline: 12px 6px; border: 0; background: transparent; color: var(--text); font-size: var(--fs-xs); text-align: start; cursor: pointer; }
+  .run-fix-btn { flex-shrink: 0; color: var(--accent-text); }
+  .run-icon { display: inline-flex; align-items: center; flex-shrink: 0; }
+  .run-icon.is-ok, .run-test-status.is-ok { color: var(--success); }
+  .run-icon.is-bad, .run-test-status.is-bad { color: var(--danger); }
+  .run-test-name { flex: 1; font-size: var(--fs-xs); }
+  .run-test-status { font-size: var(--fs-xs); color: var(--text-dim); flex-shrink: 0; }
+  .run-test-loc, .run-test-dur { font-size: var(--fs-xs); flex-shrink: 0; font-variant-numeric: tabular-nums; }
+  .run-test-msg { margin: 0; padding-block: 6px; padding-inline: 28px 12px; background: var(--danger-soft); color: var(--danger); font-size: var(--fs-xs); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .run-log-pane { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; flex-direction: column; }
   @container (max-width: 720px) {
-    .run-split {
-      grid-template-columns: 1fr;
-      overflow-y: auto;
-    }
-    .run-tree {
-      border-inline-end: 0;
-      border-block-end: 1px solid var(--border);
-      max-block-size: 200px;
-    }
-  }
-  @media (max-width: 1024px) {
-    .run-split {
-      grid-template-columns: 1fr;
-      overflow-y: auto;
-    }
-    .run-tree {
-      border-inline-end: 0;
-      border-block-end: 1px solid var(--border);
-      max-block-size: 200px;
-    }
-    .run-filter {
-      inline-size: 130px;
-    }
+    .run-flex { flex-direction: column; overflow-y: auto; }
+    .run-tree { inline-size: 100%; border-inline-end: 0; border-block-end: 1px solid var(--border); max-block-size: 200px; }
+    .run-col-resizer { display: none; }
   }
 </style>
