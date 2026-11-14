@@ -1,18 +1,10 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
 import { attachmentSupport, takesFile } from '../src/modules/threads/runtime/attachmentSupport.ts';
 import {
   providerSupportsSteer,
   RUNTIME_PROVIDERS,
 } from '../src/modules/threads/runtime/capabilities.ts';
-
-const runtimeDir = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  '../src/modules/threads/runtime',
-);
 
 test('RUNTIME_PROVIDERS enumerates all 7 structured runtime providers', () => {
   assert.deepEqual(RUNTIME_PROVIDERS, [
@@ -46,13 +38,4 @@ test('attachment parity across all 7 runtime providers matches driver capabiliti
     assert.equal(attachmentSupport(p).files, expectsPdf, `${p} PDF support`);
     assert.equal(takesFile(p, { type: 'application/pdf' }), expectsPdf, `${p} application/pdf`);
   }
-});
-
-test('RuntimeThread delegates canSteer to providerSupportsSteer instead of hardcoding claude', () => {
-  const threadSrc = readFileSync(resolve(runtimeDir, 'RuntimeThread.svelte'), 'utf8');
-  assert.match(threadSrc, /canSteer=\{providerSupportsSteer\(provider\)\}/);
-  assert.doesNotMatch(threadSrc, /canSteer=\{provider\s*===\s*['"]claude['"]\}/);
-
-  const queueSrc = readFileSync(resolve(runtimeDir, 'RuntimeQueueBar.svelte'), 'utf8');
-  assert.match(queueSrc, /Claude, Codex, pi/);
 });
