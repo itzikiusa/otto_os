@@ -9,7 +9,7 @@ import type { ApprovalDecision, RuntimeAccessMode, RuntimeProvider, RuntimeSessi
 import { loadErrorText } from '../../../lib/loadError';
 import { normalizeEffort, supportsEffortSelection, type EffortLevel, type InteractionMode } from '../../../lib/providerModels';
 import { agentProviders } from '../../../lib/providers';
-import type { ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
+import { runtimeDrafts, type ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
 import { ws } from '../../../lib/stores/workspace.svelte';
 import { council } from '../../threads/runtime/councilStore.svelte'; // ui-guards: allow — IDE agent dock supports Council multi-agent threads
 import type { RuntimeProjection } from '../../threads/runtime/projection'; // ui-guards: allow — IDE agent dock shares structured runtime projections
@@ -42,13 +42,19 @@ import {
   createTestFailureChipEntry,
   undoIdeCodeProposal,
 } from './ideAgentRuntimeOps.svelte';
-import { ideAgentState, type IdeAgentEngineBridge, type IdeShellSelectionInput } from './ideAgentState.svelte';
+import {
+  IDE_OPEN_THREAD_EVENT,
+  ideAgentState,
+  type IdeAgentEngineBridge,
+  type IdeShellSelectionInput,
+} from './ideAgentState.svelte';
 import {
   interruptIdeSessionTurn,
   isIdeSessionWorking,
   loadIdeWorkspaceSessions,
   loadSelectedIdeSessionMeta,
   openIdeThreadInThreadsView,
+  rememberIdeProjectRoot,
   runIdeComposerStateTurn,
   runIdeInlineEditStateTurn,
 } from './ideAgentTurnRunner.svelte';
@@ -99,96 +105,51 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
     this.syncSubscriptions();
   }
 
-  get provider(): string {
-    return ideAgentState.provider;
-  }
-  set provider(next: string) {
-    ideAgentState.setProvider(next);
-  }
+  get provider(): string { return ideAgentState.provider; }
+  set provider(next: string) { ideAgentState.setProvider(next); }
 
-  get model(): string | null {
-    return ideAgentState.model;
-  }
-  set model(next: string | null) {
-    ideAgentState.setModel(next);
-  }
+  get model(): string | null { return ideAgentState.model; }
+  set model(next: string | null) { ideAgentState.setModel(next); }
 
-  get effort(): EffortLevel | null {
-    return ideAgentState.effort;
-  }
-  set effort(next: EffortLevel | null) {
-    ideAgentState.setEffort(next);
-  }
+  get effort(): EffortLevel | null { return ideAgentState.effort; }
+  set effort(next: EffortLevel | null) { ideAgentState.setEffort(next); }
 
-  get runtimeAccessMode(): RuntimeAccessMode {
-    return ideAgentState.runtimeAccessMode;
-  }
-  set runtimeAccessMode(next: RuntimeAccessMode) {
-    ideAgentState.runtimeAccessMode = next;
-  }
+  get runtimeAccessMode(): RuntimeAccessMode { return ideAgentState.runtimeAccessMode; }
+  set runtimeAccessMode(next: RuntimeAccessMode) { ideAgentState.runtimeAccessMode = next; }
 
-  get planMode(): boolean {
-    return ideAgentState.planMode;
-  }
-  set planMode(next: boolean) {
-    ideAgentState.planMode = next;
-  }
+  get planMode(): boolean { return ideAgentState.planMode; }
+  set planMode(next: boolean) { ideAgentState.planMode = next; }
 
-  get freshContext(): boolean {
-    return ideAgentState.freshContext;
-  }
-  set freshContext(next: boolean) {
-    ideAgentState.freshContext = next;
-  }
+  get freshContext(): boolean { return ideAgentState.freshContext; }
+  set freshContext(next: boolean) { ideAgentState.freshContext = next; }
 
-  get reopening(): boolean {
-    return ideAgentState.reopening;
-  }
-  set reopening(next: boolean) {
-    ideAgentState.reopening = next;
-  }
+  get reopening(): boolean { return ideAgentState.reopening; }
+  set reopening(next: boolean) { ideAgentState.reopening = next; }
 
   get composerText(): string {
-    return ideAgentState.composerText;
+    const sid = ideAgentState.sessionId;
+    return sid && runtimeThreads.byId[sid] ? runtimeDrafts.for(sid).text : ideAgentState.composerText;
   }
   set composerText(next: string) {
-    ideAgentState.composerText = next;
+    const sid = ideAgentState.sessionId;
+    if (sid && runtimeThreads.byId[sid]) runtimeDrafts.for(sid).text = next;
+    else ideAgentState.composerText = next;
   }
 
-  get attachments(): ComposerFile[] {
-    return ideAgentState.attachments;
-  }
-  set attachments(next: ComposerFile[]) {
-    ideAgentState.attachments = next;
-  }
+  get attachments(): ComposerFile[] { return ideAgentState.attachments; }
+  set attachments(next: ComposerFile[]) { ideAgentState.attachments = next; }
 
-  get sending(): boolean {
-    return ideAgentState.sending;
-  }
-  set sending(next: boolean) {
-    ideAgentState.sending = next;
-  }
+  get sending(): boolean { return ideAgentState.sending; }
+  set sending(next: boolean) { ideAgentState.sending = next; }
 
-  get error(): string | null {
-    return ideAgentState.error;
-  }
-  set error(next: string | null) {
-    ideAgentState.error = next;
-  }
+  get error(): string | null { return ideAgentState.error; }
+  set error(next: string | null) { ideAgentState.error = next; }
 
-  get contexts(): IdeContextChip[] {
-    return ideAgentState.contexts;
-  }
-  set contexts(next: IdeContextChip[]) {
-    ideAgentState.contexts = next;
-  }
+  get contexts(): IdeContextChip[] { return ideAgentState.contexts; }
+  set contexts(next: IdeContextChip[]) { ideAgentState.contexts = next; }
 
-  get appliedUndoByProposalId(): Record<string, string> {
-    return ideAgentState.appliedUndoByProposalId;
-  }
-  set appliedUndoByProposalId(next: Record<string, string>) {
-    ideAgentState.appliedUndoByProposalId = next;
-  }
+  get appliedUndoByProposalId(): Record<string, string> { return ideAgentState.appliedUndoByProposalId; }
+  set appliedUndoByProposalId(next: Record<string, string>) { ideAgentState.appliedUndoByProposalId = next; }
 
   get accessMode(): 'default' | 'plan' | 'full' {
     if (this.planMode) return 'plan';
@@ -312,7 +273,29 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
     this.syncSubscriptions();
   }
 
+  private publishLiveIdeContext(): void {
+    if (typeof window === 'undefined') return;
+    const root = ide.target.kind === 'local' ? (ide.target.root ?? '').trim().replace(/\/+$/, '') : '';
+    (window as unknown as Record<string, unknown>).__ottoIdeLiveContext = {
+      root,
+      additionalRoots: [...ide.additionalRoots],
+      activePath: ide.activePath,
+      openTabs: ide.tabs.map((t) => ({ path: t.path, name: t.name })),
+    };
+    if (root && root !== '~') rememberIdeProjectRoot(root);
+    window.dispatchEvent(new CustomEvent('otto:ide-context-changed'));
+  }
+
+  applyPendingHandoff(): void {
+    const handoff = ideAgentState.takePendingHandoff();
+    if (!handoff) return;
+    this.panelOpen = true;
+    if (handoff.sessionId) void this.selectSession(handoff.sessionId);
+    else this.startNewChat();
+  }
+
   syncTargetRoot(nextKey = currentIdeTargetKey()): void {
+    this.publishLiveIdeContext();
     if (this.lastTargetKey && this.lastTargetKey !== nextKey) {
       ideAgentState.resetTargetState();
       this.lastTargetKey = nextKey;
@@ -329,8 +312,19 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
   ensureMounted(): () => void {
     this.syncTargetRoot();
     this.syncSubscriptions();
+    this.applyPendingHandoff();
     void this.refreshWorkspaceSessions();
+    const onHandoff = (): void => this.applyPendingHandoff();
+    if (typeof window !== 'undefined') window.addEventListener(IDE_OPEN_THREAD_EVENT, onHandoff);
+    const stopLiveCtx = $effect.root(() => {
+      $effect(() => {
+        void [ide.target.kind, ide.target.root, ide.additionalRoots.length, ide.activePath, ide.tabs.length];
+        this.publishLiveIdeContext();
+      });
+    });
     return () => {
+      stopLiveCtx();
+      if (typeof window !== 'undefined') window.removeEventListener(IDE_OPEN_THREAD_EVENT, onHandoff);
       if (!ideAgentState.panelOpen && !ideAgentState.inlinePrompt?.open) this.syncSubscriptions(true);
     };
   }
@@ -426,8 +420,24 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
   startNewChat(): void {
     this.error = null;
     this.sessionId = null;
+    ideAgentState.composerText = '';
     council.on = false;
     council.seats = [];
+  }
+
+  attachMentionedPath(opts: { path: string; display: string; isDir: boolean }): void {
+    if (opts.isDir) {
+      const clean = opts.display.replace(/\/+$/, '');
+      this.upsertContext({
+        key: `dir:${opts.path}`,
+        kind: 'file',
+        label: `@${clean}/`,
+        path: opts.path,
+        snippet: `Folder path: ${opts.path}`,
+      });
+      return;
+    }
+    void this.attachFile(opts.path, { openPanel: false });
   }
 
   removeContext(id: string): void {

@@ -13,6 +13,7 @@
   import { formatEffortShort, formatModelLabel, normalizeEffort, supportsEffortSelection } from '../../lib/providerModels';
   import { harnessLabel } from '../../lib/providers';
   import { auth } from '../../lib/stores/auth.svelte';
+  import RuntimeMentionMenu from '../threads/runtime/RuntimeMentionMenu.svelte'; // ui-guards: allow — shared @file/@folder search in ⌘I inline edit
   import { ide } from './ideStore.svelte';
   import { ideAgentEngine as ideAgent } from './agent/ideAgentEngine.svelte';
 
@@ -21,6 +22,9 @@
   const readOnly = $derived(!ide.canEditCollab || Boolean(ide.activeTab?.readOnly));
   let pickerOpen = $state(false);
   let providerBtnEl = $state<HTMLButtonElement | null>(null);
+  let inlineAnchorEl = $state<HTMLDivElement | null>(null);
+  let inlineFieldEl = $state<HTMLTextAreaElement | null>(null);
+  let mentionEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
 
   const inlineAgentLabel = $derived.by(() => {
     const st = ideAgent.inlinePrompt;
@@ -49,8 +53,8 @@
 
   function onInputKeydown(e: KeyboardEvent): void {
     const st = ideAgent.inlinePrompt;
-    if (!st) return;
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    if (!st || e.isComposing || mentionEl?.onKey(e)) return;
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       if (!st.busy && st.query.trim()) void ideAgent.submitInlineEdit();
     } else if (e.key === 'Escape') {
@@ -87,18 +91,43 @@
       </span>
 
       {#key `${st.path}:${st.startLine}:${st.endLine}`}
-        <textarea
-          class="input ip-field"
-          rows={1}
-          dir="auto"
-          aria-label="Describe inline code change"
-          placeholder="Ask Agent to edit or refactor these lines…"
-          use:focusOnMount={{ select: true }}
-          bind:value={st.query}
-          disabled={st.busy}
-          onkeydown={onInputKeydown}
-          data-testid="ide-inline-prompt-input"
-        ></textarea>
+        <div class="ip-field-wrap" bind:this={inlineAnchorEl}>
+          <RuntimeMentionMenu
+            bind:this={mentionEl}
+            text={st.query}
+            textareaEl={inlineFieldEl}
+            anchorEl={inlineAnchorEl}
+            cwd={ideAgent.resolveProjectCwd()}
+            allowAgents={false}
+            onpickfile={(picked) => {
+              st.query = picked.nextText;
+              requestAnimationFrame(() => {
+                inlineFieldEl?.focus();
+                inlineFieldEl?.setSelectionRange(picked.nextCaret, picked.nextCaret);
+              });
+            }}
+            ondrilldir={(nextText, nextCaret) => {
+              st.query = nextText;
+              requestAnimationFrame(() => {
+                inlineFieldEl?.focus();
+                inlineFieldEl?.setSelectionRange(nextCaret, nextCaret);
+              });
+            }}
+          />
+          <textarea
+            bind:this={inlineFieldEl}
+            class="input ip-field"
+            rows={1}
+            dir="auto"
+            aria-label="Describe inline code change"
+            placeholder="Ask Agent to edit or refactor these lines (@file to reference)…"
+            use:focusOnMount={{ select: true }}
+            bind:value={st.query}
+            disabled={st.busy}
+            onkeydown={onInputKeydown}
+            data-testid="ide-inline-prompt-input"
+          ></textarea>
+        </div>
       {/key}
 
       <div class="ip-actions">
@@ -268,9 +297,15 @@
     min-inline-size: 0;
     max-inline-size: 220px;
   }
-  textarea.ip-field {
+  .ip-field-wrap {
+    position: relative;
     flex: 1;
     min-inline-size: 160px;
+    display: flex;
+  }
+  textarea.ip-field {
+    flex: 1;
+    min-inline-size: 0;
     block-size: 26px;
     padding-block: 4px;
     padding-inline: 8px;
@@ -379,7 +414,7 @@
     color: var(--text);
   }
   @media (max-width: 640px) {
-    textarea.ip-field {
+    .ip-field-wrap {
       inline-size: 100%;
       flex-basis: 100%;
     }

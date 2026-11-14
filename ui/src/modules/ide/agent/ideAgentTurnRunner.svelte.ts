@@ -9,7 +9,7 @@ import { normalizeEffort, type EffortLevel, type InteractionMode } from '../../.
 import { harnessLabel } from '../../../lib/providers';
 import { router } from '../../../lib/router.svelte';
 import { openInThreads } from '../../../lib/runtimeThreadPort';
-import type { ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
+import { runtimeDrafts, type ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
 import { transcript } from '../../../lib/stores/transcript.svelte';
 import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
 import { askTargets } from '../../threads/runtime/askTargets.svelte'; // ui-guards: allow — IDE agent dock supports Ask-another-agent delegation
@@ -42,7 +42,20 @@ export function summarizeIdeThreadTitle(text: string, provider = 'Agent'): strin
   return first.length > 64 ? `${first.slice(0, 61)}…` : first;
 }
 
+export function rememberIdeProjectRoot(localCwd: string | null): void {
+  const clean = (localCwd ?? '').trim().replace(/\/+$/, '');
+  if (!clean || clean === '~') return;
+  threads.rememberProject(clean);
+  try {
+    localStorage.setItem('otto.ide.lastRoot', clean);
+  } catch { /* storage unavailable */ }
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('otto:ide-projects-changed'));
+  }
+}
+
 export function openIdeThreadInThreadsView(id: string | null, workspaceId: string, cwd: string | null): void {
+  rememberIdeProjectRoot(cwd);
   if (id) {
     threads.selectThread(id, { syncRoute: false });
     openInThreads(id);
@@ -143,7 +156,7 @@ export async function ensureIdeRuntimeSession(opts: {
     prompt: '',
   });
   opts.onSessionBound(created.id);
-  threads.rememberProject(opts.localCwd);
+  rememberIdeProjectRoot(opts.localCwd);
   threads.selectThread(created.id, { syncRoute: false });
   opts.syncSubscriptions();
   return created.id;
@@ -243,7 +256,7 @@ export async function executeIdePromptSend(opts: {
       cwd: opts.localCwd,
       ...(pics.length > 0 ? { images: pics } : {}),
     });
-    threads.rememberProject(opts.localCwd);
+    rememberIdeProjectRoot(opts.localCwd);
     if (seats[0]) await opts.selectSession(seats[0].id);
     return;
   }
@@ -286,6 +299,7 @@ export async function executeIdePromptSend(opts: {
   const meta: Record<string, unknown> = {
     surface: 'threads',
     interaction_mode: opts.interactionMode,
+    ...(opts.localCwd ? { ide_root: opts.localCwd } : {}),
     ...(opts.model ? { model: opts.model } : {}),
     ...(opts.effort ? { effort: opts.effort } : {}),
   };
@@ -300,7 +314,7 @@ export async function executeIdePromptSend(opts: {
     { scratch: opts.wsId === SCRATCH_WORKSPACE_ID && ws.currentId !== SCRATCH_WORKSPACE_ID },
   );
   transcript.recordOptimisticPrompt(created.id, opts.fullPrompt);
-  threads.rememberProject(opts.localCwd);
+  rememberIdeProjectRoot(opts.localCwd);
   await opts.selectSession(created.id);
 }
 
@@ -362,7 +376,10 @@ export async function runIdeComposerStateTurn(opts: {
   selectSession: (id: string) => Promise<void>;
   syncSubscriptions: () => void;
 }): Promise<void> {
-  const userText = (opts.overrideText ?? ideAgentState.composerText).trim();
+  const activeSid = ideAgentState.sessionId;
+  const activeDraft = activeSid && runtimeThreads.byId[activeSid] ? runtimeDrafts.for(activeSid) : null;
+  const rawText = opts.overrideText ?? (activeDraft ? activeDraft.text : ideAgentState.composerText);
+  const userText = rawText.trim();
   if ((!userText && ideAgentState.contexts.length === 0 && ideAgentState.attachments.length === 0) || ideAgentState.sending) {
     return;
   }
@@ -404,7 +421,10 @@ export async function runIdeComposerStateTurn(opts: {
       selectSession: opts.selectSession,
       syncSubscriptions: opts.syncSubscriptions,
     });
-    if (opts.overrideText === undefined) ideAgentState.composerText = '';
+    if (opts.overrideText === undefined) {
+      if (activeDraft) activeDraft.text = '';
+      ideAgentState.composerText = '';
+    }
     ideAgentState.contexts = [];
     ideAgentState.attachments = [];
     ideAgentState.freshContext = false;

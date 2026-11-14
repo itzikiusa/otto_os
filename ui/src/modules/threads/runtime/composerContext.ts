@@ -19,7 +19,34 @@ export function addComposerContext(current: readonly ComposerContext[], added: C
 
 export function assembleComposerMessage(text: string, context: readonly ComposerContext[]): string {
   if (!context.length) return text;
-  return [text, ...context.map((c) => `--- ${c.kind === 'diff' ? 'Diff context' : 'Review conversation'}: ${c.label} ---\n${c.text}`)].filter(Boolean).join('\n\n');
+  const headerFor = (c: ComposerContext): string => {
+    if (c.id.startsWith('file:')) return 'File context';
+    if (c.id.startsWith('dir:')) return 'Folder context';
+    return c.kind === 'diff' ? 'Diff context' : 'Review conversation';
+  };
+  return [text, ...context.map((c) => `--- ${headerFor(c)}: ${c.label} ---\n${c.text}`)].filter(Boolean).join('\n\n');
+}
+
+export function fileMentionContext(opts: {
+  path: string;
+  label: string;
+  isDir?: boolean;
+  snippet?: string;
+}): ComposerContext {
+  const cleanLabel = opts.label.startsWith('@') ? opts.label : `@${opts.label}`;
+  const prefix = opts.isDir ? 'dir' : 'file';
+  const body = opts.isDir
+    ? `Folder path: ${opts.path}`
+    : opts.snippet
+      ? `File path: ${opts.path}\n\n${opts.snippet}`
+      : `File path: ${opts.path}`;
+  return {
+    id: `${prefix}:${opts.path}`,
+    kind: 'diff',
+    label: cleanLabel,
+    path: opts.path,
+    text: body,
+  };
 }
 
 export function reviewCommentContext(repoId: string, prUrl: string, comment: PrComment): ComposerContext {

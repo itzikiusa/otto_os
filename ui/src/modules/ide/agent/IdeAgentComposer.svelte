@@ -1,13 +1,15 @@
 <script lang="ts">
-  // Threads-powered composer footer for `IdeAgentPanel.svelte`: banner stack,
-  // smart IDE context bar, slash completion, Council & Ask-another-agent
-  // delegation, image/PDF paste & file attach, dynamic ModelPickerPopover,
-  // RuntimeAccessChip + Plan toggle, and Send / Queue / Stop CTA.
+  // New-thread stage composer for `IdeAgentPanel.svelte` when `!ideAgent.sessionId`
+  // (active runtime threads run directly inside `EmbeddedRuntimeThread.svelte`).
+  // Provides 100% parity with `NewThreadStage.svelte` — unified `@` file/folder +
+  // agent mentions (`RuntimeMentionMenu`), `/` slash commands, multi-agent Council,
+  // image/PDF paste & attach, all 7+ harnesses via `ModelPickerPopover`,
+  // `RuntimeAccessChip` + Plan mode — plus smart IDE context pills (`IdeContextBar`).
   import { untrack } from 'svelte';
   import { announceShown } from '../../../lib/announce.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
-  import LazyMount from '../../../lib/components/LazyMount.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../../lib/components/ProviderIcon.svelte';
+  import { enterSends } from '../../../lib/enterSends';
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import {
     formatEffortShort,
@@ -24,21 +26,12 @@
     type ComposerSlashCommand,
   } from '../../../lib/slashActions';
   import { auth } from '../../../lib/stores/auth.svelte';
-  import { uiControl } from '../../../lib/stores/uiControl.svelte';
-  import { agentTasks } from '../../threads/runtime/agentTasks'; // ui-guards: allow — shared background task counter for RuntimeQueueBar
-  import type { BannerBlock } from '../../threads/runtime/banners'; // ui-guards: allow — shared banner stack model
   import { council, councilAgentLabel } from '../../threads/runtime/councilStore.svelte'; // ui-guards: allow — shared multi-agent council state
   import CouncilStagePicker from '../../threads/runtime/CouncilStagePicker.svelte'; // ui-guards: allow — shared Ask-several council stage picker
   import RuntimeAccessChip from '../../threads/runtime/RuntimeAccessChip.svelte'; // ui-guards: allow — shared Supervised/Auto/Full access chip
-  import RuntimeAskAgent from '../../threads/runtime/RuntimeAskAgent.svelte'; // ui-guards: allow — shared @agent peer delegation picker
-  import RuntimeBannerStack from '../../threads/runtime/RuntimeBannerStack.svelte'; // ui-guards: allow — shared composer banner stack
   import RuntimeComposerImages from '../../threads/runtime/RuntimeComposerImages.svelte'; // ui-guards: allow — shared composer image/PDF chips
-  import { mergeQueuedEdit } from '../../threads/runtime/runtimeComposer'; // ui-guards: allow — shared queued prompt edit helper
-  import RuntimePlan from '../../threads/runtime/RuntimePlan.svelte'; // ui-guards: allow — shared live agent plan banner
-  import RuntimeQueueBar from '../../threads/runtime/RuntimeQueueBar.svelte'; // ui-guards: allow — shared durable queue & revive bar
+  import RuntimeMentionMenu from '../../threads/runtime/RuntimeMentionMenu.svelte'; // ui-guards: allow — unified @file/@folder/@agent mention menu
   import { isRuntimeProvider } from '../../threads/runtime/runtimeThreads.svelte'; // ui-guards: allow — shared runtime harness predicate
-  import RuntimeUiControl from '../../threads/runtime/RuntimeUiControl.svelte'; // ui-guards: allow — shared UI control grant banner
-  import { latestTurn } from '../../threads/runtime/timeline'; // ui-guards: allow — shared latest turn lookup for active plan
   import StageSlashPopup from '../../threads/StageSlashPopup.svelte'; // ui-guards: allow — shared slash command completion popup
   import { ide } from '../ideStore.svelte';
   import { ideAgentEngine as ideAgent } from './ideAgentEngine.svelte';
@@ -47,36 +40,29 @@
   let { onsent }: { onsent?: () => void } = $props();
 
   const ModelPicker = lazyComponent(() => import('../../../lib/components/ModelPickerPopover.svelte'));
-  const RuntimeQuestions = lazyComponent(() => import('../../threads/runtime/RuntimeQuestions.svelte')); // ui-guards: allow — lazy structured question prompt card
 
+  let composerBoxEl = $state<HTMLDivElement | null>(null);
   let addContextBtnEl = $state<HTMLButtonElement | null>(null);
   let composerEl = $state<HTMLTextAreaElement | null>(null);
   let agentBtnEl = $state<HTMLButtonElement | null>(null);
   let fileInputEl = $state<HTMLInputElement | null>(null);
-  let askEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
+  let mentionEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
   let pickerOpen = $state(false);
   let cmdIdx = $state(0);
   let cmdDismissed = $state(false);
   const slashPopId = $props.id();
 
   $effect(() =>
-    pickerOpen && !ideAgent.sessionId
+    pickerOpen
       ? untrack(() =>
           council.watchModifiers({ provider: ideAgent.provider, model: ideAgent.model, effort: ideAgent.effort }),
         )
       : undefined,
   );
 
-  const activeThread = $derived(ideAgent.activeThread);
-  const runtimeSession = $derived(ideAgent.activeRuntimeSession);
-  const activeProvider = $derived(activeThread?.provider ?? ideAgent.provider);
-  const proj = $derived(ideAgent.projection);
-  const closed = $derived(runtimeSession?.status === 'closed');
-  const dormant = $derived(runtimeSession?.status === 'dormant');
-  const needsRevive = $derived(closed || dormant);
-
+  const activeProvider = $derived(ideAgent.provider);
   const agentChipLabel = $derived.by(() => {
-    if (!ideAgent.sessionId && council.on) return councilAgentLabel(auth.meta);
+    if (council.on) return councilAgentLabel(auth.meta);
     const m = ideAgent.effectiveModel;
     const base = m ? formatModelLabel(activeProvider, m, auth.meta) : harnessLabel(activeProvider);
     return supportsEffortSelection(activeProvider) && ideAgent.effort
@@ -88,44 +74,6 @@
     Boolean(ideAgent.composerText.trim()) || ideAgent.contexts.length > 0 || ideAgent.attachments.length > 0,
   );
   const canSend = $derived(hasDraftPayload && !ideAgent.sending && !ideAgent.reopening);
-
-  const turn = $derived(proj ? latestTurn(proj) : null);
-  const activePlan = $derived.by(() => {
-    if (!proj || !turn) return null;
-    const pl = proj.plans.findLast((x) => x.turn_id === turn.id);
-    return pl && pl.steps.some((s) => s.status !== 'completed') ? pl : null;
-  });
-  const background = $derived.by(() => {
-    const tasks = agentTasks(
-      proj?.items ?? [],
-      proj?.session?.background_tasks ?? runtimeSession?.background_tasks ?? [],
-    );
-    return tasks.running.filter((t) => t.background);
-  });
-  const uiAsk = $derived(
-    Boolean(
-      ideAgent.sessionId &&
-        runtimeSession &&
-        !closed &&
-        !auth.isImpersonating &&
-        runtimeSession.created_by === auth.me?.id &&
-        uiControl.promptFor(ideAgent.sessionId),
-    ),
-  );
-  const queueShown = $derived(
-    Boolean(
-      ideAgent.sessionId && ((background.length > 0 && !closed) || (proj?.queued.length ?? 0) > 0 || needsRevive),
-    ),
-  );
-  const banners = $derived.by((): BannerBlock[] => [
-    ...(uiAsk ? [{ key: 'ui', label: 'UI control request', urgent: true }] : []),
-    ...(proj?.requests.some((r) => r.kind === 'question')
-      ? [{ key: 'questions', label: 'questions', urgent: true }]
-      : []),
-    ...(activePlan ? [{ key: 'plan', label: 'plan' }] : []),
-    ...(queueShown ? [{ key: 'queue', label: needsRevive ? 'revive' : 'queue' }] : []),
-    ...(ideAgent.freshContext ? [{ key: 'fresh', label: 'fresh context' }] : []),
-  ]);
 
   const slashSuggestions = $derived.by((): ComposerSlashCommand[] => {
     const m = /^\/([\w:-]*)$/.exec(ideAgent.composerText);
@@ -167,6 +115,7 @@
     switch (slash.kind) {
       case 'open-model-picker':
       case 'open-effort-picker':
+      case 'open-mode-picker':
         ideAgent.composerText = '';
         ModelPicker.prefetch();
         pickerOpen = true;
@@ -187,18 +136,12 @@
           ideAgent.composerText = '';
         }
         return true;
-      case 'open-mode-picker':
-        ideAgent.composerText = '';
-        ModelPicker.prefetch();
-        pickerOpen = true;
-        return true;
       case 'fresh-context':
         ideAgent.freshContext = true;
         ideAgent.composerText = '';
         return true;
       case 'new-thread':
         ideAgent.startNewChat();
-        ideAgent.composerText = '';
         return true;
       case 'toggle-terminal':
         ide.openBottomTab('terminal');
@@ -225,7 +168,7 @@
   }
 
   function onComposerKeydown(e: KeyboardEvent): void {
-    if (e.isComposing || askEl?.onKey(e)) return;
+    if (e.isComposing || mentionEl?.onKey(e)) return;
     if (slashSuggestions.length > 0) {
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
@@ -243,7 +186,12 @@
         return;
       }
     }
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Tab' && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      ideAgent.planMode = !ideAgent.planMode;
+      return;
+    }
+    if (enterSends(e)) {
       e.preventDefault();
       if (handleSlashSubmit()) return;
       if (canSend) triggerSend();
@@ -263,64 +211,25 @@
 </script>
 
 <footer class="ia-foot">
-  {#if banners.length > 0 && ideAgent.sessionId}
-    {@const sid = ideAgent.sessionId}
-    <RuntimeBannerStack blocks={banners}>
-      {#snippet block(key: string)}
-        {#if key === 'ui'}
-          <RuntimeUiControl sessionId={sid} />
-        {:else if key === 'questions' && proj}
-          <LazyMount
-            lazy={RuntimeQuestions}
-            what="the questions"
-            variant="compact"
-            props={{
-              requests: proj.requests,
-              sessionId: sid,
-              agent: harnessLabel(activeProvider).replace(/ Code$/, ''),
-              onanswered: () => composerEl?.focus(),
-            }}
-          />
-        {:else if key === 'plan' && activePlan}
-          <RuntimePlan plan={activePlan} />
-        {:else if key === 'queue'}
-          <RuntimeQueueBar
-            sessionId={sid}
-            {background}
-            queued={proj?.queued ?? []}
-            running={ideAgent.isWorking}
-            canSteer={activeProvider === 'claude'}
-            {closed}
-            {dormant}
-            reopening={ideAgent.reopening}
-            onreopen={() => void ideAgent.reopenActiveSession()}
-            onedit={(t) => {
-              ideAgent.composerText = mergeQueuedEdit(ideAgent.composerText, t);
-              composerEl?.focus();
-            }}
-          />
-        {:else if key === 'fresh'}
-          <div class="ia-fresh" use:announceShown={'Next message starts fresh'}>
-            <span>Next message starts fresh</span>
-            <button
-              type="button"
-              class="btn small ghost"
-              onclick={() => {
-                ideAgent.freshContext = false;
-                composerEl?.focus();
-              }}
-            >
-              Cancel
-            </button>
-          </div>
-        {/if}
-      {/snippet}
-    </RuntimeBannerStack>
+  {#if ideAgent.freshContext}
+    <div class="ia-fresh" use:announceShown={'Next message starts fresh'}>
+      <span>Next message starts fresh</span>
+      <button
+        type="button"
+        class="btn small ghost"
+        onclick={() => {
+          ideAgent.freshContext = false;
+          composerEl?.focus();
+        }}
+      >
+        Cancel
+      </button>
+    </div>
   {/if}
 
   <IdeContextBar onfocuscomposer={() => composerEl?.focus()} />
 
-  <div class="ia-composer-box">
+  <div class="ia-composer-box" bind:this={composerBoxEl}>
     {#if slashSuggestions.length > 0}
       <StageSlashPopup
         id={slashPopId}
@@ -331,23 +240,44 @@
       />
     {/if}
 
-    {#if !ideAgent.sessionId}
-      <CouncilStagePicker part="seats" provider={ideAgent.provider} model={ideAgent.model} effort={ideAgent.effort} />
-    {:else if isRuntimeProvider(activeProvider)}
-      <RuntimeAskAgent
-        bind:this={askEl}
-        part="chips"
-        sessionId={ideAgent.sessionId}
-        provider={activeProvider}
-        access={ideAgent.runtimeAccessMode}
-        readOnly={Boolean(runtimeSession?.meta?.read_only)}
-        text={ideAgent.composerText}
-        onreplace={(t) => {
-          ideAgent.composerText = t;
+    <RuntimeMentionMenu
+      bind:this={mentionEl}
+      text={ideAgent.composerText}
+      textareaEl={composerEl}
+      anchorEl={composerBoxEl}
+      cwd={ideAgent.resolveProjectCwd()}
+      allowAgents={true}
+      agentSectionLabel={council.on ? 'Add to Council' : 'Switch agent'}
+      onpickfile={(picked) => {
+        ideAgent.composerText = picked.nextText;
+        ideAgent.attachMentionedPath({ path: picked.path, display: picked.display, isDir: picked.isDir });
+        requestAnimationFrame(() => {
           composerEl?.focus();
-        }}
-      />
-    {/if}
+          composerEl?.setSelectionRange(picked.nextCaret, picked.nextCaret);
+        });
+      }}
+      onpickagent={(picked) => {
+        ideAgent.composerText = picked.nextText;
+        if (council.on) council.pick({ provider: picked.option.provider, model: picked.option.model ?? null, effort: null });
+        else {
+          ideAgent.setProvider(picked.option.provider);
+          ideAgent.model = picked.option.model;
+        }
+        requestAnimationFrame(() => {
+          composerEl?.focus();
+          composerEl?.setSelectionRange(picked.nextCaret, picked.nextCaret);
+        });
+      }}
+      ondrilldir={(nextText, nextCaret) => {
+        ideAgent.composerText = nextText;
+        requestAnimationFrame(() => {
+          composerEl?.focus();
+          composerEl?.setSelectionRange(nextCaret, nextCaret);
+        });
+      }}
+    />
+
+    <CouncilStagePicker part="seats" provider={ideAgent.provider} model={ideAgent.model} effort={ideAgent.effort} />
 
     <textarea
       bind:this={composerEl}
@@ -360,11 +290,7 @@
       aria-autocomplete="list"
       aria-controls={slashSuggestions.length > 0 ? `${slashPopId}-list` : undefined}
       aria-activedescendant={slashSuggestions.length > 0 ? `${slashPopId}-opt-${cmdIdx}` : undefined}
-      placeholder={closed
-        ? 'Send a message to reopen this thread…'
-        : ideAgent.isWorking
-          ? 'Queue a follow-up for when this turn ends…'
-          : 'Ask anything, type @agent to delegate, or / for commands…'}
+      placeholder="Ask anything. @ files or agents, / commands"
       onkeydown={onComposerKeydown}
       onpaste={onPaste}
       data-testid="ide-agent-composer"
@@ -397,6 +323,7 @@
           aria-label={ideAgent.canAttachFiles ? 'Attach image or PDF' : 'Attach image'}
           title={ideAgent.canAttachFiles ? 'Attach image or PDF (or paste)' : 'Attach image (or paste)'}
           onclick={() => fileInputEl?.click()}
+          data-testid="ide-agent-attach-image"
         >
           <Icon name="image" size={13} />
         </button>
@@ -415,22 +342,7 @@
         />
       {/if}
 
-      {#if !ideAgent.sessionId}
-        <CouncilStagePicker
-          part="toggle"
-          provider={ideAgent.provider}
-          model={ideAgent.model}
-          effort={ideAgent.effort}
-        />
-      {:else if isRuntimeProvider(activeProvider)}
-        <RuntimeAskAgent
-          part="button"
-          sessionId={ideAgent.sessionId}
-          provider={activeProvider}
-          access={ideAgent.runtimeAccessMode}
-          disabled={closed}
-        />
-      {/if}
+      <CouncilStagePicker part="toggle" provider={ideAgent.provider} model={ideAgent.model} effort={ideAgent.effort} />
 
       <button
         bind:this={agentBtnEl}
@@ -460,7 +372,6 @@
           mode={ideAgent.runtimeAccessMode}
           agent={harnessLabel(activeProvider)}
           cwd={ideAgent.resolveProjectCwd() ?? 'this folder'}
-          disabled={closed}
           onpick={(m) => ideAgent.setRuntimeAccessMode(m)}
         />
       {/if}
@@ -470,9 +381,7 @@
         class="btn small ghost"
         class:ia-mode-plan={ideAgent.planMode}
         aria-pressed={ideAgent.planMode}
-        title={ideAgent.planMode
-          ? 'Plan mode: propose code blocks without modifying files directly'
-          : 'Toggle Plan mode'}
+        title={ideAgent.planMode ? 'Plan mode: propose code blocks without modifying files directly' : 'Toggle Plan mode (⇧⇥)'}
         onclick={() => {
           ideAgent.planMode = !ideAgent.planMode;
         }}
@@ -483,29 +392,16 @@
 
       <span class="grow"></span>
 
-      {#if ideAgent.isWorking && !hasDraftPayload}
-        <button
-          type="button"
-          class="btn small ia-stop"
-          aria-label="Stop current agent turn"
-          title="Stop turn"
-          onclick={() => void ideAgent.stopTurn()}
-          data-testid="ide-agent-stop"
-        >
-          <Icon name="stop" size={12} /> Stop
-        </button>
-      {:else}
-        <button
-          type="button"
-          class="btn small ia-cta"
-          disabled={!canSend}
-          title={ideAgent.isWorking ? 'Queue follow-up (Enter)' : 'Send message (Enter)'}
-          onclick={() => triggerSend()}
-          data-testid="ide-agent-send"
-        >
-          <Icon name="send" size={12} /> {ideAgent.isWorking ? 'Queue' : 'Send'}
-        </button>
-      {/if}
+      <button
+        type="button"
+        class="btn small ia-cta"
+        disabled={!canSend}
+        title="Send message (Enter)"
+        onclick={() => triggerSend()}
+        data-testid="ide-agent-send"
+      >
+        <Icon name="send" size={12} /> Send
+      </button>
     </div>
   </div>
 </footer>
@@ -521,7 +417,7 @@
     mode={ideAgent.interactionMode}
     onprovider={(p) => ideAgent.setProvider(p)}
     onmodel={(m) => {
-      if (!ideAgent.sessionId) council.pick({ provider: ideAgent.provider, model: m, effort: ideAgent.effort });
+      council.pick({ provider: ideAgent.provider, model: m, effort: ideAgent.effort });
       ideAgent.model = m;
     }}
     oneffort={supportsEffortSelection(activeProvider) ? (e) => (ideAgent.effort = e) : undefined}
@@ -628,11 +524,6 @@
   }
   .ia-cta:hover:not(:disabled) {
     background: var(--accent-soft-strong);
-  }
-  .ia-stop {
-    background: var(--danger-soft);
-    border-color: var(--danger);
-    color: var(--danger);
   }
   @media (pointer: coarse) {
     .ia-agent-chip {
