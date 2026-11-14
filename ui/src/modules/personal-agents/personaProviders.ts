@@ -19,9 +19,14 @@ export function personaProviders(registered: string[]): string[] {
 }
 
 /** A provider to start a new agent on: the configured default when it can
- *  carry a persona, else Claude. */
-export function personaDefault(preferred: string): string {
-  return canCarryPersona(preferred) ? preferred : 'claude';
+ *  carry a persona (and is enabled in `registered` when supplied), else the
+ *  first enabled persona provider (preferring Claude). */
+export function personaDefault(preferred: string, registered?: readonly string[]): string {
+  const allowed =
+    registered && registered.length > 0 ? PERSONA_PROVIDERS.filter((p) => registered.includes(p)) : PERSONA_PROVIDERS;
+  if (allowed.includes(preferred)) return preferred;
+  if (allowed.includes('claude')) return 'claude';
+  return allowed[0] ?? (canCarryPersona(preferred) ? preferred : 'claude');
 }
 
 /** Why `provider` is not offered — shown under the picker for an agent saved

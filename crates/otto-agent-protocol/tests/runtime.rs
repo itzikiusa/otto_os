@@ -3842,3 +3842,133 @@ async fn council_rounds_survive_a_restart_and_a_cut_round_can_be_asked_again() {
         assert!(verdict.text.contains(want), "{want}: {}", verdict.text);
     }
 }
+
+#[tokio::test]
+async fn agy_autonomous_wakeups_open_agent_turns_settle_and_persist_to_sqlite() {
+    use otto_core::agent_runtime::TurnOrigin;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(
+        &pool,
+        &host,
+        RuntimeConfig {
+            autonomous_settle: Duration::from_millis(90),
+            ..RuntimeConfig::default()
+        },
+    );
+    let s = create_as(&rt, cwd, RuntimeProvider::Agy).await;
+    host.wait(is_ready).await;
+
+    // Turn 1 schedules a background timer and ends (`end_turn`).
+    rt.prompt(&s.id, "schedule").await.unwrap();
+    host.wait_n(is_terminal, 1).await;
+    let after_t1 = rt.get(&s.id).await.unwrap();
+    assert_eq!(after_t1.background_tasks.len(), 1);
+    assert!(after_t1.background_tasks[0].label.contains("check status"));
+
+    // Autonomous wakeup #1 arrives (~40ms later) and idle-settles (~90ms after that),
+    // then autonomous wakeup #2 arrives (~180ms later) and idle-settles too.
+    host.wait_n(is_terminal, 2).await;
+    host.wait_n(is_terminal, 3).await;
+    rt.flush(&s.id).await;
+
+    let now = rt.get(&s.id).await.unwrap();
+    assert_eq!(now.status, RuntimeSessionStatus::Idle);
+    assert!(now.background_tasks.is_empty());
+
+    // User can still send a normal follow-up turn after autonomous turns settled.
+    rt.prompt(&s.id, "afterwards").await.unwrap();
+    host.wait_n(is_terminal, 4).await;
+    rt.flush(&s.id).await;
+
+    // Verify SQLite persistence via a fresh runtime replay(0) snapshot!
+    rt.shutdown().await;
+    let host2 = TestHost::new(cwd, false);
+    let rt2 = runtime(&pool, &host2, RuntimeConfig::default());
+    let RuntimeReplay::Snapshot { snapshot, .. } = rt2.replay(&s.id, 0).await.unwrap() else {
+        panic!("expected persisted snapshot from SQLite");
+    };
+    let origins: Vec<TurnOrigin> = snapshot.turns.iter().map(|t| t.origin).collect();
+    assert_eq!(
+        origins,
+        vec![
+            TurnOrigin::User,
+            TurnOrigin::Agent,
+            TurnOrigin::Agent,
+            TurnOrigin::User,
+        ]
+    );
+    assert!(snapshot
+        .turns
+        .iter()
+        .all(|t| t.status == ProviderTurnStatus::Completed));
+    for expected in [
+        "scheduled",
+        "autonomous report 1",
+        "autonomous report 2",
+        "echo: afterwards",
+    ] {
+        assert!(
+            snapshot.turn_items.iter().any(|i| matches!(
+                &i.kind,
+                TurnItemKind::AssistantMessage {
+                    text,
+                    streaming: false,
+                    ..
+                } if text == expected
+            )),
+            "missing settled persisted message {expected:?} in {:#?}",
+            snapshot.turn_items
+        );
+    }
+}
+
+#[tokio::test]
+async fn replay_flushes_held_coalesced_chunks_immediately() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(
+        &pool,
+        &host,
+        RuntimeConfig {
+            // Very long coalesce window so the 2nd rapid chunk stays in `st.held`.
+            stream_coalesce: Duration::from_secs(30),
+            ..RuntimeConfig::default()
+        },
+    );
+    let s = create_as(&rt, cwd, RuntimeProvider::Agy).await;
+    host.wait(is_ready).await;
+
+    rt.prompt(&s.id, "hold-chunk").await.unwrap();
+    let first_chunk = host
+        .wait(|e| {
+            matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+                if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, .. } if text == "part1"))
+        })
+        .await;
+    // Give stdout pump a moment to ingest the immediately-following "part2" into `st.held`.
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    let RuntimeReplay::Events { events, .. } =
+        rt.replay(&s.id, first_chunk.sequence).await.unwrap()
+    else {
+        panic!("expected replay events");
+    };
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.body,
+            RuntimeEventBody::TurnItemUpdated { turn_item }
+                if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, .. } if text == "part1part2")
+        )),
+        "expected held chunk to be flushed on replay, got {events:#?}"
+    );
+
+    rt.interrupt(&s.id).await.unwrap();
+    host.wait(is_terminal).await;
+    rt.close(&s.id).await.unwrap();
+}

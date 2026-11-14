@@ -12,6 +12,12 @@ export const ASK_PROVIDERS: readonly RuntimeProvider[] = ['claude', 'codex', 'ag
 /** Agents one ask reaches (the daemon's ASK_CHILD_MAX_TARGETS). */
 export const ASK_MAX_TARGETS = 4;
 
+/** Filter `ASK_PROVIDERS` down to enabled providers in `/meta.providers`. */
+export function askableProviders(registered: readonly string[]): RuntimeProvider[] {
+  const clean = registered.map((p) => p.trim()).filter((p) => p && p !== 'shell');
+  return clean.length > 0 ? ASK_PROVIDERS.filter((p) => clean.includes(p)) : [...ASK_PROVIDERS];
+}
+
 export interface AskOption {
   provider: RuntimeProvider;
   /** null = the provider's default model. */
@@ -40,10 +46,11 @@ export function mentionOptions(
   modelsOf: (p: RuntimeProvider) => readonly { id: string; label: string }[],
   nameOf: (p: RuntimeProvider) => string,
   limit = 8,
+  providers: readonly RuntimeProvider[] = ASK_PROVIDERS,
 ): AskOption[] {
   const words = query.toLowerCase().split(/[:/\s-]+/).filter(Boolean);
   const all: AskOption[] = [];
-  for (const p of ASK_PROVIDERS) {
+  for (const p of providers) {
     const name = nameOf(p);
     all.push({ provider: p, model: null, label: name, detail: 'default model' });
     for (const m of modelsOf(p)) all.push({ provider: p, model: m.id, label: m.label, detail: name });

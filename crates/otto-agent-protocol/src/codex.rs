@@ -103,6 +103,7 @@ pub struct CodexDriver {
     access: RuntimeAccessMode,
     thread_id: Option<String>,
     turn_id: Option<String>,
+    auto_turns: u64,
     queued: Option<RuntimePromptReq>,
     codex_turn: Option<String>,
     interrupt_when_started: bool,
@@ -129,6 +130,7 @@ impl CodexDriver {
             access: RuntimeAccessMode::default(),
             thread_id: None,
             turn_id: None,
+            auto_turns: 0,
             queued: None,
             codex_turn: None,
             interrupt_when_started: false,
@@ -150,6 +152,22 @@ impl CodexDriver {
 
     fn turn(&self) -> String {
         self.turn_id.clone().unwrap_or_default()
+    }
+
+    fn ensure_autonomous_turn(&mut self, step: &mut DriverStep, native: Option<&str>) {
+        if !self.ready || self.turn_id.is_some() {
+            return;
+        }
+        self.auto_turns += 1;
+        let id = native
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("auto-{}", self.auto_turns));
+        self.turn_id = Some(id.clone());
+        self.failure = None;
+        self.items.clear();
+        step.push(DriverEvent::TurnStarted { turn_id: id });
     }
 
     /// The thread-level sandbox mode (`SandboxMode`).
@@ -869,8 +887,11 @@ impl StructuredDriver for CodexDriver {
         for (_, p) in open {
             step.write(Self::answer(&p, ApprovalDecision::Cancel));
         }
-        if self.queued.take().is_some() {
+        if self.queued.take().is_some()
+            || (self.turn_req.is_none() && self.codex_turn.is_none() && self.turn_id.is_some())
+        {
             self.turn_id = None;
+            self.items.clear();
             step.push(DriverEvent::Terminal {
                 status: TurnTerminalStatus::Interrupted,
                 failure: None,
@@ -975,43 +996,60 @@ impl StructuredDriver for CodexDriver {
             }
             (Some(m), None) => match m.as_str() {
                 "turn/started" => {
-                    if let Some(t) = params.pointer("/turn/id").and_then(Value::as_str) {
+                    let native = params.pointer("/turn/id").and_then(Value::as_str);
+                    self.ensure_autonomous_turn(&mut step, native);
+                    if let Some(t) = native {
                         self.codex_turn = Some(t.to_string());
                     }
                     self.maybe_interrupt(&mut step);
                 }
-                "item/started" | "item/completed" if self.turn_id.is_some() => {
-                    if let Some(item) = params.get("item") {
-                        if let Some(i) = self.project(item, m == "item/completed") {
-                            step.push(DriverEvent::TurnItem(i));
+                "item/started" | "item/completed" => {
+                    self.ensure_autonomous_turn(&mut step, None);
+                    if self.turn_id.is_some() {
+                        if let Some(item) = params.get("item") {
+                            if let Some(i) = self.project(item, m == "item/completed") {
+                                step.push(DriverEvent::TurnItem(i));
+                            }
                         }
                     }
                 }
-                "item/agentMessage/delta" if self.turn_id.is_some() => {
-                    self.on_text_delta(&mut step, &params, false)
-                }
-                "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta"
-                    if self.turn_id.is_some() =>
-                {
-                    self.on_text_delta(&mut step, &params, true)
-                }
-                "item/commandExecution/outputDelta" if self.turn_id.is_some() => {
-                    if let (Some(cid), Some(d)) = (
-                        params.get("itemId").and_then(Value::as_str),
-                        params.get("delta").and_then(Value::as_str),
-                    ) {
-                        self.items
-                            .entry(cid.to_string())
-                            .or_default()
-                            .output
-                            .push_str(d);
-                        step.push(DriverEvent::CommandOutput {
-                            item_id: self.item_id(cid),
-                            chunk: d.to_string(),
-                        });
+                "item/agentMessage/delta" => {
+                    self.ensure_autonomous_turn(&mut step, None);
+                    if self.turn_id.is_some() {
+                        self.on_text_delta(&mut step, &params, false);
                     }
                 }
-                "turn/plan/updated" if self.turn_id.is_some() => self.on_plan(&mut step, &params),
+                "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
+                    self.ensure_autonomous_turn(&mut step, None);
+                    if self.turn_id.is_some() {
+                        self.on_text_delta(&mut step, &params, true);
+                    }
+                }
+                "item/commandExecution/outputDelta" => {
+                    self.ensure_autonomous_turn(&mut step, None);
+                    if self.turn_id.is_some() {
+                        if let (Some(cid), Some(d)) = (
+                            params.get("itemId").and_then(Value::as_str),
+                            params.get("delta").and_then(Value::as_str),
+                        ) {
+                            self.items
+                                .entry(cid.to_string())
+                                .or_default()
+                                .output
+                                .push_str(d);
+                            step.push(DriverEvent::CommandOutput {
+                                item_id: self.item_id(cid),
+                                chunk: d.to_string(),
+                            });
+                        }
+                    }
+                }
+                "turn/plan/updated" => {
+                    self.ensure_autonomous_turn(&mut step, None);
+                    if self.turn_id.is_some() {
+                        self.on_plan(&mut step, &params);
+                    }
+                }
                 "thread/tokenUsage/updated" => self.on_usage(&mut step, &params),
                 "mcpServer/startupStatus/updated" => self.on_mcp_startup(&mut step, &params),
                 "error" => {
@@ -1422,5 +1460,40 @@ mod tests {
         );
         let s = d.prompt("t2", &RuntimePromptReq::of("again")).unwrap();
         assert!(s.events.is_empty(), "{:?}", s.events);
+    }
+
+    #[test]
+    fn autonomous_server_turn_emits_turn_started_and_settles_on_completed() {
+        let mut d = CodexDriver::with_program("codex");
+        ready(&mut d, false);
+        let started = feed(
+            &mut d,
+            json!({"method":"turn/started","params":{"turn":{"id":"bg-turn-1","status":"inProgress"}}}),
+        );
+        assert!(started
+            .events
+            .iter()
+            .any(|e| matches!(e, DriverEvent::TurnStarted { turn_id } if turn_id == "bg-turn-1")));
+        let delta = feed(
+            &mut d,
+            json!({"method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"background reply"}}),
+        );
+        assert!(delta.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::TurnItem(i)
+                if i.id.starts_with("bg-turn-1:")
+                    && matches!(&i.kind, TurnItemKind::AssistantMessage { text, streaming: true, .. } if text == "background reply")
+        )));
+        let done = feed(
+            &mut d,
+            json!({"method":"turn/completed","params":{"turn":{"id":"bg-turn-1","status":"completed"}}}),
+        );
+        assert!(done.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::Terminal {
+                status: TurnTerminalStatus::Completed,
+                ..
+            }
+        )));
     }
 }

@@ -56,7 +56,8 @@
   import RuntimeTurnStatus from './RuntimeTurnStatus.svelte';
   import RuntimeUiControl from './RuntimeUiControl.svelte';
   import { runtimeViews } from './runtimeView.svelte';
-  import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnOutcome } from './timeline';
+  import { formatLiveElapsed } from './liveStatus';
+import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnOutcome } from './timeline';
 
   const RuntimeQuestions = lazyComponent(() => import('./RuntimeQuestions.svelte'));
   const ModelPicker = lazyComponent(() => import('../../../lib/components/ModelPickerPopover.svelte'));
@@ -123,7 +124,7 @@
   const p = $derived(runtimeViews.projections[sessionId] ?? null);
   const loadError = $derived(runtimeViews.loadError[sessionId] ?? null);
   const staleError = $derived(runtimeViews.staleError[sessionId] ?? null);
-  const rows = $derived(p ? timelineRows(p.items) : []);
+  const rows = $derived(p ? timelineRows(p.items, p.turns) : []);
   const approvals = $derived(new Map((p ? pendingApprovals(p) : []).map((a) => [a.requestId, a] as const)));
   const turn = $derived(p ? latestTurn(p) : null);
   const closed = $derived(session?.status === 'closed');
@@ -168,9 +169,9 @@
   });
   const ownTurn = $derived(turn?.origin === 'agent');
   const workingFor = $derived.by(() => {
-    if (!running || approvals.size > 0 || !turn?.started_at || turn.status !== 'running') return null;
+    if (!running || approvals.size > 0 || !turn?.started_at || (turn.status !== 'running' && turn.status !== 'pending')) return null;
     const s = Math.max(0, Math.floor((now() - Date.parse(turn.started_at)) / 1000));
-    return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+    return formatLiveElapsed(s);
   });
 
   let pickerOpen = $state(false);
@@ -368,30 +369,32 @@
 <section class="rt" class:compact aria-label="Conversation" data-testid="runtime-thread-{sessionId}">
   {#if onswitch}<RuntimeLinkedThreads {sessionId} {onswitch} />{/if}
   <div class="rt-scroll" bind:this={scroller}>
-    <div class="rt-col">
-      <LoadState what="conversation" loading={!p && !loadError} error={p ? staleError : loadError} empty={!p} onretry={() => runtimeViews.retry(sessionId)}>
-        {#if rows.length === 0}
-          <EmptyState
-            icon="threads"
-            title="Start the conversation"
-            body="Replies, tool calls and approvals stream here as the agent works."
-          />
-        {:else if p}
-          <RuntimeTimelineRows
-            {sessionId}
-            projection={p}
-            {agentName}
-            {agentChatId}
-            cwd={effectiveCwd}
-            workspaceId={session?.workspace_id}
-            onrespond={respond}
-            {onopenpath}
-            {formatAssistantText}
-            {assistantFooter}
-          />
-        {/if}
-        <RuntimeTurnStatus {workingFor} {ownTurn} {outcome} disabled={closed} onresend={(t) => void send(t, undefined, { ...snapshotDraft(draft), text: t, images: [], context: [], fresh_context: false })} />
-      </LoadState>
+    <div class="rt-stream" data-runtime-stream>
+      <div class="rt-col">
+        <LoadState what="conversation" loading={!p && !loadError} error={p ? staleError : loadError} empty={!p} onretry={() => runtimeViews.retry(sessionId)}>
+          {#if rows.length === 0}
+            <EmptyState
+              icon="threads"
+              title="Start the conversation"
+              body="Replies, tool calls and approvals stream here as the agent works."
+            />
+          {:else if p}
+            <RuntimeTimelineRows
+              {sessionId}
+              projection={p}
+              {agentName}
+              {agentChatId}
+              cwd={effectiveCwd}
+              workspaceId={session?.workspace_id}
+              onrespond={respond}
+              {onopenpath}
+              {formatAssistantText}
+              {assistantFooter}
+            />
+          {/if}
+          <RuntimeTurnStatus projection={p} {workingFor} {ownTurn} background={closed ? [] : background} {outcome} disabled={closed} onresend={(t) => void send(t, undefined, { ...snapshotDraft(draft), text: t, images: [], context: [], fresh_context: false })} />
+        </LoadState>
+      </div>
     </div>
   </div>
   <RuntimeFollow {scroller} seq={p?.lastSequence} messageIds={rows.flatMap((r) => (r.kind === 'message' ? [r.item.id] : []))} />
@@ -596,6 +599,7 @@
     min-block-size: 0;
     overflow-y: auto;
     overflow-x: hidden;
+    overflow-anchor: none;
   }
   .rt-col,
   .rt-dock {

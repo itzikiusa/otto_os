@@ -8,7 +8,7 @@ export type { IdeThreadEntry } from './ideContextBuilders';
 import type { ApprovalDecision, RuntimeAccessMode, RuntimeProvider, RuntimeSession } from '../../../lib/api/types';
 import { loadErrorText } from '../../../lib/loadError';
 import { normalizeEffort, supportsEffortSelection, type EffortLevel, type InteractionMode } from '../../../lib/providerModels';
-import { agentProviders } from '../../../lib/providers';
+import { agentProviders, defaultAgentProvider } from '../../../lib/providers';
 import { runtimeDrafts, type ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
 import { ws } from '../../../lib/stores/workspace.svelte';
 import { council } from '../../threads/runtime/councilStore.svelte'; // ui-guards: allow — IDE agent dock supports Council multi-agent threads
@@ -225,11 +225,14 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
           : 'runtime',
   );
 
-  readonly availableProviders = $derived.by((): string[] =>
-    resolveIdeHarnesses(agentProviders(), [ideAgentState.provider, ...this.threads.map((t) => t.provider)]),
-  );
+  readonly availableProviders = $derived.by((): string[] => {
+    const activeOpen = this.activeRuntimeSession?.provider ?? this.activeThread?.provider ?? null;
+    return resolveIdeHarnesses(agentProviders(), activeOpen ? [activeOpen] : []);
+  });
 
-  readonly inlineProviders = $derived.by((): RuntimeProvider[] => resolveIdeInlineProviders(this.availableProviders));
+  readonly inlineProviders = $derived.by((): RuntimeProvider[] =>
+    resolveIdeInlineProviders(this.availableProviders, agentProviders()),
+  );
 
   readonly effectiveModel = $derived<string | null>(
     ideAgentState.model ?? this.activeRuntimeSession?.model ?? this.activeThread?.model ?? null,
@@ -320,6 +323,12 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
       $effect(() => {
         void [ide.target.kind, ide.target.root, ide.additionalRoots.length, ide.activePath, ide.tabs.length];
         this.publishLiveIdeContext();
+      });
+      $effect(() => {
+        if (!ideAgentState.sessionId && this.availableProviders.length > 0 && !this.availableProviders.includes(ideAgentState.provider)) {
+          const def = defaultAgentProvider();
+          this.setProvider(this.availableProviders.includes(def) ? def : this.availableProviders[0]!);
+        }
       });
     });
     return () => {

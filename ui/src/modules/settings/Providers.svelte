@@ -5,12 +5,8 @@
   import { sectionLabel } from './sections';
   import { settingsSaveErrorText } from './ownerOnly';
   import PageBody from '../../lib/components/PageBody.svelte';
-  // Custom agent providers (root): add any CLI (opencode, kilo, …) as a
-  // session provider. Stored in the `providers` settings key; the daemon
-  // reloads its registry live on save. A non-root settings admin sees only
-  // what their own role reaches — Update all CLIs (ws editor) and the model
-  // catalog (Agents) — never the daemon-wide settings (`GET|PUT /settings`
-  // are root-only).
+  // Custom agent providers (root): add any CLI (kilo, aider, …) in `providers`;
+  // non-root admins see Update all CLIs and the model catalog only.
   import { api } from '../../lib/api/client';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -44,10 +40,12 @@
 
   // Built-in providers with their default update commands (None for shell).
   const BUILTINS: { name: string; updateCmd: string | null }[] = [
-    { name: 'claude', updateCmd: 'claude update' },
-    { name: 'codex',  updateCmd: 'codex update' },
-    { name: 'agy',    updateCmd: 'agy update' },
-    { name: 'shell',  updateCmd: null },
+    { name: 'claude',   updateCmd: 'claude update' },
+    { name: 'codex',    updateCmd: 'codex update' },
+    { name: 'agy',      updateCmd: 'agy update' },
+    { name: 'opencode', updateCmd: 'opencode upgrade' },
+    { name: 'pi',       updateCmd: 'pi update' },
+    { name: 'shell',    updateCmd: null },
   ];
 
   let loading = $state(true);
@@ -226,6 +224,7 @@
       });
       custom = (allSettings['providers'] as Record<string, ProviderDef>) ?? {};
       await auth.refreshMeta();
+      void loadCatalog();
       toasts.success('Providers saved', 'Available immediately for new sessions');
       formOpen = false;
     } catch (e) {
@@ -296,6 +295,7 @@
       allSettings = r.value;
       disabled = new Set((allSettings['disabled_providers'] as string[] | undefined) ?? []);
       await auth.refreshMeta();
+      void loadCatalog();
       toasts.success(
         enable ? `${nameOfProvider} enabled` : `${nameOfProvider} hidden`,
         enable
@@ -691,11 +691,11 @@
     >
       <div class="field">
         <label for="pv-name">Name</label>
-        <input dir="ltr" id="pv-name" class="input mono-in" bind:value={name} placeholder="opencode" spellcheck="false" autocomplete="off" />
+        <input dir="ltr" id="pv-name" class="input mono-in" bind:value={name} placeholder="kilo" spellcheck="false" autocomplete="off" />
       </div>
       <div class="field">
         <label for="pv-cmd">Command</label>
-        <input dir="ltr" id="pv-cmd" class="input mono-in" bind:value={cmd} placeholder="opencode" spellcheck="false" autocomplete="off" />
+        <input dir="ltr" id="pv-cmd" class="input mono-in" bind:value={cmd} placeholder="kilo" spellcheck="false" autocomplete="off" />
       </div>
       <div class="field">
         <label for="pv-args">Arguments (optional)</label>
@@ -707,7 +707,7 @@
       </div>
       <div class="field">
         <label for="pv-update">Update command (optional)</label>
-        <input dir="ltr" id="pv-update" class="input mono-in" bind:value={updateCmd} placeholder={'npm i -g opencode'} spellcheck="false" />
+        <input dir="ltr" id="pv-update" class="input mono-in" bind:value={updateCmd} placeholder={'npm i -g @kilocode/cli'} spellcheck="false" />
       </div>
       <div class="field">
         <label for="pv-model">Model flag template (optional)</label>

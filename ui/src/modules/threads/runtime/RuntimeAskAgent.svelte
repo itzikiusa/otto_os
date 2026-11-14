@@ -17,9 +17,9 @@
     supportsEffortSelection,
     type EffortLevel,
   } from '../../../lib/providerModels';
-  import { harnessLabel } from '../../../lib/providers';
+  import { agentProviders, harnessLabel } from '../../../lib/providers';
   import { auth } from '../../../lib/stores/auth.svelte';
-  import { ASK_MAX_TARGETS, ASK_PROVIDERS } from './askAgents';
+  import { ASK_MAX_TARGETS, askableProviders, type ASK_PROVIDERS } from './askAgents';
   import { askTargets } from './askTargets.svelte';
   import { fileMentionContext, type ComposerContext } from './composerContext';
   import RuntimeMentionMenu, { type PickedAgentMention, type PickedFileMention } from './RuntimeMentionMenu.svelte';
@@ -65,6 +65,7 @@
   let pickEffort = $state<EffortLevel | null>(null);
   const targets = $derived(askTargets.for(sessionId));
   const full = $derived(targets.length >= ASK_MAX_TARGETS);
+  const allowedProviders = $derived(askableProviders(agentProviders()));
 
   const label = (t: { provider: string; model?: string | null; effort?: string | null }): string =>
     [t.model ? formatModelLabel(t.provider, t.model, auth.meta) : harnessLabel(t.provider), t.effort ? formatEffortShort(t.effort) : null]
@@ -79,7 +80,7 @@
   const accessText = $derived(readOnly ? 'read-only, like this thread' : `${ACCESS[access]}, like this thread`);
 
   function openMenu(): void {
-    pickProvider = ASK_PROVIDERS.find((p) => p !== provider) ?? 'claude';
+    pickProvider = allowedProviders.find((p) => p !== provider) ?? allowedProviders[0] ?? 'claude';
     pickEffort = null;
     open = true;
   }
@@ -117,7 +118,7 @@
     aria-label={targets.length ? 'Ask one more agent' : 'Ask another agent'}
     title={full ? `At most ${ASK_MAX_TARGETS} agents at once` : 'Ask another agent: send this message to a new thread on another model (pick more to ask several; or type @)'}
     data-testid="runtime-ask-agent"
-    disabled={disabled || full}
+    disabled={disabled || full || allowedProviders.length === 0}
     onpointerenter={() => ModelPicker.prefetch()}
     onclick={openMenu}
   >
@@ -156,7 +157,7 @@
 {#if open && btn && ModelPicker.component}
   <ModelPicker.component
     anchor={btn}
-    providers={ASK_PROVIDERS}
+    providers={allowedProviders}
     provider={pickProvider}
     model={null}
     effort={pickEffort}

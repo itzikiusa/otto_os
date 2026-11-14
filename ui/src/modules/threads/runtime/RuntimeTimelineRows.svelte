@@ -66,7 +66,7 @@
     run_output: 'terminal',
   };
 
-  const rows = $derived(timelineRows(projection.items));
+  const rows = $derived(timelineRows(projection.items, projection.turns));
   const approvals = $derived(new Map(pendingApprovals(projection).map((a) => [a.requestId, a] as const)));
   const pendingIds = $derived(new Set(approvals.keys()));
   const requests = $derived(new Map(projection.requests.map((r) => [r.id, r] as const)));
@@ -109,6 +109,10 @@
 {#each rows as row (row.kind === 'message' ? row.item.id : row.id)}
   {#if row.kind === 'session'}
     <div class="rt-day" role="separator" aria-label="New session" data-testid="runtime-session-boundary"><span>New session</span></div>
+  {:else if row.kind === 'agent_turn'}
+    <div class="rt-day rt-agent-turn" role="separator" aria-label={row.label} data-testid="runtime-agent-turn-divider">
+      <Icon name="clock" size={12} /><span>{row.label}</span>
+    </div>
   {:else if row.kind === 'day'}
     <div class="rt-day" role="separator" aria-label={row.label}><span>{row.label}</span></div>
   {:else if row.kind === 'message' && row.item.type === 'user_message' && isRunHandoff(row.item.text)}

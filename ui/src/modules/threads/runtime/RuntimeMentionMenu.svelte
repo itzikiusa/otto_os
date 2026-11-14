@@ -7,9 +7,9 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../../lib/components/ProviderIcon.svelte';
   import { formatModelLabel, modelsForProvider } from '../../../lib/providerModels';
-  import { harnessLabel } from '../../../lib/providers';
+  import { agentProviders, harnessLabel } from '../../../lib/providers';
   import { auth } from '../../../lib/stores/auth.svelte';
-  import { mentionOptions, type AskOption } from './askAgents';
+  import { askableProviders, mentionOptions, type AskOption } from './askAgents';
   import { fetchMentionFileItems, instantOpenTabMentions } from './mentionClient';
   import {
     atMentionTokenAt,
@@ -97,6 +97,8 @@
       token.query,
       (p) => modelsForProvider(p, auth.meta),
       (p) => harnessLabel(p),
+      8,
+      askableProviders(agentProviders()),
     ).map((o) => ({
       ...o,
       label: o.model ? `${harnessLabel(o.provider)} · ${formatModelLabel(o.provider, o.model, auth.meta)}` : o.label,

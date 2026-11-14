@@ -304,6 +304,18 @@ pub trait StructuredDriver: Send + 'static {
 
     fn on_line(&mut self, line: &str) -> DriverStep;
 
+    /// Whether the running agent-initiated (`origin: agent`) turn has no
+    /// protocol-level end frame (e.g. ACP notifications) and is ready to settle
+    /// once stdout stays quiet for `RuntimeConfig::autonomous_settle`.
+    fn needs_idle_turn_settle(&self) -> bool {
+        false
+    }
+
+    /// Settle an idle agent-initiated turn once `autonomous_settle` elapses.
+    fn on_idle_settle(&mut self) -> DriverStep {
+        DriverStep::default()
+    }
+
     fn on_exit(&mut self, _code: Option<i32>) -> DriverStep {
         DriverStep::default()
     }

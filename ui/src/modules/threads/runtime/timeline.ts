@@ -72,7 +72,9 @@ export type TimelineRow =
   | { kind: 'work'; id: string; parts: WorkPart[] }
   /** A date separator, only in a thread that spans more than one day. */
   | { kind: 'day'; id: string; label: string }
-  | { kind: 'session'; id: string };
+  | { kind: 'session'; id: string }
+  /** Subtle divider before an autonomous/reactive agent wakeup turn (`origin === 'agent'`). */
+  | { kind: 'agent_turn'; id: string; label: string };
 
 const TOOL_TYPES: ReadonlySet<TurnItem['type']> = new Set(['command_execution', 'dynamic_tool', 'web_search', 'file_change']);
 const isTool = (i: TurnItem): boolean => TOOL_TYPES.has(i.type);
@@ -192,10 +194,12 @@ export function toolWords(name: string): string {
   return `${words.charAt(0).toUpperCase()}${words.slice(1)} (${server})`;
 }
 
-export function timelineRows(items: readonly TurnItem[]): TimelineRow[] {
+export function timelineRows(items: readonly TurnItem[], turns: readonly ProviderTurn[] = []): TimelineRow[] {
   // A subagent's own items render inside its card, not in the timeline;
   // plumbing tool calls and a lost-conversation error not at all.
   items = items.filter((i) => !i.parent_item_id && !isLostConversation(i) && !(i.type === 'dynamic_tool' && HIDDEN_TOOLS.has(i.tool_name)));
+  const agentTurnIds = new Set(turns.filter((t) => t.origin === 'agent').map((t) => t.id));
+  const shownAgentTurns = new Set<string>();
   // An approval naming a tool item we have folds into that tool's row.
   const tools = new Set(items.filter(isTool).map((i) => i.id));
   const folded = new Map<string, ApprovalItem>();
@@ -209,6 +213,11 @@ export function timelineRows(items: readonly TurnItem[]): TimelineRow[] {
     work = [];
   };
   for (const item of items) {
+    if (item.turn_id && agentTurnIds.has(item.turn_id) && !shownAgentTurns.has(item.turn_id) && item.type !== 'session_boundary') {
+      shownAgentTurns.add(item.turn_id);
+      flush();
+      rows.push({ kind: 'agent_turn', id: `agent-turn:${item.turn_id}`, label: 'Background update' });
+    }
     if (item.type === 'session_boundary') {
       flush();
       rows.push({ kind: 'session', id: item.id });

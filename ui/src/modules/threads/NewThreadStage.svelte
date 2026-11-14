@@ -23,7 +23,7 @@
     type EffortLevel,
     type InteractionMode,
   } from '../../lib/providerModels';
-  import { agentProviders, defaultAgentProvider, providerReadiness } from '../../lib/providers';
+  import { agentProviders, defaultAgentProvider, orderThreadHarnesses, providerReadiness } from '../../lib/providers';
   import {
     isImmediateSlashCommand,
     parseInteractiveSlashInput,
@@ -58,11 +58,7 @@
   }
   let { showCard = false }: Props = $props();
 
-  const harnesses = $derived.by(() => {
-    const merged = ['claude', 'codex', 'agy'];
-    for (const p of agentProviders()) if (!merged.includes(p)) merged.push(p);
-    return merged;
-  });
+  const harnesses = $derived(orderThreadHarnesses(agentProviders()));
 
   let provider = $state('');
   let selectedModel = $state<string | null>(null);
@@ -104,10 +100,10 @@
   });
 
   $effect(() => {
-    if (!provider) {
+    if (!provider || (harnesses.length > 0 && !harnesses.includes(provider))) {
       const def = defaultAgentProvider();
       const ready = harnesses.find((h) => providerReadiness(h).available);
-      provider = providerReadiness(def).available ? def : (ready ?? harnesses[0] ?? 'claude');
+      provider = harnesses.includes(def) && providerReadiness(def).available ? def : (ready ?? harnesses[0] ?? def);
     }
   });
 

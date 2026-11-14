@@ -21,7 +21,7 @@
     HandoverTarget,
     HandoverBriefResp,
   } from '../../lib/api/types';
-  import { agentProviders, defaultAgentProvider, providerReadiness } from '../../lib/providers';
+  import { agentProviders, defaultAgentProvider, providerReadiness, providerSubtitle } from '../../lib/providers';
 
   interface Props {
     sessionId: string;
@@ -83,16 +83,6 @@
 
   function toolFound(p: string): boolean {
     return providerReadiness(p).available;
-  }
-
-  function providerDesc(p: string): string {
-    return p === 'claude'
-      ? 'Claude Code CLI'
-      : p === 'codex'
-        ? 'Codex CLI'
-        : p === 'shell'
-          ? 'Plain shell'
-          : 'Custom provider';
   }
 
   // Default to the configured default agent; only if it equals the source (or
@@ -236,7 +226,7 @@
                 {#if p === source?.provider}<Badge label="Same" />{/if}
                 {#if !avail}<Badge label="Not found" />{/if}
               </span>
-              <span class="provider-desc">{providerDesc(p)}</span>
+              <span class="provider-desc">{providerSubtitle(p)}</span>
             </button>
           {/each}
         </div>

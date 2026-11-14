@@ -1,28 +1,48 @@
 <script lang="ts">
-  // The status line under a runtime thread's latest turn: "Working for 12s"
-  // (or "Continuing on its own" for a turn the agent started itself), then —
-  // once it ended — "Stopped" (neutral, never an error), "Stopped · no
-  // progress" (the stall watchdog), or "Partly done" when it answered but a
-  // step failed, with Details (the failed steps) and Send again.
+  // The status line under a runtime thread's latest turn: live activity +
+  // elapsed timer while running ("Working · Running npm test · 14s" or
+  // "Background wakeup · Thinking… · 4s"), a calm waiting line when idle with
+  // scheduled/background tasks ("Waiting on 1 background task: …"), or outcome
+  // ("Stopped", "Stopped · no progress", "Partly done").
   import Icon from '../../../lib/components/Icon.svelte';
+  import type { AgentTask } from './agentTasks';
+  import { deriveLiveFooter } from './liveStatus';
+  import type { RuntimeProjection } from './projection';
   import { workLabel, type TurnOutcome } from './timeline';
 
   interface Props {
-    /** "12s" while the turn runs, else null. */
+    projection?: RuntimeProjection | null;
+    /** Formatted elapsed string while the turn runs, else null. */
     workingFor: string | null;
-    /** The running turn is the agent's own. */
+    /** The running turn is the agent's own (`origin === 'agent'`). */
     ownTurn: boolean;
+    background?: readonly AgentTask[];
     outcome: TurnOutcome | null;
     disabled?: boolean;
     onresend: (text: string) => void;
   }
-  let { workingFor, ownTurn, outcome, disabled = false, onresend }: Props = $props();
+  let {
+    projection = null,
+    workingFor,
+    ownTurn,
+    background = [],
+    outcome,
+    disabled = false,
+    onresend,
+  }: Props = $props();
   let showFailed = $state(false);
+  const live = $derived(deriveLiveFooter(projection, workingFor, ownTurn, background));
 </script>
 
-{#if workingFor}
+{#if live?.mode === 'working'}
   <p class="ts" data-testid="runtime-working">
-    <span class="spinner" aria-hidden="true"></span>{ownTurn ? `Continuing on its own · ${workingFor}` : `Working for ${workingFor}`}
+    <span class="spinner" aria-hidden="true"></span>
+    <span>{live.prefix} · {live.activity} · {live.elapsed}</span>
+  </p>
+{:else if live?.mode === 'waiting_bg'}
+  <p class="ts ts-bg" data-testid="runtime-bg-waiting">
+    <span class="pulse-dot" aria-hidden="true"></span>
+    <span>{live.text}</span>
   </p>
 {:else if outcome?.kind === 'stopped'}
   <p class="ts">Stopped</p>
@@ -55,6 +75,22 @@
   }
   .ts .spinner {
     --spinner-size: 11px;
+  }
+  .ts-bg {
+    padding-block: 4px;
+  }
+  .pulse-dot {
+    inline-size: 7px;
+    block-size: 7px;
+    border-radius: 50%;
+    flex: none;
+    background: var(--accent-text);
+    animation: otto-pulse 2s ease-in-out infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .pulse-dot {
+      animation: none;
+    }
   }
   .ts-failed {
     margin: 2px 0 0;

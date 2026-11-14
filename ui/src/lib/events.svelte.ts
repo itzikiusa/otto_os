@@ -494,12 +494,19 @@ class EventsClient {
   private wirePresence(): void {
     if (this.presenceWired || typeof window === 'undefined') return;
     this.presenceWired = true;
+    const onWake = () => {
+      this.schedulePresence();
+      if (!this.stopped && !document.hidden && (!this.sock || this.sock.readyState !== WebSocket.OPEN)) {
+        this.reconnectNow();
+      }
+    };
     window.addEventListener('hashchange', this.schedulePresence);
     window.addEventListener('focus', this.schedulePresence);
     window.addEventListener('blur', this.schedulePresence);
+    window.addEventListener('online', onWake);
     // Focus moving between this document and the side pane's iframe.
     document.addEventListener('focusin', this.schedulePresence);
-    document.addEventListener('visibilitychange', this.schedulePresence);
+    document.addEventListener('visibilitychange', onWake);
     // A module that registers its handlers late: re-introduce the document.
     let t: ReturnType<typeof setTimeout> | null = null;
     onUiCapabilitiesChanged(() => {
