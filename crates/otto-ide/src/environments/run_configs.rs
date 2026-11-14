@@ -1,0 +1,355 @@
+//! Run Configurations CRUD and Active Run Session management for [`super::EnvironmentManager`].
+
+use std::collections::BTreeMap;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+
+use chrono::Utc;
+use otto_core::{new_id, Error, Result};
+use otto_state::DbPool;
+use tokio::sync::watch;
+
+use super::db_store::{clean_opt, row_to_run_config};
+use super::discovery::discover_run_configs;
+use super::runner::{evict_finished_runs, execute_run_task, ActiveRunHandle, RunStateInner};
+use super::{EnvironmentManager, SecretAccess};
+use crate::target::TargetManager;
+use crate::types::{
+    IdeRunConfig, IdeRunState, IdeRunnerKind, IdeSshSpec, IdeStartRunReq, IdeTargetKind,
+    IdeTargetSpec, IdeUpsertRunConfigReq,
+};
+
+impl EnvironmentManager {
+    pub async fn list_run_configs(
+        &self,
+        pool: &DbPool,
+        target: &IdeTargetSpec,
+    ) -> Result<Vec<IdeRunConfig>> {
+        target.validate()?;
+        let rows = sqlx::query(
+            r#"SELECT id, name, runner, command, args_json, build_flags_json, cwd,
+                      env_overrides_json, env_file, inherit_shell_env, sdk_path,
+                      toolchain_id, before_launch, target_path, test_filter, compound_ids_json
+               FROM ide_run_configs
+               WHERE project_key = ?
+               ORDER BY created_at ASC, name ASC"#,
+        )
+        .bind(target.project_key())
+        .fetch_all(pool)
+        .await
+        .map_err(|e| Error::Internal(format!("list ide_run_configs: {e}")))?;
+
+        Ok(rows.iter().map(row_to_run_config).collect())
+    }
+
+    pub async fn get_run_config(&self, pool: &DbPool, id: &str) -> Result<IdeRunConfig> {
+        let row = sqlx::query(
+            r#"SELECT id, name, runner, command, args_json, build_flags_json, cwd,
+                      env_overrides_json, env_file, inherit_shell_env, sdk_path,
+                      toolchain_id, before_launch, target_path, test_filter, compound_ids_json
+               FROM ide_run_configs WHERE id = ?"#,
+        )
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| Error::Internal(format!("get ide_run_config: {e}")))?
+        .ok_or_else(|| Error::NotFound(format!("run config '{id}'")))?;
+        Ok(row_to_run_config(&row))
+    }
+
+    pub async fn resolve_run_config_or_auto(
+        &self,
+        pool: &DbPool,
+        target: &IdeTargetSpec,
+        id: &str,
+    ) -> Result<IdeRunConfig> {
+        if let Ok(saved) = self.get_run_config(pool, id).await {
+            return Ok(saved);
+        }
+        if id.starts_with("auto:") && target.kind == IdeTargetKind::Local {
+            let mut enriched = target.clone();
+            self.enrich_target_roots(pool, &mut enriched).await;
+            let extra = enriched.additional_roots.clone();
+            let id_owned = id.to_string();
+            let found = tokio::task::spawn_blocking(move || {
+                discover_run_configs(&enriched, &extra)
+                    .into_iter()
+                    .find(|c| c.id == id_owned)
+            })
+            .await
+            .ok()
+            .flatten();
+            if let Some(cfg) = found {
+                return Ok(cfg);
+            }
+        }
+        Err(Error::NotFound(format!("run config '{id}'")))
+    }
+
+    pub async fn upsert_run_config(
+        &self,
+        pool: &DbPool,
+        req: IdeUpsertRunConfigReq,
+    ) -> Result<IdeRunConfig> {
+        self.upsert_run_config_parts(pool, &req.target, req.config)
+            .await
+    }
+
+    pub async fn upsert_run_config_parts(
+        &self,
+        pool: &DbPool,
+        target: &IdeTargetSpec,
+        mut cfg: IdeRunConfig,
+    ) -> Result<IdeRunConfig> {
+        target.validate()?;
+        if cfg.name.trim().is_empty() {
+            return Err(Error::Invalid(
+                "run configuration name cannot be empty".into(),
+            ));
+        }
+        if cfg.id.trim().is_empty() || cfg.id.starts_with("auto:") {
+            cfg.id = format!("rc_{}", new_id());
+        }
+        cfg.auto_detected = false;
+        let target_kind = match target.kind {
+            IdeTargetKind::Local => "local",
+            IdeTargetKind::Ssh => "ssh",
+        };
+        let runner_str = serde_json::to_value(cfg.runner)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "custom".into());
+        let args_json = serde_json::to_string(&cfg.args).unwrap_or_else(|_| "[]".into());
+        let build_flags_json =
+            serde_json::to_string(&cfg.build_flags).unwrap_or_else(|_| "[]".into());
+        let env_overrides_json =
+            serde_json::to_string(&cfg.env_overrides).unwrap_or_else(|_| "{}".into());
+        let compound_ids_json =
+            serde_json::to_string(&cfg.compound_configs).unwrap_or_else(|_| "[]".into());
+        let now = Utc::now().to_rfc3339();
+
+        sqlx::query(
+            r#"INSERT INTO ide_run_configs (
+                   id, project_key, target_kind, connection_id, root_path,
+                   name, runner, command, args_json, build_flags_json, cwd,
+                   env_overrides_json, env_file, inherit_shell_env, sdk_path,
+                   toolchain_id, before_launch, target_path, test_filter, compound_ids_json,
+                   created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                   project_key = excluded.project_key,
+                   target_kind = excluded.target_kind,
+                   connection_id = excluded.connection_id,
+                   root_path = excluded.root_path,
+                   name = excluded.name,
+                   runner = excluded.runner,
+                   command = excluded.command,
+                   args_json = excluded.args_json,
+                   build_flags_json = excluded.build_flags_json,
+                   cwd = excluded.cwd,
+                   env_overrides_json = excluded.env_overrides_json,
+                   env_file = excluded.env_file,
+                   inherit_shell_env = excluded.inherit_shell_env,
+                   sdk_path = excluded.sdk_path,
+                   toolchain_id = excluded.toolchain_id,
+                   before_launch = excluded.before_launch,
+                   target_path = excluded.target_path,
+                   test_filter = excluded.test_filter,
+                   compound_ids_json = excluded.compound_ids_json,
+                   updated_at = excluded.updated_at"#,
+        )
+        .bind(&cfg.id)
+        .bind(target.project_key())
+        .bind(target_kind)
+        .bind(&target.connection_id)
+        .bind(&target.root)
+        .bind(cfg.name.trim())
+        .bind(&runner_str)
+        .bind(clean_opt(&cfg.command))
+        .bind(&args_json)
+        .bind(&build_flags_json)
+        .bind(clean_opt(&cfg.cwd))
+        .bind(&env_overrides_json)
+        .bind(clean_opt(&cfg.env_file))
+        .bind(i32::from(cfg.inherit_shell_env))
+        .bind(clean_opt(&cfg.sdk_path))
+        .bind(clean_opt(&cfg.toolchain_id))
+        .bind(clean_opt(&cfg.before_launch))
+        .bind(clean_opt(&cfg.target_path))
+        .bind(clean_opt(&cfg.test_filter))
+        .bind(&compound_ids_json)
+        .bind(&now)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .map_err(|e| Error::Internal(format!("upsert ide_run_config: {e}")))?;
+
+        Ok(cfg)
+    }
+
+    pub async fn delete_run_config(&self, pool: &DbPool, id: &str) -> Result<()> {
+        let res = sqlx::query("DELETE FROM ide_run_configs WHERE id = ?")
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(|e| Error::Internal(format!("delete ide_run_config: {e}")))?;
+        if res.rows_affected() == 0 {
+            return Err(Error::NotFound(format!("run config '{id}'")));
+        }
+        Ok(())
+    }
+
+    pub fn get_run(&self, run_id: &str) -> Result<IdeRunState> {
+        self.get_run_with_tail(run_id, None)
+    }
+
+    pub fn get_run_with_tail(
+        &self,
+        run_id: &str,
+        tail_lines: Option<usize>,
+    ) -> Result<IdeRunState> {
+        self.runs
+            .get(run_id)
+            .map(|e| e.value().snapshot_with_tail(tail_lines))
+            .ok_or_else(|| Error::NotFound(format!("IDE run '{run_id}'")))
+    }
+
+    pub fn list_runs(&self) -> Vec<IdeRunState> {
+        let mut out: Vec<IdeRunState> = self.runs.iter().map(|e| e.value().snapshot()).collect();
+        out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        out
+    }
+
+    pub async fn stop_run(&self, run_id: &str) -> Result<IdeRunState> {
+        let snap = self
+            .runs
+            .get(run_id)
+            .map(|e| e.value().stop())
+            .ok_or_else(|| Error::NotFound(format!("IDE run '{run_id}'")))?;
+        evict_finished_runs(&self.runs);
+        Ok(snap)
+    }
+
+    pub async fn start_run<S: SecretAccess + ?Sized>(
+        &self,
+        pool: &DbPool,
+        secrets: &S,
+        targets: &TargetManager,
+        mut req: IdeStartRunReq,
+        ssh: Option<IdeSshSpec>,
+    ) -> Result<IdeRunState> {
+        req.target.validate()?;
+        for pf in &req.project_folders {
+            if !pf.is_empty() && !req.target.project_folders.contains(pf) {
+                req.target.project_folders.push(pf.clone());
+            }
+        }
+        self.enrich_target_roots(pool, &mut req.target).await;
+
+        let mut cfg = if let Some(adhoc) = req.adhoc {
+            adhoc
+        } else if let Some(cid) = req.config_id.as_deref().filter(|s| !s.is_empty()) {
+            self.resolve_run_config_or_auto(pool, &req.target, cid)
+                .await?
+        } else {
+            return Err(Error::Invalid(
+                "start_run requires either config_id or adhoc configuration".into(),
+            ));
+        };
+
+        for mp in req.maven_profiles {
+            if !mp.is_empty() && !cfg.maven_profiles.contains(&mp) {
+                cfg.maven_profiles.push(mp);
+            }
+        }
+        for sp in req.spring_profiles {
+            if !sp.is_empty() && !cfg.spring_profiles.contains(&sp) {
+                cfg.spring_profiles.push(sp);
+            }
+        }
+        if req.skip_tests {
+            cfg.skip_tests = true;
+        }
+        if req.offline {
+            cfg.offline = true;
+        }
+
+        let mut steps: Vec<(IdeRunConfig, BTreeMap<String, String>)> = Vec::new();
+        if cfg.runner == IdeRunnerKind::Compound && !cfg.compound_configs.is_empty() {
+            for member_id in cfg.compound_configs.iter().take(12) {
+                if member_id == &cfg.id {
+                    continue;
+                }
+                let mut member_cfg = self
+                    .resolve_run_config_or_auto(pool, &req.target, member_id)
+                    .await?;
+                if member_cfg.runner == IdeRunnerKind::Compound {
+                    continue;
+                }
+                if member_cfg.maven_profiles.is_empty() {
+                    member_cfg.maven_profiles = cfg.maven_profiles.clone();
+                }
+                if member_cfg.spring_profiles.is_empty() {
+                    member_cfg.spring_profiles = cfg.spring_profiles.clone();
+                }
+                member_cfg.skip_tests |= cfg.skip_tests;
+                member_cfg.offline |= cfg.offline;
+                let member_env = self
+                    .build_effective_env_for_run(pool, secrets, &req.target, Some(&member_cfg))
+                    .await?;
+                steps.push((member_cfg, member_env));
+            }
+            if steps.is_empty() {
+                return Err(Error::Invalid(
+                    "compound run configuration contains no runnable steps".into(),
+                ));
+            }
+        } else {
+            let env_map = self
+                .build_effective_env_for_run(pool, secrets, &req.target, Some(&cfg))
+                .await?;
+            steps.push((cfg.clone(), env_map));
+        }
+
+        let run_id = format!("run_{}", new_id());
+        let title = if cfg.name.trim().is_empty() {
+            format!("{:?}", cfg.runner)
+        } else {
+            cfg.name.clone()
+        };
+        let started_at = Utc::now().to_rfc3339();
+        let seq = self.run_seq.fetch_add(1, Ordering::Relaxed);
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let handle = Arc::new(ActiveRunHandle {
+            seq,
+            state: Mutex::new(RunStateInner::new(
+                run_id.clone(),
+                title,
+                cfg.runner,
+                started_at,
+            )),
+            stop_tx,
+        });
+        let initial = handle.snapshot();
+        self.runs.insert(run_id, Arc::clone(&handle));
+        evict_finished_runs(&self.runs);
+
+        let runs_clone = Arc::clone(&self.runs);
+        let targets_clone = targets.clone();
+        let target_spec = req.target;
+        tokio::spawn(async move {
+            execute_run_task(
+                runs_clone,
+                handle,
+                targets_clone,
+                target_spec,
+                ssh,
+                steps,
+                stop_rx,
+            )
+            .await;
+        });
+
+        Ok(initial)
+    }
+}

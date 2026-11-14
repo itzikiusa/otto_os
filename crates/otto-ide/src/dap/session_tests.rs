@@ -247,6 +247,7 @@ async fn full_mock_dap_lifecycle_over_duplex() {
             test_name: Some("TestAdd".into()),
             attach_port: None,
             env: BTreeMap::new(),
+            ..IdeDebugLaunchSpec::default()
         },
         breakpoints: vec![IdeBreakpoint {
             path: canon_src.clone(),
@@ -258,6 +259,7 @@ async fn full_mock_dap_lifecycle_over_duplex() {
             verified: None,
             message: None,
         }],
+        ..IdeStartDebugReq::default()
     };
 
     let started = mgr
@@ -468,6 +470,7 @@ async fn launch_compile_error_fails_fast_without_hanging_on_initialized() {
             ..IdeDebugLaunchSpec::default()
         },
         breakpoints: Vec::new(),
+        ..IdeStartDebugReq::default()
     };
     let t0 = std::time::Instant::now();
     let err = mgr
@@ -563,6 +566,7 @@ async fn shell_dap_bridge_hits_breakpoint_inspects_vars_and_killpg_cleans_grandc
             test_name: None,
             attach_port: None,
             env: BTreeMap::new(),
+            ..IdeDebugLaunchSpec::default()
         },
         breakpoints: vec![IdeBreakpoint {
             path: script.to_string_lossy().into_owned(),
@@ -574,6 +578,7 @@ async fn shell_dap_bridge_hits_breakpoint_inspects_vars_and_killpg_cleans_grandc
             verified: None,
             message: None,
         }],
+        ..IdeStartDebugReq::default()
     };
 
     let started = mgr
@@ -627,4 +632,55 @@ async fn shell_dap_bridge_hits_breakpoint_inspects_vars_and_killpg_cleans_grandc
         .await
         .unwrap();
     assert_eq!(stopped.state, IdeDebugState::Terminated);
+}
+
+#[test]
+fn debug_output_ring_and_terminated_session_eviction_enforce_caps() {
+    let dummy_req = || IdeStartDebugReq {
+        target: IdeTargetSpec::local("/tmp"),
+        language: "go".into(),
+        launch: IdeDebugLaunchSpec {
+            program: "main.go".into(),
+            ..IdeDebugLaunchSpec::default()
+        },
+        ..IdeStartDebugReq::default()
+    };
+
+    let mgr = DapManager::new(PathBuf::from("/tmp/otto-dap-test"));
+    for i in 0..10u64 {
+        let id = format!("dbg_term_{i:02}");
+        let meta = (id.clone(), "Test".into(), "go".into(), "dlv".into());
+        let entry = SessionEntry::new(i, meta, Vec::new(), dummy_req(), DapStartContext::new());
+        entry.mutate_and_broadcast(|snap| snap.state = IdeDebugState::Terminated);
+        mgr.sessions.insert(id, entry);
+        evict_terminated_sessions(&mgr.sessions);
+    }
+
+    let live_meta = ("dbg_live".into(), "Live".into(), "go".into(), "dlv".into());
+    let live = SessionEntry::new(
+        99,
+        live_meta,
+        Vec::new(),
+        dummy_req(),
+        DapStartContext::new(),
+    );
+    for i in 0..(MAX_DEBUG_OUTPUT + 250) {
+        live.append_output("stdout", format!("line-{i}"));
+    }
+    mgr.sessions.insert("dbg_live".into(), Arc::clone(&live));
+    evict_terminated_sessions(&mgr.sessions);
+
+    assert_eq!(mgr.sessions.len(), MAX_TERMINATED_DEBUG_SESSIONS + 1);
+    assert!(mgr.get_session("dbg_term_00").is_err());
+    assert!(mgr.get_session("dbg_term_05").is_err());
+    assert!(mgr.get_session("dbg_term_06").is_ok());
+    assert!(mgr.get_session("dbg_term_09").is_ok());
+
+    let snap = mgr.get_session("dbg_live").unwrap();
+    assert_eq!(snap.output.len(), MAX_DEBUG_OUTPUT);
+    assert_eq!(snap.output[0].text, "line-250");
+    assert_eq!(
+        snap.output[MAX_DEBUG_OUTPUT - 1].text,
+        format!("line-{}", MAX_DEBUG_OUTPUT + 249)
+    );
 }

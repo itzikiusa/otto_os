@@ -1,9 +1,10 @@
-//! Zero-install Shell (`bash` / `.sh`) Debug Adapter Protocol bridge (`shell_bridge`).
+//! Zero-install Shell (`bash` + `zsh`) Debug Adapter Protocol bridge (`shell_bridge`).
 //!
-//! Spawns `bash` with `set -T` (`functrace`) and a `trap ... DEBUG` hook communicating
-//! over dedicated out-of-band FIFOs so the debuggee script's `stdin`/`stdout`/`stderr`
-//! and `$()` subshells remain completely unpolluted. Compatible with macOS stock
-//! `/bin/bash` 3.2 as well as Bash 4/5.
+//! Spawns `bash` (`set -T` + `trap ... DEBUG`) or `zsh` (`setopt DEBUG_BEFORE_CMD` +
+//! `TRAPDEBUG` + `funcfiletrace`) communicating over dedicated out-of-band FIFOs +
+//! atomic breakpoint/pause control files so debuggee `stdin`/`stdout`/`stderr` and `$()`
+//! subshells remain completely unpolluted, and mid-run breakpoints & `pause` take effect
+//! immediately while loops are running.
 
 use std::collections::BTreeMap;
 #[cfg(unix)]
@@ -32,15 +33,24 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 #[cfg(unix)]
+use super::shell_prelude::{BASH_PRELUDE, ZSH_PRELUDE};
+#[cfg(unix)]
 use super::wire::{DapMessage, DapReader, DapWriter};
 use super::BridgeGuard;
 #[cfg(unix)]
 use crate::types::IdeTargetKind;
 use crate::types::{IdeSshSpec, IdeTargetSpec};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellFlavor {
+    Bash,
+    Zsh,
+}
+
 #[derive(Debug, Clone)]
 pub struct ShellBridgeSpec {
-    pub bash_bin: String,
+    pub shell_bin: String,
+    pub flavor: ShellFlavor,
     pub program: String,
     pub args: Vec<String>,
     pub cwd: String,
@@ -60,119 +70,9 @@ struct ShellBp {
 #[cfg(unix)]
 #[derive(Debug, Clone)]
 struct PausedState {
-    frames: Vec<(String, String, u32)>, // (func, path, line)
+    frames: Vec<(String, String, u32)>,
     vars: Vec<(String, String)>,
 }
-
-#[cfg(unix)]
-const BASH_PRELUDE: &str = r#"
-_otto_fifo_evt="$OTTO_SH_DAP_EVT"
-_otto_fifo_cmd="$OTTO_SH_DAP_CMD"
-_otto_target="$OTTO_SH_DAP_TARGET"
-unset OTTO_SH_DAP_EVT OTTO_SH_DAP_CMD OTTO_SH_DAP_TARGET
-
-exec 8<"$_otto_fifo_cmd"
-exec 9>"$_otto_fifo_evt"
-printf 'READY\n' >&9
-
-_otto_mode="step_in"
-_otto_target_depth=0
-_otto_bps="|"
-_otto_started=0
-
-# Wait for initial breakpoint configuration & configurationDone before running script
-while IFS= read -r _otto_init_cmd <&8; do
-  case "$_otto_init_cmd" in
-    BPS\|*) _otto_bps="${_otto_init_cmd#BPS}" ;;
-    RUN\|*) _otto_mode="${_otto_init_cmd#RUN|}"; break ;;
-    QUIT) exit 0 ;;
-  esac
-done
-
-_otto_trap_handler() {
-  [ "${BASH_SUBSHELL:-0}" -eq 0 ] || return 0
-  local _fn="${FUNCNAME[1]:-main}"
-  case "$_fn" in
-    _otto_*) return 0 ;;
-  esac
-  local _src="${BASH_SOURCE[1]:-$_otto_target}"
-  local _ln="${1:-1}"
-  [ -z "$_src" ] && return 0
-  case "$_src" in
-    /*) ;;
-    *) _src="$PWD/$_src" ;;
-  esac
-
-  local _depth="${#FUNCNAME[@]}"
-  local _hit=0
-  case "$_otto_bps" in
-    *"|$_src:$_ln|"*) _hit=1 ;;
-  esac
-
-  local _stop=0
-  if [ "$_hit" -eq 1 ]; then
-    _stop=1
-  elif [ "$_otto_mode" = "step_in" ]; then
-    _stop=1
-  elif [ "$_otto_mode" = "step_over" ] && [ "$_depth" -le "$_otto_target_depth" ]; then
-    _stop=1
-  elif [ "$_otto_mode" = "step_out" ] && [ "$_depth" -lt "$_otto_target_depth" ]; then
-    _stop=1
-  fi
-  [ "$_stop" -eq 1 ] || return 0
-
-  local _reason="step"
-  [ "$_hit" -eq 1 ] && _reason="breakpoint"
-
-  printf 'STOP|%s|%s|%s|%s\n' "$_reason" "$_fn" "$_src" "$_ln" >&9
-  local _i=1
-  local _max="${#BASH_SOURCE[@]}"
-  while [ "$_i" -lt "$_max" ]; do
-    local _f_name="${FUNCNAME[$_i]:-main}"
-    local _f_src="${BASH_SOURCE[$_i]:-$_src}"
-    local _f_ln="$_ln"
-    if [ "$_i" -gt 1 ]; then
-      local _prev=$((_i - 1))
-      _f_ln="${BASH_LINENO[$_prev]:-1}"
-    fi
-    printf 'FRAME|%s|%s|%s\n' "$_f_name" "$_f_src" "$_f_ln" >&9
-    _i=$((_i + 1))
-  done
-
-  while IFS='=' read -r _vk _vv; do
-    case "$_vk" in
-      _otto_*|BASH*|FUNCNAME|LINENO|OPTIND|OPTERR|PPID|SHELLOPTS|UID|EUID|GROUPS|IFS|_*|*[!A-Za-z0-9_]*) ;;
-      *) printf 'VAR|%s|%s\n' "$_vk" "${_vv}" >&9 ;;
-    esac
-  done <<EOF_VARS
-$(set -o posix; set)
-EOF_VARS
-  printf 'END_STOP\n' >&9
-
-  while IFS= read -r _cmd <&8; do
-    case "$_cmd" in
-      BPS\|*) _otto_bps="${_cmd#BPS}" ;;
-      CONT) _otto_mode="run"; return 0 ;;
-      NEXT) _otto_mode="step_over"; _otto_target_depth="$_depth"; return 0 ;;
-      STEP) _otto_mode="step_in"; return 0 ;;
-      OUT)  _otto_mode="step_out"; _otto_target_depth="$_depth"; return 0 ;;
-      EVAL\|*)
-        local _expr="${_cmd#EVAL|}"
-        local _out=""
-        local _rc=0
-        _out="$(eval "$_expr" 2>&1)" || _rc=$?
-        _out="${_out//$'\n'/ }"
-        printf 'EVAL_RES|%s|%s\n' "$_rc" "$_out" >&9
-        ;;
-      QUIT) exit 0 ;;
-    esac
-  done
-}
-
-set -T
-trap '_otto_trap_handler "$LINENO"' DEBUG
-. "$_otto_target" "$@"
-"#;
 
 #[cfg(not(unix))]
 pub(crate) async fn spawn_shell_dap_bridge(
@@ -203,16 +103,23 @@ pub(crate) async fn spawn_shell_dap_bridge(
         .map_err(|e| Error::Internal(format!("create shell debug ipc dir: {e}")))?;
     let cmd_fifo = ipc_dir.join("cmd.fifo");
     let evt_fifo = ipc_dir.join("evt.fifo");
-    let prelude_file = ipc_dir.join("prelude.bash");
+    let bps_file = ipc_dir.join("bps.txt");
+    let pause_file = ipc_dir.join("pause.flag");
+    let (prelude_name, prelude_body) = match spec.flavor {
+        ShellFlavor::Bash => ("prelude.bash", BASH_PRELUDE),
+        ShellFlavor::Zsh => ("prelude.zsh", ZSH_PRELUDE),
+    };
+    let prelude_file = ipc_dir.join(prelude_name);
 
     make_fifo(&cmd_fifo).await?;
     make_fifo(&evt_fifo).await?;
-    tokio::fs::write(&prelude_file, BASH_PRELUDE)
+    tokio::fs::write(&bps_file, "|\n")
+        .await
+        .map_err(|e| Error::Internal(format!("write shell bps file: {e}")))?;
+    tokio::fs::write(&prelude_file, prelude_body)
         .await
         .map_err(|e| Error::Internal(format!("write shell debug prelude: {e}")))?;
 
-    // Open kqueue/epoll non-blocking FIFO endpoints (`tokio::net::unix::pipe`) so zero
-    // `tokio::fs::File` `spawn_blocking` threads are ever pinned or leaked on stop/drop.
     let evt_pipe = pipe::OpenOptions::new()
         .open_receiver(&evt_fifo)
         .map_err(|e| Error::Internal(format!("open evt fifo receiver: {e}")))?;
@@ -237,9 +144,20 @@ pub(crate) async fn spawn_shell_dap_bridge(
         "OTTO_SH_DAP_EVT".into(),
         evt_fifo.to_string_lossy().into_owned(),
     );
+    env.insert(
+        "OTTO_SH_DAP_BPS".into(),
+        bps_file.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "OTTO_SH_DAP_PAUSE".into(),
+        pause_file.to_string_lossy().into_owned(),
+    );
     env.insert("OTTO_SH_DAP_TARGET".into(), spec.program.clone());
 
-    let mut cmd = Command::new(&spec.bash_bin);
+    let mut cmd = Command::new(&spec.shell_bin);
+    if spec.flavor == ShellFlavor::Zsh {
+        cmd.arg("--no-rcs");
+    }
     cmd.arg(&prelude_file)
         .args(&spec.args)
         .current_dir(&spec.cwd)
@@ -252,7 +170,7 @@ pub(crate) async fn spawn_shell_dap_bridge(
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| Error::Upstream(format!("failed to spawn bash debugger: {e}")))?;
+        .map_err(|e| Error::Upstream(format!("failed to spawn shell debugger: {e}")))?;
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -325,6 +243,9 @@ async fn run_shell_bridge_loop(
     let (r_half, w_half) = tokio::io::split(bridge_io);
     let mut dap_in = DapReader::new(r_half);
     let mut dap_out = DapWriter::new(w_half);
+    let bps_file = ipc_dir.join("bps.txt");
+    let bps_tmp = ipc_dir.join("bps.tmp");
+    let pause_file = ipc_dir.join("pause.flag");
 
     let (trap_tx, mut trap_rx) = mpsc::unbounded_channel::<TrapMsg>();
 
@@ -366,12 +287,13 @@ async fn run_shell_bridge_loop(
             let mut cur_vars: Vec<(String, String)> = Vec::new();
             while let Ok(Some(line)) = lines.next_line().await {
                 if line == "READY" {
-                    // `bash` now holds fd 9 open write-only on `evt_fifo`; drop our keepalive
-                    // writer so `bash` exiting delivers immediate kernel EOF to `evt_pipe`.
                     if let Ok(mut g) = keepalive.lock() {
                         *g = None;
                     }
                     continue;
+                }
+                if line == "EXIT" {
+                    break;
                 }
                 if let Some(rest) = line.strip_prefix("STOP|") {
                     let parts: Vec<&str> = rest.splitn(4, '|').collect();
@@ -417,6 +339,7 @@ async fn run_shell_bridge_loop(
     let mut bps_by_file: HashMap<String, Vec<ShellBp>> = HashMap::new();
     let mut paused: Option<PausedState> = None;
     let mut pending_eval_seq: Option<i64> = None;
+    let mut started = false;
 
     loop {
         tokio::select! {
@@ -456,17 +379,26 @@ async fn run_shell_bridge_loop(
                         }
                         bps_by_file.insert(canon, file_bps);
                         let encoded = encode_bp_list(&bps_by_file);
-                        let _ = cmd_pipe.write_all(format!("BPS{encoded}\n").as_bytes()).await;
+                        if tokio::fs::write(&bps_tmp, format!("{encoded}\n")).await.is_ok() {
+                            let _ = tokio::fs::rename(&bps_tmp, &bps_file).await;
+                        }
+                        if !started || paused.is_some() {
+                            let _ = cmd_pipe.write_all(format!("BPS{encoded}\n").as_bytes()).await;
+                        }
                         let _ = dap_out.send_response(req.seq, "setBreakpoints", Ok(Some(json!({ "breakpoints": ack })))).await;
                     }
                     "configurationDone" => {
-                        let initial_mode = if bps_by_file.values().any(|v| !v.is_empty()) { "run" } else { "step_in" };
-                        let _ = cmd_pipe.write_all(format!("RUN|{initial_mode}\n").as_bytes()).await;
+                        started = true;
+                        let _ = cmd_pipe.write_all(b"RUN|run\n").await;
                         let _ = dap_out.send_response(req.seq, "configurationDone", Ok(Some(json!({})))).await;
+                    }
+                    "pause" => {
+                        let _ = tokio::fs::write(&pause_file, b"1").await;
+                        let _ = dap_out.send_response(req.seq, "pause", Ok(Some(json!({})))).await;
                     }
                     "threads" => {
                         let _ = dap_out.send_response(req.seq, "threads", Ok(Some(json!({
-                            "threads": [{ "id": 1, "name": "bash main" }]
+                            "threads": [{ "id": 1, "name": "shell main" }]
                         })))).await;
                     }
                     "stackTrace" => {

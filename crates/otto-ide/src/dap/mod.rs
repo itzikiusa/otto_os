@@ -12,13 +12,18 @@
 //!   inspection, IntelliJ-style inline ghost variable values, and SSE broadcasts.
 
 pub mod adapters;
+pub(crate) mod adapters_go_py;
 pub(crate) mod adapters_jvm_js;
+pub(crate) mod adapters_rust_sh;
 pub(crate) mod java_bridge;
+pub(crate) mod lldb_bridge;
 pub(crate) mod node_bridge;
 pub(crate) mod py_bridge;
 pub mod session;
 pub(crate) mod session_inspect;
+pub(crate) mod session_transport;
 pub(crate) mod shell_bridge;
+mod shell_prelude;
 pub mod wire;
 
 use std::collections::BTreeMap;
@@ -34,7 +39,8 @@ use tokio::process::{Child, Command};
 use crate::types::{IdeSshSpec, IdeTargetKind, IdeTargetSpec};
 
 pub use adapters::{resolve_dap_adapter, DapAdapterTransport, ResolvedDapAdapter};
-pub use java_bridge::JavaJdbBridgeSpec;
+pub use java_bridge::JavaJdwpBridgeSpec;
+pub type JavaJdbBridgeSpec = JavaJdwpBridgeSpec;
 pub use node_bridge::NodeInspectorBridgeSpec;
 pub use session::{DapManager, DapStartContext};
 pub use shell_bridge::ShellBridgeSpec;

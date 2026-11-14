@@ -87,7 +87,14 @@ pub(crate) fn collect_readonly_sdk_roots(extra_dirs: &[PathBuf]) -> Vec<PathBuf>
             .or_else(|| shell_env.get(key).cloned().filter(|v| !v.trim().is_empty()))
     };
 
-    for key in ["GOROOT", "GOMODCACHE", "JAVA_HOME", "VIRTUAL_ENV"] {
+    for key in [
+        "GOROOT",
+        "GOMODCACHE",
+        "JAVA_HOME",
+        "VIRTUAL_ENV",
+        "MAVEN_REPO_LOCAL",
+        "GRADLE_USER_HOME",
+    ] {
         if let Some(v) = env_val(key) {
             candidates.push(PathBuf::from(v));
         }
@@ -655,4 +662,92 @@ fn find_jar_by_name(
         }
     }
     None
+}
+
+/// Discover local Go `replace` (`go.mod` / `go.work`) and `use` (`go.work`) target
+/// directories referenced by `primary_root` or `additional_roots`, returning
+/// canonicalized writable workspace directories (`<0.5ms`, zero subprocesses).
+#[allow(clippy::disallowed_methods)] // tiny manifest reads (`go.mod` / `go.work` <64KB)
+pub(crate) fn discover_local_go_replace_roots(
+    primary_root: &Path,
+    additional_roots: &[PathBuf],
+    is_root_user: bool,
+) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut inspect_dirs: Vec<PathBuf> = Vec::with_capacity(1 + additional_roots.len() + 1);
+    inspect_dirs.push(primary_root.to_path_buf());
+    inspect_dirs.extend(additional_roots.iter().cloned());
+    if let Some(parent) = primary_root.parent() {
+        if parent.join("go.work").is_file() && !inspect_dirs.iter().any(|d| d == parent) {
+            inspect_dirs.push(parent.to_path_buf());
+        }
+    }
+
+    let mut push_candidate = |base: &Path, raw_target: &str| {
+        let trimmed = raw_target.trim().trim_matches('"').trim_matches('\'');
+        if trimmed.is_empty() {
+            return;
+        }
+        // Only local path targets (`./...`, `../...`, `/...`, `~/...`, or existing relative dir)
+        let candidate = if let Some(rest) = trimmed.strip_prefix("~/") {
+            let Some(home) = dirs::home_dir() else {
+                return;
+            };
+            home.join(rest)
+        } else if Path::new(trimmed).is_absolute() {
+            PathBuf::from(trimmed)
+        } else if trimmed.starts_with('.') || base.join(trimmed).join("go.mod").is_file() {
+            base.join(trimmed)
+        } else {
+            return;
+        };
+        let Ok(canon) = super::ssh_exec::canonicalize_local_root_dir(
+            &candidate.to_string_lossy(),
+            is_root_user,
+        ) else {
+            return;
+        };
+        if canon != primary_root && !additional_roots.contains(&canon) && !found.contains(&canon) {
+            found.push(canon);
+        }
+    };
+
+    for dir in &inspect_dirs {
+        for manifest_name in ["go.mod", "go.work"] {
+            let mf = dir.join(manifest_name);
+            let Ok(text) = std::fs::read_to_string(&mf) else {
+                continue;
+            };
+            let mut in_use_block = false;
+            for raw_line in text.lines() {
+                let line = raw_line.split("//").next().unwrap_or("").trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if line == ")" {
+                    in_use_block = false;
+                    continue;
+                }
+                if let Some((_, rhs)) = line.split_once("=>") {
+                    if let Some(tok) = rhs.split_whitespace().next() {
+                        push_candidate(dir, tok);
+                    }
+                    continue;
+                }
+                if manifest_name == "go.work" {
+                    if let Some(rest) = line.strip_prefix("use") {
+                        let rest = rest.trim();
+                        if rest == "(" {
+                            in_use_block = true;
+                        } else if !rest.is_empty() {
+                            push_candidate(dir, rest);
+                        }
+                    } else if in_use_block {
+                        push_candidate(dir, line);
+                    }
+                }
+            }
+        }
+    }
+    found
 }

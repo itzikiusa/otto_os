@@ -61,6 +61,8 @@ pub struct IdeDebugLaunchSpec {
     pub program: String,
     #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub build_flags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -69,9 +71,23 @@ pub struct IdeDebugLaunchSpec {
     pub attach_port: Option<u16>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherit_shell_env: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sdk_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub maven_profiles: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spring_profiles: Vec<String>,
+    #[serde(default)]
+    pub skip_tests: bool,
+    #[serde(default)]
+    pub offline: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeStartDebugReq {
     pub target: IdeTargetSpec,
     pub language: String,
@@ -80,6 +96,20 @@ pub struct IdeStartDebugReq {
     pub launch: IdeDebugLaunchSpec,
     #[serde(default)]
     pub breakpoints: Vec<IdeBreakpoint>,
+    #[serde(
+        default,
+        alias = "projectFolders",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub project_folders: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub maven_profiles: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spring_profiles: Vec<String>,
+    #[serde(default)]
+    pub skip_tests: bool,
+    #[serde(default)]
+    pub offline: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -7,14 +7,19 @@
 //! intelligence (`lsp_service`), "Share with Friends" live collaborative
 //! sessions (`collab`), and zero-rebuild runtime IDE plugins (`plugins`).
 
+pub mod build_tools;
 pub mod collab;
 pub mod dap;
+pub mod deps_inspector;
 pub mod environments;
 pub mod gutter;
 pub mod http;
+pub mod java_workspace;
+pub mod local_history;
 pub mod lsp_host;
 pub mod lsp_service;
 pub mod plugins;
+pub mod projects;
 pub mod target;
 pub mod toolchains;
 pub mod toolchains_catalog;
@@ -55,18 +60,24 @@ pub struct IdeEngine {
     pub dap: dap::DapManager,
     pub collab: collab::CollabHub,
     pub plugins: plugins::IdePluginRegistry,
+    pub history: local_history::LocalHistoryStore,
+    pub projects: projects::ProjectStore,
 }
 
 impl IdeEngine {
     pub fn new(data_dir: PathBuf) -> Self {
         environments::ensure_shell_env_warming();
+        let history = local_history::LocalHistoryStore::new(data_dir.clone());
+        let projects = projects::ProjectStore::new(data_dir.clone());
         Self {
-            targets: target::TargetManager::new(),
+            targets: target::TargetManager::with_history(history.clone()),
             toolchains: toolchains::ToolchainManager::new(data_dir.clone()),
             environments: environments::EnvironmentManager::new(data_dir.clone()),
             dap: dap::DapManager::new(data_dir.clone()),
             collab: collab::CollabHub::new(),
             plugins: plugins::IdePluginRegistry::new(data_dir.clone()),
+            history,
+            projects,
             data_dir,
         }
     }

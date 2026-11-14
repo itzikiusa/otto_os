@@ -4,34 +4,27 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use dashmap::DashMap;
 use otto_core::{new_id, Error, Result};
-use otto_ssh::SshTunnel;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{broadcast, mpsc, oneshot, Notify};
 
-use super::adapters::{
-    normalize_target_path, resolve_dap_adapter, DapAdapterTransport, ResolvedDapAdapter,
+use super::adapters::{normalize_target_path, resolve_dap_adapter};
+use super::session_inspect::{fetch_variables, select_frame_and_refresh, sync_all_breakpoints};
+use super::session_transport::{
+    boot_session_connection, evict_terminated_sessions, handshake_and_run,
 };
-use super::java_bridge::spawn_java_jdb_bridge;
-use super::node_bridge::spawn_node_inspector_bridge;
-use super::session_inspect::{
-    apply_breakpoint_event, fetch_variables, handle_stopped_event, select_frame_and_refresh,
-    sync_all_breakpoints,
-};
-use super::shell_bridge::spawn_shell_dap_bridge;
 use super::wire::{DapEvent, DapMessage, DapReader, DapResponse, DapWriter};
-use super::{spawn_target_process, ssh_tunnel_config, BridgeGuard};
+use super::BridgeGuard;
 use crate::types::{
     IdeDebugAction, IdeDebugCommandReq, IdeDebugEvaluateReq, IdeDebugEvaluateResp,
     IdeDebugOutputEntry, IdeDebugSessionSnapshot, IdeDebugState, IdeProjectEnvironment,
-    IdeRunConfig, IdeSetBreakpointsReq, IdeSshSpec, IdeStartDebugReq, IdeTargetKind, IdeVariable,
+    IdeRunConfig, IdeSetBreakpointsReq, IdeSshSpec, IdeStartDebugReq, IdeVariable,
     PluginDapAdapterSpec,
 };
 
@@ -42,8 +35,8 @@ pub(crate) const MAX_DEBUG_OUTPUT_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_TERMINATED_DEBUG_SESSIONS: usize = 4;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
-type BoxRead = Box<dyn AsyncRead + Send + Unpin>;
-type BoxWrite = Box<dyn AsyncWrite + Send + Unpin>;
+pub(super) type BoxRead = Box<dyn AsyncRead + Send + Unpin>;
+pub(super) type BoxWrite = Box<dyn AsyncWrite + Send + Unpin>;
 
 /// Optional host/environment context passed when starting a debug session.
 #[derive(Debug, Clone, Default)]
@@ -99,7 +92,7 @@ pub(super) struct DapWireClient {
 }
 
 impl DapWireClient {
-    fn spawn(
+    pub(super) fn spawn(
         reader_io: BoxRead,
         writer_io: BoxWrite,
         event_tx: mpsc::UnboundedSender<DapEvent>,
@@ -142,7 +135,7 @@ impl DapWireClient {
         client
     }
 
-    async fn send_request_nowait(
+    pub(super) async fn send_request_nowait(
         &self,
         command: &str,
         arguments: Option<Value>,
@@ -204,6 +197,8 @@ pub(super) struct SessionEntry {
     pub(super) conn: RwLock<Option<Arc<ActiveConnection>>>,
     pub(super) events_tx: broadcast::Sender<IdeDebugSessionSnapshot>,
     pub(super) initialized_notify: Arc<Notify>,
+    pub(super) halted_notify: Arc<Notify>,
+    pub(super) suppress_transient_pause: AtomicBool,
 }
 
 impl SessionEntry {
@@ -253,6 +248,8 @@ impl SessionEntry {
             conn: RwLock::new(None),
             events_tx,
             initialized_notify: Arc::new(Notify::new()),
+            halted_notify: Arc::new(Notify::new()),
+            suppress_transient_pause: AtomicBool::new(false),
         })
     }
 
@@ -280,7 +277,7 @@ impl SessionEntry {
         }
     }
 
-    fn mark_terminated(&self) {
+    pub(super) fn mark_terminated(&self) {
         self.mutate_and_broadcast(|snap| {
             snap.state = IdeDebugState::Terminated;
             snap.stopped_reason = None;
@@ -292,7 +289,11 @@ impl SessionEntry {
         });
     }
 
-    fn fail_and_evict(&self, sessions: &DashMap<String, Arc<SessionEntry>>, msg: String) {
+    pub(super) fn fail_and_evict(
+        &self,
+        sessions: &DashMap<String, Arc<SessionEntry>>,
+        msg: String,
+    ) {
         self.disconnect_and_kill();
         self.mutate_and_broadcast(|snap| {
             snap.state = IdeDebugState::Error;
@@ -329,7 +330,7 @@ impl SessionEntry {
         updated
     }
 
-    fn append_output(&self, category: &str, text: String) {
+    pub(super) fn append_output(&self, category: &str, text: String) {
         if text.is_empty() {
             return;
         }
@@ -361,7 +362,7 @@ impl SessionEntry {
         self.mutate_and_broadcast(|_| {});
     }
 
-    fn active_conn(&self) -> Result<Arc<ActiveConnection>> {
+    pub(super) fn active_conn(&self) -> Result<Arc<ActiveConnection>> {
         self.conn
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -449,8 +450,28 @@ impl DapManager {
     pub async fn start_session(
         &self,
         mut req: IdeStartDebugReq,
-        ctx: DapStartContext,
+        mut ctx: DapStartContext,
     ) -> Result<IdeDebugSessionSnapshot> {
+        for folder in &req.project_folders {
+            let trimmed = folder.trim();
+            if !trimmed.is_empty() && !req.target.project_folders.iter().any(|f| f == trimmed) {
+                req.target.project_folders.push(trimmed.to_string());
+            }
+            if !trimmed.is_empty() && !req.target.additional_roots.iter().any(|f| f == trimmed) {
+                req.target.additional_roots.push(trimmed.to_string());
+            }
+        }
+        let spring_profiles = if !req.spring_profiles.is_empty() {
+            &req.spring_profiles
+        } else {
+            &req.launch.spring_profiles
+        };
+        if !spring_profiles.is_empty() {
+            let joined = spring_profiles.join(",");
+            ctx.effective_env
+                .entry("SPRING_PROFILES_ACTIVE".into())
+                .or_insert(joined);
+        }
         let resolved = resolve_dap_adapter(&self.data_dir, &req, &ctx).await?;
         let entry = self.register_entry(
             &mut req,
@@ -468,8 +489,7 @@ impl DapManager {
         Ok(entry.read_snapshot())
     }
 
-    /// Start a debug session over a pre-connected async stream (e.g. `tokio::io::duplex`
-    /// in unit tests or custom sidecars).
+    /// Start a debug session over a pre-connected async stream.
     pub async fn start_session_with_stream<S>(
         &self,
         mut req: IdeStartDebugReq,
@@ -722,7 +742,7 @@ fn build_session_title(req: &IdeStartDebugReq, adapter: &str) -> String {
     format!("Debug {prog_label} ({adapter})")
 }
 
-fn mark_resumed(entry: &SessionEntry) {
+pub(super) fn mark_resumed(entry: &SessionEntry) {
     entry.mutate_and_broadcast(|snap| {
         snap.state = IdeDebugState::Running;
         snap.stopped_reason = None;
@@ -753,475 +773,6 @@ async fn stop_entry(entry: &SessionEntry) {
     entry.mark_terminated();
 }
 
-fn spawn_line_reader<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
-    reader: R,
-    mut on_line: impl FnMut(String) + Send + 'static,
-) {
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(reader).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            on_line(line);
-        }
-    });
-}
-
-async fn resolve_target_endpoint(
-    req: &IdeStartDebugReq,
-    ctx: &DapStartContext,
-    guard: &BridgeGuard,
-    host: String,
-    port: u16,
-) -> Result<(String, u16)> {
-    if req.target.kind != IdeTargetKind::Ssh {
-        return Ok((host, port));
-    }
-    let ssh = ctx
-        .ssh
-        .as_ref()
-        .ok_or_else(|| Error::Invalid("missing SSH spec".into()))?;
-    let tunnel = SshTunnel::open(&ssh_tunnel_config(ssh)?, &host, port).await?;
-    let local_port = tunnel.local_port();
-    guard.push_tunnel(tunnel);
-    Ok(("127.0.0.1".to_string(), local_port))
-}
-
-fn parse_listening_port(line: &str) -> Option<u16> {
-    if let Some(idx) = line.rfind(':') {
-        let tail = line[idx + 1..].trim().trim_end_matches('.');
-        if let Some(port) = tail.parse::<u16>().ok().filter(|&p| p > 0) {
-            return Some(port);
-        }
-    }
-    let words: Vec<&str> = line.split_whitespace().collect();
-    for win in words.windows(2) {
-        if win[0].eq_ignore_ascii_case("port") {
-            let trimmed = win[1].trim_matches(|c: char| !c.is_ascii_digit());
-            if let Some(p) = trimmed.parse::<u16>().ok().filter(|&p| p > 0) {
-                return Some(p);
-            }
-        }
-    }
-    None
-}
-
-fn evict_terminated_sessions(sessions: &DashMap<String, Arc<SessionEntry>>) {
-    let mut terminated: Vec<(String, u64)> = sessions
-        .iter()
-        .filter_map(|item| {
-            item.value()
-                .is_terminal()
-                .then(|| (item.key().clone(), item.value().created_seq))
-        })
-        .collect();
-    if terminated.len() <= MAX_TERMINATED_DEBUG_SESSIONS {
-        return;
-    }
-    terminated.sort_by_key(|(_, seq)| *seq);
-    let excess = terminated.len() - MAX_TERMINATED_DEBUG_SESSIONS;
-    for (id, _) in terminated.into_iter().take(excess) {
-        if let Some((_, entry)) = sessions.remove(&id) {
-            entry.disconnect_and_kill();
-        }
-    }
-}
-
-async fn boot_session_connection(
-    sessions: &Arc<DashMap<String, Arc<SessionEntry>>>,
-    entry: &Arc<SessionEntry>,
-    resolved: ResolvedDapAdapter,
-    req: &IdeStartDebugReq,
-    ctx: &DapStartContext,
-) -> Result<()> {
-    let io = connect_adapter_transport(entry, &resolved.adapter_name, resolved.transport, req, ctx)
-        .await?;
-    let cmds = (
-        resolved.initialize_args,
-        resolved.launch_command.as_str(),
-        resolved.launch_args,
-    );
-    handshake_and_run(sessions, entry, io, cmds).await
-}
-
-async fn connect_adapter_transport(
-    entry: &Arc<SessionEntry>,
-    adapter_name: &str,
-    transport: DapAdapterTransport,
-    req: &IdeStartDebugReq,
-    ctx: &DapStartContext,
-) -> Result<(BoxRead, BoxWrite, Arc<BridgeGuard>)> {
-    let guard = BridgeGuard::new();
-    match transport {
-        DapAdapterTransport::Stdio {
-            command,
-            args,
-            cwd,
-            env,
-        } => {
-            let mut child =
-                spawn_target_process(&req.target, ctx.ssh.as_ref(), &command, &args, &cwd, &env)?;
-            let stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| Error::Internal("missing DAP adapter stdin".into()))?;
-            let stdout = child
-                .stdout
-                .take()
-                .ok_or_else(|| Error::Internal("missing DAP adapter stdout".into()))?;
-            if let Some(stderr) = child.stderr.take() {
-                let entry_err = entry.clone();
-                spawn_line_reader(stderr, move |l| {
-                    entry_err.append_output("stderr", format!("{l}\n"));
-                });
-            }
-            guard.push_child(child);
-            Ok((Box::new(stdout), Box::new(stdin), guard))
-        }
-        DapAdapterTransport::TcpListen {
-            command,
-            args,
-            cwd,
-            env,
-        } => {
-            let cmd_spec = (command.as_str(), args.as_slice(), cwd.as_str(), &env);
-            spawn_tcp_listen_adapter(entry, adapter_name, cmd_spec, req, ctx, guard).await
-        }
-        DapAdapterTransport::DirectTcpAttach { host, port } => {
-            let (connect_host, connect_port) =
-                resolve_target_endpoint(req, ctx, &guard, host, port).await?;
-            let tcp = TcpStream::connect((connect_host.as_str(), connect_port))
-                .await
-                .map_err(|e| {
-                    Error::Upstream(format!("attach DAP {connect_host}:{connect_port}: {e}"))
-                })?;
-            let (r, w) = tcp.into_split();
-            Ok((Box::new(r), Box::new(w), guard))
-        }
-        DapAdapterTransport::NodeInspectorBridge(spec) => {
-            let (duplex, bridge_guard) =
-                spawn_node_inspector_bridge(&req.target, ctx.ssh.as_ref(), spec).await?;
-            let (r, w) = tokio::io::split(duplex);
-            Ok((Box::new(r), Box::new(w), bridge_guard))
-        }
-        DapAdapterTransport::JavaJdbBridge(spec) => {
-            let (duplex, bridge_guard) =
-                spawn_java_jdb_bridge(&req.target, ctx.ssh.as_ref(), spec).await?;
-            let (r, w) = tokio::io::split(duplex);
-            Ok((Box::new(r), Box::new(w), bridge_guard))
-        }
-        DapAdapterTransport::ShellBridge(spec) => {
-            let (duplex, bridge_guard) =
-                spawn_shell_dap_bridge(&req.target, ctx.ssh.as_ref(), spec).await?;
-            let (r, w) = tokio::io::split(duplex);
-            Ok((Box::new(r), Box::new(w), bridge_guard))
-        }
-    }
-}
-
-async fn spawn_tcp_listen_adapter(
-    entry: &Arc<SessionEntry>,
-    adapter_name: &str,
-    (command, args, cwd, env): (&str, &[String], &str, &BTreeMap<String, String>),
-    req: &IdeStartDebugReq,
-    ctx: &DapStartContext,
-    guard: Arc<BridgeGuard>,
-) -> Result<(BoxRead, BoxWrite, Arc<BridgeGuard>)> {
-    let mut child = spawn_target_process(&req.target, ctx.ssh.as_ref(), command, args, cwd, env)?;
-    let (port_tx, mut port_rx) = mpsc::unbounded_channel::<(String, String)>();
-    if let Some(out) = child.stdout.take() {
-        let tx = port_tx.clone();
-        spawn_line_reader(out, move |l| {
-            let _ = tx.send(("stdout".into(), l));
-        });
-    }
-    if let Some(err) = child.stderr.take() {
-        let tx = port_tx.clone();
-        spawn_line_reader(err, move |l| {
-            let _ = tx.send(("stderr".into(), l));
-        });
-    }
-    drop(port_tx);
-
-    let mut found_port: Option<u16> = None;
-    let mut diag = String::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_secs(3), port_rx.recv()).await {
-            Ok(Some((_, line))) => {
-                if let Some(p) = parse_listening_port(&line) {
-                    found_port = Some(p);
-                    break;
-                }
-                if diag.len() < 4096 {
-                    diag.push_str(&line);
-                    diag.push('\n');
-                }
-            }
-            Ok(None) => break,
-            Err(_) => {}
-        }
-    }
-    let Some(remote_port) = found_port else {
-        let _ = child.start_kill();
-        return Err(Error::Upstream(format!(
-            "DAP adapter '{adapter_name}' failed to report listening port: {}",
-            diag.trim()
-        )));
-    };
-    let entry_out = entry.clone();
-    tokio::spawn(async move {
-        while let Some((cat, l)) = port_rx.recv().await {
-            entry_out.append_output(&cat, format!("{l}\n"));
-        }
-    });
-    guard.push_child(child);
-
-    let (connect_host, connect_port) =
-        resolve_target_endpoint(req, ctx, &guard, "127.0.0.1".into(), remote_port).await?;
-    let tcp = TcpStream::connect((connect_host.as_str(), connect_port))
-        .await
-        .map_err(|e| Error::Upstream(format!("connect DAP {connect_host}:{connect_port}: {e}")))?;
-    let (r, w) = tcp.into_split();
-    Ok((Box::new(r), Box::new(w), guard))
-}
-
-async fn handshake_and_run(
-    sessions: &Arc<DashMap<String, Arc<SessionEntry>>>,
-    entry: &Arc<SessionEntry>,
-    (read_io, write_io, guard): (BoxRead, BoxWrite, Arc<BridgeGuard>),
-    (initialize_args, launch_command, launch_args): (Value, &str, Value),
-) -> Result<()> {
-    let (ev_tx, ev_rx) = mpsc::unbounded_channel();
-    let wire = DapWireClient::spawn(read_io, write_io, ev_tx);
-
-    spawn_event_driver(Arc::clone(sessions), entry.clone(), ev_rx);
-
-    let init_resp = wire.request("initialize", Some(initialize_args)).await?;
-    let caps = init_resp.body.as_ref();
-    let supports_terminate = caps
-        .and_then(|c| c.get("supportsTerminateRequest"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let exception_filters: Vec<String> = caps
-        .and_then(|c| c.get("exceptionBreakpointFilters"))
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|f| f.get("filter").and_then(Value::as_str).map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let active_conn = Arc::new(ActiveConnection {
-        wire: wire.clone(),
-        guard,
-        supports_terminate,
-        exception_filters,
-    });
-    *entry.conn.write().unwrap_or_else(|e| e.into_inner()) = Some(active_conn.clone());
-
-    let mut launch_rx = wire
-        .send_request_nowait(launch_command, Some(launch_args))
-        .await?;
-
-    // Race `initialized` against `launch_rx` so immediate compile/launch failures return in <50ms
-    // instead of hanging 8 seconds waiting for an `initialized` event that will never arrive.
-    let mut launch_done = false;
-    tokio::select! {
-        _ = tokio::time::timeout(Duration::from_secs(8), entry.initialized_notify.notified()) => {}
-        launch_res = &mut launch_rx => {
-            launch_done = true;
-            match launch_res {
-                Ok(resp) if !resp.success => {
-                    let msg = resp.message.unwrap_or_else(|| "Debug target launch failed".into());
-                    return Err(Error::Invalid(msg));
-                }
-                Err(_) => {
-                    return Err(Error::Upstream(
-                        "DAP adapter closed before initialization completed".into(),
-                    ));
-                }
-                Ok(_) => {
-                    let _ = tokio::time::timeout(
-                        Duration::from_millis(200),
-                        entry.initialized_notify.notified(),
-                    )
-                    .await;
-                }
-            }
-        }
-    }
-
-    sync_all_breakpoints(entry, &active_conn).await?;
-    let _ = wire.request("configurationDone", Some(json!({}))).await;
-
-    if !launch_done {
-        // Catch fast post-configurationDone compile failures synchronously while keeping slow builds async.
-        if let Ok(launch_res) =
-            tokio::time::timeout(Duration::from_millis(60), &mut launch_rx).await
-        {
-            launch_done = true;
-            if let Ok(resp) = launch_res {
-                if !resp.success {
-                    let msg = resp
-                        .message
-                        .unwrap_or_else(|| "Debug target launch failed".into());
-                    return Err(Error::Invalid(msg));
-                }
-            }
-        }
-    }
-
-    entry.mutate_and_broadcast(|snap| {
-        if snap.state == IdeDebugState::Starting {
-            snap.state = IdeDebugState::Running;
-        }
-    });
-
-    if !launch_done {
-        let sessions_launch = Arc::clone(sessions);
-        let entry_launch = entry.clone();
-        tokio::spawn(async move {
-            if let Ok(resp) = launch_rx.await {
-                if !resp.success {
-                    let msg = resp
-                        .message
-                        .unwrap_or_else(|| "Debug target launch failed".into());
-                    entry_launch.fail_and_evict(&sessions_launch, msg);
-                }
-            }
-        });
-    }
-
-    Ok(())
-}
-
-fn spawn_event_driver(
-    sessions: Arc<DashMap<String, Arc<SessionEntry>>>,
-    entry: Arc<SessionEntry>,
-    mut ev_rx: mpsc::UnboundedReceiver<DapEvent>,
-) {
-    tokio::spawn(async move {
-        while let Some(ev) = ev_rx.recv().await {
-            match ev.event.as_str() {
-                "initialized" => {
-                    entry.initialized_notify.notify_one();
-                }
-                "breakpoint" => {
-                    if let Some(body) = &ev.body {
-                        apply_breakpoint_event(&entry, body);
-                    }
-                }
-                "output" => {
-                    if let Some(body) = &ev.body {
-                        let cat = body
-                            .get("category")
-                            .and_then(Value::as_str)
-                            .unwrap_or("stdout");
-                        if let Some(txt) = body
-                            .get("output")
-                            .and_then(Value::as_str)
-                            .filter(|_| cat != "telemetry")
-                        {
-                            entry.append_output(cat, txt.to_string());
-                        }
-                    }
-                }
-                "continued" => {
-                    mark_resumed(&entry);
-                }
-                "stopped" => {
-                    let reason = ev
-                        .body
-                        .as_ref()
-                        .and_then(|b| b.get("reason"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("breakpoint")
-                        .to_string();
-                    let stopped_tid = ev
-                        .body
-                        .as_ref()
-                        .and_then(|b| b.get("threadId"))
-                        .and_then(Value::as_i64);
-                    if let Ok(conn) = entry.active_conn() {
-                        handle_stopped_event(&entry, &conn, reason, stopped_tid).await;
-                    }
-                }
-                "terminated" | "exited" | "__eof__" => {
-                    entry.disconnect_and_kill();
-                    if !entry.is_terminal() {
-                        entry.mark_terminated();
-                    }
-                    evict_terminated_sessions(&sessions);
-                    if ev.event == "__eof__" {
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-    });
-}
-
 #[cfg(test)]
 #[path = "session_tests.rs"]
 mod tests;
-
-#[cfg(test)]
-mod retention_tests {
-    use super::*;
-    use crate::types::{IdeDebugLaunchSpec, IdeTargetSpec};
-
-    fn dummy_req() -> IdeStartDebugReq {
-        IdeStartDebugReq {
-            target: IdeTargetSpec::local("/tmp"),
-            language: "go".into(),
-            config_id: None,
-            launch: IdeDebugLaunchSpec {
-                program: "main.go".into(),
-                ..IdeDebugLaunchSpec::default()
-            },
-            breakpoints: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn debug_output_ring_and_terminated_session_eviction_enforce_caps() {
-        let mgr = DapManager::new(PathBuf::from("/tmp/otto-dap-test"));
-        for i in 0..10u64 {
-            let id = format!("dbg_term_{i:02}");
-            let meta = (id.clone(), "Test".into(), "go".into(), "dlv".into());
-            let entry = SessionEntry::new(i, meta, Vec::new(), dummy_req(), DapStartContext::new());
-            entry.mutate_and_broadcast(|snap| snap.state = IdeDebugState::Terminated);
-            mgr.sessions.insert(id, entry);
-            evict_terminated_sessions(&mgr.sessions);
-        }
-
-        let live_meta = ("dbg_live".into(), "Live".into(), "go".into(), "dlv".into());
-        let live = SessionEntry::new(
-            99,
-            live_meta,
-            Vec::new(),
-            dummy_req(),
-            DapStartContext::new(),
-        );
-        for i in 0..(MAX_DEBUG_OUTPUT + 250) {
-            live.append_output("stdout", format!("line-{i}"));
-        }
-        mgr.sessions.insert("dbg_live".into(), Arc::clone(&live));
-        evict_terminated_sessions(&mgr.sessions);
-
-        assert_eq!(mgr.sessions.len(), MAX_TERMINATED_DEBUG_SESSIONS + 1);
-        assert!(mgr.get_session("dbg_term_00").is_err());
-        assert!(mgr.get_session("dbg_term_05").is_err());
-        assert!(mgr.get_session("dbg_term_06").is_ok());
-        assert!(mgr.get_session("dbg_term_09").is_ok());
-
-        let snap = mgr.get_session("dbg_live").unwrap();
-        assert_eq!(snap.output.len(), MAX_DEBUG_OUTPUT);
-        assert_eq!(snap.output[0].text, "line-250");
-        assert_eq!(
-            snap.output[MAX_DEBUG_OUTPUT - 1].text,
-            format!("line-{}", MAX_DEBUG_OUTPUT + 249)
-        );
-    }
-}
