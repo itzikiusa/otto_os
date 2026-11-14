@@ -2,7 +2,8 @@
 // revision file-content reconstructor for `IdeComparisonModal.svelte`.
 
 import type { DiffResp, Hunk } from '../../../lib/api/types';
-import { wordDiff, type WordRange } from '../../git/diff-words'; // ui-guards: allow — reuse Otto's shared Git word diff
+import { diffLineArrays } from '../../../lib/lineDiff.ts';
+import { wordDiff, type WordRange } from '../../git/diff-words.ts'; // ui-guards: allow — reuse Otto's shared Git word diff
 
 export interface CompareHunk {
   index: number;
@@ -37,91 +38,12 @@ export interface SideBySideComparison {
   hunks: CompareHunk[];
 }
 
-const MAX_LCS_CELLS = 1_600_000;
-
 export function splitCompareLines(text: string): { lines: string[]; trailingNewline: boolean } {
   if (!text) return { lines: [], trailingNewline: false };
   const normalized = text.replace(/\r\n/g, '\n');
   const trailingNewline = normalized.endsWith('\n');
   const raw = trailingNewline ? normalized.slice(0, -1) : normalized;
   return { lines: raw.length === 0 && trailingNewline ? [''] : raw.split('\n'), trailingNewline };
-}
-
-interface RawPairOp {
-  equal: boolean;
-  leftIdx: number;
-  rightIdx: number;
-}
-
-function matchMiddleLines(a: string[], b: string[]): Array<[number, number]> {
-  const n = a.length;
-  const m = b.length;
-  if (n === 0 || m === 0) return [];
-
-  if (n * m <= MAX_LCS_CELLS) {
-    const w = m + 1;
-    const dp = new Uint32Array((n + 1) * w);
-    for (let i = n - 1; i >= 0; i--) {
-      const row = i * w;
-      const nextRow = (i + 1) * w;
-      const ai = a[i];
-      for (let j = m - 1; j >= 0; j--) {
-        dp[row + j] =
-          ai === b[j]
-            ? dp[nextRow + j + 1] + 1
-            : dp[nextRow + j] >= dp[row + j + 1]
-              ? dp[nextRow + j]
-              : dp[row + j + 1];
-      }
-    }
-    const pairs: Array<[number, number]> = [];
-    let i = 0;
-    let j = 0;
-    while (i < n && j < m) {
-      if (a[i] === b[j]) {
-        pairs.push([i, j]);
-        i += 1;
-        j += 1;
-      } else if (dp[(i + 1) * w + j] >= dp[i * w + j + 1]) {
-        i += 1;
-      } else {
-        j += 1;
-      }
-    }
-    return pairs;
-  }
-
-  // Linear lookahead anchor fallback for very large files (>1.6M LCS cells).
-  const pairs: Array<[number, number]> = [];
-  let i = 0;
-  let j = 0;
-  const lookahead = 48;
-  while (i < n && j < m) {
-    if (a[i] === b[j]) {
-      pairs.push([i, j]);
-      i += 1;
-      j += 1;
-      continue;
-    }
-    let matched = false;
-    for (let step = 1; step <= lookahead && (i + step < n || j + step < m); step++) {
-      if (j + step < m && a[i] === b[j + step]) {
-        j += step;
-        matched = true;
-        break;
-      }
-      if (i + step < n && a[i + step] === b[j]) {
-        i += step;
-        matched = true;
-        break;
-      }
-    }
-    if (!matched) {
-      i += 1;
-      j += 1;
-    }
-  }
-  return pairs;
 }
 
 /** Build aligned side-by-side rows, word-level marks, and addressable hunks. */
@@ -156,38 +78,7 @@ export function computeSideBySideComparison(
     };
   }
 
-  let pre = 0;
-  while (pre < left.length && pre < right.length && left[pre] === right[pre]) pre += 1;
-  let suf = 0;
-  while (
-    suf < left.length - pre &&
-    suf < right.length - pre &&
-    left[left.length - 1 - suf] === right[right.length - 1 - suf]
-  ) {
-    suf += 1;
-  }
-
-  const midL = left.slice(pre, left.length - suf);
-  const midR = right.slice(pre, right.length - suf);
-  const midMatches = matchMiddleLines(midL, midR);
-
-  const anchors: RawPairOp[] = [];
-  for (let i = 0; i < pre; i++) anchors.push({ equal: true, leftIdx: i, rightIdx: i });
-  for (let k = 0; k < midMatches.length; k++) {
-    anchors.push({
-      equal: true,
-      leftIdx: pre + midMatches[k][0],
-      rightIdx: pre + midMatches[k][1],
-    });
-  }
-  for (let i = 0; i < suf; i++) {
-    anchors.push({
-      equal: true,
-      leftIdx: left.length - suf + i,
-      rightIdx: right.length - suf + i,
-    });
-  }
-
+  const ops = diffLineArrays(left, right);
   const rows: AlignedCompareRow[] = [];
   const hunks: CompareHunk[] = [];
 
@@ -236,23 +127,26 @@ export function computeSideBySideComparison(
 
   let curL = 0;
   let curR = 0;
-  for (let a = 0; a < anchors.length; a++) {
-    const anc = anchors[a];
-    emitGap(curL, anc.leftIdx, curR, anc.rightIdx);
+  for (let k = 0; k < ops.length; k++) {
+    const op = ops[k];
+    if (op.op !== 'equal') continue;
+    const leftIdx = op.oldLineNo - 1;
+    const rightIdx = op.newLineNo - 1;
+    emitGap(curL, leftIdx, curR, rightIdx);
     rows.push({
       index: rows.length,
       kind: 'equal',
       hunkIndex: null,
       isHunkStart: false,
-      leftLineNo: anc.leftIdx + 1,
-      leftText: left[anc.leftIdx],
+      leftLineNo: leftIdx + 1,
+      leftText: left[leftIdx],
       leftWords: null,
-      rightLineNo: anc.rightIdx + 1,
-      rightText: right[anc.rightIdx],
+      rightLineNo: rightIdx + 1,
+      rightText: right[rightIdx],
       rightWords: null,
     });
-    curL = anc.leftIdx + 1;
-    curR = anc.rightIdx + 1;
+    curL = leftIdx + 1;
+    curR = rightIdx + 1;
   }
   emitGap(curL, left.length, curR, right.length);
 

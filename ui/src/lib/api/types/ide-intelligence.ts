@@ -92,18 +92,18 @@ export interface IdeCodeActionsResp {
 }
 
 export interface IdeDiagnostic {
-  path: string;
+  path?: string;
   line: number;
-  column?: number;
   col?: number;
+  column?: number;
   end_line?: number;
-  end_column?: number;
   end_col?: number;
+  end_column?: number;
   severity: 'error' | 'warning' | 'info' | 'hint';
   message: string;
   source?: string | null;
   code?: string | null;
-  quick_fixes?: IdeCodeAction[];
+  quick_fixes?: IdeQuickFix[];
 }
 
 export interface IdeDiagnosticsReq {
@@ -406,7 +406,14 @@ export interface IdeCollabRoom {
   active_debug_id?: string | null;
 }
 
-export interface IdeCollabCreateResp { room: IdeCollabRoom; invite_token: string; share_hash: string; }
+export interface IdeCreateCollabRoomResp {
+  room: IdeCollabRoom;
+  invite_token: string;
+  share_hash: string;
+  host_peer_id: string;
+  host_peer_secret: string;
+}
+export type IdeCollabCreateResp = IdeCreateCollabRoomResp;
 export interface IdeCollabRoomsResp { rooms: IdeCollabRoom[]; }
 export interface IdeCollabJoinResp { peer_id: string; peer_secret: string; color: string; room: IdeCollabRoom; }
 export interface IdeCollabSharedBuffer { content: string; version: number; }
@@ -440,11 +447,45 @@ export interface IdeCollabEvent {
   room?: IdeCollabRoom;
 }
 
-export interface IdePluginLanguage { id: string; name?: string; extensions: string[]; }
-export interface IdePluginLspServer { id?: string; language: string; command: string; args?: string[]; }
-export interface IdePluginDapAdapter { id?: string; language: string; command: string; args?: string[]; }
-export interface IdePluginGutterDetector { language: string; pattern: string; kind: IdeGutterItemKind | string; label_template?: string; runner?: string; }
-export interface IdePluginKeymap { key: string; command: string; description?: string; }
+export interface IdePluginLanguage {
+  id: string;
+  display_name: string;
+  extensions: string[];
+  line_comment?: string | null;
+}
+
+export interface IdePluginLspServer {
+  language: string;
+  command: string;
+  args: string[];
+  extensions: string[];
+  install_hint?: string | null;
+}
+
+export interface IdePluginDapAdapter {
+  language: string;
+  adapter_name: string;
+  command: string;
+  args: string[];
+  launch_template?: unknown;
+}
+
+export interface IdePluginGutterDetector {
+  language: string;
+  extensions: string[];
+  pattern: string;
+  kind: IdeGutterItemKind | string;
+  runner: string;
+  command_template: string;
+  args_template: string[];
+  label_prefix?: string | null;
+}
+
+export interface IdePluginKeymap {
+  key: string;
+  action: string;
+  description?: string | null;
+}
 
 export interface IdePluginContributions {
   languages: IdePluginLanguage[];
@@ -452,26 +493,22 @@ export interface IdePluginContributions {
   dap_adapters: IdePluginDapAdapter[];
   gutter_detectors: IdePluginGutterDetector[];
   keymaps: IdePluginKeymap[];
-  snippets?: { prefix: string; body: string; description?: string | null }[];
-  panels?: { id: string; title: string; command: string }[];
+  snippets: { language: string; prefix: string; body: string; description?: string | null }[];
+  panels: { id: string; title: string; icon?: string | null; command?: string | null }[];
 }
 
 export interface IdePluginInfo {
   slug: string;
   name: string;
   version: string;
-  description?: string | null;
+  description: string;
   author?: string | null;
   enabled: boolean;
   source: string;
-  install_path?: string | null;
-  contributions?: IdePluginContributions;
-  languages?: (IdePluginLanguage | string)[];
+  install_path: string;
+  contributions: IdePluginContributions;
+  languages?: string[];
   capabilities?: string[];
-  lsp_servers?: IdePluginLspServer[];
-  dap_adapters?: IdePluginDapAdapter[];
-  gutter_detectors?: IdePluginGutterDetector[];
-  keymaps?: IdePluginKeymap[];
 }
 
 export interface IdePluginCatalogEntry {
@@ -479,11 +516,10 @@ export interface IdePluginCatalogEntry {
   name: string;
   version: string;
   description: string;
-  tags?: string[];
-  ecosystems?: string[];
+  tags: string[];
+  installed: boolean;
   languages?: string[];
   source?: string;
-  installed?: boolean;
 }
 
 export interface IdePluginsResp { plugins: IdePluginInfo[]; catalog: IdePluginCatalogEntry[]; }

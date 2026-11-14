@@ -131,6 +131,10 @@ pub fn excluded_table(name: &str, portable: bool) -> bool {
                 | "k8s_clusters"
                 | "git_accounts"
                 | "issue_accounts"
+                | "ide_project_environments"
+                | "ide_run_configs"
+                | "ide_local_sdks"
+                | "ide_named_projects"
                 | "users"
         ))
 }
@@ -510,7 +514,11 @@ pub fn sanitize(
     row: &mut ArchiveRow,
     reconnect: &mut BTreeSet<String>,
 ) {
-    let id = row.get("id").map(Value::to_string).unwrap_or_default();
+    let id = row
+        .get("id")
+        .or_else(|| row.get("project_key"))
+        .map(Value::to_string)
+        .unwrap_or_default();
     let mcp_env_keys: Vec<String> = row
         .get("secret_env_keys")
         .and_then(Value::as_str)
@@ -573,7 +581,52 @@ pub fn sanitize(
                     }
                     // User documents/history remain private, lossless content; only
                     // configuration/request JSON passes through credential filtering.
-                    if matches!(
+                    if table == "ide_project_environments" && column.name == "env_vars_json" {
+                        if let Some(entries) = document.as_array_mut() {
+                            let mut scrubbed_any = false;
+                            for entry in entries.iter_mut() {
+                                let Some(obj) = entry.as_object_mut() else {
+                                    continue;
+                                };
+                                let key_name = obj
+                                    .get("key")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_owned();
+                                if key_name == "__otto_module_sdks__" {
+                                    continue;
+                                }
+                                let is_sec =
+                                    obj.get("secret").and_then(Value::as_bool) == Some(true);
+                                if is_sec {
+                                    if obj.get("secret_ref").is_some_and(|v| !v.is_null())
+                                        || obj.get("value").is_some_and(|v| !v.is_null())
+                                    {
+                                        scrubbed_any = true;
+                                    }
+                                    obj.insert("secret_ref".into(), Value::Null);
+                                    obj.insert("value".into(), Value::Null);
+                                } else if secret_key(&key_name) {
+                                    if obj
+                                        .get("value")
+                                        .and_then(Value::as_str)
+                                        .is_some_and(|s| !s.is_empty())
+                                    {
+                                        scrubbed_any = true;
+                                    }
+                                    obj.insert("value".into(), json!(""));
+                                } else if let Some(Value::String(val_str)) = obj.get_mut("value") {
+                                    *val_str = scrub_string(val_str);
+                                }
+                            }
+                            if scrubbed_any {
+                                reconnect.insert(format!(
+                                    "{table}/{id}: review and reconnect saved credentials"
+                                ));
+                            }
+                            *text = document.to_string();
+                        }
+                    } else if matches!(
                         table,
                         "settings"
                             | "workspaces"
@@ -599,6 +652,7 @@ pub fn sanitize(
                             | "swarm_channel_triggers"
                             | "goal_loops"
                             | "api_automations"
+                            | "ide_run_configs"
                     ) {
                         scrub_json(&mut document);
                         *text = document.to_string();

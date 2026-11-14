@@ -22,7 +22,8 @@
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   const RuntimeToolImages = lazyComponent(() => import('./RuntimeToolImages.svelte'));
   import { errorText, openedTarget, runNoticeOf, toolError, type PendingApproval } from './timeline';
-  import { exitText, itemDuration, relativeToCwd, rowLabel } from './workLog';
+  import { exitText, formatDuration, itemDuration, relativeToCwd, rowLabel } from './workLog';
+  import { now } from '../../../lib/stores/now.svelte';
   import { ws } from '../../../lib/stores/workspace.svelte';
   import { threads } from '../threadsStore.svelte';
 
@@ -65,7 +66,14 @@
   const failed = $derived(item.status === 'failed' || item.type === 'error');
   const stopped = $derived(item.status === 'cancelled' || item.status === 'interrupted');
   const label = $derived(rowLabel(item, cwd));
-  const took = $derived(itemDuration(item));
+  const liveReasoningElapsed = $derived.by(() => {
+    if (!running || item.type !== 'reasoning' || !item.started_at) return null;
+    const startMs = Date.parse(item.started_at);
+    if (!Number.isFinite(startMs)) return null;
+    const elapsed = Math.max(0, now() - startMs);
+    return elapsed >= 1000 ? formatDuration(elapsed) : null;
+  });
+  const took = $derived(itemDuration(item) ?? liveReasoningElapsed);
   /** Thinking reads inline (T3): its text under a quiet line, clamped until opened. */
   const thinking = $derived(item.type === 'reasoning' && !!item.text);
   const longThought = $derived(item.type === 'reasoning' && (item.text.length > 240 || item.text.split('\n').length > 3));

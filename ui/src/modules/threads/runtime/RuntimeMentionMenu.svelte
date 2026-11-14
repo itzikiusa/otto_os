@@ -296,7 +296,14 @@
           class="rmm-row" class:active={flatIndex === activeIdx} role="option" tabindex="-1"
           aria-selected={flatIndex === activeIdx}
           onmouseenter={() => (activeIdx = flatIndex)}
-          onmousedown={(ev) => { ev.preventDefault(); selectFileItem(f, false); }}
+          onmousedown={(ev) => ev.preventDefault()}
+          onclick={() => selectFileItem(f, false)}
+          onkeydown={(ev) => {
+            if (ev.target === ev.currentTarget && (ev.key === 'Enter' || ev.key === ' ')) {
+              ev.preventDefault();
+              selectFileItem(f, false);
+            }
+          }}
         >
           <span class="rmm-ico" class:dir={f.isDir}><Icon name={f.isDir ? 'folder' : 'file'} size={13} /></span>
           <span class="rmm-name mono ellipsis" dir="ltr">
@@ -310,7 +317,8 @@
             <button
               type="button" class="rmm-attach-dir" aria-label="Attach folder {f.display}"
               title="Attach folder reference" data-testid="at-mention-attach-folder"
-              onmousedown={(ev) => { ev.preventDefault(); ev.stopPropagation(); selectFileItem(f, true); }}
+              onmousedown={(ev) => ev.preventDefault()}
+              onclick={(ev) => { ev.stopPropagation(); selectFileItem(f, true); }}
             >Attach</button>
           {/if}
         </div>
@@ -331,7 +339,14 @@
           class="rmm-row" class:active={flatIndex === activeIdx} role="option" tabindex="-1"
           aria-selected={flatIndex === activeIdx}
           onmouseenter={() => (activeIdx = flatIndex)}
-          onmousedown={(ev) => { ev.preventDefault(); selectAgentItem(a); }}
+          onmousedown={(ev) => ev.preventDefault()}
+          onclick={() => selectAgentItem(a)}
+          onkeydown={(ev) => {
+            if (ev.key === 'Enter' || ev.key === ' ') {
+              ev.preventDefault();
+              selectAgentItem(a);
+            }
+          }}
         >
           <span class="rmm-ico">
             {#if hasProviderIcon(a.provider)}<ProviderIcon provider={a.provider} size={13} />{:else}<Icon name="assistant" size={13} />{/if}
@@ -350,10 +365,10 @@
   <div class="rmm" class:below={placeBelow} style:--rmm-max="{maxBlockPx}px" data-testid="runtime-at-mention-menu">
     <div class="rmm-bar">
       <div class="rmm-filters" role="group" aria-label="Filter mentions">
-        <button type="button" class="rmm-pill" class:on={filter === 'all'} aria-pressed={filter === 'all'} onmousedown={(e) => { e.preventDefault(); filter = 'all'; }}>All</button>
-        <button type="button" class="rmm-pill" class:on={filter === 'files'} aria-pressed={filter === 'files'} onmousedown={(e) => { e.preventDefault(); filter = 'files'; }}>Files</button>
+        <button type="button" class="rmm-pill" class:on={filter === 'all'} aria-pressed={filter === 'all'} onmousedown={(e) => e.preventDefault()} onclick={() => (filter = 'all')}>All</button>
+        <button type="button" class="rmm-pill" class:on={filter === 'files'} aria-pressed={filter === 'files'} onmousedown={(e) => e.preventDefault()} onclick={() => (filter = 'files')}>Files</button>
         {#if allowAgents && onpickagent}
-          <button type="button" class="rmm-pill" class:on={filter === 'agents'} aria-pressed={filter === 'agents'} onmousedown={(e) => { e.preventDefault(); filter = 'agents'; }}>Agents</button>
+          <button type="button" class="rmm-pill" class:on={filter === 'agents'} aria-pressed={filter === 'agents'} onmousedown={(e) => e.preventDefault()} onclick={() => (filter = 'agents')}>Agents</button>
         {/if}
       </div>
       <span class="rmm-hint">↑↓ navigate · ⇥ open folder · ↵ select</span>

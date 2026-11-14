@@ -16,14 +16,15 @@ pub mod shell_env;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 use chrono::Utc;
 use dashmap::DashMap;
 use otto_core::auth::BoxFuture;
+use otto_core::domain::User;
 use otto_core::secrets::{delete_async, get_async, put_async, SecretStore};
 use otto_core::{Error, Result};
 use otto_state::DbPool;
@@ -39,8 +40,8 @@ use crate::types::{
 pub use self::db_store::parse_dotenv;
 use self::db_store::{
     clean_opt, discover_local_dotenv_files, discover_local_python_venvs, is_valid_env_key,
-    load_stored_project_env, persist_project_roots, push_unique, secret_key_ref,
-    validate_attached_folder_path, StoredEnvVar, RESERVED_MODULE_SDKS_KEY,
+    load_all_stored_project_envs, load_stored_project_env, persist_project_roots, push_unique,
+    secret_key_ref, validate_attached_folder_path, StoredEnvVar, RESERVED_MODULE_SDKS_KEY,
 };
 pub use self::discovery::discover_run_configs;
 use self::module_sdks::{
@@ -49,7 +50,9 @@ use self::module_sdks::{
 };
 use self::runner::ActiveRunHandle;
 pub use self::runner_parsers::parse_test_output;
-pub use self::shell_env::{global_shell_env, parse_sentinel_env_zero, ShellEnvResolver};
+pub use self::shell_env::{
+    global_shell_env, parse_sentinel_env_zero, probe_remote_shell_env, ShellEnvResolver,
+};
 
 /// Kick off background warming of the user's login+interactive shell environment.
 pub fn ensure_shell_env_warming() {
@@ -61,12 +64,7 @@ pub fn cached_shell_env_snapshot() -> BTreeMap<String, String> {
     global_shell_env().vars_snapshot()
 }
 
-/// Alias of [`cached_shell_env_snapshot`] for peer crates/modules (`lsp_host`, `dap`).
-pub fn cached_shell_env_vars() -> BTreeMap<String, String> {
-    global_shell_env().vars_snapshot()
-}
-
-const MAX_SYNC_PROJECT_SNAPSHOTS: usize = 64;
+const MAX_SYNC_PROJECT_SNAPSHOTS: usize = 128;
 
 #[derive(Clone, Default)]
 struct SyncProjectSnapshot {
@@ -74,10 +72,35 @@ struct SyncProjectSnapshot {
     env: IdeProjectEnvironment,
 }
 
-fn sync_project_snapshots() -> &'static Mutex<Vec<SyncProjectSnapshot>> {
-    static SNAPSHOTS: std::sync::OnceLock<Mutex<Vec<SyncProjectSnapshot>>> =
-        std::sync::OnceLock::new();
-    SNAPSHOTS.get_or_init(|| Mutex::new(Vec::new()))
+type WeakSnapshotRegistry = RwLock<HashMap<PathBuf, Weak<RwLock<Vec<SyncProjectSnapshot>>>>>;
+
+fn snapshot_registry() -> &'static WeakSnapshotRegistry {
+    static REGISTRY: OnceLock<WeakSnapshotRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+#[allow(clippy::disallowed_methods)]
+fn register_instance_snapshots(data_dir: &Path, snapshots: &Arc<RwLock<Vec<SyncProjectSnapshot>>>) {
+    let mut guard = snapshot_registry()
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    guard.retain(|_, weak| weak.strong_count() > 0);
+    guard.insert(data_dir.to_path_buf(), Arc::downgrade(snapshots));
+    if let Ok(canon) = std::fs::canonicalize(data_dir) {
+        guard.insert(canon, Arc::downgrade(snapshots));
+    }
+}
+
+#[allow(clippy::disallowed_methods)]
+fn find_instance_snapshots(data_dir: &Path) -> Option<Arc<RwLock<Vec<SyncProjectSnapshot>>>> {
+    let guard = snapshot_registry()
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(arc) = guard.get(data_dir).and_then(Weak::upgrade) {
+        return Some(arc);
+    }
+    let canon = std::fs::canonicalize(data_dir).ok()?;
+    guard.get(&canon).and_then(Weak::upgrade)
 }
 
 fn upsert_snapshot_entry(
@@ -95,14 +118,27 @@ fn upsert_snapshot_entry(
     }
 }
 
-pub(super) fn record_sync_project_snapshot(project_key: &str, env: &IdeProjectEnvironment) {
-    let mut guard = sync_project_snapshots()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+fn record_snapshot_into(
+    snapshots: &RwLock<Vec<SyncProjectSnapshot>>,
+    project_key: &str,
+    env: &IdeProjectEnvironment,
+    stored_vars: &[StoredEnvVar],
+) {
+    let non_secret_vars: Vec<IdeEnvVarEntry> = stored_vars
+        .iter()
+        .filter(|s| !s.secret)
+        .map(|s| IdeEnvVarEntry {
+            key: s.key.clone(),
+            value: s.value.clone(),
+            secret: false,
+            has_secret: false,
+        })
+        .collect();
     let base_env = IdeProjectEnvironment {
-        env_vars: Vec::new(),
+        env_vars: non_secret_vars,
         ..env.clone()
     };
+    let mut guard = snapshots.write().unwrap_or_else(|e| e.into_inner());
     upsert_snapshot_entry(&mut guard, project_key.to_string(), base_env.clone());
     if project_key.starts_with("local:") {
         for (mod_root, sdk_val) in &base_env.module_sdks {
@@ -114,12 +150,13 @@ pub(super) fn record_sync_project_snapshot(project_key: &str, env: &IdeProjectEn
     }
 }
 
-fn lookup_sync_project_snapshot(project_key_or_root: &str) -> Option<IdeProjectEnvironment> {
+fn lookup_snapshot_in(
+    snapshots: &RwLock<Vec<SyncProjectSnapshot>>,
+    project_key_or_root: &str,
+) -> Option<IdeProjectEnvironment> {
     let trimmed = project_key_or_root.trim().trim_end_matches('/');
     let local_key = format!("local:{trimmed}");
-    let guard = sync_project_snapshots()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let guard = snapshots.read().unwrap_or_else(|e| e.into_inner());
     if let Some(exact) = guard.iter().rev().find(|s| {
         let sk = s.key.trim_end_matches('/');
         sk == trimmed || sk == local_key
@@ -141,32 +178,34 @@ fn lookup_sync_project_snapshot(project_key_or_root: &str) -> Option<IdeProjectE
     None
 }
 
-pub fn cached_additional_roots(project_key_or_root: &str) -> Vec<String> {
-    lookup_sync_project_snapshot(project_key_or_root)
-        .map(|e| e.additional_roots)
-        .unwrap_or_default()
-}
-
-/// Synchronous, zero-blocking effective environment resolver for local roots
-/// (used by synchronous spawners such as `lsp_host` `gopls` / `jdtls` / `pyright`).
+/// Synchronous effective environment resolver for `data_dir` + `root` using the
+/// owning [`EnvironmentManager`] instance's hydrated project environment cache.
 pub fn cached_effective_env_for_local_root(
     data_dir: &Path,
     root: &str,
 ) -> BTreeMap<String, String> {
-    let proj_opt = lookup_sync_project_snapshot(root);
-    let inherit_shell = proj_opt
-        .as_ref()
-        .map(|p| p.inherit_shell_env)
-        .unwrap_or(true);
+    let proj_opt =
+        find_instance_snapshots(data_dir).and_then(|snaps| lookup_snapshot_in(&snaps, root));
+    build_cached_local_env(data_dir, root, proj_opt.as_ref(), global_shell_env())
+}
+
+#[allow(clippy::disallowed_methods)]
+fn build_cached_local_env(
+    data_dir: &Path,
+    root: &str,
+    proj_opt: Option<&IdeProjectEnvironment>,
+    shell_env: &Arc<ShellEnvResolver>,
+) -> BTreeMap<String, String> {
+    let inherit_shell = proj_opt.map(|p| p.inherit_shell_env).unwrap_or(true);
 
     let mut map = shell_env::collect_process_base_env();
     if inherit_shell {
-        map.extend(global_shell_env().vars_snapshot());
+        map.extend(shell_env.vars_snapshot());
     }
 
     let mut path_dirs: Vec<String> = Vec::new();
     let mut has_explicit_py = false;
-    if let Some(proj) = &proj_opt {
+    if let Some(proj) = proj_opt {
         if let Some(jh) = proj.java_home.as_deref().filter(|s| !s.is_empty()) {
             map.insert("JAVA_HOME".into(), jh.to_string());
             push_unique(&mut path_dirs, format!("{}/bin", jh.trim_end_matches('/')));
@@ -250,7 +289,6 @@ pub fn cached_effective_env_for_local_root(
     }
 
     let dotenv = proj_opt
-        .as_ref()
         .and_then(|p| p.dotenv_path.as_deref())
         .filter(|s| !s.trim().is_empty())
         .map(|dp| {
@@ -265,6 +303,18 @@ pub fn cached_effective_env_for_local_root(
     if dotenv.is_file() {
         if let Ok(raw) = std::fs::read_to_string(&dotenv) {
             map.extend(parse_dotenv(&raw));
+        }
+    }
+
+    if let Some(proj) = proj_opt {
+        for item in &proj.env_vars {
+            if !item.secret {
+                if let Some(val) = &item.value {
+                    if is_valid_env_key(&item.key) {
+                        map.insert(item.key.clone(), val.clone());
+                    }
+                }
+            }
         }
     }
     map
@@ -325,26 +375,83 @@ pub struct EnvironmentManager {
     runs: Arc<DashMap<String, Arc<ActiveRunHandle>>>,
     run_seq: Arc<AtomicU64>,
     shell_env: Arc<ShellEnvResolver>,
+    snapshots: Arc<RwLock<Vec<SyncProjectSnapshot>>>,
+    snapshots_hydrated: Arc<AtomicBool>,
 }
 
 impl EnvironmentManager {
     pub fn new(data_dir: PathBuf) -> Self {
+        let snapshots = Arc::new(RwLock::new(Vec::new()));
+        register_instance_snapshots(&data_dir, &snapshots);
         Self {
             data_dir,
             runs: Arc::new(DashMap::new()),
             run_seq: Arc::new(AtomicU64::new(0)),
             shell_env: Arc::clone(global_shell_env()),
+            snapshots,
+            snapshots_hydrated: Arc::new(AtomicBool::new(false)),
         }
     }
 
     #[cfg(test)]
     pub(super) fn with_shell_env(data_dir: PathBuf, shell_env: Arc<ShellEnvResolver>) -> Self {
+        let snapshots = Arc::new(RwLock::new(Vec::new()));
+        register_instance_snapshots(&data_dir, &snapshots);
         Self {
             data_dir,
             runs: Arc::new(DashMap::new()),
             run_seq: Arc::new(AtomicU64::new(0)),
             shell_env,
+            snapshots,
+            snapshots_hydrated: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Hydrate the instance project environment snapshot cache from SQLite on
+    /// startup or first `/ws/lsp` reconnect so saved `go_root`, `java_home`,
+    /// `python_interpreter`, `dotenv_path`, `env_vars`, and `inherit_shell_env`
+    /// take effect before `/api/v1/ide/environments` is visited.
+    pub async fn ensure_hydrated(&self, pool: &DbPool) {
+        if self.snapshots_hydrated.load(Ordering::Acquire) {
+            return;
+        }
+        match load_all_stored_project_envs(pool).await {
+            Ok(all) => {
+                for (key, env, stored) in &all {
+                    record_snapshot_into(&self.snapshots, key, env, stored);
+                }
+                self.snapshots_hydrated.store(true, Ordering::Release);
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to hydrate ide_project_environments cache");
+            }
+        }
+    }
+
+    pub async fn reload_from_db(&self, pool: &DbPool) {
+        self.snapshots_hydrated.store(false, Ordering::Release);
+        self.snapshots
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.ensure_hydrated(pool).await;
+    }
+
+    pub(super) async fn refresh_project_snapshot(&self, pool: &DbPool, project_key: &str) {
+        if let Ok((env, stored)) = load_stored_project_env(pool, project_key).await {
+            record_snapshot_into(&self.snapshots, project_key, &env, &stored);
+        }
+    }
+
+    pub fn cached_additional_roots(&self, project_key_or_root: &str) -> Vec<String> {
+        lookup_snapshot_in(&self.snapshots, project_key_or_root)
+            .map(|e| e.additional_roots)
+            .unwrap_or_default()
+    }
+
+    pub fn cached_effective_env_for_local_root(&self, root: &str) -> BTreeMap<String, String> {
+        let proj_opt = lookup_snapshot_in(&self.snapshots, root);
+        build_cached_local_env(&self.data_dir, root, proj_opt.as_ref(), &self.shell_env)
     }
 
     pub fn cached_shell_env_snapshot(&self) -> BTreeMap<String, String> {
@@ -369,7 +476,9 @@ impl EnvironmentManager {
         target: &IdeTargetSpec,
     ) -> Result<IdeProjectEnvironment> {
         target.validate()?;
-        let (mut env, stored) = load_stored_project_env(pool, &target.project_key()).await?;
+        let project_key = target.project_key();
+        let (mut env, stored) = load_stored_project_env(pool, &project_key).await?;
+        record_snapshot_into(&self.snapshots, &project_key, &env, &stored);
         env.env_vars = stored
             .into_iter()
             .map(|s| IdeEnvVarEntry {
@@ -383,10 +492,18 @@ impl EnvironmentManager {
     }
 
     /// Hydrate `target.additional_roots` with folders from `project_folders`,
-    /// SQLite `ide_project_environments`, AND Named IDE Projects (`ProjectStore`).
-    pub async fn enrich_target_roots(&self, pool: &DbPool, target: &mut IdeTargetSpec) {
+    /// SQLite `ide_project_environments`, and the caller's Named IDE Projects.
+    pub async fn enrich_target_roots(
+        &self,
+        pool: &DbPool,
+        projects: Option<&ProjectStore>,
+        user: Option<&User>,
+        target: &mut IdeTargetSpec,
+    ) {
         target.absorb_project_folders(&[]);
-        if let Ok((proj, _)) = load_stored_project_env(pool, &target.project_key()).await {
+        let project_key = target.project_key();
+        if let Ok((proj, stored)) = load_stored_project_env(pool, &project_key).await {
+            record_snapshot_into(&self.snapshots, &project_key, &proj, &stored);
             for r in proj.additional_roots {
                 if !r.is_empty() && r != target.root && !target.additional_roots.contains(&r) {
                     target.additional_roots.push(r);
@@ -394,10 +511,16 @@ impl EnvironmentManager {
             }
         }
         if target.kind == IdeTargetKind::Local {
-            let store = ProjectStore::new(self.data_dir.clone());
-            for r in store.folders_for_root(&target.root) {
-                if !r.is_empty() && r != target.root && !target.additional_roots.contains(&r) {
-                    target.additional_roots.push(r);
+            if let Some(store) = projects {
+                let _ = store.ensure_hydrated(pool).await;
+                let extra = match user {
+                    Some(u) => store.folders_for_root_for_user(&target.root, u),
+                    None => store.folders_for_root(&target.root),
+                };
+                for r in extra {
+                    if !r.is_empty() && r != target.root && !target.additional_roots.contains(&r) {
+                        target.additional_roots.push(r);
+                    }
                 }
             }
         }
@@ -446,6 +569,7 @@ impl EnvironmentManager {
         Ok((env, added))
     }
 
+    #[allow(clippy::disallowed_methods)]
     pub async fn remove_project_folder(
         &self,
         pool: &DbPool,
@@ -473,13 +597,28 @@ impl EnvironmentManager {
     pub async fn get_environments<S: SecretAccess + ?Sized>(
         &self,
         pool: &DbPool,
-        _secrets: &S,
+        secrets: &S,
         targets: &TargetManager,
         target: &IdeTargetSpec,
         ssh: Option<&IdeSshSpec>,
     ) -> Result<IdeEnvironmentsResp> {
+        self.get_environments_for_user(pool, secrets, targets, target, ssh, true)
+            .await
+    }
+
+    pub async fn get_environments_for_user<S: SecretAccess + ?Sized>(
+        &self,
+        pool: &DbPool,
+        _secrets: &S,
+        targets: &TargetManager,
+        target: &IdeTargetSpec,
+        ssh: Option<&IdeSshSpec>,
+        caller_is_root: bool,
+    ) -> Result<IdeEnvironmentsResp> {
         target.validate()?;
-        let (mut env, stored_vars) = load_stored_project_env(pool, &target.project_key()).await?;
+        let project_key = target.project_key();
+        let (mut env, stored_vars) = load_stored_project_env(pool, &project_key).await?;
+        record_snapshot_into(&self.snapshots, &project_key, &env, &stored_vars);
         for extra in target.merged_extra_roots() {
             if !extra.is_empty() && extra != target.root && !env.additional_roots.contains(&extra) {
                 env.additional_roots.push(extra);
@@ -546,8 +685,16 @@ impl EnvironmentManager {
         }
 
         let effective_env = self
-            .resolve_env_layers(&env, &stored_vars, None::<&S>, target, None, false)
-            .await;
+            .resolve_env_layers(
+                &env,
+                &stored_vars,
+                None::<&S>,
+                target,
+                None,
+                false,
+                caller_is_root,
+            )
+            .await?;
 
         Ok(IdeEnvironmentsResp {
             env,
@@ -743,12 +890,32 @@ impl EnvironmentManager {
         target: &IdeTargetSpec,
         cfg: Option<&IdeRunConfig>,
     ) -> Result<BTreeMap<String, String>> {
+        self.build_effective_env_for_run_as(pool, secrets, target, cfg, true)
+            .await
+    }
+
+    pub async fn build_effective_env_for_run_as<S: SecretAccess + ?Sized>(
+        &self,
+        pool: &DbPool,
+        secrets: &S,
+        target: &IdeTargetSpec,
+        cfg: Option<&IdeRunConfig>,
+        caller_is_root: bool,
+    ) -> Result<BTreeMap<String, String>> {
         target.validate()?;
-        let (mut proj, mut stored_vars) =
-            load_stored_project_env(pool, &target.project_key()).await?;
+        let project_key = target.project_key();
+        let (mut proj, mut stored_vars) = load_stored_project_env(pool, &project_key).await?;
+        record_snapshot_into(&self.snapshots, &project_key, &proj, &stored_vars);
         layer_child_and_module_sdk_for_run(pool, target, cfg, &mut proj, &mut stored_vars).await;
-        Ok(self
-            .resolve_env_layers(&proj, &stored_vars, Some(secrets), target, cfg, true)
-            .await)
+        self.resolve_env_layers(
+            &proj,
+            &stored_vars,
+            Some(secrets),
+            target,
+            cfg,
+            true,
+            caller_is_root,
+        )
+        .await
     }
 }

@@ -8,7 +8,13 @@
   import { setContext, untrack, type Snippet } from 'svelte';
   import { announceShown } from '../../../lib/announce.svelte';
   import { ApiError } from '../../../lib/api/client';
-  import type { ApprovalDecision, PromptDelivery, RuntimeDraftContent, TurnItem } from '../../../lib/api/types';
+  import type {
+    ApprovalDecision,
+    PromptDelivery,
+    RuntimeAccessMode,
+    RuntimeDraftContent,
+    TurnItem,
+  } from '../../../lib/api/types';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import LazyMount from '../../../lib/components/LazyMount.svelte';
@@ -63,13 +69,8 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
   const RuntimeQuestions = lazyComponent(() => import('./RuntimeQuestions.svelte'));
   const ModelPicker = lazyComponent(() => import('../../../lib/components/ModelPickerPopover.svelte'));
 
-  export interface RuntimeComposerTestIds {
-    composer?: string;
-    send?: string;
-    stop?: string;
-    model?: string;
-    attach?: string;
-  }
+  export type { RuntimeComposerTestIds } from '../../../lib/runtimeThreadPort';
+  import type { RuntimeComposerTestIds } from '../../../lib/runtimeThreadPort';
 
   interface Props {
     sessionId: string;
@@ -78,6 +79,8 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
     agentChat?: string;
     hostCommands?: RuntimeHostCommands;
     compact?: boolean;
+    accessModeOverride?: RuntimeAccessMode | null;
+    onaccessmodechange?: (mode: RuntimeAccessMode) => void;
     fallbackCwd?: string | null;
     hasExternalContext?: boolean;
     transformOutgoingText?: (text: string) => string;
@@ -97,6 +100,8 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
     agentChat,
     hostCommands,
     compact = false,
+    accessModeOverride = null,
+    onaccessmodechange,
     fallbackCwd = null,
     hasExternalContext = false,
     transformOutgoingText,
@@ -185,7 +190,7 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
     return draft.effort ? `${label} · ${formatEffortShort(draft.effort)}` : label;
   });
 
-  const accessMode = $derived(draft.pickedMode ?? session?.access_mode ?? 'approval-required');
+  const accessMode = $derived(accessModeOverride ?? draft.pickedMode ?? session?.access_mode ?? 'approval-required');
   const canImages = $derived(attachmentSupport(provider).images);
   const canFiles = $derived(attachmentSupport(provider).files);
   const takes = (f: File): boolean => takesFile(provider, f);
@@ -216,6 +221,8 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
     const assembled = assembleComposerMessage(t, sent.context);
     const finalPrompt =
       typeof transformOutgoingText === 'function' ? transformOutgoingText(assembled) : assembled;
+    const effectiveAccess =
+      (typeof accessModeOverride !== 'undefined' && accessModeOverride) || sent.access_mode;
     try {
       draft.awaitSeq = (
         await runtimeThreads.prompt(ownerId, {
@@ -224,7 +231,7 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
           ...(sent.effort ? { effort: sent.effort } : {}),
           ...(pics.length ? { images: pics.map(({ mime, data_base64 }) => ({ mime, data_base64 })) } : {}),
           ...(docs.length ? { files: docs } : {}),
-          ...(sent.access_mode ? { access_mode: sent.access_mode } : {}),
+          ...(effectiveAccess ? { access_mode: effectiveAccess } : {}),
           ...(sent.fresh_context ? { fresh_context: true } : {}),
           ...(delivery ? { delivery } : {}),
         })
@@ -273,7 +280,9 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
       const payload =
         typeof transformOutgoingText === 'function' ? transformOutgoingText(assembled) : assembled;
       if (extCtx && typeof onExternalContextConsumed === 'function') onExternalContextConsumed();
-      return void askFromComposer(ownerId, draft, payload, draft.pickedMode);
+      const effectiveAccess =
+        (typeof accessModeOverride !== 'undefined' && accessModeOverride) || draft.pickedMode;
+      return void askFromComposer(ownerId, draft, payload, effectiveAccess);
     }
     const submitted = snapshotDraft(draft);
     if (needsRevive && !submitted.fresh_context) {
@@ -536,7 +545,10 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
               agent={harnessLabel(provider)}
               cwd={effectiveCwd ?? 'this folder'}
               disabled={closed || !session}
-              onpick={(m) => (draft.pickedMode = m)}
+              onpick={(m) => {
+                draft.pickedMode = m;
+                onaccessmodechange?.(m);
+              }}
             />
           {/if}
         </span>

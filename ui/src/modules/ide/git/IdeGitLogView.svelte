@@ -9,14 +9,10 @@
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
-  import { startMouseDrag } from '../../../lib/dragCursor';
+  import PaneDivider from '../../../lib/components/PaneDivider.svelte';
   import { loadErrorText } from '../../../lib/loadError';
-  import {
-    loadPaneWidth,
-    paneResizer,
-    RESIZE_TITLE,
-    savePaneWidth,
-  } from '../../../lib/paneResizer';
+  import { loadPaneWidth } from '../../../lib/paneResizer';
+  import { rel } from '../../../lib/stores/now.svelte';
   import BlamePanel from '../../git/BlamePanel.svelte'; // ui-guards: allow — reuse Otto's shared Git BlamePanel
   import { repoDiffFileLoader } from '../../git/diff-load'; // ui-guards: allow — reuse Otto's shared Git diff loader
   import DiffViewer from '../../git/DiffViewer.svelte'; // ui-guards: allow — reuse Otto's shared Git DiffViewer
@@ -76,32 +72,6 @@
     const rel = ideGit.repoRelativePath(repo, ide.activePath);
     return rel ? rel : null;
   });
-
-  function setListW(next: number): void {
-    listW = Math.max(PANE_MIN, Math.min(PANE_MAX, Math.round(next)));
-    savePaneWidth(LS_LOG_W, listW);
-  }
-
-  function startListResize(e: MouseEvent): void {
-    const startX = e.clientX;
-    const startW = listW;
-    startMouseDrag(e, {
-      cursor: 'col-resize',
-      onMove: (ev) => setListW(startW + (ev.clientX - startX)),
-      onEnd: () => savePaneWidth(LS_LOG_W, listW),
-    });
-  }
-
-  function compactDate(iso: string): string {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return '';
-    const diffSec = Math.max(0, Math.round((Date.now() - d.getTime()) / 1000));
-    if (diffSec < 60) return 'now';
-    if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m`;
-    if (diffSec < 86_400) return `${Math.floor(diffSec / 3600)}h`;
-    if (diffSec < 86_400 * 14) return `${Math.floor(diffSec / 86_400)}d`;
-    return d.toISOString().slice(0, 10);
-  }
 
   // Load branch refs when in `log` mode.
   $effect(() => {
@@ -362,7 +332,7 @@
                 <div class="gl-commit-meta">
                   <span class="ellipsis">{c.author}</span>
                   <span class="mono">{c.short_sha}</span>
-                  <span class="mono">{compactDate(c.date)}</span>
+                  <span class="mono">{rel(c.date, { compact: true })}</span>
                 </div>
               </button>
             {/each}
@@ -370,17 +340,7 @@
         </div>
       </aside>
 
-      <div
-        class="gl-resizer"
-        role="separator"
-        aria-label="Resize commit list"
-        title={RESIZE_TITLE}
-        use:paneResizer={{
-          value: listW, min: PANE_MIN, max: PANE_MAX, orientation: 'vertical',
-          text: (v) => `${Math.round(v)} pixels wide`,
-          onChange: setListW, onReset: () => setListW(380), onDragStart: startListResize,
-        }}
-      ></div>
+      <PaneDivider bind:width={listW} storageKey={LS_LOG_W} min={PANE_MIN} max={PANE_MAX} defaultWidth={380} label="Resize commit list" />
 
       <section class="gl-right" aria-label="Commit diff">
         {#if !selectedCommit}
@@ -446,8 +406,6 @@
   .gl-subject { flex: 1; min-inline-size: 0; }
   .gl-commit-meta { display: flex; align-items: center; gap: 8px; font-size: var(--fs-xs); color: var(--text-dim); min-inline-size: 0; }
   .gl-commit-meta > :first-child { flex: 1; }
-  .gl-resizer { inline-size: 4px; margin-inline: -2px; cursor: col-resize; flex-shrink: 0; z-index: 2; }
-  .gl-resizer:hover, .gl-resizer:focus-visible { background: var(--accent-soft); }
   .gl-right { display: flex; flex-direction: column; flex: 1; min-block-size: 0; min-inline-size: 0; overflow: hidden; }
   .gl-commit-head { display: flex; align-items: center; gap: 8px; block-size: 30px; min-block-size: 30px; padding-inline: 10px; border-block-end: 1px solid var(--border); background: var(--surface-2); flex-shrink: 0; min-inline-size: 0; }
   .gl-head-subject { flex: 1; font-size: var(--fs-xs); font-weight: 600; }

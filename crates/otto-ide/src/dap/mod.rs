@@ -149,11 +149,21 @@ impl Drop for BridgeGuard {
 
 /// Validate and convert [`IdeSshSpec`] into [`SshTunnelConfig`].
 pub(crate) fn ssh_tunnel_config(ssh: &IdeSshSpec) -> Result<SshTunnelConfig> {
+    crate::target::ssh_exec::validate_ssh_spec(ssh)?;
+    let identity_file = match ssh.identity_file.as_deref().map(str::trim) {
+        Some(s) if !s.is_empty() => Some(
+            otto_core::paths::expand_home_strict(s)
+                .map_err(Error::Invalid)?
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        _ => None,
+    };
     let cfg = SshTunnelConfig {
         host: ssh.host.clone(),
-        port: if ssh.port == 0 { 22 } else { ssh.port },
+        port: ssh.effective_port().unwrap_or(22),
         user: ssh.user.clone(),
-        identity_file: ssh.identity_file.clone(),
+        identity_file,
         proxy_jump: ssh.proxy_jump.clone(),
     };
     cfg.validate()?;
@@ -162,70 +172,32 @@ pub(crate) fn ssh_tunnel_config(ssh: &IdeSshSpec) -> Result<SshTunnelConfig> {
 
 /// Safe POSIX single-quote shell escaping for remote SSH command strings.
 pub(crate) fn shell_quote(raw: &str) -> String {
-    format!("'{}'", raw.replace('\'', "'\\''"))
+    crate::target::ssh_exec::posix_quote(raw)
 }
 
-fn is_safe_env_key(key: &str) -> bool {
-    !key.is_empty()
-        && key
-            .bytes()
-            .next()
-            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
-        && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-}
-
-fn build_ssh_exec_args(
+fn build_ssh_remote_command(
     ssh: &IdeSshSpec,
     command: &str,
     args: &[String],
     cwd: &str,
     env: &BTreeMap<String, String>,
-) -> Result<Vec<String>> {
-    let cfg = ssh_tunnel_config(ssh)?;
-    let mut ssh_args = vec![
-        "-o".into(),
-        "BatchMode=yes".into(),
-        "-o".into(),
-        "StrictHostKeyChecking=accept-new".into(),
-        "-o".into(),
-        "ConnectTimeout=10".into(),
-        "-o".into(),
-        "ServerAliveInterval=15".into(),
-        "-o".into(),
-        "ServerAliveCountMax=2".into(),
-        "-p".into(),
-        cfg.port.to_string(),
-    ];
-    if let Some(identity) = cfg.identity_file.as_deref().filter(|s| !s.is_empty()) {
-        ssh_args.push("-i".into());
-        ssh_args.push(identity.to_string());
-    }
-    if let Some(jump) = cfg.proxy_jump.as_deref().filter(|s| !s.trim().is_empty()) {
-        ssh_args.push("-J".into());
-        ssh_args.push(jump.to_string());
-    }
-    ssh_args.push("--".into());
-    let dest = if cfg.user.is_empty() {
-        cfg.host
+    kill_on_stdin_eof: bool,
+) -> Result<Command> {
+    let (mut ssh_args, dest) = crate::target::ssh_exec::build_ssh_cli_args(ssh, None)?;
+    let exec_line = crate::target::ssh_exec::build_remote_exec_line(cwd, command, args, env);
+    let remote_body = if kill_on_stdin_eof {
+        crate::target::ssh_exec::wrap_remote_stdio_with_eof_kill(&exec_line)
     } else {
-        format!("{}@{}", cfg.user, cfg.host)
+        exec_line
     };
+    ssh_args.push("--".into());
     ssh_args.push(dest);
-
-    let mut script = format!("cd {} && ", shell_quote(cwd));
-    for (k, v) in env {
-        if is_safe_env_key(k) {
-            script.push_str(&format!("export {k}={} && ", shell_quote(v)));
-        }
-    }
-    script.push_str("exec ");
-    script.push_str(&shell_quote(command));
-    for arg in args {
-        script.push(' ');
-        script.push_str(&shell_quote(arg));
-    }
-    ssh_args.push(format!("sh -lc {}", shell_quote(&script)));
-    Ok(ssh_args)
+    ssh_args.push(format!("sh -lc {}", shell_quote(&remote_body)));
+    let mut cmd = Command::new("ssh");
+    cmd.args(&ssh_args).kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    Ok(cmd)
 }
 
 /// Spawn a child process with piped stdio on either a Local or Remote SSH target.
@@ -257,11 +229,8 @@ pub(crate) fn spawn_target_process(
             let spec = ssh.ok_or_else(|| {
                 Error::Invalid("SSH connection metadata required for remote debug target".into())
             })?;
-            let ssh_args = build_ssh_exec_args(spec, command, args, cwd, env)?;
-            let mut cmd = Command::new("ssh");
-            cmd.args(&ssh_args)
-                .kill_on_drop(true)
-                .stdin(Stdio::piped())
+            let mut cmd = build_ssh_remote_command(spec, command, args, cwd, env, true)?;
+            cmd.stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
             cmd.spawn().map_err(|e| {
@@ -281,8 +250,35 @@ pub(crate) async fn run_target_command(
     env: &BTreeMap<String, String>,
     timeout: Duration,
 ) -> Result<std::process::Output> {
-    let mut child = spawn_target_process(target, ssh, command, args, cwd, env)?;
-    drop(child.stdin.take());
+    target.validate()?;
+    let child = match target.kind {
+        IdeTargetKind::Local => {
+            let mut cmd = Command::new(command);
+            cmd.args(args)
+                .current_dir(cwd)
+                .envs(env)
+                .kill_on_drop(true)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            #[cfg(unix)]
+            cmd.process_group(0);
+            cmd.spawn()
+                .map_err(|e| Error::Upstream(format!("failed to spawn '{command}': {e}")))?
+        }
+        IdeTargetKind::Ssh => {
+            let spec = ssh.ok_or_else(|| {
+                Error::Invalid("SSH connection metadata required for remote debug target".into())
+            })?;
+            let mut cmd = build_ssh_remote_command(spec, command, args, cwd, env, false)?;
+            cmd.stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            cmd.spawn().map_err(|e| {
+                Error::Upstream(format!("failed to spawn remote '{command}' via ssh: {e}"))
+            })?
+        }
+    };
     match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(out)) => Ok(out),
         Ok(Err(e)) => Err(Error::Upstream(format!("'{command}' failed: {e}"))),

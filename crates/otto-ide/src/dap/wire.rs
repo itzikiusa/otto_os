@@ -23,15 +23,9 @@ use std::io::{self, ErrorKind};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::{
-    AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
-};
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, BufReader};
 
-/// Maximum total byte length of the HTTP-like header block preceding `\r\n\r\n`.
-pub const MAX_HEADER_BYTES: usize = 8 * 1024;
-
-/// Maximum DAP JSON payload size (16 MiB).
-pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+pub use crate::jsonrpc_framing::{MAX_HEADER_BYTES, MAX_MESSAGE_BYTES};
 
 /// Top-level Debug Adapter Protocol message envelope.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -147,19 +141,9 @@ pub async fn write_raw_frame<W>(writer: &mut W, payload: &[u8]) -> io::Result<()
 where
     W: AsyncWrite + Unpin,
 {
-    if payload.len() > MAX_MESSAGE_BYTES {
-        return Err(invalid_data(format!(
-            "DAP outgoing payload ({} bytes) exceeds 16 MiB cap",
-            payload.len()
-        )));
-    }
     std::str::from_utf8(payload)
         .map_err(|_| invalid_data("DAP outgoing payload is not valid UTF-8"))?;
-
-    let header = format!("Content-Length: {}\r\n\r\n", payload.len());
-    writer.write_all(header.as_bytes()).await?;
-    writer.write_all(payload).await?;
-    writer.flush().await
+    crate::jsonrpc_framing::write_frame_bytes(writer, payload).await
 }
 
 /// Read a single `Content-Length` framed UTF-8 payload from `reader`.
@@ -169,79 +153,9 @@ pub async fn read_raw_frame<R>(reader: &mut R) -> io::Result<Option<String>>
 where
     R: AsyncBufRead + Unpin,
 {
-    let mut content_length: Option<usize> = None;
-    let mut header_bytes = 0usize;
-
-    loop {
-        let mut line = Vec::new();
-        let remaining_cap = (MAX_HEADER_BYTES - header_bytes + 1) as u64;
-        let n = reader
-            .take(remaining_cap)
-            .read_until(b'\n', &mut line)
-            .await?;
-
-        if n == 0 {
-            return if header_bytes == 0 {
-                Ok(None)
-            } else {
-                Err(io::Error::new(
-                    ErrorKind::UnexpectedEof,
-                    "truncated DAP headers before empty line",
-                ))
-            };
-        }
-
-        header_bytes += n;
-        if header_bytes > MAX_HEADER_BYTES {
-            return Err(invalid_data("DAP headers exceed 8 KiB cap"));
-        }
-        if !line.ends_with(b"\n") {
-            return Err(io::Error::new(
-                ErrorKind::UnexpectedEof,
-                "truncated DAP header line",
-            ));
-        }
-
-        let line_str =
-            std::str::from_utf8(&line).map_err(|_| invalid_data("non-UTF-8 DAP header line"))?;
-        let trimmed = line_str.trim_end_matches(['\r', '\n']);
-        if trimmed.is_empty() {
-            // Ignore stray leading blank lines before `Content-Length:` if no
-            // headers have been seen yet; otherwise `\r\n\r\n` terminates headers.
-            if content_length.is_none() && header_bytes == n {
-                header_bytes = 0;
-                continue;
-            }
-            break;
-        }
-
-        let (name, value) = trimmed
-            .split_once(':')
-            .ok_or_else(|| invalid_data(format!("malformed DAP header line: {trimmed}")))?;
-
-        if name.trim().eq_ignore_ascii_case("Content-Length") {
-            if content_length.is_some() {
-                return Err(invalid_data("duplicate DAP Content-Length header"));
-            }
-            let len = value
-                .trim()
-                .parse::<usize>()
-                .map_err(|_| invalid_data("invalid DAP Content-Length integer"))?;
-            if len > MAX_MESSAGE_BYTES {
-                return Err(invalid_data(format!(
-                    "DAP message length ({len} bytes) exceeds 16 MiB cap"
-                )));
-            }
-            content_length = Some(len);
-        }
-    }
-
-    let len =
-        content_length.ok_or_else(|| invalid_data("DAP frame missing Content-Length header"))?;
-
-    let mut body = vec![0u8; len];
-    reader.read_exact(&mut body).await?;
-
+    let Some(body) = crate::jsonrpc_framing::read_frame_bytes(reader).await? else {
+        return Ok(None);
+    };
     String::from_utf8(body)
         .map(Some)
         .map_err(|_| invalid_data("DAP message body contains invalid UTF-8"))
@@ -360,6 +274,7 @@ impl<W: AsyncWrite + Unpin> DapWriter<W> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use tokio::io::AsyncWriteExt;
 
     #[tokio::test]
     async fn duplex_request_response_event_round_trip() {

@@ -1,7 +1,7 @@
 // Toolchains, Shell Environment, Project Environments, Run Configurations,
 // and DAP Debugger helpers for `IdeStore`.
 
-import { api } from '../../../lib/api/client';
+import { api, ApiError } from '../../../lib/api/client';
 import { loadErrorText } from '../../../lib/loadError';
 import { pollWhileVisible, type Poller } from '../../../lib/poll';
 import { toasts } from '../../../lib/toast.svelte';
@@ -214,9 +214,26 @@ export function startJobsPoller(host: DebugAndEnvHost, prev: Poller | null, onDo
     if (running.length === 0) { poller.stop(); return; }
     let finishedAny = false;
     for (const job of running) {
-      const resp = await api.bg.get<{ job: IdeInstallJob }>(`/ide/toolchains/jobs/${encodeURIComponent(job.id)}`, signal);
-      host.installJobs = host.installJobs.map((j) => (j.id === resp.job.id ? resp.job : j));
-      if (resp.job.status !== 'running') finishedAny = true;
+      try {
+        const resp = await api.bg.get<{ job: IdeInstallJob }>(`/ide/toolchains/jobs/${encodeURIComponent(job.id)}`, signal);
+        host.installJobs = host.installJobs.map((j) => (j.id === resp.job.id ? resp.job : j));
+        if (resp.job.status !== 'running') {
+          finishedAny = true;
+          if (resp.job.status === 'error') {
+            toasts.error('Couldn’t install toolchain', resp.job.error || 'Installation exited with an error');
+          }
+        }
+      } catch (e) {
+        if (signal.aborted) return;
+        if (e instanceof ApiError && e.status === 404) {
+          const msg = 'Install job is no longer available on the daemon';
+          host.installJobs = host.installJobs.map((j) =>
+            j.id === job.id ? { ...j, status: 'error', error: msg } : j,
+          );
+          finishedAny = true;
+          toasts.error('Couldn’t install toolchain', msg);
+        }
+      }
     }
     if (finishedAny) onDone();
   }, { ms: 1200, immediate: false });
@@ -235,13 +252,9 @@ export async function fetchEnvironments(host: DebugAndEnvHost): Promise<void> {
       configs: IdeRunConfig[];
       detected_configs?: IdeRunConfig[];
       effective_env?: Record<string, string>;
-      shell_env?: IdeShellEnvResp | null;
     }>(`/ide/environments?${host.targetQuery()}`);
     host.projectEnv = resp.env;
     host.effectiveEnv = resp.effective_env ?? {};
-    if (resp.shell_env) {
-      host.shellEnv = { ...resp.shell_env, vars: resp.shell_env.vars ?? resp.shell_env.env ?? {} };
-    }
     if (resp.env?.additional_roots?.length) {
       host.syncAdditionalRootsFromEnv?.(resp.env.additional_roots);
     }
@@ -559,18 +572,10 @@ export async function createProjectPythonVenv(
   const effectiveRoot = (moduleRoot || host.target.root).replace(/\/+$/, '');
   try {
     type RawVenvPayload = { path?: string; interpreter_path?: string; python_path?: string; version?: string };
-    let raw: { venv?: RawVenvPayload } & RawVenvPayload;
-    try {
-      raw = await api.long.post<{ venv?: RawVenvPayload } & RawVenvPayload>(
-        '/ide/toolchains/python-venv',
-        { target: host.targetPayload, root: effectiveRoot, path: venvDir, base_python: pythonVersion || undefined },
-      );
-    } catch {
-      raw = await api.long.post<{ venv?: RawVenvPayload } & RawVenvPayload>(
-        '/ide/environments/python-venv',
-        { target: host.targetPayload, root: effectiveRoot, venv_dir: venvDir, python_version: pythonVersion || undefined },
-      );
-    }
+    const raw = await api.long.post<{ venv?: RawVenvPayload } & RawVenvPayload>(
+      '/ide/environments/python-venv',
+      { target: host.targetPayload, root: effectiveRoot, venv_dir: venvDir, python_version: pythonVersion || undefined },
+    );
     const v = raw.venv ?? raw;
     const normPath = v.path || `${effectiveRoot}/${venvDir.replace(/^\.\//, '')}`;
     const interp = v.interpreter_path || v.python_path || `${normPath}/bin/python`;

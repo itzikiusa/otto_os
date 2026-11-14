@@ -11,18 +11,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use otto_core::{Error, Result};
 use otto_ssh::SftpSession;
-use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 
+pub(super) use crate::jsonrpc_framing::sha256_hex;
+use crate::lsp_host::pool::LspPool;
 use crate::types::{
     detect_language, IdeFileReadResp, IdeFsEntry, IdeFsEntryKind, IdeFsMutateOp, IdeFsMutateResp,
     IdePlatformInfo,
 };
 
 use super::sdk_paths::strip_file_uri;
-use super::{join_remote, map_io_err, resolve_local_prospective_in_roots, resolve_remote_subpath};
+use super::{
+    join_remote, map_io_err, remote_parent, resolve_local_prospective_in_roots,
+    resolve_remote_in_roots,
+};
 
-pub(crate) fn enforce_non_root_path(canonical: &Path) -> Result<()> {
+pub fn enforce_non_root_path(canonical: &Path) -> Result<()> {
     use otto_core::secret_paths as sp;
     if sp::in_protected_dir(canonical)
         || sp::is_denied_dir(canonical)
@@ -316,10 +320,15 @@ pub(crate) fn build_file_read_resp(
     })
 }
 
-pub(super) fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hex::encode(hasher.finalize())
+fn is_remote_sftp_not_found(err: &Error) -> bool {
+    match err {
+        Error::NotFound(_) => true,
+        Error::Upstream(msg) => {
+            let lower = msg.to_ascii_lowercase();
+            lower.contains("not found") || lower.contains("no such file")
+        }
+        _ => false,
+    }
 }
 
 pub(super) async fn verify_local_expected_sha(dest: &Path, expected: &str) -> Result<()> {
@@ -356,21 +365,37 @@ pub(super) async fn verify_remote_expected_sha(
     let tmp = tempfile::NamedTempFile::new()
         .map_err(|e| Error::Internal(format!("temp conflict file: {e}")))?;
     let tmp_str = tmp.path().to_string_lossy().into_owned();
-    if sftp.download(remote_path, &tmp_str).await.is_ok() {
-        let existing = tokio::fs::read(tmp.path())
-            .await
-            .map_err(|e| Error::Internal(format!("read conflict file: {e}")))?;
-        let actual = sha256_hex(&existing);
-        if !actual.eq_ignore_ascii_case(expected) {
-            return Err(Error::Conflict(format!(
-                "remote file '{remote_path}' changed (expected sha256 {expected}, actual {actual})"
-            )));
+    match sftp.download(remote_path, &tmp_str).await {
+        Ok(()) => {
+            let existing = tokio::fs::read(tmp.path())
+                .await
+                .map_err(|e| Error::Internal(format!("read conflict file: {e}")))?;
+            let actual = sha256_hex(&existing);
+            if !actual.eq_ignore_ascii_case(expected) {
+                return Err(Error::Conflict(format!(
+                    "remote file '{remote_path}' changed (expected sha256 {expected}, actual {actual})"
+                )));
+            }
+            Ok(())
         }
+        Err(err) if is_remote_sftp_not_found(&err) => {
+            let empty_sha = sha256_hex(&[]);
+            if !expected.eq_ignore_ascii_case(&empty_sha) {
+                return Err(Error::Conflict(format!(
+                    "remote file '{remote_path}' was deleted before save"
+                )));
+            }
+            Ok(())
+        }
+        Err(err) => Err(err),
     }
-    Ok(())
 }
 
-pub(super) async fn write_local_atomic(dest: &Path, bytes: &[u8]) -> Result<()> {
+pub(super) async fn write_local_atomic(
+    dest: &Path,
+    bytes: &[u8],
+    lsp_pool: Option<&LspPool>,
+) -> Result<()> {
     static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
     let parent = dest
         .parent()
@@ -393,7 +418,9 @@ pub(super) async fn write_local_atomic(dest: &Path, bytes: &[u8]) -> Result<()> 
         let _ = tokio::fs::remove_file(&tmp_path).await;
         return Err(map_io_err("commit file save", dest, e));
     }
-    crate::lsp_host::pool::notify_watched_file_if_build_manifest(dest, 2);
+    if let Some(pool) = lsp_pool {
+        pool.notify_watched_file_if_build_manifest(dest, 2);
+    }
     Ok(())
 }
 
@@ -401,6 +428,7 @@ fn is_protected_root(target_path: &Path, root: &Path, additional_roots: &[PathBu
     target_path == root || additional_roots.iter().any(|r| r == target_path)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn mutate_local_fs_in_roots(
     root: &Path,
     additional_roots: &[PathBuf],
@@ -409,6 +437,7 @@ pub(super) async fn mutate_local_fs_in_roots(
     path: &str,
     dest_path: Option<&str>,
     history: Option<&crate::local_history::LocalHistoryStore>,
+    lsp_pool: Option<&LspPool>,
 ) -> Result<IdeFsMutateResp> {
     match op {
         IdeFsMutateOp::Mkdir => {
@@ -429,7 +458,7 @@ pub(super) async fn mutate_local_fs_in_roots(
             })
         }
         IdeFsMutateOp::CreateFile => {
-            let (file, _) = resolve_local_prospective_in_roots(
+            let (file, matched_root) = resolve_local_prospective_in_roots(
                 root,
                 additional_roots,
                 is_root_user,
@@ -443,20 +472,31 @@ pub(super) async fn mutate_local_fs_in_roots(
                     file.display()
                 )));
             }
-            // Auto-populate Go `package <pkg>` header when creating a new `.go` file!
-            let initial_bytes = default_new_file_template(&file);
-            write_local_atomic(&file, initial_bytes.as_bytes()).await?;
+            let file_for_tpl = file.clone();
+            let initial_bytes =
+                tokio::task::spawn_blocking(move || default_new_file_template(&file_for_tpl))
+                    .await
+                    .unwrap_or_default();
+            write_local_atomic(&file, initial_bytes.as_bytes(), lsp_pool).await?;
             if let Some(hist) = history {
-                let _ = hist.record_bytes_sync(
-                    root,
-                    &file,
-                    initial_bytes.as_bytes(),
-                    "created",
-                    "Created",
-                    false,
-                );
+                let hist_clone = hist.clone();
+                let file_clone = file.clone();
+                let bytes_vec = initial_bytes.into_bytes();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = hist_clone.record_bytes_sync(
+                        &matched_root,
+                        &file_clone,
+                        &bytes_vec,
+                        "created",
+                        "Created",
+                        false,
+                    );
+                })
+                .await;
             }
-            crate::lsp_host::pool::notify_watched_file_if_build_manifest(&file, 1);
+            if let Some(pool) = lsp_pool {
+                pool.notify_watched_file_if_build_manifest(&file, 1);
+            }
             Ok(IdeFsMutateResp {
                 ok: true,
                 path: file.to_string_lossy().into_owned(),
@@ -471,7 +511,7 @@ pub(super) async fn mutate_local_fs_in_roots(
             if is_protected_root(&src, root, additional_roots) {
                 return Err(Error::Forbidden("cannot rename workspace root".into()));
             }
-            let (dst, _) = resolve_local_prospective_in_roots(
+            let (dst, matched_root) = resolve_local_prospective_in_roots(
                 root,
                 additional_roots,
                 is_root_user,
@@ -483,19 +523,32 @@ pub(super) async fn mutate_local_fs_in_roots(
                 .await
                 .map_err(|e| map_io_err("rename path", &src, e))?;
             if let Some(hist) = history {
-                if dst.is_file() {
-                    let _ = hist.record_existing_file_sync(root, &dst, "renamed", "Renamed", false);
-                }
+                let hist_clone = hist.clone();
+                let dst_clone = dst.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if dst_clone.is_file() {
+                        let _ = hist_clone.record_existing_file_sync(
+                            &matched_root,
+                            &dst_clone,
+                            "renamed",
+                            "Renamed",
+                            false,
+                        );
+                    }
+                })
+                .await;
             }
-            crate::lsp_host::pool::notify_watched_file_if_build_manifest(&src, 3);
-            crate::lsp_host::pool::notify_watched_file_if_build_manifest(&dst, 1);
+            if let Some(pool) = lsp_pool {
+                pool.notify_watched_file_if_build_manifest(&src, 3);
+                pool.notify_watched_file_if_build_manifest(&dst, 1);
+            }
             Ok(IdeFsMutateResp {
                 ok: true,
                 path: dst.to_string_lossy().into_owned(),
             })
         }
         IdeFsMutateOp::Delete => {
-            let (target_path, _) =
+            let (target_path, matched_root) =
                 resolve_local_existing_in_roots(root, additional_roots, is_root_user, path)?;
             if is_protected_root(&target_path, root, additional_roots) {
                 return Err(Error::Forbidden("cannot delete workspace root".into()));
@@ -504,16 +557,15 @@ pub(super) async fn mutate_local_fs_in_roots(
                 .await
                 .map_err(|e| map_io_err("stat path for delete", &target_path, e))?;
             if let Some(hist) = history {
-                let root_buf = root.to_path_buf();
                 let target_buf = target_path.clone();
                 let hist_clone = hist.clone();
                 let is_dir = meta.is_dir();
                 let _ = tokio::task::spawn_blocking(move || {
                     if is_dir {
-                        let _ = hist_clone.record_deleted_dir_sync(&root_buf, &target_buf);
+                        let _ = hist_clone.record_deleted_dir_sync(&matched_root, &target_buf);
                     } else {
                         let _ = hist_clone.record_existing_file_sync(
-                            &root_buf,
+                            &matched_root,
                             &target_buf,
                             "deleted",
                             "Deleted",
@@ -531,7 +583,9 @@ pub(super) async fn mutate_local_fs_in_roots(
                 tokio::fs::remove_file(&target_path)
                     .await
                     .map_err(|e| map_io_err("delete file", &target_path, e))?;
-                crate::lsp_host::pool::notify_watched_file_if_build_manifest(&target_path, 3);
+                if let Some(pool) = lsp_pool {
+                    pool.notify_watched_file_if_build_manifest(&target_path, 3);
+                }
             }
             Ok(IdeFsMutateResp {
                 ok: true,
@@ -552,6 +606,12 @@ pub(super) async fn mutate_local_fs_in_roots(
                 true,
             )
             .await?;
+            if tokio::fs::metadata(&dst).await.is_ok() {
+                return Err(Error::Conflict(format!(
+                    "'{}' already exists",
+                    dst.display()
+                )));
+            }
             tokio::fs::copy(&src, &dst)
                 .await
                 .map_err(|e| map_io_err("duplicate file", &src, e))?;
@@ -617,14 +677,43 @@ fn default_new_file_template(file: &Path) -> String {
     format!("package {pkg}\n\n")
 }
 
+fn is_protected_remote_root(target: &str, root: &str, additional_roots: &[String]) -> bool {
+    target == root || additional_roots.iter().any(|r| r == target)
+}
+
+async fn ensure_remote_path_absent(sftp: &SftpSession, remote_path: &str) -> Result<()> {
+    if let (Some(parent), Some(leaf)) = (
+        remote_parent(remote_path),
+        remote_path.trim_end_matches('/').rsplit('/').next(),
+    ) {
+        match sftp.list_capped(&parent, 20_000).await {
+            Ok((entries, truncated)) => {
+                if entries.iter().any(|e| e.name == leaf) {
+                    return Err(Error::Conflict(format!("'{remote_path}' already exists")));
+                }
+                if !truncated {
+                    return Ok(());
+                }
+            }
+            Err(err) if is_remote_sftp_not_found(&err) => return Ok(()),
+            Err(err) => return Err(err),
+        }
+    }
+    if sftp.file_size(remote_path).await.is_ok() {
+        return Err(Error::Conflict(format!("'{remote_path}' already exists")));
+    }
+    Ok(())
+}
+
 pub(super) async fn mutate_remote_fs(
     sftp: &SftpSession,
     root: &str,
+    additional_roots: &[String],
     op: IdeFsMutateOp,
     path: &str,
     dest_path: Option<&str>,
 ) -> Result<IdeFsMutateResp> {
-    let remote = resolve_remote_subpath(root, path)?;
+    let (remote, _) = resolve_remote_in_roots(root, additional_roots, path)?;
     match op {
         IdeFsMutateOp::Mkdir => {
             sftp.mkdir(&remote).await?;
@@ -634,6 +723,7 @@ pub(super) async fn mutate_remote_fs(
             })
         }
         IdeFsMutateOp::CreateFile => {
+            ensure_remote_path_absent(sftp, &remote).await?;
             let tmp = tempfile::NamedTempFile::new()
                 .map_err(|e| Error::Internal(format!("temp file: {e}")))?;
             let tmp_str = tmp.path().to_string_lossy().into_owned();
@@ -644,10 +734,13 @@ pub(super) async fn mutate_remote_fs(
             })
         }
         IdeFsMutateOp::Rename => {
+            if is_protected_remote_root(&remote, root, additional_roots) {
+                return Err(Error::Forbidden("cannot rename workspace root".into()));
+            }
             let dst_raw = dest_path
                 .filter(|s| !s.trim().is_empty())
                 .ok_or_else(|| Error::Invalid("dest_path is required for rename".into()))?;
-            let dst = resolve_remote_subpath(root, dst_raw)?;
+            let (dst, _) = resolve_remote_in_roots(root, additional_roots, dst_raw)?;
             sftp.rename(&remote, &dst).await?;
             Ok(IdeFsMutateResp {
                 ok: true,
@@ -655,7 +748,7 @@ pub(super) async fn mutate_remote_fs(
             })
         }
         IdeFsMutateOp::Delete => {
-            if remote == root {
+            if is_protected_remote_root(&remote, root, additional_roots) {
                 return Err(Error::Forbidden("cannot delete workspace root".into()));
             }
             if sftp.remove(&remote).await.is_err() {
@@ -670,7 +763,8 @@ pub(super) async fn mutate_remote_fs(
             let dst_raw = dest_path
                 .filter(|s| !s.trim().is_empty())
                 .ok_or_else(|| Error::Invalid("dest_path is required for duplicate".into()))?;
-            let dst = resolve_remote_subpath(root, dst_raw)?;
+            let (dst, _) = resolve_remote_in_roots(root, additional_roots, dst_raw)?;
+            ensure_remote_path_absent(sftp, &dst).await?;
             let tmp = tempfile::NamedTempFile::new()
                 .map_err(|e| Error::Internal(format!("temp duplicate file: {e}")))?;
             let tmp_str = tmp.path().to_string_lossy().into_owned();

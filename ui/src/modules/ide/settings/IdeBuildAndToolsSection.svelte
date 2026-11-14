@@ -8,6 +8,7 @@
   import LoadState from '../../../lib/components/LoadState.svelte';
   import Switch from '../../../lib/components/Switch.svelte';
   import Tabs, { type TabItem } from '../../../lib/components/Tabs.svelte';
+  import { confirmer } from '../../../lib/confirm.svelte';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { ide } from '../ideStore.svelte';
@@ -116,6 +117,15 @@
     } finally {
       plBusy = false;
     }
+  }
+
+  async function confirmRemovePlugin(slug: string, name: string): Promise<void> {
+    const ok = await confirmer.ask(`Remove IDE extension "${name}"?`, {
+      title: 'Remove IDE extension?',
+      confirmLabel: 'Remove',
+      danger: true,
+    });
+    if (ok) await ide.removePlugin(slug);
   }
 </script>
 
@@ -361,7 +371,7 @@
                 <span class="srv-name">{pl.name} <Badge tone="neutral" variant="outline" label={`v${pl.version}`} /></span>
                 <span class="srv-sub">{pl.description}</span>
               </div>
-              <button type="button" class="btn small ghost" onclick={() => void ide.removePlugin(pl.slug)}>Remove</button>
+              <button type="button" class="btn small ghost" onclick={() => void confirmRemovePlugin(pl.slug, pl.name)}>Remove</button>
             </div>
           {/each}
         {/if}

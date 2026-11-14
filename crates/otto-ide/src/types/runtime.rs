@@ -325,6 +325,8 @@ pub struct IdeCreateCollabRoomResp {
     pub room: IdeCollabRoom,
     pub invite_token: String,
     pub share_hash: String,
+    pub host_peer_id: String,
+    pub host_peer_secret: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -16,6 +16,7 @@ mod runtime_debug;
 
 use std::path::Path as FsPath;
 
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -23,8 +24,8 @@ use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
 use otto_core::api::Problem;
 use otto_core::auth::AuthUser;
-use otto_core::domain::User;
 use otto_core::{Error, Result};
+use serde::Deserialize;
 
 use self::collab_sse::{
     close_collab_room, collab_guest_cursor, collab_guest_debug_action, collab_guest_edit,
@@ -52,11 +53,18 @@ use crate::types::{
     IdeFsEntryKind, IdeFsMutateReq, IdeFsMutateResp, IdeFsTreeQuery, IdeFsTreeResp, IdeGutterReq,
     IdeGutterResp, IdeInstallJobResp, IdeInstallToolchainReq, IdeOkResp, IdeProjectFolderReq,
     IdePythonVenvInfo, IdeRegisterLocalSdkReq, IdeRegisterLocalSdkResp, IdeReplaceReq,
-    IdeReplaceResp, IdeSearchReq, IdeSearchResp, IdeShellEnvResp, IdeSshSpec, IdeTargetKind,
-    IdeTargetQuery, IdeTargetSpec, IdeToolchainPythonVenvReq, IdeToolchainPythonVenvResp,
-    IdeToolchainsResp,
+    IdeReplaceResp, IdeSearchReq, IdeSearchResp, IdeShellEnvResp, IdeTargetKind, IdeTargetQuery,
+    IdeTargetSpec, IdeToolchainPythonVenvReq, IdeToolchainPythonVenvResp, IdeToolchainsResp,
 };
 use crate::IdeCtx;
+
+pub(super) fn require_root_user(user: &otto_core::domain::User) -> Result<()> {
+    if otto_core::auth::root_authority(user) {
+        Ok(())
+    } else {
+        Err(Error::Forbidden("root authority required".into()))
+    }
+}
 
 /// Problem-details error wrapper mapping [`otto_core::Error`] to HTTP status codes.
 pub(crate) struct ApiErr(pub Error);
@@ -80,6 +88,9 @@ impl IntoResponse for ApiErr {
             Error::Upstream(_) => StatusCode::BAD_GATEWAY,
             Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
+        if status == StatusCode::INTERNAL_SERVER_ERROR {
+            tracing::error!("ide internal error: {}", self.0);
+        }
         let problem = Problem {
             code: self.0.code().to_string(),
             message: self.0.to_string(),
@@ -235,23 +246,6 @@ pub fn public_router<S: IdeCtx>() -> Router<S> {
         )
 }
 
-pub(crate) async fn resolve_ssh_opt<S: IdeCtx>(
-    ctx: &S,
-    user: &User,
-    target: &IdeTargetSpec,
-) -> Result<Option<IdeSshSpec>> {
-    if target.kind == IdeTargetKind::Ssh {
-        let conn_id = target
-            .connection_id
-            .as_ref()
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| Error::Invalid("connection_id is required for SSH targets".into()))?;
-        Ok(Some(ctx.resolve_ssh_connection(user, conn_id).await?))
-    } else {
-        Ok(None)
-    }
-}
-
 // ===========================================================================
 // A. Target Filesystem, Search & Gutter Handlers
 // ===========================================================================
@@ -261,11 +255,7 @@ async fn fs_tree<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<IdeFsTreeQuery>,
 ) -> ApiResult<Json<IdeFsTreeResp>> {
-    let mut spec = q.target_spec()?;
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut spec)
-        .await;
+    let spec = q.target_spec()?;
     let resolved = ctx.ide().targets.resolve(&ctx, &user, &spec).await?;
     let mut resp = ctx
         .ide()
@@ -287,11 +277,7 @@ async fn fs_read_file<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<IdeFileQuery>,
 ) -> ApiResult<Json<IdeFileReadResp>> {
-    let mut spec = q.target_spec()?;
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut spec)
-        .await;
+    let spec = q.target_spec()?;
     let resolved = ctx.ide().targets.resolve(&ctx, &user, &spec).await?;
     let mut resp = ctx.ide().targets.read_file(&resolved, &q.path).await?;
     if resp.language == "plaintext" {
@@ -305,13 +291,13 @@ async fn fs_read_file<S: IdeCtx>(
 async fn fs_write_file<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(mut req): Json<IdeFileWriteReq>,
+    Json(req): Json<IdeFileWriteReq>,
 ) -> ApiResult<Json<IdeFileWriteResp>> {
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
-        .await;
-    let resolved = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
+    let resolved = ctx
+        .ide()
+        .targets
+        .resolve_write(&ctx, &user, &req.target)
+        .await?;
     let resp = ctx
         .ide()
         .targets
@@ -329,13 +315,13 @@ async fn fs_write_file<S: IdeCtx>(
 async fn fs_mutate<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(mut req): Json<IdeFsMutateReq>,
+    Json(req): Json<IdeFsMutateReq>,
 ) -> ApiResult<Json<IdeFsMutateResp>> {
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
-        .await;
-    let resolved = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
+    let resolved = ctx
+        .ide()
+        .targets
+        .resolve_write(&ctx, &user, &req.target)
+        .await?;
     let resp = ctx
         .ide()
         .targets
@@ -347,12 +333,8 @@ async fn fs_mutate<S: IdeCtx>(
 async fn search_workspace<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(mut req): Json<IdeSearchReq>,
+    Json(req): Json<IdeSearchReq>,
 ) -> ApiResult<Json<IdeSearchResp>> {
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
-        .await;
     let resolved = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
     let resp = ctx.ide().targets.search(&resolved, &req).await?;
     Ok(Json(resp))
@@ -361,13 +343,16 @@ async fn search_workspace<S: IdeCtx>(
 async fn replace_workspace<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(mut req): Json<IdeReplaceReq>,
+    Json(req): Json<IdeReplaceReq>,
 ) -> ApiResult<Json<IdeReplaceResp>> {
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
-        .await;
-    let resolved = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
+    let resolved = if req.dry_run {
+        ctx.ide().targets.resolve(&ctx, &user, &req.target).await?
+    } else {
+        ctx.ide()
+            .targets
+            .resolve_write(&ctx, &user, &req.target)
+            .await?
+    };
     let resp = ctx.ide().targets.replace(&resolved, &req).await?;
     Ok(Json(resp))
 }
@@ -375,16 +360,12 @@ async fn replace_workspace<S: IdeCtx>(
 async fn detect_gutter<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(mut req): Json<IdeGutterReq>,
+    Json(req): Json<IdeGutterReq>,
 ) -> ApiResult<Json<IdeGutterResp>> {
     req.target.validate()?;
     let content = match req.content {
         Some(c) => c,
         None => {
-            ctx.ide()
-                .environments
-                .enrich_target_roots(&ctx.pool(), &mut req.target)
-                .await;
             let resolved = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
             ctx.ide()
                 .targets
@@ -408,13 +389,13 @@ async fn list_toolchains<S: IdeCtx>(
     Query(q): Query<IdeTargetQuery>,
 ) -> ApiResult<Json<IdeToolchainsResp>> {
     let include_catalog = q.include_catalog;
-    let mut target = q.into_target_spec()?;
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut target)
-        .await;
-    let _ = ctx.ide().targets.resolve(&ctx, &user, &target).await?;
-    let ssh = resolve_ssh_opt(&ctx, &user, &target).await?;
+    let target = q.into_target_spec()?;
+    let ssh = ctx
+        .ide()
+        .targets
+        .resolve(&ctx, &user, &target)
+        .await?
+        .into_ssh_spec();
     let active_env = ctx
         .ide()
         .environments
@@ -441,8 +422,13 @@ async fn install_toolchain<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeInstallToolchainReq>,
 ) -> ApiResult<Json<IdeInstallJobResp>> {
-    let _ = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
-    let ssh = resolve_ssh_opt(&ctx, &user, &req.target).await?;
+    require_root_user(&user)?;
+    let ssh = ctx
+        .ide()
+        .targets
+        .resolve_write(&ctx, &user, &req.target)
+        .await?
+        .into_ssh_spec();
     let job = ctx
         .ide()
         .toolchains
@@ -456,12 +442,18 @@ async fn register_local_sdk<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeRegisterLocalSdkReq>,
 ) -> ApiResult<Json<IdeRegisterLocalSdkResp>> {
-    let _ = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
+    require_root_user(&user)?;
+    let _ = ctx
+        .ide()
+        .targets
+        .resolve_write(&ctx, &user, &req.target)
+        .await?;
     let sdk = ctx
         .ide()
         .toolchains
         .register_local_sdk(&ctx.pool(), req)
         .await?;
+    ctx.ide().targets.invalidate_local_resolve_cache();
     Ok(Json(IdeRegisterLocalSdkResp { sdk }))
 }
 
@@ -470,22 +462,23 @@ async fn delete_local_sdk<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<IdeDeleteLocalSdkQuery>,
 ) -> ApiResult<Json<IdeOkResp>> {
+    require_root_user(&user)?;
     let target = if q.root.as_deref().is_some_and(|r| !r.trim().is_empty()) {
         let spec = IdeTargetSpec {
             kind: q.kind.unwrap_or_default(),
-            workspace_id: q.workspace_id.clone(),
             root: q.root.clone().unwrap_or_default(),
+            workspace_id: None,
             connection_id: q.connection_id.clone(),
             additional_roots: Vec::new(),
             project_folders: Vec::new(),
         };
-        let _ = ctx.ide().targets.resolve(&ctx, &user, &spec).await?;
+        let _ = ctx.ide().targets.resolve_write(&ctx, &user, &spec).await?;
         spec
     } else {
         IdeTargetSpec {
             kind: q.kind.unwrap_or_default(),
-            workspace_id: q.workspace_id.clone(),
             root: "/".into(),
+            workspace_id: None,
             connection_id: q.connection_id.clone(),
             additional_roots: Vec::new(),
             project_folders: Vec::new(),
@@ -495,14 +488,16 @@ async fn delete_local_sdk<S: IdeCtx>(
         .toolchains
         .remove_local_sdk(&ctx.pool(), &target, q.id.as_deref(), q.path.as_deref())
         .await?;
+    ctx.ide().targets.invalidate_local_resolve_cache();
     Ok(Json(IdeOkResp { ok: true }))
 }
 
 async fn get_toolchain_job<S: IdeCtx>(
     State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(job_id): Path<String>,
 ) -> ApiResult<Json<IdeInstallJobResp>> {
+    require_root_user(&user)?;
     let job = ctx.ide().toolchains.get_job(&job_id)?;
     Ok(Json(IdeInstallJobResp { job }))
 }
@@ -512,12 +507,10 @@ async fn toolchain_python_venv<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeToolchainPythonVenvReq>,
 ) -> ApiResult<Json<IdeToolchainPythonVenvResp>> {
-    let mut target = req
-        .target
-        .unwrap_or_else(|| IdeTargetSpec::local(req.root.clone().unwrap_or_default()));
-    if let Some(explicit_root) = req.root.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        target.root = explicit_root.to_string();
-    }
+    let mut target = match req.target {
+        Some(t) if !t.root.trim().is_empty() => t,
+        _ => IdeTargetSpec::local(req.root.clone().unwrap_or_default()),
+    };
     let mut venv_dir = req
         .path
         .as_deref()
@@ -527,8 +520,14 @@ async fn toolchain_python_venv<S: IdeCtx>(
         .to_string();
     if FsPath::new(&venv_dir).is_absolute() {
         let vp = FsPath::new(&venv_dir);
-        if !target.root.trim().is_empty() {
-            if let Ok(rel) = vp.strip_prefix(&target.root) {
+        let base_for_strip = req
+            .root
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| target.root.trim());
+        if !base_for_strip.is_empty() {
+            if let Ok(rel) = vp.strip_prefix(base_for_strip) {
                 let rel_s = rel.to_string_lossy().into_owned();
                 if !rel_s.is_empty() {
                     venv_dir = rel_s;
@@ -542,8 +541,26 @@ async fn toolchain_python_venv<S: IdeCtx>(
         }
     }
 
-    let _ = ctx.ide().targets.resolve(&ctx, &user, &target).await?;
-    let ssh = resolve_ssh_opt(&ctx, &user, &target).await?;
+    let ssh = ctx
+        .ide()
+        .targets
+        .resolve_write(&ctx, &user, &target)
+        .await?
+        .into_ssh_spec();
+    if let Some(explicit_root) = req
+        .root
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != target.root)
+    {
+        let mut sub_target = target.clone();
+        sub_target.root = explicit_root.to_string();
+        let _ = ctx
+            .ide()
+            .targets
+            .resolve_write(&ctx, &user, &sub_target)
+            .await?;
+    }
     let created = ctx
         .ide()
         .environments
@@ -552,7 +569,7 @@ async fn toolchain_python_venv<S: IdeCtx>(
             &ctx.ide().targets,
             IdeCreatePythonVenvReq {
                 target,
-                root: None,
+                root: req.root,
                 venv_dir: Some(venv_dir),
                 python_version: req.base_python,
             },
@@ -575,17 +592,113 @@ async fn toolchain_python_venv<S: IdeCtx>(
 // C. Shell Env, Environments & Run Config Handlers
 // ===========================================================================
 
+#[derive(Debug, Default, Deserialize)]
+struct IdeShellEnvQuery {
+    #[serde(default)]
+    kind: Option<IdeTargetKind>,
+    #[serde(default)]
+    root: Option<String>,
+    #[serde(default)]
+    connection_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct IdeReloadShellEnvReq {
+    #[serde(default)]
+    target: Option<IdeTargetSpec>,
+    #[serde(default)]
+    kind: Option<IdeTargetKind>,
+    #[serde(default)]
+    root: Option<String>,
+    #[serde(default)]
+    connection_id: Option<String>,
+}
+
+fn ssh_shell_env_spec_from_parts(
+    kind: Option<IdeTargetKind>,
+    root: Option<String>,
+    connection_id: Option<String>,
+) -> Option<IdeTargetSpec> {
+    if kind == Some(IdeTargetKind::Ssh)
+        || connection_id
+            .as_deref()
+            .is_some_and(|c| !c.trim().is_empty())
+    {
+        let root_val = root
+            .filter(|r| !r.trim().is_empty())
+            .unwrap_or_else(|| "~".to_string());
+        Some(IdeTargetSpec {
+            kind: IdeTargetKind::Ssh,
+            root: root_val,
+            workspace_id: None,
+            connection_id,
+            additional_roots: Vec::new(),
+            project_folders: Vec::new(),
+        })
+    } else {
+        None
+    }
+}
+
 async fn get_shell_env<S: IdeCtx>(
     State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Query(q): Query<IdeShellEnvQuery>,
 ) -> ApiResult<Json<IdeShellEnvResp>> {
+    require_root_user(&user)?;
+    if let Some(spec) = ssh_shell_env_spec_from_parts(q.kind, q.root, q.connection_id) {
+        let ssh = ctx
+            .ide()
+            .targets
+            .resolve(&ctx, &user, &spec)
+            .await?
+            .into_ssh_spec()
+            .ok_or_else(|| Error::Invalid("expected SSH target".into()))?;
+        let resp =
+            crate::environments::probe_remote_shell_env(&ctx.ide().targets, &spec, &ssh).await?;
+        return Ok(Json(resp));
+    }
     Ok(Json(ctx.ide().environments.get_shell_env().await))
 }
 
 async fn reload_shell_env<S: IdeCtx>(
     State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Query(q): Query<IdeShellEnvQuery>,
+    body: Bytes,
 ) -> ApiResult<Json<IdeShellEnvResp>> {
+    require_root_user(&user)?;
+    let parsed_body = if body.is_empty() {
+        IdeReloadShellEnvReq::default()
+    } else {
+        serde_json::from_slice::<IdeReloadShellEnvReq>(&body)
+            .map_err(|e| Error::Invalid(format!("invalid reload request body: {e}")))?
+    };
+    let ssh_spec_opt = parsed_body
+        .target
+        .filter(|t| t.kind == IdeTargetKind::Ssh)
+        .or_else(|| {
+            ssh_shell_env_spec_from_parts(
+                parsed_body.kind.or(q.kind),
+                parsed_body.root.or(q.root),
+                parsed_body.connection_id.or(q.connection_id),
+            )
+        });
+    if let Some(mut spec) = ssh_spec_opt {
+        if spec.root.trim().is_empty() {
+            spec.root = "~".to_string();
+        }
+        let ssh = ctx
+            .ide()
+            .targets
+            .resolve(&ctx, &user, &spec)
+            .await?
+            .into_ssh_spec()
+            .ok_or_else(|| Error::Invalid("expected SSH target".into()))?;
+        let resp =
+            crate::environments::probe_remote_shell_env(&ctx.ide().targets, &spec, &ssh).await?;
+        return Ok(Json(resp));
+    }
     Ok(Json(ctx.ide().environments.reload_shell_env().await))
 }
 
@@ -594,12 +707,21 @@ async fn add_project_folder<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeProjectFolderReq>,
 ) -> ApiResult<Json<IdeEnvironmentResp>> {
-    let _ = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
+    let _ = ctx
+        .ide()
+        .targets
+        .resolve_write(&ctx, &user, &req.target)
+        .await?;
+    if req.target.kind == IdeTargetKind::Local && !user.is_root {
+        ctx.authorize_local_target(&user, &IdeTargetSpec::local(req.folder_path.clone()), false)
+            .await?;
+    }
     let env = ctx
         .ide()
         .environments
         .add_project_folder(&ctx.pool(), &req.target, &req.folder_path)
         .await?;
+    ctx.ide().targets.invalidate_local_resolve_cache();
     Ok(Json(IdeEnvironmentResp { env }))
 }
 
@@ -609,12 +731,17 @@ async fn remove_project_folder<S: IdeCtx>(
     Query(q): Query<IdeDeleteProjectFolderQuery>,
 ) -> ApiResult<Json<IdeEnvironmentResp>> {
     let target = q.target_spec()?;
-    let _ = ctx.ide().targets.resolve(&ctx, &user, &target).await?;
+    let _ = ctx
+        .ide()
+        .targets
+        .resolve_write(&ctx, &user, &target)
+        .await?;
     let env = ctx
         .ide()
         .environments
         .remove_project_folder(&ctx.pool(), &target, &q.folder_path)
         .await?;
+    ctx.ide().targets.invalidate_local_resolve_cache();
     Ok(Json(IdeEnvironmentResp { env }))
 }
 

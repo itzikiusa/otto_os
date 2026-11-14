@@ -7,13 +7,11 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use crate::java_workspace::{global_jdk_index, scan_java_workspace, JavaWorkspaceGraph};
+use crate::java_workspace::{global_jdk_index, JavaWorkspaceGraph};
 use crate::types::{IdeDiagnostic, IdeQuickFix, IdeTextEdit};
 
 use super::code_mask_for_line;
-use super::java_diag_index::{
-    collect_external_jar_symbols, collect_same_package_types, index_workspace_simple_classes,
-};
+use super::java_diag_index::{collect_same_package_types, load_or_build_java_project_index};
 pub(crate) use super::java_diag_index::{
     expected_package_from_path, find_import_candidates_by_simple,
 };
@@ -262,10 +260,14 @@ pub(crate) fn analyze_java_diagnostics(
         return Vec::new();
     }
 
-    let ws = scan_java_workspace(project_roots);
+    let project_idx = load_or_build_java_project_index(project_roots, env_map);
+    let ws = &project_idx.ws;
     let jdk = global_jdk_index(preferred_java_home);
-    let (ext_classes, ext_packages, ext_by_simple) = collect_external_jar_symbols(&ws, env_map);
-    let ws_by_simple = index_workspace_simple_classes(&ws);
+    let jdk = jdk.as_ref();
+    let ext_classes = &project_idx.ext_classes;
+    let ext_packages = &project_idx.ext_packages;
+    let ext_by_simple = &project_idx.ext_by_simple;
+    let ws_by_simple = &project_idx.ws_by_simple;
 
     let mut pkg_decl: Option<(u32, String)> = None;
     let mut imports = Vec::new();
@@ -384,7 +386,7 @@ pub(crate) fn analyze_java_diagnostics(
     let mut wildcard_packages = Vec::new();
 
     for imp in &imports {
-        let exists = resolve_java_import_exists(imp, &ws, jdk, &ext_classes, &ext_packages);
+        let exists = resolve_java_import_exists(imp, ws, jdk, ext_classes, ext_packages);
         if !exists {
             if !imp.is_wildcard && !imp.is_static {
                 unresolved_imported_simples.insert(imp.simple_or_member.clone(), imp.fqn.clone());
@@ -401,8 +403,8 @@ pub(crate) fn analyze_java_diagnostics(
             }];
             for cand in find_import_candidates_by_simple(
                 &imp.simple_or_member,
-                &ws_by_simple,
-                &ext_by_simple,
+                ws_by_simple,
+                ext_by_simple,
                 jdk,
             ) {
                 if cand != imp.fqn {
@@ -502,7 +504,7 @@ pub(crate) fn analyze_java_diagnostics(
 
     // 5. Flag body usages of unresolved imports AND unknown `PascalCase` type references!
     let current_pkg = pkg_decl.as_ref().map(|(_, p)| p.as_str()).unwrap_or("");
-    let same_pkg_types = collect_same_package_types(path, current_pkg, &ws);
+    let same_pkg_types = collect_same_package_types(path, current_pkg, ws);
     let mut emitted_type_spans = HashSet::new();
 
     for (idx, code_ln) in code_lines.iter().enumerate() {
@@ -534,21 +536,21 @@ pub(crate) fn analyze_java_diagnostics(
                     &resolved_imported_types,
                     &same_pkg_types,
                     &wildcard_packages,
-                    &ws,
+                    ws,
                     jdk,
-                    &ext_classes,
+                    ext_classes,
                 )
             {
                 continue;
             }
 
-            let start_col = lines[idx][..byte_start].chars().count() as u32 + 1;
+            let start_col = code_ln[..byte_start].chars().count() as u32 + 1;
             let end_col = start_col + tok.chars().count() as u32;
             if !emitted_type_spans.insert((ln, start_col)) {
                 continue;
             }
             let candidates =
-                find_import_candidates_by_simple(tok, &ws_by_simple, &ext_by_simple, jdk);
+                find_import_candidates_by_simple(tok, ws_by_simple, ext_by_simple, jdk);
             let fixes: Vec<IdeQuickFix> = candidates
                 .into_iter()
                 .enumerate()

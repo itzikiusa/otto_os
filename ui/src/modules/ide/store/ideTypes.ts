@@ -2,6 +2,7 @@
 // Re-exported from `../ideStore.svelte.ts` so all IDE components import from one place.
 
 import { getToken, laneFetch } from '../../../lib/api/client';
+import type { IdeQuickFix } from '../../../lib/api/types/ide-intelligence';
 
 export type IdeTargetKind = 'local' | 'ssh';
 export type IdeKeymapPreset = 'jetbrains' | 'standard';
@@ -23,7 +24,7 @@ export interface IdeNamedProject {
   primary_root: string;
   folders: string[];
   pinned: boolean;
-  updated_at?: number;
+  updated_at?: number | string;
 }
 
 export interface IdeProjectRoot {

@@ -9,65 +9,32 @@ import { untrack } from 'svelte';
 import type { ApprovalDecision, RuntimeAccessMode, RuntimeProvider, RuntimeSession } from '../../../lib/api/types';
 import { loadErrorText } from '../../../lib/loadError';
 import { normalizeEffort, supportsEffortSelection, type EffortLevel, type InteractionMode } from '../../../lib/providerModels';
-import { agentProviders, defaultAgentProvider } from '../../../lib/providers';
+import { agentProviders, attachmentSupport, defaultAgentProvider, isRuntimeProvider, takesFile } from '../../../lib/providers';
+import type { IdeRuntimeBridge, RuntimeProjectionView } from '../../../lib/runtimeThreadPort';
 import { runtimeDrafts, type ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
 import { ws } from '../../../lib/stores/workspace.svelte';
-import { council } from '../../threads/runtime/councilStore.svelte'; // ui-guards: allow — IDE agent dock supports Council multi-agent threads
-import type { RuntimeProjection } from '../../threads/runtime/projection'; // ui-guards: allow — IDE agent dock shares structured runtime projections
-import { readAttachments } from '../../threads/runtime/runtimeComposer'; // ui-guards: allow — IDE agent dock shares image/PDF attachment reader
-import { isRuntimeProvider, runtimeThreads } from '../../threads/runtime/runtimeThreads.svelte'; // ui-guards: allow — IDE agent dock drives real Otto Threads
-import { runtimeViews } from '../../threads/runtime/runtimeView.svelte'; // ui-guards: allow — IDE agent dock streams structured runtime views
-import {
-  ide,
-  type IdeDebugSessionSnapshot,
-  type IdeDiagnostic,
-  type IdeSymbolNode,
-  type IdeTestResult,
-  type IdeVariable,
-} from '../ideStore.svelte';
-import {
-  matchesIdeProjectThread,
-  resolveIdeHarnesses,
-  resolveIdeInlineProviders,
-  type IdeCodeProposal,
-  type IdeContextChip,
-  type IdeInlinePromptState,
-} from '../store/ideDiffApplier';
-import {
-  applyIdeCodeProposal,
-  computeProposalsMap,
-  createDebugFrameChipEntry,
-  createDiagnosticChipEntry,
-  createFileChipFromPath,
-  createSymbolChipFromPath,
-  createTestFailureChipEntry,
-  undoIdeCodeProposal,
-} from './ideAgentRuntimeOps.svelte';
-import {
-  IDE_OPEN_THREAD_EVENT,
-  ideAgentState,
-  type IdeAgentEngineBridge,
-  type IdeShellSelectionInput,
-} from './ideAgentState.svelte';
-import {
-  interruptIdeSessionTurn,
-  isIdeSessionWorking,
-  loadIdeWorkspaceSessions,
-  loadSelectedIdeSessionMeta,
-  openIdeThreadInThreadsView,
-  rememberIdeProjectRoot,
-  runIdeComposerStateTurn,
-  runIdeInlineEditStateTurn,
-} from './ideAgentTurnRunner.svelte';
-import {
-  buildFailedRunDraftChip,
-  collectIdeProjectRoots,
-  collectIdeThreadEntries,
-  currentIdeTargetKey,
-  resolveIdeProjectCwd,
-  resolveIdeWorkspaceId,
-  type IdeThreadEntry,
-} from './ideContextBuilders';
+import { ide, type IdeDebugSessionSnapshot, type IdeDiagnostic, type IdeSymbolNode, type IdeTestResult, type IdeVariable } from '../ideStore.svelte';
+import { matchesIdeProjectThread, resolveIdeHarnesses, resolveIdeInlineProviders, type IdeCodeProposal, type IdeContextChip, type IdeInlinePromptState } from '../store/ideDiffApplier';
+import { applyIdeCodeProposal, computeProposalsMap, createDebugFrameChipEntry, createDiagnosticChipEntry, createFileChipFromPath, createSymbolChipFromPath, createTestFailureChipEntry, undoIdeCodeProposal } from './ideAgentRuntimeOps.svelte';
+import { IDE_OPEN_THREAD_EVENT, ideAgentState, type IdeAgentEngineBridge, type IdeShellSelectionInput } from './ideAgentState.svelte';
+import { interruptIdeSessionTurn, isIdeSessionWorking, loadIdeWorkspaceSessions, loadSelectedIdeSessionMeta, openIdeThreadInThreadsView, rememberIdeProjectRoot, runIdeComposerStateTurn, runIdeInlineEditStateTurn } from './ideAgentTurnRunner.svelte';
+import { buildFailedRunDraftChip, collectIdeProjectRoots, collectIdeThreadEntries, currentIdeTargetKey, resolveIdeProjectCwd, resolveIdeWorkspaceId, type IdeThreadEntry } from './ideContextBuilders';
+
+function toIdeInteractionMode(planMode: boolean, runtimeAccessMode: RuntimeAccessMode): InteractionMode {
+  if (planMode) return 'plan';
+  return runtimeAccessMode === 'full-access' ? 'full' : 'accept-edits';
+}
+
+function fromIdeInteractionMode(
+  mode: InteractionMode,
+  prevRuntimeAccessMode: RuntimeAccessMode,
+): { planMode: boolean; runtimeAccessMode: RuntimeAccessMode } {
+  if (mode === 'plan') return { planMode: true, runtimeAccessMode: prevRuntimeAccessMode };
+  return {
+    planMode: false,
+    runtimeAccessMode: mode === 'full' ? 'full-access' : 'auto-accept-edits',
+  };
+}
 
 class IdeAgentEngine implements IdeAgentEngineBridge {
   private stopThreadsMount: (() => void) | null = null;
@@ -77,6 +44,17 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
   private stopTargetWatch: (() => void) | null = null;
   private lastTargetKey = '';
   private inflightWsLoads = new Map<string, Promise<void>>();
+
+  constructor() {
+    void ideAgentState.ensureBridge().then((b) => {
+      if (b) this.syncSubscriptions();
+    });
+  }
+
+  bindRuntimeBridge(bridge: IdeRuntimeBridge): void {
+    ideAgentState.runtimeBridge = bridge;
+    this.syncSubscriptions();
+  }
 
   get panelOpen(): boolean {
     return ideAgentState.panelOpen;
@@ -129,11 +107,13 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
 
   get composerText(): string {
     const sid = ideAgentState.sessionId;
-    return sid && runtimeThreads.byId[sid] ? runtimeDrafts.for(sid).text : ideAgentState.composerText;
+    return sid && ideAgentState.runtimeBridge?.runtimeThreads.byId[sid]
+      ? runtimeDrafts.for(sid).text
+      : ideAgentState.composerText;
   }
   set composerText(next: string) {
     const sid = ideAgentState.sessionId;
-    if (sid && runtimeThreads.byId[sid]) runtimeDrafts.for(sid).text = next;
+    if (sid && ideAgentState.runtimeBridge?.runtimeThreads.byId[sid]) runtimeDrafts.for(sid).text = next;
     else ideAgentState.composerText = next;
   }
 
@@ -152,25 +132,18 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
   get appliedUndoByProposalId(): Record<string, string> { return ideAgentState.appliedUndoByProposalId; }
   set appliedUndoByProposalId(next: Record<string, string>) { ideAgentState.appliedUndoByProposalId = next; }
 
-  get accessMode(): 'default' | 'plan' | 'full' {
-    if (this.planMode) return 'plan';
-    return this.runtimeAccessMode === 'full-access' ? 'full' : 'default';
-  }
-  set accessMode(mode: 'default' | 'plan' | 'full') {
-    this.planMode = mode === 'plan';
-    if (mode === 'full') this.runtimeAccessMode = 'full-access';
-    else if (mode === 'plan' || this.runtimeAccessMode === 'full-access') this.runtimeAccessMode = 'approval-required';
+  get effectiveRuntimeAccessMode(): RuntimeAccessMode {
+    return this.planMode ? 'approval-required' : this.runtimeAccessMode;
   }
 
   get interactionMode(): InteractionMode {
-    if (this.planMode) return 'plan';
-    return this.runtimeAccessMode === 'full-access' ? 'full' : 'accept-edits';
+    return toIdeInteractionMode(this.planMode, this.runtimeAccessMode);
   }
 
   setInteractionMode(mode: InteractionMode): void {
-    this.planMode = mode === 'plan';
-    this.runtimeAccessMode =
-      mode === 'full' ? 'full-access' : mode === 'plan' ? 'approval-required' : 'auto-accept-edits';
+    const next = fromIdeInteractionMode(mode, this.runtimeAccessMode);
+    this.planMode = next.planMode;
+    this.runtimeAccessMode = next.runtimeAccessMode;
   }
 
   setRuntimeAccessMode(mode: RuntimeAccessMode): void {
@@ -182,9 +155,11 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
   readonly activeWorkspaceId = $derived.by((): string => resolveIdeWorkspaceId());
 
   readonly sessions = $derived.by((): RuntimeSession[] => {
+    const bridge = ideAgentState.runtimeBridge;
+    if (!bridge) return [];
     const wsId = this.activeWorkspaceId;
     const roots = this.projectRoots;
-    return runtimeThreads.live(false).filter((s) =>
+    return bridge.runtimeThreads.live(false).filter((s) =>
       matchesIdeProjectThread({
         sessionId: s.id,
         activeSessionId: ideAgentState.sessionId,
@@ -198,7 +173,7 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
 
   readonly threads = $derived.by((): IdeThreadEntry[] =>
     collectIdeThreadEntries({
-      runtimeAll: Object.values(runtimeThreads.byId),
+      runtimeAll: Object.values(ideAgentState.runtimeBridge?.runtimeThreads.byId ?? {}),
       ptySessions: ws.sessions,
       statusMap: ws.statusMap,
       needsYouMap: ws.needsYou,
@@ -213,13 +188,15 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
   );
 
   readonly activeRuntimeSession = $derived<RuntimeSession | null>(
-    ideAgentState.sessionId ? (runtimeThreads.get(ideAgentState.sessionId) ?? null) : null,
+    ideAgentState.sessionId
+      ? (ideAgentState.runtimeBridge?.runtimeThreads.get(ideAgentState.sessionId) ?? null)
+      : null,
   );
 
   readonly activeThreadKind = $derived<'runtime' | 'pty' | 'draft'>(
     !ideAgentState.sessionId
       ? 'draft'
-      : runtimeThreads.get(ideAgentState.sessionId)
+      : ideAgentState.runtimeBridge?.runtimeThreads.get(ideAgentState.sessionId)
         ? 'runtime'
         : ws.getSession(ideAgentState.sessionId)
           ? 'pty'
@@ -239,17 +216,18 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
     ideAgentState.model ?? this.activeRuntimeSession?.model ?? this.activeThread?.model ?? null,
   );
 
-  readonly canAttachImages = $derived.by((): boolean => {
-    const p = this.activeRuntimeSession?.provider ?? ideAgentState.provider;
-    return isRuntimeProvider(p) && p !== 'agy';
-  });
-
-  readonly canAttachFiles = $derived.by(
-    (): boolean => (this.activeRuntimeSession?.provider ?? ideAgentState.provider) === 'claude',
+  readonly canAttachImages = $derived.by(
+    (): boolean => attachmentSupport(this.activeRuntimeSession?.provider ?? ideAgentState.provider).images,
   );
 
-  readonly projection = $derived<RuntimeProjection | null>(
-    ideAgentState.sessionId ? (runtimeViews.projections[ideAgentState.sessionId] ?? null) : null,
+  readonly canAttachFiles = $derived.by(
+    (): boolean => attachmentSupport(this.activeRuntimeSession?.provider ?? ideAgentState.provider).files,
+  );
+
+  readonly projection = $derived<RuntimeProjectionView | null>(
+    ideAgentState.sessionId
+      ? (ideAgentState.runtimeBridge?.runtimeViews.projections[ideAgentState.sessionId] ?? null)
+      : null,
   );
 
   readonly isWorking = $derived.by((): boolean => isIdeSessionWorking(ideAgentState.sending, ideAgentState.sessionId));
@@ -277,19 +255,6 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
     this.syncSubscriptions();
   }
 
-  private publishLiveIdeContext(): void {
-    if (typeof window === 'undefined') return;
-    const root = ide.target.kind === 'local' ? (ide.target.root ?? '').trim().replace(/\/+$/, '') : '';
-    (window as unknown as Record<string, unknown>).__ottoIdeLiveContext = {
-      root,
-      additionalRoots: [...ide.additionalRoots],
-      activePath: ide.activePath,
-      openTabs: ide.tabs.map((t) => ({ path: t.path, name: t.name })),
-    };
-    if (root && root !== '~') rememberIdeProjectRoot(root);
-    window.dispatchEvent(new CustomEvent('otto:ide-context-changed'));
-  }
-
   applyPendingHandoff(): void {
     const handoff = ideAgentState.takePendingHandoff();
     if (!handoff) return;
@@ -299,7 +264,8 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
   }
 
   syncTargetRoot(nextKey = currentIdeTargetKey()): void {
-    this.publishLiveIdeContext();
+    const localRoot = ide.target.kind === 'local' ? (ide.target.root ?? '').trim().replace(/\/+$/, '') : '';
+    if (localRoot && localRoot !== '~') rememberIdeProjectRoot(localRoot);
     if (this.lastTargetKey && this.lastTargetKey !== nextKey) {
       ideAgentState.resetTargetState();
       this.lastTargetKey = nextKey;
@@ -320,11 +286,7 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
     void this.refreshWorkspaceSessions();
     const onHandoff = (): void => this.applyPendingHandoff();
     if (typeof window !== 'undefined') window.addEventListener(IDE_OPEN_THREAD_EVENT, onHandoff);
-    const stopLiveCtx = $effect.root(() => {
-      $effect(() => {
-        void [ide.target.kind, ide.target.root, ide.additionalRoots.length, ide.activePath, ide.tabs.length];
-        untrack(() => this.publishLiveIdeContext());
-      });
+    const stopProviderGuard = $effect.root(() => {
       $effect(() => {
         const list = this.availableProviders;
         const curSid = ideAgentState.sessionId;
@@ -338,7 +300,7 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
       });
     });
     return () => {
-      stopLiveCtx();
+      stopProviderGuard();
       if (typeof window !== 'undefined') window.removeEventListener(IDE_OPEN_THREAD_EVENT, onHandoff);
       if (!ideAgentState.panelOpen && !ideAgentState.inlinePrompt?.open) this.syncSubscriptions(true);
     };
@@ -381,6 +343,14 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
       this.stopThreadsMount = null;
       return;
     }
+    const bridge = ideAgentState.runtimeBridge;
+    if (!bridge) {
+      void ideAgentState.ensureBridge().then((b) => {
+        if (b) this.syncSubscriptions();
+      });
+      return;
+    }
+    const { runtimeThreads, runtimeViews } = bridge;
     if (!this.stopThreadsMount) this.stopThreadsMount = runtimeThreads.mount();
     const targetSid = ideAgentState.sessionId;
     const isPtyOnly = Boolean(targetSid && !runtimeThreads.byId[targetSid] && ws.getSession(targetSid));
@@ -429,16 +399,14 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
     if (list.length > 0) this.setProvider(list[(list.indexOf(ideAgentState.provider) + 1) % list.length]);
   }
 
-  setAccessMode(mode: 'default' | 'plan' | 'full'): void {
-    this.accessMode = mode;
-  }
-
   startNewChat(): void {
     this.error = null;
     this.sessionId = null;
     ideAgentState.composerText = '';
-    council.on = false;
-    council.seats = [];
+    if (ideAgentState.runtimeBridge) {
+      ideAgentState.runtimeBridge.council.on = false;
+      ideAgentState.runtimeBridge.council.seats = [];
+    }
   }
 
   attachMentionedPath(opts: { path: string; display: string; isDir: boolean }): void {
@@ -467,12 +435,11 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
   }
 
   async addAttachments(files: Iterable<File>): Promise<void> {
-    if (!this.canAttachImages) return;
-    const allowPdf = this.canAttachFiles;
-    const read = await readAttachments(
-      files,
-      (f) => f.type.startsWith('image/') || (allowPdf && f.type === 'application/pdf'),
-    );
+    const p = this.activeRuntimeSession?.provider ?? ideAgentState.provider;
+    if (!attachmentSupport(p).images) return;
+    const bridge = ideAgentState.runtimeBridge ?? (await ideAgentState.ensureBridge());
+    if (!bridge) return;
+    const read = await bridge.readAttachments(files, (f) => takesFile(p, f));
     if (read.length > 0) {
       this.attachments = [...this.attachments, ...read];
       this.syncSubscriptions();
@@ -493,7 +460,9 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
     if (!sid || this.reopening) return false;
     this.reopening = true;
     try {
-      await runtimeThreads.reopen(sid);
+      const bridge = ideAgentState.runtimeBridge ?? (await ideAgentState.ensureBridge());
+      if (!bridge) throw new Error('Couldn’t load runtime threads in this window.');
+      await bridge.runtimeThreads.reopen(sid);
       this.error = null;
       return true;
     } catch (e) {
@@ -635,7 +604,7 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
     await runIdeInlineEditStateTurn({
       query,
       planMode: this.planMode,
-      accessMode: this.runtimeAccessMode,
+      accessMode: this.effectiveRuntimeAccessMode,
       handoffAndSend: () => {
         this.handoffInlineToChat();
         void this.sendPrompt();
@@ -706,7 +675,7 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
     await runIdeComposerStateTurn({
       overrideText,
       interactionMode: this.interactionMode,
-      accessMode: this.runtimeAccessMode,
+      accessMode: this.effectiveRuntimeAccessMode,
       planMode: this.planMode,
       ensurePanelOpen: () => {
         if (!this.panelOpen) this.panelOpen = true;
@@ -728,7 +697,9 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
   async respondApproval(requestId: string, decision: ApprovalDecision): Promise<void> {
     if (!ideAgentState.sessionId) return;
     try {
-      await runtimeThreads.respond(ideAgentState.sessionId, requestId, decision);
+      const bridge = ideAgentState.runtimeBridge ?? (await ideAgentState.ensureBridge());
+      if (!bridge) throw new Error('Couldn’t load runtime threads in this window.');
+      await bridge.runtimeThreads.respond(ideAgentState.sessionId, requestId, decision);
     } catch (e) {
       this.error = loadErrorText(e);
     }

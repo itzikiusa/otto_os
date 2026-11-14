@@ -892,16 +892,38 @@ impl Default for CatalogClient {
 
 impl CatalogClient {
     pub fn new() -> Self {
-        let http = reqwest::Client::builder()
+        let http = otto_netguard::guarded_client_builder()
             .https_only(true)
             .user_agent("otto-ide/0.2")
             .connect_timeout(HTTP_CONNECT_TIMEOUT)
             .timeout(HTTP_READ_TIMEOUT)
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .expect("build netguard-protected catalog HTTP client");
         Self {
             http,
             cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn seed_cached_entry(
+        &self,
+        platform: TargetPlatform,
+        eco: EcosystemKind,
+        entry: CatalogSdkEntry,
+    ) {
+        if let Ok(mut guard) = self.cache.lock() {
+            let slot = guard
+                .entry(platform)
+                .or_insert_with(|| CachedPlatformCatalog {
+                    fetched_at: Instant::now(),
+                    by_ecosystem: EcosystemKind::ALL
+                        .into_iter()
+                        .map(|k| (k, curated_catalog(k, platform)))
+                        .collect(),
+                });
+            slot.fetched_at = Instant::now();
+            slot.by_ecosystem.entry(eco).or_default().insert(0, entry);
         }
     }
 
@@ -980,6 +1002,7 @@ impl CatalogClient {
     }
 
     async fn get_text(&self, url: &str) -> Option<String> {
+        otto_netguard::check_url(url).await.ok()?;
         let resp = self.http.get(url).send().await.ok()?;
         if !resp.status().is_success() {
             return None;

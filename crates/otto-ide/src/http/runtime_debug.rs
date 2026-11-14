@@ -8,7 +8,7 @@ use serde::Deserialize;
 use tokio::sync::broadcast::error::RecvError;
 
 use super::collab_sse::build_debug_sse_response;
-use super::{resolve_ssh_opt, ApiResult};
+use super::ApiResult;
 use crate::dap::DapStartContext;
 use crate::types::{
     IdeCreatePythonVenvReq, IdeCreatePythonVenvResp, IdeDebugCommandReq, IdeDebugEvaluateReq,
@@ -27,19 +27,29 @@ pub(super) async fn get_environments<S: IdeCtx>(
     let mut target = q.into_target_spec()?;
     ctx.ide()
         .environments
-        .enrich_target_roots(&ctx.pool(), &mut target)
+        .enrich_target_roots(
+            &ctx.pool(),
+            Some(&ctx.ide().projects),
+            Some(&user),
+            &mut target,
+        )
         .await;
-    let _ = ctx.ide().targets.resolve(&ctx, &user, &target).await?;
-    let ssh = resolve_ssh_opt(&ctx, &user, &target).await?;
+    let ssh = ctx
+        .ide()
+        .targets
+        .resolve(&ctx, &user, &target)
+        .await?
+        .into_ssh_spec();
     let resp = ctx
         .ide()
         .environments
-        .get_environments(
+        .get_environments_for_user(
             &ctx.pool(),
             ctx.secrets(),
             &ctx.ide().targets,
             &target,
             ssh.as_ref(),
+            user.is_root,
         )
         .await?;
     Ok(Json(resp))
@@ -50,12 +60,31 @@ pub(super) async fn put_environments<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeUpdateEnvironmentReq>,
 ) -> ApiResult<Json<IdeEnvironmentResp>> {
-    let _ = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
+    let _ = ctx
+        .ide()
+        .targets
+        .resolve_write(&ctx, &user, &req.target)
+        .await?;
+    if let Some(ref extra_roots) = req.additional_roots {
+        if req.target.kind == crate::types::IdeTargetKind::Local && !user.is_root {
+            for r in extra_roots {
+                if !r.trim().is_empty() {
+                    ctx.authorize_local_target(
+                        &user,
+                        &crate::types::IdeTargetSpec::local(r.clone()),
+                        false,
+                    )
+                    .await?;
+                }
+            }
+        }
+    }
     let env = ctx
         .ide()
         .environments
         .update_environment(&ctx.pool(), ctx.secrets(), req)
         .await?;
+    ctx.ide().targets.invalidate_local_resolve_cache();
     Ok(Json(IdeEnvironmentResp { env }))
 }
 
@@ -71,9 +100,19 @@ pub(super) async fn create_python_venv<S: IdeCtx>(
     }
     ctx.ide()
         .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
+        .enrich_target_roots(
+            &ctx.pool(),
+            Some(&ctx.ide().projects),
+            Some(&user),
+            &mut req.target,
+        )
         .await;
-    let _ = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
+    let ssh = ctx
+        .ide()
+        .targets
+        .resolve_write(&ctx, &user, &req.target)
+        .await?
+        .into_ssh_spec();
     if let Some(explicit_root) = req
         .root
         .as_deref()
@@ -82,9 +121,12 @@ pub(super) async fn create_python_venv<S: IdeCtx>(
     {
         let mut sub_target = req.target.clone();
         sub_target.root = explicit_root.to_string();
-        let _ = ctx.ide().targets.resolve(&ctx, &user, &sub_target).await?;
+        let _ = ctx
+            .ide()
+            .targets
+            .resolve_write(&ctx, &user, &sub_target)
+            .await?;
     }
-    let ssh = resolve_ssh_opt(&ctx, &user, &req.target).await?;
     let resp = ctx
         .ide()
         .environments
@@ -98,7 +140,11 @@ pub(super) async fn upsert_run_config<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeUpsertRunConfigReq>,
 ) -> ApiResult<Json<IdeRunConfigResp>> {
-    let _ = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
+    let _ = ctx
+        .ide()
+        .targets
+        .resolve_write(&ctx, &user, &req.target)
+        .await?;
     let config = ctx
         .ide()
         .environments
@@ -113,10 +159,23 @@ pub(super) async fn delete_run_config<S: IdeCtx>(
     Path(id): Path<String>,
     Query(q): Query<IdeTargetQuery>,
 ) -> ApiResult<Json<IdeOkResp>> {
-    if q.root.as_deref().is_some_and(|r| !r.trim().is_empty()) {
-        let target = q.into_target_spec()?;
-        let _ = ctx.ide().targets.resolve(&ctx, &user, &target).await?;
-    }
+    let target = match ctx
+        .ide()
+        .environments
+        .get_run_config_target(&ctx.pool(), &id)
+        .await
+    {
+        Ok(stored) => stored,
+        Err(_) if q.root.as_deref().is_some_and(|r| !r.trim().is_empty()) => {
+            q.into_target_spec()?
+        }
+        Err(err) => return Err(err.into()),
+    };
+    let _ = ctx
+        .ide()
+        .targets
+        .resolve_write(&ctx, &user, &target)
+        .await?;
     ctx.ide()
         .environments
         .delete_run_config(&ctx.pool(), &id)
@@ -130,16 +189,24 @@ pub(super) async fn start_run<S: IdeCtx>(
     Json(mut req): Json<IdeStartRunReq>,
 ) -> ApiResult<Json<IdeRunResp>> {
     req.target.absorb_project_folders(&req.project_folders);
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
-        .await;
-    let _ = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
-    let ssh = resolve_ssh_opt(&ctx, &user, &req.target).await?;
+    let ssh = ctx
+        .ide()
+        .targets
+        .resolve_write(&ctx, &user, &req.target)
+        .await?
+        .into_ssh_spec();
     let run = ctx
         .ide()
         .environments
-        .start_run(&ctx.pool(), ctx.secrets(), &ctx.ide().targets, req, ssh)
+        .start_run_for_user(
+            &ctx.pool(),
+            ctx.secrets(),
+            &ctx.ide().targets,
+            Some(&ctx.ide().projects),
+            Some(&user),
+            req,
+            ssh,
+        )
         .await?;
     Ok(Json(IdeRunResp { run }))
 }
@@ -152,23 +219,27 @@ pub(super) struct GetRunQuery {
 
 pub(super) async fn get_run<S: IdeCtx>(
     State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(run_id): Path<String>,
     Query(q): Query<GetRunQuery>,
 ) -> ApiResult<Json<IdeRunResp>> {
     let run = ctx
         .ide()
         .environments
-        .get_run_with_tail(&run_id, q.tail_lines)?;
+        .get_run_for_user(&user, &run_id, q.tail_lines)?;
     Ok(Json(IdeRunResp { run }))
 }
 
 pub(super) async fn stop_run<S: IdeCtx>(
     State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(run_id): Path<String>,
 ) -> ApiResult<Json<IdeRunResp>> {
-    let run = ctx.ide().environments.stop_run(&run_id).await?;
+    let run = ctx
+        .ide()
+        .environments
+        .stop_run_for_user(&user, &run_id)
+        .await?;
     Ok(Json(IdeRunResp { run }))
 }
 
@@ -180,17 +251,26 @@ pub(super) async fn start_debug_session<S: IdeCtx>(
     req.target.absorb_project_folders(&req.project_folders);
     ctx.ide()
         .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
+        .enrich_target_roots(
+            &ctx.pool(),
+            Some(&ctx.ide().projects),
+            Some(&user),
+            &mut req.target,
+        )
         .await;
-    let _ = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
-    let ssh = resolve_ssh_opt(&ctx, &user, &req.target).await?;
+    let ssh = ctx
+        .ide()
+        .targets
+        .resolve_write(&ctx, &user, &req.target)
+        .await?
+        .into_ssh_spec();
     let run_config = match req.config_id.as_deref().filter(|s| !s.is_empty()) {
-        Some(cid) => ctx
-            .ide()
-            .environments
-            .resolve_run_config_or_auto(&ctx.pool(), &req.target, cid)
-            .await
-            .ok(),
+        Some(cid) => Some(
+            ctx.ide()
+                .environments
+                .resolve_run_config_or_auto(&ctx.pool(), &req.target, cid)
+                .await?,
+        ),
         None => None,
     };
     let adhoc_cfg = if run_config.is_none() {
@@ -209,20 +289,20 @@ pub(super) async fn start_debug_session<S: IdeCtx>(
     let effective_env = ctx
         .ide()
         .environments
-        .build_effective_env_for_run(
+        .build_effective_env_for_run_as(
             &ctx.pool(),
             ctx.secrets(),
             &req.target,
             run_config.as_ref().or(adhoc_cfg.as_ref()),
+            user.is_root,
         )
-        .await
-        .unwrap_or_default();
-    let project_env = ctx
-        .ide()
-        .environments
-        .get_project_env(&ctx.pool(), &req.target)
-        .await
-        .ok();
+        .await?;
+    let project_env = Some(
+        ctx.ide()
+            .environments
+            .get_project_env(&ctx.pool(), &req.target)
+            .await?,
+    );
     let plugin_adapters = ctx.ide().plugins.active_dap_adapters();
     let start_ctx = DapStartContext::new()
         .with_ssh(ssh)
@@ -234,6 +314,7 @@ pub(super) async fn start_debug_session<S: IdeCtx>(
 
     let target_for_collab = req.target.clone();
     let session = ctx.ide().dap.start_session(req, start_ctx).await?;
+    ctx.ide().record_debug_owner(&session.id, &user.id);
     ctx.ide()
         .collab
         .publish_debug_snapshot(Some(&target_for_collab), &session);
@@ -261,27 +342,30 @@ pub(super) async fn start_debug_session<S: IdeCtx>(
 
 pub(super) async fn list_debug_sessions<S: IdeCtx>(
     State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
 ) -> ApiResult<Json<IdeDebugSessionsResp>> {
-    Ok(Json(IdeDebugSessionsResp {
-        sessions: ctx.ide().dap.list_sessions(),
-    }))
+    let sessions = ctx
+        .ide()
+        .filter_debug_sessions(&user, ctx.ide().dap.list_sessions());
+    Ok(Json(IdeDebugSessionsResp { sessions }))
 }
 
 pub(super) async fn get_debug_session<S: IdeCtx>(
     State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<IdeDebugSessionResp>> {
+    ctx.ide().authorize_debug_session(&user, &id)?;
     let session = ctx.ide().dap.get_session(&id)?;
     Ok(Json(IdeDebugSessionResp { session }))
 }
 
 pub(super) async fn stream_debug_events<S: IdeCtx>(
     State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> ApiResult<Response> {
+    ctx.ide().authorize_debug_session(&user, &id)?;
     let initial = ctx.ide().dap.get_session(&id)?;
     let rx = ctx.ide().dap.subscribe_events(&id)?;
     Ok(build_debug_sse_response(initial, rx))
@@ -289,10 +373,11 @@ pub(super) async fn stream_debug_events<S: IdeCtx>(
 
 pub(super) async fn set_debug_breakpoints<S: IdeCtx>(
     State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<String>,
     Json(req): Json<IdeSetBreakpointsReq>,
 ) -> ApiResult<Json<IdeDebugSessionResp>> {
+    ctx.ide().authorize_debug_session(&user, &id)?;
     let session = ctx.ide().dap.set_breakpoints(&id, req).await?;
     ctx.ide().collab.publish_debug_snapshot(None, &session);
     Ok(Json(IdeDebugSessionResp { session }))
@@ -300,10 +385,11 @@ pub(super) async fn set_debug_breakpoints<S: IdeCtx>(
 
 pub(super) async fn debug_command<S: IdeCtx>(
     State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<String>,
     Json(req): Json<IdeDebugCommandReq>,
 ) -> ApiResult<Json<IdeDebugSessionResp>> {
+    ctx.ide().authorize_debug_session(&user, &id)?;
     let session = ctx.ide().dap.command(&id, req).await?;
     ctx.ide().collab.publish_debug_snapshot(None, &session);
     Ok(Json(IdeDebugSessionResp { session }))
@@ -311,10 +397,11 @@ pub(super) async fn debug_command<S: IdeCtx>(
 
 pub(super) async fn debug_variables<S: IdeCtx>(
     State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<String>,
     Json(req): Json<IdeDebugVariablesReq>,
 ) -> ApiResult<Json<IdeDebugVariablesResp>> {
+    ctx.ide().authorize_debug_session(&user, &id)?;
     let variables = ctx
         .ide()
         .dap
@@ -325,10 +412,11 @@ pub(super) async fn debug_variables<S: IdeCtx>(
 
 pub(super) async fn debug_evaluate<S: IdeCtx>(
     State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<String>,
     Json(req): Json<IdeDebugEvaluateReq>,
 ) -> ApiResult<Json<IdeDebugEvaluateResp>> {
+    ctx.ide().authorize_debug_session(&user, &id)?;
     let resp = ctx.ide().dap.evaluate(&id, req).await?;
     Ok(Json(resp))
 }

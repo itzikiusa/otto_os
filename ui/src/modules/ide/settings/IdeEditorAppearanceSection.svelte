@@ -78,7 +78,6 @@
     ide.settingsOpen = false;
     if (typeof window !== 'undefined') {
       const detail = { mode: 'local-history', root: ide.target.root, path: ide.activePath || ide.target.root };
-      window.dispatchEvent(new CustomEvent('otto:ide-open-local-history', { detail }));
       window.dispatchEvent(new CustomEvent('otto:ide-open-compare', { detail }));
     }
   }

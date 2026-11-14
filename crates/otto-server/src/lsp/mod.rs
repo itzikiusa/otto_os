@@ -102,7 +102,8 @@ async fn install_servers(
         Some(ref langs) => {
             let mut cmds = Vec::new();
             for lang in langs {
-                let entry = resolved.iter().find(|r| &r.lang == lang);
+                let norm = servers::normalize_lsp_lang(lang);
+                let entry = resolved.iter().find(|r| r.lang == norm);
                 match entry {
                     None => {
                         return Err(ApiError(Error::Invalid(format!(
@@ -273,6 +274,9 @@ async fn lsp_ws(
         .map(|c| c.trim().to_string())
         .filter(|c| !c.is_empty());
 
+    st.ctx.ide.environments.ensure_hydrated(&st.ctx.pool).await;
+    let _ = st.ctx.ide.projects.ensure_hydrated(&st.ctx.pool).await;
+
     let (key, launch) = if let Some(conn_id) = ssh_conn_id {
         if !root.starts_with('/') {
             return ws_problem(
@@ -322,7 +326,7 @@ async fn lsp_ws(
         };
         let key = pool::PoolKey {
             owner: user.id.to_string(),
-            lang,
+            lang: remote.lang,
             root: norm_root,
             ssh: Some(ssh_spec),
         };
@@ -401,7 +405,7 @@ async fn lsp_ws(
         }
         let key = pool::PoolKey {
             owner: user.id.to_string(),
-            lang,
+            lang: resolved.lang,
             root,
             ssh: None,
         };
@@ -415,34 +419,113 @@ async fn lsp_ws(
     })
 }
 
+pub(crate) fn canonical_or_ancestor(p: &std::path::Path) -> std::path::PathBuf {
+    if let Ok(c) = std::fs::canonicalize(p) {
+        return c;
+    }
+    let mut cur = p;
+    let mut tail = Vec::new();
+    while let Some(parent) = cur.parent() {
+        if let Some(name) = cur.file_name() {
+            tail.push(name.to_os_string());
+        }
+        if let Ok(mut base) = std::fs::canonicalize(parent) {
+            for comp in tail.into_iter().rev() {
+                base.push(comp);
+            }
+            return base;
+        }
+        cur = parent;
+    }
+    p.to_path_buf()
+}
+
+pub(crate) async fn ide_local_root_authorized(
+    ctx: &ServerCtx,
+    user: &otto_core::domain::User,
+    root: &std::path::Path,
+    write: bool,
+) -> otto_core::Result<bool> {
+    if user.is_root {
+        return Ok(true);
+    }
+    let canon_root = tokio::task::spawn_blocking({
+        let p = root.to_path_buf();
+        move || canonical_or_ancestor(&p)
+    })
+    .await
+    .map_err(|e| otto_core::Error::Internal(format!("ide root check: {e}")))?;
+
+    if secret_root_denial(&canon_root).is_some() {
+        return Ok(false);
+    }
+    if !write && crate::routes::session_files::lsp_root_in_own_session(ctx, user, &canon_root).await
+    {
+        return Ok(true);
+    }
+
+    ctx.ide.environments.ensure_hydrated(&ctx.pool).await;
+    let _ = ctx.ide.projects.ensure_hydrated(&ctx.pool).await;
+
+    let min_role = if write {
+        WorkspaceRole::Editor
+    } else {
+        WorkspaceRole::Viewer
+    };
+    let workspaces = ctx.workspaces.list_for_user(&user.id).await?;
+    let git = otto_state::GitStore::new(ctx.pool.clone());
+    let mut member_roots: Vec<String> = Vec::with_capacity(workspaces.len() * 2);
+    for (w, _) in workspaces {
+        if ctx.roles.check(user, &w.id, min_role).await.is_err() {
+            continue;
+        }
+        match git.list_repos(&w.id).await {
+            Ok(repos) => member_roots.extend(repos.into_iter().map(|r| r.path)),
+            Err(e) => tracing::warn!(workspace = %w.id, "ide root check: list repos: {e}"),
+        }
+        member_roots.extend(
+            ctx.ide
+                .environments
+                .cached_additional_roots(&format!("local:{}", w.root_path)),
+        );
+        member_roots.extend(ctx.ide.environments.cached_additional_roots(&w.root_path));
+        if let Some(wc) = canonical_of(&w.root_path) {
+            let ws_str = wc.to_string_lossy();
+            member_roots.extend(
+                ctx.ide
+                    .environments
+                    .cached_additional_roots(&format!("local:{ws_str}")),
+            );
+            member_roots.extend(ctx.ide.environments.cached_additional_roots(&ws_str));
+        }
+        member_roots.push(w.root_path);
+    }
+    for p in ctx.ide.projects.allowed_roots_for_user(user) {
+        member_roots.push(p);
+    }
+    let scratch_root = if write {
+        None
+    } else {
+        ctx.workspaces
+            .get(&otto_core::domain::SCRATCH_WORKSPACE_ID.to_string())
+            .await
+            .ok()
+            .map(|w| w.root_path)
+    };
+    tokio::task::spawn_blocking(move || {
+        root_under_any(&canon_root, &member_roots)
+            || scratch_root.is_some_and(|s| canonical_eq(&canon_root, &s))
+    })
+    .await
+    .map_err(|e| otto_core::Error::Internal(format!("ide root check: {e}")))
+}
+
 async fn root_visible_to(
     ctx: &ServerCtx,
     user: &otto_core::domain::User,
     root: &std::path::Path,
 ) -> otto_core::Result<bool> {
-    let workspaces = ctx.workspaces.list_for_user(&user.id).await?;
-    let git = otto_state::GitStore::new(ctx.pool.clone());
-    let mut member_roots: Vec<String> = Vec::with_capacity(workspaces.len());
-    for (w, _) in workspaces {
-        match git.list_repos(&w.id).await {
-            Ok(repos) => member_roots.extend(repos.into_iter().map(|r| r.path)),
-            Err(e) => tracing::warn!(workspace = %w.id, "lsp root check: list repos: {e}"),
-        }
-        member_roots.push(w.root_path);
-    }
-    let scratch_root = ctx
-        .workspaces
-        .get(&otto_core::domain::SCRATCH_WORKSPACE_ID.to_string())
-        .await
-        .ok()
-        .map(|w| w.root_path);
-    let root = root.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        root_under_any(&root, &member_roots)
-            || scratch_root.is_some_and(|s| canonical_eq(&root, &s))
-    })
-    .await
-    .map_err(|e| otto_core::Error::Internal(format!("lsp root check: {e}")))
+    ide_local_root_authorized(ctx, user, root, false).await
 }
 
 fn secret_root_denial(canonical: &std::path::Path) -> Option<String> {
@@ -481,9 +564,15 @@ async fn serve_lsp(
     key: pool::PoolKey,
     launch: pool::SpawnLaunch,
 ) {
-    let mut attached = match pool.attach_launch(key.clone(), &launch) {
-        Ok(a) => a,
-        Err(e) => {
+    let attach_res = {
+        let pool = Arc::clone(&pool);
+        let key_cl = key.clone();
+        let launch_cl = launch.clone();
+        tokio::task::spawn_blocking(move || pool.attach_launch(key_cl, &launch_cl)).await
+    };
+    let mut attached = match attach_res {
+        Ok(Ok(a)) => a,
+        Ok(Err(e)) => {
             tracing::error!(
                 lang = key.lang.as_str(),
                 cmd = launch.cmd.as_str(),
@@ -495,6 +584,13 @@ async fn serve_lsp(
                 "message": e.to_string(),
             });
             let _ = socket.send(Message::Text(err.to_string().into())).await;
+            return;
+        }
+        Err(join_err) => {
+            tracing::error!(
+                lang = key.lang.as_str(),
+                "lsp attach join error: {join_err}"
+            );
             return;
         }
     };
@@ -538,13 +634,13 @@ pub fn api_router() -> Router<ServerCtx> {
 
 /// Root-level WS router (self-authenticates via the `otto-bearer` subprotocol).
 pub fn ws_router(authenticator: Arc<dyn TokenAuthenticator>, ctx: ServerCtx) -> Router {
-    let spawner = pool::process_spawner_with_data_dir(ctx.data_dir.clone());
+    let pool = Arc::clone(&ctx.ide.lsp_pool);
     Router::new()
         .route("/ws/lsp", get(lsp_ws))
         .with_state(LspWsState {
             auth: authenticator,
             ctx,
-            pool: pool::LspPool::new(spawner, pool::IDLE_TIMEOUT),
+            pool,
         })
 }
 

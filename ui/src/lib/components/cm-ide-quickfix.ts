@@ -1,7 +1,7 @@
 // Deterministic <5ms Quick-Fix Engine & Concrete TextEdit Applier (`userEvent: 'input.quickfix'`,
 // 100% undoable with `⌘Z`) across all 8 IDE languages (Java, Go, TS/JS, Python, Rust, JSON, Shell, CSV/Manifests).
 
-import { EditorSelection, type ChangeSpec } from '@codemirror/state';
+import { EditorSelection, type ChangeSpec, type Text } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
 import { detectSemanticLang } from './cm-ide-semantic.ts';
 
@@ -356,4 +356,85 @@ export function computeDeterministicQuickFixes(
   }
 
   return out;
+}
+
+export function hasDeterministicQuickFixAtLine(
+  doc: Text,
+  filePath: string,
+  language: string | undefined,
+  line: number,
+): boolean {
+  if (line < 1 || line > doc.lines) return false;
+  const lang = detectSemanticLang(filePath, language);
+  const curLine = doc.line(line).text;
+  const trimmed = curLine.trim();
+  if (!trimmed && lang !== 'shell') return false;
+  const headerSlice = () => doc.sliceString(0, doc.line(Math.min(doc.lines, 80)).to);
+
+  if (lang === 'java') {
+    if (/^\s*import\s+(?:static\s+)?[\w.*$]+\s*;\s*$/.test(curLine)) return true;
+    if (
+      /^\s*public\s+(?!class\b|interface\b|enum\b|record\b|static\b)(?:<[^>{};]+>\s+)?(?:[\w.$?[\]]+(?:<[^>{};]+>)?(?:\[\])*)\s+[a-z]\w*\s*\(/.test(curLine) &&
+      !(line > 1 && doc.line(line - 1).text.trim().startsWith('@Override'))
+    ) {
+      return true;
+    }
+    const words = curLine.match(/\b[A-Z][A-Za-z0-9_]*\b/g);
+    if (words) {
+      let hdr: string | null = null;
+      for (const w of words) {
+        const fqn = JAVA_STD_IMPORTS[w];
+        if (fqn && !(hdr ??= headerSlice()).includes(`import ${fqn};`)) return true;
+      }
+    }
+    return false;
+  }
+  if (lang === 'go') {
+    if (/^\s*(?:[A-Za-z_]\w*\s+)?"[^"]+"\s*$/.test(curLine) || /^\s*import\s+"[^"]+"\s*$/.test(curLine)) {
+      return true;
+    }
+    if (/\berr\s*:?=/.test(curLine) && !(line < doc.lines && /^\s*if\s+err\s*!=\s*nil/.test(doc.line(line + 1).text))) {
+      return true;
+    }
+    if (
+      /^(\s+[A-Z]\w*\s+[*[\]\w.]+)\s*$/.test(curLine) &&
+      !curLine.includes('`') &&
+      !trimmed.startsWith('func ') &&
+      !trimmed.startsWith('type ')
+    ) {
+      return true;
+    }
+    let hdr: string | null = null;
+    for (const m of curLine.matchAll(/\b([a-z][a-z0-9_]*)\.[A-Z]\w*/g)) {
+      const imp = GO_STD_IMPORTS[m[1]];
+      if (imp && !(hdr ??= headerSlice()).includes(`"${imp}"`)) return true;
+    }
+    return false;
+  }
+  if (lang === 'ts') {
+    return /^\s*import\s+/.test(curLine) || (/^\s*(?:export\s+)?function\s+\w+\s*\(/.test(curLine) && !/\basync\b/.test(curLine));
+  }
+  if (lang === 'python') {
+    if (/^\s*(?:import|from)\s+/.test(curLine)) return true;
+    let hdr: string | null = null;
+    for (const m of curLine.matchAll(/\b([a-z_]\w*)\.[A-Za-z_]\w*/g)) {
+      const mod = m[1];
+      if (PY_STD_IMPORTS.has(mod) && !new RegExp(`^\\s*(?:import\\s+${mod}\\b|from\\s+${mod}\\b)`, 'm').test((hdr ??= headerSlice()))) {
+        return true;
+      }
+    }
+    return false;
+  }
+  if (lang === 'rust') {
+    if (/^\s*use\s+/.test(curLine) || /^(\s*let\s+)([a-z]\w*)(\s*[=:])/.test(curLine)) return true;
+    return /^\s*(?:pub\s+)?(?:struct|enum)\s+\w+/.test(curLine) && !(line > 1 && doc.line(line - 1).text.trim().startsWith('#[derive'));
+  }
+  if (lang === 'json') {
+    if (/,\s*$/.test(curLine) && line < doc.lines && /^\s*[}\]]/.test(doc.line(line + 1).text)) return true;
+    return /^(\s*)([A-Za-z_$][\w$-]*)(\s*:.*)$/.test(curLine);
+  }
+  if (lang === 'shell') {
+    return /(^|[^"\\])(\$[A-Za-z_]\w*)/.test(curLine) || !doc.line(1).text.startsWith('#!');
+  }
+  return false;
 }

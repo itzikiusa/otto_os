@@ -72,3 +72,95 @@ test('acknowledgement consumes only the submitted count of identical attachments
   acknowledgeDraft(draft,submitted);
   assert.deepEqual(draft.images,[image]);
 });
+
+test('syncIfClean updates revision after another surface sends/clears the draft so subsequent edits never 409', async () => {
+  const draft = emptyDraft();
+  let serverRevision = 1;
+  let serverDraft: ReturnType<typeof emptyDraft> | null = {
+    ...emptyDraft(),
+    text: 'draft before mobile send',
+  };
+  const savedRevisions: number[] = [];
+  const p = new DraftPersistence(
+    draft,
+    {
+      load: async () => ({
+        revision: serverRevision,
+        draft: serverDraft ? structuredClone(serverDraft) : null,
+      }),
+      save: async (d, r) => {
+        savedRevisions.push(r);
+        if (r !== serverRevision) throw { status: 409 };
+        serverRevision = r + 1;
+        serverDraft = structuredClone(d);
+        return { revision: serverRevision, draft: structuredClone(d) };
+      },
+    },
+    () => true,
+  );
+
+  await p.load();
+  assert.equal(draft.text, 'draft before mobile send');
+
+  // Another window/mobile sends the prompt: clears server draft and bumps revision 1 -> 4.
+  serverRevision = 4;
+  serverDraft = { ...emptyDraft(), model: 'claude-sonnet-4-6' };
+
+  await p.syncIfClean();
+  assert.equal(draft.text, '');
+  assert.equal(draft.model, 'claude-sonnet-4-6');
+
+  // User returns to this window, pastes an image + types, and saves cleanly at revision 4 with zero 409.
+  draft.text = 'follow-up after mobile turn';
+  draft.images = [{ name: 'clip.png', mime: 'image/png', data_base64: 'AA==' }];
+  await p.save();
+  assert.deepEqual(savedRevisions, [4]);
+  assert.equal(serverRevision, 5);
+});
+
+test('syncIfClean never overwrites typing or image paste started while GET is in flight', async () => {
+  const inflightSync = deferred<any>();
+  const draft = emptyDraft();
+  let loadCalls = 0;
+  const savedCalls: Array<{ text: string; imageCount: number; rev: number }> = [];
+
+  const p = new DraftPersistence(
+    draft,
+    {
+      load: () => {
+        loadCalls++;
+        if (loadCalls === 1) return Promise.resolve({ revision: 2, draft: null });
+        return inflightSync.promise;
+      },
+      save: async (d, r) => {
+        savedCalls.push({ text: d.text, imageCount: d.images.length, rev: r });
+        if (r !== 7) throw { status: 409 };
+        return { revision: 8, draft: structuredClone(d) };
+      },
+    },
+    () => true,
+  );
+
+  await p.load();
+
+  // Window regains focus -> syncIfClean() starts GET; user immediately pastes & types before GET finishes!
+  const syncing = p.syncIfClean();
+  draft.text = 'typed during focus sync';
+  draft.images = [{ name: 'paste.png', mime: 'image/png', data_base64: 'BB==' }];
+  const saving = p.save();
+
+  // Server had cleared the draft at revision 7 after another surface sent a turn.
+  inflightSync.resolve({ revision: 7, draft: null });
+  await Promise.all([syncing, saving]);
+
+  assert.equal(draft.text, 'typed during focus sync');
+  assert.equal(draft.images.length, 1);
+  assert.deepEqual(savedCalls, [{ text: 'typed during focus sync', imageCount: 1, rev: 7 }]);
+
+  // And when local composer already has unsaved edits, syncIfClean() is a complete no-op.
+  draft.text = 'dirty local edit';
+  const loadsBefore = loadCalls;
+  await p.syncIfClean();
+  assert.equal(loadCalls, loadsBefore);
+  assert.equal(draft.text, 'dirty local edit');
+});

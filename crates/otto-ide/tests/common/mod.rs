@@ -1,4 +1,4 @@
-//! Shared test context & HTTP helper for `otto-ide` Round 2 integration suites.
+//! Shared test context and HTTP helpers for `otto-ide` integration suites.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -49,6 +49,7 @@ pub struct TestIdeCtx {
     pub secrets: Arc<dyn SecretStore>,
     pub data_dir: PathBuf,
     pub roles: Arc<dyn RoleChecker>,
+    pub allowed_roots: Vec<PathBuf>,
 }
 
 impl IdeCtx for TestIdeCtx {
@@ -80,6 +81,57 @@ impl IdeCtx for TestIdeCtx {
         let cid = connection_id.clone();
         Box::pin(async move { Err(Error::NotFound(format!("ssh connection {cid}"))) })
     }
+
+    fn authorize_local_target<'a>(
+        &'a self,
+        user: &'a User,
+        spec: &'a otto_ide::types::IdeTargetSpec,
+        _write: bool,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            if user.is_root || spec.kind != otto_ide::types::IdeTargetKind::Local {
+                return Ok(());
+            }
+            let raw_root = spec.root.trim();
+            if raw_root.is_empty() {
+                return Err(Error::Invalid("target root must not be empty".into()));
+            }
+            let mut candidates = vec![raw_root.to_string()];
+            for extra in spec.merged_extra_roots() {
+                let t = extra.trim();
+                if !t.is_empty() {
+                    candidates.push(t.to_string());
+                }
+            }
+            let allowed_canon: Vec<PathBuf> = self
+                .allowed_roots
+                .iter()
+                .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+                .collect();
+            let data_canon =
+                std::fs::canonicalize(&self.data_dir).unwrap_or_else(|_| self.data_dir.clone());
+            for raw in candidates {
+                let expanded =
+                    otto_core::paths::expand_home_strict(&raw).map_err(Error::Invalid)?;
+                let canon = std::fs::canonicalize(&expanded).unwrap_or_else(|_| expanded.clone());
+                if !user.is_root {
+                    otto_ide::target::enforce_non_root_path(&canon)?;
+                    if canon.starts_with(&data_canon) {
+                        return Err(Error::Forbidden(
+                            "IDE workspace root cannot be inside Otto data_dir".into(),
+                        ));
+                    }
+                }
+                if !allowed_canon.iter().any(|ar| canon.starts_with(ar)) {
+                    return Err(Error::Forbidden(
+                        "target root is not inside a workspace you have permission to access"
+                            .into(),
+                    ));
+                }
+            }
+            Ok(())
+        })
+    }
 }
 
 pub fn root_user() -> User {
@@ -93,7 +145,35 @@ pub fn root_user() -> User {
     }
 }
 
-pub async fn build_test_app(data_dir: PathBuf, db_path: &Path) -> (TestIdeCtx, Router) {
+pub fn non_root_user(id: &str) -> User {
+    User {
+        id: id.into(),
+        username: id.into(),
+        display_name: format!("User {id}"),
+        is_root: false,
+        disabled: false,
+        created_at: Utc::now(),
+    }
+}
+
+pub fn router_as(ctx: &TestIdeCtx, user: User, allowed_roots: Vec<PathBuf>) -> Router {
+    let mut scoped = ctx.clone();
+    scoped.allowed_roots = allowed_roots;
+    otto_ide::api_router::<TestIdeCtx>()
+        .layer(Extension(AuthUser(user)))
+        .with_state(scoped)
+}
+
+pub fn public_router_for(ctx: &TestIdeCtx) -> Router {
+    otto_ide::public_router::<TestIdeCtx>().with_state(ctx.clone())
+}
+
+pub async fn build_test_app_as(
+    data_dir: PathBuf,
+    db_path: &Path,
+    user: User,
+    allowed_roots: Vec<PathBuf>,
+) -> (TestIdeCtx, Router) {
     std::fs::create_dir_all(&data_dir).unwrap();
     let pool = otto_state::open(db_path).await.unwrap();
     let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
@@ -105,11 +185,14 @@ pub async fn build_test_app(data_dir: PathBuf, db_path: &Path) -> (TestIdeCtx, R
         secrets,
         data_dir,
         roles,
+        allowed_roots: allowed_roots.clone(),
     };
-    let router = otto_ide::api_router::<TestIdeCtx>()
-        .layer(Extension(AuthUser(root_user())))
-        .with_state(ctx.clone());
+    let router = router_as(&ctx, user, allowed_roots);
     (ctx, router)
+}
+
+pub async fn build_test_app(data_dir: PathBuf, db_path: &Path) -> (TestIdeCtx, Router) {
+    build_test_app_as(data_dir, db_path, root_user(), Vec::new()).await
 }
 
 pub async fn send_json(

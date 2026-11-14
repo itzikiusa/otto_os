@@ -27,6 +27,7 @@ pub const DATA_ROOTS: &[&str] = &[
     "scheduled",
     "personal",
     "insights",
+    "ide-plugins",
 ];
 /// The Design Hall blob store (`<data>/design/blobs/<sha256>`), relative to
 /// the data dir. NOT a [`DATA_ROOTS`] entry — it is never walked wholesale:

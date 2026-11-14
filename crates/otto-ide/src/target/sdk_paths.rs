@@ -76,9 +76,62 @@ pub(crate) fn is_virtual_archive_uri(raw: &str) -> bool {
 /// Collect canonicalized read-only external SDK & package-cache roots on the
 /// local machine without spawning any subprocesses.
 pub(crate) fn collect_readonly_sdk_roots(extra_dirs: &[PathBuf]) -> Vec<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::with_capacity(48);
-    candidates.extend(extra_dirs.iter().cloned());
+    let base = collect_base_readonly_sdk_roots();
+    if extra_dirs.is_empty() {
+        return base;
+    }
+    let home_canon = dirs::home_dir().and_then(|h| h.canonicalize().ok());
+    let mut out = Vec::with_capacity(extra_dirs.len() + base.len());
+    for raw in extra_dirs {
+        let Ok(canon) = raw.canonicalize() else {
+            continue;
+        };
+        let sdk_dir = if canon.is_file() {
+            match canon.parent() {
+                Some(p) if p.file_name().and_then(|n| n.to_str()) == Some("bin") => {
+                    p.parent().unwrap_or(p).to_path_buf()
+                }
+                Some(p) => p.to_path_buf(),
+                None => continue,
+            }
+        } else {
+            canon
+        };
+        if sdk_dir == Path::new("/")
+            || home_canon.as_ref().is_some_and(|h| *h == sdk_dir)
+            || otto_core::secret_paths::is_denied_dir(&sdk_dir)
+        {
+            continue;
+        }
+        if !out.contains(&sdk_dir) {
+            out.push(sdk_dir);
+        }
+    }
+    for b in base {
+        if !out.contains(&b) {
+            out.push(b);
+        }
+    }
+    out
+}
 
+fn collect_base_readonly_sdk_roots() -> Vec<PathBuf> {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    type BaseCache = Option<(Instant, Option<String>, Vec<PathBuf>)>;
+    static BASE_CACHE: OnceLock<Mutex<BaseCache>> = OnceLock::new();
+    let extra_env = std::env::var("OTTO_EXTRA_READONLY_ROOTS").ok();
+    let cache = BASE_CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some((at, prev_env, paths)) = guard.as_ref() {
+            if at.elapsed() < Duration::from_secs(10) && *prev_env == extra_env {
+                return paths.clone();
+            }
+        }
+    }
+
+    let mut candidates: Vec<PathBuf> = Vec::with_capacity(48);
     let shell_env = crate::environments::cached_shell_env_snapshot();
     let env_val = |key: &str| -> Option<String> {
         std::env::var(key)
@@ -192,13 +245,15 @@ pub(crate) fn collect_readonly_sdk_roots(extra_dirs: &[PathBuf]) -> Vec<PathBuf>
         if home_canon.as_ref().is_some_and(|h| *h == canon) {
             continue;
         }
-        // Never allowlist a credential directory (`~/.ssh`, `~/.aws`, `~/.gnupg`, …).
         if otto_core::secret_paths::is_denied_dir(&canon) {
             continue;
         }
         if !out.contains(&canon) {
             out.push(canon);
         }
+    }
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((Instant::now(), extra_env, out.clone()));
     }
     out
 }

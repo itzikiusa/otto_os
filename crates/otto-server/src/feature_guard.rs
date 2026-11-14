@@ -958,8 +958,9 @@ mod root_route_tests {
         assert!(is_host_files_route("/api/v1/fs/browse"));
         assert!(is_host_files_route("/api/v1/fs/stat"));
         assert!(is_host_files_route("/api/v1/ide/fs/tree"));
-        assert!(is_host_files_route("/api/v1/ide/fs/read"));
-        assert!(is_host_files_route("/api/v1/ide/fs/write"));
+        assert!(is_host_files_route("/api/v1/ide/fs/file"));
+        assert!(is_host_files_route("/api/v1/ide/fs/mutate"));
+        assert!(is_host_files_route("/api/v1/ide/fs/complete"));
         assert!(is_host_files_route("/api/v1/ide/runs"));
         assert!(is_host_files_route("/api/v1/ide/debug/sessions"));
         assert!(is_host_files_route("/api/v1/ide/history/restore"));

@@ -6,6 +6,7 @@
   import type { Session } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { rowMenu } from '../../lib/rowMenu';
   import type { IdeSidebarProject } from './ideProjectModel';
   import { openProjectInIde } from './ideProjects.svelte';
   import type { FamilyRow } from './threadFamilies';
@@ -102,6 +103,7 @@
               <button
                 type="button"
                 class="th-ide-proj-toggle"
+                use:rowMenu
                 aria-expanded={open}
                 title={grp.project.folders.join('\n')}
                 oncontextmenu={(e) => showIdeProjectMenu(e, grp.project, firstThreadId)}

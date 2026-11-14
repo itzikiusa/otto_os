@@ -1,46 +1,44 @@
 // Pro IDE extensions for CodeEditor (JetBrains GoLand / IntelliJ parity):
 // 1-click gutter breakpoints right beside line numbers (including read-only SDK files),
 // combined breakpoint/run/lightbulb gutter, semantic coloring + rainbow brackets + quick-doc hover,
-// full JetBrains macOS keymap, and `Git ▸` / `Local History ▸` / `Compare with Clipboard` menus.
+// full JetBrains macOS keymap (`cm-ide-keymap.ts`), and `Git ▸` / `Local History ▸` menus.
 
 import {
   Decoration, EditorView, GutterMarker, ViewPlugin, WidgetType,
-  crosshairCursor, gutter, keymap, rectangularSelection,
-  type DecorationSet, type KeyBinding, type ViewUpdate,
+  crosshairCursor, gutter, rectangularSelection,
+  type DecorationSet, type ViewUpdate,
 } from '@codemirror/view';
 import {
-  EditorSelection, EditorState, Prec, RangeSet, StateEffect, StateField,
+  EditorState, Prec, RangeSet, StateEffect, StateField,
   type Extension, type Range,
 } from '@codemirror/state';
-import {
-  addCursorAbove, addCursorBelow, copyLineDown, deleteLine,
-  moveLineDown, moveLineUp, selectParentSyntax, simplifySelection,
-  toggleBlockComment, toggleComment,
-} from '@codemirror/commands';
-import { gotoLine as cmGotoLine, openSearchPanel, selectNextOccurrence, selectSelectionMatches } from '@codemirror/search';
+import { addCursorAbove, addCursorBelow, moveLineDown, moveLineUp } from '@codemirror/commands';
+import { selectNextOccurrence } from '@codemirror/search';
 import type {
   IdeBreakpoint, IdeCollabPeer, IdeDiagnostic, IdeGutterItem, IdeInlineValue, IdePeerCursor,
 } from '../api/types.ts';
 import { ctxMenu, type MenuItem } from '../contextmenu.svelte.ts';
 import { isIconName } from './Icon.svelte';
 import { createIdeCsvExtension } from './cm-ide-csv.ts';
-function isIdeManifestPath(p: string): boolean {
-  const b = (p.split('?')[0].split('/').pop() ?? '').toLowerCase();
-  return b === 'go.mod' || b === 'pom.xml' || b === 'package.json' || b === 'cargo.toml' || b === 'pyproject.toml' || b === 'build.gradle' || b === 'build.gradle.kts' || /^requirements(?:[-_.][\w-]+)?\.txt$/.test(b);
-}
 import {
   createIdeGitAndAgentExtensions, selectionOrCurrentLine, setBlameLinesEffect, setSavedContentEffect,
   type IdeEditorSelectionRange,
 } from './cm-ide-git-and-agent.ts';
-import { buildIdeVcsContextRows } from './cm-ide-history.ts';
+import { buildIdeVcsContextRows, isBpTargetGutterElement } from './cm-ide-history.ts';
 import { createIdeHoverExtension } from './cm-ide-hover.ts';
+import {
+  applyLinePrefixSuffix, buildIdeKeymap as buildIdeKeymapCore, buildIdeKeymapSpecs,
+  duplicateLineOrSelection, openReplaceInFile, selectAllOccurrences,
+  smartExpandSelection, splitSelectionIntoLines, startNewLineBelow,
+  toggleLineComment, wordAtCursor, type IdeEditorCallbacks,
+} from './cm-ide-keymap.ts';
 import {
   buildPooledLspExtensions, createCmdHoverDiveExtension, createDirectLspExtension,
   disposePooledLspClients, lspUriToPath, notifyLspDidSave, requestIdeDiveAtPos,
   type AttachPooledLspOptions, type DirectLspOptions,
 } from './cm-ide-lsp.ts';
 import {
-  applyConcreteEditsToView, computeDeterministicQuickFixes, previewConcreteEdits,
+  applyConcreteEditsToView, computeDeterministicQuickFixes, hasDeterministicQuickFixAtLine, previewConcreteEdits,
   type IdeConcreteTextEdit, type IdeQuickFixAction,
 } from './cm-ide-quickfix.ts';
 import {
@@ -49,110 +47,28 @@ import {
 } from './cm-ide-semantic.ts';
 import { readIdeEditorPreferences } from './cm-ide-theme.ts';
 
+function isIdeManifestPath(p: string): boolean {
+  const b = (p.split('?')[0].split('/').pop() ?? '').toLowerCase();
+  return (
+    b === 'go.mod' || b === 'pom.xml' || b === 'package.json' || b === 'cargo.toml' ||
+    b === 'pyproject.toml' || b === 'build.gradle' || b === 'build.gradle.kts' ||
+    /^requirements(?:[-_.][\w-]+)?\.txt$/.test(b)
+  );
+}
+
 export {
-  addCursorAbove, addCursorBelow, applyClientQuickFix, applyConcreteEditsToView, buildPooledLspExtensions,
+  addCursorAbove, addCursorBelow, applyClientQuickFix, applyConcreteEditsToView,
+  applyLinePrefixSuffix, buildIdeKeymapSpecs, buildPooledLspExtensions,
   computeDeterministicQuickFixes, createDirectLspExtension, crosshairCursor,
-  disposePooledLspClients, getIdeQuickFixesAtLine, lspUriToPath, moveLineDown, moveLineUp, notifyLspDidSave,
-  previewConcreteEdits, rectangularSelection, requestIdeDiveAtPos, selectNextOccurrence, selectionOrCurrentLine,
-  setBlameLinesEffect, setSavedContentEffect,
-  type AttachPooledLspOptions, type ClientDiagQuickFix, type DirectLspOptions, type IdeConcreteTextEdit,
-  type IdeEditorSelectionRange, type IdeQuickFixAction,
+  disposePooledLspClients, duplicateLineOrSelection, getIdeQuickFixesAtLine,
+  isBpTargetGutterElement, lspUriToPath, moveLineDown, moveLineUp, notifyLspDidSave,
+  openReplaceInFile, previewConcreteEdits, rectangularSelection, requestIdeDiveAtPos,
+  selectAllOccurrences, selectNextOccurrence, selectionOrCurrentLine,
+  setBlameLinesEffect, setSavedContentEffect, smartExpandSelection,
+  splitSelectionIntoLines, startNewLineBelow, toggleLineComment, wordAtCursor,
+  type AttachPooledLspOptions, type ClientDiagQuickFix, type DirectLspOptions,
+  type IdeConcreteTextEdit, type IdeEditorCallbacks, type IdeEditorSelectionRange, type IdeQuickFixAction,
 };
-export const toggleLineComment = toggleComment;
-
-const IDENT_CHAR_RE = /[\w$]/;
-
-export function wordAtCursor(state: EditorState): { word: string; line: number; column: number } {
-  const main = state.selection.main, ln = state.doc.lineAt(main.head), column = main.head - ln.from + 1;
-  if (!main.empty) return { word: state.sliceDoc(main.from, main.to).trim(), line: ln.number, column };
-  const text = ln.text, rel = main.head - ln.from;
-  let s = rel, e = rel;
-  while (s > 0 && IDENT_CHAR_RE.test(text[s - 1])) s--;
-  while (e < text.length && IDENT_CHAR_RE.test(text[e])) e++;
-  return { word: text.slice(s, e), line: ln.number, column };
-}
-
-export function selectAllOccurrences(view: EditorView): boolean {
-  const { state } = view;
-  if (state.selection.main.empty) {
-    const main = state.selection.main, ln = state.doc.lineAt(main.head), rel = main.head - ln.from;
-    let s = rel, e = rel;
-    while (s > 0 && IDENT_CHAR_RE.test(ln.text[s - 1])) s--;
-    while (e < ln.text.length && IDENT_CHAR_RE.test(ln.text[e])) e++;
-    if (e > s) view.dispatch({ selection: { anchor: ln.from + s, head: ln.from + e } });
-  }
-  return selectSelectionMatches(view);
-}
-
-import { applyLinePrefixSuffixSync as applyLinePrefixSuffix, splitSelectionIntoLinesSync as splitSelectionIntoLines } from './cm-editor-helpers';
-export { applyLinePrefixSuffix, splitSelectionIntoLines };
-
-export function duplicateLineOrSelection(view: EditorView): boolean {
-  if (view.state.readOnly) return false;
-  if (!view.state.selection.ranges.some((r) => !r.empty)) return copyLineDown(view);
-  const tr = view.state.changeByRange((range) => {
-    if (range.empty) {
-      const ln = view.state.doc.lineAt(range.head), ins = `\n${ln.text}`;
-      return { changes: { from: ln.to, to: ln.to, insert: ins }, range: EditorSelection.cursor(range.head + ins.length) };
-    }
-    const sel = view.state.sliceDoc(range.from, range.to);
-    return { changes: { from: range.to, to: range.to, insert: sel }, range: EditorSelection.range(range.to, range.to + sel.length) };
-  });
-  view.dispatch(view.state.update(tr, { userEvent: 'input', scrollIntoView: true }));
-  return true;
-}
-
-export function startNewLineBelow(view: EditorView): boolean {
-  if (view.state.readOnly) return false;
-  const ln = view.state.doc.lineAt(view.state.selection.main.head);
-  const indent = /^(\s*)/.exec(ln.text)?.[1] ?? '';
-  const ins = `\n${indent}`;
-  view.dispatch({ changes: { from: ln.to, to: ln.to, insert: ins }, selection: EditorSelection.cursor(ln.to + ins.length), userEvent: 'input', scrollIntoView: true });
-  return true;
-}
-
-export function smartExpandSelection(view: EditorView): boolean {
-  const main = view.state.selection.main, ln = view.state.doc.lineAt(main.head);
-  if (main.empty) {
-    const rel = main.head - ln.from;
-    let s = rel, e = rel;
-    while (s > 0 && IDENT_CHAR_RE.test(ln.text[s - 1])) s--;
-    while (e < ln.text.length && IDENT_CHAR_RE.test(ln.text[e])) e++;
-    if (e > s) { view.dispatch({ selection: { anchor: ln.from + s, head: ln.from + e } }); return true; }
-  }
-  if (selectParentSyntax(view)) return true;
-  if (main.from > ln.from || main.to < ln.to) { view.dispatch({ selection: { anchor: ln.from, head: ln.to } }); return true; }
-  return false;
-}
-
-export function openReplaceInFile(view: EditorView): boolean {
-  openSearchPanel(view);
-  requestAnimationFrame(() => { const rep = view.dom.querySelector<HTMLInputElement>('.cm-search input[name="replace"]'); rep?.focus(); rep?.select(); });
-  return true;
-}
-
-// ── State Effects & Callbacks ────────────────────────────────────────────────
-
-export interface IdeEditorCallbacks {
-  onToggleBreakpoint?: ((line: number) => void) | null;
-  onEditBreakpoint?: ((line: number, event?: MouseEvent) => void) | null;
-  onGutterAction?: ((item: IdeGutterItem, mode: 'run' | 'debug') => void) | null;
-  onDefinitionJump?: ((target: { path?: string; line: number; column: number; symbol?: string; originLine?: number; originColumn?: number }) => void) | null;
-  onImplementationJump?: ((target: { path?: string; line: number; column: number; symbol?: string; originLine?: number; originColumn?: number }) => void) | null;
-  onFindUsages?: ((ctx: { line: number; column: number; symbol?: string }) => void) | null;
-  onFileStructure?: (() => void) | null;
-  onJumpSymbol?: ((delta: -1 | 1) => void) | null;
-  onNavigateBack?: (() => void) | null;
-  onNavigateForward?: (() => void) | null;
-  onQuickFix?: ((ctx: { line: number; column: number; symbol?: string; clientX?: number; clientY?: number }) => void) | null;
-  onRenameSymbol?: ((ctx: { line: number; column: number; symbol: string }) => void) | null;
-  onFormat?: (() => void) | null;
-  onToggleBlame?: (() => void) | null;
-  onDiagnostics?: ((diags: IdeDiagnostic[]) => void) | null;
-  onAgentAction?: ((mode: 'chat' | 'inline', sel: IdeEditorSelectionRange) => void) | null;
-  onPasteFromHistory?: (() => void) | null;
-  onGoToLine?: (() => void) | null;
-}
 
 export interface IdeDebugStatePayload { pausedLine: number | null; inlineValues: IdeInlineValue[]; }
 export type BreakpointsEffectPayload = IdeBreakpoint[] | { breakpoints: IdeBreakpoint[]; muted?: boolean };
@@ -236,7 +152,11 @@ class CombinedGutterMarker extends GutterMarker {
       const bulb = document.createElement('button');
       bulb.type = 'button'; bulb.className = 'cm-ide-lightbulb-btn'; bulb.dataset.testid = 'ide-gutter-lightbulb';
       bulb.title = 'Show Quick Fixes (⌥⏎)'; bulb.setAttribute('aria-label', 'Show Quick Fixes'); bulb.textContent = '💡';
-      bulb.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); const r = bulb.getBoundingClientRect(); this.getCallbacks().onQuickFix?.({ line: this.line, column: 1, clientX: r.left, clientY: r.bottom + 4 }); });
+      bulb.addEventListener('mousedown', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const r = bulb.getBoundingClientRect();
+        this.getCallbacks().onQuickFix?.({ line: this.line, column: 1, clientX: r.left, clientY: r.bottom + 4 });
+      });
       wrap.appendChild(bulb);
     }
     return wrap;
@@ -244,11 +164,14 @@ class CombinedGutterMarker extends GutterMarker {
 }
 
 const bpSpacer = new (class extends GutterMarker {
-  toDOM(): HTMLElement { const s = document.createElement('span'); s.className = 'cm-ide-bp-spacer'; s.setAttribute('aria-hidden', 'true'); s.appendChild(gutterSvg('enabled')); return s; }
+  toDOM(): HTMLElement {
+    const s = document.createElement('span');
+    s.className = 'cm-ide-bp-spacer';
+    s.setAttribute('aria-hidden', 'true');
+    s.appendChild(gutterSvg('enabled'));
+    return s;
+  }
 })();
-
-import { isBpTargetGutterElement } from './cm-ide-history.ts';
-export { isBpTargetGutterElement };
 
 export interface CreateIdeExtensionsOptions {
   filePath?: string; language?: string; root?: string; connectionId?: string | null; projectFolders?: string[];
@@ -297,7 +220,16 @@ export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Ext
 
   const runField = StateField.define<Map<number, IdeGutterItem>>({
     create() { const m = new Map<number, IdeGutterItem>(); for (const it of opts.gutterItems) m.set(it.line, it); return m; },
-    update(m, tr) { for (const ef of tr.effects) if (ef.is(setGutterItemsEffect)) { const n = new Map<number, IdeGutterItem>(); for (const it of ef.value) n.set(it.line, it); return n; } return m; },
+    update(m, tr) {
+      for (const ef of tr.effects) {
+        if (ef.is(setGutterItemsEffect)) {
+          const n = new Map<number, IdeGutterItem>();
+          for (const it of ef.value) n.set(it.line, it);
+          return n;
+        }
+      }
+      return m;
+    },
   });
 
   const handleBpClick = (_v: EditorView, ln: number, me: MouseEvent): boolean => {
@@ -319,9 +251,13 @@ export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Ext
   const bpAndRunGutter = gutter({
     class: 'cm-ide-bp-gutter',
     markers(view) {
-      const { map, muted, pausedLine, hoverLine } = view.state.field(bpField), runMap = view.state.field(runField);
+      const { map, muted, pausedLine, hoverLine } = view.state.field(bpField);
+      const runMap = view.state.field(runField);
       const curLn = view.state.doc.lineAt(view.state.selection.main.head).number;
-      const hasBulbOnCur = !view.state.readOnly && (getIdeQuickFixesAtLine(view.state, curLn).length > 0 || computeDeterministicQuickFixes(view.state.doc.toString(), opts.filePath ?? '', opts.language, curLn).length > 0);
+      const hasBulbOnCur =
+        !view.state.readOnly &&
+        (getIdeQuickFixesAtLine(view.state, curLn).length > 0 ||
+          hasDeterministicQuickFixAtLine(view.state.doc, opts.filePath ?? '', opts.language, curLn));
       const lines = new Set<number>([...map.keys(), ...runMap.keys()]);
       if (pausedLine != null) lines.add(pausedLine);
       if (hoverLine != null) lines.add(hoverLine);
@@ -330,15 +266,42 @@ export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Ext
       const markers: Range<GutterMarker>[] = [];
       for (const ln of [...lines].sort((a, b) => a - b)) {
         if (ln < 1 || ln > view.state.doc.lines) continue;
-        const bp = map.get(ln) as (IdeBreakpoint & { verified?: boolean }) | undefined, runItem = runMap.get(ln) ?? null, isPaused = pausedLine === ln;
-        let bpKind: BpVisualKind | null = null, tip = '', verified = false;
+        const bp = map.get(ln) as (IdeBreakpoint & { verified?: boolean }) | undefined;
+        const runItem = runMap.get(ln) ?? null;
+        const isPaused = pausedLine === ln;
+        let bpKind: BpVisualKind | null = null;
+        let tip = '';
+        let verified = false;
         if (bp) {
           bpKind = muted ? 'muted' : !bp.enabled ? 'disabled' : bp.log_message ? 'logpoint' : (bp.condition || bp.hit_condition) ? 'conditional' : 'enabled';
-          tip = muted ? `Muted breakpoint at line ${ln}` : bp.log_message ? `Logpoint at line ${ln}: ${bp.log_message}` : bp.condition ? `Conditional breakpoint at line ${ln}: ${bp.condition}` : !bp.enabled ? `Disabled breakpoint at line ${ln}` : `${bp.verified ? 'Verified b' : 'B'}reakpoint at line ${ln}`;
+          tip = muted
+            ? `Muted breakpoint at line ${ln}`
+            : bp.log_message
+              ? `Logpoint at line ${ln}: ${bp.log_message}`
+              : bp.condition
+                ? `Conditional breakpoint at line ${ln}: ${bp.condition}`
+                : !bp.enabled
+                  ? `Disabled breakpoint at line ${ln}`
+                  : `${bp.verified ? 'Verified b' : 'B'}reakpoint at line ${ln}`;
           verified = Boolean((bp.verified || pausedLine != null) && !muted && bp.enabled);
-        } else if (isPaused) { bpKind = 'paused'; tip = `Paused at line ${ln}`; }
-        else if (hoverLine === ln) bpKind = 'preview';
-        markers.push(new CombinedGutterMarker({ bpKind, tooltip: tip, alsoPaused: isPaused, verified, runItem, showBulb: hasBulbOnCur && ln === curLn && !runItem, line: ln, getCallbacks: opts.getCallbacks }).range(view.state.doc.line(ln).from));
+        } else if (isPaused) {
+          bpKind = 'paused';
+          tip = `Paused at line ${ln}`;
+        } else if (hoverLine === ln) {
+          bpKind = 'preview';
+        }
+        markers.push(
+          new CombinedGutterMarker({
+            bpKind,
+            tooltip: tip,
+            alsoPaused: isPaused,
+            verified,
+            runItem,
+            showBulb: hasBulbOnCur && ln === curLn && !runItem,
+            line: ln,
+            getCallbacks: opts.getCallbacks,
+          }).range(view.state.doc.line(ln).from),
+        );
       }
       return RangeSet.of(markers, true);
     },
@@ -397,12 +360,20 @@ class InlineGhostValuesWidget extends WidgetType {
   summary: string;
   constructor(summary: string) { super(); this.summary = summary; }
   eq(o: InlineGhostValuesWidget): boolean { return this.summary === o.summary; }
-  toDOM(): HTMLElement { const s = document.createElement('span'); s.className = 'cm-ide-inline-values'; s.setAttribute('aria-hidden', 'true'); s.textContent = `  // ${this.summary}`; return s; }
+  toDOM(): HTMLElement {
+    const s = document.createElement('span');
+    s.className = 'cm-ide-inline-values';
+    s.setAttribute('aria-hidden', 'true');
+    s.textContent = `  // ${this.summary}`;
+    return s;
+  }
 }
 
 function computeDebugDecorations(doc: EditorState['doc'], payload: IdeDebugStatePayload): DecorationSet {
   const ranges: Range<Decoration>[] = [];
-  if (payload.pausedLine != null && payload.pausedLine >= 1 && payload.pausedLine <= doc.lines) ranges.push(Decoration.line({ class: 'cm-ide-paused-line' }).range(doc.line(payload.pausedLine).from));
+  if (payload.pausedLine != null && payload.pausedLine >= 1 && payload.pausedLine <= doc.lines) {
+    ranges.push(Decoration.line({ class: 'cm-ide-paused-line' }).range(doc.line(payload.pausedLine).from));
+  }
   if (payload.inlineValues.length) {
     const byLine = new Map<number, Map<string, string>>();
     for (const iv of payload.inlineValues) {
@@ -423,8 +394,13 @@ class PeerCaretWidget extends WidgetType {
   constructor(name: string, slot: number, eol: boolean) { super(); this.name = name; this.slot = slot; this.eol = eol; }
   eq(o: PeerCaretWidget): boolean { return this.name === o.name && this.slot === o.slot && this.eol === o.eol; }
   toDOM(): HTMLElement {
-    const w = document.createElement('span'); w.className = `${this.eol ? 'cm-ide-peer-eol' : 'cm-ide-peer-caret'} cm-ide-peer-slot-${this.slot}`; w.setAttribute('aria-hidden', 'true');
-    const p = document.createElement('span'); p.className = `cm-ide-peer-pill${this.eol ? ' is-eol' : ''}`; p.textContent = this.name; w.appendChild(p);
+    const w = document.createElement('span');
+    w.className = `${this.eol ? 'cm-ide-peer-eol' : 'cm-ide-peer-caret'} cm-ide-peer-slot-${this.slot}`;
+    w.setAttribute('aria-hidden', 'true');
+    const p = document.createElement('span');
+    p.className = `cm-ide-peer-pill${this.eol ? ' is-eol' : ''}`;
+    p.textContent = this.name;
+    w.appendChild(p);
     return w;
   }
 }
@@ -498,56 +474,35 @@ const ideEditorTheme = EditorView.baseTheme({
   '.cm-ide-peer-pill.is-eol': { insetBlockStart: '0', insetBlockEnd: 'auto', insetInlineStart: 'var(--sp-3)' },
 });
 
-export function buildIdeKeymap(preset: 'jetbrains' | 'standard', getCallbacks: () => IdeEditorCallbacks, filePath = '', language?: string): Extension {
-  const applyFirstFix = (v: EditorView): boolean => {
-    const i = wordAtCursor(v.state), lFixes = getIdeQuickFixesAtLine(v.state, i.line);
-    if (lFixes.length) { applyClientQuickFix(v, lFixes[0]); return true; }
-    const dFixes = computeDeterministicQuickFixes(v.state.doc.toString(), filePath, language, i.line, i.word || undefined);
-    if (dFixes.length) return applyConcreteEditsToView(v, dFixes[0].edits, filePath);
-    const cb = getCallbacks().onQuickFix; if (cb) { cb({ line: i.line, column: i.column, symbol: i.word || undefined }); return true; }
-    return false;
-  };
-  const bindings: KeyBinding[] = [
-    { key: 'Mod-Alt-ArrowUp', run: addCursorAbove }, { key: 'Mod-Alt-ArrowDown', run: addCursorBelow },
-    { key: 'Alt-Shift-ArrowUp', run: moveLineUp }, { key: 'Alt-Shift-ArrowDown', run: moveLineDown },
-    { key: 'Ctrl-ArrowUp', run: (v) => { const cb = getCallbacks().onJumpSymbol; if (cb) { cb(-1); return true; } return moveLineUp(v); } },
-    { key: 'Ctrl-ArrowDown', run: (v) => { const cb = getCallbacks().onJumpSymbol; if (cb) { cb(1); return true; } return moveLineDown(v); } },
-    { key: 'Alt-ArrowUp', run: smartExpandSelection }, { key: 'Alt-ArrowDown', run: simplifySelection },
-    { key: 'Shift-Enter', run: startNewLineBelow },
-    { key: 'Ctrl-g', run: selectNextOccurrence }, { key: 'Ctrl-Mod-g', run: selectAllOccurrences },
-    { key: 'Mod-g', run: (v) => { const cb = getCallbacks().onGoToLine; if (cb) { cb(); return true; } return cmGotoLine(v); } },
-    { key: 'Alt-Shift-i', run: splitSelectionIntoLines }, { key: 'Alt-Shift-I', run: splitSelectionIntoLines },
-    { key: 'Mod-/', run: toggleLineComment }, { key: 'Mod-Alt-/', run: toggleBlockComment }, { key: 'Mod-Shift-/', run: toggleBlockComment },
-    { key: 'Mod-r', run: openReplaceInFile },
-    { key: 'Mod-Shift-v', run: () => { const cb = getCallbacks().onPasteFromHistory; if (cb) { cb(); return true; } if (typeof window !== 'undefined') { window.dispatchEvent(new CustomEvent('otto:ide-paste-history')); return true; } return false; } },
-    { key: 'F12', run: (v) => { const cbs = getCallbacks(); if (!cbs.onDefinitionJump) return false; void requestIdeDiveAtPos(v, v.state.selection.main.head, 'definition', cbs); return true; } },
-    { key: 'Mod-b', run: (v) => { const cbs = getCallbacks(); if (!cbs.onDefinitionJump) return false; void requestIdeDiveAtPos(v, v.state.selection.main.head, 'definition', cbs); return true; } },
-    { key: 'Mod-Alt-b', run: (v) => { const cbs = getCallbacks(); if (!cbs.onImplementationJump && !cbs.onDefinitionJump) return false; void requestIdeDiveAtPos(v, v.state.selection.main.head, 'implementation', cbs); return true; } },
-    { key: 'Alt-F7', run: (v) => { const cb = getCallbacks().onFindUsages; if (!cb) return false; const i = wordAtCursor(v.state); cb({ line: i.line, column: i.column, symbol: i.word || undefined }); return true; } },
-    { key: 'Mod-F12', run: () => { const cb = getCallbacks().onFileStructure; if (!cb) return false; cb(); return true; } },
-    { key: 'Mod-Alt-ArrowLeft', run: () => { const cb = getCallbacks().onNavigateBack; if (!cb) return false; cb(); return true; } },
-    { key: 'Mod-Alt-ArrowRight', run: () => { const cb = getCallbacks().onNavigateForward; if (!cb) return false; cb(); return true; } },
-    { key: 'Alt-Enter', run: (v) => { const cb = getCallbacks().onQuickFix; if (!cb) return applyFirstFix(v); const i = wordAtCursor(v.state), c = v.coordsAtPos(v.state.selection.main.head); cb({ line: i.line, column: i.column, symbol: i.word || undefined, clientX: c?.left, clientY: c?.bottom }); return true; } },
-    { key: 'Alt-Shift-Enter', run: applyFirstFix },
-    { key: 'Shift-F6', run: (v) => { const cb = getCallbacks().onRenameSymbol; if (!cb) return false; const i = wordAtCursor(v.state); cb({ line: i.line, column: i.column, symbol: i.word }); return true; } },
-    { key: 'Mod-Alt-l', run: () => { const cb = getCallbacks().onFormat; if (!cb) return false; cb(); return true; } },
-    { key: 'Mod-F8', run: (v) => { const cb = getCallbacks().onToggleBreakpoint; if (!cb) return false; cb(v.state.doc.lineAt(v.state.selection.main.head).number); return true; } },
-    ...(preset === 'jetbrains'
-      ? [{ key: 'Mod-[', run: () => { const cb = getCallbacks().onNavigateBack; if (!cb) return false; cb(); return true; } }, { key: 'Mod-]', run: () => { const cb = getCallbacks().onNavigateForward; if (!cb) return false; cb(); return true; } }, { key: 'Mod-d', run: duplicateLineOrSelection }, { key: 'Mod-Backspace', run: deleteLine }]
-      : [{ key: 'Mod-d', run: selectNextOccurrence }, { key: 'Shift-Mod-d', run: duplicateLineOrSelection }, { key: 'Shift-Mod-k', run: deleteLine }]),
-  ];
-  return Prec.high(keymap.of(bindings));
+export function buildIdeKeymap(
+  preset: 'jetbrains' | 'standard',
+  getCallbacks: () => IdeEditorCallbacks,
+  filePath = '',
+  language?: string,
+): Extension {
+  return buildIdeKeymapCore(preset, getCallbacks, filePath, language, requestIdeDiveAtPos);
 }
 
 export function createIdeExtensions(opts: CreateIdeExtensionsOptions): Extension {
   const debugField = StateField.define<{ payload: IdeDebugStatePayload; decos: DecorationSet }>({
-    create(st) { const payload = { pausedLine: opts.pausedLine, inlineValues: opts.inlineValues }; return { payload, decos: computeDebugDecorations(st.doc, payload) }; },
-    update(cur, tr) { let payload = cur.payload, changed = false; for (const ef of tr.effects) if (ef.is(setDebugDecorationsEffect)) { payload = ef.value; changed = true; } return changed || tr.docChanged ? { payload, decos: computeDebugDecorations(tr.state.doc, payload) } : cur; },
+    create(st) {
+      const payload = { pausedLine: opts.pausedLine, inlineValues: opts.inlineValues };
+      return { payload, decos: computeDebugDecorations(st.doc, payload) };
+    },
+    update(cur, tr) {
+      let payload = cur.payload, changed = false;
+      for (const ef of tr.effects) if (ef.is(setDebugDecorationsEffect)) { payload = ef.value; changed = true; }
+      return changed || tr.docChanged ? { payload, decos: computeDebugDecorations(tr.state.doc, payload) } : cur;
+    },
     provide: (f) => EditorView.decorations.from(f, (v) => v.decos),
   });
   const peersField = StateField.define<{ peers: PeerCursorInput[]; decos: DecorationSet }>({
     create(st) { return { peers: opts.peerCursors, decos: computePeerDecorations(st.doc, opts.peerCursors) }; },
-    update(cur, tr) { let peers = cur.peers, changed = false; for (const ef of tr.effects) if (ef.is(setPeerCursorsEffect)) { peers = ef.value; changed = true; } return changed || tr.docChanged ? { peers, decos: computePeerDecorations(tr.state.doc, peers) } : cur; },
+    update(cur, tr) {
+      let peers = cur.peers, changed = false;
+      for (const ef of tr.effects) if (ef.is(setPeerCursorsEffect)) { peers = ef.value; changed = true; }
+      return changed || tr.docChanged ? { peers, decos: computePeerDecorations(tr.state.doc, peers) } : cur;
+    },
     provide: (f) => EditorView.decorations.from(f, (v) => v.decos),
   });
 
@@ -592,8 +547,19 @@ export function createIdeExtensions(opts: CreateIdeExtensionsOptions): Extension
 
   return [
     ideEditorTheme, debugField, peersField, fullContextMenu,
-    createIdeSemanticExtensions({ filePath: fPath, language: opts.language, root: opts.root, connectionId: opts.connectionId, projectFolders: opts.projectFolders, getPreferences: () => readIdeEditorPreferences(), onDiagnostics: (diags) => opts.getCallbacks().onDiagnostics?.(diags), onFindUsages: (ctx) => opts.getCallbacks().onFindUsages?.(ctx) }),
-    createIdeHoverExtension({ filePath: fPath, language: opts.language, root: opts.root, connectionId: opts.connectionId, projectFolders: opts.projectFolders, getPreferences: () => readIdeEditorPreferences(), onDefinitionJump: (t) => opts.getCallbacks().onDefinitionJump?.(t), onFindUsages: (ctx) => opts.getCallbacks().onFindUsages?.(ctx), onQuickFix: (ctx) => opts.getCallbacks().onQuickFix?.(ctx) }),
+    createIdeSemanticExtensions({
+      filePath: fPath, language: opts.language, root: opts.root, connectionId: opts.connectionId, projectFolders: opts.projectFolders,
+      getPreferences: () => readIdeEditorPreferences(),
+      onDiagnostics: (diags) => opts.getCallbacks().onDiagnostics?.(diags),
+      onFindUsages: (ctx) => opts.getCallbacks().onFindUsages?.(ctx),
+    }),
+    createIdeHoverExtension({
+      filePath: fPath, language: opts.language, root: opts.root, connectionId: opts.connectionId, projectFolders: opts.projectFolders,
+      getPreferences: () => readIdeEditorPreferences(),
+      onDefinitionJump: (t) => opts.getCallbacks().onDefinitionJump?.(t),
+      onFindUsages: (ctx) => opts.getCallbacks().onFindUsages?.(ctx),
+      onQuickFix: (ctx) => opts.getCallbacks().onQuickFix?.(ctx),
+    }),
     createCmdHoverDiveExtension(opts.getCallbacks),
     createIdeGitAndAgentExtensions({ savedContent: opts.savedContent, blameByLine: opts.blameByLine, wordAtCursor, getCallbacks: opts.getCallbacks }),
     ...(isCsv ? [createIdeCsvExtension(fPath)] : []),

@@ -10,6 +10,32 @@ import { historyField } from '@codemirror/commands';
 import { EditorState, type Extension, type StateEffect } from '@codemirror/state';
 import { ViewPlugin, type EditorView } from '@codemirror/view';
 import type { MenuItem } from '../contextmenu.svelte.ts';
+import {
+  IDE_UNDO_DRAFT_INDEX_KEY,
+  IDE_UNDO_DRAFT_PREFIX,
+  IDE_UNDO_JOURNAL_KEY,
+  isSecretIdePath,
+  MAX_JOURNAL_ENTRY_CHARS,
+  readIdeUndoDraft,
+  readJournalMap,
+  removeIdeUndoDraft,
+  writeIdeUndoDraftImmediate,
+  writeJournalMap,
+  type IdeUndoDraftRecord,
+  type IdeUndoJournalEntry,
+} from './cm-ide-drafts.ts';
+
+export {
+  IDE_UNDO_DRAFT_INDEX_KEY,
+  IDE_UNDO_DRAFT_PREFIX,
+  IDE_UNDO_JOURNAL_KEY,
+  isSecretIdePath,
+  readIdeUndoDraft,
+  removeIdeUndoDraft,
+  writeIdeUndoDraftImmediate,
+  type IdeUndoDraftRecord,
+  type IdeUndoJournalEntry,
+};
 
 /** Returns true when a `.cm-gutters` target should toggle/preview a breakpoint (all gutter cells except ▶, 💡, 🎯↑, fold chevron, or diff bar). */
 export function isBpTargetGutterElement(target: EventTarget | null): boolean {
@@ -18,12 +44,9 @@ export function isBpTargetGutterElement(target: EventTarget | null): boolean {
   return !el.closest('.cm-ide-run-btn, .cm-ide-gutter-run-btn, .cm-ide-lightbulb-btn, .cm-ide-dep-gutter-btn, .cm-fold-marker, .cm-ide-diff-bar');
 }
 
-export const IDE_UNDO_JOURNAL_KEY = 'otto.ide.undoJournal.v1';
 export const IDE_CLIPBOARD_HISTORY_KEY = 'otto.ide.clipboardHistory.v1';
 
 const MAX_SINGLETON_STATES = 24;
-const MAX_JOURNAL_FILES = 24;
-const MAX_JOURNAL_ENTRY_CHARS = 160_000;
 const MAX_CLIPBOARD_ITEMS = 30;
 const MAX_CLIPBOARD_ITEM_CHARS = 32_000;
 
@@ -67,45 +90,6 @@ export function evictSingletonIdeState(paths: Iterable<string> | 'all'): void {
 
 // ── Durable Undo/Redo Step Journal (`localStorage['otto.ide.undoJournal.v1']`) ──
 
-export interface IdeUndoJournalEntry {
-  stateJson: { doc: string; [k: string]: unknown };
-  baseSavedContent: string | null;
-  unsaved: boolean;
-  scrollTop: number;
-  updatedAt: number;
-}
-
-type UndoJournalMap = Record<string, IdeUndoJournalEntry>;
-
-function readJournalMap(storage?: Pick<Storage, 'getItem'> | null): UndoJournalMap {
-  const store = storage ?? (typeof localStorage !== 'undefined' ? localStorage : null);
-  if (!store) return {};
-  try {
-    const raw = store.getItem(IDE_UNDO_JOURNAL_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as unknown;
-    return parsed && typeof parsed === 'object' ? (parsed as UndoJournalMap) : {};
-  } catch {
-    return {};
-  }
-}
-
-function writeJournalMap(map: UndoJournalMap, storage?: Pick<Storage, 'setItem'> | null): void {
-  const store = storage ?? (typeof localStorage !== 'undefined' ? localStorage : null);
-  if (!store) return;
-  const entries = Object.entries(map).sort((a, b) => (b[1]?.updatedAt ?? 0) - (a[1]?.updatedAt ?? 0)).slice(0, MAX_JOURNAL_FILES);
-  const trimmed: UndoJournalMap = {};
-  for (const [k, v] of entries) trimmed[k] = v;
-  try {
-    store.setItem(IDE_UNDO_JOURNAL_KEY, JSON.stringify(trimmed));
-  } catch {
-    // Quota tight: keep newest 8 entries.
-    const compact: UndoJournalMap = {};
-    for (const [k, v] of entries.slice(0, 8)) compact[k] = v;
-    try { store.setItem(IDE_UNDO_JOURNAL_KEY, JSON.stringify(compact)); } catch { /* ignore */ }
-  }
-}
-
 export function persistIdeUndoJournal(
   filePath: string,
   state: EditorState,
@@ -113,17 +97,20 @@ export function persistIdeUndoJournal(
   scrollTop = 0,
   storage?: Pick<Storage, 'getItem' | 'setItem'> | null,
 ): void {
-  if (!filePath || state.doc.length > MAX_JOURNAL_ENTRY_CHARS) return;
+  if (!filePath || isSecretIdePath(filePath) || state.doc.length > MAX_JOURNAL_ENTRY_CHARS) return;
   try {
     const stateJson = state.toJSON({ history: historyField }) as { doc: string; history?: unknown };
     const serialized = JSON.stringify(stateJson);
     if (serialized.length > MAX_JOURNAL_ENTRY_CHARS) return;
     const docStr = stateJson.doc;
+    const baseSavedContent = savedContent ?? docStr;
     const unsaved = savedContent != null ? docStr !== savedContent : false;
     const map = readJournalMap(storage);
     map[filePath] = {
       stateJson,
-      baseSavedContent: savedContent ?? docStr,
+      baseSavedContent,
+      savedContent: baseSavedContent,
+      ...(unsaved ? { draftContent: docStr } : {}),
       unsaved,
       scrollTop,
       updatedAt: Date.now(),
@@ -228,6 +215,7 @@ export function recordIdeClipboardEntry(
   filePath?: string,
   storage?: Pick<Storage, 'getItem' | 'setItem'> | null,
 ): IdeClipboardEntry[] {
+  if (filePath && isSecretIdePath(filePath)) return readIdeClipboardHistory(storage);
   const clean = text.slice(0, MAX_CLIPBOARD_ITEM_CHARS);
   if (!clean.trim()) return readIdeClipboardHistory(storage);
   const prev = readIdeClipboardHistory(storage).filter((it) => it.text !== clean);
@@ -249,6 +237,44 @@ export function recordIdeClipboardEntry(
 export function clearIdeClipboardHistory(storage?: Pick<Storage, 'removeItem'> | null): void {
   const store = storage ?? (typeof localStorage !== 'undefined' ? localStorage : null);
   try { store?.removeItem(IDE_CLIPBOARD_HISTORY_KEY); } catch { /* ignore */ }
+}
+
+/** Clear all persisted IDE undo journals, unsaved drafts, clipboard history, and singleton caches on sign-out. */
+export function clearIdeSensitiveStorage(
+  storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem' | 'key' | 'length'> | null,
+): void {
+  evictSingletonIdeState('all');
+  const store = storage ?? (typeof localStorage !== 'undefined' ? localStorage : null);
+  if (!store) return;
+  forgetIdeUndoJournal('all', store);
+  clearIdeClipboardHistory(store);
+  removeIdeUndoDraft('all', store);
+  try {
+    if (typeof store.length === 'number' && typeof store.key === 'function') {
+      const extraKeys: string[] = [];
+      for (let i = 0; i < store.length; i++) {
+        const k = store.key(i);
+        if (k && k.startsWith(IDE_UNDO_DRAFT_PREFIX)) extraKeys.push(k);
+      }
+      for (let i = 0; i < extraKeys.length; i++) store.removeItem(extraKeys[i]);
+    }
+  } catch { /* ignore */ }
+}
+
+if (typeof window !== 'undefined') {
+  const checkAuthCleared = (): void => {
+    try {
+      const hasToken = Boolean(
+        (typeof localStorage !== 'undefined' && localStorage.getItem('otto_token')) ||
+        (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('otto_imp_token')),
+      );
+      if (!hasToken) clearIdeSensitiveStorage();
+    } catch { /* ignore */ }
+  };
+  window.addEventListener('otto:auth-changed', checkAuthCleared);
+  window.addEventListener('storage', (e) => {
+    if (e.key === 'otto_token' && !e.newValue) checkAuthCleared();
+  });
 }
 
 export async function getLatestClipboardForCompare(storage?: Pick<Storage, 'getItem'> | null): Promise<string> {
@@ -278,11 +304,7 @@ export function dispatchIdeCompareEvent(detail: {
   leftLabel?: string;
 }): void {
   if (typeof window === 'undefined') return;
-  if (detail.mode === 'local-history') {
-    window.dispatchEvent(new CustomEvent('otto:ide-open-local-history', { detail: { path: detail.path } }));
-  } else {
-    window.dispatchEvent(new CustomEvent('otto:ide-open-compare', { detail }));
-  }
+  window.dispatchEvent(new CustomEvent('otto:ide-open-compare', { detail }));
 }
 
 export function dispatchIdeGitMenuAction(action: string, path: string): void {

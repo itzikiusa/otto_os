@@ -124,6 +124,7 @@ struct Block {
     item_id: String,
     message_id: String,
     text: String,
+    started_at: chrono::DateTime<chrono::Utc>,
 }
 
 struct Tool {
@@ -310,7 +311,9 @@ impl ClaudeDriver {
                 streaming,
             },
         };
-        item(b.item_id.clone(), status, None, kind)
+        let mut it = item(b.item_id.clone(), status, None, kind);
+        it.started_at = Some(b.started_at);
+        it
     }
 
     fn close_blocks(&mut self, step: &mut DriverStep) {
@@ -383,6 +386,7 @@ impl ClaudeDriver {
                         item_id: format!("{}:{mid}:{index}", self.turn()),
                         message_id: mid,
                         text: String::new(),
+                        started_at: chrono::Utc::now(),
                     },
                 );
             }
@@ -516,6 +520,7 @@ impl ClaudeDriver {
                         item_id: format!("{}:{mid}:a{n}", self.turn()),
                         message_id: mid.clone(),
                         text: text.to_string(),
+                        started_at: chrono::Utc::now(),
                     };
                     self.emit_closed(step, b);
                 }

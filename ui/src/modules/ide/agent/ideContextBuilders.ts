@@ -3,10 +3,14 @@
 
 import { api } from '../../../lib/api/client';
 import type { RuntimeAccessMode, RuntimeSession, Session, SessionStatus } from '../../../lib/api/types';
-import { defaultAgentProvider, harnessLabel } from '../../../lib/providers';
+import {
+  defaultAgentProvider,
+  harnessLabel,
+  isPlainShellSession,
+  isRuntimeProvider,
+} from '../../../lib/providers';
+import { inThreadsScope } from '../../../lib/stores/sessionBuckets';
 import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
-import { isRuntimeProvider } from '../../threads/runtime/runtimeThreads.svelte'; // ui-guards: allow — IDE inline edit resolves default runtime harness
-import { isPlainShellSession, isThreadSession } from '../../threads/threadsHelpers'; // ui-guards: allow — IDE agent dock filters workspace PTY threads
 import {
   ide,
   ideBasename,
@@ -22,13 +26,19 @@ import {
   detectProposalLanguage,
   lineRangeFromOffsets,
   matchesIdeProjectThread,
-  MAX_CHIP_SNIPPET_CHARS,
-  MAX_CONTEXT_CHIPS,
   offsetsForLineRange,
-  truncateSnippet,
   type IdeContextChip,
   type IdeInlinePromptState,
 } from '../store/ideDiffApplier';
+import { buildPureSymbolDraftChip, upsertIdeContextChipList } from './ideSymbolChip';
+
+function isIdePtyThreadSession(s: Session, pool: readonly Session[]): boolean {
+  if (s.kind === 'connection') return false;
+  const meta = s.meta as Record<string, unknown> | undefined;
+  if (typeof meta?.side_of === 'string' && meta.side_of.trim() !== '') return false;
+  if (meta?.threads_terminal === true) return false;
+  return inThreadsScope(s, pool);
+}
 
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07/g;
@@ -103,20 +113,7 @@ export function upsertIdeContextChip(
   draft: Omit<IdeContextChip, 'id'> & { id?: string },
   allocId: () => string,
 ): { chip: IdeContextChip; next: IdeContextChip[] } {
-  const snippet = truncateSnippet(draft.snippet, MAX_CHIP_SNIPPET_CHARS);
-  const idx = contexts.findIndex((c) => c.key === draft.key);
-  if (idx >= 0) {
-    const updated: IdeContextChip = { ...contexts[idx], ...draft, id: contexts[idx].id, snippet };
-    const next = contexts.slice();
-    next[idx] = updated;
-    return { chip: updated, next };
-  }
-  const created: IdeContextChip = { ...draft, id: draft.id ?? allocId(), snippet };
-  const trimmed =
-    contexts.length >= MAX_CONTEXT_CHIPS
-      ? contexts.slice(contexts.length - (MAX_CONTEXT_CHIPS - 1))
-      : contexts;
-  return { chip: created, next: [...trimmed, created] };
+  return upsertIdeContextChipList(contexts, draft, allocId);
 }
 
 export function buildSelectionDraftChip(
@@ -276,7 +273,7 @@ export function collectIdeThreadEntries(opts: {
 
   for (let i = 0; i < opts.ptySessions.length; i++) {
     const s = opts.ptySessions[i];
-    if (s.archived || seen.has(s.id) || isPlainShellSession(s) || !isThreadSession(s, opts.ptySessions)) continue;
+    if (s.archived || seen.has(s.id) || isPlainShellSession(s) || !isIdePtyThreadSession(s, opts.ptySessions)) continue;
     if (
       !matchesIdeProjectThread({
         sessionId: s.id,
@@ -322,20 +319,7 @@ export function buildSymbolDraftChip(
   buf: string,
   sym: IdeSymbolNode,
 ): Omit<IdeContextChip, 'id'> {
-  const startLine = Math.max(1, sym.line || 1);
-  const endLine = Math.max(startLine, sym.end_line || startLine);
-  const slice = offsetsForLineRange(buf, startLine, endLine);
-  return {
-    key: `symbol:${fullPath}:${sym.name}:${startLine}`,
-    kind: 'symbol',
-    label: `@${relPath}#${sym.name}`,
-    sublabel: `L${startLine}-L${endLine}`,
-    path: fullPath,
-    startLine,
-    endLine,
-    language: detectProposalLanguage(relPath),
-    snippet: slice.text || `${sym.kind} ${sym.name} (L${startLine}-L${endLine})`,
-  };
+  return buildPureSymbolDraftChip(fullPath, relPath, buf, sym);
 }
 
 export function buildDiagnosticDraftChip(

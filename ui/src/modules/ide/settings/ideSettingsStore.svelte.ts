@@ -1,7 +1,17 @@
 // Reactive draft/apply Settings & Project Structure state + category tree for
 // the IntelliJ IDEA / GoLand-style Unified IDE Settings modal (`⌘,`).
 
-import { lsGet, lsSet } from '../../../lib/storage';
+import {
+  cloneIdePreferences as clonePrefs,
+  DEFAULT_IDE_PREFERENCES,
+  IDE_COLOR_SCHEME_OPTIONS,
+  IDE_PREFS_STORAGE_KEY,
+  readIdePreferences,
+  writeIdePreferences,
+  type ConcreteIdeColorSchemeId as ConcreteIdeSchemeId,
+  type IdeColorSchemeId as IdeEditorSchemeId,
+  type IdePreferences,
+} from '../../../lib/idePreferences.svelte';
 import {
   ide,
   ideBasename,
@@ -10,144 +20,28 @@ import {
   type IdeProjectEnvironment,
 } from '../ideStore.svelte';
 
-export const IDE_PREFS_STORAGE_KEY = 'otto.ide.preferences.v1';
-
-export type IdeEditorSchemeId =
-  | 'auto'
-  | 'jetbrains-islands-dark'
-  | 'jetbrains-darcula'
-  | 'jetbrains-islands-light'
-  | 'vscode-dark-modern'
-  | 'vscode-light-modern';
-
-export type ConcreteIdeSchemeId = Exclude<IdeEditorSchemeId, 'auto'>;
+export {
+  DEFAULT_IDE_PREFERENCES,
+  IDE_PREFS_STORAGE_KEY,
+  type ConcreteIdeSchemeId,
+  type IdeEditorSchemeId,
+  type IdePreferences,
+};
 
 export const EDITOR_SCHEMES: readonly {
   id: IdeEditorSchemeId;
   label: string;
   tone: 'auto' | 'dark' | 'light';
   desc: string;
-}[] = [
-  { id: 'auto', label: 'Follow Otto (Dark / Light)', tone: 'auto', desc: 'Switches automatically between your preferred dark and light editor schemes' },
-  { id: 'jetbrains-islands-dark', label: 'JetBrains Islands Dark', tone: 'dark', desc: 'GoLand / IntelliJ 2025 Islands Dark (#CF8E6D keywords, #56A8F5 funcs, #6AAB73 strings)' },
-  { id: 'jetbrains-darcula', label: 'JetBrains Darcula', tone: 'dark', desc: 'Classic IntelliJ Darcula (#CC7832 keywords, #FFC66D declarations, #9876AA fields)' },
-  { id: 'jetbrains-islands-light', label: 'JetBrains Islands Light', tone: 'light', desc: 'Crisp JetBrains daylight palette (#0033B3 keywords, #067D17 strings, #871094 fields)' },
-  { id: 'vscode-dark-modern', label: 'VS Code Dark Modern', tone: 'dark', desc: 'Familiar Dark+ / Dark Modern (#569CD6 / #C586C0 / #DCDCAA / #4EC9B0)' },
-  { id: 'vscode-light-modern', label: 'VS Code Light Modern', tone: 'light', desc: 'Clean Light Modern (#0000FF / #AF00DB / #795E26 / #267F99)' },
-];
-
-export interface IdePreferences {
-  colorScheme: IdeEditorSchemeId;
-  preferredDarkScheme: ConcreteIdeSchemeId;
-  preferredLightScheme: ConcreteIdeSchemeId;
-  rainbowBrackets: boolean;
-  uiDensity: 'comfortable' | 'compact';
-  debuggerLayout: 'tabbed' | 'split';
-  keymapPreset: IdeKeymapPreset;
-  fontSize: number;
-  lineHeight: number;
-  fontLigatures: boolean;
-  formatOnSave: boolean;
-  autoFoldImports: boolean;
-  breadcrumbs: boolean;
-  inlayHints: boolean;
-  codeVision: boolean;
-  compactHover: boolean;
-  javaUnresolvedImports: boolean;
-  lombokSupport: boolean;
-  unusedImports: boolean;
-  gitTreeBadges: boolean;
-  localHistoryEnabled: boolean;
-  localHistoryRetentionDays: number;
-  breakOnExceptions: boolean;
-  prettyJsonLogs: boolean;
-  consoleLineWrap: boolean;
-  defaultBuildToolJava: 'auto' | 'maven' | 'gradle';
-  goModulesEnabled: boolean;
-  goProxy: string;
-  cargoCheckOnSave: boolean;
-  npmPackageManager: 'npm' | 'pnpm' | 'yarn' | 'bun';
-  goEnabledModules: Record<string, boolean>;
-  moduleSdkMap: Record<string, string>;
-  javaLanguageLevel: '8' | '11' | '17' | '21' | '23';
-  javaCompilerOutput: string;
-  shellDialect: 'zsh' | 'bash' | 'POSIX sh';
-  jsonValidateSchemas: boolean;
-  csvDelimiter: 'auto' | ',' | '\t' | ';';
-  csvFirstRowHeader: boolean;
-  csvRainbowColumns: boolean;
-}
-
-export const DEFAULT_IDE_PREFERENCES: IdePreferences = {
-  colorScheme: 'auto',
-  preferredDarkScheme: 'jetbrains-islands-dark',
-  preferredLightScheme: 'jetbrains-islands-light',
-  rainbowBrackets: true,
-  uiDensity: 'comfortable',
-  debuggerLayout: 'tabbed',
-  keymapPreset: 'jetbrains',
-  fontSize: 13,
-  lineHeight: 1.55,
-  fontLigatures: true,
-  formatOnSave: false,
-  autoFoldImports: true,
-  breadcrumbs: true,
-  inlayHints: true,
-  codeVision: true,
-  compactHover: true,
-  javaUnresolvedImports: true,
-  lombokSupport: true,
-  unusedImports: true,
-  gitTreeBadges: true,
-  localHistoryEnabled: true,
-  localHistoryRetentionDays: 14,
-  breakOnExceptions: false,
-  prettyJsonLogs: true,
-  consoleLineWrap: false,
-  defaultBuildToolJava: 'auto',
-  goModulesEnabled: true,
-  goProxy: 'https://proxy.golang.org,direct',
-  cargoCheckOnSave: true,
-  npmPackageManager: 'npm',
-  goEnabledModules: {},
-  moduleSdkMap: {},
-  javaLanguageLevel: '21',
-  javaCompilerOutput: 'target/classes',
-  shellDialect: 'zsh',
-  jsonValidateSchemas: true,
-  csvDelimiter: 'auto',
-  csvFirstRowHeader: true,
-  csvRainbowColumns: true,
-};
+}[] = IDE_COLOR_SCHEME_OPTIONS.map((o) => ({
+  id: o.id,
+  label: o.label,
+  tone: o.group,
+  desc: o.desc,
+}));
 
 export function loadIdePreferences(): IdePreferences {
-  try {
-    const raw = lsGet(IDE_PREFS_STORAGE_KEY);
-    if (!raw) {
-      return {
-        ...DEFAULT_IDE_PREFERENCES,
-        keymapPreset: ide.keymapPreset,
-        formatOnSave: ide.formatOnSave,
-      };
-    }
-    const parsed = JSON.parse(raw) as Partial<IdePreferences>;
-    return {
-      ...DEFAULT_IDE_PREFERENCES,
-      ...parsed,
-      goEnabledModules: { ...(parsed.goEnabledModules ?? {}) },
-      moduleSdkMap: { ...(parsed.moduleSdkMap ?? {}) },
-    };
-  } catch {
-    return { ...DEFAULT_IDE_PREFERENCES };
-  }
-}
-
-function clonePrefs(p: IdePreferences): IdePreferences {
-  return {
-    ...p,
-    goEnabledModules: { ...p.goEnabledModules },
-    moduleSdkMap: { ...p.moduleSdkMap },
-  };
+  return readIdePreferences();
 }
 
 export interface SettingsTreeNode {
@@ -373,9 +267,9 @@ class IdeSettingsController {
   }
 
   async apply(): Promise<void> {
-    const snap = clonePrefs(this.draft);
-    lsSet(IDE_PREFS_STORAGE_KEY, JSON.stringify(snap));
+    const snap = writeIdePreferences(this.draft);
     this.committed = clonePrefs(snap);
+    this.draft = clonePrefs(snap);
     ide.setKeymapPreset(snap.keymapPreset);
     ide.setFormatOnSave(snap.formatOnSave);
     ide.breakOnExceptions = snap.breakOnExceptions;
@@ -405,10 +299,6 @@ class IdeSettingsController {
         env_vars: this.envDraft.env_vars.filter((v) => v.key.trim().length > 0),
       });
       this.envDirty = false;
-    }
-
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('otto:ide-prefs-changed', { detail: snap }));
     }
   }
 

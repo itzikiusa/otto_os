@@ -4,28 +4,42 @@
 export * from './store/ideTypes';
 
 import { api } from '../../lib/api/client';
-import { loadErrorText } from '../../lib/loadError';
+import { idePreferences } from '../../lib/idePreferences.svelte';
+import { ideWorkspacePort } from '../../lib/ideWorkspacePort.svelte';
 import { type Poller } from '../../lib/poll';
 import { lsGet, lsSet } from '../../lib/storage';
-import { toastError } from '../../lib/toastError';
 import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
+import { toastError } from '../../lib/toastError';
 import {
   attachProjectFolder, canonicalizeLocalProjectPath, createTemplatedFile, detachProjectFolder,
-  detectBuildToolFromState, detectFastRunConfigs, findContainingRoot, formatRelativeToRoots,
-  loadActiveProjectIdLocal, loadAttachedRootEntries, loadBuildToolPrefsLocal, loadNamedProjectsLocal,
-  loadSavedAdditionalRoots, loadSavedBreakpoints, mergeFastRunConfigs, mutatePathBreakpoints,
-  normalizeBreakpointsMap, normalizeRootPath, performCloseAllTabs, pushNavigationHistory,
-  restoreWorkspaceTabsOrInitial, revealPathInTree, saveActiveProjectIdLocal, saveAdditionalRootsLocal,
-  saveBuildToolPrefsLocal, saveLastIdeRoot,
+  detectBuildToolFromState, formatRelativeToRoots,
+  loadActiveProjectIdLocal, loadNamedProjectsLocal,
+  mutatePathBreakpoints, normalizeRootPath, performCloseAllTabs, pushNavigationHistory,
+  revealPathInTree, saveActiveProjectIdLocal, saveBuildToolPrefsLocal, saveLastIdeRoot,
 } from './shell/ideProjectHelpers';
 import {
   applyFallbackPrefixSuffix, computeFallbackSelection, IdeBufferPerfController,
   performAgentEdit, performCloseTab, performOpenFile, performSaveFile, saveWorkspaceOpenTabs,
 } from './store/ideBufferPerf';
+import {
+  computeIdeProjectRoots, fetchIdeWorkspaceTree, IdeCollabState, IdeDebugState, IdeTargetEnvState,
+  normalizePathDiagnostics, performCloseTabBatch, resetTargetLifecycleState, syncAdditionalRootsFromEnvState,
+  type IncomingIdeDiagnostic,
+} from './store/ideStateSlices.svelte';
 import type * as ProjMod from './shell/ideProjectsManager';
 import type * as LspSearchMod from './shell/ideLspAndSearchHelpers';
 import type * as CollabMod from './store/ideCollabController';
 import type * as DebugEnvMod from './store/ideDebugAndEnvController';
+import type {
+  IdeBottomTab, IdeBreakpoint, IdeCodeAction, IdeCollabRole, IdeCollabRoom,
+  IdeDebugSessionSnapshot, IdeDiagnostic, IdeEditorHandle, IdeEditorSelectionRange,
+  IdeEnvVar, IdeFsEntry, IdeGutterItem,
+  IdeInstalledSdk, IdeInstallJob, IdeKeymapPreset, IdeNamedProject, IdeNavLocation, IdeOpenTab,
+  IdeProjectEnvironment, IdeProjectRoot, IdeReferenceLocation, IdeRenameEdit,
+  IdeReplaceResp, IdeRunConfig, IdeRunState, IdeSearchItem,
+  IdeSearchMode, IdeShellEnvResp, IdeSymbolNode, IdeTargetSpec, IdeTextEdit,
+  IdeVariable,
+} from './store/ideTypes';
 
 let projModP: Promise<typeof ProjMod> | null = null;
 let lspModP: Promise<typeof LspSearchMod> | null = null;
@@ -36,24 +50,16 @@ const loadProjMod = () => (projModP ??= import('./shell/ideProjectsManager'));
 const loadLspMod = () => (lspModP ??= import('./shell/ideLspAndSearchHelpers'));
 const loadCollabMod = () => (collabModP ??= import('./store/ideCollabController'));
 const loadDebugEnvMod = () => (debugEnvModP ??= import('./store/ideDebugAndEnvController').then((m) => (debugEnvSyncMod = m)));
-import {
-  ideBasename, type IdeBottomTab, type IdeBreakpoint, type IdeCodeAction, type IdeCollabRole, type IdeCollabRoom,
-  type IdeDebugSessionSnapshot, type IdeDetectedSdk, type IdeDiagnostic, type IdeEditorHandle, type IdeEditorSelectionRange,
-  type IdeEnvVar, type IdeFsEntry, type IdeFsTreeResp, type IdeGutterItem,
-  type IdeInstalledSdk, type IdeInstallJob, type IdeKeymapPreset, type IdeNamedProject, type IdeNavLocation, type IdeOpenTab,
-  type IdePeerCursor, type IdePluginCatalogEntry, type IdePluginInfo, type IdeProjectEnvironment,
-  type IdeProjectRoot, type IdePythonVenv, type IdeReferenceLocation, type IdeRenameEdit,
-  type IdeReplaceResp, type IdeReplEntry, type IdeRunConfig, type IdeRunState, type IdeSearchItem,
-  type IdeSearchMode, type IdeShellEnvResp, type IdeSymbolNode, type IdeTargetSpec, type IdeTextEdit,
-  type IdeToolchainEcosystem, type IdeVariable, type IdeWatch,
-} from './store/ideTypes';
 
 const KEYMAP_STORAGE_KEY = 'otto.ide.keymap';
-const FORMAT_ON_SAVE_KEY = 'otto.ide.formatOnSave';
 const DOCK_OPEN_KEY = 'otto.ide.dockOpen';
 const DOCK_TAB_KEY = 'otto.ide.dockTab';
 
 class IdeStore {
+  readonly envState = new IdeTargetEnvState();
+  readonly debugState = new IdeDebugState();
+  readonly collabState = new IdeCollabState();
+
   target = $state<IdeTargetSpec>({ kind: 'local', workspace_id: null, root: '', connection_id: null, connection_name: null });
   additionalRoots = $state<string[]>([]);
   namedProjects = $state<IdeNamedProject[]>(loadNamedProjectsLocal());
@@ -101,63 +107,11 @@ class IdeStore {
   replacePreview = $state<IdeReplaceResp | null>(null);
   replaceLoading = $state(false);
 
-  toolchains = $state<IdeToolchainEcosystem[]>([]);
-  detectedSdks = $state<IdeDetectedSdk[]>([]);
-  toolchainsLoading = $state(false);
-  toolchainsError = $state<string | null>(null);
-  installJobs = $state<IdeInstallJob[]>([]);
-  projectEnv = $state<IdeProjectEnvironment | null>(null);
-  effectiveEnv = $state<Record<string, string>>({});
-  shellEnv = $state<IdeShellEnvResp | null>(null);
-  shellEnvLoading = $state(false);
-  pythonVenvs = $state<IdePythonVenv[]>([]);
-  dotenvFiles = $state<string[]>([]);
-  runConfigs = $state<IdeRunConfig[]>([]);
-  detectedConfigs = $state<IdeRunConfig[]>([]);
-  selectedConfigId = $state<string | null>(null);
-  envLoading = $state(false);
-  envError = $state<string | null>(null);
-  activeRun = $state<IdeRunState | null>(null);
-  runsHistory = $state<IdeRunState[]>([]);
-
-  breakpointsByPath = $state<Record<string, IdeBreakpoint[]>>({});
-  breakpointsMuted = $state(false);
-  breakOnExceptions = $state(false);
-  activeDebug = $state<IdeDebugSessionSnapshot | null>(null);
-  expandedVariables = $state<Record<number, IdeVariable[]>>({});
-  watches = $state<IdeWatch[]>([]);
-  replEntries = $state<IdeReplEntry[]>([]);
-  debugLoading = $state(false);
-
-  collabRoom = $state<IdeCollabRoom | null>(null);
-  collabRooms = $state<IdeCollabRoom[]>([]);
-  collabInviteToken = $state<string | null>(null);
-  collabShareHash = $state<string | null>(null);
-  collabIsGuest = $state(false);
-  collabPeerId = $state<string | null>(null);
-  collabPeerSecret = $state<string | null>(null);
-  collabGuestToken = $state<string | null>(null);
-  peerCursors = $state<IdePeerCursor[]>([]);
-  followingPeerId = $state<string | null>(null);
-  sharedBuffers = $state<Record<string, { content: string; version: number }>>({});
-  collabLoading = $state(false);
-  collabError = $state<string | null>(null);
-
-  plugins = $state<IdePluginInfo[]>([]);
-  pluginCatalog = $state<IdePluginCatalogEntry[]>([]);
-  pluginsLoading = $state(false);
-  pluginsError = $state<string | null>(null);
-
-  keymapPreset = $state<IdeKeymapPreset>(lsGet(KEYMAP_STORAGE_KEY) === 'standard' ? 'standard' : 'jetbrains');
-  formatOnSave = $state<boolean>(lsGet(FORMAT_ON_SAVE_KEY) === '1');
+  keymapPreset = $state<IdeKeymapPreset>(
+    lsGet(KEYMAP_STORAGE_KEY) === 'standard' || idePreferences.current.keymapPreset === 'standard' ? 'standard' : 'jetbrains',
+  );
   settingsOpen = $state(false);
   settingsSection = $state<string>('project.project');
-  buildToolOpen = $state(false);
-  detectedBuildToolOverride = $state<'maven' | 'gradle' | null>(null);
-  activeMavenProfiles = $state<string[]>([]);
-  activeSpringProfiles = $state<string[]>([]);
-  buildSkipTests = $state(false);
-  buildOffline = $state(false);
   closedTabPaths = $state<string[]>([]);
   toolchainsOpen = $state(false);
   environmentsOpen = $state(false);
@@ -174,35 +128,77 @@ class IdeStore {
     (['debug', 'run', 'git', 'problems', 'usages', 'terminal'].includes(lsGet(DOCK_TAB_KEY) ?? '') ? lsGet(DOCK_TAB_KEY) : 'run') as IdeBottomTab,
   );
 
+  // Delegated sub-store accessors (`SOLID-4` — single source of truth on `envState` / `debugState` / `collabState`)
+  get toolchains() { return this.envState.toolchains; } set toolchains(v) { this.envState.toolchains = v; }
+  get detectedSdks() { return this.envState.detectedSdks; } set detectedSdks(v) { this.envState.detectedSdks = v; }
+  get toolchainsLoading() { return this.envState.toolchainsLoading; } set toolchainsLoading(v) { this.envState.toolchainsLoading = v; }
+  get toolchainsError() { return this.envState.toolchainsError; } set toolchainsError(v) { this.envState.toolchainsError = v; }
+  get installJobs() { return this.envState.installJobs; } set installJobs(v) { this.envState.installJobs = v; }
+  get projectEnv() { return this.envState.projectEnv; } set projectEnv(v) { this.envState.projectEnv = v; }
+  get effectiveEnv() { return this.envState.effectiveEnv; } set effectiveEnv(v) { this.envState.effectiveEnv = v; }
+  get shellEnv() { return this.envState.shellEnv; } set shellEnv(v) { this.envState.shellEnv = v; }
+  get shellEnvLoading() { return this.envState.shellEnvLoading; } set shellEnvLoading(v) { this.envState.shellEnvLoading = v; }
+  get pythonVenvs() { return this.envState.pythonVenvs; } set pythonVenvs(v) { this.envState.pythonVenvs = v; }
+  get dotenvFiles() { return this.envState.dotenvFiles; } set dotenvFiles(v) { this.envState.dotenvFiles = v; }
+  get runConfigs() { return this.envState.runConfigs; } set runConfigs(v) { this.envState.runConfigs = v; }
+  get detectedConfigs() { return this.envState.detectedConfigs; } set detectedConfigs(v) { this.envState.detectedConfigs = v; }
+  get selectedConfigId() { return this.envState.selectedConfigId; } set selectedConfigId(v) { this.envState.selectedConfigId = v; }
+  get envLoading() { return this.envState.envLoading; } set envLoading(v) { this.envState.envLoading = v; }
+  get envError() { return this.envState.envError; } set envError(v) { this.envState.envError = v; }
+  get activeRun() { return this.envState.activeRun; } set activeRun(v) { this.envState.activeRun = v; }
+  get runsHistory() { return this.envState.runsHistory; } set runsHistory(v) { this.envState.runsHistory = v; }
+  get buildToolOpen() { return this.envState.buildToolOpen; } set buildToolOpen(v) { this.envState.buildToolOpen = v; }
+  get detectedBuildToolOverride() { return this.envState.detectedBuildToolOverride; } set detectedBuildToolOverride(v) { this.envState.detectedBuildToolOverride = v; }
+  get activeMavenProfiles() { return this.envState.activeMavenProfiles; } set activeMavenProfiles(v) { this.envState.activeMavenProfiles = v; }
+  get activeSpringProfiles() { return this.envState.activeSpringProfiles; } set activeSpringProfiles(v) { this.envState.activeSpringProfiles = v; }
+  get buildSkipTests() { return this.envState.buildSkipTests; } set buildSkipTests(v) { this.envState.buildSkipTests = v; }
+  get buildOffline() { return this.envState.buildOffline; } set buildOffline(v) { this.envState.buildOffline = v; }
+
+  get breakpointsByPath() { return this.debugState.breakpointsByPath; } set breakpointsByPath(v) { this.debugState.breakpointsByPath = v; }
+  get breakpointsMuted() { return this.debugState.breakpointsMuted; } set breakpointsMuted(v) { this.debugState.breakpointsMuted = v; }
+  get breakOnExceptions() { return this.debugState.breakOnExceptions; } set breakOnExceptions(v) { this.debugState.breakOnExceptions = v; }
+  get activeDebug() { return this.debugState.activeDebug; } set activeDebug(v) { this.debugState.activeDebug = v; }
+  get expandedVariables() { return this.debugState.expandedVariables; } set expandedVariables(v) { this.debugState.expandedVariables = v; }
+  get watches() { return this.debugState.watches; } set watches(v) { this.debugState.watches = v; }
+  get replEntries() { return this.debugState.replEntries; } set replEntries(v) { this.debugState.replEntries = v; }
+  get debugLoading() { return this.debugState.debugLoading; } set debugLoading(v) { this.debugState.debugLoading = v; }
+  get allBreakpoints() { return this.debugState.allBreakpoints; }
+  get breakpoints() { return this.debugState.allBreakpoints; }
+  get effectiveBreakpoints() { return this.debugState.effectiveBreakpoints; }
+
+  get collabRoom() { return this.collabState.collabRoom; } set collabRoom(v) { this.collabState.collabRoom = v; }
+  get collabRooms() { return this.collabState.collabRooms; } set collabRooms(v) { this.collabState.collabRooms = v; }
+  get collabInviteToken() { return this.collabState.collabInviteToken; } set collabInviteToken(v) { this.collabState.collabInviteToken = v; }
+  get collabShareHash() { return this.collabState.collabShareHash; } set collabShareHash(v) { this.collabState.collabShareHash = v; }
+  get collabIsGuest() { return this.collabState.collabIsGuest; } set collabIsGuest(v) { this.collabState.collabIsGuest = v; }
+  get collabPeerId() { return this.collabState.collabPeerId; } set collabPeerId(v) { this.collabState.collabPeerId = v; }
+  get collabPeerSecret() { return this.collabState.collabPeerSecret; } set collabPeerSecret(v) { this.collabState.collabPeerSecret = v; }
+  get collabGuestToken() { return this.collabState.collabGuestToken; } set collabGuestToken(v) { this.collabState.collabGuestToken = v; }
+  get peerCursors() { return this.collabState.peerCursors; } set peerCursors(v) { this.collabState.peerCursors = v; }
+  get followingPeerId() { return this.collabState.followingPeerId; } set followingPeerId(v) { this.collabState.followingPeerId = v; }
+  get sharedBuffers() { return this.collabState.sharedBuffers; } set sharedBuffers(v) { this.collabState.sharedBuffers = v; }
+  get collabLoading() { return this.collabState.collabLoading; } set collabLoading(v) { this.collabState.collabLoading = v; }
+  get collabError() { return this.collabState.collabError; } set collabError(v) { this.collabState.collabError = v; }
+  get plugins() { return this.collabState.plugins; } set plugins(v) { this.collabState.plugins = v; }
+  get pluginCatalog() { return this.collabState.pluginCatalog; } set pluginCatalog(v) { this.collabState.pluginCatalog = v; }
+  get pluginsLoading() { return this.collabState.pluginsLoading; } set pluginsLoading(v) { this.collabState.pluginsLoading = v; }
+  get pluginsError() { return this.collabState.pluginsError; } set pluginsError(v) { this.collabState.pluginsError = v; }
+  get canEditCollab() { return this.collabState.canEditCollab; }
+
+  get formatOnSave(): boolean { return idePreferences.current.formatOnSave; }
+  set formatOnSave(v: boolean) { idePreferences.update({ formatOnSave: Boolean(v) }); }
+
   readonly hasTarget = $derived(Boolean(this.target.root));
   readonly buildToolKind = $derived(detectBuildToolFromState(this.detectedBuildToolOverride, this.treeRootEntries, this.childrenByDir, this.tabs, this.runConfigs));
   readonly activeProject = $derived<IdeNamedProject | null>(
     this.activeProjectId ? (this.namedProjects.find((p) => p.id === this.activeProjectId) ?? null) : null,
   );
-  readonly projectRoots = $derived.by((): IdeProjectRoot[] => {
-    if (!this.target.root) return [];
-    const primary = normalizeRootPath(this.target.root);
-    const out: IdeProjectRoot[] = [{ path: primary, name: ideBasename(primary) || primary, isPrimary: true }];
-    for (let i = 0; i < this.additionalRoots.length; i++) {
-      const r = normalizeRootPath(this.additionalRoots[i]);
-      if (r && r !== primary && !out.some((x) => x.path === r)) {
-        out.push({ path: r, name: ideBasename(r) || r, isPrimary: false });
-      }
-    }
-    return out;
-  });
+  readonly projectRoots = $derived.by((): IdeProjectRoot[] => computeIdeProjectRoots(this.target.root, this.additionalRoots));
   readonly activeTab = $derived(this.tabs.find((t) => t.path === this._activePath) ?? null);
   readonly splitTab = $derived(this.splitPath ? (this.tabs.find((t) => t.path === this.splitPath) ?? null) : null);
   readonly activeSymbols = $derived(this._activePath ? (this.symbolsByPath[this._activePath] ?? []) : []);
-  readonly allBreakpoints = $derived(Object.values(this.breakpointsByPath).flat());
-  readonly breakpoints = $derived(this.allBreakpoints);
-  readonly effectiveBreakpoints = $derived(this.breakpointsMuted ? [] : this.allBreakpoints);
   readonly canNavigateBack = $derived(this.navIndex > 0);
   readonly canNavigateForward = $derived(this.navIndex >= 0 && this.navIndex < this.navHistory.length - 1);
-  readonly canEditCollab = $derived(
-    !this.collabIsGuest ||
-      Boolean(this.collabRoom && (this.collabRoom.peers.find((p) => p.peer_id === this.collabPeerId)?.role ?? this.collabRoom.default_role) === 'editor'),
-  );
 
   private bufPerf = new IdeBufferPerfController();
   private editorHandles: { primary: IdeEditorHandle | null; split: IdeEditorHandle | null } = { primary: null, split: null };
@@ -217,6 +213,15 @@ class IdeStore {
   private cursorSendTimer: ReturnType<typeof setTimeout> | null = null;
   private collabEditTimer: ReturnType<typeof setTimeout> | null = null;
 
+  syncWorkspacePort(): void {
+    ideWorkspacePort.publish({
+      root: this.target.kind === 'local' && this.target.root ? this.target.root : null,
+      additionalRoots: this.target.kind === 'local' ? this.additionalRoots : [],
+      activePath: this._activePath,
+      tabs: this.tabs.map((t) => ({ path: t.path, dirty: this.bufPerf.isTabDirty(t) })),
+    });
+  }
+
   get activePath(): string | null { return this._activePath; }
   set activePath(next: string | null) {
     if (this._activePath === next) return;
@@ -230,17 +235,17 @@ class IdeStore {
         if (this.symbolsByPath[next] === undefined) void this.loadSymbols(next, this.getBuffer(next));
       }
     }
+    this.syncWorkspacePort();
   }
 
   get targetPayload(): IdeTargetSpec {
-    const folders = this.projectRoots.map((r) => r.path);
     return {
       kind: this.target.kind,
       workspace_id: this.target.workspace_id ?? null,
       root: this.target.root,
       connection_id: this.target.kind === 'ssh' ? (this.target.connection_id ?? null) : null,
       additional_roots: this.additionalRoots.length > 0 ? this.additionalRoots : undefined,
-      project_folders: folders,
+      project_folders: this.projectRoots.map((r) => r.path),
     };
   }
 
@@ -314,28 +319,7 @@ class IdeStore {
 
   private resetTargetState(next: IdeTargetSpec, overrideAdditionalRoots?: string[]): void {
     this.disposeStreams();
-    this.target = next;
-    const savedRoots = overrideAdditionalRoots
-      ? overrideAdditionalRoots.map((r) => normalizeRootPath(r)).filter((r) => r && r !== normalizeRootPath(next.root))
-      : (next.root ? loadSavedAdditionalRoots(next) : []);
-    this.additionalRoots = savedRoots;
-    if (overrideAdditionalRoots && next.root) saveAdditionalRootsLocal(next, savedRoots);
-    this.breakpointsByPath = next.root ? normalizeBreakpointsMap(loadSavedBreakpoints(next), (p) => this.resolvePath(p)) : {};
-    const initialExpanded: Record<string, boolean> = {};
-    if (next.root) initialExpanded[normalizeRootPath(next.root)] = true;
-    // Scale discipline (#71): keep 30+ secondary repo roots collapsed on cold open (<80ms, <30MB RAM)!
-    if (savedRoots.length <= 2) {
-      for (let i = 0; i < savedRoots.length; i++) initialExpanded[savedRoots[i]] = true;
-    }
-    this.treeRootEntries = []; this.childrenByDir = {}; this.expandedDirs = initialExpanded; this.treeError = null;
-    this.tabs = []; this.closedTabPaths = []; this.hasClosedAllTabs = false; this._activePath = null; this.splitPath = null; this.splitDirection = null;
-    this.gutterByPath = {}; this.symbolsByPath = {}; this.problems = []; this.usages = [];
-    this.searchResults = []; this.replacePreview = null; this.navHistory = []; this.navIndex = -1;
-    this.projectEnv = null; this.effectiveEnv = {}; this.runConfigs = []; this.detectedConfigs = []; this.selectedConfigId = null;
-    this.activeRun = null; this.runsHistory = []; this.activeDebug = null; this.expandedVariables = {}; this.replEntries = [];
-    const bt = loadBuildToolPrefsLocal(next.root);
-    this.buildToolOpen = bt.open; this.detectedBuildToolOverride = null; this.activeMavenProfiles = bt.mavenProfiles;
-    this.activeSpringProfiles = bt.springProfiles; this.buildSkipTests = bt.skipTests; this.buildOffline = bt.offline;
+    resetTargetLifecycleState(this, next, () => { this._activePath = null; }, overrideAdditionalRoots);
   }
 
   private persistBuildToolPrefs(): void {
@@ -348,25 +332,7 @@ class IdeStore {
   setBuildOffline(v: boolean): void { this.buildOffline = v; this.persistBuildToolPrefs(); }
 
   syncAdditionalRootsFromEnv(envRoots: string[]): void {
-    const primary = normalizeRootPath(this.target.root);
-    const merged = [...this.additionalRoots];
-    let changed = false;
-    for (let i = 0; i < envRoots.length; i++) {
-      const clean = normalizeRootPath(envRoots[i]);
-      if (clean && clean !== primary && !merged.includes(clean)) { merged.push(clean); changed = true; }
-    }
-    if (!changed) return;
-    this.additionalRoots = merged;
-    saveAdditionalRootsLocal(this.target, merged);
-    if (merged.length <= 2) {
-      const nextExp = { ...this.expandedDirs };
-      for (let i = 0; i < merged.length; i++) {
-        if (nextExp[merged[i]] === undefined) nextExp[merged[i]] = true;
-        if (nextExp[merged[i]] && !this.childrenByDir[merged[i]]) void loadAttachedRootEntries(this, merged[i]);
-      }
-      this.expandedDirs = nextExp;
-    }
-    void loadProjMod().then((m) => m.syncCurrentProjectFolders(this));
+    syncAdditionalRootsFromEnvState(this, envRoots, () => void loadProjMod().then((m) => m.syncCurrentProjectFolders(this)));
   }
 
   get bottomTab(): IdeBottomTab { return this.activeBottomTab; }
@@ -375,8 +341,8 @@ class IdeStore {
   get workspaceRoot(): string { return this.target.root; }
   refreshTree(dirPath?: string): Promise<void> { return this.loadTree(dirPath); }
   openSettings(section?: string): void { if (section) this.settingsSection = section; this.settingsOpen = true; }
-  setKeymapPreset(preset: IdeKeymapPreset): void { this.keymapPreset = preset; lsSet(KEYMAP_STORAGE_KEY, preset); }
-  setFormatOnSave(next: boolean): void { this.formatOnSave = next; lsSet(FORMAT_ON_SAVE_KEY, next ? '1' : '0'); }
+  setKeymapPreset(preset: IdeKeymapPreset): void { this.keymapPreset = preset; lsSet(KEYMAP_STORAGE_KEY, preset); idePreferences.update({ keymapPreset: preset }); }
+  setFormatOnSave(next: boolean): void { idePreferences.update({ formatOnSave: Boolean(next) }); }
   openEnvironmentsModal(tab: 'env' | 'configs' = 'env'): void { this.environmentsInitialTab = tab; this.environmentsOpen = true; }
   openFindInPath(opts: { scopePath?: string | null; replace?: boolean } = {}): void {
     this.searchScopePath = opts.scopePath ?? null;
@@ -394,53 +360,10 @@ class IdeStore {
   registerEditorHandle(slot: 'primary' | 'split', handle: IdeEditorHandle | null): void { this.editorHandles[slot] = handle; }
   clearProblems(): void { this.problems = []; }
   clearRepl(): void { this.replEntries = []; }
+  flushHistorySnapshot(path?: string): void { this.bufPerf.flushHistorySnapshot(this, path); }
 
-  async loadTree(dirPath?: string): Promise<void> {
-    if (!this.target.root || this.collabIsGuest) return;
-    const primary = normalizeRootPath(this.target.root);
-    const normDir = dirPath ? normalizeRootPath(dirPath) : '';
-    const isRoot = !normDir || normDir === primary;
-    if (!isRoot && this.additionalRoots.includes(normDir)) {
-      await loadAttachedRootEntries(this, normDir);
-      return;
-    }
-    const attachedParent = !isRoot ? findContainingRoot(normDir, this.projectRoots) : null;
-    if (isRoot) { this.treeLoading = true; this.treeError = null; }
-    try {
-      const query = attachedParent && !attachedParent.isPrimary && this.target.kind === 'local'
-        ? new URLSearchParams({ kind: 'local', root: attachedParent.path, path: normDir, show_hidden: String(this.showHidden) }).toString()
-        : this.targetQuery({ path: isRoot ? '' : normDir, show_hidden: this.showHidden });
-      const resp = await api.get<IdeFsTreeResp>(`/ide/fs/tree?${query}`);
-      if (resp.target_os) this.targetOs = resp.target_os;
-      if (resp.target_arch) this.targetArch = resp.target_arch;
-      if (isRoot) {
-        if (resp.root && this.target.root === '~') {
-          this.target = { ...this.target, root: resp.root };
-          this.expandedDirs = { ...this.expandedDirs, [normalizeRootPath(resp.root)]: true };
-        }
-        const entries = resp.entries ?? [];
-        this.treeRootEntries = entries;
-        this.childrenByDir = { ...this.childrenByDir, [normalizeRootPath(this.target.root)]: entries };
-        if (this.runConfigs.length === 0) {
-          const fast = detectFastRunConfigs(this.target.root, entries);
-          this.detectedConfigs = fast;
-          this.runConfigs = mergeFastRunConfigs([], fast);
-          if (!this.selectedConfigId && this.runConfigs.length > 0) this.selectedConfigId = this.runConfigs[0].id;
-        }
-        for (let i = 0; i < this.additionalRoots.length; i++) {
-          const ar = this.additionalRoots[i];
-          if (this.expandedDirs[ar]) void loadAttachedRootEntries(this, ar);
-        }
-        void loadProjMod().then((m) => m.probeWorkspaceBuildTool(this));
-        void restoreWorkspaceTabsOrInitial(this);
-      } else if (normDir) {
-        this.childrenByDir = { ...this.childrenByDir, [normDir]: resp.entries ?? [] };
-      }
-    } catch (e) {
-      if (isRoot) this.treeError = loadErrorText(e); else toastError('Couldn’t open folder', e);
-    } finally {
-      if (isRoot) this.treeLoading = false;
-    }
+  loadTree(dirPath?: string): Promise<void> {
+    return fetchIdeWorkspaceTree(this, dirPath, () => void loadProjMod().then((m) => m.probeWorkspaceBuildTool(this)));
   }
 
   async toggleDir(dirPath: string): Promise<void> {
@@ -459,13 +382,17 @@ class IdeStore {
 
   async addProjectFolder(folderPath: string): Promise<boolean> {
     const ok = await attachProjectFolder(this, folderPath);
-    if (ok) void loadProjMod().then((m) => m.syncCurrentProjectFolders(this));
+    if (ok) { this.syncWorkspacePort(); void loadProjMod().then((m) => m.syncCurrentProjectFolders(this)); }
     return ok;
   }
-  attachProjectFolders(paths: string[]): Promise<number> { return loadProjMod().then((m) => m.attachProjectFoldersBatch(this, paths)); }
+  async attachProjectFolders(paths: string[]): Promise<number> {
+    const count = await (await loadProjMod()).attachProjectFoldersBatch(this, paths);
+    if (count > 0) this.syncWorkspacePort();
+    return count;
+  }
   async removeProjectFolder(folderPath: string): Promise<boolean> {
     const ok = await detachProjectFolder(this, folderPath);
-    if (ok) void loadProjMod().then((m) => m.syncCurrentProjectFolders(this));
+    if (ok) { this.syncWorkspacePort(); void loadProjMod().then((m) => m.syncCurrentProjectFolders(this)); }
     return ok;
   }
   activateProject(projectId: string): Promise<void> { return loadProjMod().then((m) => m.activateNamedProject(this, projectId)); }
@@ -483,13 +410,23 @@ class IdeStore {
     return revealPathInTree(this, target, this.revealSeq);
   }
 
-  mutateFs(op: 'mkdir' | 'create_file' | 'rename' | 'delete' | 'duplicate', path: string, destPath?: string): Promise<boolean> {
-    return loadProjMod().then((m) => m.performMutateFs(this, (p) => this.bufPerf.flush(this, p), (ps, cd) => this.evictClosedMetadata(ps, cd), (p) => { this._activePath = p; }, op, path, destPath));
+  async mutateFs(op: 'mkdir' | 'create_file' | 'rename' | 'delete' | 'duplicate', path: string, destPath?: string): Promise<boolean> {
+    const ok = await (await loadProjMod()).performMutateFs(
+      this,
+      (p) => this.bufPerf.flush(this, p),
+      (ps, clearProblems) => this.evictClosedMetadata(ps, clearProblems),
+      (p) => { this._activePath = p; },
+      op,
+      path,
+      destPath,
+    );
+    if (ok) this.syncWorkspacePort();
+    return ok;
   }
 
-  private evictClosedMetadata(paths: string[], clearDirty = true): void {
+  private evictClosedMetadata(paths: string[], clearProblems = true): void {
     if (paths.length === 0) return;
-    this.bufPerf.evictPaths(this, paths, clearDirty);
+    this.bufPerf.evictPaths(this, paths, clearProblems);
     if (!this.collabRoom) {
       const set = new Set(paths);
       this.sharedBuffers = Object.fromEntries(Object.entries(this.sharedBuffers).filter(([k]) => !set.has(k)));
@@ -499,6 +436,7 @@ class IdeStore {
   async openFile(rawPath: string, opts: { line?: number; col?: number; preview?: boolean; inSplit?: boolean; reload?: boolean } = {}): Promise<void> {
     await performOpenFile(this, this.bufPerf, this.isNavigatingHistory, rawPath, opts);
     saveWorkspaceOpenTabs(this.target.root, this.tabs.map((t) => t.path), this._activePath, this.splitPath);
+    this.syncWorkspacePort();
   }
 
   pushNavLocation(path: string, line: number, col = 1): void {
@@ -535,6 +473,7 @@ class IdeStore {
       this.evictClosedMetadata([path]);
       saveWorkspaceOpenTabs(this.target.root, this.tabs.map((t) => t.path), this._activePath, this.splitPath);
     }
+    this.syncWorkspacePort();
   }
   async reopenClosedTab(): Promise<void> {
     const next = this.closedTabPaths[0];
@@ -544,28 +483,17 @@ class IdeStore {
   }
 
   closeOtherTabs(keepPath: string): void {
-    this.bufPerf.flushAll(this);
-    const closing = this.tabs.filter((t) => t.path !== keepPath && !t.pinned && !this.bufPerf.isTabDirty(t)).map((t) => t.path);
-    this.tabs = this.tabs.filter((t) => t.path === keepPath || t.pinned || this.bufPerf.isTabDirty(t));
-    this.evictClosedMetadata(closing);
-    this.activePath = keepPath;
-    if (this.splitPath && !this.tabs.some((t) => t.path === this.splitPath)) this.closeSplit();
-    saveWorkspaceOpenTabs(this.target.root, this.tabs.map((t) => t.path), this._activePath, this.splitPath);
+    performCloseTabBatch(this, this.bufPerf, (closing) => this.evictClosedMetadata(closing), keepPath);
   }
 
   closeUnmodifiedTabs(): void {
-    this.bufPerf.flushAll(this);
-    const closing = this.tabs.filter((t) => !t.pinned && !this.bufPerf.isTabDirty(t)).map((t) => t.path);
-    this.tabs = this.tabs.filter((t) => t.pinned || this.bufPerf.isTabDirty(t));
-    this.evictClosedMetadata(closing);
-    if (this.tabs.length === 0) { this.hasClosedAllTabs = true; this.activePath = null; this.closeSplit(); }
-    else if (!this.tabs.some((t) => t.path === this._activePath)) this.activePath = this.tabs[0].path;
-    saveWorkspaceOpenTabs(this.target.root, this.tabs.map((t) => t.path), this._activePath, this.splitPath);
+    performCloseTabBatch(this, this.bufPerf, (closing) => this.evictClosedMetadata(closing));
   }
 
   async closeAllTabs(opts?: { force?: boolean }): Promise<void> {
     await performCloseAllTabs(this, this.bufPerf, (paths) => this.evictClosedMetadata(paths), opts);
     saveWorkspaceOpenTabs(this.target.root, this.tabs.map((t) => t.path), this._activePath, this.splitPath);
+    this.syncWorkspacePort();
   }
 
   getBuffer(path?: string): string {
@@ -576,6 +504,7 @@ class IdeStore {
   updateBuffer(path: string, content: string): void {
     const fullPath = this.resolvePath(path);
     if (!this.bufPerf.recordEdit(this, fullPath, content)) return;
+    this.syncWorkspacePort();
     if (this.collabRoom && this.canEditCollab) {
       if (this.collabEditTimer) clearTimeout(this.collabEditTimer);
       this.collabEditTimer = setTimeout(() => void this.sendCollabEdit(fullPath, this.getBuffer(fullPath), false), 120);
@@ -592,7 +521,9 @@ class IdeStore {
 
   async saveFile(path?: string, forceOverwrite = false): Promise<boolean> {
     if (this.formatOnSave && (!path || path === this._activePath)) await this.formatActiveFile();
-    return performSaveFile(this, this.bufPerf, path, forceOverwrite);
+    const ok = await performSaveFile(this, this.bufPerf, path, forceOverwrite);
+    this.syncWorkspacePort();
+    return ok;
   }
 
   async saveAll(): Promise<void> {
@@ -607,8 +538,10 @@ class IdeStore {
     return tab ? computeFallbackSelection(this.getBuffer(tab.path), this.cursorInfo) : null;
   }
 
-  applyAgentEdit(path: string, nextContent: string, range?: { from: number; to: number }): Promise<boolean> {
-    return performAgentEdit(this, this.bufPerf, () => this.editorHandles.primary, path, nextContent, range);
+  async applyAgentEdit(path: string, nextContent: string, range?: { from: number; to: number }): Promise<boolean> {
+    const ok = await performAgentEdit(this, this.bufPerf, () => this.editorHandles.primary, path, nextContent, range);
+    if (ok) this.syncWorkspacePort();
+    return ok;
   }
 
   applyPrefixSuffix(prefix: string, suffix: string): void {
@@ -623,7 +556,9 @@ class IdeStore {
   splitSelectionToLines(): void { this.editorHandles.primary?.splitSelectionToLines(); }
   loadGutter(path: string, content?: string): Promise<void> { return this.bufPerf.scheduleGutter(this, path, content); }
   loadSymbols(path: string, content?: string): Promise<void> { return this.bufPerf.scheduleSymbols(this, path, content); }
-  setDiagnostics(path: string, items: IdeDiagnostic[]): void { this.problems = [...this.problems.filter((d) => d.path !== path), ...items]; }
+  setDiagnostics(path: string, items: readonly IncomingIdeDiagnostic[]): void {
+    this.problems = [...this.problems.filter((d) => d.path !== path), ...normalizePathDiagnostics(path, items)];
+  }
 
   findReferences(path: string, line: number, column: number, symbol?: string): Promise<void> { return loadLspMod().then((m) => m.runFindReferences(this, path, line, column, symbol)); }
   async openRenameModal(path: string, line: number, column: number, symbol = ''): Promise<void> {
@@ -762,17 +697,21 @@ class IdeStore {
     finally { this.leaveCollabRoom(); }
   }
   leaveCollabRoom(): void {
-    this.collabSseCtl?.abort(); this.collabSseCtl = null;
-    this.collabRoom = null; this.collabInviteToken = null; this.collabShareHash = null;
-    this.collabIsGuest = false; this.collabPeerId = null; this.collabPeerSecret = null;
-    this.collabGuestToken = null; this.peerCursors = []; this.followingPeerId = null;
+    this.collabSseCtl?.abort();
+    this.collabSseCtl = null;
+    this.collabState.leave();
+  }
+  onCollabJoinFailed(errorMsg: string): void {
+    this.collabSseCtl?.abort();
+    this.collabSseCtl = null;
+    this.collabState.joinFailed(errorMsg);
   }
   async joinCollabRoom(roomId: string, token: string, displayName = 'Teammate'): Promise<void> {
     this.collabSseCtl = await (await loadCollabMod()).joinCollabSession(this, roomId, token, displayName, this.collabSseCtl);
   }
   followPeer(peerId: string | null): void { void loadCollabMod().then((m) => m.followCollabPeer(this, peerId)); }
   sendCursorUpdate(path: string, selections: { anchor: number; head: number }[], activeLine: number): Promise<void> { return loadLspMod().then((m) => m.runSendCursorUpdate(this, path, selections, activeLine)); }
-  sendCollabEdit(path: string, content: string, save = false): Promise<void> { return loadLspMod().then((m) => m.runSendCollabEdit(this, this.bufPerf, path, content, save)); }
+  sendCollabEdit(path: string, content: string, save = false): Promise<boolean> { return loadLspMod().then((m) => m.runSendCollabEdit(this, this.bufPerf, path, content, save)); }
   async loadPlugins(): Promise<void> { await (await loadCollabMod()).loadIdePlugins(this); }
   installPlugin(source: string): Promise<boolean> { return loadCollabMod().then((m) => m.installIdePlugin(this, source)); }
   togglePlugin(slug: string, enabled: boolean): Promise<void> { return loadLspMod().then((m) => m.runTogglePlugin(this, slug, enabled)); }

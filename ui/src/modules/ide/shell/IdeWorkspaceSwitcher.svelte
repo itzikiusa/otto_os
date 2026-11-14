@@ -6,6 +6,7 @@
   import { confirmer } from '../../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
+  import { rowMenu } from '../../../lib/rowMenu';
   import { viewport } from '../../../lib/stores/viewport.svelte';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
   import { ide, ideBasename, type IdeNamedProject } from '../ideStore.svelte';
@@ -169,6 +170,7 @@
           title={`${proj.name} (${proj.folders.length} ${proj.folders.length === 1 ? 'repo' : 'repos'}) — right-click for options`}
           onclick={() => void ide.activateProject(proj.id)}
           oncontextmenu={(e) => openProjectContextMenu(e, proj)}
+          use:rowMenu
           data-testid="ide-project-pill"
         >
           <span class="ws-pill-name" dir="auto">{proj.name}</span>

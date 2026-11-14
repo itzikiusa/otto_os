@@ -17,3 +17,5 @@ export const TerminalDrawerView = lazyComponent(() => import('./ThreadTerminalDr
 export const StageSlashView = lazyComponent(() => import('./StageSlashPopup.svelte'));
 export const ProjectCardView = lazyComponent(() => import('./ThreadProjectCard.svelte'));
 export const ThreadSheetsView = lazyComponent(() => import('./ThreadSheets.svelte'));
+export const IdeProjectsSectionView = lazyComponent(() => import('./ThreadIdeProjectsSection.svelte'));
+export const OriginGroupsView = lazyComponent(() => import('./ThreadOriginGroups.svelte'));

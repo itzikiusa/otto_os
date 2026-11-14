@@ -67,8 +67,9 @@ export function atMentionTokenAt(text: string, caret = text.length): AtMentionTo
     // Once the closing quote is typed, the mention token is complete.
     if (inner.includes('"') || /[\r\n]/.test(inner)) return null;
     let end = clampedCaret;
-    while (end < text.length && text[end] !== '"' && !/[\r\n]/.test(text[end])) end++;
-    if (text[end] === '"') end++;
+    let probe = clampedCaret;
+    while (probe < text.length && text[probe] !== '"' && !/[\r\n]/.test(text[probe])) probe++;
+    if (probe < text.length && text[probe] === '"') end = probe + 1;
     return {
       query: inner,
       start: atIdx,

@@ -456,7 +456,20 @@ pub(crate) fn find_definitions_in_content(
             continue;
         }
         let mask = code_mask_for_line(lang, line, &mut in_block);
-        let code_head = trimmed.split("//").next().unwrap_or("").trim();
+        let masked_code: String = line
+            .char_indices()
+            .map(|(bi, ch)| {
+                if mask.get(bi).copied().unwrap_or(false) {
+                    ch
+                } else {
+                    ' '
+                }
+            })
+            .collect();
+        let code_head = masked_code.trim();
+        if code_head.is_empty() {
+            continue;
+        }
         if lang == "go" {
             if (code_head.starts_with("const") || code_head.starts_with("var"))
                 && code_head.ends_with('(')
@@ -469,10 +482,17 @@ pub(crate) fn find_definitions_in_content(
                 continue;
             }
         }
-        if !line.contains(symbol) {
+        if !masked_code.contains(symbol) {
             continue;
         }
-        if is_definition_line(lang, code_head, symbol, go_decl_group) {
+        let is_def = is_definition_line(lang, code_head, symbol, go_decl_group)
+            || (code_head.contains(';')
+                && code_head
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|stmt| !stmt.is_empty())
+                    .any(|stmt| is_definition_line(lang, stmt, symbol, go_decl_group)));
+        if is_def {
             let col = find_symbol_column(line, &mask, symbol).unwrap_or(1);
             out.push(IdeReferenceLocation {
                 path: path.to_string(),
@@ -727,7 +747,7 @@ fn find_symbol_column(line: &str, mask: &[bool], symbol: &str) -> Option<u32> {
         if code_ok {
             return Some(line[..s].chars().count() as u32 + 1);
         }
-        from = s + 1;
+        from = s + line[s..].chars().next().map_or(1, char::len_utf8);
     }
     line.find(symbol)
         .map(|s| line[..s].chars().count() as u32 + 1)

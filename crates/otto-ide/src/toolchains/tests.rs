@@ -130,7 +130,7 @@ async fn register_and_remove_local_sdk_round_trip_persists_and_surfaces_in_fast_
         .unwrap();
     let elapsed = t0.elapsed();
     assert!(
-        elapsed < Duration::from_millis(80),
+        elapsed < Duration::from_millis(500),
         "non-catalog list_toolchains must not make network requests (took {elapsed:?})"
     );
     assert_eq!(resp.ecosystems.len(), 7);

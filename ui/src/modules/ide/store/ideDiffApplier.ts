@@ -3,6 +3,7 @@
 // (`otto-fake-claude` safe), range splicing, and sub-2ms line diffing.
 
 import { escapeHtml, unescapeHtml } from '../../../lib/html.ts';
+import { diffLineArrays } from '../../../lib/lineDiff.ts';
 
 export type IdeContextKind =
   | 'selection'
@@ -339,73 +340,6 @@ export function extractCodeProposals(
   return proposals;
 }
 
-type RawDiffOp = { kind: 'same' | 'add' | 'del'; text: string };
-
-function lcsOps(a: readonly string[], a0: number, a1: number, b: readonly string[], b0: number, b1: number, out: RawDiffOp[]): void {
-  const m = a1 - a0, n = b1 - b0, cols = n + 1;
-  const dp = new Int32Array((m + 1) * cols);
-  for (let i = m - 1; i >= 0; i--) {
-    const ai = a[a0 + i], row = i * cols, nextRow = (i + 1) * cols;
-    for (let j = n - 1; j >= 0; j--) dp[row + j] = ai === b[b0 + j] ? dp[nextRow + j + 1] + 1 : Math.max(dp[nextRow + j], dp[row + j + 1]);
-  }
-  let i = 0, j = 0;
-  while (i < m && j < n) {
-    if (a[a0 + i] === b[b0 + j]) { out.push({ kind: 'same', text: a[a0 + i] }); i++; j++; }
-    else if (dp[(i + 1) * cols + j] >= dp[i * cols + j + 1]) out.push({ kind: 'del', text: a[a0 + i++] });
-    else out.push({ kind: 'add', text: b[b0 + j++] });
-  }
-  while (i < m) out.push({ kind: 'del', text: a[a0 + i++] });
-  while (j < n) out.push({ kind: 'add', text: b[b0 + j++] });
-}
-
-function uniqueAnchors(a: readonly string[], a0: number, a1: number, b: readonly string[], b0: number, b1: number): [number, number][] {
-  const posA = new Map<string, number>(), posB = new Map<string, number>();
-  for (let i = a0; i < a1; i++) posA.set(a[i], posA.has(a[i]) ? -1 : i);
-  for (let j = b0; j < b1; j++) if ((posA.get(b[j]) ?? -1) >= 0) posB.set(b[j], posB.has(b[j]) ? -1 : j);
-  const pairs: [number, number][] = [];
-  for (let i = a0; i < a1; i++) {
-    const ia = posA.get(a[i]) ?? -1, ib = posB.get(a[i]) ?? -1;
-    if (ia >= 0 && ib >= 0) pairs.push([ia, ib]);
-  }
-  if (pairs.length === 0) return [];
-  const tails: number[] = [], prev = new Int32Array(pairs.length).fill(-1);
-  for (let k = 0; k < pairs.length; k++) {
-    let lo = 0, hi = tails.length;
-    while (lo < hi) { const mid = (lo + hi) >> 1; if (pairs[tails[mid]][1] < pairs[k][1]) lo = mid + 1; else hi = mid; }
-    if (lo > 0) prev[k] = tails[lo - 1];
-    tails[lo] = k;
-  }
-  const lis: [number, number][] = [];
-  for (let cur = tails[tails.length - 1]; cur >= 0; cur = prev[cur]) lis.push(pairs[cur]);
-  return lis.reverse();
-}
-
-function diffRange(a: readonly string[], a0: number, a1: number, b: readonly string[], b0: number, b1: number, out: RawDiffOp[], allowAnchor: boolean): void {
-  while (a0 < a1 && b0 < b1 && a[a0] === b[b0]) { out.push({ kind: 'same', text: a[a0++] }); b0++; }
-  let suf = 0;
-  while (a0 < a1 - suf && b0 < b1 - suf && a[a1 - 1 - suf] === b[b1 - 1 - suf]) suf++;
-  const ae = a1 - suf, be = b1 - suf, m = ae - a0, n = be - b0;
-  if (m === 0) for (let j = b0; j < be; j++) out.push({ kind: 'add', text: b[j] });
-  else if (n === 0) for (let i = a0; i < ae; i++) out.push({ kind: 'del', text: a[i] });
-  else if (m + n <= 600 && m * n <= 90_000) lcsOps(a, a0, ae, b, b0, be, out);
-  else if (allowAnchor) {
-    const anchors = uniqueAnchors(a, a0, ae, b, b0, be);
-    let ca = a0, cb = b0;
-    for (let k = 0; k < anchors.length; k++) {
-      const [ia, ib] = anchors[k];
-      if (ia > ca || ib > cb) diffRange(a, ca, ia, b, cb, ib, out, false);
-      out.push({ kind: 'same', text: a[ia] });
-      ca = ia + 1; cb = ib + 1;
-    }
-    if (ca < ae || cb < be) diffRange(a, ca, ae, b, cb, be, out, false);
-  } else if (m * n <= 40_000) lcsOps(a, a0, ae, b, b0, be, out);
-  else {
-    for (let i = a0; i < ae; i++) out.push({ kind: 'del', text: a[i] });
-    for (let j = b0; j < be; j++) out.push({ kind: 'add', text: b[j] });
-  }
-  for (let s = ae; s < a1; s++) out.push({ kind: 'same', text: a[s] });
-}
-
 export function computeLineDiff(before: string, after: string): IdeDiffLine[] {
   const split = (s: string): string[] => {
     if (!s) return [];
@@ -413,14 +347,14 @@ export function computeLineDiff(before: string, after: string): IdeDiffLine[] {
     const t = n.endsWith('\n') ? n.slice(0, -1) : n;
     return t.length === 0 ? [''] : t.split('\n');
   };
-  const a = split(before), b = split(after);
+  const a = split(before);
+  const b = split(after);
   if (a.length === 0 && b.length === 0) return [];
-  const raw: RawDiffOp[] = [];
-  diffRange(a, 0, a.length, b, 0, b.length, raw, true);
-  let oldNo = 1, newNo = 1;
-  return raw.map((op) =>
-    op.kind === 'same' ? { kind: 'same', text: op.text, oldLine: oldNo++, newLine: newNo++ }
-    : op.kind === 'del' ? { kind: 'del', text: op.text, oldLine: oldNo++, newLine: null }
-    : { kind: 'add', text: op.text, oldLine: null, newLine: newNo++ },
+  return diffLineArrays(a, b).map((op) =>
+    op.op === 'equal'
+      ? { kind: 'same', text: op.line, oldLine: op.oldLineNo, newLine: op.newLineNo }
+      : op.op === 'delete'
+        ? { kind: 'del', text: op.line, oldLine: op.oldLineNo, newLine: null }
+        : { kind: 'add', text: op.line, oldLine: null, newLine: op.newLineNo },
   );
 }

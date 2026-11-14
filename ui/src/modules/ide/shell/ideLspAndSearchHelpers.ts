@@ -548,9 +548,9 @@ export async function runSendCollabEdit(
   path: string,
   content: string,
   save = false,
-): Promise<void> {
+): Promise<boolean> {
   bufPerf.flush(host, path);
-  if (!host.collabRoom || !host.collabPeerId || !host.collabPeerSecret || !host.canEditCollab) return;
+  if (!host.collabRoom || !host.collabPeerId || !host.collabPeerSecret || !host.canEditCollab) return false;
   try {
     const res = await collabGuestPost<{ version: number }>(
       `/ide/collab/guest/${encodeURIComponent(host.collabRoom.id)}/edit`,
@@ -565,8 +565,10 @@ export async function runSendCollabEdit(
       },
     );
     host.sharedBuffers = { ...host.sharedBuffers, [path]: { content, version: res.version } };
+    return true;
   } catch (e) {
     if (save) toastError('Couldn’t sync edit to room', e);
+    return false;
   }
 }
 

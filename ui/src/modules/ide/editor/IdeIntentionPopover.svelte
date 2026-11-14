@@ -2,6 +2,8 @@
   // GoLand / IntelliJ `⌥⏎` Intention & Quick-Fix Popover with Live `- / +` Diff Preview
   // AND 4-Mode Dependency Update Preview on manifest files (`go.mod`, `pom.xml`, etc.).
   // Deterministic fixes apply concrete code edits in `<5ms` (undoable with `⌘Z`), never forcing Agent!
+  import { tick } from 'svelte';
+  import { placeAnchored, type AnchorPlacement } from '../../../lib/anchorPlace';
   import Icon from '../../../lib/components/Icon.svelte';
   import { detectManifestEcosystem, executeIdeDepAction, type IdeDepItem } from '../../../lib/components/cm-ide-deps';
   import { previewConcreteEdits, type IdeConcreteTextEdit, type IdeQuickFixAction } from '../../../lib/components/cm-ide-quickfix';
@@ -55,8 +57,22 @@
   }
 
   const eco = $derived(detectManifestEcosystem(filePath));
-  const clampedX = $derived(typeof window !== 'undefined' ? Math.max(12, Math.min(anchorX, window.innerWidth - 580)) : anchorX);
-  const clampedY = $derived(typeof window !== 'undefined' ? Math.max(12, Math.min(anchorY, window.innerHeight - 360)) : anchorY);
+  const returnFocusEl =
+    typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+  let anchorEl = $state<HTMLSpanElement | null>(null);
+  let pos = $state<AnchorPlacement>({ left: 12, top: 12, maxH: 340 });
+
+  function closePopover(restoreFocus = true): void {
+    onclose();
+    if (restoreFocus) returnFocusEl?.focus();
+  }
+
+  function updatePlacement(): void {
+    if (typeof window === 'undefined' || !anchorEl || !popEl) return;
+    pos = placeAnchored(anchorEl, popEl, { prefer: 'below', align: 'start', gap: 4 });
+  }
 
   function splitPreview(edits: IdeConcreteTextEdit[]): { before: string[]; after: string[] } {
     const p = previewConcreteEdits(docText, edits);
@@ -255,17 +271,34 @@
   const activeRow = $derived(rows[Math.min(selectedIdx, Math.max(0, rows.length - 1))] ?? null);
 
   function handleKeydown(e: KeyboardEvent): void {
-    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); onclose(); }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closePopover(true); }
     else if (e.key === 'ArrowDown') { e.preventDefault(); selectedIdx = (selectedIdx + 1) % Math.max(1, rows.length); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); selectedIdx = (selectedIdx - 1 + rows.length) % Math.max(1, rows.length); }
     else if (e.key === 'Enter' && activeRow && !activeRow.disabled) { e.preventDefault(); activeRow.run(); }
   }
 
   let popEl = $state<HTMLDivElement | null>(null);
-  $effect(() => { popEl?.focus(); });
+  $effect(() => {
+    void anchorX;
+    void anchorY;
+    void rows.length;
+    void selectedIdx;
+    void tick().then(() => {
+      updatePlacement();
+      popEl?.focus();
+    });
+  });
+
+  $effect(() => {
+    const onResize = (): void => updatePlacement();
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  });
 </script>
 
-<svelte:window onkeydown={handleKeydown} onmousedown={(e) => { if (popEl && !popEl.contains(e.target as Node)) onclose(); }} />
+<svelte:window onkeydown={handleKeydown} onmousedown={(e) => { if (popEl && !popEl.contains(e.target as Node)) closePopover(true); }} />
+
+<span bind:this={anchorEl} class="ide-int-anchor" aria-hidden="true" style:left="{anchorX}px" style:top="{anchorY}px"></span>
 
 <div
   bind:this={popEl}
@@ -273,8 +306,9 @@
   role="dialog"
   aria-label="Context Actions and Quick Fixes"
   tabindex="-1"
-  style:inset-inline-start="{clampedX}px"
-  style:inset-block-start="{clampedY}px"
+  style:left="{pos.left}px"
+  style:top="{pos.top}px"
+  style:max-block-size="{Math.min(340, pos.maxH)}px"
   data-testid="ide-intention-popover"
   data-dep-popover={eco ? 'true' : undefined}
 >
@@ -319,9 +353,10 @@
 
 <style>
   .sr-only { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
+  .ide-int-anchor { position: fixed; inline-size: 0; block-size: 0; pointer-events: none; }
   .ide-intention-popover {
     position: fixed; z-index: var(--z-popover); display: flex; align-items: stretch;
-    max-inline-size: min(560px, calc(100vw - 24px)); max-block-size: min(340px, calc(100vh - 24px));
+    max-inline-size: min(560px, calc(100vw - 16px));
     background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-m);
     box-shadow: var(--glass-shadow); overflow: hidden; outline: none;
   }

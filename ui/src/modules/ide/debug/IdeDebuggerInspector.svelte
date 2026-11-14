@@ -3,15 +3,9 @@
   import type { Snippet } from 'svelte';
   import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import PaneDivider from '../../../lib/components/PaneDivider.svelte';
   import { copyWithToast } from '../../../lib/clipboard';
-  import { startMouseDrag } from '../../../lib/dragCursor';
-  import {
-    loadPaneWidth,
-    paneResizer,
-    pxWide,
-    RESIZE_TITLE,
-    savePaneWidth,
-  } from '../../../lib/paneResizer';
+  import { loadPaneWidth } from '../../../lib/paneResizer';
   import { viewport } from '../../../lib/stores/viewport.svelte';
   import { pushIdeNavLocation } from '../editor/ideEditorStoreBridge.svelte';
   import {
@@ -67,34 +61,6 @@
     openScopes = { ...openScopes, [scopeKey(first)]: true };
     if (!ide.expandedVariables[first.variables_reference]) void loadRef(first.variables_reference);
   });
-
-  function setFramesW(v: number): void {
-    framesW = Math.max(160, Math.min(560, Math.round(v)));
-    savePaneWidth(LS_FRAMES_W, framesW);
-  }
-  function dragFramesW(e: MouseEvent): void {
-    const startX = e.clientX;
-    const startW = framesW;
-    startMouseDrag(e, {
-      cursor: 'col-resize',
-      onMove: (ev) => { framesW = Math.max(160, Math.min(560, Math.round(startW + (ev.clientX - startX)))); },
-      onEnd: () => savePaneWidth(LS_FRAMES_W, framesW),
-    });
-  }
-
-  function setVarsW(v: number): void {
-    varsW = Math.max(200, Math.min(680, Math.round(v)));
-    savePaneWidth(LS_VARS_W, varsW);
-  }
-  function dragVarsW(e: MouseEvent): void {
-    const startX = e.clientX;
-    const startW = varsW;
-    startMouseDrag(e, {
-      cursor: 'col-resize',
-      onMove: (ev) => { varsW = Math.max(200, Math.min(680, Math.round(startW + (ev.clientX - startX)))); },
-      onEnd: () => savePaneWidth(LS_VARS_W, varsW),
-    });
-  }
 
   async function loadRef(ref: number): Promise<void> {
     if (ref <= 0 || loadingRefs[ref]) return;
@@ -229,16 +195,7 @@
   </section>
 
   {#if (showVariables || hasTrailingConsole) && !viewport.isPhone}
-    <div
-      class="dbg-col-resizer"
-      aria-label="Resize Frames column"
-      title={RESIZE_TITLE}
-      data-testid="ide-debug-col-resizer"
-      use:paneResizer={{
-        value: framesW, min: 160, max: 560, text: pxWide,
-        onChange: setFramesW, onReset: () => setFramesW(250), onDragStart: dragFramesW,
-      }}
-    ></div>
+    <PaneDivider bind:width={framesW} storageKey={LS_FRAMES_W} min={160} max={560} defaultWidth={250} label="Resize Frames column" />
   {/if}
 {/if}
 
@@ -329,25 +286,13 @@
   </section>
 
   {#if hasTrailingConsole && !viewport.isPhone}
-    <div
-      class="dbg-col-resizer"
-      aria-label="Resize Variables column"
-      title={RESIZE_TITLE}
-      data-testid="ide-debug-vars-resizer"
-      use:paneResizer={{
-        value: varsW, min: 200, max: 680, text: pxWide,
-        onChange: setVarsW, onReset: () => setVarsW(340), onDragStart: dragVarsW,
-      }}
-    ></div>
+    <PaneDivider bind:width={varsW} storageKey={LS_VARS_W} min={200} max={680} defaultWidth={340} label="Resize Variables column" />
   {/if}
 {/if}
 
 <style>
   .dbg-col { display: flex; flex-direction: column; flex-shrink: 0; min-block-size: 0; min-inline-size: 160px; border-inline-end: 1px solid var(--border); }
   .dbg-col.is-fill { flex: 1; flex-shrink: 1; border-inline-end: 0; }
-  .dbg-col-resizer { position: relative; inline-size: 4px; margin-inline: -2px; flex-shrink: 0; cursor: col-resize; z-index: var(--z-sticky); }
-  .dbg-col-resizer::after { content: ''; position: absolute; inset-block: 0; inset-inline-start: 1px; inline-size: 2px; background: transparent; transition: background var(--dur-fast) ease-out; }
-  .dbg-col-resizer:hover::after, .dbg-col-resizer:focus-visible::after { background: var(--accent-text); }
   .dbg-col-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; block-size: 28px; min-block-size: 28px; padding-inline: 10px; border-block-end: 1px solid var(--border); background: var(--surface-2); flex-shrink: 0; }
   .dbg-col-title, .dbg-subhead { margin: 0; font-size: var(--fs-xs); font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; }
   .dbg-subhead { padding: 4px 10px; }
@@ -386,6 +331,5 @@
   .dbg-watch-err { flex: 1; color: var(--danger); font-size: var(--fs-xs); }
   @media (max-width: 640px) {
     .dbg-col { inline-size: 100%; border-inline-end: 0; border-block-end: 1px solid var(--border); min-block-size: 150px; }
-    .dbg-col-resizer { display: none; }
   }
 </style>

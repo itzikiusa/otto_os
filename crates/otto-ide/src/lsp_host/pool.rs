@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -24,6 +24,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use super::{framing, servers};
+use crate::environments::EnvironmentManager;
 use crate::types::IdeSshSpec;
 
 /// How long an unused server outlives its last socket when documents remain open.
@@ -80,23 +81,8 @@ pub struct ServerIo {
 /// Starts a server for `key` with `launch`.
 pub type Spawner = Arc<dyn Fn(&PoolKey, &SpawnLaunch) -> std::io::Result<ServerIo> + Send + Sync>;
 
-static ACTIVE_POOLS: OnceLock<Mutex<Vec<Weak<LspPool>>>> = OnceLock::new();
-
-fn register_pool(pool: &Arc<LspPool>) {
-    let reg = ACTIVE_POOLS.get_or_init(|| Mutex::new(Vec::new()));
-    let mut guard = reg.lock().unwrap_or_else(|e| e.into_inner());
-    guard.retain(|w| w.strong_count() > 0);
-    guard.push(Arc::downgrade(pool));
-}
-
-/// Notify active pooled language servers when a project build manifest changes
-/// (`1` = Created, `2` = Changed, `3` = Deleted) so `jdtls`, `gopls`,
-/// `rust-analyzer`, `pyright`, and `tsserver` refresh immediately without stale caches.
-pub fn notify_watched_file_if_build_manifest(path: &Path, change_type: u8) {
-    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-        return;
-    };
-    let is_manifest = matches!(
+fn is_build_manifest_name(name: &str) -> bool {
+    matches!(
         name,
         "pom.xml"
             | "build.gradle"
@@ -113,46 +99,7 @@ pub fn notify_watched_file_if_build_manifest(path: &Path, change_type: u8) {
             | "jsconfig.json"
             | "pyproject.toml"
             | "requirements.txt"
-    );
-    if !is_manifest {
-        return;
-    }
-    let Some(reg) = ACTIVE_POOLS.get() else {
-        return;
-    };
-    let pools: Vec<Arc<LspPool>> = {
-        let mut guard = reg.lock().unwrap_or_else(|e| e.into_inner());
-        guard.retain(|w| w.strong_count() > 0);
-        guard.iter().filter_map(Weak::upgrade).collect()
-    };
-    if pools.is_empty() {
-        return;
-    }
-    let uri = path_to_file_uri(path);
-    let path_str = path.to_string_lossy();
-    for pool in pools {
-        pool.notify_watched_path(&path_str, &uri, change_type);
-    }
-}
-
-/// Immediately evict detached (`active_clients == 0`) local LSP servers belonging to
-/// other workspace roots when switching active projects (`0ms` workspace-switch reap).
-pub fn evict_detached_other_roots(active_root: &str) {
-    let trimmed = active_root.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-    let Some(reg) = ACTIVE_POOLS.get() else {
-        return;
-    };
-    let pools: Vec<Arc<LspPool>> = {
-        let mut guard = reg.lock().unwrap_or_else(|e| e.into_inner());
-        guard.retain(|w| w.strong_count() > 0);
-        guard.iter().filter_map(Weak::upgrade).collect()
-    };
-    for pool in pools {
-        pool.evict_detached_other_roots_inner(trimmed);
-    }
+    )
 }
 
 fn path_to_file_uri(path: &Path) -> String {
@@ -166,17 +113,7 @@ fn path_to_file_uri(path: &Path) -> String {
 
 /// POSIX single-quote escaping (`'abc'` -> `'abc'`, `a'b` -> `'a'\''b'`).
 pub fn posix_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-fn reject_ssh_option_like(field: &str, val: &str) -> std::io::Result<()> {
-    if val.starts_with('-') || val.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("ssh {field} must not start with '-' or contain whitespace"),
-        ));
-    }
-    Ok(())
+    crate::target::ssh_exec::posix_quote(s)
 }
 
 /// Build the remote POSIX shell script that enters `root`, augments `PATH`
@@ -308,60 +245,26 @@ fn terminate_process_group(pgid: u32) {
     });
 }
 
-/// Production spawner supporting both Local (with inherited user login-shell env,
-/// SDK `PATH`, and strict child heap caps) and Remote SSH (`ssh -T`) workspaces.
-pub fn process_spawner_with_data_dir(data_dir: PathBuf) -> Spawner {
+fn build_process_spawner(data_dir: PathBuf, environments: Option<EnvironmentManager>) -> Spawner {
     Arc::new(move |key: &PoolKey, launch: &SpawnLaunch| {
         let mut command = if let Some(ssh) = &key.ssh {
-            reject_ssh_option_like("host", &ssh.host)?;
-            if !ssh.user.is_empty() {
-                reject_ssh_option_like("user", &ssh.user)?;
-            }
-            if let Some(jump) = &ssh.proxy_jump {
-                reject_ssh_option_like("proxy_jump", jump)?;
-            }
-            let mut c = tokio::process::Command::new("ssh");
-            c.arg("-T")
-                .arg("-o")
-                .arg("BatchMode=yes")
-                .arg("-o")
-                .arg("StrictHostKeyChecking=accept-new")
-                .arg("-o")
-                .arg("LogLevel=ERROR")
-                .arg("-o")
-                .arg("ConnectTimeout=10")
-                .arg("-o")
-                .arg("ServerAliveInterval=15")
-                .arg("-o")
-                .arg("ServerAliveCountMax=3");
-            if ssh.port > 0 {
-                c.arg("-p").arg(ssh.port.to_string());
-            }
-            if let Some(identity) = &ssh.identity_file {
-                if !identity.is_empty() {
-                    let expanded = otto_core::paths::expand_home_strict(identity)
-                        .unwrap_or_else(|_| PathBuf::from(identity));
-                    c.arg("-i").arg(expanded);
-                }
-            }
-            if let Some(jump) = &ssh.proxy_jump {
-                if !jump.is_empty() {
-                    c.arg("-J").arg(jump);
-                }
-            }
-            let target = if ssh.user.is_empty() {
-                ssh.host.clone()
-            } else {
-                format!("{}@{}", ssh.user, ssh.host)
-            };
+            let (ssh_args, dest) =
+                crate::target::ssh_exec::build_ssh_cli_args(ssh, None).map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
+                })?;
             let remote_script = build_remote_lsp_script(&key.root, launch);
-            c.arg("--").arg(target).arg(remote_script);
+            let mut c = tokio::process::Command::new("ssh");
+            c.args(&ssh_args).arg("--").arg(dest).arg(remote_script);
             #[cfg(unix)]
             c.process_group(0);
             c
         } else {
-            let effective_env =
-                crate::environments::cached_effective_env_for_local_root(&data_dir, &key.root);
+            let effective_env = match &environments {
+                Some(envs) => envs.cached_effective_env_for_local_root(&key.root),
+                None => {
+                    crate::environments::cached_effective_env_for_local_root(&data_dir, &key.root)
+                }
+            };
             let mut c = tokio::process::Command::new(&launch.cmd);
             c.args(&launch.args)
                 .current_dir(&key.root)
@@ -410,6 +313,17 @@ pub fn process_spawner_with_data_dir(data_dir: PathBuf) -> Spawner {
     })
 }
 
+/// Production spawner bound directly to an [`EnvironmentManager`] instance.
+pub fn process_spawner_with_engine(data_dir: PathBuf, environments: EnvironmentManager) -> Spawner {
+    build_process_spawner(data_dir, Some(environments))
+}
+
+/// Production spawner supporting both Local (with inherited user login-shell env,
+/// SDK `PATH`, and strict child heap caps) and Remote SSH (`ssh -T`) workspaces.
+pub fn process_spawner_with_data_dir(data_dir: PathBuf) -> Spawner {
+    build_process_spawner(data_dir, None)
+}
+
 /// Default spawner when no explicit `data_dir` is supplied.
 pub fn process_spawner() -> Spawner {
     process_spawner_with_data_dir(std::env::temp_dir())
@@ -444,15 +358,30 @@ struct Entry {
     last_active: Arc<AtomicU64>,
 }
 
+struct InflightGuard<'a> {
+    inflight: &'a (Mutex<HashSet<PoolKey>>, Condvar),
+    key: PoolKey,
+}
+
+impl Drop for InflightGuard<'_> {
+    fn drop(&mut self) {
+        let mut set = self.inflight.0.lock().unwrap_or_else(|e| e.into_inner());
+        set.remove(&self.key);
+        self.inflight.1.notify_all();
+    }
+}
+
 /// The pool: one entry (actor task + server) per [`PoolKey`].
 pub struct LspPool {
     entries: Mutex<HashMap<PoolKey, Entry>>,
+    inflight: (Mutex<HashSet<PoolKey>>, Condvar),
     spawner: Spawner,
     idle: Duration,
     write_cap: usize,
     next_client: AtomicU64,
     next_gen: AtomicU64,
     activity_seq: Arc<AtomicU64>,
+    environments: Option<EnvironmentManager>,
 }
 
 /// One socket's attachment. Dropping it detaches the socket.
@@ -489,22 +418,35 @@ impl LspPool {
         Self::with_write_cap(spawner, idle, WRITE_QUEUE_MAX_BYTES)
     }
 
-    /// [`Self::new`] with an explicit stdin backlog bound (tests).
-    pub fn with_write_cap(spawner: Spawner, idle: Duration, write_cap: usize) -> Arc<Self> {
-        let pool = Self::new_unregistered(spawner, idle, write_cap);
-        register_pool(&pool);
-        pool
+    pub fn new_with_environments(
+        spawner: Spawner,
+        idle: Duration,
+        environments: EnvironmentManager,
+    ) -> Arc<Self> {
+        Self::new_inner(spawner, idle, WRITE_QUEUE_MAX_BYTES, Some(environments))
     }
 
-    fn new_unregistered(spawner: Spawner, idle: Duration, write_cap: usize) -> Arc<Self> {
+    /// [`Self::new`] with an explicit stdin backlog bound (tests).
+    pub fn with_write_cap(spawner: Spawner, idle: Duration, write_cap: usize) -> Arc<Self> {
+        Self::new_inner(spawner, idle, write_cap, None)
+    }
+
+    fn new_inner(
+        spawner: Spawner,
+        idle: Duration,
+        write_cap: usize,
+        environments: Option<EnvironmentManager>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             entries: Mutex::new(HashMap::new()),
+            inflight: (Mutex::new(HashSet::new()), Condvar::new()),
             spawner,
             idle,
             write_cap,
             next_client: AtomicU64::new(1),
             next_gen: AtomicU64::new(1),
             activity_seq: Arc::new(AtomicU64::new(1)),
+            environments,
         })
     }
 
@@ -517,57 +459,136 @@ impl LspPool {
         self.entries.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn evict_detached_other_roots_inner(&self, active_root: &str) {
-        let active_canon = std::fs::canonicalize(active_root).ok();
-        let attached: Vec<String> =
-            crate::environments::cached_additional_roots(&format!("local:{active_root}"))
-                .into_iter()
-                .chain(crate::environments::cached_additional_roots(active_root))
-                .collect();
-        let mut entries = self.lock();
-        let victims: Vec<PoolKey> = entries
+    fn cached_attached_roots(&self, root: &str) -> Vec<String> {
+        match &self.environments {
+            Some(envs) => envs.cached_additional_roots(root),
+            None => Vec::new(),
+        }
+    }
+
+    /// Notify active pooled language servers when a project build manifest changes
+    /// (`1` = Created, `2` = Changed, `3` = Deleted).
+    pub fn notify_watched_file_if_build_manifest(&self, path: &Path, change_type: u8) {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            return;
+        };
+        if !is_build_manifest_name(name) {
+            return;
+        }
+        let uri = path_to_file_uri(path);
+        let candidates: Vec<(PoolKey, mpsc::UnboundedSender<Ctl>)> = self
+            .lock()
             .iter()
-            .filter(|(k, e)| {
-                if k.ssh.is_some() || e.active_clients.load(Ordering::Acquire) > 0 {
-                    return false;
-                }
-                if k.root == active_root || attached.iter().any(|ar| ar == &k.root) {
-                    return false;
-                }
-                if let Some(ac) = &active_canon {
-                    if std::fs::canonicalize(&k.root).ok().as_ref() == Some(ac) {
-                        return false;
-                    }
-                }
-                true
-            })
-            .map(|(k, _)| k.clone())
+            .filter(|(k, _)| k.ssh.is_none())
+            .map(|(k, e)| (k.clone(), e.ctl.clone()))
             .collect();
-        for victim in victims {
-            if let Some(removed) = entries.remove(&victim) {
-                let _ = removed.ctl.send(Ctl::Evict);
+        for (k, ctl) in candidates {
+            let in_primary = path.starts_with(Path::new(&k.root));
+            let in_attached = !in_primary
+                && self
+                    .cached_attached_roots(&k.root)
+                    .iter()
+                    .any(|ar| path.starts_with(Path::new(ar)));
+            if in_primary || in_attached {
+                let _ = ctl.send(Ctl::WatchedFile {
+                    uri: uri.clone(),
+                    change_type,
+                });
             }
         }
     }
 
-    fn notify_watched_path(&self, path_str: &str, uri: &str, change_type: u8) {
-        let watched_path = Path::new(path_str);
-        let entries = self.lock();
-        for (k, e) in entries.iter() {
-            if k.ssh.is_some() {
-                continue;
+    /// Evict detached (`active_clients == 0`) local LSP servers owned by `owner`
+    /// that belong to neither `primary_root`, `matched_root`, nor `additional_roots`.
+    pub fn evict_detached_other_roots_for_user(
+        &self,
+        owner: &str,
+        matched_root: &Path,
+        primary_root: &Path,
+        additional_roots: &[PathBuf],
+    ) {
+        let mut keep_roots = HashSet::with_capacity(2 + additional_roots.len());
+        let insert_clean = |set: &mut HashSet<String>, s: &str| {
+            let trimmed = s.trim().trim_end_matches('/');
+            if !trimmed.is_empty() {
+                set.insert(trimmed.to_string());
             }
-            let in_primary = watched_path.starts_with(Path::new(&k.root));
-            let in_attached = !in_primary
-                && crate::environments::cached_additional_roots(&format!("local:{}", k.root))
-                    .into_iter()
-                    .chain(crate::environments::cached_additional_roots(&k.root))
-                    .any(|ar| watched_path.starts_with(Path::new(&ar)));
-            if in_primary || in_attached {
-                let _ = e.ctl.send(Ctl::WatchedFile {
-                    uri: uri.to_string(),
-                    change_type,
-                });
+        };
+        insert_clean(&mut keep_roots, &matched_root.to_string_lossy());
+        insert_clean(&mut keep_roots, &primary_root.to_string_lossy());
+        for ar in additional_roots {
+            insert_clean(&mut keep_roots, &ar.to_string_lossy());
+        }
+        for ar in self.cached_attached_roots(&primary_root.to_string_lossy()) {
+            insert_clean(&mut keep_roots, &ar);
+        }
+        for ar in self.cached_attached_roots(&matched_root.to_string_lossy()) {
+            insert_clean(&mut keep_roots, &ar);
+        }
+        if keep_roots.is_empty() {
+            return;
+        }
+
+        // Snapshot candidate keys outside any nested environment lock or filesystem call.
+        let snapshot_keys: Vec<PoolKey> = self
+            .lock()
+            .iter()
+            .filter(|(k, e)| {
+                k.owner == owner && k.ssh.is_none() && e.active_clients.load(Ordering::Acquire) == 0
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        if snapshot_keys.is_empty() {
+            return;
+        }
+        let victims: Vec<PoolKey> = snapshot_keys
+            .into_iter()
+            .filter(|k| {
+                let kr = k.root.trim().trim_end_matches('/');
+                if keep_roots.contains(kr) {
+                    return false;
+                }
+                !self
+                    .cached_attached_roots(kr)
+                    .iter()
+                    .any(|ar| keep_roots.contains(ar.trim().trim_end_matches('/')))
+            })
+            .collect();
+        if victims.is_empty() {
+            return;
+        }
+        let mut entries = self.lock();
+        for victim in victims {
+            let should_remove = entries
+                .get(&victim)
+                .is_some_and(|e| e.active_clients.load(Ordering::Acquire) == 0);
+            if should_remove {
+                if let Some(removed) = entries.remove(&victim) {
+                    let _ = removed.ctl.send(Ctl::Evict);
+                }
+            }
+        }
+    }
+
+    fn evict_owner_excess(entries: &mut HashMap<PoolKey, Entry>, owner: &str) {
+        while entries.keys().filter(|k| k.owner == owner).count() >= MAX_SERVERS_PER_OWNER {
+            let zero_doc_victim = entries
+                .iter()
+                .filter(|(k, e)| k.owner == owner && e.open_docs.load(Ordering::Acquire) == 0)
+                .min_by_key(|(_, e)| e.last_active.load(Ordering::Acquire))
+                .map(|(k, _)| k.clone());
+            let victim = zero_doc_victim.or_else(|| {
+                entries
+                    .iter()
+                    .filter(|(k, _)| k.owner == owner)
+                    .min_by_key(|(_, e)| e.last_active.load(Ordering::Acquire))
+                    .map(|(k, _)| k.clone())
+            });
+            let Some(victim_key) = victim else {
+                break;
+            };
+            if let Some(evicted) = entries.remove(&victim_key) {
+                let _ = evicted.ctl.send(Ctl::Evict);
             }
         }
     }
@@ -590,67 +611,74 @@ impl LspPool {
     ) -> std::io::Result<Attached> {
         let client = self.next_client.fetch_add(1, Ordering::Relaxed);
         let (out_tx, rx) = mpsc::channel(CLIENT_CAPACITY);
-        let mut entries = self.lock();
-        if let Some(e) = entries.get(&key) {
-            if e.ctl
-                .send(Ctl::Attach {
-                    client,
-                    tx: out_tx.clone(),
-                })
-                .is_ok()
+
+        let _inflight_guard = loop {
             {
-                let tick = self.activity_seq.fetch_add(1, Ordering::Relaxed);
-                e.last_active.store(tick, Ordering::Release);
-                return Ok(Attached {
-                    client,
-                    rx,
-                    ctl: e.ctl.clone(),
-                    data: e.data.clone(),
-                });
+                let mut entries = self.lock();
+                if let Some(e) = entries.get(&key) {
+                    if e.ctl
+                        .send(Ctl::Attach {
+                            client,
+                            tx: out_tx.clone(),
+                        })
+                        .is_ok()
+                    {
+                        let tick = self.activity_seq.fetch_add(1, Ordering::Relaxed);
+                        e.last_active.store(tick, Ordering::Release);
+                        return Ok(Attached {
+                            client,
+                            rx,
+                            ctl: e.ctl.clone(),
+                            data: e.data.clone(),
+                        });
+                    }
+                    entries.remove(&key);
+                }
             }
-            entries.remove(&key);
-        }
 
-        // Immediately reap detached 0-doc servers from a previous workspace when switching roots.
-        let stale_other_roots: Vec<PoolKey> = entries
-            .iter()
-            .filter(|(k, e)| {
-                k.owner == key.owner
-                    && k.root != key.root
-                    && e.open_docs.load(Ordering::Acquire) == 0
-                    && e.active_clients.load(Ordering::Acquire) == 0
-            })
-            .map(|(k, _)| k.clone())
-            .collect();
-        for rk in stale_other_roots {
-            if let Some(evicted) = entries.remove(&rk) {
-                let _ = evicted.ctl.send(Ctl::Evict);
+            let mut set = self.inflight.0.lock().unwrap_or_else(|e| e.into_inner());
+            if set.contains(&key) {
+                while set.contains(&key) {
+                    set = self.inflight.1.wait(set).unwrap_or_else(|e| e.into_inner());
+                }
+                continue;
             }
-        }
-
-        // Enforce strict `<= MAX_SERVERS_PER_OWNER` (`2`) LRU cap per user:
-        // prefer evicting 0-open-doc servers first, then fallback to oldest overall.
-        while entries.keys().filter(|k| k.owner == key.owner).count() >= MAX_SERVERS_PER_OWNER {
-            let zero_doc_victim = entries
-                .iter()
-                .filter(|(k, e)| k.owner == key.owner && e.open_docs.load(Ordering::Acquire) == 0)
-                .min_by_key(|(_, e)| e.last_active.load(Ordering::Acquire))
-                .map(|(k, _)| k.clone());
-            let victim = zero_doc_victim.or_else(|| {
-                entries
-                    .iter()
-                    .filter(|(k, _)| k.owner == key.owner)
-                    .min_by_key(|(_, e)| e.last_active.load(Ordering::Acquire))
-                    .map(|(k, _)| k.clone())
-            });
-            let Some(victim_key) = victim else {
-                break;
+            set.insert(key.clone());
+            break InflightGuard {
+                inflight: &self.inflight,
+                key: key.clone(),
             };
-            if let Some(evicted) = entries.remove(&victim_key) {
-                let _ = evicted.ctl.send(Ctl::Evict);
+        };
+
+        let attached_for_new: HashSet<String> = self
+            .cached_attached_roots(&key.root)
+            .into_iter()
+            .map(|s| s.trim().trim_end_matches('/').to_string())
+            .collect();
+
+        {
+            let mut entries = self.lock();
+            let stale_other_roots: Vec<PoolKey> = entries
+                .iter()
+                .filter(|(k, e)| {
+                    let kr = k.root.trim().trim_end_matches('/');
+                    k.owner == key.owner
+                        && k.root != key.root
+                        && !attached_for_new.contains(kr)
+                        && e.open_docs.load(Ordering::Acquire) == 0
+                        && e.active_clients.load(Ordering::Acquire) == 0
+                })
+                .map(|(k, _)| k.clone())
+                .collect();
+            for rk in stale_other_roots {
+                if let Some(evicted) = entries.remove(&rk) {
+                    let _ = evicted.ctl.send(Ctl::Evict);
+                }
             }
+            Self::evict_owner_excess(&mut entries, &key.owner);
         }
 
+        // Spawn outside `self.entries` lock so unrelated workspaces/users never stall.
         let io = (self.spawner)(&key, launch)?;
         let gen = self.next_gen.fetch_add(1, Ordering::Relaxed);
         let init_tick = self.activity_seq.fetch_add(1, Ordering::Relaxed);
@@ -660,18 +688,24 @@ impl LspPool {
         let (ctl, ctl_rx) = mpsc::unbounded_channel();
         let (data, data_rx) = mpsc::channel(DATA_CAPACITY);
         let _ = ctl.send(Ctl::Attach { client, tx: out_tx });
-        entries.insert(
-            key.clone(),
-            Entry {
-                gen,
-                ctl: ctl.clone(),
-                data: data.clone(),
-                open_docs: Arc::clone(&open_docs),
-                active_clients: Arc::clone(&active_clients),
-                last_active: Arc::clone(&last_active),
-            },
-        );
-        drop(entries);
+
+        {
+            let mut entries = self.lock();
+            Self::evict_owner_excess(&mut entries, &key.owner);
+            entries.insert(
+                key.clone(),
+                Entry {
+                    gen,
+                    ctl: ctl.clone(),
+                    data: data.clone(),
+                    open_docs: Arc::clone(&open_docs),
+                    active_clients: Arc::clone(&active_clients),
+                    last_active: Arc::clone(&last_active),
+                },
+            );
+        }
+        drop(_inflight_guard);
+
         tokio::spawn(run_actor(
             Arc::clone(self),
             key,
@@ -760,6 +794,7 @@ async fn run_actor(
 
     let mut mux = Mux::new(
         key.clone(),
+        pool.environments.clone(),
         w_tx,
         Arc::clone(&backlog),
         open_docs,
@@ -861,6 +896,7 @@ enum Init {
 
 struct Mux {
     key: PoolKey,
+    environments: Option<EnvironmentManager>,
     to_server_tx: mpsc::UnboundedSender<Vec<u8>>,
     backlog: Arc<AtomicUsize>,
     open_docs: Arc<AtomicUsize>,
@@ -911,8 +947,10 @@ fn detect_local_python_path(root: &str) -> Option<String> {
 }
 
 impl Mux {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         key: PoolKey,
+        environments: Option<EnvironmentManager>,
         to_server_tx: mpsc::UnboundedSender<Vec<u8>>,
         backlog: Arc<AtomicUsize>,
         open_docs: Arc<AtomicUsize>,
@@ -922,6 +960,7 @@ impl Mux {
     ) -> Self {
         Self {
             key,
+            environments,
             to_server_tx,
             backlog,
             open_docs,
@@ -1073,20 +1112,22 @@ impl Mux {
         folders.push(json!({ "uri": primary_uri, "name": primary_name }));
 
         if self.key.ssh.is_none() {
-            let pkey = format!("local:{}", self.key.root.trim_end_matches('/'));
-            for extra in crate::environments::cached_additional_roots(&pkey) {
-                let extra_trimmed = extra.trim();
-                if extra_trimmed.is_empty() || extra_trimmed == self.key.root {
-                    continue;
+            if let Some(envs) = &self.environments {
+                let pkey = format!("local:{}", self.key.root.trim_end_matches('/'));
+                for extra in envs.cached_additional_roots(&pkey) {
+                    let extra_trimmed = extra.trim();
+                    if extra_trimmed.is_empty() || extra_trimmed == self.key.root {
+                        continue;
+                    }
+                    let name = Path::new(extra_trimmed)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("attached");
+                    folders.push(json!({
+                        "uri": format!("file://{extra_trimmed}"),
+                        "name": name,
+                    }));
                 }
-                let name = Path::new(extra_trimmed)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("attached");
-                folders.push(json!({
-                    "uri": format!("file://{extra_trimmed}"),
-                    "name": name,
-                }));
             }
         }
         folders
@@ -1441,7 +1482,7 @@ mod tests {
             })
         });
         (
-            LspPool::new_unregistered(spawner, idle, WRITE_QUEUE_MAX_BYTES),
+            LspPool::new_inner(spawner, idle, WRITE_QUEUE_MAX_BYTES, None),
             Fake {
                 spawns,
                 inits,
@@ -1537,7 +1578,7 @@ mod tests {
             connection_id: "conn_1".into(),
             name: "box".into(),
             host: "127.0.0.1".into(),
-            port: 2222,
+            port: Some(2222),
             user: "dev".into(),
             identity_file: None,
             proxy_jump: None,
@@ -1549,9 +1590,27 @@ mod tests {
 
     #[test]
     fn remote_script_escapes_paths_and_refuses_option_injection() {
-        assert!(reject_ssh_option_like("host", "-oProxyCommand=evil").is_err());
-        assert!(reject_ssh_option_like("user", "dev\nroot").is_err());
-        assert!(reject_ssh_option_like("host", "dev.example.com").is_ok());
+        let bad_host = IdeSshSpec {
+            connection_id: "c1".into(),
+            name: "bad".into(),
+            host: "-oProxyCommand=evil".into(),
+            port: Some(22),
+            user: "dev".into(),
+            identity_file: None,
+            proxy_jump: None,
+        };
+        assert!(crate::target::ssh_exec::validate_ssh_spec(&bad_host).is_err());
+
+        let bad_id = IdeSshSpec {
+            connection_id: "c1".into(),
+            name: "bad-id".into(),
+            host: "dev.example.com".into(),
+            port: Some(22),
+            user: "dev".into(),
+            identity_file: Some("-oProxyCommand=evil".into()),
+            proxy_jump: None,
+        };
+        assert!(crate::target::ssh_exec::validate_ssh_spec(&bad_id).is_err());
 
         let launch = SpawnLaunch {
             cmd: "pyright-langserver".into(),
@@ -1673,7 +1732,6 @@ mod tests {
         assert_eq!(MAX_SERVERS_PER_OWNER, 2);
 
         let (pool, fake) = fake_pool(IDLE_TIMEOUT);
-        register_pool(&pool);
         let lang_key = |lang: &str, root: &str| PoolKey {
             owner: "u1".into(),
             lang: lang.into(),
@@ -1710,8 +1768,8 @@ mod tests {
 
         // Manifest file notification reaches active `/repo-lru-test` servers immediately,
         // while sibling prefix `/repo-lru-test-other` is strictly excluded by `Path::starts_with`:
-        notify_watched_file_if_build_manifest(Path::new("/repo-lru-test-other/pom.xml"), 2);
-        notify_watched_file_if_build_manifest(Path::new("/repo-lru-test/pom.xml"), 2);
+        pool.notify_watched_file_if_build_manifest(Path::new("/repo-lru-test-other/pom.xml"), 2);
+        pool.notify_watched_file_if_build_manifest(Path::new("/repo-lru-test/pom.xml"), 2);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
             let log = fake.doc_log.lock().unwrap().clone();
@@ -1731,19 +1789,42 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
-        // Close all tabs/sockets on `/repo-lru-test` and call `evict_detached_other_roots`: `0ms` reap!
+        // Detached server owned by another user (`u2`) and attached folder of `u1` must NOT be evicted.
+        let mut s_u2 = pool
+            .attach(key_for("u2", "/repo-other-user"), "tsls", &[])
+            .unwrap();
+        init(&mut s_u2, 1).await;
+        s_u2.send(open("file:///repo-other-user/x.ts")).await;
+        let _ = recv(&mut s_u2).await;
+        drop(s_u2);
+
         s_rust.send(close("file:///repo-lru-test/main.rs")).await;
         tokio::task::yield_now().await;
         drop(s_rust);
         drop(s_ts);
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        evict_detached_other_roots("/repo2-lru-test");
-        assert_eq!(pool.live_servers(), 0);
+        // When `/repo-lru-test` is listed as an attached root of `/repo2-lru-test`, keep it:
+        pool.evict_detached_other_roots_for_user(
+            "u1",
+            Path::new("/repo2-lru-test"),
+            Path::new("/repo2-lru-test"),
+            &[PathBuf::from("/repo-lru-test")],
+        );
+        assert_eq!(pool.live_servers(), 3);
+
+        // Switching `u1` to `/repo2-lru-test` without `/repo-lru-test` attached reaps `u1`'s detached servers while preserving `u2`'s:
+        pool.evict_detached_other_roots_for_user(
+            "u1",
+            Path::new("/repo2-lru-test"),
+            Path::new("/repo2-lru-test"),
+            &[],
+        );
+        assert_eq!(pool.live_servers(), 1);
 
         let _s_new = pool
             .attach(lang_key("go", "/repo2-lru-test"), "gopls", &[])
             .unwrap();
-        assert_eq!(pool.live_servers(), 1);
+        assert_eq!(pool.live_servers(), 2);
     }
 }

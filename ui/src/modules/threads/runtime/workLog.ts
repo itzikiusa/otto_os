@@ -36,11 +36,14 @@ export function formatDuration(ms: number): string {
   return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
-/** A finished call's run time, or null when it has no start / end. */
+/** A finished call's run time, or null when it has no start / end.
+ *  Legacy persisted reasoning rows had identical start/end (`0ms`); hide `<50ms` on reasoning. */
 export function itemDuration(i: TurnItem): string | null {
   if (!i.started_at || !i.completed_at || isLive(i)) return null;
   const ms = Date.parse(i.completed_at) - Date.parse(i.started_at);
-  return Number.isFinite(ms) && ms >= 0 ? formatDuration(ms) : null;
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  if (i.type === 'reasoning' && ms < 50) return null;
+  return formatDuration(ms);
 }
 
 /** "Error: Exit code 2" / "Exit code 2" → "exit 2"; anything else unchanged. */

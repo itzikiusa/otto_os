@@ -446,8 +446,10 @@ credentials are refused with 403 (`RootRoute::Lsp`).
   `~/go/bin`, `~/.local/bin`, Homebrew, …), and includes both the built-in
   language servers (`gopls`, `typescript-language-server`, `jdtls`,
   `rust-analyzer`, `pyright-langserver`, `bash-language-server`,
-  `vscode-json-language-server`, `clangd`, …) and any enabled runtime IDE plugin
-  language servers (`IdePluginRegistry`). Local spawns inherit the cached user
+  `vscode-json-language-server`, `vscode-css-language-server`,
+  `vscode-html-language-server`, `marksman`) and any enabled runtime IDE plugin
+  language servers (`IdePluginRegistry`, e.g. `kotlin-language-server` or
+  `clangd`). Local spawns inherit the cached user
   login+interactive shell environment (`$SHELL -lic`, e.g. `GOPRIVATE`) merged
   with the project's SDK environment and enforce explicit child memory caps
   (`gopls` `GOMEMLIMIT=256MiB`/`GOGC=50`, `jdtls` `-Xmx256m`, `rust-analyzer`

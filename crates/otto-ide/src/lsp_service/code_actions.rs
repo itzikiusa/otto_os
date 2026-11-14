@@ -1,4 +1,4 @@
-//! Concrete Text-Edit Code Actions (`POST /ide/lsp/code-actions`, `#77`).
+//! Concrete Text-Edit Code Actions (`POST /ide/lsp/code-actions`).
 //!
 //! Every returned `IdeCodeAction` carries concrete machine-applicable `edits: Vec<IdeTextEdit>`
 //! (`1`-based `start_line`, `start_col`, `end_line`, `end_col`, `new_text`) so `⌥⏎` and

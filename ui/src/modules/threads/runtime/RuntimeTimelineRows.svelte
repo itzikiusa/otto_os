@@ -20,6 +20,8 @@
   import RuntimeWorkRow from './RuntimeWorkRow.svelte';
   import {
     approvalOutcome,
+    formatMessageClock,
+    formatMessageTooltip,
     isRunHandoff,
     messageAttribution,
     pendingApprovals,
@@ -27,7 +29,7 @@
     timelineRows,
     type WorkEntry,
   } from './timeline';
-  import { shouldFold } from './workLog';
+  import { formatDuration, shouldFold } from './workLog';
 
   interface Props {
     sessionId: string;
@@ -119,9 +121,21 @@
     <!-- A routine's report handed to the agent: its result card and the agent's reply show it. -->
   {:else if row.kind === 'message' && row.item.type === 'user_message' && messageAttribution(row.item.text)}
     {@const a = messageAttribution(row.item.text)!}
-    <div class="rt-from" data-testid="rt-from"><span class="rt-from-h"><Icon name="send" size={12} /> From {a.from}</span><Markdown md={a.body} /></div>
+    {@const peerIso = row.item.started_at ?? row.item.updated_at}
+    {@const peerClock = formatMessageClock(peerIso)}
+    <div class="rt-from" data-testid="rt-from">
+      <span class="rt-from-h">
+        <Icon name="send" size={12} /> From {a.from}
+        {#if peerClock && peerIso}
+          <time class="rt-msg-time" datetime={peerIso} title={formatMessageTooltip(peerIso)}>{peerClock}</time>
+        {/if}
+      </span>
+      <Markdown md={a.body} />
+    </div>
   {:else if row.kind === 'message' && row.item.type === 'user_message'}
     {@const parsed = parseUserMessageWithBadges(row.item.text)}
+    {@const userIso = row.item.started_at ?? row.item.updated_at}
+    {@const userClock = formatMessageClock(userIso)}
     <div class="rt-user">
       {#if row.item.attachments?.length}<RuntimeAttachments {sessionId} attachments={row.item.attachments} />{/if}
       {#if parsed.badges.length > 0}
@@ -150,12 +164,33 @@
       {#if parsed.prose || (parsed.badges.length === 0 && row.item.text)}
         <div class="rt-bubble" dir="auto">{parsed.badges.length > 0 ? parsed.prose : row.item.text}</div>
       {/if}
+      {#if userClock && userIso}
+        <time
+          class="rt-msg-time"
+          datetime={userIso}
+          title={formatMessageTooltip(userIso)}
+          data-testid="runtime-user-time"
+        >{userClock}</time>
+      {/if}
     </div>
   {:else if row.kind === 'message' && row.item.type === 'assistant_message'}
     {@const mdText = formatAssistantText ? formatAssistantText(row.item) : row.item.text}
+    {@const startIso = row.item.started_at ?? row.item.updated_at}
+    {@const endIso = row.item.completed_at ?? row.item.updated_at}
+    {@const activeIso = row.item.streaming ? startIso : endIso}
+    {@const assistantClock = formatMessageClock(activeIso)}
+    {@const elapsedMs = !row.item.streaming && row.item.started_at && row.item.completed_at ? Date.parse(row.item.completed_at) - Date.parse(row.item.started_at) : 0}
     <div class="rt-assistant" class:streaming={row.item.streaming} dir="auto">
       {#if mdText || !assistantFooter}<Markdown md={mdText} />{/if}
       {#if assistantFooter}{@render assistantFooter(row.item)}{/if}
+      {#if assistantClock && activeIso}
+        <time
+          class="rt-msg-time"
+          datetime={activeIso}
+          title={formatMessageTooltip(startIso, row.item.completed_at ?? (row.item.streaming ? null : row.item.updated_at), row.item.streaming)}
+          data-testid="runtime-assistant-time"
+        >{row.item.streaming ? `Started ${assistantClock}` : elapsedMs >= 1000 ? `${assistantClock} · ${formatDuration(elapsedMs)}` : assistantClock}</time>
+      {/if}
     </div>
   {:else if row.kind === 'work'}
     {@const flat = row.parts.flatMap((part) => (part.kind === 'group' ? part.entries : [part.entry]))}
@@ -269,6 +304,22 @@
     font-size: var(--fs-s);
     font-weight: 600;
     color: var(--accent-text);
+  }
+  .rt-msg-time {
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
+    font-weight: 400;
+    line-height: 1.2;
+    font-variant-numeric: tabular-nums;
+    align-self: flex-start;
+  }
+  .rt-user > .rt-msg-time {
+    align-self: flex-end;
+    padding-inline: 4px;
+  }
+  .rt-from-h > .rt-msg-time {
+    align-self: center;
+    margin-inline-start: 4px;
   }
   .rt-work {
     display: flex;

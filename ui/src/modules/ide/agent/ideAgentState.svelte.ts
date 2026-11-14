@@ -3,16 +3,26 @@
 // the lazily loaded `ideAgentEngine` (`agent/ideAgentEngine.svelte.ts`).
 
 import type { RuntimeAccessMode } from '../../../lib/api/types';
+import { ideWorkspacePort } from '../../../lib/ideWorkspacePort.svelte';
 import type { EffortLevel } from '../../../lib/providerModels';
-import { defaultAgentProvider } from '../../../lib/providers';
+import { defaultAgentProvider, isRuntimeProvider } from '../../../lib/providers';
+import {
+  getIdeRuntimeBridge,
+  loadIdeRuntimeBridge,
+  type IdeRuntimeBridge,
+} from '../../../lib/runtimeThreadPort';
 import { lsGet, lsRemove, lsSet } from '../../../lib/storage';
 import type { ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
 import { ide, ideBasename } from '../ideStore.svelte';
-import type {
-  IdeCodeProposal,
-  IdeContextChip,
-  IdeInlinePromptState,
+import {
+  detectProposalLanguage,
+  lineRangeFromOffsets,
+  offsetsForLineRange,
+  type IdeCodeProposal,
+  type IdeContextChip,
+  type IdeInlinePromptState,
 } from '../store/ideDiffApplier';
+import { upsertIdeContextChipList } from './ideSymbolChip';
 
 export const AGENT_OPEN_KEY = 'otto.ide.agentOpen';
 export const AGENT_PROVIDER_KEY = 'otto.ide.agent.provider';
@@ -22,66 +32,7 @@ export const IDE_LAST_ROOT_KEY = 'otto.ide.lastRoot';
 export const IDE_OPEN_HANDOFF_KEY = 'otto.ide.openThreadHandoff';
 export const IDE_OPEN_THREAD_EVENT = 'otto:ide-open-thread';
 
-const MAX_CONTEXT_CHIPS = 12;
-const MAX_CHIP_SNIPPET_CHARS = 8_000;
 const EFFORT_LEVELS = new Set<string>(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
-const RUNTIME_SET = new Set<string>(['claude', 'codex', 'gemini', 'agy', 'grok', 'opencode', 'pi']);
-const EXT_LANG_MAP: Record<string, string> = {
-  go: 'go', java: 'java', class: 'java', rs: 'rust', py: 'python', pyi: 'python', pyw: 'python',
-  ts: 'typescript', tsx: 'tsx', mts: 'typescript', cts: 'typescript', js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'jsx',
-  json: 'json', jsonc: 'json', jsonl: 'jsonl', ndjson: 'jsonl', csv: 'csv', tsv: 'tsv',
-  sh: 'shell', bash: 'shell', zsh: 'shell', bats: 'shell', yaml: 'yaml', yml: 'yaml', md: 'markdown', sql: 'sql', html: 'html', css: 'css', svelte: 'svelte', toml: 'toml',
-};
-
-function truncateSnippet(text: string, maxChars = MAX_CHIP_SNIPPET_CHARS): string {
-  const cap = Math.max(0, maxChars);
-  const norm = text.replace(/\r\n/g, '\n');
-  if (norm.length <= cap) return norm;
-  const suffix = '\n… [truncated]';
-  return cap <= suffix.length ? norm.slice(0, cap) : `${norm.slice(0, cap - suffix.length)}${suffix}`;
-}
-
-function detectProposalLanguage(path: string, explicitLang = ''): string {
-  const clean = explicitLang.trim().toLowerCase();
-  if (clean && !clean.includes('/') && !clean.includes('.')) return clean;
-  if (/^(?:jdt:\/\/|jar:)/i.test(path.trim())) return 'java';
-  const base = (path.split(/[?#]/)[0] ?? path).split(/[\\/]/).pop() ?? path;
-  const ext = base.includes('.') ? (base.split('.').pop()?.toLowerCase() ?? '') : '';
-  return EXT_LANG_MAP[ext] ?? (clean || 'txt');
-}
-
-function offsetsForLineRange(content: string, startLine: number, endLine: number): { from: number; to: number; startLine: number; endLine: number; text: string } {
-  if (!content) return { from: 0, to: 0, startLine: 1, endLine: 1, text: '' };
-  const sTarget = Math.max(1, Math.min(startLine, endLine));
-  const eTarget = Math.max(sTarget, endLine);
-  let line = 1, from = 0, foundStart = sTarget === 1;
-  for (let i = 0; i < content.length; i++) {
-    if (content.charCodeAt(i) === 10) {
-      if (line === eTarget) return { from, to: i, startLine: sTarget, endLine: line, text: content.slice(from, i) };
-      if (++line === sTarget) { from = i + 1; foundStart = true; }
-    }
-  }
-  if (!foundStart) from = content.length;
-  return { from, to: content.length, startLine: Math.min(sTarget, line), endLine: line, text: content.slice(from) };
-}
-
-function lineRangeFromOffsets(content: string, anchor: number, head: number): { from: number; to: number; startLine: number; endLine: number; text: string } {
-  const len = content.length;
-  const lo = Math.max(0, Math.min(len, Math.min(anchor, head)));
-  const hi = Math.max(0, Math.min(len, Math.max(anchor, head)));
-  let startLine = 1;
-  for (let i = 0; i < lo; i++) if (content.charCodeAt(i) === 10) startLine++;
-  if (lo === hi) {
-    const from = lo === 0 ? 0 : content.lastIndexOf('\n', Math.max(0, lo - 1)) + 1;
-    const nextNl = content.indexOf('\n', lo);
-    const to = nextNl === -1 ? len : nextNl;
-    return { from, to, startLine, endLine: startLine, text: content.slice(from, to) };
-  }
-  let endLine = startLine;
-  const scanEnd = hi > lo && content.charCodeAt(hi - 1) === 10 ? hi - 1 : hi;
-  for (let i = lo; i < scanEnd; i++) if (content.charCodeAt(i) === 10) endLine++;
-  return { from: lo, to: hi, startLine, endLine, text: content.slice(lo, hi) };
-}
 
 export interface IdeShellSelectionInput {
   path?: string;
@@ -164,7 +115,7 @@ export function resolveSelectionLite(
 }
 
 class IdeAgentSharedState {
-  panelOpen = $state<boolean>(lsGet(AGENT_OPEN_KEY) === '1');
+  panelOpen = $state<boolean>(ideWorkspacePort.agentDockOpen);
   sessionId = $state<string | null>(null);
   inlinePrompt = $state<IdeInlinePromptState | null>(null);
   provider = $state<string>(initialProvider());
@@ -181,6 +132,7 @@ class IdeAgentSharedState {
   error = $state<string | null>(null);
   contexts = $state<IdeContextChip[]>([]);
   appliedUndoByProposalId = $state<Record<string, string>>({});
+  runtimeBridge = $state<IdeRuntimeBridge | null>(getIdeRuntimeBridge());
 
   chipSeq = 0;
   inlineReqSeq = 0;
@@ -210,6 +162,21 @@ class IdeAgentSharedState {
     }
   }
 
+  ensureBridge(): Promise<IdeRuntimeBridge | null> {
+    if (this.runtimeBridge) return Promise.resolve(this.runtimeBridge);
+    const cached = getIdeRuntimeBridge();
+    if (cached) {
+      this.runtimeBridge = cached;
+      return Promise.resolve(cached);
+    }
+    return loadIdeRuntimeBridge()
+      .then((b) => {
+        this.runtimeBridge = b;
+        return b;
+      })
+      .catch(() => null);
+  }
+
   takePendingHandoff(): IdeThreadHandoff | null {
     const h = this.pendingHandoff ?? consumeStoredHandoff();
     this.pendingHandoff = null;
@@ -219,7 +186,7 @@ class IdeAgentSharedState {
   setPanelOpen(next: boolean): boolean {
     if (this.panelOpen === next) return false;
     this.panelOpen = next;
-    lsSet(AGENT_OPEN_KEY, next ? '1' : '0');
+    ideWorkspacePort.setAgentDockOpen(next);
     return true;
   }
 
@@ -244,22 +211,9 @@ class IdeAgentSharedState {
   }
 
   upsertContext(draft: Omit<IdeContextChip, 'id'> & { id?: string }): IdeContextChip {
-    const snippet = truncateSnippet(draft.snippet, MAX_CHIP_SNIPPET_CHARS);
-    const idx = this.contexts.findIndex((c) => c.key === draft.key);
-    if (idx >= 0) {
-      const updated: IdeContextChip = { ...this.contexts[idx], ...draft, id: this.contexts[idx].id, snippet };
-      const next = this.contexts.slice();
-      next[idx] = updated;
-      this.contexts = next;
-      return updated;
-    }
-    const created: IdeContextChip = { ...draft, id: draft.id ?? `ctx-${++this.chipSeq}`, snippet };
-    const trimmed =
-      this.contexts.length >= MAX_CONTEXT_CHIPS
-        ? this.contexts.slice(this.contexts.length - (MAX_CONTEXT_CHIPS - 1))
-        : this.contexts;
-    this.contexts = [...trimmed, created];
-    return created;
+    const { chip, next } = upsertIdeContextChipList(this.contexts, draft, () => `ctx-${++this.chipSeq}`);
+    this.contexts = next;
+    return chip;
   }
 
   markSelectionSync(selection?: IdeShellSelectionInput): IdeContextChip | null {
@@ -284,9 +238,9 @@ class IdeAgentSharedState {
     const r = resolveSelectionLite(sel);
     if (!r) return false;
     const prev = this.inlinePrompt;
-    const defProvider = RUNTIME_SET.has(this.provider)
+    const defProvider = isRuntimeProvider(this.provider)
       ? this.provider
-      : RUNTIME_SET.has(defaultAgentProvider())
+      : isRuntimeProvider(defaultAgentProvider())
         ? defaultAgentProvider()
         : 'claude';
     this.inlinePrompt = {

@@ -15,10 +15,11 @@ zero-rebuild **runtime IDE plugins**.
     and are additionally guarded by `is_host_files_route` so an agent-session
     token cannot escape its Seatbelt sandbox through the daemon's IDE filesystem,
     runner, debugger, or history routes.
-  - Toolchain installation (`/ide/toolchains/install`, `/ide/toolchains/uninstall`)
-    and mutating plugin routes (`/ide/plugins*`) carry `RouteClass::Admin`
-    (human credentials only); minting a collab share room (`POST /ide/collab/rooms`)
-    carries `RouteClass::Secret` (human credentials only).
+  - Toolchain installation and local SDK mutations (`/ide/toolchains/install`,
+    `/ide/toolchains/local`) and mutating plugin routes (`/ide/plugins*`) carry
+    `RouteClass::Admin` (human credentials only); minting a collab share room
+    (`POST /ide/collab/rooms`) carries `RouteClass::Secret` (human credentials
+    only).
   - Public guest routes (`/api/v1/ide/collab/guest/*`) sit outside the bearer
     chokepoint and authenticate each request with the room's capability share
     token (`viewer` vs `editor`).
@@ -34,7 +35,8 @@ zero-rebuild **runtime IDE plugins**.
     `store/ideDiffApplier.ts`, `store/ideBufferPerf.ts`),
     `ui/src/lib/components/CodeEditor.svelte`,
     `ui/src/lib/components/cm-ide-extensions.ts`,
-    `ui/src/lib/components/cm-ide-git-and-agent.ts`, `ui/src/lib/api/ide.ts`.
+    `ui/src/lib/components/cm-ide-git-and-agent.ts`,
+    `ui/src/lib/api/types/ide.ts`, `ui/src/lib/api/types/ide-intelligence.ts`.
 
 ## Walkthrough
 
@@ -102,7 +104,6 @@ global system directories:
 | **Node / TypeScript** | Node LTS (22), `pnpm`, `typescript-language-server`, `vscode-langservers-extracted`, `prettier`, `js-debug` |
 | **Shell (Bash / Zsh)** | `bash-language-server`, `shellcheck`, `shfmt`, built-in `otto-sh-dap` (`DEBUG` trap DAP debugger) |
 | **JSON & CSV / TSV** | `vscode-json-language-server`, live JSONPath breadcrumb, Pretty / Minify / Sort Keys, `$ref` navigation, virtualized `IdeCsvView` (`Table ↔ Text` toggle, rainbow columns, sort/filter, inline cell edit + undo, column stats) |
-| **C / C++** | `clangd`, `clang-format`, `CodeLLDB` |
 
 Installed `<data_dir>/toolchains/**/bin` directories and custom registered local
 SDKs (`POST /ide/toolchains/local`) are automatically prepended to `PATH` (setting
@@ -151,7 +152,7 @@ items directly into the editor gutter:
 - **Python:** `if __name__ == "__main__":`, `def test_*`, `class Test*`
 - **Java:** `public static void main`, `@Test`, `@ParameterizedTest`
 - **JS / TS:** `describe(...)`, `it(...)`, `test(...)`
-- **C / C++:** `int main(...)`, `TEST(...)`, `TEST_F(...)`
+- **Shell (Bash / Zsh):** runnable scripts and functions (plus custom `gutter_detectors` contributed by runtime IDE plugins)
 
 Clicking the gutter play button offers **Run** or **Debug** for that exact item.
 
@@ -163,7 +164,7 @@ plus zero-install built-in bridges across every major ecosystem: `dlv dap` (Go),
 `java-debug-adapter` or built-in `otto-jdi-jdwp` (`jdb`/JDWP for Java),
 `debugpy.adapter` or built-in `otto-py-bdb` (Python stdlib `bdb`), `js-debug`
 or built-in `otto-node-cdp` (`node --inspect-brk=0` CDP), `codelldb` /
-`lldb-dap` or built-in `otto-lldb-dap` (`/usr/bin/lldb` for Rust & C/C++), and
+`lldb-dap` or built-in `otto-lldb-dap` (`/usr/bin/lldb` for Rust), and
 `otto-sh-dap` (`DEBUG` trap for Bash/Zsh), plus a deterministic mock adapter:
 
 - **1-Click Gutter Breakpoints:** Clicking anywhere beside or on line numbers in
@@ -235,7 +236,8 @@ Install an `otto-ide-plugin.json` extension into `<data_dir>/ide-plugins/<slug>/
 `catalog:protobuf-grpc-ide`) or declare an `"ide"` contribution block inside
 `~/otto-plugins/*/otto-plugin.json` — with zero app rebuild:
 
-- Contributes custom `languages`, `lsp_servers` (automatically picked up by
+- Contributes custom `languages`, `lsp_servers` (such as Kotlin
+  `kotlin-language-server` or C/C++ `clangd`, automatically picked up by
   `/ws/lsp` and `/lsp/capabilities`), `dap_adapters`, `gutter_detectors`,
   `keymaps`, `snippets`, and `panels`.
 - Reference plugins ship under `examples/ide-plugins/kotlin-ide` and
@@ -247,9 +249,9 @@ Install an `otto-ide-plugin.json` extension into `<data_dir>/ide-plugins/<slug>/
 
 `IdeAgentPanel.svelte` and `IdeInlinePromptBar.svelte` share the **exact same
 Otto Threads pool** as `#/threads` (`threadsSessionStore`), uniting structured
-runtime sessions (`/api/v1/workspaces/{id}/runtime-sessions` for `claude`,
-`codex`, `gemini`) and PTY-backed agent harnesses (`agy`, `grok`, `opencode`,
-`pi`) with the shared `ModelPicker` and thread switcher:
+runtime sessions (`/api/v1/workspaces/{id}/runtime-sessions` across `claude`,
+`codex`, `gemini`, `agy`, `grok`, `opencode`, and `pi`) with 1:1 attachment and
+composer capability parity, the shared `ModelPicker`, and the thread switcher:
 
 - **6-source context marking (`ideAgentController.svelte.ts`):**
   1. **Editor selection (`⌘L` / contextual selection bar / right-click menu):**
@@ -346,7 +348,8 @@ Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api
 
 - **"Language server unavailable" banner:** Click **Toolchains** in the IDE
   toolbar and install the matching language server (for example `rust-analyzer`,
-  `gopls`, `pyright`, `jdtls`, `typescript-language-server`, or `clangd`). The
+  `gopls`, `pyright`, `jdtls`, or `typescript-language-server`, or install/enable
+  a runtime IDE plugin for additional languages such as Kotlin or C/C++). The
   editor reconnects automatically once the install job finishes.
 - **Remote SSH target fails to connect:** Verify the SSH connection succeeds in
   **Connections** first (`BatchMode=yes` key auth is used for non-interactive

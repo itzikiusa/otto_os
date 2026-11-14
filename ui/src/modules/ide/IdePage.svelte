@@ -18,6 +18,8 @@
   import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { ideWorkspacePort } from '../../lib/ideWorkspacePort.svelte';
+  import type { IdeCompareMode } from './history/ideComparisonLoader';
   import IdeEditorArea from './IdeEditorArea.svelte';
   import IdeProjectTree from './IdeProjectTree.svelte';
   import { ide } from './ideStore.svelte';
@@ -57,15 +59,16 @@
   let explorerVisible = $state(true);
   let mobileView = $state<'files' | 'editor' | 'tools' | 'agent'>('editor');
   let folderPickerMode = $state<'open' | 'attach' | null>(null);
-  let fallbackCompare = $state<{
-    mode: 'local-history' | 'git-revision' | 'git-branch' | 'clipboard' | 'file';
-    root: string; targetPath: string; secondPath: string | null; isDir: boolean;
-    initialFilter: 'all' | 'deleted'; initialRef: string | null; initialClipboardText?: string;
+  let compareTarget = $state<{
+    mode: IdeCompareMode;
+    root: string;
+    targetPath: string;
+    secondPath: string | null;
+    isDir: boolean;
+    initialFilter: 'all' | 'deleted';
+    initialRef: string | null;
+    initialClipboardText?: string;
   } | null>(null);
-
-  function treeMounted(): boolean {
-    return viewport.isPhone ? mobileView === 'files' : explorerVisible;
-  }
 
   function resolveRootForPath(p: string): string {
     const clean = p.replace(/\/+$/, '') || '/';
@@ -77,58 +80,65 @@
     return best || (ide.target.root.replace(/\/+$/, '') || '/');
   }
 
-  const resolvedIdeScheme = $derived(
-    quickPrefs.colorScheme === 'auto'
-      ? ui.resolvedScheme === 'light'
-        ? quickPrefs.preferredLightScheme
-        : quickPrefs.preferredDarkScheme
-      : quickPrefs.colorScheme,
-  );
-
-  $effect(() => {
-    if (typeof document !== 'undefined') document.documentElement.dataset.ideScheme = resolvedIdeScheme;
-  });
+  function openCompareModal(opts: {
+    mode: IdeCompareMode;
+    path?: string;
+    secondPath?: string | null;
+    isDir?: boolean;
+    filter?: 'all' | 'deleted';
+    ref?: string | null;
+    clipboardText?: string;
+  }): void {
+    const p = opts.path || ide.activePath || ide.target.root;
+    if (!p) return;
+    compareTarget = {
+      mode: opts.mode,
+      root: resolveRootForPath(p),
+      targetPath: p,
+      secondPath: opts.secondPath ?? null,
+      isDir: opts.isDir ?? false,
+      initialFilter: opts.filter ?? 'all',
+      initialRef: opts.ref ?? null,
+      initialClipboardText: opts.clipboardText,
+    };
+  }
 
   $effect(() => {
     if (typeof window === 'undefined') return;
     const onOpenSettings = (ev: Event): void => ide.openSettings((ev as CustomEvent<{ section?: string }>).detail?.section);
     const onPrefsChanged = (): void => { quickPrefs = readQuickSchemePrefs(); };
     const onPageHide = (): void => ide.suspendOnPageLeave();
-    const onFallbackLocalHistory = (ev: Event): void => {
-      if (treeMounted()) return;
-      const d = (ev as CustomEvent<{ path?: string; isDir?: boolean; filter?: 'all' | 'deleted' } | undefined>).detail;
+    const onLocalHistory = (ev: Event): void => {
+      const d = (ev as CustomEvent<{ path?: string; isDir?: boolean; filter?: 'all' | 'deleted'; putLabel?: boolean } | undefined>).detail;
       const p = d?.path || ide.activePath || ide.target.root;
       if (!p) return;
-      fallbackCompare = { mode: 'local-history', root: resolveRootForPath(p), targetPath: p, secondPath: null, isDir: d?.isDir ?? p === ide.target.root, initialFilter: d?.filter ?? 'all', initialRef: null };
+      if (d?.putLabel) {
+        void import('./history/ideComparisonLoader').then((m) => m.promptPutLocalHistoryLabel(resolveRootForPath(p), p));
+        return;
+      }
+      openCompareModal({ mode: 'local-history', path: p, isDir: d?.isDir ?? p === ide.target.root, filter: d?.filter ?? 'all' });
     };
-    const onFallbackCompare = (ev: Event): void => {
-      if (treeMounted()) return;
-      const d = (ev as CustomEvent<{ mode?: 'local-history' | 'git-revision' | 'git-branch' | 'clipboard' | 'file'; path?: string; secondPath?: string; isDir?: boolean; filter?: 'all' | 'deleted'; ref?: string; clipboardText?: string } | undefined>).detail;
-      const p = d?.path || ide.activePath || ide.target.root;
-      if (!p) return;
-      fallbackCompare = { mode: d?.mode ?? 'local-history', root: resolveRootForPath(p), targetPath: p, secondPath: d?.secondPath ?? null, isDir: d?.isDir ?? false, initialFilter: d?.filter ?? 'all', initialRef: d?.ref ?? null, initialClipboardText: d?.clipboardText };
+    const onCompare = (ev: Event): void => {
+      const d = (ev as CustomEvent<{ mode?: IdeCompareMode; path?: string; secondPath?: string; isDir?: boolean; filter?: 'all' | 'deleted'; ref?: string; clipboardText?: string } | undefined>).detail;
+      openCompareModal({ mode: d?.mode ?? 'local-history', path: d?.path, secondPath: d?.secondPath, isDir: d?.isDir, filter: d?.filter, ref: d?.ref, clipboardText: d?.clipboardText });
     };
-    const onFallbackGit = (ev: Event): void => {
-      if (treeMounted()) return;
+    const onGitAction = (ev: Event): void => {
       const detail = (ev as CustomEvent<{ action?: string; path?: string } | undefined>).detail;
-      void import('./git/ideGitQuickMenu').then((m) => m.runIdeGitActionEvent(detail, (mode, p) => {
-        const tp = p || ide.activePath || ide.target.root;
-        if (tp) fallbackCompare = { mode, root: resolveRootForPath(tp), targetPath: tp, secondPath: null, isDir: false, initialFilter: 'all', initialRef: null };
-      }));
+      void import('./git/ideGitQuickMenu').then((m) => m.runIdeGitActionEvent(detail, (mode, p) => openCompareModal({ mode, path: p })));
     };
     window.addEventListener('otto:ide-open-settings', onOpenSettings);
     window.addEventListener('otto:ide-prefs-changed', onPrefsChanged);
-    window.addEventListener('otto:ide-open-local-history', onFallbackLocalHistory);
-    window.addEventListener('otto:ide-open-compare', onFallbackCompare);
-    window.addEventListener('otto:ide-git-action', onFallbackGit);
+    window.addEventListener('otto:ide-open-local-history', onLocalHistory);
+    window.addEventListener('otto:ide-open-compare', onCompare);
+    window.addEventListener('otto:ide-git-action', onGitAction);
     window.addEventListener('pagehide', onPageHide);
     window.addEventListener('beforeunload', onPageHide);
     return () => {
       window.removeEventListener('otto:ide-open-settings', onOpenSettings);
       window.removeEventListener('otto:ide-prefs-changed', onPrefsChanged);
-      window.removeEventListener('otto:ide-open-local-history', onFallbackLocalHistory);
-      window.removeEventListener('otto:ide-open-compare', onFallbackCompare);
-      window.removeEventListener('otto:ide-git-action', onFallbackGit);
+      window.removeEventListener('otto:ide-open-local-history', onLocalHistory);
+      window.removeEventListener('otto:ide-open-compare', onCompare);
+      window.removeEventListener('otto:ide-git-action', onGitAction);
       window.removeEventListener('pagehide', onPageHide);
       window.removeEventListener('beforeunload', onPageHide);
     };
@@ -157,6 +167,7 @@
   let lastAgentOpen = false;
   $effect(() => {
     const open = ideAgent.panelOpen;
+    ideWorkspacePort.setAgentDockOpen(open);
     if (open !== lastAgentOpen) {
       lastAgentOpen = open;
       if (viewport.isPhone) {
@@ -242,10 +253,11 @@
     let shiftDirty = false;
     const onKeyDown = (e: KeyboardEvent): void => {
       if (e.key === 'Shift') {
-        if (e.metaKey || e.ctrlKey || e.altKey) shiftDirty = true;
+        if (!e.repeat) shiftDirty = Boolean(e.metaKey || e.ctrlKey || e.altKey);
         return;
       }
       shiftDirty = true;
+      lastShiftUp = 0;
       handleIdeWindowKeyDown(e, ui.overlayOpen, () => triggerAgentShortcut());
     };
     const onKeyUp = (e: KeyboardEvent): void => {
@@ -267,11 +279,11 @@
     };
   });
 
-  // Preserve CodeMirror `EditorState` & ⌘Z undo stack across screen switches (#76 §5).
+  // Preserve CodeMirror `EditorState` & ⌘Z undo stack across screen switches.
   onDestroy(() => {
+    ideWorkspacePort.setAgentDockOpen(false);
     ide.suspendOnPageLeave();
     ideAgent.dispose();
-    if (typeof document !== 'undefined') delete document.documentElement.dataset.ideScheme;
   });
 
   async function leaveOrEndCollab(): Promise<void> {
@@ -291,7 +303,7 @@
   }
 </script>
 
-<div class="ide-page" data-testid="ide-page" data-ide-scheme={resolvedIdeScheme}>
+<div class="ide-page" data-testid="ide-page">
   <PageHeader title="IDE">
     {#snippet badge()}
       <IdeWorkspaceSwitcher />
@@ -509,7 +521,7 @@
 
       <div class="ide-mobile-body">
         {#if mobileView === 'files'}
-          <IdeProjectTree />
+          <IdeProjectTree onOpenCompare={openCompareModal} />
         {:else if mobileView === 'tools'}
           <LazyMount lazy={IdeBottomDockLazy} what="bottom tool dock" variant="panel" />
         {:else if mobileView === 'agent'}
@@ -522,7 +534,7 @@
       <div class="ide-workbench">
         {#if explorerVisible}
           <div class="ide-rail-wrap" style:inline-size="{treeW}px">
-            <IdeProjectTree />
+            <IdeProjectTree onOpenCompare={openCompareModal} />
           </div>
           <PaneDivider bind:width={treeW} storageKey={TREE_W_KEY} min={180} max={620} defaultWidth={270} label="Resize project explorer" />
         {/if}
@@ -588,8 +600,8 @@
   {#if ide.pluginsOpen}
     <LazyMount lazy={IdePluginsModalLazy} what="extensions manager" quiet onerror={() => (ide.pluginsOpen = false)} />
   {/if}
-  {#if fallbackCompare}
-    <LazyMount lazy={IdeComparisonModalLazy} what="comparison tool" quiet props={{ ...fallbackCompare, onclose: () => (fallbackCompare = null) }} onerror={() => (fallbackCompare = null)} />
+  {#if compareTarget}
+    <LazyMount lazy={IdeComparisonModalLazy} what="comparison tool" quiet props={{ ...compareTarget, onclose: () => (compareTarget = null) }} onerror={() => (compareTarget = null)} />
   {/if}
 </div>
 

@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import { performance } from 'node:perf_hooks';
 import { test } from 'node:test';
 import {
+  buildPureSymbolDraftChip,
+  upsertIdeContextChipList,
+} from '../src/modules/ide/agent/ideSymbolChip.ts';
+import {
   buildIdeAgentPrompt,
   computeLineDiff,
   detectProposalLanguage,
@@ -466,4 +470,66 @@ test('buildIdeAgentPrompt omits empty wrapper when omitWhenEmpty is set and supp
   assert.equal(detectProposalLanguage('events/trace.jsonl'), 'jsonl');
   assert.equal(detectProposalLanguage('data/metrics.csv'), 'csv');
   assert.equal(detectProposalLanguage('data/metrics.tsv'), 'tsv');
+});
+
+test('attachSymbol (buildPureSymbolDraftChip + upsertIdeContextChipList) formats @relPath#SymbolName and slices exact symbol lines', () => {
+  const draftAdd = buildPureSymbolDraftChip('/ws/demo/calc/calc.go', 'calc/calc.go', SAMPLE_GO, {
+    name: 'Add',
+    kind: 'function',
+    line: 3,
+    end_line: 5,
+  });
+  assert.equal(draftAdd.kind, 'symbol');
+  assert.equal(draftAdd.label, '@calc/calc.go#Add');
+  assert.equal(draftAdd.sublabel, 'L3-L5');
+  assert.equal(draftAdd.path, '/ws/demo/calc/calc.go');
+  assert.equal(draftAdd.startLine, 3);
+  assert.equal(draftAdd.endLine, 5);
+  assert.equal(draftAdd.language, 'go');
+  assert.equal(draftAdd.snippet, 'func Add(a, b int) int {\n\treturn a + b\n}');
+
+  let seq = 0;
+  const first = upsertIdeContextChipList([], draftAdd, () => `ctx-${++seq}`);
+  assert.equal(first.next.length, 1);
+  assert.equal(first.chip.id, 'ctx-1');
+  assert.equal(first.chip.label, '@calc/calc.go#Add');
+
+  // Re-attaching the same symbol updates in place without duplicating the chip id.
+  const updatedBuf = SAMPLE_GO.replace('return a + b', 'return a + b + 1');
+  const draftAddEdited = buildPureSymbolDraftChip('/ws/demo/calc/calc.go', 'calc/calc.go', updatedBuf, {
+    name: 'Add',
+    kind: 'function',
+    line: 3,
+    end_line: 5,
+  });
+  const second = upsertIdeContextChipList(first.next, draftAddEdited, () => `ctx-${++seq}`);
+  assert.equal(second.next.length, 1);
+  assert.equal(second.chip.id, 'ctx-1');
+  assert.ok(second.chip.snippet.includes('return a + b + 1'));
+
+  // Empty buffer falls back cleanly to `<kind> <name> (L<start>-L<end>)` and round-trips through `<ide_context>`.
+  const fallbackSub = buildPureSymbolDraftChip('/ws/demo/calc/calc.go', 'calc/calc.go', '', {
+    name: 'Sub',
+    kind: 'function',
+    line: 7,
+    end_line: 9,
+  });
+  assert.equal(fallbackSub.label, '@calc/calc.go#Sub');
+  assert.equal(fallbackSub.snippet, 'function Sub (L7-L9)');
+
+  const third = upsertIdeContextChipList(second.next, fallbackSub, () => `ctx-${++seq}`);
+  assert.equal(third.next.length, 2);
+
+  const prompt = buildIdeAgentPrompt('Optimize symbol implementations', third.next, {
+    workspaceRoot: '/ws/demo',
+    omitWhenEmpty: true,
+  });
+  const parsed = parseIdeContextChipsFromPrompt(prompt);
+  assert.equal(parsed.length, 2);
+  assert.equal(parsed[0].kind, 'symbol');
+  assert.equal(parsed[0].label, '@calc/calc.go#Add');
+  assert.equal(parsed[0].startLine, 3);
+  assert.equal(parsed[0].endLine, 5);
+  assert.equal(parsed[1].kind, 'symbol');
+  assert.equal(parsed[1].label, '@calc/calc.go#Sub');
 });

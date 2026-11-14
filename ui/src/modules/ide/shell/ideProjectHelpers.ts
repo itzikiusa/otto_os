@@ -3,6 +3,12 @@
 
 import { api } from '../../../lib/api/client';
 import { confirmer } from '../../../lib/confirm.svelte';
+import {
+  loadNamedIdeProjectsLocal,
+  saveNamedIdeProjectsLocal,
+  type NamedIdeProject,
+} from '../../../lib/ideProjectsModel';
+import { ideWorkspacePort } from '../../../lib/ideWorkspacePort.svelte';
 import { lsGet, lsSet } from '../../../lib/storage';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
@@ -114,6 +120,10 @@ export function projectStorageKey(target: IdeTargetSpec): string {
 }
 
 export function loadSavedAdditionalRoots(target: IdeTargetSpec): string[] {
+  if (!target.root) return [];
+  if (target.kind === 'local') {
+    return ideWorkspacePort.rootsForLocal(target.root);
+  }
   const key = projectStorageKey(target);
   if (!key) return [];
   try {
@@ -127,6 +137,11 @@ export function loadSavedAdditionalRoots(target: IdeTargetSpec): string[] {
 }
 
 export function saveAdditionalRootsLocal(target: IdeTargetSpec, roots: string[]): void {
+  if (!target.root) return;
+  if (target.kind === 'local') {
+    ideWorkspacePort.saveRootsForLocal(target.root, roots);
+    return;
+  }
   const key = projectStorageKey(target);
   if (!key) return;
   try {
@@ -269,6 +284,17 @@ export async function attachProjectFolder(host: ProjectHelperHost, rawFolder: st
     return false;
   }
   const nextRoots = [...host.additionalRoots, clean];
+  try {
+    const resp = await api.post<{ env: IdeProjectEnvironment }>('/ide/projects/folders', {
+      target: host.targetPayload,
+      folder_path: clean,
+    });
+    if (resp?.env) host.projectEnv = resp.env;
+  } catch (e) {
+    toastError(`Couldn’t add ${ideBasename(clean)} to project`, e);
+    return false;
+  }
+
   host.additionalRoots = nextRoots;
   host.expandedDirs = { ...host.expandedDirs, [clean]: true };
   saveAdditionalRootsLocal(host.target, nextRoots);
@@ -279,16 +305,6 @@ export async function attachProjectFolder(host: ProjectHelperHost, rawFolder: st
   for (let i = 0; i < host.tabs.length; i++) {
     host.tabs[i].external = isPathExternal(host.tabs[i].path, allRoots);
   }
-
-  try {
-    const resp = await api.post<{ env: IdeProjectEnvironment }>('/ide/projects/folders', {
-      target: host.targetPayload,
-      folder_path: clean,
-    });
-    if (resp?.env) host.projectEnv = resp.env;
-  } catch {
-    await host.saveEnvironment({ additional_roots: nextRoots });
-  }
   toasts.success(`Added ${ideBasename(clean)} to project`);
   return true;
 }
@@ -297,6 +313,15 @@ export async function detachProjectFolder(host: ProjectHelperHost, rawFolder: st
   const clean = normalizeRootPath(rawFolder);
   if (!host.additionalRoots.includes(clean)) return false;
   const nextRoots = host.additionalRoots.filter((r) => r !== clean);
+  try {
+    const q = host.targetQuery({ folder_path: clean });
+    const resp = await api.del<{ env?: IdeProjectEnvironment }>(`/ide/projects/folders?${q}`);
+    if (resp?.env) host.projectEnv = resp.env;
+  } catch (e) {
+    toastError(`Couldn’t remove ${ideBasename(clean)} from project`, e);
+    return false;
+  }
+
   host.additionalRoots = nextRoots;
   saveAdditionalRootsLocal(host.target, nextRoots);
 
@@ -309,14 +334,6 @@ export async function detachProjectFolder(host: ProjectHelperHost, rawFolder: st
   const allRoots = host.projectRoots;
   for (let i = 0; i < host.tabs.length; i++) {
     host.tabs[i].external = isPathExternal(host.tabs[i].path, allRoots);
-  }
-
-  try {
-    const q = host.targetQuery({ folder_path: clean });
-    const resp = await api.del<{ env?: IdeProjectEnvironment }>(`/ide/projects/folders?${q}`);
-    if (resp?.env) host.projectEnv = resp.env;
-  } catch {
-    await host.saveEnvironment({ additional_roots: nextRoots });
   }
   toasts.info(`Removed ${ideBasename(clean)} from project`);
   return true;
@@ -466,11 +483,38 @@ export function mergeFastRunConfigs(saved: IdeRunConfig[], detected: IdeRunConfi
   return [...explicit, ...mergedAuto];
 }
 
-const NAMED_PROJECTS_KEY = 'otto.ide.namedProjects.v1';
 const ACTIVE_PROJECT_KEY = 'otto.ide.activeProjectId.v1';
-const LAST_ROOT_KEY = 'otto.ide.lastRoot';
 const BUILD_TOOL_PREFS_PREFIX = 'otto.ide.buildToolPrefs:';
 const GRADLE_FILES = new Set(['build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts', 'gradlew']);
+
+export function toIdeNamedProject(p: NamedIdeProject): IdeNamedProject {
+  return {
+    id: p.id,
+    name: p.name,
+    primary_root: p.primaryRoot,
+    folders: p.folders,
+    pinned: p.pinned,
+    updated_at: p.updatedAt,
+  };
+}
+
+export function fromIdeNamedProject(p: IdeNamedProject): NamedIdeProject {
+  const rawTs = p.updated_at;
+  const updatedAt =
+    typeof rawTs === 'number' && Number.isFinite(rawTs)
+      ? rawTs
+      : rawTs
+        ? Date.parse(String(rawTs)) || Date.now()
+        : Date.now();
+  return {
+    id: p.id,
+    name: p.name,
+    primaryRoot: p.primary_root,
+    folders: p.folders,
+    pinned: p.pinned,
+    updatedAt,
+  };
+}
 
 export function emitIdeProjectsChanged(projects?: IdeNamedProject[], activeProjectId?: string | null, root?: string): void {
   if (typeof window !== 'undefined') {
@@ -478,37 +522,21 @@ export function emitIdeProjectsChanged(projects?: IdeNamedProject[], activeProje
   }
 }
 
-export function saveLastIdeRoot(root: string): void { if (root) lsSet(LAST_ROOT_KEY, root); }
+export function saveLastIdeRoot(root: string): void {
+  if (root) ideWorkspacePort.setLastRoot(root);
+}
 export function loadActiveProjectIdLocal(): string | null { return lsGet(ACTIVE_PROJECT_KEY) || null; }
 export function saveActiveProjectIdLocal(id: string | null, projects?: IdeNamedProject[], root?: string): void {
   lsSet(ACTIVE_PROJECT_KEY, id ?? '');
   emitIdeProjectsChanged(projects, id, root);
 }
 export function saveNamedProjectsLocal(projects: IdeNamedProject[], activeProjectId?: string | null): void {
-  try { lsSet(NAMED_PROJECTS_KEY, JSON.stringify(projects)); } catch { /* quota */ }
-  emitIdeProjectsChanged(projects, activeProjectId);
+  saveNamedIdeProjectsLocal(projects.map(fromIdeNamedProject));
+  if (activeProjectId !== undefined) emitIdeProjectsChanged(projects, activeProjectId);
 }
 
 export function loadNamedProjectsLocal(): IdeNamedProject[] {
-  try {
-    const raw = lsGet(NAMED_PROJECTS_KEY);
-    const parsed = raw ? JSON.parse(raw) : null;
-    if (!Array.isArray(parsed)) return [];
-    const out: IdeNamedProject[] = [];
-    for (let i = 0; i < parsed.length; i++) {
-      const p = parsed[i];
-      if (!p || typeof p.id !== 'string' || typeof p.primary_root !== 'string') continue;
-      const primary = normalizeRootPath(p.primary_root);
-      if (!primary) continue;
-      const rawFolders: string[] = Array.isArray(p.folders) ? p.folders.map((f: unknown) => normalizeRootPath(String(f))).filter(Boolean) : [];
-      out.push({
-        id: p.id, name: String(p.name || ideBasename(primary) || 'Project').trim(), primary_root: primary,
-        folders: [primary, ...rawFolders.filter((f) => f !== primary)], pinned: p.pinned !== false,
-        updated_at: typeof p.updated_at === 'number' ? p.updated_at : Date.now(),
-      });
-    }
-    return out;
-  } catch { return []; }
+  return loadNamedIdeProjectsLocal().map(toIdeNamedProject);
 }
 
 export interface WorkspaceBuildToolPrefs { open: boolean; mavenProfiles: string[]; springProfiles: string[]; skipTests: boolean; offline: boolean; }

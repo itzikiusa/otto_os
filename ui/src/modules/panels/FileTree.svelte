@@ -17,12 +17,13 @@
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
-  import FolderPicker from '../../lib/components/FolderPicker.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  const FolderPickerModal = lazyComponent(() => import('../../lib/components/FolderPicker.svelte'));
   import { emptyHistory, folderCrumbs, historyTarget, parentFolder, resolveJump, settleFolder } from '../../lib/components/folderNavigation';
   import { lsGet, lsSet } from '../../lib/storage';
   import { ListWindow } from '../../lib/listWindow.svelte';
   import { tabRowIn, treeKeyAction } from './treeKeys';
-  import { renderMarkdownGfm } from '../../lib/md';
   import type { FsBrowse, FsEntry, FsRead } from '../../lib/api/types';
 
   interface Props {
@@ -324,17 +325,19 @@
 
   // ── Markdown / HTML preview ────────────────────────────────────────────────
   let previewMode = $state(true);
+  let mdMod = $state<typeof import('../../lib/md') | null>(null);
   const viewerExt = $derived((viewerName.split('.').pop() ?? '').toLowerCase());
   const canPreview = $derived(['md', 'markdown', 'mdx', 'html', 'htm'].includes(viewerExt));
   const isMarkdown = $derived(['md', 'markdown', 'mdx'].includes(viewerExt));
+  $effect(() => { if (viewerFile && isMarkdown && !mdMod) void import('../../lib/md').then((m) => (mdMod = m)).catch(() => {}); });
   // Rendered HTML wrapped for a sandboxed iframe (no scripts run).
   const previewSrcdoc = $derived.by(() => {
-    if (!viewerFile || !canPreview) return '';
+    if (!viewerFile || !canPreview || (isMarkdown && !mdMod)) return '';
     const inner = isMarkdown ? renderMarkdown(viewerFile.content) : viewerFile.content;
     return `<!doctype html><html><head><meta charset="utf-8"><style>${PREVIEW_CSS}</style></head><body>${inner}</body></html>`;
   });
   // Through lib/md (sanitized, never throws) — not a direct `marked` call.
-  const renderMarkdown = (src: string): string => renderMarkdownGfm(src, { breaks: true });
+  const renderMarkdown = (src: string): string => (mdMod ? mdMod.renderMarkdownGfm(src, { breaks: true }) : '');
   // The srcdoc is an isolated, script-less document: it can't see the app's
   // tokens, so it gets a palette per resolved scheme (it used to be dark-only
   // — light grey text on a hard-coded near-black box in the light theme).
@@ -424,12 +427,8 @@
 </script>
 
 {#if showPicker}
-  <FolderPicker
-    title="Choose folder"
-    start={effectiveRoot}
-    onpick={onPickFolder}
-    onclose={() => (showPicker = false)}
-  />
+  <LazyMount lazy={FolderPickerModal} what="the folder picker" quiet onerror={() => (showPicker = false)}
+    props={{ title: 'Choose folder', start: effectiveRoot, onpick: onPickFolder, onclose: () => (showPicker = false) }} />
 {/if}
 
   <div class="ft-wrap">

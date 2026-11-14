@@ -6769,7 +6769,7 @@ Full multi-language IDE over Local (`kind: "local"`) and Remote SSH (`kind: "ssh
 | GET /ide/fs/file?kind=&root=&workspace_id=&connection_id=&path= | Agents: Edit | query `IdeFileQuery` | `IdeFileReadResp` (`content`, `sha256`, `language`, `line_count`, `read_only` for external SDK/module files) |
 | PUT /ide/fs/file | Agents: Edit | `IdeFileWriteReq` (`expected_sha256?` → 409 on mismatch; records Local History snapshot) | `IdeFileWriteResp` |
 | POST /ide/fs/mutate | Agents: Edit | `IdeFsMutateReq` (`mkdir` \| `create_file` \| `rename` \| `delete` \| `duplicate`; snapshots deleted files into Local History before unlink) | `IdeFsMutateResp` |
-| POST /ide/fs/complete | Agents: Edit | `IdeFsCompleteReq` (`prefix` incl. `@~/...`, `@../...`, `/abs/...`, or workspace-relative; `workspace_roots`, `limit?`) | `IdeFsCompleteResp` (`items`, `truncated` in `<15ms` for `@` composer menus) |
+| POST /ide/fs/complete | Agents: Edit | `IdeFsCompleteReq` (`query` [alias `prefix`] incl. `@~/...`, `@../...`, `/abs/...`, or workspace-relative; `cwd?`, `roots`, `target?`, `aliases`, `limit?`) | `IdeFsCompleteResp` (`items`, `base_dir`, `elapsed_ms` in `<15ms` for `@` composer menus) |
 | POST /ide/search | Agents: Edit | `IdeSearchReq` (`files` \| `text` \| `symbols` \| `all` across primary + attached roots) | `IdeSearchResp` |
 | POST /ide/replace | Agents: Edit | `IdeReplaceReq` (`dry_run?` preview or atomic apply across primary + attached roots) | `IdeReplaceResp` |
 | POST /ide/gutter | Agents: Edit | `IdeGutterReq` | `IdeGutterResp` (runnable tests, benchmarks, `main` / script entry points + plugin detectors) |
@@ -6781,17 +6781,17 @@ Full multi-language IDE over Local (`kind: "local"`) and Remote SSH (`kind: "ssh
 | POST /ide/lsp/format | Agents: Edit | `IdeFormatReq` | `IdeFormatResp` |
 | POST /ide/lsp/code-actions | Agents: Edit | `IdeCodeActionsReq` | `IdeCodeActionsResp` |
 | POST /ide/lsp/diagnostics | Agents: Edit | `IdeDiagnosticsReq` (`path`, `content?`, `language?`, `target?`, `project_folders?`) | `IdeDiagnosticsResp` (`diagnostics` with concrete `quick_fixes` text edits across Java Lombok/`src.zip`/Maven/Gradle, Go, Python, Rust, JS/TS, Shell, JSON) |
-| POST /ide/lsp/hover | Agents: Edit | `IdeHoverReq` (`path`, `line`, `character`, `content?`, `target?`, `project_folders?`) | `IdeHoverResp` (compact JetBrains Quick-Doc `signature`, `summary`, `doc_comment`, `package_or_module`, `defined_at`) |
+| POST /ide/lsp/hover | Agents: Edit | `IdeHoverReq` (`path`, `line`, `character` [alias `column`], `content?`, `target?`, `project_folders?`) | `IdeHoverResp` (compact JetBrains Quick-Doc `found`, `symbol`, `kind`, `package_name`, `signature`, `summary`, `full_doc`, `defined_in`) |
 | GET /ide/history/list?root=&path=&include_deleted=&limit= | Agents: Edit | query `IdeHistoryListQuery` | `IdeHistoryListResp` (content-addressed Local History snapshots + `deleted` entries under folder paths) |
 | GET /ide/history/entry?root=&id= | Agents: Edit | query `IdeHistoryEntryQuery` | `IdeHistoryEntryResp` (`entry`, `content` UTF-8 blob) |
 | POST /ide/history/restore | Agents: Edit | `IdeHistoryRestoreReq` (`root` or `target`, `id`) | `IdeHistoryRestoreResp` (recreates parent dirs + writes exact snapshot bytes back to disk) |
 | POST /ide/history/snapshot | Agents: Edit | `IdeHistorySnapshotReq` (`root` or `target`, `path`, `content`, `label?`) | `IdeHistorySnapshotResp` (`entry`) |
-| GET /ide/toolchains?kind=&root=&workspace_id=&connection_id=&include_catalog= | Agents: Edit | query `IdeTargetQuery` (`include_catalog=true` fetches live vendor versions; default `false` uses bundled catalog with zero external network I/O) | `IdeToolchainsResp` (`sdks`, `detected` system SDKs across `/Library/Java/JavaVirtualMachines`, SDKMAN, Homebrew, `pyenv`/`uv`, `rustup`, `nvm`/`fnm`/`volta`, `catalog`, `jobs`) |
+| GET /ide/toolchains?kind=&root=&workspace_id=&connection_id=&include_catalog= | Agents: Edit | query `IdeTargetQuery` (`include_catalog=true` fetches live vendor versions; default `false` uses bundled catalog with zero external network I/O) | `IdeToolchainsResp` (`target_os`, `target_arch`, `ecosystems`, `detected` system SDKs across `/Library/Java/JavaVirtualMachines`, SDKMAN, Homebrew, `pyenv`/`uv`, `rustup`, `nvm`/`fnm`/`volta`, `jobs`) |
 | POST /ide/toolchains/install | human + Agents: Edit | `IdeInstallToolchainReq` | `IdeInstallJobResp` |
-| POST /ide/toolchains/local | Agents: Edit | `IdeRegisterLocalSdkReq` (`ecosystem`, local SDK `path`) | `IdeRegisterLocalSdkResp` (`sdk` with `source: "local"`) |
-| DELETE /ide/toolchains/local?kind=&root=&workspace_id=&connection_id=&ecosystem=&id=&path= | Agents: Edit | query `IdeDeleteLocalSdkQuery` | `IdeOkResp` |
+| POST /ide/toolchains/local | human + Agents: Edit | `IdeRegisterLocalSdkReq` (`ecosystem`, local SDK `path`) | `IdeRegisterLocalSdkResp` (`sdk` with `source: "local"`) |
+| DELETE /ide/toolchains/local?kind=&root=&workspace_id=&connection_id=&ecosystem=&id=&path= | human + Agents: Edit | query `IdeDeleteLocalSdkQuery` | `IdeOkResp` |
 | GET /ide/toolchains/jobs/{job_id} | Agents: Edit | — | `IdeInstallJobResp` |
-| POST /ide/toolchains/python-venv | Agents: Edit | `IdeToolchainPythonVenvReq` (`target?`, `root?`, `venv_name?`, `base_python?`) | `IdeToolchainPythonVenvResp` (`venv`, `interpreter_path`) |
+| POST /ide/toolchains/python-venv | human + Agents: Edit | `IdeToolchainPythonVenvReq` (`target?`, `root?`, `path?` [alias `venv_dir`], `base_python?`) | `IdeToolchainPythonVenvResp` (`ok`, `venv`, `interpreter_path`) |
 | GET /ide/shell-env | Agents: Edit | — | `IdeShellEnvResp` (cached login+interactive `$SHELL -lic` snapshot: `status`, `shell`, `vars`, `var_count`, `loaded_at`, `duration_ms`) |
 | POST /ide/shell-env/reload | Agents: Edit | — | `IdeShellEnvResp` (invalidates and re-captures the cached `$SHELL -lic` snapshot once) |
 | GET /ide/projects | Agents: Edit | — | `IdeProjectsResp` (`projects`: named multi-repo IDE projects) |
@@ -6801,19 +6801,19 @@ Full multi-language IDE over Local (`kind: "local"`) and Remote SSH (`kind: "ssh
 | POST /ide/projects/folders | Agents: Edit | `IdeProjectFolderReq` (`target`, `folder_path`) | `IdeEnvironmentResp` (attaches `folder_path` to `env.additional_roots`) |
 | DELETE /ide/projects/folders?kind=&root=&workspace_id=&connection_id=&folder_path= | Agents: Edit | query `IdeDeleteProjectFolderQuery` | `IdeEnvironmentResp` (detaches `folder_path` from `env.additional_roots`) |
 | POST /ide/projects/folders/bulk | Agents: Edit | `IdeBulkFoldersReq` (`target`, `folder_paths`) | `IdeBulkFoldersResp` (`additional_roots`) |
-| POST /ide/deps/inspect | Agents: Edit | `IdeDepsInspectReq` (`target?`, `path`, `content?`) | `IdeDepsInspectResp` (`dependencies`, `summary` across `go.mod`, `pom.xml`, `build.gradle*`, `Cargo.toml`, `package.json`, `pyproject.toml`/`requirements.txt` with `latest_version`, `deprecated`, `vulnerabilities`, line offsets) |
-| POST /ide/deps/action | Agents: Edit | `IdeDepsActionReq` (`upgrade` \| `exclude` \| `reimport`) | `IdeDepsActionResp` (`updated_content`, `command_output`) |
-| POST /ide/build-tools/model | Agents: Edit | `IdeBuildToolsModelReq` (`target?`, `root?`) | `IdeBuildToolsModelResp` (`kind`, `modules`, `profiles`, `spring_profiles`, `lifecycle_phases`, `tasks`) |
-| GET /ide/environments?kind=&root=&workspace_id=&connection_id= | Agents: Edit | query `IdeTargetQuery` | `IdeEnvironmentsResp` (project SDK overrides, `module_sdks`, `inherit_shell_env`, `additional_roots`, Python venvs, `.env` files, instant `<25ms` auto-discovered + saved run configs, `shell_env` summary) |
+| POST /ide/deps/inspect | Agents: Edit | `IdeDepsInspectReq` (`target?`, `path`, `content?`) | `IdeDepsInspectResp` (`ecosystem`, `items` across `go.mod`, `pom.xml`, `build.gradle*`, `Cargo.toml`, `package.json`, `pyproject.toml`/`requirements.txt` with `latest_version`, `latest_patch`, `deprecated`, `vulnerabilities`, line offsets) |
+| POST /ide/deps/action | human + Agents: Edit | `IdeDepsActionReq` (`target?`, `path`, `action` [`tidy` \| `vendor` \| `sync` \| `why` \| `merge_directives` \| `maven_sync` \| `maven_tree` \| `gradle_sync` \| `vuln_scan` \| `update_one` \| `update_direct_latest` \| `update_direct_patch` \| `update_all_latest` \| `update_all_patch`], `module?`, `version?`) | `IdeDepsActionResp` (`ok`, `updated_content`, `output`) |
+| POST /ide/build-tools/model | Agents: Edit | `IdeBuildToolsModelReq` (`roots`, `target?`) | `IdeBuildToolsModelResp` (`has_maven`, `has_gradle`, `profiles`, `projects`) |
+| GET /ide/environments?kind=&root=&workspace_id=&connection_id= | Agents: Edit | query `IdeTargetQuery` | `IdeEnvironmentsResp` (`env` incl. project SDK overrides, `module_sdks`, `inherit_shell_env`, `additional_roots`; `python_venvs`, `dotenv_files`, `configs`, instant `<25ms` auto-discovered `detected_configs`, `effective_env`) |
 | PUT /ide/environments | Agents: Edit | `IdeUpdateEnvironmentReq` (secrets stored in Keychain; supports per-module `module_sdks`) | `IdeEnvironmentResp` |
-| POST /ide/environments/python-venv | Agents: Edit | `IdeCreatePythonVenvReq` | `IdeCreatePythonVenvResp` |
+| POST /ide/environments/python-venv | human + Agents: Edit | `IdeCreatePythonVenvReq` | `IdeCreatePythonVenvResp` |
 | POST /ide/run-configs | Agents: Edit | `IdeUpsertRunConfigReq` (supports `maven_profiles` / `spring_profiles`) | `IdeRunConfigResp` |
 | DELETE /ide/run-configs/{id} | Agents: Edit | — | `IdeOkResp` |
-| POST /ide/runs | Agents: Edit | `IdeStartRunReq` (saved `config_id`, inline `config`, or `kind`/`program`/`args`/`maven_profiles`/`spring_profiles`) | `IdeRunResp` |
+| POST /ide/runs | human + Agents: Edit | `IdeStartRunReq` (`target`, saved `config_id?`, inline `adhoc?` [alias `ad_hoc`] `IdeRunConfig`, `project_folders?`, `maven_profiles?`, `spring_profiles?`, `skip_tests?`, `offline?`) | `IdeRunResp` |
 | GET /ide/runs/{run_id}?tail_lines= | Agents: Edit | query `tail_lines?` | `IdeRunResp` (`IdeRunState` incl. `output_seq`, bounded `output` ring, parsed `tests`) |
 | POST /ide/runs/{run_id}/stop | Agents: Edit | — | `IdeRunResp` |
 | GET /ide/debug/sessions | Agents: Edit | — | `IdeDebugSessionsResp` |
-| POST /ide/debug/sessions | Agents: Edit | `IdeStartDebugReq` (`codelldb` / `otto-lldb-dap`, `dlv`, `debugpy` / `otto-py-bdb`, `js-debug` / `otto-node-cdp`, `java-debug-adapter` / `otto-jdi-jdwp`, `otto-sh-dap`, or `mock`; accepts `launch` or flat `program`/`cwd`/`args`) | `IdeDebugSessionResp` |
+| POST /ide/debug/sessions | human + Agents: Edit | `IdeStartDebugReq` (`target`, `language`, `config_id?`, nested `launch` `IdeDebugLaunchSpec` across `codelldb` / `otto-lldb-dap`, `dlv`, `debugpy` / `otto-py-bdb`, `js-debug` / `otto-node-cdp`, `java-debug-adapter` / `otto-jdi-jdwp`, `otto-sh-dap`, or `mock`, `breakpoints?`, `project_folders?`, `maven_profiles?`, `spring_profiles?`, `skip_tests?`, `offline?`) | `IdeDebugSessionResp` |
 | GET /ide/debug/sessions/{id} | Agents: Edit | — | `IdeDebugSessionResp` |
 | GET /ide/debug/sessions/{id}/events | Agents: Edit | — | `text/event-stream` (`IdeDebugSessionSnapshot` SSE frames) |
 | PUT /ide/debug/sessions/{id}/breakpoints | Agents: Edit | `IdeSetBreakpointsReq` | `IdeDebugSessionResp` |
@@ -6821,7 +6821,7 @@ Full multi-language IDE over Local (`kind: "local"`) and Remote SSH (`kind: "ssh
 | POST /ide/debug/sessions/{id}/variables | Agents: Edit | `IdeDebugVariablesReq` | `IdeDebugVariablesResp` |
 | POST /ide/debug/sessions/{id}/evaluate | Agents: Edit | `IdeDebugEvaluateReq` | `IdeDebugEvaluateResp` |
 | GET /ide/collab/rooms | Agents: Edit | — | `IdeCollabRoomsResp` |
-| POST /ide/collab/rooms | human + Agents: Edit | `IdeCreateCollabRoomReq` | `IdeCreateCollabRoomResp` (`room`, `invite_token`, `share_hash`) |
+| POST /ide/collab/rooms | human + Agents: Edit | `IdeCreateCollabRoomReq` | `IdeCreateCollabRoomResp` (`room`, `invite_token`, `share_hash`, `host_peer_id`, `host_peer_secret`) |
 | POST /ide/collab/rooms/{room_id}/role | Agents: Edit | `IdeCollabRoleReq` (`viewer` \| `editor`) | `IdeCollabRoomResp` |
 | DELETE /ide/collab/rooms/{room_id} | Agents: Edit | — | `IdeOkResp` |
 | POST /ide/collab/guest/{room_id}/join | collab invite token | `IdeCollabJoinReq` | `IdeCollabJoinResp` (`peer_id`, `peer_secret`, `color`, `room`) |

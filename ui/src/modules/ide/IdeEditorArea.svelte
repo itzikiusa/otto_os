@@ -3,11 +3,15 @@
   import CodeEditor, { registerIdeEditorCore } from '../../lib/components/CodeEditor.svelte';
   import type * as CmIdeDepsMod from '../../lib/components/cm-ide-deps';
   import type * as CmIdeMod from '../../lib/components/cm-ide-extensions';
-  import * as cmIdeHistoryMod from '../../lib/components/cm-ide-history';
   import * as cmIdeThemeMod from '../../lib/components/cm-ide-theme';
   import { IDE_PREFS_EVENT, readIdeEditorPreferences } from '../../lib/components/cm-ide-theme';
 
-  registerIdeEditorCore(cmIdeThemeMod, cmIdeHistoryMod);
+  let histReady = $state(false);
+  registerIdeEditorCore(cmIdeThemeMod, null);
+  void import('../../lib/components/cm-ide-history').then((m) => {
+    registerIdeEditorCore(cmIdeThemeMod, m);
+    histReady = true;
+  });
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
@@ -34,7 +38,6 @@
     pushIdeNavLocation,
     putIdeLocalHistoryLabel,
     resetIdeEditorBridgeState,
-    scheduleAutoLocalHistorySnapshot,
   } from './editor/ideEditorStoreBridge.svelte';
   import type { IdeOutlineNode } from './editor/ideLangAnalyzer';
   let langAnalyzerMod = $state<typeof import('./editor/ideLangAnalyzer') | null>(null);
@@ -110,14 +113,14 @@
     const cur = ide.activeTab;
     if (!cur) { stagedPrimaryTab = null; return; }
     if (!langAnalyzerMod) void import('./editor/ideLangAnalyzer').then((m) => { langAnalyzerMod = m; });
-    if (!cur.loading && !cur.error) { stagedPrimaryTab = cur; everMountedEditor = true; }
+    if (!cur.loading && !cur.error && histReady) { stagedPrimaryTab = cur; everMountedEditor = true; }
     else if (stagedPrimaryTab && !ide.tabs.some((t) => t.path === stagedPrimaryTab?.path)) stagedPrimaryTab = null;
   });
 
   $effect(() => {
     const cur = ide.splitTab;
     if (!cur) { stagedSplitTab = null; return; }
-    if (!cur.loading && !cur.error) { stagedSplitTab = cur; everMountedEditor = true; }
+    if (!cur.loading && !cur.error && histReady) { stagedSplitTab = cur; everMountedEditor = true; }
     else if (stagedSplitTab && !ide.tabs.some((t) => t.path === stagedSplitTab?.path)) stagedSplitTab = null;
   });
 
@@ -393,7 +396,7 @@
             props={{
               path: stagedPrimaryTab.path, content: stagedPrimaryTab.content,
               readOnly: stagedPrimaryTab.readOnly || !ide.canEditCollab, isJsonl: activeDocKind === 'jsonl',
-              onchange: (val: string) => { ide.updateBuffer(stagedPrimaryTab!.path, val); scheduleAutoLocalHistorySnapshot(stagedPrimaryTab!.path, val); },
+              onchange: (val: string) => { ide.updateBuffer(stagedPrimaryTab!.path, val); },
               onswitchtext: (ln: number) => { tableModeByPath = { ...tableModeByPath, [stagedPrimaryTab!.path]: 'text' }; requestAnimationFrame(() => primaryEditorRef?.goToLine(ln, 1)); },
             }}
           />
@@ -416,7 +419,7 @@
             peerCursors={ide.peerCursors.filter((p) => p.path === pTab.path)}
             keymapPreset={ide.keymapPreset}
             jumpToLine={ide.jumpRequest?.path === pTab.path ? { line: ide.jumpRequest.line, column: ide.jumpRequest.col, seq: ide.jumpRequest.seq } : null}
-            onchange={(val) => { ide.updateBuffer(pTab.path, val); scheduleAutoLocalHistorySnapshot(pTab.path, val); }}
+            onchange={(val) => { ide.updateBuffer(pTab.path, val); }}
             onCursorChange={(info) => ide.updateCursor(pTab.path, { line: info.line, col: info.column, cursors: info.cursorCount, selections: info.selections })}
             onDefinitionJump={(t) => void performIdeDive('definition', pTab.path, t, pTab.content)}
             onImplementationJump={(t) => void performIdeDive('implementation', pTab.path, t, pTab.content)}
@@ -430,7 +433,6 @@
             onOpenLocalHistory={() => {
               flushAutoLocalHistorySnapshot(pTab.path);
               window.dispatchEvent(new CustomEvent('otto:ide-open-compare', { detail: { mode: 'local-history', path: pTab.path } }));
-              window.dispatchEvent(new CustomEvent('otto:ide-open-local-history', { detail: { path: pTab.path } }));
             }}
             onOpenDepAnalyzer={() => { manifestModeByPath = { ...manifestModeByPath, [pTab.path]: 'analyzer' }; }}
             onOpenManifestIntention={(ln, dep) => openIntentionPopoverAt(pTab.path, ln, 1, { manifestDep: dep })}
@@ -499,7 +501,7 @@
                 pausedLine={ide.activeDebug?.state === 'paused' && ide.activeDebug.paused_file === sTab.path ? (ide.activeDebug.paused_line ?? null) : null}
                 inlineValues={ide.activeDebug?.state === 'paused' && ide.activeDebug.paused_file === sTab.path ? ide.activeDebug.inline_values : []}
                 keymapPreset={ide.keymapPreset}
-                onchange={(val) => { ide.updateBuffer(sTab.path, val); scheduleAutoLocalHistorySnapshot(sTab.path, val); }}
+                onchange={(val) => { ide.updateBuffer(sTab.path, val); }}
                 onDefinitionJump={(t) => void performIdeDive('definition', sTab.path, t, sTab.content)}
                 onImplementationJump={(t) => void performIdeDive('implementation', sTab.path, t, sTab.content)}
                 onFindUsages={(ctx) => void ide.findReferences(sTab.path, ctx.line, ctx.column, ctx.symbol)}

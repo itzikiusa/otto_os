@@ -1,8 +1,10 @@
 <script lang="ts">
   // Lazy-loaded Workspace & Named Multi-Repo Project switcher popover.
   import { tick } from 'svelte';
+  import { placeAnchored, type AnchorPlacement } from '../../../lib/anchorPlace';
   import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import { rowMenu } from '../../../lib/rowMenu';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
   import { ide, ideBasename, type IdeNamedProject } from '../ideStore.svelte';
 
@@ -18,7 +20,8 @@
   let query = $state('');
   let popEl = $state<HTMLDivElement | undefined>(undefined);
   let searchEl = $state<HTMLInputElement | undefined>(undefined);
-  let pos = $state({ left: 12, top: 48, width: 500, maxH: 460 });
+  let width = $state(500);
+  let pos = $state<AnchorPlacement>({ left: 12, top: 48, maxH: 460 });
 
   function shortenHomePath(p: string): string {
     if (!p) return '';
@@ -49,19 +52,17 @@
     );
   });
 
+  function closePopover(restoreFocus = true): void {
+    onclose();
+    if (restoreFocus) triggerEl?.focus();
+  }
+
   function clampPosition(): void {
     if (typeof window === 'undefined' || !triggerEl) return;
-    const rect = triggerEl.getBoundingClientRect();
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const width = Math.max(260, Math.min(540, vw - 16));
-    const isRtl = document.documentElement.dir === 'rtl';
-    const rawLeft = isRtl ? rect.right - width : rect.left;
-    const left = Math.max(8, Math.min(rawLeft, vw - width - 8));
-    const maxH = Math.max(200, Math.min(520, vh - 16));
-    const measuredH = popEl ? Math.min(popEl.offsetHeight || 340, maxH) : 340;
-    const top = Math.max(8, Math.min(rect.bottom + 6, vh - measuredH - 8));
-    pos = { left, top, width, maxH };
+    width = Math.max(260, Math.min(540, window.innerWidth - 16));
+    if (popEl) {
+      pos = placeAnchored(triggerEl, popEl, { prefer: 'below', align: 'start' });
+    }
   }
 
   $effect(() => {
@@ -75,15 +76,14 @@
   $effect(() => {
     void filteredWorkspaces.length;
     void filteredNamedProjects.length;
-    requestAnimationFrame(() => clampPosition());
+    void tick().then(clampPosition);
   });
 
   $effect(() => {
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') {
         e.stopPropagation();
-        onclose();
-        triggerEl?.focus();
+        closePopover(true);
       }
     };
     const onResize = (): void => clampPosition();
@@ -99,7 +99,7 @@
     try {
       await ide.setLocalTarget(rootPath, id);
     } finally {
-      onclose();
+      closePopover(true);
     }
   }
 
@@ -107,20 +107,20 @@
     try {
       await ide.activateProject(proj.id);
     } finally {
-      onclose();
+      closePopover(true);
     }
   }
 </script>
 
-<div class="ws-backdrop" role="presentation" onclick={onclose}></div>
+<div class="ws-backdrop" role="presentation" onclick={() => closePopover(true)}></div>
 <div
   bind:this={popEl}
   class="ws-popover"
   role="dialog"
   aria-label="Switch workspace or project folder"
-  style:inset-inline-start="{pos.left}px"
+  style:left="{pos.left}px"
   style:top="{pos.top}px"
-  style:inline-size="{pos.width}px"
+  style:inline-size="{width}px"
   style:max-block-size="{pos.maxH}px"
   data-testid="ide-workspace-popover"
 >
@@ -149,6 +149,7 @@
             class="ws-proj-select"
             onclick={() => void pickNamedProject(proj)}
             oncontextmenu={(e) => onprojectcontextmenu(e, proj)}
+            use:rowMenu
             data-testid="ide-named-project-option"
           >
             <span class="ws-item-icon"><Icon name="layers" size={14} /></span>

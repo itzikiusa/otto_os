@@ -3,6 +3,7 @@
 
 import { api } from '../../../lib/api/client';
 import { confirmer } from '../../../lib/confirm.svelte';
+import { idePreferences } from '../../../lib/idePreferences.svelte';
 import { toasts } from '../../../lib/toast.svelte';
 import { ide, ideBasename, type IdeOpenTab } from '../ideStore.svelte';
 
@@ -54,16 +55,10 @@ export function formatIdeTabDisplayName(
   return `${base.slice(0, prefixLen)}…${base.slice(base.length - suffixLen)}`;
 }
 
-// ── Auto-Snapshotting Local History (`4s` idle + tab switch / blur) ──────────
-
-const snapshotTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const pendingSnapshots = new Map<string, string>();
-const lastSnapshotted = new Map<string, string>();
+// ── Auto-Snapshotting Local History (delegates to single timer in `IdeBufferPerfController`) ──
 
 async function postHistorySnapshot(filePath: string, content: string, label: string): Promise<boolean> {
   if (!filePath || filePath.includes('://')) return false;
-  if (label === 'Change' && lastSnapshotted.get(filePath) === content) return false;
-  lastSnapshotted.set(filePath, content);
   const folders = getIdeProjectFolders();
   const root = folders.find((f) => filePath === f || filePath.startsWith(`${f}/`)) ?? ide.target.root;
   try {
@@ -79,31 +74,12 @@ async function postHistorySnapshot(filePath: string, content: string, label: str
   }
 }
 
-export function scheduleAutoLocalHistorySnapshot(filePath: string, content: string): void {
-  if (!filePath || filePath.includes('://')) return;
-  pendingSnapshots.set(filePath, content);
-  const prev = snapshotTimers.get(filePath);
-  if (prev !== undefined) clearTimeout(prev);
-  snapshotTimers.set(
-    filePath,
-    setTimeout(() => {
-      snapshotTimers.delete(filePath);
-      const latest = pendingSnapshots.get(filePath);
-      pendingSnapshots.delete(filePath);
-      if (latest !== undefined) void postHistorySnapshot(filePath, latest, 'Change');
-    }, 4000),
-  );
+export function scheduleAutoLocalHistorySnapshot(_filePath: string, _content: string): void {
+  // Handled by `IdeBufferPerfController.recordEdit` (`ide.updateBuffer`) so only one timer runs.
 }
 
 export function flushAutoLocalHistorySnapshot(filePath?: string): void {
-  const keys = filePath ? [filePath] : [...pendingSnapshots.keys()];
-  for (const k of keys) {
-    const t = snapshotTimers.get(k);
-    if (t !== undefined) { clearTimeout(t); snapshotTimers.delete(k); }
-    const latest = pendingSnapshots.get(k);
-    pendingSnapshots.delete(k);
-    if (latest !== undefined) void postHistorySnapshot(k, latest, 'Change');
-  }
+  ide.flushHistorySnapshot(filePath);
 }
 
 export async function putIdeLocalHistoryLabel(filePath: string, content: string): Promise<void> {
@@ -126,36 +102,29 @@ let fallbackBackStack = $state<NavEntry[]>([]);
 let fallbackFwdStack = $state<NavEntry[]>([]);
 let navJumping = false;
 
-const FORMAT_ON_SAVE_KEY = 'otto.ide.formatOnSave';
-function readBoolPref(key: string): boolean {
-  try { return typeof localStorage !== 'undefined' && localStorage.getItem(key) === '1'; }
-  catch { return false; }
-}
-export const ideEditorPrefs = $state({ formatOnSave: readBoolPref(FORMAT_ON_SAVE_KEY) });
+export const ideEditorPrefs = {
+  get formatOnSave(): boolean {
+    return idePreferences.current.formatOnSave;
+  },
+  set formatOnSave(v: boolean) {
+    idePreferences.update({ formatOnSave: Boolean(v) });
+  },
+};
 export function toggleFormatOnSave(): void {
-  const next = !ideEditorPrefs.formatOnSave;
-  ideEditorPrefs.formatOnSave = next;
+  const next = !idePreferences.current.formatOnSave;
+  idePreferences.update({ formatOnSave: next });
   const s = extIde() as { setFormatOnSave?: (v: boolean) => void };
   if (typeof s.setFormatOnSave === 'function') s.setFormatOnSave(next);
-  try { localStorage.setItem(FORMAT_ON_SAVE_KEY, next ? '1' : '0'); } catch { /* ignore */ }
 }
 
 export function evictIdeEditorBridgePaths(paths: Iterable<string>): void {
   for (const p of paths) {
-    const t = snapshotTimers.get(p);
-    if (t !== undefined) { clearTimeout(t); snapshotTimers.delete(p); }
-    pendingSnapshots.delete(p);
-    lastSnapshotted.delete(p);
     delete fallbackPinned[p];
   }
 }
 
 export function resetIdeEditorBridgeState(): void {
   flushAutoLocalHistorySnapshot();
-  for (const t of snapshotTimers.values()) clearTimeout(t);
-  snapshotTimers.clear();
-  pendingSnapshots.clear();
-  lastSnapshotted.clear();
   fallbackPinned = {};
   fallbackBackStack = [];
   fallbackFwdStack = [];

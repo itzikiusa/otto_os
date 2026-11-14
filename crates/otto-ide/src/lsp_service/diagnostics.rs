@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use otto_core::domain::User;
-use otto_core::Result;
+use otto_core::{Error, Result};
 use regex::Regex;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -73,30 +73,27 @@ pub async fn diagnostics<S: IdeCtx>(
     req: IdeDiagnosticsReq,
 ) -> Result<IdeDiagnosticsResp> {
     let target_spec_opt = resolve_effective_target_spec(&req);
-    let mut resolved_opt: Option<(ResolvedTarget, IdeTargetSpec)> = None;
-    if let Some(spec) = target_spec_opt {
-        if let Ok(r) = ctx.ide().targets.resolve(ctx, user, &spec).await {
-            resolved_opt = Some((r, spec));
+    let resolved_opt = match target_spec_opt {
+        Some(spec) => {
+            let resolved = ctx.ide().targets.resolve(ctx, user, &spec).await?;
+            Some((resolved, spec))
         }
-    }
+        None => None,
+    };
 
     let content = match req.content.clone() {
         Some(c) => c,
         None => {
-            if let Some((ref resolved, _)) = resolved_opt {
-                ctx.ide()
-                    .targets
-                    .read_file(resolved, &req.path)
-                    .await
-                    .map(|f| f.content)
-                    .unwrap_or_default()
-            } else if Path::new(&req.path).is_file() {
-                tokio::fs::read_to_string(&req.path)
-                    .await
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            }
+            let Some((ref resolved, _)) = resolved_opt else {
+                return Err(Error::Invalid(
+                    "target is required when content is omitted".into(),
+                ));
+            };
+            ctx.ide()
+                .targets
+                .read_file(resolved, &req.path)
+                .await?
+                .content
         }
     };
 
@@ -125,18 +122,6 @@ pub async fn diagnostics<S: IdeCtx>(
         } = resolved
         {
             readonly_roots = ro.clone();
-        }
-    } else {
-        for pf in &req.project_folders {
-            let p = PathBuf::from(pf);
-            if p.is_dir() {
-                project_roots.push(p);
-            }
-        }
-        if let Some(parent) = Path::new(&req.path).parent() {
-            if parent.is_dir() && project_roots.is_empty() {
-                project_roots.push(parent.to_path_buf());
-            }
         }
     }
     if preferred_java_home.is_none() {
@@ -189,6 +174,15 @@ pub async fn diagnostics<S: IdeCtx>(
 
 fn resolve_effective_target_spec(req: &IdeDiagnosticsReq) -> Option<IdeTargetSpec> {
     if let Some(mut spec) = req.target.clone() {
+        spec.absorb_project_folders(&req.project_folders);
+        return Some(spec);
+    }
+    if let Some(first) = req.project_folders.iter().find(|s| !s.trim().is_empty()) {
+        let mut spec = IdeTargetSpec {
+            kind: IdeTargetKind::Local,
+            root: first.trim().to_string(),
+            ..Default::default()
+        };
         spec.absorb_project_folders(&req.project_folders);
         return Some(spec);
     }
@@ -404,7 +398,7 @@ pub(crate) async fn analyze_go_diagnostics(
             let q = cap[1].to_string();
             used_qualifiers.insert(q.clone());
             if let Some(m) = cap.get(1) {
-                let col = raw[..m.start()].chars().count() as u32 + 1;
+                let col = code_ln[..m.start()].chars().count() as u32 + 1;
                 body_qual_sites.push((ln, col, q));
             }
         }

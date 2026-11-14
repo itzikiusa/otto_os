@@ -5,18 +5,12 @@
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
+  import PaneDivider from '../../../lib/components/PaneDivider.svelte';
   import { api, isAbortError } from '../../../lib/api/client';
   import type { DiffResp, FileChange, Repo, RepoStatusResp } from '../../../lib/api/types';
   import { confirmer } from '../../../lib/confirm.svelte';
-  import { startMouseDrag } from '../../../lib/dragCursor';
   import { loadErrorText } from '../../../lib/loadError';
-  import {
-    loadPaneWidth,
-    paneResizer,
-    pxWide,
-    RESIZE_TITLE,
-    savePaneWidth,
-  } from '../../../lib/paneResizer';
+  import { loadPaneWidth } from '../../../lib/paneResizer';
   import { plural } from '../../../lib/plural';
   import { git } from '../../../lib/stores/git.svelte';
   import { viewport } from '../../../lib/stores/viewport.svelte';
@@ -134,21 +128,6 @@
       });
     return () => ctl.abort();
   });
-
-  function setLeftW(v: number): void {
-    leftW = Math.max(220, Math.min(560, Math.round(v)));
-    savePaneWidth(LS_GIT_LEFT_W, leftW);
-  }
-  function resetLeftW(): void { setLeftW(320); }
-  function dragLeftW(e: MouseEvent): void {
-    const startX = e.clientX;
-    const startW = leftW;
-    startMouseDrag(e, {
-      cursor: 'col-resize',
-      onMove: (ev) => { leftW = Math.max(220, Math.min(560, Math.round(startW + (ev.clientX - startX)))); },
-      onEnd: () => savePaneWidth(LS_GIT_LEFT_W, leftW),
-    });
-  }
 
   function badgeLetter(c: FileChange): string {
     if (c.kind === 'untracked') return '?';
@@ -354,15 +333,7 @@
   </section>
 
   {#if !viewport.isPhone}
-    <div
-      class="gc-resizer"
-      aria-label="Resize local changes list"
-      title={RESIZE_TITLE}
-      use:paneResizer={{
-        value: leftW, min: 220, max: 560, text: pxWide,
-        onChange: setLeftW, onReset: resetLeftW, onDragStart: dragLeftW,
-      }}
-    ></div>
+    <PaneDivider bind:width={leftW} storageKey={LS_GIT_LEFT_W} min={220} max={560} defaultWidth={320} label="Resize local changes list" />
   {/if}
 
   <section class="gc-right" aria-label="Selected file diff">
@@ -450,9 +421,6 @@
   .gc-msg { resize: none; font-size: var(--fs-xs); min-block-size: 44px; padding: 6px 8px; }
   .gc-composer-bar { display: flex; align-items: center; gap: 8px; }
   .gc-amend { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-xs); color: var(--text-dim); cursor: pointer; }
-  .gc-resizer { position: relative; inline-size: 4px; margin-inline: -2px; flex-shrink: 0; cursor: col-resize; z-index: var(--z-sticky); }
-  .gc-resizer::after { content: ''; position: absolute; inset-block: 0; inset-inline-start: 1px; inline-size: 2px; background: transparent; transition: background var(--dur-fast) ease-out; }
-  .gc-resizer:hover::after, .gc-resizer:focus-visible::after { background: var(--accent-text); }
   .gc-right { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; flex-direction: column; overflow: hidden; }
   .gc-diff-bar {
     display: flex; align-items: center; gap: 8px; block-size: 28px; min-block-size: 28px;
@@ -464,6 +432,5 @@
   @media (max-width: 640px) {
     .gc-split { flex-direction: column; overflow-y: auto; }
     .gc-left { inline-size: 100%; border-inline-end: 0; border-block-end: 1px solid var(--border); max-block-size: 260px; }
-    .gc-resizer { display: none; }
   }
 </style>

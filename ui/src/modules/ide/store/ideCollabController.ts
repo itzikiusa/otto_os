@@ -42,6 +42,7 @@ export interface CollabHostState {
   pluginCatalog: IdePluginCatalogEntry[];
   pluginsLoading: boolean;
   pluginsError: string | null;
+  onCollabJoinFailed?(errorMsg: string): void;
   openFile(path: string, opts?: { line?: number; col?: number; preview?: boolean }): Promise<void>;
   applyDebugSnapshot(snap: IdeDebugSessionSnapshot): void;
 }
@@ -107,7 +108,13 @@ export async function startCollabSession(
   store.collabLoading = true;
   store.collabError = null;
   try {
-    const resp = await api.post<{ room: IdeCollabRoom; invite_token: string; share_hash: string }>('/ide/collab/rooms', {
+    const resp = await api.post<{
+      room: IdeCollabRoom;
+      invite_token: string;
+      share_hash: string;
+      host_peer_id?: string;
+      host_peer_secret?: string;
+    }>('/ide/collab/rooms', {
       target: store.targetPayload,
       title: title || ideBasename(store.target.root) || 'IDE Session',
       default_role: defaultRole,
@@ -118,29 +125,28 @@ export async function startCollabSession(
       resp.share_hash || `#/ide?collab=${encodeURIComponent(resp.room.id)}&token=${encodeURIComponent(resp.invite_token)}`;
     store.collabIsGuest = false;
     store.collabGuestToken = resp.invite_token;
-    const joined = await collabGuestPost<{ peer_id: string; peer_secret: string; room: IdeCollabRoom }>(
-      `/ide/collab/guest/${encodeURIComponent(resp.room.id)}/join`,
-      resp.invite_token,
-      { display_name: 'Host', token: resp.invite_token },
-    );
-    store.collabPeerId = joined.peer_id;
-    store.collabPeerSecret = joined.peer_secret;
-    store.collabRoom = joined.room;
-    for (let i = 0; i < store.tabs.length; i++) {
-      const tab = store.tabs[i];
-      if (tab.loading) continue;
-      try {
-        const seeded = await collabGuestPost<{ version: number }>(
-          `/ide/collab/guest/${encodeURIComponent(resp.room.id)}/edit`,
-          resp.invite_token,
-          { peer_id: joined.peer_id, peer_secret: joined.peer_secret, path: tab.path, content: tab.content, save: false },
-        );
-        store.sharedBuffers = { ...store.sharedBuffers, [tab.path]: { content: tab.content, version: seeded.version } };
-      } catch {
-        /* best-effort initial buffer seed */
+    const hostPeerId = resp.host_peer_id ?? null;
+    const hostPeerSecret = resp.host_peer_secret ?? null;
+    store.collabPeerId = hostPeerId;
+    store.collabPeerSecret = hostPeerSecret;
+    if (hostPeerId && hostPeerSecret) {
+      for (let i = 0; i < store.tabs.length; i++) {
+        const tab = store.tabs[i];
+        if (tab.loading) continue;
+        try {
+          const seeded = await collabGuestPost<{ version: number }>(
+            `/ide/collab/guest/${encodeURIComponent(resp.room.id)}/edit`,
+            resp.invite_token,
+            { peer_id: hostPeerId, peer_secret: hostPeerSecret, path: tab.path, content: tab.content, save: false },
+          );
+          store.sharedBuffers = { ...store.sharedBuffers, [tab.path]: { content: tab.content, version: seeded.version } };
+        } catch {
+          /* best-effort initial buffer seed */
+        }
       }
+      return attachCollabEventStream(store, resp.room.id, resp.invite_token, hostPeerId, prevCtl);
     }
-    return attachCollabEventStream(store, resp.room.id, resp.invite_token, joined.peer_id, prevCtl);
+    return prevCtl;
   } catch (e) {
     store.collabError = loadErrorText(e);
     toastError('Couldn’t start shared session', e);
@@ -189,7 +195,20 @@ export async function joinCollabSession(
     }
     return attachCollabEventStream(store, roomId, token, joined.peer_id, prevCtl);
   } catch (e) {
-    store.collabError = loadErrorText(e);
+    const msg = loadErrorText(e);
+    if (store.onCollabJoinFailed) {
+      store.onCollabJoinFailed(msg);
+    } else {
+      store.collabRoom = null;
+      store.collabIsGuest = false;
+      store.collabPeerId = null;
+      store.collabPeerSecret = null;
+      store.collabGuestToken = null;
+      store.peerCursors = [];
+      store.followingPeerId = null;
+      store.sharedBuffers = {};
+      store.collabError = msg;
+    }
     toastError('Couldn’t join shared session', e);
     return prevCtl;
   } finally {

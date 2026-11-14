@@ -13,27 +13,12 @@ import { extOf, langExtOf } from './cm-editor-helpers';
 import type * as CmIdeDepsMod from './cm-ide-deps';
 import type * as CmIdeMod from './cm-ide-extensions';
 import { isManifestPath } from './cm-ide-history';
+import { lspLanguageIdFor, normalizeIdeLspServerLang } from './cm-ide-keymap';
 
-const EXT_TO_LSP_LANG: Record<string, string> = {
-  js: 'javascript', jsx: 'javascriptreact', ts: 'typescript', tsx: 'typescriptreact',
-  mjs: 'javascript', cjs: 'javascript', mts: 'typescript', cts: 'typescript',
-  py: 'python', pyi: 'python', go: 'go', rs: 'rust',
-  json: 'json', jsonc: 'json', jsonl: 'json', ndjson: 'json',
-  html: 'html', htm: 'html', css: 'css', scss: 'scss',
-  less: 'less', md: 'markdown', mdx: 'markdown',
-  java: 'java', class: 'java', kt: 'kotlin', kts: 'kotlin',
-  sh: 'shellscript', bash: 'shellscript', zsh: 'shellscript', bats: 'shellscript',
-  yaml: 'yaml', yml: 'yaml', graphql: 'graphql', gql: 'graphql', proto: 'protobuf',
-};
+export { lspLanguageIdFor, normalizeIdeLspServerLang };
 
 function lspLangFor(filePath: string, ideMode: boolean, language?: string): string | null {
-  const ext = extOf(filePath);
-  if (ext === 'csv' || ext === 'tsv') return null;
-  if (EXT_TO_LSP_LANG[ext]) return EXT_TO_LSP_LANG[ext];
-  if (!ideMode || !language || language === 'csv' || language === 'tsv' || language === 'plaintext') return null;
-  if (language === 'shell') return 'shellscript';
-  if (language === 'jsonl') return 'json';
-  return language;
+  return lspLanguageIdFor(filePath, ideMode, language);
 }
 
 export function uriToPath(uri: string): string {
@@ -77,16 +62,17 @@ export async function attachCodeEditorLsp(opts: {
   try {
     const lspLang = lspLangFor(opts.filePath, opts.ideMode, opts.language);
     if (!lspLang || !opts.rootPath) return;
+    const serverLang = normalizeIdeLspServerLang(lspLang);
     if (!opts.connId) {
       let caps = await getLspCapabilities(false);
-      if (opts.ideMode && caps && !caps.servers.some((s) => s.lang === lspLang && s.available)) {
+      if (opts.ideMode && caps && !caps.servers.some((s) => s.lang === serverLang && s.available)) {
         caps = await getLspCapabilities(true);
       }
-      if (!caps?.servers.some((s) => s.lang === lspLang && s.available)) return;
+      if (!caps?.servers.some((s) => s.lang === serverLang && s.available)) return;
     }
     if (!opts.isCurrent()) return;
 
-    const wsUri = lspWsUrl(lspLang, opts.rootPath, opts.connId);
+    const wsUri = lspWsUrl(serverLang, opts.rootPath, opts.connId);
     const token = getToken();
     const protocols = token ? [WS_BEARER_SUBPROTOCOL, token] : undefined;
     const rootUri = `file://${opts.rootPath}`;

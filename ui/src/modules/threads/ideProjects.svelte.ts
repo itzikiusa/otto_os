@@ -1,79 +1,74 @@
 // Reactive IDE Projects & live-editor context bridge for the Threads module.
-// Reads `localStorage` keys (`otto.ide.namedProjects.v1`, `otto.ide.lastRoot`,
-// `otto.ide.roots:local:*`) + `window.__ottoIdeLiveContext` and listens to
-// `'otto:ide-projects-changed'`, `'otto:ide-context-changed'`, and `'storage'`
-// events without importing `src/modules/ide/*`.
+// Consumes the shared `ui/src/lib/ideWorkspacePort.svelte.ts` and
+// `ui/src/lib/ideProjectsModel.ts` contracts without importing `src/modules/ide/*`.
 
 import { untrack } from 'svelte';
 import { api } from '../../lib/api/client';
 import type { Session } from '../../lib/api/types';
+import {
+  fetchNamedIdeProjectsFromServer,
+  loadNamedIdeProjectsLocal,
+  normalizeProjectPath,
+  type NamedIdeProject,
+} from '../../lib/ideProjectsModel';
+import { ideWorkspacePort } from '../../lib/ideWorkspacePort.svelte';
 import { router } from '../../lib/router.svelte';
 import { lsGet, lsSet } from '../../lib/storage';
 import { git } from '../../lib/stores/git.svelte';
 import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
 import {
+  basenameOfPath,
   buildIdePathAliases,
   canonicalIdePath,
   discoverIdeProjects,
-  IDE_CONTEXT_CHANGED_EVENT,
-  IDE_LAST_ROOT_KEY,
-  IDE_NAMED_PROJECTS_KEY,
   IDE_OPEN_HANDOFF_KEY,
   IDE_OPEN_THREAD_EVENT,
   IDE_PROJECTS_CHANGED_EVENT,
-  IDE_ROOTS_KEY_PREFIX,
   isSameOrSubpath,
-  parseNamedIdeProjects,
-  parseSavedAdditionalRoots,
   trimTrailingSlashes,
   type IdeLiveContextSnapshot,
   type IdeSidebarProject,
-  type NamedIdeProjectRecord,
 } from './ideProjectModel';
-
-declare global {
-  interface Window {
-    __ottoIdeLiveContext?: IdeLiveContextSnapshot | null;
-  }
-}
-
-function readAdditionalRootsFromStorage(): Record<string, string[]> {
-  if (typeof window === 'undefined') return {};
-  const map: Record<string, string[]> = {};
-  try {
-    for (let i = 0; i < window.localStorage.length; i++) {
-      const key = window.localStorage.key(i);
-      if (!key || !key.startsWith(IDE_ROOTS_KEY_PREFIX)) continue;
-      const primary = trimTrailingSlashes(key.slice(IDE_ROOTS_KEY_PREFIX.length));
-      if (!primary || primary === '~') continue;
-      const roots = parseSavedAdditionalRoots(window.localStorage.getItem(key));
-      map[primary] = roots;
-    }
-  } catch {
-    // Ignore storage iteration failures in restricted contexts.
-  }
-  return map;
-}
 
 class IdeProjectsBridge {
   private rev = $state(0);
+  private serverProjects = $state<NamedIdeProject[] | null>(null);
+  private hydratedProjects = false;
   private serverRootsByPrimary: Record<string, string[]> = {};
   private hydratedPrimaries = new Set<string>();
 
   constructor() {
     if (typeof window !== 'undefined') {
       const bump = (): void => {
+        this.serverProjects = null;
+        this.hydratedProjects = false;
         this.rev = untrack(() => this.rev) + 1;
       };
       window.addEventListener(IDE_PROJECTS_CHANGED_EVENT, bump);
-      window.addEventListener(IDE_CONTEXT_CHANGED_EVENT, bump);
       window.addEventListener('storage', bump);
     }
   }
 
   refresh(): void {
     this.hydratedPrimaries.clear();
+    this.hydratedProjects = false;
+    this.serverProjects = null;
     this.rev = untrack(() => this.rev) + 1;
+  }
+
+  private ensureBackendProjects(): void {
+    if (this.hydratedProjects || lsGet('otto_mock') === '1') return;
+    this.hydratedProjects = true;
+    void fetchNamedIdeProjectsFromServer()
+      .then((list) => {
+        if (list) {
+          this.serverProjects = list;
+          this.rev = untrack(() => this.rev) + 1;
+        }
+      })
+      .catch(() => {
+        // Offline/test harnesses fall back cleanly to `loadNamedIdeProjectsLocal()`.
+      });
   }
 
   private hydrateServerEnv(primaryRoot: string): void {
@@ -82,54 +77,88 @@ class IdeProjectsBridge {
     if (lsGet('otto_mock') === '1') return;
     this.hydratedPrimaries.add(clean);
     void api
-      .get<{ additional_roots?: string[] }>(
+      .get<{ env?: { additional_roots?: string[] }; additional_roots?: string[] }>(
         `/ide/environments?kind=local&root=${encodeURIComponent(clean)}`,
       )
       .then((res) => {
-        const extra = Array.isArray(res?.additional_roots)
-          ? res.additional_roots.map(trimTrailingSlashes).filter((r) => Boolean(r && r !== '~'))
+        const rawRoots = res?.env?.additional_roots ?? res?.additional_roots;
+        const extra = Array.isArray(rawRoots)
+          ? rawRoots.map(trimTrailingSlashes).filter((r) => Boolean(r && r !== '~'))
           : [];
         if (extra.length > 0) {
           this.serverRootsByPrimary[clean] = extra;
-          this.rev += 1;
+          this.rev = untrack(() => this.rev) + 1;
         }
       })
       .catch(() => {
-        // Endpoint optional in test/offline harnesses; localStorage + live context remain authoritative.
+        // Endpoint optional in test/offline harnesses; local + live context remain authoritative.
       });
   }
 
   get liveContext(): IdeLiveContextSnapshot | null {
     void this.rev;
-    if (typeof window === 'undefined') return null;
-    return window.__ottoIdeLiveContext ?? null;
+    const snap = ideWorkspacePort.current;
+    if (!snap.root && snap.tabs.length === 0 && !snap.activePath) return null;
+    return {
+      root: snap.root ?? '',
+      additionalRoots: snap.additionalRoots,
+      activePath: snap.activePath,
+      openTabs: snap.tabs.map((t) => ({
+        path: t.path,
+        name: basenameOfPath(t.path) || t.path,
+      })),
+    };
   }
 
-  get namedProjects(): NamedIdeProjectRecord[] {
+  get namedProjects(): NamedIdeProject[] {
     void this.rev;
-    return parseNamedIdeProjects(lsGet(IDE_NAMED_PROJECTS_KEY));
+    this.ensureBackendProjects();
+    return this.serverProjects ?? loadNamedIdeProjectsLocal();
   }
 
   get lastRoot(): string | null {
     void this.rev;
-    const raw = trimTrailingSlashes(lsGet(IDE_LAST_ROOT_KEY) ?? '');
+    const raw = normalizeProjectPath(ideWorkspacePort.lastRoot ?? '');
     return raw && raw !== '~' ? raw : null;
   }
 
   projectsFor(sessions: readonly Session[] = []): IdeSidebarProject[] {
     void this.rev;
-    const mergedAdditional: Record<string, string[]> = {
-      ...readAdditionalRootsFromStorage(),
-    };
+    const named = this.namedProjects;
+    const last = this.lastRoot;
+    const live = this.liveContext;
+
+    const candidatePrimaries = new Set<string>();
+    for (const p of named) {
+      if (p.primaryRoot) candidatePrimaries.add(trimTrailingSlashes(p.primaryRoot));
+    }
+    if (last) candidatePrimaries.add(last);
+    if (live?.root) candidatePrimaries.add(trimTrailingSlashes(live.root));
+    for (const s of sessions) {
+      const metaRoot = typeof s.meta?.ide_root === 'string' ? s.meta.ide_root : null;
+      if (metaRoot) candidatePrimaries.add(trimTrailingSlashes(metaRoot));
+      else if (s.meta?.surface === 'ide' && s.cwd) candidatePrimaries.add(trimTrailingSlashes(s.cwd));
+    }
+
+    const mergedAdditional: Record<string, string[]> = {};
+    for (const primary of candidatePrimaries) {
+      if (!primary || primary === '~') continue;
+      const localExtra = ideWorkspacePort.rootsForLocal(primary);
+      const serverExtra = this.serverRootsByPrimary[primary] ?? [];
+      if (localExtra.length > 0 || serverExtra.length > 0) {
+        mergedAdditional[primary] = [...new Set([...localExtra, ...serverExtra])];
+      }
+    }
     for (const [primary, extra] of Object.entries(this.serverRootsByPrimary)) {
       const prev = mergedAdditional[primary] ?? [];
       mergedAdditional[primary] = [...new Set([...prev, ...extra])];
     }
+
     const list = discoverIdeProjects({
-      namedProjects: this.namedProjects,
-      lastRoot: this.lastRoot,
+      namedProjects: named,
+      lastRoot: last,
       additionalRootsByPrimary: mergedAdditional,
-      liveContext: this.liveContext,
+      liveContext: live,
       sessions,
     });
     for (let i = 0; i < list.length; i++) this.hydrateServerEnv(list[i].primaryRoot);
@@ -214,12 +243,12 @@ export function openProjectInIde(
     router.go('ide');
     return;
   }
-  const named = parseNamedIdeProjects(lsGet(IDE_NAMED_PROJECTS_KEY));
+  const named = ideProjects.namedProjects;
   const matchedNamed =
     (projectId ? named.find((p) => p.id === projectId) : null) ??
     named.find((p) => p.folders.some((f) => isSameOrSubpath(cleanRoot, f)));
-  lsSet(IDE_LAST_ROOT_KEY, matchedNamed?.primary_root ?? cleanRoot);
-  if (sessionId !== null) lsSet('otto.ide.agentOpen', '1');
+  ideWorkspacePort.setLastRoot(matchedNamed?.primaryRoot ?? cleanRoot);
+  if (sessionId !== null) ideWorkspacePort.setAgentDockOpen(true);
   lsSet(
     IDE_OPEN_HANDOFF_KEY,
     JSON.stringify({

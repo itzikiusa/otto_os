@@ -1,118 +1,60 @@
 // Shared reactive preferences for the IDE Bottom Dock, Debugger layout,
 // Console log formatting, and Project Tree Git status indicators.
-// Persists into `'otto.ide.preferences.v1'` by merging keys so sibling
-// editor/settings tracks never overwrite each other.
+// Delegates persistence and canonical field names to `ui/src/lib/idePreferences.svelte.ts`.
 
-export const IDE_PREFS_STORAGE_KEY = 'otto.ide.preferences.v1';
-export const IDE_PREFS_EVENT = 'otto:ide-prefs-changed';
+import {
+  IDE_PREFS_EVENT,
+  IDE_PREFS_STORAGE_KEY,
+  idePreferences,
+} from '../../../lib/idePreferences.svelte';
+
+export { IDE_PREFS_EVENT, IDE_PREFS_STORAGE_KEY };
 
 export type DebuggerLayoutMode = 'tabbed' | 'split';
 
-interface RawIdePrefs extends Record<string, unknown> {
-  debuggerLayout?: string;
-  consolePrettyJson?: boolean;
-  prettyJsonLogs?: boolean;
-  debuggerPrettyJson?: boolean;
-  consoleWrapLines?: boolean;
-  wrapConsoleLines?: boolean;
-  consoleLineWrap?: boolean;
-  gitStatusInTree?: boolean;
-  showGitStatusInTree?: boolean;
-  dbgShowFrames?: boolean;
-  dbgShowVariables?: boolean;
-  dbgShowWatches?: boolean;
-  dbgShowConsole?: boolean;
-  hiddenDockTabs?: string[];
-}
-
-function readRawPrefs(): RawIdePrefs {
-  if (typeof localStorage === 'undefined') return {};
-  try {
-    const raw = localStorage.getItem(IDE_PREFS_STORAGE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? (parsed as RawIdePrefs) : {};
-  } catch {
-    return {};
-  }
-}
-
-function boolOr(val: unknown, fallback: boolean): boolean {
-  return typeof val === 'boolean' ? val : fallback;
-}
-
 class IdeDockPreferences {
-  debuggerLayout = $state<DebuggerLayoutMode>('tabbed');
-  consolePrettyJson = $state(true);
-  consoleWrapLines = $state(true);
-  gitStatusInTree = $state(true);
-  dbgShowFrames = $state(true);
-  dbgShowVariables = $state(true);
-  dbgShowWatches = $state(true);
-  dbgShowConsole = $state(true);
-  hiddenDockTabs = $state<string[]>([]);
+  get debuggerLayout(): DebuggerLayoutMode {
+    return idePreferences.current.debuggerLayout;
+  }
 
-  private broadcasting = false;
+  get consolePrettyJson(): boolean {
+    return idePreferences.current.prettyJsonLogs;
+  }
 
-  constructor() {
-    this.syncFromStorage();
-    if (typeof window !== 'undefined') {
-      window.addEventListener(IDE_PREFS_EVENT, (ev: Event) => {
-        if (this.broadcasting) return;
-        const detail = (ev as CustomEvent<RawIdePrefs | undefined>).detail;
-        this.applyRaw(detail && typeof detail === 'object' ? detail : readRawPrefs());
-      });
-      window.addEventListener('storage', (ev: StorageEvent) => {
-        if (ev.key === IDE_PREFS_STORAGE_KEY) this.syncFromStorage();
-      });
-    }
+  get consoleWrapLines(): boolean {
+    return idePreferences.current.consoleLineWrap;
+  }
+
+  get gitStatusInTree(): boolean {
+    return idePreferences.current.gitTreeBadges;
+  }
+
+  get dbgShowFrames(): boolean {
+    return idePreferences.current.dbgShowFrames;
+  }
+
+  get dbgShowVariables(): boolean {
+    return idePreferences.current.dbgShowVariables;
+  }
+
+  get dbgShowWatches(): boolean {
+    return idePreferences.current.dbgShowWatches;
+  }
+
+  get dbgShowConsole(): boolean {
+    return idePreferences.current.dbgShowConsole;
+  }
+
+  get hiddenDockTabs(): string[] {
+    return idePreferences.current.hiddenDockTabs;
   }
 
   syncFromStorage(): void {
-    this.applyRaw(readRawPrefs());
-  }
-
-  private applyRaw(p: RawIdePrefs): void {
-    this.debuggerLayout = p.debuggerLayout === 'split' ? 'split' : 'tabbed';
-    this.consolePrettyJson = boolOr(
-      p.consolePrettyJson ?? p.prettyJsonLogs ?? p.debuggerPrettyJson,
-      true,
-    );
-    this.consoleWrapLines = boolOr(
-      p.consoleWrapLines ?? p.wrapConsoleLines ?? p.consoleLineWrap,
-      true,
-    );
-    this.gitStatusInTree = boolOr(p.gitStatusInTree ?? p.showGitStatusInTree, true);
-    this.dbgShowFrames = boolOr(p.dbgShowFrames, true);
-    this.dbgShowVariables = boolOr(p.dbgShowVariables, true);
-    this.dbgShowWatches = boolOr(p.dbgShowWatches, true);
-    this.dbgShowConsole = boolOr(p.dbgShowConsole, true);
-    this.hiddenDockTabs = Array.isArray(p.hiddenDockTabs)
-      ? p.hiddenDockTabs.filter((x): x is string => typeof x === 'string')
-      : [];
-  }
-
-  private patchStorage(patch: RawIdePrefs): void {
-    if (typeof localStorage === 'undefined') return;
-    try {
-      const merged: RawIdePrefs = { ...readRawPrefs(), ...patch };
-      localStorage.setItem(IDE_PREFS_STORAGE_KEY, JSON.stringify(merged));
-      if (typeof window !== 'undefined') {
-        this.broadcasting = true;
-        try {
-          window.dispatchEvent(new CustomEvent(IDE_PREFS_EVENT, { detail: merged }));
-        } finally {
-          this.broadcasting = false;
-        }
-      }
-    } catch {
-      /* ignore quota / private mode */
-    }
+    idePreferences.reload();
   }
 
   setDebuggerLayout(next: DebuggerLayoutMode): void {
-    this.debuggerLayout = next;
-    this.patchStorage({ debuggerLayout: next });
+    idePreferences.update({ debuggerLayout: next });
   }
 
   toggleDebuggerLayout(): void {
@@ -120,17 +62,14 @@ class IdeDockPreferences {
   }
 
   setConsolePrettyJson(next: boolean): void {
-    this.consolePrettyJson = next;
-    this.patchStorage({ consolePrettyJson: next, prettyJsonLogs: next });
+    idePreferences.update({ prettyJsonLogs: next });
   }
 
   setConsoleWrapLines(next: boolean): void {
-    this.consoleWrapLines = next;
-    this.patchStorage({ consoleWrapLines: next, wrapConsoleLines: next });
+    idePreferences.update({ consoleLineWrap: next });
   }
 
   toggleFrames(): void {
-    // In split mode, prevent hiding the very last visible column.
     if (
       this.debuggerLayout === 'split' &&
       this.dbgShowFrames &&
@@ -139,8 +78,7 @@ class IdeDockPreferences {
     ) {
       return;
     }
-    this.dbgShowFrames = !this.dbgShowFrames;
-    this.patchStorage({ dbgShowFrames: this.dbgShowFrames });
+    idePreferences.update({ dbgShowFrames: !this.dbgShowFrames });
   }
 
   toggleVariables(): void {
@@ -152,13 +90,11 @@ class IdeDockPreferences {
     ) {
       return;
     }
-    this.dbgShowVariables = !this.dbgShowVariables;
-    this.patchStorage({ dbgShowVariables: this.dbgShowVariables });
+    idePreferences.update({ dbgShowVariables: !this.dbgShowVariables });
   }
 
   toggleWatches(): void {
-    this.dbgShowWatches = !this.dbgShowWatches;
-    this.patchStorage({ dbgShowWatches: this.dbgShowWatches });
+    idePreferences.update({ dbgShowWatches: !this.dbgShowWatches });
   }
 
   toggleConsolePane(): void {
@@ -170,8 +106,7 @@ class IdeDockPreferences {
     ) {
       return;
     }
-    this.dbgShowConsole = !this.dbgShowConsole;
-    this.patchStorage({ dbgShowConsole: this.dbgShowConsole });
+    idePreferences.update({ dbgShowConsole: !this.dbgShowConsole });
   }
 
   isDockTabHidden(tabId: string): boolean {
@@ -180,25 +115,24 @@ class IdeDockPreferences {
 
   toggleDockTabHidden(tabId: string, allIds: readonly string[]): void {
     const currentlyHidden = this.hiddenDockTabs.includes(tabId);
+    let next: string[];
     if (!currentlyHidden) {
       const remaining = allIds.filter((id) => id !== tabId && !this.hiddenDockTabs.includes(id));
       if (remaining.length === 0) return;
-      this.hiddenDockTabs = [...this.hiddenDockTabs, tabId];
+      next = [...this.hiddenDockTabs, tabId];
     } else {
-      this.hiddenDockTabs = this.hiddenDockTabs.filter((id) => id !== tabId);
+      next = this.hiddenDockTabs.filter((id) => id !== tabId);
     }
-    this.patchStorage({ hiddenDockTabs: this.hiddenDockTabs });
+    idePreferences.update({ hiddenDockTabs: next });
   }
 
   ensureDockTabVisible(tabId: string): void {
     if (!this.hiddenDockTabs.includes(tabId)) return;
-    this.hiddenDockTabs = this.hiddenDockTabs.filter((id) => id !== tabId);
-    this.patchStorage({ hiddenDockTabs: this.hiddenDockTabs });
+    idePreferences.update({ hiddenDockTabs: this.hiddenDockTabs.filter((id) => id !== tabId) });
   }
 
   resetDockTabs(): void {
-    this.hiddenDockTabs = [];
-    this.patchStorage({ hiddenDockTabs: [] });
+    idePreferences.update({ hiddenDockTabs: [] });
   }
 }
 

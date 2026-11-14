@@ -405,7 +405,7 @@
     }
     if (enterSends(e)) {
       e.preventDefault();
-      void launch(!((e.metaKey || e.ctrlKey) && !prompt.trim() && stageContext.length === 0));
+      void launch(!((e.metaKey || e.ctrlKey) && !prompt.trim() && stageContext.length === 0 && files.list.length === 0));
     }
   }
 
@@ -542,7 +542,7 @@
           aria-label={busy ? 'Starting thread' : council.ready ? `Ask ${council.seats.length} agents` : 'Start thread'}
           title="Start thread (↵) — ⌘↵ with no text opens an empty one"
           data-testid="new-thread-send-btn"
-          disabled={busy || (!prompt.trim() && stageContext.length === 0)}
+          disabled={busy || (!prompt.trim() && stageContext.length === 0 && files.list.length === 0)}
           onclick={() => void launch(true)}
         >
           {#if busy}

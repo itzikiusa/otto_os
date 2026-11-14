@@ -85,10 +85,10 @@ pub struct PiDriver {
     ready: bool,
     turn_id: Option<String>,
     auto_turns: u64,
-    /// The streaming assistant message: its item id and text so far.
-    message: Option<(String, String)>,
-    /// The streaming thinking/reasoning block: its item id and text so far.
-    thought: Option<(String, String)>,
+    /// The streaming assistant message: its item id, text so far, and start time.
+    message: Option<(String, String, chrono::DateTime<chrono::Utc>)>,
+    /// The streaming thinking/reasoning block: its item id, text so far, and start time.
+    thought: Option<(String, String, chrono::DateTime<chrono::Utc>)>,
     messages: u32,
     tools: HashMap<String, Tool>,
     /// This pi sends `agent_settled` (1.x): a turn ends there, and a
@@ -166,9 +166,9 @@ impl PiDriver {
     }
 
     fn close_thought(&mut self, step: &mut DriverStep) {
-        if let Some((id, text)) = self.thought.take() {
+        if let Some((id, text, started_at)) = self.thought.take() {
             if !text.is_empty() {
-                step.push(DriverEvent::TurnItem(item(
+                let mut it = item(
                     id,
                     TurnItemStatus::Completed,
                     None,
@@ -176,15 +176,17 @@ impl PiDriver {
                         text,
                         streaming: false,
                     },
-                )));
+                );
+                it.started_at = Some(started_at);
+                step.push(DriverEvent::TurnItem(it));
             }
         }
     }
 
     fn close_message(&mut self, step: &mut DriverStep) {
-        if let Some((id, text)) = self.message.take() {
+        if let Some((id, text, started_at)) = self.message.take() {
             if !text.is_empty() {
-                step.push(DriverEvent::TurnItem(item(
+                let mut it = item(
                     id.clone(),
                     TurnItemStatus::Completed,
                     None,
@@ -193,7 +195,9 @@ impl PiDriver {
                         text,
                         streaming: false,
                     },
-                )));
+                );
+                it.started_at = Some(started_at);
+                step.push(DriverEvent::TurnItem(it));
             }
         }
     }
@@ -208,11 +212,12 @@ impl PiDriver {
             self.thought = Some((
                 format!("{}:thought:{}", self.turn(), self.messages),
                 String::new(),
+                chrono::Utc::now(),
             ));
         }
-        let (id, text) = self.thought.as_mut().expect("set above");
+        let (id, text, started_at) = self.thought.as_mut().expect("set above");
         text.push_str(delta);
-        step.push(DriverEvent::TurnItem(item(
+        let mut it = item(
             id.clone(),
             TurnItemStatus::Running,
             None,
@@ -220,7 +225,9 @@ impl PiDriver {
                 text: text.clone(),
                 streaming: true,
             },
-        )));
+        );
+        it.started_at = Some(*started_at);
+        step.push(DriverEvent::TurnItem(it));
     }
 
     fn on_text(&mut self, step: &mut DriverStep, delta: &str) {
@@ -233,11 +240,12 @@ impl PiDriver {
             self.message = Some((
                 format!("{}:msg:{}", self.turn(), self.messages),
                 String::new(),
+                chrono::Utc::now(),
             ));
         }
-        let (id, text) = self.message.as_mut().expect("set above");
+        let (id, text, started_at) = self.message.as_mut().expect("set above");
         text.push_str(delta);
-        step.push(DriverEvent::TurnItem(item(
+        let mut it = item(
             id.clone(),
             TurnItemStatus::Running,
             None,
@@ -246,7 +254,9 @@ impl PiDriver {
                 text: text.clone(),
                 streaming: true,
             },
-        )));
+        );
+        it.started_at = Some(*started_at);
+        step.push(DriverEvent::TurnItem(it));
     }
 
     fn tool_kind(name: &str, args: &Value, output: Option<String>) -> TurnItemKind {
@@ -327,6 +337,34 @@ impl PiDriver {
             Some("message_update") => {
                 let ev = &v["assistantMessageEvent"];
                 match ev.get("type").and_then(Value::as_str) {
+                    Some("text_start") => {
+                        self.ensure_autonomous_turn(step);
+                        if self.turn_id.is_some() {
+                            self.close_thought(step);
+                            if self.message.is_none() {
+                                self.messages += 1;
+                                self.message = Some((
+                                    format!("{}:msg:{}", self.turn(), self.messages),
+                                    String::new(),
+                                    chrono::Utc::now(),
+                                ));
+                            }
+                        }
+                    }
+                    Some("thinking_start") => {
+                        self.ensure_autonomous_turn(step);
+                        if self.turn_id.is_some() {
+                            self.close_message(step);
+                            if self.thought.is_none() {
+                                self.messages += 1;
+                                self.thought = Some((
+                                    format!("{}:thought:{}", self.turn(), self.messages),
+                                    String::new(),
+                                    chrono::Utc::now(),
+                                ));
+                            }
+                        }
+                    }
                     Some("text_delta") => {
                         let delta = ev.get("delta").and_then(Value::as_str).unwrap_or("");
                         if !delta.is_empty() {

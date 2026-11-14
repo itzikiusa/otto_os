@@ -47,15 +47,11 @@ export interface HistoryRestoreResp {
   recreated: boolean;
 }
 
-export async function readCurrentDiskOrTab(
+export async function readDiskFileOnly(
   absPath: string,
   signal?: AbortSignal,
 ): Promise<{ content: string; exists: boolean }> {
   const clean = ide.resolvePath(absPath);
-  const openTab = ide.tabs.find((t) => t.path === clean && !t.loading && !t.error);
-  if (openTab) {
-    return { content: ide.getBuffer(clean), exists: true };
-  }
   try {
     const root = ideGit.rootContainingPath(clean)?.path || ide.target.root;
     const res = await api.get<IdeFileReadResp>(
@@ -66,6 +62,18 @@ export async function readCurrentDiskOrTab(
   } catch {
     return { content: '', exists: false };
   }
+}
+
+export async function readCurrentDiskOrTab(
+  absPath: string,
+  signal?: AbortSignal,
+): Promise<{ content: string; exists: boolean }> {
+  const clean = ide.resolvePath(absPath);
+  const openTab = ide.tabs.find((t) => t.path === clean && !t.loading && !t.error);
+  if (openTab) {
+    return { content: ide.getBuffer(clean), exists: true };
+  }
+  return readDiskFileOnly(clean, signal);
 }
 
 export async function refreshTreeForRestoredPath(
@@ -160,20 +168,23 @@ export async function fetchGitRefFileContent(
   ref: string,
   signal?: AbortSignal,
 ): Promise<{ leftText: string; rightText: string; rightExists: boolean }> {
-  const cur = await readCurrentDiskOrTab(absPath, signal);
+  const [cur, disk] = await Promise.all([
+    readCurrentDiskOrTab(absPath, signal),
+    readDiskFileOnly(absPath, signal),
+  ]);
   const relPath = ideGit.repoRelativePath(repo, absPath);
   if (!relPath) {
-    return { leftText: cur.content, rightText: cur.content, rightExists: cur.exists };
+    return { leftText: disk.content, rightText: cur.content, rightExists: cur.exists };
   }
   const encRepo = encodeURIComponent(repo.id);
   const encPath = encodeURIComponent(relPath);
-  let headText = cur.content;
+  let headText = disk.content;
   try {
     const workingDiff = await api.get<DiffResp>(
       `/repos/${encRepo}/diff?target=working&path=${encPath}&full=true`,
       signal,
     );
-    headText = reconstructFileFromDiff(cur.content, workingDiff, 'reverse');
+    headText = reconstructFileFromDiff(disk.content, workingDiff, 'reverse');
   } catch {
     /* working tree already matches HEAD */
   }

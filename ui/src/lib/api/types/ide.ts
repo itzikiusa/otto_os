@@ -365,7 +365,6 @@ export interface IdeEnvironmentsResp {
   configs: IdeRunConfig[];
   detected_configs?: IdeRunConfig[];
   effective_env?: Record<string, string>;
-  shell_env?: IdeShellEnvResp | null;
 }
 
 export interface IdePythonVenvResp {

@@ -479,6 +479,7 @@ async fn apply_rows(
                             | "effective_user_id"
                             | "real_author_id"
                             | "owner_id"
+                            | "owner_user_id"
                             | "approved_by"
                             | "decided_by"
                             | "requested_by"
@@ -786,6 +787,9 @@ async fn restore_owned(
             }
         }
     }
+    let _ = ctx.ide.projects.reload_from_db(&ctx.pool).await;
+    ctx.ide.environments.reload_from_db(&ctx.pool).await;
+    let _ = ctx.ide.plugins.reload();
     Ok(RestoreResult {
         records_inserted: rows.inserted,
         records_skipped: rows.skipped,

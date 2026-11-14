@@ -8,6 +8,7 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import { detectCsvDelimiter, parseCsvLine, type CsvDelimiter } from '../../../lib/components/cm-ide-csv';
   import { copyWithToast } from '../../../lib/clipboard';
+  import { rowMenu } from '../../../lib/rowMenu';
 
   interface Props {
     path: string;
@@ -460,10 +461,20 @@
                         selectedCol = colIdx;
                       }}
                       ondblclick={() => startEditCell(realRowIdx, colIdx)}
+                      onkeydown={(e) => {
+                        if (e.key === 'Enter' || e.key === 'F2') {
+                          e.preventDefault();
+                          startEditCell(realRowIdx, colIdx);
+                        } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c') {
+                          e.preventDefault();
+                          void copyWithToast(val, table.headers[colIdx]);
+                        }
+                      }}
                       oncontextmenu={(e) => {
                         e.preventDefault();
                         void copyWithToast(val, table.headers[colIdx]);
                       }}
+                      use:rowMenu
                     >{val}</button>
                   {/if}
                 </td>

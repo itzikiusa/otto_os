@@ -5,14 +5,17 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
+use otto_core::domain::User;
 use otto_core::{new_id, Error, Result};
 use otto_state::DbPool;
+use sqlx::Row;
 use tokio::sync::watch;
 
 use super::db_store::{clean_opt, row_to_run_config};
 use super::discovery::discover_run_configs;
 use super::runner::{evict_finished_runs, execute_run_task, ActiveRunHandle, RunStateInner};
 use super::{EnvironmentManager, SecretAccess};
+use crate::projects::ProjectStore;
 use crate::target::TargetManager;
 use crate::types::{
     IdeRunConfig, IdeRunState, IdeRunnerKind, IdeSshSpec, IdeStartRunReq, IdeTargetKind,
@@ -29,7 +32,8 @@ impl EnvironmentManager {
         let rows = sqlx::query(
             r#"SELECT id, name, runner, command, args_json, build_flags_json, cwd,
                       env_overrides_json, env_file, inherit_shell_env, sdk_path,
-                      toolchain_id, before_launch, target_path, test_filter, compound_ids_json
+                      toolchain_id, before_launch, target_path, test_filter, compound_ids_json,
+                      maven_profiles_json, spring_profiles_json, skip_tests, offline
                FROM ide_run_configs
                WHERE project_key = ?
                ORDER BY created_at ASC, name ASC"#,
@@ -46,7 +50,8 @@ impl EnvironmentManager {
         let row = sqlx::query(
             r#"SELECT id, name, runner, command, args_json, build_flags_json, cwd,
                       env_overrides_json, env_file, inherit_shell_env, sdk_path,
-                      toolchain_id, before_launch, target_path, test_filter, compound_ids_json
+                      toolchain_id, before_launch, target_path, test_filter, compound_ids_json,
+                      maven_profiles_json, spring_profiles_json, skip_tests, offline
                FROM ide_run_configs WHERE id = ?"#,
         )
         .bind(id)
@@ -55,6 +60,32 @@ impl EnvironmentManager {
         .map_err(|e| Error::Internal(format!("get ide_run_config: {e}")))?
         .ok_or_else(|| Error::NotFound(format!("run config '{id}'")))?;
         Ok(row_to_run_config(&row))
+    }
+
+    pub async fn get_run_config_target(&self, pool: &DbPool, id: &str) -> Result<IdeTargetSpec> {
+        let row = sqlx::query(
+            "SELECT target_kind, root_path, connection_id FROM ide_run_configs WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| Error::Internal(format!("get ide_run_config target: {e}")))?
+        .ok_or_else(|| Error::NotFound(format!("run config '{id}'")))?;
+
+        let kind_str: String = row.try_get("target_kind").unwrap_or_default();
+        let kind = if kind_str == "ssh" {
+            IdeTargetKind::Ssh
+        } else {
+            IdeTargetKind::Local
+        };
+        Ok(IdeTargetSpec {
+            kind,
+            root: row.try_get("root_path").unwrap_or_default(),
+            workspace_id: None,
+            connection_id: row.try_get("connection_id").ok().flatten(),
+            additional_roots: Vec::new(),
+            project_folders: Vec::new(),
+        })
     }
 
     pub async fn resolve_run_config_or_auto(
@@ -68,7 +99,8 @@ impl EnvironmentManager {
         }
         if id.starts_with("auto:") && target.kind == IdeTargetKind::Local {
             let mut enriched = target.clone();
-            self.enrich_target_roots(pool, &mut enriched).await;
+            self.enrich_target_roots(pool, None, None, &mut enriched)
+                .await;
             let extra = enriched.additional_roots.clone();
             let id_owned = id.to_string();
             let found = tokio::task::spawn_blocking(move || {
@@ -126,6 +158,10 @@ impl EnvironmentManager {
             serde_json::to_string(&cfg.env_overrides).unwrap_or_else(|_| "{}".into());
         let compound_ids_json =
             serde_json::to_string(&cfg.compound_configs).unwrap_or_else(|_| "[]".into());
+        let maven_profiles_json =
+            serde_json::to_string(&cfg.maven_profiles).unwrap_or_else(|_| "[]".into());
+        let spring_profiles_json =
+            serde_json::to_string(&cfg.spring_profiles).unwrap_or_else(|_| "[]".into());
         let now = Utc::now().to_rfc3339();
 
         sqlx::query(
@@ -134,8 +170,9 @@ impl EnvironmentManager {
                    name, runner, command, args_json, build_flags_json, cwd,
                    env_overrides_json, env_file, inherit_shell_env, sdk_path,
                    toolchain_id, before_launch, target_path, test_filter, compound_ids_json,
+                   maven_profiles_json, spring_profiles_json, skip_tests, offline,
                    created_at, updated_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                    project_key = excluded.project_key,
                    target_kind = excluded.target_kind,
@@ -156,6 +193,10 @@ impl EnvironmentManager {
                    target_path = excluded.target_path,
                    test_filter = excluded.test_filter,
                    compound_ids_json = excluded.compound_ids_json,
+                   maven_profiles_json = excluded.maven_profiles_json,
+                   spring_profiles_json = excluded.spring_profiles_json,
+                   skip_tests = excluded.skip_tests,
+                   offline = excluded.offline,
                    updated_at = excluded.updated_at"#,
         )
         .bind(&cfg.id)
@@ -178,6 +219,10 @@ impl EnvironmentManager {
         .bind(clean_opt(&cfg.target_path))
         .bind(clean_opt(&cfg.test_filter))
         .bind(&compound_ids_json)
+        .bind(&maven_profiles_json)
+        .bind(&spring_profiles_json)
+        .bind(i32::from(cfg.skip_tests))
+        .bind(i32::from(cfg.offline))
         .bind(&now)
         .bind(&now)
         .execute(pool)
@@ -214,8 +259,37 @@ impl EnvironmentManager {
             .ok_or_else(|| Error::NotFound(format!("IDE run '{run_id}'")))
     }
 
+    pub fn get_run_for_user(
+        &self,
+        user: &User,
+        run_id: &str,
+        tail_lines: Option<usize>,
+    ) -> Result<IdeRunState> {
+        let entry = self
+            .runs
+            .get(run_id)
+            .ok_or_else(|| Error::NotFound(format!("IDE run '{run_id}'")))?;
+        if !can_access_run(entry.value(), user) {
+            return Err(Error::Forbidden(
+                "cannot access an IDE run owned by another user".into(),
+            ));
+        }
+        Ok(entry.value().snapshot_with_tail(tail_lines))
+    }
+
     pub fn list_runs(&self) -> Vec<IdeRunState> {
         let mut out: Vec<IdeRunState> = self.runs.iter().map(|e| e.value().snapshot()).collect();
+        out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        out
+    }
+
+    pub fn list_runs_for_user(&self, user: &User) -> Vec<IdeRunState> {
+        let mut out: Vec<IdeRunState> = self
+            .runs
+            .iter()
+            .filter(|e| can_access_run(e.value(), user))
+            .map(|e| e.value().snapshot())
+            .collect();
         out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
         out
     }
@@ -230,11 +304,43 @@ impl EnvironmentManager {
         Ok(snap)
     }
 
+    pub async fn stop_run_for_user(&self, user: &User, run_id: &str) -> Result<IdeRunState> {
+        let snap = {
+            let entry = self
+                .runs
+                .get(run_id)
+                .ok_or_else(|| Error::NotFound(format!("IDE run '{run_id}'")))?;
+            if !can_access_run(entry.value(), user) {
+                return Err(Error::Forbidden(
+                    "cannot stop an IDE run owned by another user".into(),
+                ));
+            }
+            entry.value().stop()
+        };
+        evict_finished_runs(&self.runs);
+        Ok(snap)
+    }
+
     pub async fn start_run<S: SecretAccess + ?Sized>(
         &self,
         pool: &DbPool,
         secrets: &S,
         targets: &TargetManager,
+        req: IdeStartRunReq,
+        ssh: Option<IdeSshSpec>,
+    ) -> Result<IdeRunState> {
+        self.start_run_for_user(pool, secrets, targets, None, None, req, ssh)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_run_for_user<S: SecretAccess + ?Sized>(
+        &self,
+        pool: &DbPool,
+        secrets: &S,
+        targets: &TargetManager,
+        projects: Option<&ProjectStore>,
+        user: Option<&User>,
         mut req: IdeStartRunReq,
         ssh: Option<IdeSshSpec>,
     ) -> Result<IdeRunState> {
@@ -244,7 +350,8 @@ impl EnvironmentManager {
                 req.target.project_folders.push(pf.clone());
             }
         }
-        self.enrich_target_roots(pool, &mut req.target).await;
+        self.enrich_target_roots(pool, projects, user, &mut req.target)
+            .await;
 
         let mut cfg = if let Some(adhoc) = req.adhoc {
             adhoc
@@ -274,6 +381,7 @@ impl EnvironmentManager {
             cfg.offline = true;
         }
 
+        let caller_is_root = user.map(|u| u.is_root).unwrap_or(true);
         let mut steps: Vec<(IdeRunConfig, BTreeMap<String, String>)> = Vec::new();
         if cfg.runner == IdeRunnerKind::Compound && !cfg.compound_configs.is_empty() {
             for member_id in cfg.compound_configs.iter().take(12) {
@@ -295,7 +403,13 @@ impl EnvironmentManager {
                 member_cfg.skip_tests |= cfg.skip_tests;
                 member_cfg.offline |= cfg.offline;
                 let member_env = self
-                    .build_effective_env_for_run(pool, secrets, &req.target, Some(&member_cfg))
+                    .build_effective_env_for_run_as(
+                        pool,
+                        secrets,
+                        &req.target,
+                        Some(&member_cfg),
+                        caller_is_root,
+                    )
                     .await?;
                 steps.push((member_cfg, member_env));
             }
@@ -306,7 +420,13 @@ impl EnvironmentManager {
             }
         } else {
             let env_map = self
-                .build_effective_env_for_run(pool, secrets, &req.target, Some(&cfg))
+                .build_effective_env_for_run_as(
+                    pool,
+                    secrets,
+                    &req.target,
+                    Some(&cfg),
+                    caller_is_root,
+                )
                 .await?;
             steps.push((cfg.clone(), env_map));
         }
@@ -320,8 +440,10 @@ impl EnvironmentManager {
         let started_at = Utc::now().to_rfc3339();
         let seq = self.run_seq.fetch_add(1, Ordering::Relaxed);
         let (stop_tx, stop_rx) = watch::channel(false);
+        let owner_user_id = user.map(|u| u.id.clone()).unwrap_or_default();
         let handle = Arc::new(ActiveRunHandle {
             seq,
+            owner_user_id,
             state: Mutex::new(RunStateInner::new(
                 run_id.clone(),
                 title,
@@ -352,4 +474,8 @@ impl EnvironmentManager {
 
         Ok(initial)
     }
+}
+
+fn can_access_run(handle: &ActiveRunHandle, user: &User) -> bool {
+    user.is_root || (!handle.owner_user_id.is_empty() && handle.owner_user_id == user.id)
 }

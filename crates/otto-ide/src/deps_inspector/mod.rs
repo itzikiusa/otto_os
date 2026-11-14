@@ -14,13 +14,13 @@ use std::time::Duration;
 use regex::Regex;
 use serde_json::Value;
 
-use crate::java_workspace::{parse_pom_properties, resolve_m2_repo, strip_xml_comments};
+use crate::java_workspace::{parse_pom_properties, strip_xml_comments};
 use crate::types::{IdeDepItem, IdeDepManagedIn, IdeDepsInspectResp};
 
 pub use self::actions::run_deps_action;
-pub(crate) use self::enrich::{apply_best_newer_versions, same_major_minor};
 use self::enrich::{
-    enrich_crates_updates, enrich_npm_updates, enrich_osv_vulnerabilities, enrich_pypi_updates,
+    enrich_crates_updates, enrich_maven_updates, enrich_npm_updates, enrich_osv_vulnerabilities,
+    enrich_pypi_updates, same_major_minor,
 };
 
 /// Inspect a manifest file (`go.mod`, `pom.xml`, `build.gradle*`, `package.json`,
@@ -88,28 +88,42 @@ pub fn parse_go_mod(content: &str) -> Vec<IdeDepItem> {
     let mut in_require = false;
     for (idx, raw_line) in content.lines().enumerate() {
         let line_no = (idx + 1) as u32;
-        let trimmed = raw_line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("//") {
+        let code_trimmed = raw_line
+            .split_once("//")
+            .map_or(raw_line, |(c, _)| c)
+            .trim();
+        if code_trimmed.is_empty() {
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("require") {
-            let after = rest.trim();
-            if after.starts_with('(') {
-                in_require = true;
+        if let Some(rest) = code_trimmed.strip_prefix("require") {
+            if rest.is_empty() || rest.starts_with(char::is_whitespace) || rest.starts_with('(') {
+                let after = rest.trim();
+                if after.starts_with('(') {
+                    if after.contains(')') {
+                        if let Some(item) = parse_go_require_spec(raw_line, line_no, true) {
+                            items.push(item);
+                        }
+                    } else {
+                        in_require = true;
+                    }
+                    continue;
+                }
+                if let Some(item) = parse_go_require_spec(raw_line, line_no, true) {
+                    items.push(item);
+                }
                 continue;
             }
-            if let Some(item) = parse_go_require_spec(raw_line, line_no, true) {
-                items.push(item);
-            }
-            continue;
         }
         if in_require {
-            if trimmed.starts_with(')') {
+            if code_trimmed.starts_with(')') {
                 in_require = false;
                 continue;
             }
             if let Some(item) = parse_go_require_spec(raw_line, line_no, false) {
                 items.push(item);
+            }
+            if code_trimmed.ends_with(')') {
+                in_require = false;
             }
         }
     }
@@ -134,7 +148,12 @@ fn parse_go_require_spec(raw_line: &str, line_no: u32, strip_kw: bool) -> Option
     } else {
         code_part
     };
-    let mut parts = work.split_whitespace();
+    let trimmed_work = work.trim();
+    let inner_work = trimmed_work
+        .strip_prefix('(')
+        .map(|s| s.strip_suffix(')').unwrap_or(s))
+        .unwrap_or_else(|| trimmed_work.strip_suffix(')').unwrap_or(trimmed_work));
+    let mut parts = inner_work.split_whitespace();
     let mod_name = parts.next()?;
     let ver = parts.next()?;
     if mod_name.starts_with('(') || mod_name.starts_with(')') {
@@ -469,63 +488,6 @@ pub fn parse_gradle_dependencies(content: &str) -> Vec<IdeDepItem> {
     items
 }
 
-async fn enrich_maven_updates(items: &mut [IdeDepItem], env_map: &BTreeMap<String, String>) {
-    let m2 = resolve_m2_repo(env_map);
-    let ver_re = Regex::new(r"<version>\s*([^<\s]+)\s*</version>").unwrap();
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_millis(2200))
-        .build()
-        .ok();
-
-    for item in items.iter_mut() {
-        let Some((group, artifact)) = item.name.split_once(':') else {
-            continue;
-        };
-        let mut versions: Vec<String> = Vec::new();
-        if let Some(m2_dir) = &m2 {
-            let art_dir = m2_dir.join(group.replace('.', "/")).join(artifact);
-            if let Ok(mut rd) = tokio::fs::read_dir(&art_dir).await {
-                while let Ok(Some(entry)) = rd.next_entry().await {
-                    let epath = entry.path();
-                    if epath.is_dir() {
-                        if let Some(v) = entry.file_name().to_str() {
-                            versions.push(v.to_string());
-                        }
-                    } else if entry
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with("maven-metadata")
-                    {
-                        if let Ok(xml) = tokio::fs::read_to_string(&epath).await {
-                            for cap in ver_re.captures_iter(&xml) {
-                                versions.push(cap[1].to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if versions.is_empty() && !otto_core::e2e::isolated() {
-            if let Some(http) = &client {
-                let url = format!(
-                    "https://repo1.maven.org/maven2/{}/{artifact}/maven-metadata.xml",
-                    group.replace('.', "/")
-                );
-                if let Ok(resp) = http.get(&url).send().await {
-                    if resp.status().is_success() {
-                        if let Ok(xml) = resp.text().await {
-                            for cap in ver_re.captures_iter(&xml) {
-                                versions.push(cap[1].to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        apply_best_newer_versions(item, &versions);
-    }
-}
-
 // ── 3. Node (`package.json`), Rust (`Cargo.toml`), Python (`requirements.txt` / `pyproject.toml`) ──
 
 pub fn parse_package_json(content: &str) -> Vec<IdeDepItem> {
@@ -535,10 +497,10 @@ pub fn parse_package_json(content: &str) -> Vec<IdeDepItem> {
     for (idx, line) in content.lines().enumerate() {
         let t = line.trim();
         if t.starts_with("\"dependencies\"") {
-            section = "deps";
+            section = if t.contains('}') { "" } else { "deps" };
             continue;
         } else if t.starts_with("\"devDependencies\"") {
-            section = "dev";
+            section = if t.contains('}') { "" } else { "dev" };
             continue;
         } else if !section.is_empty() && t.starts_with('}') {
             section = "";

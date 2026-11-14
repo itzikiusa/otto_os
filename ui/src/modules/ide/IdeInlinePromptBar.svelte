@@ -12,12 +12,17 @@
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { formatEffortShort, formatModelLabel, normalizeEffort, supportsEffortSelection } from '../../lib/providerModels';
   import { harnessLabel } from '../../lib/providers';
+  import { loadRuntimeMentionMenu } from '../../lib/runtimeThreadPort';
   import { auth } from '../../lib/stores/auth.svelte';
-  import RuntimeMentionMenu from '../threads/runtime/RuntimeMentionMenu.svelte'; // ui-guards: allow — shared @file/@folder search in ⌘I inline edit
   import { ide } from './ideStore.svelte';
   import { ideAgentEngine as ideAgent } from './agent/ideAgentEngine.svelte';
 
   const ModelPicker = lazyComponent(() => import('../../lib/components/ModelPickerPopover.svelte'));
+  const MentionMenu = lazyComponent(loadRuntimeMentionMenu);
+
+  $effect(() => {
+    if (ideAgent.inlinePrompt?.open) MentionMenu.prefetch();
+  });
 
   const readOnly = $derived(!ide.canEditCollab || Boolean(ide.activeTab?.readOnly));
   let pickerOpen = $state(false);
@@ -92,28 +97,30 @@
 
       {#key `${st.path}:${st.startLine}:${st.endLine}`}
         <div class="ip-field-wrap" bind:this={inlineAnchorEl}>
-          <RuntimeMentionMenu
-            bind:this={mentionEl}
-            text={st.query}
-            textareaEl={inlineFieldEl}
-            anchorEl={inlineAnchorEl}
-            cwd={ideAgent.resolveProjectCwd()}
-            allowAgents={false}
-            onpickfile={(picked) => {
-              st.query = picked.nextText;
-              requestAnimationFrame(() => {
-                inlineFieldEl?.focus();
-                inlineFieldEl?.setSelectionRange(picked.nextCaret, picked.nextCaret);
-              });
-            }}
-            ondrilldir={(nextText, nextCaret) => {
-              st.query = nextText;
-              requestAnimationFrame(() => {
-                inlineFieldEl?.focus();
-                inlineFieldEl?.setSelectionRange(nextCaret, nextCaret);
-              });
-            }}
-          />
+          {#if MentionMenu.component}
+            <MentionMenu.component
+              bind:this={mentionEl}
+              text={st.query}
+              textareaEl={inlineFieldEl}
+              anchorEl={inlineAnchorEl}
+              cwd={ideAgent.resolveProjectCwd()}
+              allowAgents={false}
+              onpickfile={(picked) => {
+                st.query = picked.nextText;
+                requestAnimationFrame(() => {
+                  inlineFieldEl?.focus();
+                  inlineFieldEl?.setSelectionRange(picked.nextCaret, picked.nextCaret);
+                });
+              }}
+              ondrilldir={(nextText, nextCaret) => {
+                st.query = nextText;
+                requestAnimationFrame(() => {
+                  inlineFieldEl?.focus();
+                  inlineFieldEl?.setSelectionRange(nextCaret, nextCaret);
+                });
+              }}
+            />
+          {/if}
           <textarea
             bind:this={inlineFieldEl}
             class="input ip-field"

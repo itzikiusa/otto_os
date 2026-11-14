@@ -10,7 +10,7 @@ use otto_core::domain::User;
 use otto_core::{Error, Result};
 
 use super::ApiResult;
-use crate::target::{canonicalize_local_root_dir, enforce_non_root_path};
+use crate::target::enforce_non_root_path;
 use crate::types::{
     IdeCodeActionsReq, IdeCodeActionsResp, IdeDiagnosticsReq, IdeDiagnosticsResp, IdeFormatReq,
     IdeFormatResp, IdeFsCompleteReq, IdeFsCompleteResp, IdeHistoryEntryQuery, IdeHistoryEntryResp,
@@ -27,12 +27,12 @@ use crate::IdeCtx;
 pub(super) async fn lsp_symbols<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(mut req): Json<IdeSymbolsReq>,
+    Json(req): Json<IdeSymbolsReq>,
 ) -> ApiResult<Json<IdeSymbolsResp>> {
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
-        .await;
+    if !user.is_root && req.target.kind == crate::types::IdeTargetKind::Local {
+        ctx.authorize_local_target(&user, &req.target, false)
+            .await?;
+    }
     Ok(Json(
         crate::lsp_service::document_symbols(&ctx, &user, req).await?,
     ))
@@ -44,10 +44,6 @@ pub(super) async fn lsp_definition<S: IdeCtx>(
     Json(mut req): Json<IdeReferencesReq>,
 ) -> ApiResult<Json<IdeReferencesResp>> {
     req.target.absorb_project_folders(&req.project_folders);
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
-        .await;
     Ok(Json(
         crate::lsp_service::goto_definition(&ctx, &user, req).await?,
     ))
@@ -59,10 +55,6 @@ pub(super) async fn lsp_implementation<S: IdeCtx>(
     Json(mut req): Json<IdeReferencesReq>,
 ) -> ApiResult<Json<IdeReferencesResp>> {
     req.target.absorb_project_folders(&req.project_folders);
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
-        .await;
     Ok(Json(
         crate::lsp_service::goto_implementation(&ctx, &user, req).await?,
     ))
@@ -74,10 +66,6 @@ pub(super) async fn lsp_references<S: IdeCtx>(
     Json(mut req): Json<IdeReferencesReq>,
 ) -> ApiResult<Json<IdeReferencesResp>> {
     req.target.absorb_project_folders(&req.project_folders);
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
-        .await;
     Ok(Json(
         crate::lsp_service::find_references(&ctx, &user, req).await?,
     ))
@@ -86,12 +74,15 @@ pub(super) async fn lsp_references<S: IdeCtx>(
 pub(super) async fn lsp_rename<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(mut req): Json<IdeRenameReq>,
+    Json(req): Json<IdeRenameReq>,
 ) -> ApiResult<Json<IdeRenameResp>> {
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
-        .await;
+    if req.apply {
+        let _ = ctx
+            .ide()
+            .targets
+            .resolve_write(&ctx, &user, &req.target)
+            .await?;
+    }
     Ok(Json(
         crate::lsp_service::rename_symbol(&ctx, &user, req).await?,
     ))
@@ -100,12 +91,8 @@ pub(super) async fn lsp_rename<S: IdeCtx>(
 pub(super) async fn lsp_format<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(mut req): Json<IdeFormatReq>,
+    Json(req): Json<IdeFormatReq>,
 ) -> ApiResult<Json<IdeFormatResp>> {
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
-        .await;
     Ok(Json(
         crate::lsp_service::format_document(&ctx, &user, req).await?,
     ))
@@ -114,12 +101,12 @@ pub(super) async fn lsp_format<S: IdeCtx>(
 pub(super) async fn lsp_code_actions<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(mut req): Json<IdeCodeActionsReq>,
+    Json(req): Json<IdeCodeActionsReq>,
 ) -> ApiResult<Json<IdeCodeActionsResp>> {
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
-        .await;
+    if !user.is_root && req.target.kind == crate::types::IdeTargetKind::Local {
+        ctx.authorize_local_target(&user, &req.target, false)
+            .await?;
+    }
     Ok(Json(
         crate::lsp_service::code_actions(&ctx, &user, req).await?,
     ))
@@ -132,10 +119,6 @@ pub(super) async fn lsp_diagnostics<S: IdeCtx>(
 ) -> ApiResult<Json<IdeDiagnosticsResp>> {
     if let Some(target) = &mut req.target {
         target.absorb_project_folders(&req.project_folders);
-        ctx.ide()
-            .environments
-            .enrich_target_roots(&ctx.pool(), target)
-            .await;
     }
     Ok(Json(
         crate::lsp_service::diagnostics(&ctx, &user, req).await?,
@@ -149,10 +132,6 @@ pub(super) async fn lsp_hover<S: IdeCtx>(
 ) -> ApiResult<Json<IdeHoverResp>> {
     if let Some(target) = &mut req.target {
         target.absorb_project_folders(&req.project_folders);
-        ctx.ide()
-            .environments
-            .enrich_target_roots(&ctx.pool(), target)
-            .await;
     }
     Ok(Json(crate::lsp_service::hover(&ctx, &user, req).await?))
 }
@@ -162,10 +141,36 @@ pub(super) async fn lsp_hover<S: IdeCtx>(
 // ---------------------------------------------------------------------------
 
 pub(super) async fn fs_complete<S: IdeCtx>(
-    State(_ctx): State<S>,
+    State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeFsCompleteReq>,
 ) -> ApiResult<Json<IdeFsCompleteResp>> {
+    if !user.is_root {
+        let mut authorized_any = false;
+        if let Some(ref t) = req.target {
+            if !t.root.trim().is_empty() {
+                let _ = ctx.ide().targets.resolve(&ctx, &user, t).await?;
+                authorized_any = true;
+            }
+        }
+        for r in &req.roots {
+            if !r.trim().is_empty() {
+                ctx.authorize_local_target(&user, &IdeTargetSpec::local(r.clone()), false)
+                    .await?;
+                authorized_any = true;
+            }
+        }
+        if let Some(cwd) = req.cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            ctx.authorize_local_target(&user, &IdeTargetSpec::local(cwd.to_string()), false)
+                .await?;
+            authorized_any = true;
+        }
+        if !authorized_any {
+            return Err(
+                Error::Forbidden("workspace root is required for path completion".into()).into(),
+            );
+        }
+    }
     let is_root = user.is_root;
     let resp = tokio::task::spawn_blocking(move || {
         crate::target::complete::complete_fs_paths(&req, is_root)
@@ -183,26 +188,27 @@ async fn authorize_history_root<S: IdeCtx>(
     ctx: &S,
     user: &User,
     raw_root: &str,
+    write: bool,
 ) -> Result<(PathBuf, Vec<PathBuf>)> {
     if raw_root.trim().is_empty() {
         return Err(Error::Invalid("missing 'root' parameter".into()));
     }
-    let mut spec = IdeTargetSpec::local(raw_root.to_string());
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut spec)
-        .await;
-    let _ = ctx.ide().targets.resolve(ctx, user, &spec).await?;
-    let canon_root = canonicalize_local_root_dir(raw_root, user.is_root)?;
-    let mut extra_roots = Vec::new();
-    for er in spec.merged_extra_roots() {
-        if let Ok(c) = canonicalize_local_root_dir(&er, user.is_root) {
-            if c != canon_root && !extra_roots.contains(&c) {
-                extra_roots.push(c);
-            }
-        }
+    let spec = IdeTargetSpec::local(raw_root.to_string());
+    let resolved = if write {
+        ctx.ide().targets.resolve_write(ctx, user, &spec).await?
+    } else {
+        ctx.ide().targets.resolve(ctx, user, &spec).await?
+    };
+    match resolved {
+        crate::target::ResolvedTarget::Local {
+            root,
+            additional_roots,
+            ..
+        } => Ok((root, additional_roots)),
+        crate::target::ResolvedTarget::Ssh { .. } => Err(Error::Invalid(
+            "local history requires a local target".into(),
+        )),
     }
-    Ok((canon_root, extra_roots))
 }
 
 pub(super) async fn history_list<S: IdeCtx>(
@@ -210,11 +216,14 @@ pub(super) async fn history_list<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<IdeHistoryListQuery>,
 ) -> ApiResult<Json<IdeHistoryListResp>> {
-    let (canon_root, _) = authorize_history_root(&ctx, &user, &q.root).await?;
+    let (canon_root, extra_roots) = authorize_history_root(&ctx, &user, &q.root, false).await?;
     let store = ctx.ide().history.clone();
+    let is_root = user.is_root;
     let resp = tokio::task::spawn_blocking(move || {
         store.list_entries(
             &canon_root,
+            &extra_roots,
+            is_root,
             q.path.as_deref(),
             q.include_deleted,
             q.limit,
@@ -231,11 +240,14 @@ pub(super) async fn history_entry<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<IdeHistoryEntryQuery>,
 ) -> ApiResult<Json<IdeHistoryEntryResp>> {
-    let (canon_root, _) = authorize_history_root(&ctx, &user, &q.root).await?;
+    let (canon_root, extra_roots) = authorize_history_root(&ctx, &user, &q.root, false).await?;
     let store = ctx.ide().history.clone();
-    let resp = tokio::task::spawn_blocking(move || store.get_entry(&canon_root, &q.id))
-        .await
-        .map_err(|e| Error::Internal(format!("history entry worker failed: {e}")))??;
+    let is_root = user.is_root;
+    let resp = tokio::task::spawn_blocking(move || {
+        store.get_entry(&canon_root, &extra_roots, is_root, &q.id)
+    })
+    .await
+    .map_err(|e| Error::Internal(format!("history entry worker failed: {e}")))??;
     Ok(Json(resp))
 }
 
@@ -245,7 +257,7 @@ pub(super) async fn history_restore<S: IdeCtx>(
     Json(req): Json<IdeHistoryRestoreReq>,
 ) -> ApiResult<Json<IdeHistoryRestoreResp>> {
     let (canon_root, extra_roots) =
-        authorize_history_root(&ctx, &user, req.effective_root()).await?;
+        authorize_history_root(&ctx, &user, req.effective_root(), true).await?;
     let store = ctx.ide().history.clone();
     let is_root = user.is_root;
     let resp = tokio::task::spawn_blocking(move || {
@@ -262,7 +274,7 @@ pub(super) async fn history_snapshot<S: IdeCtx>(
     Json(req): Json<IdeHistorySnapshotReq>,
 ) -> ApiResult<Json<IdeHistorySnapshotResp>> {
     let (canon_root, extra_roots) =
-        authorize_history_root(&ctx, &user, req.effective_root()).await?;
+        authorize_history_root(&ctx, &user, req.effective_root(), true).await?;
     let store = ctx.ide().history.clone();
     let is_root = user.is_root;
     let entry = tokio::task::spawn_blocking(move || -> Result<_> {
@@ -281,15 +293,15 @@ pub(super) async fn history_snapshot<S: IdeCtx>(
             .or_else(|| otto_core::secret_paths::canonicalize_prospective(&target_candidate))
             .ok_or_else(|| Error::Invalid("invalid snapshot path".into()))?;
 
-        let allowed = std::iter::once(&canon_root)
+        let matched_root = std::iter::once(&canon_root)
             .chain(extra_roots.iter())
-            .any(|r| resolved_path.starts_with(r));
-        if !allowed {
-            return Err(Error::Forbidden(format!(
-                "snapshot path '{}' escapes workspace root",
-                resolved_path.display()
-            )));
-        }
+            .find(|r| resolved_path.starts_with(r))
+            .ok_or_else(|| {
+                Error::Forbidden(format!(
+                    "snapshot path '{}' escapes workspace root",
+                    resolved_path.display()
+                ))
+            })?;
         if !is_root {
             enforce_non_root_path(&resolved_path)?;
         }
@@ -311,8 +323,20 @@ pub(super) async fn history_snapshot<S: IdeCtx>(
             for item in walker.flatten().take(200) {
                 let p = item.path();
                 if p.is_file() {
-                    if let Some(rec) =
-                        store.record_existing_file_sync(&canon_root, p, "manual", label, false)
+                    let Ok(canon_p) = std::fs::canonicalize(p) else {
+                        continue;
+                    };
+                    let Some(entry_root) = std::iter::once(&canon_root)
+                        .chain(extra_roots.iter())
+                        .find(|r| canon_p.starts_with(r))
+                    else {
+                        continue;
+                    };
+                    if !is_root && enforce_non_root_path(&canon_p).is_err() {
+                        continue;
+                    }
+                    if let Some(rec) = store
+                        .record_existing_file_sync(entry_root, &canon_p, "manual", label, false)
                     {
                         if first.is_none() {
                             first = Some(rec);
@@ -325,7 +349,7 @@ pub(super) async fn history_snapshot<S: IdeCtx>(
             }
             let marker = resolved_path.join(".otto-folder-snapshot");
             return store
-                .record_bytes_sync(&canon_root, &marker, b"", "manual", label, false)?
+                .record_bytes_sync(matched_root, &marker, b"", "manual", label, false)?
                 .ok_or_else(|| Error::Invalid("unable to record folder snapshot".into()));
         }
 
@@ -335,7 +359,7 @@ pub(super) async fn history_snapshot<S: IdeCtx>(
             req.content.into_bytes()
         };
         store
-            .record_bytes_sync(&canon_root, &resolved_path, &bytes, "manual", label, false)?
+            .record_bytes_sync(matched_root, &resolved_path, &bytes, "manual", label, false)?
             .ok_or_else(|| {
                 Error::Invalid("snapshot skipped (binary content or exceeds 2 MiB limit)".into())
             })

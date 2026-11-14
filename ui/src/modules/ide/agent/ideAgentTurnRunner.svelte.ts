@@ -4,19 +4,15 @@
 
 import { api } from '../../../lib/api/client';
 import type { PromptImage, RuntimeAccessMode, RuntimeProvider } from '../../../lib/api/types';
+import { ideWorkspacePort } from '../../../lib/ideWorkspacePort.svelte';
 import { loadErrorText } from '../../../lib/loadError';
 import { normalizeEffort, type EffortLevel, type InteractionMode } from '../../../lib/providerModels';
-import { harnessLabel } from '../../../lib/providers';
+import { harnessLabel, isRuntimeProvider } from '../../../lib/providers';
 import { router } from '../../../lib/router.svelte';
-import { openInThreads } from '../../../lib/runtimeThreadPort';
+import { openInThreads, type IdeRuntimeBridge } from '../../../lib/runtimeThreadPort';
 import { runtimeDrafts, type ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
 import { transcript } from '../../../lib/stores/transcript.svelte';
 import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
-import { askTargets } from '../../threads/runtime/askTargets.svelte'; // ui-guards: allow — IDE agent dock supports Ask-another-agent delegation
-import { council } from '../../threads/runtime/councilStore.svelte'; // ui-guards: allow — IDE agent dock supports Council multi-agent threads
-import { isRuntimeProvider, runtimeThreads } from '../../threads/runtime/runtimeThreads.svelte'; // ui-guards: allow — IDE agent dock drives real Otto Threads
-import { runtimeViews } from '../../threads/runtime/runtimeView.svelte'; // ui-guards: allow — IDE agent dock streams structured runtime views
-import { threads } from '../../threads/threadsStore.svelte'; // ui-guards: allow — IDE agent dock syncs shared thread focus and project drafts
 import { ide } from '../ideStore.svelte';
 import {
   buildIdeAgentPrompt,
@@ -33,6 +29,12 @@ import {
 import { ideAgentState } from './ideAgentState.svelte';
 import { resolveIdeProjectCwd, resolveIdeWorkspaceId } from './ideContextBuilders';
 
+async function requireIdeRuntimeBridge(): Promise<IdeRuntimeBridge> {
+  const bridge = ideAgentState.runtimeBridge ?? (await ideAgentState.ensureBridge());
+  if (!bridge) throw new Error('Couldn’t load runtime threads in this window.');
+  return bridge;
+}
+
 export function summarizeIdeThreadTitle(text: string, provider = 'Agent'): string {
   const first =
     stripIdeContextBlocks(text)
@@ -45,37 +47,48 @@ export function summarizeIdeThreadTitle(text: string, provider = 'Agent'): strin
 export function rememberIdeProjectRoot(localCwd: string | null): void {
   const clean = (localCwd ?? '').trim().replace(/\/+$/, '');
   if (!clean || clean === '~') return;
-  threads.rememberProject(clean);
-  try {
-    localStorage.setItem('otto.ide.lastRoot', clean);
-  } catch { /* storage unavailable */ }
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('otto:ide-projects-changed'));
+  ideWorkspacePort.setLastRoot(clean);
+  if (ideAgentState.runtimeBridge) {
+    ideAgentState.runtimeBridge.threads.rememberProject(clean);
+  } else {
+    void ideAgentState.ensureBridge().then((b) => b?.threads.rememberProject(clean));
   }
 }
 
 export function openIdeThreadInThreadsView(id: string | null, workspaceId: string, cwd: string | null): void {
   rememberIdeProjectRoot(cwd);
+  const bridge = ideAgentState.runtimeBridge;
   if (id) {
-    threads.selectThread(id, { syncRoute: false });
+    if (bridge) bridge.threads.selectThread(id, { syncRoute: false });
+    else void ideAgentState.ensureBridge().then((b) => b?.threads.selectThread(id, { syncRoute: false }));
     openInThreads(id);
     return;
   }
-  threads.startNewThread({ workspaceId, cwd });
-  router.go('threads/new');
+  if (bridge) {
+    bridge.threads.startNewThread({ workspaceId, cwd });
+    router.go('threads/new');
+    return;
+  }
+  void ideAgentState.ensureBridge().then((b) => {
+    b?.threads.startNewThread({ workspaceId, cwd });
+    router.go('threads/new');
+  });
 }
 
 export async function interruptIdeSessionTurn(sessionId: string): Promise<void> {
-  if (runtimeThreads.byId[sessionId]) await runtimeThreads.interrupt(sessionId);
+  const bridge = ideAgentState.runtimeBridge ?? (await ideAgentState.ensureBridge());
+  if (bridge?.runtimeThreads.byId[sessionId]) await bridge.runtimeThreads.interrupt(sessionId);
   else await api.post<void>(`/sessions/${encodeURIComponent(sessionId)}/input`, { text: '\u001b', submit: false });
 }
 
 export async function loadIdeWorkspaceSessions(wsId: string, inflight: Map<string, Promise<void>>): Promise<void> {
   if (!wsId) return;
+  const bridge = ideAgentState.runtimeBridge ?? (await ideAgentState.ensureBridge());
+  if (!bridge) return;
   const key = `${wsId}:all`;
   let pending = inflight.get(key);
   if (!pending) {
-    pending = Promise.allSettled([runtimeThreads.load(wsId), runtimeThreads.loadAll()])
+    pending = Promise.allSettled([bridge.runtimeThreads.load(wsId), bridge.runtimeThreads.loadAll()])
       .then(() => undefined)
       .finally(() => {
         inflight.delete(key);
@@ -88,9 +101,10 @@ export async function loadIdeWorkspaceSessions(wsId: string, inflight: Map<strin
 export function isIdeSessionWorking(sending: boolean, sid: string | null): boolean {
   if (sending) return true;
   if (!sid) return false;
-  const row = runtimeThreads.byId[sid];
+  const bridge = ideAgentState.runtimeBridge;
+  const row = bridge?.runtimeThreads.byId[sid];
   if (row && (row.status === 'working' || row.status === 'starting')) return true;
-  const proj = runtimeViews.projections[sid];
+  const proj = bridge?.runtimeViews.projections[sid];
   if (proj) {
     if (proj.session?.status === 'running' || proj.session?.status === 'starting') return true;
     if (proj.turns.some((t) => t.status === 'running' || t.status === 'pending')) return true;
@@ -106,17 +120,18 @@ export function isIdeSessionWorking(sending: boolean, sid: string | null): boole
 export async function loadSelectedIdeSessionMeta(
   id: string,
 ): Promise<{ provider: string; model?: string | null; accessMode?: RuntimeAccessMode } | null> {
-  threads.selectThread(id, { syncRoute: false });
+  const bridge = await requireIdeRuntimeBridge();
+  bridge.threads.selectThread(id, { syncRoute: false });
   const pty = ws.getSession(id);
-  if (pty && !runtimeThreads.byId[id]) {
+  if (pty && !bridge.runtimeThreads.byId[id]) {
     return {
       provider: pty.provider,
       model: typeof pty.meta?.model === 'string' && pty.meta.model.trim() ? pty.meta.model.trim() : null,
     };
   }
-  const row = runtimeThreads.get(id) ?? (await runtimeThreads.loadOne(id));
+  const row = bridge.runtimeThreads.get(id) ?? (await bridge.runtimeThreads.loadOne(id));
   if (!row) return null;
-  void runtimeThreads.loadLinked(id).catch(() => {});
+  void bridge.runtimeThreads.loadLinked(id).catch(() => {});
   return {
     provider: row.provider,
     ...(row.model ? { model: row.model } : {}),
@@ -135,6 +150,8 @@ export async function ensureIdeRuntimeSession(opts: {
   onSessionBound: (id: string) => void;
   syncSubscriptions: () => void;
 }): Promise<string> {
+  const bridge = await requireIdeRuntimeBridge();
+  const { runtimeThreads, threads } = bridge;
   if (opts.existingId) {
     const row =
       runtimeThreads.get(opts.existingId) ??
@@ -175,6 +192,7 @@ export async function executeIdeInlineEdit(opts: {
   isCancelled: () => boolean;
 }): Promise<IdeCodeProposal | null> {
   const { state: st, query } = opts;
+  const bridge = await requireIdeRuntimeBridge();
   const inlineChip: IdeContextChip = {
     id: 'inline-sel',
     key: `selection:${st.path}:${st.startLine}-${st.endLine}`,
@@ -204,7 +222,7 @@ export async function executeIdeInlineEdit(opts: {
     syncSubscriptions: opts.syncSubscriptions,
   });
   if (opts.isCancelled()) return null;
-  const knownIds = new Set((runtimeViews.projections[sid]?.items ?? []).map((i) => i.id));
+  const knownIds = new Set((bridge.runtimeViews.projections[sid]?.items ?? []).map((i) => i.id));
   const resp = await dispatchPromptToRuntimeSession(sid, promptPayload, {
     model: st.model,
     effort,
@@ -232,6 +250,8 @@ export async function executeIdePromptSend(opts: {
   selectSession: (id: string) => Promise<void>;
   syncSubscriptions: () => void;
 }): Promise<void> {
+  const bridge = await requireIdeRuntimeBridge();
+  const { askTargets, council, runtimeThreads } = bridge;
   const pics: PromptImage[] = opts.files
     .filter((f) => f.mime.startsWith('image/'))
     .map(({ mime, data_base64 }) => ({ mime, data_base64 }));
@@ -377,7 +397,10 @@ export async function runIdeComposerStateTurn(opts: {
   syncSubscriptions: () => void;
 }): Promise<void> {
   const activeSid = ideAgentState.sessionId;
-  const activeDraft = activeSid && runtimeThreads.byId[activeSid] ? runtimeDrafts.for(activeSid) : null;
+  const activeDraft =
+    activeSid && ideAgentState.runtimeBridge?.runtimeThreads.byId[activeSid]
+      ? runtimeDrafts.for(activeSid)
+      : null;
   const rawText = opts.overrideText ?? (activeDraft ? activeDraft.text : ideAgentState.composerText);
   const userText = rawText.trim();
   if ((!userText && ideAgentState.contexts.length === 0 && ideAgentState.attachments.length === 0) || ideAgentState.sending) {

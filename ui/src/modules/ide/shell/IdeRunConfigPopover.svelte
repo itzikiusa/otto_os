@@ -1,6 +1,7 @@
 <script lang="ts">
   // Lazy-loaded Launch target selector popover for `IdeRunToolbar.svelte`.
   import { tick } from 'svelte';
+  import { placeAnchored, type AnchorPlacement } from '../../../lib/anchorPlace';
   import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { ide, type IdeRunConfig } from '../ideStore.svelte';
@@ -16,7 +17,8 @@
   let filter = $state('');
   let popEl = $state<HTMLDivElement | undefined>(undefined);
   let filterEl = $state<HTMLInputElement | undefined>(undefined);
-  let pos = $state({ left: 12, top: 48, width: 360, maxH: 400 });
+  let width = $state(360);
+  let pos = $state<AnchorPlacement>({ left: 12, top: 48, maxH: 400 });
 
   const savedConfigs = $derived.by(() => {
     const q = filter.trim().toLowerCase();
@@ -28,39 +30,39 @@
     return ide.runConfigs.filter((c) => Boolean(c.auto_detected) && (!q || c.name.toLowerCase().includes(q) || c.runner.toLowerCase().includes(q)));
   });
 
+  function closePopover(restoreFocus = true): void {
+    onclose();
+    if (restoreFocus) triggerEl?.focus();
+  }
+
   function clampPosition(): void {
     if (typeof window === 'undefined' || !triggerEl) return;
-    const rect = triggerEl.getBoundingClientRect();
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const width = Math.max(250, Math.min(400, vw - 16));
-    const left = Math.max(8, Math.min(rect.right - width, vw - width - 8));
-    const maxH = Math.max(200, Math.min(460, vh - 16));
-    const measuredH = popEl ? Math.min(popEl.offsetHeight || 280, maxH) : 280;
-    const top = Math.max(8, Math.min(rect.bottom + 6, vh - measuredH - 8));
-    pos = { left, top, width, maxH };
+    width = Math.max(250, Math.min(400, window.innerWidth - 16));
+    if (popEl) {
+      pos = placeAnchored(triggerEl, popEl, { prefer: 'below', align: 'end' });
+    }
   }
 
   $effect(() => {
     clampPosition();
     void tick().then(() => {
       clampPosition();
-      filterEl?.focus();
+      if (filterEl) filterEl.focus();
+      else popEl?.focus();
     });
   });
 
   $effect(() => {
     void savedConfigs.length;
     void detectedConfigs.length;
-    requestAnimationFrame(() => clampPosition());
+    void tick().then(clampPosition);
   });
 
   $effect(() => {
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') {
         e.stopPropagation();
-        onclose();
-        triggerEl?.focus();
+        closePopover(true);
       }
     };
     const onResize = (): void => clampPosition();
@@ -74,19 +76,20 @@
 
   function selectTarget(id: string): void {
     ide.selectedConfigId = id;
-    onclose();
+    closePopover(true);
   }
 </script>
 
-<div class="run-backdrop" role="presentation" onclick={onclose}></div>
+<div class="run-backdrop" role="presentation" onclick={() => closePopover(true)}></div>
 <div
   bind:this={popEl}
   class="run-popover"
   role="dialog"
   aria-label="Launch targets"
-  style:inset-inline-start="{pos.left}px"
+  tabindex="-1"
+  style:left="{pos.left}px"
   style:top="{pos.top}px"
-  style:inline-size="{pos.width}px"
+  style:inline-size="{width}px"
   style:max-block-size="{pos.maxH}px"
   data-testid="ide-run-config-popover"
 >

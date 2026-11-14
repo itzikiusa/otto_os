@@ -5,15 +5,9 @@
   import Badge from '../../lib/components/Badge.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import { startMouseDrag } from '../../lib/dragCursor';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import { formatSeconds } from '../../lib/metric-format';
-  import {
-    loadPaneWidth,
-    paneResizer,
-    pxWide,
-    RESIZE_TITLE,
-    savePaneWidth,
-  } from '../../lib/paneResizer';
+  import { loadPaneWidth } from '../../lib/paneResizer';
   import type { BadgeTone } from '../../lib/status';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import {
@@ -118,21 +112,6 @@
   const consoleLines = $derived<readonly ConsoleLineInput[]>(
     (shownRun?.output ?? []).map((text) => ({ text })),
   );
-
-  function setTreeW(v: number): void {
-    treeW = Math.max(200, Math.min(620, Math.round(v)));
-    savePaneWidth(LS_RUN_TREE_W, treeW);
-  }
-  function resetTreeW(): void { setTreeW(320); }
-  function dragTreeW(e: MouseEvent): void {
-    const startX = e.clientX;
-    const startW = treeW;
-    startMouseDrag(e, {
-      cursor: 'col-resize',
-      onMove: (ev) => { treeW = Math.max(200, Math.min(620, Math.round(startW + (ev.clientX - startX)))); },
-      onEnd: () => savePaneWidth(LS_RUN_TREE_W, treeW),
-    });
-  }
 
   function testKey(t: IdeTestResult, idx: number): string {
     return `${t.suite ?? ''}::${t.name}::${idx}`;
@@ -335,15 +314,7 @@
         </section>
 
         {#if !viewport.isPhone}
-          <div
-            class="run-col-resizer"
-            aria-label="Resize test results tree"
-            title={RESIZE_TITLE}
-            use:paneResizer={{
-              value: treeW, min: 200, max: 620, text: pxWide,
-              onChange: setTreeW, onReset: resetTreeW, onDragStart: dragTreeW,
-            }}
-          ></div>
+          <PaneDivider bind:width={treeW} storageKey={LS_RUN_TREE_W} min={200} max={620} defaultWidth={320} label="Resize test results tree" />
         {/if}
       {/if}
 
@@ -386,9 +357,6 @@
   .run-compact-btn { block-size: 22px; padding-block: 0; flex-shrink: 0; }
   .run-flex { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; overflow: hidden; }
   .run-tree { flex-shrink: 0; min-block-size: 0; min-inline-size: 200px; overflow-y: auto; border-inline-end: 1px solid var(--border); }
-  .run-col-resizer { position: relative; inline-size: 4px; margin-inline: -2px; flex-shrink: 0; cursor: col-resize; z-index: var(--z-sticky); }
-  .run-col-resizer::after { content: ''; position: absolute; inset-block: 0; inset-inline-start: 1px; inline-size: 2px; background: transparent; transition: background var(--dur-fast) ease-out; }
-  .run-col-resizer:hover::after, .run-col-resizer:focus-visible::after { background: var(--accent-text); }
   .run-filter-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 20px 12px; font-size: var(--fs-xs); }
   .run-suite { border-block-end: 1px solid var(--separator); }
   .run-suite-head { display: flex; align-items: center; gap: 6px; inline-size: 100%; padding-block: 6px; padding-inline: 10px; border: 0; background: var(--surface-2); color: var(--text); font-size: var(--fs-xs); font-weight: 600; text-align: start; cursor: pointer; }
@@ -411,6 +379,6 @@
   @container (max-width: 720px) {
     .run-flex { flex-direction: column; overflow-y: auto; }
     .run-tree { inline-size: 100%; border-inline-end: 0; border-block-end: 1px solid var(--border); max-block-size: 200px; }
-    .run-col-resizer { display: none; }
+    .run-flex :global(.pane-divider) { display: none; }
   }
 </style>

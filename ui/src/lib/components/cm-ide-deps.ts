@@ -98,11 +98,31 @@ export function parseManifestDependencies(filePath: string, content: string): Id
   } else if (eco === 'npm') {
     let sec: string | null = null;
     for (let i = 0; i < lines.length; i++) {
-      const t = lines[i].trim(), ln = i + 1, mSec = /^"(dependencies|devDependencies|peerDependencies)"\s*:\s*\{/.exec(t);
-      if (mSec) { sec = mSec[1]; continue; }
-      if (sec && t.startsWith('}')) { sec = null; continue; }
+      const t = lines[i].trim();
+      const ln = i + 1;
+      const mSec = /^"(dependencies|devDependencies|peerDependencies)"\s*:\s*\{/.exec(t);
+      if (mSec) {
+        sec = t.includes('}') ? null : mSec[1];
+        continue;
+      }
+      if (sec && t.startsWith('}')) {
+        sec = null;
+        continue;
+      }
       const mDep = sec ? /^"(@?[^"]+)"\s*:\s*"([^"]+)"/.exec(t) : null;
-      if (mDep) items.push({ name: mDep[1], current_version: mDep[2], indirect: sec !== 'dependencies', scope: sec, line: ln, end_line: ln, deprecated: Boolean(KNOWN_DEPRECATED[mDep[1]]), deprecation_note: KNOWN_DEPRECATED[mDep[1]] ?? null, vulnerabilities: [] });
+      if (mDep) {
+        items.push({
+          name: mDep[1],
+          current_version: mDep[2],
+          indirect: sec !== 'dependencies',
+          scope: sec,
+          line: ln,
+          end_line: ln,
+          deprecated: Boolean(KNOWN_DEPRECATED[mDep[1]]),
+          deprecation_note: KNOWN_DEPRECATED[mDep[1]] ?? null,
+          vulnerabilities: [],
+        });
+      }
     }
   } else if (eco === 'cargo') {
     let inDeps = false;
@@ -323,43 +343,98 @@ export function createIdeDepsExtension(opts: CreateIdeDepsExtensionOptions): Ext
     private abort: AbortController | null = null;
     constructor(view: EditorView) {
       const initial = parseManifestDependencies(opts.filePath, view.state.doc.toString());
-      queueMicrotask(() => { if (!view.dom.isConnected) return; view.dispatch({ effects: setManifestDepsEffect.of(initial) }); opts.onDepsUpdated?.(initial); this.scheduleInspect(view, 40); });
+      queueMicrotask(() => {
+        if (!view.dom.isConnected) return;
+        view.dispatch({ effects: setManifestDepsEffect.of(initial) });
+        opts.onDepsUpdated?.(initial);
+        this.scheduleInspect(view, 40);
+      });
       this.decorations = this.buildDecos(view, initial);
     }
     update(u: ViewUpdate) {
       if (u.docChanged) {
         const parsed = parseManifestDependencies(opts.filePath, u.state.doc.toString());
-        queueMicrotask(() => { if (u.view.dom.isConnected) { u.view.dispatch({ effects: setManifestDepsEffect.of(parsed) }); opts.onDepsUpdated?.(parsed); } });
+        queueMicrotask(() => {
+          if (u.view.dom.isConnected) {
+            u.view.dispatch({ effects: setManifestDepsEffect.of(parsed) });
+            opts.onDepsUpdated?.(parsed);
+          }
+        });
         this.scheduleInspect(u.view, 300);
       }
-      if (u.docChanged || u.viewportChanged || u.transactions.some((t) => t.effects.some((e) => e.is(setManifestDepsEffect)))) this.decorations = this.buildDecos(u.view, getManifestAllDeps(u.state));
+      const depsChanged = u.transactions.some((t) => t.effects.some((e) => e.is(setManifestDepsEffect)));
+      if (u.docChanged || u.viewportChanged || depsChanged) {
+        this.decorations = this.buildDecos(u.view, getManifestAllDeps(u.state));
+      }
     }
-    destroy() { if (this.timer) clearTimeout(this.timer); this.abort?.abort(); }
+    destroy() {
+      if (this.timer) clearTimeout(this.timer);
+      this.abort?.abort();
+    }
     scheduleInspect(view: EditorView, ms: number) {
       if (this.timer) clearTimeout(this.timer);
       this.abort?.abort();
       this.timer = setTimeout(() => {
-        const ctrl = new AbortController(); this.abort = ctrl; const snap = view.state.doc.toString();
-        void inspectIdeDependencies({ root: opts.root, connectionId: opts.connectionId, projectFolders: opts.projectFolders, path: opts.filePath, content: snap, signal: ctrl.signal }).then((items) => {
-          if (view.dom.isConnected && view.state.doc.toString() === snap) { view.dispatch({ effects: setManifestDepsEffect.of(items) }); opts.onDepsUpdated?.(items); }
+        const ctrl = new AbortController();
+        this.abort = ctrl;
+        const snap = view.state.doc.toString();
+        void inspectIdeDependencies({
+          root: opts.root,
+          connectionId: opts.connectionId,
+          projectFolders: opts.projectFolders,
+          path: opts.filePath,
+          content: snap,
+          signal: ctrl.signal,
+        }).then((items) => {
+          if (view.dom.isConnected && view.state.doc.toString() === snap) {
+            view.dispatch({ effects: setManifestDepsEffect.of(items) });
+            opts.onDepsUpdated?.(items);
+          }
         });
       }, ms);
     }
     buildDecos(view: EditorView, deps: IdeDepItem[]): DecorationSet {
-      const doc = view.state.doc, ranges: Range<Decoration>[] = [];
+      const doc = view.state.doc;
+      const ranges: Range<Decoration>[] = [];
+      const pushCv = (lineTo: number, actions: Array<{ label: string; action: string }>) => {
+        const widget = new ManifestCodeVisionWidget(actions, (act) => triggerAction(view, act));
+        ranges.push(Decoration.widget({ widget, side: 1 }).range(lineTo));
+      };
       for (let ln = 1; ln <= Math.min(doc.lines, 80); ln++) {
-        const lineObj = doc.line(ln), t = lineObj.text.trim();
+        const lineObj = doc.line(ln);
+        const t = lineObj.text.trim();
         if (eco === 'go' && (/^require\s*\(/.test(t) || /^require\s+\S+/.test(t))) {
-          ranges.push(Decoration.widget({ widget: new ManifestCodeVisionWidget([{ label: '↻ Update all dependencies', action: 'update_all_latest' }, { label: '↻ Update direct dependencies', action: 'update_direct_latest' }, { label: '🧹 Go Mod Tidy', action: 'tidy' }], (act) => triggerAction(view, act)), side: 1 }).range(lineObj.to)); break;
+          pushCv(lineObj.to, [
+            { label: '↻ Update all dependencies', action: 'update_all_latest' },
+            { label: '↻ Update direct dependencies', action: 'update_direct_latest' },
+            { label: '🧹 Go Mod Tidy', action: 'tidy' },
+          ]);
+          break;
         }
         if (eco === 'maven' && t === '<dependencies>') {
-          ranges.push(Decoration.widget({ widget: new ManifestCodeVisionWidget([{ label: '↻ Sync Maven', action: 'maven_sync' }, { label: '🛡 Vulnerability Scan', action: 'vuln_scan' }], (act) => triggerAction(view, act)), side: 1 }).range(lineObj.to)); break;
+          pushCv(lineObj.to, [
+            { label: '↻ Sync Maven', action: 'maven_sync' },
+            { label: '🛡 Vulnerability Scan', action: 'vuln_scan' },
+          ]);
+          break;
         }
         if (eco === 'gradle' && /^dependencies\s*\{/.test(t)) {
-          ranges.push(Decoration.widget({ widget: new ManifestCodeVisionWidget([{ label: '↻ Sync Gradle', action: 'gradle_sync' }, { label: '🛡 Vulnerability Scan', action: 'vuln_scan' }], (act) => triggerAction(view, act)), side: 1 }).range(lineObj.to)); break;
+          pushCv(lineObj.to, [
+            { label: '↻ Sync Gradle', action: 'gradle_sync' },
+            { label: '🛡 Vulnerability Scan', action: 'vuln_scan' },
+          ]);
+          break;
         }
-        if ((eco === 'npm' && /^"dependencies"\s*:/.test(t)) || (eco === 'cargo' && t === '[dependencies]') || (eco === 'pypi' && (ln === 1 || /^dependencies\s*=/.test(t) || /^\[tool\.poetry\.dependencies\]/.test(t)))) {
-          ranges.push(Decoration.widget({ widget: new ManifestCodeVisionWidget([{ label: '↻ Update dependencies', action: 'update_all_latest' }, { label: '🛡 Vulnerability Scan', action: 'vuln_scan' }], (act) => triggerAction(view, act)), side: 1 }).range(lineObj.to)); break;
+        const isGenericBlock =
+          (eco === 'npm' && /^"dependencies"\s*:/.test(t)) ||
+          (eco === 'cargo' && t === '[dependencies]') ||
+          (eco === 'pypi' && (ln === 1 || /^dependencies\s*=/.test(t) || /^\[tool\.poetry\.dependencies\]/.test(t)));
+        if (isGenericBlock) {
+          pushCv(lineObj.to, [
+            { label: '↻ Update dependencies', action: 'update_all_latest' },
+            { label: '🛡 Vulnerability Scan', action: 'vuln_scan' },
+          ]);
+          break;
         }
       }
       for (const d of deps) {

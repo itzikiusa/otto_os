@@ -5,7 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, RwLock};
 
 /// Read all entry paths from a ZIP / JAR / `ct.sym` central directory without
 /// decompressing any file payloads (`< 2ms` even on 60 MB archives).
@@ -115,10 +116,44 @@ pub struct JdkClassIndex {
     pub by_simple: HashMap<String, Vec<String>>,
 }
 
-static GLOBAL_JDK_INDEX: OnceLock<JdkClassIndex> = OnceLock::new();
+const MAX_JDK_INDEX_CACHE_ENTRIES: usize = 8;
 
-pub fn global_jdk_index(preferred_java_home: Option<&Path>) -> &'static JdkClassIndex {
-    GLOBAL_JDK_INDEX.get_or_init(|| build_jdk_index(preferred_java_home))
+type JdkCacheMap = HashMap<Option<PathBuf>, (u64, Arc<JdkClassIndex>)>;
+
+static GLOBAL_JDK_INDEX_CACHE: OnceLock<RwLock<JdkCacheMap>> = OnceLock::new();
+static JDK_CACHE_TICK: AtomicU64 = AtomicU64::new(1);
+
+pub fn global_jdk_index(preferred_java_home: Option<&Path>) -> Arc<JdkClassIndex> {
+    let effective_home =
+        find_any_java_home(preferred_java_home).map(|p| std::fs::canonicalize(&p).unwrap_or(p));
+    let cache = GLOBAL_JDK_INDEX_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    if let Some(found) = cache
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&effective_home)
+        .map(|(_, idx)| Arc::clone(idx))
+    {
+        return found;
+    }
+
+    let built = Arc::new(build_jdk_index_for_home(effective_home.as_deref()));
+    let mut map = cache.write().unwrap_or_else(|e| e.into_inner());
+    let tick = JDK_CACHE_TICK.fetch_add(1, Ordering::Relaxed);
+    if let Some((seen_tick, existing)) = map.get_mut(&effective_home) {
+        *seen_tick = tick;
+        return Arc::clone(existing);
+    }
+    if map.len() >= MAX_JDK_INDEX_CACHE_ENTRIES {
+        if let Some(oldest_key) = map
+            .iter()
+            .min_by_key(|(_, (t, _))| *t)
+            .map(|(k, _)| k.clone())
+        {
+            map.remove(&oldest_key);
+        }
+    }
+    map.insert(effective_home, (tick, Arc::clone(&built)));
+    built
 }
 
 fn find_any_java_home(preferred: Option<&Path>) -> Option<PathBuf> {
@@ -157,11 +192,11 @@ fn find_any_java_home(preferred: Option<&Path>) -> Option<PathBuf> {
     None
 }
 
-fn build_jdk_index(preferred_java_home: Option<&Path>) -> JdkClassIndex {
+fn build_jdk_index_for_home(resolved_java_home: Option<&Path>) -> JdkClassIndex {
     let mut fqns = HashSet::new();
     let mut packages = HashSet::new();
 
-    if let Some(jh) = find_any_java_home(preferred_java_home) {
+    if let Some(jh) = resolved_java_home {
         let src_zip = jh.join("lib/src.zip");
         let ct_sym = jh.join("lib/ct.sym");
         if src_zip.is_file() {

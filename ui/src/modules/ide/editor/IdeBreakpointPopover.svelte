@@ -1,6 +1,8 @@
 <script lang="ts">
   // Viewport-clamped GoLand-style gutter breakpoint editor popover:
   // Enabled switch, Condition, Hit Count, Log Message (logpoint), and Remove.
+  import { tick } from 'svelte';
+  import { placeAnchored, type AnchorPlacement } from '../../../lib/anchorPlace';
   import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import Switch from '../../../lib/components/Switch.svelte';
@@ -17,7 +19,15 @@
 
   let { path, line, anchorX, anchorY, onclose }: Props = $props();
 
+  const returnFocusEl =
+    typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+  let anchorEl = $state<HTMLSpanElement | undefined>(undefined);
   let popEl = $state<HTMLDivElement | undefined>(undefined);
+  let condInputEl = $state<HTMLInputElement | undefined>(undefined);
+  let width = $state(360);
+  let pos = $state<AnchorPlacement>({ left: 12, top: 12, maxH: 360 });
   const existing = $derived(
     (ide.breakpointsByPath[path] ?? []).find((b) => b.line === line) as
       | (IdeBreakpoint & { verified?: boolean; message?: string | null })
@@ -41,26 +51,42 @@
     logMessage = cur?.log_message ?? '';
   });
 
-  // Strictly clamp popover coordinates inside the viewport on every screen size.
-  const clampedPos = $derived.by(() => {
-    const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
-    const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
-    const width = Math.min(360, vw - 24);
-    const estHeight = 290;
-    const left = Math.max(12, Math.min(anchorX + 8, vw - width - 12));
-    const top = Math.max(12, Math.min(anchorY - 12, vh - estHeight - 12));
-    return { left, top, width };
+  function closePopover(): void {
+    onclose();
+    returnFocusEl?.focus();
+  }
+
+  function updatePlacement(): void {
+    if (typeof window === 'undefined') return;
+    width = Math.min(360, window.innerWidth - 16);
+    if (anchorEl && popEl) {
+      pos = placeAnchored(anchorEl, popEl, { prefer: 'below', align: 'start', gap: 6 });
+    }
+  }
+
+  $effect(() => {
+    void anchorX;
+    void anchorY;
+    void tick().then(() => {
+      updatePlacement();
+      condInputEl?.focus();
+    });
   });
 
   $effect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
-        onclose();
+        closePopover();
       }
     };
+    const onResize = (): void => updatePlacement();
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('resize', onResize);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', onResize);
+    };
   });
 
   function saveAndClose(e?: SubmitEvent): void {
@@ -71,14 +97,16 @@
       hit_condition: hitCondition.trim() || null,
       log_message: logMessage.trim() || null,
     });
-    onclose();
+    closePopover();
   }
 
   function removeAndClose(): void {
     ide.removeBreakpoint(path, line);
-    onclose();
+    closePopover();
   }
 </script>
+
+<span bind:this={anchorEl} class="bp-pop-anchor" aria-hidden="true" style:left="{anchorX}px" style:top="{anchorY}px"></span>
 
 <div
   class="bp-pop-backdrop"
@@ -93,9 +121,10 @@
     role="dialog"
     aria-modal="true"
     aria-label="Edit breakpoint at {ideBasename(path)} line {line}"
-    style:inset-inline-start={`${clampedPos.left}px`}
-    style:inset-block-start={`${clampedPos.top}px`}
-    style:inline-size={`${clampedPos.width}px`}
+    style:left="{pos.left}px"
+    style:top="{pos.top}px"
+    style:inline-size="{width}px"
+    style:max-block-size="{pos.maxH}px"
     data-testid="ide-breakpoint-popover"
   >
     <header class="bp-pop-head">
@@ -131,6 +160,7 @@
       <label class="bp-field">
         <span>Condition (pause when true)</span>
         <input
+          bind:this={condInputEl}
           class="input bp-input mono"
           type="text"
           dir="ltr"
@@ -188,6 +218,12 @@
 </div>
 
 <style>
+  .bp-pop-anchor {
+    position: fixed;
+    inline-size: 0;
+    block-size: 0;
+    pointer-events: none;
+  }
   .bp-pop-backdrop {
     position: fixed;
     inset: 0;
@@ -196,7 +232,6 @@
   .bp-popover {
     position: fixed;
     z-index: var(--z-popover);
-    max-block-size: calc(100vh - 24px);
     overflow-y: auto;
     background: var(--surface);
     border: 1px solid var(--border-strong);

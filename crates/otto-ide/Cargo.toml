@@ -9,14 +9,10 @@ description = "Full multi-language IDE engine: Local + SSH targets, OS/arch SDK 
 otto-core = { workspace = true }
 otto-state = { workspace = true }
 otto-ssh = { workspace = true }
-otto-connections = { workspace = true }
-otto-rbac = { workspace = true }
 otto-netguard = { workspace = true }
 otto-git-cmd = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = "0.1.19"
-futures = "0.3.34"
 futures-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -26,7 +22,6 @@ regex = "1.13"
 tracing = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
-ulid = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
 sqlx = { workspace = true }
@@ -34,12 +29,11 @@ dashmap = { workspace = true }
 dirs = { workspace = true }
 shell-words = { workspace = true }
 ignore = { workspace = true }
-async-trait = { workspace = true }
 bytes = { workspace = true }
 ring = { workspace = true }
-base64 = { workspace = true }
 tempfile = { workspace = true }
 
 [dev-dependencies]
+otto-rbac = { workspace = true }
 tower = { version = "0.5.3", features = ["util"] }
 http-body-util = "0.1.5"

@@ -6,32 +6,16 @@
   lead thread and any delegated child threads.
 -->
 <script lang="ts">
-  import { onMount, untrack, type Snippet } from 'svelte';
-  import type { TurnItem } from '../../../lib/api/types';
+  import { onMount, untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../../lib/loadError';
   import { EMBED_DEFAULTS, openInThreads, type RuntimeThreadViewProps } from '../../../lib/runtimeThreadPort';
   import { embedStatus } from './embedStatus';
-  import RuntimeThread, { type RuntimeComposerTestIds } from './RuntimeThread.svelte';
+  import RuntimeThread from './RuntimeThread.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
   import { runtimeViews } from './runtimeView.svelte';
   import { isRunning } from './timeline';
-
-  interface ExtendedEmbedProps extends RuntimeThreadViewProps {
-    /** Hide the embed header bar unless a linked child thread is active (used when IDE dock header already shows switcher + Open in Threads). */
-    hideEmbedBarWhenUnlinked?: boolean;
-    fallbackCwd?: string | null;
-    hasExternalContext?: boolean;
-    transformOutgoingText?: (text: string) => string;
-    onExternalContextConsumed?: () => void;
-    onopenpath?: (path: string, line?: number) => void;
-    formatAssistantText?: (item: Extract<TurnItem, { type: 'assistant_message' }>) => string;
-    assistantFooter?: Snippet<[Extract<TurnItem, { type: 'assistant_message' }>]>;
-    composerTopSlot?: Snippet<[{ focusComposer: () => void }]>;
-    composerFootLeadSlot?: Snippet<[{ focusComposer: () => void }]>;
-    testIds?: RuntimeComposerTestIds;
-  }
 
   let {
     sessionId,
@@ -42,6 +26,8 @@
     ondetach,
     onstatus,
     hostCommands,
+    accessModeOverride = null,
+    onaccessmodechange,
     hideEmbedBarWhenUnlinked = false,
     fallbackCwd = null,
     hasExternalContext = false,
@@ -53,7 +39,7 @@
     composerTopSlot,
     composerFootLeadSlot,
     testIds,
-  }: ExtendedEmbedProps = $props();
+  }: RuntimeThreadViewProps = $props();
 
   let picked = $state<string | null>(null);
   const shown = $derived(picked && runtimeThreads.group(sessionId).some((t) => t.id === picked) ? picked : sessionId);
@@ -134,6 +120,8 @@
           focused={focusOnMount}
           {compact}
           {hostCommands}
+          {accessModeOverride}
+          {onaccessmodechange}
           {fallbackCwd}
           {hasExternalContext}
           {transformOutgoingText}

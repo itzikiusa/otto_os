@@ -10,6 +10,7 @@ use std::time::Duration;
 use otto_core::{Error, Result};
 use regex::{Regex, RegexBuilder};
 
+use crate::lsp_host::pool::LspPool;
 use crate::types::{
     IdeReplacePreview, IdeReplaceReq, IdeReplaceResp, IdeSearchItem, IdeSearchItemKind,
     IdeSearchMode, IdeSearchReq, IdeSearchResp,
@@ -17,7 +18,7 @@ use crate::types::{
 
 use super::fs_ops::resolve_local_existing_in_roots;
 use super::{
-    enforce_non_root_path, join_remote, map_io_err, resolve_remote_subpath, ResolvedTarget,
+    enforce_non_root_path, join_remote, map_io_err, resolve_remote_in_roots, ResolvedTarget,
     TargetManager, MAX_SEARCH_FILE_BYTES,
 };
 
@@ -51,78 +52,116 @@ pub(super) fn build_matcher(
     };
     RegexBuilder::new(&pattern)
         .case_insensitive(!case_sensitive)
+        .multi_line(true)
         .build()
         .map_err(|e| Error::Invalid(format!("invalid search pattern: {e}")))
 }
 
-fn single_mask_matches(mask: &str, rel_path: &str) -> bool {
-    let base = rel_path.rsplit('/').next().unwrap_or(rel_path);
-    if mask == "*" || mask == "**" || mask == "**/*" {
-        return true;
-    }
-    if let Some(ext) = mask.strip_prefix("*.") {
-        if !ext.contains('*') && !ext.contains('/') {
-            return base
-                .rsplit_once('.')
-                .is_some_and(|(_, e)| e.eq_ignore_ascii_case(ext));
-        }
-    }
-    // Convert glob mask (`cmd/*.go`, `*_test.go`, `internal/**`) to anchored case-insensitive match.
-    let target = if mask.contains('/') { rel_path } else { base };
-    let mut rx = String::from("^");
-    let chars: Vec<char> = mask.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '*' && i + 1 < chars.len() && chars[i + 1] == '*' {
-            rx.push_str(".*");
-            i += 2;
-            if i < chars.len() && chars[i] == '/' {
-                i += 1;
-            }
-        } else if chars[i] == '*' {
-            rx.push_str("[^/]*");
-            i += 1;
-        } else if chars[i] == '?' {
-            rx.push('.');
-            i += 1;
-        } else {
-            rx.push_str(&regex::escape(&chars[i].to_string()));
-            i += 1;
-        }
-    }
-    rx.push('$');
-    RegexBuilder::new(&rx)
-        .case_insensitive(true)
-        .build()
-        .is_ok_and(|re| re.is_match(target))
+enum CompiledMask {
+    Any,
+    Ext(String),
+    Regex { full_path: bool, re: Regex },
+    Never,
 }
 
-pub(super) fn glob_matches(file_glob: Option<&str>, rel_path: &str) -> bool {
-    let Some(glob) = file_glob.map(str::trim).filter(|g| !g.is_empty()) else {
-        return true;
-    };
-    let mut positives = Vec::new();
-    let mut negatives = Vec::new();
-    for raw_part in glob
-        .split([',', ';'])
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-    {
-        if let Some(neg) = raw_part.strip_prefix('!').map(str::trim) {
-            if !neg.is_empty() {
-                negatives.push(neg);
+impl CompiledMask {
+    fn compile(mask: &str) -> Self {
+        if mask == "*" || mask == "**" || mask == "**/*" {
+            return Self::Any;
+        }
+        if let Some(ext) = mask.strip_prefix("*.") {
+            if !ext.contains('*') && !ext.contains('/') && !ext.contains('?') {
+                return Self::Ext(ext.to_ascii_lowercase());
             }
-        } else {
-            positives.push(raw_part);
+        }
+        let full_path = mask.contains('/');
+        let mut rx = String::from("^");
+        let chars: Vec<char> = mask.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '*' && i + 1 < chars.len() && chars[i + 1] == '*' {
+                rx.push_str(".*");
+                i += 2;
+                if i < chars.len() && chars[i] == '/' {
+                    i += 1;
+                }
+            } else if chars[i] == '*' {
+                rx.push_str("[^/]*");
+                i += 1;
+            } else if chars[i] == '?' {
+                rx.push('.');
+                i += 1;
+            } else {
+                rx.push_str(&regex::escape(&chars[i].to_string()));
+                i += 1;
+            }
+        }
+        rx.push('$');
+        match RegexBuilder::new(&rx).case_insensitive(true).build() {
+            Ok(re) => Self::Regex { full_path, re },
+            Err(_) => Self::Never,
         }
     }
-    if negatives.iter().any(|m| single_mask_matches(m, rel_path)) {
-        return false;
+
+    fn matches(&self, rel_path: &str) -> bool {
+        let base = rel_path.rsplit('/').next().unwrap_or(rel_path);
+        match self {
+            Self::Any => true,
+            Self::Ext(ext) => base
+                .rsplit_once('.')
+                .is_some_and(|(_, e)| e.eq_ignore_ascii_case(ext)),
+            Self::Regex { full_path, re } => {
+                let target = if *full_path { rel_path } else { base };
+                re.is_match(target)
+            }
+            Self::Never => false,
+        }
     }
-    if positives.is_empty() {
-        return true;
+}
+
+pub(super) struct CompiledFileGlob {
+    positives: Vec<CompiledMask>,
+    negatives: Vec<CompiledMask>,
+}
+
+impl CompiledFileGlob {
+    pub(super) fn compile(file_glob: Option<&str>) -> Self {
+        let Some(glob) = file_glob.map(str::trim).filter(|g| !g.is_empty()) else {
+            return Self {
+                positives: Vec::new(),
+                negatives: Vec::new(),
+            };
+        };
+        let mut positives = Vec::new();
+        let mut negatives = Vec::new();
+        for raw_part in glob
+            .split([',', ';'])
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
+            if let Some(neg) = raw_part.strip_prefix('!').map(str::trim) {
+                if !neg.is_empty() {
+                    negatives.push(CompiledMask::compile(neg));
+                }
+            } else {
+                positives.push(CompiledMask::compile(raw_part));
+            }
+        }
+        Self {
+            positives,
+            negatives,
+        }
     }
-    positives.iter().any(|m| single_mask_matches(m, rel_path))
+
+    pub(super) fn matches(&self, rel_path: &str) -> bool {
+        if self.negatives.iter().any(|m| m.matches(rel_path)) {
+            return false;
+        }
+        if self.positives.is_empty() {
+            return true;
+        }
+        self.positives.iter().any(|m| m.matches(rel_path))
+    }
 }
 
 #[allow(clippy::disallowed_methods)] // runs inside spawn_blocking
@@ -254,6 +293,7 @@ pub(super) fn search_local_sync(
         15_000,
     )?;
     let matcher = build_matcher(&req.query, req.regex, req.case_sensitive, req.whole_word)?;
+    let compiled_glob = CompiledFileGlob::compile(req.file_glob.as_deref());
     let q_lower = req.query.to_ascii_lowercase();
     let want_files = matches!(req.mode, IdeSearchMode::Files | IdeSearchMode::All);
     let want_symbols = matches!(req.mode, IdeSearchMode::Symbols | IdeSearchMode::All);
@@ -265,7 +305,7 @@ pub(super) fn search_local_sync(
     for full_path in &files {
         let p = Path::new(full_path);
         let rel = display_rel_path(p, root, additional_roots);
-        if !glob_matches(req.file_glob.as_deref(), &rel) {
+        if !compiled_glob.matches(&rel) {
             continue;
         }
 
@@ -423,43 +463,65 @@ fn scan_text_in_file(
     }
 }
 
+fn display_remote_rel_path(path: &str, root: &str, additional_roots: &[String]) -> String {
+    if path == root {
+        return String::new();
+    }
+    let root_prefix = format!("{}/", root.trim_end_matches('/'));
+    if let Some(rel) = path.strip_prefix(&root_prefix) {
+        return rel.to_string();
+    }
+    for extra in additional_roots {
+        let extra_clean = extra.trim_end_matches('/');
+        let extra_prefix = format!("{extra_clean}/");
+        if let Some(rel) = path.strip_prefix(&extra_prefix) {
+            let base = extra_clean.rsplit('/').next().unwrap_or("attached");
+            return format!("{base}/{rel}");
+        }
+    }
+    path.trim_start_matches('/').to_string()
+}
+
 pub(super) async fn search_remote_ssh(
     mgr: &TargetManager,
     target: &ResolvedTarget,
     root: &str,
+    additional_roots: &[String],
     req: &IdeSearchReq,
     limit: usize,
 ) -> Result<IdeSearchResp> {
     let mut items = Vec::new();
     let mut truncated = false;
     let q_lower = req.query.to_ascii_lowercase();
-    let search_root = match req
+    let compiled_glob = CompiledFileGlob::compile(req.file_glob.as_deref());
+    let search_roots: Vec<String> = match req
         .scope_path
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        Some(sp) => resolve_remote_subpath(root, sp)?,
-        None => root.to_string(),
+        Some(sp) => vec![resolve_remote_in_roots(root, additional_roots, sp)?.0],
+        None => std::iter::once(root.to_string())
+            .chain(additional_roots.iter().cloned())
+            .collect(),
     };
 
     if matches!(req.mode, IdeSearchMode::Files | IdeSearchMode::All) {
         let files = mgr.list_files(target, 5_000).await?;
         for f in files {
-            if !f.starts_with(&search_root) {
+            if !search_roots
+                .iter()
+                .any(|sr| f == *sr || f.starts_with(&format!("{}/", sr.trim_end_matches('/'))))
+            {
                 continue;
             }
-            let rel = f
-                .strip_prefix(root)
-                .unwrap_or(&f)
-                .trim_start_matches('/')
-                .to_string();
+            let rel = display_remote_rel_path(&f, root, additional_roots);
             let matched = if req.case_sensitive {
                 rel.contains(&req.query)
             } else {
                 rel.to_ascii_lowercase().contains(&q_lower)
             };
-            if matched && glob_matches(req.file_glob.as_deref(), &rel) {
+            if matched && compiled_glob.matches(&rel) {
                 if items.len() >= limit {
                     truncated = true;
                     break;
@@ -478,43 +540,45 @@ pub(super) async fn search_remote_ssh(
     }
 
     if !truncated && !matches!(req.mode, IdeSearchMode::Files) {
-        let cap = limit.saturating_sub(items.len()) + 1;
-        let case_flag = if req.case_sensitive { "-s" } else { "-i" };
-        let fixed_flag = if req.regex { "" } else { "-F" };
-        let word_flag = if req.whole_word { "-w" } else { "" };
-        let q_escaped = shell_words::quote(&req.query);
-        let script = format!(
-            "if command -v rg >/dev/null 2>&1; then \
-               rg --line-number --column --no-heading --color=never {case_flag} {fixed_flag} {word_flag} -- {q_escaped} . | head -n {cap}; \
-             else \
-               grep -rnI {} {} -- {q_escaped} . | head -n {cap}; \
-             fi",
-            if req.case_sensitive { "" } else { "-i" },
-            if req.whole_word { "-w" } else { "" }
-        );
-        if let Ok(out) = mgr
-            .exec_shell(
-                target,
-                &script,
-                Some(&search_root),
-                &BTreeMap::new(),
-                Duration::from_secs(15),
-            )
-            .await
-        {
-            for raw_line in out.stdout.lines() {
-                if items.len() >= limit {
-                    truncated = true;
-                    break;
-                }
-                if let Some(parsed) = parse_rg_or_grep_line(&search_root, raw_line) {
-                    let rel = parsed
-                        .path
-                        .strip_prefix(root)
-                        .unwrap_or(&parsed.path)
-                        .trim_start_matches('/');
-                    if glob_matches(req.file_glob.as_deref(), rel) {
-                        items.push(parsed);
+        for search_root in &search_roots {
+            if items.len() >= limit {
+                truncated = true;
+                break;
+            }
+            let cap = limit.saturating_sub(items.len()) + 1;
+            let case_flag = if req.case_sensitive { "-s" } else { "-i" };
+            let fixed_flag = if req.regex { "" } else { "-F" };
+            let word_flag = if req.whole_word { "-w" } else { "" };
+            let q_escaped = shell_words::quote(&req.query);
+            let script = format!(
+                "if command -v rg >/dev/null 2>&1; then \
+                   rg --line-number --column --no-heading --color=never {case_flag} {fixed_flag} {word_flag} -- {q_escaped} . | head -n {cap}; \
+                 else \
+                   grep -rnI {} {} -- {q_escaped} . | head -n {cap}; \
+                 fi",
+                if req.case_sensitive { "" } else { "-i" },
+                if req.whole_word { "-w" } else { "" }
+            );
+            if let Ok(out) = mgr
+                .exec_shell(
+                    target,
+                    &script,
+                    Some(search_root),
+                    &BTreeMap::new(),
+                    Duration::from_secs(15),
+                )
+                .await
+            {
+                for raw_line in out.stdout.lines() {
+                    if items.len() >= limit {
+                        truncated = true;
+                        break;
+                    }
+                    if let Some(parsed) = parse_rg_or_grep_line(search_root, raw_line) {
+                        let rel = display_remote_rel_path(&parsed.path, root, additional_roots);
+                        if compiled_glob.matches(&rel) {
+                            items.push(parsed);
+                        }
                     }
                 }
             }
@@ -551,6 +615,7 @@ pub(super) fn replace_local_sync(
     restricted: bool,
     req: &IdeReplaceReq,
     matcher: &Regex,
+    lsp_pool: Option<&LspPool>,
 ) -> Result<IdeReplaceResp> {
     let candidates = match &req.paths {
         Some(explicit) if !explicit.is_empty() => {
@@ -571,6 +636,7 @@ pub(super) fn replace_local_sync(
         )?,
     };
 
+    let compiled_glob = CompiledFileGlob::compile(req.file_glob.as_deref());
     let mut files_changed = 0usize;
     let mut total_replacements = 0usize;
     let mut previews = Vec::new();
@@ -578,7 +644,7 @@ pub(super) fn replace_local_sync(
     for full_path in candidates {
         let p = Path::new(&full_path);
         let rel = display_rel_path(p, root, additional_roots);
-        if !glob_matches(req.file_glob.as_deref(), &rel) {
+        if !compiled_glob.matches(&rel) {
             continue;
         }
         let Ok(meta) = std::fs::metadata(p) else {
@@ -604,11 +670,18 @@ pub(super) fn replace_local_sync(
         };
 
         if !req.dry_run {
+            let existing_perms = meta.permissions();
             let tmp = p.with_extension("otto-replace-tmp");
             std::fs::write(&tmp, replaced_text.as_bytes())
                 .map_err(|e| map_io_err("write replace temp", &tmp, e))?;
-            std::fs::rename(&tmp, p).map_err(|e| map_io_err("commit replace", p, e))?;
-            crate::lsp_host::pool::notify_watched_file_if_build_manifest(p, 2);
+            let _ = std::fs::set_permissions(&tmp, existing_perms);
+            if let Err(e) = std::fs::rename(&tmp, p) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(map_io_err("commit replace", p, e));
+            }
+            if let Some(pool) = lsp_pool {
+                pool.notify_watched_file_if_build_manifest(p, 2);
+            }
         }
 
         files_changed += 1;
@@ -632,6 +705,7 @@ pub(super) async fn replace_remote_ssh(
     mgr: &TargetManager,
     target: &ResolvedTarget,
     root: &str,
+    additional_roots: &[String],
     req: &IdeReplaceReq,
     matcher: &Regex,
 ) -> Result<IdeReplaceResp> {
@@ -639,7 +713,7 @@ pub(super) async fn replace_remote_ssh(
         Some(explicit) if !explicit.is_empty() => {
             let mut out = Vec::with_capacity(explicit.len());
             for p in explicit {
-                out.push(resolve_remote_subpath(root, p)?);
+                out.push(resolve_remote_in_roots(root, additional_roots, p)?.0);
             }
             out
         }
@@ -655,7 +729,8 @@ pub(super) async fn replace_remote_ssh(
                 scope_path: req.scope_path.clone(),
                 limit: Some(500),
             };
-            let hits = search_remote_ssh(mgr, target, root, &search_req, 500).await?;
+            let hits =
+                search_remote_ssh(mgr, target, root, additional_roots, &search_req, 500).await?;
             let mut uniq: Vec<String> = hits.items.into_iter().map(|i| i.path).collect();
             uniq.sort();
             uniq.dedup();

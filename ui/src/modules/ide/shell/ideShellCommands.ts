@@ -1,23 +1,26 @@
-// Synchronous IDE keyboard shortcuts (#70 §3) and Color Scheme preference helpers
+// Synchronous IDE keyboard shortcuts and Color Scheme preference helpers
 // for `IdePage.svelte`. Command palette & menus live in `./ideShellMenus.ts`.
 
 import { confirmer } from '../../../lib/confirm.svelte';
 import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
+import {
+  readIdePreferences,
+  writeIdePreferences,
+  type ConcreteIdeColorSchemeId,
+  type IdeColorSchemeId,
+} from '../../../lib/idePreferences.svelte';
 import { ide, ideBasename } from '../ideStore.svelte';
 import { ideAgent } from '../store/ideAgentController.svelte';
 
-const IDE_PREFS_KEY = 'otto.ide.preferences.v1';
-
-export type IdeQuickSchemeId =
-  | 'auto'
-  | 'jetbrains-islands-dark'
-  | 'jetbrains-darcula'
-  | 'jetbrains-islands-light'
-  | 'vscode-dark-modern'
-  | 'vscode-light-modern';
-
-export type IdeDarkSchemeId = 'jetbrains-islands-dark' | 'jetbrains-darcula' | 'vscode-dark-modern';
-export type IdeLightSchemeId = 'jetbrains-islands-light' | 'vscode-light-modern';
+export type IdeQuickSchemeId = IdeColorSchemeId;
+export type IdeDarkSchemeId = Extract<
+  ConcreteIdeColorSchemeId,
+  'jetbrains-islands-dark' | 'jetbrains-darcula' | 'vscode-dark-modern'
+>;
+export type IdeLightSchemeId = Extract<
+  ConcreteIdeColorSchemeId,
+  'jetbrains-islands-light' | 'vscode-light-modern'
+>;
 
 export interface QuickSchemePrefs {
   colorScheme: IdeQuickSchemeId;
@@ -27,35 +30,20 @@ export interface QuickSchemePrefs {
 }
 
 export function readQuickSchemePrefs(): QuickSchemePrefs {
-  const defaults: QuickSchemePrefs = {
-    colorScheme: 'auto',
-    preferredDarkScheme: 'jetbrains-islands-dark',
-    preferredLightScheme: 'jetbrains-islands-light',
-    rainbowBrackets: true,
+  const p = readIdePreferences();
+  return {
+    colorScheme: p.colorScheme,
+    preferredDarkScheme: p.preferredDarkScheme as IdeDarkSchemeId,
+    preferredLightScheme: p.preferredLightScheme as IdeLightSchemeId,
+    rainbowBrackets: p.rainbowBrackets,
   };
-  try {
-    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(IDE_PREFS_KEY) : null;
-    if (!raw) return defaults;
-    const parsed = JSON.parse(raw) as Partial<QuickSchemePrefs>;
-    return {
-      colorScheme: parsed.colorScheme ?? defaults.colorScheme,
-      preferredDarkScheme: parsed.preferredDarkScheme ?? defaults.preferredDarkScheme,
-      preferredLightScheme: parsed.preferredLightScheme ?? defaults.preferredLightScheme,
-      rainbowBrackets: parsed.rainbowBrackets ?? defaults.rainbowBrackets,
-    };
-  } catch {
-    return defaults;
-  }
 }
 
-export function writeQuickSchemePref(patch: { colorScheme?: IdeQuickSchemeId; rainbowBrackets?: boolean }): QuickSchemePrefs {
-  try {
-    const raw = localStorage.getItem(IDE_PREFS_KEY);
-    const base = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
-    const next = { ...base, ...patch };
-    localStorage.setItem(IDE_PREFS_KEY, JSON.stringify(next));
-    window.dispatchEvent(new CustomEvent('otto:ide-prefs-changed', { detail: next }));
-  } catch { /* ignore */ }
+export function writeQuickSchemePref(patch: {
+  colorScheme?: IdeQuickSchemeId;
+  rainbowBrackets?: boolean;
+}): QuickSchemePrefs {
+  writeIdePreferences(patch);
   return readQuickSchemePrefs();
 }
 
@@ -96,7 +84,7 @@ const inXterm = (t: EventTarget | null): boolean => t instanceof Element && Bool
 export function handleIdeChord(e: KeyboardEvent, overlayOpen: boolean, toggleExplorer: () => void): boolean {
   if (overlayOpen) return false;
   const mod = e.metaKey || e.ctrlKey;
-  if (mod && !e.shiftKey && !e.altKey && e.code === 'Comma') { e.preventDefault(); ide.openSettings(); return true; }
+  if (mod && !e.shiftKey && !e.altKey && (e.code === 'Comma' || e.key === ',')) { e.preventDefault(); ide.openSettings(); return true; }
   if (mod && !e.shiftKey && !e.altKey && e.code === 'KeyS') { e.preventDefault(); void ide.saveFile(); return true; }
   if (mod && !e.shiftKey && e.altKey && e.code === 'KeyS') { e.preventDefault(); void ide.saveAll(); return true; }
   if (mod && !e.shiftKey && !e.altKey && e.code === 'KeyW' && ide.activePath) { e.preventDefault(); void ide.closeTab(ide.activePath); return true; }
@@ -133,6 +121,12 @@ export function handleIdeWindowKeyDown(e: KeyboardEvent, overlayOpen: boolean, t
   if (!e.defaultPrevented && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && !(e.ctrlKey && !e.metaKey && inXterm(e.target))) {
     if (e.code === 'KeyL') { e.preventDefault(); triggerAgent(); return; }
     if (e.code === 'KeyI') { e.preventDefault(); ideAgent.openInlineEdit(); return; }
+    if (e.code === 'Comma' || e.key === ',') { e.preventDefault(); ide.openSettings(); return; }
+  }
+  if (!e.defaultPrevented && (e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.code === 'KeyV' && e.target instanceof Element && Boolean(e.target.closest('.ide-editor-area'))) {
+    e.preventDefault();
+    window.dispatchEvent(new CustomEvent('otto:ide-paste-history'));
+    return;
   }
   if (e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey && e.key === 'F12') { e.preventDefault(); ide.openBottomTab('terminal'); }
   else if (e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey && e.key === 'F7' && ide.activePath) { e.preventDefault(); void ide.findReferences(ide.activePath, ide.cursorInfo.line, ide.cursorInfo.col); }

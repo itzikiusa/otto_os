@@ -1,5 +1,5 @@
 <script lang="ts">
-  // IntelliJ IDEA right-side Maven / Gradle Tool Window (#76 §1):
+  // IntelliJ IDEA right-side Maven / Gradle Tool Window:
   // Profiles (Maven/Gradle + Spring Boot), multi-module projects, Lifecycle, Plugins, Dependencies, Repositories.
   import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';

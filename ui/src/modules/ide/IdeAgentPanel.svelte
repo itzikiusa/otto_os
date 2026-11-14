@@ -11,11 +11,16 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { harnessLabel } from '../../lib/providers';
-  import { CONV_CTX, type PreviewReq } from '../agents/conversation/context'; // ui-guards: allow — route Markdown file/code links directly to IDE editor
-  import EmbeddedRuntimeThread from '../threads/runtime/EmbeddedRuntimeThread.svelte'; // ui-guards: allow — IDE agent dock embeds real Otto Threads runtime view
+  import {
+    CONV_CTX,
+    loadPtyConversationView,
+    loadRuntimeThreadView,
+    type PreviewReq,
+  } from '../../lib/runtimeThreadPort';
   import IdeAgentComposer from './agent/IdeAgentComposer.svelte';
   import IdeContextBar, { showIdeContextMenu, showIdeSessionMenu } from './agent/IdeContextBar.svelte';
   import IdeProposalCard from './agent/IdeProposalCard.svelte';
@@ -27,9 +32,15 @@
   } from './agent/ideAgentEngine.svelte';
   import { ide } from './ideStore.svelte';
 
-  const PtyConversationView = lazyComponent(() => import('../agents/conversation/ConversationView.svelte')); // ui-guards: allow — lazy PTY thread conversation view
+  const EmbeddedRuntimeView = lazyComponent(loadRuntimeThreadView);
+  const PtyConversationView = lazyComponent(loadPtyConversationView);
 
+  EmbeddedRuntimeView.prefetch();
   onMount(() => ideAgent.ensureMounted());
+
+  $effect(() => {
+    if (ideAgent.activeThreadKind === 'runtime') EmbeddedRuntimeView.prefetch();
+  });
 
   $effect(() => {
     const r = (ide.target.root ?? '').trim().replace(/\/+$/, '');
@@ -229,76 +240,82 @@
     {@const activeSid = ideAgent.sessionId}
     <div class="ia-runtime-host" data-testid="ide-agent-messages">
       {#key activeSid}
-        <EmbeddedRuntimeThread
-          sessionId={activeSid}
-          workspaceId={ideAgent.activeWorkspaceId}
-          compact
-          focusOnMount
-          hideEmbedBarWhenUnlinked
-          fallbackCwd={ideAgent.resolveProjectCwd()}
-          hasExternalContext={ideAgent.contexts.length > 0}
-          transformOutgoingText={wrapOutgoingWithIdeContext}
-          onExternalContextConsumed={() => ideAgent.clearContexts()}
-          onopenpath={(path, line) => {
-            void ide.openFile(ide.resolvePath(path), { line: line ?? 1, preview: false });
-          }}
-          formatAssistantText={formatAssistantMarkdown}
-          hostCommands={{
-            newThread: () => ideAgent.startNewChat(),
-            openTerminal: () => ide.openBottomTab('terminal'),
-            openFiles: () => {
-              ide.searchInitialTab = 'files';
-              ide.searchEverywhereOpen = true;
-            },
-          }}
-          testIds={{
-            composer: 'ide-agent-composer',
-            send: 'ide-agent-send',
-            stop: 'ide-agent-stop',
-            model: 'ide-agent-provider',
-            attach: 'ide-agent-attach-image',
-          }}
-        >
-          {#snippet assistantFooter(item)}
-            {#each proposalsFor(item) as proposal (proposal.id)}
-              <IdeProposalCard {proposal} />
-            {/each}
-          {/snippet}
-          {#snippet composerTopSlot({ focusComposer })}
-            <div class="ia-embed-ctx">
-              <IdeContextBar onfocuscomposer={focusComposer} />
-            </div>
-          {/snippet}
-          {#snippet composerFootLeadSlot({ focusComposer })}
-            <button
-              type="button"
-              class="icon-btn"
-              aria-haspopup="menu"
-              aria-label="Attach IDE context"
-              title="Attach selection, file, diagnostic, or debug frame"
-              onclick={(e) => showIdeContextMenu(e.currentTarget, focusComposer)}
-              data-testid="ide-agent-add-context"
-            >
-              <Icon name="plus" size={13} />
-            </button>
-            <button
-              type="button"
-              class="btn small ghost"
-              class:ia-mode-plan={ideAgent.planMode}
-              aria-pressed={ideAgent.planMode}
-              title={ideAgent.planMode
-                ? 'Plan mode: propose code blocks without modifying files directly'
-                : 'Toggle Plan mode'}
-              onclick={() => {
-                ideAgent.planMode = !ideAgent.planMode;
-                focusComposer();
-              }}
-              data-testid="ide-agent-mode"
-            >
-              Plan
-            </button>
-          {/snippet}
-        </EmbeddedRuntimeThread>
+        {#if EmbeddedRuntimeView.component}
+          <EmbeddedRuntimeView.component
+            sessionId={activeSid}
+            workspaceId={ideAgent.activeWorkspaceId}
+            compact
+            focusOnMount
+            hideEmbedBarWhenUnlinked
+            accessModeOverride={ideAgent.effectiveRuntimeAccessMode}
+            onaccessmodechange={(m) => ideAgent.setRuntimeAccessMode(m)}
+            fallbackCwd={ideAgent.resolveProjectCwd()}
+            hasExternalContext={ideAgent.contexts.length > 0}
+            transformOutgoingText={wrapOutgoingWithIdeContext}
+            onExternalContextConsumed={() => ideAgent.clearContexts()}
+            onopenpath={(path, line) => {
+              void ide.openFile(ide.resolvePath(path), { line: line ?? 1, preview: false });
+            }}
+            formatAssistantText={formatAssistantMarkdown}
+            hostCommands={{
+              newThread: () => ideAgent.startNewChat(),
+              openTerminal: () => ide.openBottomTab('terminal'),
+              openFiles: () => {
+                ide.searchInitialTab = 'files';
+                ide.searchEverywhereOpen = true;
+              },
+            }}
+            testIds={{
+              composer: 'ide-agent-composer',
+              send: 'ide-agent-send',
+              stop: 'ide-agent-stop',
+              model: 'ide-agent-provider',
+              attach: 'ide-agent-attach-image',
+            }}
+          >
+            {#snippet assistantFooter(item)}
+              {#each proposalsFor(item) as proposal (proposal.id)}
+                <IdeProposalCard {proposal} />
+              {/each}
+            {/snippet}
+            {#snippet composerTopSlot({ focusComposer })}
+              <div class="ia-embed-ctx">
+                <IdeContextBar onfocuscomposer={focusComposer} />
+              </div>
+            {/snippet}
+            {#snippet composerFootLeadSlot({ focusComposer })}
+              <button
+                type="button"
+                class="icon-btn"
+                aria-haspopup="menu"
+                aria-label="Attach IDE context"
+                title="Attach selection, file, diagnostic, or debug frame"
+                onclick={(e) => showIdeContextMenu(e.currentTarget, focusComposer)}
+                data-testid="ide-agent-add-context"
+              >
+                <Icon name="plus" size={13} />
+              </button>
+              <button
+                type="button"
+                class="btn small ghost"
+                class:ia-mode-plan={ideAgent.planMode}
+                aria-pressed={ideAgent.planMode}
+                title={ideAgent.planMode
+                  ? 'Plan mode: propose code blocks without modifying files directly'
+                  : 'Toggle Plan mode'}
+                onclick={() => {
+                  ideAgent.planMode = !ideAgent.planMode;
+                  focusComposer();
+                }}
+                data-testid="ide-agent-mode"
+              >
+                Plan
+              </button>
+            {/snippet}
+          </EmbeddedRuntimeView.component>
+        {:else}
+          <LoadState what="thread" loading empty />
+        {/if}
       {/key}
     </div>
   {:else}

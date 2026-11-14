@@ -5,14 +5,9 @@
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
+  import PaneDivider from '../../../lib/components/PaneDivider.svelte';
   import { copyWithToast } from '../../../lib/clipboard';
-  import { startMouseDrag } from '../../../lib/dragCursor';
-  import {
-    loadPaneWidth,
-    paneResizer,
-    RESIZE_TITLE,
-    savePaneWidth,
-  } from '../../../lib/paneResizer';
+  import { loadPaneWidth } from '../../../lib/paneResizer';
   import { plural } from '../../../lib/plural';
   import { viewport } from '../../../lib/stores/viewport.svelte';
   import { ide, ideBasename, type IdeReferenceLocation } from '../ideStore.svelte';
@@ -53,21 +48,6 @@
   const visibleGroups = $derived(
     selectedFile ? usageGroups.filter((g) => g.path === selectedFile) : usageGroups,
   );
-
-  function setFilesW(v: number): void {
-    filesW = Math.max(160, Math.min(480, Math.round(v)));
-    savePaneWidth(LS_USG_W, filesW);
-  }
-
-  function dragFilesW(e: MouseEvent): void {
-    const startX = e.clientX;
-    const startW = filesW;
-    startMouseDrag(e, {
-      cursor: 'col-resize',
-      onMove: (ev) => setFilesW(startW + (ev.clientX - startX)),
-      onEnd: () => savePaneWidth(LS_USG_W, filesW),
-    });
-  }
 
   function findAtCursor(): void {
     if (!ide.activePath) return;
@@ -128,17 +108,7 @@
                 </button>
               {/each}
             </aside>
-            <div
-              class="usg-resizer"
-              role="separator"
-              aria-label="Resize usages file list"
-              title={RESIZE_TITLE}
-              use:paneResizer={{
-                value: filesW, min: 160, max: 480, orientation: 'vertical',
-                text: (v) => `${Math.round(v)} pixels wide`,
-                onChange: setFilesW, onReset: () => setFilesW(240), onDragStart: dragFilesW,
-              }}
-            ></div>
+            <PaneDivider bind:width={filesW} storageKey={LS_USG_W} min={160} max={480} defaultWidth={240} label="Resize usages file list" />
           {/if}
 
           <div class="usg-list">
@@ -180,8 +150,6 @@
   .usg-file-btn { inline-size: 100%; display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 4px 10px; border: 0; background: transparent; color: var(--text); font-size: var(--fs-xs); text-align: start; cursor: pointer; }
   .usg-file-btn:hover { background: var(--hover); }
   .usg-file-btn.active { background: var(--accent-soft); color: var(--accent-text); }
-  .usg-resizer { inline-size: 4px; margin-inline: -2px; cursor: col-resize; flex-shrink: 0; z-index: 2; }
-  .usg-resizer:hover, .usg-resizer:focus-visible { background: var(--accent-soft); }
   .usg-list { flex: 1; min-inline-size: 0; overflow-y: auto; }
   .usg-group { border-block-end: 1px solid var(--separator); }
   .usg-file-head { display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: var(--surface-2); font-size: var(--fs-xs); font-weight: 600; }

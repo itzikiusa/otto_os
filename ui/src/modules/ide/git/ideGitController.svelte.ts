@@ -3,7 +3,7 @@
 // Zero reinvented git state; zero idle polling (Otto's FSEvents watcher pushes
 // `repo_status_changed` over WebSocket automatically).
 
-import { api } from '../../../lib/api/client';
+import { api, ApiError } from '../../../lib/api/client';
 import { gitApi } from '../../../lib/api/git';
 import type {
   DiscardReq,
@@ -12,8 +12,10 @@ import type {
   RepoResolveResp,
   RepoStatusResp,
 } from '../../../lib/api/types';
+import { loadErrorText } from '../../../lib/loadError';
 import { git } from '../../../lib/stores/git.svelte';
 import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
+import { toastError } from '../../../lib/toastError';
 import {
   ide,
   ideBasename,
@@ -411,10 +413,15 @@ class IdeGitController {
       existing.savedContent = fresh.content;
       existing.dirty = false;
       existing.sha256 = fresh.sha256;
-    } catch {
-      existing.dirty = false;
-      existing.savedContent = existing.content;
-      await ide.closeTab(existing.path);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) {
+        existing.dirty = false;
+        existing.savedContent = existing.content;
+        await ide.closeTab(existing.path);
+      } else {
+        existing.error = loadErrorText(e);
+        toastError(`Couldn’t reload ${ideBasename(existing.path)}`, e);
+      }
     }
   }
 

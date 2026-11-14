@@ -393,6 +393,7 @@
   .st-search-box:focus-within { border-color: var(--accent); }
   .st-search-in { flex: 1; min-inline-size: 0; border: 0; background: transparent; color: var(--text); font-size: var(--fs-xs); outline: none; }
   .st-tree { flex: 1; min-block-size: 0; overflow-y: auto; padding: 4px 8px 10px; display: flex; flex-direction: column; gap: 2px; outline: none; }
+  .st-tree:focus-visible { outline: 2px solid var(--accent-text); outline-offset: -2px; border-radius: var(--radius-s); }
   .st-tree-row { display: flex; align-items: center; border-radius: var(--radius-s); }
   .st-tree-row:hover { background: var(--hover); }
   .st-tree-row.is-active { background: var(--accent-soft); }

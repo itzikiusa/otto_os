@@ -15,6 +15,7 @@ pub mod environments;
 pub mod gutter;
 pub mod http;
 pub mod java_workspace;
+pub mod jsonrpc_framing;
 pub mod local_history;
 pub mod lsp_host;
 pub mod lsp_service;
@@ -49,6 +50,14 @@ pub trait IdeCtx: Clone + Send + Sync + 'static {
         user: &'a User,
         connection_id: &'a Id,
     ) -> BoxFuture<'a, Result<IdeSshSpec>>;
+    fn authorize_local_target<'a>(
+        &'a self,
+        _user: &'a User,
+        _spec: &'a types::IdeTargetSpec,
+        _write: bool,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// Shared stateful IDE engine mounted on `ServerCtx`.
@@ -62,6 +71,8 @@ pub struct IdeEngine {
     pub plugins: plugins::IdePluginRegistry,
     pub history: local_history::LocalHistoryStore,
     pub projects: projects::ProjectStore,
+    pub lsp_pool: Arc<lsp_host::pool::LspPool>,
+    pub debug_owners: dashmap::DashMap<String, String>,
 }
 
 impl IdeEngine {
@@ -69,17 +80,75 @@ impl IdeEngine {
         environments::ensure_shell_env_warming();
         let history = local_history::LocalHistoryStore::new(data_dir.clone());
         let projects = projects::ProjectStore::new(data_dir.clone());
+        let environments = environments::EnvironmentManager::new(data_dir.clone());
+        let spawner =
+            lsp_host::pool::process_spawner_with_engine(data_dir.clone(), environments.clone());
+        let lsp_pool = lsp_host::pool::LspPool::new_with_environments(
+            spawner,
+            lsp_host::pool::IDLE_TIMEOUT,
+            environments.clone(),
+        );
+        let targets = target::TargetManager::with_services(
+            history.clone(),
+            Arc::clone(&lsp_pool),
+            environments.clone(),
+        );
         Self {
-            targets: target::TargetManager::with_history(history.clone()),
+            targets,
             toolchains: toolchains::ToolchainManager::new(data_dir.clone()),
-            environments: environments::EnvironmentManager::new(data_dir.clone()),
+            environments,
             dap: dap::DapManager::new(data_dir.clone()),
             collab: collab::CollabHub::new(),
             plugins: plugins::IdePluginRegistry::new(data_dir.clone()),
             history,
             projects,
+            lsp_pool,
+            debug_owners: dashmap::DashMap::new(),
             data_dir,
         }
+    }
+
+    pub fn record_debug_owner(&self, debug_id: &str, user_id: &str) {
+        if self.debug_owners.len() >= 2048 {
+            if let Some(first) = self.debug_owners.iter().next().map(|e| e.key().clone()) {
+                self.debug_owners.remove(&first);
+            }
+        }
+        self.debug_owners
+            .insert(debug_id.to_string(), user_id.to_string());
+    }
+
+    pub fn authorize_debug_session(&self, user: &User, debug_id: &str) -> Result<()> {
+        if user.is_root {
+            return Ok(());
+        }
+        match self.debug_owners.get(debug_id) {
+            Some(owner) if owner.value() == &user.id => Ok(()),
+            Some(_) => Err(otto_core::Error::Forbidden(
+                "debug session belongs to another user".into(),
+            )),
+            None => Err(otto_core::Error::NotFound(format!(
+                "debug session not found: {debug_id}"
+            ))),
+        }
+    }
+
+    pub fn filter_debug_sessions(
+        &self,
+        user: &User,
+        sessions: Vec<types::IdeDebugSessionSnapshot>,
+    ) -> Vec<types::IdeDebugSessionSnapshot> {
+        if user.is_root {
+            return sessions;
+        }
+        sessions
+            .into_iter()
+            .filter(|s| {
+                self.debug_owners
+                    .get(&s.id)
+                    .is_some_and(|o| o.value() == &user.id)
+            })
+            .collect()
     }
 }
 

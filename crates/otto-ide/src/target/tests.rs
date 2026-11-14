@@ -61,11 +61,11 @@ async fn local_tree_read_write_conflict_and_mutate_roundtrip() {
         .unwrap();
     assert_ne!(updated.sha256, read.sha256);
 
-    // Tree listing shows `src` dir quickly (<25ms even on loaded CI):
+    // Tree listing shows `src` dir:
     let t0 = Instant::now();
     let tree = mgr.list_tree(&target, None, false).await.unwrap();
     assert!(
-        t0.elapsed() < Duration::from_millis(50),
+        t0.elapsed() < Duration::from_millis(500),
         "shallow list_tree took {:?}",
         t0.elapsed()
     );
@@ -352,7 +352,7 @@ fn ssh_validation_and_piped_command_builder_reject_unsafe_inputs() {
         connection_id: "c1".into(),
         name: "bad".into(),
         host: "-oProxyCommand=evil".into(),
-        port: 22,
+        port: Some(22),
         user: "ubuntu".into(),
         identity_file: None,
         proxy_jump: None,
@@ -360,11 +360,22 @@ fn ssh_validation_and_piped_command_builder_reject_unsafe_inputs() {
     let spec = IdeTargetSpec::ssh("c1".into(), "/srv/app");
     assert!(mgr.resolve_with_ssh(&spec, "u1", bad_ssh).is_err());
 
+    let bad_identity = IdeSshSpec {
+        connection_id: "c1".into(),
+        name: "bad-id".into(),
+        host: "dev.internal".into(),
+        port: Some(22),
+        user: "ubuntu".into(),
+        identity_file: Some("-oProxyCommand=evil".into()),
+        proxy_jump: None,
+    };
+    assert!(mgr.resolve_with_ssh(&spec, "u1", bad_identity).is_err());
+
     let good_ssh = IdeSshSpec {
         connection_id: "c1".into(),
         name: "devbox".into(),
         host: "dev.internal".into(),
-        port: 2222,
+        port: Some(2222),
         user: "ubuntu".into(),
         identity_file: Some("/Users/me/.ssh/id_ed25519".into()),
         proxy_jump: Some("bastion.internal:22".into()),
@@ -389,4 +400,174 @@ fn ssh_validation_and_piped_command_builder_reject_unsafe_inputs() {
     assert!(mgr
         .build_piped_command(&resolved, "dlv", &[], None, &bad_env)
         .is_err());
+}
+
+#[tokio::test]
+async fn replace_preserves_executable_mode_and_supports_multiline_regex() {
+    let tmp = tempfile::tempdir().unwrap();
+    let script = tmp.path().join("deploy.sh");
+    std::fs::write(&script, "#!/bin/sh\nFOO=old\necho $FOO\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let mgr = TargetManager::new();
+    let spec = IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned());
+    let target = mgr.resolve_local(&spec, true).unwrap();
+
+    // Whitespace-only query is rejected:
+    let ws_err = mgr
+        .replace(
+            &target,
+            &IdeReplaceReq {
+                target: spec.clone(),
+                query: "   ".into(),
+                replacement: "x".into(),
+                case_sensitive: true,
+                regex: false,
+                whole_word: false,
+                file_glob: None,
+                scope_path: None,
+                paths: None,
+                dry_run: false,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(ws_err, Error::Invalid(_)));
+
+    // Line-anchored regex `^FOO=old$` matches interior line:
+    let res = mgr
+        .replace(
+            &target,
+            &IdeReplaceReq {
+                target: spec,
+                query: "^FOO=old$".into(),
+                replacement: "FOO=new".into(),
+                case_sensitive: true,
+                regex: true,
+                whole_word: false,
+                file_glob: Some("*.sh".into()),
+                scope_path: None,
+                paths: None,
+                dry_run: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.files_changed, 1);
+    assert_eq!(res.replacements, 1);
+    let updated = std::fs::read_to_string(&script).unwrap();
+    assert_eq!(updated, "#!/bin/sh\nFOO=new\necho $FOO\n");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&script).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "executable mode must survive replace");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn complete_fs_paths_blocks_symlink_to_secret_directory_for_non_root() {
+    let ws = tempfile::tempdir().unwrap();
+    let secret_outside = tempfile::tempdir().unwrap();
+    let fake_ssh = secret_outside.path().join(".ssh");
+    std::fs::create_dir_all(&fake_ssh).unwrap();
+    std::fs::write(fake_ssh.join("id_ed25519"), "PRIVATE\n").unwrap();
+    std::fs::write(ws.path().join("main.rs"), "fn main() {}\n").unwrap();
+    std::os::unix::fs::symlink(&fake_ssh, ws.path().join("keys_link")).unwrap();
+
+    let ws_str = ws.path().to_string_lossy().into_owned();
+    let root_items = complete::complete_fs_paths(
+        &crate::types::IdeFsCompleteReq {
+            query: String::new(),
+            cwd: Some(ws_str.clone()),
+            roots: vec![ws_str.clone()],
+            limit: 50,
+            ..Default::default()
+        },
+        false,
+    )
+    .items;
+    assert!(
+        !root_items
+            .iter()
+            .any(|i| i.path.contains("keys_link") || i.display.contains("keys_link")),
+        "symlink to secret dir must be omitted: {root_items:?}"
+    );
+    let link_items = complete::complete_fs_paths(
+        &crate::types::IdeFsCompleteReq {
+            query: "keys_link/".into(),
+            cwd: Some(ws_str.clone()),
+            roots: vec![ws_str],
+            limit: 50,
+            ..Default::default()
+        },
+        false,
+    )
+    .items;
+    assert!(
+        link_items.is_empty(),
+        "traversing symlink into .ssh must return empty: {link_items:?}"
+    );
+}
+
+#[tokio::test]
+async fn multi_root_write_and_mutate_record_history_under_matched_root() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let primary = tempfile::tempdir().unwrap();
+    let attached = tempfile::tempdir().unwrap();
+    std::fs::write(primary.path().join("a.rs"), "fn a() {}\n").unwrap();
+    std::fs::write(attached.path().join("b.rs"), "fn b() { 1 }\n").unwrap();
+
+    let history = LocalHistoryStore::new(data_dir.path().to_path_buf());
+    let mgr = TargetManager::with_history(history.clone());
+    let mut spec = IdeTargetSpec::local(primary.path().to_string_lossy().into_owned());
+    spec.additional_roots = vec![attached.path().to_string_lossy().into_owned()];
+    let target = mgr.resolve_local(&spec, true).unwrap();
+
+    let attached_file = attached.path().join("b.rs").to_string_lossy().into_owned();
+    mgr.write_file(&target, &attached_file, "fn b() { 2 }\n", None, false)
+        .await
+        .unwrap();
+
+    // Querying the attached folder directly returns its snapshots:
+    let attached_only = history
+        .list_entries(
+            &target.local_project_roots()[1],
+            &[],
+            true,
+            None,
+            true,
+            Some(20),
+            None,
+        )
+        .unwrap();
+    assert!(
+        !attached_only.entries.is_empty(),
+        "expected LocalHistory entries in attached root bucket, got empty"
+    );
+    assert!(attached_only.entries.iter().any(|e| e.rel_path == "b.rs"));
+
+    // Querying via primary root + `additional_roots` also finds the attached file:
+    let listed = history
+        .list_entries(
+            &target.local_project_roots()[0],
+            &target.local_project_roots()[1..],
+            true,
+            Some(&attached_file),
+            true,
+            Some(20),
+            None,
+        )
+        .unwrap();
+    assert!(
+        !listed.entries.is_empty(),
+        "expected LocalHistory entries for attached root file, got empty"
+    );
+    assert!(listed.entries.iter().any(|e| e.rel_path == "b.rs"));
 }

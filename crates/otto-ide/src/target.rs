@@ -10,7 +10,7 @@ pub mod complete;
 mod fs_ops;
 pub(crate) mod sdk_paths;
 mod search;
-mod ssh_exec;
+pub(crate) mod ssh_exec;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -30,7 +30,7 @@ use crate::types::{
 };
 use crate::IdeCtx;
 
-pub(crate) use self::fs_ops::enforce_non_root_path;
+pub use self::fs_ops::enforce_non_root_path;
 use self::fs_ops::{
     build_file_read_resp, build_remote_tree_entries, list_local_dir_sync, mutate_local_fs_in_roots,
     mutate_remote_fs, normalize_arch_name, normalize_os_name, parse_uname_output,
@@ -49,7 +49,7 @@ pub(crate) use self::ssh_exec::canonicalize_local_root_dir;
 pub(super) use self::ssh_exec::{
     join_remote, map_io_err, normalize_remote_root, remote_parent,
     resolve_local_prospective_in_roots, resolve_remote_in_roots, resolve_remote_in_roots_or_sdk,
-    resolve_remote_subpath, validate_ssh_spec, SshControlSocket,
+    validate_ssh_spec, SshControlSocket,
 };
 
 /// Maximum bytes read into the text editor buffer (`4 MiB`).
@@ -62,6 +62,9 @@ const DEFAULT_SEARCH_LIMIT: usize = 200;
 const MAX_SEARCH_LIMIT: usize = 1000;
 /// Idle retention for pooled SFTP sessions.
 pub(super) const SFTP_IDLE_TTL: Duration = Duration::from_secs(90);
+/// Short TTL for resolved local target root + SDK allowlist snapshots.
+const LOCAL_RESOLVE_TTL: Duration = Duration::from_secs(5);
+const LOCAL_RESOLVE_CACHE_CAP: usize = 128;
 
 /// Captured output of a bounded command executed on a [`ResolvedTarget`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +88,7 @@ pub enum ResolvedTarget {
         additional_roots: Vec<PathBuf>,
         readonly_roots: Vec<PathBuf>,
         is_root_user: bool,
+        actor_id: String,
     },
     Ssh {
         spec: IdeSshSpec,
@@ -104,6 +108,13 @@ impl ResolvedTarget {
 
     pub fn is_ssh(&self) -> bool {
         matches!(self, Self::Ssh { .. })
+    }
+
+    pub fn into_ssh_spec(self) -> Option<IdeSshSpec> {
+        match self {
+            Self::Ssh { spec, .. } => Some(spec),
+            Self::Local { .. } => None,
+        }
     }
 
     pub fn local_project_roots(&self) -> Vec<PathBuf> {
@@ -135,7 +146,10 @@ impl ResolvedTarget {
             Self::Ssh { spec, root, .. } => {
                 format!(
                     "ssh:{}:{}@{}:{}:{root}",
-                    spec.connection_id, spec.user, spec.host, spec.port
+                    spec.connection_id,
+                    spec.user,
+                    spec.host,
+                    spec.effective_port().unwrap_or(22)
                 )
             }
         }
@@ -149,13 +163,25 @@ pub(super) struct SshPoolKey {
     pub(super) params: SftpParams,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct LocalResolveCacheKey {
+    actor_id: String,
+    is_root_user: bool,
+    root: String,
+    additional_roots: Vec<String>,
+    extra_sdk_dirs: Vec<PathBuf>,
+}
+
 /// Manages local and multiplexed SSH filesystem, search, and process operations.
 #[derive(Clone)]
 pub struct TargetManager {
     pub(super) sftp_pool: Arc<DashMap<SshPoolKey, (Arc<SftpSession>, Instant)>>,
-    pub(super) ssh_sockets: Arc<DashMap<SshPoolKey, Arc<SshControlSocket>>>,
+    pub(super) ssh_sockets: Arc<DashMap<SshPoolKey, (Arc<SshControlSocket>, Instant)>>,
     pub(super) ssh_platform_cache: Arc<DashMap<String, IdePlatformInfo>>,
+    local_resolve_cache: Arc<DashMap<LocalResolveCacheKey, (ResolvedTarget, Instant)>>,
     history: Option<LocalHistoryStore>,
+    lsp_pool: Option<Arc<crate::lsp_host::pool::LspPool>>,
+    environments: Option<crate::environments::EnvironmentManager>,
 }
 
 impl Default for TargetManager {
@@ -170,7 +196,10 @@ impl TargetManager {
             sftp_pool: Arc::new(DashMap::new()),
             ssh_sockets: Arc::new(DashMap::new()),
             ssh_platform_cache: Arc::new(DashMap::new()),
+            local_resolve_cache: Arc::new(DashMap::new()),
             history: None,
+            lsp_pool: None,
+            environments: None,
         }
     }
 
@@ -181,24 +210,61 @@ impl TargetManager {
         }
     }
 
-    /// Resolve and authorize an [`IdeTargetSpec`] using [`IdeCtx`].
+    pub fn with_services(
+        history: LocalHistoryStore,
+        lsp_pool: Arc<crate::lsp_host::pool::LspPool>,
+        environments: crate::environments::EnvironmentManager,
+    ) -> Self {
+        Self {
+            history: Some(history),
+            lsp_pool: Some(lsp_pool),
+            environments: Some(environments),
+            ..Self::new()
+        }
+    }
+
+    pub fn invalidate_local_resolve_cache(&self) {
+        self.local_resolve_cache.clear();
+    }
+
+    /// Resolve and authorize an [`IdeTargetSpec`] for read operations using [`IdeCtx`].
     pub async fn resolve<S: IdeCtx>(
         &self,
         ctx: &S,
         user: &User,
         spec: &IdeTargetSpec,
     ) -> Result<ResolvedTarget> {
+        self.resolve_with_access(ctx, user, spec, false).await
+    }
+
+    /// Resolve and authorize an [`IdeTargetSpec`] for write/exec operations using [`IdeCtx`].
+    pub async fn resolve_write<S: IdeCtx>(
+        &self,
+        ctx: &S,
+        user: &User,
+        spec: &IdeTargetSpec,
+    ) -> Result<ResolvedTarget> {
+        self.resolve_with_access(ctx, user, spec, true).await
+    }
+
+    async fn resolve_with_access<S: IdeCtx>(
+        &self,
+        ctx: &S,
+        user: &User,
+        spec: &IdeTargetSpec,
+        write: bool,
+    ) -> Result<ResolvedTarget> {
         spec.validate()?;
         match spec.kind {
             IdeTargetKind::Local => {
+                ctx.authorize_local_target(user, spec, write).await?;
+                let pool = ctx.pool();
+                let _ = ctx.ide().projects.ensure_hydrated(&pool).await;
+                ctx.ide().environments.ensure_hydrated(&pool).await;
+
                 let mut merged_spec = spec.clone();
                 let mut extra_sdk_dirs = vec![ctx.ide().toolchains.toolchains_dir()];
-                if let Ok(proj_env) = ctx
-                    .ide()
-                    .environments
-                    .get_project_env(&ctx.pool(), spec)
-                    .await
-                {
+                if let Ok(proj_env) = ctx.ide().environments.get_project_env(&pool, spec).await {
                     for ar in proj_env.additional_roots {
                         if !ar.trim().is_empty() && !merged_spec.additional_roots.contains(&ar) {
                             merged_spec.additional_roots.push(ar);
@@ -214,22 +280,83 @@ impl TargetManager {
                             extra_sdk_dirs.push(PathBuf::from(p));
                         }
                     }
+                    for mod_sdk in proj_env.module_sdks.into_values() {
+                        if !mod_sdk.trim().is_empty() {
+                            extra_sdk_dirs.push(PathBuf::from(mod_sdk));
+                        }
+                    }
                 }
-                for cached_ar in crate::environments::cached_additional_roots(&spec.project_key()) {
+                for reg_sdk in crate::toolchains::load_registered_local_sdks(&pool).await {
+                    extra_sdk_dirs.push(PathBuf::from(reg_sdk.path));
+                }
+                let cached_ars = if let Some(envs) = &self.environments {
+                    envs.cached_additional_roots(&spec.project_key())
+                } else {
+                    ctx.ide()
+                        .environments
+                        .cached_additional_roots(&spec.project_key())
+                };
+                for cached_ar in cached_ars {
                     if !cached_ar.trim().is_empty()
                         && !merged_spec.additional_roots.contains(&cached_ar)
                     {
                         merged_spec.additional_roots.push(cached_ar);
                     }
                 }
-                for proj_ar in ctx.ide().projects.folders_for_root(&spec.root) {
+                for proj_ar in ctx
+                    .ide()
+                    .projects
+                    .folders_for_root_for_user(&spec.root, user)
+                {
                     if !proj_ar.trim().is_empty()
                         && !merged_spec.additional_roots.contains(&proj_ar)
                     {
                         merged_spec.additional_roots.push(proj_ar);
                     }
                 }
-                self.resolve_local_with_sdks(&merged_spec, user.is_root, &extra_sdk_dirs)
+                // Re-authorize any attached folders that were merged from stored project/env state.
+                if merged_spec.additional_roots != spec.additional_roots {
+                    ctx.authorize_local_target(user, &merged_spec, write)
+                        .await?;
+                }
+
+                let cache_key = LocalResolveCacheKey {
+                    actor_id: user.id.as_str().to_string(),
+                    is_root_user: user.is_root,
+                    root: merged_spec.root.clone(),
+                    additional_roots: merged_spec.merged_extra_roots(),
+                    extra_sdk_dirs: extra_sdk_dirs.clone(),
+                };
+                if let Some(entry) = self.local_resolve_cache.get(&cache_key) {
+                    if entry.1.elapsed() < LOCAL_RESOLVE_TTL {
+                        return Ok(entry.0.clone());
+                    }
+                }
+
+                let mgr = self.clone();
+                let is_root = user.is_root;
+                let actor_id = user.id.as_str().to_string();
+                let resolved = tokio::task::spawn_blocking(move || {
+                    mgr.resolve_local_with_sdks_for_actor(
+                        &merged_spec,
+                        is_root,
+                        &actor_id,
+                        &extra_sdk_dirs,
+                    )
+                })
+                .await
+                .map_err(|e| Error::Internal(format!("resolve_local join: {e}")))??;
+
+                if self.local_resolve_cache.len() >= LOCAL_RESOLVE_CACHE_CAP {
+                    self.local_resolve_cache
+                        .retain(|_, (_, at)| at.elapsed() < LOCAL_RESOLVE_TTL);
+                    if self.local_resolve_cache.len() >= LOCAL_RESOLVE_CACHE_CAP {
+                        self.local_resolve_cache.clear();
+                    }
+                }
+                self.local_resolve_cache
+                    .insert(cache_key, (resolved.clone(), Instant::now()));
+                Ok(resolved)
             }
             IdeTargetKind::Ssh => {
                 let conn_id = spec.connection_id.as_ref().ok_or_else(|| {
@@ -255,6 +382,16 @@ impl TargetManager {
         &self,
         spec: &IdeTargetSpec,
         is_root_user: bool,
+        extra_sdk_dirs: &[PathBuf],
+    ) -> Result<ResolvedTarget> {
+        self.resolve_local_with_sdks_for_actor(spec, is_root_user, "local", extra_sdk_dirs)
+    }
+
+    pub fn resolve_local_with_sdks_for_actor(
+        &self,
+        spec: &IdeTargetSpec,
+        is_root_user: bool,
+        actor_id: &str,
         extra_sdk_dirs: &[PathBuf],
     ) -> Result<ResolvedTarget> {
         spec.validate()?;
@@ -283,6 +420,7 @@ impl TargetManager {
             additional_roots,
             readonly_roots,
             is_root_user,
+            actor_id: actor_id.to_string(),
         })
     }
 
@@ -310,6 +448,59 @@ impl TargetManager {
             additional_roots,
             actor_id: actor_id.to_string(),
         })
+    }
+
+    /// Validate that `raw_path` resolves inside `target`'s primary or attached roots
+    /// (and passes non-root secret-path checks when `!is_root_user`).
+    pub async fn validate_subpath(
+        &self,
+        target: &IdeTargetSpec,
+        raw_path: &str,
+        is_root_user: bool,
+    ) -> Result<()> {
+        match target.kind {
+            IdeTargetKind::Local => {
+                let resolved = self.resolve_local(target, is_root_user)?;
+                let ResolvedTarget::Local {
+                    root,
+                    additional_roots,
+                    ..
+                } = resolved
+                else {
+                    return Err(Error::Invalid("expected local target".into()));
+                };
+                match resolve_local_existing_in_roots(
+                    &root,
+                    &additional_roots,
+                    is_root_user,
+                    raw_path,
+                ) {
+                    Ok(_) => return Ok(()),
+                    Err(Error::NotFound(_)) => {}
+                    Err(err) => return Err(err),
+                }
+                let _ = resolve_local_prospective_in_roots(
+                    &root,
+                    &additional_roots,
+                    is_root_user,
+                    raw_path,
+                    false,
+                )
+                .await?;
+                Ok(())
+            }
+            IdeTargetKind::Ssh => {
+                let root = normalize_remote_root(&target.root)?;
+                let mut extra = Vec::new();
+                for raw_extra in target.merged_extra_roots() {
+                    if !raw_extra.trim().is_empty() {
+                        extra.push(normalize_remote_root(&raw_extra)?);
+                    }
+                }
+                let _ = resolve_remote_in_roots(&root, &extra, raw_path)?;
+                Ok(())
+            }
+        }
     }
 
     /// Detect `(os, arch)` of `target` (`macos`/`linux` × `aarch64`/`x86_64`).
@@ -363,6 +554,7 @@ impl TargetManager {
                 root,
                 additional_roots,
                 is_root_user,
+                actor_id,
                 ..
             } => {
                 let (resolved_dir, matched_root) = resolve_local_existing_in_roots(
@@ -372,9 +564,14 @@ impl TargetManager {
                     path.unwrap_or(""),
                 )?;
                 if path.unwrap_or("").trim().is_empty() {
-                    crate::lsp_host::pool::evict_detached_other_roots(
-                        &matched_root.to_string_lossy(),
-                    );
+                    if let Some(pool) = &self.lsp_pool {
+                        pool.evict_detached_other_roots_for_user(
+                            actor_id,
+                            &matched_root,
+                            root,
+                            additional_roots,
+                        );
+                    }
                 }
                 let dir_for_scan = resolved_dir.clone();
                 let restricted = !*is_root_user;
@@ -437,6 +634,7 @@ impl TargetManager {
                 additional_roots,
                 readonly_roots,
                 is_root_user,
+                ..
             } => {
                 if is_virtual_archive_uri(path) {
                     return read_virtual_java_archive(
@@ -531,7 +729,7 @@ impl TargetManager {
                 is_root_user,
                 ..
             } => {
-                let (dest, _) = resolve_local_prospective_in_roots(
+                let (dest, matched_root) = resolve_local_prospective_in_roots(
                     root,
                     additional_roots,
                     *is_root_user,
@@ -543,19 +741,45 @@ impl TargetManager {
                     verify_local_expected_sha(&dest, exp).await?;
                 }
                 if let Some(hist) = &self.history {
-                    if dest.is_file() {
-                        let _ = hist.record_existing_file_sync(
-                            root,
-                            &dest,
-                            "external",
-                            "Before edit",
+                    let hist_clone = hist.clone();
+                    let mr = matched_root.clone();
+                    let dest_clone = dest.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if dest_clone.is_file() {
+                            let _ = hist_clone.record_existing_file_sync(
+                                &mr,
+                                &dest_clone,
+                                "external",
+                                "Before edit",
+                                true,
+                            );
+                        }
+                    })
+                    .await;
+                }
+                write_local_atomic(&dest, new_bytes, self.lsp_pool.as_deref()).await?;
+                if matches!(
+                    dest.file_name().and_then(|n| n.to_str()),
+                    Some("go.mod" | "go.work")
+                ) {
+                    self.invalidate_local_resolve_cache();
+                }
+                if let Some(hist) = &self.history {
+                    let hist_clone = hist.clone();
+                    let mr = matched_root.clone();
+                    let dest_clone = dest.clone();
+                    let saved_bytes = new_bytes.to_vec();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = hist_clone.record_bytes_sync(
+                            &mr,
+                            &dest_clone,
+                            &saved_bytes,
+                            "saved",
+                            "Saved",
                             true,
                         );
-                    }
-                }
-                write_local_atomic(&dest, new_bytes).await?;
-                if let Some(hist) = &self.history {
-                    let _ = hist.record_bytes_sync(root, &dest, new_bytes, "saved", "Saved", true);
+                    })
+                    .await;
                 }
                 Ok(IdeFileWriteResp {
                     path: dest.to_string_lossy().into_owned(),
@@ -628,17 +852,18 @@ impl TargetManager {
                     path,
                     dest_path,
                     self.history.as_ref(),
+                    self.lsp_pool.as_deref(),
                 )
                 .await
             }
             ResolvedTarget::Ssh {
                 spec,
                 root,
+                additional_roots,
                 actor_id,
-                ..
             } => {
                 let sftp = self.acquire_sftp(actor_id, spec)?;
-                mutate_remote_fs(&sftp, root, op, path, dest_path).await
+                mutate_remote_fs(&sftp, root, additional_roots, op, path, dest_path).await
             }
         }
     }
@@ -662,27 +887,44 @@ impl TargetManager {
                 .await
                 .map_err(|e| Error::Internal(format!("list_files join: {e}")))?
             }
-            ResolvedTarget::Ssh { root, .. } => {
-                let script = format!(
-                    "if command -v rg >/dev/null 2>&1; then rg --files | head -n {cap}; \
-                     else find . -maxdepth 8 -type f -not -path '*/.*' -not -path '*/node_modules/*' -not -path '*/target/*' | head -n {cap}; fi"
-                );
-                let out = self
-                    .exec_shell(
-                        target,
-                        &script,
-                        Some(root),
-                        &BTreeMap::new(),
-                        Duration::from_secs(15),
-                    )
-                    .await?;
-                let files = out
-                    .stdout
-                    .lines()
-                    .map(|l| l.trim().trim_start_matches("./"))
-                    .filter(|l| !l.is_empty())
-                    .map(|rel| join_remote(root, rel))
-                    .collect();
+            ResolvedTarget::Ssh {
+                root,
+                additional_roots,
+                ..
+            } => {
+                let mut files = Vec::new();
+                for scan_root in std::iter::once(root.as_str())
+                    .chain(additional_roots.iter().map(String::as_str))
+                {
+                    let rem = cap.saturating_sub(files.len());
+                    if rem == 0 {
+                        break;
+                    }
+                    let script = format!(
+                        "if command -v rg >/dev/null 2>&1; then rg --files | head -n {rem}; \
+                         else find . -maxdepth 8 -type f -not -path '*/.*' -not -path '*/node_modules/*' -not -path '*/target/*' | head -n {rem}; fi"
+                    );
+                    let out = self
+                        .exec_shell(
+                            target,
+                            &script,
+                            Some(scan_root),
+                            &BTreeMap::new(),
+                            Duration::from_secs(15),
+                        )
+                        .await?;
+                    for rel in out
+                        .stdout
+                        .lines()
+                        .map(|l| l.trim().trim_start_matches("./"))
+                        .filter(|l| !l.is_empty())
+                    {
+                        if files.len() >= cap {
+                            break;
+                        }
+                        files.push(join_remote(scan_root, rel));
+                    }
+                }
                 Ok(files)
             }
         }
@@ -722,9 +964,11 @@ impl TargetManager {
                 .await
                 .map_err(|e| Error::Internal(format!("search join: {e}")))?
             }
-            ResolvedTarget::Ssh { root, .. } => {
-                search_remote_ssh(self, target, root, req, limit).await
-            }
+            ResolvedTarget::Ssh {
+                root,
+                additional_roots,
+                ..
+            } => search_remote_ssh(self, target, root, additional_roots, req, limit).await,
         }
     }
 
@@ -734,7 +978,7 @@ impl TargetManager {
         target: &ResolvedTarget,
         req: &IdeReplaceReq,
     ) -> Result<IdeReplaceResp> {
-        if req.query.is_empty() {
+        if req.query.trim().is_empty() {
             return Err(Error::Invalid("replace query must not be empty".into()));
         }
         let matcher = build_matcher(&req.query, req.regex, req.case_sensitive, req.whole_word)?;
@@ -749,15 +993,25 @@ impl TargetManager {
                 let extra_clone = additional_roots.clone();
                 let restricted = !*is_root_user;
                 let req_clone = req.clone();
+                let lsp_pool = self.lsp_pool.clone();
                 tokio::task::spawn_blocking(move || {
-                    replace_local_sync(&root_clone, &extra_clone, restricted, &req_clone, &matcher)
+                    replace_local_sync(
+                        &root_clone,
+                        &extra_clone,
+                        restricted,
+                        &req_clone,
+                        &matcher,
+                        lsp_pool.as_deref(),
+                    )
                 })
                 .await
                 .map_err(|e| Error::Internal(format!("replace join: {e}")))?
             }
-            ResolvedTarget::Ssh { root, .. } => {
-                replace_remote_ssh(self, target, root, req, &matcher).await
-            }
+            ResolvedTarget::Ssh {
+                root,
+                additional_roots,
+                ..
+            } => replace_remote_ssh(self, target, root, additional_roots, req, &matcher).await,
         }
     }
 }

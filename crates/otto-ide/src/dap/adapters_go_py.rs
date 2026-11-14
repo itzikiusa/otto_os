@@ -129,10 +129,12 @@ pub(super) async fn resolve_go_adapter(
         };
         let mut test_args = Vec::new();
         if let Some(tname) = req.launch.test_name.as_deref().filter(|s| !s.is_empty()) {
-            let clean = tname.trim_start_matches('^').trim_end_matches('$');
-            test_args.push("-test.v".to_string());
-            test_args.push("-test.run".to_string());
-            test_args.push(format!("^{}$", regex::escape(clean)));
+            let pattern = format_go_test_run_pattern(tname);
+            if !pattern.is_empty() {
+                test_args.push("-test.v".to_string());
+                test_args.push("-test.run".to_string());
+                test_args.push(pattern);
+            }
         }
         test_args.extend(req.launch.args.clone());
         let mut body = json!({
@@ -198,6 +200,25 @@ fn find_go_mod_dir(target: &IdeTargetSpec, program: &str, fallback_cwd: &str) ->
         }
     }
     fallback_cwd.to_string()
+}
+
+/// Format a Go `-test.run` pattern so each `/`-delimited subtest segment is
+/// anchored independently (`^Parent$/^Subtest$`) without double-escaping
+/// segments that were already anchored per segment.
+pub(crate) fn format_go_test_run_pattern(tname: &str) -> String {
+    tname
+        .split('/')
+        .filter(|seg| !seg.is_empty())
+        .map(|seg| {
+            if seg.len() >= 2 && seg.starts_with('^') && seg.ends_with('$') {
+                seg.to_string()
+            } else {
+                let clean = seg.trim_start_matches('^').trim_end_matches('$');
+                format!("^{}$", regex::escape(clean))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 pub(super) async fn resolve_python_adapter(

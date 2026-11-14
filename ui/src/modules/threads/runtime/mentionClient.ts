@@ -154,6 +154,7 @@ export async function fetchMentionFileItems(opts: {
   });
 
   let serverItems: RawFsCompletionItem[] = [];
+  let fsCompleteOk = false;
   if (!fsCompleteUnsupported) {
     try {
       const resp = await api.post<FsCompleteResp>(
@@ -168,6 +169,7 @@ export async function fetchMentionFileItems(opts: {
         opts.signal,
       );
       serverItems = resp.items ?? [];
+      fsCompleteOk = true;
     } catch (err) {
       if (opts.signal?.aborted) return [];
       if (err instanceof ApiError && (err.status === 404 || err.status === 405 || err.status === 501)) {
@@ -178,7 +180,7 @@ export async function fetchMentionFileItems(opts: {
     }
   }
 
-  if (serverItems.length === 0 && (fsCompleteUnsupported || !opts.signal?.aborted)) {
+  if (!fsCompleteOk && serverItems.length === 0 && (fsCompleteUnsupported || !opts.signal?.aborted)) {
     try {
       serverItems = await fetchFallbackItems(
         opts.query,

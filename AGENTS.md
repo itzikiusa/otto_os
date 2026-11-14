@@ -78,6 +78,7 @@ Otto.app (Tauri / otto-desktop)
 | `otto-review` | Multi-agent code-review engine — reviewer sessions, managed summarizer + deterministic fallback, and the pure core (diff render/caps, configs/budgets, lens expansion, prompts, draft parsing); routes + ctx-bound orchestration stay in `otto-server` |
 | `otto-automation` | Scheduled Tasks (cadence, 60 s supervisor, run engine, report delivery) + Goal Loops controller, behind the `AutomationCtx` trait (otto-server's impl: `src/automation_ctx.rs`) |
 | `otto-rooms` | Session rooms domain — capability registries, room actions, recap capture/archive/engines, the session-authority sync and per-room maintenance, ICE/TURN settings — behind the `RoomsCtx` trait (otto-server's impl: `src/rooms/ctx.rs`; the handlers, WS upgrades and socket run loops stay in `otto-server`) |
+| `otto-ide` | Multi-language IDE engine — Local + Remote SSH targets, OS/arch SDK & toolchain manager, cached login shell env, environments & run configs, DAP debugger, LSP intelligence & `/ws/lsp` host, dependency/vulnerability inspector, content-addressed Local History, live collaborative editing, and runtime IDE plugins (behind `IdeCtx`; host glue in `otto-server`'s `modules/ctx_impls.rs` and `lsp/`) |
 | `otto-server` | Axum routes wiring the crates together; also hosts the code-review routes + orchestration, the session-rooms routes and sockets (domain in `otto-rooms`), workflow engine & plugin supervisor. `boot/` is the daemon composition root (`open_state` → `build_ctx` → recovery → `spawn_background`; `ServerCtx::from_parts` is the one context literal, shared with `ServerCtx::for_tests`) |
 | `ottod` | The daemon binary: process setup, single-instance lock, listeners, shutdown; drives `otto_server::boot` |
 
@@ -92,7 +93,8 @@ Otto.app (Tauri / otto-desktop)
 `browser`, `canvas`, `connections`, `database` (Database Explorer),
 `design-hall` (Design Hall: lobby, artifact view, brand kit, learning log —
 embedded under unified `Product`), `desktop` (menu-bar tray & floating bar
-pages), `git`, `help`, `home` (personal dashboard of live boxes), `insights`,
+pages), `git`, `help`, `home` (personal dashboard of live boxes), `ide`
+(multi-language IDE), `insights`,
 `kubernetes` (Kubernetes console), `loops` (goal loops), `mcp` (MCP control
 plane), `panels`, `personal-agents` (embedded under unified `Scheduled Tasks`),
 `plugins`, `product` (unified Stories · Designs · Learnings hub), `rooms`

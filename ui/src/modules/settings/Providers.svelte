@@ -386,7 +386,7 @@
       return;
     }
     if (!/^[a-z0-9][a-z0-9_-]*$/.test(n)) {
-      formError = 'Use lowercase letters, digits, - or _ in the name (for example opencode).';
+      formError = 'Use lowercase letters, digits, - or _ in the name (for example kilo).';
       return;
     }
     if (editing !== n && custom[n]) {
@@ -436,7 +436,7 @@
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
-  <SectionIntro>Built-ins are always available; add any other CLI (opencode, kilo, …) under Custom. Every change here applies immediately to new sessions.</SectionIntro>
+  <SectionIntro>Built-ins are always available; add any other CLI (kilo, aider, …) under Custom. Every change here applies immediately to new sessions.</SectionIntro>
   <div class="providers-body">
 
   {#if !auth.isRoot}

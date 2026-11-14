@@ -11,6 +11,7 @@ import {
 } from '@codemirror/state';
 import { copyWithToast } from '../clipboard';
 import { ctxMenu, type MenuItem } from '../contextmenu.svelte';
+import { diffLineArrays } from '../lineDiff.ts';
 
 export interface IdeEditorSelectionRange {
   from: number;
@@ -49,7 +50,6 @@ export const setSavedContentEffect = StateEffect.define<string | null>();
 export const setBlameLinesEffect = StateEffect.define<Record<number, string> | null>();
 
 const MAX_DIFF_GUTTER_LINES = 4_000;
-const MAX_LCS_CELLS = 48_000;
 
 export function selectionOrCurrentLine(state: EditorState): IdeEditorSelectionRange {
   const { from, to } = state.selection.main;
@@ -150,42 +150,25 @@ function buildDiffState(
     }
   };
 
-  if (oldMid * newMid > MAX_LCS_CELLS || oldMid === 0 || newMid === 0) {
+  if (oldMid === 0 || newMid === 0) {
     pushHunk(prefix, prefix + oldMid, prefix, prefix + newMid);
   } else {
     const oldSlice = savedLines.slice(prefix, prefix + oldMid);
     const newSlice: string[] = new Array(newMid);
     for (let k = 0; k < newMid; k++) newSlice[k] = doc.line(prefix + 1 + k).text;
-    const cols = newMid + 1;
-    const dp = new Uint16Array((oldMid + 1) * cols);
-    for (let i = oldMid - 1; i >= 0; i--) {
-      const oTxt = oldSlice[i];
-      for (let j = newMid - 1; j >= 0; j--) {
-        dp[i * cols + j] = oTxt === newSlice[j]
-          ? dp[(i + 1) * cols + (j + 1)] + 1
-          : Math.max(dp[(i + 1) * cols + j], dp[i * cols + (j + 1)]);
-      }
+    const ops = diffLineArrays(oldSlice, newSlice);
+    let curO = 0;
+    let curN = 0;
+    for (let k = 0; k < ops.length; k++) {
+      const op = ops[k];
+      if (op.op !== 'equal') continue;
+      const oIdx = op.oldLineNo - 1;
+      const nIdx = op.newLineNo - 1;
+      pushHunk(prefix + curO, prefix + oIdx, prefix + curN, prefix + nIdx);
+      curO = oIdx + 1;
+      curN = nIdx + 1;
     }
-    const anchors: Array<[number, number]> = [[0, 0]];
-    let i = 0;
-    let j = 0;
-    while (i < oldMid && j < newMid) {
-      if (oldSlice[i] === newSlice[j]) {
-        anchors.push([i, j], [i + 1, j + 1]);
-        i++;
-        j++;
-      } else if (dp[(i + 1) * cols + j] >= dp[i * cols + (j + 1)]) {
-        i++;
-      } else {
-        j++;
-      }
-    }
-    anchors.push([oldMid, newMid]);
-    for (let k = 0; k < anchors.length - 1; k += 2) {
-      const [oS, nS] = anchors[k];
-      const [oE, nE] = anchors[k + 1];
-      pushHunk(prefix + oS, prefix + oE, prefix + nS, prefix + nE);
-    }
+    pushHunk(prefix + curO, prefix + oldMid, prefix + curN, prefix + newMid);
   }
 
   const ranges: Range<GutterMarker>[] = [];

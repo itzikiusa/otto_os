@@ -89,6 +89,7 @@ impl DapStartContext {
 pub(super) struct DapWireClient {
     writer: tokio::sync::Mutex<DapWriter<BoxWrite>>,
     pending: Mutex<HashMap<i64, oneshot::Sender<DapResponse>>>,
+    retired: AtomicBool,
 }
 
 impl DapWireClient {
@@ -100,6 +101,7 @@ impl DapWireClient {
         let client = Arc::new(Self {
             writer: tokio::sync::Mutex::new(DapWriter::new(writer_io)),
             pending: Mutex::new(HashMap::new()),
+            retired: AtomicBool::new(false),
         });
         let client_ref = client.clone();
         tokio::spawn(async move {
@@ -117,7 +119,9 @@ impl DapWireClient {
                         }
                     }
                     DapMessage::Event(ev) => {
-                        let _ = event_tx.send(ev);
+                        if !client_ref.retired.load(Ordering::SeqCst) {
+                            let _ = event_tx.send(ev);
+                        }
                     }
                     DapMessage::Request(rev_req) => {
                         let mut w = client_ref.writer.lock().await;
@@ -130,9 +134,21 @@ impl DapWireClient {
             if let Ok(mut map) = client_ref.pending.lock() {
                 map.clear();
             }
-            let _ = event_tx.send(DapEvent::new(0, "__eof__", None));
+            if !client_ref.retired.load(Ordering::SeqCst) {
+                let _ = event_tx.send(DapEvent::new(0, "__eof__", None));
+            }
         });
         client
+    }
+
+    pub(super) fn retire(&self) {
+        self.retired.store(true, Ordering::SeqCst);
+    }
+
+    pub(super) fn abort_pending(&self) {
+        if let Ok(mut map) = self.pending.lock() {
+            map.clear();
+        }
     }
 
     pub(super) async fn send_request_nowait(
@@ -199,6 +215,7 @@ pub(super) struct SessionEntry {
     pub(super) initialized_notify: Arc<Notify>,
     pub(super) halted_notify: Arc<Notify>,
     pub(super) suppress_transient_pause: AtomicBool,
+    pub(super) restarting: AtomicBool,
 }
 
 impl SessionEntry {
@@ -250,6 +267,7 @@ impl SessionEntry {
             initialized_notify: Arc::new(Notify::new()),
             halted_notify: Arc::new(Notify::new()),
             suppress_transient_pause: AtomicBool::new(false),
+            restarting: AtomicBool::new(false),
         })
     }
 
@@ -272,12 +290,20 @@ impl SessionEntry {
     }
 
     pub(super) fn disconnect_and_kill(&self) {
+        if self.restarting.load(Ordering::SeqCst) {
+            return;
+        }
         if let Some(conn) = self.conn.write().unwrap_or_else(|e| e.into_inner()).take() {
+            conn.wire.retire();
+            conn.wire.abort_pending();
             conn.guard.kill_all();
         }
     }
 
     pub(super) fn mark_terminated(&self) {
+        if self.restarting.load(Ordering::SeqCst) {
+            return;
+        }
         self.mutate_and_broadcast(|snap| {
             snap.state = IdeDebugState::Terminated;
             snap.stopped_reason = None;
@@ -580,43 +606,7 @@ impl DapManager {
                 return Ok(entry.read_snapshot());
             }
             IdeDebugAction::Restart => {
-                stop_entry(&entry).await;
-                let (mut orig_req, orig_ctx) = {
-                    let mut r = entry
-                        .orig_req
-                        .read()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clone();
-                    r.breakpoints = entry.read_snapshot().breakpoints;
-                    let c = entry
-                        .orig_ctx
-                        .read()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clone();
-                    (r, c)
-                };
-                for bp in &mut orig_req.breakpoints {
-                    bp.path = normalize_target_path(&orig_req.target, &bp.path);
-                }
-                entry.mutate_and_broadcast(|snap| {
-                    snap.state = IdeDebugState::Starting;
-                    snap.stopped_reason = None;
-                    snap.paused_file = None;
-                    snap.paused_line = None;
-                    snap.stack_frames.clear();
-                    snap.scopes.clear();
-                    snap.inline_values.clear();
-                    snap.error = None;
-                });
-                let resolved = resolve_dap_adapter(&self.data_dir, &orig_req, &orig_ctx).await?;
-                if let Err(err) =
-                    boot_session_connection(&self.sessions, &entry, resolved, &orig_req, &orig_ctx)
-                        .await
-                {
-                    entry.fail_and_evict(&self.sessions, err.to_string());
-                    return Err(err);
-                }
-                return Ok(entry.read_snapshot());
+                return self.restart_entry(&entry).await;
             }
             IdeDebugAction::SelectFrame => {
                 let conn = entry.active_conn()?;
@@ -728,6 +718,73 @@ impl DapManager {
             variables_reference,
         })
     }
+
+    async fn restart_entry(&self, entry: &Arc<SessionEntry>) -> Result<IdeDebugSessionSnapshot> {
+        use futures_util::FutureExt;
+
+        entry.restarting.store(true, Ordering::SeqCst);
+        teardown_connection(entry).await;
+        // Let any event queued before `wire.retire()` drain harmlessly while
+        // `restarting` suppresses `disconnect_and_kill` / `mark_terminated`.
+        tokio::task::yield_now().await;
+
+        if let Ok(mut files) = entry.configured_bp_files.lock() {
+            files.clear();
+        }
+        if let Ok(mut rtc) = entry.temp_run_to_cursor.lock() {
+            *rtc = None;
+        }
+        entry
+            .suppress_transient_pause
+            .store(false, Ordering::SeqCst);
+        let _ = entry.initialized_notify.notified().now_or_never();
+        let _ = entry.halted_notify.notified().now_or_never();
+
+        let (mut orig_req, orig_ctx) = {
+            let mut r = entry
+                .orig_req
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            r.breakpoints = entry.read_snapshot().breakpoints;
+            let c = entry
+                .orig_ctx
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            (r, c)
+        };
+        for bp in &mut orig_req.breakpoints {
+            bp.path = normalize_target_path(&orig_req.target, &bp.path);
+        }
+        entry.mutate_and_broadcast(|snap| {
+            snap.state = IdeDebugState::Starting;
+            snap.stopped_reason = None;
+            snap.paused_file = None;
+            snap.paused_line = None;
+            snap.threads.clear();
+            snap.stack_frames.clear();
+            snap.scopes.clear();
+            snap.inline_values.clear();
+            snap.error = None;
+        });
+        entry.restarting.store(false, Ordering::SeqCst);
+
+        let resolved = match resolve_dap_adapter(&self.data_dir, &orig_req, &orig_ctx).await {
+            Ok(res) => res,
+            Err(err) => {
+                entry.fail_and_evict(&self.sessions, err.to_string());
+                return Err(err);
+            }
+        };
+        if let Err(err) =
+            boot_session_connection(&self.sessions, entry, resolved, &orig_req, &orig_ctx).await
+        {
+            entry.fail_and_evict(&self.sessions, err.to_string());
+            return Err(err);
+        }
+        Ok(entry.read_snapshot())
+    }
 }
 
 fn build_session_title(req: &IdeStartDebugReq, adapter: &str) -> String {
@@ -752,9 +809,10 @@ pub(super) fn mark_resumed(entry: &SessionEntry) {
     });
 }
 
-async fn stop_entry(entry: &SessionEntry) {
+async fn teardown_connection(entry: &SessionEntry) {
     let old = entry.conn.write().unwrap_or_else(|e| e.into_inner()).take();
     if let Some(conn) = old {
+        conn.wire.retire();
         if conn.supports_terminate {
             let _ = tokio::time::timeout(
                 Duration::from_millis(800),
@@ -768,8 +826,13 @@ async fn stop_entry(entry: &SessionEntry) {
                 .request("disconnect", Some(json!({ "terminateDebuggee": true }))),
         )
         .await;
+        conn.wire.abort_pending();
         conn.guard.kill_all();
     }
+}
+
+async fn stop_entry(entry: &SessionEntry) {
+    teardown_connection(entry).await;
     entry.mark_terminated();
 }
 

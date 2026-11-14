@@ -7,9 +7,9 @@
 //! - `rename_symbol`: workspace refactoring with `apply: false` preview & `apply: true` write.
 //! - `format_document`: CLI formatters (`gofmt`, `rustfmt`, `prettier`, `ruff`/`black`,
 //!   `google-java-format`, `buf`) with toolchain `PATH` + deterministic fallback.
-//! - `code_actions`: concrete `IdeTextEdit` Quick Fixes & Refactorings (`#77`).
-//! - `diagnostics`: `< 30ms` stateless Java/Go/Python/JSON/Shell/TS/Rust diagnostics (`#64`).
-//! - `hover`: clean single-symbol Quick-Doc hover without neighbor bleed (`#64`).
+//! - `code_actions`: concrete `IdeTextEdit` Quick Fixes & Refactorings.
+//! - `diagnostics`: `< 30ms` stateless Java/Go/Python/JSON/Shell/TS/Rust diagnostics.
+//! - `hover`: clean single-symbol Quick-Doc hover without neighbor bleed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -554,18 +554,20 @@ fn find_word_byte_ranges_on_line(line: &str, mask: &[bool], symbol: &str) -> Vec
     if symbol.is_empty() || line.len() < symbol.len() {
         return ranges;
     }
-    let bytes = line.as_bytes();
     let mut from = 0;
     while let Some(rel) = line[from..].find(symbol) {
         let start = from + rel;
         let end = start + symbol.len();
         let code_ok = mask.get(start..end).is_some_and(|s| s.iter().all(|&b| b));
-        let prev_ok = start == 0 || !is_ident_char(bytes[start - 1] as char);
-        let next_ok = end == bytes.len() || !is_ident_char(bytes[end] as char);
+        let prev_ok = line[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_ident_char(c));
+        let next_ok = line[end..].chars().next().is_none_or(|c| !is_ident_char(c));
         if code_ok && prev_ok && next_ok {
             ranges.push((start, end));
         }
-        from = start + 1;
+        from = start + line[start..].chars().next().map_or(1, char::len_utf8);
     }
     ranges
 }

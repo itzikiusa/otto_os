@@ -3951,21 +3951,35 @@ async fn replay_flushes_held_coalesced_chunks_immediately() {
                 if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, .. } if text == "part1"))
         })
         .await;
-    // Give stdout pump a moment to ingest the immediately-following "part2" into `st.held`.
-    tokio::time::sleep(Duration::from_millis(40)).await;
-
-    let RuntimeReplay::Events { events, .. } =
-        rt.replay(&s.id, first_chunk.sequence).await.unwrap()
-    else {
-        panic!("expected replay events");
+    // Poll replay until the stdout pump ingests the immediately-following "part2" into `st.held`
+    // and `replay` flushes it into the ring.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut last_events = Vec::new();
+    let flushed = loop {
+        let RuntimeReplay::Events { events, .. } =
+            rt.replay(&s.id, first_chunk.sequence).await.unwrap()
+        else {
+            panic!("expected replay events");
+        };
+        let found = events.iter().any(|e| {
+            matches!(
+                &e.body,
+                RuntimeEventBody::TurnItemUpdated { turn_item }
+                    if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, .. } if text == "part1part2")
+            )
+        });
+        if found {
+            break true;
+        }
+        last_events = events;
+        if tokio::time::Instant::now() >= deadline {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     };
     assert!(
-        events.iter().any(|e| matches!(
-            &e.body,
-            RuntimeEventBody::TurnItemUpdated { turn_item }
-                if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, .. } if text == "part1part2")
-        )),
-        "expected held chunk to be flushed on replay, got {events:#?}"
+        flushed,
+        "expected held chunk to be flushed on replay within 2s, got {last_events:#?}"
     );
 
     rt.interrupt(&s.id).await.unwrap();
@@ -4223,5 +4237,44 @@ async fn agy_switches_model_and_effort_live_while_acp_steer_falls_back_to_queue(
     let drained = host.wait_n(is_terminal, 5).await;
     assert_eq!(terminal(&drained), Some(TurnTerminalStatus::Completed));
     assert_eq!(last_assistant_text(&host), "echo: after hang");
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn multi_chunk_reasoning_and_message_preserve_started_at_across_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(
+        &pool,
+        &host,
+        RuntimeConfig {
+            stream_coalesce: Duration::from_secs(30),
+            ..RuntimeConfig::default()
+        },
+    );
+    let s = create(&rt, cwd).await;
+    host.wait(is_ready).await;
+
+    rt.prompt(&s.id, "timed-think").await.unwrap();
+    host.wait(is_terminal).await;
+
+    let items = host.items();
+    let reasoning = items
+        .iter()
+        .find(|i| matches!(i.kind, TurnItemKind::Reasoning { .. }))
+        .expect("reasoning item");
+    assert_eq!(reasoning.status, TurnItemStatus::Completed);
+    assert!(reasoning.completed_at.unwrap() > reasoning.started_at.unwrap());
+
+    let message = items
+        .iter()
+        .find(|i| matches!(i.kind, TurnItemKind::AssistantMessage { .. }))
+        .expect("assistant message item");
+    assert_eq!(message.status, TurnItemStatus::Completed);
+    assert!(message.completed_at.unwrap() > message.started_at.unwrap());
+    assert!(message.started_at.unwrap() >= reasoning.completed_at.unwrap());
+
     rt.close(&s.id).await.unwrap();
 }

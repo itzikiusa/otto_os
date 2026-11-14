@@ -684,3 +684,458 @@ fn debug_output_ring_and_terminated_session_eviction_enforce_caps() {
         format!("line-{}", MAX_DEBUG_OUTPUT + 249)
     );
 }
+
+#[test]
+fn go_test_run_pattern_anchors_subtest_segments_without_double_escaping() {
+    use crate::dap::adapters_go_py::format_go_test_run_pattern;
+
+    assert_eq!(format_go_test_run_pattern("TestAdd"), "^TestAdd$");
+    assert_eq!(format_go_test_run_pattern("^TestAdd$"), "^TestAdd$");
+    assert_eq!(
+        format_go_test_run_pattern("^TestParse$/^empty_input$"),
+        "^TestParse$/^empty_input$"
+    );
+    assert_eq!(
+        format_go_test_run_pattern(r"^TestParse$/^case\.1$"),
+        r"^TestParse$/^case\.1$"
+    );
+    assert_eq!(
+        format_go_test_run_pattern("TestParse/case.1"),
+        r"^TestParse$/^case\.1$"
+    );
+    assert_eq!(
+        format_go_test_run_pattern("^TestParse/case(1)$"),
+        r"^TestParse$/^case\(1\)$"
+    );
+    assert_eq!(
+        format_go_test_run_pattern("TestSuite/group/case+1"),
+        r"^TestSuite$/^group$/^case\+1$"
+    );
+}
+
+#[tokio::test]
+async fn exception_breakpoints_and_streamed_snapshot_events_over_duplex() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src_file = tmp.path().join("panic_test.go");
+    std::fs::write(
+        &src_file,
+        "package p\nfunc run() {\n\tx := 1\n\tpanic(x)\n}\n",
+    )
+    .unwrap();
+    let canon_src = std::fs::canonicalize(&src_file)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    let (client_io, server_io) = tokio::io::duplex(65536);
+    let recorded_bp_args: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded_exc_filters: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+    let bp_sink = Arc::clone(&recorded_bp_args);
+    let exc_sink = Arc::clone(&recorded_exc_filters);
+    let canon_for_srv = canon_src.clone();
+
+    let server_task = tokio::spawn(async move {
+        let (sr, sw) = tokio::io::split(server_io);
+        let mut r = DapReader::new(sr);
+        let mut w = DapWriter::new(sw);
+        while let Some(DapMessage::Request(req)) = r.next_message().await.unwrap() {
+            match req.command.as_str() {
+                "initialize" => {
+                    w.send_response(
+                        req.seq,
+                        "initialize",
+                        Ok(Some(json!({
+                            "supportsConfigurationDoneRequest": true,
+                            "supportsTerminateRequest": true,
+                            "supportsHitConditionalBreakpoints": true,
+                            "supportsLogPoints": true,
+                            "exceptionBreakpointFilters": [
+                                { "filter": "unrecovered-panic", "label": "Panic" }
+                            ]
+                        }))),
+                    )
+                    .await
+                    .unwrap();
+                }
+                "launch" => {
+                    w.send_event("initialized", Some(json!({}))).await.unwrap();
+                    w.send_response(req.seq, "launch", Ok(Some(json!({}))))
+                        .await
+                        .unwrap();
+                }
+                "setBreakpoints" => {
+                    if let Some(args) = &req.arguments {
+                        bp_sink.lock().unwrap().push(args.clone());
+                    }
+                    let bps = req
+                        .arguments
+                        .as_ref()
+                        .and_then(|a| a.get("breakpoints"))
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    w.send_response(
+                        req.seq,
+                        "setBreakpoints",
+                        Ok(Some(json!({ "breakpoints": bps }))),
+                    )
+                    .await
+                    .unwrap();
+                }
+                "setExceptionBreakpoints" => {
+                    let filters: Vec<String> = req
+                        .arguments
+                        .as_ref()
+                        .and_then(|a| a.get("filters"))
+                        .and_then(Value::as_array)
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let enabled = !filters.is_empty();
+                    exc_sink.lock().unwrap().push(filters);
+                    w.send_response(req.seq, "setExceptionBreakpoints", Ok(Some(json!({}))))
+                        .await
+                        .unwrap();
+                    if enabled {
+                        w.send_event(
+                            "stopped",
+                            Some(json!({ "reason": "exception", "threadId": 1 })),
+                        )
+                        .await
+                        .unwrap();
+                    }
+                }
+                "threads" => {
+                    w.send_response(
+                        req.seq,
+                        "threads",
+                        Ok(Some(json!({
+                            "threads": [{ "id": 1, "name": "goroutine 1" }]
+                        }))),
+                    )
+                    .await
+                    .unwrap();
+                }
+                "stackTrace" => {
+                    w.send_response(
+                        req.seq,
+                        "stackTrace",
+                        Ok(Some(json!({
+                            "stackFrames": [{
+                                "id": 100,
+                                "name": "p.run",
+                                "source": { "path": canon_for_srv },
+                                "line": 4,
+                                "column": 1
+                            }]
+                        }))),
+                    )
+                    .await
+                    .unwrap();
+                }
+                "scopes" => {
+                    w.send_response(
+                        req.seq,
+                        "scopes",
+                        Ok(Some(json!({
+                            "scopes": [{ "name": "Locals", "variablesReference": 10, "expensive": false }]
+                        }))),
+                    )
+                    .await
+                    .unwrap();
+                }
+                "variables" => {
+                    w.send_response(
+                        req.seq,
+                        "variables",
+                        Ok(Some(json!({
+                            "variables": [{ "name": "x", "value": "1", "type": "int", "variablesReference": 0 }]
+                        }))),
+                    )
+                    .await
+                    .unwrap();
+                }
+                "disconnect" => {
+                    w.send_response(req.seq, "disconnect", Ok(Some(json!({}))))
+                        .await
+                        .unwrap();
+                    break;
+                }
+                other => {
+                    w.send_response(req.seq, other, Ok(Some(json!({}))))
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+    });
+
+    let mgr = DapManager::new(tmp.path().to_path_buf());
+    let start_req = IdeStartDebugReq {
+        target: IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned()),
+        language: "go".into(),
+        launch: IdeDebugLaunchSpec {
+            program: canon_src.clone(),
+            cwd: Some(tmp.path().to_string_lossy().into_owned()),
+            ..IdeDebugLaunchSpec::default()
+        },
+        breakpoints: vec![
+            IdeBreakpoint {
+                path: canon_src.clone(),
+                line: 3,
+                enabled: true,
+                condition: None,
+                hit_condition: Some("3".into()),
+                log_message: None,
+                verified: None,
+                message: None,
+            },
+            IdeBreakpoint {
+                path: canon_src.clone(),
+                line: 4,
+                enabled: true,
+                condition: None,
+                hit_condition: None,
+                log_message: Some("x={x}".into()),
+                verified: None,
+                message: None,
+            },
+        ],
+        ..IdeStartDebugReq::default()
+    };
+
+    let started = mgr
+        .start_session_with_stream(start_req, "mock-go", client_io, true)
+        .await
+        .unwrap();
+    let mut sub = mgr.subscribe_events(&started.id).unwrap();
+
+    mgr.set_breakpoints(
+        &started.id,
+        IdeSetBreakpointsReq {
+            breakpoints: started.breakpoints.clone(),
+            break_on_exceptions: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut observed_paused: Option<IdeDebugSessionSnapshot> = None;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Ok(ev) = sub.recv().await {
+            if ev.state == IdeDebugState::Paused
+                && ev.stopped_reason.as_deref() == Some("exception")
+            {
+                observed_paused = Some(ev);
+                break;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for exception stop over subscribe_events");
+
+    let snap = observed_paused.expect("exception snapshot");
+    assert_eq!(snap.paused_line, Some(4));
+    assert_eq!(snap.stopped_reason.as_deref(), Some("exception"));
+
+    {
+        let bp_calls = recorded_bp_args.lock().unwrap();
+        assert!(!bp_calls.is_empty());
+        let bps = bp_calls[0]["breakpoints"].as_array().unwrap();
+        assert_eq!(bps[0]["hitCondition"].as_str(), Some("3"));
+        assert_eq!(bps[1]["logMessage"].as_str(), Some("x={x}"));
+    }
+    {
+        let exc_calls = recorded_exc_filters.lock().unwrap();
+        assert!(
+            exc_calls
+                .iter()
+                .any(|f| f == &vec!["unrecovered-panic".to_string()]),
+            "expected setExceptionBreakpoints with advertised filter, got {exc_calls:?}"
+        );
+    }
+
+    let stopped = mgr
+        .command(
+            &started.id,
+            IdeDebugCommandReq {
+                action: IdeDebugAction::Stop,
+                thread_id: None,
+                frame_id: None,
+                path: None,
+                line: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(stopped.state, IdeDebugState::Terminated);
+    let term_ev = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let ev = sub.recv().await.unwrap();
+            if ev.state == IdeDebugState::Terminated {
+                return ev;
+            }
+        }
+    })
+    .await
+    .expect("expected Terminated snapshot on subscribe_events");
+    assert_eq!(term_ev.state, IdeDebugState::Terminated);
+    let _ = server_task.await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shell_dap_logpoints_hit_conditions_and_restart_preserve_live_events() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let script = root.join("loop.sh");
+    // Line 1: shebang
+    // Line 2: for ITER in 1 2 3 4; do
+    // Line 3:   STEP="s-$ITER"       <-- non-pausing logpoint (`log-iter={ITER}`)
+    // Line 4:   LAST="$STEP"          <-- hit_condition = "3" (pauses only on 3rd hit!)
+    // Line 5: done
+    std::fs::write(
+        &script,
+        "#!/usr/bin/env bash\nfor ITER in 1 2 3 4; do\n  STEP=\"s-$ITER\"\n  LAST=\"$STEP\"\ndone\n",
+    )
+    .unwrap();
+
+    let mgr = DapManager::new(root.join(".otto-data"));
+    let req = IdeStartDebugReq {
+        target: IdeTargetSpec::local(root.to_string_lossy().into_owned()),
+        language: "shell".into(),
+        launch: IdeDebugLaunchSpec {
+            program: script.to_string_lossy().into_owned(),
+            cwd: Some(root.to_string_lossy().into_owned()),
+            ..IdeDebugLaunchSpec::default()
+        },
+        breakpoints: vec![
+            IdeBreakpoint {
+                path: script.to_string_lossy().into_owned(),
+                line: 3,
+                enabled: true,
+                condition: None,
+                hit_condition: None,
+                log_message: Some("log-iter={ITER}".into()),
+                verified: None,
+                message: None,
+            },
+            IdeBreakpoint {
+                path: script.to_string_lossy().into_owned(),
+                line: 4,
+                enabled: true,
+                condition: None,
+                hit_condition: Some("3".into()),
+                log_message: None,
+                verified: None,
+                message: None,
+            },
+        ],
+        ..IdeStartDebugReq::default()
+    };
+
+    let started = mgr
+        .start_session(req, DapStartContext::new())
+        .await
+        .unwrap();
+    let mut sub = mgr.subscribe_events(&started.id).unwrap();
+
+    let first_pause = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let snap = mgr.get_session(&started.id).unwrap();
+            if snap.state == IdeDebugState::Paused {
+                return snap;
+            }
+            let _ = sub.recv().await;
+        }
+    })
+    .await
+    .expect("shell debugger should pause on 3rd hit at line 4");
+
+    assert_eq!(first_pause.paused_line, Some(4));
+    assert!(
+        first_pause.scopes[0]
+            .variables
+            .iter()
+            .any(|v| v.name == "ITER" && v.value == "3"),
+        "expected hit_condition=3 to skip iterations 1 and 2 and pause at ITER=3, got {:?}",
+        first_pause.scopes[0].variables
+    );
+    for expected_log in ["log-iter=1", "log-iter=2", "log-iter=3"] {
+        assert!(
+            first_pause
+                .output
+                .iter()
+                .any(|o| o.category == "console" && o.text.contains(expected_log)),
+            "expected non-pausing logpoint output '{expected_log}', got {:?}",
+            first_pause.output
+        );
+    }
+
+    // Restart the session and verify the retiring bridge's `terminated` / `__eof__`
+    // does not clobber the new run before or after it reaches the 3rd hit again.
+    mgr.command(
+        &started.id,
+        IdeDebugCommandReq {
+            action: IdeDebugAction::Restart,
+            thread_id: None,
+            frame_id: None,
+            path: None,
+            line: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut saw_clobber_terminated = false;
+    let second_pause = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            match tokio::time::timeout(Duration::from_millis(50), sub.recv()).await {
+                Ok(Ok(ev)) => {
+                    if ev.state == IdeDebugState::Terminated {
+                        saw_clobber_terminated = true;
+                    }
+                    if ev.state == IdeDebugState::Paused {
+                        return ev;
+                    }
+                }
+                _ => {
+                    let snap = mgr.get_session(&started.id).unwrap();
+                    if snap.state == IdeDebugState::Paused {
+                        return snap;
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("restarted shell session should pause at line 4 on 3rd hit");
+
+    assert!(
+        !saw_clobber_terminated,
+        "Restart must not emit a spurious Terminated state from the retired connection"
+    );
+    assert_eq!(second_pause.paused_line, Some(4));
+    assert!(second_pause.scopes[0]
+        .variables
+        .iter()
+        .any(|v| v.name == "ITER" && v.value == "3"));
+
+    let stopped = mgr
+        .command(
+            &started.id,
+            IdeDebugCommandReq {
+                action: IdeDebugAction::Stop,
+                thread_id: None,
+                frame_id: None,
+                path: None,
+                line: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(stopped.state, IdeDebugState::Terminated);
+}

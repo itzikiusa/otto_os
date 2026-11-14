@@ -39,7 +39,11 @@ pub(super) async fn create_collab_room<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeCreateCollabRoomReq>,
 ) -> ApiResult<Json<IdeCreateCollabRoomResp>> {
-    let _ = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
+    let _ = ctx
+        .ide()
+        .targets
+        .resolve_write(&ctx, &user, &req.target)
+        .await?;
     let resp = ctx.ide().collab.create_room(&user, req)?;
     Ok(Json(resp))
 }
@@ -88,28 +92,31 @@ pub(super) async fn list_plugins<S: IdeCtx>(
 
 pub(super) async fn install_plugin<S: IdeCtx>(
     State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeInstallPluginReq>,
 ) -> ApiResult<Json<IdePluginResp>> {
+    super::require_root_user(&user)?;
     let plugin = ctx.ide().plugins.install(&req.source).await?;
     Ok(Json(IdePluginResp { plugin }))
 }
 
 pub(super) async fn toggle_plugin<S: IdeCtx>(
     State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(slug): Path<String>,
     Json(req): Json<IdeTogglePluginReq>,
 ) -> ApiResult<Json<IdePluginResp>> {
+    super::require_root_user(&user)?;
     let plugin = ctx.ide().plugins.toggle(&slug, req.enabled)?;
     Ok(Json(IdePluginResp { plugin }))
 }
 
 pub(super) async fn uninstall_plugin<S: IdeCtx>(
     State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(slug): Path<String>,
 ) -> ApiResult<Json<IdeOkResp>> {
+    super::require_root_user(&user)?;
     ctx.ide().plugins.uninstall(&slug)?;
     Ok(Json(IdeOkResp { ok: true }))
 }
@@ -212,10 +219,11 @@ pub(super) async fn collab_guest_edit<S: IdeCtx>(
     Path(room_id): Path<String>,
     Json(req): Json<IdeCollabEditReq>,
 ) -> ApiResult<Json<IdeCollabEditResp>> {
-    let (target, _host_user_id) =
-        ctx.ide()
-            .collab
-            .authorize_editor(&room_id, &req.peer_id, &req.peer_secret)?;
+    let (target, _host_user_id) = ctx.ide().collab.validate_edit_precheck(&room_id, &req)?;
+    ctx.ide()
+        .targets
+        .validate_subpath(&target, &req.path, false)
+        .await?;
     let mut saved_to_target = false;
     if req.save && target.kind == IdeTargetKind::Local {
         let resolved = ctx.ide().targets.resolve_local(&target, false)?;
@@ -238,6 +246,35 @@ pub(super) async fn collab_guest_debug_action<S: IdeCtx>(
     Json(req): Json<IdeCollabDebugActionReq>,
 ) -> ApiResult<Json<IdeDebugSessionResp>> {
     let (target, _host_user_id) = ctx.ide().collab.authorize_debug_action(&room_id, &req)?;
+
+    if let Some(ref bps) = req.breakpoints {
+        for bp in bps {
+            if bp
+                .condition
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+                || bp
+                    .log_message
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty())
+            {
+                return Err(Error::Forbidden(
+                    "guest collaborators cannot set conditional or logpoint expressions".into(),
+                )
+                .into());
+            }
+            ctx.ide()
+                .targets
+                .validate_subpath(&target, &bp.path, false)
+                .await?;
+        }
+    }
+    if let Some(path) = req.path.as_deref().filter(|s| !s.trim().is_empty()) {
+        ctx.ide()
+            .targets
+            .validate_subpath(&target, path, false)
+            .await?;
+    }
 
     let mut latest_snap = None;
     if let Some(breakpoints) = req.breakpoints.clone() {

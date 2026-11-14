@@ -147,6 +147,7 @@ struct Segment {
     /// The agent named it (`messageId`): later chunks of that id append.
     named: bool,
     text: String,
+    started_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Default)]
@@ -818,7 +819,9 @@ impl AcpDriver {
                 streaming,
             },
         };
-        item(seg.item_id.clone(), status, None, kind)
+        let mut it = item(seg.item_id.clone(), status, None, kind);
+        it.started_at = Some(seg.started_at);
+        it
     }
 
     fn close_segment(&mut self, step: &mut DriverStep) {
@@ -858,6 +861,7 @@ impl AcpDriver {
                         message_id: mid.unwrap_or_else(|| item_id.clone()),
                         item_id,
                         text: String::new(),
+                        started_at: chrono::Utc::now(),
                     }
                 }
             });

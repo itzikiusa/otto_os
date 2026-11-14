@@ -413,12 +413,24 @@ impl IdePluginRegistry {
                 "git plugin URL must not contain whitespace".into(),
             ));
         }
+        otto_netguard::check_url(url)
+            .await
+            .map_err(Error::Forbidden)?;
 
         let staging = self.plugins_dir.join(format!(".staging-{}", new_id()));
         let clone_res = tokio::time::timeout(
             Duration::from_secs(60),
             otto_git_cmd::hardened_command()
-                .args(["-c", "protocol.allow=https", "clone", "--depth", "1", "--"])
+                .args([
+                    "-c",
+                    "protocol.allow=https",
+                    "-c",
+                    "http.followRedirects=false",
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--",
+                ])
                 .arg(url)
                 .arg(&staging)
                 .output(),
@@ -894,6 +906,11 @@ mod tests {
         assert!(reg.install("--upload-pack=evil").await.is_err());
         assert!(reg.install("-oProxyCommand=evil").await.is_err());
         assert!(reg.install("http://example.com/repo.git").await.is_err());
+        assert!(reg
+            .install("https://127.0.0.1:8443/repo.git")
+            .await
+            .is_err());
+        assert!(reg.install("https://10.0.0.5/internal.git").await.is_err());
         assert!(reg.install("ssh://git@example.com/repo.git").await.is_err());
         assert!(reg.install("file:///tmp/repo").await.is_err());
         assert!(reg.toggle("../traversal", false).is_err());

@@ -16,10 +16,55 @@
 // (direct LLM-API model providers, not spawnable agent CLIs) and intentionally
 // does not use this registry.
 
+import type { RuntimeProvider, Session } from './api/types';
 import { auth } from './stores/auth.svelte';
 
 /** The pseudo-provider that opens a raw shell — can't plan/review/analyze. */
 export const SHELL_PROVIDER = 'shell';
+
+/** Harnesses with a structured runtime driver (Threads / IDE Agent dock). */
+export const RUNTIME_PROVIDERS: readonly RuntimeProvider[] = [
+  'claude',
+  'codex',
+  'agy',
+  'gemini',
+  'grok',
+  'opencode',
+  'pi',
+];
+
+export function isRuntimeProvider(provider: string): provider is RuntimeProvider {
+  return (RUNTIME_PROVIDERS as readonly string[]).includes(provider);
+}
+
+/** What a runtime thread's agent takes besides text. Claude: images + PDFs
+ *  (content/document blocks); Codex and pi: images; the ACP agents
+ *  (Antigravity, Gemini, Grok, OpenCode): images + PDFs, and the driver
+ *  refuses with a clear message if that agent did not advertise them. */
+export function attachmentSupport(provider: string): { images: boolean; files: boolean } {
+  const files =
+    provider === 'claude' ||
+    provider === 'agy' ||
+    provider === 'gemini' ||
+    provider === 'grok' ||
+    provider === 'opencode';
+  return { images: files || provider === 'codex' || provider === 'pi', files };
+}
+
+/** Whether `f` is an attachment `provider` takes. */
+export function takesFile(provider: string, f: Pick<File, 'type'>): boolean {
+  const can = attachmentSupport(provider);
+  return (can.images && f.type.startsWith('image/')) || (can.files && f.type === 'application/pdf');
+}
+
+/** Whether a session is a raw interactive shell PTY (not a coding-agent CLI). */
+export function isPlainShellSession(s: Session | null | undefined): boolean {
+  if (!s) return false;
+  return (
+    s.provider === SHELL_PROVIDER &&
+    typeof (s.meta as Record<string, unknown> | undefined)?.nested_provider !== 'string'
+  );
+}
 
 /** Built-in fallback used only before `/meta` has loaded (meta is normally
  *  present by the time any picker renders). */

@@ -1,4 +1,4 @@
-// Maven & Gradle multi-module model loader, fallback manifest parser, and goal runner (#76 §1).
+// Maven & Gradle multi-module model loader, fallback manifest parser, and goal runner.
 
 import { api } from '../../../lib/api/client';
 import { normalizeRootPath } from '../shell/ideProjectHelpers';

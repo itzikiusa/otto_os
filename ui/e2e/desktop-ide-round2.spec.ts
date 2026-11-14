@@ -206,7 +206,7 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
 
     // Drag horizontal column resizer (+60px)
     const framesPane = page.getByTestId('ide-debug-frames-pane');
-    const colResizer = page.getByTestId('ide-debug-col-resizer').first();
+    const colResizer = dbgPanel.getByRole('separator', { name: 'Resize Frames column' }).first();
     const framesWBefore = (await framesPane.boundingBox())!.width;
     const colBox = (await colResizer.boundingBox())!;
     await page.mouse.move(colBox.x + colBox.width / 2, colBox.y + colBox.height / 2);
@@ -278,16 +278,16 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     expect(goColors.fieldColor).not.toBe(goColors.callColor);
     await saveR2Shot(page, '04-r2-go-semantic-islands-dark.png');
 
-    // Switch to JetBrains Islands Light -> verify scheme & capture Light screenshot -> restore Dark
+    // Switch to JetBrains Islands Light -> verify editor-scoped scheme (no `:root` bleed) -> restore Dark
+    const editorOuter = page.locator('.ide-editor-area .code-editor-outer').first();
     await page.evaluate(async () => {
       document.documentElement.dataset.scheme = 'light';
       // @ts-expect-error browser Vite runtime import
       const { writeIdeEditorPreferences } = await import('/src/lib/components/cm-ide-theme.ts');
       writeIdeEditorPreferences({ colorScheme: 'jetbrains-islands-light' });
     });
-    await expect
-      .poll(() => page.evaluate(() => document.documentElement.dataset.ideScheme))
-      .toBe('jetbrains-islands-light');
+    await expect(editorOuter).toHaveAttribute('data-ide-scheme', 'jetbrains-islands-light');
+    expect(await page.evaluate(() => document.documentElement.dataset.ideScheme)).toBeUndefined();
     await saveR2Shot(page, '05-r2-go-semantic-islands-light.png');
 
     await page.evaluate(async () => {
@@ -296,9 +296,8 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
       const { writeIdeEditorPreferences } = await import('/src/lib/components/cm-ide-theme.ts');
       writeIdeEditorPreferences({ colorScheme: 'jetbrains-islands-dark' });
     });
-    await expect
-      .poll(() => page.evaluate(() => document.documentElement.dataset.ideScheme))
-      .toBe('jetbrains-islands-dark');
+    await expect(editorOuter).toHaveAttribute('data-ide-scheme', 'jetbrains-islands-dark');
+    expect(await page.evaluate(() => document.documentElement.dataset.ideScheme)).toBeUndefined();
 
     // 4a) Compact Quick-Doc hover on `ComputeBonus` surrounded by `NeighborAboveDoc` & `NeighborBelowDoc`
     const computeTok = page
@@ -385,9 +384,6 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     await page.keyboard.press('Alt+Enter');
 
     const intentionPop = page.getByTestId('ide-intention-popover');
-    if (!(await intentionPop.isVisible().catch(() => false))) {
-      await page.getByTestId('ide-quickfix-btn').click();
-    }
     await expect(intentionPop).toBeVisible({ timeout: 10_000 });
     await expectFullyInViewport(page, intentionPop, 'IDE intention & quick-fix popover');
     await expect(page.getByTestId('ide-intention-preview')).toBeVisible();
@@ -412,14 +408,28 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
   }) => {
     test.setTimeout(90_000);
     await bootR2Ide(page, seed, 'dark');
+    await openR2File(page, 'app', 'main.go');
 
-    // 5a) Open unified two-pane Settings via `⌘,`
+    // 5a) Open unified two-pane Settings directly via `⌘,` (no toolbar button fallback)
     await page.keyboard.press('Meta+,');
     const settingsModal = page.getByTestId('ide-settings-modal');
-    if (!(await settingsModal.isVisible().catch(() => false))) {
-      await page.getByTestId('ide-settings-btn').click();
-    }
     await expect(settingsModal).toBeVisible({ timeout: 10_000 });
+
+    // Verify VS Code Modern dark & light editor color schemes apply cleanly to `.code-editor-outer`
+    const editorOuter = page.locator('.ide-editor-area .code-editor-outer').first();
+    await page.getByTestId('ide-settings-nav-appearance.ui').click();
+    const schemeSelect = page.getByTestId('ide-color-scheme-select');
+    await schemeSelect.selectOption('vscode-dark-modern');
+    await page.getByTestId('ide-settings-apply').click();
+    await expect(editorOuter).toHaveAttribute('data-ide-scheme', 'vscode-dark-modern');
+
+    await schemeSelect.selectOption('vscode-light-modern');
+    await page.getByTestId('ide-settings-apply').click();
+    await expect(editorOuter).toHaveAttribute('data-ide-scheme', 'vscode-light-modern');
+
+    await schemeSelect.selectOption('jetbrains-islands-dark');
+    await page.getByTestId('ide-settings-apply').click();
+    await expect(editorOuter).toHaveAttribute('data-ide-scheme', 'jetbrains-islands-dark');
 
     // Search filter narrows categories cleanly
     const searchIn = page.getByTestId('ide-settings-search');
@@ -560,10 +570,16 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     await openR2File(page, 'notes', 'recoverable.txt');
     await expect(editorContent(page)).toContainText('Alpha v2');
 
-    // 7a) Open Side-by-Side Local History comparison on `recoverable.txt` & revert hunk via `>>`!
-    await page.evaluate((filePath) => {
-      window.dispatchEvent(new CustomEvent('otto:ide-open-compare', { detail: { mode: 'local-history', path: filePath } }));
-    }, recAbs);
+    // 7a) Open Side-by-Side Local History comparison via Project Tree context menu & revert hunk via `>>`!
+    const tree = page.getByTestId('ide-project-tree');
+    const recItem = tree.locator('button.tree-item[title$="recoverable.txt"]').first();
+    await expect(recItem).toBeVisible({ timeout: 10_000 });
+    await recItem.click({ button: 'right' });
+    const ctxMenu = page.locator('.ctx-menu');
+    await expect(ctxMenu).toBeVisible({ timeout: 5_000 });
+    await ctxMenu.getByRole('menuitem', { name: 'Local History' }).click();
+    await expect(ctxMenu).toBeVisible({ timeout: 5_000 });
+    await ctxMenu.getByRole('menuitem', { name: 'Show History…' }).click();
     const cmpModal = page.getByTestId('ide-comparison-modal');
     await expect(cmpModal).toBeVisible({ timeout: 15_000 });
     const rows = cmpModal.getByTestId('ide-local-history-row');
@@ -580,8 +596,6 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     await expect(cmpModal).toHaveCount(0);
 
     // 7b) Delete `recoverable.txt` via `IdeProjectTree` -> verify gone -> Restore via Local History (`Deleted`)!
-    const tree = page.getByTestId('ide-project-tree');
-    const recItem = tree.locator('button.tree-item[title$="recoverable.txt"]').first();
     await expect(recItem).toBeVisible();
     await recItem.focus();
     await page.keyboard.press('Meta+Backspace');
@@ -626,17 +640,16 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     await page.keyboard.press('Meta+z');
     await expect(editorContent(page)).not.toContainText('Transient unsaved edit');
 
-    await page.evaluate(() => window.dispatchEvent(new CustomEvent('otto:ide-paste-history')));
+    await editorContent(page).click();
+    await page.keyboard.press('Meta+Shift+V');
     const clipModal = page.getByTestId('ide-clipboard-history-popover');
     await expect(clipModal).toBeVisible({ timeout: 10_000 });
     await page.keyboard.press('Escape');
 
-    // 8a) Open AI Agent dock (`⌘L`) -> verify `@` & `@~/` mention menus clamp in viewport + `EmbeddedRuntimeThread`!
+    // 8a) Open AI Agent dock directly via `⌘L` -> verify `@` & `@~/` mention menus clamp in viewport + `EmbeddedRuntimeThread`!
     const agentPanel = page.getByTestId('ide-agent-panel');
-    if (!(await agentPanel.isVisible().catch(() => false))) {
-      await page.getByTestId('ide-toggle-agent').click();
-    }
-    await expect(agentPanel).toBeVisible();
+    await page.keyboard.press('Meta+l');
+    await expect(agentPanel).toBeVisible({ timeout: 5_000 });
 
     const composer = page.getByTestId('ide-agent-composer');
     await composer.click();

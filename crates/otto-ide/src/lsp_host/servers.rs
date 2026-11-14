@@ -30,8 +30,8 @@ pub fn normalize_lsp_lang(lang: &str) -> &str {
     match lang.trim() {
         "sh" | "bash" | "zsh" | "shellscript" => "shell",
         "jsonc" | "jsonl" | "ndjson" => "json",
-        "tsx" => "typescript",
-        "jsx" => "javascript",
+        "tsx" | "typescriptreact" => "typescript",
+        "jsx" | "javascriptreact" => "javascript",
         other => other,
     }
 }

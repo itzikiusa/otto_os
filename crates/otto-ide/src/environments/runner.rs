@@ -19,7 +19,6 @@ use crate::types::{
     IdeTargetSpec,
 };
 
-use super::db_store::is_valid_env_key;
 pub(super) use super::runner_cmd::{
     apply_runtime_profile_and_module_venv, build_runner_command, compile_java_main_step,
     has_manual_classpath, resolve_program_in_env, resolve_run_cwd,
@@ -151,6 +150,7 @@ impl RunStateInner {
 
 pub(super) struct ActiveRunHandle {
     pub(super) seq: u64,
+    pub(super) owner_user_id: String,
     pub(super) state: Mutex<RunStateInner>,
     pub(super) stop_tx: watch::Sender<bool>,
 }
@@ -346,8 +346,16 @@ pub(super) async fn execute_run_task(
             .filter(|s| !s.is_empty())
         {
             append_run_line(&handle, format!("$ {pre}"));
-            if let Err(err) =
-                run_before_launch(&targets, &target, ssh.as_ref(), pre, &cwd, &env_map).await
+            if let Err(err) = run_before_launch(
+                &targets,
+                &target,
+                ssh.as_ref(),
+                &handle.owner_user_id,
+                pre,
+                &cwd,
+                &env_map,
+            )
+            .await
             {
                 if let Some(dir) = temp_java_build_dir.take() {
                     let _ = tokio::fs::remove_dir_all(dir).await;
@@ -372,24 +380,32 @@ pub(super) async fn execute_run_task(
         );
 
         let is_local = target.kind == IdeTargetKind::Local;
-        let mut child =
-            match spawn_run_child(&target, ssh.as_ref(), &program, &args, &cwd, &env_map) {
-                Ok(c) => c,
-                Err(err) => {
-                    if let Some(dir) = temp_java_build_dir.take() {
-                        let _ = tokio::fs::remove_dir_all(dir).await;
-                    }
-                    finish_run(
-                        &handle,
-                        IdeRunStatus::Failed,
-                        Some(127),
-                        started.elapsed(),
-                        Some(err),
-                    );
-                    evict_finished_runs(&runs);
-                    return;
+        let mut child = match spawn_run_child(
+            &targets,
+            &target,
+            ssh.as_ref(),
+            &handle.owner_user_id,
+            &program,
+            &args,
+            &cwd,
+            &env_map,
+        ) {
+            Ok(c) => c,
+            Err(err) => {
+                if let Some(dir) = temp_java_build_dir.take() {
+                    let _ = tokio::fs::remove_dir_all(dir).await;
                 }
-            };
+                finish_run(
+                    &handle,
+                    IdeRunStatus::Failed,
+                    Some(127),
+                    started.elapsed(),
+                    Some(err),
+                );
+                evict_finished_runs(&runs);
+                return;
+            }
+        };
         let pid = child.id();
         let mut pg_guard = ChildProcessGroupGuard {
             pid,
@@ -524,6 +540,7 @@ async fn run_before_launch(
     targets: &TargetManager,
     target: &IdeTargetSpec,
     ssh: Option<&IdeSshSpec>,
+    actor_id: &str,
     script: &str,
     cwd: &str,
     env_map: &BTreeMap<String, String>,
@@ -553,7 +570,7 @@ async fn run_before_launch(
         IdeTargetKind::Ssh => {
             let spec = ssh.ok_or("missing SSH spec for before_launch")?;
             let res = targets
-                .resolve_with_ssh(target, "ide-run", spec.clone())
+                .resolve_with_ssh(target, actor_id, spec.clone())
                 .map_err(|e| e.to_string())?;
             let out = targets
                 .exec_shell(&res, script, Some(cwd), env_map, Duration::from_secs(120))
@@ -567,9 +584,12 @@ async fn run_before_launch(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_run_child(
+    targets: &TargetManager,
     target: &IdeTargetSpec,
     ssh: Option<&IdeSshSpec>,
+    actor_id: &str,
     program: &str,
     args: &[String],
     cwd: &str,
@@ -592,56 +612,9 @@ fn spawn_run_child(
         }
         IdeTargetKind::Ssh => {
             let spec = ssh.ok_or("missing SSH connection spec for remote run")?;
-            if !otto_ssh::valid_ssh_host(&spec.host) || !otto_ssh::valid_ssh_user(&spec.user) {
-                return Err("invalid SSH host or user".into());
-            }
-            let mut remote_cmd = format!("cd {} && ", shell_words::quote(cwd));
-            for (k, v) in env_map {
-                if is_valid_env_key(k) {
-                    remote_cmd.push_str(&format!("export {}={} && ", k, shell_words::quote(v)));
-                }
-            }
-            remote_cmd.push_str(&shell_words::quote(program));
-            for a in args {
-                remote_cmd.push(' ');
-                remote_cmd.push_str(&shell_words::quote(a));
-            }
-            let mut cmd = Command::new("ssh");
-            cmd.args([
-                "-T",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-            ]);
-            if spec.port != 0 && spec.port != 22 {
-                cmd.arg("-p").arg(spec.port.to_string());
-            }
-            if let Some(id_file) = spec
-                .identity_file
-                .as_deref()
-                .filter(|s| !s.trim().is_empty())
-            {
-                cmd.arg("-i").arg(id_file);
-            }
-            if let Some(jump) = spec.proxy_jump.as_deref().filter(|s| !s.trim().is_empty()) {
-                if !otto_ssh::valid_proxy_jump(jump) {
-                    return Err("invalid SSH ProxyJump".into());
-                }
-                cmd.arg("-J").arg(jump);
-            }
-            let dest = if spec.user.trim().is_empty() {
-                spec.host.clone()
-            } else {
-                format!("{}@{}", spec.user.trim(), spec.host)
-            };
-            cmd.arg("--")
-                .arg(dest)
-                .arg(remote_cmd)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true);
+            let mut cmd = targets
+                .build_ssh_run_command(spec, actor_id, cwd, program, args, env_map)
+                .map_err(|e| e.to_string())?;
             #[cfg(unix)]
             cmd.process_group(0);
             cmd.spawn().map_err(|e| format!("spawn ssh: {e}"))

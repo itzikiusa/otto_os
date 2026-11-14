@@ -1,4 +1,4 @@
-//! Structured Clean Quick-Doc Hover (`POST /ide/lsp/hover`, `#64` §3).
+//! Structured Clean Quick-Doc Hover (`POST /ide/lsp/hover`).
 //!
 //! Resolves the exact symbol under cursor (local buffer + multi-repo workspace +
 //! Go `replace` / `$GOROOT` / `$GOMODCACHE` + Java modules / `-sources.jar` / `src.zip`)
@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use otto_core::domain::User;
-use otto_core::Result;
+use otto_core::{Error, Result};
 
 use crate::types::{
     IdeHoverDefinedIn, IdeHoverReq, IdeHoverResp, IdeReferencesReq, IdeTargetKind, IdeTargetSpec,
@@ -24,27 +24,23 @@ use super::{extract_identifier_at, is_ident_char, resolve_language};
 pub async fn hover<S: IdeCtx>(ctx: &S, user: &User, req: IdeHoverReq) -> Result<IdeHoverResp> {
     let target_spec_opt = resolve_hover_target(&req);
     let resolved_opt = match &target_spec_opt {
-        Some(spec) => ctx.ide().targets.resolve(ctx, user, spec).await.ok(),
+        Some(spec) => Some(ctx.ide().targets.resolve(ctx, user, spec).await?),
         None => None,
     };
 
     let content = match req.content.clone() {
         Some(c) => c,
         None => {
-            if let Some(ref resolved) = resolved_opt {
-                ctx.ide()
-                    .targets
-                    .read_file(resolved, &req.path)
-                    .await
-                    .map(|f| f.content)
-                    .unwrap_or_default()
-            } else if Path::new(&req.path).is_file() {
-                tokio::fs::read_to_string(&req.path)
-                    .await
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            }
+            let Some(ref resolved) = resolved_opt else {
+                return Err(Error::Invalid(
+                    "target is required when content is omitted".into(),
+                ));
+            };
+            ctx.ide()
+                .targets
+                .read_file(resolved, &req.path)
+                .await?
+                .content
         }
     };
     if content.is_empty() {
@@ -116,6 +112,15 @@ pub async fn hover<S: IdeCtx>(ctx: &S, user: &User, req: IdeHoverReq) -> Result<
 
 fn resolve_hover_target(req: &IdeHoverReq) -> Option<IdeTargetSpec> {
     if let Some(mut spec) = req.target.clone() {
+        spec.absorb_project_folders(&req.project_folders);
+        return Some(spec);
+    }
+    if let Some(first) = req.project_folders.iter().find(|s| !s.trim().is_empty()) {
+        let mut spec = IdeTargetSpec {
+            kind: IdeTargetKind::Local,
+            root: first.trim().to_string(),
+            ..Default::default()
+        };
         spec.absorb_project_folders(&req.project_folders);
         return Some(spec);
     }

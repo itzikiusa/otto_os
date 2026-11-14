@@ -666,20 +666,11 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
     // Switch back to Files tab
     await page.getByRole('tab', { name: /^Files$/i }).first().click();
 
-    // `⇧⇧` Double-Shift opens Search Everywhere modal
+    // `⇧⇧` Double-Shift opens Search Everywhere modal directly
     await page.keyboard.press('Shift');
     await page.keyboard.press('Shift');
-    let searchDialog = page.locator('.sheet[role="dialog"]').last();
-    const openedViaDoubleShift = await searchDialog
-      .waitFor({ state: 'visible', timeout: 3_000 })
-      .then(
-        () => true,
-        () => false,
-      );
-    if (!openedViaDoubleShift) {
-      await clickHeaderAction(page, /Search Everywhere|Search/i);
-      searchDialog = page.locator('.sheet[role="dialog"]').last();
-    }
+    const searchDialog = page.locator('.sheet[role="dialog"]').last();
+    await expect(searchDialog).toBeVisible({ timeout: 5_000 });
     await expectFullyInViewport(page, searchDialog, 'Search Everywhere modal');
 
     // Search files (`calc_test.go`), symbols (`compute_total`), and text (`fibonacci`)
@@ -1251,17 +1242,16 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
       (r) => r.request().method() === 'POST' && r.url().includes('/api/v1/ide/collab/rooms'),
       { timeout: 15_000 },
     );
-    const hostJoinWait = page.waitForResponse(
-      (r) => r.request().method() === 'POST' && r.url().includes('/join'),
-      { timeout: 15_000 },
-    );
     await startRoomBtn.click();
     const created = (await (await createWait).json()) as {
       room: { id: string };
       invite_token: string;
       share_hash: string;
+      host_peer_id: string;
+      host_peer_secret: string;
     };
-    expect((await hostJoinWait).ok()).toBeTruthy();
+    expect(created.host_peer_id).toBeTruthy();
+    expect(created.host_peer_secret).toBeTruthy();
 
     const roomId = created.room.id;
     const inviteToken = created.invite_token;

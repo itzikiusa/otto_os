@@ -84,10 +84,20 @@ struct Pending {
 }
 
 /// Accumulated state of one Codex item.
-#[derive(Default)]
 struct Item {
     text: String,
     output: String,
+    started_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl Default for Item {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            output: String::new(),
+            started_at: chrono::Utc::now(),
+        }
+    }
 }
 
 pub struct CodexDriver {
@@ -325,13 +335,17 @@ impl CodexDriver {
             .and_then(Value::as_array)
             .is_some_and(|a| !a.is_empty());
         if matches!(ty, "agentMessage" | "reasoning") && empty_text && !streamed && !summary {
-            // Shown from its first delta, never as an empty bubble.
+            // Shown from its first delta, never as an empty bubble; record its
+            // start timestamp now so summary-only reasoning keeps real duration.
             if completed {
                 self.items.remove(&cid);
+            } else {
+                self.items.entry(cid).or_default();
             }
             return None;
         }
         let st = self.items.entry(cid.clone()).or_default();
+        let started_at = st.started_at;
         let s = |k: &str| it.get(k).and_then(Value::as_str).map(str::to_string);
         let status = match it.get("status").and_then(Value::as_str) {
             Some("inProgress") => TurnItemStatus::Running,
@@ -480,6 +494,7 @@ impl CodexDriver {
             self.items.remove(&cid);
         }
         let mut out = item(self.item_id(&cid), status, title, kind);
+        out.started_at = Some(started_at);
         out.error = error;
         Some(out)
     }
@@ -494,6 +509,7 @@ impl CodexDriver {
             .and_then(Value::as_str)
             .unwrap_or_default();
         let st = self.items.entry(cid.to_string()).or_default();
+        let started_at = st.started_at;
         st.text.push_str(delta);
         let text = st.text.clone();
         let kind = if reasoning {
@@ -508,7 +524,8 @@ impl CodexDriver {
                 streaming: true,
             }
         };
-        let item = item(self.item_id(cid), TurnItemStatus::Running, None, kind);
+        let mut item = item(self.item_id(cid), TurnItemStatus::Running, None, kind);
+        item.started_at = Some(started_at);
         step.push(DriverEvent::TurnItem(item));
     }
 

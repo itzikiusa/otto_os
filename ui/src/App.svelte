@@ -22,14 +22,8 @@
   import { router } from './lib/router.svelte';
   import { ui } from './lib/stores/ui.svelte';
   import { isEmbedded, isTauri } from './lib/desktop';
-  import {
-    daemonSupervisor,
-    installFailed,
-    offlineDetail,
-    supervisorErrorText,
-    type DaemonReport,
-  } from './modules/desktop/daemonState';
-  import { preloadRoute } from './shell/pages.svelte';
+  import type * as DaemonStateMod from './modules/desktop/daemonState';
+  import { loadPage, preloadRoute } from './shell/pages.svelte';
 
   ui.applyTheme();
 
@@ -46,7 +40,7 @@
   let shareChunk: Promise<typeof import('./modules/share/SharePage.svelte')> | null = null;
   let pairChunk: Promise<typeof import('./modules/phone/PairPage.svelte')> | null = null;
   let ideGuestChunk: Promise<[
-    typeof import('./modules/ide/IdePage.svelte'),
+     ReturnType<typeof loadPage> extends Promise<infer P> ? P : never,
     typeof import('./lib/components/ContextMenu.svelte'),
     typeof import('./lib/components/ConfirmDialog.svelte'),
   ]> | null = null;
@@ -66,7 +60,7 @@
   const pair = () => (pairChunk ??= import('./modules/phone/PairPage.svelte'));
   const ideGuest = () =>
     (ideGuestChunk ??= Promise.all([
-      import('./modules/ide/IdePage.svelte'),
+      loadPage('ide'),
       import('./lib/components/ContextMenu.svelte'),
       import('./lib/components/ConfirmDialog.svelte'),
     ]));
@@ -154,8 +148,12 @@
   // after the boot event asks for the status (which carries the last
   // diagnosis); on a first run with nothing installed it starts the daemon
   // (single-flight in the shell).
-  let daemonReport = $state<DaemonReport | null>(null);
-  const daemonDetail = $derived(offlineDetail(daemonReport));
+  let daemonMod = $state<typeof DaemonStateMod | null>(null);
+  let daemonModChunk: Promise<typeof DaemonStateMod> | null = null;
+  const loadDaemonState = () =>
+    (daemonModChunk ??= import('./modules/desktop/daemonState').then((m) => ((daemonMod = m), m)));
+  let daemonReport = $state<DaemonStateMod.DaemonReport | null>(null);
+  const daemonDetail = $derived(daemonMod ? daemonMod.offlineDetail(daemonReport) : null);
   onMount(() => {
     const syncIdeGuest = () => {
       if (!getToken() && hasIdeCollabInviteHash()) ideCollabGuest = true;
@@ -167,16 +165,21 @@
     }
     let disposed = false;
     let stop: () => void = () => {};
-    void daemonSupervisor
-      .onState((report) => (daemonReport = report))
-      .then((fn) => (disposed ? fn() : (stop = fn)))
-      .catch(() => {});
-    void daemonSupervisor
-      .status()
-      .then(async (report) => {
-        if (!report || disposed) return;
-        daemonReport ??= report;
-        if (!report.healthy && !report.installed) await daemonSupervisor.start();
+    void loadDaemonState()
+      .then((m) => {
+        if (disposed) return;
+        void m.daemonSupervisor
+          .onState((report) => (daemonReport = report))
+          .then((fn) => (disposed ? fn() : (stop = fn)))
+          .catch(() => {});
+        void m.daemonSupervisor
+          .status()
+          .then(async (report) => {
+            if (!report || disposed) return;
+            daemonReport ??= report;
+            if (!report.healthy && !report.installed) await m.daemonSupervisor.start();
+          })
+          .catch(() => {});
       })
       .catch(() => {});
     return () => {
@@ -197,13 +200,15 @@
     daemonAction = kind;
     daemonActionError = '';
     try {
-      if (kind === 'restart') await daemonSupervisor.restart();
-      else await daemonSupervisor.reinstall();
+      const m = await loadDaemonState();
+      if (kind === 'restart') await m.daemonSupervisor.restart();
+      else await m.daemonSupervisor.reinstall();
       // The old diagnosis no longer applies; a new one arrives as an event.
       daemonReport = null;
       await auth.boot(true);
     } catch (e) {
-      daemonActionError = `${kind === 'restart' ? 'Restart' : 'Reinstall'} failed: ${supervisorErrorText(e)}`;
+      const detail = daemonMod ? daemonMod.supervisorErrorText(e) : String(e);
+      daemonActionError = `${kind === 'restart' ? 'Restart' : 'Reinstall'} failed: ${detail}`;
     } finally {
       daemonAction = null;
     }
@@ -231,7 +236,7 @@
        single-session SharePage using the token captured from the URL fragment. -->
   {#await share() then m}<m.default sessionId={router.parts[1] ?? ''} />{:catch}{@render chunkError()}{/await}
 {:else if ideCollabGuest}
-  {#await ideGuest()}{@render chunkWait()}{:then [ideMod, menuMod, confirmMod]}<ideMod.default /><menuMod.default /><confirmMod.default />{:catch}{@render chunkError()}{/await}
+  {#await ideGuest()}{@render chunkWait()}{:then [IdeGuestPage, menuMod, confirmMod]}<IdeGuestPage /><menuMod.default /><confirmMod.default />{:catch}{@render chunkError()}{/await}
 {:else if router.module === 'pair'}
   <!-- Phone pairing (pre-auth): the one-time code from the QR is the only
        credential until the person on the Mac approves this phone. -->
@@ -278,7 +283,7 @@
         <button class="btn" onclick={() => void runDaemonAction('restart')} disabled={daemonAction !== null}>
           {daemonAction === 'restart' ? 'Restarting…' : 'Restart daemon'}
         </button>
-        {#if installFailed(daemonReport)}
+        {#if daemonMod?.installFailed(daemonReport)}
           <button class="btn" onclick={() => void runDaemonAction('reinstall')} disabled={daemonAction !== null}>
             {daemonAction === 'reinstall' ? 'Reinstalling…' : 'Reinstall daemon'}
           </button>

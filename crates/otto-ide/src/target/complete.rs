@@ -1,13 +1,16 @@
 //! Ultra-fast (`< 15ms`) `@` file & path completion (`POST /ide/fs/complete`)
 //! supporting workspace fuzzy search, aliases, `@~/...`, `@/...`, `@../...`,
-//! and `@./...` with zero persistent RAM caches and strict latency caps.
+//! and `@./...` with a bounded short-TTL `git ls-files` cache and strict latency caps.
 
 #![allow(clippy::disallowed_methods)] // synchronous @ completion invoked inside spawn_blocking
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant, SystemTime};
+
+use dashmap::DashMap;
 
 use crate::target::enforce_non_root_path;
 
@@ -45,6 +48,19 @@ const BLOCKED_ABS_PREFIXES: &[&str] = &["/proc", "/dev", "/System/Volumes"];
 const SHALLOW_MAX_DEPTH: usize = 5;
 const SHALLOW_MAX_VISITED: usize = 8_000;
 const SHALLOW_DEADLINE_MS: u64 = 25;
+const GIT_LS_CACHE_TTL: Duration = Duration::from_secs(8);
+const GIT_LS_CACHE_CAP: usize = 64;
+
+struct CachedGitFiles {
+    fetched_at: Instant,
+    index_mtime: Option<SystemTime>,
+    files: Arc<Vec<String>>,
+}
+
+fn git_ls_cache() -> &'static DashMap<PathBuf, CachedGitFiles> {
+    static CACHE: OnceLock<DashMap<PathBuf, CachedGitFiles>> = OnceLock::new();
+    CACHE.get_or_init(DashMap::new)
+}
 
 #[derive(Clone)]
 enum TokenFormat {
@@ -143,11 +159,58 @@ fn is_blocked_system_path(path: &Path) -> bool {
         .any(|p| s == *p || s.starts_with(&format!("{p}/")))
 }
 
-fn is_allowed_path(path: &Path, is_root_user: bool) -> bool {
+fn has_secret_dir_component(path: &Path) -> bool {
+    path.components().any(|c| {
+        matches!(
+            c.as_os_str().to_str(),
+            Some(".ssh" | ".aws" | ".gnupg" | ".kube" | ".codex" | ".claude" | ".gemini")
+        )
+    })
+}
+
+fn is_allowed_lexical_or_canonical(path: &Path, is_root_user: bool) -> bool {
     if is_blocked_system_path(path) || otto_core::secret_paths::is_denied_dir(path) {
         return false;
     }
-    is_root_user || enforce_non_root_path(path).is_ok()
+    is_root_user || (!has_secret_dir_component(path) && enforce_non_root_path(path).is_ok())
+}
+
+fn canonical_allowed_dir(path: &Path, is_root_user: bool) -> Option<PathBuf> {
+    if !is_allowed_lexical_or_canonical(path, is_root_user) {
+        return None;
+    }
+    let canon = fs::canonicalize(path).ok()?;
+    if !canon.is_dir() || !is_allowed_lexical_or_canonical(&canon, is_root_user) {
+        return None;
+    }
+    Some(canon)
+}
+
+fn is_allowed_entry_in_canonical_dir(
+    entry_path: &Path,
+    ft: &fs::FileType,
+    is_root_user: bool,
+) -> bool {
+    if !is_allowed_lexical_or_canonical(entry_path, is_root_user) {
+        return false;
+    }
+    if ft.is_symlink() {
+        let Ok(canon) = fs::canonicalize(entry_path) else {
+            return false;
+        };
+        return is_allowed_lexical_or_canonical(&canon, is_root_user);
+    }
+    true
+}
+
+fn is_allowed_path(path: &Path, is_root_user: bool) -> bool {
+    if !is_allowed_lexical_or_canonical(path, is_root_user) {
+        return false;
+    }
+    let Ok(canon) = fs::canonicalize(path) else {
+        return false;
+    };
+    is_allowed_lexical_or_canonical(&canon, is_root_user)
 }
 
 fn score_candidate(name: &str, rel_path: &str, query_lower: &str, is_dir: bool) -> Option<i32> {
@@ -219,27 +282,33 @@ pub fn complete_fs_paths(req: &IdeFsCompleteReq, is_root_user: bool) -> IdeFsCom
 
     let mut workspace_roots: Vec<PathBuf> = Vec::new();
     if let Some(c) = &cwd_path {
-        if c.is_dir() && is_allowed_path(c, is_root_user) {
-            workspace_roots.push(clean_lexical(c));
+        if let Some(canon) = canonical_allowed_dir(c, is_root_user) {
+            workspace_roots.push(canon);
         }
     }
     for r in &req.roots {
         let p = clean_lexical(&expand_tilde(r.trim()));
-        if p.is_dir() && is_allowed_path(&p, is_root_user) && !workspace_roots.contains(&p) {
-            workspace_roots.push(p);
+        if let Some(canon) = canonical_allowed_dir(&p, is_root_user) {
+            if !workspace_roots.contains(&canon) {
+                workspace_roots.push(canon);
+            }
         }
     }
     if let Some(t) = &req.target {
         if !t.root.trim().is_empty() {
             let p = clean_lexical(&expand_tilde(t.root.trim()));
-            if p.is_dir() && is_allowed_path(&p, is_root_user) && !workspace_roots.contains(&p) {
-                workspace_roots.push(p);
+            if let Some(canon) = canonical_allowed_dir(&p, is_root_user) {
+                if !workspace_roots.contains(&canon) {
+                    workspace_roots.push(canon);
+                }
             }
         }
         for er in t.merged_extra_roots() {
             let p = clean_lexical(&expand_tilde(er.trim()));
-            if p.is_dir() && is_allowed_path(&p, is_root_user) && !workspace_roots.contains(&p) {
-                workspace_roots.push(p);
+            if let Some(canon) = canonical_allowed_dir(&p, is_root_user) {
+                if !workspace_roots.contains(&canon) {
+                    workspace_roots.push(canon);
+                }
             }
         }
     }
@@ -288,13 +357,13 @@ pub fn complete_fs_paths(req: &IdeFsCompleteReq, is_root_user: bool) -> IdeFsCom
         };
     };
 
-    if !dir_prefix.is_dir() || !is_allowed_path(&dir_prefix, is_root_user) {
+    let Some(_canon_dir) = canonical_allowed_dir(&dir_prefix, is_root_user) else {
         return IdeFsCompleteResp {
             items: Vec::new(),
             base_dir: dir_prefix.to_string_lossy().into_owned(),
             elapsed_ms: started.elapsed().as_millis() as u64,
         };
-    }
+    };
 
     let items = complete_in_dir(
         &dir_prefix,
@@ -466,14 +535,14 @@ fn complete_in_dir(
             if name.starts_with('.') && !q_lower.starts_with('.') {
                 continue;
             }
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
             let path = entry.path();
-            if !is_allowed_path(&path, is_root_user) {
+            if !is_allowed_entry_in_canonical_dir(&path, &ft, is_root_user) {
                 continue;
             }
-            let is_dir = entry
-                .file_type()
-                .map(|ft| ft.is_dir() || (ft.is_symlink() && path.is_dir()))
-                .unwrap_or(false);
+            let is_dir = ft.is_dir() || (ft.is_symlink() && path.is_dir());
             if is_dir && SKIP_DIRS.contains(&name.as_str()) {
                 continue;
             }
@@ -485,14 +554,18 @@ fn complete_in_dir(
     }
 
     // Stage 2: Deep search ONLY if `dir_prefix` is NOT `$HOME` and NOT `/` AND `q_lower` is non-empty!
-    let is_home_or_root =
-        dir_prefix.parent().is_none() || home.is_some_and(|h| clean_lexical(h) == dir_prefix);
+    let home_canon = home.and_then(|h| fs::canonicalize(h).ok());
+    let dir_canon = fs::canonicalize(dir_prefix).ok();
+    let is_home_or_root = dir_prefix.parent().is_none()
+        || home.is_some_and(|h| clean_lexical(h) == dir_prefix)
+        || (home_canon.is_some() && home_canon == dir_canon);
     if !is_home_or_root && !q_lower.is_empty() {
         if let Some(repo_root) = find_git_root(dir_prefix, home) {
             collect_git_ls_files(
                 &repo_root,
                 dir_prefix,
                 &q_lower,
+                limit,
                 is_root_user,
                 &mut seen,
                 &mut scored,
@@ -537,25 +610,65 @@ fn search_across_roots(
     if roots.is_empty() {
         return Vec::new();
     }
+    let capped_roots = &roots[..roots.len().min(36)];
     let per_root_limit = limit;
-    let results: Vec<Vec<(i32, IdeFsCompleteItem)>> = std::thread::scope(|s| {
-        let handles: Vec<_> = roots
-            .iter()
-            .take(36)
-            .map(|root| {
-                s.spawn(move || {
-                    let fmt = TokenFormat::Workspace {
-                        multi_root,
-                        root: root.clone(),
-                    };
-                    complete_in_dir_scored(root, raw_q, &fmt, per_root_limit, is_root_user, home)
+    let all_cached = capped_roots.len() <= 2
+        || capped_roots.iter().all(|r| {
+            find_git_root(r, home)
+                .and_then(|gr| fs::canonicalize(gr).ok())
+                .is_some_and(|canon| {
+                    git_ls_cache()
+                        .get(&canon)
+                        .is_some_and(|c| c.fetched_at.elapsed() < GIT_LS_CACHE_TTL)
                 })
-            })
-            .collect();
-        handles.into_iter().filter_map(|h| h.join().ok()).collect()
-    });
+        });
 
-    let mut merged: Vec<(i32, IdeFsCompleteItem)> = results.into_iter().flatten().collect();
+    let mut merged: Vec<(i32, IdeFsCompleteItem)> = if all_cached {
+        capped_roots
+            .iter()
+            .flat_map(|root| {
+                let fmt = TokenFormat::Workspace {
+                    multi_root,
+                    root: root.clone(),
+                };
+                complete_in_dir_scored(root, raw_q, &fmt, per_root_limit, is_root_user, home)
+            })
+            .collect()
+    } else {
+        let worker_count = capped_roots.len().clamp(1, 4);
+        let chunk_size = capped_roots.len().div_ceil(worker_count);
+        std::thread::scope(|s| {
+            let handles: Vec<_> = capped_roots
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    s.spawn(move || {
+                        let mut local = Vec::new();
+                        for root in chunk {
+                            let fmt = TokenFormat::Workspace {
+                                multi_root,
+                                root: root.clone(),
+                            };
+                            local.extend(complete_in_dir_scored(
+                                root,
+                                raw_q,
+                                &fmt,
+                                per_root_limit,
+                                is_root_user,
+                                home,
+                            ));
+                        }
+                        local
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|h| h.join().ok())
+                .flatten()
+                .collect()
+        })
+    };
+
     merged.sort_by(|a, b| {
         b.0.cmp(&a.0)
             .then_with(|| a.1.display.len().cmp(&b.1.display.len()))
@@ -588,14 +701,14 @@ fn complete_in_dir_scored(
             if name.starts_with('.') && !q_lower.starts_with('.') {
                 continue;
             }
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
             let path = entry.path();
-            if !is_allowed_path(&path, is_root_user) {
+            if !is_allowed_entry_in_canonical_dir(&path, &ft, is_root_user) {
                 continue;
             }
-            let is_dir = entry
-                .file_type()
-                .map(|ft| ft.is_dir() || (ft.is_symlink() && path.is_dir()))
-                .unwrap_or(false);
+            let is_dir = ft.is_dir() || (ft.is_symlink() && path.is_dir());
             if is_dir && SKIP_DIRS.contains(&name.as_str()) {
                 continue;
             }
@@ -611,6 +724,7 @@ fn complete_in_dir_scored(
             &repo_root,
             root,
             &q_lower,
+            limit,
             is_root_user,
             &mut seen,
             &mut scored,
@@ -639,58 +753,123 @@ fn complete_in_dir_scored(
         .collect()
 }
 
-fn collect_git_ls_files(
-    repo_root: &Path,
-    dir_prefix: &Path,
-    q_lower: &str,
-    is_root_user: bool,
-    seen: &mut HashSet<PathBuf>,
-    scored: &mut Vec<(i32, PathBuf, bool)>,
-) {
+fn load_or_query_git_ls_files(repo_root: &Path) -> Option<(PathBuf, Arc<Vec<String>>)> {
+    let canon_repo = fs::canonicalize(repo_root).ok()?;
+    let index_mtime = fs::metadata(canon_repo.join(".git/index"))
+        .and_then(|m| m.modified())
+        .ok();
+    let cache = git_ls_cache();
+    if let Some(hit) = cache.get(&canon_repo) {
+        if hit.fetched_at.elapsed() < GIT_LS_CACHE_TTL && hit.index_mtime == index_mtime {
+            return Some((canon_repo, Arc::clone(&hit.files)));
+        }
+    }
+
     let mut cmd = otto_git_cmd::hardened_std_command();
-    cmd.arg("-C").arg(repo_root).args([
+    cmd.arg("-C").arg(&canon_repo).args([
         "ls-files",
         "-z",
         "--cached",
         "--others",
         "--exclude-standard",
     ]);
-    if let Ok(sub) = dir_prefix.strip_prefix(repo_root) {
-        if !sub.as_os_str().is_empty() {
-            cmd.arg("--").arg(sub);
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let files: Vec<String> = out
+        .stdout
+        .split(|&b| b == 0)
+        .filter(|raw| !raw.is_empty())
+        .filter_map(|raw| std::str::from_utf8(raw).ok().map(str::to_string))
+        .collect();
+    let arc_files = Arc::new(files);
+
+    cache.retain(|_, v| v.fetched_at.elapsed() < GIT_LS_CACHE_TTL);
+    if cache.len() >= GIT_LS_CACHE_CAP {
+        if let Some(oldest) = cache
+            .iter()
+            .min_by_key(|e| e.value().fetched_at)
+            .map(|e| e.key().clone())
+        {
+            cache.remove(&oldest);
         }
     }
-    let Ok(out) = cmd.output() else {
+    cache.insert(
+        canon_repo.clone(),
+        CachedGitFiles {
+            fetched_at: Instant::now(),
+            index_mtime,
+            files: Arc::clone(&arc_files),
+        },
+    );
+    Some((canon_repo, arc_files))
+}
+
+fn collect_git_ls_files(
+    repo_root: &Path,
+    dir_prefix: &Path,
+    q_lower: &str,
+    limit: usize,
+    is_root_user: bool,
+    seen: &mut HashSet<PathBuf>,
+    scored: &mut Vec<(i32, PathBuf, bool)>,
+) {
+    let Some((canon_repo, rel_files)) = load_or_query_git_ls_files(repo_root) else {
         return;
     };
-    if !out.status.success() {
-        return;
-    }
-    let mut matched = 0usize;
-    for raw in out.stdout.split(|&b| b == 0) {
-        if raw.is_empty() {
-            continue;
+    let canon_prefix = fs::canonicalize(dir_prefix).unwrap_or_else(|_| dir_prefix.to_path_buf());
+    let sub_prefix = canon_prefix
+        .strip_prefix(&canon_repo)
+        .ok()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| format!("{}/", p.to_string_lossy().replace('\\', "/")));
+
+    let mut prelim: Vec<(i32, &str)> = Vec::new();
+    for rel_repo in rel_files.iter() {
+        if let Some(sp) = &sub_prefix {
+            if !rel_repo.starts_with(sp.as_str()) {
+                continue;
+            }
         }
-        let Ok(rel_repo) = std::str::from_utf8(raw) else {
-            continue;
-        };
-        if q_lower.is_empty() && matched >= 80 {
+        if q_lower.is_empty() && prelim.len() >= 120 {
             break;
         }
-        let name = rel_repo.rsplit('/').next().unwrap_or(rel_repo);
-        let Some(sc) = score_candidate(name, rel_repo, q_lower, false) else {
-            continue;
+        let name = rel_repo.rsplit('/').next().unwrap_or(rel_repo.as_str());
+        if let Some(sc) = score_candidate(name, rel_repo, q_lower, false) {
+            prelim.push((sc, rel_repo.as_str()));
+        }
+    }
+    prelim.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.len().cmp(&b.1.len()))
+            .then_with(|| a.1.cmp(b.1))
+    });
+
+    let cap = limit.max(80);
+    let mut accepted = 0usize;
+    for (sc, rel_repo) in prelim {
+        if accepted >= cap {
+            break;
+        }
+        let lexical_full = if dir_prefix == canon_prefix {
+            canon_repo.join(rel_repo)
+        } else {
+            let rel_under_prefix = match &sub_prefix {
+                Some(sp) => rel_repo.strip_prefix(sp.as_str()).unwrap_or(rel_repo),
+                None => rel_repo,
+            };
+            dir_prefix.join(rel_under_prefix)
         };
-        let full = repo_root.join(rel_repo);
-        if !full.starts_with(dir_prefix) || seen.contains(&full) {
+        if seen.contains(&lexical_full) {
             continue;
         }
-        if !is_allowed_path(&full, is_root_user) {
+        if !is_allowed_path(&lexical_full, is_root_user) {
             continue;
         }
-        seen.insert(full.clone());
-        scored.push((sc, full, false));
-        matched += 1;
+        seen.insert(lexical_full.clone());
+        scored.push((sc, lexical_full, false));
+        accepted += 1;
     }
 }
 
@@ -725,11 +904,11 @@ fn walk_bounded(
         let Ok(ft) = entry.file_type() else {
             continue;
         };
-        let is_dir = ft.is_dir();
-        if is_dir && SKIP_DIRS.contains(&name.as_str()) {
+        if !is_allowed_entry_in_canonical_dir(&path, &ft, is_root_user) {
             continue;
         }
-        if !is_allowed_path(&path, is_root_user) {
+        let is_dir = ft.is_dir() || (ft.is_symlink() && path.is_dir());
+        if is_dir && SKIP_DIRS.contains(&name.as_str()) {
             continue;
         }
         let rel = path
@@ -742,7 +921,7 @@ fn walk_bounded(
                 scored.push((sc, path.clone(), is_dir));
             }
         }
-        if is_dir && depth < SHALLOW_MAX_DEPTH {
+        if ft.is_dir() && depth < SHALLOW_MAX_DEPTH {
             walk_bounded(
                 base,
                 &path,

@@ -435,3 +435,66 @@ export function openedTarget(item: TurnItem): OpenedTarget | null {
 function idOr(id: string | null, kind: OpenedTarget['kind']): OpenedTarget | null {
   return id ? { kind, id } : null;
 }
+
+function pad2(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+function fmtLocalDate(d: Date): string {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+function fmtLocalClockSec(d: Date): string {
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
+function fmtLocalDateTime(d: Date): string {
+  return `${fmtLocalDate(d)} ${fmtLocalClockSec(d)}`;
+}
+
+function compactSpan(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 1000) return '';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+/** Local short `HH:mm` clock for message rows, or `""` when invalid/absent. */
+export function formatMessageClock(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
+/** Full local date + seconds tooltip for sent, streaming, and settled messages. */
+export function formatMessageTooltip(
+  startedAt: string | null | undefined,
+  completedAt?: string | null,
+  streaming?: boolean,
+): string {
+  const start = startedAt ? new Date(startedAt) : null;
+  const startOk = start !== null && !Number.isNaN(start.getTime());
+  const end = completedAt ? new Date(completedAt) : null;
+  const endOk = end !== null && !Number.isNaN(end.getTime());
+
+  if (streaming) {
+    const d = startOk ? start! : endOk ? end! : null;
+    return d ? `Streaming since ${fmtLocalClockSec(d)}` : '';
+  }
+
+  if (completedAt !== undefined) {
+    if (startOk && endOk) {
+      const span = compactSpan(end!.getTime() - start!.getTime());
+      const suffix = span ? ` (${span})` : '';
+      return `Started ${fmtLocalClockSec(start!)} · Completed ${fmtLocalClockSec(end!)}${suffix} · ${fmtLocalDate(end!)}`;
+    }
+    if (endOk) return `Completed ${fmtLocalDateTime(end!)}`;
+    if (startOk) return `Started ${fmtLocalDateTime(start!)}`;
+    return '';
+  }
+
+  return startOk ? `Sent ${fmtLocalDateTime(start!)}` : '';
+}

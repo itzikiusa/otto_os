@@ -269,6 +269,17 @@ fn main() {
                             }
                         }
                     }
+                    "timed-think" => {
+                        chunk(&sid, "agent_thought_chunk", "step 1 ");
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                        chunk(&sid, "agent_thought_chunk", "step 2");
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                        chunk(&sid, "agent_message_chunk", "answer 1 ");
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                        chunk(&sid, "agent_message_chunk", "answer 2");
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                        done("end_turn");
+                    }
                     "schedule" => {
                         update(
                             &sid,

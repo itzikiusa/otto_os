@@ -1,8 +1,8 @@
-//! Integration tests for Stateless Java & Polyglot Diagnostics (`POST /ide/lsp/diagnostics`),
-//! Clean Single-Symbol Hover (`POST /ide/lsp/hover`), Concrete Quick-Fix Edits (`#77`),
-//! Build Tools Model (`POST /ide/build-tools/model`), Manifest Dependency Inspector & Actions
-//! (`POST /ide/deps/inspect`, `POST /ide/deps/action`), and Multi-Repo Java Workspace
-//! Precedence over `~/.m2` JARs!
+//! Integration tests for stateless Java & polyglot diagnostics (`POST /ide/lsp/diagnostics`),
+//! single-symbol hover (`POST /ide/lsp/hover`), concrete quick-fix edits,
+//! build tools model (`POST /ide/build-tools/model`), manifest dependency inspector & actions
+//! (`POST /ide/deps/inspect`, `POST /ide/deps/action`), and multi-repo Java workspace
+//! precedence over `~/.m2` JARs.
 
 mod common;
 
@@ -54,7 +54,7 @@ public class OrderProcessor {
     let order_path = order_file.to_string_lossy().into_owned();
 
     // 1. Java diagnostics: unresolved import + unresolved body type + missing List import candidate
-    //    + unused import warning + ZERO false positives on Lombok `@Slf4j` / `log.info(...)`:
+    //    + unused import warning + zero false positives on Lombok `@Slf4j` / `log.info(...)`:
     let (st_diag, diag_body) = send_json(
         &app,
         Method::POST,
@@ -129,7 +129,7 @@ public class OrderProcessor {
         "Lombok @Slf4j/@Data and synthesized log must produce zero errors: {diags:?}"
     );
 
-    // 2. Polyglot diagnostics: JSON exact line/col, Python SyntaxError, Go syntax error, Bash syntax error:
+    // 2. Polyglot diagnostics: JSON exact line/col, Python SyntaxError, Shell syntax error:
     let (st_json, json_body) = send_json(
         &app,
         Method::POST,
@@ -193,7 +193,7 @@ public class OrderProcessor {
         .iter()
         .any(|a| !a["edits"].as_array().unwrap().is_empty()));
 
-    // 4. `POST /ide/lsp/hover` isolates grouped Go var/const docs with ZERO neighbor bleed:
+    // 4. `POST /ide/lsp/hover` isolates grouped Go var/const docs without neighbor bleed:
     let decimal_go = ws.join("decimal.go");
     let decimal_src = r#"package decimal
 
@@ -362,7 +362,7 @@ async fn build_tools_model_and_manifest_deps_inspect_and_action_record_history()
         .unwrap()
         .ends_with("platform-parent/pom.xml"));
 
-    // 3. `POST /ide/deps/action` (`update_single` alias -> updates `<slf4j.version>` & snapshots Local History!):
+    // 3. `POST /ide/deps/action` (`update_single` -> updates `<slf4j.version>` & snapshots Local History):
     let (st_act, act_body) = send_json(
         &app,
         Method::POST,
@@ -514,7 +514,7 @@ public class AppMain {
     .await;
     assert_eq!(st_env, StatusCode::OK);
 
-    // 3A. With `toolkit` attached in `project_folders`: Go-to-Definition jumps to editable local `toolkit`!
+    // 3A. With `toolkit` attached in `project_folders`: Go-to-Definition jumps to editable local `toolkit`:
     let (st_def, def_body) = send_json(
         &app,
         Method::POST,
@@ -547,7 +547,7 @@ public class AppMain {
         "local attached module must win over .m2 JAR: {locs:?}"
     );
 
-    // 3B. Running `AppMain.java` WITH `project_folders: [toolkit]` prints `"LOCAL_TOOLKIT_V2"`!
+    // 3B. Running `AppMain.java` with `project_folders: [toolkit]` prints `"LOCAL_TOOLKIT_V2"`:
     let out_attached =
         run_java_main_and_collect_output(&app, &svc_str, &app_main.to_string_lossy(), vec![tk_str])
             .await;
@@ -556,7 +556,7 @@ public class AppMain {
         "expected LOCAL_TOOLKIT_V2 when toolkit attached, got: {out_attached}"
     );
 
-    // 3C. Running `AppMain.java` WITHOUT `toolkit` (`project_folders: []`) falls back to `~/.m2` JAR (`"M2_JAR_V1"`)!
+    // 3C. Running `AppMain.java` without `toolkit` (`project_folders: []`) falls back to `~/.m2` JAR (`"M2_JAR_V1"`):
     let out_detached =
         run_java_main_and_collect_output(&app, &svc_str, &app_main.to_string_lossy(), Vec::new())
             .await;

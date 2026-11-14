@@ -17,25 +17,27 @@
   import { ide, type IdeFsEntry, type IdeSymbolNode } from './ideStore.svelte';
 
   const FolderPickerLazy = lazyComponent(() => import('../../lib/components/FolderPicker.svelte'));
-  const IdeComparisonModalLazy = lazyComponent(
-    () => import('./history/IdeComparisonModal.svelte'),
-  );
   const IdeTreeSecondaryTabsLazy = lazyComponent(
     () => import('./history/IdeTreeSecondaryTabs.svelte'),
   );
 
   type ExplorerTab = 'files' | 'structure' | 'breakpoints';
 
-  interface ActiveComparisonTarget {
+  interface CompareModalRequest {
     mode: IdeCompareMode;
-    root: string;
-    targetPath: string;
+    path?: string;
     secondPath?: string | null;
-    isDir: boolean;
-    initialFilter: 'all' | 'deleted';
-    initialRef?: string | null;
-    initialClipboardText?: string;
+    isDir?: boolean;
+    filter?: 'all' | 'deleted';
+    ref?: string | null;
+    clipboardText?: string;
   }
+
+  interface Props {
+    onOpenCompare?: (opts: CompareModalRequest) => void;
+  }
+
+  let { onOpenCompare }: Props = $props();
 
   const VIRTUAL_MIN = 150;
   const ROW_H = 26;
@@ -47,7 +49,6 @@
   let clientHeight = $state(720);
   let addFolderPickerOpen = $state(false);
   let selectedDirPath = $state<string | null>(null);
-  let compareTarget = $state<ActiveComparisonTarget | null>(null);
   let manifestTreeModal = $state<{ title: string; output: string } | null>(null);
   let liveGit = $state<typeof IdeGitSingleton | null>(null);
 
@@ -63,61 +64,18 @@
     const idx = fullPath.lastIndexOf('/');
     return idx > 0 ? fullPath.slice(0, idx) : ide.target.root;
   };
-  function rootForProjectPath(targetPath: string): string {
-    const clean = normPath(targetPath);
-    let best = '';
-    for (let i = 0; i < ide.projectRoots.length; i++) {
-      const rp = normPath(ide.projectRoots[i].path);
-      if ((clean === rp || clean.startsWith(`${rp}/`)) && rp.length > best.length) best = rp;
-    }
-    return best || normPath(ide.target.root);
-  }
   function triggerNewTreeEntry(baseDir: string, op: 'create_file' | 'mkdir', extHint = ''): void {
     void import('./history/ideTreeNodeMenus').then((m) => m.promptCreateTreeEntry(baseDir, op, extHint));
   }
-  function openCompareModal(opts: { mode: IdeCompareMode; path?: string; secondPath?: string | null; isDir?: boolean; filter?: 'all' | 'deleted'; ref?: string | null; clipboardText?: string }): void {
-    const p = opts.path || ide.activePath || ide.target.root;
-    if (!p) return;
-    compareTarget = {
-      mode: opts.mode, root: rootForProjectPath(p), targetPath: p, secondPath: opts.secondPath ?? null,
-      isDir: opts.isDir ?? false, initialFilter: opts.filter ?? 'all', initialRef: opts.ref ?? null, initialClipboardText: opts.clipboardText,
-    };
+  function openCompareModal(opts: CompareModalRequest): void {
+    if (onOpenCompare) {
+      onOpenCompare(opts);
+      return;
+    }
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('otto:ide-open-compare', { detail: opts }));
+    }
   }
-
-  // Listen for window comparison, Local History, and Git action events from Editor / ⌘K.
-  $effect(() => {
-    if (typeof window === 'undefined') return;
-    const onLocalHistory = (ev: Event): void => {
-      const d = (ev as CustomEvent<{ path?: string; isDir?: boolean; filter?: 'all' | 'deleted'; putLabel?: boolean } | undefined>).detail;
-      const p = d?.path || ide.activePath || ide.target.root;
-      if (!p) return;
-      if (d?.putLabel) {
-        void import('./history/ideComparisonLoader').then((m) =>
-          m.promptPutLocalHistoryLabel(rootForProjectPath(p), p),
-        );
-        return;
-      }
-      openCompareModal({ mode: 'local-history', path: p, isDir: d?.isDir ?? p === ide.target.root, filter: d?.filter ?? 'all' });
-    };
-    const onCompare = (ev: Event): void => {
-      const d = (ev as CustomEvent<{ mode?: IdeCompareMode; path?: string; secondPath?: string; isDir?: boolean; filter?: 'all' | 'deleted'; ref?: string; clipboardText?: string } | undefined>).detail;
-      openCompareModal({ mode: d?.mode ?? 'local-history', path: d?.path, secondPath: d?.secondPath, isDir: d?.isDir, filter: d?.filter, ref: d?.ref, clipboardText: d?.clipboardText });
-    };
-    const onGitAction = (ev: Event): void => {
-      const detail = (ev as CustomEvent<{ action?: string; path?: string } | undefined>).detail;
-      void import('./git/ideGitQuickMenu').then((m) =>
-        m.runIdeGitActionEvent(detail, (mode, p) => openCompareModal({ mode, path: p })),
-      );
-    };
-    window.addEventListener('otto:ide-open-local-history', onLocalHistory);
-    window.addEventListener('otto:ide-open-compare', onCompare);
-    window.addEventListener('otto:ide-git-action', onGitAction);
-    return () => {
-      window.removeEventListener('otto:ide-open-local-history', onLocalHistory);
-      window.removeEventListener('otto:ide-open-compare', onCompare);
-      window.removeEventListener('otto:ide-git-action', onGitAction);
-    };
-  });
 
   $effect(() => {
     void ide.target.root;
@@ -392,16 +350,6 @@
     quiet
     props={{ title: 'Add folder to project', start: ide.target.kind === 'local' ? ide.target.root : '', onpick: (picked: string) => { addFolderPickerOpen = false; void ide.addProjectFolder(picked); }, onclose: () => (addFolderPickerOpen = false) }}
     onerror={() => (addFolderPickerOpen = false)}
-  />
-{/if}
-
-{#if compareTarget}
-  <LazyMount
-    lazy={IdeComparisonModalLazy}
-    what="comparison tool"
-    quiet
-    props={{ mode: compareTarget.mode, root: compareTarget.root, targetPath: compareTarget.targetPath, secondPath: compareTarget.secondPath, isDir: compareTarget.isDir, initialFilter: compareTarget.initialFilter, initialRef: compareTarget.initialRef, initialClipboardText: compareTarget.initialClipboardText, onclose: () => (compareTarget = null) }}
-    onerror={() => (compareTarget = null)}
   />
 {/if}
 

@@ -7,6 +7,7 @@
 export type * from './ideDiffApplier';
 export type { IdeThreadEntry } from '../agent/ideContextBuilders';
 
+import { loadIdeRuntimeBridge } from '../../../lib/runtimeThreadPort';
 import type { IdeAgentEngine } from '../agent/ideAgentEngine.svelte';
 import { ideAgentState, type IdeShellSelectionInput } from '../agent/ideAgentState.svelte';
 import type {
@@ -22,7 +23,13 @@ let enginePromise: Promise<IdeAgentEngine> | null = null;
 
 function loadIdeAgentEngine(): Promise<IdeAgentEngine> {
   if (!enginePromise) {
-    enginePromise = import('../agent/ideAgentEngine.svelte').then((m) => m.ideAgentEngine);
+    enginePromise = Promise.all([
+      loadIdeRuntimeBridge().catch(() => null),
+      import('../agent/ideAgentEngine.svelte'),
+    ]).then(([bridge, m]) => {
+      if (bridge) m.ideAgentEngine.bindRuntimeBridge(bridge);
+      return m.ideAgentEngine;
+    });
   }
   return enginePromise;
 }

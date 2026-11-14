@@ -4,7 +4,7 @@
 
 import type { Session } from '../../lib/api/types';
 
-export const IDE_NAMED_PROJECTS_KEY = 'otto.ide.namedProjects.v1';
+export const IDE_NAMED_PROJECTS_KEY = 'otto.ide.projects.v1';
 export const IDE_LAST_ROOT_KEY = 'otto.ide.lastRoot';
 export const IDE_ROOTS_KEY_PREFIX = 'otto.ide.roots:local:';
 export const IDE_OPEN_HANDOFF_KEY = 'otto.ide.openThreadHandoff';
@@ -17,6 +17,15 @@ export interface NamedIdeProjectRecord {
   name: string;
   primary_root: string;
   folders: string[];
+  pinned?: boolean;
+}
+
+export interface NamedIdeProjectInput {
+  id: string;
+  name: string;
+  primaryRoot?: string;
+  primary_root?: string;
+  folders: readonly string[];
   pinned?: boolean;
 }
 
@@ -89,7 +98,13 @@ export function parseNamedIdeProjects(raw: string | null | undefined): NamedIdeP
       const entry = parsed[i];
       if (!entry || typeof entry !== 'object') continue;
       const rec = entry as Record<string, unknown>;
-      const primary = trimTrailingSlashes(typeof rec.primary_root === 'string' ? rec.primary_root : '');
+      const rawPrimary =
+        typeof rec.primaryRoot === 'string'
+          ? rec.primaryRoot
+          : typeof rec.primary_root === 'string'
+            ? rec.primary_root
+            : '';
+      const primary = trimTrailingSlashes(rawPrimary);
       const foldersRaw = Array.isArray(rec.folders) ? rec.folders : [];
       const folders: string[] = [];
       const pushFolder = (f: string): void => {
@@ -143,7 +158,7 @@ export function parseSavedAdditionalRoots(raw: string | null | undefined): strin
 }
 
 export interface DiscoverIdeProjectsInput {
-  namedProjects?: readonly NamedIdeProjectRecord[];
+  namedProjects?: readonly NamedIdeProjectInput[];
   lastRoot?: string | null;
   additionalRootsByPrimary?: Readonly<Record<string, readonly string[]>>;
   liveContext?: IdeLiveContextSnapshot | null;
@@ -216,7 +231,7 @@ export function discoverIdeProjects(input: DiscoverIdeProjectsInput): IdeSidebar
     registerProject({
       id: np.id,
       name: np.name,
-      primaryRoot: np.primary_root,
+      primaryRoot: np.primaryRoot ?? np.primary_root ?? '',
       folders: np.folders,
       pinned: np.pinned === true,
     });

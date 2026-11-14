@@ -272,3 +272,165 @@ var PowPrecisionNegativeExponent = 16
         "hover doc must never bleed into subsequent symbols: {doc}"
     );
 }
+
+#[tokio::test]
+async fn multibyte_utf8_literals_and_identifiers_never_panic_or_skew_columns() {
+    // Non-ASCII UTF-8 inside preceding string/comment spans on the same line as an unimported Go package.
+    let go_src =
+        "package main\n\nfunc main() {\n\t_ = \"שלום 🚀\"; /* αβγ */ fmt.Println(\"ok\")\n}\n";
+    let go_diags =
+        diagnostics::analyze_go_diagnostics("main.go", go_src, &[], &[], &BTreeMap::new()).await;
+    // Whether `gofmt` is installed or not, UTF-8 byte-vs-char indexing on `code_ln` must never panic,
+    // and when `gofmt` passes syntax, `fmt` must be reported at its exact 1-based character column.
+    if let Some(d) = go_diags.iter().find(|d| d.message.contains("fmt")) {
+        let expected_col = ("	_ = \"שלום 🚀\"; /* αβγ */ ".chars().count() + 1) as u32;
+        assert_eq!(d.col, expected_col);
+    }
+
+    // Non-ASCII UTF-8 inside preceding string/comment spans on the same line as an unresolved Java type.
+    let java_src = "package com.acme;\n\npublic class Utf8Demo {\n    public void run() {\n        String s = \"שלום 🚀\"; /* αβγ */ MissingType val = null;\n    }\n}\n";
+    let java_diags = java_diag::analyze_java_diagnostics(
+        "/tmp/src/main/java/com/acme/Utf8Demo.java",
+        java_src,
+        &[],
+        None,
+        &BTreeMap::new(),
+    );
+    let missing = java_diags
+        .iter()
+        .find(|d| d.message.contains("MissingType"))
+        .expect("expected MissingType diagnostic");
+    let expected_java_col =
+        ("        String s = \"שלום 🚀\"; /* αβγ */ ".chars().count() + 1) as u32;
+    assert_eq!(missing.col, expected_java_col);
+
+    // Multi-byte UTF-8 identifier appearing inside a preceding string literal and comment on the same line.
+    let ts_src =
+        "/* überTax */ const label = \"überTax\"; function überTax(v: number) { return überTax(v); }\n";
+    let defs = navigation::find_definitions_in_content("tax.ts", "typescript", ts_src, "überTax");
+    assert_eq!(defs.len(), 1);
+    let expected_def_col = ("/* überTax */ const label = \"überTax\"; function "
+        .chars()
+        .count()
+        + 1) as u32;
+    assert_eq!(defs[0].column, expected_def_col);
+
+    let refs = find_symbol_occurrences_in_text("tax.ts", "typescript", ts_src, "überTax");
+    assert_eq!(refs.len(), 2);
+    let (renamed, edit) =
+        rename_identifier_in_text("tax.ts", "typescript", ts_src, "überTax", "αβDuty")
+            .expect("utf8 rename");
+    assert_eq!(edit.occurrences, 2);
+    assert!(renamed.contains("/* überTax */ const label = \"überTax\";"));
+    assert!(renamed.contains("function αβDuty(v: number) { return αβDuty(v); }"));
+}
+
+fn synthetic_central_dir_zip(entry_names: &[&str]) -> Vec<u8> {
+    let mut cd = Vec::new();
+    for name in entry_names {
+        let nb = name.as_bytes();
+        cd.extend_from_slice(&[0x50, 0x4b, 0x01, 0x02]);
+        cd.extend_from_slice(&[0u8; 24]);
+        cd.extend_from_slice(&(nb.len() as u16).to_le_bytes());
+        cd.extend_from_slice(&[0u8; 16]);
+        cd.extend_from_slice(nb);
+    }
+    let cd_size = cd.len() as u32;
+    let count = entry_names.len() as u16;
+    let mut out = cd;
+    out.extend_from_slice(&[0x50, 0x4b, 0x05, 0x06]);
+    out.extend_from_slice(&[0u8; 4]);
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&cd_size.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}
+
+#[test]
+fn jdk_index_caches_per_java_home_and_java_project_index_invalidates_on_file_addition() {
+    let tmp = tempfile::tempdir().unwrap();
+    let jdk_a = tmp.path().join("jdk-17");
+    let jdk_b = tmp.path().join("jdk-21");
+    std::fs::create_dir_all(jdk_a.join("lib")).unwrap();
+    std::fs::create_dir_all(jdk_b.join("lib")).unwrap();
+    std::fs::write(
+        jdk_a.join("lib/src.zip"),
+        synthetic_central_dir_zip(&["java.base/java/lang/JdkAlphaOnly.java"]),
+    )
+    .unwrap();
+    std::fs::write(
+        jdk_b.join("lib/src.zip"),
+        synthetic_central_dir_zip(&["java.base/java/lang/JdkBetaOnly.java"]),
+    )
+    .unwrap();
+
+    let idx_a = crate::java_workspace::global_jdk_index(Some(&jdk_a));
+    let idx_b = crate::java_workspace::global_jdk_index(Some(&jdk_b));
+    assert!(idx_a.fqns.contains("java.lang.JdkAlphaOnly"));
+    assert!(!idx_a.fqns.contains("java.lang.JdkBetaOnly"));
+    assert!(idx_b.fqns.contains("java.lang.JdkBetaOnly"));
+    assert!(!idx_b.fqns.contains("java.lang.JdkAlphaOnly"));
+
+    // Verify Java workspace index caching + immediate directory-mtime invalidation.
+    let ws = tmp.path().join("maven-app");
+    let pkg_dir = ws.join("src/main/java/com/acme/app");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+    std::fs::write(
+        ws.join("pom.xml"),
+        "<project><modelVersion>4.0.0</modelVersion><groupId>com.acme</groupId><artifactId>app</artifactId><version>1.0.0</version></project>\n",
+    )
+    .unwrap();
+    let service_path = pkg_dir.join("OrderService.java");
+    let service_src = "package com.acme.app;\n\npublic class OrderService {\n    public NewlyAddedHelper build() {\n        return null;\n    }\n}\n";
+    std::fs::write(&service_path, service_src).unwrap();
+    let roots = vec![ws.canonicalize().unwrap()];
+    let service_str = service_path.to_string_lossy().into_owned();
+
+    let (hits_before, _) = java_diag_index::workspace_cache_stats();
+    let first = java_diag::analyze_java_diagnostics(
+        &service_str,
+        service_src,
+        &roots,
+        Some(&jdk_a),
+        &BTreeMap::new(),
+    );
+    assert!(
+        first.iter().any(|d| d.message.contains("NewlyAddedHelper")),
+        "expected unresolved NewlyAddedHelper before helper class exists: {first:?}"
+    );
+
+    let second = java_diag::analyze_java_diagnostics(
+        &service_str,
+        service_src,
+        &roots,
+        Some(&jdk_a),
+        &BTreeMap::new(),
+    );
+    let (hits_after, _) = java_diag_index::workspace_cache_stats();
+    assert!(
+        hits_after > hits_before,
+        "second pass should hit workspace index cache"
+    );
+    assert_eq!(first.len(), second.len());
+
+    // Adding a sibling class in `pkg_dir` advances `pkg_dir` mtime (nudge if filesystem has coarse clock).
+    std::thread::sleep(std::time::Duration::from_millis(15));
+    std::fs::write(
+        pkg_dir.join("NewlyAddedHelper.java"),
+        "package com.acme.app;\n\npublic class NewlyAddedHelper {}\n",
+    )
+    .unwrap();
+    let third = java_diag::analyze_java_diagnostics(
+        &service_str,
+        service_src,
+        &roots,
+        Some(&jdk_a),
+        &BTreeMap::new(),
+    );
+    assert!(
+        !third.iter().any(|d| d.message.contains("NewlyAddedHelper")),
+        "workspace index cache must invalidate when a new source file is added: {third:?}"
+    );
+}

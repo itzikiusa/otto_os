@@ -4,6 +4,7 @@
   // nested under their lead), History folded at the bottom, and a quiet footer
   // (Settings · Git · Usage · Sync).
   import Icon from '../../lib/components/Icon.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -12,9 +13,8 @@
   import { personalAgentName } from '../../lib/personalAgentBadges';
   import { canonicalIdePath, groupThreadsByIdeProject } from './ideProjectModel';
   import { ideProjects, openProjectInIde } from './ideProjects.svelte';
-  import ThreadIdeProjectsSection, { type OrderedIdeProjectGroup } from './ThreadIdeProjectsSection.svelte';
+  import type { OrderedIdeProjectGroup } from './ThreadIdeProjectsSection.svelte';
   import ThreadSidebarRow from './ThreadSidebarRow.svelte';
-  import ThreadOriginGroups from './ThreadOriginGroups.svelte';
   import { originGroups, threadOrigin } from './threadOrigins';
   import { inboxOrder } from './threadFamilies';
   import {
@@ -24,7 +24,7 @@
     sessionBranch,
   } from './threadsHelpers';
   import { threadRepos } from './threadRepos.svelte';
-  import { FilterPopover, FolderPickerModal, PullRequestsView, SettingsView, UsageView } from './threadLazy.svelte';
+  import { FilterPopover, FolderPickerModal, IdeProjectsSectionView, OriginGroupsView, PullRequestsView, SettingsView, UsageView } from './threadLazy.svelte';
   import { threadsChrome } from './threadsChrome.svelte';
   import { buildSidebarLegacyThreadMenu, reviveLegacyThread } from './threadMenu';
   import { promptNewScript } from './threadGitMenus';
@@ -398,16 +398,23 @@
       <p class="th-empty">{search.trim() ? 'No threads match' : 'No threads yet'}</p>
     {:else}
       <div data-testid="threads-active-list">
-        <ThreadIdeProjectsSection
-          groups={ideProjectGroups}
-          {foldedFamilies}
-          ontogglefamily={(id) => (foldedFamilies = { ...foldedFamilies, [id]: !foldedFamilies[id] })}
-          onnewthread={(cwd) => newThreadIn(cwd)}
-          onrowclick={handleRowClick}
-          onreopen={(sess, beside) => void reopenArchived(sess, beside)}
-          onmenu={showThreadMenu}
-          {onselect}
-        />
+        {#if ideProjectGroups.length > 0}
+          <LazyMount
+            lazy={IdeProjectsSectionView}
+            what="IDE projects"
+            variant="compact"
+            props={{
+              groups: ideProjectGroups,
+              foldedFamilies,
+              ontogglefamily: (id: string) => (foldedFamilies = { ...foldedFamilies, [id]: !foldedFamilies[id] }),
+              onnewthread: (cwd: string) => newThreadIn(cwd),
+              onrowclick: handleRowClick,
+              onreopen: (sess: Session, beside: boolean) => void reopenArchived(sess, beside),
+              onmenu: showThreadMenu,
+              onselect,
+            }}
+          />
+        {/if}
         {#each projectGroups as grp (grp.key)}
           {@const open = !closedFolders[grp.key]}
           <section class="th-group" aria-label="Project {grp.label}">
@@ -459,7 +466,20 @@
       </div>
     {/if}
 
-    <ThreadOriginGroups groups={sideGroups} onrowclick={handleRowClick} onreopen={(sess, beside) => void reopenArchived(sess, beside)} onmenu={showThreadMenu} {onselect} />
+    {#if sideGroups.length > 0}
+      <LazyMount
+        lazy={OriginGroupsView}
+        what="other thread groups"
+        variant="compact"
+        props={{
+          groups: sideGroups,
+          onrowclick: handleRowClick,
+          onreopen: (sess: Session, beside: boolean) => void reopenArchived(sess, beside),
+          onmenu: showThreadMenu,
+          onselect,
+        }}
+      />
+    {/if}
 
     <section class="th-group" aria-label="History and archived threads">
       <button

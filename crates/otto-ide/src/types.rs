@@ -28,12 +28,19 @@ pub struct IdeSshSpec {
     pub connection_id: Id,
     pub name: String,
     pub host: String,
-    pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
     pub user: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_jump: Option<String>,
+}
+
+impl IdeSshSpec {
+    pub fn effective_port(&self) -> Option<u16> {
+        self.port.filter(|&p| p > 0)
+    }
 }
 
 /// Execution / filesystem target kind.

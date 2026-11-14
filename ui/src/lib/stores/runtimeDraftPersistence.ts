@@ -32,6 +32,9 @@ export function acknowledgeComposer(d: ComposerContent, sent: RuntimeDraftConten
 export function emptyDraft(): RuntimeDraftContent {
   return { text: '', images: [], model: null, effort: null, access_mode: null, fresh_context: false, context: [] };
 }
+function isEmptyDraftContent(d: RuntimeDraftContent | null | undefined): boolean {
+  return !d || (!d.text && d.images.length === 0 && d.context.length === 0 && !d.fresh_context);
+}
 const copy = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 const equal = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
 
@@ -59,7 +62,9 @@ export class DraftPersistence {
   private revision = 0;
   private loaded = false;
   private loading: Promise<void> | null = null;
+  private syncing: Promise<void> | null = null;
   private writing: Promise<void> | null = null;
+  private inSaveCall = false;
   private saved = '';
   private conflicted = false;
   private baseline: RuntimeDraftContent;
@@ -98,6 +103,46 @@ export class DraftPersistence {
     }).catch(e => { if (this.owns()) this.status('error', String(e)); }).finally(() => { this.loading = null; });
     return this.loading;
   }
+  /** Refresh `revision` on an idle, clean composer so another surface sending/clearing
+   *  the draft never causes a spurious `409` on the next keystroke or image paste. */
+  syncIfClean(): Promise<void> {
+    if (
+      !this.owns() ||
+      !this.loaded ||
+      this.loading ||
+      this.inSaveCall ||
+      this.conflicted ||
+      JSON.stringify(this.current) !== this.saved
+    ) {
+      return Promise.resolve();
+    }
+    if (this.syncing) return this.syncing;
+    this.syncing = this.transport
+      .load()
+      .then(record => {
+        if (!this.owns() || this.inSaveCall || this.conflicted) return;
+        const remoteDraft = record.draft ?? emptyDraft();
+        const remoteJson = JSON.stringify(remoteDraft);
+        if (JSON.stringify(this.current) === this.saved) {
+          this.revision = record.revision;
+          for (const key of Object.keys(remoteDraft) as (keyof RuntimeDraftContent)[]) {
+            Object.assign(this.current, { [key]: copy(remoteDraft[key]) });
+          }
+          this.saved = remoteJson;
+          this.status('saved');
+        } else if (isEmptyDraftContent(record.draft)) {
+          this.revision = record.revision;
+          this.saved = remoteJson;
+        }
+      })
+      .catch(() => {
+        /* background sync: keep the clean composer undisturbed */
+      })
+      .finally(() => {
+        this.syncing = null;
+      });
+    return this.syncing;
+  }
   save(): Promise<void> {
     if (!this.owns() || this.conflicted) return Promise.resolve();
     if (this.writing) return this.writing;
@@ -105,11 +150,13 @@ export class DraftPersistence {
     return this.writing;
   }
   private async drain(): Promise<void> {
+    if (this.syncing) await this.syncing;
     if (!this.loaded) await this.load();
     if (!this.loaded || !this.owns()) return;
     while (this.owns() && JSON.stringify(this.current) !== this.saved) {
       const snapshot = copy(this.current);
       this.status('saving');
+      this.inSaveCall = true;
       try {
         const record = await this.transport.save(snapshot, this.revision);
         if (!this.owns()) return;
@@ -120,6 +167,8 @@ export class DraftPersistence {
         this.conflicted = (e as { status?: number }).status === 409;
         this.status('error', this.conflicted ? 'This draft changed in another window. Retry to save this version.' : 'Draft not saved. Retry when connected.');
         return;
+      } finally {
+        this.inSaveCall = false;
       }
     }
     if (this.owns()) this.status('saved');

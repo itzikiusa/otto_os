@@ -289,6 +289,12 @@ async fn agent_credentials_are_confined_on_files_and_root_routes() {
         assert_eq!(st, 403);
         let (st, _) = d.send("GET", token, "/fs/stat?path=/tmp", None).await;
         assert_eq!(st, 403, "agent token must not stat host paths");
+        let ide_file = format!(
+            "/ide/fs/file?kind=local&root={}&path=secrets.json",
+            d._tmp.path().display()
+        );
+        let (st, body) = d.send("GET", token, &ide_file, None).await;
+        assert_eq!(st, 403, "agent token must not read IDE host files: {body}");
     }
     // The person's token stats a folder without listing it (S14-306).
     let (st, body) = d.send("GET", &d.human, "/fs/stat?path=/tmp", None).await;

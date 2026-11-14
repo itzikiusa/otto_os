@@ -16,7 +16,7 @@ use super::db_store::{
     safe_join_allowed_roots, validate_attached_folder_path, StoredEnvVar,
 };
 use super::{shell_env, EnvironmentManager, SecretAccess};
-use crate::target::TargetManager;
+use crate::target::{enforce_non_root_path, TargetManager};
 use crate::toolchains::{find_executable_in, is_executable_file, system_search_dirs};
 use crate::types::{
     IdeCreatePythonVenvReq, IdeCreatePythonVenvResp, IdeProjectEnvironment, IdePythonVenvInfo,
@@ -24,6 +24,7 @@ use crate::types::{
 };
 
 impl EnvironmentManager {
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn resolve_env_layers<S: SecretAccess + ?Sized>(
         &self,
         proj: &IdeProjectEnvironment,
@@ -32,20 +33,25 @@ impl EnvironmentManager {
         target: &IdeTargetSpec,
         cfg: Option<&IdeRunConfig>,
         await_shell: bool,
-    ) -> BTreeMap<String, String> {
+        caller_is_root: bool,
+    ) -> Result<BTreeMap<String, String>> {
         let mut map = BTreeMap::new();
         let inherit_shell =
             proj.inherit_shell_env && cfg.map(|c| c.inherit_shell_env).unwrap_or(true);
 
         if target.kind == IdeTargetKind::Local {
-            map.extend(shell_env::collect_process_base_env());
-            if inherit_shell {
-                let shell_vars = if await_shell {
-                    self.shell_env.vars_or_load().await
-                } else {
-                    self.shell_env.vars_snapshot()
-                };
-                map.extend(shell_vars);
+            if caller_is_root {
+                map.extend(shell_env::collect_process_base_env());
+                if inherit_shell {
+                    let shell_vars = if await_shell {
+                        self.shell_env.vars_or_load().await
+                    } else {
+                        self.shell_env.vars_snapshot()
+                    };
+                    map.extend(shell_vars);
+                }
+            } else {
+                map.extend(shell_env::collect_safe_non_root_base_env());
             }
         }
 
@@ -118,7 +124,7 @@ impl EnvironmentManager {
             {
                 push_unique(&mut path_dirs, d.to_string_lossy().into_owned());
             }
-            if !otto_core::e2e::isolated() {
+            if !otto_core::e2e::isolated() && caller_is_root {
                 if let Some(home) = dirs::home_dir() {
                     for rel in ["go/bin", ".cargo/bin", ".local/bin"] {
                         let p = home.join(rel);
@@ -178,13 +184,17 @@ impl EnvironmentManager {
 
             if let Some(dotenv_rel) = proj.dotenv_path.as_deref().filter(|s| !s.is_empty()) {
                 if let Some(dotenv_file) = safe_join_allowed_roots(&all_roots, dotenv_rel) {
-                    if let Ok(raw) = tokio::fs::read_to_string(&dotenv_file).await {
-                        map.extend(parse_dotenv(&raw));
+                    if caller_is_root || !otto_core::secret_paths::is_denied_file(&dotenv_file) {
+                        if let Ok(raw) = tokio::fs::read_to_string(&dotenv_file).await {
+                            map.extend(parse_dotenv(&raw));
+                        }
                     }
                 }
             } else {
                 let default_dotenv = Path::new(&target.root).join(".env");
-                if default_dotenv.is_file() {
+                if default_dotenv.is_file()
+                    && (caller_is_root || !otto_core::secret_paths::is_denied_file(&default_dotenv))
+                {
                     if let Ok(raw) = tokio::fs::read_to_string(&default_dotenv).await {
                         map.extend(parse_dotenv(&raw));
                     }
@@ -197,8 +207,10 @@ impl EnvironmentManager {
                 .filter(|s| !s.is_empty())
             {
                 if let Some(resolved_ef) = safe_join_allowed_roots(&all_roots, cfg_env_file) {
-                    if let Ok(raw) = tokio::fs::read_to_string(&resolved_ef).await {
-                        map.extend(parse_dotenv(&raw));
+                    if caller_is_root || !otto_core::secret_paths::is_denied_file(&resolved_ef) {
+                        if let Ok(raw) = tokio::fs::read_to_string(&resolved_ef).await {
+                            map.extend(parse_dotenv(&raw));
+                        }
                     }
                 }
             }
@@ -208,8 +220,24 @@ impl EnvironmentManager {
             if item.secret {
                 if let Some(sec_store) = secrets {
                     if let Some(sref) = &item.secret_ref {
-                        if let Ok(Some(secret_val)) = sec_store.get_secret(sref).await {
-                            map.insert(item.key.clone(), secret_val);
+                        match sec_store.get_secret(sref).await {
+                            Ok(Some(secret_val)) => {
+                                map.insert(item.key.clone(), secret_val);
+                            }
+                            Ok(None) => {
+                                tracing::warn!(
+                                    key = %item.key,
+                                    "configured IDE secret env var was not found in secret store"
+                                );
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    key = %item.key,
+                                    error = %err,
+                                    "failed to read IDE secret env var from secret store"
+                                );
+                                return Err(err);
+                            }
                         }
                     }
                 } else if item.secret_ref.is_some() {
@@ -228,7 +256,7 @@ impl EnvironmentManager {
             }
         }
 
-        map
+        Ok(map)
     }
 
     pub async fn discover_dotenv_files(
@@ -360,7 +388,7 @@ impl EnvironmentManager {
                 }
             }
         }
-        if rel_dir.contains("..") || rel_dir.starts_with('/') {
+        if rel_dir.contains("..") || rel_dir.starts_with('/') || rel_dir.starts_with('-') {
             return Err(Error::Invalid(
                 "venv_dir must be a safe workspace-relative directory".into(),
             ));
@@ -372,19 +400,39 @@ impl EnvironmentManager {
             if !prospective.starts_with(&effective_root) {
                 return Err(Error::Forbidden("venv_dir escapes workspace root".into()));
             }
-            crate::target::enforce_non_root_path(&prospective)?;
+            enforce_non_root_path(&prospective)?;
         }
+
+        let validated_py = match req.python_version.as_deref().map(str::trim) {
+            Some(v) if !v.is_empty() => {
+                let registered_py_sdks = if req.target.kind == IdeTargetKind::Local {
+                    crate::toolchains::load_registered_local_sdks(pool)
+                        .await
+                        .into_iter()
+                        .map(|s| PathBuf::from(s.path))
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                Some(validate_python_spec(
+                    v,
+                    req.target.kind == IdeTargetKind::Local,
+                    &registered_py_sdks,
+                )?)
+            }
+            _ => None,
+        };
 
         let resp = match req.target.kind {
             IdeTargetKind::Local => {
-                self.create_local_venv(&effective_root, &rel_dir, req.python_version.as_deref())
+                self.create_local_venv(&effective_root, &rel_dir, validated_py.as_deref())
                     .await?
             }
             IdeTargetKind::Ssh => {
                 let spec = ssh.ok_or_else(|| Error::Invalid("SSH spec required".into()))?;
                 let resolved = targets.resolve_with_ssh(&req.target, "ide-venv", spec.clone())?;
                 let q_dir = shell_words::quote(&rel_dir);
-                let script = match req.python_version.as_deref().filter(|s| !s.is_empty()) {
+                let script = match validated_py.as_deref() {
                     Some(ver) => format!(
                         "if command -v uv >/dev/null 2>&1; then uv venv --python {} {q_dir}; else python3 -m venv {q_dir}; fi && echo \"VER:$({q_dir}/bin/python --version 2>&1)\"",
                         shell_words::quote(ver)
@@ -403,7 +451,7 @@ impl EnvironmentManager {
                     )
                     .await?;
                 if !out.success() {
-                    return Err(Error::Internal(format!(
+                    return Err(Error::Invalid(format!(
                         "remote venv creation failed: {}",
                         out.stderr.trim()
                     )));
@@ -442,6 +490,8 @@ impl EnvironmentManager {
             .bind(&now)
             .execute(pool)
             .await;
+            self.refresh_project_snapshot(pool, &req.target.project_key())
+                .await;
         }
         Ok(resp)
     }
@@ -461,24 +511,37 @@ impl EnvironmentManager {
             find_executable_in(&search, &["uv"])
         };
 
+        let explicit_py_path = py_ver.map(PathBuf::from).filter(|p| p.is_absolute());
+
         let status_out = if let Some(uv) = uv_bin {
             let mut cmd = Command::new(uv);
             cmd.arg("venv");
             if let Some(v) = py_ver.filter(|s| !s.trim().is_empty()) {
-                cmd.args(["--python", v]);
+                cmd.arg("--python").arg(v);
             }
-            cmd.arg(&venv_path).kill_on_drop(true).output().await
+            cmd.arg("--")
+                .arg(&venv_path)
+                .kill_on_drop(true)
+                .output()
+                .await
         } else {
-            let explicit_py = py_ver
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from)
-                .filter(|p| is_executable_file(p));
-            let py = explicit_py
+            if let Some(v) = py_ver {
+                if explicit_py_path.is_none() && !is_known_python_bin_name(v) {
+                    return Err(Error::Invalid(format!(
+                        "Python version '{v}' requires uv or an installed python binary path"
+                    )));
+                }
+            }
+            let py = explicit_py_path
+                .or_else(|| {
+                    py_ver
+                        .filter(|v| is_known_python_bin_name(v))
+                        .and_then(|v| find_executable_in(&search, &[v]))
+                })
                 .or_else(|| find_executable_in(&search, &["python3", "python"]))
                 .ok_or_else(|| Error::Invalid("neither uv nor python3 found on host".into()))?;
             Command::new(py)
-                .args(["-m", "venv"])
+                .args(["-m", "venv", "--"])
                 .arg(&venv_path)
                 .kill_on_drop(true)
                 .output()
@@ -487,7 +550,7 @@ impl EnvironmentManager {
         .map_err(|e| Error::Internal(format!("spawn venv creator: {e}")))?;
 
         if !status_out.status.success() {
-            return Err(Error::Internal(format!(
+            return Err(Error::Invalid(format!(
                 "venv creation failed: {}",
                 String::from_utf8_lossy(&status_out.stderr).trim()
             )));
@@ -500,4 +563,107 @@ impl EnvironmentManager {
             version,
         })
     }
+}
+
+#[allow(clippy::disallowed_methods)]
+fn validate_python_spec(raw: &str, is_local: bool, registered_sdks: &[PathBuf]) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with('-')
+        || trimmed.contains("..")
+        || trimmed.chars().any(|c| c.is_control())
+    {
+        return Err(Error::Invalid(format!(
+            "invalid Python version or interpreter '{trimmed}'"
+        )));
+    }
+
+    if trimmed.contains('/') || trimmed.contains('\\') || trimmed.starts_with('~') {
+        if !is_local {
+            if !trimmed.starts_with('/')
+                || !trimmed
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '+'))
+            {
+                return Err(Error::Invalid(format!(
+                    "invalid remote Python interpreter path '{trimmed}'"
+                )));
+            }
+            let base = Path::new(trimmed)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            if !is_known_python_bin_name(base) {
+                return Err(Error::Invalid(format!(
+                    "remote interpreter '{trimmed}' is not a Python binary"
+                )));
+            }
+            return Ok(trimmed.to_string());
+        }
+
+        let expanded = otto_core::paths::expand_home_strict(trimmed).map_err(Error::Invalid)?;
+        let canon = std::fs::canonicalize(&expanded).map_err(|_| {
+            Error::Invalid(format!(
+                "Python interpreter '{}' does not exist",
+                expanded.display()
+            ))
+        })?;
+        enforce_non_root_path(&canon)?;
+        if !is_executable_file(&canon) {
+            return Err(Error::Invalid(format!(
+                "Python interpreter '{}' is not an executable file",
+                canon.display()
+            )));
+        }
+        let in_registered_sdk = registered_sdks.iter().any(|sdk| {
+            let sdk_canon = std::fs::canonicalize(sdk).unwrap_or_else(|_| sdk.clone());
+            canon == sdk_canon || canon.starts_with(&sdk_canon)
+        });
+        let req_name = expanded.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let canon_name = canon.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let canon_str = canon.to_string_lossy();
+        let is_valid_python = in_registered_sdk
+            || (is_known_python_bin_name(req_name)
+                && (is_known_python_bin_name(canon_name)
+                    || (canon_name == "Python" && canon_str.contains(".framework/"))));
+        if !is_valid_python {
+            return Err(Error::Invalid(format!(
+                "path '{}' is not a recognized Python interpreter",
+                expanded.display()
+            )));
+        }
+        return Ok(canon.to_string_lossy().into_owned());
+    }
+
+    if trimmed.len() > 32
+        || !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+'))
+    {
+        return Err(Error::Invalid(format!(
+            "invalid Python version '{trimmed}'"
+        )));
+    }
+    let starts_digit = trimmed.chars().next().is_some_and(|c| c.is_ascii_digit());
+    if !starts_digit && !is_known_python_bin_name(trimmed) && !trimmed.starts_with("cpython-") {
+        return Err(Error::Invalid(format!(
+            "unsupported Python version selector '{trimmed}'"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn is_known_python_bin_name(name: &str) -> bool {
+    if matches!(name, "python" | "python3" | "pypy" | "pypy3") {
+        return true;
+    }
+    for prefix in ["python3.", "python2.", "pypy3."] {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            return !rest.is_empty()
+                && rest
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || matches!(c, 't' | 'd' | 'm'));
+        }
+    }
+    false
 }

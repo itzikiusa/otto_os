@@ -21,6 +21,8 @@ use super::fs_ops::{enforce_non_root_path, resolve_local_existing_in_roots};
 use super::sdk_paths::strip_file_uri;
 use super::{ExecOutput, ResolvedTarget, SshPoolKey, TargetManager, SFTP_IDLE_TTL};
 
+const SSH_POOL_CAPACITY: usize = 32;
+
 /// Private ControlMaster socket directory for multiplexed `ssh` exec/stdio spawns.
 pub(crate) struct SshControlSocket {
     dir: PathBuf,
@@ -167,15 +169,14 @@ impl TargetManager {
                 actor_id,
                 ..
             } => {
-                validate_ssh_spec(spec)?;
                 let ctl = self.acquire_ssh_socket(actor_id, spec)?;
                 let remote_cwd = cwd
                     .filter(|c| !c.trim().is_empty())
                     .unwrap_or(root.as_str());
                 let remote_cmd = build_remote_exec_line(remote_cwd, program, args, env);
-                let mut ssh_args = build_ssh_base_args(spec, &ctl.ctl_path);
+                let (mut ssh_args, dest) = build_ssh_cli_args(spec, Some(&ctl.ctl_path))?;
                 ssh_args.push("--".into());
-                ssh_args.push(ctl.ssh_target.clone());
+                ssh_args.push(dest);
                 ssh_args.push(remote_cmd);
 
                 let mut cmd = Command::new("ssh");
@@ -187,6 +188,45 @@ impl TargetManager {
                 Ok(cmd)
             }
         }
+    }
+
+    /// Build a multiplexed SSH `Command` for long-lived run tasks whose stdin is
+    /// unused: keeps local stdin piped so killing the local `ssh` client delivers
+    /// immediate EOF to a remote watcher that sends `SIGTERM` to the remote process.
+    pub fn build_ssh_run_command(
+        &self,
+        spec: &IdeSshSpec,
+        actor_id: &str,
+        cwd: &str,
+        program: &str,
+        args: &[String],
+        env: &BTreeMap<String, String>,
+    ) -> Result<Command> {
+        if program.trim().is_empty() || program.chars().any(char::is_control) {
+            return Err(Error::Invalid("invalid command program name".into()));
+        }
+        for k in env.keys() {
+            if !valid_env_key(k) {
+                return Err(Error::Invalid(format!(
+                    "invalid environment variable name '{k}'"
+                )));
+            }
+        }
+        let ctl = self.acquire_ssh_socket(actor_id, spec)?;
+        let exec_line = build_remote_exec_line(cwd, program, args, env);
+        let wrapped = wrap_remote_null_stdin_with_eof_kill(&exec_line);
+        let (mut ssh_args, dest) = build_ssh_cli_args(spec, Some(&ctl.ctl_path))?;
+        ssh_args.push("--".into());
+        ssh_args.push(dest);
+        ssh_args.push(wrapped);
+
+        let mut cmd = Command::new("ssh");
+        cmd.args(ssh_args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        Ok(cmd)
     }
 
     /// Spawn a long-lived piped child process on either local OS or multiplexed SSH.
@@ -212,11 +252,20 @@ impl TargetManager {
         remote_port: u16,
     ) -> Result<SshTunnel> {
         validate_ssh_spec(spec)?;
+        let identity_file = match spec.identity_file.as_deref().map(str::trim) {
+            Some(s) if !s.is_empty() => Some(
+                otto_core::paths::expand_home_strict(s)
+                    .map_err(Error::Invalid)?
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            _ => None,
+        };
         let cfg = SshTunnelConfig {
             host: spec.host.clone(),
-            port: spec.port,
+            port: spec.effective_port().unwrap_or(22),
             user: spec.user.clone(),
-            identity_file: spec.identity_file.clone(),
+            identity_file,
             proxy_jump: spec.proxy_jump.clone(),
         };
         SshTunnel::open(&cfg, remote_host, remote_port).await
@@ -228,14 +277,23 @@ impl TargetManager {
         spec: &IdeSshSpec,
     ) -> Result<Arc<SftpSession>> {
         validate_ssh_spec(spec)?;
+        let identity_file = match spec.identity_file.as_deref().map(str::trim) {
+            Some(s) if !s.is_empty() => Some(
+                otto_core::paths::expand_home_strict(s)
+                    .map_err(Error::Invalid)?
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            _ => None,
+        };
         let key = SshPoolKey {
             actor_id: actor_id.to_string(),
             connection_id: spec.connection_id.to_string(),
             params: SftpParams {
                 host: spec.host.clone(),
-                port: Some(spec.port),
+                port: spec.effective_port(),
                 user: (!spec.user.is_empty()).then(|| spec.user.clone()),
-                identity_file: spec.identity_file.clone(),
+                identity_file,
                 jump: spec.proxy_jump.clone(),
             },
         };
@@ -246,6 +304,17 @@ impl TargetManager {
         self.sftp_pool.retain(|_, (sess, touched)| {
             touched.elapsed() < SFTP_IDLE_TTL || Arc::strong_count(sess) > 1
         });
+        while self.sftp_pool.len() >= SSH_POOL_CAPACITY {
+            let victim = self
+                .sftp_pool
+                .iter()
+                .filter(|e| Arc::strong_count(&e.value().0) <= 1)
+                .min_by_key(|e| e.value().1)
+                .or_else(|| self.sftp_pool.iter().min_by_key(|e| e.value().1))
+                .map(|e| e.key().clone());
+            let Some(k) = victim else { break };
+            self.sftp_pool.remove(&k);
+        }
         let session = Arc::new(SftpSession::new(key.params.clone())?);
         self.sftp_pool
             .insert(key, (session.clone(), Instant::now()));
@@ -257,22 +326,47 @@ impl TargetManager {
         actor_id: &str,
         spec: &IdeSshSpec,
     ) -> Result<Arc<SshControlSocket>> {
+        validate_ssh_spec(spec)?;
+        let identity_file = match spec.identity_file.as_deref().map(str::trim) {
+            Some(s) if !s.is_empty() => Some(
+                otto_core::paths::expand_home_strict(s)
+                    .map_err(Error::Invalid)?
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            _ => None,
+        };
         let key = SshPoolKey {
             actor_id: actor_id.to_string(),
             connection_id: spec.connection_id.to_string(),
             params: SftpParams {
                 host: spec.host.clone(),
-                port: Some(spec.port),
+                port: spec.effective_port(),
                 user: (!spec.user.is_empty()).then(|| spec.user.clone()),
-                identity_file: spec.identity_file.clone(),
+                identity_file,
                 jump: spec.proxy_jump.clone(),
             },
         };
-        if let Some(existing) = self.ssh_sockets.get(&key) {
-            return Ok(existing.clone());
+        if let Some(mut existing) = self.ssh_sockets.get_mut(&key) {
+            existing.1 = Instant::now();
+            return Ok(existing.0.clone());
+        }
+        self.ssh_sockets.retain(|_, (sock, touched)| {
+            touched.elapsed() < SFTP_IDLE_TTL || Arc::strong_count(sock) > 1
+        });
+        while self.ssh_sockets.len() >= SSH_POOL_CAPACITY {
+            let victim = self
+                .ssh_sockets
+                .iter()
+                .filter(|e| Arc::strong_count(&e.value().0) <= 1)
+                .min_by_key(|e| e.value().1)
+                .or_else(|| self.ssh_sockets.iter().min_by_key(|e| e.value().1))
+                .map(|e| e.key().clone());
+            let Some(k) = victim else { break };
+            self.ssh_sockets.remove(&k);
         }
         let sock = Arc::new(SshControlSocket::new(spec)?);
-        self.ssh_sockets.insert(key, sock.clone());
+        self.ssh_sockets.insert(key, (sock.clone(), Instant::now()));
         Ok(sock)
     }
 }
@@ -320,6 +414,19 @@ pub(crate) fn validate_ssh_spec(spec: &IdeSshSpec) -> Result<()> {
             spec.user
         )));
     }
+    if let Some(id_file) = spec
+        .identity_file
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if id_file.starts_with('-') || id_file.chars().any(char::is_control) {
+            return Err(Error::Invalid(
+                "SSH identity_file contains unsafe characters".into(),
+            ));
+        }
+        let _ = otto_core::paths::expand_home_strict(id_file).map_err(Error::Invalid)?;
+    }
     if let Some(jump) = spec.proxy_jump.as_deref().filter(|s| !s.trim().is_empty()) {
         if !valid_proxy_jump(jump) {
             return Err(Error::Invalid(format!(
@@ -330,7 +437,7 @@ pub(crate) fn validate_ssh_spec(spec: &IdeSshSpec) -> Result<()> {
     Ok(())
 }
 
-fn valid_env_key(key: &str) -> bool {
+pub(crate) fn valid_env_key(key: &str) -> bool {
     let mut chars = key.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -339,7 +446,17 @@ fn valid_env_key(key: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-fn build_ssh_base_args(spec: &IdeSshSpec, ctl_path: &str) -> Vec<String> {
+pub(crate) fn posix_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Shared OpenSSH CLI argument builder across `target`, `dap`, `toolchains`,
+/// `environments`, and `lsp_host`. Returns `(ssh_args_without_dashdash, destination)`.
+pub(crate) fn build_ssh_cli_args(
+    spec: &IdeSshSpec,
+    ctl_path: Option<&str>,
+) -> Result<(Vec<String>, String)> {
+    validate_ssh_spec(spec)?;
     let mut args = vec![
         "-T".into(),
         "-o".into(),
@@ -347,32 +464,56 @@ fn build_ssh_base_args(spec: &IdeSshSpec, ctl_path: &str) -> Vec<String> {
         "-o".into(),
         "StrictHostKeyChecking=accept-new".into(),
         "-o".into(),
+        "LogLevel=ERROR".into(),
+        "-o".into(),
         "ConnectTimeout=12".into(),
-        "-o".into(),
-        "ControlMaster=auto".into(),
-        "-o".into(),
-        format!("ControlPath={ctl_path}"),
-        "-o".into(),
-        "ControlPersist=60s".into(),
         "-o".into(),
         "ServerAliveInterval=15".into(),
         "-o".into(),
         "ServerAliveCountMax=2".into(),
-        "-p".into(),
-        spec.port.to_string(),
     ];
-    if let Some(id_file) = spec.identity_file.as_deref().filter(|s| !s.is_empty()) {
-        args.push("-i".into());
-        args.push(id_file.to_string());
+    if let Some(ctl) = ctl_path {
+        args.extend([
+            "-o".into(),
+            "ControlMaster=auto".into(),
+            "-o".into(),
+            format!("ControlPath={ctl}"),
+            "-o".into(),
+            "ControlPersist=60s".into(),
+        ]);
     }
-    if let Some(jump) = spec.proxy_jump.as_deref().filter(|s| !s.trim().is_empty()) {
+    if let Some(port) = spec.effective_port() {
+        args.push("-p".into());
+        args.push(port.to_string());
+    }
+    if let Some(id_file) = spec
+        .identity_file
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let expanded = otto_core::paths::expand_home_strict(id_file).map_err(Error::Invalid)?;
+        args.push("-i".into());
+        args.push(expanded.to_string_lossy().into_owned());
+    }
+    if let Some(jump) = spec
+        .proxy_jump
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         args.push("-J".into());
         args.push(jump.to_string());
     }
-    args
+    let dest = if spec.user.trim().is_empty() {
+        spec.host.clone()
+    } else {
+        format!("{}@{}", spec.user, spec.host)
+    };
+    Ok((args, dest))
 }
 
-fn build_remote_exec_line(
+pub(crate) fn build_remote_exec_line(
     cwd: &str,
     program: &str,
     args: &[String],
@@ -392,6 +533,29 @@ fn build_remote_exec_line(
         parts.push(shell_words::quote(arg).into_owned());
     }
     parts.join(" ")
+}
+
+fn wrap_remote_null_stdin_with_eof_kill(exec_line: &str) -> String {
+    format!(
+        "( {exec_line} ) </dev/null & pid=$!; \
+         ( cat >/dev/null; kill -TERM \"$pid\" ) >/dev/null 2>&1 & watcher=$!; \
+         wait \"$pid\"; rc=$?; kill \"$watcher\" 2>/dev/null; exit \"$rc\""
+    )
+}
+
+/// Wrap a remote command that may read binary frames on `stdin` (such as DAP
+/// stdio adapters) OR ignore `stdin` while listening on TCP (`dlv`, JDWP, Node
+/// inspector) so closing the local `ssh` pipe cleanly terminates the remote
+/// process without `-tt` PTY newline mangling.
+pub(crate) fn wrap_remote_stdio_with_eof_kill(exec_line: &str) -> String {
+    format!(
+        "fifo=\"/tmp/.otto-ide-$$-$(date +%s 2>/dev/null || echo 0)\"; \
+         mkfifo \"$fifo\" || exit 1; \
+         ( {exec_line} ) <\"$fifo\" & pid=$!; \
+         exec 3>\"$fifo\"; rm -f \"$fifo\"; \
+         ( cat >&3; exec 3>&-; sleep 1; kill -TERM \"$pid\" ) >/dev/null 2>&1 & watcher=$!; \
+         exec 3>&-; wait \"$pid\"; rc=$?; kill \"$watcher\" 2>/dev/null; exit \"$rc\""
+    )
 }
 
 async fn run_command_bounded(mut cmd: Command, timeout: Duration) -> Result<ExecOutput> {
@@ -491,11 +655,6 @@ pub(crate) fn normalize_remote_root(raw: &str) -> Result<String> {
     } else {
         clean.into()
     })
-}
-
-pub(crate) fn resolve_remote_subpath(root: &str, raw: &str) -> Result<String> {
-    let (p, _) = resolve_remote_in_roots(root, &[], raw)?;
-    Ok(p)
 }
 
 pub(crate) fn resolve_remote_in_roots(

@@ -4332,19 +4332,15 @@ dependencies = [
 name = "otto-ide"
 version = "0.2.2"
 dependencies = [
- "async-trait",
  "axum",
- "base64 0.23.1",
  "bytes",
  "chrono",
  "dashmap",
  "dirs",
- "futures",
  "futures-util",
  "hex",
  "http-body-util",
  "ignore",
- "otto-connections",
  "otto-core",
  "otto-git-cmd",
  "otto-netguard",
@@ -4362,10 +4358,8 @@ dependencies = [
  "sqlx",
  "tempfile",
  "tokio",
- "tokio-stream",
  "tower",
  "tracing",
- "ulid",
  "uuid",
 ]
 

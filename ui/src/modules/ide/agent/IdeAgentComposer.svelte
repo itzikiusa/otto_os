@@ -17,7 +17,12 @@
     supportsEffortSelection,
     supportsInteractionMode,
   } from '../../../lib/providerModels';
-  import { harnessLabel } from '../../../lib/providers';
+  import {
+    attachmentSupport,
+    harnessLabel,
+    isRuntimeProvider,
+    takesFile,
+  } from '../../../lib/providers';
   import {
     HOST_ONLY_SLASH_COMMANDS,
     INTERACTIVE_SLASH_COMMANDS,
@@ -26,19 +31,15 @@
     type ComposerSlashCommand,
   } from '../../../lib/slashActions';
   import { auth } from '../../../lib/stores/auth.svelte';
-  import { council, councilAgentLabel } from '../../threads/runtime/councilStore.svelte'; // ui-guards: allow — shared multi-agent council state
-  import CouncilStagePicker from '../../threads/runtime/CouncilStagePicker.svelte'; // ui-guards: allow — shared Ask-several council stage picker
-  import RuntimeAccessChip from '../../threads/runtime/RuntimeAccessChip.svelte'; // ui-guards: allow — shared Supervised/Auto/Full access chip
-  import RuntimeComposerImages from '../../threads/runtime/RuntimeComposerImages.svelte'; // ui-guards: allow — shared composer image/PDF chips
-  import RuntimeMentionMenu from '../../threads/runtime/RuntimeMentionMenu.svelte'; // ui-guards: allow — unified @file/@folder/@agent mention menu
-  import { isRuntimeProvider } from '../../threads/runtime/runtimeThreads.svelte'; // ui-guards: allow — shared runtime harness predicate
-  import StageSlashPopup from '../../threads/StageSlashPopup.svelte'; // ui-guards: allow — shared slash command completion popup
   import { ide } from '../ideStore.svelte';
   import { ideAgentEngine as ideAgent } from './ideAgentEngine.svelte';
+  import { ideAgentState } from './ideAgentState.svelte';
   import IdeContextBar, { showIdeContextMenu } from './IdeContextBar.svelte';
 
   let { onsent }: { onsent?: () => void } = $props();
 
+  void ideAgentState.ensureBridge();
+  const bridge = $derived(ideAgentState.runtimeBridge);
   const ModelPicker = lazyComponent(() => import('../../../lib/components/ModelPickerPopover.svelte'));
 
   let composerBoxEl = $state<HTMLDivElement | null>(null);
@@ -53,16 +54,20 @@
   const slashPopId = $props.id();
 
   $effect(() =>
-    pickerOpen
+    pickerOpen && bridge
       ? untrack(() =>
-          council.watchModifiers({ provider: ideAgent.provider, model: ideAgent.model, effort: ideAgent.effort }),
+          bridge.council.watchModifiers({
+            provider: ideAgent.provider,
+            model: ideAgent.model,
+            effort: ideAgent.effort,
+          }),
         )
       : undefined,
   );
 
   const activeProvider = $derived(ideAgent.provider);
   const agentChipLabel = $derived.by(() => {
-    if (council.on) return councilAgentLabel(auth.meta);
+    if (bridge?.council.on) return bridge.councilAgentLabel(auth.meta);
     const m = ideAgent.effectiveModel;
     const base = m ? formatModelLabel(activeProvider, m, auth.meta) : harnessLabel(activeProvider);
     return supportsEffortSelection(activeProvider) && ideAgent.effort
@@ -199,11 +204,8 @@
   }
 
   function onPaste(e: ClipboardEvent): void {
-    if (!ideAgent.canAttachImages) return;
-    const allowPdf = ideAgent.canAttachFiles;
-    const files = [...(e.clipboardData?.files ?? [])].filter(
-      (f) => f.type.startsWith('image/') || (allowPdf && f.type === 'application/pdf'),
-    );
+    if (!attachmentSupport(activeProvider).images) return;
+    const files = [...(e.clipboardData?.files ?? [])].filter((f) => takesFile(activeProvider, f));
     if (files.length === 0) return;
     e.preventDefault();
     void ideAgent.addAttachments(files);
@@ -230,8 +232,8 @@
   <IdeContextBar onfocuscomposer={() => composerEl?.focus()} />
 
   <div class="ia-composer-box" bind:this={composerBoxEl}>
-    {#if slashSuggestions.length > 0}
-      <StageSlashPopup
+    {#if slashSuggestions.length > 0 && bridge}
+      <bridge.StageSlashPopup
         id={slashPopId}
         items={slashSuggestions}
         active={cmdIdx}
@@ -240,44 +242,56 @@
       />
     {/if}
 
-    <RuntimeMentionMenu
-      bind:this={mentionEl}
-      text={ideAgent.composerText}
-      textareaEl={composerEl}
-      anchorEl={composerBoxEl}
-      cwd={ideAgent.resolveProjectCwd()}
-      allowAgents={true}
-      agentSectionLabel={council.on ? 'Add to Council' : 'Switch agent'}
-      onpickfile={(picked) => {
-        ideAgent.composerText = picked.nextText;
-        ideAgent.attachMentionedPath({ path: picked.path, display: picked.display, isDir: picked.isDir });
-        requestAnimationFrame(() => {
-          composerEl?.focus();
-          composerEl?.setSelectionRange(picked.nextCaret, picked.nextCaret);
-        });
-      }}
-      onpickagent={(picked) => {
-        ideAgent.composerText = picked.nextText;
-        if (council.on) council.pick({ provider: picked.option.provider, model: picked.option.model ?? null, effort: null });
-        else {
-          ideAgent.setProvider(picked.option.provider);
-          ideAgent.model = picked.option.model;
-        }
-        requestAnimationFrame(() => {
-          composerEl?.focus();
-          composerEl?.setSelectionRange(picked.nextCaret, picked.nextCaret);
-        });
-      }}
-      ondrilldir={(nextText, nextCaret) => {
-        ideAgent.composerText = nextText;
-        requestAnimationFrame(() => {
-          composerEl?.focus();
-          composerEl?.setSelectionRange(nextCaret, nextCaret);
-        });
-      }}
-    />
+    {#if bridge}
+      <bridge.RuntimeMentionMenu
+        bind:this={mentionEl}
+        text={ideAgent.composerText}
+        textareaEl={composerEl}
+        anchorEl={composerBoxEl}
+        cwd={ideAgent.resolveProjectCwd()}
+        allowAgents={true}
+        agentSectionLabel={bridge.council.on ? 'Add to Council' : 'Switch agent'}
+        onpickfile={(picked) => {
+          ideAgent.composerText = picked.nextText;
+          ideAgent.attachMentionedPath({ path: picked.path, display: picked.display, isDir: picked.isDir });
+          requestAnimationFrame(() => {
+            composerEl?.focus();
+            composerEl?.setSelectionRange(picked.nextCaret, picked.nextCaret);
+          });
+        }}
+        onpickagent={(picked) => {
+          ideAgent.composerText = picked.nextText;
+          if (bridge.council.on) {
+            bridge.council.pick({
+              provider: picked.option.provider,
+              model: picked.option.model ?? null,
+              effort: null,
+            });
+          } else {
+            ideAgent.setProvider(picked.option.provider);
+            ideAgent.model = picked.option.model ?? null;
+          }
+          requestAnimationFrame(() => {
+            composerEl?.focus();
+            composerEl?.setSelectionRange(picked.nextCaret, picked.nextCaret);
+          });
+        }}
+        ondrilldir={(nextText, nextCaret) => {
+          ideAgent.composerText = nextText;
+          requestAnimationFrame(() => {
+            composerEl?.focus();
+            composerEl?.setSelectionRange(nextCaret, nextCaret);
+          });
+        }}
+      />
 
-    <CouncilStagePicker part="seats" provider={ideAgent.provider} model={ideAgent.model} effort={ideAgent.effort} />
+      <bridge.CouncilStagePicker
+        part="seats"
+        provider={ideAgent.provider}
+        model={ideAgent.model}
+        effort={ideAgent.effort}
+      />
+    {/if}
 
     <textarea
       bind:this={composerEl}
@@ -296,9 +310,12 @@
       data-testid="ide-agent-composer"
     ></textarea>
 
-    {#if ideAgent.attachments.length > 0}
+    {#if ideAgent.attachments.length > 0 && bridge}
       <div class="ia-attach-row">
-        <RuntimeComposerImages images={ideAgent.attachments} onremove={(i) => ideAgent.removeAttachment(i)} />
+        <bridge.RuntimeComposerImages
+          images={ideAgent.attachments}
+          onremove={(i) => ideAgent.removeAttachment(i)}
+        />
       </div>
     {/if}
 
@@ -342,7 +359,14 @@
         />
       {/if}
 
-      <CouncilStagePicker part="toggle" provider={ideAgent.provider} model={ideAgent.model} effort={ideAgent.effort} />
+      {#if bridge}
+        <bridge.CouncilStagePicker
+          part="toggle"
+          provider={ideAgent.provider}
+          model={ideAgent.model}
+          effort={ideAgent.effort}
+        />
+      {/if}
 
       <button
         bind:this={agentBtnEl}
@@ -367,9 +391,9 @@
         <span class="ellipsis">{agentChipLabel}</span>
       </button>
 
-      {#if isRuntimeProvider(activeProvider)}
-        <RuntimeAccessChip
-          mode={ideAgent.runtimeAccessMode}
+      {#if isRuntimeProvider(activeProvider) && bridge}
+        <bridge.RuntimeAccessChip
+          mode={ideAgent.effectiveRuntimeAccessMode}
           agent={harnessLabel(activeProvider)}
           cwd={ideAgent.resolveProjectCwd() ?? 'this folder'}
           onpick={(m) => ideAgent.setRuntimeAccessMode(m)}
@@ -417,7 +441,7 @@
     mode={ideAgent.interactionMode}
     onprovider={(p) => ideAgent.setProvider(p)}
     onmodel={(m) => {
-      council.pick({ provider: ideAgent.provider, model: m, effort: ideAgent.effort });
+      bridge?.council.pick({ provider: ideAgent.provider, model: m, effort: ideAgent.effort });
       ideAgent.model = m;
     }}
     oneffort={supportsEffortSelection(activeProvider) ? (e) => (ideAgent.effort = e) : undefined}

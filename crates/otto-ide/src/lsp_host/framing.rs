@@ -7,17 +7,14 @@
 //! `read_message`  reads exactly one framed message, returning the raw JSON
 //! body bytes.
 
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncBufRead, AsyncWrite};
 
 /// Write one Content-Length-framed message to `writer`.
 pub async fn write_message<W>(writer: &mut W, body: &[u8]) -> std::io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    writer.write_all(header.as_bytes()).await?;
-    writer.write_all(body).await?;
-    writer.flush().await
+    crate::jsonrpc_framing::write_frame_bytes(writer, body).await
 }
 
 /// Read one Content-Length-framed message from `reader`.
@@ -28,72 +25,7 @@ pub async fn read_message<R>(reader: &mut R) -> std::io::Result<Option<Vec<u8>>>
 where
     R: AsyncBufRead + Unpin,
 {
-    const MAX_HEADER_BYTES: usize = 8 * 1024;
-    const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
-    let invalid = |message| std::io::Error::new(std::io::ErrorKind::InvalidData, message);
-    let mut content_length: Option<usize> = None;
-    let mut header_bytes = 0;
-    loop {
-        let mut line = Vec::new();
-        // Bound each read before allocating: read_line can grow without limit
-        // when a broken language server emits an unterminated header.
-        let n = reader
-            .take((MAX_HEADER_BYTES - header_bytes + 1) as u64)
-            .read_until(b'\n', &mut line)
-            .await?;
-        if n == 0 {
-            return if header_bytes == 0 {
-                Ok(None)
-            } else {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "truncated LSP headers",
-                ))
-            };
-        }
-        header_bytes += n;
-        if header_bytes > MAX_HEADER_BYTES {
-            return Err(invalid("LSP headers exceed 8 KiB"));
-        }
-        if !line.ends_with(b"\n") {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "truncated LSP header line",
-            ));
-        }
-        let line =
-            std::str::from_utf8(&line).map_err(|_| invalid("invalid LSP header encoding"))?;
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if trimmed.is_empty() {
-            break;
-        }
-        if let Some((name, value)) = trimmed.split_once(':') {
-            if name.eq_ignore_ascii_case("Content-Length") {
-                if content_length.is_some() {
-                    return Err(invalid("duplicate LSP Content-Length"));
-                }
-                let value = value
-                    .trim()
-                    .parse::<usize>()
-                    .map_err(|_| invalid("invalid LSP Content-Length"))?;
-                if value > MAX_BODY_BYTES {
-                    return Err(invalid("LSP message exceeds 16 MiB"));
-                }
-                content_length = Some(value);
-            }
-        }
-    }
-
-    let len = content_length.ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "LSP message missing Content-Length header",
-        )
-    })?;
-
-    let mut buf = vec![0u8; len];
-    reader.read_exact(&mut buf).await?;
-    Ok(Some(buf))
+    crate::jsonrpc_framing::read_frame_bytes(reader).await
 }
 
 #[cfg(test)]

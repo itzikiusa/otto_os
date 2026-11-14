@@ -8,14 +8,9 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import Modal from '../../../lib/components/Modal.svelte';
-  import { startMouseDrag } from '../../../lib/dragCursor';
+  import PaneDivider from '../../../lib/components/PaneDivider.svelte';
   import { loadErrorText } from '../../../lib/loadError';
-  import {
-    loadPaneWidth,
-    paneResizer,
-    RESIZE_TITLE,
-    savePaneWidth,
-  } from '../../../lib/paneResizer';
+  import { loadPaneWidth } from '../../../lib/paneResizer';
   import { toasts } from '../../../lib/toast.svelte';
   import { toastError } from '../../../lib/toastError';
   import { ideGit } from '../git/ideGitController.svelte';
@@ -100,21 +95,6 @@
   const hasSidebar = $derived(
     mode === 'local-history' || mode === 'git-revision' || mode === 'git-branch',
   );
-
-  function setSideW(next: number): void {
-    sideW = Math.max(210, Math.min(480, Math.round(next)));
-    savePaneWidth(LS_SIDE_W, sideW);
-  }
-
-  function startSideDrag(e: MouseEvent): void {
-    const sX = e.clientX;
-    const sW = sideW;
-    startMouseDrag(e, {
-      cursor: 'col-resize',
-      onMove: (ev) => setSideW(sW + (ev.clientX - sX)),
-      onEnd: () => savePaneWidth(LS_SIDE_W, sideW),
-    });
-  }
 
   // 1. Load Local History entries (`GET /ide/history/list?...&q=`).
   $effect(() => {
@@ -391,17 +371,7 @@
         onSelectRef={(ref) => (selectedRef = ref)}
         onRetry={() => (reloadSeq += 1)}
       />
-      <div
-        class="icm-resizer"
-        role="separator"
-        aria-label="Resize revision list"
-        title={RESIZE_TITLE}
-        use:paneResizer={{
-          value: sideW, min: 210, max: 480, orientation: 'vertical',
-          text: (v) => `${Math.round(v)} pixels wide`,
-          onChange: setSideW, onReset: () => setSideW(290), onDragStart: startSideDrag,
-        }}
-      ></div>
+      <PaneDivider bind:width={sideW} storageKey={LS_SIDE_W} min={210} max={480} defaultWidth={290} label="Resize revision list" />
     {/if}
 
     <section class="icm-right">
@@ -445,11 +415,9 @@
 
 <style>
   .icm-root {
-    display: flex; block-size: 540px; max-block-size: 76vh; min-block-size: 340px;
+    display: flex; block-size: 540px; max-block-size: 76dvh; min-block-size: 340px;
     margin-block: -8px; margin-inline: -12px;
     border-block: 1px solid var(--border); overflow: hidden; background: var(--surface);
   }
-  .icm-resizer { inline-size: 4px; margin-inline: -2px; cursor: col-resize; flex-shrink: 0; z-index: 2; }
-  .icm-resizer:hover, .icm-resizer:focus-visible { background: var(--accent-soft); }
   .icm-right { flex: 1; min-inline-size: 0; min-block-size: 0; display: flex; flex-direction: column; overflow: hidden; }
 </style>

@@ -3,10 +3,8 @@
 
 import type { PromptImage, RuntimeAccessMode, RuntimePromptResp } from '../../../lib/api/types';
 import type { EffortLevel } from '../../../lib/providerModels';
+import type { RuntimeProjectionView } from '../../../lib/runtimeThreadPort';
 import type { ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
-import type { RuntimeProjection } from '../../threads/runtime/projection'; // ui-guards: allow — IDE agent dock shares structured runtime projections
-import { runtimeThreads } from '../../threads/runtime/runtimeThreads.svelte'; // ui-guards: allow — IDE agent dock drives real Otto Threads
-import { runtimeViews } from '../../threads/runtime/runtimeView.svelte'; // ui-guards: allow — IDE agent dock streams structured runtime views
 import {
   ide,
   ideBasename,
@@ -27,6 +25,7 @@ import {
   type IdeContextChip,
   type IdeInlinePromptState,
 } from '../store/ideDiffApplier';
+import { ideAgentState } from './ideAgentState.svelte';
 import {
   buildDebugFrameDraftChip,
   buildDiagnosticDraftChip,
@@ -48,7 +47,7 @@ export function readIdeFileBuffer(fullPath: string): string {
 }
 
 export function computeProposalsMap(opts: {
-  projection: RuntimeProjection | null;
+  projection: RuntimeProjectionView | null;
   appliedMap: Readonly<Record<string, string>>;
   appliedPathByProposalId: ReadonlyMap<string, string>;
   proposalCache: Map<string, { sig: string; proposals: IdeCodeProposal[] }>;
@@ -130,6 +129,9 @@ export async function dispatchPromptToRuntimeSession(
     freshContext?: boolean;
   } = {},
 ): Promise<RuntimePromptResp> {
+  const bridge = ideAgentState.runtimeBridge ?? (await ideAgentState.ensureBridge());
+  if (!bridge) throw new Error('Couldn’t load runtime threads in this window.');
+  const { runtimeThreads, runtimeViews } = bridge;
   const row = runtimeThreads.get(sid);
   const proj = runtimeViews.projections[sid];
   const turnBusy =
@@ -159,6 +161,7 @@ export function waitForInlineTurnCompletion(
   knownIds: ReadonlySet<string>,
   isCancelled: () => boolean,
 ): Promise<{ messageId: string; text: string }> {
+  if (!ideAgentState.runtimeBridge) void ideAgentState.ensureBridge();
   return new Promise((resolve, reject) => {
     let settled = false;
     let stopEffect: (() => void) | null = null;
@@ -182,8 +185,10 @@ export function waitForInlineTurnCompletion(
           finish(() => resolve({ messageId: 'cancelled', text: '' }));
           return;
         }
-        const proj = runtimeViews.projections[sid];
-        const rowStatus = runtimeThreads.byId[sid]?.status;
+        const bridge = ideAgentState.runtimeBridge;
+        if (!bridge) return;
+        const proj = bridge.runtimeViews.projections[sid];
+        const rowStatus = bridge.runtimeThreads.byId[sid]?.status;
         if (!proj) return;
         const errItem = proj.items.find(
           (i) => !knownIds.has(i.id) && i.type === 'error' && (!resp.turn_id || i.turn_id === resp.turn_id),
@@ -336,7 +341,7 @@ export function createSymbolChipFromPath(path: string, sym: IdeSymbolNode): Omit
 }
 
 export function createDiagnosticChipEntry(diag: IdeDiagnostic): { chip: Omit<IdeContextChip, 'id'>; prompt: string } {
-  const fullPath = ide.resolvePath(diag.path);
+  const fullPath = ide.resolvePath(diag.path || ide.activePath || '');
   const relPath = ide.relativePath(fullPath) || ideBasename(fullPath);
   return {
     chip: buildDiagnosticDraftChip(fullPath, relPath, readIdeFileBuffer(fullPath), diag),

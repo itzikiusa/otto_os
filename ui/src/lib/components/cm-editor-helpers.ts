@@ -12,21 +12,12 @@ import { forgetEditorState, loadEditorState, PERSIST_MAX_BYTES, prepareEditorHis
 import type { FindProvider } from '../findProviders';
 import type { SqlDialectName } from '../sql-dialects';
 import type * as CmIdeHistType from './cm-ide-history';
-import type * as CmIdeThemeType from './cm-ide-theme';
 
 export interface CursorChangeInfo {
   line: number; column: number; cursorCount: number;
   selectedLines: number; selectionLength: number;
   selections: { anchor: number; head: number }[];
 }
-
-export const FALLBACK_IDE_PREFS: CmIdeThemeType.IdeEditorPreferences = {
-  colorScheme: 'auto', darkColorScheme: 'jetbrains-islands-dark', lightColorScheme: 'jetbrains-islands-light',
-  fontSize: 13, lineHeight: 1.55, tabSize: 4, wordWrap: false,
-  inlayHints: true, codeVision: true, rainbowBrackets: true, showBreadcrumbs: true, autoFoldImports: true,
-  compactHover: true, javaUnresolvedImports: true, lombokSupport: true, unusedImports: true,
-  formatOnSave: false, keymapPreset: 'jetbrains',
-};
 
 export const lightEditorTheme = EditorView.theme({
   '&': { color: 'var(--text)', backgroundColor: 'transparent' },
@@ -296,6 +287,7 @@ export function parkEditorHistory(opts: {
 export interface KeptTabStateEntry {
   state: EditorState; scroll: StateEffect<unknown>; chars: number;
   dialect: SqlDialectName; langReady: boolean; language: string | undefined;
+  savedContent?: string | null;
 }
 
 export function createEditorStateCache() {
@@ -317,7 +309,12 @@ export function createEditorStateCache() {
         lightTabMeta.delete(oldest);
       }
     },
-    stashOutgoing(fromPath: string, entry: KeptTabStateEntry, ideMode: boolean, onEvict: (p: string, st: EditorState) => void): void {
+    stashOutgoing(
+      fromPath: string,
+      entry: KeptTabStateEntry,
+      ideMode: boolean,
+      onEvict: (p: string, st: EditorState, savedContent?: string | null) => void,
+    ): void {
       keptStates.delete(fromPath);
       if (entry.chars <= KEPT_MAX_CHARS) keptStates.set(fromPath, entry);
       const maxKept = ideMode ? IDE_MAX_KEPT : MAX_KEPT;
@@ -325,7 +322,7 @@ export function createEditorStateCache() {
         const oldest = keptStates.keys().next().value;
         if (oldest === undefined) break;
         const ev = keptStates.get(oldest);
-        if (ev) onEvict(oldest, ev.state);
+        if (ev) onEvict(oldest, ev.state, ev.savedContent);
         keptStates.delete(oldest);
       }
     },
@@ -345,8 +342,8 @@ export function createEditorStateCache() {
         if (historyKey) { const hk = historyKey(p); if (hk) forgetEditorState(hk.key); }
       }
     },
-    drainAndClear(onEach: (p: string, st: EditorState) => void): void {
-      for (const [p, k] of keptStates) onEach(p, k.state);
+    drainAndClear(onEach: (p: string, st: EditorState, savedContent?: string | null) => void): void {
+      for (const [p, k] of keptStates) onEach(p, k.state, k.savedContent);
       keptStates.clear();
       lightTabMeta.clear();
     },

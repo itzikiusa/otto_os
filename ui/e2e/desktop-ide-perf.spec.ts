@@ -29,6 +29,7 @@ test.describe.configure({ mode: 'serial' });
 
 const TREE_FILE_COUNT = 2_500;
 const BIG_FILE_LINES = 5_000;
+const isDebugDaemon = (process.env.OTTO_E2E_BIN ?? '').includes('/debug/');
 
 interface ProcMetric {
   cpuPct: number;
@@ -289,6 +290,7 @@ test.describe('Desktop IDE — Perf, Virtualization, Retention & Parallel Load',
     const ltDurations = browserName === 'chromium' ? await longTasks(page) : null;
 
     emitPerfMetric(info, 'test1_idle_gate', {
+      isDebugDaemon,
       idleApiRequests: reqStats.count,
       idlePaths: reqStats.paths,
       longTasksCount: ltDurations ? ltDurations.length : null,
@@ -306,7 +308,7 @@ test.describe('Desktop IDE — Perf, Virtualization, Retention & Parallel Load',
     if (ltDurations !== null) {
       expect(ltDurations.length, '0 Chromium long tasks during 4.0s idle window').toBe(0);
     }
-    expect(idleRes.daemon.rssMb).toBeLessThan(250);
+    expect(idleRes.daemon.rssMb).toBeLessThan(isDebugDaemon ? 320 : 250);
     expect(idleRes.daemon.cpuPct).toBeLessThan(5);
   });
 
@@ -1179,9 +1181,11 @@ test.describe('Desktop IDE — Perf, Virtualization, Retention & Parallel Load',
 
       emitPerfMetric(info, 'test6_memory_budget_and_25cycle_torture', {
         browserEngine: browserName,
+        isDebugDaemon,
         preIdeDaemonRssMb: preIdeRes.daemon.rssMb,
         ideDaemonDeltaMb,
         ideHeapDeltaMb,
+        activePeakIdeCoreDeltaMb: round2(activePeakOttoCoreRssMb - preIdeRes.daemon.rssMb),
         activePeakOttoCoreRssMb,
         activePeakDaemonTreeRssMb,
         activePeakAgentChildrenRssMb: peakRes.agentChildren.rssMb,
@@ -1207,7 +1211,8 @@ test.describe('Desktop IDE — Perf, Virtualization, Retention & Parallel Load',
 
       expect(fatal).toEqual([]);
       expect(ideDaemonDeltaMb, 'ottod IDE RSS delta < 80 MB').toBeLessThan(80);
-      expect(activePeakOttoCoreRssMb, 'ottod + active LSP/DAP children RSS < 450 MB at peak 8-tab load').toBeLessThan(450);
+      expect(round2(activePeakOttoCoreRssMb - preIdeRes.daemon.rssMb), 'IDE + active LSP/DAP children RSS delta < 350 MB at peak 8-tab load').toBeLessThan(350);
+      expect(activePeakOttoCoreRssMb, 'ottod + active LSP/DAP children RSS ceiling at peak 8-tab load').toBeLessThan(isDebugDaemon ? 600 : 450);
       expect(activePeakDaemonTreeRssMb, 'whole ottod + active LSP/DAP + ClickHouse tree RSS < 1 GB at peak').toBeLessThan(1024);
       expect(daemonTreeRssMbCycle0, 'whole ottod daemon process tree RSS < 1 GB (cycle 0)').toBeLessThan(1024);
       expect(daemonTreeRssMbCycle25, 'whole ottod daemon process tree RSS < 1 GB (cycle 25)').toBeLessThan(1024);

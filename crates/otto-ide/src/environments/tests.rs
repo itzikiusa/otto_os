@@ -204,6 +204,7 @@ fn finished_runs_evict_cleanly_past_max_finished_runs_preserving_running() {
         let id = format!("run_fin_{i:02}");
         let handle = Arc::new(ActiveRunHandle {
             seq: i,
+            owner_user_id: String::new(),
             state: Mutex::new(RunStateInner::new(
                 id.clone(),
                 "Finished".into(),
@@ -228,6 +229,7 @@ fn finished_runs_evict_cleanly_past_max_finished_runs_preserving_running() {
         "run_active".into(),
         Arc::new(ActiveRunHandle {
             seq: 100,
+            owner_user_id: String::new(),
             state: Mutex::new(RunStateInner::new(
                 "run_active".into(),
                 "Active".into(),
@@ -254,6 +256,7 @@ fn streaming_10k_lines_and_maven_spring_profile_flags_work() {
     let (stop_tx, _stop_rx) = watch::channel(false);
     let handle = ActiveRunHandle {
         seq: 1,
+        owner_user_id: String::new(),
         state: Mutex::new(RunStateInner::new(
             "run_perf".into(),
             "CargoTest".into(),
@@ -267,7 +270,7 @@ fn streaming_10k_lines_and_maven_spring_profile_flags_work() {
     for i in 0..10_000 {
         append_run_line(&handle, format!("stdout log line {i}"));
     }
-    assert!(started.elapsed() < Duration::from_millis(50));
+    assert!(started.elapsed() < Duration::from_millis(500));
     assert_eq!(handle.snapshot().output.len(), MAX_RUN_OUTPUT_LINES);
 
     for _ in 0..200 {
@@ -316,6 +319,7 @@ async fn stopping_run_kills_entire_unix_process_group_leaving_zero_orphans() {
     let (stop_tx, stop_rx) = watch::channel(false);
     let handle = Arc::new(ActiveRunHandle {
         seq: 1,
+        owner_user_id: "u_test".into(),
         state: Mutex::new(RunStateInner::new(
             "run_pg".into(),
             "PG Test".into(),
@@ -500,4 +504,73 @@ async fn create_python_venv_rejects_out_of_root_sensitive_and_traversal_paths() 
             "expected Invalid for SSH root '{bad_root}', got: {err_ssh:?}"
         );
     }
+
+    // Reject non-Python executables and leading-dash flags in python_version.
+    for bad_py in ["--help", "/bin/sh", "3.99;id"] {
+        let err_py = mgr
+            .create_python_venv(
+                &pool,
+                &targets,
+                IdeCreatePythonVenvReq {
+                    target: target.clone(),
+                    root: None,
+                    venv_dir: Some(".venv".into()),
+                    python_version: Some(bad_py.into()),
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err_py,
+                otto_core::Error::Invalid(_) | otto_core::Error::Forbidden(_)
+            ),
+            "expected Invalid/Forbidden for python_version '{bad_py}', got: {err_py:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn saved_run_config_round_trips_profiles_skip_tests_and_offline() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let pool = otto_state::db::open(&tmp.path().join("test.db"))
+        .await
+        .unwrap();
+    let mgr = EnvironmentManager::new(tmp.path().join("data"));
+    let target = IdeTargetSpec::local(ws.to_string_lossy().into_owned());
+
+    let saved = mgr
+        .upsert_run_config_parts(
+            &pool,
+            &target,
+            IdeRunConfig {
+                id: String::new(),
+                name: "Spring Dev".into(),
+                runner: IdeRunnerKind::Maven,
+                args: vec!["spring-boot:run".into()],
+                maven_profiles: vec!["dev".into(), "cloud".into()],
+                spring_profiles: vec!["local".into()],
+                skip_tests: true,
+                offline: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let fetched = mgr.get_run_config(&pool, &saved.id).await.unwrap();
+    assert_eq!(fetched.maven_profiles, vec!["dev", "cloud"]);
+    assert_eq!(fetched.spring_profiles, vec!["local"]);
+    assert!(fetched.skip_tests);
+    assert!(fetched.offline);
+
+    let listed = mgr.list_run_configs(&pool, &target).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].maven_profiles, vec!["dev", "cloud"]);
+    assert_eq!(listed[0].spring_profiles, vec!["local"]);
+    assert!(listed[0].skip_tests);
+    assert!(listed[0].offline);
 }

@@ -18,12 +18,20 @@ import { LS_WS_RECENT, noteRecent, parseRecent } from './workspaceSwitch';
 import { ws } from '../lib/stores/workspace.svelte';
 import { installPaletteSources, type PaletteDeps } from './paletteSources.svelte';
 import { registerBrowserView } from '../lib/browserPort';
-import { registerRuntimeThreadView } from '../lib/runtimeThreadPort';
+import {
+  registerIdeRuntimeBridge,
+  registerPtyConversationView,
+  registerRuntimeMentionMenu,
+  registerRuntimeThreadView,
+} from '../lib/runtimeThreadPort';
 
 // Hosts that embed the Browser view (Threads' inspector) load it through the port.
 registerBrowserView(() => import('../modules/browser/BrowserView.svelte'));
-// Hosts that embed one Threads conversation (a personal agent's chat).
+// Hosts that embed one Threads conversation (Personal Agents, IDE Agent dock).
 registerRuntimeThreadView(() => import('../modules/threads/runtime/EmbeddedRuntimeThread.svelte'));
+registerPtyConversationView(() => import('../modules/agents/conversation/ConversationView.svelte'));
+registerRuntimeMentionMenu(() => import('../modules/threads/runtime/RuntimeMentionMenu.svelte'));
+registerIdeRuntimeBridge(async () => (await import('../modules/threads/runtime/ideRuntimeBridge.svelte')).ideRuntimeBridge);
 
 export function installShell(deps: PaletteDeps): () => void {
   const stopPalette = installPaletteSources(deps);

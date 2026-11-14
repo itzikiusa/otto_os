@@ -21,17 +21,18 @@ pub(crate) use self::discovery::{
     resolve_java_home_dir, system_search_dirs,
 };
 use self::local_registry::{
-    host_key_for_target, load_registered_local_sdks, normalize_and_validate_local_sdk,
+    host_key_for_target, load_all_local_host_sdks, load_registered_local_sdks_by_host,
+    normalize_and_validate_local_sdk,
 };
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::Utc;
 use dashmap::DashMap;
-use otto_core::domain::User;
 use otto_core::{new_id, Error, Result};
 use otto_state::DbPool;
 use sqlx::Row;
@@ -43,11 +44,9 @@ use crate::toolchains_catalog::{
 };
 use crate::types::{
     IdeEcosystemKind, IdeInstallComponent, IdeInstallJob, IdeInstallJobStatus,
-    IdeInstallToolchainReq, IdeInstalledSdk, IdeProjectEnvironment, IdePythonVenvInfo,
-    IdeRegisterLocalSdkReq, IdeSshSpec, IdeTargetKind, IdeTargetSpec, IdeToolchainEcosystem,
-    IdeToolchainPythonVenvReq, IdeToolchainPythonVenvResp, IdeToolchainsResp,
+    IdeInstallToolchainReq, IdeInstalledSdk, IdeProjectEnvironment, IdeRegisterLocalSdkReq,
+    IdeSshSpec, IdeTargetKind, IdeTargetSpec, IdeToolchainEcosystem, IdeToolchainsResp,
 };
-use crate::IdeCtx;
 
 use self::installer::{
     build_remote_install_script, install_local_dap, install_local_lsp, install_local_sdk,
@@ -57,6 +56,10 @@ use self::installer::{
 const MAX_JOB_LOGS: usize = 400;
 const MAX_FINISHED_JOBS: usize = 16;
 
+pub(crate) async fn load_registered_local_sdks(pool: &DbPool) -> Vec<IdeInstalledSdk> {
+    load_all_local_host_sdks(pool).await
+}
+
 /// Manages SDK/LSP/DAP discovery and background installation jobs across
 /// local and remote SSH targets.
 #[derive(Clone)]
@@ -65,6 +68,7 @@ pub struct ToolchainManager {
     catalog: Arc<CatalogClient>,
     jobs: Arc<DashMap<String, IdeInstallJob>>,
     finished_order: Arc<Mutex<VecDeque<String>>>,
+    allow_test_loopback: Arc<AtomicBool>,
 }
 
 impl ToolchainManager {
@@ -74,7 +78,24 @@ impl ToolchainManager {
             catalog: Arc::new(CatalogClient::new()),
             jobs: Arc::new(DashMap::new()),
             finished_order: Arc::new(Mutex::new(VecDeque::new())),
+            allow_test_loopback: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub(crate) fn allows_test_loopback(&self) -> bool {
+        self.allow_test_loopback.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn seed_test_catalog_entry(
+        &self,
+        platform: TargetPlatform,
+        ecosystem: IdeEcosystemKind,
+        entry: CatalogSdkEntry,
+    ) {
+        self.allow_test_loopback.store(true, Ordering::Relaxed);
+        self.catalog
+            .seed_cached_entry(platform, EcosystemKind::from(ecosystem), entry);
     }
 
     pub fn toolchains_dir(&self) -> PathBuf {
@@ -135,55 +156,6 @@ impl ToolchainManager {
         roots
     }
 
-    /// Host-context helper for `GET /ide/toolchains` (fast zero-HTTPS default).
-    pub async fn list_for_ctx<C: IdeCtx>(
-        &self,
-        ctx: &C,
-        user: &User,
-        target: &IdeTargetSpec,
-    ) -> Result<IdeToolchainsResp> {
-        let ssh = resolve_optional_ssh(ctx, user, target).await?;
-        let active_env = ctx
-            .ide()
-            .environments
-            .get_project_env(&ctx.pool(), target)
-            .await
-            .ok();
-        self.list_toolchains_with_opts(
-            Some(&ctx.pool()),
-            &ctx.ide().targets,
-            target,
-            ssh.as_ref(),
-            active_env.as_ref(),
-            false,
-        )
-        .await
-    }
-
-    /// Host-context helper for `POST /ide/toolchains/install`.
-    pub async fn install_for_ctx<C: IdeCtx>(
-        &self,
-        ctx: &C,
-        user: &User,
-        req: IdeInstallToolchainReq,
-    ) -> Result<IdeInstallJob> {
-        let ssh = resolve_optional_ssh(ctx, user, &req.target).await?;
-        self.start_install(&ctx.ide().targets, req, ssh).await
-    }
-
-    /// Discover installed & curated/cached downloadable SDKs, LSPs, and DAPs on `target`
-    /// without making outbound HTTPS catalog calls (`<5ms`).
-    pub async fn list_toolchains(
-        &self,
-        targets: &TargetManager,
-        target: &IdeTargetSpec,
-        ssh: Option<&IdeSshSpec>,
-        active_env: Option<&IdeProjectEnvironment>,
-    ) -> Result<IdeToolchainsResp> {
-        self.list_toolchains_with_opts(None, targets, target, ssh, active_env, false)
-            .await
-    }
-
     /// Discover installed & downloadable SDKs, LSPs, and DAPs on `target`.
     ///
     /// When `include_catalog == false`, returns curated + warm-cached catalog entries
@@ -201,7 +173,7 @@ impl ToolchainManager {
     ) -> Result<IdeToolchainsResp> {
         target.validate()?;
         let custom_sdks = match pool {
-            Some(db) => load_registered_local_sdks(db, &host_key_for_target(target)).await,
+            Some(db) => load_registered_local_sdks_by_host(db, &host_key_for_target(target)).await,
             None => HashMap::new(),
         };
         match target.kind {
@@ -326,87 +298,28 @@ impl ToolchainManager {
                 .execute(pool)
                 .await
                 .map_err(|e| Error::Internal(format!("delete ide_local_sdks by path: {e}")))?;
+
+            if target.kind == IdeTargetKind::Local {
+                if let (Ok(tc_canon), Ok(target_canon)) = (
+                    std::fs::canonicalize(self.toolchains_dir()),
+                    std::fs::canonicalize(trimmed),
+                ) {
+                    if target_canon != tc_canon && target_canon.starts_with(&tc_canon) {
+                        if target_canon.is_dir() {
+                            let _ = tokio::fs::remove_dir_all(&target_canon).await;
+                        } else {
+                            let _ = tokio::fs::remove_file(&target_canon).await;
+                        }
+                        if let Some(parent) = target_canon.parent() {
+                            if parent != tc_canon && parent.starts_with(&tc_canon) {
+                                let _ = tokio::fs::remove_dir(parent).await;
+                            }
+                        }
+                    }
+                }
+            }
         }
         Ok(())
-    }
-
-    /// Create a per-project or per-module Python virtualenv on demand (`POST /ide/toolchains/python-venv`).
-    pub async fn create_python_venv(
-        &self,
-        req: &IdeToolchainPythonVenvReq,
-        is_root_user: bool,
-    ) -> Result<IdeToolchainPythonVenvResp> {
-        let root_str = req
-            .root
-            .as_deref()
-            .or_else(|| req.target.as_ref().map(|t| t.root.as_str()))
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| Error::Invalid("root or target.root is required".into()))?;
-        let canon_root = crate::target::canonicalize_local_root_dir(root_str, is_root_user)?;
-        let rel_or_abs = req
-            .path
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(".venv");
-        if rel_or_abs.contains("..") {
-            return Err(Error::Invalid("venv path must not contain '..'".into()));
-        }
-        let raw_venv_dir = if std::path::Path::new(rel_or_abs).is_absolute() {
-            PathBuf::from(rel_or_abs)
-        } else {
-            canon_root.join(rel_or_abs)
-        };
-        let venv_dir = otto_core::secret_paths::canonicalize_prospective(&raw_venv_dir)
-            .ok_or_else(|| Error::Invalid("invalid venv path".into()))?;
-        if !venv_dir.starts_with(&canon_root) {
-            return Err(Error::Invalid("venv path must stay within root".into()));
-        }
-        if !is_root_user {
-            crate::target::enforce_non_root_path(&canon_root)?;
-            crate::target::enforce_non_root_path(&venv_dir)?;
-        }
-        let base_py = req
-            .base_python
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| find_executable_in(&system_search_dirs(), &["python3", "python"]))
-            .ok_or_else(|| Error::NotFound("python3 not found on host".into()))?;
-
-        let out = tokio::process::Command::new(&base_py)
-            .arg("-m")
-            .arg("venv")
-            .arg(&venv_dir)
-            .current_dir(&canon_root)
-            .output()
-            .await
-            .map_err(|e| Error::Internal(format!("spawn python3 -m venv: {e}")))?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            return Err(Error::Invalid(format!(
-                "python3 -m venv failed: {}",
-                stderr.trim()
-            )));
-        }
-        let interp = if venv_dir.join("bin/python3").is_file() {
-            venv_dir.join("bin/python3")
-        } else {
-            venv_dir.join("bin/python")
-        };
-        let version =
-            detected::read_pyvenv_cfg_version(&venv_dir).unwrap_or_else(|| "3".to_string());
-        Ok(IdeToolchainPythonVenvResp {
-            ok: true,
-            venv: IdePythonVenvInfo {
-                path: venv_dir.to_string_lossy().into_owned(),
-                version,
-                kind: "venv".into(),
-            },
-            interpreter_path: interp.to_string_lossy().into_owned(),
-        })
     }
 
     async fn list_local(
@@ -662,6 +575,7 @@ impl ToolchainManager {
                     entry.log_lines.push(format!("Completed cleanly: {path}"));
                 }
                 Err(err) => {
+                    tracing::warn!(job_id, error = %err, "IDE toolchain install job failed");
                     entry.status = IdeInstallJobStatus::Error;
                     entry.error = Some(err.clone());
                     entry.log_lines.push(format!("ERROR: {err}"));
@@ -755,23 +669,6 @@ impl ToolchainManager {
             format!("Running remote installer on {}...", ssh.host),
         );
         run_ssh_streaming(ssh, &script, |line| self.log_progress(job_id, 60, line)).await
-    }
-}
-
-pub(crate) async fn resolve_optional_ssh<C: IdeCtx>(
-    ctx: &C,
-    user: &User,
-    target: &IdeTargetSpec,
-) -> Result<Option<IdeSshSpec>> {
-    if target.kind == IdeTargetKind::Ssh {
-        let conn_id = target
-            .connection_id
-            .as_ref()
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| Error::Invalid("SSH target requires non-empty connection_id".into()))?;
-        Ok(Some(ctx.resolve_ssh_connection(user, conn_id).await?))
-    } else {
-        Ok(None)
     }
 }
 

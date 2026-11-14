@@ -25,7 +25,7 @@ pub(super) fn host_key_for_target(target: &IdeTargetSpec) -> String {
     }
 }
 
-pub(super) async fn load_registered_local_sdks(
+pub(super) async fn load_registered_local_sdks_by_host(
     pool: &DbPool,
     host_key: &str,
 ) -> HashMap<EcosystemKind, Vec<IdeInstalledSdk>> {
@@ -40,7 +40,10 @@ pub(super) async fn load_registered_local_sdks(
     .await
     {
         Ok(r) => r,
-        Err(_) => return HashMap::new(),
+        Err(err) => {
+            tracing::warn!(error = %err, host_key, "failed to load ide_local_sdks");
+            return HashMap::new();
+        }
     };
 
     let mut out: HashMap<EcosystemKind, Vec<IdeInstalledSdk>> = HashMap::new();
@@ -67,6 +70,14 @@ pub(super) async fn load_registered_local_sdks(
         });
     }
     out
+}
+
+pub(crate) async fn load_all_local_host_sdks(pool: &DbPool) -> Vec<IdeInstalledSdk> {
+    load_registered_local_sdks_by_host(pool, "local")
+        .await
+        .into_values()
+        .flatten()
+        .collect()
 }
 
 pub(super) fn normalize_and_validate_local_sdk(
@@ -96,17 +107,7 @@ pub(super) fn normalize_and_validate_local_sdk(
             "refusing to register root or system configuration directory as SDK".into(),
         ));
     }
-    if let Some(home) = dirs::home_dir() {
-        let hs = home.to_string_lossy();
-        for blocked_rel in [".ssh", ".aws", ".gnupg", ".kube"] {
-            let blocked = format!("{}/{blocked_rel}", hs.trim_end_matches('/'));
-            if canon_str == blocked || canon_str.starts_with(&format!("{blocked}/")) {
-                return Err(Error::Forbidden(
-                    "refusing to register sensitive credential directory as SDK".into(),
-                ));
-            }
-        }
-    }
+    crate::target::enforce_non_root_path(&canon)?;
 
     match eco {
         EcosystemKind::Java => {

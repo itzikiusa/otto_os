@@ -17,7 +17,6 @@ use crate::types::{
 };
 
 use super::module_sdks::sanitize_module_sdks;
-use super::record_sync_project_snapshot;
 
 /// Reserved internal `StoredEnvVar.key` persisted inside `env_vars_json` to store
 /// per-module SDK overrides (`IdeProjectEnvironment.module_sdks`) without altering
@@ -278,23 +277,9 @@ pub(super) fn safe_join_allowed_roots(
     None
 }
 
-pub(super) async fn load_stored_project_env(
-    pool: &DbPool,
-    project_key: &str,
-) -> Result<(IdeProjectEnvironment, Vec<StoredEnvVar>)> {
-    let row = sqlx::query(
-        r#"SELECT java_home, go_root, rust_toolchain, node_home, python_interpreter,
-                  dotenv_path, extra_path, env_vars_json, additional_roots_json, inherit_shell_env
-           FROM ide_project_environments WHERE project_key = ?"#,
-    )
-    .bind(project_key)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| Error::Internal(format!("query ide_project_environments: {e}")))?;
-
-    let Some(row) = row else {
-        return Ok((IdeProjectEnvironment::default(), Vec::new()));
-    };
+fn decode_project_env_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> (IdeProjectEnvironment, Vec<StoredEnvVar>) {
     let raw_json: String = row.try_get("env_vars_json").unwrap_or_else(|_| "[]".into());
     let raw_stored: Vec<StoredEnvVar> = serde_json::from_str(&raw_json).unwrap_or_default();
     let mut module_sdks: BTreeMap<String, String> = BTreeMap::new();
@@ -329,8 +314,50 @@ pub(super) async fn load_stored_project_env(
         module_sdks,
         env_vars: Vec::new(),
     };
-    record_sync_project_snapshot(project_key, &env);
-    Ok((env, stored))
+    (env, stored)
+}
+
+pub(super) async fn load_stored_project_env(
+    pool: &DbPool,
+    project_key: &str,
+) -> Result<(IdeProjectEnvironment, Vec<StoredEnvVar>)> {
+    let row = sqlx::query(
+        r#"SELECT java_home, go_root, rust_toolchain, node_home, python_interpreter,
+                  dotenv_path, extra_path, env_vars_json, additional_roots_json, inherit_shell_env
+           FROM ide_project_environments WHERE project_key = ?"#,
+    )
+    .bind(project_key)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| Error::Internal(format!("query ide_project_environments: {e}")))?;
+
+    let Some(row) = row else {
+        return Ok((IdeProjectEnvironment::default(), Vec::new()));
+    };
+    Ok(decode_project_env_row(&row))
+}
+
+pub(super) async fn load_all_stored_project_envs(
+    pool: &DbPool,
+) -> Result<Vec<(String, IdeProjectEnvironment, Vec<StoredEnvVar>)>> {
+    let rows = sqlx::query(
+        r#"SELECT project_key, java_home, go_root, rust_toolchain, node_home, python_interpreter,
+                  dotenv_path, extra_path, env_vars_json, additional_roots_json, inherit_shell_env
+           FROM ide_project_environments"#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| Error::Internal(format!("query all ide_project_environments: {e}")))?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let key: String = row.try_get("project_key").unwrap_or_default();
+        if !key.is_empty() {
+            let (env, stored) = decode_project_env_row(row);
+            out.push((key, env, stored));
+        }
+    }
+    Ok(out)
 }
 
 pub(super) fn row_to_run_config(row: &sqlx::sqlite::SqliteRow) -> IdeRunConfig {
@@ -347,7 +374,15 @@ pub(super) fn row_to_run_config(row: &sqlx::sqlite::SqliteRow) -> IdeRunConfig {
     let compound_s: String = row
         .try_get("compound_ids_json")
         .unwrap_or_else(|_| "[]".into());
+    let maven_s: String = row
+        .try_get("maven_profiles_json")
+        .unwrap_or_else(|_| "[]".into());
+    let spring_s: String = row
+        .try_get("spring_profiles_json")
+        .unwrap_or_else(|_| "[]".into());
     let inherit_shell_env = row.try_get::<i64, _>("inherit_shell_env").unwrap_or(1) != 0;
+    let skip_tests = row.try_get::<i64, _>("skip_tests").unwrap_or(0) != 0;
+    let offline = row.try_get::<i64, _>("offline").unwrap_or(0) != 0;
 
     IdeRunConfig {
         id: row.try_get("id").unwrap_or_default(),
@@ -366,8 +401,11 @@ pub(super) fn row_to_run_config(row: &sqlx::sqlite::SqliteRow) -> IdeRunConfig {
         target_path: row.try_get("target_path").ok().flatten(),
         test_filter: row.try_get("test_filter").ok().flatten(),
         compound_configs: serde_json::from_str(&compound_s).unwrap_or_default(),
+        maven_profiles: serde_json::from_str(&maven_s).unwrap_or_default(),
+        spring_profiles: serde_json::from_str(&spring_s).unwrap_or_default(),
+        skip_tests,
+        offline,
         auto_detected: false,
-        ..Default::default()
     }
 }
 

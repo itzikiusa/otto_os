@@ -27,14 +27,10 @@ import type {
   RuntimeSessionStatus,
   Session,
 } from '../../../lib/api/types';
+import { isRuntimeProvider, RUNTIME_PROVIDERS } from '../../../lib/providers';
 import { threads } from '../threadsStore.svelte';
 
-const RUNTIME_PROVIDERS: readonly string[] = ['claude', 'codex', 'gemini', 'grok', 'agy', 'opencode', 'pi'];
-
-/** Providers a new thread runs on the structured runtime (the rest stay PTY). */
-export function isRuntimeProvider(provider: string): provider is RuntimeProvider {
-  return RUNTIME_PROVIDERS.includes(provider);
-}
+export { isRuntimeProvider, RUNTIME_PROVIDERS };
 
 /** `set_session_status` in otto-agent-protocol's runtime.rs. */
 const SESSION_STATUS: Record<ProviderSessionStatus, RuntimeSessionStatus> = {

@@ -62,12 +62,8 @@ pub async fn run_deps_action(
         ("go.mod", "vendor") => exec_cmd("go", &["mod", "vendor"], &dir, env_map).await?,
         ("go.mod", "sync") => exec_cmd("go", &["mod", "download"], &dir, env_map).await?,
         ("go.mod", "why") => {
-            let m = req
-                .module
-                .as_deref()
-                .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| Error::Invalid("module is required for 'why'".into()))?;
-            exec_cmd("go", &["mod", "why", "-m", m.trim()], &dir, env_map).await?
+            let m = validate_dep_spec("module", req.module.as_deref().unwrap_or(""))?;
+            exec_cmd("go", &["mod", "why", "-m", "--", m], &dir, env_map).await?
         }
         ("go.mod", "merge_directives") => {
             let raw = fs::read_to_string(manifest_path)
@@ -78,31 +74,26 @@ pub async fn run_deps_action(
             (true, "Merged require directives".into())
         }
         ("go.mod", "update_one") => {
-            let m = req
-                .module
-                .as_deref()
-                .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| Error::Invalid("module is required for 'update_one'".into()))?;
-            let v = req
-                .version
-                .as_deref()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or("latest");
+            let m = validate_dep_spec("module", req.module.as_deref().unwrap_or(""))?;
+            let v = match req.version.as_deref().filter(|s| !s.trim().is_empty()) {
+                Some(rv) => validate_dep_spec("version", rv)?,
+                None => "latest",
+            };
             // Perform instant deterministic in-place edit first when an exact version is given,
             // then run `go get` when non-isolated so `go.sum` stays in sync.
             if v != "latest" && v != "patch" {
                 let raw = fs::read_to_string(manifest_path)
                     .map_err(|e| Error::Internal(format!("read go.mod: {e}")))?;
-                if let Some(updated) = bump_go_mod_in_place(&raw, m.trim(), v.trim()) {
+                if let Some(updated) = bump_go_mod_in_place(&raw, m, v) {
                     fs::write(manifest_path, updated)
                         .map_err(|e| Error::Internal(format!("write go.mod: {e}")))?;
                 }
             }
             if !otto_core::e2e::isolated() {
-                let spec = format!("{}@{}", m.trim(), v.trim());
-                let _ = exec_cmd("go", &["get", &spec], &dir, env_map).await;
+                let spec = format!("{m}@{v}");
+                let _ = exec_cmd("go", &["get", "--", &spec], &dir, env_map).await;
             }
-            (true, format!("Updated {} to {}", m.trim(), v.trim()))
+            (true, format!("Updated {m} to {v}"))
         }
         (
             "go.mod",
@@ -117,7 +108,7 @@ pub async fn run_deps_action(
                 let raw = fs::read_to_string(manifest_path).unwrap_or_default();
                 let direct_mods: Vec<String> = parse_go_mod(&raw)
                     .into_iter()
-                    .filter(|d| !d.indirect)
+                    .filter(|d| !d.indirect && validate_dep_spec("module", &d.name).is_ok())
                     .map(|d| {
                         if patch_only {
                             format!("{}@patch", d.name)
@@ -129,7 +120,7 @@ pub async fn run_deps_action(
                 if direct_mods.is_empty() {
                     (true, "No direct dependencies to update".into())
                 } else {
-                    let mut args: Vec<&str> = vec!["get"];
+                    let mut args: Vec<&str> = vec!["get", "--"];
                     for dm in &direct_mods {
                         args.push(dm.as_str());
                     }
@@ -208,26 +199,15 @@ pub async fn run_deps_action(
             (true, format!("Updated {count} dependencies"))
         }
         (_, "update_one") => {
-            let m = req
-                .module
-                .as_deref()
-                .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| Error::Invalid("module is required for 'update_one'".into()))?;
-            let v = req
-                .version
-                .as_deref()
-                .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| Error::Invalid("version is required for 'update_one'".into()))?;
+            let m = validate_dep_spec("module", req.module.as_deref().unwrap_or(""))?;
+            let v = validate_dep_spec("version", req.version.as_deref().unwrap_or(""))?;
             let raw = fs::read_to_string(manifest_path)
                 .map_err(|e| Error::Internal(format!("read {}: {e}", manifest_path.display())))?;
-            let updated =
-                bump_manifest_version_in_place(manifest_path, fname, &raw, m.trim(), v.trim())
-                    .ok_or_else(|| {
-                        Error::Invalid(format!("dependency '{}' not found in {fname}", m.trim()))
-                    })?;
+            let updated = bump_manifest_version_in_place(manifest_path, fname, &raw, m, v)
+                .ok_or_else(|| Error::Invalid(format!("dependency '{m}' not found in {fname}")))?;
             fs::write(manifest_path, &updated)
                 .map_err(|e| Error::Internal(format!("write {}: {e}", manifest_path.display())))?;
-            (true, format!("Updated {} to {}", m.trim(), v.trim()))
+            (true, format!("Updated {m} to {v}"))
         }
         _ => {
             return Err(Error::Invalid(format!(
@@ -255,6 +235,23 @@ pub async fn run_deps_action(
         updated_content,
         output,
     })
+}
+
+fn validate_dep_spec<'a>(label: &str, raw: &'a str) -> Result<&'a str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(Error::Invalid(format!("{label} is required")));
+    }
+    if trimmed.starts_with('-')
+        || trimmed
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '<' | '>' | '"' | '\''))
+    {
+        return Err(Error::Invalid(format!(
+            "invalid {label} '{trimmed}': must not start with '-' or contain whitespace, quotes, or control characters"
+        )));
+    }
+    Ok(trimmed)
 }
 
 async fn exec_cmd(
@@ -321,7 +318,7 @@ pub fn bump_manifest_version_in_place(
                     );
                 }
             }
-            if hit.managed_in.is_some() {
+            if hit.managed_in.is_some() || hit.current_version.is_empty() {
                 // Insert explicit `<version>` line right after `<artifactId>`
                 let lines: Vec<&str> = content.lines().collect();
                 let art_idx = (hit.line as usize).saturating_sub(1);
@@ -436,15 +433,18 @@ fn merge_go_mod_requires(content: &str) -> String {
     let mut header_lines = Vec::new();
     let mut in_req = false;
     for line in content.lines() {
-        let t = line.trim();
-        if t.starts_with("require") {
-            if t.contains('(') {
-                in_req = true;
+        let code_t = line.split_once("//").map_or(line, |(c, _)| c).trim();
+        if let Some(rest) = code_t.strip_prefix("require") {
+            if rest.is_empty() || rest.starts_with(char::is_whitespace) || rest.starts_with('(') {
+                let after = rest.trim();
+                if after.starts_with('(') && !after.contains(')') {
+                    in_req = true;
+                }
+                continue;
             }
-            continue;
         }
         if in_req {
-            if t.starts_with(')') {
+            if code_t.starts_with(')') || code_t.ends_with(')') {
                 in_req = false;
             }
             continue;
@@ -474,4 +474,125 @@ fn merge_go_mod_requires(content: &str) -> String {
     }
     header_lines.push(String::new());
     header_lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_line_empty_package_json_deps_never_misparse_scripts() {
+        let pkg = r#"{
+  "name": "demo",
+  "dependencies": {},
+  "devDependencies": {},
+  "scripts": {
+    "test": "vitest",
+    "build": "tsc"
+  }
+}
+"#;
+        let items = parse_package_json(pkg);
+        assert!(
+            items.is_empty(),
+            "empty dependencies/devDependencies must not leak into scripts: {items:?}"
+        );
+    }
+
+    #[test]
+    fn go_mod_single_line_require_parens_preserve_replace_blocks_and_token_boundaries() {
+        let go_mod = "module example.com/app\n\ngo 1.22\n\nrequire ()\n\nreplace (\n\texample.com/old => ../local_old\n)\n\nrequire (example.com/inline v1.2.0)\nrequire (\n\tgithub.com/foo/bar v1.0.0\n\tgithub.com/foo/bar-baz v2.0.0\n)\n";
+        let items = parse_go_mod(go_mod);
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "example.com/inline",
+                "github.com/foo/bar",
+                "github.com/foo/bar-baz"
+            ]
+        );
+
+        let bumped = bump_go_mod_in_place(go_mod, "github.com/foo/bar", "v1.1.0")
+            .expect("bump exact module");
+        assert!(bumped.contains("\tgithub.com/foo/bar v1.1.0\n"));
+        assert!(bumped.contains("\tgithub.com/foo/bar-baz v2.0.0\n"));
+
+        let merged = merge_go_mod_requires(go_mod);
+        assert!(
+            merged.contains("replace (\n\texample.com/old => ../local_old\n)"),
+            "merge_go_mod_requires must preserve replace block after require (): {merged}"
+        );
+        assert!(merged.contains("\texample.com/inline v1.2.0"));
+    }
+
+    #[test]
+    fn versionless_bom_pom_dependency_inserts_version_tag_after_artifact_id() {
+        let pom = r#"<project>
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-dependencies</artifactId>
+        <version>3.2.0</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+  </dependencies>
+</project>
+"#;
+        let updated = bump_manifest_version_in_place(
+            Path::new("/tmp/nonexistent/pom.xml"),
+            "pom.xml",
+            pom,
+            "org.springframework.boot:spring-boot-starter-web",
+            "3.3.1",
+        )
+        .expect("insert version tag");
+        assert!(
+            updated.contains(
+                "      <artifactId>spring-boot-starter-web</artifactId>\n      <version>3.3.1</version>\n"
+            ),
+            "expected clean <version> insertion after <artifactId>, got:\n{updated}"
+        );
+        assert!(!updated.contains("3.3.1    <dependency>"));
+    }
+
+    #[tokio::test]
+    async fn deps_action_rejects_flag_injection_and_whitespace_specs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let go_mod_path = root.join("go.mod");
+        fs::write(&go_mod_path, "module example.com/app\n\ngo 1.22\n").unwrap();
+        let history = LocalHistoryStore::new(root.join(".history"));
+
+        for (action, bad_mod, bad_ver) in [
+            ("why", Some("-toolexec=/bin/sh"), None),
+            ("update_one", Some("-modfile=evil.mod"), Some("v1.0.0")),
+            ("update_one", Some("example.com/pkg"), Some("-u=evil")),
+            ("update_one", Some("example.com/pkg extra"), Some("v1.0.0")),
+        ] {
+            let req = IdeDepsActionReq {
+                target: None,
+                path: go_mod_path.to_string_lossy().into_owned(),
+                action: action.into(),
+                module: bad_mod.map(str::to_string),
+                version: bad_ver.map(str::to_string),
+            };
+            let err = run_deps_action(&root, &go_mod_path, &req, &BTreeMap::new(), &history)
+                .await
+                .expect_err("flag or whitespace injection must be rejected");
+            assert!(
+                matches!(err, Error::Invalid(_)),
+                "expected Error::Invalid, got {err:?}"
+            );
+        }
+    }
 }

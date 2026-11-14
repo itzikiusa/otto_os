@@ -5,9 +5,9 @@
 
   let coreThemeMod: typeof CmIdeThemeType | null = null;
   let coreHistMod: typeof CmIdeHistType | null = null;
-  export function registerIdeEditorCore(themeMod: typeof CmIdeThemeType, histMod: typeof CmIdeHistType): void {
+  export function registerIdeEditorCore(themeMod: typeof CmIdeThemeType, histMod?: typeof CmIdeHistType | null): void {
     coreThemeMod = themeMod;
-    coreHistMod = histMod;
+    if (histMod) coreHistMod = histMod;
   }
 </script>
 
@@ -32,7 +32,7 @@
   import {
     applyLinePrefixSuffixSync, buildEditorFindProviderSpec,
     buildReadOnlyExtension, computeCursorChangeInfo, createCompletionExtension,
-    createEditorStateCache, FALLBACK_IDE_PREFS,
+    createEditorStateCache,
     foldMarkerGutter, hasLongLine, langExtOf,
     lightEditorTheme, parkEditorHistory, placeholderEditorTheme, restoreOrCreateEditorState,
     revealEditorLine, splitSelectionIntoLinesSync, type CursorChangeInfo,
@@ -100,15 +100,15 @@
     onOpenLocalHistory = null, onOpenDepAnalyzer = null, onOpenManifestIntention = null, onManifestDepsUpdated = null,
   }: Props = $props();
 
-  let idePrefs = $state<CmIdeThemeType.IdeEditorPreferences>(coreThemeMod ? coreThemeMod.readIdeEditorPreferences() : FALLBACK_IDE_PREFS);
+  let idePrefs = $state<CmIdeThemeType.IdeEditorPreferences | null>(coreThemeMod ? coreThemeMod.readIdeEditorPreferences() : null);
   const effectiveIdeScheme = $derived(
-    coreThemeMod
+    coreThemeMod && idePrefs
       ? coreThemeMod.resolveEffectiveIdeScheme(idePrefs, ui.resolvedScheme)
       : (ui.resolvedScheme === 'dark' ? 'jetbrains-islands-dark' : 'jetbrains-islands-light'),
   );
 
   function themeExt(appScheme: 'light' | 'dark', plain = false): Extension {
-    if (ideMode && coreThemeMod) {
+    if (ideMode && coreThemeMod && idePrefs) {
       const scheme = coreThemeMod.resolveEffectiveIdeScheme(idePrefs, appScheme);
       return coreThemeMod.createIdeSyntaxTheme({ dark: coreThemeMod.isDarkIdeScheme(scheme), plain, ideMode: true });
     }
@@ -118,22 +118,14 @@
 
   let container: HTMLDivElement | undefined = $state();
   let view: EditorView | null = null;
-  let lspCompartment = new Compartment();
-  let ideBpCompartment = new Compartment();
-  let ideCompartment = new Compartment();
-  let ideDepsCompartment = new Compartment();
-  let readOnlyCompartment = new Compartment();
-  let appliedReadOnly = true;
-  let completionCompartment = new Compartment();
-  let placeholderCompartment = new Compartment();
-  let appliedPlaceholder = '';
-  let wrapCompartment = new Compartment();
-  let appliedWrap = false;
+  let lspCompartment = new Compartment(), ideBpCompartment = new Compartment();
+  let ideCompartment = new Compartment(), ideDepsCompartment = new Compartment();
+  let readOnlyCompartment = new Compartment(), completionCompartment = new Compartment();
+  let placeholderCompartment = new Compartment(), wrapCompartment = new Compartment(), langCompartment = new Compartment();
+  let appliedReadOnly = true, appliedPlaceholder = '', appliedWrap = false, appliedLangReady = true;
   let appliedDialect: SqlDialectName = 'standard';
-  let langCompartment = new Compartment();
-  let appliedLangReady = true;
   let appliedLanguage: string | undefined = undefined;
-  let livePath = '';
+  let livePath = '', liveSavedContent: string | null = null;
   let pendingScrollTop: number | null = null;
   let historySaveTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -143,8 +135,7 @@
 
   let ideMod: typeof CmIdeMod | null = null;
   let ideModPromise: Promise<typeof CmIdeMod> | null = null;
-  let ideMounted = false;
-  let appliedIdePath = '';
+  let ideMounted = false, appliedIdePath = '';
   let appliedKeymapPreset: 'jetbrains' | 'standard' = 'jetbrains';
 
   function ensureIdeMod(): Promise<typeof CmIdeMod> {
@@ -424,7 +415,9 @@
   export function notifyDidSave(): void {
     if (view && ideMod) ideMod.notifyLspDidSave(view);
     if (view && ideMode && !readOnly && livePath) {
-      coreHistMod?.persistIdeUndoJournal(livePath, view.state, view.state.doc.toString(), view.scrollDOM.scrollTop);
+      const savedDoc = view.state.doc.toString();
+      liveSavedContent = savedDoc;
+      coreHistMod?.persistIdeUndoJournal(livePath, view.state, savedDoc, view.scrollDOM.scrollTop);
     }
   }
 
@@ -456,7 +449,7 @@
       readOnlyCompartment.of(readOnlyExt(readOnly, hk)),
       completionCompartment.of(completionExt()),
       placeholderCompartment.of(placeholderExt((appliedPlaceholder = placeholder))),
-      wrapCompartment.of(wrapExt((appliedWrap = wrap || (ideMode && idePrefs.wordWrap)))),
+      wrapCompartment.of(wrapExt((appliedWrap = wrap || Boolean(ideMode && idePrefs?.wordWrap)))),
       placeholderEditorTheme, search({ top: false }),
       themeCompartment.of(themeExt(ui.resolvedScheme, appliedPlain)),
       lspCompartment.of([]), selectionListener, changeListener,
@@ -484,9 +477,10 @@
   }
 
   function parkHistory(forPath: string, state: EditorState, scrollTop: number, diskSaved?: string | null): void {
+    const resolvedSaved = diskSaved !== undefined ? diskSaved : (forPath === livePath ? liveSavedContent : null);
     parkEditorHistory({
       forPath, state, scrollTop, readOnly, ideMode,
-      diskSaved: diskSaved ?? savedContent, langReady: appliedLangReady, language: appliedLanguage,
+      diskSaved: resolvedSaved, langReady: appliedLangReady, language: appliedLanguage,
       coreHistMod, historyKey,
     });
   }
@@ -494,7 +488,7 @@
   function parkLive(): void {
     if (historySaveTimer !== null) clearTimeout(historySaveTimer);
     historySaveTimer = null;
-    if (view) parkHistory(livePath, view.state, view.scrollDOM.scrollTop, savedContent);
+    if (view) parkHistory(livePath, view.state, view.scrollDOM.scrollTop, liveSavedContent);
   }
 
   function applyPendingScroll(): void {
@@ -510,7 +504,7 @@
     if (u.state.doc.length > PERSIST_MAX_BYTES) return;
     historySaveTimer = setTimeout(() => {
       historySaveTimer = null;
-      if (view) parkHistory(livePath, view.state, view.scrollDOM.scrollTop, savedContent);
+      if (view) parkHistory(livePath, view.state, view.scrollDOM.scrollTop, liveSavedContent);
     }, ideMode ? 600 : 1500);
   });
 
@@ -527,7 +521,7 @@
 
   function buildEditor(el: HTMLDivElement, filePath: string, fileContent: string, rootPath: string, connId?: string | null): void {
     parkLive();
-    stateCache.drainAndClear((p, st) => parkHistory(p, st, 0));
+    stateCache.drainAndClear((p, st, evSaved) => parkHistory(p, st, 0, evSaved));
     teardownEditor();
     lspCompartment = new Compartment(); ideBpCompartment = new Compartment();
     ideCompartment = new Compartment(); ideDepsCompartment = new Compartment();
@@ -538,6 +532,7 @@
 
     skipDestroyPark = false;
     livePath = filePath;
+    liveSavedContent = savedContent;
     view = new EditorView({ state: createState(filePath, fileContent), parent: el });
     applyPendingScroll();
     ensureLang(filePath);
@@ -556,19 +551,21 @@
 
     const prevScrollTop = view.scrollDOM.scrollTop;
     const prevSel = view.state.selection.main;
+    const outgoingSaved = liveSavedContent;
     stateCache.saveLightMeta(fromPath, prevScrollTop, prevSel.anchor, prevSel.head);
     view.dispatch({ effects: [lspCompartment.reconfigure([]), ideDepsCompartment.reconfigure([])] });
 
-    parkHistory(fromPath, view.state, prevScrollTop, savedContent);
+    parkHistory(fromPath, view.state, prevScrollTop, outgoingSaved);
     stateCache.stashOutgoing(
       fromPath,
-      { state: view.state, scroll: view.scrollSnapshot(), chars: view.state.doc.length, dialect: appliedDialect, langReady: appliedLangReady, language: appliedLanguage },
+      { state: view.state, scroll: view.scrollSnapshot(), chars: view.state.doc.length, dialect: appliedDialect, langReady: appliedLangReady, language: appliedLanguage, savedContent: outgoingSaved },
       ideMode,
-      (evPath, evState) => parkHistory(evPath, evState, 0),
+      (evPath, evState, evSaved) => parkHistory(evPath, evState, 0, evSaved),
     );
 
     skipDestroyPark = false;
     livePath = toPath;
+    liveSavedContent = savedContent;
     const kept = stateCache.takeKept(toPath);
     if (!kept) {
       const st = createState(toPath, toContent);
@@ -592,7 +589,7 @@
         readOnlyCompartment.reconfigure(readOnlyExt((appliedReadOnly = readOnly), readOnly ? null : (historyKey?.(toPath) ?? null))),
         completionCompartment.reconfigure(completionExt()),
         placeholderCompartment.reconfigure(placeholderExt((appliedPlaceholder = placeholder))),
-        wrapCompartment.reconfigure(wrapExt((appliedWrap = wrap || (ideMode && idePrefs.wordWrap)))),
+        wrapCompartment.reconfigure(wrapExt((appliedWrap = wrap || Boolean(ideMode && idePrefs?.wordWrap)))),
         themeCompartment.reconfigure(themeExt(ui.resolvedScheme, appliedPlain)),
         kept.scroll,
       ];
@@ -646,12 +643,13 @@
 
   $effect(() => {
     if (!ideMode || typeof window === 'undefined') return;
+    if (!idePrefs && coreThemeMod) idePrefs = coreThemeMod.readIdeEditorPreferences();
     const onPrefs = () => {
       if (coreThemeMod) idePrefs = coreThemeMod.readIdeEditorPreferences();
       if (!view) return;
       const effects: StateEffect<unknown>[] = [
         themeCompartment.reconfigure(themeExt(ui.resolvedScheme, appliedPlain)),
-        wrapCompartment.reconfigure(wrapExt((appliedWrap = wrap || (ideMode && idePrefs.wordWrap)))),
+        wrapCompartment.reconfigure(wrapExt((appliedWrap = wrap || Boolean(ideMode && idePrefs?.wordWrap)))),
       ];
       if (ideMod && ideMounted && isIdeActive()) effects.push(ideCompartment.reconfigure(buildIdeExtIfLoaded()));
       view.dispatch({ effects });
@@ -667,7 +665,7 @@
       else if (ideMod && ideMounted) view.dispatch({ effects: makeEffect(ideMod) });
     });
   }
-  $effect(() => { const v = savedContent; syncIdeEffect(v != null, (m) => m.setSavedContentEffect.of(v)); });
+  $effect(() => { const v = savedContent; if (livePath === path) liveSavedContent = v; syncIdeEffect(v != null, (m) => m.setSavedContentEffect.of(v)); });
   $effect(() => { const v = blameByLine; syncIdeEffect(v != null, (m) => m.setBlameLinesEffect.of(v)); });
   $effect(() => { const b = breakpoints, mu = breakpointsMuted; syncIdeEffect(b.length > 0 || !!onToggleBreakpoint, (m) => m.setBreakpointsEffect.of({ breakpoints: b, muted: mu })); });
   $effect(() => { const v = gutterItems; syncIdeEffect(v.length > 0, (m) => m.setGutterItemsEffect.of(v)); });
@@ -692,7 +690,7 @@
     view.dispatch({ effects: readOnlyCompartment.reconfigure(readOnlyExt(ro, ro ? null : untrack(() => historyKey?.(livePath) ?? null))) });
   });
   $effect(() => {
-    const on = wrap || (ideMode && idePrefs.wordWrap);
+    const on = wrap || Boolean(ideMode && idePrefs?.wordWrap);
     if (!view || on === appliedWrap) return;
     appliedWrap = on; view.dispatch({ effects: wrapCompartment.reconfigure(wrapExt(on)) });
   });
@@ -745,7 +743,7 @@
     unregisterParker(); changes.flush();
     if (!skipDestroyPark) {
       parkLive();
-      stateCache.drainAndClear((p, st) => parkHistory(p, st, 0));
+      stateCache.drainAndClear((p, st, evSaved) => parkHistory(p, st, 0, evSaved));
     } else {
       if (historySaveTimer !== null) { clearTimeout(historySaveTimer); historySaveTimer = null; }
       stateCache.evict('all', historyKey);
@@ -756,8 +754,8 @@
 
 <div class="code-editor-outer" class:is-ide={ideMode} data-lang={language ?? ''}
   data-ide-scheme={ideMode ? effectiveIdeScheme : undefined}
-  style:--ide-editor-fs={ideMode ? `${idePrefs.fontSize}px` : undefined}
-  style:--ide-editor-lh={ideMode ? String(idePrefs.lineHeight) : undefined}>
+  style:--ide-editor-fs={ideMode ? `${idePrefs?.fontSize ?? 13}px` : undefined}
+  style:--ide-editor-lh={ideMode ? String(idePrefs?.lineHeight ?? 1.55) : undefined}>
   <div class="code-editor-wrap" dir="ltr" bind:this={container}></div>
   {#if sel && !ideMode && !onAgentAction}<button class="send-to-agent-btn" onclick={sendToAgent} type="button">Send to agent ↗</button>{/if}
 </div>

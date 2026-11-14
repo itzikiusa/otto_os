@@ -25,7 +25,8 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::Notify;
 
-use crate::types::IdeShellEnvResp;
+use crate::target::TargetManager;
+use crate::types::{IdeShellEnvResp, IdeSshSpec, IdeTargetSpec};
 
 use super::is_valid_env_key;
 
@@ -297,6 +298,80 @@ pub(crate) fn collect_process_base_env() -> BTreeMap<String, String> {
         }
     }
     out
+}
+
+/// Minimal safe host environment subset for non-root callers so the daemon
+/// owner's process environment secrets never enter `effective_env`.
+pub(crate) fn collect_safe_non_root_base_env() -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for key in ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TERM"] {
+        if let Ok(val) = std::env::var(key) {
+            if should_keep_env_entry(key, &val) {
+                out.insert(key.to_string(), val);
+            }
+        }
+    }
+    out
+}
+
+/// Probe the login shell environment on a remote SSH target (`GET /ide/shell-env`
+/// and `POST /ide/shell-env/reload` when `target.kind == ssh`).
+pub async fn probe_remote_shell_env(
+    targets: &TargetManager,
+    target: &IdeTargetSpec,
+    ssh: &IdeSshSpec,
+) -> otto_core::Result<IdeShellEnvResp> {
+    let started = Instant::now();
+    let resolved = targets.resolve_with_ssh(target, "ide-shell-env", ssh.clone())?;
+    let token = PROBE_TOKEN_SEQ.fetch_add(1, Ordering::Relaxed);
+    let start_marker = format!("__OTTO_REMOTE_ENV_BEGIN_{token}__");
+    let end_marker = format!("__OTTO_REMOTE_ENV_END_{token}__");
+    let script = format!(
+        "sh_bin=\"${{SHELL:-/bin/sh}}\"; \"$sh_bin\" -lc 'printf \"%s\" \"{start_marker}\"; (env -0 2>/dev/null || printenv -0 2>/dev/null); printf \"%s\" \"{end_marker}\"; printf \"\\n__OTTO_SHELL__=%s\\n\" \"${{SHELL:-/bin/sh}}\"'"
+    );
+    let out = targets
+        .exec_shell(
+            &resolved,
+            &script,
+            Some(&target.root),
+            &BTreeMap::new(),
+            Duration::from_secs(8),
+        )
+        .await?;
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let shell_name = out
+        .stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("__OTTO_SHELL__="))
+        .unwrap_or("/bin/sh")
+        .trim()
+        .to_string();
+
+    match parse_sentinel_env_zero(out.stdout.as_bytes(), &start_marker, &end_marker) {
+        Ok(vars) => {
+            let var_count = vars.len();
+            Ok(IdeShellEnvResp {
+                status: "ready".to_string(),
+                shell: shell_name,
+                var_count,
+                env: vars.clone(),
+                vars,
+                loaded_at: Some(Utc::now().to_rfc3339()),
+                duration_ms: Some(duration_ms),
+                error: None,
+            })
+        }
+        Err(err) => Ok(IdeShellEnvResp {
+            status: "degraded".to_string(),
+            shell: shell_name,
+            var_count: 0,
+            vars: BTreeMap::new(),
+            env: BTreeMap::new(),
+            loaded_at: Some(Utc::now().to_rfc3339()),
+            duration_ms: Some(duration_ms),
+            error: Some(err),
+        }),
+    }
 }
 
 fn detect_user_shell() -> String {

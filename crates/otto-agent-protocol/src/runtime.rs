@@ -1274,6 +1274,8 @@ impl AgentRuntime {
                 attachments,
             },
         );
+        user.started_at = Some(now);
+        user.completed_at = Some(now);
         user.turn_id = Some(turn_id.clone());
         upsert_item(&self.inner, live, &mut st, user);
         set_session_status(
@@ -2340,6 +2342,35 @@ fn flush_held(inner: &Inner, live: &Live, st: &mut State) {
 }
 
 fn upsert_item(inner: &Inner, live: &Live, st: &mut State, mut item: TurnItem) {
+    let now_utc = Utc::now();
+    if let Some(prior) = st
+        .held
+        .iter()
+        .find(|h| h.id == item.id)
+        .or_else(|| st.proj.items.get(&item.id))
+    {
+        if prior.started_at.is_some() {
+            item.started_at = prior.started_at;
+        } else if item.started_at.is_none() {
+            item.started_at = Some(now_utc);
+        }
+        if item.status.is_open() {
+            item.completed_at = None;
+        } else if !prior.status.is_open() && prior.completed_at.is_some() {
+            item.completed_at = prior.completed_at;
+        } else if item.completed_at.is_none() {
+            item.completed_at = prior.completed_at.or(Some(now_utc));
+        }
+    } else {
+        if item.started_at.is_none() {
+            item.started_at = Some(now_utc);
+        }
+        if item.status.is_open() {
+            item.completed_at = None;
+        } else if item.completed_at.is_none() {
+            item.completed_at = Some(now_utc);
+        }
+    }
     // Superseded: the newer state of a held item replaces it.
     st.held.retain(|h| h.id != item.id);
     let window = inner.config.stream_coalesce;
@@ -2351,7 +2382,7 @@ fn upsert_item(inner: &Inner, live: &Live, st: &mut State, mut item: TurnItem) {
             .is_some_and(|t| now.duration_since(*t) < window);
         if recent && st.proj.items.contains_key(&item.id) {
             item.ordinal = st.proj.items[&item.id].ordinal;
-            item.updated_at = Utc::now();
+            item.updated_at = now_utc;
             st.held.push(item);
             return;
         }
@@ -2366,7 +2397,7 @@ fn upsert_item(inner: &Inner, live: &Live, st: &mut State, mut item: TurnItem) {
             st.proj.next_item_ordinal
         }
     };
-    item.updated_at = Utc::now();
+    item.updated_at = now_utc;
     emit(
         inner,
         live,
@@ -2376,8 +2407,13 @@ fn upsert_item(inner: &Inner, live: &Live, st: &mut State, mut item: TurnItem) {
 }
 
 fn settle_item(item: &mut TurnItem, status: TurnItemStatus, now: chrono::DateTime<Utc>) {
+    if item.started_at.is_none() {
+        item.started_at = Some(now);
+    }
     if item.status.is_open() {
         item.status = status;
+        item.completed_at = Some(now);
+    } else if item.completed_at.is_none() {
         item.completed_at = Some(now);
     }
     match &mut item.kind {
@@ -3023,3 +3059,7 @@ fn scope_request_id(st: &State, native: &str) -> String {
         .request_ids
         .scoped(native)
 }
+
+#[cfg(test)]
+#[path = "runtime_tests.rs"]
+mod tests;

@@ -515,9 +515,18 @@ fn push_sdk(
 
 pub(super) const REMOTE_PROBE_SCRIPT: &str = r#"
 echo "UNAME:$(uname -s) $(uname -m)"
-export PATH="$HOME/.otto/toolchains/go/bin:$HOME/.otto/toolchains/rust/bin:$HOME/.otto/toolchains/rust/cargo/bin:$HOME/.otto/toolchains/python/bin:$HOME/.otto/toolchains/shell/bin:$HOME/.otto/toolchains/json/bin:$HOME/.cargo/bin:$HOME/go/bin:/opt/homebrew/bin:/usr/local/go/bin:/usr/local/bin:$PATH"
-for d in "$HOME"/.otto/toolchains/java/jdks/*; do [ -d "$d" ] && echo "SDK:java:otto:$d"; done
-for d in "$HOME"/.otto/toolchains/go/sdks/*; do [ -d "$d" ] && echo "SDK:go:otto:$d"; done
+export PATH="$HOME/.otto/toolchains/java/current/bin:$HOME/.otto/toolchains/go/current/bin:$HOME/.otto/toolchains/node/current/bin:$HOME/.otto/toolchains/go/bin:$HOME/.otto/toolchains/rust/bin:$HOME/.otto/toolchains/rust/cargo/bin:$HOME/.otto/toolchains/python/bin:$HOME/.otto/toolchains/shell/bin:$HOME/.otto/toolchains/json/bin:$HOME/.cargo/bin:$HOME/go/bin:/opt/homebrew/bin:/usr/local/go/bin:/usr/local/bin:$PATH"
+for d in "$HOME"/.otto/toolchains/java/jdks/*; do
+  [ -d "$d" ] || continue
+  jh=""
+  for cand in "$d/Contents/Home" "$d" "$d"/*/Contents/Home "$d"/*; do
+    if [ -x "$cand/bin/java" ]; then jh="$cand"; break; fi
+  done
+  [ -n "$jh" ] && echo "SDK:java:otto:$jh"
+done
+for d in "$HOME"/.otto/toolchains/go/sdks/*; do
+  if [ -x "$d/go/bin/go" ]; then echo "SDK:go:otto:$d/go"; elif [ -x "$d/bin/go" ]; then echo "SDK:go:otto:$d"; fi
+done
 for d in "$HOME"/.otto/toolchains/rust/rustup/toolchains/*; do [ -d "$d" ] && echo "SDK:rust:otto:$d"; done
 for d in "$HOME"/.otto/toolchains/node/sdks/*; do [ -d "$d" ] && echo "SDK:node:otto:$d"; done
 for d in "$HOME"/.otto/toolchains/python/interpreters/*; do [ -x "$d/bin/python3" ] && echo "SDK:python:otto:$d/bin/python3"; done
