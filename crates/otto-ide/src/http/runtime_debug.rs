@@ -62,9 +62,29 @@ pub(super) async fn put_environments<S: IdeCtx>(
 pub(super) async fn create_python_venv<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeCreatePythonVenvReq>,
+    Json(mut req): Json<IdeCreatePythonVenvReq>,
 ) -> ApiResult<Json<IdeCreatePythonVenvResp>> {
+    if req.target.root.trim().is_empty() {
+        if let Some(r) = req.root.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            req.target = crate::types::IdeTargetSpec::local(r.to_string());
+        }
+    }
+    ctx.ide()
+        .environments
+        .enrich_target_roots(&ctx.pool(), &mut req.target)
+        .await;
     let _ = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
+    if req.target.kind == crate::types::IdeTargetKind::Local {
+        if let Some(explicit_root) = req
+            .root
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != req.target.root)
+        {
+            let sub_target = crate::types::IdeTargetSpec::local(explicit_root.to_string());
+            let _ = ctx.ide().targets.resolve(&ctx, &user, &sub_target).await?;
+        }
+    }
     let ssh = resolve_ssh_opt(&ctx, &user, &req.target).await?;
     let resp = ctx
         .ide()
@@ -174,10 +194,28 @@ pub(super) async fn start_debug_session<S: IdeCtx>(
             .ok(),
         None => None,
     };
+    let adhoc_cfg = if run_config.is_none() {
+        Some(crate::types::IdeRunConfig {
+            cwd: req.launch.cwd.clone(),
+            target_path: (!req.launch.program.trim().is_empty())
+                .then(|| req.launch.program.clone()),
+            env_file: req.launch.env_file.clone(),
+            inherit_shell_env: req.launch.inherit_shell_env.unwrap_or(true),
+            sdk_path: req.launch.sdk_path.clone(),
+            ..Default::default()
+        })
+    } else {
+        None
+    };
     let effective_env = ctx
         .ide()
         .environments
-        .build_effective_env_for_run(&ctx.pool(), ctx.secrets(), &req.target, run_config.as_ref())
+        .build_effective_env_for_run(
+            &ctx.pool(),
+            ctx.secrets(),
+            &req.target,
+            run_config.as_ref().or(adhoc_cfg.as_ref()),
+        )
         .await
         .unwrap_or_default();
     let project_env = ctx

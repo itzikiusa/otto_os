@@ -9,7 +9,8 @@ use otto_core::{Error, Result};
 use serde_json::json;
 
 use super::adapters::{
-    locate_binary, normalize_target_path, DapAdapterTransport, ResolvedDapAdapter,
+    locate_binary, normalize_target_path, resolve_debug_sdk_override, DapAdapterTransport,
+    ResolvedDapAdapter,
 };
 use super::java_bridge::{infer_java_fqcn, JavaJdwpBridgeSpec};
 use super::node_bridge::NodeInspectorBridgeSpec;
@@ -25,6 +26,14 @@ pub(super) async fn resolve_js_ts_adapter(
     env: BTreeMap<String, String>,
 ) -> Result<ResolvedDapAdapter> {
     let mut node_candidates = Vec::new();
+    if let Some(sdk) = resolve_debug_sdk_override(req, ctx, cwd) {
+        let trimmed = sdk.trim_end_matches('/');
+        if trimmed.ends_with("/node") || Path::new(trimmed).is_file() {
+            node_candidates.push(trimmed.to_string());
+        } else {
+            node_candidates.push(format!("{trimmed}/bin/node"));
+        }
+    }
     if let Some(nh) = ctx
         .project_env
         .as_ref()
@@ -184,8 +193,19 @@ pub(super) async fn resolve_java_adapter(
     }
 
     let mut jdk_bins = Vec::new();
+    if let Some(sdk) = resolve_debug_sdk_override(req, ctx, cwd) {
+        let trimmed = sdk.trim_end_matches('/');
+        let home = trimmed
+            .strip_suffix("/bin/java")
+            .or_else(|| trimmed.strip_suffix("/bin/javac"))
+            .or_else(|| trimmed.strip_suffix("/bin"))
+            .unwrap_or(trimmed);
+        jdk_bins.push(home.to_string());
+    }
     if let Some(jh) = env.get("JAVA_HOME").filter(|s| !s.is_empty()) {
-        jdk_bins.push(jh.clone());
+        if !jdk_bins.contains(jh) {
+            jdk_bins.push(jh.clone());
+        }
     }
     if req.target.kind == IdeTargetKind::Local {
         let managed = data_dir.join("toolchains/java/current");
@@ -251,7 +271,14 @@ pub(super) async fn resolve_java_adapter(
             .test_name
             .as_deref()
             .is_some_and(|s| !s.is_empty());
-        let out_base = PathBuf::from(cwd).join(".otto-java-debug-classes");
+        let mut cwd_hash: u64 = 0xcbf29ce484222325;
+        for b in cwd.as_bytes() {
+            cwd_hash ^= u64::from(*b);
+            cwd_hash = cwd_hash.wrapping_mul(0x100000001b3);
+        }
+        let out_base = data_dir
+            .join("java-debug-classes")
+            .join(format!("{cwd_hash:016x}"));
         let env_clone = env.clone();
         let plan = tokio::task::spawn_blocking(move || {
             crate::java_workspace::prepare_java_execution(

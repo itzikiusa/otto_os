@@ -318,12 +318,35 @@ impl EnvironmentManager {
         ssh: Option<&IdeSshSpec>,
     ) -> Result<IdeCreatePythonVenvResp> {
         req.target.validate()?;
-        let rel_dir = req
+        let mut effective_root = req
+            .root
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(req.target.root.as_str())
+            .to_string();
+        let mut rel_dir = req
             .venv_dir
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .unwrap_or(".venv");
+            .unwrap_or(".venv")
+            .to_string();
+
+        if req.target.kind == IdeTargetKind::Local && Path::new(&rel_dir).is_absolute() {
+            let vp = Path::new(&rel_dir).to_path_buf();
+            if let Ok(rel) = vp.strip_prefix(&effective_root) {
+                let rel_s = rel.to_string_lossy().into_owned();
+                if !rel_s.is_empty() {
+                    rel_dir = rel_s;
+                }
+            } else if let (Some(parent), Some(fname)) =
+                (vp.parent(), vp.file_name().and_then(|n| n.to_str()))
+            {
+                effective_root = parent.to_string_lossy().into_owned();
+                rel_dir = fname.to_string();
+            }
+        }
         if rel_dir.contains("..") || rel_dir.starts_with('/') {
             return Err(Error::Invalid(
                 "venv_dir must be a safe workspace-relative directory".into(),
@@ -332,13 +355,13 @@ impl EnvironmentManager {
 
         let resp = match req.target.kind {
             IdeTargetKind::Local => {
-                self.create_local_venv(&req.target.root, rel_dir, req.python_version.as_deref())
+                self.create_local_venv(&effective_root, &rel_dir, req.python_version.as_deref())
                     .await?
             }
             IdeTargetKind::Ssh => {
                 let spec = ssh.ok_or_else(|| Error::Invalid("SSH spec required".into()))?;
                 let resolved = targets.resolve_with_ssh(&req.target, "ide-venv", spec.clone())?;
-                let q_dir = shell_words::quote(rel_dir);
+                let q_dir = shell_words::quote(&rel_dir);
                 let script = match req.python_version.as_deref().filter(|s| !s.is_empty()) {
                     Some(ver) => format!(
                         "if command -v uv >/dev/null 2>&1; then uv venv --python {} {q_dir}; else python3 -m venv {q_dir}; fi && echo \"VER:$({q_dir}/bin/python --version 2>&1)\"",
@@ -352,7 +375,7 @@ impl EnvironmentManager {
                     .exec_shell(
                         &resolved,
                         &script,
-                        Some(&req.target.root),
+                        Some(&effective_root),
                         &BTreeMap::new(),
                         Duration::from_secs(120),
                     )
@@ -371,7 +394,7 @@ impl EnvironmentManager {
                     .trim_start_matches("Python ")
                     .trim()
                     .to_string();
-                let venv_path = format!("{}/{rel_dir}", req.target.root.trim_end_matches('/'));
+                let venv_path = format!("{}/{rel_dir}", effective_root.trim_end_matches('/'));
                 IdeCreatePythonVenvResp {
                     interpreter_path: format!("{venv_path}/bin/python"),
                     path: venv_path,
@@ -381,7 +404,9 @@ impl EnvironmentManager {
         };
 
         let (existing, _) = load_stored_project_env(pool, &req.target.project_key()).await?;
-        if existing.python_interpreter.is_none() {
+        if existing.python_interpreter.is_none()
+            && effective_root.trim_end_matches('/') == req.target.root.trim_end_matches('/')
+        {
             let now = Utc::now().to_rfc3339();
             let _ = sqlx::query(
                 r#"INSERT INTO ide_project_environments (project_key, root_path, python_interpreter, updated_at)

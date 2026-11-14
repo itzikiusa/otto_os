@@ -7,6 +7,7 @@ mod db_store;
 pub mod discovery;
 mod discovery_jvm_py;
 mod env_layers;
+pub(crate) mod module_sdks;
 mod run_configs;
 mod runner;
 mod runner_cmd;
@@ -39,9 +40,13 @@ pub use self::db_store::parse_dotenv;
 use self::db_store::{
     clean_opt, discover_local_dotenv_files, discover_local_python_venvs, is_valid_env_key,
     load_stored_project_env, persist_project_roots, push_unique, secret_key_ref,
-    validate_attached_folder_path, StoredEnvVar,
+    validate_attached_folder_path, StoredEnvVar, RESERVED_MODULE_SDKS_KEY,
 };
 pub use self::discovery::discover_run_configs;
+use self::module_sdks::{
+    apply_module_sdk_to_project_env, layer_child_and_module_sdk_for_run, match_longest_module_sdk,
+    sanitize_module_sdks,
+};
 use self::runner::ActiveRunHandle;
 pub use self::runner_parsers::parse_test_output;
 pub use self::shell_env::{global_shell_env, parse_sentinel_env_zero, ShellEnvResolver};
@@ -61,7 +66,7 @@ pub fn cached_shell_env_vars() -> BTreeMap<String, String> {
     global_shell_env().vars_snapshot()
 }
 
-const MAX_SYNC_PROJECT_SNAPSHOTS: usize = 32;
+const MAX_SYNC_PROJECT_SNAPSHOTS: usize = 64;
 
 #[derive(Clone, Default)]
 struct SyncProjectSnapshot {
@@ -75,23 +80,37 @@ fn sync_project_snapshots() -> &'static Mutex<Vec<SyncProjectSnapshot>> {
     SNAPSHOTS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+fn upsert_snapshot_entry(
+    guard: &mut Vec<SyncProjectSnapshot>,
+    key: String,
+    env: IdeProjectEnvironment,
+) {
+    if let Some(pos) = guard.iter().position(|s| s.key == key) {
+        guard.remove(pos);
+    }
+    guard.push(SyncProjectSnapshot { key, env });
+    if guard.len() > MAX_SYNC_PROJECT_SNAPSHOTS {
+        let excess = guard.len() - MAX_SYNC_PROJECT_SNAPSHOTS;
+        guard.drain(0..excess);
+    }
+}
+
 pub(super) fn record_sync_project_snapshot(project_key: &str, env: &IdeProjectEnvironment) {
     let mut guard = sync_project_snapshots()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    if let Some(pos) = guard.iter().position(|s| s.key == project_key) {
-        guard.remove(pos);
-    }
-    guard.push(SyncProjectSnapshot {
-        key: project_key.to_string(),
-        env: IdeProjectEnvironment {
-            env_vars: Vec::new(),
-            ..env.clone()
-        },
-    });
-    if guard.len() > MAX_SYNC_PROJECT_SNAPSHOTS {
-        let excess = guard.len() - MAX_SYNC_PROJECT_SNAPSHOTS;
-        guard.drain(0..excess);
+    let base_env = IdeProjectEnvironment {
+        env_vars: Vec::new(),
+        ..env.clone()
+    };
+    upsert_snapshot_entry(&mut guard, project_key.to_string(), base_env.clone());
+    if project_key.starts_with("local:") {
+        for (mod_root, sdk_val) in &base_env.module_sdks {
+            let mut mod_env = base_env.clone();
+            apply_module_sdk_to_project_env(&mut mod_env, mod_root, sdk_val, None, None);
+            let mod_key = format!("local:{}", mod_root.trim_end_matches('/'));
+            upsert_snapshot_entry(&mut guard, mod_key, mod_env);
+        }
     }
 }
 
@@ -101,14 +120,25 @@ fn lookup_sync_project_snapshot(project_key_or_root: &str) -> Option<IdeProjectE
     let guard = sync_project_snapshots()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    guard
-        .iter()
-        .rev()
-        .find(|s| {
-            let sk = s.key.trim_end_matches('/');
-            sk == trimmed || sk == local_key
-        })
-        .map(|s| s.env.clone())
+    if let Some(exact) = guard.iter().rev().find(|s| {
+        let sk = s.key.trim_end_matches('/');
+        sk == trimmed || sk == local_key
+    }) {
+        return Some(exact.env.clone());
+    }
+    if !trimmed.starts_with("local:") && trimmed.starts_with('/') {
+        let cands = vec![trimmed.to_string()];
+        for snap in guard.iter().rev() {
+            if let Some((mod_root, sdk_val)) =
+                match_longest_module_sdk(&snap.env.module_sdks, &cands, true)
+            {
+                let mut mod_env = snap.env.clone();
+                apply_module_sdk_to_project_env(&mut mod_env, &mod_root, &sdk_val, None, None);
+                return Some(mod_env);
+            }
+        }
+    }
+    None
 }
 
 pub fn cached_additional_roots(project_key_or_root: &str) -> Vec<String> {
@@ -548,7 +578,7 @@ impl EnvironmentManager {
 
         for item in &req.env_vars {
             let key = item.key.trim().to_string();
-            if key.is_empty() || !is_valid_env_key(&key) {
+            if key.is_empty() || key == RESERVED_MODULE_SDKS_KEY || !is_valid_env_key(&key) {
                 return Err(Error::Invalid(format!(
                     "invalid environment variable name '{key}'"
                 )));
@@ -616,6 +646,21 @@ impl EnvironmentManager {
             }
             None => prev_proj.additional_roots,
         };
+
+        let next_module_sdks = match &req.module_sdks {
+            Some(explicit_map) => sanitize_module_sdks(explicit_map),
+            None => prev_proj.module_sdks,
+        };
+        if !next_module_sdks.is_empty() {
+            let encoded = serde_json::to_string(&next_module_sdks)
+                .map_err(|e| Error::Internal(format!("serialize module_sdks: {e}")))?;
+            next_stored.push(StoredEnvVar {
+                key: RESERVED_MODULE_SDKS_KEY.into(),
+                value: Some(encoded),
+                secret: false,
+                secret_ref: None,
+            });
+        }
 
         let env_vars_json = serde_json::to_string(&next_stored)
             .map_err(|e| Error::Internal(format!("serialize env_vars_json: {e}")))?;
@@ -701,39 +746,7 @@ impl EnvironmentManager {
         target.validate()?;
         let (mut proj, mut stored_vars) =
             load_stored_project_env(pool, &target.project_key()).await?;
-
-        // Layer per-module SDK overrides if `cfg.cwd` points to an attached child repository!
-        if target.kind == IdeTargetKind::Local {
-            if let Some(mod_cwd) = cfg
-                .and_then(|c| c.cwd.as_deref())
-                .map(str::trim)
-                .filter(|s| !s.is_empty() && *s != "." && *s != target.root)
-            {
-                let mod_key = format!("local:{}", mod_cwd.trim_end_matches('/'));
-                if let Ok((mod_proj, mod_vars)) = load_stored_project_env(pool, &mod_key).await {
-                    if mod_proj.java_home.is_some() {
-                        proj.java_home = mod_proj.java_home;
-                    }
-                    if mod_proj.go_root.is_some() {
-                        proj.go_root = mod_proj.go_root;
-                    }
-                    if mod_proj.rust_toolchain.is_some() {
-                        proj.rust_toolchain = mod_proj.rust_toolchain;
-                    }
-                    if mod_proj.node_home.is_some() {
-                        proj.node_home = mod_proj.node_home;
-                    }
-                    if mod_proj.python_interpreter.is_some() {
-                        proj.python_interpreter = mod_proj.python_interpreter;
-                    }
-                    if mod_proj.dotenv_path.is_some() {
-                        proj.dotenv_path = mod_proj.dotenv_path;
-                    }
-                    stored_vars.extend(mod_vars);
-                }
-            }
-        }
-
+        layer_child_and_module_sdk_for_run(pool, target, cfg, &mut proj, &mut stored_vars).await;
         Ok(self
             .resolve_env_layers(&proj, &stored_vars, Some(secrets), target, cfg, true)
             .await)

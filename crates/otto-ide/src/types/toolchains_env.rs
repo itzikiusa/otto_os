@@ -250,6 +250,8 @@ pub struct IdeProjectEnvironment {
     pub inherit_shell_env: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub module_sdks: BTreeMap<String, String>,
     #[serde(default, alias = "vars")]
     pub env_vars: Vec<IdeEnvVarEntry>,
 }
@@ -266,6 +268,7 @@ impl Default for IdeProjectEnvironment {
             extra_path: None,
             inherit_shell_env: true,
             additional_roots: Vec::new(),
+            module_sdks: BTreeMap::new(),
             env_vars: Vec::new(),
         }
     }
@@ -292,6 +295,8 @@ pub struct IdeUpdateEnvironmentReq {
     pub inherit_shell_env: Option<bool>,
     #[serde(default)]
     pub additional_roots: Option<Vec<String>>,
+    #[serde(default)]
+    pub module_sdks: Option<BTreeMap<String, String>>,
     #[serde(default, alias = "vars")]
     pub env_vars: Vec<IdeEnvVarEntry>,
 }
@@ -347,10 +352,13 @@ pub struct IdePythonVenvInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeCreatePythonVenvReq {
+    #[serde(default)]
     pub target: IdeTargetSpec,
     #[serde(default)]
+    pub root: Option<String>,
+    #[serde(default, alias = "path")]
     pub venv_dir: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "base_python")]
     pub python_version: Option<String>,
 }
 
@@ -523,7 +531,7 @@ pub struct IdeStartRunReq {
     pub target: IdeTargetSpec,
     #[serde(default)]
     pub config_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "ad_hoc")]
     pub adhoc: Option<IdeRunConfig>,
     #[serde(
         default,

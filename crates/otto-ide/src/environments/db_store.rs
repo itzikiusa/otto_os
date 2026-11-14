@@ -16,7 +16,14 @@ use crate::types::{
     IdeTargetSpec,
 };
 
+use super::module_sdks::sanitize_module_sdks;
 use super::record_sync_project_snapshot;
+
+/// Reserved internal `StoredEnvVar.key` persisted inside `env_vars_json` to store
+/// per-module SDK overrides (`IdeProjectEnvironment.module_sdks`) without altering
+/// SQLite migrations (compatible with rollback binaries). Stripped on load and never
+/// exposed in `env_vars` or exported as an OS environment variable.
+pub(super) const RESERVED_MODULE_SDKS_KEY: &str = "__otto_module_sdks__";
 
 /// Internal SQLite representation inside `ide_project_environments.env_vars_json`.
 /// Never stores plaintext values when `secret == true`; stores `secret_ref` only.
@@ -285,7 +292,20 @@ pub(super) async fn load_stored_project_env(
         return Ok((IdeProjectEnvironment::default(), Vec::new()));
     };
     let raw_json: String = row.try_get("env_vars_json").unwrap_or_else(|_| "[]".into());
-    let stored: Vec<StoredEnvVar> = serde_json::from_str(&raw_json).unwrap_or_default();
+    let raw_stored: Vec<StoredEnvVar> = serde_json::from_str(&raw_json).unwrap_or_default();
+    let mut module_sdks: BTreeMap<String, String> = BTreeMap::new();
+    let mut stored: Vec<StoredEnvVar> = Vec::with_capacity(raw_stored.len());
+    for item in raw_stored {
+        if item.key == RESERVED_MODULE_SDKS_KEY {
+            if let Some(raw_map) = &item.value {
+                if let Ok(parsed) = serde_json::from_str::<BTreeMap<String, String>>(raw_map) {
+                    module_sdks = sanitize_module_sdks(&parsed);
+                }
+            }
+        } else {
+            stored.push(item);
+        }
+    }
     let roots_json: String = row
         .try_get("additional_roots_json")
         .unwrap_or_else(|_| "[]".into());
@@ -302,6 +322,7 @@ pub(super) async fn load_stored_project_env(
         extra_path: row.try_get("extra_path").ok().flatten(),
         inherit_shell_env,
         additional_roots,
+        module_sdks,
         env_vars: Vec::new(),
     };
     record_sync_project_snapshot(project_key, &env);

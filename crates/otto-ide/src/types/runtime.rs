@@ -61,6 +61,8 @@ pub struct IdeDebugLaunchSpec {
     pub program: String,
     #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub build_flags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -69,6 +71,12 @@ pub struct IdeDebugLaunchSpec {
     pub attach_port: Option<u16>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherit_shell_env: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sdk_path: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub maven_profiles: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -550,6 +550,7 @@ async fn toolchain_python_venv<S: IdeCtx>(
             &ctx.ide().targets,
             IdeCreatePythonVenvReq {
                 target,
+                root: None,
                 venv_dir: Some(venv_dir),
                 python_version: req.base_python,
             },

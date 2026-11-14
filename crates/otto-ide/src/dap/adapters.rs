@@ -109,6 +109,104 @@ pub fn normalize_target_path(target: &IdeTargetSpec, raw: &str) -> String {
     clean
 }
 
+/// Resolve the effective per-launch SDK override:
+/// `req.launch.sdk_path` -> `ctx.run_config.sdk_path` -> `ctx.project_env.module_sdks`
+/// longest-prefix match against `req.launch.program` and `cwd`.
+pub(super) fn resolve_debug_sdk_override(
+    req: &IdeStartDebugReq,
+    ctx: &DapStartContext,
+    cwd: &str,
+) -> Option<String> {
+    if let Some(s) = req
+        .launch
+        .sdk_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(s.to_string());
+    }
+    if let Some(s) = ctx
+        .run_config
+        .as_ref()
+        .and_then(|rc| rc.sdk_path.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(s.to_string());
+    }
+    if let Some(pe) = &ctx.project_env {
+        let mut cands = Vec::new();
+        if !req.launch.program.trim().is_empty() {
+            cands.push(normalize_target_path(&req.target, &req.launch.program));
+        }
+        if !cwd.trim().is_empty() {
+            cands.push(cwd.to_string());
+        }
+        if let Some((_, sdk)) = crate::environments::module_sdks::match_longest_module_sdk(
+            &pe.module_sdks,
+            &cands,
+            req.target.kind == IdeTargetKind::Local,
+        ) {
+            return Some(sdk);
+        }
+    }
+    None
+}
+
+fn load_debug_dotenv_file(
+    req: &IdeStartDebugReq,
+    ctx: &DapStartContext,
+    effective_cwd: &str,
+    raw_env_file: &str,
+) -> Option<BTreeMap<String, String>> {
+    if req.target.kind != IdeTargetKind::Local {
+        return None;
+    }
+    let trimmed = raw_env_file.trim();
+    if trimmed.is_empty() || trimmed.contains("..") {
+        return None;
+    }
+    let mut allowed_roots = vec![PathBuf::from(&req.target.root)];
+    for extra in req
+        .target
+        .merged_extra_roots()
+        .into_iter()
+        .chain(req.project_folders.iter().cloned())
+        .chain(
+            ctx.project_env
+                .iter()
+                .flat_map(|pe| pe.additional_roots.iter().cloned()),
+        )
+    {
+        if !extra.is_empty() {
+            allowed_roots.push(PathBuf::from(extra));
+        }
+    }
+    if !effective_cwd.is_empty() {
+        allowed_roots.push(PathBuf::from(effective_cwd));
+    }
+
+    let cand = if Path::new(trimmed).is_absolute() {
+        PathBuf::from(trimmed)
+    } else if !effective_cwd.is_empty() && Path::new(effective_cwd).join(trimmed).is_file() {
+        Path::new(effective_cwd).join(trimmed)
+    } else {
+        Path::new(&req.target.root).join(trimmed)
+    };
+    let canon = std::fs::canonicalize(&cand).ok()?;
+    let in_allowed = allowed_roots.iter().any(|r| {
+        std::fs::canonicalize(r)
+            .map(|cr| canon.starts_with(&cr))
+            .unwrap_or(false)
+    });
+    if !in_allowed {
+        return None;
+    }
+    let content = std::fs::read_to_string(&canon).ok()?;
+    Some(crate::environments::parse_dotenv(&content))
+}
+
 /// Merge user login+interactive shell env (`~/.zshenv`/`~/.zshrc`), project SDK paths,
 /// `.env`/secret vars, run-config overrides, and launch-specific overrides.
 pub fn build_effective_env(
@@ -116,11 +214,22 @@ pub fn build_effective_env(
     req: &IdeStartDebugReq,
     ctx: &DapStartContext,
 ) -> BTreeMap<String, String> {
-    let mut env = ctx.effective_env.clone();
+    let raw_cwd = req
+        .launch
+        .cwd
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            ctx.run_config
+                .as_ref()
+                .and_then(|r| r.cwd.as_deref())
+                .filter(|s| !s.trim().is_empty())
+        })
+        .unwrap_or(req.target.root.as_str());
+    let effective_cwd = normalize_target_path(&req.target, raw_cwd);
 
-    if req.target.kind == IdeTargetKind::Local {
-        let inherit_shell = ctx
-            .project_env
+    let inherit_shell = req.launch.inherit_shell_env.unwrap_or_else(|| {
+        ctx.project_env
             .as_ref()
             .map(|p| p.inherit_shell_env)
             .unwrap_or(true)
@@ -128,7 +237,30 @@ pub fn build_effective_env(
                 .run_config
                 .as_ref()
                 .map(|r| r.inherit_shell_env)
-                .unwrap_or(true);
+                .unwrap_or(true)
+    });
+
+    let mut env = if !inherit_shell && req.launch.inherit_shell_env == Some(false) {
+        let mut base = if req.target.kind == IdeTargetKind::Local {
+            crate::environments::shell_env::collect_process_base_env()
+        } else {
+            BTreeMap::new()
+        };
+        for (k, v) in &ctx.effective_env {
+            if ctx
+                .project_env
+                .as_ref()
+                .is_some_and(|pe| pe.env_vars.iter().any(|ev| ev.key == *k))
+            {
+                base.insert(k.clone(), v.clone());
+            }
+        }
+        base
+    } else {
+        ctx.effective_env.clone()
+    };
+
+    if req.target.kind == IdeTargetKind::Local {
         if inherit_shell {
             for (k, v) in
                 crate::environments::cached_effective_env_for_local_root(data_dir, &req.target.root)
@@ -138,39 +270,84 @@ pub fn build_effective_env(
             for (k, v) in crate::environments::cached_shell_env_snapshot() {
                 env.entry(k).or_insert(v);
             }
-        }
-        for (k, v) in std::env::vars() {
-            env.entry(k).or_insert(v);
+            for (k, v) in std::env::vars() {
+                env.entry(k).or_insert(v);
+            }
+        } else {
+            for (k, v) in crate::environments::shell_env::collect_process_base_env() {
+                env.entry(k).or_insert(v);
+            }
         }
     }
 
+    let mut effective_proj = ctx.project_env.clone().unwrap_or_default();
+    if let Some(sdk_override) = resolve_debug_sdk_override(req, ctx, &effective_cwd) {
+        crate::environments::module_sdks::apply_module_sdk_to_project_env(
+            &mut effective_proj,
+            &effective_cwd,
+            &sdk_override,
+            ctx.run_config.as_ref().map(|rc| rc.runner),
+            Some(req.language.as_str()),
+        );
+    }
+
     let mut path_entries: Vec<String> = Vec::new();
-    if let Some(pe) = &ctx.project_env {
-        if let Some(jh) = pe.java_home.as_deref().filter(|s| !s.is_empty()) {
-            env.insert("JAVA_HOME".into(), jh.to_string());
-            path_entries.push(format!("{jh}/bin"));
+    if let Some(jh) = effective_proj
+        .java_home
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        env.insert("JAVA_HOME".into(), jh.to_string());
+        path_entries.push(format!("{}/bin", jh.trim_end_matches('/')));
+    }
+    if let Some(gr) = effective_proj.go_root.as_deref().filter(|s| !s.is_empty()) {
+        env.insert("GOROOT".into(), gr.to_string());
+        path_entries.push(format!("{}/bin", gr.trim_end_matches('/')));
+    }
+    if let Some(rt) = effective_proj
+        .rust_toolchain
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        if rt.starts_with('/') {
+            path_entries.push(format!("{}/bin", rt.trim_end_matches('/')));
+        } else {
+            env.insert("RUSTUP_TOOLCHAIN".into(), rt.to_string());
         }
-        if let Some(gr) = pe.go_root.as_deref().filter(|s| !s.is_empty()) {
-            env.insert("GOROOT".into(), gr.to_string());
-            path_entries.push(format!("{gr}/bin"));
-        }
-        if let Some(nh) = pe.node_home.as_deref().filter(|s| !s.is_empty()) {
-            path_entries.push(format!("{nh}/bin"));
-        }
-        if let Some(py) = pe.python_interpreter.as_deref().filter(|s| !s.is_empty()) {
-            if let Some(parent) = Path::new(py).parent().and_then(|p| p.to_str()) {
-                path_entries.push(parent.to_string());
+    }
+    if let Some(nh) = effective_proj
+        .node_home
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        path_entries.push(format!("{}/bin", nh.trim_end_matches('/')));
+    }
+    if let Some(py) = effective_proj
+        .python_interpreter
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        if let Some(parent) = Path::new(py).parent() {
+            path_entries.push(parent.to_string_lossy().into_owned());
+            if let Some(venv) = parent.parent() {
+                if venv.join("pyvenv.cfg").is_file() || req.target.kind == IdeTargetKind::Ssh {
+                    env.insert("VIRTUAL_ENV".into(), venv.to_string_lossy().into_owned());
+                }
             }
         }
-        if let Some(extra) = pe.extra_path.as_deref().filter(|s| !s.is_empty()) {
-            for seg in extra.split(':').filter(|s| !s.is_empty()) {
-                path_entries.push(seg.to_string());
-            }
+    }
+    if let Some(extra) = effective_proj
+        .extra_path
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        for seg in extra.split(':').filter(|s| !s.is_empty()) {
+            path_entries.push(seg.to_string());
         }
-        for entry in pe.env_vars.iter().filter(|e| !e.secret) {
-            if let Some(val) = &entry.value {
-                env.insert(entry.key.clone(), val.clone());
-            }
+    }
+    for entry in effective_proj.env_vars.iter().filter(|e| !e.secret) {
+        if let Some(val) = &entry.value {
+            env.insert(entry.key.clone(), val.clone());
         }
     }
 
@@ -219,8 +396,23 @@ pub fn build_effective_env(
     }
 
     if let Some(rc) = &ctx.run_config {
+        if let Some(rc_ef) = rc.env_file.as_deref().filter(|s| !s.trim().is_empty()) {
+            if let Some(parsed) = load_debug_dotenv_file(req, ctx, &effective_cwd, rc_ef) {
+                env.extend(parsed);
+            }
+        }
         for (k, v) in &rc.env_overrides {
             env.insert(k.clone(), v.clone());
+        }
+    }
+    if let Some(launch_ef) = req
+        .launch
+        .env_file
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        if let Some(parsed) = load_debug_dotenv_file(req, ctx, &effective_cwd, launch_ef) {
+            env.extend(parsed);
         }
     }
     for (k, v) in &req.launch.env {

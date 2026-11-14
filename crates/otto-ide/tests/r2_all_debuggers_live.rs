@@ -424,6 +424,11 @@ public class AppMain {
         out.contains("JAVA_DONE:otto:84:PRO-1"),
         "missing JAVA_DONE output: {out}"
     );
+    assert!(
+        !app_dir.join(".otto-java-debug-classes").exists()
+            && !toolkit.join(".otto-java-debug-classes").exists(),
+        "Java debug compile must write under data_dir, never inside user repo cwd"
+    );
 }
 
 #[tokio::test]

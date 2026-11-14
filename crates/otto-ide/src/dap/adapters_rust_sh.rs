@@ -330,18 +330,46 @@ async fn compile_rust_debug_artifact(
     } else {
         vec!["build".into(), "--message-format=json".into()]
     };
-    if let Some(toolchain) = ctx
-        .project_env
-        .as_ref()
-        .and_then(|p| p.rust_toolchain.as_deref())
+    for extra_flag in ctx
+        .run_config
+        .iter()
+        .flat_map(|rc| rc.build_flags.iter())
+        .chain(req.launch.build_flags.iter())
+        .map(|s| s.trim())
         .filter(|s| !s.is_empty())
     {
-        cargo_args.insert(0, format!("+{toolchain}"));
+        cargo_args.push(extra_flag.to_string());
+    }
+    let sdk_override = super::adapters::resolve_debug_sdk_override(req, ctx, cwd);
+    let toolchain_opt = sdk_override
+        .as_deref()
+        .or_else(|| env.get("RUSTUP_TOOLCHAIN").map(String::as_str))
+        .or_else(|| {
+            ctx.project_env
+                .as_ref()
+                .and_then(|p| p.rust_toolchain.as_deref())
+        })
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let mut cargo_bin = "cargo".to_string();
+    if let Some(tc) = toolchain_opt {
+        if let Some(root) = tc
+            .strip_suffix("/bin/cargo")
+            .or_else(|| tc.strip_suffix("/bin"))
+            .or_else(|| tc.starts_with('/').then_some(tc))
+        {
+            let cand = format!("{}/bin/cargo", root.trim_end_matches('/'));
+            if req.target.kind != IdeTargetKind::Local || Path::new(&cand).is_file() {
+                cargo_bin = cand;
+            }
+        } else {
+            cargo_args.insert(0, format!("+{tc}"));
+        }
     }
     let out = run_target_command(
         &req.target,
         ctx.ssh.as_ref(),
-        "cargo",
+        &cargo_bin,
         &cargo_args,
         &cargo_cwd,
         env,

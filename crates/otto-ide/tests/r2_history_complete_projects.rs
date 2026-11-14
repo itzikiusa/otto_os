@@ -443,3 +443,352 @@ async fn projects_crud_scan_repos_detected_sdks_and_python_venv_endpoint_work() 
         "missing interpreter {interp}"
     );
 }
+
+#[tokio::test]
+async fn module_sdks_roundtrip_target_path_runs_and_debug_launch_overrides_work() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().join("otto-data");
+    let db_path = tmp.path().join("state.db");
+    let ws = tmp.path().join("ws-root");
+    let mod_go = tmp.path().join("mod-go");
+    let mod_py = tmp.path().join("mod-py");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(&mod_go).unwrap();
+    std::fs::create_dir_all(&mod_py).unwrap();
+    std::fs::write(
+        mod_go.join("go.mod"),
+        "module example.com/modgo\n\ngo 1.22\n",
+    )
+    .unwrap();
+
+    let (_ctx, app) = build_test_app(data_dir.clone(), &db_path).await;
+
+    // 1. `POST /ide/environments/python-venv` with optional `root` creates `<mod_py>/.venv`:
+    let (st_ev, ev_body) = send_json(
+        &app,
+        Method::POST,
+        "/ide/environments/python-venv",
+        Some(json!({
+            "target": { "kind": "local", "root": ws.to_string_lossy() },
+            "root": mod_py.to_string_lossy(),
+            "venv_dir": ".venv",
+        })),
+    )
+    .await;
+    assert_eq!(st_ev, StatusCode::OK, "env python-venv failed: {ev_body}");
+    let py_interp = ev_body["interpreter_path"].as_str().unwrap().to_string();
+    assert!(
+        py_interp.contains("mod-py/.venv/bin/python"),
+        "expected mod-py venv interpreter, got {py_interp}"
+    );
+    assert!(std::path::Path::new(&py_interp).is_file());
+
+    // 2. `PUT /ide/environments` + `GET /ide/environments` round-trip `module_sdks`:
+    let mod_go_canon = std::fs::canonicalize(&mod_go)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let mod_py_canon = std::fs::canonicalize(&mod_py)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let fake_go_sdk = tmp.path().join("custom-go-1.24");
+    std::fs::create_dir_all(fake_go_sdk.join("bin")).unwrap();
+    let fake_go_str = fake_go_sdk.to_string_lossy().into_owned();
+
+    let (st_put, put_body) = send_json(
+        &app,
+        Method::PUT,
+        "/ide/environments",
+        Some(json!({
+            "target": { "kind": "local", "root": ws.to_string_lossy() },
+            "additional_roots": [mod_go_canon, mod_py_canon],
+            "module_sdks": {
+                &mod_go_canon: &fake_go_str,
+                &mod_py_canon: &py_interp,
+            },
+            "env_vars": [
+                { "key": "TEAM_NAME", "value": "platform", "secret": false, "has_secret": false }
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(
+        st_put,
+        StatusCode::OK,
+        "PUT /ide/environments failed: {put_body}"
+    );
+    assert_eq!(put_body["env"]["module_sdks"][&mod_go_canon], fake_go_str);
+    assert_eq!(put_body["env"]["module_sdks"][&mod_py_canon], py_interp);
+    assert!(
+        !put_body["env"]["env_vars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["key"] == "__otto_module_sdks__"),
+        "reserved key leaked into env_vars: {put_body}"
+    );
+
+    // Subsequent PUT with `module_sdks` omitted (`None`) preserves existing `module_sdks`:
+    let (st_put2, put2_body) = send_json(
+        &app,
+        Method::PUT,
+        "/ide/environments",
+        Some(json!({
+            "target": { "kind": "local", "root": ws.to_string_lossy() },
+            "env_vars": [
+                { "key": "TEAM_NAME", "value": "core-ide", "secret": false, "has_secret": false }
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(st_put2, StatusCode::OK);
+    assert_eq!(put2_body["env"]["module_sdks"][&mod_go_canon], fake_go_str);
+
+    let (st_get, get_body) = send_json(
+        &app,
+        Method::GET,
+        &format!(
+            "/ide/environments?root={}",
+            urlencode(&ws.to_string_lossy())
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(st_get, StatusCode::OK);
+    assert_eq!(get_body["env"]["module_sdks"][&mod_py_canon], py_interp);
+    assert!(get_body["effective_env"]["__otto_module_sdks__"].is_null());
+
+    // Sync snapshot (`lsp_host` `cached_effective_env_for_local_root`) sees module SDK:
+    let sync_go_env =
+        otto_ide::environments::cached_effective_env_for_local_root(&data_dir, &mod_go_canon);
+    assert_eq!(
+        sync_go_env.get("GOROOT").map(String::as_str),
+        Some(fake_go_str.as_str())
+    );
+
+    // 3. Ad-hoc `POST /ide/runs` with `target_path` inside `mod_py` (`cwd: None`) uses `module_sdks`:
+    let py_probe = mod_py.join("check_venv.py");
+    std::fs::write(
+        &py_probe,
+        "import os, sys\nprint('VENV_OUT=' + os.environ.get('VIRTUAL_ENV', '') + '|' + sys.executable)\n",
+    )
+    .unwrap();
+    let (st_run, run_body) = send_json(
+        &app,
+        Method::POST,
+        "/ide/runs",
+        Some(json!({
+            "target": { "kind": "local", "root": ws.to_string_lossy() },
+            "adhoc": {
+                "name": "Check mod-py venv",
+                "runner": "python",
+                "target_path": py_probe.to_string_lossy(),
+                "args": [],
+            }
+        })),
+    )
+    .await;
+    assert_eq!(st_run, StatusCode::OK, "ad-hoc run failed: {run_body}");
+    let run_id = run_body["run"]["id"].as_str().unwrap().to_string();
+    let mut run_output = String::new();
+    for _ in 0..40 {
+        let (_, poll) = send_json(&app, Method::GET, &format!("/ide/runs/{run_id}"), None).await;
+        if matches!(
+            poll["run"]["status"].as_str(),
+            Some("passed" | "failed" | "stopped")
+        ) {
+            run_output = poll["run"]["output"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_default();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(75)).await;
+    }
+    assert!(
+        run_output.contains("mod-py/.venv"),
+        "expected module_sdks VIRTUAL_ENV on target_path run (`cwd: None`), got: {run_output}"
+    );
+
+    // 4. `POST /ide/debug/sessions` honors `launch.sdk_path`, `launch.env_file`,
+    //    `launch.inherit_shell_env`, and `launch.build_flags`:
+    let dbg_script = mod_py.join("dbg_launch.py");
+    std::fs::write(
+        mod_py.join(".env.debug"),
+        "DEBUG_ENV_TOKEN=from_launch_dotenv\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &dbg_script,
+        "import os, sys\ntok = os.environ.get('DEBUG_ENV_TOKEN', '')\nexe = sys.executable\nprint(f'DBG_PY:{tok}:{exe}', flush=True)\n",
+    )
+    .unwrap();
+    let (st_dbg, dbg_body) = send_json(
+        &app,
+        Method::POST,
+        "/ide/debug/sessions",
+        Some(json!({
+            "target": { "kind": "local", "root": ws.to_string_lossy() },
+            "language": "python",
+            "launch": {
+                "program": dbg_script.to_string_lossy(),
+                "cwd": mod_py.to_string_lossy(),
+                "sdk_path": py_interp,
+                "env_file": ".env.debug",
+                "inherit_shell_env": false,
+            },
+            "breakpoints": [
+                { "path": dbg_script.to_string_lossy(), "line": 4 }
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(
+        st_dbg,
+        StatusCode::OK,
+        "python debug start failed: {dbg_body}"
+    );
+    let sid = dbg_body["session"]["id"].as_str().unwrap().to_string();
+    let mut paused = false;
+    for _ in 0..50 {
+        let (_, sb) = send_json(
+            &app,
+            Method::GET,
+            &format!("/ide/debug/sessions/{sid}"),
+            None,
+        )
+        .await;
+        if sb["session"]["state"] == "paused" {
+            paused = true;
+            let vars = collect_scope_vars(&sb["session"]);
+            assert!(
+                vars.iter().any(|v| v["name"] == "tok"
+                    && v["value"]
+                        .as_str()
+                        .unwrap_or("")
+                        .contains("from_launch_dotenv")),
+                "expected launch.env_file var in locals: {vars:?}"
+            );
+            assert!(
+                vars.iter().any(|v| v["name"] == "exe"
+                    && v["value"].as_str().unwrap_or("").contains("mod-py/.venv")),
+                "expected launch.sdk_path interpreter in sys.executable: {vars:?}"
+            );
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(80)).await;
+    }
+    assert!(paused, "expected Python debug session to pause at line 4");
+    let _ = send_json(
+        &app,
+        Method::POST,
+        &format!("/ide/debug/sessions/{sid}/command"),
+        Some(json!({ "action": "continue" })),
+    )
+    .await;
+
+    // Also verify Go `dlv` honors `launch.build_flags` (`-tags=customdbg`) if `dlv` is installed:
+    let home = std::env::var("HOME").unwrap_or_default();
+    let dlv_path = [
+        format!("{home}/go/bin/dlv"),
+        "/opt/homebrew/bin/dlv".into(),
+        "/usr/local/bin/dlv".into(),
+    ]
+    .into_iter()
+    .find(|p| std::path::Path::new(p).is_file());
+    if dlv_path.is_some() {
+        let goroot_out = tokio::process::Command::new("go")
+            .args(["env", "GOROOT"])
+            .output()
+            .await
+            .ok();
+        let real_goroot = goroot_out
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        std::fs::write(
+            mod_go.join("tagged_on.go"),
+            "//go:build customdbg\n\npackage main\n\nfunc tagLabel() string { return \"CUSTOM_TAG_ACTIVE\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            mod_go.join("tagged_off.go"),
+            "//go:build !customdbg\n\npackage main\n\nfunc tagLabel() string { return \"DEFAULT_NO_TAG\" }\n",
+        )
+        .unwrap();
+        let go_main = mod_go.join("main.go");
+        std::fs::write(
+            &go_main,
+            "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tlbl := tagLabel()\n\tfmt.Println(\"GO_TAG_RESULT:\" + lbl)\n}\n",
+        )
+        .unwrap();
+        let (st_go, go_body) = send_json(
+            &app,
+            Method::POST,
+            "/ide/debug/sessions",
+            Some(json!({
+                "target": { "kind": "local", "root": ws.to_string_lossy() },
+                "language": "go",
+                "launch": {
+                    "program": go_main.to_string_lossy(),
+                    "cwd": mod_go.to_string_lossy(),
+                    "sdk_path": real_goroot,
+                    "build_flags": ["-tags=customdbg"],
+                },
+                "breakpoints": [
+                    { "path": go_main.to_string_lossy(), "line": 7 }
+                ]
+            })),
+        )
+        .await;
+        assert_eq!(st_go, StatusCode::OK, "go debug start failed: {go_body}");
+        let gsid = go_body["session"]["id"].as_str().unwrap().to_string();
+        let mut go_paused = false;
+        for _ in 0..80 {
+            let (_, sb) = send_json(
+                &app,
+                Method::GET,
+                &format!("/ide/debug/sessions/{gsid}"),
+                None,
+            )
+            .await;
+            if sb["session"]["state"] == "paused" {
+                go_paused = true;
+                let vars = collect_scope_vars(&sb["session"]);
+                assert!(
+                    vars.iter().any(|v| v["name"] == "lbl"
+                        && v["value"].as_str().unwrap_or("").contains("CUSTOM_TAG_ACTIVE")),
+                    "expected -tags=customdbg build flag to select CUSTOM_TAG_ACTIVE, got: {vars:?}"
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(go_paused, "expected Go debug session to pause at line 7");
+        let _ = send_json(
+            &app,
+            Method::POST,
+            &format!("/ide/debug/sessions/{gsid}/command"),
+            Some(json!({ "action": "continue" })),
+        )
+        .await;
+    }
+}
+
+fn collect_scope_vars(sess: &serde_json::Value) -> Vec<&serde_json::Value> {
+    sess["scopes"]
+        .as_array()
+        .map(|s| {
+            s.iter()
+                .filter_map(|sc| sc["variables"].as_array())
+                .flatten()
+                .collect()
+        })
+        .unwrap_or_default()
+}

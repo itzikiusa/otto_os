@@ -8,7 +8,8 @@ use otto_core::{Error, Result};
 use serde_json::{json, Value};
 
 use super::adapters::{
-    locate_binary, normalize_target_path, DapAdapterTransport, ResolvedDapAdapter,
+    locate_binary, normalize_target_path, resolve_debug_sdk_override, DapAdapterTransport,
+    ResolvedDapAdapter,
 };
 use super::py_bridge::PY_STDLIB_DAP_BRIDGE;
 use super::{run_target_command, DapStartContext};
@@ -73,6 +74,13 @@ pub(super) async fn resolve_go_adapter(
                 .cloned(),
         );
     }
+    flag_parts.extend(
+        req.launch
+            .build_flags
+            .iter()
+            .filter(|s| !s.trim().is_empty())
+            .cloned(),
+    );
     if let Some(env_flags) = env
         .get("DLV_BUILD_FLAGS")
         .or_else(|| env.get("GO_BUILD_FLAGS"))
@@ -201,6 +209,19 @@ pub(super) async fn resolve_python_adapter(
 ) -> Result<ResolvedDapAdapter> {
     let program = normalize_target_path(&req.target, &req.launch.program);
     let mut candidates = Vec::new();
+    if let Some(sdk) = resolve_debug_sdk_override(req, ctx, cwd) {
+        let trimmed = sdk.trim_end_matches('/');
+        if trimmed.ends_with("/python")
+            || trimmed.ends_with("/python3")
+            || trimmed.contains("/python3.")
+            || Path::new(trimmed).is_file()
+        {
+            candidates.push(trimmed.to_string());
+        } else {
+            candidates.push(format!("{trimmed}/bin/python"));
+            candidates.push(format!("{trimmed}/bin/python3"));
+        }
+    }
     if let Some(py) = ctx
         .project_env
         .as_ref()

@@ -98,6 +98,7 @@ async fn sqlite_crud_redacts_secrets_preserves_multiroot_and_layers_intellij_env
                 extra_path: Some("/custom/bin".into()),
                 inherit_shell_env: None,
                 additional_roots: None,
+                module_sdks: None,
                 env_vars: vec![
                     IdeEnvVarEntry {
                         key: "APP_ENV".into(),
