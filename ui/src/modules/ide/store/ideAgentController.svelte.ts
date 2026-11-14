@@ -4,7 +4,7 @@
 // loading `../agent/ideAgentEngine.svelte.ts` dynamically only when opened or
 // when editor context is attached.
 
-export * from './ideDiffApplier';
+export type * from './ideDiffApplier';
 export type { IdeThreadEntry } from '../agent/ideContextBuilders';
 
 import type { IdeAgentEngine } from '../agent/ideAgentEngine.svelte';

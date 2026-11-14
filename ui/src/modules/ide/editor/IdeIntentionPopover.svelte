@@ -192,6 +192,7 @@
     }
 
     for (const [idx, qf] of clientFixes.entries()) {
+      if (out.some((r) => r.label === qf.title)) continue;
       const p = clientFixPreview(qf);
       out.push({
         id: `cf-${idx}-${qf.title}`,

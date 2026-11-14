@@ -100,8 +100,8 @@ export interface IdeCodeAction {
   is_preferred?: boolean;
   edits?: IdeTextEdit[];
   command?: string | null;
-  edit_preview?: string;
-  replacement_content?: string;
+  edit_preview?: string | null;
+  replacement_content?: string | null;
 }
 
 export interface IdeDiagnostic {

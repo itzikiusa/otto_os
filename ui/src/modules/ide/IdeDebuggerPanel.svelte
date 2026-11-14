@@ -361,8 +361,8 @@
   }
   .dbg-controls, .dbg-meta, .dbg-right, .dbg-pane-group { display: flex; align-items: center; gap: 4px; min-inline-size: 0; flex-shrink: 0; }
   .dbg-compact-btn { block-size: 22px; padding-block: 0; }
-  .dbg-subtabs { block-size: 22px; }
-  .dbg-subtabs button { padding-block: 0; padding-inline: 8px; font-size: var(--fs-xs); }
+  .dbg-subtabs { block-size: 22px; flex-shrink: 0; }
+  .dbg-subtabs button { padding-block: 0; padding-inline: 8px; font-size: var(--fs-xs); white-space: nowrap; flex-shrink: 0; }
   .dbg-pane-btn {
     display: inline-flex; align-items: center; gap: 4px; block-size: 22px; padding-inline: 6px;
     border: 1px solid var(--border); border-radius: var(--radius-s);

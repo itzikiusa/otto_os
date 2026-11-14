@@ -4,6 +4,7 @@
 // `'otto:ide-projects-changed'`, `'otto:ide-context-changed'`, and `'storage'`
 // events without importing `src/modules/ide/*`.
 
+import { untrack } from 'svelte';
 import { api } from '../../lib/api/client';
 import type { Session } from '../../lib/api/types';
 import { router } from '../../lib/router.svelte';
@@ -62,7 +63,7 @@ class IdeProjectsBridge {
   constructor() {
     if (typeof window !== 'undefined') {
       const bump = (): void => {
-        this.rev += 1;
+        this.rev = untrack(() => this.rev) + 1;
       };
       window.addEventListener(IDE_PROJECTS_CHANGED_EVENT, bump);
       window.addEventListener(IDE_CONTEXT_CHANGED_EVENT, bump);
@@ -72,7 +73,7 @@ class IdeProjectsBridge {
 
   refresh(): void {
     this.hydratedPrimaries.clear();
-    this.rev += 1;
+    this.rev = untrack(() => this.rev) + 1;
   }
 
   private hydrateServerEnv(primaryRoot: string): void {

@@ -11,10 +11,10 @@ zero-rebuild **runtime IDE plugins**.
 - Route: `#/ide`. Sidebar entry **IDE** (Build group). ⌘K: "Go to IDE",
   "Toggle IDE AI Agent", "IDE: Inline Edit with Agent".
 - RBAC:
-  - Protected `/api/v1/ide/*` routes require **Agents: Edit** (`Require(Agents, Edit)`).
-  - `/api/v1/ide/fs/*` is additionally guarded by `is_host_files_route`, so an
-    agent-session token cannot escape its Seatbelt sandbox through the daemon's
-    IDE filesystem routes.
+  - Protected `/api/v1/ide/*` routes require **Agents: Edit** (`Require(Agents, Edit)`),
+    and are additionally guarded by `is_host_files_route` so an agent-session
+    token cannot escape its Seatbelt sandbox through the daemon's IDE filesystem,
+    runner, debugger, or history routes.
   - Toolchain installation (`/ide/toolchains/install`, `/ide/toolchains/uninstall`)
     and mutating plugin routes (`/ide/plugins*`) carry `RouteClass::Admin`
     (human credentials only); minting a collab share room (`POST /ide/collab/rooms`)
@@ -72,10 +72,18 @@ active:
 - **Add Prefix / Suffix to Lines:** Wraps every selected line (or every cursor
   line) with a chosen prefix and/or suffix in a single undoable CodeMirror
   transaction.
-- **Keymap presets:** Switch between **JetBrains macOS** (`⌘B` go to
-  definition / usages, `⌥⏎` quick-fix, `⇧F6` rename symbol, `⌥⌘L` format,
-  `⌘F8` toggle breakpoint, `⌘D` duplicate line/selection, `⌘⌫` delete line)
-  and **Standard** (`F12`, `⌘.`, `F2`, `⇧⌥F`, `F9`, `⌘D` next occurrence).
+- **Keymap presets:** Switch between **JetBrains macOS** (`⌘,` IDE Settings &
+  Project Structure, `⌘B` go to definition / usages, `⌥⏎` instant `<10ms`
+  deterministic quick-fix, `⇧F6` rename symbol, `⌥⌘L` format, `⌘F8` or 1-click
+  gutter breakpoint toggle, `⌘D` duplicate line/selection / compare files,
+  `⌘⇧V` clipboard history, `⌘⌫` delete line) and **Standard** (`F12`, `⌘.`,
+  `F2`, `⇧⌥F`, `F9`, `⌘D` next occurrence).
+- **6 Color Schemes, Semantic Coloring & Rainbow Brackets:** Choose between
+  **JetBrains Islands Dark**, **JetBrains Darcula**, **JetBrains Islands Light**,
+  **VS Code Dark+**, **VS Code Light+**, and **Otto Default** in `⌘,` (`Editor →
+  Color Scheme`), with distinct semantic token coloring (`package` vs exported
+  struct field vs function call in Go, `@Annotation` gold vs instance field
+  purple in Java) and 6-stop depth-cycled **Rainbow Brackets** (`()`, `[]`, `{}`).
 
 ### 3. SDKs & Toolchains Manager
 
@@ -147,29 +155,31 @@ items directly into the editor gutter:
 
 Clicking the gutter play button offers **Run** or **Debug** for that exact item.
 
-### 6. Full DAP Debugger
+### 6. Full DAP Debugger & Tabbed/Split Dock
 
 `crates/otto-ide/src/dap/` speaks framing-accurate `Content-Length` JSON-RPC
 Debug Adapter Protocol over stdio (or over `ssh -T` for Remote SSH targets)
-against `codelldb` / `lldb-dap` (Rust, C/C++), `dlv dap` (Go), `debugpy.adapter`
-(Python), Node inspector / `js-debug` (JS/TS), and `java-debug-adapter` + JDWP
-(Java), plus a deterministic built-in mock adapter when testing without an
-external debugger binary:
+plus zero-install built-in bridges across every major ecosystem: `dlv dap` (Go),
+`java-debug-adapter` or built-in `otto-jdi-jdwp` (`jdb`/JDWP for Java),
+`debugpy.adapter` or built-in `otto-py-bdb` (Python stdlib `bdb`), `js-debug`
+or built-in `otto-node-cdp` (`node --inspect-brk=0` CDP), `codelldb` /
+`lldb-dap` or built-in `otto-lldb-dap` (`/usr/bin/lldb` for Rust & C/C++), and
+`otto-sh-dap` (`DEBUG` trap for Bash/Zsh), plus a deterministic mock adapter:
 
-- **Breakpoints:** Line breakpoints, conditional breakpoints (`condition`), hit
-  counts (`hit_condition`), logpoints (`log_message`), and exception filters
-  (`caught` / `uncaught`).
-- **Execution controls:** Continue (`F5` / `⌥⌘R`), Pause, Step Over (`F8` /
-  `F10`), Step Into (`F7` / `F11`), Step Out (`⇧F8` / `⇧F11`), Restart, Stop,
-  and **Run to Cursor**.
-- **Inspection:** Threads & Call Stack frames, expandable Scopes & Variables
-  trees (`variablesReference`), Watch expressions, an interactive Debug Console
-  (REPL `evaluate`), and IntelliJ-style **inline ghost variable values** rendered
-  at the end of source lines while paused.
+- **1-Click Gutter Breakpoints:** Clicking anywhere beside or on line numbers in
+  `.cm-gutters` toggles verified breakpoints in 1 click (persisted across tab
+  switches and restarts); right-clicking edits conditions (`condition`), hit
+  counts (`hit_condition`), logpoints (`log_message`), and exception filters.
+- **Execution controls & Tabbed/Split layout:** Switch between `Debugger`
+  (`Frames` | `Variables & Watches` with draggable column resizer and hideable
+  panes), full-width `Console` (with automatic multi-line JSON log pretty
+  formatting), or side-by-side **Split** mode alongside a draggable bottom-dock
+  height resizer, inline ghost variable values, and an integrated **Git** dock
+  tab reusing Otto's `DiffViewer` + stage/commit controls.
 
-### 7. LSP Intelligence
+### 7. LSP Intelligence, Quick-Doc, Manifest Inspector & Local History
 
-Combines two complementary paths:
+Combines live LSP multiplexing with zero-roundtrip editor intelligence:
 
 - **Live WebSocket bridge (`WS /ws/lsp?lang=&root=&connection_id=`):** Multiplexes
   live `didOpen` / `didChange` diagnostics, hover, and completions per
@@ -179,9 +189,26 @@ Combines two complementary paths:
 - **Structured IDE intelligence (`/api/v1/ide/lsp/*`):** Provides document
   outline symbols, workspace symbol search, go-to-definition, find usages
   (feeding the **Usages** bottom dock), cross-file symbol rename, formatting,
-  diagnostics, and quick-fix code actions — backed by LSP when available with a
-  fast lexical/regex fallback so navigation works immediately even before a
-  language server is installed.
+  Lombok/`src.zip`/Maven/Gradle-aware Java & polyglot diagnostics
+  (`POST /ide/lsp/diagnostics`), compact JetBrains-style **Quick-Doc hover**
+  (`POST /ide/lsp/hover`, isolated strictly to the hovered declaration with zero
+  neighbor-comment bleed), and `<10ms` deterministic `⌥⏎` **Quick Fixes**
+  applied as native `⌘Z`-undoable CodeMirror transactions.
+- **Settings (`⌘,`), Named Multi-Repo Projects, Build Tools & Dependency Inspector:**
+  Two-pane IntelliJ-style Settings & Project Structure modal (`Project` /
+  per-module SDKs with auto-detected host SDKs, `Languages & Frameworks`,
+  `Build Tools`), named multi-repo workspace projects (`/ide/projects*`), a
+  collapsible right-hand **Maven / Gradle** tool window (`POST /ide/build-tools/model`)
+  with Maven & Spring Boot profile activation, and inline **Dependency &
+  Vulnerability Intelligence** (`/ide/deps/*`) with `[Text | Dependency Analyzer]`
+  tabs on `go.mod`, `pom.xml`, `build.gradle*`, `Cargo.toml`, `package.json`,
+  and `pyproject.toml`.
+- **Interactive Comparison Tool & Backend Local History (`/ide/history/*`):**
+  Side-by-side diff modal (`IdeComparisonModal`) with per-hunk `>>` / `<<`
+  apply/revert arrows and an editable right-hand buffer, backed by a content-addressed
+  daemon Local History journal that snapshots every save, refactor, and
+  deletion so deleted files can be restored with 1 click from folder **Local
+  History (`Deleted`)**.
 
 ### 8. Share with Friends (Live Collaboration)
 
@@ -275,16 +302,24 @@ runtime sessions (`/api/v1/workspaces/{id}/runtime-sessions` for `claude`,
 Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api.md)
 (**IDE** section) and [`docs/contracts/ws.md`](../contracts/ws.md) (§1c).
 
-- Target, Multi-Folder, FS, Search & Gutter: `GET /ide/fs/tree`, `GET /ide/fs/file`,
-  `PUT /ide/fs/file`, `POST /ide/fs/mutate`, `POST /ide/projects/folders`,
-  `DELETE /ide/projects/folders`, `POST /ide/search`, `POST /ide/replace`,
+- Target, Named Projects, Multi-Folder, FS, Local History, Search & Gutter:
+  `GET /ide/fs/tree`, `GET /ide/fs/file`, `PUT /ide/fs/file`,
+  `POST /ide/fs/mutate`, `POST /ide/fs/complete`, `GET /ide/history/list`,
+  `GET /ide/history/entry`, `POST /ide/history/restore`,
+  `POST /ide/history/snapshot`, `GET /ide/projects`, `POST /ide/projects`,
+  `DELETE /ide/projects/{id}`, `POST /ide/projects/scan-repos`,
+  `POST /ide/projects/folders`, `DELETE /ide/projects/folders`,
+  `POST /ide/projects/folders/bulk`, `POST /ide/search`, `POST /ide/replace`,
   `POST /ide/gutter`.
-- Toolchains, Shell Env & Environments: `GET /ide/toolchains`,
-  `POST /ide/toolchains/install`, `POST /ide/toolchains/local`,
-  `DELETE /ide/toolchains/local`, `GET /ide/toolchains/jobs/{job_id}`,
-  `GET /ide/shell-env`, `POST /ide/shell-env/reload`, `GET /ide/environments`,
-  `PUT /ide/environments`, `POST /ide/environments/python-venv`,
-  `POST /ide/run-configs`, `DELETE /ide/run-configs/{id}`.
+- Toolchains, Shell Env, Build Tools, Dependencies & Environments:
+  `GET /ide/toolchains`, `POST /ide/toolchains/install`,
+  `POST /ide/toolchains/local`, `DELETE /ide/toolchains/local`,
+  `GET /ide/toolchains/jobs/{job_id}`, `POST /ide/toolchains/python-venv`,
+  `GET /ide/shell-env`, `POST /ide/shell-env/reload`, `POST /ide/deps/inspect`,
+  `POST /ide/deps/action`, `POST /ide/build-tools/model`,
+  `GET /ide/environments`, `PUT /ide/environments`,
+  `POST /ide/environments/python-venv`, `POST /ide/run-configs`,
+  `DELETE /ide/run-configs/{id}`.
 - Run & DAP Debugger: `POST /ide/runs`, `GET /ide/runs/{run_id}`,
   `POST /ide/runs/{run_id}/stop`, `POST /ide/debug/sessions`,
   `GET /ide/debug/sessions`, `GET /ide/debug/sessions/{id}`,
@@ -296,6 +331,7 @@ Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api
 - LSP Intelligence: `POST /ide/lsp/symbols`, `POST /ide/lsp/definition`,
   `POST /ide/lsp/implementation`, `POST /ide/lsp/references`,
   `POST /ide/lsp/rename`, `POST /ide/lsp/format`, `POST /ide/lsp/code-actions`,
+  `POST /ide/lsp/diagnostics`, `POST /ide/lsp/hover`,
   plus `WS /ws/lsp?lang=&root=&connection_id=`.
 - Collaboration: `POST /ide/collab/rooms`, `GET /ide/collab/rooms`,
   `POST /ide/collab/rooms/{room_id}/role`, `DELETE /ide/collab/rooms/{room_id}`,

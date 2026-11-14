@@ -5,7 +5,7 @@
   // `PtyConversationView` for legacy PTY threads) — layered seamlessly with
   // smart IDE context pills (`IdeContextBar`) and 1-click `IdeProposalCard`
   // Diff Preview + Apply/Undo.
-  import { onMount, setContext } from 'svelte';
+  import { onMount, setContext, untrack } from 'svelte';
   import { announceShown } from '../../lib/announce.svelte';
   import type { TurnItem } from '../../lib/api/types';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -33,7 +33,8 @@
 
   $effect(() => {
     const r = (ide.target.root ?? '').trim().replace(/\/+$/, '');
-    ideAgent.syncTargetRoot(r ? `${ide.target.kind}:${r}` : '');
+    const nextKey = r ? `${ide.target.kind}:${r}` : '';
+    untrack(() => ideAgent.syncTargetRoot(nextKey));
   });
 
   // Route every Markdown file link & code-block Open action inside EmbeddedRuntimeThread to the IDE editor.

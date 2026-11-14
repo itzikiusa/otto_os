@@ -1151,7 +1151,11 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
     const modal = page.locator('.sheet[role="dialog"]').last();
     await expectFullyInViewport(page, modal, 'Environments & Run Configurations modal');
 
-    // Verify masked Keychain secret badge renders cleanly without exposing plaintext
+    // Verify masked Keychain secret badge renders cleanly on Project environment tab without exposing plaintext
+    const envTab = modal.getByRole('tab', { name: /Project environment/i }).first();
+    if ((await envTab.count()) > 0 && (await envTab.getAttribute('aria-selected')) !== 'true') {
+      await envTab.click();
+    }
     await expect(modal).toContainText('Stored in Keychain');
     await expect(modal).not.toContainText('sk_test_super_secret_value');
 
@@ -2076,10 +2080,8 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
       await expect(evalLineEl).toBeVisible();
       const evalBox = await evalLineEl.boundingBox();
       expect(evalBox).toBeTruthy();
-      // Click on `EvaluateAdmission` token and press F12
-      await activeEditorContent(page).click();
-      await page.keyboard.press('Meta+ArrowUp');
-      for (let down = 0; down < 14; down++) await page.keyboard.press('ArrowDown');
+      // Click on `EvaluateAdmission` line (auto-folded `import (…)` collapses lines 3-7) and press F12
+      await page.mouse.click(evalBox!.x + 8, evalBox!.y + evalBox!.height / 2);
       await page.keyboard.press('Home');
       for (let right = 0; right < 22; right++) await page.keyboard.press('ArrowRight');
       await page.keyboard.press('F12');
@@ -2088,7 +2090,7 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
       // Navigate Back via `ide-nav-back` (`Cmd+[`) -> returns to `main.go`!
       await expect(page.getByTestId('ide-nav-back')).toBeEnabled();
       await page.getByTestId('ide-nav-back').click();
-      await expect(activeEditorContent(page)).toContainText('os.Getenv("GO_DEBUGGING_PARAMS")', {
+      await expect(activeEditorContent(page)).toContainText(`os.Getenv("${shellVarKey}")`, {
         timeout: 10_000,
       });
 
@@ -2108,9 +2110,14 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
       expect(stdlibDef.locations[0].path).toMatch(/\/src\/fmt\/print\.go$/);
 
       // Trigger real F12 jump on `Printf` in CodeMirror!
-      await activeEditorContent(page).click();
-      await page.keyboard.press('Meta+ArrowUp');
-      for (let down = 0; down < 15; down++) await page.keyboard.press('ArrowDown');
+      const printfLineEl = page
+        .locator('.cm-editor .cm-content .cm-line')
+        .filter({ hasText: 'fmt.Printf' })
+        .first();
+      await expect(printfLineEl).toBeVisible();
+      const printfBox = await printfLineEl.boundingBox();
+      expect(printfBox).toBeTruthy();
+      await page.mouse.click(printfBox!.x + 8, printfBox!.y + printfBox!.height / 2);
       await page.keyboard.press('Home');
       for (let right = 0; right < 7; right++) await page.keyboard.press('ArrowRight');
       await page.keyboard.press('F12');
@@ -2122,7 +2129,7 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
 
       // Navigate Back (`Cmd+[`) from `$GOROOT/src/fmt/print.go` -> returns directly to `main.go`!
       await page.getByTestId('ide-nav-back').click();
-      await expect(activeEditorContent(page)).toContainText('os.Getenv("GO_DEBUGGING_PARAMS")', {
+      await expect(activeEditorContent(page)).toContainText(`os.Getenv("${shellVarKey}")`, {
         timeout: 10_000,
       });
 

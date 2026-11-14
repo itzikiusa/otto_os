@@ -8,12 +8,14 @@
 
 import { historyField } from '@codemirror/commands';
 import { EditorState, type Extension, type StateEffect } from '@codemirror/state';
+import { ViewPlugin, type EditorView } from '@codemirror/view';
 import type { MenuItem } from '../contextmenu.svelte.ts';
 
 /** Returns true when a `.cm-gutters` target should toggle/preview a breakpoint (all gutter cells except ▶, 💡, 🎯↑, fold chevron, or diff bar). */
 export function isBpTargetGutterElement(target: EventTarget | null): boolean {
-  if (!(target instanceof Element) || !target.closest('.cm-gutters')) return false;
-  return !target.closest('.cm-ide-run-btn, .cm-ide-gutter-run-btn, .cm-ide-lightbulb-btn, .cm-ide-dep-gutter-btn, .cm-fold-marker, .cm-ide-diff-bar');
+  const el = target instanceof Element ? target : target instanceof Node ? target.parentElement : null;
+  if (!el || !el.closest('.cm-gutters')) return false;
+  return !el.closest('.cm-ide-run-btn, .cm-ide-gutter-run-btn, .cm-ide-lightbulb-btn, .cm-ide-dep-gutter-btn, .cm-fold-marker, .cm-ide-diff-bar');
 }
 
 export const IDE_UNDO_JOURNAL_KEY = 'otto.ide.undoJournal.v1';
@@ -26,7 +28,7 @@ const MAX_CLIPBOARD_ITEMS = 30;
 const MAX_CLIPBOARD_ITEM_CHARS = 32_000;
 
 export interface SingletonIdeTabState {
-  state: EditorState;
+  stateJson: { doc: string; [k: string]: unknown };
   scroll: StateEffect<unknown> | null;
   scrollTop: number;
   chars: number;
@@ -157,7 +159,18 @@ export function restoreIdeStateFromJournal(
   }
 }
 
-export function forgetIdeUndoJournal(filePath: string, storage?: Pick<Storage, 'getItem' | 'setItem'> | null): void {
+export function forgetIdeUndoJournal(
+  filePath: string | 'all',
+  storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | null,
+): void {
+  if (filePath === 'all') {
+    const store = storage ?? (typeof localStorage !== 'undefined' ? localStorage : null);
+    try {
+      if (store && 'removeItem' in store && typeof store.removeItem === 'function') store.removeItem(IDE_UNDO_JOURNAL_KEY);
+      else writeJournalMap({}, storage);
+    } catch { /* ignore */ }
+    return;
+  }
   const map = readJournalMap(storage);
   if (filePath in map) {
     delete map[filePath];
@@ -174,8 +187,7 @@ export function restoreDurableIdeState(
   const mem = getSingletonIdeState(filePath);
   if (mem) {
     try {
-      const json = mem.state.toJSON({ history: historyField }) as { doc: string };
-      let st = EditorState.fromJSON(json, { extensions }, { history: historyField });
+      let st = EditorState.fromJSON(mem.stateJson, { extensions }, { history: historyField });
       let restoredDraft: string | null = null;
       if (st.doc.toString() !== diskContent) {
         if (savedContent != null && savedContent === diskContent) restoredDraft = st.doc.toString();
@@ -351,4 +363,76 @@ export function buildIdeVcsContextRows(
       },
     },
   ];
+}
+
+export function isManifestPath(p: string): boolean {
+  const b = (p.split('?')[0].split('/').pop() ?? '').toLowerCase();
+  return (
+    b === 'go.mod' || b === 'pom.xml' || b === 'package.json' || b === 'cargo.toml' ||
+    b === 'pyproject.toml' || b === 'build.gradle' || b === 'build.gradle.kts' ||
+    /^requirements(?:[-_.][\w-]+)?\.txt$/.test(b)
+  );
+}
+
+export function fallbackSelectionRange(state: EditorState): {
+  from: number; to: number; startLine: number; endLine: number; text: string;
+} {
+  const { doc, selection } = state;
+  const { from, to } = selection.main;
+  if (from === to) {
+    const ln = doc.lineAt(from);
+    return { from: ln.from, to: ln.to, startLine: ln.number, endLine: ln.number, text: ln.text };
+  }
+  const startLine = doc.lineAt(from).number;
+  const endLine = to > from && doc.lineAt(to).from === to ? doc.lineAt(to - 1).number : doc.lineAt(to).number;
+  return { from, to, startLine, endLine, text: state.sliceDoc(from, to) };
+}
+
+export function applyFallbackQuickFixEdits(
+  view: EditorView,
+  edits: readonly { start_line: number; start_col: number; end_line: number; end_col: number; new_text: string }[],
+): void {
+  const doc = view.state.doc;
+  const specs = edits.map((e) => {
+    const sLn = doc.line(Math.max(1, Math.min(doc.lines, e.start_line)));
+    const eLn = doc.line(Math.max(1, Math.min(doc.lines, e.end_line)));
+    const from = Math.min(doc.length, sLn.from + Math.max(0, e.start_col - 1));
+    const to = Math.max(from, Math.min(doc.length, eLn.from + Math.max(0, e.end_col - 1)));
+    return { from, to, insert: e.new_text };
+  });
+  view.dispatch({ changes: specs, userEvent: 'input.quickfix' });
+}
+
+export function createFallbackBpGutterHandlers(opts: {
+  isIdeMounted: () => boolean;
+  getToggle: () => ((line: number) => void) | null;
+  getEdit: () => ((line: number, event?: MouseEvent) => void) | null;
+}): Extension {
+  return ViewPlugin.fromClass(class {
+    private dom: HTMLElement;
+    private onDown: (ev: MouseEvent) => void;
+    private onCtx: (ev: MouseEvent) => void;
+    constructor(v: EditorView) {
+      this.dom = v.scrollDOM;
+      this.onDown = (ev) => {
+        const onToggle = opts.getToggle(), onEdit = opts.getEdit();
+        if (opts.isIdeMounted() || ev.button !== 0 || ev.altKey || ev.metaKey || ev.ctrlKey || (!onToggle && !onEdit) || !isBpTargetGutterElement(ev.target)) return;
+        const ln = v.state.doc.lineAt(v.lineBlockAtHeight(ev.clientY - v.documentTop).from).number;
+        if (ev.shiftKey && onEdit) { ev.preventDefault(); ev.stopPropagation(); onEdit(ln, ev); }
+        else if (onToggle) { ev.preventDefault(); ev.stopPropagation(); onToggle(ln); }
+      };
+      this.onCtx = (ev) => {
+        const onEdit = opts.getEdit();
+        if (opts.isIdeMounted() || !onEdit || !isBpTargetGutterElement(ev.target)) return;
+        const ln = v.state.doc.lineAt(v.lineBlockAtHeight(ev.clientY - v.documentTop).from).number;
+        ev.preventDefault(); ev.stopPropagation(); onEdit(ln, ev);
+      };
+      this.dom.addEventListener('mousedown', this.onDown, true);
+      this.dom.addEventListener('contextmenu', this.onCtx, true);
+    }
+    destroy(): void {
+      this.dom.removeEventListener('mousedown', this.onDown, true);
+      this.dom.removeEventListener('contextmenu', this.onCtx, true);
+    }
+  });
 }

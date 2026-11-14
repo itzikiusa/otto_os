@@ -377,12 +377,12 @@ pub fn agent_session_of(ctx: &AuthContext) -> Option<&otto_core::Id> {
         .or(ctx.mcp_session_id.as_ref())
 }
 
-/// The daemon-side host filesystem routes (`/api/v1/fs/*`, `/api/v1/ide/fs/*`)
-/// and the session-scoped working-folder files (`/api/v1/sessions/{id}/files/*`,
-/// PC-1): all read/write the disk unconfined as the daemon's OS account.
+/// Host filesystem & IDE routes (`/api/v1/fs/*`, protected `/api/v1/ide/*`,
+/// `/api/v1/sessions/{id}/files/*`): all act on disk/processes as OS account.
 fn is_host_files_route(template: &str) -> bool {
     template.starts_with("/api/v1/fs/")
-        || template.starts_with("/api/v1/ide/fs/")
+        || (template.starts_with("/api/v1/ide/")
+            && !template.starts_with("/api/v1/ide/collab/guest/"))
         || template.starts_with("/api/v1/sessions/{id}/files/")
 }
 
@@ -960,6 +960,12 @@ mod root_route_tests {
         assert!(is_host_files_route("/api/v1/ide/fs/tree"));
         assert!(is_host_files_route("/api/v1/ide/fs/read"));
         assert!(is_host_files_route("/api/v1/ide/fs/write"));
+        assert!(is_host_files_route("/api/v1/ide/runs"));
+        assert!(is_host_files_route("/api/v1/ide/debug/sessions"));
+        assert!(is_host_files_route("/api/v1/ide/history/restore"));
+        assert!(!is_host_files_route(
+            "/api/v1/ide/collab/guest/{room_id}/state"
+        ));
         assert!(is_host_files_route("/api/v1/sessions/{id}/files/browse"));
         assert!(is_host_files_route("/api/v1/sessions/{id}/files/read"));
         assert!(!is_host_files_route("/api/v1/sessions/{id}/transcript"));

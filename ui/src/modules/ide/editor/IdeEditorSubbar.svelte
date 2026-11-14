@@ -15,7 +15,7 @@
   import { ide, type IdeOpenTab, type IdeSymbolNode } from '../ideStore.svelte';
   import { ideAgent } from '../store/ideAgentController.svelte';
   import { pushIdeNavLocation, revealInIdeProjectTree, toggleFormatOnSave } from './ideEditorStoreBridge.svelte';
-  import { transformJsonText, type IdeOutlineNode } from './ideLangAnalyzer';
+  import type { IdeOutlineNode } from './ideLangAnalyzer';
 
   interface Props {
     activeTab: IdeOpenTab;
@@ -87,8 +87,9 @@
     ctxMenu.showAt(anchor, items, { align: 'end' });
   }
 
-  function applyJsonTransform(mode: 'pretty' | 'minify' | 'sort'): void {
+  async function applyJsonTransform(mode: 'pretty' | 'minify' | 'sort'): Promise<void> {
     if (activeTab.readOnly) return;
+    const { transformJsonText } = await import('./ideLangAnalyzer');
     const res = transformJsonText(activeTab.content, mode, activeDocKind === 'jsonl');
     if (!res.ok) { toasts.error('Invalid JSON', res.error); return; }
     onapplyjson(res.text);
@@ -130,7 +131,7 @@
     {#if (activeDocKind === 'json' || activeDocKind === 'jsonl') && !activeTab.readOnly && effectiveViewMode === 'text' && !hasNonEmptySelection}
       <button type="button" class="btn small ghost" onclick={() => applyJsonTransform('pretty')} title="Pretty-print JSON">Pretty</button>
       <button type="button" class="btn small ghost" onclick={() => applyJsonTransform('minify')} title="Minify JSON">Minify</button>
-      <button type="button" class="btn small ghost" onclick={() => applyJsonTransform('sort')} title="Sort JSON keys alphabetically">Sort</button>
+      <button type="button" class="btn small ghost" aria-label="Sort keys" onclick={() => applyJsonTransform('sort')} title="Sort JSON keys alphabetically">Sort</button>
     {/if}
 
     {#if hasNonEmptySelection && effectiveViewMode === 'text'}

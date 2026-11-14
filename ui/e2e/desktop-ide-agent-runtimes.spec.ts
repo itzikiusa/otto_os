@@ -345,7 +345,7 @@ test.describe('Desktop IDE Round 2 — Agent Dock, Inline Edit, Multi-Language D
 
     // A) Attach `⏸` paused debug frame from a live Python debug session (`pyapp/calc_run.py`)
     await openFileFromTree(page, 'pyapp', 'calc_run.py');
-    await expect(activeEditor(page)).toContainText('result = compute_answer(20, 22)');
+    await expect(activeEditor(page)).toContainText(/result = compute_answer\((?:a:\s*)?20,\s*(?:b:\s*)?22\)/);
     await toggleGutterBreakpoint(page, 7);
 
     const gutterBtn = page.locator('.cm-gutters .cm-ide-gutter-run-btn').first();

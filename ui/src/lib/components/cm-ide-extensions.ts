@@ -10,7 +10,7 @@ import {
 } from '@codemirror/view';
 import {
   EditorSelection, EditorState, Prec, RangeSet, StateEffect, StateField,
-  type ChangeSpec, type Extension, type Range, type SelectionRange,
+  type Extension, type Range,
 } from '@codemirror/state';
 import {
   addCursorAbove, addCursorBelow, copyLineDown, deleteLine,
@@ -84,45 +84,8 @@ export function selectAllOccurrences(view: EditorView): boolean {
   return selectSelectionMatches(view);
 }
 
-export function splitSelectionIntoLines(view: EditorView): boolean {
-  const { state } = view, next: SelectionRange[] = [];
-  let changed = false;
-  for (const r of state.selection.ranges) {
-    const startLn = state.doc.lineAt(r.from).number;
-    let endLn = state.doc.lineAt(r.to).number;
-    if (!r.empty && r.to > r.from && state.doc.lineAt(r.to).from === r.to) endLn = state.doc.lineAt(r.to - 1).number;
-    if (endLn <= startLn) { next.push(r); continue; }
-    changed = true;
-    for (let ln = startLn; ln <= endLn; ln++) {
-      const line = state.doc.line(ln);
-      next.push(EditorSelection.range(Math.max(line.from, r.from), Math.min(line.to, r.to)));
-    }
-  }
-  if (!changed || !next.length) return false;
-  view.dispatch({ selection: EditorSelection.create(next) });
-  return true;
-}
-
-export function applyLinePrefixSuffix(view: EditorView, prefix: string, suffix: string): boolean {
-  if ((!prefix && !suffix) || view.state.readOnly) return false;
-  const { doc, selection } = view.state, touched = new Set<number>();
-  for (const r of selection.ranges) {
-    const startLn = doc.lineAt(r.from).number;
-    const endLn = !r.empty && r.to > r.from && doc.lineAt(r.to).from === r.to ? doc.lineAt(r.to - 1).number : doc.lineAt(r.to).number;
-    for (let ln = startLn; ln <= endLn; ln++) touched.add(ln);
-  }
-  const lines = [...touched].sort((a, b) => a - b);
-  if (!lines.length) return false;
-  const changes: ChangeSpec[] = [], cursors: SelectionRange[] = [], delta = prefix.length + suffix.length;
-  lines.forEach((ln, idx) => {
-    const line = doc.line(ln);
-    if (prefix.length) changes.push({ from: line.from, to: line.from, insert: prefix });
-    if (suffix.length) changes.push({ from: line.to, to: line.to, insert: suffix });
-    cursors.push(EditorSelection.cursor(line.to + (idx + 1) * delta));
-  });
-  view.dispatch({ changes, selection: EditorSelection.create(cursors, cursors.length - 1), userEvent: 'input', scrollIntoView: true });
-  return true;
-}
+import { applyLinePrefixSuffixSync as applyLinePrefixSuffix, splitSelectionIntoLinesSync as splitSelectionIntoLines } from './cm-editor-helpers';
+export { applyLinePrefixSuffix, splitSelectionIntoLines };
 
 export function duplicateLineOrSelection(view: EditorView): boolean {
   if (view.state.readOnly) return false;
@@ -339,8 +302,8 @@ export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Ext
 
   const handleBpClick = (_v: EditorView, ln: number, me: MouseEvent): boolean => {
     const cbs = opts.getCallbacks();
-    if (me.shiftKey && cbs.onEditBreakpoint) { me.preventDefault(); cbs.onEditBreakpoint(ln, me); return true; }
-    if (cbs.onToggleBreakpoint) { me.preventDefault(); cbs.onToggleBreakpoint(ln); return true; }
+    if (me.shiftKey && cbs.onEditBreakpoint) { me.preventDefault(); me.stopPropagation(); cbs.onEditBreakpoint(ln, me); return true; }
+    if (cbs.onToggleBreakpoint) { me.preventDefault(); me.stopPropagation(); cbs.onToggleBreakpoint(ln); return true; }
     return false;
   };
   const handleBpCtx = (v: EditorView, ln: number, me: MouseEvent): boolean => {
@@ -382,31 +345,50 @@ export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Ext
     initialSpacer: () => bpSpacer,
   });
 
-  const gutterHandlers = Prec.highest(EditorView.domEventHandlers({
-    mousemove(ev, view) {
-      if (!opts.getCallbacks().onToggleBreakpoint || !isBpTargetGutterElement(ev.target)) {
-        if (view.state.field(bpField).hoverLine !== null) view.dispatch({ effects: setHoverBpLineEffect.of(null) });
-        return false;
-      }
-      const ln = view.state.doc.lineAt(view.lineBlockAtHeight(ev.clientY - view.documentTop).from).number;
-      if (view.state.field(bpField).hoverLine !== ln) view.dispatch({ effects: setHoverBpLineEffect.of(ln) });
-      return false;
-    },
-    mouseleave(_ev, view) {
-      if (view.state.field(bpField).hoverLine !== null) view.dispatch({ effects: setHoverBpLineEffect.of(null) });
-      return false;
-    },
-    mousedown(ev, view) {
-      if (ev.button !== 0 || ev.altKey || ev.metaKey || ev.ctrlKey || !isBpTargetGutterElement(ev.target)) return false;
-      const ln = view.state.doc.lineAt(view.lineBlockAtHeight(ev.clientY - view.documentTop).from).number;
-      return handleBpClick(view, ln, ev);
-    },
-    contextmenu(ev, view) {
-      if (!isBpTargetGutterElement(ev.target)) return false;
-      const ln = view.state.doc.lineAt(view.lineBlockAtHeight(ev.clientY - view.documentTop).from).number;
-      return handleBpCtx(view, ln, ev);
-    },
-  }));
+  const gutterHandlers = ViewPlugin.fromClass(class {
+    private dom: HTMLElement;
+    private onMove: (ev: MouseEvent) => void;
+    private onLeave: () => void;
+    private onDown: (ev: MouseEvent) => void;
+    private onCtx: (ev: MouseEvent) => void;
+    constructor(view: EditorView) {
+      this.dom = view.scrollDOM;
+      const lineAtY = (clientY: number) =>
+        view.state.doc.lineAt(view.lineBlockAtHeight(clientY - view.documentTop).from).number;
+      this.onMove = (ev) => {
+        const st = view.state.field(bpField, false);
+        if (!st) return;
+        if (!opts.getCallbacks().onToggleBreakpoint || !isBpTargetGutterElement(ev.target)) {
+          if (st.hoverLine !== null) view.dispatch({ effects: setHoverBpLineEffect.of(null) });
+          return;
+        }
+        const ln = lineAtY(ev.clientY);
+        if (st.hoverLine !== ln) view.dispatch({ effects: setHoverBpLineEffect.of(ln) });
+      };
+      this.onLeave = () => {
+        const st = view.state.field(bpField, false);
+        if (st && st.hoverLine !== null) view.dispatch({ effects: setHoverBpLineEffect.of(null) });
+      };
+      this.onDown = (ev) => {
+        if (ev.button !== 0 || ev.altKey || ev.metaKey || ev.ctrlKey || !isBpTargetGutterElement(ev.target)) return;
+        handleBpClick(view, lineAtY(ev.clientY), ev);
+      };
+      this.onCtx = (ev) => {
+        if (!isBpTargetGutterElement(ev.target)) return;
+        handleBpCtx(view, lineAtY(ev.clientY), ev);
+      };
+      this.dom.addEventListener('mousemove', this.onMove);
+      this.dom.addEventListener('mouseleave', this.onLeave);
+      this.dom.addEventListener('mousedown', this.onDown, true);
+      this.dom.addEventListener('contextmenu', this.onCtx, true);
+    }
+    destroy(): void {
+      this.dom.removeEventListener('mousemove', this.onMove);
+      this.dom.removeEventListener('mouseleave', this.onLeave);
+      this.dom.removeEventListener('mousedown', this.onDown, true);
+      this.dom.removeEventListener('contextmenu', this.onCtx, true);
+    }
+  });
 
   return [bpField, runField, bpAndRunGutter, gutterHandlers];
 }

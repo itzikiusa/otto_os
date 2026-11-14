@@ -280,6 +280,18 @@ export interface CreateIdeDepsExtensionOptions {
   onDepsUpdated?: (items: IdeDepItem[]) => void;
 }
 
+const depTheme = EditorView.baseTheme({
+  '.cm-ide-dep-deprecated': { textDecoration: 'line-through', color: 'var(--text-dim)' },
+  '.cm-ide-dep-outdated': { textDecoration: 'underline wavy var(--warning)', textUnderlineOffset: '3px' },
+  '.cm-ide-dep-vulnerable': { textDecoration: 'underline wavy var(--danger)', backgroundColor: 'color-mix(in srgb, var(--danger) 8%, transparent)', borderRadius: '2px' },
+  '.cm-ide-dep-cv-bar': { display: 'inline-flex', alignItems: 'center', gap: '10px', marginInlineStart: '12px', userSelect: 'none' },
+  '.cm-ide-dep-cv-link': { appearance: 'none', border: 'none', background: 'transparent', color: 'var(--accent-text)', fontFamily: 'var(--font-ui)', fontSize: 'var(--fs-xs)', cursor: 'pointer', padding: '0 2px' },
+  '.cm-ide-dep-cv-link:hover': { textDecoration: 'underline' },
+  '.cm-ide-dep-gutter': { width: '18px', userSelect: 'none' },
+  '.cm-ide-dep-gutter-btn': { appearance: 'none', border: 'none', background: 'transparent', fontSize: 'var(--fs-xs)', padding: '0', cursor: 'pointer', lineHeight: '1' },
+  '.cm-ide-dep-shield-marker': { fontSize: 'var(--fs-xs)', lineHeight: '1', cursor: 'help' },
+});
+
 export function createIdeDepsExtension(opts: CreateIdeDepsExtensionOptions): Extension {
   const eco = detectManifestEcosystem(opts.filePath);
   if (!eco) return [];
@@ -444,18 +456,6 @@ export function createIdeDepsExtension(opts: CreateIdeDepsExtensionOptions): Ext
       return true;
     },
   }));
-
-  const depTheme = EditorView.baseTheme({
-    '.cm-ide-dep-deprecated': { textDecoration: 'line-through', color: 'var(--text-dim)' },
-    '.cm-ide-dep-outdated': { textDecoration: 'underline wavy var(--warning)', textUnderlineOffset: '3px' },
-    '.cm-ide-dep-vulnerable': { textDecoration: 'underline wavy var(--danger)', backgroundColor: 'color-mix(in srgb, var(--danger) 8%, transparent)', borderRadius: '2px' },
-    '.cm-ide-dep-cv-bar': { display: 'inline-flex', alignItems: 'center', gap: '10px', marginInlineStart: '12px', userSelect: 'none' },
-    '.cm-ide-dep-cv-link': { appearance: 'none', border: 'none', background: 'transparent', color: 'var(--accent-text)', fontFamily: 'var(--font-ui)', fontSize: 'var(--fs-xs)', cursor: 'pointer', padding: '0 2px' },
-    '.cm-ide-dep-cv-link:hover': { textDecoration: 'underline' },
-    '.cm-ide-dep-gutter': { width: '18px', userSelect: 'none' },
-    '.cm-ide-dep-gutter-btn': { appearance: 'none', border: 'none', background: 'transparent', fontSize: 'var(--fs-xs)', padding: '0', cursor: 'pointer', lineHeight: '1' },
-    '.cm-ide-dep-shield-marker': { fontSize: 'var(--fs-xs)', lineHeight: '1', cursor: 'help' },
-  });
 
   return [manifestDepsField, depTheme, Prec.high(depGutter), plugin, depHover, ctxHandler];
 }

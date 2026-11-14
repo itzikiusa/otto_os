@@ -1,6 +1,7 @@
 <script lang="ts">
   // Collapsible, height-resizable (120px..85vh), maximizable IDE Bottom Tool Dock
   // hosting Debug, Run & tests, Git, Problems, Usages, and Terminal.
+  import { untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
@@ -50,7 +51,7 @@
   $effect(() => {
     void ide.target.root;
     void ide.projectRoots.length;
-    ideGit.syncVisibleRoots({ probeAll: false });
+    untrack(() => ideGit.syncVisibleRoots({ probeAll: false }));
   });
 
   $effect(() => {

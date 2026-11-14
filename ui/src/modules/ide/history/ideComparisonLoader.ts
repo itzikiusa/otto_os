@@ -68,6 +68,28 @@ export async function readCurrentDiskOrTab(
   }
 }
 
+export async function refreshTreeForRestoredPath(
+  fallbackRoot: string,
+  restoredPath: string,
+  relPath?: string | null,
+): Promise<string> {
+  await ide.loadTree();
+  const sampleEntry = ide.treeRootEntries[0]?.path;
+  const canonicalRoot = sampleEntry
+    ? sampleEntry.slice(0, sampleEntry.lastIndexOf('/'))
+    : fallbackRoot.replace(/\/+$/, '');
+  const cleanRoot = fallbackRoot.replace(/\/+$/, '');
+  const derivedRel =
+    relPath?.replace(/^\/+/, '') ||
+    (restoredPath.startsWith(`${cleanRoot}/`) ? restoredPath.slice(cleanRoot.length + 1) : '');
+  const resolved = derivedRel ? `${canonicalRoot}/${derivedRel}` : restoredPath;
+  const slash = resolved.lastIndexOf('/');
+  const parentDir = slash > canonicalRoot.length ? resolved.slice(0, slash) : '';
+  if (parentDir) await ide.loadTree(parentDir);
+  await ide.revealInProjectTree(resolved);
+  return resolved;
+}
+
 export async function writeCurrentAndSyncIde(
   absPath: string,
   nextContent: string,
@@ -93,7 +115,7 @@ export async function writeCurrentAndSyncIde(
       tab.dirty = false;
       tab.sha256 = resp.sha256;
     }
-    if (wasMissing) await ide.loadTree();
+    if (wasMissing) await refreshTreeForRestoredPath(root, clean);
     void ideGit.refreshActive();
     return true;
   } catch (e) {

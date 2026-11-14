@@ -27,6 +27,7 @@
     promptPutLocalHistoryLabel,
     readClipboardForCompare,
     readCurrentDiskOrTab,
+    refreshTreeForRestoredPath,
     writeCurrentAndSyncIde,
     type HistoryEntryResp,
     type HistoryListResp,
@@ -325,8 +326,8 @@
     restoring = true;
     try {
       const res = await api.post<HistoryRestoreResp>('/ide/history/restore', { root, id: entry.id });
-      const restoredPath = res.path || entry.path;
-      await ide.loadTree();
+      const rawPath = res.path || entry.path;
+      const restoredPath = await refreshTreeForRestoredPath(root, rawPath, entry.rel_path);
       if (ide.tabs.some((t) => t.path === restoredPath)) {
         await ideGit.reloadIdeTabIfOpen(restoredPath);
       } else {

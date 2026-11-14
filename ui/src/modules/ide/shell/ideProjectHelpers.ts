@@ -7,11 +7,13 @@ import { lsGet, lsSet } from '../../../lib/storage';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
 import {
+  autoOpenInitialEntry,
   buildNewFileTemplate,
   ideBasename,
   type IdeBreakpoint,
   type IdeFsEntry,
   type IdeFsTreeResp,
+  type IdeNamedProject,
   type IdeNavLocation,
   type IdeOpenTab,
   type IdeProjectEnvironment,
@@ -19,6 +21,7 @@ import {
   type IdeRunConfig,
   type IdeTargetSpec,
 } from '../store/ideTypes';
+import { loadWorkspaceOpenTabs } from '../store/ideBufferPerf';
 
 export interface ProjectHelperHost {
   target: IdeTargetSpec;
@@ -446,4 +449,124 @@ export function detectFastRunConfigs(rootPath: string, entries: IdeFsEntry[]): I
     });
   }
   return out;
+}
+
+export function mergeFastRunConfigs(saved: IdeRunConfig[], detected: IdeRunConfig[]): IdeRunConfig[] {
+  const explicit = saved.filter((c) => !c.auto_detected);
+  const seenIds = new Set(explicit.map((c) => c.id));
+  const seenNames = new Set(explicit.map((c) => `${c.runner}:${c.name.toLowerCase()}`));
+  const mergedAuto: IdeRunConfig[] = [];
+  for (const item of [...saved.filter((c) => c.auto_detected), ...detected]) {
+    const key = `${item.runner}:${item.name.toLowerCase()}`;
+    if (seenIds.has(item.id) || seenNames.has(key)) continue;
+    seenIds.add(item.id);
+    seenNames.add(key);
+    mergedAuto.push({ ...item, auto_detected: true });
+  }
+  return [...explicit, ...mergedAuto];
+}
+
+const NAMED_PROJECTS_KEY = 'otto.ide.namedProjects.v1';
+const ACTIVE_PROJECT_KEY = 'otto.ide.activeProjectId.v1';
+const LAST_ROOT_KEY = 'otto.ide.lastRoot';
+const BUILD_TOOL_PREFS_PREFIX = 'otto.ide.buildToolPrefs:';
+const GRADLE_FILES = new Set(['build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts', 'gradlew']);
+
+export function emitIdeProjectsChanged(projects?: IdeNamedProject[], activeProjectId?: string | null, root?: string): void {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('otto:ide-projects-changed', { detail: { projects, activeProjectId, root } }));
+  }
+}
+
+export function saveLastIdeRoot(root: string): void { if (root) lsSet(LAST_ROOT_KEY, root); }
+export function loadActiveProjectIdLocal(): string | null { return lsGet(ACTIVE_PROJECT_KEY) || null; }
+export function saveActiveProjectIdLocal(id: string | null, projects?: IdeNamedProject[], root?: string): void {
+  lsSet(ACTIVE_PROJECT_KEY, id ?? '');
+  emitIdeProjectsChanged(projects, id, root);
+}
+export function saveNamedProjectsLocal(projects: IdeNamedProject[], activeProjectId?: string | null): void {
+  try { lsSet(NAMED_PROJECTS_KEY, JSON.stringify(projects)); } catch { /* quota */ }
+  emitIdeProjectsChanged(projects, activeProjectId);
+}
+
+export function loadNamedProjectsLocal(): IdeNamedProject[] {
+  try {
+    const raw = lsGet(NAMED_PROJECTS_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (!Array.isArray(parsed)) return [];
+    const out: IdeNamedProject[] = [];
+    for (let i = 0; i < parsed.length; i++) {
+      const p = parsed[i];
+      if (!p || typeof p.id !== 'string' || typeof p.primary_root !== 'string') continue;
+      const primary = normalizeRootPath(p.primary_root);
+      if (!primary) continue;
+      const rawFolders: string[] = Array.isArray(p.folders) ? p.folders.map((f: unknown) => normalizeRootPath(String(f))).filter(Boolean) : [];
+      out.push({
+        id: p.id, name: String(p.name || ideBasename(primary) || 'Project').trim(), primary_root: primary,
+        folders: [primary, ...rawFolders.filter((f) => f !== primary)], pinned: p.pinned !== false,
+        updated_at: typeof p.updated_at === 'number' ? p.updated_at : Date.now(),
+      });
+    }
+    return out;
+  } catch { return []; }
+}
+
+export interface WorkspaceBuildToolPrefs { open: boolean; mavenProfiles: string[]; springProfiles: string[]; skipTests: boolean; offline: boolean; }
+
+export function loadBuildToolPrefsLocal(root: string): WorkspaceBuildToolPrefs {
+  const empty: WorkspaceBuildToolPrefs = { open: false, mavenProfiles: [], springProfiles: [], skipTests: false, offline: false };
+  if (!root) return empty;
+  try {
+    const raw = lsGet(`${BUILD_TOOL_PREFS_PREFIX}${normalizeRootPath(root)}`);
+    if (!raw) return empty;
+    const p = JSON.parse(raw) as Partial<WorkspaceBuildToolPrefs>;
+    return {
+      open: Boolean(p.open), mavenProfiles: Array.isArray(p.mavenProfiles) ? p.mavenProfiles : [],
+      springProfiles: Array.isArray(p.springProfiles) ? p.springProfiles : [], skipTests: Boolean(p.skipTests), offline: Boolean(p.offline),
+    };
+  } catch { return empty; }
+}
+
+export function saveBuildToolPrefsLocal(root: string, prefs: WorkspaceBuildToolPrefs): void {
+  if (root) lsSet(`${BUILD_TOOL_PREFS_PREFIX}${normalizeRootPath(root)}`, JSON.stringify(prefs));
+}
+
+export function detectBuildToolFromState(
+  override: 'maven' | 'gradle' | null, rootEntries: IdeFsEntry[], childrenByDir: Record<string, IdeFsEntry[]>, tabs: IdeOpenTab[], runConfigs: IdeRunConfig[],
+): 'maven' | 'gradle' | null {
+  if (override) return override;
+  const check = (name: string): 'maven' | 'gradle' | null => {
+    const l = name.toLowerCase();
+    return l === 'pom.xml' ? 'maven' : GRADLE_FILES.has(l) ? 'gradle' : null;
+  };
+  for (let i = 0; i < rootEntries.length; i++) { const k = check(rootEntries[i].name); if (k) return k; }
+  for (const entries of Object.values(childrenByDir)) for (let i = 0; i < entries.length; i++) { const k = check(entries[i].name); if (k) return k; }
+  for (let i = 0; i < tabs.length; i++) { const k = check(tabs[i].name); if (k) return k; }
+  for (let i = 0; i < runConfigs.length; i++) {
+    const r = runConfigs[i].runner;
+    if (r === 'maven' || r === 'java_maven') return 'maven';
+    if (r === 'gradle' || r === 'java_gradle') return 'gradle';
+  }
+  return null;
+}
+
+export async function restoreWorkspaceTabsOrInitial(host: {
+  target: IdeTargetSpec; collabIsGuest: boolean; tabs: IdeOpenTab[]; hasClosedAllTabs: boolean; activePath: string | null;
+  treeRootEntries: IdeFsEntry[]; childrenByDir: Record<string, IdeFsEntry[]>;
+  toggleDir(dirPath: string): Promise<void>; openFile(rawPath: string, opts?: { preview?: boolean }): Promise<void>; openInSplit(path: string, dir?: 'right' | 'down'): void;
+}): Promise<void> {
+  if (host.collabIsGuest || host.tabs.length > 0 || host.hasClosedAllTabs) return;
+  if (typeof window !== 'undefined' && /[?&](file|collab)=/.test(window.location.hash)) return;
+  const saved = loadWorkspaceOpenTabs(host.target.root);
+  if (saved && saved.paths.length > 0) {
+    for (let i = 0; i < saved.paths.length; i++) await host.openFile(saved.paths[i], { preview: false });
+    const validTabs = host.tabs.filter((t) => !t.error);
+    if (validTabs.length > 0) {
+      if (saved.splitPath && validTabs.some((t) => t.path === saved.splitPath)) host.openInSplit(saved.splitPath, 'right');
+      if (saved.activePath && validTabs.some((t) => t.path === saved.activePath)) host.activePath = saved.activePath;
+      return;
+    }
+    host.tabs = [];
+  }
+  await autoOpenInitialEntry(host);
 }

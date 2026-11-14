@@ -2,27 +2,19 @@
   // GoLand-style Multi-Tab Bar (locked 34px height, CLS = 0): Back/Forward cursor history,
   // smart middle-ellipsis + parent-folder disambiguation, dirty dot / pin / read-only lock,
   // Local History / Git context items, overflow tabs picker, and Split Right / Down controls.
-  import { copyWithToast } from '../../../lib/clipboard';
   import Icon from '../../../lib/components/Icon.svelte';
-  import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { rowMenu } from '../../../lib/rowMenu';
   import { onTabKey } from '../../../lib/tabKeys';
   import { ide, type IdeOpenTab } from '../ideStore.svelte';
-  import { ideAgent } from '../store/ideAgentController.svelte';
   import {
     canIdeNavigateBack,
     canIdeNavigateForward,
-    closeAllIdeTabs,
-    closeUnmodifiedIdeTabs,
     flushAutoLocalHistorySnapshot,
     formatIdeTabDisplayName,
     isIdeTabPinned,
     navigateIdeBack,
     navigateIdeForward,
-    openIdeTerminalForPath,
     pushIdeNavLocation,
-    putIdeLocalHistoryLabel,
-    revealInIdeProjectTree,
     toggleIdeTabPinned,
   } from './ideEditorStoreBridge.svelte';
 
@@ -33,81 +25,18 @@
   let { onsave }: Props = $props();
 
   function openTabMenu(e: MouseEvent, tab: IdeOpenTab): void {
-    const tabDirty = tab.dirty ?? (tab.content !== tab.savedContent);
-    const pinned = isIdeTabPinned(tab);
-    const items: MenuItem[] = [
-      {
-        label: 'Save',
-        icon: 'download',
-        hint: '⌘S',
-        disabled: tab.readOnly || !tabDirty,
-        action: () => onsave(tab.path),
-      },
-      {
-        label: pinned ? 'Unpin tab' : 'Pin tab',
-        icon: 'pin',
-        action: () => toggleIdeTabPinned(tab.path),
-      },
-      { separator: true },
-      { label: 'Split right', icon: 'split', action: () => ide.openInSplit(tab.path, 'right') },
-      { label: 'Split down', icon: 'unified', action: () => ide.openInSplit(tab.path, 'down') },
-      { separator: true },
-      { label: 'Close', icon: 'x', disabled: pinned, action: () => void ide.closeTab(tab.path) },
-      {
-        label: 'Close others',
-        disabled: ide.tabs.length <= 1,
-        action: () => ide.closeOtherTabs(tab.path),
-      },
-      { label: 'Close unmodified', action: () => void closeUnmodifiedIdeTabs() },
-      { label: 'Close all', action: () => void closeAllIdeTabs() },
-      { separator: true },
-      {
-        label: 'Local History: Show History…',
-        icon: 'clock',
-        action: () => {
-          flushAutoLocalHistorySnapshot(tab.path);
-          window.dispatchEvent(new CustomEvent('otto:ide-open-local-history', { detail: { path: tab.path } }));
-        },
-      },
-      {
-        label: 'Local History: Put Label…',
-        icon: 'tag',
-        action: () => void putIdeLocalHistoryLabel(tab.path, tab.content),
-      },
-      { separator: true },
-      { label: 'Copy path', icon: 'copy', action: () => void copyWithToast(tab.path, 'file path') },
-      {
-        label: 'Copy relative path',
-        icon: 'copy',
-        action: () => void copyWithToast(ide.relativePath(tab.path), 'relative path'),
-      },
-      { label: 'Reveal in project tree', icon: 'folder', action: () => void revealInIdeProjectTree(tab.path) },
-      { label: 'Open in terminal', icon: 'terminal', action: () => void openIdeTerminalForPath(tab.path) },
-      { label: 'Add to Agent context', icon: 'assistant', action: () => void ideAgent.attachFile(tab.path, { openPanel: true }) },
-    ];
-    ctxMenu.show(e, items);
+    e.preventDefault();
+    const el = e.currentTarget instanceof HTMLElement ? e.currentTarget : null;
+    const anchor =
+      el && (e.detail === 0 || e.type === 'click')
+        ? el
+        : new MouseEvent('contextmenu', { clientX: e.clientX, clientY: e.clientY });
+    void import('./ideEditorActionsLazy').then((m) => m.openIdeTabContextMenu(anchor, tab, onsave));
   }
 
   function openOverflowTabsMenu(e: MouseEvent): void {
     const anchor = e.currentTarget as HTMLElement | null;
-    const items: MenuItem[] = ide.tabs.map((t) => {
-      const dirty = t.dirty ?? (t.content !== t.savedContent);
-      return {
-        label: `${formatIdeTabDisplayName(t, ide.tabs, 34)}${dirty ? ' •' : ''}`,
-        icon: t.path === ide.activePath ? 'check' : isIdeTabPinned(t) ? 'pin' : t.readOnly ? 'lock' : 'file',
-        hint: ide.relativePath(t.path),
-        action: () => {
-          if (ide.activePath && ide.activePath !== t.path) flushAutoLocalHistorySnapshot(ide.activePath);
-          ide.activePath = t.path;
-        },
-      };
-    });
-    items.push(
-      { separator: true },
-      { label: 'Close unmodified tabs', action: () => void closeUnmodifiedIdeTabs() },
-      { label: 'Close all tabs', icon: 'x', action: () => void closeAllIdeTabs() },
-    );
-    ctxMenu.showAt(anchor, items, { align: 'end' });
+    void import('./ideEditorActionsLazy').then((m) => m.openIdeOverflowTabsMenu(anchor));
   }
 </script>
 

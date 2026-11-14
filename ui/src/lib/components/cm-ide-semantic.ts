@@ -364,6 +364,7 @@ export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Ext
     private timer: ReturnType<typeof setTimeout> | null = null;
     private abort: AbortController | null = null;
     private didAutoFold = false;
+    private hadSemanticDiags = false;
     constructor(view: EditorView) {
       this.decorations = this.compute(view);
       queueMicrotask(() => { if (view.dom.isConnected) { this.maybeAutoFoldImports(view); this.scheduleDiagnostics(view, 10); } });
@@ -402,7 +403,7 @@ export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Ext
             if (prefs.unusedImports === false && (sd.code === 'unused-import' || /unused import/i.test(sd.message))) continue;
             if (lang === 'java' && prefs.javaUnresolvedImports === false && (sd.code === 'unresolved-import' || /unresolved import|package .* does not exist/i.test(sd.message))) continue;
             if (lang === 'java' && prefs.lombokSupport !== false && /package lombok\b.*does not exist|cannot find symbol.*\bvariable log\b/i.test(sd.message)) continue;
-            if (!clientDiags.some((c) => c.line === sd.line && c.message === sd.message)) {
+            if (!clientDiags.some((c) => c.line === sd.line && (c.message === sd.message || (Boolean(c.code) && c.code === sd.code)))) {
               clientDiags.push({ line: sd.line, column: sd.col ?? sd.column ?? 1, endLine: sd.end_line ?? sd.line, endColumn: sd.end_col ?? 200, severity: sd.severity === 'error' ? 'error' : sd.severity === 'warning' ? 'warning' : 'info', message: sd.message, source: sd.source ?? 'lsp', code: sd.code, quickFixes: (sd.quick_fixes ?? []).map((qf) => ({ title: qf.title, line: qf.line, endLine: qf.end_line ?? qf.line, replacement: qf.replacement, deleteLine: qf.delete_line, edits: qf.edits })) });
             }
             if (sd.severity === 'error' && (lang !== 'java' || prefs.javaUnresolvedImports !== false) && sd.line >= 1 && sd.line <= view.state.doc.lines) {
@@ -422,12 +423,17 @@ export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Ext
         if (d.quickFixes.length) fixMap.set(d.line, [...(fixMap.get(d.line) ?? []), ...d.quickFixes]);
         const actions: LintAction[] = d.quickFixes.map((qf) => ({ name: qf.title, apply: (v) => applyClientQuickFix(v, qf) }));
         cmDiags.push({ from: Math.min(from, doc.length), to: Math.min(to, doc.length), severity: d.severity, message: d.message, source: d.source, actions });
-        ideDiags.push({ path: opts.filePath, line: d.line, column: d.column, end_line: d.endLine, end_column: d.endColumn, severity: d.severity, message: d.message, source: d.source, code: d.code ?? null });
+        ideDiags.push({ path: opts.filePath, line: d.line, column: d.column, end_line: d.endLine, end_column: d.endColumn, severity: d.severity, message: d.message, source: d.source, code: d.code ?? null, quick_fixes: d.quickFixes.length ? d.quickFixes.map((qf, idx) => ({ id: `qf-${d.line}-${idx}`, title: qf.title, kind: 'quickfix', is_preferred: idx === 0, edits: qf.edits?.length ? qf.edits.map((e) => ({ ...e, path: e.path || opts.filePath })) : [{ path: opts.filePath, start_line: qf.line, start_col: 1, end_line: qf.deleteLine ? Math.min(doc.lines + 1, qf.endLine + 1) : qf.endLine, end_col: qf.deleteLine && qf.endLine < doc.lines ? 1 : doc.line(Math.min(doc.lines, qf.endLine)).length + 1, new_text: qf.deleteLine ? '' : (qf.replacement ?? '') }] })) : undefined });
       }
       if (errorLines.size) foldedRanges(view.state).between(0, Math.min(doc.length, 4096), (f, t) => { for (let ln = doc.lineAt(f).number; ln <= doc.lineAt(t).number; ln++) if (errorLines.has(ln)) { view.dispatch({ effects: unfoldEffect.of({ from: f, to: t }) }); break; } });
-      const trSpec = setDiagnostics(view.state, cmDiags), prevEf = Array.isArray(trSpec.effects) ? trSpec.effects : trSpec.effects ? [trSpec.effects] : [];
-      view.dispatch({ ...trSpec, effects: [...prevEf, setLineQuickFixesEffect.of(fixMap), setServerUnresolvedEffect.of(unresolved)] });
-      opts.onDiagnostics?.(ideDiags);
+      if (ideDiags.length > 0 || this.hadSemanticDiags) {
+        this.hadSemanticDiags = ideDiags.length > 0;
+        const trSpec = setDiagnostics(view.state, cmDiags), prevEf = Array.isArray(trSpec.effects) ? trSpec.effects : trSpec.effects ? [trSpec.effects] : [];
+        view.dispatch({ ...trSpec, effects: [...prevEf, setLineQuickFixesEffect.of(fixMap), setServerUnresolvedEffect.of(unresolved)] });
+        opts.onDiagnostics?.(ideDiags);
+      } else {
+        view.dispatch({ effects: [setLineQuickFixesEffect.of(fixMap), setServerUnresolvedEffect.of(unresolved)] });
+      }
     }
     compute(view: EditorView): DecorationSet {
       const prefs = opts.getPreferences(), docText = view.state.doc.toString(), vis = view.visibleRanges, items: Range<Decoration>[] = [], extraUnres = view.state.field(serverUnresolvedField, false);

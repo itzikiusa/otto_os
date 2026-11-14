@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import CodeEditor, { registerIdeEditorCore } from '../../lib/components/CodeEditor.svelte';
   import type * as CmIdeDepsMod from '../../lib/components/cm-ide-deps';
   import type * as CmIdeMod from '../../lib/components/cm-ide-extensions';
@@ -23,6 +23,7 @@
   import {
     areIdeBreakpointsMuted,
     classifyIdeFile,
+    evictIdeEditorBridgePaths,
     fetchIdeGitBlame,
     flushAutoLocalHistorySnapshot,
     getIdeProjectFolders,
@@ -35,7 +36,18 @@
     resetIdeEditorBridgeState,
     scheduleAutoLocalHistorySnapshot,
   } from './editor/ideEditorStoreBridge.svelte';
-  import { computeJsonPathAt, detectIdeDocKind, extractInstantSymbols, type IdeOutlineNode } from './editor/ideLangAnalyzer';
+  import type { IdeOutlineNode } from './editor/ideLangAnalyzer';
+  let langAnalyzerMod = $state<typeof import('./editor/ideLangAnalyzer') | null>(null);
+  function fastDocKind(filePath: string, language?: string): string {
+    const clean = filePath.split('?')[0].toLowerCase();
+    const base = clean.slice(clean.lastIndexOf('/') + 1);
+    const dot = base.lastIndexOf('.');
+    const ext = dot >= 0 ? base.slice(dot + 1) : '';
+    if (ext === 'csv' || ext === 'tsv' || language === 'csv' || language === 'tsv') return 'csv';
+    if (ext === 'jsonl' || ext === 'ndjson' || language === 'jsonl') return 'jsonl';
+    if (ext === 'json' || ext === 'jsonc' || language === 'json') return 'json';
+    return langAnalyzerMod ? langAnalyzerMod.detectIdeDocKind(filePath, language) : 'other';
+  }
 
   const IdeInlinePromptBarLazy = lazyComponent(() => import('./IdeInlinePromptBar.svelte'));
   const IdeCsvViewLazy = lazyComponent(() => import('./editor/IdeCsvView.svelte'));
@@ -97,6 +109,7 @@
   $effect(() => {
     const cur = ide.activeTab;
     if (!cur) { stagedPrimaryTab = null; return; }
+    if (!langAnalyzerMod) void import('./editor/ideLangAnalyzer').then((m) => { langAnalyzerMod = m; });
     if (!cur.loading && !cur.error) { stagedPrimaryTab = cur; everMountedEditor = true; }
     else if (stagedPrimaryTab && !ide.tabs.some((t) => t.path === stagedPrimaryTab?.path)) stagedPrimaryTab = null;
   });
@@ -143,15 +156,24 @@
   }
 
   const unsubEvict = subscribeIdeBufferEvictions((paths) => {
-    primaryEditorRef?.evictPaths?.(paths);
-    splitEditorRef?.evictPaths?.(paths);
-    if (paths === 'all') {
+    const pathList = paths === 'all' ? 'all' : [...paths];
+    primaryEditorRef?.evictPaths?.(pathList);
+    splitEditorRef?.evictPaths?.(pathList);
+    if (!primaryEditorRef) {
+      void import('../../lib/components/cm-ide-history').then((m) => {
+        m.evictSingletonIdeState(pathList);
+        if (pathList === 'all') m.forgetIdeUndoJournal('all');
+        else for (const p of pathList) m.forgetIdeUndoJournal(p);
+      }).catch(() => {});
+    }
+    if (pathList === 'all') {
       blameEnabledByPath = {}; blameByPath = {}; tableModeByPath = {}; manifestModeByPath = {}; manifestDepsByPath = {};
       bpEditor = null; intentionState = null; resetIdeEditorBridgeState(); disposeAllPooledLsp(); return;
     }
+    evictIdeEditorBridgePaths(pathList);
     const nextBlame = { ...blameByPath }, nextBlameOn = { ...blameEnabledByPath };
     const nextMode = { ...tableModeByPath }, nextManMode = { ...manifestModeByPath }, nextManDeps = { ...manifestDepsByPath };
-    for (const p of paths) {
+    for (const p of pathList) {
       delete nextBlame[p]; delete nextBlameOn[p]; delete nextMode[p]; delete nextManMode[p]; delete nextManDeps[p];
       if (bpEditor?.path === p) bpEditor = null;
       if (intentionState?.path === p) intentionState = null;
@@ -171,7 +193,7 @@
 
   const projectFolders = $derived(getIdeProjectFolders());
   const hasNonEmptySelection = $derived(ide.cursorInfo.selections.some((s) => s.anchor !== s.head));
-  const activeDocKind = $derived(ide.activeTab ? detectIdeDocKind(ide.activeTab.path, ide.activeTab.language) : 'other');
+  const activeDocKind = $derived(ide.activeTab ? fastDocKind(ide.activeTab.path, ide.activeTab.language) : 'other');
   const activeIsManifest = $derived(ide.activeTab ? isManifestPath(ide.activeTab.path) : false);
   const effectiveManifestMode = $derived(ide.activeTab ? (manifestModeByPath[ide.activeTab.path] ?? 'text') : 'text');
   const activeFileMeta = $derived(ide.activeTab ? classifyIdeFile(ide.activeTab, ide.target.root, projectFolders.slice(1)) : { external: false, sdkLabel: null });
@@ -181,7 +203,9 @@
   });
   const effectiveSymbols = $derived.by((): IdeSymbolNode[] => {
     const t = ide.activeTab;
-    return !t ? [] : (ide.activeSymbols.length > 0 ? ide.activeSymbols : extractInstantSymbols(t.path, t.language, t.content));
+    if (!t) return [];
+    if (ide.activeSymbols.length > 0) return ide.activeSymbols;
+    return langAnalyzerMod ? langAnalyzerMod.extractInstantSymbols(t.path, t.language, t.content) : [];
   });
   const enclosingSymbol = $derived.by((): IdeSymbolNode | null => {
     const ln = ide.cursorInfo.line;
@@ -195,7 +219,11 @@
     walk(effectiveSymbols);
     return best;
   });
-  const activeJsonPath = $derived(activeDocKind === 'json' && ide.activeTab ? computeJsonPathAt(ide.activeTab.content, ide.cursorInfo.line, ide.cursorInfo.col) : null);
+  const activeJsonPath = $derived(
+    activeDocKind === 'json' && ide.activeTab && langAnalyzerMod
+      ? langAnalyzerMod.computeJsonPathAt(ide.activeTab.content, ide.cursorInfo.line, ide.cursorInfo.col)
+      : null,
+  );
   const pathSegments = $derived(ide.activeTab ? ide.relativePath(ide.activeTab.path).split('/').filter(Boolean) : []);
   const activeDiags = $derived(ide.activeTab ? ide.problems.filter((d) => d.path === ide.activeTab?.path) : []);
   const errorCount = $derived(activeDiags.filter((d) => d.severity === 'error').length);
@@ -406,7 +434,11 @@
             }}
             onOpenDepAnalyzer={() => { manifestModeByPath = { ...manifestModeByPath, [pTab.path]: 'analyzer' }; }}
             onOpenManifestIntention={(ln, dep) => openIntentionPopoverAt(pTab.path, ln, 1, { manifestDep: dep })}
-            onManifestDepsUpdated={(items) => { manifestDepsByPath = { ...manifestDepsByPath, [pTab.path]: items }; }}
+            onManifestDepsUpdated={(items) => untrack(() => {
+              const prev = manifestDepsByPath[pTab.path];
+              if (!items.length && (!prev || !prev.length)) return;
+              manifestDepsByPath = { ...manifestDepsByPath, [pTab.path]: items };
+            })}
             onQuickFix={(ctx) => openIntentionPopoverAt(pTab.path, ctx.line, ctx.column, { x: ctx.clientX, y: ctx.clientY, symbol: ctx.symbol })}
             onRenameSymbol={(ctx) => void ide.openRenameModal(pTab.path, ctx.line, ctx.column, ctx.symbol)}
             onFormat={() => void ide.formatActiveFile()}

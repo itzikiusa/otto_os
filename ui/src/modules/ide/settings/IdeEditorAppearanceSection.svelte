@@ -378,16 +378,16 @@
   .ea-sec[data-preview-scheme='jetbrains-darcula'] { --syn-bg: var(--surface); --syn-keyword: var(--warning); --syn-func-decl: var(--cat-2); --syn-string: var(--cat-3); --syn-type: var(--cat-4); --syn-number: var(--cat-1); }
   .ea-sec[data-preview-scheme='vscode-dark-modern'] { --syn-bg: var(--term-bg); --syn-keyword: var(--cat-1); --syn-func-decl: var(--cat-2); --syn-string: var(--code-number); --syn-type: var(--cat-6); --syn-number: var(--cat-3); }
   .ea-sec[data-preview-scheme='jetbrains-islands-light'], .ea-sec[data-preview-scheme='vscode-light-modern'] { --syn-bg: var(--surface); --syn-fg: var(--text); --syn-keyword: var(--cat-4); --syn-func-decl: var(--cat-1); --syn-string: var(--cat-3); --syn-type: var(--cat-6); }
-  .code-preview { border: 1px solid var(--border-strong); border-radius: var(--radius-s); background: var(--syn-bg, var(--term-bg)); color: var(--syn-fg, var(--text)); overflow: hidden; }
+  .code-preview { border: 1px solid var(--border-strong); border-radius: var(--radius-s); background: var(--syn-bg); color: var(--syn-fg); overflow: hidden; }
   .cp-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; background: var(--surface-2); border-block-end: 1px solid var(--border); font-size: var(--fs-xs); font-weight: 600; }
   .cp-code { margin: 0; padding: 12px; font-family: var(--font-mono); font-size: var(--fs-xs); line-height: 1.6; overflow-x: auto; }
-  .kw { color: var(--syn-keyword, var(--code-keyword)); font-weight: 600; }
-  .fn { color: var(--syn-func-decl, var(--accent-text)); }
-  .ty { color: var(--syn-type, var(--info)); }
-  .str { color: var(--syn-string, var(--code-string)); }
-  .num { color: var(--syn-number, var(--warning)); }
-  .rb1 { color: var(--syn-rb-1, var(--warning)); font-weight: 600; }
-  .rb2 { color: var(--syn-rb-2, var(--accent-text)); font-weight: 600; }
-  .rb3 { color: var(--syn-rb-3, var(--info)); font-weight: 600; }
-  .rb4 { color: var(--syn-rb-4, var(--success)); font-weight: 600; }
+  .kw { color: var(--syn-keyword); font-weight: 600; }
+  .fn { color: var(--syn-func-decl); }
+  .ty { color: var(--syn-type); }
+  .str { color: var(--syn-string); }
+  .num { color: var(--syn-number); }
+  .rb1 { color: var(--syn-rb-1); font-weight: 600; }
+  .rb2 { color: var(--syn-rb-2); font-weight: 600; }
+  .rb3 { color: var(--syn-rb-3); font-weight: 600; }
+  .rb4 { color: var(--syn-rb-4); font-weight: 600; }
 </style>

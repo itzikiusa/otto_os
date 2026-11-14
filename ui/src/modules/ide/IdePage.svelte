@@ -24,14 +24,13 @@
   import IdeRunToolbar from './shell/IdeRunToolbar.svelte';
   import IdeWorkspaceSwitcher from './shell/IdeWorkspaceSwitcher.svelte';
   import {
-    buildIdePaletteCommands,
     handleIdeChord,
     handleIdeWindowKeyDown,
     readQuickSchemePrefs,
-    showIdeMoreMenu,
-    showIdeSchemeMenu,
   } from './shell/ideShellCommands';
   import { ideAgent } from './store/ideAgentController.svelte';
+
+  const loadShellMenus = () => import('./shell/ideShellMenus');
 
   const FolderPickerLazy = lazyComponent(() => import('../../lib/components/FolderPicker.svelte'));
   const IdeBottomDockLazy = lazyComponent(() => import('./IdeBottomDock.svelte'));
@@ -45,6 +44,7 @@
   const IdeSshTargetModalLazy = lazyComponent(() => import('./IdeSshTargetModal.svelte'));
   const IdeShareModalLazy = lazyComponent(() => import('./IdeShareModal.svelte'));
   const IdePluginsModalLazy = lazyComponent(() => import('./IdePluginsModal.svelte'));
+  const IdeComparisonModalLazy = lazyComponent(() => import('./history/IdeComparisonModal.svelte'));
 
   const TREE_W_KEY = 'otto.ide.treeW';
   const BUILD_TOOL_W_KEY = 'otto.ide.buildToolW';
@@ -57,6 +57,25 @@
   let explorerVisible = $state(true);
   let mobileView = $state<'files' | 'editor' | 'tools' | 'agent'>('editor');
   let folderPickerMode = $state<'open' | 'attach' | null>(null);
+  let fallbackCompare = $state<{
+    mode: 'local-history' | 'git-revision' | 'git-branch' | 'clipboard' | 'file';
+    root: string; targetPath: string; secondPath: string | null; isDir: boolean;
+    initialFilter: 'all' | 'deleted'; initialRef: string | null; initialClipboardText?: string;
+  } | null>(null);
+
+  function treeMounted(): boolean {
+    return viewport.isPhone ? mobileView === 'files' : explorerVisible;
+  }
+
+  function resolveRootForPath(p: string): string {
+    const clean = p.replace(/\/+$/, '') || '/';
+    let best = '';
+    for (let i = 0; i < ide.projectRoots.length; i++) {
+      const rp = ide.projectRoots[i].path.replace(/\/+$/, '') || '/';
+      if ((clean === rp || clean.startsWith(`${rp}/`)) && rp.length > best.length) best = rp;
+    }
+    return best || (ide.target.root.replace(/\/+$/, '') || '/');
+  }
 
   const resolvedIdeScheme = $derived(
     quickPrefs.colorScheme === 'auto'
@@ -75,13 +94,41 @@
     const onOpenSettings = (ev: Event): void => ide.openSettings((ev as CustomEvent<{ section?: string }>).detail?.section);
     const onPrefsChanged = (): void => { quickPrefs = readQuickSchemePrefs(); };
     const onPageHide = (): void => ide.suspendOnPageLeave();
+    const onFallbackLocalHistory = (ev: Event): void => {
+      if (treeMounted()) return;
+      const d = (ev as CustomEvent<{ path?: string; isDir?: boolean; filter?: 'all' | 'deleted' } | undefined>).detail;
+      const p = d?.path || ide.activePath || ide.target.root;
+      if (!p) return;
+      fallbackCompare = { mode: 'local-history', root: resolveRootForPath(p), targetPath: p, secondPath: null, isDir: d?.isDir ?? p === ide.target.root, initialFilter: d?.filter ?? 'all', initialRef: null };
+    };
+    const onFallbackCompare = (ev: Event): void => {
+      if (treeMounted()) return;
+      const d = (ev as CustomEvent<{ mode?: 'local-history' | 'git-revision' | 'git-branch' | 'clipboard' | 'file'; path?: string; secondPath?: string; isDir?: boolean; filter?: 'all' | 'deleted'; ref?: string; clipboardText?: string } | undefined>).detail;
+      const p = d?.path || ide.activePath || ide.target.root;
+      if (!p) return;
+      fallbackCompare = { mode: d?.mode ?? 'local-history', root: resolveRootForPath(p), targetPath: p, secondPath: d?.secondPath ?? null, isDir: d?.isDir ?? false, initialFilter: d?.filter ?? 'all', initialRef: d?.ref ?? null, initialClipboardText: d?.clipboardText };
+    };
+    const onFallbackGit = (ev: Event): void => {
+      if (treeMounted()) return;
+      const detail = (ev as CustomEvent<{ action?: string; path?: string } | undefined>).detail;
+      void import('./git/ideGitQuickMenu').then((m) => m.runIdeGitActionEvent(detail, (mode, p) => {
+        const tp = p || ide.activePath || ide.target.root;
+        if (tp) fallbackCompare = { mode, root: resolveRootForPath(tp), targetPath: tp, secondPath: null, isDir: false, initialFilter: 'all', initialRef: null };
+      }));
+    };
     window.addEventListener('otto:ide-open-settings', onOpenSettings);
     window.addEventListener('otto:ide-prefs-changed', onPrefsChanged);
+    window.addEventListener('otto:ide-open-local-history', onFallbackLocalHistory);
+    window.addEventListener('otto:ide-open-compare', onFallbackCompare);
+    window.addEventListener('otto:ide-git-action', onFallbackGit);
     window.addEventListener('pagehide', onPageHide);
     window.addEventListener('beforeunload', onPageHide);
     return () => {
       window.removeEventListener('otto:ide-open-settings', onOpenSettings);
       window.removeEventListener('otto:ide-prefs-changed', onPrefsChanged);
+      window.removeEventListener('otto:ide-open-local-history', onFallbackLocalHistory);
+      window.removeEventListener('otto:ide-open-compare', onFallbackCompare);
+      window.removeEventListener('otto:ide-git-action', onFallbackGit);
       window.removeEventListener('pagehide', onPageHide);
       window.removeEventListener('beforeunload', onPageHide);
     };
@@ -163,15 +210,24 @@
     });
   });
 
-  $effect(() =>
-    registry.register(
-      'ide',
-      buildIdePaletteCommands({
-        onAttachFolder: () => (folderPickerMode = 'attach'),
-        onTriggerAgent: () => triggerAgentShortcut(),
-      }),
-    ),
-  );
+  $effect(() => {
+    let cleanup: (() => void) | null = null;
+    let disposed = false;
+    void loadShellMenus().then((m) => {
+      if (disposed) return;
+      cleanup = registry.register(
+        'ide',
+        m.buildIdePaletteCommands({
+          onAttachFolder: () => (folderPickerMode = 'attach'),
+          onTriggerAgent: () => triggerAgentShortcut(),
+        }),
+      );
+    });
+    return () => {
+      disposed = true;
+      cleanup?.();
+    };
+  });
 
   $effect(() => {
     const claim = (e: KeyboardEvent): boolean => handleIdeChord(e, ui.overlayOpen, () => (explorerVisible = !explorerVisible));
@@ -332,7 +388,10 @@
             aria-label="Color scheme"
             title="Color scheme & rainbow brackets"
             aria-haspopup="menu"
-            onclick={(e) => showIdeSchemeMenu(e, quickPrefs, (next) => (quickPrefs = next))}
+            onclick={(e) => {
+              const anchor = e.currentTarget instanceof HTMLElement ? e.currentTarget : e;
+              void loadShellMenus().then((m) => m.showIdeSchemeMenu(anchor, quickPrefs, (next) => (quickPrefs = next)));
+            }}
             data-testid="ide-scheme-btn"
           >
             <Icon name="palette" size={14} />
@@ -362,13 +421,17 @@
         aria-label="More actions"
         title="More actions"
         aria-haspopup="menu"
-        onclick={(e) =>
-          showIdeMoreMenu(e, {
-            explorerVisible,
-            onToggleExplorer: () => (explorerVisible = !explorerVisible),
-            onTriggerAgent: () => triggerAgentShortcut(),
-            onAttachFolder: () => (folderPickerMode = 'attach'),
-          })}
+        onclick={(e) => {
+          const anchor = e.currentTarget instanceof HTMLElement ? e.currentTarget : e;
+          void loadShellMenus().then((m) =>
+            m.showIdeMoreMenu(anchor, {
+              explorerVisible,
+              onToggleExplorer: () => (explorerVisible = !explorerVisible),
+              onTriggerAgent: () => triggerAgentShortcut(),
+              onAttachFolder: () => (folderPickerMode = 'attach'),
+            }),
+          );
+        }}
         data-testid="ide-more-btn"
       >
         <Icon name="more" size={14} />
@@ -524,6 +587,9 @@
   {/if}
   {#if ide.pluginsOpen}
     <LazyMount lazy={IdePluginsModalLazy} what="extensions manager" quiet onerror={() => (ide.pluginsOpen = false)} />
+  {/if}
+  {#if fallbackCompare}
+    <LazyMount lazy={IdeComparisonModalLazy} what="comparison tool" quiet props={{ ...fallbackCompare, onclose: () => (fallbackCompare = null) }} onerror={() => (fallbackCompare = null)} />
   {/if}
 </div>
 

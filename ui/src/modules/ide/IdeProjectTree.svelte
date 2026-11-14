@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
@@ -10,7 +10,7 @@
   import { scrollBehavior } from '../../lib/motion';
   import { rowMenu } from '../../lib/rowMenu';
   import { ideDockPrefs } from './debug/ideDockPrefs.svelte';
-  import { ideGit, type IdeGitLetter } from './git/ideGitController.svelte';
+  import type { ideGit as IdeGitSingleton, IdeGitLetter } from './git/ideGitController.svelte';
   import type { IdeCompareMode } from './history/ideComparisonLoader';
   import type { FlatSymbolNode } from './history/IdeTreeSecondaryTabs.svelte';
   import type { FlatTreeNode } from './history/ideTreeNodeMenus';
@@ -49,6 +49,13 @@
   let selectedDirPath = $state<string | null>(null);
   let compareTarget = $state<ActiveComparisonTarget | null>(null);
   let manifestTreeModal = $state<{ title: string; output: string } | null>(null);
+  let liveGit = $state<typeof IdeGitSingleton | null>(null);
+
+  $effect(() => {
+    void import('./git/ideGitController.svelte').then((m) => {
+      liveGit = m.ideGit;
+    });
+  });
 
   const normPath = (p: string): string => p.replace(/\/+$/, '') || '/';
   const shortenHome = (p: string): string => p.replace(/^\/(?:Users|home)\/[^/]+/, '~');
@@ -116,7 +123,9 @@
     void ide.target.root;
     void ide.projectRoots.length;
     void ide.activePath;
-    if (ideDockPrefs.gitStatusInTree) ideGit.syncVisibleRoots({ probeAll: false });
+    const enabled = ideDockPrefs.gitStatusInTree;
+    const g = liveGit;
+    if (enabled && g) untrack(() => g.syncVisibleRoots({ probeAll: false }));
   });
 
   $effect(() => {
@@ -216,7 +225,7 @@
 
   function resolveGitLetter(node: FlatTreeNode): IdeGitLetter | null {
     if (!ideDockPrefs.gitStatusInTree || node.entry.kind === 'dir') return null;
-    const live = ideGit.treeGitOverlay.files.get(normPath(node.entry.path));
+    const live = liveGit?.treeGitOverlay.files.get(normPath(node.entry.path));
     if (live) return live;
     const raw = node.entry.git_status;
     if (raw === 'M' || raw === 'A' || raw === 'D' || raw === 'U' || raw === 'R' || raw === 'C') return raw;
@@ -224,7 +233,7 @@
   }
 
   function isDirtyFolder(node: FlatTreeNode): boolean {
-    return Boolean(ideDockPrefs.gitStatusInTree && node.entry.kind === 'dir' && ideGit.treeGitOverlay.dirtyDirs.has(normPath(node.entry.path)));
+    return Boolean(ideDockPrefs.gitStatusInTree && node.entry.kind === 'dir' && liveGit?.treeGitOverlay.dirtyDirs.has(normPath(node.entry.path)));
   }
 
   function onNodeClick(node: FlatTreeNode): void {
@@ -235,7 +244,7 @@
         ide.expandedDirs = { ...ide.expandedDirs, [node.entry.path]: curExpanded };
       }
       if (!curExpanded && node.isProjectRoot && ideDockPrefs.gitStatusInTree) {
-        void ideGit.ensureRootDetected(node.entry.path);
+        void import('./git/ideGitController.svelte').then((m) => m.ideGit.ensureRootDetected(node.entry.path));
       }
       void ide.toggleDir(node.entry.path);
       return;
@@ -282,14 +291,14 @@
     <div class="tree-panel" role="tabpanel" id="ide-explorer-panel-files" aria-labelledby="ide-explorer-tab-files">
       <div class="tree-toolbar">
         <input class="tree-filter" type="search" dir="ltr" aria-label="Filter files" placeholder="Filter…" bind:value={ide.treeFilter} data-testid="ide-tree-filter" />
-        <button type="button" class="tree-act" aria-label="New file" title="New file…" onclick={() => triggerNewTreeEntry(selectedDirPath || ide.target.root, 'create_file')}>
+        <button type="button" class="tree-act" aria-label="New file" title="New file…" onclick={() => triggerNewTreeEntry(ide.target.root || selectedDirPath || '', 'create_file')}>
           <Icon name="plus" size={12} />
         </button>
         {#if ide.target.kind === 'local'}
           <button type="button" class="tree-act" aria-label="Add folder to project" title="Add folder to project…" onclick={() => (addFolderPickerOpen = true)} data-testid="ide-add-folder-btn">
             <Icon name="worktree" size={12} />
           </button>
-          <button type="button" class="tree-act" aria-label="Show project local history" title="Show project local history and deleted files" onclick={() => openCompareModal({ mode: 'local-history', path: selectedDirPath || ide.target.root, isDir: true, filter: 'all' })} data-testid="ide-tree-local-history-btn">
+          <button type="button" class="tree-act" aria-label="Show project local history" title="Show project local history and deleted files" onclick={() => openCompareModal({ mode: 'local-history', path: ide.target.root || selectedDirPath || '', isDir: true, filter: 'all' })} data-testid="ide-tree-local-history-btn">
             <Icon name="clock" size={12} />
           </button>
         {/if}

@@ -65,7 +65,8 @@ export function selectionOrCurrentLine(state: EditorState): IdeEditorSelectionRa
 }
 
 class DiffGutterMarker extends GutterMarker {
-  constructor(readonly kind: 'add' | 'mod' | 'del') { super(); }
+  readonly kind: 'add' | 'mod' | 'del';
+  constructor(kind: 'add' | 'mod' | 'del') { super(); this.kind = kind; }
   eq(o: DiffGutterMarker): boolean { return this.kind === o.kind; }
   toDOM(): HTMLElement {
     const bar = document.createElement('span');
@@ -243,7 +244,8 @@ export function rollbackDiffHunk(view: EditorView, hunk: IdeDiffHunk): boolean {
 }
 
 class InlineBlameWidget extends WidgetType {
-  constructor(readonly text: string) { super(); }
+  readonly text: string;
+  constructor(text: string) { super(); this.text = text; }
   eq(o: InlineBlameWidget): boolean { return this.text === o.text; }
   toDOM(): HTMLElement {
     const span = document.createElement('span');

@@ -220,7 +220,7 @@ export class IdeBufferPerfController {
   evictPaths(host: IdeBufferHost, paths: Iterable<string>, clearProblems = true): void {
     const closed = new Set<string>(paths);
     if (closed.size === 0) return;
-    for (const p of closed) { this.clearSync(p); this.clearHistoryTimer(p); this.liveBuffers.delete(p); this.cancelJob(this.gutterJobs, p); this.cancelJob(this.symbolJobs, p); }
+    for (const p of closed) { this.clearSync(p); this.clearHistoryTimer(p); this.liveBuffers.delete(p); this.lastSnapshotted.delete(p); this.cancelJob(this.gutterJobs, p); this.cancelJob(this.symbolJobs, p); }
     if (Object.keys(host.gutterByPath).some((k) => closed.has(k))) host.gutterByPath = Object.fromEntries(Object.entries(host.gutterByPath).filter(([k]) => !closed.has(k)));
     if (Object.keys(host.symbolsByPath).some((k) => closed.has(k))) host.symbolsByPath = Object.fromEntries(Object.entries(host.symbolsByPath).filter(([k]) => !closed.has(k)));
     if (clearProblems && host.problems.some((d) => closed.has(d.path))) host.problems = host.problems.filter((d) => !closed.has(d.path));

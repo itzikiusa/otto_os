@@ -30,12 +30,12 @@
   import type * as CmIdeMod from './cm-ide-extensions';
   import type * as CmIdeDepsMod from './cm-ide-deps';
   import {
-    applyFallbackQuickFixEdits, attachCodeEditorLsp, buildEditorFindProviderSpec,
+    applyLinePrefixSuffixSync, buildEditorFindProviderSpec,
     buildReadOnlyExtension, computeCursorChangeInfo, createCompletionExtension,
-    createEditorStateCache, createFallbackBpGutterHandlers, FALLBACK_IDE_PREFS,
-    fallbackSelectionRange, foldMarkerGutter, hasLongLine, isManifestPath, langExtOf,
+    createEditorStateCache, FALLBACK_IDE_PREFS,
+    foldMarkerGutter, hasLongLine, langExtOf,
     lightEditorTheme, parkEditorHistory, placeholderEditorTheme, restoreOrCreateEditorState,
-    revealEditorLine, sendSelectionToAgentSession, uriToPath, type CursorChangeInfo,
+    revealEditorLine, splitSelectionIntoLinesSync, type CursorChangeInfo,
   } from './cm-editor-helpers';
   import { ui } from '../stores/ui.svelte';
   import { keyContext } from '../keys';
@@ -143,8 +143,6 @@
 
   let ideMod: typeof CmIdeMod | null = null;
   let ideModPromise: Promise<typeof CmIdeMod> | null = null;
-  let depsMod: typeof CmIdeDepsMod | null = null;
-  let depsModPromise: Promise<typeof CmIdeDepsMod> | null = null;
   let ideMounted = false;
   let appliedIdePath = '';
   let appliedKeymapPreset: 'jetbrains' | 'standard' = 'jetbrains';
@@ -191,6 +189,8 @@
     return ideMod.createIdeExtensions(buildIdeOpts(p));
   }
 
+  let appliedManifestDepsPath = '';
+
   function mountIdeExtensions(target: EditorView, forPath?: string): void {
     if (!isIdeActive()) return;
     const p = forPath ?? (livePath || path);
@@ -200,19 +200,12 @@
       }
     };
     if (ideMod) apply(); else void ensureIdeMod().then(apply);
-    mountManifestDeps(target, p);
-  }
-
-  function mountManifestDeps(target: EditorView, forPath: string): void {
-    if (!ideMode || !isManifestPath(forPath)) {
-      target.dispatch({ effects: ideDepsCompartment.reconfigure([]) });
-      onManifestDepsUpdated?.([]);
-      return;
-    }
-    const apply = (m: typeof CmIdeDepsMod) => {
-      if (view !== target || livePath !== forPath) return;
-      const ext = m.createIdeDepsExtension({
-        filePath: forPath, root, connectionId, projectFolders,
+    if (ideMode || appliedManifestDepsPath) {
+      void import('./cm-editor-ondemand').then((m) => m.mountIdeManifestDeps({
+        target, forPath: p, ideMode, appliedPath: appliedManifestDepsPath,
+        setAppliedPath: (next) => { appliedManifestDepsPath = next; },
+        isCurrent: () => view === target && livePath === p,
+        ideDepsCompartment, root, connectionId, projectFolders,
         onApplyContent: (nextContent) => { applyAgentEdit(nextContent); },
         onOpenIntentionMenu: (ln, dep) => onOpenManifestIntention?.(ln, dep),
         onJumpLocation: (loc) => onDefinitionJump?.(loc),
@@ -220,19 +213,19 @@
         onOpenLocalHistory: () => onOpenLocalHistory?.(),
         onOpenDepAnalyzer: () => onOpenDepAnalyzer?.(),
         onToggleBlame,
-        onDepsUpdated: (items) => onManifestDepsUpdated?.(items),
-      });
-      target.dispatch({ effects: ideDepsCompartment.reconfigure(ext) });
-    };
-    if (depsMod) apply(depsMod);
-    else void (depsModPromise ??= import('./cm-ide-deps').then((m) => ((depsMod = m), m))).then(apply, () => {});
+        onDepsUpdated: (items) => untrack(() => onManifestDepsUpdated?.(items)),
+      }));
+    }
   }
 
-  const fallbackBpGutterExt = createFallbackBpGutterHandlers({
-    isIdeMounted: () => ideMounted,
-    getToggle: () => onToggleBreakpoint,
-    getEdit: () => onEditBreakpoint,
-  });
+  const fallbackBpGutterExt = (): Extension =>
+    coreHistMod && (ideMode || onToggleBreakpoint || onEditBreakpoint)
+      ? coreHistMod.createFallbackBpGutterHandlers({
+          isIdeMounted: () => ideMounted,
+          getToggle: () => onToggleBreakpoint,
+          getEdit: () => onEditBreakpoint,
+        })
+      : [];
 
   // ── Long-line plain mode (`highlightLineLimit`) ─────────────────────────────
   let appliedPlain = false;
@@ -295,7 +288,11 @@
   });
 
   async function sendToAgent(): Promise<void> {
-    if (sel && view) await sendSelectionToAgentSession(path, language, sel.startLine, sel.endLine, view.state.sliceDoc(sel.from, sel.to));
+    if (!sel || !view) return;
+    const text = view.state.sliceDoc(sel.from, sel.to);
+    const { startLine, endLine } = sel;
+    const m = await import('./cm-editor-ondemand');
+    await m.sendSelectionToAgentSession(path, language, startLine, endLine, text);
   }
 
   const cmLangFor = (filePath: string, hint?: string): Extension | null => cmLangNow(langExtOf(filePath, hint), appliedDialect);
@@ -312,14 +309,14 @@
     }, () => {});
   }
 
-  function handleLspJump(uri: string, line: number, column: number): void {
-    const targetPath = uriToPath(uri);
+  function handleLspJump(targetPath: string, line: number, column: number): void {
     if (targetPath === livePath) revealLine(line, column);
     else onDefinitionJump?.({ path: targetPath, line, column });
   }
 
-  function attachLsp(editorView: EditorView, filePath: string, rootPath: string, connId?: string | null): Promise<void> {
-    return attachCodeEditorLsp({
+  async function attachLsp(editorView: EditorView, filePath: string, rootPath: string, connId?: string | null): Promise<void> {
+    const m = await import('./cm-editor-ondemand');
+    return m.attachCodeEditorLsp({
       editorView, filePath, rootPath, connId, ideMode, language, lspCompartment,
       isCurrent: () => view === editorView && livePath === filePath,
       ensureIdeMod, onLocationJump: handleLspJump, onDiagnostics,
@@ -329,7 +326,7 @@
   function teardownEditor(): void {
     changes.cancel();
     if (plainRecheck) clearTimeout(plainRecheck);
-    plainRecheck = null; ideMounted = false; appliedIdePath = '';
+    plainRecheck = null; ideMounted = false; appliedIdePath = ''; appliedManifestDepsPath = '';
     try { view?.destroy(); } catch { /* ignore */ }
     view = null;
     if (keyContext.openFind === openEditorSearch) keyContext.openFind = null;
@@ -352,7 +349,8 @@
 
   export function getSelectionRange(): CmIdeMod.IdeEditorSelectionRange | null {
     if (!view) return null;
-    return ideMod ? ideMod.selectionOrCurrentLine(view.state) : fallbackSelectionRange(view.state);
+    if (ideMod) return ideMod.selectionOrCurrentLine(view.state);
+    return coreHistMod ? coreHistMod.fallbackSelectionRange(view.state) : null;
   }
 
   export function applyAgentEdit(nextContent: string, range?: { from: number; to: number }): boolean {
@@ -369,7 +367,7 @@
     if (!view || readOnly || !edits.length) return false;
     let ok = true;
     if (ideMod) ok = ideMod.applyConcreteEditsToView(view, edits, livePath || path);
-    else applyFallbackQuickFixEdits(view, edits);
+    else coreHistMod?.applyFallbackQuickFixEdits(view, edits);
     if (ok) { changes.flush(); parkLive(); view.focus(); }
     return ok;
   }
@@ -395,30 +393,29 @@
 
   export function applyPrefixSuffix(prefix: string, suffix: string): void {
     if (!view || readOnly) return;
-    const target = view;
-    const run = (m: typeof CmIdeMod) => {
-      if (view !== target) return;
-      if (m.applyLinePrefixSuffix(target, prefix, suffix)) { changes.flush(); parkLive(); }
-      target.focus();
-    };
-    if (ideMod) run(ideMod); else void ensureIdeMod().then(run);
+    if (applyLinePrefixSuffixSync(view, prefix, suffix)) { changes.flush(); parkLive(); }
+    view.focus();
   }
 
   export function splitSelectionToLines(): void {
     if (!view) return;
-    const target = view;
-    const run = (m: typeof CmIdeMod) => { if (view === target) { m.splitSelectionIntoLines(target); target.focus(); } };
-    if (ideMod) run(ideMod); else void ensureIdeMod().then(run);
+    splitSelectionIntoLinesSync(view);
+    view.focus();
   }
+
+  let skipDestroyPark = false;
 
   export function evictPaths(paths: Iterable<string> | 'all'): void {
     stateCache.evict(paths, historyKey);
     if (paths === 'all') {
+      skipDestroyPark = true;
       coreHistMod?.evictSingletonIdeState('all');
+      coreHistMod?.forgetIdeUndoJournal('all');
       ideMod?.disposePooledLspClients({ forceAll: true });
       return;
     }
     for (const p of paths) {
+      if (p === livePath) skipDestroyPark = true;
       coreHistMod?.evictSingletonIdeState([p]);
       coreHistMod?.forgetIdeUndoJournal(p);
     }
@@ -473,7 +470,7 @@
         : []),
       Prec.highest(keymap.of([{ key: 'Mod-a', run: selectAll }])),
       keymap.of([...defaultKeymap, ...searchKeymap, ...lintKeymap, ...completionKeymap, ...foldKeymap]),
-      langCompartment.of(langExt ?? []), fallbackBpGutterExt,
+      langCompartment.of(langExt ?? []), fallbackBpGutterExt(),
       ...(hk || (ideMode && !readOnly) ? [historySaver] : []),
       ...(oncopy || ideMode ? [copyRecorder] : []),
     ];
@@ -539,6 +536,7 @@
     langCompartment = new Compartment();
     sel = null;
 
+    skipDestroyPark = false;
     livePath = filePath;
     view = new EditorView({ state: createState(filePath, fileContent), parent: el });
     applyPendingScroll();
@@ -569,6 +567,7 @@
       (evPath, evState) => parkHistory(evPath, evState, 0),
     );
 
+    skipDestroyPark = false;
     livePath = toPath;
     const kept = stateCache.takeKept(toPath);
     if (!kept) {
@@ -662,9 +661,11 @@
   });
 
   function syncIdeEffect(needMount: boolean, makeEffect: (m: typeof CmIdeMod) => StateEffect<unknown>): void {
-    if (!view) return;
-    if (!ideMounted && needMount) mountIdeExtensions(view);
-    else if (ideMod && ideMounted) view.dispatch({ effects: makeEffect(ideMod) });
+    untrack(() => {
+      if (!view) return;
+      if (!ideMounted && needMount) mountIdeExtensions(view);
+      else if (ideMod && ideMounted) view.dispatch({ effects: makeEffect(ideMod) });
+    });
   }
   $effect(() => { const v = savedContent; syncIdeEffect(v != null, (m) => m.setSavedContentEffect.of(v)); });
   $effect(() => { const v = blameByLine; syncIdeEffect(v != null, (m) => m.setBlameLinesEffect.of(v)); });
@@ -741,8 +742,14 @@
 
   const unregisterParker = registerLiveParker(() => { if (historySaveTimer !== null) parkLive(); });
   onDestroy(() => {
-    unregisterParker(); changes.flush(); parkLive();
-    stateCache.drainAndClear((p, st) => parkHistory(p, st, 0));
+    unregisterParker(); changes.flush();
+    if (!skipDestroyPark) {
+      parkLive();
+      stateCache.drainAndClear((p, st) => parkHistory(p, st, 0));
+    } else {
+      if (historySaveTimer !== null) { clearTimeout(historySaveTimer); historySaveTimer = null; }
+      stateCache.evict('all', historyKey);
+    }
     teardownEditor();
   });
 </script>

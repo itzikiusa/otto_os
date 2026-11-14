@@ -5,6 +5,7 @@
 export * from '../store/ideDiffApplier';
 export type { IdeThreadEntry } from './ideContextBuilders';
 
+import { untrack } from 'svelte';
 import type { ApprovalDecision, RuntimeAccessMode, RuntimeProvider, RuntimeSession } from '../../../lib/api/types';
 import { loadErrorText } from '../../../lib/loadError';
 import { normalizeEffort, supportsEffortSelection, type EffortLevel, type InteractionMode } from '../../../lib/providerModels';
@@ -322,12 +323,17 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
     const stopLiveCtx = $effect.root(() => {
       $effect(() => {
         void [ide.target.kind, ide.target.root, ide.additionalRoots.length, ide.activePath, ide.tabs.length];
-        this.publishLiveIdeContext();
+        untrack(() => this.publishLiveIdeContext());
       });
       $effect(() => {
-        if (!ideAgentState.sessionId && this.availableProviders.length > 0 && !this.availableProviders.includes(ideAgentState.provider)) {
-          const def = defaultAgentProvider();
-          this.setProvider(this.availableProviders.includes(def) ? def : this.availableProviders[0]!);
+        const list = this.availableProviders;
+        const curSid = ideAgentState.sessionId;
+        const curProv = ideAgentState.provider;
+        if (!curSid && list.length > 0 && !list.includes(curProv)) {
+          untrack(() => {
+            const def = defaultAgentProvider();
+            this.setProvider(list.includes(def) ? def : list[0]!);
+          });
         }
       });
     });
@@ -354,7 +360,8 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
       this.lastTargetKey = currentIdeTargetKey();
       this.stopTargetWatch = $effect.root(() => {
         $effect(() => {
-          this.syncTargetRoot(currentIdeTargetKey());
+          const nextKey = currentIdeTargetKey();
+          untrack(() => this.syncTargetRoot(nextKey));
         });
       });
     } else if (!watchNeeded && this.stopTargetWatch) {

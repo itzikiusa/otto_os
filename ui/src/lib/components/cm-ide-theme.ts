@@ -385,11 +385,23 @@ function makeEditorSurfaceTheme(dark: boolean, ideMode: boolean): Extension {
   );
 }
 
+const highlightExt = syntaxHighlighting(ideHighlightStyle);
+const themeExtCache = new Map<string, Extension>();
+
 export function createIdeSyntaxTheme(opts: {
   dark: boolean;
   plain?: boolean;
   ideMode?: boolean;
 }): Extension {
-  const surface = makeEditorSurfaceTheme(opts.dark, Boolean(opts.ideMode));
-  return opts.plain ? surface : [surface, syntaxHighlighting(ideHighlightStyle)];
+  const dark = Boolean(opts.dark);
+  const ideMode = Boolean(opts.ideMode);
+  const plain = Boolean(opts.plain);
+  const key = `${dark ? 1 : 0}:${ideMode ? 1 : 0}:${plain ? 1 : 0}`;
+  let cached = themeExtCache.get(key);
+  if (!cached) {
+    const surface = makeEditorSurfaceTheme(dark, ideMode);
+    cached = plain ? surface : [surface, highlightExt];
+    themeExtCache.set(key, cached);
+  }
+  return cached;
 }

@@ -14,10 +14,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use dashmap::DashMap;
 use otto_core::{new_id, Error, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -53,28 +52,32 @@ struct RootIndex {
 }
 
 /// Thread-safe, disk-backed Local History store with zero retained blob cache.
+///
+/// Uses a fixed 16-stripe sync mutex array hashed by bucket prefix rather than
+/// a growing map of locks: Local History operations run from both sync tasks
+/// and async handlers (`KeyedLocks` is an async Tokio mutex), and 16 stripes
+/// bound memory to `< 1 KiB` with zero pruning overhead.
 #[derive(Clone)]
 pub struct LocalHistoryStore {
     base_dir: PathBuf,
-    root_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
+    stripes: Arc<[Mutex<()>; 16]>,
 }
 
 impl LocalHistoryStore {
     pub fn new(data_dir: PathBuf) -> Self {
         Self {
             base_dir: data_dir.join("ide-local-history"),
-            root_locks: Arc::new(DashMap::new()),
+            stripes: Arc::new(std::array::from_fn(|_| Mutex::new(()))),
         }
     }
 
-    fn lock_for_bucket(&self, bucket: &str) -> Arc<Mutex<()>> {
-        if self.root_locks.len() > 128 {
-            self.root_locks.retain(|_, v| Arc::strong_count(v) > 1);
-        }
-        self.root_locks
-            .entry(bucket.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
+    fn lock_bucket(&self, bucket: &str) -> MutexGuard<'_, ()> {
+        let idx = bucket
+            .get(..2)
+            .and_then(|s| u8::from_str_radix(s, 16).ok())
+            .unwrap_or(0) as usize
+            & 15;
+        self.stripes[idx].lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn bucket_dir(&self, canon_root: &Path) -> (String, PathBuf) {
@@ -110,8 +113,7 @@ impl LocalHistoryStore {
             .unwrap_or_else(|_| file_str.clone());
 
         let (bucket, root_dir) = self.bucket_dir(canon_root);
-        let lock = self.lock_for_bucket(&bucket);
-        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self.lock_bucket(&bucket);
 
         let blobs_dir = root_dir.join("blobs");
         std::fs::create_dir_all(&blobs_dir)
@@ -223,8 +225,7 @@ impl LocalHistoryStore {
         search_query: Option<&str>,
     ) -> Result<IdeHistoryListResp> {
         let (bucket, root_dir) = self.bucket_dir(canon_root);
-        let lock = self.lock_for_bucket(&bucket);
-        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self.lock_bucket(&bucket);
 
         let idx = read_index(&root_dir);
         let filter_path = normalize_target_filter(canon_root, target_path)?;
@@ -294,8 +295,7 @@ impl LocalHistoryStore {
     pub fn get_entry(&self, canon_root: &Path, entry_id: &str) -> Result<IdeHistoryEntryResp> {
         let (bucket, root_dir) = self.bucket_dir(canon_root);
         let (entry, content) = {
-            let lock = self.lock_for_bucket(&bucket);
-            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = self.lock_bucket(&bucket);
             let idx = read_index(&root_dir);
             let found = idx
                 .entries
