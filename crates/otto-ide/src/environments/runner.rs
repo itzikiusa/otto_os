@@ -1,18 +1,9 @@
-//! Background Test & Run execution engine and structured multi-language test
-//! output parsers (`go test -v`, `cargo test`, `pytest -v` / `unittest`,
-//! `node --test` / `vitest`, Bats TAP, and Maven Surefire / Gradle / JUnit).
-//!
-//! Memory & leak invariants:
-//! - Active run output ring buffers are strictly bounded to `<= 2,000` lines
-//!   AND `<= 512 KB` (`MAX_RUN_OUTPUT_BYTES`), compacting to `<= 256 KB` on
-//!   completion and retaining at most `MAX_FINISHED_RUNS` terminated runs.
-//! - Every local child process spawns in its own Unix process group
-//!   (`process_group(0)`) with a synchronous `Drop` safeguard and `-pgid`
-//!   `SIGTERM` -> `SIGKILL` termination so `go run` / `go test` / `npm` child
-//!   binaries never leak orphan processes.
+//! Background Test & Run execution engine (`execute_run_task`, `build_runner_command`),
+//! multi-repo Java source-first classpath compilation, Maven/Gradle/Spring Boot
+//! profile injection, and Unix process-group lifecycle cleanup.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, VecDeque};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -23,20 +14,23 @@ use tokio::process::Command;
 use tokio::sync::watch;
 
 use crate::target::TargetManager;
-use crate::toolchains::{find_executable_in, is_executable_file};
 use crate::types::{
     IdeRunConfig, IdeRunState, IdeRunStatus, IdeRunnerKind, IdeSshSpec, IdeTargetKind,
-    IdeTargetSpec, IdeTestCaseResult, IdeTestCaseStatus,
+    IdeTargetSpec,
 };
 
-use super::is_valid_env_key;
+use super::db_store::is_valid_env_key;
+pub(super) use super::runner_cmd::{
+    apply_runtime_profile_and_module_venv, build_runner_command, compile_java_main_step,
+    has_manual_classpath, resolve_program_in_env, resolve_run_cwd,
+};
+use super::runner_parsers::IncrementalTestTracker;
 
 pub(super) const MAX_FINISHED_RUNS: usize = 8;
 pub(super) const MAX_RUN_OUTPUT_LINES: usize = 2_000;
 pub(super) const MAX_RUN_OUTPUT_BYTES: usize = 512 * 1024;
 const MAX_FINISHED_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_SINGLE_LINE_BYTES: usize = 16 * 1024;
-const MAX_PARSED_TESTS: usize = 2_000;
 
 pub(super) fn evict_finished_runs(runs: &DashMap<String, Arc<ActiveRunHandle>>) {
     let mut finished: Vec<(String, String, u64)> = runs
@@ -193,8 +187,6 @@ impl ActiveRunHandle {
     }
 }
 
-/// Ensures local Unix child process groups (`-pgid`) are reaped even if the
-/// owning Tokio task is cancelled or dropped abruptly.
 struct ChildProcessGroupGuard {
     pid: Option<u32>,
     is_local: bool,
@@ -267,7 +259,6 @@ async fn cleanup_remaining_process_group(pid: Option<u32>, is_local: bool) {
     #[cfg(unix)]
     if is_local {
         if let Some(p) = pid {
-            // Reap any stray background grandchild left in `-pgid` after leader exit.
             let _ = Command::new("/bin/kill")
                 .args(["-KILL", &format!("-{p}")])
                 .stdin(Stdio::null())
@@ -295,7 +286,7 @@ pub(super) async fn execute_run_task(
     let multi_step = steps.len() > 1;
     let mut last_exit = Some(0);
 
-    for (idx, (cfg, env_map)) in steps.into_iter().enumerate() {
+    for (idx, (cfg, mut env_map)) in steps.into_iter().enumerate() {
         if *stop_rx.borrow() {
             finish_run(
                 &handle,
@@ -320,7 +311,33 @@ pub(super) async fn execute_run_task(
         }
 
         let cwd = resolve_run_cwd(&target, cfg.cwd.as_deref());
-        let (program, args) = build_runner_command(&cfg, &cwd, &env_map);
+        apply_runtime_profile_and_module_venv(&cfg, &target, &cwd, &mut env_map);
+
+        let mut temp_java_build_dir: Option<PathBuf> = None;
+        let (program, args) = if target.kind == IdeTargetKind::Local
+            && cfg.runner == IdeRunnerKind::JavaMain
+            && !has_manual_classpath(&cfg)
+        {
+            match compile_java_main_step(&cfg, &target, &cwd, &env_map, &handle).await {
+                Ok((prog, built_args, out_dir)) => {
+                    temp_java_build_dir = Some(out_dir);
+                    (prog, built_args)
+                }
+                Err(err) => {
+                    finish_run(
+                        &handle,
+                        IdeRunStatus::Failed,
+                        Some(1),
+                        started.elapsed(),
+                        Some(err),
+                    );
+                    evict_finished_runs(&runs);
+                    return;
+                }
+            }
+        } else {
+            build_runner_command(&cfg, &cwd, &env_map)
+        };
 
         if let Some(pre) = cfg
             .before_launch
@@ -332,6 +349,9 @@ pub(super) async fn execute_run_task(
             if let Err(err) =
                 run_before_launch(&targets, &target, ssh.as_ref(), pre, &cwd, &env_map).await
             {
+                if let Some(dir) = temp_java_build_dir.take() {
+                    let _ = tokio::fs::remove_dir_all(dir).await;
+                }
                 finish_run(
                     &handle,
                     IdeRunStatus::Failed,
@@ -356,6 +376,9 @@ pub(super) async fn execute_run_task(
             match spawn_run_child(&target, ssh.as_ref(), &program, &args, &cwd, &env_map) {
                 Ok(c) => c,
                 Err(err) => {
+                    if let Some(dir) = temp_java_build_dir.take() {
+                        let _ = tokio::fs::remove_dir_all(dir).await;
+                    }
                     finish_run(
                         &handle,
                         IdeRunStatus::Failed,
@@ -410,6 +433,9 @@ pub(super) async fn execute_run_task(
         }
         if let Some(t) = stderr_task {
             let _ = tokio::time::timeout(Duration::from_millis(250), t).await;
+        }
+        if let Some(dir) = temp_java_build_dir.take() {
+            let _ = tokio::fs::remove_dir_all(dir).await;
         }
 
         match wait_res {
@@ -620,843 +646,5 @@ fn spawn_run_child(
             cmd.process_group(0);
             cmd.spawn().map_err(|e| format!("spawn ssh: {e}"))
         }
-    }
-}
-
-fn resolve_program_in_env(program: &str, env_map: &BTreeMap<String, String>) -> PathBuf {
-    if program.contains('/') {
-        return PathBuf::from(program);
-    }
-    if let Some(path_str) = env_map.get("PATH") {
-        let dirs: Vec<PathBuf> = std::env::split_paths(path_str).collect();
-        if let Some(hit) = find_executable_in(&dirs, &[program]) {
-            return hit;
-        }
-    }
-    PathBuf::from(program)
-}
-
-pub(super) fn resolve_run_cwd(target: &IdeTargetSpec, raw_cwd: Option<&str>) -> String {
-    let Some(c) = raw_cwd
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && *s != ".")
-    else {
-        return target.root.clone();
-    };
-    if c.starts_with('/') {
-        let allowed_roots = std::iter::once(target.root.as_str())
-            .chain(target.additional_roots.iter().map(String::as_str));
-        if target.kind == IdeTargetKind::Local {
-            if let Ok(canon_c) = std::fs::canonicalize(c) {
-                for allowed in allowed_roots.clone() {
-                    if let Ok(canon_root) = std::fs::canonicalize(allowed) {
-                        if canon_c.starts_with(&canon_root) {
-                            return canon_c.to_string_lossy().into_owned();
-                        }
-                    }
-                }
-            }
-        }
-        for allowed in allowed_roots {
-            if c == allowed || c.starts_with(&format!("{}/", allowed.trim_end_matches('/'))) {
-                return c.to_string();
-            }
-        }
-        return target.root.clone();
-    }
-    if c.contains("..") {
-        return target.root.clone();
-    }
-    let rel = c.trim_start_matches("./");
-    format!("{}/{rel}", target.root.trim_end_matches('/'))
-}
-
-pub(super) fn build_runner_command(
-    cfg: &IdeRunConfig,
-    cwd: &str,
-    env_map: &BTreeMap<String, String>,
-) -> (String, Vec<String>) {
-    let cmd_opt = cfg
-        .command
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let mut args = cfg.args.clone();
-    let build_flags: Vec<String> = cfg
-        .build_flags
-        .iter()
-        .map(|f| f.trim().to_string())
-        .filter(|f| !f.is_empty())
-        .collect();
-    let filter = cfg
-        .test_filter
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-
-    match cfg.runner {
-        IdeRunnerKind::GoTest => {
-            let prog = cmd_opt.unwrap_or("go").to_string();
-            let mut out = Vec::new();
-            let has_leading_test = args.first().map(String::as_str) == Some("test");
-            if has_leading_test {
-                args.remove(0);
-            }
-            out.push("test".into());
-            if !args.iter().any(|a| a == "-v") && !build_flags.iter().any(|a| a == "-v") {
-                out.push("-v".into());
-            }
-            out.extend(build_flags);
-            if let Some(f) = filter {
-                if !args.iter().any(|a| a == "-run") {
-                    out.extend(["-run".into(), f.to_string()]);
-                }
-            }
-            if args.is_empty() {
-                out.push(cfg.target_path.clone().unwrap_or_else(|| "./...".into()));
-            } else {
-                out.extend(args);
-            }
-            (prog, out)
-        }
-        IdeRunnerKind::GoRun => {
-            let prog = cmd_opt.unwrap_or("go").to_string();
-            if args.first().map(String::as_str) == Some("run") {
-                args.remove(0);
-            }
-            let mut out = vec!["run".into()];
-            out.extend(build_flags);
-            if args.is_empty() {
-                out.push(cfg.target_path.clone().unwrap_or_else(|| ".".into()));
-            } else {
-                out.extend(args);
-            }
-            (prog, out)
-        }
-        IdeRunnerKind::GoBuild => {
-            let prog = cmd_opt.unwrap_or("go").to_string();
-            if args.first().map(String::as_str) == Some("build") {
-                args.remove(0);
-            }
-            let mut out = vec!["build".into()];
-            out.extend(build_flags);
-            if args.is_empty() {
-                out.push(cfg.target_path.clone().unwrap_or_else(|| ".".into()));
-            } else {
-                out.extend(args);
-            }
-            (prog, out)
-        }
-        IdeRunnerKind::CargoTest => {
-            let prog = cmd_opt.unwrap_or("cargo").to_string();
-            if args.first().map(String::as_str) == Some("test") {
-                args.remove(0);
-            }
-            let mut out = vec!["test".into()];
-            out.extend(build_flags);
-            if let Some(f) = filter {
-                if !args.iter().any(|a| a == f) {
-                    args.insert(0, f.to_string());
-                }
-            }
-            out.extend(args);
-            (prog, out)
-        }
-        IdeRunnerKind::CargoRun => {
-            let prog = cmd_opt.unwrap_or("cargo").to_string();
-            if args.first().map(String::as_str) == Some("run") {
-                args.remove(0);
-            }
-            let mut out = vec!["run".into()];
-            out.extend(build_flags);
-            out.extend(args);
-            (prog, out)
-        }
-        IdeRunnerKind::Pytest => {
-            let py = env_map
-                .get("VIRTUAL_ENV")
-                .map(|v| format!("{v}/bin/python"))
-                .unwrap_or_else(|| "python3".into());
-            if let Some(explicit) = cmd_opt {
-                return (explicit.to_string(), args);
-            }
-            let pytest_bin = resolve_program_in_env("pytest", env_map);
-            if is_executable_file(&pytest_bin) {
-                if !args.iter().any(|a| a == "-v") {
-                    args.insert(0, "-v".into());
-                }
-                args.extend(build_flags);
-                if let Some(f) = filter {
-                    if !args.iter().any(|a| a == f) {
-                        args.extend(["-k".into(), f.to_string()]);
-                    }
-                }
-                ("pytest".into(), args)
-            } else {
-                let mut u = vec![
-                    "-m".into(),
-                    "unittest".into(),
-                    "discover".into(),
-                    "-v".into(),
-                ];
-                u.extend(build_flags);
-                u.extend(args);
-                (py, u)
-            }
-        }
-        IdeRunnerKind::Python => {
-            let default_py = env_map
-                .get("VIRTUAL_ENV")
-                .map(|v| format!("{v}/bin/python"))
-                .unwrap_or_else(|| "python3".into());
-            let prog = cmd_opt.map(str::to_string).unwrap_or(default_py);
-            let mut out = build_flags;
-            if args.is_empty() {
-                if let Some(tp) = &cfg.target_path {
-                    out.push(tp.clone());
-                }
-            } else {
-                out.extend(args);
-            }
-            (prog, out)
-        }
-        IdeRunnerKind::Node => {
-            let prog = cmd_opt.unwrap_or("node").to_string();
-            let mut out = build_flags;
-            if args.is_empty() {
-                if let Some(tp) = &cfg.target_path {
-                    out.push(tp.clone());
-                }
-            } else {
-                out.extend(args);
-            }
-            (prog, out)
-        }
-        IdeRunnerKind::Npm => (
-            cmd_opt.unwrap_or("npm").to_string(),
-            if args.is_empty() {
-                vec!["test".into()]
-            } else {
-                args
-            },
-        ),
-        IdeRunnerKind::Vitest => {
-            let prog = cmd_opt.unwrap_or("npx").to_string();
-            if args.first().map(String::as_str) != Some("vitest") {
-                let mut v = vec!["vitest".into(), "run".into()];
-                v.extend(build_flags);
-                v.extend(args);
-                args = v;
-            }
-            (prog, args)
-        }
-        IdeRunnerKind::JavaMain => {
-            let prog = cmd_opt.unwrap_or("java").to_string();
-            let mut out = build_flags;
-            if args.is_empty() {
-                if let Some(fqcn) = filter {
-                    out.push(fqcn.to_string());
-                } else if let Some(tp) = &cfg.target_path {
-                    out.push(tp.clone());
-                }
-            } else {
-                out.extend(args);
-            }
-            (prog, out)
-        }
-        IdeRunnerKind::JavaJunit | IdeRunnerKind::Maven => {
-            let mvnw = Path::new(cwd).join("mvnw");
-            let prog = cmd_opt.map(str::to_string).unwrap_or_else(|| {
-                if is_executable_file(&mvnw) {
-                    "./mvnw".into()
-                } else {
-                    "mvn".into()
-                }
-            });
-            if args.is_empty() {
-                args.push("test".into());
-            }
-            args.extend(build_flags);
-            if let Some(f) = filter {
-                args.push(format!("-Dtest={f}"));
-            }
-            (prog, args)
-        }
-        IdeRunnerKind::Gradle => {
-            let gradlew = Path::new(cwd).join("gradlew");
-            let prog = cmd_opt.map(str::to_string).unwrap_or_else(|| {
-                if is_executable_file(&gradlew) {
-                    "./gradlew".into()
-                } else {
-                    "gradle".into()
-                }
-            });
-            if args.is_empty() {
-                args.push("test".into());
-            }
-            args.extend(build_flags);
-            if let Some(f) = filter {
-                args.extend(["--tests".into(), f.to_string()]);
-            }
-            (prog, args)
-        }
-        IdeRunnerKind::Shell => {
-            let is_bats = cfg
-                .target_path
-                .as_deref()
-                .is_some_and(|p| p.ends_with(".bats"));
-            let prog = cmd_opt
-                .unwrap_or(if is_bats { "bats" } else { "bash" })
-                .to_string();
-            let mut out = build_flags;
-            if args.is_empty() {
-                if let Some(tp) = &cfg.target_path {
-                    out.push(tp.clone());
-                }
-            } else {
-                out.extend(args);
-            }
-            (prog, out)
-        }
-        IdeRunnerKind::Compound | IdeRunnerKind::Custom => {
-            let c = cmd_opt.unwrap_or("echo");
-            if args.is_empty() && c.contains(' ') {
-                ("sh".into(), vec!["-c".into(), c.to_string()])
-            } else {
-                let mut out = build_flags;
-                out.extend(args);
-                (c.to_string(), out)
-            }
-        }
-    }
-}
-
-/// Stateful $O(1)$-per-line test parser that retains structured test cases
-/// across an entire run even after `output` rolls past `MAX_RUN_OUTPUT_LINES`.
-#[derive(Default)]
-struct IncrementalTestTracker {
-    results: Vec<IdeTestCaseResult>,
-    go_index: HashMap<String, usize>,
-    last_go_idx: Option<usize>,
-}
-
-impl IncrementalTestTracker {
-    fn push_capped(&mut self, item: IdeTestCaseResult) {
-        if self.results.len() < MAX_PARSED_TESTS {
-            self.results.push(item);
-        }
-    }
-
-    fn compact_on_finish(&mut self) {
-        self.go_index.clear();
-        self.go_index.shrink_to_fit();
-        self.results.shrink_to_fit();
-    }
-
-    fn ingest_line(&mut self, runner: IdeRunnerKind, line: &str) {
-        match runner {
-            IdeRunnerKind::GoTest => self.ingest_go_line(line),
-            IdeRunnerKind::CargoTest => {
-                if let Some(tc) = parse_cargo_test_line(line) {
-                    self.push_capped(tc);
-                }
-            }
-            IdeRunnerKind::Pytest => {
-                if let Some(tc) = parse_python_test_line(line) {
-                    self.push_capped(tc);
-                }
-            }
-            IdeRunnerKind::Node
-            | IdeRunnerKind::Vitest
-            | IdeRunnerKind::Npm
-            | IdeRunnerKind::Shell => {
-                if let Some(tc) = parse_js_test_line(line) {
-                    self.push_capped(tc);
-                }
-            }
-            IdeRunnerKind::JavaJunit | IdeRunnerKind::Maven | IdeRunnerKind::Gradle => {
-                if let Some(tc) = parse_jvm_test_line(line) {
-                    self.push_capped(tc);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn ingest_go_line(&mut self, line: &str) {
-        let t = line.trim();
-        if let Some(name) = t
-            .strip_prefix("=== RUN")
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            if let Some(&idx) = self.go_index.get(name) {
-                self.results[idx] = simple_test_case(name, IdeTestCaseStatus::Running, None);
-                self.last_go_idx = Some(idx);
-            } else if self.results.len() < MAX_PARSED_TESTS {
-                let idx = self.results.len();
-                self.results
-                    .push(simple_test_case(name, IdeTestCaseStatus::Running, None));
-                self.go_index.insert(name.to_string(), idx);
-                self.last_go_idx = Some(idx);
-            }
-        } else if t.starts_with("--- ") {
-            if let Some((status, rest)) = t
-                .strip_prefix("--- PASS:")
-                .map(|r| (IdeTestCaseStatus::Passed, r))
-                .or_else(|| {
-                    t.strip_prefix("--- FAIL:")
-                        .map(|r| (IdeTestCaseStatus::Failed, r))
-                })
-                .or_else(|| {
-                    t.strip_prefix("--- SKIP:")
-                        .map(|r| (IdeTestCaseStatus::Skipped, r))
-                })
-            {
-                let rest = rest.trim();
-                let (name, dur_ms) = match rest.split_once(' ') {
-                    Some((n, tail)) => (n.trim(), parse_seconds_parens(tail)),
-                    None => (rest, None),
-                };
-                if let Some(&idx) = self.go_index.get(name) {
-                    self.results[idx].status = status;
-                    self.results[idx].duration_ms = dur_ms;
-                    self.last_go_idx = Some(idx);
-                } else if self.results.len() < MAX_PARSED_TESTS {
-                    let idx = self.results.len();
-                    self.results.push(simple_test_case(name, status, dur_ms));
-                    self.go_index.insert(name.to_string(), idx);
-                    self.last_go_idx = Some(idx);
-                }
-            }
-        } else if t.contains(".go:") {
-            if let Some((file, ln, msg)) = parse_go_diag_line(t) {
-                if let Some(idx) = self.last_go_idx {
-                    let entry = &mut self.results[idx];
-                    entry.file.get_or_insert(file);
-                    entry.line.get_or_insert(ln);
-                    entry.message = Some(msg);
-                }
-            }
-        }
-    }
-}
-
-/// Parse raw runner output lines into structured per-test pass/fail/duration items.
-pub fn parse_test_output(runner: IdeRunnerKind, lines: &[String]) -> Vec<IdeTestCaseResult> {
-    let mut tracker = IncrementalTestTracker::default();
-    for line in lines {
-        tracker.ingest_line(runner, line);
-    }
-    tracker.results
-}
-
-fn parse_go_diag_line(trimmed: &str) -> Option<(String, u32, String)> {
-    let (file_part, rest) = trimmed.split_once(".go:")?;
-    if file_part.contains(' ') {
-        return None;
-    }
-    let (line_s, msg) = rest.split_once(':')?;
-    let line_no = line_s.trim().parse::<u32>().ok()?;
-    Some((format!("{file_part}.go"), line_no, msg.trim().to_string()))
-}
-
-fn parse_cargo_test_line(line: &str) -> Option<IdeTestCaseResult> {
-    let rest = line.trim().strip_prefix("test ")?;
-    let (name, outcome) = rest.rsplit_once(" ... ")?;
-    let status = if outcome.starts_with("ok") {
-        IdeTestCaseStatus::Passed
-    } else if outcome.starts_with("FAILED") {
-        IdeTestCaseStatus::Failed
-    } else if outcome.starts_with("ignored") {
-        IdeTestCaseStatus::Skipped
-    } else {
-        return None;
-    };
-    Some(simple_test_case(name.trim(), status, None))
-}
-
-fn parse_python_test_line(line: &str) -> Option<IdeTestCaseResult> {
-    let t = line.trim();
-    if t.contains("::") {
-        let mut parts = t.split_whitespace();
-        if let (Some(first), Some(second)) = (parts.next(), parts.next()) {
-            let st = match second {
-                "PASSED" => Some(IdeTestCaseStatus::Passed),
-                "FAILED" | "ERROR" => Some(IdeTestCaseStatus::Failed),
-                "SKIPPED" | "XFAIL" => Some(IdeTestCaseStatus::Skipped),
-                _ => None,
-            };
-            if let Some(status) = st {
-                let (file, name) = first.split_once("::").unwrap_or(("", first));
-                let mut item = simple_test_case(name, status, None);
-                if !file.is_empty() {
-                    item.suite = Some(file.to_string());
-                    item.file = Some(file.to_string());
-                }
-                return Some(item);
-            }
-        }
-    }
-    let (left, right) = t.rsplit_once(" ... ")?;
-    let status = match right.trim() {
-        "ok" => IdeTestCaseStatus::Passed,
-        "FAIL" | "ERROR" => IdeTestCaseStatus::Failed,
-        s if s.starts_with("skipped") => IdeTestCaseStatus::Skipped,
-        _ => return None,
-    };
-    Some(simple_test_case(left.trim(), status, None))
-}
-
-fn parse_js_test_line(line: &str) -> Option<IdeTestCaseResult> {
-    let t = line.trim();
-    if let Some(rest) = t
-        .strip_prefix("ok ")
-        .or_else(|| t.strip_prefix("✓ "))
-        .or_else(|| t.strip_prefix("✔ "))
-    {
-        let name = rest
-            .split_once(" - ")
-            .map(|(_, n)| n)
-            .unwrap_or(rest)
-            .trim();
-        if !name.is_empty() {
-            return Some(simple_test_case(
-                name,
-                IdeTestCaseStatus::Passed,
-                parse_ms_suffix(name),
-            ));
-        }
-    } else if let Some(rest) = t
-        .strip_prefix("not ok ")
-        .or_else(|| t.strip_prefix("✖ "))
-        .or_else(|| t.strip_prefix("× "))
-    {
-        let name = rest
-            .split_once(" - ")
-            .map(|(_, n)| n)
-            .unwrap_or(rest)
-            .trim();
-        if !name.is_empty() {
-            return Some(simple_test_case(
-                name,
-                IdeTestCaseStatus::Failed,
-                parse_ms_suffix(name),
-            ));
-        }
-    }
-    None
-}
-
-fn parse_jvm_test_line(line: &str) -> Option<IdeTestCaseResult> {
-    let t = line
-        .trim()
-        .trim_start_matches("[INFO] ")
-        .trim_start_matches("[ERROR] ");
-    if t.contains(" > ") {
-        if let Some((left, right)) = t.rsplit_once(' ') {
-            if left.contains(" > ") {
-                let st = match right {
-                    "PASSED" => Some(IdeTestCaseStatus::Passed),
-                    "FAILED" => Some(IdeTestCaseStatus::Failed),
-                    "SKIPPED" => Some(IdeTestCaseStatus::Skipped),
-                    _ => None,
-                };
-                if let Some(status) = st {
-                    let (suite, name) = left.split_once(" > ").unwrap_or(("", left));
-                    let mut item = simple_test_case(name.trim(), status, None);
-                    item.suite = Some(suite.trim().to_string());
-                    return Some(item);
-                }
-            }
-        }
-    }
-    if t.starts_with("Tests run:") && t.contains("-- in ") {
-        if let Some((_, suite)) = t.split_once("-- in ") {
-            let failed = !t.contains("Failures: 0, Errors: 0");
-            let status = if failed {
-                IdeTestCaseStatus::Failed
-            } else {
-                IdeTestCaseStatus::Passed
-            };
-            let mut item = simple_test_case(suite.trim(), status, None);
-            item.suite = Some(suite.trim().to_string());
-            return Some(item);
-        }
-    }
-    None
-}
-
-fn simple_test_case(
-    name: &str,
-    status: IdeTestCaseStatus,
-    duration_ms: Option<u64>,
-) -> IdeTestCaseResult {
-    IdeTestCaseResult {
-        name: name.to_string(),
-        suite: None,
-        status,
-        duration_ms,
-        file: None,
-        line: None,
-        message: None,
-    }
-}
-
-fn parse_seconds_parens(s: &str) -> Option<u64> {
-    let inner = s
-        .trim()
-        .trim_start_matches('(')
-        .trim_end_matches(')')
-        .trim_end_matches('s');
-    inner
-        .parse::<f64>()
-        .ok()
-        .map(|sec| (sec * 1000.0).round() as u64)
-}
-
-fn parse_ms_suffix(s: &str) -> Option<u64> {
-    let start = s.rfind('(')?;
-    let inner = s[start + 1..].trim_end_matches(')').trim();
-    inner
-        .strip_suffix("ms")?
-        .trim()
-        .parse::<f64>()
-        .ok()
-        .map(|v| v.round() as u64)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_structured_test_results_across_go_rust_python_js_shell_and_jvm() {
-        let go_out = vec![
-            "=== RUN   TestAdd".to_string(),
-            "--- PASS: TestAdd (0.02s)".to_string(),
-            "=== RUN   TestSub".to_string(),
-            "    calc_test.go:19: expected 3, got 2".to_string(),
-            "--- FAIL: TestSub (0.01s)".to_string(),
-        ];
-        let go_res = parse_test_output(IdeRunnerKind::GoTest, &go_out);
-        assert_eq!(go_res.len(), 2);
-        assert_eq!(go_res[0].status, IdeTestCaseStatus::Passed);
-        assert_eq!(go_res[0].duration_ms, Some(20));
-        assert_eq!(go_res[1].status, IdeTestCaseStatus::Failed);
-        assert_eq!(go_res[1].line, Some(19));
-
-        let cargo_res = parse_test_output(
-            IdeRunnerKind::CargoTest,
-            &[
-                "test math::adds ... ok".into(),
-                "test math::fails ... FAILED".into(),
-            ],
-        );
-        assert_eq!(cargo_res.len(), 2);
-        assert_eq!(cargo_res[0].status, IdeTestCaseStatus::Passed);
-        assert_eq!(cargo_res[1].status, IdeTestCaseStatus::Failed);
-
-        let py_res = parse_test_output(
-            IdeRunnerKind::Pytest,
-            &["tests/test_app.py::test_ok PASSED [100%]".into()],
-        );
-        assert_eq!(py_res[0].name, "test_ok");
-        assert_eq!(py_res[0].status, IdeTestCaseStatus::Passed);
-
-        let bats_res = parse_test_output(
-            IdeRunnerKind::Shell,
-            &[
-                "ok 1 healthcheck passes".into(),
-                "not ok 2 missing env fails".into(),
-            ],
-        );
-        assert_eq!(bats_res.len(), 2);
-        assert_eq!(bats_res[0].status, IdeTestCaseStatus::Passed);
-        assert_eq!(bats_res[1].status, IdeTestCaseStatus::Failed);
-
-        let jvm_res = parse_test_output(
-            IdeRunnerKind::Gradle,
-            &["com.acme.CalcTest > addsNumbers() PASSED".into()],
-        );
-        assert_eq!(jvm_res.len(), 1);
-        assert_eq!(jvm_res[0].status, IdeTestCaseStatus::Passed);
-    }
-
-    #[test]
-    fn streaming_10k_lines_is_under_50ms_caps_512kb_memory_and_preserves_tests() {
-        let (stop_tx, _stop_rx) = watch::channel(false);
-        let handle = ActiveRunHandle {
-            seq: 1,
-            state: Mutex::new(RunStateInner::new(
-                "run_perf".into(),
-                "CargoTest".into(),
-                IdeRunnerKind::CargoTest,
-                "2026-01-01T00:00:00Z".into(),
-            )),
-            stop_tx,
-        };
-
-        let lines: Vec<String> = (0..10_000)
-            .map(|i| match i {
-                0 => "test early::first_case ... ok".to_string(),
-                500 => "test early::second_case ... FAILED".to_string(),
-                9_999 => "test late::final_case ... ok".to_string(),
-                _ => format!("stdout log line {i}"),
-            })
-            .collect();
-
-        let started = Instant::now();
-        for line in lines {
-            append_run_line(&handle, line);
-        }
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed < Duration::from_millis(50),
-            "streaming 10,000 stdout lines took {elapsed:?}, expected < 50ms"
-        );
-
-        let snap = handle.snapshot();
-        assert_eq!(snap.output.len(), MAX_RUN_OUTPUT_LINES);
-        assert_eq!(snap.output_seq, 10_000);
-        assert_eq!(snap.tests.len(), 3);
-
-        // Verify byte ceiling (`<= 512 KB`) even under heavy 8 KB log lines:
-        for _ in 0..200 {
-            append_run_line(&handle, "x".repeat(8192));
-        }
-        let active_bytes = handle.state.lock().unwrap().output_bytes();
-        assert!(active_bytes <= MAX_RUN_OUTPUT_BYTES);
-
-        finish_run(
-            &handle,
-            IdeRunStatus::Passed,
-            Some(0),
-            Duration::from_millis(10),
-            None,
-        );
-        let compacted_bytes = handle.state.lock().unwrap().output_bytes();
-        assert!(compacted_bytes <= MAX_FINISHED_OUTPUT_BYTES);
-    }
-
-    #[test]
-    fn build_runner_command_supports_go_build_shell_and_build_flags() {
-        let cfg = IdeRunConfig {
-            id: "rc_go".into(),
-            name: "Go Run".into(),
-            runner: IdeRunnerKind::GoRun,
-            build_flags: vec!["-race".into(), "-tags=integration".into()],
-            target_path: Some("./cmd/admission".into()),
-            ..Default::default()
-        };
-        let (prog, args) = build_runner_command(&cfg, "/tmp", &BTreeMap::new());
-        assert_eq!(prog, "go");
-        assert_eq!(
-            args,
-            vec!["run", "-race", "-tags=integration", "./cmd/admission"]
-        );
-
-        let gb = IdeRunConfig {
-            runner: IdeRunnerKind::GoBuild,
-            build_flags: vec!["-o".into(), "bin/server".into()],
-            target_path: Some("./cmd/server".into()),
-            ..Default::default()
-        };
-        let (b_prog, b_args) = build_runner_command(&gb, "/tmp", &BTreeMap::new());
-        assert_eq!(b_prog, "go");
-        assert_eq!(b_args, vec!["build", "-o", "bin/server", "./cmd/server"]);
-
-        let sh_cfg = IdeRunConfig {
-            runner: IdeRunnerKind::Shell,
-            build_flags: vec!["-x".into()],
-            target_path: Some("scripts/deploy.sh".into()),
-            ..Default::default()
-        };
-        let (sh_prog, sh_args) = build_runner_command(&sh_cfg, "/tmp", &BTreeMap::new());
-        assert_eq!(sh_prog, "bash");
-        assert_eq!(sh_args, vec!["-x", "scripts/deploy.sh"]);
-    }
-
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn stopping_run_kills_entire_unix_process_group_leaving_zero_orphans() {
-        let tmp = tempfile::tempdir().unwrap();
-        let pid_file = tmp.path().join("child.pid");
-        let script = tmp.path().join("spawn_child.sh");
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\nsleep 60 &\necho $! > '{}'\nwait\n",
-                pid_file.display()
-            ),
-        )
-        .unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        let runs: Arc<DashMap<String, Arc<ActiveRunHandle>>> = Arc::new(DashMap::new());
-        let (stop_tx, stop_rx) = watch::channel(false);
-        let handle = Arc::new(ActiveRunHandle {
-            seq: 1,
-            state: Mutex::new(RunStateInner::new(
-                "run_pg".into(),
-                "PG Test".into(),
-                IdeRunnerKind::Shell,
-                "2026-01-01T00:00:00Z".into(),
-            )),
-            stop_tx,
-        });
-        runs.insert("run_pg".into(), Arc::clone(&handle));
-
-        let target = IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned());
-        let cfg = IdeRunConfig {
-            id: "rc_pg".into(),
-            name: "PG Test".into(),
-            runner: IdeRunnerKind::Shell,
-            target_path: Some("spawn_child.sh".into()),
-            ..Default::default()
-        };
-        let runs_c = Arc::clone(&runs);
-        let handle_c = Arc::clone(&handle);
-        let task = tokio::spawn(async move {
-            execute_run_task(
-                runs_c,
-                handle_c,
-                TargetManager::new(),
-                target,
-                None,
-                vec![(cfg, BTreeMap::new())],
-                stop_rx,
-            )
-            .await;
-        });
-
-        for _ in 0..40 {
-            if pid_file.is_file() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        let grandchild_pid: u32 = std::fs::read_to_string(&pid_file)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-
-        handle.stop();
-        task.await.unwrap();
-
-        let alive = Command::new("/bin/kill")
-            .args(["-0", &grandchild_pid.to_string()])
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false);
-        assert!(
-            !alive,
-            "grandchild sleep process {grandchild_pid} leaked after stop_run!"
-        );
     }
 }

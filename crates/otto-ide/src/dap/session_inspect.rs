@@ -60,23 +60,64 @@ pub(super) async fn sync_all_breakpoints(
         }
     }
 
+    let snap_before = entry.read_snapshot();
+    let need_halt_resume =
+        snap_before.state == IdeDebugState::Running && snap_before.adapter == "dlv";
+    if need_halt_resume {
+        entry
+            .suppress_transient_pause
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let halted_fut = entry.halted_notify.notified();
+        if conn
+            .wire
+            .request("pause", Some(json!({ "threadId": 1 })))
+            .await
+            .is_ok()
+        {
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(750), halted_fut).await;
+        }
+    }
+
     let mut active_files = BTreeSet::new();
     for (path, indexed_bps) in by_file {
         if !indexed_bps.is_empty() {
             active_files.insert(path.clone());
         }
         let payload_bps: Vec<Value> = indexed_bps.iter().map(|(_, v)| v.clone()).collect();
-        match conn
+        let req_payload = json!({
+            "source": { "path": path },
+            "breakpoints": payload_bps,
+        });
+        let mut resp_res = conn
             .wire
-            .request(
-                "setBreakpoints",
-                Some(json!({
-                    "source": { "path": path },
-                    "breakpoints": payload_bps,
-                })),
-            )
-            .await
-        {
+            .request("setBreakpoints", Some(req_payload.clone()))
+            .await;
+        if let Err(ref e) = resp_res {
+            if !need_halt_resume
+                && snap_before.state == IdeDebugState::Running
+                && e.to_string().to_ascii_lowercase().contains("running")
+            {
+                entry
+                    .suppress_transient_pause
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                let halted_fut = entry.halted_notify.notified();
+                let _ = conn
+                    .wire
+                    .request("pause", Some(json!({ "threadId": 1 })))
+                    .await;
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_millis(750), halted_fut).await;
+                resp_res = conn.wire.request("setBreakpoints", Some(req_payload)).await;
+                entry
+                    .suppress_transient_pause
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                let _ = conn
+                    .wire
+                    .request("continue", Some(json!({ "threadId": 1 })))
+                    .await;
+            }
+        }
+        match resp_res {
             Ok(resp) => {
                 let ack_list = resp
                     .body
@@ -119,6 +160,15 @@ pub(super) async fn sync_all_breakpoints(
                 }
             }
         }
+    }
+    if need_halt_resume {
+        entry
+            .suppress_transient_pause
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = conn
+            .wire
+            .request("continue", Some(json!({ "threadId": 1 })))
+            .await;
     }
     if let Ok(mut prev_files) = entry.configured_bp_files.lock() {
         *prev_files = active_files;

@@ -5,48 +5,58 @@
 //! - [`public_router`]: capability-token `/ide/collab/guest/*` routes nested under
 //!   `/api/v1` for "Share with Friends" live collaborative editing and co-debugging.
 
-use std::convert::Infallible;
-use std::time::Duration;
+#[path = "http/collab_sse.rs"]
+mod collab_sse;
+#[path = "http/intelligence.rs"]
+mod intelligence;
+#[path = "http/projects_deps.rs"]
+mod projects_deps;
+#[path = "http/runtime_debug.rs"]
+mod runtime_debug;
 
-use axum::body::Body;
+use std::path::Path as FsPath;
+
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
-use bytes::Bytes;
-use futures_util::stream;
 use otto_core::api::Problem;
 use otto_core::auth::AuthUser;
 use otto_core::domain::User;
 use otto_core::{Error, Result};
-use serde::Deserialize;
-use serde_json::{json, Value};
-use tokio::sync::broadcast::{self, error::RecvError};
 
-use crate::dap::DapStartContext;
+use self::collab_sse::{
+    close_collab_room, collab_guest_cursor, collab_guest_debug_action, collab_guest_edit,
+    collab_guest_events, collab_guest_join, collab_guest_state, create_collab_room, install_plugin,
+    list_collab_rooms, list_plugins, set_collab_role, toggle_plugin, uninstall_plugin,
+};
+use self::intelligence::{
+    fs_complete, history_entry, history_list, history_restore, history_snapshot, lsp_code_actions,
+    lsp_definition, lsp_diagnostics, lsp_format, lsp_hover, lsp_implementation, lsp_references,
+    lsp_rename, lsp_symbols,
+};
+use self::projects_deps::{
+    add_project_folders_bulk, build_tools_model, delete_project, deps_action, deps_inspect,
+    list_projects, scan_repos, upsert_project,
+};
+use self::runtime_debug::{
+    create_python_venv, debug_command, debug_evaluate, debug_variables, delete_run_config,
+    get_debug_session, get_environments, get_run, list_debug_sessions, put_environments,
+    set_debug_breakpoints, start_debug_session, start_run, stop_run, stream_debug_events,
+    upsert_run_config,
+};
 use crate::types::{
-    IdeCodeActionsReq, IdeCodeActionsResp, IdeCollabCursorReq, IdeCollabDebugActionReq,
-    IdeCollabEditReq, IdeCollabEditResp, IdeCollabEvent, IdeCollabJoinReq, IdeCollabJoinResp,
-    IdeCollabRoleReq, IdeCollabRoom, IdeCollabRoomResp, IdeCollabRoomsResp, IdeCollabStateResp,
-    IdeCreateCollabRoomReq, IdeCreateCollabRoomResp, IdeCreatePythonVenvReq,
-    IdeCreatePythonVenvResp, IdeDebugAction, IdeDebugCommandReq, IdeDebugEvaluateReq,
-    IdeDebugEvaluateResp, IdeDebugSessionResp, IdeDebugSessionSnapshot, IdeDebugSessionsResp,
-    IdeDebugVariablesReq, IdeDebugVariablesResp, IdeDeleteLocalSdkQuery,
-    IdeDeleteProjectFolderQuery, IdeEnvironmentResp, IdeEnvironmentsResp, IdeFileQuery,
-    IdeFileReadResp, IdeFileWriteReq, IdeFileWriteResp, IdeFormatReq, IdeFormatResp,
+    IdeCreatePythonVenvReq, IdeDeleteLocalSdkQuery, IdeDeleteProjectFolderQuery,
+    IdeEnvironmentResp, IdeFileQuery, IdeFileReadResp, IdeFileWriteReq, IdeFileWriteResp,
     IdeFsEntryKind, IdeFsMutateReq, IdeFsMutateResp, IdeFsTreeQuery, IdeFsTreeResp, IdeGutterReq,
-    IdeGutterResp, IdeInstallJobResp, IdeInstallPluginReq, IdeInstallToolchainReq, IdeOkResp,
-    IdePluginResp, IdePluginsResp, IdeProjectFolderReq, IdeReferencesReq, IdeReferencesResp,
-    IdeRegisterLocalSdkReq, IdeRegisterLocalSdkResp, IdeRenameReq, IdeRenameResp, IdeReplaceReq,
-    IdeReplaceResp, IdeRunConfigResp, IdeRunResp, IdeSearchReq, IdeSearchResp,
-    IdeSetBreakpointsReq, IdeShellEnvResp, IdeSshSpec, IdeStartDebugReq, IdeStartRunReq,
-    IdeSymbolsReq, IdeSymbolsResp, IdeTargetKind, IdeTargetQuery, IdeTargetSpec,
-    IdeTogglePluginReq, IdeToolchainsResp, IdeUpdateEnvironmentReq, IdeUpsertRunConfigReq,
+    IdeGutterResp, IdeInstallJobResp, IdeInstallToolchainReq, IdeOkResp, IdeProjectFolderReq,
+    IdePythonVenvInfo, IdeRegisterLocalSdkReq, IdeRegisterLocalSdkResp, IdeReplaceReq,
+    IdeReplaceResp, IdeSearchReq, IdeSearchResp, IdeShellEnvResp, IdeSshSpec, IdeTargetKind,
+    IdeTargetQuery, IdeTargetSpec, IdeToolchainPythonVenvReq, IdeToolchainPythonVenvResp,
+    IdeToolchainsResp,
 };
 use crate::IdeCtx;
-
-const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Problem-details error wrapper mapping [`otto_core::Error`] to HTTP status codes.
 pub(crate) struct ApiErr(pub Error);
@@ -78,18 +88,19 @@ impl IntoResponse for ApiErr {
     }
 }
 
-type ApiResult<T> = std::result::Result<T, ApiErr>;
+pub(crate) type ApiResult<T> = std::result::Result<T, ApiErr>;
 
 /// Protected `/ide/*` REST & SSE routes (nested under `/api/v1`).
 pub fn api_router<S: IdeCtx>() -> Router<S> {
     Router::new()
-        // A. Target Filesystem, Search, Gutter & Extended LSP
+        // A. Target Filesystem, Search, Gutter, Completion & Extended LSP
         .route("/ide/fs/tree", get(fs_tree::<S>))
         .route(
             "/ide/fs/file",
             get(fs_read_file::<S>).put(fs_write_file::<S>),
         )
         .route("/ide/fs/mutate", post(fs_mutate::<S>))
+        .route("/ide/fs/complete", post(fs_complete::<S>))
         .route("/ide/search", post(search_workspace::<S>))
         .route("/ide/replace", post(replace_workspace::<S>))
         .route("/ide/gutter", post(detect_gutter::<S>))
@@ -100,7 +111,14 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
         .route("/ide/lsp/rename", post(lsp_rename::<S>))
         .route("/ide/lsp/format", post(lsp_format::<S>))
         .route("/ide/lsp/code-actions", post(lsp_code_actions::<S>))
-        // B. OS/Arch Toolchains, Custom Local SDKs & SDK Downloader
+        .route("/ide/lsp/diagnostics", post(lsp_diagnostics::<S>))
+        .route("/ide/lsp/hover", post(lsp_hover::<S>))
+        // A2. Backend Local History & Deleted-File Recovery
+        .route("/ide/history/list", get(history_list::<S>))
+        .route("/ide/history/entry", get(history_entry::<S>))
+        .route("/ide/history/restore", post(history_restore::<S>))
+        .route("/ide/history/snapshot", post(history_snapshot::<S>))
+        // B. OS/Arch Toolchains, Detected SDKs, Custom Local SDKs & SDK Downloader
         .route("/ide/toolchains", get(list_toolchains::<S>))
         .route("/ide/toolchains/install", post(install_toolchain::<S>))
         .route(
@@ -108,13 +126,30 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
             post(register_local_sdk::<S>).delete(delete_local_sdk::<S>),
         )
         .route("/ide/toolchains/jobs/{job_id}", get(get_toolchain_job::<S>))
-        // C. Shell Env, Multi-Folder Projects, Environments, Python Venvs & Run Configs
+        .route(
+            "/ide/toolchains/python-venv",
+            post(toolchain_python_venv::<S>),
+        )
+        // C. Shell Env, Named Projects, Dependencies, Build Tools & Run Configs
         .route("/ide/shell-env", get(get_shell_env::<S>))
         .route("/ide/shell-env/reload", post(reload_shell_env::<S>))
+        .route(
+            "/ide/projects",
+            get(list_projects::<S>).post(upsert_project::<S>),
+        )
+        .route("/ide/projects/{id}", delete(delete_project::<S>))
+        .route("/ide/projects/scan-repos", post(scan_repos::<S>))
         .route(
             "/ide/projects/folders",
             post(add_project_folder::<S>).delete(remove_project_folder::<S>),
         )
+        .route(
+            "/ide/projects/folders/bulk",
+            post(add_project_folders_bulk::<S>),
+        )
+        .route("/ide/deps/inspect", post(deps_inspect::<S>))
+        .route("/ide/deps/action", post(deps_action::<S>))
+        .route("/ide/build-tools/model", post(build_tools_model::<S>))
         .route(
             "/ide/environments",
             get(get_environments::<S>).put(put_environments::<S>),
@@ -200,7 +235,7 @@ pub fn public_router<S: IdeCtx>() -> Router<S> {
         )
 }
 
-async fn resolve_ssh_opt<S: IdeCtx>(
+pub(crate) async fn resolve_ssh_opt<S: IdeCtx>(
     ctx: &S,
     user: &User,
     target: &IdeTargetSpec,
@@ -218,7 +253,7 @@ async fn resolve_ssh_opt<S: IdeCtx>(
 }
 
 // ===========================================================================
-// A. Target Filesystem, Search, Gutter & Extended LSP Handlers
+// A. Target Filesystem, Search & Gutter Handlers
 // ===========================================================================
 
 async fn fs_tree<S: IdeCtx>(
@@ -363,104 +398,6 @@ async fn detect_gutter<S: IdeCtx>(
     Ok(Json(IdeGutterResp { items }))
 }
 
-async fn lsp_symbols<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(mut req): Json<IdeSymbolsReq>,
-) -> ApiResult<Json<IdeSymbolsResp>> {
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
-        .await;
-    Ok(Json(
-        crate::lsp_service::document_symbols(&ctx, &user, req).await?,
-    ))
-}
-
-async fn lsp_definition<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(mut req): Json<IdeReferencesReq>,
-) -> ApiResult<Json<IdeReferencesResp>> {
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
-        .await;
-    Ok(Json(
-        crate::lsp_service::goto_definition(&ctx, &user, req).await?,
-    ))
-}
-
-async fn lsp_implementation<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(mut req): Json<IdeReferencesReq>,
-) -> ApiResult<Json<IdeReferencesResp>> {
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
-        .await;
-    Ok(Json(
-        crate::lsp_service::goto_implementation(&ctx, &user, req).await?,
-    ))
-}
-
-async fn lsp_references<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(mut req): Json<IdeReferencesReq>,
-) -> ApiResult<Json<IdeReferencesResp>> {
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
-        .await;
-    Ok(Json(
-        crate::lsp_service::find_references(&ctx, &user, req).await?,
-    ))
-}
-
-async fn lsp_rename<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(mut req): Json<IdeRenameReq>,
-) -> ApiResult<Json<IdeRenameResp>> {
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
-        .await;
-    Ok(Json(
-        crate::lsp_service::rename_symbol(&ctx, &user, req).await?,
-    ))
-}
-
-async fn lsp_format<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(mut req): Json<IdeFormatReq>,
-) -> ApiResult<Json<IdeFormatResp>> {
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
-        .await;
-    Ok(Json(
-        crate::lsp_service::format_document(&ctx, &user, req).await?,
-    ))
-}
-
-async fn lsp_code_actions<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(mut req): Json<IdeCodeActionsReq>,
-) -> ApiResult<Json<IdeCodeActionsResp>> {
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
-        .await;
-    Ok(Json(
-        crate::lsp_service::code_actions(&ctx, &user, req).await?,
-    ))
-}
-
 // ===========================================================================
 // B. OS/Arch Toolchains, Custom Local SDKs & SDK Downloader Handlers
 // ===========================================================================
@@ -471,7 +408,11 @@ async fn list_toolchains<S: IdeCtx>(
     Query(q): Query<IdeTargetQuery>,
 ) -> ApiResult<Json<IdeToolchainsResp>> {
     let include_catalog = q.include_catalog;
-    let target = q.into_target_spec()?;
+    let mut target = q.into_target_spec()?;
+    ctx.ide()
+        .environments
+        .enrich_target_roots(&ctx.pool(), &mut target)
+        .await;
     let _ = ctx.ide().targets.resolve(&ctx, &user, &target).await?;
     let ssh = resolve_ssh_opt(&ctx, &user, &target).await?;
     let active_env = ctx
@@ -536,6 +477,7 @@ async fn delete_local_sdk<S: IdeCtx>(
             root: q.root.clone().unwrap_or_default(),
             connection_id: q.connection_id.clone(),
             additional_roots: Vec::new(),
+            project_folders: Vec::new(),
         };
         let _ = ctx.ide().targets.resolve(&ctx, &user, &spec).await?;
         spec
@@ -546,6 +488,7 @@ async fn delete_local_sdk<S: IdeCtx>(
             root: "/".into(),
             connection_id: q.connection_id.clone(),
             additional_roots: Vec::new(),
+            project_folders: Vec::new(),
         }
     };
     ctx.ide()
@@ -564,24 +507,83 @@ async fn get_toolchain_job<S: IdeCtx>(
     Ok(Json(IdeInstallJobResp { job }))
 }
 
+async fn toolchain_python_venv<S: IdeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Json(req): Json<IdeToolchainPythonVenvReq>,
+) -> ApiResult<Json<IdeToolchainPythonVenvResp>> {
+    let mut target = req
+        .target
+        .unwrap_or_else(|| IdeTargetSpec::local(req.root.clone().unwrap_or_default()));
+    if let Some(explicit_root) = req.root.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        target.root = explicit_root.to_string();
+    }
+    let mut venv_dir = req
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(".venv")
+        .to_string();
+    if FsPath::new(&venv_dir).is_absolute() {
+        let vp = FsPath::new(&venv_dir);
+        if let Ok(rel) = vp.strip_prefix(&target.root) {
+            let rel_s = rel.to_string_lossy().into_owned();
+            if !rel_s.is_empty() {
+                venv_dir = rel_s;
+            }
+        } else if let (Some(parent), Some(fname)) =
+            (vp.parent(), vp.file_name().and_then(|n| n.to_str()))
+        {
+            target.root = parent.to_string_lossy().into_owned();
+            venv_dir = fname.to_string();
+        }
+    }
+
+    let _ = ctx.ide().targets.resolve(&ctx, &user, &target).await?;
+    let ssh = resolve_ssh_opt(&ctx, &user, &target).await?;
+    let created = ctx
+        .ide()
+        .environments
+        .create_python_venv(
+            &ctx.pool(),
+            &ctx.ide().targets,
+            IdeCreatePythonVenvReq {
+                target,
+                venv_dir: Some(venv_dir),
+                python_version: req.base_python,
+            },
+            ssh.as_ref(),
+        )
+        .await?;
+
+    Ok(Json(IdeToolchainPythonVenvResp {
+        ok: true,
+        venv: IdePythonVenvInfo {
+            path: created.path,
+            version: created.version,
+            kind: "venv".into(),
+        },
+        interpreter_path: created.interpreter_path,
+    }))
+}
+
 // ===========================================================================
-// C. Shell Env, Multi-Folder Projects, Environments & Run Config Handlers
+// C. Shell Env, Environments & Run Config Handlers
 // ===========================================================================
 
 async fn get_shell_env<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(_user)): Extension<AuthUser>,
 ) -> ApiResult<Json<IdeShellEnvResp>> {
-    let resp = ctx.ide().environments.get_shell_env().await;
-    Ok(Json(resp))
+    Ok(Json(ctx.ide().environments.get_shell_env().await))
 }
 
 async fn reload_shell_env<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(_user)): Extension<AuthUser>,
 ) -> ApiResult<Json<IdeShellEnvResp>> {
-    let resp = ctx.ide().environments.reload_shell_env().await;
-    Ok(Json(resp))
+    Ok(Json(ctx.ide().environments.reload_shell_env().await))
 }
 
 async fn add_project_folder<S: IdeCtx>(
@@ -613,660 +615,13 @@ async fn remove_project_folder<S: IdeCtx>(
     Ok(Json(IdeEnvironmentResp { env }))
 }
 
-async fn get_environments<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-    Query(q): Query<IdeTargetQuery>,
-) -> ApiResult<Json<IdeEnvironmentsResp>> {
-    let mut target = q.into_target_spec()?;
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut target)
-        .await;
-    let _ = ctx.ide().targets.resolve(&ctx, &user, &target).await?;
-    let ssh = resolve_ssh_opt(&ctx, &user, &target).await?;
-    let resp = ctx
-        .ide()
-        .environments
-        .get_environments(
-            &ctx.pool(),
-            ctx.secrets(),
-            &ctx.ide().targets,
-            &target,
-            ssh.as_ref(),
-        )
-        .await?;
-    Ok(Json(resp))
-}
-
-async fn put_environments<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeUpdateEnvironmentReq>,
-) -> ApiResult<Json<IdeEnvironmentResp>> {
-    let _ = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
-    let env = ctx
-        .ide()
-        .environments
-        .update_environment(&ctx.pool(), ctx.secrets(), req)
-        .await?;
-    Ok(Json(IdeEnvironmentResp { env }))
-}
-
-async fn create_python_venv<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeCreatePythonVenvReq>,
-) -> ApiResult<Json<IdeCreatePythonVenvResp>> {
-    let _ = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
-    let ssh = resolve_ssh_opt(&ctx, &user, &req.target).await?;
-    let resp = ctx
-        .ide()
-        .environments
-        .create_python_venv(&ctx.pool(), &ctx.ide().targets, req, ssh.as_ref())
-        .await?;
-    Ok(Json(resp))
-}
-
-async fn upsert_run_config<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeUpsertRunConfigReq>,
-) -> ApiResult<Json<IdeRunConfigResp>> {
-    let _ = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
-    let config = ctx
-        .ide()
-        .environments
-        .upsert_run_config(&ctx.pool(), req)
-        .await?;
-    Ok(Json(IdeRunConfigResp { config }))
-}
-
-async fn delete_run_config<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-    Path(id): Path<String>,
-    Query(q): Query<IdeTargetQuery>,
-) -> ApiResult<Json<IdeOkResp>> {
-    if q.root.as_deref().is_some_and(|r| !r.trim().is_empty()) {
-        let target = q.into_target_spec()?;
-        let _ = ctx.ide().targets.resolve(&ctx, &user, &target).await?;
-    }
-    ctx.ide()
-        .environments
-        .delete_run_config(&ctx.pool(), &id)
-        .await?;
-    Ok(Json(IdeOkResp { ok: true }))
-}
-
-async fn start_run<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(mut req): Json<IdeStartRunReq>,
-) -> ApiResult<Json<IdeRunResp>> {
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
-        .await;
-    let _ = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
-    let ssh = resolve_ssh_opt(&ctx, &user, &req.target).await?;
-    let run = ctx
-        .ide()
-        .environments
-        .start_run(&ctx.pool(), ctx.secrets(), &ctx.ide().targets, req, ssh)
-        .await?;
-    Ok(Json(IdeRunResp { run }))
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct GetRunQuery {
-    #[serde(default)]
-    tail_lines: Option<usize>,
-}
-
-async fn get_run<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
-    Path(run_id): Path<String>,
-    Query(q): Query<GetRunQuery>,
-) -> ApiResult<Json<IdeRunResp>> {
-    let run = ctx
-        .ide()
-        .environments
-        .get_run_with_tail(&run_id, q.tail_lines)?;
-    Ok(Json(IdeRunResp { run }))
-}
-
-async fn stop_run<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
-    Path(run_id): Path<String>,
-) -> ApiResult<Json<IdeRunResp>> {
-    let run = ctx.ide().environments.stop_run(&run_id).await?;
-    Ok(Json(IdeRunResp { run }))
-}
-
-// ===========================================================================
-// D. Full DAP Debugger Engine Handlers + SSE Event Stream
-// ===========================================================================
-
-async fn start_debug_session<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(mut req): Json<IdeStartDebugReq>,
-) -> ApiResult<Json<IdeDebugSessionResp>> {
-    ctx.ide()
-        .environments
-        .enrich_target_roots(&ctx.pool(), &mut req.target)
-        .await;
-    let _ = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
-    let ssh = resolve_ssh_opt(&ctx, &user, &req.target).await?;
-    let run_config = match req.config_id.as_deref().filter(|s| !s.is_empty()) {
-        Some(cid) => ctx
-            .ide()
-            .environments
-            .resolve_run_config_or_auto(&ctx.pool(), &req.target, cid)
-            .await
-            .ok(),
-        None => None,
-    };
-    let effective_env = ctx
-        .ide()
-        .environments
-        .build_effective_env_for_run(&ctx.pool(), ctx.secrets(), &req.target, run_config.as_ref())
-        .await
-        .unwrap_or_default();
-    let project_env = ctx
-        .ide()
-        .environments
-        .get_project_env(&ctx.pool(), &req.target)
-        .await
-        .ok();
-    let plugin_adapters = ctx.ide().plugins.active_dap_adapters();
-    let start_ctx = DapStartContext::new()
-        .with_ssh(ssh)
-        .with_effective_env(effective_env)
-        .with_project_env(project_env)
-        .with_run_config(run_config)
-        .with_plugin_adapters(plugin_adapters)
-        .with_caller_is_root(user.is_root);
-
-    let target_for_collab = req.target.clone();
-    let session = ctx.ide().dap.start_session(req, start_ctx).await?;
-    ctx.ide()
-        .collab
-        .publish_debug_snapshot(Some(&target_for_collab), &session);
-
-    // Forward asynchronous DAP events (breakpoint stops, console output, termination)
-    // to any active Share-with-Friends room bound to this target.
-    if let Ok(mut rx) = ctx.ide().dap.subscribe_events(&session.id) {
-        let engine = ctx.ide().clone();
-        let target_clone = target_for_collab;
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(snap) => {
-                        engine
-                            .collab
-                            .publish_debug_snapshot(Some(&target_clone), &snap);
-                    }
-                    Err(RecvError::Lagged(_)) => continue,
-                    Err(RecvError::Closed) => break,
-                }
-            }
-        });
-    }
-
-    Ok(Json(IdeDebugSessionResp { session }))
-}
-
-async fn list_debug_sessions<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
-) -> ApiResult<Json<IdeDebugSessionsResp>> {
-    Ok(Json(IdeDebugSessionsResp {
-        sessions: ctx.ide().dap.list_sessions(),
-    }))
-}
-
-async fn get_debug_session<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
-    Path(id): Path<String>,
-) -> ApiResult<Json<IdeDebugSessionResp>> {
-    let session = ctx.ide().dap.get_session(&id)?;
-    Ok(Json(IdeDebugSessionResp { session }))
-}
-
-async fn stream_debug_events<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
-    Path(id): Path<String>,
-) -> ApiResult<Response> {
-    let initial = ctx.ide().dap.get_session(&id)?;
-    let rx = ctx.ide().dap.subscribe_events(&id)?;
-    Ok(build_debug_sse_response(initial, rx))
-}
-
-async fn set_debug_breakpoints<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
-    Path(id): Path<String>,
-    Json(req): Json<IdeSetBreakpointsReq>,
-) -> ApiResult<Json<IdeDebugSessionResp>> {
-    let session = ctx.ide().dap.set_breakpoints(&id, req).await?;
-    ctx.ide().collab.publish_debug_snapshot(None, &session);
-    Ok(Json(IdeDebugSessionResp { session }))
-}
-
-async fn debug_command<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
-    Path(id): Path<String>,
-    Json(req): Json<IdeDebugCommandReq>,
-) -> ApiResult<Json<IdeDebugSessionResp>> {
-    let session = ctx.ide().dap.command(&id, req).await?;
-    ctx.ide().collab.publish_debug_snapshot(None, &session);
-    Ok(Json(IdeDebugSessionResp { session }))
-}
-
-async fn debug_variables<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
-    Path(id): Path<String>,
-    Json(req): Json<IdeDebugVariablesReq>,
-) -> ApiResult<Json<IdeDebugVariablesResp>> {
-    let variables = ctx
-        .ide()
-        .dap
-        .expand_variables(&id, req.variables_reference)
-        .await?;
-    Ok(Json(IdeDebugVariablesResp { variables }))
-}
-
-async fn debug_evaluate<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
-    Path(id): Path<String>,
-    Json(req): Json<IdeDebugEvaluateReq>,
-) -> ApiResult<Json<IdeDebugEvaluateResp>> {
-    let resp = ctx.ide().dap.evaluate(&id, req).await?;
-    Ok(Json(resp))
-}
-
-// ===========================================================================
-// E. "Share with Friends" Host Routes
-// ===========================================================================
-
-async fn create_collab_room<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeCreateCollabRoomReq>,
-) -> ApiResult<Json<IdeCreateCollabRoomResp>> {
-    let _ = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
-    let resp = ctx.ide().collab.create_room(&user, req)?;
-    Ok(Json(resp))
-}
-
-async fn list_collab_rooms<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-) -> ApiResult<Json<IdeCollabRoomsResp>> {
-    let rooms = ctx.ide().collab.list_rooms(&user)?;
-    Ok(Json(IdeCollabRoomsResp { rooms }))
-}
-
-async fn set_collab_role<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-    Path(room_id): Path<String>,
-    Json(req): Json<IdeCollabRoleReq>,
-) -> ApiResult<Json<IdeCollabRoomResp>> {
-    let room = ctx
-        .ide()
-        .collab
-        .set_peer_role(&user, &room_id, &req.peer_id, req.role)?;
-    Ok(Json(IdeCollabRoomResp { room }))
-}
-
-async fn close_collab_room<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-    Path(room_id): Path<String>,
-) -> ApiResult<Json<IdeOkResp>> {
-    ctx.ide().collab.close_room(&user, &room_id)?;
-    Ok(Json(IdeOkResp { ok: true }))
-}
-
-// ===========================================================================
-// F. Runtime IDE Plugins Routes
-// ===========================================================================
-
-async fn list_plugins<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
-) -> ApiResult<Json<IdePluginsResp>> {
-    let (plugins, catalog) = ctx.ide().plugins.list();
-    Ok(Json(IdePluginsResp { plugins, catalog }))
-}
-
-async fn install_plugin<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
-    Json(req): Json<IdeInstallPluginReq>,
-) -> ApiResult<Json<IdePluginResp>> {
-    let plugin = ctx.ide().plugins.install(&req.source).await?;
-    Ok(Json(IdePluginResp { plugin }))
-}
-
-async fn toggle_plugin<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
-    Path(slug): Path<String>,
-    Json(req): Json<IdeTogglePluginReq>,
-) -> ApiResult<Json<IdePluginResp>> {
-    let plugin = ctx.ide().plugins.toggle(&slug, req.enabled)?;
-    Ok(Json(IdePluginResp { plugin }))
-}
-
-async fn uninstall_plugin<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(_user)): Extension<AuthUser>,
-    Path(slug): Path<String>,
-) -> ApiResult<Json<IdeOkResp>> {
-    ctx.ide().plugins.uninstall(&slug)?;
-    Ok(Json(IdeOkResp { ok: true }))
-}
-
-// ===========================================================================
-// Public Capability-Token Guest Collaboration Routes
-// ===========================================================================
-
-#[derive(Debug, Default, Deserialize)]
-struct CollabGuestQuery {
-    #[serde(default)]
-    token: Option<String>,
-    #[serde(default)]
-    peer_id: Option<String>,
-}
-
-fn extract_collab_token(headers: &HeaderMap, query_token: Option<&str>) -> Result<String> {
-    if let Some(tok) = query_token.map(str::trim).filter(|s| !s.is_empty()) {
-        return Ok(tok.to_string());
-    }
-    if let Some(hv) = headers
-        .get("x-ide-collab-token")
-        .and_then(|v| v.to_str().ok())
-    {
-        let trimmed = hv.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
-        }
-    }
-    if let Some(auth) = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-    {
-        if let Some(tok) = auth
-            .strip_prefix("Bearer ")
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            return Ok(tok.to_string());
-        }
-    }
-    Err(Error::Unauthorized)
-}
-
-async fn collab_guest_join<S: IdeCtx>(
-    State(ctx): State<S>,
-    Path(room_id): Path<String>,
-    headers: HeaderMap,
-    Json(mut req): Json<IdeCollabJoinReq>,
-) -> ApiResult<Json<IdeCollabJoinResp>> {
-    if req.token.trim().is_empty() {
-        req.token = extract_collab_token(&headers, None)?;
-    }
-    let resp = ctx.ide().collab.join_room(&room_id, req)?;
-    Ok(Json(resp))
-}
-
-async fn collab_guest_state<S: IdeCtx>(
-    State(ctx): State<S>,
-    Path(room_id): Path<String>,
-    headers: HeaderMap,
-    Query(q): Query<CollabGuestQuery>,
-) -> ApiResult<Json<IdeCollabStateResp>> {
-    let token = extract_collab_token(&headers, q.token.as_deref())?;
-    let mut state = ctx.ide().collab.get_state(&room_id, &token)?;
-    if let Some(debug_id) = state.room.active_debug_id.as_deref() {
-        if let Ok(fresh) = ctx.ide().dap.get_session(debug_id) {
-            state.active_debug = Some(fresh);
-        }
-    }
-    Ok(Json(state))
-}
-
-async fn collab_guest_events<S: IdeCtx>(
-    State(ctx): State<S>,
-    Path(room_id): Path<String>,
-    headers: HeaderMap,
-    Query(q): Query<CollabGuestQuery>,
-) -> ApiResult<Response> {
-    let _ = &q.peer_id;
-    let token = extract_collab_token(&headers, q.token.as_deref())?;
-    let (room, rx) = ctx.ide().collab.subscribe(&room_id, &token)?;
-    Ok(build_collab_sse_response(room, rx))
-}
-
-async fn collab_guest_cursor<S: IdeCtx>(
-    State(ctx): State<S>,
-    Path(room_id): Path<String>,
-    Json(req): Json<IdeCollabCursorReq>,
-) -> ApiResult<Json<IdeOkResp>> {
-    ctx.ide().collab.update_cursor(&room_id, req)?;
-    Ok(Json(IdeOkResp { ok: true }))
-}
-
-async fn collab_guest_edit<S: IdeCtx>(
-    State(ctx): State<S>,
-    Path(room_id): Path<String>,
-    Json(req): Json<IdeCollabEditReq>,
-) -> ApiResult<Json<IdeCollabEditResp>> {
-    let (target, _host_user_id) =
-        ctx.ide()
-            .collab
-            .authorize_editor(&room_id, &req.peer_id, &req.peer_secret)?;
-    let mut saved_to_target = false;
-    if req.save && target.kind == IdeTargetKind::Local {
-        let resolved = ctx.ide().targets.resolve_local(&target, false)?;
-        ctx.ide()
-            .targets
-            .write_file(&resolved, &req.path, &req.content, None, false)
-            .await?;
-        saved_to_target = true;
-    }
-    let version = ctx
-        .ide()
-        .collab
-        .apply_edit(&room_id, &req, saved_to_target)?;
-    Ok(Json(IdeCollabEditResp { version }))
-}
-
-async fn collab_guest_debug_action<S: IdeCtx>(
-    State(ctx): State<S>,
-    Path(room_id): Path<String>,
-    Json(req): Json<IdeCollabDebugActionReq>,
-) -> ApiResult<Json<IdeDebugSessionResp>> {
-    let (target, _host_user_id) = ctx.ide().collab.authorize_debug_action(&room_id, &req)?;
-
-    let mut latest_snap = None;
-    if let Some(breakpoints) = req.breakpoints.clone() {
-        let updated = ctx
-            .ide()
-            .dap
-            .set_breakpoints(
-                &req.debug_id,
-                IdeSetBreakpointsReq {
-                    breakpoints,
-                    break_on_exceptions: false,
-                },
-            )
-            .await?;
-        latest_snap = Some(updated);
-    }
-
-    let skip_cmd = latest_snap.is_some()
-        && req.action == IdeDebugAction::SelectFrame
-        && req.frame_id.is_none();
-    let session = if skip_cmd {
-        latest_snap.unwrap()
-    } else {
-        ctx.ide()
-            .dap
-            .command(
-                &req.debug_id,
-                IdeDebugCommandReq {
-                    action: req.action,
-                    thread_id: req.thread_id,
-                    frame_id: req.frame_id,
-                    path: req.path,
-                    line: req.line,
-                },
-            )
-            .await?
-    };
-
-    ctx.ide()
-        .collab
-        .publish_debug_snapshot(Some(&target), &session);
-    Ok(Json(IdeDebugSessionResp { session }))
-}
-
-// ===========================================================================
-// Server-Sent Events (`text/event-stream`) Framing Helpers
-// ===========================================================================
-
-fn sse_headers_response(body: Body) -> Response {
-    let mut resp = Response::new(body);
-    let headers = resp.headers_mut();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("text/event-stream; charset=utf-8"),
-    );
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    headers.insert(
-        HeaderName::from_static("x-accel-buffering"),
-        HeaderValue::from_static("no"),
-    );
-    resp
-}
-
-fn format_sse_data(value: &Value) -> Bytes {
-    let payload = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
-    Bytes::from(format!("data: {payload}\n\n"))
-}
-
-fn build_debug_sse_response(
-    initial: IdeDebugSessionSnapshot,
-    rx: broadcast::Receiver<IdeDebugSessionSnapshot>,
-) -> Response {
-    struct State {
-        initial: Option<IdeDebugSessionSnapshot>,
-        rx: broadcast::Receiver<IdeDebugSessionSnapshot>,
-    }
-
-    let stream = stream::unfold(
-        State {
-            initial: Some(initial),
-            rx,
-        },
-        |mut st| async move {
-            if let Some(first) = st.initial.take() {
-                let val = serde_json::to_value(&first).unwrap_or_else(|_| json!({}));
-                return Some((Ok::<Bytes, Infallible>(format_sse_data(&val)), st));
-            }
-            match tokio::time::timeout(SSE_KEEPALIVE_INTERVAL, st.rx.recv()).await {
-                Ok(Ok(snap)) => {
-                    let val = serde_json::to_value(&snap).unwrap_or_else(|_| json!({}));
-                    Some((Ok(format_sse_data(&val)), st))
-                }
-                Ok(Err(RecvError::Lagged(_))) => {
-                    Some((Ok(Bytes::from_static(b": lagged\n\n")), st))
-                }
-                Ok(Err(RecvError::Closed)) => None,
-                Err(_) => Some((Ok(Bytes::from_static(b": keepalive\n\n")), st)),
-            }
-        },
-    );
-
-    sse_headers_response(Body::from_stream(stream))
-}
-
-fn format_collab_event_frame(ev: &IdeCollabEvent) -> Bytes {
-    let mut val = serde_json::to_value(ev).unwrap_or_else(|_| json!({}));
-    if let Value::Object(ref mut map) = val {
-        match ev {
-            IdeCollabEvent::CursorMoved { .. } => {
-                map.insert("kind".into(), Value::String("cursor".into()));
-            }
-            IdeCollabEvent::BufferUpdated { .. } => {
-                map.insert("kind".into(), Value::String("edit".into()));
-            }
-            _ => {}
-        }
-    }
-    format_sse_data(&val)
-}
-
-fn build_collab_sse_response(
-    room: IdeCollabRoom,
-    rx: broadcast::Receiver<IdeCollabEvent>,
-) -> Response {
-    struct State {
-        initial_room: Option<IdeCollabRoom>,
-        rx: broadcast::Receiver<IdeCollabEvent>,
-        done: bool,
-    }
-
-    let stream = stream::unfold(
-        State {
-            initial_room: Some(room),
-            rx,
-            done: false,
-        },
-        |mut st| async move {
-            if st.done {
-                return None;
-            }
-            if let Some(r) = st.initial_room.take() {
-                let val = json!({ "type": "room_state", "room": r });
-                return Some((Ok::<Bytes, Infallible>(format_sse_data(&val)), st));
-            }
-            match tokio::time::timeout(SSE_KEEPALIVE_INTERVAL, st.rx.recv()).await {
-                Ok(Ok(ev)) => {
-                    if matches!(ev, IdeCollabEvent::RoomClosed { .. }) {
-                        st.done = true;
-                    }
-                    let frame = format_collab_event_frame(&ev);
-                    Some((Ok(frame), st))
-                }
-                Ok(Err(RecvError::Lagged(_))) => {
-                    Some((Ok(Bytes::from_static(b": lagged\n\n")), st))
-                }
-                Ok(Err(RecvError::Closed)) => None,
-                Err(_) => Some((Ok(Bytes::from_static(b": keepalive\n\n")), st)),
-            }
-        },
-    );
-
-    sse_headers_response(Body::from_stream(stream))
-}
-
 #[cfg(test)]
 mod tests {
+    use super::collab_sse::{extract_collab_token, format_collab_event_frame};
     use super::*;
-    use crate::types::IdeSelectionRange;
+    use crate::types::{IdeCollabEvent, IdeSelectionRange};
+    use axum::http::{header, HeaderMap, HeaderValue};
+    use serde_json::Value;
 
     #[test]
     fn collab_token_extraction_checks_query_header_and_bearer() {

@@ -6,26 +6,23 @@
 //! feature works transparently on both the local Mac/Linux machine and remote
 //! SSH hosts.
 
+pub mod complete;
 mod fs_ops;
 pub(crate) mod sdk_paths;
 mod search;
+mod ssh_exec;
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use otto_core::domain::User;
 use otto_core::{Error, Result};
-use otto_ssh::{
-    valid_proxy_jump, valid_ssh_host, valid_ssh_user, SftpParams, SftpSession, SshTunnel,
-    SshTunnelConfig,
-};
-use tokio::process::{Child, Command};
+use otto_ssh::{SftpParams, SftpSession};
 
+use crate::local_history::LocalHistoryStore;
 use crate::types::{
     IdeFileReadResp, IdeFileWriteResp, IdeFsMutateOp, IdeFsMutateResp, IdeFsTreeResp,
     IdePlatformInfo, IdeReplaceReq, IdeReplaceResp, IdeSearchReq, IdeSearchResp, IdeSshSpec,
@@ -33,7 +30,7 @@ use crate::types::{
 };
 use crate::IdeCtx;
 
-pub(super) use self::fs_ops::enforce_non_root_path;
+pub(crate) use self::fs_ops::enforce_non_root_path;
 use self::fs_ops::{
     build_file_read_resp, build_remote_tree_entries, list_local_dir_sync, mutate_local_fs_in_roots,
     mutate_remote_fs, normalize_arch_name, normalize_os_name, parse_uname_output,
@@ -41,12 +38,18 @@ use self::fs_ops::{
     verify_remote_expected_sha, write_local_atomic,
 };
 use self::sdk_paths::{
-    collect_readonly_sdk_roots, is_virtual_archive_uri, read_virtual_java_archive,
-    resolve_local_readable, strip_file_uri,
+    collect_readonly_sdk_roots, discover_local_go_replace_roots, is_virtual_archive_uri,
+    read_virtual_java_archive, resolve_local_readable,
 };
 use self::search::{
     build_matcher, collect_local_files_multi, replace_local_sync, replace_remote_ssh,
     search_local_sync, search_remote_ssh,
+};
+pub(crate) use self::ssh_exec::canonicalize_local_root_dir;
+pub(super) use self::ssh_exec::{
+    join_remote, map_io_err, normalize_remote_root, remote_parent,
+    resolve_local_prospective_in_roots, resolve_remote_in_roots, resolve_remote_in_roots_or_sdk,
+    resolve_remote_subpath, validate_ssh_spec, SshControlSocket,
 };
 
 /// Maximum bytes read into the text editor buffer (`4 MiB`).
@@ -58,7 +61,7 @@ const DEFAULT_SEARCH_LIMIT: usize = 200;
 /// Hard ceiling on returned search items.
 const MAX_SEARCH_LIMIT: usize = 1000;
 /// Idle retention for pooled SFTP sessions.
-const SFTP_IDLE_TTL: Duration = Duration::from_secs(90);
+pub(super) const SFTP_IDLE_TTL: Duration = Duration::from_secs(90);
 
 /// Captured output of a bounded command executed on a [`ResolvedTarget`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,85 +143,19 @@ impl ResolvedTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct SshPoolKey {
-    actor_id: String,
-    connection_id: String,
-    params: SftpParams,
-}
-
-/// Private ControlMaster socket directory for multiplexed `ssh` exec/stdio spawns.
-struct SshControlSocket {
-    dir: PathBuf,
-    ctl_path: String,
-    ssh_target: String,
-}
-
-impl SshControlSocket {
-    fn new(spec: &IdeSshSpec) -> Result<Self> {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let base = if Path::new("/tmp").is_dir() {
-            PathBuf::from("/tmp")
-        } else {
-            std::env::temp_dir()
-        };
-        let dir = base.join(format!("oi-{pid}-{n}"));
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| Error::Internal(format!("create ssh control dir: {e}")))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
-                .map_err(|e| Error::Internal(format!("secure ssh control dir: {e}")))?;
-        }
-        let ctl_path = dir.join("c.s").to_string_lossy().into_owned();
-        let ssh_target = if spec.user.is_empty() {
-            spec.host.clone()
-        } else {
-            format!("{}@{}", spec.user, spec.host)
-        };
-        Ok(Self {
-            dir,
-            ctl_path,
-            ssh_target,
-        })
-    }
-}
-
-impl Drop for SshControlSocket {
-    fn drop(&mut self) {
-        let dir = self.dir.clone();
-        let ctl = self.ctl_path.clone();
-        let target = self.ssh_target.clone();
-        std::thread::spawn(move || {
-            if Path::new(&ctl).exists() {
-                let _ = std::process::Command::new("ssh")
-                    .args([
-                        "-o",
-                        &format!("ControlPath={ctl}"),
-                        "-O",
-                        "exit",
-                        "--",
-                        &target,
-                    ])
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn();
-            }
-            #[allow(clippy::disallowed_methods)]
-            let _ = std::fs::remove_dir_all(dir);
-        });
-    }
+pub(super) struct SshPoolKey {
+    pub(super) actor_id: String,
+    pub(super) connection_id: String,
+    pub(super) params: SftpParams,
 }
 
 /// Manages local and multiplexed SSH filesystem, search, and process operations.
 #[derive(Clone)]
 pub struct TargetManager {
-    sftp_pool: Arc<DashMap<SshPoolKey, (Arc<SftpSession>, Instant)>>,
-    ssh_sockets: Arc<DashMap<SshPoolKey, Arc<SshControlSocket>>>,
-    ssh_platform_cache: Arc<DashMap<String, IdePlatformInfo>>,
+    pub(super) sftp_pool: Arc<DashMap<SshPoolKey, (Arc<SftpSession>, Instant)>>,
+    pub(super) ssh_sockets: Arc<DashMap<SshPoolKey, Arc<SshControlSocket>>>,
+    pub(super) ssh_platform_cache: Arc<DashMap<String, IdePlatformInfo>>,
+    history: Option<LocalHistoryStore>,
 }
 
 impl Default for TargetManager {
@@ -233,6 +170,14 @@ impl TargetManager {
             sftp_pool: Arc::new(DashMap::new()),
             ssh_sockets: Arc::new(DashMap::new()),
             ssh_platform_cache: Arc::new(DashMap::new()),
+            history: None,
+        }
+    }
+
+    pub fn with_history(history: LocalHistoryStore) -> Self {
+        Self {
+            history: Some(history),
+            ..Self::new()
         }
     }
 
@@ -277,6 +222,13 @@ impl TargetManager {
                         merged_spec.additional_roots.push(cached_ar);
                     }
                 }
+                for proj_ar in ctx.ide().projects.folders_for_root(&spec.root) {
+                    if !proj_ar.trim().is_empty()
+                        && !merged_spec.additional_roots.contains(&proj_ar)
+                    {
+                        merged_spec.additional_roots.push(proj_ar);
+                    }
+                }
                 self.resolve_local_with_sdks(&merged_spec, user.is_root, &extra_sdk_dirs)
             }
             IdeTargetKind::Ssh => {
@@ -307,8 +259,9 @@ impl TargetManager {
     ) -> Result<ResolvedTarget> {
         spec.validate()?;
         let canonical = canonicalize_local_root_dir(&spec.root, is_root_user)?;
-        let mut additional_roots = Vec::with_capacity(spec.additional_roots.len());
-        for raw_extra in &spec.additional_roots {
+        let extra_list = spec.merged_extra_roots();
+        let mut additional_roots = Vec::with_capacity(extra_list.len());
+        for raw_extra in &extra_list {
             let trimmed = raw_extra.trim();
             if trimmed.is_empty() {
                 continue;
@@ -317,6 +270,11 @@ impl TargetManager {
                 if canon_extra != canonical && !additional_roots.contains(&canon_extra) {
                     additional_roots.push(canon_extra);
                 }
+            }
+        }
+        for go_rep in discover_local_go_replace_roots(&canonical, &additional_roots, is_root_user) {
+            if go_rep != canonical && !additional_roots.contains(&go_rep) {
+                additional_roots.push(go_rep);
             }
         }
         let readonly_roots = collect_readonly_sdk_roots(extra_sdk_dirs);
@@ -339,7 +297,7 @@ impl TargetManager {
         validate_ssh_spec(&ssh)?;
         let norm_root = normalize_remote_root(&spec.root)?;
         let mut additional_roots = Vec::new();
-        for extra in &spec.additional_roots {
+        for extra in &spec.merged_extra_roots() {
             if let Ok(nr) = normalize_remote_root(extra) {
                 if nr != norm_root && !additional_roots.contains(&nr) {
                     additional_roots.push(nr);
@@ -550,7 +508,7 @@ impl TargetManager {
     }
 
     /// Atomically write a UTF-8 file to `target` with optional `expected_sha256`
-    /// optimistic concurrency check (`409 Conflict` on mismatch).
+    /// optimistic concurrency check (`409 Conflict` on mismatch) and Local History capture.
     pub async fn write_file(
         &self,
         target: &ResolvedTarget,
@@ -584,7 +542,21 @@ impl TargetManager {
                 if let Some(exp) = expected_sha256.filter(|s| !s.is_empty()) {
                     verify_local_expected_sha(&dest, exp).await?;
                 }
+                if let Some(hist) = &self.history {
+                    if dest.is_file() {
+                        let _ = hist.record_existing_file_sync(
+                            root,
+                            &dest,
+                            "external",
+                            "Before edit",
+                            true,
+                        );
+                    }
+                }
                 write_local_atomic(&dest, new_bytes).await?;
+                if let Some(hist) = &self.history {
+                    let _ = hist.record_bytes_sync(root, &dest, new_bytes, "saved", "Saved", true);
+                }
                 Ok(IdeFileWriteResp {
                     path: dest.to_string_lossy().into_owned(),
                     size: new_bytes.len() as u64,
@@ -648,8 +620,16 @@ impl TargetManager {
                 is_root_user,
                 ..
             } => {
-                mutate_local_fs_in_roots(root, additional_roots, *is_root_user, op, path, dest_path)
-                    .await
+                mutate_local_fs_in_roots(
+                    root,
+                    additional_roots,
+                    *is_root_user,
+                    op,
+                    path,
+                    dest_path,
+                    self.history.as_ref(),
+                )
+                .await
             }
             ResolvedTarget::Ssh {
                 spec,
@@ -779,529 +759,6 @@ impl TargetManager {
                 replace_remote_ssh(self, target, root, req, &matcher).await
             }
         }
-    }
-
-    /// Execute a bounded command (`program` + `args`) on `target`.
-    pub async fn exec_command(
-        &self,
-        target: &ResolvedTarget,
-        program: &str,
-        args: &[String],
-        cwd: Option<&str>,
-        env: &BTreeMap<String, String>,
-        timeout: Duration,
-    ) -> Result<ExecOutput> {
-        let mut cmd = self.build_piped_command(target, program, args, cwd, env)?;
-        cmd.stdin(Stdio::null());
-        run_command_bounded(cmd, timeout).await
-    }
-
-    /// Execute a bounded POSIX `sh -c <script>` command on `target`.
-    pub async fn exec_shell(
-        &self,
-        target: &ResolvedTarget,
-        script: &str,
-        cwd: Option<&str>,
-        env: &BTreeMap<String, String>,
-        timeout: Duration,
-    ) -> Result<ExecOutput> {
-        let args = vec!["-c".to_string(), script.to_string()];
-        self.exec_command(target, "sh", &args, cwd, env, timeout)
-            .await
-    }
-
-    /// Build a `tokio::process::Command` with piped `stdin`/`stdout`/`stderr`
-    /// and `kill_on_drop(true)` targeting either local OS or multiplexed SSH.
-    pub fn build_piped_command(
-        &self,
-        target: &ResolvedTarget,
-        program: &str,
-        args: &[String],
-        cwd: Option<&str>,
-        env: &BTreeMap<String, String>,
-    ) -> Result<Command> {
-        if program.trim().is_empty() || program.chars().any(char::is_control) {
-            return Err(Error::Invalid("invalid command program name".into()));
-        }
-        for k in env.keys() {
-            if !valid_env_key(k) {
-                return Err(Error::Invalid(format!(
-                    "invalid environment variable name '{k}'"
-                )));
-            }
-        }
-        match target {
-            ResolvedTarget::Local {
-                root,
-                additional_roots,
-                is_root_user,
-                ..
-            } => {
-                let work_dir = match cwd.filter(|c| !c.trim().is_empty()) {
-                    Some(c) => {
-                        resolve_local_existing_in_roots(root, additional_roots, *is_root_user, c)?.0
-                    }
-                    None => root.clone(),
-                };
-                let mut cmd = Command::new(program);
-                cmd.args(args)
-                    .current_dir(work_dir)
-                    .envs(env)
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .kill_on_drop(true);
-                Ok(cmd)
-            }
-            ResolvedTarget::Ssh {
-                spec,
-                root,
-                actor_id,
-                ..
-            } => {
-                validate_ssh_spec(spec)?;
-                let ctl = self.acquire_ssh_socket(actor_id, spec)?;
-                let remote_cwd = cwd
-                    .filter(|c| !c.trim().is_empty())
-                    .unwrap_or(root.as_str());
-                let remote_cmd = build_remote_exec_line(remote_cwd, program, args, env);
-                let mut ssh_args = build_ssh_base_args(spec, &ctl.ctl_path);
-                ssh_args.push("--".into());
-                ssh_args.push(ctl.ssh_target.clone());
-                ssh_args.push(remote_cmd);
-
-                let mut cmd = Command::new("ssh");
-                cmd.args(ssh_args)
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .kill_on_drop(true);
-                Ok(cmd)
-            }
-        }
-    }
-
-    /// Spawn a long-lived piped child process on either local OS or multiplexed SSH.
-    pub async fn spawn_piped(
-        &self,
-        target: &ResolvedTarget,
-        program: &str,
-        args: &[String],
-        cwd: Option<&str>,
-        env: &BTreeMap<String, String>,
-    ) -> Result<Child> {
-        let mut cmd = self.build_piped_command(target, program, args, cwd, env)?;
-        cmd.spawn()
-            .map_err(|e| Error::Upstream(format!("failed to spawn '{program}': {e}")))
-    }
-
-    /// Open a local port forward (`ssh -L`) to `remote_host:remote_port` on an
-    /// SSH target (used by TCP-mode DAP adapters like `dlv` or JDWP).
-    pub async fn open_ssh_tunnel(
-        &self,
-        spec: &IdeSshSpec,
-        remote_host: &str,
-        remote_port: u16,
-    ) -> Result<SshTunnel> {
-        validate_ssh_spec(spec)?;
-        let cfg = SshTunnelConfig {
-            host: spec.host.clone(),
-            port: spec.port,
-            user: spec.user.clone(),
-            identity_file: spec.identity_file.clone(),
-            proxy_jump: spec.proxy_jump.clone(),
-        };
-        SshTunnel::open(&cfg, remote_host, remote_port).await
-    }
-
-    fn acquire_sftp(&self, actor_id: &str, spec: &IdeSshSpec) -> Result<Arc<SftpSession>> {
-        validate_ssh_spec(spec)?;
-        let key = SshPoolKey {
-            actor_id: actor_id.to_string(),
-            connection_id: spec.connection_id.to_string(),
-            params: SftpParams {
-                host: spec.host.clone(),
-                port: Some(spec.port),
-                user: (!spec.user.is_empty()).then(|| spec.user.clone()),
-                identity_file: spec.identity_file.clone(),
-                jump: spec.proxy_jump.clone(),
-            },
-        };
-        if let Some(mut entry) = self.sftp_pool.get_mut(&key) {
-            entry.1 = Instant::now();
-            return Ok(entry.0.clone());
-        }
-        self.sftp_pool.retain(|_, (sess, touched)| {
-            touched.elapsed() < SFTP_IDLE_TTL || Arc::strong_count(sess) > 1
-        });
-        let session = Arc::new(SftpSession::new(key.params.clone())?);
-        self.sftp_pool
-            .insert(key, (session.clone(), Instant::now()));
-        Ok(session)
-    }
-
-    fn acquire_ssh_socket(
-        &self,
-        actor_id: &str,
-        spec: &IdeSshSpec,
-    ) -> Result<Arc<SshControlSocket>> {
-        let key = SshPoolKey {
-            actor_id: actor_id.to_string(),
-            connection_id: spec.connection_id.to_string(),
-            params: SftpParams {
-                host: spec.host.clone(),
-                port: Some(spec.port),
-                user: (!spec.user.is_empty()).then(|| spec.user.clone()),
-                identity_file: spec.identity_file.clone(),
-                jump: spec.proxy_jump.clone(),
-            },
-        };
-        if let Some(existing) = self.ssh_sockets.get(&key) {
-            return Ok(existing.clone());
-        }
-        let sock = Arc::new(SshControlSocket::new(spec)?);
-        self.ssh_sockets.insert(key, sock.clone());
-        Ok(sock)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Validation & Path Resolution Helpers
-// ---------------------------------------------------------------------------
-
-fn canonicalize_local_root_dir(raw_root: &str, is_root_user: bool) -> Result<PathBuf> {
-    let decoded = strip_file_uri(raw_root);
-    let expanded = otto_core::paths::expand_home_strict(&decoded).map_err(Error::Invalid)?;
-    let canonical = expanded
-        .canonicalize()
-        .map_err(|e| map_io_err("resolve workspace root", &expanded, e))?;
-    let meta = std::fs::metadata(&canonical)
-        .map_err(|e| map_io_err("stat workspace root", &canonical, e))?;
-    if !meta.is_dir() {
-        return Err(Error::Invalid(format!(
-            "target root '{}' is not a directory",
-            canonical.display()
-        )));
-    }
-    if otto_core::secret_paths::is_denied_dir(&canonical) {
-        return Err(Error::Forbidden(format!(
-            "{} holds protected credentials; access denied",
-            canonical.display()
-        )));
-    }
-    if !is_root_user {
-        enforce_non_root_path(&canonical)?;
-    }
-    Ok(canonical)
-}
-
-fn validate_ssh_spec(spec: &IdeSshSpec) -> Result<()> {
-    if !valid_ssh_host(&spec.host) {
-        return Err(Error::Invalid(format!(
-            "SSH host '{}' is not a valid hostname or IP",
-            spec.host
-        )));
-    }
-    if !valid_ssh_user(&spec.user) {
-        return Err(Error::Invalid(format!(
-            "SSH user '{}' is not a valid username",
-            spec.user
-        )));
-    }
-    if let Some(jump) = spec.proxy_jump.as_deref().filter(|s| !s.trim().is_empty()) {
-        if !valid_proxy_jump(jump) {
-            return Err(Error::Invalid(format!(
-                "SSH proxy_jump '{jump}' is invalid"
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn valid_env_key(key: &str) -> bool {
-    let mut chars = key.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first.is_ascii_alphabetic() || first == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-fn build_ssh_base_args(spec: &IdeSshSpec, ctl_path: &str) -> Vec<String> {
-    let mut args = vec![
-        "-T".into(),
-        "-o".into(),
-        "BatchMode=yes".into(),
-        "-o".into(),
-        "StrictHostKeyChecking=accept-new".into(),
-        "-o".into(),
-        "ConnectTimeout=12".into(),
-        "-o".into(),
-        "ControlMaster=auto".into(),
-        "-o".into(),
-        format!("ControlPath={ctl_path}"),
-        "-o".into(),
-        "ControlPersist=60s".into(),
-        "-o".into(),
-        "ServerAliveInterval=15".into(),
-        "-o".into(),
-        "ServerAliveCountMax=2".into(),
-        "-p".into(),
-        spec.port.to_string(),
-    ];
-    if let Some(id_file) = spec.identity_file.as_deref().filter(|s| !s.is_empty()) {
-        args.push("-i".into());
-        args.push(id_file.to_string());
-    }
-    if let Some(jump) = spec.proxy_jump.as_deref().filter(|s| !s.trim().is_empty()) {
-        args.push("-J".into());
-        args.push(jump.to_string());
-    }
-    args
-}
-
-fn build_remote_exec_line(
-    cwd: &str,
-    program: &str,
-    args: &[String],
-    env: &BTreeMap<String, String>,
-) -> String {
-    let mut parts = Vec::new();
-    parts.push(format!("cd {} &&", shell_words::quote(cwd)));
-    if !env.is_empty() {
-        parts.push("env".into());
-        for (k, v) in env {
-            parts.push(format!("{k}={}", shell_words::quote(v)));
-        }
-    }
-    parts.push("exec".into());
-    parts.push(shell_words::quote(program).into_owned());
-    for arg in args {
-        parts.push(shell_words::quote(arg).into_owned());
-    }
-    parts.join(" ")
-}
-
-async fn run_command_bounded(mut cmd: Command, timeout: Duration) -> Result<ExecOutput> {
-    let child = cmd
-        .spawn()
-        .map_err(|e| Error::Upstream(format!("failed to start process: {e}")))?;
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(out)) => Ok(ExecOutput {
-            exit_code: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        }),
-        Ok(Err(e)) => Err(Error::Upstream(format!("process wait failed: {e}"))),
-        Err(_) => Err(Error::Upstream(format!(
-            "command timed out after {}s",
-            timeout.as_secs()
-        ))),
-    }
-}
-
-pub(super) async fn resolve_local_prospective_in_roots(
-    root: &Path,
-    additional_roots: &[PathBuf],
-    is_root_user: bool,
-    raw: &str,
-    create_dirs: bool,
-) -> Result<(PathBuf, PathBuf)> {
-    let decoded = strip_file_uri(raw);
-    let trimmed = decoded.trim();
-    if trimmed.is_empty() {
-        return Err(Error::Invalid("file path must not be empty".into()));
-    }
-    let abs = if trimmed.starts_with('~') {
-        otto_core::paths::expand_home_strict(trimmed).map_err(Error::Invalid)?
-    } else {
-        let p = Path::new(trimmed);
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            root.join(p)
-        }
-    };
-    let mut prospective = otto_core::secret_paths::canonicalize_prospective(&abs)
-        .ok_or_else(|| Error::Invalid(format!("invalid target path '{}'", abs.display())))?;
-
-    let matched_root = std::iter::once(root)
-        .chain(additional_roots.iter().map(PathBuf::as_path))
-        .find(|r| prospective.starts_with(r))
-        .ok_or_else(|| {
-            Error::Forbidden(format!(
-                "path '{}' escapes workspace root '{}'",
-                prospective.display(),
-                root.display()
-            ))
-        })?
-        .to_path_buf();
-
-    if !is_root_user {
-        enforce_non_root_path(&prospective)?;
-    }
-    if create_dirs {
-        if let Some(parent) = prospective.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| map_io_err("create parent directories", parent, e))?;
-            if let Ok(canon_parent) = parent.canonicalize() {
-                if !canon_parent.starts_with(&matched_root) {
-                    return Err(Error::Forbidden(
-                        "parent directory escapes workspace root".into(),
-                    ));
-                }
-                if !is_root_user {
-                    enforce_non_root_path(&canon_parent)?;
-                }
-                if let Some(name) = prospective.file_name() {
-                    prospective = canon_parent.join(name);
-                }
-            }
-        }
-    }
-    Ok((prospective, matched_root))
-}
-
-fn normalize_remote_root(raw: &str) -> Result<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed.chars().any(char::is_control) {
-        return Err(Error::Invalid("invalid remote root path".into()));
-    }
-    if !trimmed.starts_with('/') && !trimmed.starts_with('~') {
-        return Err(Error::Invalid(
-            "remote SSH root path must start with '/' or '~'".into(),
-        ));
-    }
-    let clean = trimmed.trim_end_matches('/');
-    Ok(if clean.is_empty() {
-        "/".into()
-    } else {
-        clean.into()
-    })
-}
-
-pub(super) fn resolve_remote_subpath(root: &str, raw: &str) -> Result<String> {
-    let (p, _) = resolve_remote_in_roots(root, &[], raw)?;
-    Ok(p)
-}
-
-fn resolve_remote_in_roots(
-    root: &str,
-    additional_roots: &[String],
-    raw: &str,
-) -> Result<(String, String)> {
-    let decoded = strip_file_uri(raw);
-    if decoded.chars().any(char::is_control) {
-        return Err(Error::Invalid(
-            "remote path contains control characters".into(),
-        ));
-    }
-    let trimmed = decoded.trim();
-    if trimmed.is_empty() || trimmed == "." {
-        return Ok((root.to_string(), root.to_string()));
-    }
-    let combined = if trimmed.starts_with('/') || trimmed.starts_with('~') {
-        trimmed.to_string()
-    } else {
-        join_remote(root, trimmed)
-    };
-    let normalized = lexical_normalize_remote(&combined)?;
-    for candidate_root in std::iter::once(root).chain(additional_roots.iter().map(String::as_str)) {
-        if candidate_root == "/"
-            || normalized == candidate_root
-            || normalized.starts_with(&format!("{candidate_root}/"))
-        {
-            return Ok((normalized, candidate_root.to_string()));
-        }
-    }
-    Err(Error::Forbidden(format!(
-        "remote path '{normalized}' is outside workspace root '{root}'"
-    )))
-}
-
-fn resolve_remote_in_roots_or_sdk(
-    root: &str,
-    additional_roots: &[String],
-    raw: &str,
-) -> Result<(String, Option<String>)> {
-    if let Ok((p, r)) = resolve_remote_in_roots(root, additional_roots, raw) {
-        return Ok((p, Some(r)));
-    }
-    let decoded = strip_file_uri(raw);
-    let normalized = lexical_normalize_remote(decoded.trim())?;
-    let is_remote_sdk = [
-        "/usr/local/go/",
-        "/usr/lib/go",
-        "/usr/share/go",
-        "/usr/lib/python",
-        "/usr/lib/jvm/",
-        "/.otto/toolchains/",
-        "/go/pkg/mod/",
-        "/.cargo/registry/",
-        "/.rustup/toolchains/",
-    ]
-    .iter()
-    .any(|prefix| normalized.contains(prefix));
-    if is_remote_sdk {
-        return Ok((normalized, None));
-    }
-    Err(Error::Forbidden(format!(
-        "remote path '{normalized}' is outside workspace root '{root}'"
-    )))
-}
-
-fn lexical_normalize_remote(path: &str) -> Result<String> {
-    let is_tilde = path.starts_with('~');
-    let mut stack: Vec<&str> = Vec::new();
-    for seg in path.split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                if stack.is_empty() || (is_tilde && stack.len() == 1) {
-                    return Err(Error::Forbidden("path traversal above root refused".into()));
-                }
-                stack.pop();
-            }
-            other => stack.push(other),
-        }
-    }
-    if is_tilde {
-        Ok(stack.join("/"))
-    } else {
-        Ok(format!("/{}", stack.join("/")))
-    }
-}
-
-pub(super) fn join_remote(base: &str, rel: &str) -> String {
-    let b = base.trim_end_matches('/');
-    let r = rel.trim_start_matches('/');
-    if b.is_empty() {
-        format!("/{r}")
-    } else {
-        format!("{b}/{r}")
-    }
-}
-
-pub(super) fn remote_parent(path: &str) -> Option<String> {
-    let clean = path.trim_end_matches('/');
-    if clean.is_empty() || clean == "/" || clean == "~" {
-        return None;
-    }
-    match clean.rsplit_once('/') {
-        Some(("", _)) => Some("/".into()),
-        Some((parent, _)) => Some(parent.into()),
-        None => None,
-    }
-}
-
-pub(super) fn map_io_err(action: &str, path: &Path, err: std::io::Error) -> Error {
-    let msg = format!("cannot {action} '{}': {err}", path.display());
-    match err.kind() {
-        std::io::ErrorKind::NotFound => Error::NotFound(msg),
-        std::io::ErrorKind::PermissionDenied => Error::Forbidden(msg),
-        std::io::ErrorKind::AlreadyExists => Error::Conflict(msg),
-        _ => Error::Invalid(msg),
     }
 }
 

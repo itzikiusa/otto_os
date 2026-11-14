@@ -408,6 +408,7 @@ pub(super) async fn mutate_local_fs_in_roots(
     op: IdeFsMutateOp,
     path: &str,
     dest_path: Option<&str>,
+    history: Option<&crate::local_history::LocalHistoryStore>,
 ) -> Result<IdeFsMutateResp> {
     match op {
         IdeFsMutateOp::Mkdir => {
@@ -445,6 +446,16 @@ pub(super) async fn mutate_local_fs_in_roots(
             // Auto-populate Go `package <pkg>` header when creating a new `.go` file!
             let initial_bytes = default_new_file_template(&file);
             write_local_atomic(&file, initial_bytes.as_bytes()).await?;
+            if let Some(hist) = history {
+                let _ = hist.record_bytes_sync(
+                    root,
+                    &file,
+                    initial_bytes.as_bytes(),
+                    "created",
+                    "Created",
+                    false,
+                );
+            }
             crate::lsp_host::pool::notify_watched_file_if_build_manifest(&file, 1);
             Ok(IdeFsMutateResp {
                 ok: true,
@@ -471,6 +482,11 @@ pub(super) async fn mutate_local_fs_in_roots(
             tokio::fs::rename(&src, &dst)
                 .await
                 .map_err(|e| map_io_err("rename path", &src, e))?;
+            if let Some(hist) = history {
+                if dst.is_file() {
+                    let _ = hist.record_existing_file_sync(root, &dst, "renamed", "Renamed", false);
+                }
+            }
             crate::lsp_host::pool::notify_watched_file_if_build_manifest(&src, 3);
             crate::lsp_host::pool::notify_watched_file_if_build_manifest(&dst, 1);
             Ok(IdeFsMutateResp {
@@ -487,6 +503,26 @@ pub(super) async fn mutate_local_fs_in_roots(
             let meta = tokio::fs::symlink_metadata(&target_path)
                 .await
                 .map_err(|e| map_io_err("stat path for delete", &target_path, e))?;
+            if let Some(hist) = history {
+                let root_buf = root.to_path_buf();
+                let target_buf = target_path.clone();
+                let hist_clone = hist.clone();
+                let is_dir = meta.is_dir();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if is_dir {
+                        let _ = hist_clone.record_deleted_dir_sync(&root_buf, &target_buf);
+                    } else {
+                        let _ = hist_clone.record_existing_file_sync(
+                            &root_buf,
+                            &target_buf,
+                            "deleted",
+                            "Deleted",
+                            false,
+                        );
+                    }
+                })
+                .await;
+            }
             if meta.is_dir() {
                 tokio::fs::remove_dir_all(&target_path)
                     .await

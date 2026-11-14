@@ -1,8 +1,8 @@
-//! JavaScript / TypeScript (`js-debug` + V8 Inspector) and Java (`java-debug` + `jdb`/JDWP)
+//! JavaScript / TypeScript (`js-debug` + V8 Inspector) and Java (`java-debug` + direct JDWP)
 //! DAP adapter resolvers.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use otto_core::{Error, Result};
@@ -11,7 +11,7 @@ use serde_json::json;
 use super::adapters::{
     locate_binary, normalize_target_path, DapAdapterTransport, ResolvedDapAdapter,
 };
-use super::java_bridge::{infer_java_fqcn, JavaJdbBridgeSpec};
+use super::java_bridge::{infer_java_fqcn, JavaJdwpBridgeSpec};
 use super::node_bridge::NodeInspectorBridgeSpec;
 use super::{run_target_command, DapStartContext};
 use crate::types::{IdeDebugOutputEntry, IdeStartDebugReq, IdeTargetKind, IdeTargetSpec};
@@ -205,32 +205,97 @@ pub(super) async fn resolve_java_adapter(
         .ok_or_else(|| {
             Error::NotFound("JDK 'java' not found; install Temurin JDK via IDE → Toolchains".into())
         })?;
-    let jdb_bin = locate_binary(&req.target, ctx, &env, &make_candidates("jdb"))
-        .await
-        .ok_or_else(|| {
-            Error::NotFound(
-                "JDK 'jdb' debugger not found; install a full JDK via IDE → Toolchains".into(),
-            )
-        })?;
 
     let program = resolve_java_source_or_fqcn(&req.target, &req.launch.program, cwd);
     let mut initial_output = Vec::new();
     let mut source_map = HashMap::new();
+    let mut source_roots = Vec::new();
     for bp in &req.breakpoints {
         let p = normalize_target_path(&req.target, &bp.path);
         if let Some(fname) = Path::new(&p).file_name().and_then(|n| n.to_str()) {
-            source_map.insert(fname.to_string(), p);
+            source_map.insert(fname.to_string(), p.clone());
+        }
+        let sroot = infer_java_source_root(&p, cwd);
+        if !source_roots.contains(&sroot) {
+            source_roots.push(sroot);
         }
     }
 
     let (classpath, main_class) = if req.launch.attach_port.is_some() {
         (cwd.to_string(), String::new())
+    } else if req.target.kind == IdeTargetKind::Local {
+        let javac_bin = locate_binary(&req.target, ctx, &env, &make_candidates("javac"))
+            .await
+            .ok_or_else(|| Error::NotFound("JDK 'javac' compiler not found".into()))?;
+        let mut proj_roots = Vec::new();
+        for r in std::iter::once(req.target.root.as_str())
+            .chain(req.target.additional_roots.iter().map(String::as_str))
+            .chain(req.project_folders.iter().map(String::as_str))
+            .chain(std::iter::once(cwd))
+        {
+            if !r.trim().is_empty() {
+                let pb = PathBuf::from(normalize_target_path(&req.target, r));
+                if !proj_roots.contains(&pb) {
+                    proj_roots.push(pb);
+                }
+            }
+        }
+        let prog_path = PathBuf::from(&program);
+        let (target_path, explicit_main) = if program.ends_with(".java") || prog_path.exists() {
+            (prog_path, None)
+        } else {
+            (PathBuf::from(cwd), Some(program.clone()))
+        };
+        let include_tests = req
+            .launch
+            .test_name
+            .as_deref()
+            .is_some_and(|s| !s.is_empty());
+        let out_base = PathBuf::from(cwd).join(".otto-java-debug-classes");
+        let env_clone = env.clone();
+        let plan = tokio::task::spawn_blocking(move || {
+            crate::java_workspace::prepare_java_execution(
+                &target_path,
+                explicit_main.as_deref(),
+                include_tests,
+                &proj_roots,
+                &env_clone,
+                &javac_bin,
+                &out_base,
+            )
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("java debug build task failed: {e}")))??;
+
+        for sr in &plan.source_roots {
+            let s = sr.to_string_lossy().into_owned();
+            if !source_roots.contains(&s) {
+                source_roots.push(s);
+            }
+        }
+        if program.ends_with(".java") {
+            if let Some(fname) = Path::new(&program).file_name().and_then(|n| n.to_str()) {
+                source_map.insert(fname.to_string(), program.clone());
+            }
+            let sroot = infer_java_source_root(&program, cwd);
+            if !source_roots.contains(&sroot) {
+                source_roots.push(sroot);
+            }
+        }
+        initial_output.push(IdeDebugOutputEntry {
+            category: "console".into(),
+            text: format!("Compiled {} with debug symbols (-g)\n", plan.main_class),
+        });
+        (plan.classpath, plan.main_class)
     } else if program.ends_with(".java") {
         let javac_bin = locate_binary(&req.target, ctx, &env, &make_candidates("javac"))
             .await
             .ok_or_else(|| Error::NotFound("JDK 'javac' compiler not found".into()))?;
         let out_dir = format!("{cwd}/.otto-java-debug-classes");
         let src_root = infer_java_source_root(&program, cwd);
+        if !source_roots.contains(&src_root) {
+            source_roots.push(src_root.clone());
+        }
         let compile_cmd = format!(
             "mkdir -p {} && {} -g -d {} -sourcepath {} {}",
             super::shell_quote(&out_dir),
@@ -256,48 +321,53 @@ pub(super) async fn resolve_java_adapter(
                 err_s.trim()
             )));
         }
-        initial_output.push(IdeDebugOutputEntry {
-            category: "console".into(),
-            text: format!("Compiled {program} with debug symbols (-g)\n"),
-        });
         if let Some(fname) = Path::new(&program).file_name().and_then(|n| n.to_str()) {
             source_map.insert(fname.to_string(), program.clone());
         }
         let fqcn = infer_java_fqcn(&req.target, &program).await;
         (out_dir, fqcn)
     } else {
-        let cp = env.get("CLASSPATH").cloned().unwrap_or_else(|| {
-            let mut entries = Vec::new();
-            for rel in [
-                "target/test-classes",
-                "target/classes",
-                "build/classes/java/test",
-                "build/classes/java/main",
-                "out/production",
-            ] {
-                let p = Path::new(cwd).join(rel);
-                if p.is_dir() {
-                    entries.push(p.to_string_lossy().into_owned());
-                }
-            }
-            entries.push(cwd.to_string());
-            entries.join(":")
-        });
+        let cp = env
+            .get("CLASSPATH")
+            .cloned()
+            .unwrap_or_else(|| cwd.to_string());
         (cp, program)
     };
 
+    let mut jvm_flags = Vec::new();
+    let mut spring: Vec<String> = req
+        .spring_profiles
+        .iter()
+        .chain(req.launch.spring_profiles.iter())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    spring.dedup();
+    if spring.is_empty() {
+        if let Some(sp) = env
+            .get("SPRING_PROFILES_ACTIVE")
+            .filter(|s| !s.trim().is_empty())
+        {
+            spring.push(sp.trim().to_string());
+        }
+    }
+    if !spring.is_empty() {
+        jvm_flags.push(format!("-Dspring.profiles.active={}", spring.join(",")));
+    }
+
     Ok(ResolvedDapAdapter {
-        adapter_name: "jdb-jdwp-dap".into(),
+        adapter_name: "java-jdwp-dap".into(),
         language: "java".into(),
-        transport: DapAdapterTransport::JavaJdbBridge(JavaJdbBridgeSpec {
+        transport: DapAdapterTransport::JavaJdwpBridge(JavaJdwpBridgeSpec {
             java_bin,
-            jdb_bin,
+            jvm_flags,
             classpath,
             main_class: main_class.clone(),
             args: req.launch.args.clone(),
             cwd: cwd.to_string(),
             env,
             attach_port: req.launch.attach_port,
+            source_roots,
             source_map,
         }),
         initialize_args: json!({
@@ -328,16 +398,20 @@ fn resolve_java_source_or_fqcn(target: &IdeTargetSpec, raw_prog: &str, cwd: &str
         return normalize_target_path(target, &in_cwd.to_string_lossy());
     }
     let rel_java = format!("{}.java", raw_prog.replace('.', "/"));
-    for root_sub in ["src/main/java", "src/test/java", "src", "."] {
-        let cand = Path::new(&target.root).join(root_sub).join(&rel_java);
-        if cand.is_file() {
-            return normalize_target_path(target, &cand.to_string_lossy());
+    for root in std::iter::once(target.root.as_str())
+        .chain(target.additional_roots.iter().map(String::as_str))
+    {
+        for root_sub in ["src/main/java", "src/test/java", "src", "."] {
+            let cand = Path::new(root).join(root_sub).join(&rel_java);
+            if cand.is_file() {
+                return normalize_target_path(target, &cand.to_string_lossy());
+            }
         }
     }
     norm
 }
 
-pub(super) fn infer_java_source_root(java_file: &str, fallback: &str) -> String {
+pub(crate) fn infer_java_source_root(java_file: &str, fallback: &str) -> String {
     for marker in ["/src/main/java/", "/src/test/java/", "/src/"] {
         if let Some((prefix, _)) = java_file.split_once(marker) {
             let trimmed = marker.trim_end_matches('/');
