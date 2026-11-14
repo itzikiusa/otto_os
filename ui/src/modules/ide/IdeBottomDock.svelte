@@ -1,13 +1,10 @@
 <script lang="ts">
-  // Collapsible, height-resizable IDE Bottom Tool Dock hosting Debug, Run &
-  // Tests, Problems, Usages (LSP references), and Terminal (local or SSH PTY).
-  import Badge from '../../lib/components/Badge.svelte';
-  import EmptyState from '../../lib/components/EmptyState.svelte';
+  // Collapsible, height-resizable (120px..85vh), maximizable IDE Bottom Tool Dock
+  // hosting Debug, Run & tests, Git, Problems, Usages, and Terminal.
   import Icon from '../../lib/components/Icon.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
-  import LoadState from '../../lib/components/LoadState.svelte';
   import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
-  import { copyWithToast } from '../../lib/clipboard';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { startMouseDrag } from '../../lib/dragCursor';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import {
@@ -16,56 +13,74 @@
     RESIZE_TITLE_VERTICAL,
     savePaneWidth,
   } from '../../lib/paneResizer';
-  import { plural } from '../../lib/plural';
   import { viewport } from '../../lib/stores/viewport.svelte';
-  import {
-    ide,
-    ideBasename,
-    type IdeBottomTab,
-    type IdeReferenceLocation,
-  } from './ideStore.svelte';
+  import { ideDockPrefs } from './debug/ideDockPrefs.svelte';
+  import { ideGit } from './git/ideGitController.svelte';
+  import { ide, type IdeBottomTab } from './ideStore.svelte';
+
+  type DockTab = IdeBottomTab | 'git';
 
   const IdeDebuggerPanelLazy = lazyComponent(() => import('./IdeDebuggerPanel.svelte'));
+  const IdeGitToolPanelLazy = lazyComponent(() => import('./git/IdeGitToolPanel.svelte'));
   const IdeProblemsPanelLazy = lazyComponent(() => import('./IdeProblemsPanel.svelte'));
   const IdeRunPanelLazy = lazyComponent(() => import('./IdeRunPanel.svelte'));
   const IdeTerminalPanelLazy = lazyComponent(() => import('./IdeTerminalPanel.svelte'));
+  const IdeUsagesPanelLazy = lazyComponent(() => import('./debug/IdeUsagesPanel.svelte'));
 
   interface Props {
     defaultHeight?: number;
   }
-  let { defaultHeight = 280 }: Props = $props();
+  let { defaultHeight = 300 }: Props = $props();
 
   const LS_DOCK_H = 'otto_ide_dock_h';
-  const DOCK_MIN = 160;
-  const DOCK_MAX = 640;
+  const DOCK_MIN = 120;
 
-  let dockHeight = $state(loadPaneWidth(LS_DOCK_H, 280, DOCK_MIN, DOCK_MAX));
-  let tall = $state(false);
-  let usagesQuery = $state('');
+  let winH = $state(typeof window !== 'undefined' ? window.innerHeight : 900);
+  const dockMax = $derived(Math.max(520, Math.round(winH * 0.85)));
+  const maxTargetH = $derived(Math.max(460, Math.round(winH * 0.78)));
 
-  const effectiveHeight = $derived(tall ? 480 : dockHeight);
+  let dockHeight = $state(loadPaneWidth(LS_DOCK_H, 300, DOCK_MIN, 760));
+  let maximized = $state(false);
+
+  const effectiveHeight = $derived(
+    Math.max(DOCK_MIN, Math.min(dockMax, maximized ? maxTargetH : dockHeight)),
+  );
+  const activeDockTab = $derived(ide.activeBottomTab as DockTab);
+
+  $effect(() => {
+    void ide.target.root;
+    void ide.projectRoots.length;
+    ideGit.syncVisibleRoots({ probeAll: false });
+  });
+
+  $effect(() => {
+    const cur = activeDockTab;
+    if (ideDockPrefs.isDockTabHidden(cur)) {
+      ideDockPrefs.ensureDockTabVisible(cur);
+    }
+  });
 
   function setDockHeight(next: number): void {
-    tall = false;
-    dockHeight = Math.max(DOCK_MIN, Math.min(DOCK_MAX, Math.round(next)));
+    maximized = false;
+    dockHeight = Math.max(DOCK_MIN, Math.min(dockMax, Math.round(next)));
     savePaneWidth(LS_DOCK_H, dockHeight);
   }
 
   function resetDockHeight(): void {
-    tall = false;
-    dockHeight = Math.max(DOCK_MIN, Math.min(DOCK_MAX, defaultHeight));
+    maximized = false;
+    dockHeight = Math.max(DOCK_MIN, Math.min(dockMax, defaultHeight));
     savePaneWidth(LS_DOCK_H, dockHeight);
   }
 
   function startDockDrag(e: MouseEvent): void {
     const startY = e.clientY;
     const startH = effectiveHeight;
-    tall = false;
+    maximized = false;
     startMouseDrag(e, {
       cursor: 'row-resize',
       onMove: (ev) => {
         const delta = startY - ev.clientY;
-        dockHeight = Math.max(DOCK_MIN, Math.min(DOCK_MAX, Math.round(startH + delta)));
+        dockHeight = Math.max(DOCK_MIN, Math.min(dockMax, Math.round(startH + delta)));
       },
       onEnd: () => savePaneWidth(LS_DOCK_H, dockHeight),
     });
@@ -91,20 +106,15 @@
     return r.status;
   });
 
-  const dockTabs = $derived<readonly TabItem<IdeBottomTab>[]>([
+  const allDockTabs = $derived<readonly TabItem<DockTab>[]>([
+    { id: 'debug', label: 'Debug', icon: 'bug', count: debugCount, testid: 'ide-tab-debug' },
+    { id: 'run', label: 'Run & tests', icon: 'play', count: runCount, testid: 'ide-tab-run' },
     {
-      id: 'debug',
-      label: 'Debug',
-      icon: 'bug',
-      count: debugCount,
-      testid: 'ide-tab-debug',
-    },
-    {
-      id: 'run',
-      label: 'Run & tests',
-      icon: 'play',
-      count: runCount,
-      testid: 'ide-tab-run',
+      id: 'git',
+      label: 'Git',
+      icon: 'branch',
+      count: ideGit.totalChangeCount > 0 ? ideGit.totalChangeCount : undefined,
+      testid: 'ide-dock-tab-git',
     },
     {
       id: 'problems',
@@ -120,16 +130,52 @@
       count: ide.usages.length > 0 ? ide.usages.length : undefined,
       testid: 'ide-tab-usages',
     },
-    {
-      id: 'terminal',
-      label: 'Terminal',
-      icon: 'terminal',
-      testid: 'ide-tab-terminal',
-    },
+    { id: 'terminal', label: 'Terminal', icon: 'terminal', testid: 'ide-tab-terminal' },
   ]);
 
-  function onTabSelect(tab: IdeBottomTab): void {
-    ide.openBottomTab(tab);
+  const dockTabs = $derived(
+    allDockTabs.filter((t) => !ideDockPrefs.isDockTabHidden(t.id) || t.id === activeDockTab),
+  );
+
+  function onTabSelect(tab: DockTab): void {
+    ide.openBottomTab(tab as IdeBottomTab);
+  }
+
+  function openDockViewMenu(e: MouseEvent): void {
+    const allIds = allDockTabs.map((t) => t.id);
+    const items: MenuItem[] = allDockTabs.map((t) => {
+      const visible = !ideDockPrefs.isDockTabHidden(t.id);
+      return {
+        label: t.label,
+        checked: visible,
+        action: () => {
+          const wasActive = activeDockTab === t.id;
+          ideDockPrefs.toggleDockTabHidden(t.id, allIds);
+          if (wasActive && ideDockPrefs.isDockTabHidden(t.id)) {
+            const next = allDockTabs.find((x) => !ideDockPrefs.isDockTabHidden(x.id));
+            if (next) onTabSelect(next.id);
+          }
+        },
+      };
+    });
+    items.push(
+      { separator: true },
+      {
+        label: maximized ? 'Restore dock height' : 'Maximize dock height (78%)',
+        icon: maximized ? 'minimize' : 'maximize',
+        action: () => {
+          ide.toggleBottomDock(true);
+          maximized = !maximized;
+        },
+      },
+      {
+        label: 'Reset visible tabs',
+        icon: 'refresh',
+        disabled: ideDockPrefs.hiddenDockTabs.length === 0,
+        action: () => ideDockPrefs.resetDockTabs(),
+      },
+    );
+    ctxMenu.show(e, items);
   }
 
   function onHeaderClickCapture(e: MouseEvent): void {
@@ -137,45 +183,9 @@
     const hitTab = (e.target as HTMLElement | null)?.closest('[role="tab"]');
     if (hitTab) ide.toggleBottomDock(true);
   }
-
-  // Group LSP find-references items by file for the Usages tab.
-  interface UsageGroup {
-    path: string;
-    relPath: string;
-    items: IdeReferenceLocation[];
-  }
-
-  const filteredUsages = $derived.by((): IdeReferenceLocation[] => {
-    const q = usagesQuery.trim().toLowerCase();
-    if (!q) return ide.usages;
-    return ide.usages.filter(
-      (u) => u.path.toLowerCase().includes(q) || u.preview.toLowerCase().includes(q),
-    );
-  });
-
-  const usageGroups = $derived.by((): UsageGroup[] => {
-    const map = new Map<string, IdeReferenceLocation[]>();
-    for (const u of filteredUsages) {
-      const arr = map.get(u.path);
-      if (arr) arr.push(u);
-      else map.set(u.path, [u]);
-    }
-    const groups: UsageGroup[] = [];
-    for (const [path, items] of map.entries()) {
-      groups.push({
-        path,
-        relPath: ide.relativePath(path) || ideBasename(path),
-        items,
-      });
-    }
-    return groups;
-  });
-
-  function findAtCursor(): void {
-    if (!ide.activePath) return;
-    void ide.findReferences(ide.activePath, ide.cursorInfo.line, ide.cursorInfo.col);
-  }
 </script>
+
+<svelte:window onresize={() => (winH = window.innerHeight)} />
 
 <section
   class="dock-shell"
@@ -190,10 +200,11 @@
       role="separator"
       aria-label="Resize IDE bottom dock"
       title={RESIZE_TITLE_VERTICAL}
+      data-testid="ide-dock-resizer"
       use:paneResizer={{
         value: effectiveHeight,
         min: DOCK_MIN,
-        max: DOCK_MAX,
+        max: dockMax,
         orientation: 'horizontal',
         invert: true,
         text: (v) => `${Math.round(v)} pixels tall`,
@@ -204,11 +215,10 @@
     ></div>
   {/if}
 
-  <!-- Clicking any tab while the dock is collapsed opens the dock on that tab. -->
   <div class="dock-header" role="presentation" onclickcapture={onHeaderClickCapture}>
     <Tabs
       tabs={dockTabs}
-      value={ide.activeBottomTab}
+      value={activeDockTab}
       onchange={onTabSelect}
       label="IDE tool panels"
       idBase={ide.bottomDockOpen ? 'ide-dock' : undefined}
@@ -216,20 +226,31 @@
       testid="ide-dock-tabs"
     >
       {#snippet trailing()}
+        <button
+          type="button"
+          class="icon-btn dock-act"
+          aria-label="Dock view options"
+          title="Show or hide dock tabs"
+          onclick={openDockViewMenu}
+          data-testid="ide-dock-view-menu"
+        >
+          <Icon name="more" size={12} />
+        </button>
         {#if ide.bottomDockOpen}
           <button
             type="button"
-            class="icon-btn"
-            aria-label={tall ? 'Restore dock height' : 'Expand dock height'}
-            title={tall ? 'Restore dock height' : 'Expand dock height'}
-            onclick={() => (tall = !tall)}
+            class="icon-btn dock-act"
+            aria-label={maximized ? 'Restore dock height' : 'Maximize dock height'}
+            title={maximized ? 'Restore dock height' : 'Maximize dock height (78%)'}
+            onclick={() => (maximized = !maximized)}
+            data-testid="ide-dock-maximize"
           >
-            <Icon name={tall ? 'minimize' : 'maximize'} size={12} />
+            <Icon name={maximized ? 'minimize' : 'maximize'} size={12} />
           </button>
         {/if}
         <button
           type="button"
-          class="icon-btn"
+          class="icon-btn dock-act"
           aria-expanded={ide.bottomDockOpen}
           aria-label={ide.bottomDockOpen ? 'Collapse bottom dock' : 'Expand bottom dock'}
           title={ide.bottomDockOpen ? 'Collapse bottom dock' : 'Expand bottom dock'}
@@ -245,118 +266,20 @@
     <div
       class="dock-body"
       role="tabpanel"
-      id="ide-dock-panel-{ide.activeBottomTab}"
-      aria-labelledby="ide-dock-tab-{ide.activeBottomTab}"
+      id="ide-dock-panel-{activeDockTab}"
+      aria-labelledby="ide-dock-tab-{activeDockTab}"
     >
-      {#if ide.activeBottomTab === 'debug'}
+      {#if activeDockTab === 'debug'}
         <LazyMount lazy={IdeDebuggerPanelLazy} what="the debugger" variant="panel" />
-      {:else if ide.activeBottomTab === 'run'}
+      {:else if activeDockTab === 'run'}
         <LazyMount lazy={IdeRunPanelLazy} what="run & tests" variant="panel" />
-      {:else if ide.activeBottomTab === 'problems'}
+      {:else if activeDockTab === 'git'}
+        <LazyMount lazy={IdeGitToolPanelLazy} what="the Git tool window" variant="panel" />
+      {:else if activeDockTab === 'problems'}
         <LazyMount lazy={IdeProblemsPanelLazy} what="the problems list" variant="panel" />
-      {:else if ide.activeBottomTab === 'usages'}
-        <div class="usg-root" data-testid="ide-usages-panel">
-          {#if ide.usages.length > 0 || ide.usagesSymbol}
-            <header class="usg-bar">
-              {#if ide.usagesSymbol}
-                <Badge tone="accent" label={ide.usagesSymbol} />
-              {/if}
-              <span class="usg-summary dim">
-                {plural(ide.usages.length, 'reference')} across {plural(usageGroups.length, 'file')}
-              </span>
-              <span class="grow"></span>
-              {#if ide.usages.length > 0}
-                <div class="input-group usg-search">
-                  <Icon name="search" size={12} />
-                  <input
-                    type="search"
-                    dir="ltr"
-                    aria-label="Filter usages"
-                    placeholder="Filter usages…"
-                    bind:value={usagesQuery}
-                  />
-                </div>
-              {/if}
-              {#if ide.activePath}
-                <button type="button" class="btn small ghost" onclick={findAtCursor}>
-                  <Icon name="refresh" size={12} />
-                  <span>Find at cursor</span>
-                </button>
-              {/if}
-            </header>
-          {/if}
-
-          <div class="usg-body">
-            <LoadState
-              what="symbol usages"
-              loading={ide.usagesLoading}
-              empty={ide.usages.length === 0}
-              variant="panel"
-              rows={3}
-            >
-              {#snippet emptyView()}
-                <EmptyState
-                  icon="search"
-                  title="No symbol usages yet"
-                  body="Place the caret on any symbol in the editor and run Find usages to list every reference across the project."
-                  actionLabel={ide.activePath ? 'Find usages at cursor' : undefined}
-                  actionIcon="search"
-                  actionKind="secondary"
-                  onaction={ide.activePath ? findAtCursor : undefined}
-                  headingLevel={2}
-                />
-              {/snippet}
-
-              {#if usageGroups.length === 0}
-                <EmptyState
-                  icon="filter"
-                  title="No matching usages"
-                  body="No reference locations match the active filter."
-                  actionLabel="Clear filter"
-                  actionKind="secondary"
-                  onaction={() => (usagesQuery = '')}
-                  headingLevel={2}
-                />
-              {:else}
-                {#each usageGroups as group (group.path)}
-                  <section class="usg-group" aria-label={`References in ${group.relPath}`}>
-                    <div class="usg-file-head">
-                      <Icon name="file" size={12} />
-                      <span class="usg-file-path mono ellipsis" dir="ltr" title={group.path}>
-                        {group.relPath}
-                      </span>
-                      <Badge tone="neutral" variant="outline" label={String(group.items.length)} />
-                    </div>
-                    {#each group.items as u, idx (`${u.path}:${u.line}:${u.column}:${idx}`)}
-                      <div class="usg-row-wrap reveal-host">
-                        <button
-                          type="button"
-                          class="usg-row"
-                          onclick={() => void ide.openFile(u.path, { line: u.line, col: u.column })}
-                        >
-                          <span class="usg-loc mono dim" dir="ltr">:{u.line}:{u.column}</span>
-                          <span class="usg-preview mono ellipsis" dir="ltr" title={u.preview.trim()}>
-                            {u.preview.trim() || `${ideBasename(u.path)}:${u.line}`}
-                          </span>
-                        </button>
-                        <button
-                          type="button"
-                          class="icon-btn reveal-on-hover"
-                          aria-label={`Copy ${group.relPath}:${u.line}`}
-                          title={`Copy ${group.relPath}:${u.line}`}
-                          onclick={() => void copyWithToast(`${group.relPath}:${u.line}:${u.column}`, 'location')}
-                        >
-                          <Icon name="copy" size={12} />
-                        </button>
-                      </div>
-                    {/each}
-                  </section>
-                {/each}
-              {/if}
-            </LoadState>
-          </div>
-        </div>
-      {:else if ide.activeBottomTab === 'terminal'}
+      {:else if activeDockTab === 'usages'}
+        <LazyMount lazy={IdeUsagesPanelLazy} what="the usages panel" variant="panel" />
+      {:else if activeDockTab === 'terminal'}
         <LazyMount lazy={IdeTerminalPanelLazy} what="the terminal" variant="panel" />
       {/if}
     </div>
@@ -365,146 +288,19 @@
 
 <style>
   .dock-shell {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    flex-shrink: 0;
-    min-inline-size: 0;
-    border-block-start: 1px solid var(--border);
-    background: var(--surface);
+    position: relative; display: flex; flex-direction: column; flex-shrink: 0;
+    min-inline-size: 0; border-block-start: 1px solid var(--border); background: var(--surface);
   }
-  .dock-shell.is-open {
-    max-block-size: 65%;
-    min-block-size: 160px;
-  }
-  .dock-resizer {
-    position: absolute;
-    inset-block-start: -4px;
-    inset-inline: 0;
-    block-size: 8px;
-    cursor: row-resize;
-    z-index: var(--z-sticky);
-  }
-  .dock-resizer::after {
-    content: '';
-    position: absolute;
-    inset-block-start: 4px;
-    inset-inline: 0;
-    block-size: 2px;
-    background: transparent;
-    transition: background var(--dur-fast) ease-out;
-  }
-  .dock-resizer:hover::after,
-  .dock-resizer:focus-visible::after {
-    background: var(--accent-text);
-  }
-  .dock-header {
-    flex-shrink: 0;
-    min-inline-size: 0;
-  }
-  .dock-body {
-    flex: 1;
-    min-block-size: 0;
-    min-inline-size: 0;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-  .usg-root {
-    display: flex;
-    flex-direction: column;
-    block-size: 100%;
-    min-block-size: 0;
-    min-inline-size: 0;
-    background: var(--surface);
-  }
-  .usg-bar {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-    padding-block: 4px;
-    padding-inline: 10px;
-    border-block-end: 1px solid var(--border);
-    background: var(--surface);
-    flex-shrink: 0;
-  }
-  .usg-summary {
-    font-size: var(--fs-xs);
-    font-variant-numeric: tabular-nums;
-  }
-  .usg-search {
-    block-size: 24px;
-    inline-size: 180px;
-    font-size: var(--fs-xs);
-  }
-  .usg-body {
-    flex: 1;
-    min-block-size: 0;
-    overflow-y: auto;
-  }
-  .usg-group {
-    border-block-end: 1px solid var(--separator);
-  }
-  .usg-file-head {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding-block: 6px;
-    padding-inline: 10px;
-    background: var(--surface-2);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-  }
-  .usg-file-path {
-    flex: 1;
-    font-size: var(--fs-xs);
-  }
-  .usg-row-wrap {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding-inline-end: 8px;
-    border-block-start: 1px solid var(--separator);
-  }
-  .usg-row-wrap:hover {
-    background: var(--hover);
-  }
-  .usg-row {
-    flex: 1;
-    min-inline-size: 0;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding-block: 4px;
-    padding-inline: 22px 8px;
-    border: 0;
-    background: transparent;
-    color: var(--text);
-    font-size: var(--fs-xs);
-    text-align: start;
-    cursor: pointer;
-  }
-  .usg-loc {
-    flex-shrink: 0;
-    font-size: var(--fs-xs);
-    font-variant-numeric: tabular-nums;
-  }
-  .usg-preview {
-    flex: 1;
-    font-size: var(--fs-xs);
-  }
+  .dock-shell.is-open { max-block-size: 85%; min-block-size: 120px; }
+  .dock-resizer { position: absolute; inset-block-start: -4px; inset-inline: 0; block-size: 8px; cursor: row-resize; z-index: var(--z-sticky); }
+  .dock-resizer::after { content: ''; position: absolute; inset-block-start: 4px; inset-inline: 0; block-size: 2px; background: transparent; transition: background var(--dur-fast) ease-out; }
+  .dock-resizer:hover::after, .dock-resizer:focus-visible::after { background: var(--accent-text); }
+  .dock-header { flex-shrink: 0; min-inline-size: 0; block-size: 32px; min-block-size: 32px; max-block-size: 32px; overflow: hidden; }
+  .dock-header :global(.otabs) { block-size: 32px; min-block-size: 32px; }
+  .dock-act { block-size: 22px; inline-size: 22px; }
+  .dock-body { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; flex-direction: column; overflow: hidden; }
   @media (max-width: 640px) {
-    .dock-shell.is-open {
-      flex: 1;
-      block-size: 100%;
-      max-block-size: none;
-    }
-    .dock-resizer {
-      display: none;
-    }
-    .usg-search {
-      inline-size: 100%;
-    }
+    .dock-shell.is-open { flex: 1; block-size: 100%; max-block-size: none; }
+    .dock-resizer { display: none; }
   }
 </style>
